@@ -15,6 +15,7 @@ import requests
 import base64
 import re
 import pyexiv2
+import xml.sax.saxutils as saxutils
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from flask import Flask, render_template_string, request, jsonify, send_file
@@ -123,21 +124,25 @@ def read_metadata(filepath):
         desc = ""
         regions = []
         
-        with pyexiv2.Image(filepath) as img:
+        # Prioritize reading from a .xmp sidecar if it exists, fallback to native file
+        xmp_path = os.path.splitext(filepath)[0] + '.xmp'
+        target_file = xmp_path if os.path.exists(xmp_path) else filepath
+
+        with pyexiv2.Image(target_file) as img:
             xmp = img.read_xmp()
             
             # Read Booru Tags
-            val = xmp.get('Xmp.dc.subject')
+            val = xmp.get('Xmp.dc.subject', [])
             if isinstance(val, list): tags = val
             elif isinstance(val, str): tags = [val]
                 
             # Read Description
-            val = xmp.get('Xmp.dc.description')
+            val = xmp.get('Xmp.dc.description', "")
             if isinstance(val, dict): desc = val.get('x-default', '')
             elif isinstance(val, str): desc = val
                 
-            # Parse XMP-iptcExt:ImageRegion structs
-            region_keys = [k for k in xmp.keys() if k.startswith('Xmp.iptcExt.ImageRegion[')]
+            # Parse XMP IPTC ImageRegion structs
+            region_keys = [k for k in xmp.keys() if 'ImageRegion[' in k]
             indices = set()
             for k in region_keys:
                 m = re.search(r'\[(\d+)\]', k)
@@ -152,10 +157,10 @@ def read_metadata(filepath):
                     left = float(xmp.get(f'{prefix}/iptcExt:RegionBoundary/iptcExt:rbX', 0))
                     top = float(xmp.get(f'{prefix}/iptcExt:RegionBoundary/iptcExt:rbY', 0))
                     
-                    # Convert IPTC standard top-left representation back to YOLO center
-                    cx = left + (w / 2)
-                    cy = top + (h / 2)
-                    regions.append({"class_name": name, "cx": cx, "cy": cy, "w": w, "h": h})
+                    if w > 0 and h > 0:
+                        cx = left + (w / 2)
+                        cy = top + (h / 2)
+                        regions.append({"class_name": name, "cx": cx, "cy": cy, "w": w, "h": h})
                 except Exception:
                     pass
                     
@@ -167,38 +172,61 @@ def read_metadata(filepath):
 def write_metadata(filepath, tags, description, regions):
     try:
         filename = os.path.basename(filepath)
-        sync_yolo_labels(filename, regions) # Sync parallel sidecar for the YOLO trainer
+        sync_yolo_labels(filename, regions) # Sync parallel lightweight sidecar strictly for the YOLO trainer
+
+        xmp_path = os.path.splitext(filepath)[0] + '.xmp'
         
-        with pyexiv2.Image(filepath) as img:
-            xmp = img.read_xmp()
+        # Since Exiv2 cannot natively write to BMFF/JXL formats without crashing, 
+        # and modifying complex struct bags via pyexiv2 dictionaries triggers Toolkit Error 102,
+        # we bypass the library bugs by generating a beautifully clean, industry-standard XMP Sidecar manually.
+        
+        esc = saxutils.escape
+        
+        subject_xml = ""
+        if tags:
+            subject_xml = "<dc:subject>\n    <rdf:Bag>\n" + "".join([f"     <rdf:li>{esc(tag)}</rdf:li>\n" for tag in tags]) + "    </rdf:Bag>\n   </dc:subject>"
             
-            # Update Subject (Tags)
-            xmp['Xmp.dc.subject'] = tags
+        desc_xml = ""
+        if description:
+            desc_xml = f'<dc:description>\n    <rdf:Alt>\n     <rdf:li xml:lang="x-default">{esc(description)}</rdf:li>\n    </rdf:Alt>\n   </dc:description>'
             
-            # Update Description
-            if description:
-                xmp['Xmp.dc.description'] = description
-            elif 'Xmp.dc.description' in xmp:
-                del xmp['Xmp.dc.description']
-                
-            # Wipe existing regions cleanly
-            for k in list(xmp.keys()):
-                if k.startswith('Xmp.iptcExt.ImageRegion'):
-                    del xmp[k]
-                    
-            # Reconstruct Region struct array
-            for i, box in enumerate(regions, 1):
-                prefix = f'Xmp.iptcExt.ImageRegion[{i}]'
-                xmp[f'{prefix}/iptcExt:RegionName'] = box['class_name']
-                xmp[f'{prefix}/iptcExt:RegionBoundary/iptcExt:rbShape'] = 'rectangle'
-                xmp[f'{prefix}/iptcExt:RegionBoundary/iptcExt:rbUnit'] = 'relative'
-                # Convert YOLO center back to standard top-left
-                xmp[f'{prefix}/iptcExt:RegionBoundary/iptcExt:rbX'] = str(box['cx'] - (box['w'] / 2))
-                xmp[f'{prefix}/iptcExt:RegionBoundary/iptcExt:rbY'] = str(box['cy'] - (box['h'] / 2))
-                xmp[f'{prefix}/iptcExt:RegionBoundary/iptcExt:rbW'] = str(box['w'])
-                xmp[f'{prefix}/iptcExt:RegionBoundary/iptcExt:rbH'] = str(box['h'])
-                
-            img.modify_xmp(xmp)
+        regions_xml = ""
+        if regions:
+            regions_xml = "<iptcExt:ImageRegion>\n    <rdf:Bag>\n"
+            for box in regions:
+                rx = box['cx'] - (box['w'] / 2)
+                ry = box['cy'] - (box['h'] / 2)
+                regions_xml += f"""     <rdf:li rdf:parseType="Resource">
+      <iptcExt:RegionName>{esc(box['class_name'])}</iptcExt:RegionName>
+      <iptcExt:RegionBoundary rdf:parseType="Resource">
+       <iptcExt:rbShape>rectangle</iptcExt:rbShape>
+       <iptcExt:rbUnit>relative</iptcExt:rbUnit>
+       <iptcExt:rbX>{rx:.6f}</iptcExt:rbX>
+       <iptcExt:rbY>{ry:.6f}</iptcExt:rbY>
+       <iptcExt:rbW>{box['w']:.6f}</iptcExt:rbW>
+       <iptcExt:rbH>{box['h']:.6f}</iptcExt:rbH>
+      </iptcExt:RegionBoundary>
+     </rdf:li>\n"""
+            regions_xml += "    </rdf:Bag>\n   </iptcExt:ImageRegion>"
+
+        xmp_content = f"""<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="PythonSidecar">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" 
+    xmlns:dc="http://purl.org/dc/elements/1.1/" 
+    xmlns:iptcExt="http://iptc.org/std/Iptc4xmpExt/2008-02-29/">
+   {subject_xml}
+   {desc_xml}
+   {regions_xml}
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"""
+        
+        # Directly write the validated XML structure to the sidecar
+        with open(xmp_path, 'w', encoding='utf-8') as f:
+            f.write(xmp_content)
+
         return True
     except Exception as e:
         access_logger.error(f"Error writing metadata: {e}")
@@ -337,7 +365,7 @@ def api_upload():
 
 @app.route("/api/list", methods=["GET"])
 def api_list():
-    files = [f for f in os.listdir(MEDIA_DIR) if os.path.isfile(os.path.join(MEDIA_DIR, f)) and not f.startswith('.') and not f.endswith('.txt') and not f.endswith('.json')]
+    files = [f for f in os.listdir(MEDIA_DIR) if os.path.isfile(os.path.join(MEDIA_DIR, f)) and not f.startswith('.') and not f.endswith('.txt') and not f.endswith('.xmp')]
     return jsonify({"success": True, "files": sorted(files)})
 
 @app.route("/api/file/<filename>")
@@ -363,10 +391,14 @@ def api_metadata():
 @app.route("/api/delete", methods=["POST"])
 def api_delete():
     filename = secure_filename(request.json.get("filename", ""))
-    filepath = os.path.join(MEDIA_DIR, filename)
-    txtpath = os.path.join(MEDIA_DIR, os.path.splitext(filename)[0] + ".txt")
-    if os.path.exists(filepath): os.remove(filepath)
-    if os.path.exists(txtpath): os.remove(txtpath)
+    base_name = os.path.splitext(filename)[0]
+    
+    # Wipe the primary file, sidecar, and YOLO labels cleanly
+    for ext in ['.jxl', '.txt', '.xmp', os.path.splitext(filename)[1]]:
+        path = os.path.join(MEDIA_DIR, base_name + ext)
+        if os.path.exists(path): 
+            os.remove(path)
+            
     return jsonify({"success": True})
 
 @app.route("/api/auto_tag", methods=["POST"])
