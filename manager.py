@@ -588,6 +588,22 @@ HTML_TEMPLATE = """
             pointer-events: none;
             letter-spacing: -2px;
         }
+
+        .resizable-vertical {
+            resize: vertical;
+            overflow: hidden;
+            position: relative;
+        }
+        .resizable-vertical::after {
+            content: '=';
+            position: absolute;
+            right: 4px;
+            bottom: 0px;
+            font-size: 18px;
+            color: #9CA3AF;
+            pointer-events: none;
+            line-height: 1;
+        }
     </style>
 </head>
 <body class="bg-gray-900 text-white font-sans h-screen flex w-full overflow-hidden">
@@ -615,16 +631,19 @@ HTML_TEMPLATE = """
     <!-- Right Pane: Editor & YOLO -->
     <div class="flex-1 bg-gray-800 flex flex-col h-full shadow-xl min-w-[320px] overflow-hidden relative">
         <div class="p-4 border-b border-gray-700 flex justify-between items-center flex-shrink-0 z-10 bg-gray-800">
-            <h2 class="text-xl font-bold">Metadata Editor</h2>
+            <h2 class="text-xl font-bold flex items-center gap-3">
+                Metadata Editor
+                <span id="save_indicator" class="text-xs font-bold px-2 py-1 rounded bg-gray-900 text-gray-500 hidden transition-colors"></span>
+            </h2>
             <button id="btn_delete" onclick="deleteCurrentFile()" class="hidden text-red-400 hover:text-red-300 transition text-sm flex items-center">Delete File</button>
         </div>
 
         <div id="editor_panel" class="p-4 flex flex-col opacity-50 pointer-events-none transition-opacity border-b border-gray-700 pb-6 flex-1 overflow-y-auto">
             <p id="selected_filename" class="text-sm font-mono text-blue-400 truncate mb-2 border-b border-gray-700 pb-2 flex-shrink-0">No file selected</p>
             
-            <!-- Canvas container takes all possible space and enables vertical scrolling to make tall images massive -->
-            <div id="canvas_container" class="bg-black rounded shadow w-full relative border border-gray-700 flex-1 overflow-y-auto overflow-x-hidden min-h-[300px]">
-                <canvas id="media_canvas"></canvas>
+            <!-- Resizable Canvas Tagging Container -->
+            <div id="canvas_container" class="bg-black rounded shadow w-full relative border border-gray-700 overflow-hidden min-h-[200px] resizable-vertical" style="flex: 1 1 auto;">
+                <canvas id="media_canvas" class="absolute"></canvas>
             </div>
             
             <!-- Region Toggle -->
@@ -638,7 +657,7 @@ HTML_TEMPLATE = """
             
             <div class="mt-4 flex-shrink-0">
                 <label class="block text-sm font-bold text-gray-300 mb-1">Booru Tags (XMP-dc:Subject)</label>
-                <input type="text" id="meta_tags" placeholder="e.g. christmas tree, beach" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-white focus:border-blue-500">
+                <input type="text" id="meta_tags" oninput="triggerAutosave()" placeholder="e.g. christmas tree, beach" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-white focus:border-blue-500">
             </div>
 
             <div class="mt-4 flex-shrink-0">
@@ -648,10 +667,8 @@ HTML_TEMPLATE = """
                         ✨ Auto-Describe
                     </button>
                 </div>
-                <textarea id="meta_desc" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-white focus:border-blue-500 resize-y min-h-[80px]" placeholder="Description..."></textarea>
+                <textarea id="meta_desc" oninput="triggerAutosave()" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-white focus:border-blue-500 resize-y min-h-[80px]" placeholder="Description..."></textarea>
             </div>
-
-            <button onclick="saveMetadata()" id="btn_save" class="w-full bg-green-600 hover:bg-green-500 py-3 rounded font-bold transition shadow text-lg mt-4 flex-shrink-0">Save EXIF Metadata</button>
         </div>
 
         <!-- YOLO Tools -->
@@ -729,6 +746,7 @@ HTML_TEMPLATE = """
         let drawing = false;
         let startX = 0, startY = 0, curX = 0, curY = 0, pendingBox = null;
         let hasLoadedSettings = false;
+        let autosaveTimeout = null;
 
         async function fetchState() {
             try {
@@ -808,6 +826,9 @@ HTML_TEMPLATE = """
             document.getElementById('yolo_controls').classList.remove('opacity-50', 'pointer-events-none');
             document.getElementById('btn_delete').classList.remove('hidden');
             
+            // Reset indicators
+            document.getElementById('save_indicator').classList.add('hidden');
+            
             currentImgObj.src = '/api/file/' + filename + '?ts=' + Date.now();
             
             const res = await fetch('/api/metadata', {
@@ -823,6 +844,19 @@ HTML_TEMPLATE = """
             }
         }
 
+        function triggerAutosave() {
+            if (!currentFile) return;
+            const ind = document.getElementById('save_indicator');
+            ind.classList.remove('hidden', 'text-green-400', 'text-gray-500');
+            ind.classList.add('text-yellow-400');
+            ind.innerText = "Saving...";
+            
+            clearTimeout(autosaveTimeout);
+            autosaveTimeout = setTimeout(() => {
+                saveMetadata();
+            }, 1000);
+        }
+
         async function saveMetadata() {
             if(!currentFile) return;
             const tags = document.getElementById('meta_tags').value.split(',').map(s => s.trim()).filter(s => s);
@@ -833,7 +867,19 @@ HTML_TEMPLATE = """
                     tags: tags, description: document.getElementById('meta_desc').value, regions: currentRegions
                 })
             });
-            if((await res.json()).success) alert("EXIF & YOLO Sync Saved!");
+            const data = await res.json();
+            if(data.success) {
+                const ind = document.getElementById('save_indicator');
+                ind.classList.remove('text-yellow-400');
+                ind.classList.add('text-green-400');
+                ind.innerText = "✓ Saved";
+                setTimeout(() => { 
+                    if(ind.innerText === "✓ Saved") {
+                        ind.classList.remove('text-green-400');
+                        ind.classList.add('text-gray-500');
+                    }
+                }, 2000);
+            }
         }
 
         async function deleteCurrentFile() {
@@ -841,6 +887,7 @@ HTML_TEMPLATE = """
             if(confirm(`Delete ${currentFile}?`)) {
                 await fetch('/api/delete', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({filename: currentFile}) });
                 currentFile = null; document.getElementById('editor_panel').classList.add('opacity-50', 'pointer-events-none');
+                document.getElementById('save_indicator').classList.add('hidden');
                 loadGallery();
             }
         }
@@ -857,8 +904,9 @@ HTML_TEMPLATE = """
             if(data.success) {
                 currentRegions = currentRegions.concat(data.regions);
                 drawCanvas();
+                triggerAutosave();
             } else alert(data.error);
-            btn.innerText = "Auto-Tag Image Regions";
+            btn.innerText = "Auto-Tag Current Image";
         }
 
         async function runAutoDescribe() {
@@ -878,6 +926,7 @@ HTML_TEMPLATE = """
                     const descBox = document.getElementById('meta_desc');
                     if(descBox.value.trim() !== "") descBox.value += "\\n\\n";
                     descBox.value += data.description;
+                    triggerAutosave();
                 } else alert("Error: " + data.error);
             } catch(e) {
                 alert("Network error calling LLM Endpoint.");
@@ -913,10 +962,12 @@ HTML_TEMPLATE = """
         currentImgObj.onload = () => drawCanvas();
         window.addEventListener('resize', () => { if(currentFile) drawCanvas(); });
 
-        // Dynamic Resizing Observer for the Canvas element based on drag boundaries
+        // Dynamic Resizing Observer for the Container boundaries
         const canvasContainer = document.getElementById('canvas_container');
         const resizeObserver = new ResizeObserver(() => {
-            if(currentFile && currentImgObj.width) drawCanvas();
+            if(currentFile && currentImgObj.width) {
+                requestAnimationFrame(() => drawCanvas());
+            }
         });
         if(canvasContainer) resizeObserver.observe(canvasContainer);
 
@@ -925,11 +976,24 @@ HTML_TEMPLATE = """
             const aspect = currentImgObj.width / currentImgObj.height;
             const parent = canvas.parentElement;
             
-            let drawW = parent.clientWidth;
+            const parentW = parent.clientWidth;
+            const parentH = parent.clientHeight;
+            
+            // Image object fitting logic (no scrolling)
+            let drawW = parentW;
             let drawH = drawW / aspect;
+            
+            if (drawH > parentH) {
+                drawH = parentH;
+                drawW = drawH * aspect;
+            }
             
             canvas.width = drawW; 
             canvas.height = drawH;
+            
+            // Center Canvas absolutely inside its flex wrapper
+            canvas.style.left = `${(parentW - drawW) / 2}px`;
+            canvas.style.top = `${(parentH - drawH) / 2}px`;
             
             ctx.clearRect(0,0, canvas.width, canvas.height); 
             ctx.drawImage(currentImgObj, 0, 0, drawW, drawH);
@@ -969,7 +1033,10 @@ HTML_TEMPLATE = """
                 const b = currentRegions[i], pxW = b.w * canvas.width, pxH = b.h * canvas.height;
                 const pxX = (b.cx * canvas.width) - pxW/2, pxY = (b.cy * canvas.height) - pxH/2;
                 if (e.offsetX >= pxX && e.offsetX <= pxX+pxW && e.offsetY >= pxY && e.offsetY <= pxY+pxH) {
-                    currentRegions.splice(i, 1); drawCanvas(); break; 
+                    currentRegions.splice(i, 1); 
+                    drawCanvas(); 
+                    triggerAutosave(); 
+                    break; 
                 }
             }
         });
@@ -982,7 +1049,9 @@ HTML_TEMPLATE = """
         function saveRegion() {
             pendingBox.class_name = document.getElementById('modal_region_name').value.trim() || "region";
             currentRegions.push(pendingBox); pendingBox = null;
-            document.getElementById('region_modal').classList.add('hidden'); drawCanvas();
+            document.getElementById('region_modal').classList.add('hidden'); 
+            drawCanvas();
+            triggerAutosave();
         }
         function cancelRegion() { pendingBox = null; document.getElementById('region_modal').classList.add('hidden'); drawCanvas(); }
         
