@@ -58,17 +58,20 @@ state = {
     "oai_endpoint": "https://api.openai.com/v1/chat/completions",
     "oai_key": "",
     "oai_model": "gpt-4o-mini",
-    "oai_prompt": "Describe this image in a brief, highly detailed paragraph suitable for photo metadata."
+    "oai_system_prompt": "You are an expert image analysis AI. Provide concise, highly detailed, and accurate responses.",
+    "oai_actions": [
+        {"id": "1", "name": "Describe Scene", "prompt": "Describe the overall scene, lighting, and composition in a detailed paragraph.", "target": "description"},
+        {"id": "2", "name": "Describe Clothes", "prompt": "Focus entirely on the subject's clothing, style, and accessories.", "target": "description"},
+        {"id": "3", "name": "Booru Tags", "prompt": "Generate a comma-separated list of Danbooru-style tags for the subjects and scene.", "target": "tags"},
+        {"id": "4", "name": "Box Objects", "prompt": "Identify the primary objects in this image and create bounding boxes for them.", "target": "regions"}
+    ]
 }
 
 metadata_index = {}
-thumb_memory_cache = {} # Keeps disk clean, holds downsampled JXL layers in RAM
+thumb_memory_cache = {}
 
-# --- Helper Functions ---
 def get_safe_path(base_dir, user_path):
-    """Prevents directory traversal attacks while allowing subfolders"""
     abs_base = os.path.abspath(base_dir)
-    # Strip leading slashes from user path to ensure it joins correctly
     clean_path = user_path.lstrip('\\/')
     abs_target = os.path.abspath(os.path.join(base_dir, clean_path))
     if os.path.commonpath([abs_base, abs_target]) == abs_base:
@@ -78,7 +81,6 @@ def get_safe_path(base_dir, user_path):
 def build_metadata_index():
     access_logger.info("Building metadata index...")
     for root, _, filenames in os.walk(MEDIA_DIR):
-        # Skip YOLO runs and hidden dirs
         if any(part.startswith('.') or part == 'runs' for part in root.split(os.sep)):
             continue
         for f in filenames:
@@ -102,7 +104,7 @@ def load_config():
             access_logger.error(f"Failed to load config: {e}")
 
 def save_config():
-    keys_to_save = ["remote_ip", "oai_endpoint", "oai_key", "oai_model", "oai_prompt"]
+    keys_to_save = ["remote_ip", "oai_endpoint", "oai_key", "oai_model", "oai_system_prompt", "oai_actions"]
     try:
         with open(CONFIG_FILE, "w") as f:
             json.dump({k: state.get(k) for k in keys_to_save}, f, indent=4)
@@ -131,9 +133,7 @@ load_config()
 load_classes()
 populate_model_selector()
 
-# --- Deduplication & Hashing Subsystem ---
 def get_ahash_for_file(filepath, cache):
-    """Calculates a compact 64-bit average hash based on an 8x8 resized gray image."""
     filename = os.path.basename(filepath)
     try:
         mtime = os.path.getmtime(filepath)
@@ -156,9 +156,7 @@ def get_ahash_for_file(filepath, cache):
         access_logger.error(f"Error hashing {filename}: {e}")
     return None
 
-# --- pyexiv2 & YOLO Sync Subsystems ---
 def sync_yolo_labels(filepath, regions):
-    """Generates the lightweight YOLO .txt sidecar used ONLY by the training worker"""
     for reg in regions:
         if reg['class_name'] not in state["classes"]:
             state["classes"].append(reg['class_name'])
@@ -175,29 +173,24 @@ def sync_yolo_labels(filepath, regions):
             f.write(f"{cls_id} {reg['cx']:.6f} {reg['cy']:.6f} {reg['w']:.6f} {reg['h']:.6f}\n")
 
 def read_metadata(filepath):
-    """Strictly loads metadata natively from the image using pyexiv2 (XMP/IPTC Standards)"""
     try:
         tags = []
         desc = ""
         regions = []
         
-        # Prioritize reading from a .xmp sidecar if it exists, fallback to native file
         xmp_path = os.path.splitext(filepath)[0] + '.xmp'
         target_file = xmp_path if os.path.exists(xmp_path) else filepath
 
         if not os.path.exists(target_file):
             return {"tags": [], "description": "", "regions": []}
 
-        # 1. Read structural tags via pyexiv2 standard read
         with pyexiv2.Image(target_file) as img:
             xmp = img.read_xmp()
             
-            # Read Booru Tags
             val = xmp.get('Xmp.dc.subject', [])
             if isinstance(val, list): tags = val
             elif isinstance(val, str): tags = [val]
                 
-            # Parse XMP IPTC ImageRegion structs
             region_keys = [k for k in xmp.keys() if 'ImageRegion[' in k]
             indices = set()
             for k in region_keys:
@@ -220,11 +213,9 @@ def read_metadata(filepath):
                 except Exception:
                     pass
 
-        # Bypass pyexiv2 dict bug by extracting description directly from XML if sidecar exists
         if os.path.exists(xmp_path):
             with open(xmp_path, 'r', encoding='utf-8') as f:
                 xml_str = f.read()
-            # Regex specifically targeting the x-default alt text
             m = re.search(r'<dc:description>\s*<rdf:Alt>\s*<rdf:li[^>]*>(.*?)</rdf:li>', xml_str, re.DOTALL)
             if m:
                 extracted = saxutils.unescape(m.group(1).strip())
@@ -283,11 +274,9 @@ def write_metadata(filepath, tags, description, regions):
 </x:xmpmeta>
 <?xpacket end="w"?>"""
         
-        # Directly write the validated XML structure to the sidecar
         with open(xmp_path, 'w', encoding='utf-8') as f:
             f.write(xmp_content)
 
-        # Update Live Search Index
         rel_path = os.path.relpath(filepath, MEDIA_DIR).replace('\\', '/')
         metadata_index[rel_path] = {"tags": tags, "description": description}
 
@@ -300,7 +289,6 @@ def get_base64_image(image_path):
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
-# --- YOLO Training Workers ---
 def remote_yolo_train_worker(abs_folder, dataset_dir, config, remote_ip):
     try:
         state["status_text"] = f"Zipping dataset and offloading to {remote_ip}..."
@@ -375,7 +363,6 @@ model.train(data=yaml_path, epochs=epochs, batch=batch, imgsz=imgsz, device=devi
         state["status_text"] = f"Training error: {e}"
         training_logger.error(f"Training worker error: {e}")
 
-
 # --- Web Routes ---
 @app.route("/")
 def index():
@@ -395,7 +382,8 @@ def get_state():
         "oai_endpoint": state["oai_endpoint"],
         "oai_key": state["oai_key"],
         "oai_model": state["oai_model"],
-        "oai_prompt": state["oai_prompt"]
+        "oai_system_prompt": state.get("oai_system_prompt", ""),
+        "oai_actions": state.get("oai_actions", [])
     })
 
 @app.route("/api/update_settings", methods=["POST"])
@@ -404,7 +392,8 @@ def update_settings():
     state["oai_endpoint"] = data.get("oai_endpoint", state["oai_endpoint"])
     state["oai_key"] = data.get("oai_key", state["oai_key"])
     state["oai_model"] = data.get("oai_model", state["oai_model"])
-    state["oai_prompt"] = data.get("oai_prompt", state["oai_prompt"])
+    state["oai_system_prompt"] = data.get("oai_system_prompt", state.get("oai_system_prompt", ""))
+    state["oai_actions"] = data.get("oai_actions", state.get("oai_actions", []))
     save_config()
     return jsonify({"success": True})
 
@@ -412,7 +401,6 @@ def update_settings():
 def api_upload():
     if 'file' not in request.files: return jsonify({"success": False})
     
-    # Process Subfolder Target
     folder = request.form.get("folder", "").strip()
     target_dir = get_safe_path(MEDIA_DIR, folder) if folder else MEDIA_DIR
     if not target_dir: return jsonify({"success": False})
@@ -428,13 +416,11 @@ def api_upload():
     file.save(temp_path)
     
     try:
-        # Convert if not already JXL
         if not filename.lower().endswith('.jxl'):
             subprocess.run(['cjxl', temp_path, jxl_path, '-d', '0'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if temp_path != jxl_path and os.path.exists(temp_path): 
                 os.remove(temp_path)
                 
-        # NEW: Process bundled metadata immediately if provided by the bulk uploader
         meta_json = request.form.get("metadata")
         if meta_json:
             meta_data = json.loads(meta_json)
@@ -507,18 +493,21 @@ def api_thumb(filename):
     filepath = get_safe_path(MEDIA_DIR, filename)
     if not filepath or not os.path.exists(filepath): return "", 404
 
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext != '.jxl':
+        mime = 'image/jpeg' if ext in ['.jpg', '.jpeg'] else ('image/png' if ext == '.png' else 'image/webp')
+        return send_file(filepath, mimetype=mime)
+
     mtime = os.path.getmtime(filepath)
     if filename in thumb_memory_cache and thumb_memory_cache[filename]['mtime'] == mtime:
         return send_file(io.BytesIO(thumb_memory_cache[filename]['data']), mimetype='image/jpeg')
 
     temp_jpg = os.path.join(tempfile.gettempdir(), f"preview_{os.getpid()}_{time.time()}.jpg")
     try:
-        # djxl progressive decoding downsampling 8 for immense speedup
         subprocess.run(['djxl', filepath, temp_jpg, '--downsampling', '8'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         with open(temp_jpg, 'rb') as f:
             img_data = f.read()
         
-        # Max memory capacity of 250 previews
         if len(thumb_memory_cache) > 250:
             thumb_memory_cache.pop(next(iter(thumb_memory_cache)))
             
@@ -548,7 +537,6 @@ def api_delete():
     filepath = get_safe_path(MEDIA_DIR, filename)
     if filepath:
         base_path = os.path.splitext(filepath)[0]
-        # Wipe the primary file, sidecar, and YOLO labels cleanly
         for ext in ['.jxl', '.txt', '.xmp', os.path.splitext(filename)[1]]:
             if os.path.exists(base_path + ext): 
                 os.remove(base_path + ext)
@@ -581,24 +569,20 @@ def dedup():
         h = get_ahash_for_file(path, cache)
         if h: hashes[f] = h
         
-    # Write updated hashes to disk cache
     try:
         with open(cache_path, 'w') as f: json.dump(cache, f)
     except: pass
         
-    # 1. Compare hashes for similarity candidates
     candidates = []
     files_with_hash = list(hashes.keys())
     for i in range(len(files_with_hash)):
         for j in range(i+1, len(files_with_hash)):
             f1, f2 = files_with_hash[i], files_with_hash[j]
             dist = sum(c1 != c2 for c1, c2 in zip(hashes[f1], hashes[f2]))
-            if dist <= 5: # Threshold for identical or lightly transformed images
+            if dist <= 5: 
                 candidates.append((f1, f2))
                 
     duplicate_pairs = []
-    
-    # 2. Strict Full Image comparison for verified similarity
     for f1, f2 in candidates:
         temp1 = os.path.join(tempfile.gettempdir(), f"temp_full1_{os.getpid()}_{random.randint(0,999)}.jpg")
         temp2 = os.path.join(tempfile.gettempdir(), f"temp_full2_{os.getpid()}_{random.randint(0,999)}.jpg")
@@ -610,11 +594,8 @@ def dedup():
             img2 = cv2.imread(temp2)
             
             if img1 is not None and img2 is not None:
-                # Align shapes if they differ
                 if img1.shape != img2.shape:
                     img2 = cv2.resize(img2, (img1.shape[1], img1.shape[0]))
-                    
-                # Mathematical pixel comparison (allow mild JXL compression artifacting diffs)
                 diff = cv2.absdiff(img1, img2).mean()
                 if diff < 15.0: 
                     duplicate_pairs.append((f1, f2))
@@ -624,7 +605,6 @@ def dedup():
             if os.path.exists(temp1): os.remove(temp1)
             if os.path.exists(temp2): os.remove(temp2)
             
-    # 3. Group matching pairs together using basic graph components
     adj = {f: [] for f in files}
     for f1, f2 in duplicate_pairs:
         adj[f1].append(f2)
@@ -658,7 +638,6 @@ def dedup_merge():
         return jsonify({"success": False, "error": "Target not found"})
 
     try:
-        # Read base metadata
         base_meta = read_metadata(target_path)
 
         for other in others:
@@ -667,7 +646,6 @@ def dedup_merge():
 
             other_meta = read_metadata(other_path)
 
-            # Merge Tags (Case-insensitive deduplication)
             merged_tags = []
             seen_tags = set()
             for t in base_meta["tags"] + other_meta["tags"]:
@@ -676,19 +654,16 @@ def dedup_merge():
                     merged_tags.append(t)
             base_meta["tags"] = merged_tags
 
-            # Merge Description
             d1, d2 = base_meta["description"].strip(), other_meta["description"].strip()
             if d1 and d2 and d1 != d2 and d2 not in d1:
                 base_meta["description"] = f"{d1}\n\n{d2}"
             elif d2 and not d1:
                 base_meta["description"] = d2
 
-            # Merge Regions (Spatial deduplication)
             for r2 in other_meta["regions"]:
                 is_dup = False
                 for r1 in base_meta["regions"]:
                     if r1["class_name"] == r2["class_name"]:
-                        # If boxes are extremely close, consider them duplicate entries for the same object
                         if abs(r1["cx"] - r2["cx"]) < 0.05 and abs(r1["cy"] - r2["cy"]) < 0.05 and \
                            abs(r1["w"] - r2["w"]) < 0.05 and abs(r1["h"] - r2["h"]) < 0.05:
                             is_dup = True
@@ -696,11 +671,9 @@ def dedup_merge():
                 if not is_dup:
                     base_meta["regions"].append(r2)
 
-        # Save merged metadata back to target image
         success = write_metadata(target_path, base_meta["tags"], base_meta["description"], base_meta["regions"])
 
         if success:
-            # Safely delete the redundant copies
             for other in others:
                 other_path = get_safe_path(MEDIA_DIR, other)
                 base_name = os.path.splitext(other_path)[0]
@@ -720,18 +693,24 @@ def dedup_merge():
 def auto_tag():
     model_path = request.json.get("model")
     filename = request.json.get("filename", "")
-    jxl_path = get_safe_path(MEDIA_DIR, filename)
+    filepath = get_safe_path(MEDIA_DIR, filename)
     
-    if not os.path.exists(model_path) or not jxl_path or not os.path.exists(jxl_path):
+    if not os.path.exists(model_path) or not filepath or not os.path.exists(filepath):
         return jsonify({"success": False, "error": "Invalid model or file."})
         
-    temp_jpg = os.path.join(tempfile.gettempdir(), f"temp_{int(time.time())}.jpg")
+    temp_jpg = None
+    ext = os.path.splitext(filepath)[1].lower()
+    
     try:
-        # Decode JXL to temporary JPG for YOLO inference
-        subprocess.run(['djxl', jxl_path, temp_jpg], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
+        if ext == '.jxl':
+            temp_jpg = os.path.join(tempfile.gettempdir(), f"temp_tag_{int(time.time())}.jpg")
+            subprocess.run(['djxl', filepath, temp_jpg], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            target_img = temp_jpg
+        else:
+            target_img = filepath 
+            
         model = YOLO(model_path)
-        results = model(temp_jpg, verbose=False, conf=0.25)
+        results = model(target_img, verbose=False, conf=0.25)
         
         new_regions = []
         if results[0].boxes is not None:
@@ -744,61 +723,142 @@ def auto_tag():
                 if cls_name not in state["classes"]:
                     state["classes"].append(cls_name)
         save_classes()
-        os.remove(temp_jpg)
         return jsonify({"success": True, "regions": new_regions})
     except Exception as e:
-        if os.path.exists(temp_jpg): os.remove(temp_jpg)
+        access_logger.error(f"OAI Auto-Tag Error: {e}")
         return jsonify({"success": False, "error": str(e)})
+    finally:
+        if temp_jpg and os.path.exists(temp_jpg):
+            os.remove(temp_jpg)
 
-@app.route("/api/auto_describe", methods=["POST"])
-def auto_describe():
+@app.route("/api/run_llm", methods=["POST"])
+def run_llm():
     filename = request.json.get("filename", "")
-    jxl_path = get_safe_path(MEDIA_DIR, filename)
+    action_id = str(request.json.get("action_id", ""))
     
-    if not jxl_path or not os.path.exists(jxl_path):
+    filepath = get_safe_path(MEDIA_DIR, filename)
+    if not filepath or not os.path.exists(filepath):
         return jsonify({"success": False, "error": "File not found."})
 
     endpoint = state.get("oai_endpoint", "").strip()
     model = state.get("oai_model", "").strip()
     api_key = state.get("oai_key", "").strip()
-    prompt = state.get("oai_prompt", "").strip()
+    sys_prompt = state.get("oai_system_prompt", "")
+    
+    action = next((a for a in state.get("oai_actions", []) if str(a["id"]) == action_id), None)
 
-    if not endpoint or not model:
-        return jsonify({"success": False, "error": "LLM Endpoint or Model not configured. Check AI Settings."})
+    if not endpoint or not model or not action:
+        return jsonify({"success": False, "error": "LLM Settings or Action not configured."})
 
-    temp_jpg = os.path.join(tempfile.gettempdir(), f"temp_desc_{int(time.time())}.jpg")
+    temp_jpg = None
+    ext = os.path.splitext(filepath)[1].lower()
+    
     try:
-        # LLMs don't read JXL well, convert to standard JPEG
-        subprocess.run(['djxl', jxl_path, temp_jpg], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        base64_image = get_base64_image(temp_jpg)
+        if ext == '.jxl':
+            temp_jpg = os.path.join(tempfile.gettempdir(), f"temp_llm_{int(time.time())}.jpg")
+            subprocess.run(['djxl', filepath, temp_jpg], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            target_img = temp_jpg
+        else:
+            target_img = filepath 
+
+        base64_image = get_base64_image(target_img)
 
         headers = {"Content-Type": "application/json"}
         if api_key: headers["Authorization"] = f"Bearer {api_key}"
+        
+        user_prompt = action["prompt"]
+        if action["target"] == "regions":
+            user_prompt += "\n\nYou MUST respond entirely in valid JSON using this format: {\"boxes\": [{\"class_name\": \"name\", \"cx\": 0.5, \"cy\": 0.5, \"w\": 0.1, \"h\": 0.1}]}. Coordinates must be normalized floats between 0.0 and 1.0 representing center X, center Y, width, and height."
 
         payload = {
             "model": model,
             "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
-                }
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": [
+                    {"type": "text", "text": user_prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                ]}
             ],
-            "max_tokens": 500
+            "max_tokens": 1000
         }
 
-        response = requests.post(endpoint, headers=headers, json=payload, timeout=500)
-        response.raise_for_status()
-        desc = response.json()['choices'][0]['message']['content']
+        # Inject Explicit OpenAI Tool Calls if target is Bounding Boxes
+        if action["target"] == "regions":
+            payload["tools"] = [{
+                "type": "function",
+                "function": {
+                    "name": "create_bounding_boxes",
+                    "description": "Create bounding boxes for specific objects in the image. Coordinates must be normalized between 0.0 and 1.0.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "boxes": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "class_name": {"type": "string"},
+                                        "cx": {"type": "number"},
+                                        "cy": {"type": "number"},
+                                        "w": {"type": "number"},
+                                        "h": {"type": "number"}
+                                    },
+                                    "required": ["class_name", "cx", "cy", "w", "h"]
+                                }
+                            }
+                        },
+                        "required": ["boxes"]
+                    }
+                }
+            }]
+            payload["tool_choice"] = {"type": "function", "function": {"name": "create_bounding_boxes"}}
 
-        os.remove(temp_jpg)
-        return jsonify({"success": True, "description": desc})
+        response = requests.post(endpoint, headers=headers, json=payload, timeout=600)
+        response.raise_for_status()
+        resp_msg = response.json()['choices'][0]['message']
+
+        # Parse LLM Response appropriately
+        if action["target"] == "regions":
+            boxes = []
+            # 1. Try explicit Tool Calls parsing
+            if resp_msg.get('tool_calls'):
+                try:
+                    args = json.loads(resp_msg['tool_calls'][0]['function']['arguments'])
+                    boxes = args.get('boxes', [])
+                except Exception: pass
+            
+            # 2. Intelligent JSON Fallback (for older/local models that ignore tool_choice)
+            if not boxes and resp_msg.get('content'):
+                try:
+                    content = resp_msg['content']
+                    json_str = content[content.find('{'):content.rfind('}')+1]
+                    fallback_args = json.loads(json_str)
+                    boxes = fallback_args.get('boxes', [])
+                except Exception: pass
+                
+            # Sync new classes
+            for b in boxes:
+                if b.get('class_name') and b['class_name'] not in state["classes"]:
+                    state["classes"].append(b['class_name'])
+            save_classes()
+            
+            return jsonify({"success": True, "target": "regions", "regions": boxes})
+            
+        elif action["target"] == "tags":
+            content = resp_msg.get('content', '')
+            tags = [t.strip() for t in content.split(',') if t.strip()]
+            return jsonify({"success": True, "target": "tags", "tags": tags})
+            
+        else: # description
+            content = resp_msg.get('content', '')
+            return jsonify({"success": True, "target": "description", "description": content})
+
     except Exception as e:
-        if os.path.exists(temp_jpg): os.remove(temp_jpg)
-        access_logger.error(f"OAI Auto-Describe Error: {e}")
+        access_logger.error(f"OAI Run LLM Error: {e}")
         return jsonify({"success": False, "error": str(e)})
+    finally:
+        if temp_jpg and os.path.exists(temp_jpg): 
+            os.remove(temp_jpg)
 
 @app.route("/api/train", methods=["POST"])
 def train():
@@ -839,7 +899,6 @@ def train():
     val_count = max(1, int(len(valid_pairs) * 0.05)) if len(valid_pairs) > 1 else 0
     val_bases, train_bases = valid_pairs[:val_count], valid_pairs[val_count:]
 
-    # JXL Decoding Loop for YOLO
     for b in train_bases:
         base_name = os.path.basename(b)
         subprocess.run(['djxl', b + ".jxl", os.path.join(img_tr, base_name + ".jpg")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -876,7 +935,6 @@ def get_tailwind():
         content = f.read()
     return content, 200, {'Content-Type': 'application/javascript; charset=utf-8'}
 
-
 # --- Frontend Templates ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -890,7 +948,7 @@ HTML_TEMPLATE = """
         .gallery-item { 
             cursor: pointer; 
             transition: transform 0.1s; 
-            aspect-ratio: 1 / 1; /* Guaranteed square grid item to prevent overlapping */
+            aspect-ratio: 1 / 1;
             position: relative;
         }
         .gallery-item:hover { transform: scale(1.02); border-color: #60A5FA; z-index: 10; }
@@ -929,7 +987,6 @@ HTML_TEMPLATE = """
             line-height: 1;
         }
         
-        /* Custom scrollbar for dedup groups */
         .scroller::-webkit-scrollbar { height: 8px; }
         .scroller::-webkit-scrollbar-track { background: #374151; border-radius: 4px; }
         .scroller::-webkit-scrollbar-thumb { background: #4B5563; border-radius: 4px; }
@@ -997,7 +1054,7 @@ HTML_TEMPLATE = """
             
             <!-- Region Toggle -->
             <div class="flex justify-between items-center mt-2 flex-shrink-0">
-                <span class="text-xs text-gray-400">Click & Drag on image to add a bounding box</span>
+                <span class="text-xs text-gray-400">Left Drag: Add Box | Mid Click: Rename | Right Click: Delete</span>
                 <label class="text-sm text-gray-300 flex items-center gap-2 cursor-pointer font-bold hover:text-white transition">
                     <input type="checkbox" id="toggle_regions" checked onchange="drawCanvas()" class="accent-blue-500 w-4 h-4 cursor-pointer">
                     Show Regions
@@ -1011,10 +1068,13 @@ HTML_TEMPLATE = """
 
             <div class="mt-4 flex-shrink-0">
                 <div class="flex justify-between items-center mb-1">
-                    <label class="block text-sm font-bold text-gray-300">Description (XMP-dc:Description)</label>
-                    <button onclick="runAutoDescribe()" id="btn_autodescribe" class="text-xs bg-yellow-600 hover:bg-yellow-500 text-white px-2 py-1 rounded shadow transition flex items-center gap-1">
-                        ✨ Auto-Describe
-                    </button>
+                    <label class="block text-sm font-bold text-gray-300">Description / Actions</label>
+                    <div class="flex items-center gap-2">
+                        <select id="llm_action_select" class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-1 max-w-[150px]"></select>
+                        <button onclick="runLLM()" id="btn_run_llm" class="text-xs bg-yellow-600 hover:bg-yellow-500 text-white px-2 py-1 rounded shadow transition flex items-center gap-1 font-bold">
+                            ✨ Run AI
+                        </button>
+                    </div>
                 </div>
                 <textarea id="meta_desc" oninput="triggerAutosave()" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-white focus:border-blue-500 resize-y min-h-[80px]" placeholder="Description..."></textarea>
             </div>
@@ -1079,21 +1139,39 @@ HTML_TEMPLATE = """
         <div class="bg-gray-800 p-6 rounded-lg shadow-xl w-96 border border-gray-600">
             <h2 class="text-lg font-bold mb-4 text-purple-400">OAI Vision Settings</h2>
             
-            <label class="block text-xs text-gray-400 mb-1">Endpoint URL</label>
-            <input type="text" id="cfg_endpoint" class="w-full p-2 bg-gray-700 rounded mb-3 border border-gray-600 text-sm">
-            
-            <label class="block text-xs text-gray-400 mb-1">API Key (Optional for Local)</label>
-            <input type="password" id="cfg_apikey" class="w-full p-2 bg-gray-700 rounded mb-3 border border-gray-600 text-sm">
-            
-            <label class="block text-xs text-gray-400 mb-1">Model Name</label>
-            <input type="text" id="cfg_model" class="w-full p-2 bg-gray-700 rounded mb-3 border border-gray-600 text-sm">
-            
-            <label class="block text-xs text-gray-400 mb-1">System Prompt</label>
-            <textarea id="cfg_prompt" class="w-full p-2 bg-gray-700 rounded mb-4 border border-gray-600 text-sm h-20 resize-none"></textarea>
+            <div class="overflow-y-auto scroller flex-1 pr-2 space-y-4">
+                <div>
+                    <label class="block text-xs font-bold text-gray-400 mb-1">Endpoint URL</label>
+                    <input type="text" id="cfg_endpoint" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+                </div>
+                
+                <div>
+                    <label class="block text-xs font-bold text-gray-400 mb-1">API Key (Optional for Local)</label>
+                    <input type="password" id="cfg_apikey" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+                </div>
+                
+                <div>
+                    <label class="block text-xs font-bold text-gray-400 mb-1">Model Name</label>
+                    <input type="text" id="cfg_model" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+                </div>
+                
+                <div>
+                    <label class="block text-xs font-bold text-gray-400 mb-1">Global System Prompt</label>
+                    <textarea id="cfg_system" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm h-16 resize-y text-white"></textarea>
+                </div>
 
-            <div class="flex justify-end space-x-3 border-t border-gray-700 pt-4">
-                <button onclick="document.getElementById('ai_settings_modal').classList.add('hidden')" class="bg-gray-600 px-4 py-2 rounded text-sm">Close</button>
-                <button onclick="saveAiSettings()" class="bg-green-600 px-4 py-2 rounded text-sm font-bold">Save Settings</button>
+                <div class="border-t border-gray-600 pt-4">
+                    <div class="flex justify-between items-center mb-2">
+                        <label class="block text-xs font-bold text-gray-400">LLM Actions (Prompts & Tools)</label>
+                        <button onclick="addAiAction()" class="text-xs bg-indigo-600 hover:bg-indigo-500 text-white px-2 py-1 rounded shadow transition font-bold">+ Add Action</button>
+                    </div>
+                    <div id="actions_container" class="space-y-3"></div>
+                </div>
+            </div>
+
+            <div class="flex justify-end space-x-3 border-t border-gray-700 pt-4 mt-4 flex-shrink-0">
+                <button onclick="document.getElementById('ai_settings_modal').classList.add('hidden')" class="bg-gray-600 hover:bg-gray-500 px-4 py-2 rounded text-sm transition">Cancel</button>
+                <button onclick="saveAiSettings()" class="bg-green-600 hover:bg-green-500 px-4 py-2 rounded text-sm font-bold transition">Save Configuration</button>
             </div>
         </div>
     </div>
@@ -1110,9 +1188,11 @@ HTML_TEMPLATE = """
         const ctx = canvas.getContext('2d');
         let currentImgObj = new Image();
         let drawing = false;
-        let startX = 0, startY = 0, curX = 0, curY = 0, pendingBox = null;
+        let startX = 0, startY = 0, curX = 0, curY = 0, pendingBox = null, editingBoxIndex = null;
         let hasLoadedSettings = false;
         let autosaveTimeout = null;
+        
+        let oai_actions_cache = [];
 
         async function fetchState() {
             try {
@@ -1136,26 +1216,132 @@ HTML_TEMPLATE = """
                     document.getElementById('cfg_endpoint').value = state.oai_endpoint;
                     document.getElementById('cfg_apikey').value = state.oai_key;
                     document.getElementById('cfg_model').value = state.oai_model;
-                    document.getElementById('cfg_prompt').value = state.oai_prompt;
+                    document.getElementById('cfg_system').value = state.oai_system_prompt || "";
+                    
+                    oai_actions_cache = state.oai_actions || [];
+                    renderAiActions();
+                    updateLlmActionDropdown();
                     hasLoadedSettings = true;
                 }
             } catch(e) {}
         }
         setInterval(fetchState, 2000); fetchState();
 
+        // --- Action Editor Logic ---
+        function renderAiActions() {
+            const container = document.getElementById('actions_container');
+            container.innerHTML = '';
+            oai_actions_cache.forEach((act, idx) => {
+                const isSelectedDesc = act.target === 'description' ? 'selected' : '';
+                const isSelectedTags = act.target === 'tags' ? 'selected' : '';
+                const isSelectedRegions = act.target === 'regions' ? 'selected' : '';
+                
+                container.innerHTML += `
+                    <div class="bg-gray-800 p-2 rounded border border-gray-700 relative group action-row" data-id="${act.id || Date.now() + Math.random()}">
+                        <button onclick="this.parentElement.remove()" class="absolute top-2 right-2 text-red-500 hover:text-red-400 hidden group-hover:block text-xs font-bold px-1 bg-gray-900 rounded border border-red-900">X</button>
+                        <div class="flex gap-2 mb-2 pr-6">
+                            <input type="text" class="act-name flex-1 bg-gray-900 text-white text-xs p-1.5 rounded border border-gray-600" placeholder="Action Name" value="${act.name.replace(/"/g, '&quot;')}">
+                            <select class="act-target bg-gray-900 text-white text-xs p-1.5 rounded border border-gray-600 w-28">
+                                <option value="description" ${isSelectedDesc}>-> Description</option>
+                                <option value="tags" ${isSelectedTags}>-> Tags</option>
+                                <option value="regions" ${isSelectedRegions}>-> Draw Boxes</option>
+                            </select>
+                        </div>
+                        <textarea class="act-prompt w-full bg-gray-900 text-white text-xs p-1.5 rounded border border-gray-600 h-12 resize-y" placeholder="User prompt...">${act.prompt}</textarea>
+                    </div>
+                `;
+            });
+        }
+
+        function addAiAction() {
+            oai_actions_cache.push({id: String(Date.now()), name: "New Action", prompt: "", target: "description"});
+            renderAiActions();
+        }
+
+        function updateLlmActionDropdown() {
+            const sel = document.getElementById('llm_action_select');
+            const prev = sel.value;
+            sel.innerHTML = '';
+            oai_actions_cache.forEach(act => {
+                let opt = document.createElement('option');
+                opt.value = act.id;
+                opt.text = act.name;
+                sel.add(opt);
+            });
+            if(prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+        }
+
         async function saveAiSettings() {
+            const rows = document.querySelectorAll('.action-row');
+            oai_actions_cache = [];
+            rows.forEach(r => {
+                oai_actions_cache.push({
+                    id: r.getAttribute('data-id'),
+                    name: r.querySelector('.act-name').value.trim() || "Action",
+                    prompt: r.querySelector('.act-prompt').value.trim(),
+                    target: r.querySelector('.act-target').value
+                });
+            });
+            
             await fetch('/api/update_settings', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
                     oai_endpoint: document.getElementById('cfg_endpoint').value,
                     oai_key: document.getElementById('cfg_apikey').value,
                     oai_model: document.getElementById('cfg_model').value,
-                    oai_prompt: document.getElementById('cfg_prompt').value
+                    oai_system_prompt: document.getElementById('cfg_system').value,
+                    oai_actions: oai_actions_cache
                 })
             });
+            
+            updateLlmActionDropdown();
             document.getElementById('ai_settings_modal').classList.add('hidden');
         }
 
+        async function runLLM() {
+            if(!currentFile) return;
+            const actionId = document.getElementById('llm_action_select').value;
+            if(!actionId) return alert("Select an action first.");
+            
+            const btn = document.getElementById('btn_run_llm');
+            const ogText = btn.innerHTML;
+            btn.innerHTML = `Wait...`;
+            btn.disabled = true;
+
+            try {
+                const res = await fetch('/api/run_llm', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({filename: currentFile, action_id: actionId})
+                });
+                const data = await res.json();
+                
+                if(data.success) {
+                    if(data.target === 'regions') {
+                        currentRegions = currentRegions.concat(data.regions);
+                        drawCanvas();
+                        triggerAutosave();
+                    } else if(data.target === 'tags') {
+                        const tagsBox = document.getElementById('meta_tags');
+                        let current = tagsBox.value.split(',').map(s=>s.trim()).filter(s=>s);
+                        data.tags.forEach(t => { if(!current.includes(t)) current.push(t); });
+                        tagsBox.value = current.join(', ');
+                        triggerAutosave();
+                    } else {
+                        const descBox = document.getElementById('meta_desc');
+                        if(descBox.value.trim() !== "") descBox.value += "\\n\\n";
+                        descBox.value += data.description;
+                        triggerAutosave();
+                    }
+                } else alert("Error: " + data.error);
+            } catch(e) {
+                alert("Network error calling LLM Endpoint.");
+            }
+            
+            btn.innerHTML = ogText;
+            btn.disabled = false;
+        }
+
+        // --- Core Application ---
         async function loadGallery() {
             const res = await fetch('/api/list');
             const data = await res.json();
@@ -1205,7 +1391,7 @@ HTML_TEMPLATE = """
         async function selectFile(filename) {
             currentFile = filename;
             document.querySelectorAll('.gallery-item').forEach(el => el.classList.remove('selected-item'));
-            document.getElementById(`thumb_${filename.replace(/\\./g, '_')}`)?.classList.add('selected-item');
+            document.getElementById(`thumb_${filename.replace(/[^a-zA-Z0-9]/g, '_')}`)?.classList.add('selected-item');
             
             document.getElementById('selected_filename').innerText = filename;
             document.getElementById('editor_panel').classList.remove('opacity-50', 'pointer-events-none');
@@ -1441,33 +1627,6 @@ HTML_TEMPLATE = """
             btn.innerText = "Auto-Tag Current Image";
         }
 
-        async function runAutoDescribe() {
-            if(!currentFile) return;
-            const btn = document.getElementById('btn_autodescribe');
-            const originalText = btn.innerHTML;
-            btn.innerHTML = `Wait...`;
-            btn.disabled = true;
-
-            try {
-                const res = await fetch('/api/auto_describe', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({filename: currentFile})
-                });
-                const data = await res.json();
-                if(data.success) {
-                    const descBox = document.getElementById('meta_desc');
-                    if(descBox.value.trim() !== "") descBox.value += "\\n\\n";
-                    descBox.value += data.description;
-                    triggerAutosave();
-                } else alert("Error: " + data.error);
-            } catch(e) {
-                alert("Network error calling LLM Endpoint.");
-            }
-            
-            btn.innerHTML = originalText;
-            btn.disabled = false;
-        }
-
         function quickTrain() {
             fetch('/api/train', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({}) });
             alert("Training started in background! Watch the AI Status.");
@@ -1555,7 +1714,26 @@ HTML_TEMPLATE = """
             if(drawing) { ctx.strokeStyle = '#FCD34D'; ctx.strokeRect(startX, startY, curX-startX, curY-startY); }
         }
 
-        canvas.addEventListener('mousedown', e => { if(e.button===0 && currentFile) { startX = e.offsetX; startY = e.offsetY; drawing = true; }});
+        canvas.addEventListener('mousedown', e => { 
+            if(!currentFile) return;
+            if(e.button === 0) { 
+                startX = e.offsetX; startY = e.offsetY; drawing = true; 
+            } else if(e.button === 1) { 
+                e.preventDefault();
+                if(!document.getElementById('toggle_regions').checked) return;
+                for (let i = currentRegions.length - 1; i >= 0; i--) {
+                    const b = currentRegions[i], pxW = b.w * canvas.width, pxH = b.h * canvas.height;
+                    const pxX = (b.cx * canvas.width) - pxW/2, pxY = (b.cy * canvas.height) - pxH/2;
+                    if (e.offsetX >= pxX && e.offsetX <= pxX+pxW && e.offsetY >= pxY && e.offsetY <= pxY+pxH) {
+                        editingBoxIndex = i;
+                        document.getElementById('modal_region_name').value = b.class_name;
+                        document.getElementById('region_modal').classList.remove('hidden');
+                        setTimeout(() => document.getElementById('modal_region_name').focus(), 100);
+                        break; 
+                    }
+                }
+            }
+        });
         canvas.addEventListener('mousemove', e => { if(drawing) { curX = e.offsetX; curY = e.offsetY; drawCanvas(); }});
         canvas.addEventListener('mouseup', e => {
             if(!drawing || e.button!==0) return; drawing = false; curX = e.offsetX; curY = e.offsetY;
@@ -1592,8 +1770,15 @@ HTML_TEMPLATE = """
         });
 
         function saveRegion() {
-            pendingBox.class_name = document.getElementById('modal_region_name').value.trim() || "region";
-            currentRegions.push(pendingBox); pendingBox = null;
+            const newName = document.getElementById('modal_region_name').value.trim() || "region";
+            if (editingBoxIndex !== null) {
+                currentRegions[editingBoxIndex].class_name = newName;
+                editingBoxIndex = null;
+            } else if (pendingBox) {
+                pendingBox.class_name = newName;
+                currentRegions.push(pendingBox); 
+                pendingBox = null;
+            }
             document.getElementById('region_modal').classList.add('hidden'); 
             drawCanvas();
             triggerAutosave();
