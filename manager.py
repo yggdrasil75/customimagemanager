@@ -6,6 +6,8 @@ import subprocess
 import shutil
 import sys
 import numpy as np
+import tempfile
+import io
 import time
 import random 
 import json
@@ -59,6 +61,34 @@ state = {
     "oai_prompt": "Describe this image in a brief, highly detailed paragraph suitable for photo metadata."
 }
 
+metadata_index = {}
+thumb_memory_cache = {} # Keeps disk clean, holds downsampled JXL layers in RAM
+
+# --- Helper Functions ---
+def get_safe_path(base_dir, user_path):
+    """Prevents directory traversal attacks while allowing subfolders"""
+    abs_base = os.path.abspath(base_dir)
+    # Strip leading slashes from user path to ensure it joins correctly
+    clean_path = user_path.lstrip('\\/')
+    abs_target = os.path.abspath(os.path.join(base_dir, clean_path))
+    if os.path.commonpath([abs_base, abs_target]) == abs_base:
+        return abs_target
+    return None
+
+def build_metadata_index():
+    access_logger.info("Building metadata index...")
+    for root, _, filenames in os.walk(MEDIA_DIR):
+        if 'runs' in root: continue
+        for f in filenames:
+            if f.endswith('.jxl') and not f.startswith('.'):
+                rel_path = os.path.relpath(os.path.join(root, f), MEDIA_DIR).replace('\\', '/')
+                if rel_path not in metadata_index:
+                    meta = read_metadata(os.path.join(root, f))
+                    metadata_index[rel_path] = {
+                        "tags": meta.get("tags", []),
+                        "description": meta.get("description", "")
+                    }
+
 def load_config():
     if os.path.exists(CONFIG_FILE):
         try:
@@ -95,19 +125,40 @@ def populate_model_selector():
     models.sort(key=os.path.getmtime)
     state["available_models"] = models
 
-load_config()
-load_classes()
-populate_model_selector()
+# --- Deduplication & Hashing Subsystem ---
+def get_ahash_for_file(filepath, cache):
+    """Calculates a compact 64-bit average hash based on an 8x8 resized gray image."""
+    filename = os.path.basename(filepath)
+    try:
+        mtime = os.path.getmtime(filepath)
+        if filename in cache and cache[filename].get('mtime') == mtime:
+            return cache[filename]['hash']
+            
+        temp_jpg = os.path.join(MEDIA_DIR, f"temp_hash_{os.getpid()}_{int(time.time()*1000)}.jpg")
+        subprocess.run(['djxl', filepath, temp_jpg], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        img = cv2.imread(temp_jpg, cv2.IMREAD_GRAYSCALE)
+        if os.path.exists(temp_jpg): os.remove(temp_jpg)
+        
+        if img is not None:
+            resized = cv2.resize(img, (8, 8))
+            avg = resized.mean()
+            hash_str = ''.join(['1' if b else '0' for b in (resized >= avg).flatten()])
+            cache[filename] = {'hash': hash_str, 'mtime': mtime}
+            return hash_str
+    except Exception as e:
+        access_logger.error(f"Error hashing {filename}: {e}")
+    return None
 
 # --- pyexiv2 & YOLO Sync Subsystems ---
-def sync_yolo_labels(filename, regions):
+def sync_yolo_labels(filepath, regions):
     """Generates the lightweight YOLO .txt sidecar used ONLY by the training worker"""
     for reg in regions:
         if reg['class_name'] not in state["classes"]:
             state["classes"].append(reg['class_name'])
     save_classes()
     
-    txt_path = os.path.join(MEDIA_DIR, os.path.splitext(filename)[0] + ".txt")
+    txt_path = os.path.splitext(filepath)[0] + ".txt"
     if not regions:
         if os.path.exists(txt_path): os.remove(txt_path)
         return
@@ -128,6 +179,10 @@ def read_metadata(filepath):
         xmp_path = os.path.splitext(filepath)[0] + '.xmp'
         target_file = xmp_path if os.path.exists(xmp_path) else filepath
 
+        if not os.path.exists(target_file):
+            return {"tags": [], "description": "", "regions": []}
+
+        # 1. Read structural tags via pyexiv2 standard read
         with pyexiv2.Image(target_file) as img:
             xmp = img.read_xmp()
             
@@ -365,7 +420,7 @@ def api_upload():
 
 @app.route("/api/list", methods=["GET"])
 def api_list():
-    files = [f for f in os.listdir(MEDIA_DIR) if os.path.isfile(os.path.join(MEDIA_DIR, f)) and not f.startswith('.') and not f.endswith('.txt') and not f.endswith('.xmp')]
+    files = [f for f in os.listdir(MEDIA_DIR) if os.path.isfile(os.path.join(MEDIA_DIR, f)) and not f.startswith('.') and not f.endswith('.txt') and not f.endswith('.xmp') and not f.endswith('.json')]
     return jsonify({"success": True, "files": sorted(files)})
 
 @app.route("/api/file/<filename>")
@@ -400,6 +455,158 @@ def api_delete():
             os.remove(path)
             
     return jsonify({"success": True})
+
+@app.route("/api/dedup", methods=["POST"])
+def dedup():
+    files = [f for f in os.listdir(MEDIA_DIR) if f.endswith('.jxl') and not f.startswith('.')]
+    cache_path = os.path.join(MEDIA_DIR, "ahash_cache.json")
+    cache = {}
+    
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'r') as f: cache = json.load(f)
+        except Exception: pass
+        
+    hashes = {}
+    for f in files:
+        path = os.path.join(MEDIA_DIR, f)
+        h = get_ahash_for_file(path, cache)
+        if h: hashes[f] = h
+        
+    # Write updated hashes to disk cache
+    try:
+        with open(cache_path, 'w') as f: json.dump(cache, f)
+    except: pass
+        
+    # 1. Compare hashes for similarity candidates
+    candidates = []
+    files_with_hash = list(hashes.keys())
+    for i in range(len(files_with_hash)):
+        for j in range(i+1, len(files_with_hash)):
+            f1, f2 = files_with_hash[i], files_with_hash[j]
+            dist = sum(c1 != c2 for c1, c2 in zip(hashes[f1], hashes[f2]))
+            if dist <= 5: # Threshold for identical or lightly transformed images
+                candidates.append((f1, f2))
+                
+    duplicate_pairs = []
+    
+    # 2. Strict Full Image comparison for verified similarity
+    for f1, f2 in candidates:
+        temp1 = os.path.join(MEDIA_DIR, f"temp_full1_{os.getpid()}_{random.randint(0,999)}.jpg")
+        temp2 = os.path.join(MEDIA_DIR, f"temp_full2_{os.getpid()}_{random.randint(0,999)}.jpg")
+        try:
+            subprocess.run(['djxl', os.path.join(MEDIA_DIR, f1), temp1], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(['djxl', os.path.join(MEDIA_DIR, f2), temp2], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            img1 = cv2.imread(temp1)
+            img2 = cv2.imread(temp2)
+            
+            if img1 is not None and img2 is not None:
+                # Align shapes if they differ
+                if img1.shape != img2.shape:
+                    img2 = cv2.resize(img2, (img1.shape[1], img1.shape[0]))
+                    
+                # Mathematical pixel comparison (allow mild JXL compression artifacting diffs)
+                diff = cv2.absdiff(img1, img2).mean()
+                if diff < 15.0: 
+                    duplicate_pairs.append((f1, f2))
+        except Exception as e:
+            pass
+        finally:
+            if os.path.exists(temp1): os.remove(temp1)
+            if os.path.exists(temp2): os.remove(temp2)
+            
+    # 3. Group matching pairs together using basic graph components
+    adj = {f: [] for f in files}
+    for f1, f2 in duplicate_pairs:
+        adj[f1].append(f2)
+        adj[f2].append(f1)
+        
+    visited = set()
+    groups = []
+    for f in files:
+        if f not in visited and adj[f]:
+            q = [f]
+            comp = []
+            while q:
+                curr = q.pop(0)
+                if curr not in visited:
+                    visited.add(curr)
+                    comp.append(curr)
+                    q.extend(adj[curr])
+            if len(comp) > 1:
+                groups.append(comp)
+                
+    return jsonify({"success": True, "groups": groups})
+
+@app.route("/api/dedup_merge", methods=["POST"])
+def dedup_merge():
+    data = request.json
+    target = secure_filename(data.get("target", ""))
+    others = [secure_filename(f) for f in data.get("others", []) if f]
+
+    if not target:
+        return jsonify({"success": False, "error": "Invalid request"})
+
+    target_path = os.path.join(MEDIA_DIR, target)
+    if not os.path.exists(target_path):
+        return jsonify({"success": False, "error": "Target not found"})
+
+    try:
+        # Read base metadata
+        base_meta = read_metadata(target_path)
+
+        for other in others:
+            other_path = os.path.join(MEDIA_DIR, other)
+            if not os.path.exists(other_path): continue
+
+            other_meta = read_metadata(other_path)
+
+            # Merge Tags (Case-insensitive deduplication)
+            merged_tags = []
+            seen_tags = set()
+            for t in base_meta["tags"] + other_meta["tags"]:
+                if t.lower() not in seen_tags:
+                    seen_tags.add(t.lower())
+                    merged_tags.append(t)
+            base_meta["tags"] = merged_tags
+
+            # Merge Description
+            d1, d2 = base_meta["description"].strip(), other_meta["description"].strip()
+            if d1 and d2 and d1 != d2 and d2 not in d1:
+                base_meta["description"] = f"{d1}\n\n{d2}"
+            elif d2 and not d1:
+                base_meta["description"] = d2
+
+            # Merge Regions (Spatial deduplication)
+            for r2 in other_meta["regions"]:
+                is_dup = False
+                for r1 in base_meta["regions"]:
+                    if r1["class_name"] == r2["class_name"]:
+                        # If boxes are extremely close, consider them duplicate entries for the same object
+                        if abs(r1["cx"] - r2["cx"]) < 0.05 and abs(r1["cy"] - r2["cy"]) < 0.05 and \
+                           abs(r1["w"] - r2["w"]) < 0.05 and abs(r1["h"] - r2["h"]) < 0.05:
+                            is_dup = True
+                            break
+                if not is_dup:
+                    base_meta["regions"].append(r2)
+
+        # Save merged metadata back to target image
+        success = write_metadata(target_path, base_meta["tags"], base_meta["description"], base_meta["regions"])
+
+        if success:
+            # Safely delete the redundant copies
+            for other in others:
+                base_name = os.path.splitext(other)[0]
+                for ext in ['.jxl', '.txt', '.xmp', os.path.splitext(other)[1]]:
+                    path = os.path.join(MEDIA_DIR, base_name + ext)
+                    if os.path.exists(path):
+                        os.remove(path)
+            return jsonify({"success": True})
+        else:
+            return jsonify({"success": False, "error": "Failed to write merged metadata"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
 
 @app.route("/api/auto_tag", methods=["POST"])
 def auto_tag():
@@ -546,9 +753,9 @@ def get_training_log():
 
 @app.route("/tailwind", methods=["GET"])
 def get_tailwind():
-    if not os.path.exists('tailwindcss.js'):
-        return jsonify({"error": "tailwindcss.js not found"}), 404
-    with open('tailwindcss.js', 'r') as f:
+    if not os.path.exists('static/tailwindcss.js'):
+        return jsonify({"error": "static/tailwindcss.js not found"}), 404
+    with open('static/tailwindcss.js', 'r') as f:
         content = f.read()
     return content, 200, {'Content-Type': 'application/javascript; charset=utf-8'}
 
@@ -604,6 +811,12 @@ HTML_TEMPLATE = """
             pointer-events: none;
             line-height: 1;
         }
+        
+        /* Custom scrollbar for dedup groups */
+        .scroller::-webkit-scrollbar { height: 8px; }
+        .scroller::-webkit-scrollbar-track { background: #374151; border-radius: 4px; }
+        .scroller::-webkit-scrollbar-thumb { background: #4B5563; border-radius: 4px; }
+        .scroller::-webkit-scrollbar-thumb:hover { background: #6B7280; }
     </style>
 </head>
 <body class="bg-gray-900 text-white font-sans h-screen flex w-full overflow-hidden">
@@ -612,7 +825,12 @@ HTML_TEMPLATE = """
     <div class="flex flex-col border-r border-gray-700 h-full resizable-pane bg-gray-900 z-10" style="width: 60%; min-width: 350px; max-width: 80vw; padding-bottom: 20px;">
         <div class="p-4 bg-gray-800 border-b border-gray-700 flex justify-between items-center shadow-sm z-10 flex-shrink-0">
             <h1 class="text-2xl font-bold text-blue-400">Media Library</h1>
-            <span class="text-sm text-gray-400" id="file_count">0 Items</span>
+            <div class="flex gap-4 items-center">
+                <button id="btn_dedup" onclick="runDedup()" class="text-xs bg-indigo-600 hover:bg-indigo-500 font-bold px-3 py-1.5 rounded transition shadow flex items-center gap-2">
+                    🔍 Find Duplicates
+                </button>
+                <span class="text-sm text-gray-400" id="file_count">0 Items</span>
+            </div>
         </div>
 
         <div id="dropzone" class="m-4 border-2 border-dashed border-gray-600 rounded-lg p-6 text-center text-gray-400 transition-colors flex flex-col items-center justify-center bg-gray-800 flex-shrink-0">
@@ -693,6 +911,22 @@ HTML_TEMPLATE = """
             <div class="mt-auto border-t border-gray-700 pt-2">
                 <p class="text-xs text-gray-400 font-bold">AI Status:</p>
                 <p id="status_text" class="text-xs text-yellow-400 break-words">Ready.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dedup Modal -->
+    <div id="dedup_modal" class="hidden absolute inset-0 bg-black bg-opacity-80 flex flex-col items-center justify-center z-50 p-6">
+        <div class="bg-gray-800 p-6 rounded-lg shadow-xl w-full max-w-5xl h-[80vh] flex flex-col border border-gray-600">
+            <div class="flex justify-between items-center mb-4 flex-shrink-0 border-b border-gray-700 pb-4">
+                <div>
+                    <h2 class="text-2xl font-bold text-indigo-400">Duplicate Images Found</h2>
+                    <p class="text-sm text-gray-400 mt-1">Review duplicates below. Click "Keep & Merge" to automatically combine metadata tags and regions into a master image while trashing the rest.</p>
+                </div>
+                <button onclick="document.getElementById('dedup_modal').classList.add('hidden')" class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded font-bold transition">Done</button>
+            </div>
+            <div id="dedup_content" class="flex-1 overflow-y-auto space-y-6 pt-2 pr-2">
+                <!-- Groups dynamically inserted here -->
             </div>
         </div>
     </div>
@@ -800,7 +1034,7 @@ HTML_TEMPLATE = """
             data.files.forEach(f => {
                 const div = document.createElement('div');
                 div.className = `gallery-item bg-gray-800 border-2 border-transparent rounded overflow-hidden group`;
-                div.id = `thumb_${f}`;
+                div.id = `thumb_${f.replace(/\\./g, '_')}`;
                 div.onclick = () => selectFile(f);
                 
                 const img = document.createElement('img');
@@ -813,13 +1047,13 @@ HTML_TEMPLATE = """
                 
                 div.appendChild(img); div.appendChild(label); grid.appendChild(div);
             });
-            if (currentFile) document.getElementById(`thumb_${currentFile}`)?.classList.add('selected-item');
+            if (currentFile) document.getElementById(`thumb_${currentFile.replace(/\\./g, '_')}`)?.classList.add('selected-item');
         }
 
         async function selectFile(filename) {
             currentFile = filename;
             document.querySelectorAll('.gallery-item').forEach(el => el.classList.remove('selected-item'));
-            document.getElementById(`thumb_${filename}`)?.classList.add('selected-item');
+            document.getElementById(`thumb_${filename.replace(/\\./g, '_')}`)?.classList.add('selected-item');
             
             document.getElementById('selected_filename').innerText = filename;
             document.getElementById('editor_panel').classList.remove('opacity-50', 'pointer-events-none');
@@ -888,6 +1122,126 @@ HTML_TEMPLATE = """
                 await fetch('/api/delete', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({filename: currentFile}) });
                 currentFile = null; document.getElementById('editor_panel').classList.add('opacity-50', 'pointer-events-none');
                 document.getElementById('save_indicator').classList.add('hidden');
+                loadGallery();
+            }
+        }
+
+        // --- Dedup System Client Logic ---
+        async function runDedup() {
+            const btn = document.getElementById('btn_dedup');
+            const ogText = btn.innerHTML;
+            btn.innerHTML = `Wait...`;
+            btn.disabled = true;
+
+            try {
+                const res = await fetch('/api/dedup', { method: 'POST' });
+                const data = await res.json();
+                
+                if(data.success) {
+                    if(data.groups.length === 0) {
+                        alert("Great news! No duplicate images were found in your library.");
+                    } else {
+                        renderDedupGroups(data.groups);
+                        document.getElementById('dedup_modal').classList.remove('hidden');
+                    }
+                }
+            } catch(e) {
+                alert("Error running the dedup scan.");
+            }
+            
+            btn.innerHTML = ogText;
+            btn.disabled = false;
+        }
+
+        function renderDedupGroups(groups) {
+            const container = document.getElementById('dedup_content');
+            container.innerHTML = '';
+            groups.forEach((group, idx) => {
+                let html = `<div class="bg-gray-750 border border-gray-700 p-4 rounded-lg shadow-lg mb-4" id="dedup_group_${idx}">
+                    <h3 class="font-bold text-gray-300 mb-3 border-b border-gray-700 pb-2">Similarity Group ${idx+1}</h3>
+                    <div class="flex gap-4 overflow-x-auto pb-2 scroller">`;
+                
+                const groupStr = JSON.stringify(group).replace(/"/g, '&quot;');
+                
+                group.forEach(file => {
+                    const safeId = file.replace(/\\./g, '_');
+                    html += `
+                    <div class="flex flex-col items-center flex-shrink-0 w-40 bg-gray-800 p-2 rounded border border-gray-700 relative group" id="dedup_item_${safeId}">
+                        <img src="/api/file/${file}" class="w-36 h-36 object-cover rounded mb-2 border border-gray-600 bg-black">
+                        <p class="text-[10px] truncate w-full text-center text-gray-400 mb-2 font-mono" title="${file}">${file}</p>
+                        <div class="flex flex-col w-full gap-1">
+                            <button onclick="keepAndMerge('${file}', '${groupStr}', ${idx})" class="w-full bg-green-600 hover:bg-green-500 text-xs font-bold px-2 py-1.5 rounded transition shadow">Keep & Merge</button>
+                            <button onclick="deleteFromDedup('${file}', ${idx})" class="w-full bg-gray-700 hover:bg-red-600 text-gray-300 hover:text-white text-[10px] font-bold px-2 py-1 rounded transition">Delete Only</button>
+                        </div>
+                    </div>`;
+                });
+                
+                html += `</div></div>`;
+                container.innerHTML += html;
+            });
+        }
+
+        async function keepAndMerge(target, groupStr, groupId) {
+            const allFiles = JSON.parse(groupStr);
+            const others = allFiles.filter(f => f !== target);
+            
+            if(others.length === 0) {
+                alert("No other files to merge with.");
+                return;
+            }
+
+            if(!confirm(`Keep ${target} and smartly merge metadata from ${others.length} other duplicate(s)?\\n\\nThe other files will be deleted automatically.`)) return;
+
+            const res = await fetch('/api/dedup_merge', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({target: target, others: others})
+            });
+            
+            const data = await res.json();
+            if(data.success) {
+                const groupEl = document.getElementById(`dedup_group_${groupId}`);
+                if(groupEl) groupEl.remove();
+
+                if(document.getElementById('dedup_content').children.length === 0) {
+                    document.getElementById('dedup_modal').classList.add('hidden');
+                }
+
+                if(others.includes(currentFile)) {
+                    currentFile = null;
+                    document.getElementById('editor_panel').classList.add('opacity-50', 'pointer-events-none');
+                } else if(currentFile === target) {
+                    selectFile(target); // Reload merged metadata into editor
+                }
+                loadGallery();
+            } else {
+                alert("Error merging: " + data.error);
+            }
+        }
+
+        async function deleteFromDedup(filename, groupId) {
+            if(confirm(`Trash file ${filename} WITHOUT merging metadata?`)) {
+                await fetch('/api/delete', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({filename: filename}) });
+                
+                const safeId = filename.replace(/\\./g, '_');
+                const el = document.getElementById(`dedup_item_${safeId}`);
+                if(el) el.remove();
+                
+                // Hide group if only 1 remains
+                const groupEl = document.getElementById(`dedup_group_${groupId}`);
+                if(groupEl && groupEl.querySelectorAll('.flex-shrink-0').length <= 1) {
+                    groupEl.remove();
+                }
+
+                // Close modal if completely empty
+                if(document.getElementById('dedup_content').children.length === 0) {
+                    document.getElementById('dedup_modal').classList.add('hidden');
+                }
+                
+                if(currentFile === filename) {
+                    currentFile = null;
+                    document.getElementById('editor_panel').classList.add('opacity-50', 'pointer-events-none');
+                }
                 loadGallery();
             }
         }
@@ -1016,7 +1370,6 @@ HTML_TEMPLATE = """
             const x1 = Math.min(startX, curX), x2 = Math.max(startX, curX), y1 = Math.min(startY, curY), y2 = Math.max(startY, curY);
             if((x2-x1)<10 || (y2-y1)<10) { drawCanvas(); return; }
             
-            // Re-enable visibility if drawing a new box
             if(!document.getElementById('toggle_regions').checked) {
                 document.getElementById('toggle_regions').checked = true;
             }
@@ -1028,7 +1381,7 @@ HTML_TEMPLATE = """
         });
         canvas.addEventListener('contextmenu', e => {
             e.preventDefault(); if(!currentFile) return;
-            if(!document.getElementById('toggle_regions').checked) return; // Prevent accidental deletion while hidden
+            if(!document.getElementById('toggle_regions').checked) return; 
             for (let i = currentRegions.length - 1; i >= 0; i--) {
                 const b = currentRegions[i], pxW = b.w * canvas.width, pxH = b.h * canvas.height;
                 const pxX = (b.cx * canvas.width) - pxW/2, pxY = (b.cy * canvas.height) - pxH/2;
@@ -1128,5 +1481,8 @@ TRAINING_PORTAL_TEMPLATE = """
 """
 
 if __name__ == '__main__':
+    load_config()
+    load_classes()
+    populate_model_selector()
     access_logger.info("Starting Web Application on Port 8000...")
     app.run(host='0.0.0.0', port=8000, debug=False, threaded=True)
