@@ -78,9 +78,11 @@ def get_safe_path(base_dir, user_path):
 def build_metadata_index():
     access_logger.info("Building metadata index...")
     for root, _, filenames in os.walk(MEDIA_DIR):
-        if 'runs' in root: continue
+        # Skip YOLO runs and hidden dirs
+        if any(part.startswith('.') or part == 'runs' for part in root.split(os.sep)):
+            continue
         for f in filenames:
-            if f.endswith('.jxl') and not f.startswith('.'):
+            if not f.startswith('.') and not f.endswith('.txt') and not f.endswith('.xmp') and not f.endswith('.json'):
                 rel_path = os.path.relpath(os.path.join(root, f), MEDIA_DIR).replace('\\', '/')
                 if rel_path not in metadata_index:
                     meta = read_metadata(os.path.join(root, f))
@@ -124,6 +126,10 @@ def populate_model_selector():
     models = glob.glob(search_path)
     models.sort(key=os.path.getmtime)
     state["available_models"] = models
+
+load_config()
+load_classes()
+populate_model_selector()
 
 # --- Deduplication & Hashing Subsystem ---
 def get_ahash_for_file(filepath, cache):
@@ -191,11 +197,6 @@ def read_metadata(filepath):
             if isinstance(val, list): tags = val
             elif isinstance(val, str): tags = [val]
                 
-            # Read Description
-            val = xmp.get('Xmp.dc.description', "")
-            if isinstance(val, dict): desc = val.get('x-default', '')
-            elif isinstance(val, str): desc = val
-                
             # Parse XMP IPTC ImageRegion structs
             region_keys = [k for k in xmp.keys() if 'ImageRegion[' in k]
             indices = set()
@@ -218,6 +219,16 @@ def read_metadata(filepath):
                         regions.append({"class_name": name, "cx": cx, "cy": cy, "w": w, "h": h})
                 except Exception:
                     pass
+
+        # Bypass pyexiv2 dict bug by extracting description directly from XML if sidecar exists
+        if os.path.exists(xmp_path):
+            with open(xmp_path, 'r', encoding='utf-8') as f:
+                xml_str = f.read()
+            # Regex specifically targeting the x-default alt text
+            m = re.search(r'<dc:description>\s*<rdf:Alt>\s*<rdf:li[^>]*>(.*?)</rdf:li>', xml_str, re.DOTALL)
+            if m:
+                extracted = saxutils.unescape(m.group(1).strip())
+                if extracted: desc = extracted
                     
         return {"tags": tags, "description": desc, "regions": regions}
     except Exception as e:
@@ -226,15 +237,9 @@ def read_metadata(filepath):
 
 def write_metadata(filepath, tags, description, regions):
     try:
-        filename = os.path.basename(filepath)
-        sync_yolo_labels(filename, regions) # Sync parallel lightweight sidecar strictly for the YOLO trainer
+        sync_yolo_labels(filepath, regions)
 
         xmp_path = os.path.splitext(filepath)[0] + '.xmp'
-        
-        # Since Exiv2 cannot natively write to BMFF/JXL formats without crashing, 
-        # and modifying complex struct bags via pyexiv2 dictionaries triggers Toolkit Error 102,
-        # we bypass the library bugs by generating a beautifully clean, industry-standard XMP Sidecar manually.
-        
         esc = saxutils.escape
         
         subject_xml = ""
@@ -281,6 +286,10 @@ def write_metadata(filepath, tags, description, regions):
         # Directly write the validated XML structure to the sidecar
         with open(xmp_path, 'w', encoding='utf-8') as f:
             f.write(xmp_content)
+
+        # Update Live Search Index
+        rel_path = os.path.relpath(filepath, MEDIA_DIR).replace('\\', '/')
+        metadata_index[rel_path] = {"tags": tags, "description": description}
 
         return True
     except Exception as e:
@@ -402,13 +411,20 @@ def update_settings():
 @app.route("/api/upload", methods=["POST"])
 def api_upload():
     if 'file' not in request.files: return jsonify({"success": False})
+    
+    # Process Subfolder Target
+    folder = request.form.get("folder", "").strip()
+    target_dir = get_safe_path(MEDIA_DIR, folder) if folder else MEDIA_DIR
+    if not target_dir: return jsonify({"success": False})
+    os.makedirs(target_dir, exist_ok=True)
+    
     file = request.files['file']
     filename = secure_filename(file.filename)
     base_name, _ = os.path.splitext(filename)
     jxl_name = f"{base_name}.jxl"
     
-    temp_path = os.path.join(MEDIA_DIR, filename)
-    jxl_path = os.path.join(MEDIA_DIR, jxl_name)
+    temp_path = os.path.join(target_dir, filename)
+    jxl_path = os.path.join(target_dir, jxl_name)
     file.save(temp_path)
     
     try:
@@ -418,25 +434,92 @@ def api_upload():
     except Exception as e:
         return jsonify({"success": True, "filename": filename, "warning": "Original format retained."})
 
+@app.route("/api/move", methods=["POST"])
+def api_move():
+    filename = request.json.get("filename", "")
+    new_folder = request.json.get("new_folder", "").strip()
+    
+    old_path = get_safe_path(MEDIA_DIR, filename)
+    if not old_path or not os.path.exists(old_path): return jsonify({"success": False})
+    
+    target_dir = get_safe_path(MEDIA_DIR, new_folder) if new_folder else MEDIA_DIR
+    if not target_dir: return jsonify({"success": False})
+    os.makedirs(target_dir, exist_ok=True)
+    
+    base_name = os.path.basename(filename)
+    new_path = os.path.join(target_dir, base_name)
+    
+    if old_path != new_path:
+        old_base = os.path.splitext(old_path)[0]
+        new_base = os.path.splitext(new_path)[0]
+        for ext in ['.jxl', '.txt', '.xmp']:
+            if os.path.exists(old_base + ext):
+                shutil.move(old_base + ext, new_base + ext)
+                
+        metadata_index.pop(filename, None)
+        build_metadata_index()
+        
+    return jsonify({"success": True})
+
 @app.route("/api/list", methods=["GET"])
 def api_list():
-    files = [f for f in os.listdir(MEDIA_DIR) if os.path.isfile(os.path.join(MEDIA_DIR, f)) and not f.startswith('.') and not f.endswith('.txt') and not f.endswith('.xmp') and not f.endswith('.json')]
-    return jsonify({"success": True, "files": sorted(files)})
+    files_payload = []
+    for root, _, filenames in os.walk(MEDIA_DIR):
+        if any(part.startswith('.') or part == 'runs' for part in root.split(os.sep)):
+            continue
+        for f in filenames:
+            if not f.startswith('.') and not f.endswith('.txt') and not f.endswith('.xmp') and not f.endswith('.json'):
+                rel_path = os.path.relpath(os.path.join(root, f), MEDIA_DIR).replace('\\', '/')
+                meta = metadata_index.get(rel_path, {"tags": [], "description": ""})
+                files_payload.append({
+                    "filename": rel_path,
+                    "tags": meta.get("tags", []),
+                    "description": meta.get("description", "")
+                })
+    return jsonify({"success": True, "files": sorted(files_payload, key=lambda x: x['filename'])})
 
-@app.route("/api/file/<filename>")
+@app.route("/api/file/<path:filename>")
 def api_file(filename):
-    filepath = os.path.join(MEDIA_DIR, secure_filename(filename))
-    if os.path.exists(filepath):
+    filepath = get_safe_path(MEDIA_DIR, filename)
+    if filepath and os.path.exists(filepath):
         mime = 'image/jxl' if filename.lower().endswith('.jxl') else None
         return send_file(filepath, mimetype=mime)
     return "", 404
 
+@app.route("/api/thumb/<path:filename>")
+def api_thumb(filename):
+    filepath = get_safe_path(MEDIA_DIR, filename)
+    if not filepath or not os.path.exists(filepath): return "", 404
+
+    mtime = os.path.getmtime(filepath)
+    if filename in thumb_memory_cache and thumb_memory_cache[filename]['mtime'] == mtime:
+        return send_file(io.BytesIO(thumb_memory_cache[filename]['data']), mimetype='image/jpeg')
+
+    temp_jpg = os.path.join(tempfile.gettempdir(), f"preview_{os.getpid()}_{time.time()}.jpg")
+    try:
+        # djxl progressive decoding downsampling 8 for immense speedup
+        subprocess.run(['djxl', filepath, temp_jpg, '--downsampling', '8'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with open(temp_jpg, 'rb') as f:
+            img_data = f.read()
+        
+        # Max memory capacity of 250 previews
+        if len(thumb_memory_cache) > 250:
+            thumb_memory_cache.pop(next(iter(thumb_memory_cache)))
+            
+        thumb_memory_cache[filename] = {'mtime': mtime, 'data': img_data}
+        return send_file(io.BytesIO(img_data), mimetype='image/jpeg')
+    except Exception:
+        return send_file(filepath, mimetype='image/jxl')
+    finally:
+        if os.path.exists(temp_jpg): os.remove(temp_jpg)
+
 @app.route("/api/metadata", methods=["POST"])
 def api_metadata():
     data = request.json
-    filename = secure_filename(data.get("filename", ""))
-    filepath = os.path.join(MEDIA_DIR, filename)
-    if not os.path.exists(filepath): return jsonify({"success": False})
+    filename = data.get("filename", "")
+    filepath = get_safe_path(MEDIA_DIR, filename)
+    
+    if not filepath or not os.path.exists(filepath): return jsonify({"success": False})
     
     if data.get("action") == "read":
         return jsonify({"success": True, "metadata": read_metadata(filepath)})
@@ -445,20 +528,29 @@ def api_metadata():
 
 @app.route("/api/delete", methods=["POST"])
 def api_delete():
-    filename = secure_filename(request.json.get("filename", ""))
-    base_name = os.path.splitext(filename)[0]
-    
-    # Wipe the primary file, sidecar, and YOLO labels cleanly
-    for ext in ['.jxl', '.txt', '.xmp', os.path.splitext(filename)[1]]:
-        path = os.path.join(MEDIA_DIR, base_name + ext)
-        if os.path.exists(path): 
-            os.remove(path)
+    filename = request.json.get("filename", "")
+    filepath = get_safe_path(MEDIA_DIR, filename)
+    if filepath:
+        base_path = os.path.splitext(filepath)[0]
+        # Wipe the primary file, sidecar, and YOLO labels cleanly
+        for ext in ['.jxl', '.txt', '.xmp', os.path.splitext(filename)[1]]:
+            if os.path.exists(base_path + ext): 
+                os.remove(base_path + ext)
+        
+        thumb_memory_cache.pop(filename, None)
+        metadata_index.pop(filename, None)
             
     return jsonify({"success": True})
 
 @app.route("/api/dedup", methods=["POST"])
 def dedup():
-    files = [f for f in os.listdir(MEDIA_DIR) if f.endswith('.jxl') and not f.startswith('.')]
+    files = []
+    for root, _, filenames in os.walk(MEDIA_DIR):
+        if any(part.startswith('.') or part == 'runs' for part in root.split(os.sep)): continue
+        for f in filenames:
+            if f.endswith('.jxl'):
+                files.append(os.path.relpath(os.path.join(root, f), MEDIA_DIR).replace('\\', '/'))
+                
     cache_path = os.path.join(MEDIA_DIR, "ahash_cache.json")
     cache = {}
     
@@ -469,7 +561,7 @@ def dedup():
         
     hashes = {}
     for f in files:
-        path = os.path.join(MEDIA_DIR, f)
+        path = get_safe_path(MEDIA_DIR, f)
         h = get_ahash_for_file(path, cache)
         if h: hashes[f] = h
         
@@ -492,11 +584,11 @@ def dedup():
     
     # 2. Strict Full Image comparison for verified similarity
     for f1, f2 in candidates:
-        temp1 = os.path.join(MEDIA_DIR, f"temp_full1_{os.getpid()}_{random.randint(0,999)}.jpg")
-        temp2 = os.path.join(MEDIA_DIR, f"temp_full2_{os.getpid()}_{random.randint(0,999)}.jpg")
+        temp1 = os.path.join(tempfile.gettempdir(), f"temp_full1_{os.getpid()}_{random.randint(0,999)}.jpg")
+        temp2 = os.path.join(tempfile.gettempdir(), f"temp_full2_{os.getpid()}_{random.randint(0,999)}.jpg")
         try:
-            subprocess.run(['djxl', os.path.join(MEDIA_DIR, f1), temp1], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(['djxl', os.path.join(MEDIA_DIR, f2), temp2], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(['djxl', get_safe_path(MEDIA_DIR, f1), temp1], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(['djxl', get_safe_path(MEDIA_DIR, f2), temp2], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
             img1 = cv2.imread(temp1)
             img2 = cv2.imread(temp2)
@@ -542,14 +634,11 @@ def dedup():
 @app.route("/api/dedup_merge", methods=["POST"])
 def dedup_merge():
     data = request.json
-    target = secure_filename(data.get("target", ""))
-    others = [secure_filename(f) for f in data.get("others", []) if f]
+    target = data.get("target", "")
+    others = [f for f in data.get("others", []) if f]
 
-    if not target:
-        return jsonify({"success": False, "error": "Invalid request"})
-
-    target_path = os.path.join(MEDIA_DIR, target)
-    if not os.path.exists(target_path):
+    target_path = get_safe_path(MEDIA_DIR, target)
+    if not target_path or not os.path.exists(target_path):
         return jsonify({"success": False, "error": "Target not found"})
 
     try:
@@ -557,8 +646,8 @@ def dedup_merge():
         base_meta = read_metadata(target_path)
 
         for other in others:
-            other_path = os.path.join(MEDIA_DIR, other)
-            if not os.path.exists(other_path): continue
+            other_path = get_safe_path(MEDIA_DIR, other)
+            if not other_path or not os.path.exists(other_path): continue
 
             other_meta = read_metadata(other_path)
 
@@ -597,11 +686,14 @@ def dedup_merge():
         if success:
             # Safely delete the redundant copies
             for other in others:
-                base_name = os.path.splitext(other)[0]
+                other_path = get_safe_path(MEDIA_DIR, other)
+                base_name = os.path.splitext(other_path)[0]
                 for ext in ['.jxl', '.txt', '.xmp', os.path.splitext(other)[1]]:
-                    path = os.path.join(MEDIA_DIR, base_name + ext)
+                    path = base_name + ext
                     if os.path.exists(path):
                         os.remove(path)
+                thumb_memory_cache.pop(other, None)
+                metadata_index.pop(other, None)
             return jsonify({"success": True})
         else:
             return jsonify({"success": False, "error": "Failed to write merged metadata"})
@@ -611,13 +703,13 @@ def dedup_merge():
 @app.route("/api/auto_tag", methods=["POST"])
 def auto_tag():
     model_path = request.json.get("model")
-    filename = secure_filename(request.json.get("filename", ""))
-    jxl_path = os.path.join(MEDIA_DIR, filename)
+    filename = request.json.get("filename", "")
+    jxl_path = get_safe_path(MEDIA_DIR, filename)
     
-    if not os.path.exists(model_path) or not os.path.exists(jxl_path):
+    if not os.path.exists(model_path) or not jxl_path or not os.path.exists(jxl_path):
         return jsonify({"success": False, "error": "Invalid model or file."})
         
-    temp_jpg = os.path.join(MEDIA_DIR, f"temp_{int(time.time())}.jpg")
+    temp_jpg = os.path.join(tempfile.gettempdir(), f"temp_{int(time.time())}.jpg")
     try:
         # Decode JXL to temporary JPG for YOLO inference
         subprocess.run(['djxl', jxl_path, temp_jpg], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -644,10 +736,10 @@ def auto_tag():
 
 @app.route("/api/auto_describe", methods=["POST"])
 def auto_describe():
-    filename = secure_filename(request.json.get("filename", ""))
-    jxl_path = os.path.join(MEDIA_DIR, filename)
+    filename = request.json.get("filename", "")
+    jxl_path = get_safe_path(MEDIA_DIR, filename)
     
-    if not os.path.exists(jxl_path):
+    if not jxl_path or not os.path.exists(jxl_path):
         return jsonify({"success": False, "error": "File not found."})
 
     endpoint = state.get("oai_endpoint", "").strip()
@@ -658,7 +750,7 @@ def auto_describe():
     if not endpoint or not model:
         return jsonify({"success": False, "error": "LLM Endpoint or Model not configured. Check AI Settings."})
 
-    temp_jpg = os.path.join(MEDIA_DIR, f"temp_desc_{int(time.time())}.jpg")
+    temp_jpg = os.path.join(tempfile.gettempdir(), f"temp_desc_{int(time.time())}.jpg")
     try:
         # LLMs don't read JXL well, convert to standard JPEG
         subprocess.run(['djxl', jxl_path, temp_jpg], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -712,9 +804,16 @@ def train():
     img_val, lab_val = os.path.join(dataset_dir, "images", "val"), os.path.join(dataset_dir, "labels", "val")
     for d in [img_tr, lab_tr, img_val, lab_val]: os.makedirs(d, exist_ok=True)
     
-    # Find active labels and matching images
-    labeled_bases = [os.path.splitext(f)[0] for f in os.listdir(MEDIA_DIR) if f.endswith('.txt') and f != 'classes.txt' and os.path.getsize(os.path.join(MEDIA_DIR, f)) > 0]
-    valid_pairs = [b for b in labeled_bases if os.path.exists(os.path.join(MEDIA_DIR, b + ".jxl"))]
+    labeled_bases = []
+    for root, _, filenames in os.walk(MEDIA_DIR):
+        if any(part.startswith('.') or part == 'runs' for part in root.split(os.sep)): continue
+        for f in filenames:
+            if f.endswith('.txt') and f != 'classes.txt':
+                txt_path = os.path.join(root, f)
+                if os.path.getsize(txt_path) > 0:
+                    labeled_bases.append(os.path.splitext(txt_path)[0])
+                    
+    valid_pairs = [b for b in labeled_bases if os.path.exists(b + ".jxl")]
 
     if not valid_pairs:
         state["status_text"] = "No region tags found! Label some images first."
@@ -726,11 +825,13 @@ def train():
 
     # JXL Decoding Loop for YOLO
     for b in train_bases:
-        subprocess.run(['djxl', os.path.join(MEDIA_DIR, b + ".jxl"), os.path.join(img_tr, b + ".jpg")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        shutil.copy(os.path.join(MEDIA_DIR, b + ".txt"), os.path.join(lab_tr, b + ".txt"))
+        base_name = os.path.basename(b)
+        subprocess.run(['djxl', b + ".jxl", os.path.join(img_tr, base_name + ".jpg")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        shutil.copy(b + ".txt", os.path.join(lab_tr, base_name + ".txt"))
     for b in val_bases:
-        subprocess.run(['djxl', os.path.join(MEDIA_DIR, b + ".jxl"), os.path.join(img_val, b + ".jpg")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        shutil.copy(os.path.join(MEDIA_DIR, b + ".txt"), os.path.join(lab_val, b + ".txt"))
+        base_name = os.path.basename(b)
+        subprocess.run(['djxl', b + ".jxl", os.path.join(img_val, base_name + ".jpg")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        shutil.copy(b + ".txt", os.path.join(lab_val, base_name + ".txt"))
 
     yaml_path = os.path.join(dataset_dir, "dataset.yaml")
     with open(yaml_path, "w") as f:
@@ -833,15 +934,27 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
+        <!-- Search and Filter Bar -->
+        <div class="px-4 py-3 bg-gray-800 border-b border-gray-700">
+            <input type="text" id="search_input" oninput="filterGallery()" placeholder="Search by tags, filename, folder, or description..." class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500 shadow-inner">
+        </div>
+
         <div id="dropzone" class="m-4 border-2 border-dashed border-gray-600 rounded-lg p-6 text-center text-gray-400 transition-colors flex flex-col items-center justify-center bg-gray-800 flex-shrink-0">
             <svg class="w-10 h-10 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path></svg>
             <p class="font-bold">Drag & Drop Images Here</p>
             <p class="text-xs text-gray-500 mt-1">Automatically converted and stored as lossless .JXL</p>
+            
+            <div class="mt-4 flex flex-col items-center gap-2">
+                <div class="flex items-center gap-2">
+                    <span class="text-xs text-gray-500">Target Folder:</span>
+                    <input type="text" id="upload_folder" placeholder="root" class="bg-gray-700 text-white text-xs px-2 py-1 rounded border border-gray-600 focus:border-blue-500 w-32">
+                </div>
+                <button onclick="document.getElementById('file_input').click()" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-semibold transition shadow">Browse Files</button>
+            </div>
             <input type="file" id="file_input" multiple class="hidden">
-            <button onclick="document.getElementById('file_input').click()" class="mt-4 bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm font-semibold transition shadow">Browse Files</button>
         </div>
 
-        <div class="flex-1 overflow-y-auto p-4 content-start">
+        <div class="flex-1 overflow-y-auto p-4 content-start scroller">
             <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4" id="gallery_grid"></div>
         </div>
     </div>
@@ -856,10 +969,12 @@ HTML_TEMPLATE = """
             <button id="btn_delete" onclick="deleteCurrentFile()" class="hidden text-red-400 hover:text-red-300 transition text-sm flex items-center">Delete File</button>
         </div>
 
-        <div id="editor_panel" class="p-4 flex flex-col opacity-50 pointer-events-none transition-opacity border-b border-gray-700 pb-6 flex-1 overflow-y-auto">
-            <p id="selected_filename" class="text-sm font-mono text-blue-400 truncate mb-2 border-b border-gray-700 pb-2 flex-shrink-0">No file selected</p>
+        <div id="editor_panel" class="p-4 flex flex-col opacity-50 pointer-events-none transition-opacity border-b border-gray-700 pb-6 flex-1 overflow-y-auto scroller">
+            <div class="flex justify-between items-center border-b border-gray-700 pb-2 mb-2 flex-shrink-0">
+                <p id="selected_filename" class="text-sm font-mono text-blue-400 truncate w-3/4" title="Path">No file selected</p>
+                <button onclick="moveCurrentFile()" class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded shadow transition uppercase font-bold tracking-wider">Move</button>
+            </div>
             
-            <!-- Resizable Canvas Tagging Container -->
             <div id="canvas_container" class="bg-black rounded shadow w-full relative border border-gray-700 overflow-hidden min-h-[200px] resizable-vertical" style="flex: 1 1 auto;">
                 <canvas id="media_canvas" class="absolute"></canvas>
             </div>
@@ -972,6 +1087,7 @@ HTML_TEMPLATE = """
         const fileInput = document.getElementById('file_input');
         let currentFile = null;
         let currentRegions = [];
+        let libraryData = [];
         
         // Canvas Setup
         const canvas = document.getElementById('media_canvas');
@@ -1027,27 +1143,47 @@ HTML_TEMPLATE = """
         async function loadGallery() {
             const res = await fetch('/api/list');
             const data = await res.json();
-            document.getElementById('file_count').innerText = `${data.files.length} Items`;
+            libraryData = data.files;
+            filterGallery();
+        }
+
+        function filterGallery() {
+            const q = document.getElementById('search_input').value.toLowerCase().trim();
+            const filtered = q ? libraryData.filter(item => 
+                item.filename.toLowerCase().includes(q) ||
+                item.description.toLowerCase().includes(q) ||
+                item.tags.some(t => t.toLowerCase().includes(q))
+            ) : libraryData;
+
+            document.getElementById('file_count').innerText = `${filtered.length} Items`;
             const grid = document.getElementById('gallery_grid');
             grid.innerHTML = '';
             
-            data.files.forEach(f => {
+            filtered.forEach(item => {
+                const f = item.filename;
+                const safeId = f.replace(/[^a-zA-Z0-9]/g, '_');
                 const div = document.createElement('div');
                 div.className = `gallery-item bg-gray-800 border-2 border-transparent rounded overflow-hidden group`;
-                div.id = `thumb_${f.replace(/\\./g, '_')}`;
+                div.id = `thumb_${safeId}`;
                 div.onclick = () => selectFile(f);
                 
                 const img = document.createElement('img');
-                img.src = '/api/file/' + f;
+                img.src = '/api/thumb/' + encodeURIComponent(f);
+                img.loading = "lazy";
                 img.className = "absolute inset-0 w-full h-full object-cover pointer-events-none"; 
                 
-                const label = document.createElement('div');
-                label.className = "absolute bottom-0 w-full bg-black bg-opacity-75 text-xs truncate px-2 py-1 text-center opacity-0 group-hover:opacity-100 pointer-events-none";
-                label.innerText = f;
+                let tagHtml = item.tags.length > 0 ? `<div class="absolute top-1 right-1 bg-blue-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow">${item.tags.length} tags</div>` : '';
                 
-                div.appendChild(img); div.appendChild(label); grid.appendChild(div);
+                const label = document.createElement('div');
+                label.className = "absolute bottom-0 w-full bg-black bg-opacity-80 text-[10px] truncate px-2 py-1 text-center opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity";
+                label.innerText = f.split('/').pop(); 
+                
+                div.appendChild(img);
+                if(tagHtml) div.insertAdjacentHTML('beforeend', tagHtml);
+                div.appendChild(label); 
+                grid.appendChild(div);
             });
-            if (currentFile) document.getElementById(`thumb_${currentFile.replace(/\\./g, '_')}`)?.classList.add('selected-item');
+            if (currentFile) document.getElementById(`thumb_${currentFile.replace(/[^a-zA-Z0-9]/g, '_')}`)?.classList.add('selected-item');
         }
 
         async function selectFile(filename) {
@@ -1063,7 +1199,7 @@ HTML_TEMPLATE = """
             // Reset indicators
             document.getElementById('save_indicator').classList.add('hidden');
             
-            currentImgObj.src = '/api/file/' + filename + '?ts=' + Date.now();
+            currentImgObj.src = '/api/file/' + encodeURIComponent(filename) + '?ts=' + Date.now();
             
             const res = await fetch('/api/metadata', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1094,15 +1230,21 @@ HTML_TEMPLATE = """
         async function saveMetadata() {
             if(!currentFile) return;
             const tags = document.getElementById('meta_tags').value.split(',').map(s => s.trim()).filter(s => s);
+            const desc = document.getElementById('meta_desc').value;
+            const target = currentFile;
+            
             const res = await fetch('/api/metadata', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
-                    action: 'write', filename: currentFile, 
-                    tags: tags, description: document.getElementById('meta_desc').value, regions: currentRegions
+                    action: 'write', filename: target, 
+                    tags: tags, description: desc, regions: currentRegions
                 })
             });
             const data = await res.json();
             if(data.success) {
+                const libItem = libraryData.find(i => i.filename === target);
+                if(libItem) { libItem.tags = tags; libItem.description = desc; }
+                
                 const ind = document.getElementById('save_indicator');
                 ind.classList.remove('text-yellow-400');
                 ind.classList.add('text-green-400');
@@ -1116,9 +1258,29 @@ HTML_TEMPLATE = """
             }
         }
 
+        async function moveCurrentFile() {
+            if(!currentFile) return;
+            const dirSplit = currentFile.split('/');
+            const currentDir = dirSplit.length > 1 ? dirSplit.slice(0, -1).join('/') : "";
+            
+            const newPath = prompt("Enter new folder path for this file (leave blank for root media directory):", currentDir);
+            if(newPath === null) return;
+            
+            const res = await fetch('/api/move', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({filename: currentFile, new_folder: newPath})
+            });
+            const data = await res.json();
+            if(data.success) {
+                currentFile = null;
+                document.getElementById('editor_panel').classList.add('opacity-50', 'pointer-events-none');
+                loadGallery();
+            } else { alert("Failed to move file."); }
+        }
+
         async function deleteCurrentFile() {
             if(!currentFile) return;
-            if(confirm(`Delete ${currentFile}?`)) {
+            if(confirm(`Delete ${currentFile.split('/').pop()}?`)) {
                 await fetch('/api/delete', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({filename: currentFile}) });
                 currentFile = null; document.getElementById('editor_panel').classList.add('opacity-50', 'pointer-events-none');
                 document.getElementById('save_indicator').classList.add('hidden');
@@ -1164,11 +1326,11 @@ HTML_TEMPLATE = """
                 const groupStr = JSON.stringify(group).replace(/"/g, '&quot;');
                 
                 group.forEach(file => {
-                    const safeId = file.replace(/\\./g, '_');
+                    const safeId = file.replace(/[^a-zA-Z0-9]/g, '_');
                     html += `
                     <div class="flex flex-col items-center flex-shrink-0 w-40 bg-gray-800 p-2 rounded border border-gray-700 relative group" id="dedup_item_${safeId}">
-                        <img src="/api/file/${file}" class="w-36 h-36 object-cover rounded mb-2 border border-gray-600 bg-black">
-                        <p class="text-[10px] truncate w-full text-center text-gray-400 mb-2 font-mono" title="${file}">${file}</p>
+                        <img src="/api/thumb/${encodeURIComponent(file)}" class="w-36 h-36 object-cover rounded mb-2 border border-gray-600 bg-black">
+                        <p class="text-[10px] truncate w-full text-center text-gray-400 mb-2 font-mono" title="${file}">${file.split('/').pop()}</p>
                         <div class="flex flex-col w-full gap-1">
                             <button onclick="keepAndMerge('${file}', '${groupStr}', ${idx})" class="w-full bg-green-600 hover:bg-green-500 text-xs font-bold px-2 py-1.5 rounded transition shadow">Keep & Merge</button>
                             <button onclick="deleteFromDedup('${file}', ${idx})" class="w-full bg-gray-700 hover:bg-red-600 text-gray-300 hover:text-white text-[10px] font-bold px-2 py-1 rounded transition">Delete Only</button>
@@ -1220,10 +1382,10 @@ HTML_TEMPLATE = """
         }
 
         async function deleteFromDedup(filename, groupId) {
-            if(confirm(`Trash file ${filename} WITHOUT merging metadata?`)) {
+            if(confirm(`Trash file ${filename.split('/').pop()} WITHOUT merging metadata?`)) {
                 await fetch('/api/delete', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({filename: filename}) });
                 
-                const safeId = filename.replace(/\\./g, '_');
+                const safeId = filename.replace(/[^a-zA-Z0-9]/g, '_');
                 const el = document.getElementById(`dedup_item_${safeId}`);
                 if(el) el.remove();
                 
@@ -1304,12 +1466,17 @@ HTML_TEMPLATE = """
 
         async function handleFiles(files) {
             const og = dropzone.innerHTML;
+            const targetFolder = document.getElementById('upload_folder').value.trim();
             for(let i=0; i<files.length; i++) {
                 dropzone.innerHTML = `<p class="text-blue-400 font-bold animate-pulse">Converting ${i+1}/${files.length}...</p>`;
-                let fd = new FormData(); fd.append('file', files[i]);
+                let fd = new FormData(); 
+                fd.append('file', files[i]);
+                fd.append('folder', targetFolder);
                 await fetch('/api/upload', { method: 'POST', body: fd });
             }
-            dropzone.innerHTML = og; loadGallery();
+            dropzone.innerHTML = og; 
+            document.getElementById('upload_folder').value = targetFolder;
+            loadGallery();
         }
 
         // Canvas Handlers
@@ -1481,8 +1648,8 @@ TRAINING_PORTAL_TEMPLATE = """
 """
 
 if __name__ == '__main__':
-    load_config()
-    load_classes()
-    populate_model_selector()
+    access_logger.info("Starting Background Indexer...")
+    threading.Thread(target=build_metadata_index).start()
+    
     access_logger.info("Starting Web Application on Port 8000...")
     app.run(host='0.0.0.0', port=8000, debug=False, threaded=True)
