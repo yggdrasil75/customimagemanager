@@ -428,10 +428,26 @@ def api_upload():
     file.save(temp_path)
     
     try:
-        subprocess.run(['cjxl', temp_path, jxl_path, '-d', '0'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if temp_path != jxl_path: os.remove(temp_path)
+        # Convert if not already JXL
+        if not filename.lower().endswith('.jxl'):
+            subprocess.run(['cjxl', temp_path, jxl_path, '-d', '0'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if temp_path != jxl_path and os.path.exists(temp_path): 
+                os.remove(temp_path)
+                
+        # NEW: Process bundled metadata immediately if provided by the bulk uploader
+        meta_json = request.form.get("metadata")
+        if meta_json:
+            meta_data = json.loads(meta_json)
+            write_metadata(
+                jxl_path, 
+                meta_data.get("tags", []), 
+                meta_data.get("description", ""), 
+                meta_data.get("regions", [])
+            )
+            
         return jsonify({"success": True, "filename": jxl_name})
     except Exception as e:
+        access_logger.error(f"Upload processing error: {e}")
         return jsonify({"success": True, "filename": filename, "warning": "Original format retained."})
 
 @app.route("/api/move", methods=["POST"])
@@ -773,7 +789,7 @@ def auto_describe():
             "max_tokens": 500
         }
 
-        response = requests.post(endpoint, headers=headers, json=payload, timeout=45)
+        response = requests.post(endpoint, headers=headers, json=payload, timeout=500)
         response.raise_for_status()
         desc = response.json()['choices'][0]['message']['content']
 
@@ -1467,13 +1483,22 @@ HTML_TEMPLATE = """
         async function handleFiles(files) {
             const og = dropzone.innerHTML;
             const targetFolder = document.getElementById('upload_folder').value.trim();
-            for(let i=0; i<files.length; i++) {
-                dropzone.innerHTML = `<p class="text-blue-400 font-bold animate-pulse">Converting ${i+1}/${files.length}...</p>`;
-                let fd = new FormData(); 
-                fd.append('file', files[i]);
-                fd.append('folder', targetFolder);
-                await fetch('/api/upload', { method: 'POST', body: fd });
+            const batchSize = 4;
+            let completed = 0;
+
+            for(let i=0; i < files.length; i += batchSize) {
+                const batch = Array.from(files).slice(i, i + batchSize);
+                
+                dropzone.innerHTML = `<p class="text-blue-400 font-bold animate-pulse">Uploading ${completed} to ${Math.min(completed + batchSize, files.length)} of ${files.length}...</p>`;
+                
+                await Promise.all(batch.map(file => {
+                    let fd = new FormData(); 
+                    fd.append('file', file);
+                    fd.append('folder', targetFolder);
+                    return fetch('/api/upload', { method: 'POST', body: fd }).then(() => completed++);
+                }));
             }
+            
             dropzone.innerHTML = og; 
             document.getElementById('upload_folder').value = targetFolder;
             loadGallery();
