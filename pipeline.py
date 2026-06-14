@@ -32,6 +32,10 @@ Node types
   for_each_box   : run `steps` (a list of mini-llm nodes) once per subject, with
                    the subject's CROP as the image. Each step may carry a `when`
                    guard: {"field": "is_animal", "equals": false}.
+  for_each_panel : for each box in ctx['panels'], crop the panel and run a full
+                   detect+pose+describe pass INSIDE it (`detect` opts + `steps`),
+                   remapping every box back to full-page coords. Subjects from all
+                   panels are concatenated into ctx['subjects'].
 
 `store` semantics
 -----------------
@@ -73,6 +77,19 @@ def crop_box(image_bgr, box, pad=0.04):
     if x2 - x1 < 4 or y2 - y1 < 4:
         return image_bgr
     return image_bgr[y1:y2, x1:x2]
+
+
+def _region_to_page(b, ox, oy, ow, oh):
+    """Remap a box normalised within a panel/region (origin ox,oy and size ow,oh
+    in PAGE-normalised units) back to full-page normalised coords."""
+    return {"class_name": b.get("class_name", "part"),
+            "cx": ox + b["cx"] * ow, "cy": oy + b["cy"] * oh,
+            "w": b["w"] * ow, "h": b["h"] * oh}
+
+
+def _strip_name(b):
+    """Drop class_name, keep only the four geometry keys (subject['box'] shape)."""
+    return {k: b[k] for k in ("cx", "cy", "w", "h")}
 
 
 def _map_box_to_full(b, x1, y1, x2, y2, W, H):
@@ -139,30 +156,159 @@ def _cond_ok(when, subj):
     return subj.get(field) == when.get("equals")
 
 
+# ── pose ↔ box validation ─────────────────────────────────────────────────────
+def _box_corners(b):
+    """(x1,y1,x2,y2) for a normalised center-form box."""
+    cx, cy = float(b["cx"]), float(b["cy"])
+    w, h = float(b["w"]), float(b["h"])
+    return cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2
+
+
+def _kpts_in_box(person, box, vis_thresh=0.2):
+    """Fraction of a skeleton's *visible* keypoints that fall inside `box`."""
+    pts = [p for p in person.get("keypoints", []) if p.get("v", 0) >= vis_thresh]
+    if not pts:
+        return 0.0
+    x1, y1, x2, y2 = _box_corners(box)
+    inside = sum(1 for p in pts if x1 <= p["x"] <= x2 and y1 <= p["y"] <= y2)
+    return inside / len(pts)
+
+
+def _box_from_kpts(person, vis_thresh=0.2, pad=0.03):
+    """Synthesise a normalised box from a skeleton's visible-keypoint extent."""
+    pts = [p for p in person.get("keypoints", []) if p.get("v", 0) >= vis_thresh]
+    if len(pts) < 2:
+        return None
+    xs = [p["x"] for p in pts]; ys = [p["y"] for p in pts]
+    x1, y1 = max(0.0, min(xs) - pad), max(0.0, min(ys) - pad)
+    x2, y2 = min(1.0, max(xs) + pad), min(1.0, max(ys) + pad)
+    if x2 - x1 < 1e-3 or y2 - y1 < 1e-3:
+        return None
+    return {"cx": (x1 + x2) / 2, "cy": (y1 + y2) / 2, "w": x2 - x1, "h": y2 - y1}
+
+
+def match_pose_boxes(boxes, pose, unmatched_box="keep",
+                     contain_thresh=0.4, vis_thresh=0.2):
+    """Validate detector boxes against pose skeletons and return enriched subjects.
+
+    Each detector box is matched to the skeleton that places the largest fraction
+    of its visible keypoints inside it. A skeleton with no box gets a synthesised
+    one. `unmatched_box` controls boxes that contain no skeleton:
+        "keep"  -> keep, pose=None
+        "drop"  -> discard
+        "flag"  -> keep, mark needs_review=True
+    Returns: list of {box, pose, class_name, needs_review}.
+    """
+    people = (pose or {}).get("people", []) or []
+    used = set()
+    subjects = []
+
+    for b in boxes:
+        best_i, best_frac = -1, 0.0
+        for i, person in enumerate(people):
+            if i in used:
+                continue
+            frac = _kpts_in_box(person, b, vis_thresh)
+            if frac > best_frac:
+                best_frac, best_i = frac, i
+        matched = best_frac >= contain_thresh and best_i >= 0
+        if matched:
+            used.add(best_i)
+            subjects.append({"box": b, "pose": people[best_i],
+                             "class_name": b.get("class_name", "person"),
+                             "needs_review": False})
+        else:
+            if unmatched_box == "drop":
+                continue
+            subjects.append({"box": b, "pose": None,
+                             "class_name": b.get("class_name", "person"),
+                             "needs_review": (unmatched_box == "flag")})
+
+    # skeletons with no detector box -> synthesise a box from keypoints
+    for i, person in enumerate(people):
+        if i in used:
+            continue
+        nb = _box_from_kpts(person, vis_thresh)
+        if nb:
+            nb["class_name"] = "person"
+            subjects.append({"box": nb, "pose": person,
+                             "class_name": "person", "needs_review": False,
+                             "from_pose": True})
+    return subjects
+
+
 # ── engine ────────────────────────────────────────────────────────────────────
 def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
-                 max_boxes=12, max_steps=200, pose_fn=None, ocr_fn=None):
-    """Execute `tree` against `image_bgr` using the `llm` callable. `pose_fn`
-    and `ocr_fn`, if given, are called as fn(image_bgr) by 'pose'/'ocr' nodes.
+                 max_boxes=12, max_steps=200, pose_fn=None, ocr_fn=None,
+                 person_fn=None, panel_fn=None, endpoints=None, max_workers=None):
+    """Execute `tree` against `image_bgr` using the `llm` callable.
+
+    Injected detectors (all optional, called as fn(image_bgr)):
+      pose_fn   -> {"people":[{"keypoints":[{x,y,v}...]}], ...}
+      ocr_fn    -> {"text": str, "lines":[{text,cx,cy,w,h}...]}
+      person_fn -> [{class_name,cx,cy,w,h}]  (YOLO/OBB character boxes, normalised)
+      panel_fn  -> [{cx,cy,w,h}]             (comic panel boxes, normalised)
+
+    Parallelism:
+      endpoints   -> optional list of LLM endpoint URLs. When given, independent
+                     work (subjects within a panel, and panels) is fanned out
+                     across a thread pool; each call is pinned to one endpoint
+                     round-robin. The `llm` callable is invoked as
+                     llm(prompt, img, want, choices, endpoint). Steps WITHIN a
+                     subject stay sequential (they have data dependencies, e.g.
+                     the is_animal `when` guards). Falls back to single-threaded
+                     when endpoints is None/empty.
+      max_workers -> cap on concurrent calls (default: len(endpoints)).
+
     Returns a structured analysis dict. Individual model failures degrade to
     empty results rather than aborting the whole run."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
     nodes = {n["id"]: n for n in tree.get("nodes", [])}
     if not nodes:
         return {"schema": SCHEMA, "image_type": None, "summary": "",
-                "tags": [], "subjects": [], "pose": None, "ocr": None}
+                "tags": [], "subjects": [], "panels": [], "pose": None, "ocr": None}
 
     ctx = {"image_type": None, "tags": [], "summary": "", "subjects": [],
-           "pose": None, "ocr": None}
+           "panels": [], "pose": None, "ocr": None}
 
-    def call(prompt, img, want, choices=None):
+    endpoints = list(endpoints or [])
+    parallel = len(endpoints) > 1
+    n_workers = max_workers or (len(endpoints) if endpoints else 1)
+    _rr = {"i": 0}
+    _rr_lock = threading.Lock()
+    _tags_lock = threading.Lock()
+    _progress_lock = threading.Lock()
+
+    def _next_endpoint():
+        if not endpoints:
+            return None
+        with _rr_lock:
+            ep = endpoints[_rr["i"] % len(endpoints)]
+            _rr["i"] += 1
+        return ep
+
+    def _report(msg):
+        if progress:
+            with _progress_lock:
+                progress(msg)
+
+    def call(prompt, img, want, choices=None, endpoint=None):
         try:
+            if endpoint is not None:
+                return llm(prompt, img, want, choices, endpoint)
             return llm(prompt, img, want, choices)
+        except TypeError:
+            # llm callable doesn't accept an endpoint arg — call without it
+            try:
+                return llm(prompt, img, want, choices)
+            except Exception as e:
+                _report(f"step failed: {e}")
         except Exception as e:
-            if progress:
-                progress(f"step failed: {e}")
-            return {"text": "", "tags": [], "bool": False,
-                    "boxes": [], "json": {}}.get(
-                        want, (choices[0] if choices else ""))
+            _report(f"step failed: {e}")
+        return {"text": "", "tags": [], "bool": False,
+                "boxes": [], "json": {}}.get(want, (choices[0] if choices else ""))
 
     def store_global(key, want, value):
         if not key:
@@ -179,10 +325,105 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
             return
         if want == "tags" or key == "tags":
             tg = value if isinstance(value, list) else []
-            subj.setdefault("tags", []).extend(tg)
-            ctx["tags"].extend(tg)
+            # the default "tags" key is the subject's main tag list; any other
+            # key (e.g. "outfit_tags") gets its own field so tag groups stay
+            # separate. Either way they also feed the global tag pool.
+            field = "tags" if key == "tags" else key
+            subj.setdefault(field, []).extend(tg)   # subj owned by one thread
+            with _tags_lock:                         # ctx["tags"] is shared
+                ctx["tags"].extend(tg)
         else:
             subj[key] = value
+
+    # ── region-scoped helpers (work on the full image OR a panel crop) ──────────
+    def detect_subjects_in(region_bgr, node, endpoint=None):
+        """Run detector+pose+match (or LLM fallback) on a region; return a list of
+        subject dicts whose boxes are normalised to the REGION, not the page."""
+        unmatched = node.get("unmatched_box",
+                             tree.get("settings", {}).get("unmatched_box", "keep"))
+        det_boxes = []
+        if person_fn:
+            try:
+                det_boxes = person_fn(region_bgr) or []
+            except Exception as e:
+                _report(f"person-detect failed: {e}")
+        pose = None
+        if pose_fn:
+            try:
+                pose = pose_fn(region_bgr)
+            except Exception as e:
+                _report(f"pose failed: {e}")
+
+        if det_boxes:
+            clamped = []
+            for b in det_boxes[:max_boxes]:
+                cb = _clamp(b)
+                if cb:
+                    cb["class_name"] = b.get("class_name", "person")
+                    clamped.append(cb)
+            matched = match_pose_boxes(clamped, pose, unmatched_box=unmatched,
+                                       contain_thresh=node.get("contain_thresh", 0.4))
+        elif node.get("llm_fallback", True) and node.get("prompt"):
+            boxes = call(_fmt(node["prompt"], ctx), region_bgr, "boxes",
+                         None, endpoint) or []
+            matched = []
+            for b in boxes[:max_boxes]:
+                cb = _clamp(b)
+                if cb:
+                    matched.append({"box": cb, "pose": None,
+                                    "class_name": (b.get("class_name") or "subject").strip() or "subject",
+                                    "needs_review": False, "from_llm": True})
+        else:
+            matched = []
+
+        return pose, [{
+            "box": {k: m["box"][k] for k in ("cx", "cy", "w", "h")},
+            "label": m["class_name"],
+            "pose": m.get("pose"),
+            "needs_review": m.get("needs_review", False),
+            "tags": [],
+        } for m in matched]
+
+    def _describe_one_subject(region_bgr, subj, steps, off, endpoint):
+        """Run all `steps` for a single subject. Steps stay sequential (data
+        deps via `when`). Mutates only `subj`, so it's safe to run many of these
+        concurrently as long as each owns a different subject."""
+        H, W = region_bgr.shape[:2]
+        x1, y1, x2, y2 = _crop_rect(H, W, subj["box"], crop_pad)
+        if x2 - x1 < 4 or y2 - y1 < 4:
+            x1, y1, x2, y2 = 0, 0, W, H
+        crop = region_bgr[y1:y2, x1:x2]
+        for st in steps:
+            if not _cond_ok(st.get("when"), subj):
+                continue
+            _report(f'{subj["label"]}: {st.get("label", st.get("store", "step"))}')
+            want = st.get("want", "text")
+            out = call(_fmt(st["prompt"], ctx, subj), crop, want,
+                       st.get("choices"), endpoint)
+            if want == "boxes":
+                for b in (out or [])[:max_boxes]:
+                    if not b.get("class_name"):
+                        b["class_name"] = st.get("label") or "part"
+                    fb = _map_box_to_full(b, x1, y1, x2, y2, W, H)   # crop->region
+                    if fb and off is not None:
+                        fb = _region_to_page(fb, *off)               # region->page
+                    if fb:
+                        subj.setdefault("sub_boxes", []).append(fb)
+            else:
+                store_subj(subj, st.get("store"), want, out)
+
+    def describe_subjects_in(region_bgr, subjects, steps, off=None, pool=None):
+        """Describe every subject in a region. When a thread `pool` is supplied
+        the subjects are processed concurrently (each pinned to one endpoint);
+        otherwise sequentially."""
+        if pool is not None and len(subjects) > 1:
+            futs = [pool.submit(_describe_one_subject, region_bgr, s, steps,
+                                off, _next_endpoint()) for s in subjects]
+            for f in futs:
+                f.result()
+        else:
+            for s in subjects:
+                _describe_one_subject(region_bgr, s, steps, off, _next_endpoint())
 
     cur = tree.get("start") or tree["nodes"][0]["id"]
     guard = 0
@@ -197,13 +438,13 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
 
         if ntype == "classify":
             choice = call(_fmt(node["prompt"], ctx), image_bgr, "choice",
-                          node.get("choices"))
+                          node.get("choices"), _next_endpoint())
             ctx["image_type"] = choice
             cur = (node.get("routes") or {}).get(choice) or node.get("next")
 
         elif ntype == "llm":
             want = node.get("want", "text")
-            out = call(_fmt(node["prompt"], ctx), image_bgr, want)
+            out = call(_fmt(node["prompt"], ctx), image_bgr, want, None, _next_endpoint())
             store_global(node.get("store"), want, out)
             if want == "bool" and node.get("branch"):
                 cur = node["branch"].get("true" if out else "false") or node.get("next")
@@ -211,7 +452,8 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
                 cur = node.get("next")
 
         elif ntype == "boxes":
-            boxes = call(_fmt(node["prompt"], ctx), image_bgr, "boxes") or []
+            boxes = call(_fmt(node["prompt"], ctx), image_bgr, "boxes",
+                         None, _next_endpoint()) or []
             subjects = []
             for b in boxes[:max_boxes]:
                 cb = _clamp(b)          # clamp off-screen boxes to the image
@@ -228,62 +470,116 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
         elif ntype == "pose":
             if pose_fn:
                 try:
-                    ctx["pose"] = pose_fn(image_bgr)
+                    p = pose_fn(image_bgr)
+                    ctx["pose"] = p
+                    n = len((p or {}).get("people", []))
+                    _report(f"pose: {n} skeleton(s) detected")
                 except Exception as e:
-                    if progress:
-                        progress(f"pose failed: {e}")
+                    _report(f"pose failed: {e}")
+            else:
+                _report("pose: no pose_fn injected")
             cur = node.get("next")
 
         elif ntype == "ocr":
             if ocr_fn:
                 try:
-                    ctx["ocr"] = ocr_fn(image_bgr)
+                    o = ocr_fn(image_bgr)
+                    ctx["ocr"] = o
+                    txt = (o or {}).get("text", "")
+                    _report(f"ocr: {len(txt)} chars" +
+                            (f" ({(o or {}).get('note', '')})" if (o or {}).get("note") else ""))
                 except Exception as e:
-                    if progress:
-                        progress(f"ocr failed: {e}")
+                    _report(f"ocr failed: {e}")
+            else:
+                _report("ocr: no ocr_fn injected")
+            cur = node.get("next")
+
+        elif ntype == "detect_persons":
+            # Detector-driven character boxes, validated against pose skeletons.
+            pose, subs = detect_subjects_in(image_bgr, node, _next_endpoint())
+            if pose is not None:
+                ctx["pose"] = pose
+            ctx["subjects"] = subs
+            cur = node.get("next")
+
+        elif ntype == "panels":
+            # Comic panel detection -> ctx['panels'] (each a normalised box).
+            panels = []
+            if panel_fn:
+                try:
+                    panels = panel_fn(image_bgr) or []
+                except Exception as e:
+                    _report(f"panel-detect failed: {e}")
+            elif node.get("prompt"):
+                panels = call(_fmt(node["prompt"], ctx), image_bgr, "boxes",
+                              None, _next_endpoint()) or []
+            ctx["panels"] = [cb for cb in (_clamp(b) for b in panels[:max_boxes]) if cb]
             cur = node.get("next")
 
         elif ntype == "for_each_box":
+            if parallel:
+                with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                    describe_subjects_in(image_bgr, ctx["subjects"],
+                                         node.get("steps", []), pool=pool)
+            else:
+                describe_subjects_in(image_bgr, ctx["subjects"], node.get("steps", []))
+            cur = node.get("next")
+
+        elif ntype == "for_each_panel":
+            # For each detected panel: crop it, detect+pose+describe characters
+            # INSIDE the panel, then remap every box back to full-page coords so
+            # subjects/sub-boxes are stored in one consistent space. Subjects from
+            # all panels are concatenated into ctx['subjects']. Panels are walked
+            # sequentially; the characters WITHIN each panel fan out across the
+            # endpoint pool (avoids nested-pool deadlock, and subjects are the
+            # numerous unit that dominates runtime).
             steps = node.get("steps", [])
+            det = node.get("detect", {})          # detect_persons-style options
             H, W = image_bgr.shape[:2]
-            for subj in ctx["subjects"]:
-                x1, y1, x2, y2 = _crop_rect(H, W, subj["box"], crop_pad)
-                if x2 - x1 < 4 or y2 - y1 < 4:
-                    x1, y1, x2, y2 = 0, 0, W, H
-                crop = image_bgr[y1:y2, x1:x2]
-                for st in steps:
-                    if not _cond_ok(st.get("when"), subj):
+            panels = ctx.get("panels") or []
+            if not panels:                        # no panels -> treat whole image as one
+                panels = [{"cx": .5, "cy": .5, "w": 1.0, "h": 1.0}]
+            all_subjects = []
+            pool = ThreadPoolExecutor(max_workers=n_workers) if parallel else None
+            try:
+                for pi, panel in enumerate(panels):
+                    px1, py1, px2, py2 = _crop_rect(H, W, panel, 0.0)
+                    if px2 - px1 < 8 or py2 - py1 < 8:
                         continue
-                    if progress:
-                        progress(f'{subj["label"]}: {st.get("label", st.get("store", "step"))}')
-                    want = st.get("want", "text")
-                    out = call(_fmt(st["prompt"], ctx, subj), crop, want,
-                               st.get("choices"))
-                    if want == "boxes":
-                        # sub-boxes are detected on the CROP — map them back to
-                        # full-image coords so they become real regions.
-                        for b in (out or [])[:max_boxes]:
-                            if not b.get("class_name"):
-                                b["class_name"] = st.get("label") or "part"
-                            fb = _map_box_to_full(b, x1, y1, x2, y2, W, H)
-                            if fb:
-                                subj.setdefault("sub_boxes", []).append(fb)
-                    else:
-                        store_subj(subj, st.get("store"), want, out)
+                    pcrop = image_bgr[py1:py2, px1:px2]
+                    # panel origin/size in PAGE-normalised units, for remapping
+                    ox, oy = px1 / W, py1 / H
+                    ow, oh = (px2 - px1) / W, (py2 - py1) / H
+                    _report(f"panel {pi + 1}/{len(panels)}")
+                    _pose, subs = detect_subjects_in(pcrop, det, _next_endpoint())
+                    describe_subjects_in(pcrop, subs, steps,
+                                         off=(ox, oy, ow, oh), pool=pool)
+                    for s in subs:
+                        s["panel"] = pi
+                        s["box"] = _strip_name(_region_to_page(
+                            {**s["box"], "class_name": s["label"]}, ox, oy, ow, oh))
+                    all_subjects.extend(subs)
+            finally:
+                if pool is not None:
+                    pool.shutdown(wait=True)
+            ctx["subjects"] = all_subjects
             cur = node.get("next")
 
         else:
             cur = node.get("next")
 
-    # finalise subject tags + global tags
+    # finalise subject tags + global tags (dedup every *_tags field per subject)
     for s in ctx["subjects"]:
-        s["tags"] = _dedup(s.get("tags", []))
+        for k in list(s.keys()):
+            if k == "tags" or k.endswith("_tags"):
+                s[k] = _dedup(s.get(k, []))
     return {
         "schema": SCHEMA,
         "image_type": ctx.get("image_type"),
         "summary": ctx.get("summary", ""),
         "tags": _dedup(ctx["tags"]),
         "subjects": ctx["subjects"],
+        "panels": ctx.get("panels", []),
         "pose": ctx.get("pose"),
         "ocr": ctx.get("ocr"),
     }
@@ -302,71 +598,62 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
 #        - detailed crop description
 #        - per-subject booru tags
 DEFAULT_PIPELINE = {
-    "start": "classify",
+    "start": "persons",
+    "settings": {"unmatched_box": "keep"},   # keep | drop | flag
     "nodes": [
         {
-            "id": "classify", "type": "classify", "label": "Classifying image",
-            "prompt": ("Classify this image as exactly one of: character, group, scenery. "
-                       "'character' = one main subject (a person, animal, or creature). "
-                       "'group' = several people or characters together. "
-                       "'scenery' = a landscape, location, or object scene with no single main character. "
-                       "Reply with one word only."),
-            "choices": ["character", "group", "scenery"],
-            "routes": {"character": "overall_tags",
-                       "group": "overall_tags",
-                       "scenery": "overall_tags"},
-            "next": "overall_tags"
+            "id": "persons", "type": "detect_persons",
+            "label": "Detecting characters",
+            "unmatched_box": "keep", "contain_thresh": 0.4, "llm_fallback": True,
+            "prompt": ("Detect each distinct person, character, or animal in this image "
+                       "and return a bounding box for each. Short class_name "
+                       "(e.g. 'girl', 'man', 'dog'). Coordinates normalised 0..1."),
+            "next": "ocr"
         },
         {
-            "id": "overall_tags", "type": "llm", "want": "tags", "store": "tags",
-            "label": "Overall tags",
-            "prompt": ("Generate a comma-separated list of Danbooru-style tags describing this "
-                       "{image_type} image: subjects, setting, colors, mood, and notable objects. "
-                       "Tags only, no sentences."),
+            "id": "ocr", "type": "ocr", "label": "Reading text",
+            "next": "per_subject"
+        },
+        {
+            "id": "per_subject", "type": "for_each_box", "source": "subjects",
+            "label": "Describing each character",
+            "steps": [
+                {"want": "bool", "store": "is_animal", "label": "animal?",
+                 "prompt": ("Is the main subject in this cropped image an animal or creature "
+                            "(not a human)? Answer yes or no.")},
+                {"want": "text", "store": "appearance", "label": "appearance",
+                 "prompt": ("Describe the appearance of the subject in this crop in detail: "
+                            "body type, face, hair/fur, colors, distinguishing features.")},
+                {"want": "text", "store": "outfit", "label": "outfit",
+                 "when": {"field": "is_animal", "equals": False},
+                 "prompt": "Describe this subject's clothing, outfit, accessories, and style."},
+                {"want": "text", "store": "detail", "label": "detail",
+                 "prompt": ("Vivid detailed description of this cropped subject: pose, "
+                            "expression, action, notable details.")},
+                {"want": "tags", "store": "tags", "label": "subject tags",
+                 "prompt": "Danbooru-style tags for just this cropped subject, comma-separated."},
+                {"want": "boxes", "store": "boxes", "label": "Detecting clothes",
+                 "when": {"field": "is_animal", "equals": False},
+                 "prompt": ("Detect individual pieces of clothing on this subject. Highly "
+                            "descriptive class_name (e.g. 'yellow sundress').")},
+                {"want": "boxes", "store": "boxes", "label": "Detecting faces",
+                 "prompt": "Detect the face of this subject. class_name like 'cute girl'."},
+            ],
             "next": "overall_desc"
         },
         {
             "id": "overall_desc", "type": "llm", "want": "text", "store": "summary",
             "label": "Overall description",
-            "prompt": ("Write a detailed paragraph describing this {image_type} image as a whole: "
-                       "the scene, composition, lighting, color palette, and overall mood."),
-            "next": "pose"
+            "prompt": ("Using the detected characters and text, write a detailed paragraph "
+                       "describing this image as a whole: scene, composition, lighting, "
+                       "color palette, and overall mood."),
+            "next": "overall_tags"
         },
         {
-            "id": "pose", "type": "pose", "label": "Estimating pose",
-            "next": "subjects"
-        },
-        {
-            "id": "subjects", "type": "boxes", "store": "subjects",
-            "label": "Detecting subjects",
-            "prompt": ("Detect the main subjects in this {image_type} image and return a bounding "
-                       "box for each. For 'character' or 'group', box each distinct person or "
-                       "character. For 'scenery', box the most salient objects or landmarks. "
-                       "Give each box a short class_name (e.g. 'girl', 'man', 'dog', 'castle'). "
-                       "Coordinates normalised 0..1."),
-            "next": "per_subject"
-        },
-        {
-            "id": "per_subject", "type": "for_each_box", "source": "subjects",
-            "label": "Describing each subject",
-            "steps": [
-                {"want": "bool", "store": "is_animal", "label": "animal?",
-                 "prompt": ("Is the main subject in this cropped image an animal or creature "
-                            "(i.e. not a human)? Answer yes or no.")},
-                {"want": "text", "store": "appearance", "label": "appearance",
-                 "prompt": ("Describe the appearance of the subject in this crop in detail: "
-                            "body type, face, hair/fur, colors, and distinguishing features.")},
-                {"want": "text", "store": "outfit", "label": "outfit",
-                 "when": {"field": "is_animal", "equals": False},
-                 "prompt": ("Describe this subject's clothing, outfit, accessories, and overall "
-                            "style in detail.")},
-                {"want": "text", "store": "detail", "label": "detail",
-                 "prompt": ("Give a vivid, detailed description of this cropped subject: pose, "
-                            "expression, action, and any notable details.")},
-                {"want": "tags", "store": "tags", "label": "subject tags",
-                 "prompt": ("List Danbooru-style tags for just this cropped subject, "
-                            "comma-separated. Tags only.")},
-            ],
+            "id": "overall_tags", "type": "llm", "want": "tags", "store": "tags",
+            "label": "Overall tags",
+            "prompt": ("Danbooru-style tags describing this image overall: subjects, setting, "
+                       "colors, mood, notable objects. Tags only, no sentences."),
             "next": None
         },
     ]

@@ -1153,6 +1153,71 @@ def _run_pose(img_bgr):
             return wb   # else fall through to body pose
     return _run_pose_yolo(img_bgr)
 
+# ── character / panel detectors (for the pipeline) ───────────────────────────--
+_person_cache = {"path": None, "model": None}
+_panel_cache = {"path": None, "model": None}
+
+def _detect_obb_or_box(img_bgr, model_path, cache, keep_classes=None,
+                       conf=0.25, as_obb=False):
+    """Run a YOLO (optionally OBB) model and return normalised center-form boxes
+    [{class_name,cx,cy,w,h}]. OBB results are reduced to their axis-aligned
+    enclosing box (the rest of the pipeline assumes upright crops). Never raises."""
+    try:
+        if cache["path"] != model_path:
+            cache["model"] = YOLO(model_path); cache["path"] = model_path
+        res = cache["model"](img_bgr, verbose=False, conf=conf)
+        if not res:
+            return []
+        r = res[0]; H, W = img_bgr.shape[:2]
+        out = []
+        obb = getattr(r, "obb", None)
+        if as_obb and obb is not None and len(obb) > 0:
+            names = r.names
+            for i in range(len(obb)):
+                cid = int(obb.cls[i].item()); name = names.get(cid, str(cid))
+                if keep_classes and name not in keep_classes:
+                    continue
+                # xyxyxyxy -> axis-aligned enclosing box, normalised
+                pts = obb.xyxyxyxy[i].cpu().numpy().reshape(-1, 2)
+                x1, y1 = pts[:, 0].min() / W, pts[:, 1].min() / H
+                x2, y2 = pts[:, 0].max() / W, pts[:, 1].max() / H
+                out.append({"class_name": name, "cx": (x1 + x2) / 2,
+                            "cy": (y1 + y2) / 2, "w": x2 - x1, "h": y2 - y1})
+            return out
+        if r.boxes is not None:
+            names = r.names
+            for b in r.boxes:
+                cid = int(b.cls[0].item()); name = names.get(cid, str(cid))
+                if keep_classes and name not in keep_classes:
+                    continue
+                cx, cy, w, h = b.xywhn[0].tolist()
+                out.append({"class_name": name, "cx": cx, "cy": cy, "w": w, "h": h})
+        return out
+    except Exception as e:
+        access_logger.error(f"detect({model_path}): {e}")
+        return []
+
+def _run_person(img_bgr):
+    """Detect characters. Prefers a configured OBB model; else the COCO 'person'
+    class from the standard YOLO detector. Empty list lets the pipeline fall back
+    to the LLM (e.g. stylised art, non-human creatures)."""
+    obb = (state.get("person_obb_model") or "").strip()
+    if obb:
+        boxes = _detect_obb_or_box(img_bgr, obb, _person_cache, as_obb=True)
+        if boxes:
+            return boxes
+    model_path = f"yolo11{_yolo_size()}.pt"
+    return _detect_obb_or_box(img_bgr, model_path, _person_cache,
+                              keep_classes={"person"})
+
+def _run_panels(img_bgr):
+    """Detect comic panels via a configured panel model (OBB or box). Empty if
+    none configured -> pipeline can fall back to an LLM prompt."""
+    pm = (state.get("panel_model") or "").strip()
+    if not pm:
+        return []
+    return _detect_obb_or_box(img_bgr, pm, _panel_cache, as_obb=True)
+
 # ── OCR ─────────────────────────────────────────────────────────────────────--
 _ocr_cache = {"engine": None, "reader": None}
 
@@ -1373,9 +1438,11 @@ def _normalize_endpoint(endpoint):
             endpoint = base + '/chat/completions'
     return endpoint
 
-def _llm_request(messages, tools=None, tool_choice=None, timeout=600):
-    """Low-level OpenAI-compatible chat call. Returns the message dict or raises."""
-    endpoint = _normalize_endpoint(state.get("oai_endpoint", ""))
+def _llm_request(messages, tools=None, tool_choice=None, timeout=600, endpoint=None):
+    """Low-level OpenAI-compatible chat call. Returns the message dict or raises.
+    `endpoint` overrides the configured one (used to spread load across several
+    model instances during a parallel pipeline run)."""
+    endpoint = _normalize_endpoint(endpoint or state.get("oai_endpoint", ""))
     model    = state.get("oai_model", "").strip()
     key      = state.get("oai_key", "").strip()
     if not endpoint or not model:
@@ -1400,8 +1467,9 @@ _BOX_TOOL = [{"type": "function", "function": {
             "cy": {"type": "number"}, "w": {"type": "number"}, "h": {"type": "number"}},
         "required": ["class_name", "cx", "cy", "w", "h"]}}}, "required": ["boxes"]}}}]
 
-def _llm_call(prompt, image_bgr, want="text", choices=None):
-    """Typed single-turn call used by the pipeline engine. `want` controls parsing."""
+def _llm_call(prompt, image_bgr, want="text", choices=None, endpoint=None):
+    """Typed single-turn call used by the pipeline engine. `want` controls parsing.
+    `endpoint` (optional) pins this call to a specific model instance."""
     content = [{"type": "text", "text": prompt}]
     if image_bgr is not None:
         ok, buf = cv2.imencode('.jpg', image_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -1414,7 +1482,8 @@ def _llm_call(prompt, image_bgr, want="text", choices=None):
 
     if want == "boxes":
         msg = _llm_request(messages, _BOX_TOOL,
-                           {"type": "function", "function": {"name": "create_bounding_boxes"}})
+                           {"type": "function", "function": {"name": "create_bounding_boxes"}},
+                           endpoint=endpoint)
         boxes = []
         if msg.get("tool_calls"):
             try:
@@ -1428,7 +1497,7 @@ def _llm_call(prompt, image_bgr, want="text", choices=None):
                 pass
         return [cb for cb in (_clamp_box(b) for b in boxes) if cb]
 
-    msg  = _llm_request(messages)
+    msg  = _llm_request(messages, endpoint=endpoint)
     text = (msg.get("content") or "").strip()
     if want == "tags":
         return [t.strip() for t in re.split(r'[,\n]', text) if t.strip()]
@@ -2352,6 +2421,25 @@ def _pose_fn(bgr):
 def _ocr_fn(bgr):
     return _run_ocr(bgr)
 
+def _person_fn(bgr):
+    return _run_person(bgr)
+
+def _panel_fn(bgr):
+    return _run_panels(bgr)
+
+def _pipeline_endpoints():
+    """Endpoint URLs for parallel pipeline runs. Reads state['oai_endpoints']
+    (a list, or newline/comma-separated string). Falls back to the single
+    configured endpoint. Returning <=1 entry keeps the engine single-threaded."""
+    raw = state.get("oai_endpoints") or []
+    if isinstance(raw, str):
+        raw = re.split(r"[,\n]", raw)
+    eps = [e.strip() for e in raw if e and e.strip()]
+    if not eps:
+        single = (state.get("oai_endpoint") or "").strip()
+        eps = [single] if single else []
+    return eps
+
 def _apply_pipeline_result(fp, analysis):
     """Merge a pipeline analysis into a file's metadata: union tags, append
     detected subjects AND their sub-boxes (clothing/face parts) and any OCR text
@@ -2366,9 +2454,14 @@ def _apply_pipeline_result(fp, analysis):
     for s in analysis.get("subjects", []):
         cb = _clamp_box(s.get("box", {}))
         if cb:
-            regions.append({"class_name": s.get("label", "subject"),
-                            "cx": cb["cx"], "cy": cb["cy"], "w": cb["w"], "h": cb["h"],
-                            "confirmed": False})
+            reg = {"class_name": s.get("label", "subject"),
+                   "cx": cb["cx"], "cy": cb["cy"], "w": cb["w"], "h": cb["h"],
+                   "confirmed": False}
+            if s.get("needs_review"):
+                reg["needs_review"] = True
+            if s.get("pose"):
+                reg["pose"] = s["pose"]   # skeleton validated to THIS character
+            regions.append(reg)
         for sb in s.get("sub_boxes", []):       # clothing / face parts, etc.
             cbb = _clamp_box(sb)
             if cbb:
@@ -2411,7 +2504,9 @@ def run_pipeline_route():
         state["status_text"] = f"Smart Tag: {msg}"
 
     try:
-        analysis = run_pipeline(tree, bgr, _llm_call, pose_fn=_pose_fn, ocr_fn=_ocr_fn, progress=_progress)
+        analysis = run_pipeline(tree, bgr, _llm_call, pose_fn=_pose_fn, ocr_fn=_ocr_fn,
+                                person_fn=_person_fn, panel_fn=_panel_fn,
+                                endpoints=_pipeline_endpoints(), progress=_progress)
     except Exception as e:
         state["status_text"] = "Ready."
         return jsonify({"success": False, "error": str(e)})
@@ -2440,7 +2535,9 @@ def bulk_pipeline():
                 errors.append(fn); continue
             def _prog(msg, i=i): state["status_text"] = f"Smart Tag {i+1}/{total}: {msg}"
             analysis = run_pipeline(tree, _to_bgr(img), _llm_call,
-                                    pose_fn=_pose_fn, ocr_fn=_ocr_fn, progress=_prog)
+                                    pose_fn=_pose_fn, ocr_fn=_ocr_fn,
+                                    person_fn=_person_fn, panel_fn=_panel_fn,
+                                    endpoints=_pipeline_endpoints(), progress=_prog)
             _apply_pipeline_result(fp, analysis)
             done += 1
         except Exception as e:
@@ -2448,6 +2545,104 @@ def bulk_pipeline():
             access_logger.error(f"bulk_pipeline {fn}: {e}")
     state["status_text"] = "Ready."
     return jsonify({"success": True, "done": done, "errors": errors})
+
+def _merge_comic_analyses(folder, page_analyses, summarize=True):
+    """Aggregate per-page pipeline analyses into comic-level metadata.
+
+    - tags: union across all pages (order-preserving, deduped)
+    - characters: distinct subject labels across pages, each with the longest
+      per-page description seen for that label (a reasonable 'best' blurb)
+    - description: per-page scene summaries joined into a synopsis; if
+      `summarize` and an LLM is configured, condensed into a short series blurb
+    Writes the result into comic.json + the comics DB row. Returns the dict.
+    """
+    all_tags, seen = [], set()
+    characters = {}            # label -> best (longest) description
+    page_lines = []
+    for idx, (page, analysis) in enumerate(page_analyses):
+        for t in analysis.get("tags", []):
+            if t and t.lower() not in seen:
+                all_tags.append(t); seen.add(t.lower())
+        for s in analysis.get("subjects", []):
+            label = (s.get("label") or "").strip()
+            if not label:
+                continue
+            desc = (s.get("detail") or "").strip()
+            if label not in characters or len(desc) > len(characters[label]):
+                characters[label] = desc
+        scene = (analysis.get("summary") or "").strip()
+        if scene:
+            page_lines.append(f"Page {idx + 1}: {scene}")
+
+    synopsis = "\n".join(page_lines)
+    if summarize and synopsis and state.get("oai_endpoint") and state.get("oai_model"):
+        try:
+            prompt = ("Below are one-line summaries of each page of a comic, in order. "
+                      "Write a short synopsis (2-4 sentences) of the comic as a whole.\n\n"
+                      + synopsis)
+            condensed = (_llm_call(prompt, None, "text") or "").strip()
+            if condensed:
+                synopsis = condensed
+        except Exception as e:
+            access_logger.warning(f"comic synopsis {folder}: {e}")
+
+    data = _load_comic_json(folder) or {}
+    data["tags"] = all_tags
+    data["characters"] = sorted(characters.keys())
+    data["character_notes"] = characters          # label -> blurb
+    data["description"] = synopsis
+    if "pages" not in data:
+        data["pages"] = _comic_ordered_pages(folder)
+    data.setdefault("schema", COMIC_SCHEMA)
+    _write_comic_json(folder, data)
+    _upsert_comic_row(folder, data)
+    return data
+
+@app.route("/api/comic_pipeline", methods=["POST"])
+def comic_pipeline_route():
+    """Run the pipeline across every page of a comic IN ORDER, store each page's
+    result, then merge tags / characters / description up to the comic level.
+    Expects {"folder": "<comic folder rel path>"}. Uses the comic pipeline tree
+    if configured (state['comic_pipeline_tree']), else the default tree."""
+    folder = (request.json.get("folder") or "").strip().strip("/")
+    if not folder:
+        return jsonify({"success": False, "error": "No comic folder given."})
+    if not state.get("oai_endpoint") or not state.get("oai_model"):
+        return jsonify({"success": False, "error": "LLM not configured."})
+    pages = _comic_ordered_pages(folder)
+    if not pages:
+        return jsonify({"success": False, "error": "No pages found in comic."})
+    tree = state.get("comic_pipeline_tree") or state.get("pipeline_tree") or DEFAULT_PIPELINE
+    total = len(pages)
+    page_analyses, errors = [], []
+    for i, page in enumerate(pages):
+        rel = f"{folder}/{page}"
+        fp = get_safe_path(MEDIA_DIR, rel)
+        if not fp or not os.path.exists(fp):
+            errors.append(page); continue
+        try:
+            img = read_jxl(fp)
+            if img is None:
+                errors.append(page); continue
+            def _prog(msg, i=i): state["status_text"] = f"Comic {i+1}/{total}: {msg}"
+            analysis = run_pipeline(tree, _to_bgr(img), _llm_call,
+                                    pose_fn=_pose_fn, ocr_fn=_ocr_fn,
+                                    person_fn=_person_fn, panel_fn=_panel_fn,
+                                    endpoints=_pipeline_endpoints(), progress=_prog)
+            _apply_pipeline_result(fp, analysis)      # store per-page result too
+            page_analyses.append((page, analysis))
+        except Exception as e:
+            errors.append(page)
+            access_logger.error(f"comic_pipeline {rel}: {e}")
+    state["status_text"] = "Merging comic…"
+    merged = _merge_comic_analyses(folder, page_analyses,
+                                   summarize=request.json.get("summarize", True))
+    state["status_text"] = "Ready."
+    return jsonify({"success": True, "pages_done": len(page_analyses),
+                    "errors": errors, "comic": {
+                        "tags": merged.get("tags", []),
+                        "characters": merged.get("characters", []),
+                        "description": merged.get("description", "")}})
 
 @app.route("/api/pose", methods=["POST"])
 def api_pose():
