@@ -30,7 +30,9 @@ from flask import Flask, render_template_string, request, jsonify, send_file, Re
 from ultralytics import YOLO
 import imagecodecs
 from dup_heuristics import DuplicateClassifier, classify_pair, extract_features
+import object_grouping as og
 from pipeline import DEFAULT_PIPELINE, run_pipeline
+from templates import HTML, TRAINING_HTML
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 app       = Flask(__name__)
@@ -155,6 +157,24 @@ def _init_db():
             created REAL NOT NULL
         );
 
+        -- Cached per-image object embeddings for the discovery/grouping scan.
+        -- Doubles as the scan checkpoint: a restart skips any rel_path already
+        -- present whose mtime + params still match, so a 22k-image scan resumes
+        -- instead of restarting. `boxes` and `embs` are JSON; `embs` is a list
+        -- of float lists (one per box). `sig` encodes the model/param fingerprint
+        -- so changing the model or max_regions invalidates stale rows.
+        CREATE TABLE IF NOT EXISTS object_embeddings (
+            rel_path  TEXT PRIMARY KEY,
+            mtime     REAL,
+            sig       TEXT,
+            n_boxes   INTEGER,
+            boxes     TEXT,
+            embs      TEXT,
+            tags      TEXT,
+            created   REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_objemb_sig ON object_embeddings(sig);
+
         -- A comic is a folder of ordered page images plus its own metadata.
         -- Source of truth is <folder>/comic.json (portable); this is a cache.
         CREATE TABLE IF NOT EXISTS comics (
@@ -208,6 +228,9 @@ def _update_meta(rel_path, tags, description):
 
 def _delete_file_row(rel_path):
     _db().execute("DELETE FROM files WHERE rel_path=?", (rel_path,))
+    # drop any cached object embeddings for this file so the discovery cache
+    # doesn't keep returning a deleted image
+    _db().execute("DELETE FROM object_embeddings WHERE rel_path=?", (rel_path,))
     _db().commit()
 
 def _get_file_row(rel_path):
@@ -792,7 +815,12 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
             analysis = _read_analysis_from_xmp(xmp_path)
         if flag is None:
             flag = _read_flag_from_xmp(xmp_path)
-        if pose is None:
+        # Preserve an existing skeleton when the caller passes nothing usable.
+        # IMPORTANT: treat an empty/peopleless pose ({} or {"people": []}) the
+        # same as None — otherwise a pipeline run that produced no skeleton would
+        # silently overwrite a good pose written earlier (e.g. by the manual pose
+        # button), making it look like "pose isn't being stored".
+        if not (pose and pose.get("people")):
             pose = _read_pose_from_xmp(xmp_path)
         esc = saxutils.escape
         subj = ("<dc:subject><rdf:Bag>" +
@@ -1218,6 +1246,26 @@ def _run_panels(img_bgr):
         return []
     return _detect_obb_or_box(img_bgr, pm, _panel_cache, as_obb=True)
 
+_face_cache = {"path": None, "model": None}
+
+def _run_faces(img_bgr):
+    """Detect faces with a configured YOLO face model (e.g. yolov8n-face.pt).
+    Returns normalised boxes [{class_name:'face',cx,cy,w,h}]. Boxes below the
+    object-grouping minimum (32px) are dropped — sub-32px faces carry too little
+    signal to tag usefully. Empty if no model configured."""
+    fm = (state.get("face_model") or "").strip()
+    if not fm:
+        return []
+    boxes = _detect_obb_or_box(img_bgr, fm, _face_cache)
+    H, W = img_bgr.shape[:2]
+    out = []
+    for b in boxes:
+        if b["w"] * W < 32 or b["h"] * H < 32:
+            continue
+        b["class_name"] = "face"
+        out.append(b)
+    return out
+
 # ── OCR ─────────────────────────────────────────────────────────────────────--
 _ocr_cache = {"engine": None, "reader": None}
 
@@ -1594,6 +1642,22 @@ def index(): return render_template_string(HTML)
 @app.route("/training_portal")
 def training_portal(): return render_template_string(TRAINING_HTML)
 
+@app.route("/web/<path:filename>")
+def web_asset(filename):
+    """Serve the UI's static assets (css/js) from the web/ directory next to
+    this module. Restricted to .css/.js and guarded against path traversal."""
+    import mimetypes
+    web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+    # only allow simple filenames with safe extensions
+    if ("/" in filename or "\\" in filename or ".." in filename
+            or not filename.endswith((".css", ".js"))):
+        return "", 404
+    fp = os.path.join(web_dir, filename)
+    if not os.path.isfile(fp):
+        return "", 404
+    mime = "text/css" if filename.endswith(".css") else "application/javascript"
+    return send_file(fp, mimetype=mime)
+
 @app.route("/api/state")
 def api_state():
     return jsonify({k: state[k] for k in
@@ -1736,6 +1800,39 @@ def api_thumb(filename):
     fp = get_safe_path(MEDIA_DIR, filename)
     if not fp or not os.path.exists(fp): return "",404
     return serve_thumb(filename, fp)
+
+@app.route("/api/crop")
+def api_crop():
+    """Serve a cropped, downscaled JPEG of one normalised box within an image.
+    Query: file, cx, cy, w, h (all normalised). Used by the object-grouping UI to
+    show each cluster member's actual object rather than the whole image."""
+    fn = request.args.get("file", "")
+    fp = get_safe_path(MEDIA_DIR, fn)
+    if not fp or not os.path.exists(fp):
+        return "", 404
+    try:
+        img = read_jxl(fp)
+        if img is None:
+            return "", 404
+        bgr = _to_bgr(img); H, W = bgr.shape[:2]
+        cx = float(request.args.get("cx", .5)); cy = float(request.args.get("cy", .5))
+        w  = float(request.args.get("w", 1.));  h  = float(request.args.get("h", 1.))
+        x1 = max(0, int((cx - w / 2) * W)); y1 = max(0, int((cy - h / 2) * H))
+        x2 = min(W, int((cx + w / 2) * W)); y2 = min(H, int((cy + h / 2) * H))
+        if x2 - x1 < 2 or y2 - y1 < 2:
+            return "", 404
+        crop = bgr[y1:y2, x1:x2]
+        scale = 128 / max(crop.shape[0], crop.shape[1])
+        if scale < 1:
+            crop = cv2.resize(crop, (int(crop.shape[1] * scale), int(crop.shape[0] * scale)),
+                              interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if not ok:
+            return "", 500
+        return Response(buf.tobytes(), mimetype="image/jpeg")
+    except Exception as e:
+        access_logger.warning(f"api_crop {fn}: {e}")
+        return "", 500
 
 @app.route("/api/metadata", methods=["POST"])
 def api_metadata():
@@ -2479,7 +2576,15 @@ def _apply_pipeline_result(fp, analysis):
     desc = _compose_description(analysis, meta["description"])
     if ocr and ocr.get("text"):
         desc = (desc + "\n\nDetected text: " + ocr["text"]).strip()
-    write_metadata(fp, tags, desc, regions, analysis=analysis, pose=analysis.get("pose"))
+    # Pose to store at the image level: prefer the global skeleton; if the graph
+    # didn't produce one, reconstruct it from the per-subject skeletons that the
+    # detect/for_each_panel steps validated, so pose is stored either way.
+    pose = analysis.get("pose")
+    if not (pose and pose.get("people")):
+        people = [s["pose"] for s in analysis.get("subjects", []) if s.get("pose")]
+        if people:
+            pose = {"kind": "body", "people": people}
+    write_metadata(fp, tags, desc, regions, analysis=analysis, pose=pose)
     return tags, desc, regions
 
 @app.route("/api/run_pipeline", methods=["POST"])
@@ -2545,6 +2650,251 @@ def bulk_pipeline():
             access_logger.error(f"bulk_pipeline {fn}: {e}")
     state["status_text"] = "Ready."
     return jsonify({"success": True, "done": done, "errors": errors})
+
+# ── untrained-object discovery + grouping (depth + heuristics) ────────────────--
+# In-memory store of the last grouping run, so the UI can fetch clusters then
+# bulk-tag them by id without recomputing. Keyed by run id.
+_grouping_runs = {}
+
+def _discover_sig(depth_model, cnn_model, max_regions):
+    """Fingerprint of the params that affect embeddings. Changing any of these
+    invalidates cached rows so they get recomputed rather than mixed."""
+    raw = f"{depth_model or '-'}|{cnn_model or '-'}|{max_regions}|gpu={og.has_gpu()}"
+    return hashlib.md5(raw.encode()).hexdigest()[:12]
+
+def _objemb_valid(sig):
+    """Return {rel_path: mtime} for cached rows matching the current sig."""
+    try:
+        rows = _db().execute(
+            "SELECT rel_path, mtime FROM object_embeddings WHERE sig=?", (sig,)).fetchall()
+        return {rp: mt for (rp, mt) in rows}
+    except Exception:
+        return {}
+
+def _objemb_save(rel_path, mtime, sig, boxes, embs, tags):
+    """Persist one image's embeddings (the checkpoint write). boxes: list of
+    dicts; embs: ndarray (N,D); tags: list."""
+    try:
+        box_json = json.dumps([{k: round(float(b[k]), 5)
+                                for k in ("cx", "cy", "w", "h")} for b in boxes])
+        emb_json = json.dumps([[round(float(x), 6) for x in row] for row in embs]) \
+            if embs is not None and len(embs) else "[]"
+        _db().execute(
+            "INSERT OR REPLACE INTO object_embeddings "
+            "(rel_path, mtime, sig, n_boxes, boxes, embs, tags, created) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (rel_path, mtime, sig, len(boxes), box_json, emb_json,
+             json.dumps(tags or []), time.time()))
+        _db().commit()
+    except Exception as e:
+        access_logger.warning(f"objemb_save {rel_path}: {e}")
+
+def _objemb_load_all(sig, rel_paths):
+    """Load cached boxes+embeddings for the given files (current sig). Returns
+    (embeddings_list, items_list) ready for clustering."""
+    import numpy as _np
+    embeddings, items = [], []
+    if not rel_paths:
+        return embeddings, items
+    CH = 900   # chunk to stay under SQLite variable limit
+    rp_set = set(rel_paths)
+    for i in range(0, len(rel_paths), CH):
+        chunk = rel_paths[i:i + CH]
+        ph = ",".join("?" * len(chunk))
+        rows = _db().execute(
+            f"SELECT rel_path, boxes, embs, tags FROM object_embeddings "
+            f"WHERE sig=? AND rel_path IN ({ph})", (sig, *chunk)).fetchall()
+        for rp, box_json, emb_json, tag_json in rows:
+            if rp not in rp_set:
+                continue
+            try:
+                boxes = json.loads(box_json); embs = json.loads(emb_json)
+                tags = json.loads(tag_json) if tag_json else []
+            except Exception:
+                continue
+            for b, e in zip(boxes, embs):
+                embeddings.append(_np.array(e, _np.float32))
+                items.append({"file": rp, "tags": tags, "box": b})
+    return embeddings, items
+
+@app.route("/api/discover_objects", methods=["POST"])
+def discover_objects():
+    """Find untrained objects (no YOLO class needed) via depth + heuristic region
+    proposals, embed them, and cluster visually-similar objects ACROSS images.
+    Returns clusters for review/bulk-tagging.
+
+    Body: {filenames?, min_cluster?, eps?, max_regions?, force?}
+    With no `filenames`, scans the WHOLE library. Embeddings are cached per file
+    in the object_embeddings table, which doubles as a checkpoint: a restart or
+    re-run only processes files not already cached for the current model/params,
+    so an interrupted 22k scan resumes instead of starting over. `force: true`
+    ignores the cache and recomputes everything."""
+    body = request.json or {}
+    filenames = body.get("filenames") or []
+    if not filenames:
+        # whole-library scan: pull non-comic images that are big enough to bother
+        rows = _db().execute(
+            "SELECT rel_path, width, height FROM files "
+            "WHERE (comic_folder IS NULL OR comic_folder='')").fetchall()
+        filenames = [rp for (rp, w, h) in rows
+                     if not (w and h) or min(w, h) >= og.MIN_IMAGE_PX]
+    depth_model = (state.get("depth_model") or "").strip() or None
+    cnn_model = (state.get("grouping_cnn") or "").strip() or None
+    max_regions = int(body.get("max_regions", 40))
+    if not filenames:
+        return jsonify({"success": False, "error": "No eligible images found."})
+
+    skipped, errors = [], []
+    total = len(filenames)
+    gpu_batch = int(body.get("gpu_batch", state.get("discover_batch", 8)))
+    workers = int(body.get("decode_workers", state.get("discover_workers", 4)))
+
+    # ── checkpoint / cache ──────────────────────────────────────────────────--
+    sig = _discover_sig(depth_model, cnn_model, max_regions)
+    force = bool(body.get("force", False))
+    cached = {} if force else _objemb_valid(sig)
+    to_scan = []
+    for fn in filenames:
+        fp = get_safe_path(MEDIA_DIR, fn)
+        if not fp or not os.path.exists(fp):
+            errors.append(fn); continue
+        try:
+            mt = os.path.getmtime(fp)
+        except Exception:
+            mt = 0
+        # cached and unchanged -> resume/skip (the checkpoint hit)
+        if fn in cached and abs((cached[fn] or 0) - mt) < 1e-6:
+            continue
+        to_scan.append((fn, mt))
+
+    state["status_text"] = (f"{len(filenames)-len(to_scan)} cached · "
+                            f"scanning {len(to_scan)} new…")
+    mtimes = dict(to_scan)
+    scan_names = [fn for fn, _ in to_scan]
+
+    def _loader(fn):
+        fp = get_safe_path(MEDIA_DIR, fn)
+        if not fp or not os.path.exists(fp):
+            return None
+        img = read_jxl(fp)
+        if img is None:
+            return None
+        return _to_bgr(img)
+
+    def _file_tags(fn):
+        try:
+            fp = get_safe_path(MEDIA_DIR, fn)
+            meta = read_metadata(fp) if fp else None
+            return meta.get("tags", []) if meta else []
+        except Exception:
+            return []
+
+    def _prog(d, t):
+        state["status_text"] = f"Discovering objects {d}/{t} new…"
+
+    # scan only uncached files; PERSIST each result immediately (checkpoint)
+    for r in og.scan_images(_loader, scan_names, depth_model=depth_model,
+                            cnn_model=cnn_model, max_regions=max_regions,
+                            gpu_batch=gpu_batch, decode_workers=workers,
+                            progress=_prog):
+        fn = r["name"]
+        if r["error"]:
+            errors.append(fn); continue
+        if r["skipped"]:
+            skipped.append(fn)
+            # record an empty row so we don't re-attempt tiny images every run
+            _objemb_save(fn, mtimes.get(fn, 0), sig, [], None, [])
+            continue
+        boxes, embs = r["boxes"], r["embeddings"]
+        tags = _file_tags(fn)
+        # checkpoint write — survives a restart
+        _objemb_save(fn, mtimes.get(fn, 0), sig, boxes or [],
+                     embs if embs is not None else [], tags)
+
+    # ── cluster from the FULL cache (old + newly scanned) ───────────────────--
+    state["status_text"] = "Clustering…"
+    import numpy as _np
+    valid_files = [fn for fn in filenames
+                   if get_safe_path(MEDIA_DIR, fn) and
+                   os.path.exists(get_safe_path(MEDIA_DIR, fn))]
+    embeddings, items = _objemb_load_all(sig, valid_files)
+    labels = og.group_embeddings(
+        _np.array(embeddings) if embeddings else _np.zeros((0, 1), _np.float32),
+        min_cluster=int(body.get("min_cluster", 2)),
+        eps=float(body.get("eps", 0.18)))
+    suggestions = og.suggest_cluster_labels(items, labels)
+
+    clusters = {}
+    for it, lab in zip(items, labels):
+        lab = int(lab)
+        if lab < 0:
+            continue
+        clusters.setdefault(lab, {"id": lab, "suggested": suggestions.get(lab, ""),
+                                  "members": []})
+        clusters[lab]["members"].append(it)
+    cluster_list = sorted(clusters.values(), key=lambda c: -len(c["members"]))
+
+    run_id = hashlib.md5((",".join(filenames) + str(time.time())).encode()).hexdigest()[:12]
+    # Keep only the few most recent runs — each holds the full member list
+    # (can be 100k+ entries), so unbounded retention slowly leaks to OOM.
+    _grouping_runs[run_id] = cluster_list
+    while len(_grouping_runs) > 3:
+        _grouping_runs.pop(next(iter(_grouping_runs)))
+    # free the large intermediates now rather than waiting on GC
+    del embeddings, items, clusters
+    state["status_text"] = "Ready."
+    return jsonify({"success": True, "run_id": run_id,
+                    "clusters": cluster_list,
+                    "n_objects": sum(len(c["members"]) for c in cluster_list),
+                    "n_clusters": len(cluster_list),
+                    "scanned_new": len(scan_names), "from_cache": len(filenames) - len(scan_names),
+                    "skipped_small": skipped, "errors": errors})
+
+@app.route("/api/bulk_tag_cluster", methods=["POST"])
+def bulk_tag_cluster():
+    """Apply a tag (and optional box region) to members of a discovered cluster.
+    Body: {run_id, cluster_id, tag, add_box?, members?}. If `members` (a list of
+    {file,box}) is given, only those are tagged — this is how the UI applies a
+    cluster the user has pruned. Otherwise the full stored cluster is used."""
+    body = request.json or {}
+    run = _grouping_runs.get(body.get("run_id"))
+    if not run:
+        return jsonify({"success": False, "error": "Unknown or expired run_id."})
+    cid = int(body.get("cluster_id", -1))
+    tag = (body.get("tag") or "").strip()
+    if not tag:
+        return jsonify({"success": False, "error": "No tag given."})
+    add_box = bool(body.get("add_box", False))
+    cluster = next((c for c in run if c["id"] == cid), None)
+    if not cluster:
+        return jsonify({"success": False, "error": "Unknown cluster_id."})
+
+    members = body.get("members")
+    if not members:                      # no pruning sent -> tag the whole cluster
+        members = cluster["members"]
+
+    touched, errors = 0, []
+    for m in members:
+        fp = get_safe_path(MEDIA_DIR, m["file"])
+        if not fp or not os.path.exists(fp):
+            errors.append(m["file"]); continue
+        try:
+            meta = read_metadata(fp)
+            tags = list(meta.get("tags", []))
+            if tag not in tags:
+                tags.append(tag)
+            regions = list(meta.get("regions", []))
+            if add_box and m.get("box"):
+                b = m["box"]
+                regions.append({"class_name": tag, "cx": b["cx"], "cy": b["cy"],
+                                "w": b["w"], "h": b["h"], "confirmed": False})
+            write_metadata(fp, tags, meta.get("description", ""), regions,
+                           analysis=meta.get("analysis"), pose=meta.get("pose"))
+            touched += 1
+        except Exception as e:
+            errors.append(m["file"])
+            access_logger.error(f"bulk_tag_cluster {m['file']}: {e}")
+    return jsonify({"success": True, "tagged": touched, "errors": errors})
 
 def _merge_comic_analyses(folder, page_analyses, summarize=True):
     """Aggregate per-page pipeline analyses into comic-level metadata.
@@ -2914,2072 +3264,8 @@ def _background_autotag_worker():
             access_logger.error(f"autotag worker: {e}")
             time.sleep(30)
 
-# ── HTML ───────────────────────────────────────────────────────────────────────
-HTML = r"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"><title>Media Library</title>
-<script src="/tailwind"></script>
-<style>
-:root{--accent:#3B82F6}
-body{font-family:system-ui,sans-serif}
-.masonry{column-width:130px;column-gap:8px}
-.gallery-item{cursor:pointer;display:inline-block;width:100%;margin:0 0 8px;break-inside:avoid;
-  vertical-align:top;position:relative;background:#111827;border-radius:6px;overflow:hidden;
-  border:2px solid transparent;transition:transform .1s,border-color .1s}
-.gallery-item:hover{transform:scale(1.03);border-color:#60A5FA;z-index:10}
-.selected-item{border-color:#3B82F6!important;box-shadow:0 0 0 2px #3B82F6}
-.multi-selected{border-color:#22c55e!important;box-shadow:0 0 0 2px #22c55e}
-.sel-check{pointer-events:none}
-.gallery-item img{width:100%;height:100%;object-fit:cover;display:block;opacity:0;transition:opacity .2s}
-.gallery-item img.loaded{opacity:1}
-.label{position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,.8);
-  font-size:10px;padding:2px 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-  opacity:0;transition:opacity .15s}
-.gallery-item:hover .label{opacity:1}
-.tag-badge{position:absolute;top:3px;right:3px;background:#2563eb;color:#fff;
-  font-size:9px;font-weight:700;padding:1px 4px;border-radius:99px}
-.comic-badge{position:absolute;top:3px;left:3px;background:#7c3aed;color:#fff;
-  font-size:9px;font-weight:700;padding:1px 5px;border-radius:99px;display:flex;gap:2px;align-items:center}
-.subchip{background:#374151;border:1px solid #4b5563;border-radius:6px;padding:2px 8px;
-  font-size:11px;color:#d1d5db;white-space:nowrap;cursor:pointer}
-.subchip:hover{background:#4b5563}
-.cstrip{box-sizing:border-box}
-.skeleton{position:absolute;inset:0;background:linear-gradient(90deg,#1f2937 25%,#374151 50%,#1f2937 75%);
-  background-size:200% 100%;animation:shimmer 1.4s infinite}
-@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
-canvas{cursor:crosshair;display:block}
-.rpane{resize:horizontal;overflow:hidden;position:relative}
-.rpane::after{content:'||';position:absolute;right:3px;bottom:3px;font-size:11px;
-  color:#6B7280;pointer-events:none;letter-spacing:-2px}
-.rv{resize:vertical;overflow:hidden;position:relative}
-.rv::after{content:'=';position:absolute;right:4px;bottom:0;font-size:18px;
-  color:#9CA3AF;pointer-events:none;line-height:1}
-::-webkit-scrollbar{width:5px;height:5px}
-::-webkit-scrollbar-track{background:#1f2937}
-::-webkit-scrollbar-thumb{background:#4B5563;border-radius:3px}
-#editor_region.vertical{flex-direction:row}
-#editor_region.horizontal{flex-direction:column}
-#image_pane{flex:1 1 auto;min-width:0;min-height:0}
-#controls_pane{background:#161c27}
-#editor_region.vertical #controls_pane{width:340px;min-width:280px;max-width:46%;height:100%;border-left:1px solid #374151}
-#editor_region.horizontal #controls_pane{width:100%;height:40%;min-height:170px;border-top:1px solid #374151}
-</style>
-</head>
-<body class="bg-gray-900 text-white h-screen flex overflow-hidden">
-
-<!-- Left -->
-<div class="flex flex-col h-full rpane bg-gray-900 border-r border-gray-700 z-10"
-     style="width:25%;min-width:240px;max-width:55vw;padding-bottom:20px">
-
-  <div class="p-4 bg-gray-800 border-b border-gray-700 flex justify-between items-center flex-shrink-0">
-    <h1 class="text-xl font-bold text-blue-400">Media Library</h1>
-    <div class="flex gap-3 items-center">
-      <button id="btn_dedup" onclick="runDedup(false)"
-        class="text-xs bg-indigo-600 hover:bg-indigo-500 font-bold px-3 py-1.5 rounded">🔍 Duplicates</button>
-      <button id="btn_review" onclick="openReview()"
-        class="text-xs bg-rose-700 hover:bg-rose-600 font-bold px-3 py-1.5 rounded">🚩 Review AI<span id="review_badge" class="hidden ml-1 bg-rose-900 px-1.5 rounded-full"></span></button>
-      <span id="dedup_cache_badge" class="hidden text-[10px] text-gray-500 italic"></span>
-      <span id="file_count" class="text-sm text-gray-400">—</span>
-    </div>
-  </div>
-
-  <div class="px-4 py-2 bg-gray-800 border-b border-gray-700 flex gap-2 flex-shrink-0">
-    <select id="folder_select" onchange="onFolderChange()"
-      class="bg-gray-700 rounded border border-gray-600 text-sm text-white px-2 max-w-[34%]">
-      <option value="">All folders</option>
-    </select>
-    <input id="search_input" type="text"
-      placeholder="Search…  try: height:<512  width:>=1024  is:untagged  is:unconfirmed"
-      class="flex-1 p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
-    <button onclick="makeComic()" title="Package the current folder as a comic"
-      class="text-xs bg-purple-700 hover:bg-purple-600 px-2 rounded font-bold whitespace-nowrap">📚 Make comic</button>
-  </div>
-
-  <!-- Bulk action bar — shown only when items are selected -->
-  <div id="bulk_bar"
-    class="hidden px-4 py-2 bg-gray-750 border-b border-gray-600 flex items-center gap-2 flex-shrink-0 flex-wrap">
-    <span id="bulk_count" class="text-xs font-bold text-blue-300 mr-1"></span>
-    <input id="bulk_tag_input" type="text" placeholder="Add tag(s), comma-separated, then Enter"
-      class="flex-1 min-w-[160px] bg-gray-700 text-xs px-2 py-1.5 rounded border border-gray-600 text-white focus:border-blue-400"
-      onkeydown="if(event.key==='Enter') applyBulkTag()">
-    <button onclick="applyBulkTag()"
-      class="text-xs bg-blue-600 hover:bg-blue-500 px-3 py-1.5 rounded font-bold">Tag</button>
-    <button onclick="bulkDelete()"
-      class="text-xs bg-red-700 hover:bg-red-600 px-3 py-1.5 rounded font-bold">🗑 Delete</button>
-    <button onclick="bulkBox()" title="Run AI box detection on every selected image"
-      class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1.5 rounded font-bold">🤖 AI Box</button>
-    <select id="bulk_action_select" title="AI action to run on each selected image"
-      class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-1.5 max-w-[130px]"></select>
-    <button onclick="bulkRunAI()" title="Run the chosen AI action on every selected image"
-      class="text-xs bg-yellow-600 hover:bg-yellow-500 px-3 py-1.5 rounded font-bold">✨ Run AI</button>
-    <button onclick="bulkPipeline()" title="Run the full Smart Tag pipeline on every selected image"
-      class="text-xs bg-teal-600 hover:bg-teal-500 px-3 py-1.5 rounded font-bold">🌳 Smart Tag</button>
-    <button onclick="clearSelection()"
-      class="text-xs bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded ml-auto">✕ Deselect</button>
-  </div>
-
-  <div id="dropzone"
-    class="mx-4 mt-3 mb-1 border-2 border-dashed border-gray-600 rounded-lg p-4 text-center text-gray-400 flex flex-col items-center bg-gray-800 flex-shrink-0">
-    <p class="font-bold text-sm">Drag & Drop Images</p>
-    <p class="text-xs text-gray-500">Stored as lossless .JXL</p>
-    <div class="mt-2 flex items-center gap-2">
-      <input id="upload_folder" type="text" placeholder="folder (opt)"
-        class="bg-gray-700 text-xs px-2 py-1 rounded border border-gray-600 w-28">
-      <button onclick="document.getElementById('file_input').click()"
-        class="bg-blue-600 hover:bg-blue-500 px-3 py-1 rounded text-xs font-bold">Browse</button>
-    </div>
-    <input id="file_input" type="file" multiple class="hidden">
-  </div>
-
-  <!-- Pagination bar -->
-  <div class="flex items-center gap-2 px-4 py-2 flex-shrink-0 text-xs text-gray-400">
-    <button id="btn_prev" onclick="changePage(-1)"
-      class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded disabled:opacity-30">◀ Prev</button>
-    <span id="page_info">Page 1</span>
-    <button id="btn_next" onclick="changePage(1)"
-      class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded disabled:opacity-30">Next ▶</button>
-    <span class="ml-auto" id="showing_info"></span>
-  </div>
-
-  <div class="flex-1 overflow-y-auto px-4 pb-2" id="gallery_scroll">
-    <div id="gallery_grid" class="masonry"></div>
-  </div>
-</div>
-
-<!-- Right: Editor (adaptive — image beside controls when portrait, image above when landscape) -->
-<div id="editor_region" class="flex-1 flex h-full overflow-hidden vertical">
-
-  <!-- IMAGE PANE -->
-  <div id="image_pane" class="flex flex-col bg-gray-900">
-    <div class="px-3 py-2 bg-gray-800 border-b border-gray-700 flex items-center gap-2 flex-shrink-0">
-      <p id="selected_filename" class="text-xs font-mono text-blue-400 truncate flex-1">No file selected</p>
-      <span id="save_indicator" class="text-xs font-bold px-2 py-0.5 rounded bg-gray-900 text-gray-500 hidden"></span>
-    </div>
-    <div id="canvas_container" class="flex-1 bg-black overflow-hidden relative" style="min-height:120px">
-      <canvas id="media_canvas" class="absolute"></canvas>
-    </div>
-    <div class="px-3 py-1 bg-gray-800 border-t border-gray-700 flex justify-between items-center flex-shrink-0">
-      <span class="text-[10px] text-gray-500">Drag: add box · hover to locate</span>
-      <div class="flex items-center gap-2">
-        <button onclick="openPopout()" title="Open in popout for detail labelling"
-          class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-gray-300">⛶ Popout</button>
-        <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
-          <input type="checkbox" id="toggle_regions" checked onchange="drawCanvas()" class="accent-blue-500">
-          Regions
-        </label>
-        <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
-          <input type="checkbox" id="toggle_skeleton" onchange="drawCanvas();if(typeof popoutOpen!=='undefined'&&popoutOpen)drawPopout();" class="accent-cyan-500">
-          Skeleton
-        </label>
-      </div>
-    </div>
-  </div>
-
-  <!-- CONTROLS PANE (its own scroll; never resizes the image) -->
-  <div id="controls_pane" class="overflow-y-auto flex-shrink-0">
-    <div id="editor_panel" class="p-3 flex flex-col gap-3 opacity-50 pointer-events-none">
-      <div class="flex justify-between items-center gap-2">
-        <span class="text-sm font-bold text-gray-300">Editor</span>
-        <div class="flex items-center gap-1">
-          <button onclick="moveCurrentFile()"
-            class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded uppercase font-bold">Move</button>
-          <button onclick="confirmAllRegions()" title="Confirm every unconfirmed box"
-            class="text-[10px] bg-amber-700 hover:bg-amber-600 px-2 py-1 rounded text-white">✓ Confirm all</button>
-          <button id="btn_delete" onclick="deleteCurrentFile()"
-            class="hidden text-red-400 hover:text-red-300 text-xs px-1">Delete</button>
-        </div>
-      </div>
-
-      <div id="flag_banner" class="hidden text-xs bg-red-900/60 border border-red-700 rounded p-2 text-red-200">
-        <div class="font-bold mb-1">🚩 AI suggests deletion</div>
-        <div id="flag_reason" class="mb-2 text-red-300"></div>
-        <div class="flex gap-2">
-          <button onclick="deleteFlaggedCurrent()" class="bg-red-700 hover:bg-red-600 px-2 py-1 rounded font-bold">Delete</button>
-          <button onclick="clearCurrentFlag()" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Keep</button>
-        </div>
-      </div>
-
-      <div id="regions_list"
-        class="hidden max-h-48 overflow-y-auto bg-gray-900 border border-gray-700 rounded p-1 space-y-0.5"></div>
-
-      <div>
-        <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Tags</label>
-        <input id="meta_tags" type="text" oninput="triggerAutosave()"
-          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
-      </div>
-
-      <div>
-        <div class="flex justify-between items-center mb-1">
-          <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Description</label>
-          <div class="flex items-center gap-1">
-            <select id="llm_action_select"
-              class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-0.5 max-w-[130px]"></select>
-            <button onclick="runLLM()" id="btn_run_llm"
-              class="text-xs bg-yellow-600 hover:bg-yellow-500 px-2 py-0.5 rounded font-bold">✨ AI</button>
-          </div>
-        </div>
-        <textarea id="meta_desc" oninput="triggerAutosave()" rows="4"
-          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
-      </div>
-
-      <div id="analysis_panel" class="hidden">
-        <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">AI Analysis</label>
-        <div id="analysis_body"
-          class="text-xs bg-gray-900 border border-gray-700 rounded p-2 space-y-2 max-h-48 overflow-y-auto"></div>
-      </div>
-    </div>
-
-    <!-- AI Tools -->
-    <div class="p-3 flex flex-col gap-2 border-t border-gray-700">
-      <div class="flex justify-between items-center">
-        <h3 class="font-bold text-purple-400 text-sm">AI Tooling</h3>
-        <div class="flex gap-2">
-          <button onclick="document.getElementById('ai_modal').classList.remove('hidden')"
-            class="text-xs bg-gray-700 px-2 py-1 rounded hover:bg-gray-600">⚙ Settings</button>
-          <a href="/training_portal" target="_blank"
-            class="text-xs text-purple-300 bg-gray-700 px-2 py-1 rounded hover:bg-gray-600 border border-purple-800">Trainer ↗</a>
-        </div>
-      </div>
-      <div id="yolo_controls" class="opacity-50 pointer-events-none">
-        <select id="model_selector"
-          class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm mb-1"></select>
-        <button onclick="runAutoTag()" id="btn_autotag"
-          class="w-full bg-indigo-600 hover:bg-indigo-500 py-1.5 rounded font-bold text-sm">Auto-Tag Image</button>
-      </div>
-      <button onclick="runPipeline()" id="btn_smarttag"
-        class="w-full bg-teal-600 hover:bg-teal-500 py-1.5 rounded font-bold text-sm">🌳 Smart Tag (AI pipeline)</button>
-      <div class="grid grid-cols-2 gap-2">
-        <button onclick="runPose()" id="btn_pose"
-          class="bg-cyan-700 hover:bg-cyan-600 py-1.5 rounded font-bold text-sm">🦴 Pose</button>
-        <button onclick="runOCR()" id="btn_ocr"
-          class="bg-sky-700 hover:bg-sky-600 py-1.5 rounded font-bold text-sm">🔤 OCR</button>
-      </div>
-      <button onclick="quickTrain()"
-        class="w-full bg-purple-600 hover:bg-purple-500 py-1.5 rounded font-bold text-sm">Quick Train</button>
-      <label class="flex items-center justify-between text-xs text-gray-300 mt-1 cursor-pointer">
-        <span>Background auto-tag when idle</span>
-        <input type="checkbox" id="autotag_toggle" onchange="toggleAutotag()" class="accent-purple-500">
-      </label>
-      <p class="text-xs text-gray-400">Status: <span id="status_text" class="text-yellow-400">Ready.</span></p>
-    </div>
-  </div>
-</div>
-
-<!-- Dedup Modal -->
-<div id="dedup_modal" class="hidden absolute inset-0 bg-black/80 flex items-center justify-center z-50 p-6">
-  <div class="bg-gray-800 rounded-lg border border-gray-600 shadow-xl w-full max-w-5xl h-[85vh] flex flex-col">
-    <div class="flex justify-between items-start p-5 border-b border-gray-700 flex-shrink-0">
-      <div>
-        <h2 class="text-xl font-bold text-indigo-400">Duplicates</h2>
-        <p class="text-xs text-gray-400 mt-1">"Keep & Merge" consolidates metadata into the highest-res copy.</p>
-        <p id="dedup_cache_info" class="text-xs text-gray-500 mt-1"></p>
-      </div>
-      <div class="flex gap-2 ml-4 flex-shrink-0">
-        <button onclick="runDedup(true)"
-          class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs font-bold text-yellow-400">↺ Rescan</button>
-        <button onclick="document.getElementById('dedup_modal').classList.add('hidden')"
-          class="bg-gray-700 hover:bg-gray-600 px-4 py-1.5 rounded font-bold text-sm">Done</button>
-      </div>
-    </div>
-    <div id="dedup_content" class="flex-1 overflow-y-auto p-4 space-y-4"></div>
-  </div>
-</div>
-
-<!-- Region Modal -->
-<div id="region_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
-  <div class="bg-gray-800 p-6 rounded-lg border border-gray-600 w-72">
-    <h2 class="font-bold mb-3">Region Name</h2>
-    <input id="modal_region_name" type="text"
-      class="w-full p-2 bg-gray-700 rounded border border-gray-600 mb-4 text-white">
-    <div class="flex justify-end gap-2">
-      <button onclick="cancelRegion()" class="bg-gray-600 px-4 py-1.5 rounded text-sm">Cancel</button>
-      <button onclick="saveRegion()" class="bg-blue-600 px-4 py-1.5 rounded text-sm font-bold">Add</button>
-    </div>
-  </div>
-</div>
-
-<!-- AI Settings Modal -->
-<div id="ai_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
-  <div class="bg-gray-800 p-5 rounded-lg border border-gray-600 w-[400px] flex flex-col max-h-[90vh]">
-    <h2 class="font-bold text-purple-400 mb-4 flex-shrink-0">LLM / Vision Settings</h2>
-    <div class="overflow-y-auto flex-1 space-y-3 pr-1">
-      <div><label class="text-xs text-gray-400 block mb-1">Endpoint</label>
-        <input id="cfg_endpoint" type="text" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white"></div>
-      <div><label class="text-xs text-gray-400 block mb-1">API Key</label>
-        <input id="cfg_apikey" type="password" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white"></div>
-      <div><label class="text-xs text-gray-400 block mb-1">Model</label>
-        <input id="cfg_model" type="text" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white"></div>
-      <div><label class="text-xs text-gray-400 block mb-1">Pose &amp; detection models <span class="text-gray-600">(auto-downloaded)</span></label>
-        <div class="grid grid-cols-3 gap-2">
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">YOLO size</span>
-            <select id="cfg_yolo_size" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="n">n · nano</option><option value="s">s · small</option>
-              <option value="m">m · medium</option><option value="l">l · large</option>
-              <option value="x">x · xlarge</option>
-            </select>
-          </div>
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Pose type</span>
-            <select id="cfg_pose_kind" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="body">Body · 17 pts</option>
-              <option value="wholebody">Whole-body · 133 (hands+face)</option>
-            </select>
-          </div>
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Pose size</span>
-            <select id="cfg_pose_size" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="n">n · nano</option><option value="s">s · small</option>
-              <option value="m">m · medium</option><option value="l">l · large</option>
-              <option value="x">x · xlarge</option>
-            </select>
-          </div>
-        </div>
-        <p class="text-[10px] text-gray-600 mt-1">Whole-body pose needs <code>rtmlib</code> + <code>onnxruntime</code>; OCR needs <code>rapidocr_onnxruntime</code> or <code>easyocr</code>. Weights download automatically on first use.</p>
-      </div>
-      <div><label class="text-xs text-gray-400 block mb-1">System Prompt</label>
-        <textarea id="cfg_system" rows="2"
-          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea></div>
-      <div class="border-t border-gray-600 pt-3">
-        <div class="flex justify-between items-center mb-2">
-          <label class="text-xs font-bold text-gray-400">Actions</label>
-          <button onclick="addAiAction()"
-            class="text-xs bg-indigo-600 hover:bg-indigo-500 px-2 py-0.5 rounded font-bold">+ Add</button>
-        </div>
-        <div id="actions_container" class="space-y-2"></div>
-      </div>
-      <div class="border-t border-gray-600 pt-3">
-        <label class="text-xs font-bold text-gray-400 block mb-1">Smart Tag pipeline (advanced JSON)</label>
-        <p class="text-[10px] text-gray-500 mb-1">Decision tree run by 🌳 Smart Tag. Edit carefully.</p>
-        <textarea id="cfg_pipeline" rows="6"
-          class="w-full p-2 bg-gray-900 rounded border border-gray-600 text-xs text-white font-mono resize-y"></textarea>
-        <p id="cfg_pipeline_err" class="text-[10px] text-red-400 mt-1 hidden"></p>
-      </div>
-    </div>
-    <div class="flex justify-end gap-2 pt-3 border-t border-gray-700 mt-3 flex-shrink-0">
-      <button onclick="document.getElementById('ai_modal').classList.add('hidden')"
-        class="bg-gray-600 px-4 py-1.5 rounded text-sm">Cancel</button>
-      <button onclick="saveAiSettings()"
-        class="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded text-sm font-bold">Save</button>
-    </div>
-  </div>
-</div>
-
-<!-- Popout labelling window -->
-<div id="popout_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
-  <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
-    <span id="popout_filename" class="text-xs font-mono text-blue-400 truncate flex-1"></span>
-    <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
-      <input type="checkbox" id="popout_toggle_regions" checked onchange="drawPopout()" class="accent-blue-500">
-      Regions
-    </label>
-    <span class="text-[10px] text-gray-500 hidden sm:inline">Drag:Add · Mid:Rename · Right:Delete · Scroll:Zoom · Click+drag canvas:Pan</span>
-    <button onclick="closePopout()" class="text-gray-400 hover:text-white text-lg leading-none ml-2">✕</button>
-  </div>
-  <!-- Canvas fills remaining space -->
-  <div id="popout_canvas_wrap" class="flex-1 overflow-hidden relative bg-black select-none">
-    <canvas id="popout_canvas" class="absolute top-0 left-0" style="cursor:crosshair"></canvas>
-  </div>
-</div>
-
-<!-- Comic reader -->
-<div id="comic_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
-  <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
-    <span class="text-purple-300 font-bold">📚 <span id="comic_title_h">Comic</span></span>
-    <span id="comic_pageinfo" class="text-xs text-gray-400"></span>
-    <div class="ml-auto flex gap-2 items-center">
-      <select id="comic_action_select" title="AI action to run on every page"
-        class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-1 max-w-[130px]"></select>
-      <button onclick="comicRunAI()"
-        class="text-xs bg-yellow-600 hover:bg-yellow-500 px-3 py-1 rounded font-bold">✨ Run AI</button>
-      <button onclick="comicPipeline()"
-        class="text-xs bg-teal-600 hover:bg-teal-500 px-3 py-1 rounded font-bold">🌳 Smart Tag</button>
-      <button onclick="comicBoxAll()"
-        class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1 rounded font-bold">🤖 Box all pages</button>
-      <button onclick="closeComic()" class="text-gray-400 hover:text-white text-lg leading-none">✕</button>
-    </div>
-  </div>
-  <div class="flex flex-1 overflow-hidden">
-    <div class="w-72 bg-gray-850 border-r border-gray-700 p-3 overflow-y-auto flex-shrink-0 space-y-2">
-      <label class="text-[10px] uppercase text-gray-400 font-bold block">Title</label>
-      <input id="comic_title" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-      <label class="text-[10px] uppercase text-gray-400 font-bold block">Author</label>
-      <input id="comic_author" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-      <label class="text-[10px] uppercase text-gray-400 font-bold block">Description</label>
-      <textarea id="comic_desc" rows="3" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
-      <label class="text-[10px] uppercase text-gray-400 font-bold block">Tags (comma)</label>
-      <input id="comic_tags" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-      <label class="text-[10px] uppercase text-gray-400 font-bold block">Characters (comma)</label>
-      <input id="comic_chars" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-      <button onclick="saveComic()" class="w-full bg-green-600 hover:bg-green-500 py-1.5 rounded font-bold text-sm mt-1">Save comic info</button>
-      <button onclick="setComicCover()" class="w-full bg-gray-700 hover:bg-gray-600 py-1 rounded text-xs">Set current page as cover</button>
-      <button onclick="openComicPageInEditor()" class="w-full bg-indigo-700 hover:bg-indigo-600 py-1 rounded text-xs">Edit current page metadata</button>
-      <button onclick="unpackageComic()" class="w-full bg-red-800 hover:bg-red-700 py-1 rounded text-xs text-red-200">Unpackage comic</button>
-    </div>
-    <div class="flex-1 flex flex-col overflow-hidden">
-      <div id="comic_view" class="flex-1 overflow-auto bg-black flex items-center justify-center relative">
-        <img id="comic_page_img" class="max-h-full max-w-full object-contain" alt="">
-        <button onclick="comicPage(-1)"
-          class="absolute left-2 top-1/2 -translate-y-1/2 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl">‹</button>
-        <button onclick="comicPage(1)"
-          class="absolute right-2 top-1/2 -translate-y-1/2 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl">›</button>
-      </div>
-      <div id="comic_strip" class="h-20 flex gap-1 overflow-x-auto bg-gray-900 border-t border-gray-700 p-1 flex-shrink-0"></div>
-    </div>
-  </div>
-</div>
-
-<!-- Review AI suggestions -->
-<div id="review_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
-  <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
-    <span class="text-rose-300 font-bold">🚩 Review AI suggestions</span>
-    <span id="review_progress" class="text-xs text-gray-400"></span>
-    <div class="ml-auto flex gap-2">
-      <button onclick="reviewDeleteAllFlagged()"
-        class="text-xs bg-red-800 hover:bg-red-700 px-3 py-1 rounded font-bold text-red-200">Delete all flagged…</button>
-      <button onclick="closeReview()" class="text-gray-400 hover:text-white text-lg leading-none">✕</button>
-    </div>
-  </div>
-  <div class="flex flex-1 overflow-hidden">
-    <div class="flex-1 bg-black flex items-center justify-center overflow-hidden relative">
-      <img id="review_img" class="max-h-full max-w-full object-contain" alt="">
-      <button onclick="reviewStep(-1)"
-        class="absolute left-2 top-1/2 -translate-y-1/2 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl">‹</button>
-      <button onclick="reviewStep(1)"
-        class="absolute right-2 top-1/2 -translate-y-1/2 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl">›</button>
-    </div>
-    <div class="w-80 bg-gray-850 border-l border-gray-700 p-4 overflow-y-auto flex-shrink-0 space-y-3">
-      <p id="review_filename" class="text-xs font-mono text-blue-400 break-all"></p>
-      <div id="review_flag" class="hidden bg-red-900/60 border border-red-700 rounded p-2 text-xs text-red-200">
-        <div class="font-bold mb-1">AI suggests deletion</div>
-        <div id="review_reason" class="text-red-300 mb-2"></div>
-        <div class="flex gap-2">
-          <button onclick="reviewDelete()" class="bg-red-700 hover:bg-red-600 px-3 py-1 rounded font-bold">Delete</button>
-          <button onclick="reviewKeep()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded">Keep</button>
-        </div>
-      </div>
-      <div id="review_boxes" class="hidden bg-gray-900 border border-gray-700 rounded p-2 text-xs">
-        <div class="mb-2"><span id="review_boxcount" class="font-bold text-amber-300"></span> unconfirmed box(es)</div>
-        <div class="flex gap-2 flex-wrap">
-          <button onclick="reviewConfirmBoxes()" class="bg-blue-700 hover:bg-blue-600 px-3 py-1 rounded font-bold">Confirm all</button>
-          <button onclick="reviewOpenEditor()" class="bg-indigo-700 hover:bg-indigo-600 px-3 py-1 rounded">Open in editor</button>
-        </div>
-      </div>
-      <div class="text-[10px] text-gray-500">Resolve an item to advance · ← / → navigate · Esc closes.</div>
-    </div>
-  </div>
-</div>
-
-<script>
-// ── State ──────────────────────────────────────────────────────────────────
-let currentFile=null, currentRegions=[], oai_actions_cache=[], hasSettings=false;
-let autosaveTO=null, drawing=false, startX=0,startY=0,curX=0,curY=0;
-let pendingBox=null, editingBoxIdx=null;
-let activeRegionIdx=-1, _suppressPaste=false, currentFlag=null, currentPose=null;
-let currentPage=0, totalFiles=0, currentSearch='', currentFolder='', allFolders=[];
-const PAGE=200;
-
-async function loadFolders(){
-  try{
-    const d=await fetch('/api/folders').then(r=>r.json());
-    allFolders=d.folders||[];
-    const sel=document.getElementById('folder_select');
-    const prev=sel.value;
-    sel.innerHTML='<option value="">All folders</option>';
-    allFolders.forEach(f=>{
-      const o=document.createElement('option');
-      o.value=f.path;
-      o.text=(f.path==='/'?'(root)':f.path)+`  (${f.count})`;
-      sel.appendChild(o);
-    });
-    sel.value=prev;
-  }catch(e){}
-}
-function onFolderChange(){
-  currentFolder=document.getElementById('folder_select').value;
-  currentPage=0; loadGallery();
-}
-
-// Multi-selection
-let selectedFiles = new Set();   // rel_paths currently selected
-let lastClickedFile = null;      // for shift-range selection
-let galleryFiles = [];           // current page's file list, in render order
-
-const canvas=document.getElementById('media_canvas');
-const ctx=canvas.getContext('2d');
-const imgObj=new Image();
-
-// Lazy thumbnail loading via IntersectionObserver
-const io=new IntersectionObserver(entries=>{
-  entries.forEach(e=>{
-    if(!e.isIntersecting) return;
-    const item=e.target, img=item.querySelector('img');
-    if(img && !img.src){
-      img.src=item.dataset.src;
-      img.onload=()=>{ img.classList.add('loaded'); item.querySelector('.skeleton')?.remove(); };
-      img.onerror=()=>{ item.querySelector('.skeleton')?.remove(); };
-    }
-    io.unobserve(item);
-  });
-},{rootMargin:'300px'});
-
-// ── Polling ────────────────────────────────────────────────────────────────
-async function fetchState(){
-  try{
-    const s=await fetch('/api/state').then(r=>r.json());
-    document.getElementById('status_text').innerText=s.status_text;
-    const sel=document.getElementById('model_selector');
-    const prev=sel.value;
-    const models=s.available_models||[];
-    sel.innerHTML=models.length?'':'<option value="">No Models</option>';
-    models.forEach(m=>{const o=document.createElement('option');o.value=m;
-      const pts=m.split(/[\/\\]/);o.text=pts.slice(-3).join('/');sel.appendChild(o);});
-    if(prev) sel.value=prev;
-    if(!hasSettings){
-      document.getElementById('cfg_endpoint').value=s.oai_endpoint;
-      document.getElementById('cfg_apikey').value=s.oai_key;
-      document.getElementById('cfg_model').value=s.oai_model;
-      document.getElementById('cfg_yolo_size').value=s.yolo_size||'n';
-      document.getElementById('cfg_pose_kind').value=s.pose_kind||'body';
-      document.getElementById('cfg_pose_size').value=s.pose_size||'n';
-      document.getElementById('cfg_system').value=s.oai_system_prompt||'';
-      oai_actions_cache=s.oai_actions||[];
-      renderAiActions(); updateActionDropdown(); hasSettings=true;
-      try{ document.getElementById('cfg_pipeline').value=JSON.stringify(s.pipeline_tree||{},null,2); }catch(_){}
-      const at=document.getElementById('autotag_toggle');
-      if(at) at.checked=!!s.autotag_enabled;
-    }
-  }catch(e){}
-}
-setInterval(fetchState,2500); fetchState();
-
-// ── Gallery ────────────────────────────────────────────────────────────────
-let searchDebounce=null;
-document.getElementById('search_input').addEventListener('input',e=>{
-  clearTimeout(searchDebounce);
-  searchDebounce=setTimeout(()=>{ currentSearch=e.target.value.trim(); currentPage=0; loadGallery(); },300);
-});
-
-async function loadGallery(){
-  const params=new URLSearchParams({page:currentPage,q:currentSearch,folder:currentFolder});
-  const data=await fetch('/api/list?'+params).then(r=>r.json());
-  totalFiles=data.total;
-  renderGallery(data.files);
-  updatePager();
-}
-
-function renderGallery(files){
-  galleryFiles = files.filter(x=>x.kind!=='comic');
-  io.disconnect();
-  const grid=document.getElementById('gallery_grid');
-  grid.innerHTML='';
-  files.forEach(item=>{
-    if(item.kind==='comic'){
-      const div=document.createElement('div');
-      div.className='gallery-item';
-      div.dataset.kind='comic';
-      div.dataset.folder=item.folder;
-      const cover=item.cover;
-      if(cover) div.dataset.src=`/api/thumb/${encodeURIComponent(cover)}`;
-      div.addEventListener('click',()=>openComic(item.folder));
-      div.style.aspectRatio=(item.width&&item.height)?`${item.width}/${item.height}`:'2/3';
-      div.innerHTML=`<div class="skeleton"></div>
-        ${cover?'<img alt="">':'<div class="absolute inset-0 flex items-center justify-center text-4xl">📚</div>'}
-        <span class="comic-badge">📚 ${item.page_count}</span>
-        <span class="label">${_esc(item.title)}</span>`;
-      grid.appendChild(div);
-      if(cover) io.observe(div);
-      return;
-    }
-    const f=item.filename;
-    const sid=f.replace(/[^a-zA-Z0-9]/g,'_');
-    const div=document.createElement('div');
-    div.className='gallery-item';
-    div.id=`t_${sid}`;
-    div.dataset.filename=f;
-    div.dataset.kind='image';
-    div.dataset.src=`/api/thumb/${encodeURIComponent(f)}`;
-    div.addEventListener('click', e => handleGalleryClick(e, f));
-    div.style.aspectRatio=(item.width&&item.height)?`${item.width}/${item.height}`:'1/1';
-    div.innerHTML=`<div class="skeleton"></div>
-      <img alt="">
-      ${item.tags.length?`<span class="tag-badge">${item.tags.length}</span>`:''}
-      <span class="label">${f.split('/').pop()}</span>
-      <span class="sel-check hidden absolute top-1 left-1 w-4 h-4 rounded-full bg-blue-500 border-2 border-white flex items-center justify-center text-[8px] font-bold text-white">✓</span>`;
-    grid.appendChild(div);
-    io.observe(div);
-  });
-  refreshSelectionUI();
-}
-
-function updatePager(){
-  const pages=Math.max(1,Math.ceil(totalFiles/PAGE));
-  document.getElementById('page_info').innerText=`Page ${currentPage+1} / ${pages}`;
-  document.getElementById('file_count').innerText=`${totalFiles} files`;
-  const start=currentPage*PAGE+1, end=Math.min((currentPage+1)*PAGE,totalFiles);
-  document.getElementById('showing_info').innerText=`Showing ${start}–${end}`;
-  document.getElementById('btn_prev').disabled=currentPage===0;
-  document.getElementById('btn_next').disabled=(currentPage+1)>=pages;
-}
-
-function changePage(dir){
-  const pages=Math.ceil(totalFiles/PAGE);
-  currentPage=Math.max(0,Math.min(pages-1,currentPage+dir));
-  document.getElementById('gallery_scroll').scrollTop=0;
-  loadGallery();
-}
-
-// ── Selection ──────────────────────────────────────────────────────────────
-function handleGalleryClick(e, f){
-  if(e.ctrlKey || e.metaKey){
-    // Ctrl/Cmd: toggle this file in the selection set
-    toggleSelect(f);
-    lastClickedFile = f;
-  } else if(e.shiftKey && lastClickedFile){
-    // Shift: select range from lastClicked to this
-    const idx1 = galleryFiles.findIndex(x=>x.filename===lastClickedFile);
-    const idx2 = galleryFiles.findIndex(x=>x.filename===f);
-    if(idx1>=0 && idx2>=0){
-      const lo=Math.min(idx1,idx2), hi=Math.max(idx1,idx2);
-      galleryFiles.slice(lo, hi+1).forEach(x => selectedFiles.add(x.filename));
-    }
-    refreshSelectionUI();
-  } else {
-    // Plain click: open in editor (but also track as last clicked)
-    selectedFiles.clear();
-    lastClickedFile = f;
-    selectFile(f);
-    return;
-  }
-}
-
-function toggleSelect(f){
-  if(selectedFiles.has(f)) selectedFiles.delete(f);
-  else selectedFiles.add(f);
-  refreshSelectionUI();
-}
-
-function clearSelection(){
-  selectedFiles.clear();
-  refreshSelectionUI();
-}
-
-function refreshSelectionUI(){
-  // Update item borders
-  document.querySelectorAll('.gallery-item').forEach(el=>{
-    const f=el.dataset.filename;
-    const chk=el.querySelector('.sel-check');
-    if(selectedFiles.has(f)){
-      el.classList.add('multi-selected');
-      chk?.classList.remove('hidden');
-    } else {
-      el.classList.remove('multi-selected');
-      chk?.classList.add('hidden');
-    }
-    // Keep single-select highlight
-    if(f===currentFile && selectedFiles.size===0)
-      el.classList.add('selected-item');
-    else
-      el.classList.remove('selected-item');
-  });
-  // Bulk bar
-  const bar=document.getElementById('bulk_bar');
-  const cnt=document.getElementById('bulk_count');
-  if(selectedFiles.size>0){
-    bar.classList.remove('hidden');
-    cnt.innerText=`${selectedFiles.size} selected`;
-  } else {
-    bar.classList.add('hidden');
-    document.getElementById('bulk_tag_input').value='';
-  }
-}
-
-// ── File select (single) ───────────────────────────────────────────────────
-async function selectFile(fn){
-  currentFile=fn;
-  // Clear multi-selection visual when opening single file
-  document.querySelectorAll('.gallery-item').forEach(e=>{
-    e.classList.remove('selected-item','multi-selected');
-    e.querySelector('.sel-check')?.classList.add('hidden');
-  });
-  document.getElementById('t_'+fn.replace(/[^a-zA-Z0-9]/g,'_'))?.classList.add('selected-item');
-  document.getElementById('selected_filename').innerText=fn;
-  document.getElementById('editor_panel').classList.remove('opacity-50','pointer-events-none');
-  document.getElementById('yolo_controls').classList.remove('opacity-50','pointer-events-none');
-  document.getElementById('btn_delete').classList.remove('hidden');
-  document.getElementById('save_indicator').classList.add('hidden');
-  imgObj.src=`/api/file/${encodeURIComponent(fn)}?ts=${Date.now()}`;
-  const d=await fetch('/api/metadata',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({action:'read',filename:fn})}).then(r=>r.json());
-  if(d.success){
-    document.getElementById('meta_tags').value=d.metadata.tags.join(', ');
-    document.getElementById('meta_desc').value=d.metadata.description;
-    currentRegions=d.metadata.regions||[];
-    currentAnalysis=d.metadata.analysis||null;
-    currentFlag=d.metadata.flag||null;
-    currentPose=d.metadata.pose||null;
-    activeRegionIdx=-1;
-    drawCanvas(); renderAnalysis(); renderRegionsList(); renderFlagBanner();
-  }
-}
-
-// ── Autosave ───────────────────────────────────────────────────────────────
-function triggerAutosave(){
-  if(!currentFile) return;
-  renderRegionsList();
-  const ind=document.getElementById('save_indicator');
-  ind.classList.remove('hidden','text-green-400'); ind.classList.add('text-yellow-400');
-  ind.innerText='Saving…';
-  clearTimeout(autosaveTO);
-  autosaveTO=setTimeout(saveMetadata,900);
-}
-async function saveMetadata(){
-  if(!currentFile) return;
-  const tags=document.getElementById('meta_tags').value.split(',').map(s=>s.trim()).filter(Boolean);
-  const desc=document.getElementById('meta_desc').value;
-  const r=await fetch('/api/metadata',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({action:'write',filename:currentFile,tags,description:desc,regions:currentRegions})
-  }).then(r=>r.json());
-  if(r.success){
-    const ind=document.getElementById('save_indicator');
-    ind.classList.remove('text-yellow-400'); ind.classList.add('text-green-400');
-    ind.innerText='✓ Saved';
-    setTimeout(()=>{ if(ind.innerText==='✓ Saved'){ ind.classList.remove('text-green-400');
-      ind.classList.add('text-gray-500'); } },2000);
-  }
-}
-
-// ── File ops ───────────────────────────────────────────────────────────────
-async function moveCurrentFile(){
-  if(!currentFile) return;
-  const cur=currentFile.split('/').slice(0,-1).join('/');
-  const np=prompt('New folder (blank=root):',cur);
-  if(np===null) return;
-  const r=await fetch('/api/move',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename:currentFile,new_folder:np})}).then(r=>r.json());
-  if(r.success){ currentFile=null; loadGallery(); }
-  else alert('Move failed.');
-}
-async function deleteCurrentFile(){
-  if(!currentFile) return;
-  await fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename:currentFile})});
-  currentFile=null;
-  document.getElementById('editor_panel').classList.add('opacity-50','pointer-events-none');
-  document.getElementById('save_indicator').classList.add('hidden');
-  loadGallery();
-}
-
-// ── Bulk operations ────────────────────────────────────────────────────────
-async function applyBulkTag(){
-  const raw = document.getElementById('bulk_tag_input').value.trim();
-  if(!raw){ document.getElementById('bulk_tag_input').focus(); return; }
-  const tags = raw.split(',').map(s=>s.trim()).filter(Boolean);
-  const files = [...selectedFiles];
-  const btn = document.querySelector('#bulk_bar button');
-  document.getElementById('bulk_tag_input').value='';
-  const d = await fetch('/api/bulk_tag',{method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filenames:files,tags})}).then(r=>r.json());
-  if(d.success){
-    showToast(`Tagged ${d.updated} file(s) with: ${tags.join(', ')}`);
-    // If current file is in the set, refresh its tag display
-    if(currentFile && selectedFiles.has(currentFile)){
-      const meta = await fetch('/api/metadata',{method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({action:'read',filename:currentFile})}).then(r=>r.json());
-      if(meta.success) document.getElementById('meta_tags').value=meta.metadata.tags.join(', ');
-    }
-    loadGallery();
-  } else {
-    alert('Bulk tag error: '+(d.error||'unknown'));
-  }
-}
-
-async function bulkDelete(){
-  const files=[...selectedFiles];
-  if(!files.length) return;
-  const d=await fetch('/api/bulk_delete',{method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filenames:files})}).then(r=>r.json());
-  if(d.success){
-    showToast(`Deleted ${d.deleted} file(s).`);
-    if(currentFile && files.includes(currentFile)){
-      currentFile=null;
-      document.getElementById('editor_panel').classList.add('opacity-50','pointer-events-none');
-      document.getElementById('save_indicator').classList.add('hidden');
-    }
-    selectedFiles.clear();
-    loadGallery();
-  } else {
-    alert('Bulk delete error.');
-  }
-}
-
-// ── Toast ──────────────────────────────────────────────────────────────────
-function showToast(msg){
-  let t=document.getElementById('toast');
-  if(!t){
-    t=document.createElement('div');
-    t.id='toast';
-    t.className='fixed bottom-6 left-1/2 -translate-x-1/2 bg-gray-700 border border-gray-500 text-white text-sm px-5 py-2 rounded-full shadow-xl z-[100] transition-opacity';
-    document.body.appendChild(t);
-  }
-  t.innerText=msg; t.style.opacity='1';
-  clearTimeout(t._to);
-  t._to=setTimeout(()=>t.style.opacity='0', 2500);
-}
-
-// ── Global keyboard shortcuts ──────────────────────────────────────────────
-document.addEventListener('keydown', async e=>{
-  const tag=document.activeElement.tagName;
-  const inInput = tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT';
-
-  // Ctrl+V on gallery (no input focused) → paste clipboard as bulk tag
-  if((e.ctrlKey||e.metaKey) && e.key==='v' && !inInput && selectedFiles.size>0){
-    e.preventDefault();
-    try{
-      const text=(await navigator.clipboard.readText()).trim();
-      if(text){
-        document.getElementById('bulk_tag_input').value=text;
-        applyBulkTag();
-      }
-    }catch(_){ showToast('Clipboard access denied — type tags in the bar instead.'); }
-    return;
-  }
-
-  // Delete key with selection (and no input focused)
-  if(e.key==='Delete' && !inInput && selectedFiles.size>0){
-    e.preventDefault();
-    bulkDelete();
-    return;
-  }
-
-  // Delete key for single current file
-  if(e.key==='Delete' && !inInput && currentFile && selectedFiles.size===0){
-    e.preventDefault();
-    deleteCurrentFile();
-    return;
-  }
-
-  // Escape: clear selection or close popout
-  if(e.key==='Escape'){
-    if(!document.getElementById('popout_modal').classList.contains('hidden')){
-      closePopout(); return;
-    }
-    if(selectedFiles.size>0){ clearSelection(); return; }
-  }
-});
-imgObj.onload=()=>{ applyEditorLayout(); };
-function applyEditorLayout(){
-  const reg=document.getElementById('editor_region'); if(!reg) return;
-  let vertical=true;
-  if(imgObj && imgObj.naturalWidth && imgObj.naturalHeight)
-    vertical = imgObj.naturalHeight >= imgObj.naturalWidth;   // portrait/square → side-by-side
-  reg.classList.toggle('vertical', vertical);
-  reg.classList.toggle('horizontal', !vertical);
-  requestAnimationFrame(()=>{ if(currentFile&&imgObj.width) drawCanvas(); });
-}
-window.addEventListener('resize',()=>{ if(currentFile&&imgObj.width) drawCanvas(); });
-new ResizeObserver(()=>{ if(currentFile&&imgObj.width) requestAnimationFrame(drawCanvas); })
-  .observe(document.getElementById('canvas_container'));
-
-function drawCanvas(){
-  if(!imgObj.src||!imgObj.width) return;
-  const p=canvas.parentElement, pw=p.clientWidth, ph=p.clientHeight;
-  const asp=imgObj.width/imgObj.height;
-  let dw=pw, dh=dw/asp;
-  if(dh>ph){ dh=ph; dw=dh*asp; }
-  canvas.width=dw; canvas.height=dh;
-  canvas.style.left=`${(pw-dw)/2}px`; canvas.style.top=`${(ph-dh)/2}px`;
-  ctx.clearRect(0,0,dw,dh); ctx.drawImage(imgObj,0,0,dw,dh);
-  if(document.getElementById('toggle_regions').checked){
-    ctx.font='12px sans-serif';
-    currentRegions.forEach((b,idx)=>{
-      const x=(b.cx-b.w/2)*dw, y=(b.cy-b.h/2)*dh, w=b.w*dw, h=b.h*dh;
-      const conf=(b.confirmed!==false);
-      const active=(idx===activeRegionIdx);
-      const col=conf?'#3B82F6':'#F59E0B';
-      ctx.strokeStyle=col; ctx.lineWidth=active?3:1.5;
-      ctx.setLineDash(conf?[]:[5,4]); ctx.strokeRect(x,y,w,h); ctx.setLineDash([]);
-      // small number badge (maps to the regions list); avoids overlapping names
-      const num=String(idx+1)+(conf?'':'?');
-      const nbw=ctx.measureText(num).width+6;
-      ctx.fillStyle=col; ctx.fillRect(x,y,nbw,14);
-      ctx.fillStyle='#fff'; ctx.fillText(num,x+3,y+11);
-      // full name only for the active/hovered box
-      if(active){
-        const label=b.class_name+(conf?'':' (?)');
-        const lw=ctx.measureText(label).width+8;
-        ctx.fillStyle=col; ctx.fillRect(x,y-18,lw,18);
-        ctx.fillStyle='#fff'; ctx.fillText(label,x+4,y-5);
-      }
-    });
-  }
-  drawSkeleton(ctx,dw,dh,1);
-  if(drawing){ ctx.strokeStyle='#FCD34D'; ctx.lineWidth=1.5;
-    ctx.strokeRect(startX,startY,curX-startX,curY-startY); }
-}
-canvas.addEventListener('mousedown',e=>{
-  if(!currentFile) return;
-  if(e.button===0){ startX=e.offsetX; startY=e.offsetY; drawing=true; }
-  else if(e.button===1){ e.preventDefault();
-    if(!document.getElementById('toggle_regions').checked) return;
-    for(let i=currentRegions.length-1;i>=0;i--){
-      const b=currentRegions[i];
-      const px=(b.cx-b.w/2)*canvas.width, py=(b.cy-b.h/2)*canvas.height;
-      if(e.offsetX>=px&&e.offsetX<=px+b.w*canvas.width&&
-         e.offsetY>=py&&e.offsetY<=py+b.h*canvas.height){
-        if(b.confirmed===false){           // middle-click confirms an unconfirmed box
-          b.confirmed=true; drawCanvas(); triggerAutosave();
-        } else {                            // confirmed box → rename
-          _suppressPaste=true; setTimeout(()=>_suppressPaste=false,400);
-          editingBoxIdx=i;
-          document.getElementById('modal_region_name').value=b.class_name;
-          document.getElementById('region_modal').classList.remove('hidden');
-          setTimeout(()=>document.getElementById('modal_region_name').focus(),80);
-        }
-        break;
-      }
-    }
-  }
-});
-canvas.addEventListener('mousemove',e=>{
-  if(drawing){curX=e.offsetX;curY=e.offsetY;drawCanvas();return;}
-  if(document.getElementById('toggle_regions').checked){
-    const i=regionAtCanvas(e.offsetX,e.offsetY);
-    if(i!==activeRegionIdx) setActiveRegion(i);
-  }
-});
-canvas.addEventListener('auxclick',e=>{ if(e.button===1) e.preventDefault(); });  // block X11 middle-paste
-canvas.addEventListener('mouseup',e=>{
-  if(!drawing||e.button!==0) return; drawing=false; curX=e.offsetX; curY=e.offsetY;
-  const x1=Math.min(startX,curX),x2=Math.max(startX,curX),y1=Math.min(startY,curY),y2=Math.max(startY,curY);
-  if(x2-x1<10||y2-y1<10){ drawCanvas(); return; }
-  if(!document.getElementById('toggle_regions').checked)
-    document.getElementById('toggle_regions').checked=true;
-  pendingBox={cx:((x1+x2)/2)/canvas.width,cy:((y1+y2)/2)/canvas.height,
-              w:(x2-x1)/canvas.width,h:(y2-y1)/canvas.height};
-  document.getElementById('modal_region_name').value='';
-  document.getElementById('region_modal').classList.remove('hidden');
-  setTimeout(()=>document.getElementById('modal_region_name').focus(),80);
-});
-canvas.addEventListener('contextmenu',e=>{
-  e.preventDefault(); if(!currentFile||!document.getElementById('toggle_regions').checked) return;
-  for(let i=currentRegions.length-1;i>=0;i--){
-    const b=currentRegions[i];
-    const px=(b.cx-b.w/2)*canvas.width,py=(b.cy-b.h/2)*canvas.height;
-    if(e.offsetX>=px&&e.offsetX<=px+b.w*canvas.width&&e.offsetY>=py&&e.offsetY<=py+b.h*canvas.height){
-      currentRegions.splice(i,1); drawCanvas(); triggerAutosave(); break;
-    }
-  }
-});
-document.getElementById('modal_region_name').addEventListener('keyup',e=>{
-  if(e.key==='Enter') saveRegion(); if(e.key==='Escape') cancelRegion();
-});
-document.getElementById('modal_region_name').addEventListener('paste',e=>{
-  // On Linux, middle-click pastes the PRIMARY selection; suppress that when the
-  // rename box was opened by a middle-click. Deliberate Ctrl+V still works.
-  if(_suppressPaste){ e.preventDefault(); _suppressPaste=false; }
-});
-function saveRegion(){
-  const name=document.getElementById('modal_region_name').value.trim()||'region';
-  if(editingBoxIdx!==null){currentRegions[editingBoxIdx].class_name=name;editingBoxIdx=null;}
-  else if(pendingBox){pendingBox.class_name=name;pendingBox.confirmed=true;
-    currentRegions.push(pendingBox);pendingBox=null;}
-  document.getElementById('region_modal').classList.add('hidden');
-  drawCanvas(); if(popoutOpen) drawPopout(); triggerAutosave();
-}
-function cancelRegion(){
-  pendingBox=null;editingBoxIdx=null;
-  document.getElementById('region_modal').classList.add('hidden'); drawCanvas();
-  if(popoutOpen) drawPopout();
-}
-
-// ── Regions list (reliable confirm/edit even when boxes overlap) ────────────
-function regionAtCanvas(px,py){
-  for(let i=currentRegions.length-1;i>=0;i--){
-    const b=currentRegions[i];
-    const x=(b.cx-b.w/2)*canvas.width, y=(b.cy-b.h/2)*canvas.height;
-    if(px>=x&&px<=x+b.w*canvas.width&&py>=y&&py<=y+b.h*canvas.height) return i;
-  }
-  return -1;
-}
-function setActiveRegion(i){
-  activeRegionIdx=i;
-  const el=document.getElementById('regions_list');
-  if(el)[...el.querySelectorAll('.rrow')].forEach((r,j)=>r.classList.toggle('bg-gray-700', j===i));
-  drawCanvas(); if(popoutOpen) drawPopout();
-}
-function renderRegionsList(){
-  const el=document.getElementById('regions_list'); if(!el) return;
-  if(!currentRegions.length){ el.innerHTML=''; el.classList.add('hidden'); return; }
-  el.classList.remove('hidden');
-  el.innerHTML=currentRegions.map((b,i)=>{
-    const conf=(b.confirmed!==false);
-    return `<div class="rrow flex items-center gap-1 text-xs px-1 py-0.5 rounded ${i===activeRegionIdx?'bg-gray-700':''}"
-      onmouseenter="setActiveRegion(${i})" onmouseleave="setActiveRegion(-1)">
-      <span class="w-5 text-right text-gray-500 flex-shrink-0">${i+1}</span>
-      <span class="inline-block w-2 h-2 rounded-full flex-shrink-0" style="background:${conf?'#3B82F6':'#F59E0B'}"></span>
-      <input class="flex-1 min-w-0 bg-transparent text-white border-b border-transparent focus:border-gray-500 focus:outline-none"
-        value="${_esc(b.class_name)}" onchange="renameRegion(${i}, this.value)">
-      ${conf?'<span class="text-[9px] text-blue-400 flex-shrink-0">ok</span>'
-            :`<button class="text-amber-400 px-1 flex-shrink-0" title="Confirm" onclick="confirmRegion(${i})">✓</button>`}
-      <button class="text-red-400 px-1 flex-shrink-0" title="Delete" onclick="deleteRegion(${i})">✕</button>
-    </div>`;
-  }).join('');
-}
-function renameRegion(i,name){
-  if(currentRegions[i]){ currentRegions[i].class_name=(name||'').trim()||'region';
-    drawCanvas(); if(popoutOpen) drawPopout(); triggerAutosave(); }
-}
-function confirmRegion(i){
-  if(currentRegions[i]){ currentRegions[i].confirmed=true;
-    drawCanvas(); if(popoutOpen) drawPopout(); triggerAutosave(); }
-}
-function deleteRegion(i){
-  currentRegions.splice(i,1);
-  if(activeRegionIdx>=currentRegions.length) activeRegionIdx=-1;
-  drawCanvas(); if(popoutOpen) drawPopout(); triggerAutosave();
-}
-
-// ── Popout labelling window ────────────────────────────────────────────────
-const pc     = document.getElementById('popout_canvas');
-const pctx   = pc.getContext('2d');
-pc.addEventListener('auxclick',e=>{ if(e.button===1) e.preventDefault(); });
-const popoutImg = new Image();
-let popoutOpen  = false;
-// pan/zoom state
-let pZoom=1, pPanX=0, pPanY=0;
-let pPanning=false, pPanSX=0, pPanSY=0, pPanOX=0, pPanOY=0;
-let pDrawing=false, pSX=0, pSY=0, pCX=0, pCY=0;
-
-function openPopout(){
-  if(!currentFile) return;
-  popoutOpen=true;
-  pZoom=1; pPanX=0; pPanY=0;
-  document.getElementById('popout_filename').innerText=currentFile;
-  document.getElementById('popout_modal').classList.remove('hidden');
-  // Sync regions checkbox
-  document.getElementById('popout_toggle_regions').checked =
-    document.getElementById('toggle_regions').checked;
-  popoutImg.src = imgObj.src;
-}
-
-function closePopout(){
-  popoutOpen=false;
-  document.getElementById('popout_modal').classList.add('hidden');
-}
-
-popoutImg.onload = ()=>{
-  fitPopout();
-  drawPopout();
-};
-
-function fitPopout(){
-  const wrap=document.getElementById('popout_canvas_wrap');
-  const ww=wrap.clientWidth, wh=wrap.clientHeight;
-  const iw=popoutImg.naturalWidth||popoutImg.width;
-  const ih=popoutImg.naturalHeight||popoutImg.height;
-  if(!iw||!ih) return;
-  pZoom=Math.min(ww/iw, wh/ih);
-  pPanX=(ww - iw*pZoom)/2;
-  pPanY=(wh - ih*pZoom)/2;
-  pc.width=ww; pc.height=wh;
-}
-
-new ResizeObserver(()=>{ if(popoutOpen){ fitPopout(); drawPopout(); } })
-  .observe(document.getElementById('popout_canvas_wrap'));
-
-function drawPopout(){
-  const iw=popoutImg.naturalWidth||popoutImg.width;
-  const ih=popoutImg.naturalHeight||popoutImg.height;
-  if(!iw||!ih) return;
-  const wrap=document.getElementById('popout_canvas_wrap');
-  pc.width=wrap.clientWidth; pc.height=wrap.clientHeight;
-  pctx.clearRect(0,0,pc.width,pc.height);
-  pctx.save();
-  pctx.translate(pPanX,pPanY);
-  pctx.scale(pZoom,pZoom);
-  pctx.drawImage(popoutImg,0,0,iw,ih);
-
-  if(document.getElementById('popout_toggle_regions').checked){
-    pctx.font=`${12/pZoom}px sans-serif`;
-    currentRegions.forEach((b,idx)=>{
-      const x=(b.cx-b.w/2)*iw, y=(b.cy-b.h/2)*ih, w=b.w*iw, h=b.h*ih;
-      const conf=(b.confirmed!==false);
-      const active=(idx===activeRegionIdx);
-      const col=conf?'#3B82F6':'#F59E0B';
-      pctx.strokeStyle=col; pctx.lineWidth=(active?3:2)/pZoom;
-      pctx.setLineDash(conf?[]:[6/pZoom,4/pZoom]); pctx.strokeRect(x,y,w,h); pctx.setLineDash([]);
-      const num=String(idx+1)+(conf?'':'?');
-      const nbw=pctx.measureText(num).width+6/pZoom;
-      pctx.fillStyle=col; pctx.fillRect(x,y,nbw,14/pZoom);
-      pctx.fillStyle='#fff'; pctx.fillText(num,x+3/pZoom,y+11/pZoom);
-      if(active){
-        const label=b.class_name+(conf?'':' (?)');
-        const lw=pctx.measureText(label).width+8/pZoom;
-        pctx.fillStyle=col; pctx.fillRect(x,y-18/pZoom,lw,18/pZoom);
-        pctx.fillStyle='#fff'; pctx.fillText(label,x+4/pZoom,y-5/pZoom);
-      }
-    });
-  }
-  drawSkeleton(pctx,iw,ih,pZoom);
-  if(pDrawing){
-    pctx.strokeStyle='#FCD34D'; pctx.lineWidth=1.5/pZoom;
-    pctx.strokeRect(pSX,pSY,pCX-pSX,pCY-pSY);
-  }
-  pctx.restore();
-}
-
-// Convert canvas pixel → image-space coords
-function pcToImg(cx,cy){
-  return [(cx-pPanX)/pZoom, (cy-pPanY)/pZoom];
-}
-
-pc.addEventListener('wheel',e=>{
-  e.preventDefault();
-  const rect=pc.getBoundingClientRect();
-  const mx=e.clientX-rect.left, my=e.clientY-rect.top;
-  const delta=e.deltaY<0?1.15:1/1.15;
-  // Zoom toward mouse
-  pPanX=mx-(mx-pPanX)*delta;
-  pPanY=my-(my-pPanY)*delta;
-  pZoom*=delta;
-  pZoom=Math.max(0.1,Math.min(pZoom,50));
-  drawPopout();
-},{passive:false});
-
-pc.addEventListener('mousedown',e=>{
-  if(e.button===1||((e.button===0)&&e.altKey)){
-    // Pan with middle button or Alt+drag
-    e.preventDefault();
-    pPanning=true; pPanSX=e.clientX; pPanSY=e.clientY; pPanOX=pPanX; pPanOY=pPanY;
-    pc.style.cursor='grabbing';
-    return;
-  }
-  if(e.button===0){
-    const [ix,iy]=pcToImg(e.offsetX,e.offsetY);
-    pSX=ix; pSY=iy; pDrawing=true;
-  }
-  if(e.button===1){
-    // Middle: confirm an unconfirmed box, otherwise rename
-    e.preventDefault();
-    if(!document.getElementById('popout_toggle_regions').checked) return;
-    const iw=popoutImg.naturalWidth, ih=popoutImg.naturalHeight;
-    const [ix,iy]=pcToImg(e.offsetX,e.offsetY);
-    for(let i=currentRegions.length-1;i>=0;i--){
-      const b=currentRegions[i];
-      const bx=(b.cx-b.w/2)*iw, by=(b.cy-b.h/2)*ih;
-      if(ix>=bx&&ix<=bx+b.w*iw&&iy>=by&&iy<=by+b.h*ih){
-        if(b.confirmed===false){
-          b.confirmed=true; drawPopout(); drawCanvas(); triggerAutosave();
-        } else {
-          _suppressPaste=true; setTimeout(()=>_suppressPaste=false,400);
-          editingBoxIdx=i;
-          document.getElementById('modal_region_name').value=b.class_name;
-          document.getElementById('region_modal').classList.remove('hidden');
-          setTimeout(()=>document.getElementById('modal_region_name').focus(),80);
-        }
-        break;
-      }
-    }
-  }
-});
-
-pc.addEventListener('mousemove',e=>{
-  if(pPanning){
-    pPanX=pPanOX+(e.clientX-pPanSX);
-    pPanY=pPanOY+(e.clientY-pPanSY);
-    drawPopout(); return;
-  }
-  if(pDrawing){
-    const [ix,iy]=pcToImg(e.offsetX,e.offsetY);
-    pCX=ix; pCY=iy; drawPopout();
-  }
-});
-
-pc.addEventListener('mouseup',e=>{
-  if(pPanning){ pPanning=false; pc.style.cursor='crosshair'; return; }
-  if(!pDrawing||e.button!==0) return;
-  pDrawing=false;
-  const [ix,iy]=pcToImg(e.offsetX,e.offsetY);
-  pCX=ix; pCY=iy;
-  const iw=popoutImg.naturalWidth, ih=popoutImg.naturalHeight;
-  const x1=Math.min(pSX,pCX)/iw, x2=Math.max(pSX,pCX)/iw;
-  const y1=Math.min(pSY,pCY)/ih, y2=Math.max(pSY,pCY)/ih;
-  if((x2-x1)*iw<5||(y2-y1)*ih<5){ drawPopout(); return; }
-  if(!document.getElementById('popout_toggle_regions').checked)
-    document.getElementById('popout_toggle_regions').checked=true;
-  pendingBox={cx:(x1+x2)/2,cy:(y1+y2)/2,w:x2-x1,h:y2-y1,confirmed:true};
-  document.getElementById('modal_region_name').value='';
-  document.getElementById('region_modal').classList.remove('hidden');
-  setTimeout(()=>document.getElementById('modal_region_name').focus(),80);
-});
-
-pc.addEventListener('contextmenu',e=>{
-  e.preventDefault();
-  if(!document.getElementById('popout_toggle_regions').checked) return;
-  const iw=popoutImg.naturalWidth, ih=popoutImg.naturalHeight;
-  const [ix,iy]=pcToImg(e.offsetX,e.offsetY);
-  for(let i=currentRegions.length-1;i>=0;i--){
-    const b=currentRegions[i];
-    const bx=(b.cx-b.w/2)*iw, by=(b.cy-b.h/2)*ih;
-    if(ix>=bx&&ix<=bx+b.w*iw&&iy>=by&&iy<=by+b.h*ih){
-      currentRegions.splice(i,1); drawPopout(); drawCanvas(); triggerAutosave(); break;
-    }
-  }
-});
-
-// ── Upload ─────────────────────────────────────────────────────────────────
-const dz=document.getElementById('dropzone');
-['dragenter','dragover','dragleave','drop'].forEach(n=>
-  dz.addEventListener(n,e=>{e.preventDefault();e.stopPropagation();},false));
-['dragenter','dragover'].forEach(n=>dz.addEventListener(n,()=>dz.classList.add('border-blue-500'),false));
-['dragleave','drop'].forEach(n=>dz.addEventListener(n,()=>dz.classList.remove('border-blue-500'),false));
-dz.addEventListener('drop',e=>handleFiles(e.dataTransfer.files),false);
-document.getElementById('file_input').addEventListener('change',e=>handleFiles(e.target.files));
-async function handleFiles(files){
-  const og=dz.innerHTML, folder=document.getElementById('upload_folder').value.trim();
-  const arr=Array.from(files); let done=0;
-  for(let i=0;i<arr.length;i+=4){
-    const slice=arr.slice(i,i+4);
-    dz.innerHTML=`<p class="text-blue-400 font-bold animate-pulse">Uploading ${done}/${arr.length}…</p>`;
-    await Promise.all(slice.map(f=>{
-      const fd=new FormData(); fd.append('file',f); fd.append('folder',folder);
-      return fetch('/api/upload',{method:'POST',body:fd}).then(()=>done++);
-    }));
-  }
-  dz.innerHTML=og; loadGallery();
-}
-
-// ── Dedup ──────────────────────────────────────────────────────────────────
-async function fetchDedupStatus(){
-  try{
-    const d=await fetch('/api/dedup_status').then(r=>r.json());
-    const badge=document.getElementById('dedup_cache_badge');
-    if(d.has_cache&&d.group_count>0){
-      const age=Math.round((Date.now()/1000-d.created)/60);
-      const ageStr=age<60?`${age}m ago`:`${Math.round(age/60)}h ago`;
-      badge.innerText=`cached ${ageStr} · ${d.group_count} groups`;
-      badge.classList.remove('hidden');
-    } else { badge.classList.add('hidden'); }
-  }catch(e){}
-}
-
-// Dedup pagination — only DEDUP_PAGE_SIZE group DOM nodes exist at any time
-let dedupTotalGroups=0, dedupPage=0;
-const DEDUP_PAGE_SIZE=30;
-
-async function runDedup(force=false){
-  const btn=document.getElementById('btn_dedup');
-  btn.innerHTML='⏳ Scanning…'; btn.disabled=true;
-  try{
-    const d=await fetch('/api/dedup',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({force})}).then(r=>r.json());
-    if(d.success){
-      if(!d.total_groups){ alert('No duplicates found!'); }
-      else{
-        dedupTotalGroups=d.total_groups; dedupPage=0;
-        const info=document.getElementById('dedup_cache_info');
-        info.innerText=d.from_cache
-          ?'Cached results — click ↺ Rescan to recompute.'
-          :`Fresh scan — ${d.total_groups} group(s) found.`;
-        document.getElementById('dedup_modal').classList.remove('hidden');
-        await loadDedupPage(0);
-      }
-      fetchDedupStatus();
-    } else alert('Error: '+(d.error||'unknown'));
-  }catch(e){ alert('Network error during dedup.'); }
-  btn.innerHTML='🔍 Duplicates'; btn.disabled=false;
-}
-
-async function loadDedupPage(page){
-  dedupPage=page;
-  const c=document.getElementById('dedup_content');
-  c.innerHTML='<p class="text-gray-400 text-sm animate-pulse p-4">Loading…</p>';
-  const d=await fetch(`/api/dedup_groups?page=${page}&page_size=${DEDUP_PAGE_SIZE}`).then(r=>r.json());
-  if(!d.success){ c.innerHTML='<p class="text-red-400 p-4">Failed.</p>'; return; }
-  dedupTotalGroups=d.total;
-  c.innerHTML='';
-  if(!d.groups.length){
-    if(dedupTotalGroups===0){
-      document.getElementById('dedup_modal').classList.add('hidden');
-      showToast('All duplicates resolved!');
-    } else { loadDedupPage(Math.max(0,page-1)); }
-    return;
-  }
-  d.groups.forEach(g=>renderDedupGroup(g));
-  updateDedupPager(page,d.total);
-}
-
-function updateDedupPager(page,total){
-  const pages=Math.max(1,Math.ceil(total/DEDUP_PAGE_SIZE));
-  let p=document.getElementById('dedup_pager');
-  if(!p){
-    p=document.createElement('div');
-    p.id='dedup_pager';
-    p.className='flex items-center gap-3 px-4 py-3 border-t border-gray-700 flex-shrink-0 text-xs text-gray-400 flex-wrap';
-    document.querySelector('#dedup_modal .flex-col').appendChild(p);
-  }
-  p.innerHTML=`
-    <button onclick="loadDedupPage(${page-1})" ${page===0?'disabled':''}
-      class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded disabled:opacity-30">◀ Prev</button>
-    <span>Page ${page+1}/${pages} · ${total} groups remaining</span>
-    <button onclick="loadDedupPage(${page+1})" ${page>=pages-1?'disabled':''}
-      class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded disabled:opacity-30">Next ▶</button>
-    <span class="ml-auto flex items-center gap-2">
-      <label class="text-gray-500">Auto-resolve ≥</label>
-      <input id="autoresolve_threshold" type="number" min="0" max="100" value="100" step="5"
-        class="w-16 bg-gray-800 border border-gray-600 rounded px-2 py-0.5 text-white text-center"
-        title="Only auto-resolve groups where all duplicates score at or above this similarity %">
-      <label class="text-gray-500">%</label>
-      <button onclick="bulkResolveAll()"
-        class="bg-green-800 hover:bg-green-700 px-3 py-1 rounded font-bold text-green-300">
-        ⚡ Auto-resolve</button>
-    </span>`;
-}
-
-function renderDedupGroup(group){
-  const c=document.getElementById('dedup_content');
-  const div=document.createElement('div');
-  div.className='bg-gray-850 border border-gray-700 p-3 rounded-lg';
-  div.id=`dg_${group.db_id}`;
-  const badge=group.kind==='exact'
-    ?'<span class="text-[9px] bg-red-900 text-red-300 px-1.5 py-0.5 rounded font-bold ml-2">EXACT</span>'
-    :'<span class="text-[9px] bg-yellow-900 text-yellow-300 px-1.5 py-0.5 rounded font-bold ml-2">SIMILAR</span>';
-  let inner=`<p class="text-xs font-bold text-gray-400 mb-2">${group.items.length} files${badge}</p>
-    <div class="flex gap-3 overflow-x-auto pb-1">`;
-  group.items.forEach((item,idx)=>{
-    const f=item.filename;
-    let scoreBadge='';
-    if(item.score !== null && item.score !== undefined){
-      const pct = Math.round(item.score * 100);
-      const hue = Math.round(item.score * 120);
-      if(idx===0){
-        scoreBadge=`<span class="text-[9px] font-bold px-1.5 py-0.5 rounded"
-          style="background:hsl(120,60%,20%);color:hsl(120,80%,70%)">★ reference</span>`;
-      } else {
-        scoreBadge=`<span class="text-[9px] font-bold px-1.5 py-0.5 rounded"
-          style="background:hsl(${hue},60%,20%);color:hsl(${hue},80%,70%)">${pct}% similar</span>`;
-      }
-    }
-    inner+=`<div class="flex-shrink-0 w-40 bg-gray-900 p-2 rounded border border-gray-700"
-        data-file="${f.replace(/"/g,'&quot;')}" data-gid="${group.db_id}"
-        data-score="${item.score ?? ''}">
-      <img loading="lazy" src="/api/thumb/${encodeURIComponent(f)}"
-        class="w-full h-28 object-cover rounded mb-1 bg-black">
-      <p class="text-[10px] truncate text-blue-300 font-mono mb-1" title="${f}">${f.split('/').pop()}</p>
-      <p class="text-[10px] text-gray-400 mb-1">${item.resolution}
-        <span class="${item.quality==='Lossless'?'text-green-400':'text-yellow-400'}">${item.quality}</span></p>
-      ${scoreBadge ? `<p class="mb-1">${scoreBadge}</p>` : ''}
-      <button class="w-full bg-green-700 hover:bg-green-600 text-xs font-bold py-1 rounded mb-1"
-        onclick="keepAndMerge(this)">Keep &amp; Merge</button>
-      <button class="w-full bg-gray-700 hover:bg-red-700 text-xs py-0.5 rounded mb-1"
-        onclick="deleteFromDedup(this)">Delete</button>
-      <button class="w-full bg-gray-800 hover:bg-gray-600 text-[10px] py-0.5 rounded text-gray-400 hover:text-white"
-        onclick="removeFromGroup(this)" title="Keep file but exclude it from this group permanently">
-        ✕ Not a duplicate
-      </button>
-    </div>`;
-  });
-  inner+=`</div>`;
-  div.innerHTML=inner;
-  c.appendChild(div);
-}
-
-async function keepAndMerge(btn){
-  const card=btn.closest('[data-file]');
-  const target=card.dataset.file;
-  const gid=parseInt(card.dataset.gid);
-  const groupDiv=document.getElementById(`dg_${gid}`);
-  const others=[...groupDiv.querySelectorAll('[data-file]')]
-    .map(el=>el.dataset.file).filter(f=>f!==target);
-  if(!others.length){ showToast('Nothing to merge.'); return; }
-  const d=await fetch('/api/dedup_merge',{method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({target,others,db_id:gid})}).then(r=>r.json());
-  if(d.success){
-    groupDiv.remove();
-    if(others.includes(currentFile)){ currentFile=null;
-      document.getElementById('editor_panel').classList.add('opacity-50','pointer-events-none'); }
-    else if(currentFile===target) selectFile(target);
-    loadGallery();
-    if(!document.getElementById('dedup_content').children.length) loadDedupPage(dedupPage);
-  } else showToast('Merge error: '+d.error);
-}
-
-async function deleteFromDedup(btn){
-  const card=btn.closest('[data-file]');
-  const fn=card.dataset.file;
-  const gid=parseInt(card.dataset.gid);
-  await fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename:fn})});
-  card.remove();
-  if(currentFile===fn){ currentFile=null;
-    document.getElementById('editor_panel').classList.add('opacity-50','pointer-events-none'); }
-  const groupDiv=document.getElementById(`dg_${gid}`);
-  if(groupDiv&&groupDiv.querySelectorAll('[data-file]').length<2){
-    groupDiv.remove();
-    fetch('/api/dedup_clear_group',{method:'POST',
-      headers:{'Content-Type':'application/json'},body:JSON.stringify({db_id:gid})});
-  }
-  loadGallery();
-  if(!document.getElementById('dedup_content').children.length) loadDedupPage(dedupPage);
-}
-
-async function removeFromGroup(btn){
-  const card   = btn.closest('[data-file]');
-  const file   = card.dataset.file;
-  const gid    = parseInt(card.dataset.gid);
-
-  const d = await fetch('/api/dedup_exclude', {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({file, db_id: gid})
-  }).then(r=>r.json());
-
-  if(d.success){
-    card.remove();
-    showToast(`"${file.split('/').pop()}" excluded from this group permanently.`);
-    if(!d.group_remains){
-      document.getElementById(`dg_${gid}`)?.remove();
-    } else {
-      // If only 1 card remains, also remove the group
-      const groupDiv = document.getElementById(`dg_${gid}`);
-      if(groupDiv && groupDiv.querySelectorAll('[data-file]').length < 2){
-        groupDiv.remove();
-        fetch('/api/dedup_clear_group',{method:'POST',
-          headers:{'Content-Type':'application/json'},body:JSON.stringify({db_id:gid})});
-      }
-    }
-    if(!document.getElementById('dedup_content').children.length) loadDedupPage(dedupPage);
-  } else {
-    showToast('Error: ' + d.error);
-  }
-}
-async function bulkResolveAll() {
-  const thresholdPct = parseFloat(document.getElementById('autoresolve_threshold')?.value ?? 100);
-  const threshold    = thresholdPct / 100;   // convert to 0–1 to match stored scoresq
-  let resolved=0, skipped=0;
-
-  while(true){
-    const d=await fetch(`/api/dedup_groups?page=0&page_size=50`).then(r=>r.json());
-    if(!d.groups.length) break;
-    let anyMerged=false;
-    for(const group of d.groups){
-      // Check every non-reference item meets the threshold
-      // score===null means exact duplicate (always resolve regardless of threshold)
-      const nonRef = group.items.slice(1);
-      const allQualify = nonRef.every(item =>
-        item.score === null || item.score === undefined || item.score >= threshold
-      );
-      if(!allQualify){ skipped++; continue; }
-      const target=group.items[0].filename;
-      const others=nonRef.map(x=>x.filename);
-      if(others.length){
-        await fetch('/api/dedup_merge',{method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({target,others,db_id:group.db_id})});
-        resolved++;
-        anyMerged=true;
-      }
-    }
-    // If nothing was merged this pass (all remaining below threshold), stop
-    if(!anyMerged) break;
-    if(d.total===0) break;
-  }
-
-  const msg = skipped > 0
-    ? `Resolved ${resolved} group(s). Skipped ${skipped} below ${thresholdPct}%.`
-    : `Resolved ${resolved} group(s).`;
-  showToast(msg);
-  loadGallery();
-  await loadDedupPage(0);
-}
-
-
-
-
-// ── AI actions ─────────────────────────────────────────────────────────────
-function renderAiActions(){
-  const c=document.getElementById('actions_container'); c.innerHTML='';
-  oai_actions_cache.forEach(act=>{
-    const d=document.createElement('div');
-    d.className='bg-gray-800 p-2 rounded border border-gray-700 relative group action-row';
-    d.dataset.id=act.id||String(Date.now()+Math.random());
-    const opts=['description','tags','regions','flag'].map(v=>
-      `<option value="${v}"${act.target===v?' selected':''}>${
-        v==='regions'?'→ Boxes':v==='tags'?'→ Tags':v==='flag'?'→ Flag':'→ Desc'}</option>`).join('');
-    d.innerHTML=`<button onclick="this.parentElement.remove()"
-      class="absolute top-1 right-1 text-red-500 hidden group-hover:block text-xs px-1 bg-gray-900 rounded">✕</button>
-      <div class="flex gap-1 mb-1 pr-5">
-        <input class="act-name flex-1 bg-gray-900 text-white text-xs p-1 rounded border border-gray-600"
-          value="${act.name.replace(/"/g,'&quot;')}" placeholder="Name">
-        <select class="act-target bg-gray-900 text-white text-xs p-1 rounded border border-gray-600 w-20">${opts}</select>
-      </div>
-      <textarea class="act-prompt w-full bg-gray-900 text-white text-xs p-1 rounded border border-gray-600 h-9 resize-y"
-        placeholder="Prompt…">${act.prompt}</textarea>`;
-    c.appendChild(d);
-  });
-}
-function addAiAction(){
-  oai_actions_cache.push({id:String(Date.now()),name:'New Action',prompt:'',target:'description'});
-  renderAiActions();
-}
-function updateActionDropdown(){
-  ['llm_action_select','bulk_action_select','comic_action_select'].forEach(id=>{
-    const sel=document.getElementById(id); if(!sel) return;
-    const prev=sel.value;
-    sel.innerHTML='';
-    oai_actions_cache.forEach(a=>{const o=document.createElement('option');o.value=a.id;o.text=a.name;sel.appendChild(o);});
-    if(prev&&[...sel.options].some(o=>o.value===prev)) sel.value=prev;
-  });
-}
-async function saveAiSettings(){
-  oai_actions_cache=[...document.querySelectorAll('.action-row')].map(r=>({
-    id:r.dataset.id, name:r.querySelector('.act-name').value.trim()||'Action',
-    prompt:r.querySelector('.act-prompt').value.trim(), target:r.querySelector('.act-target').value}));
-  // Validate the pipeline JSON before saving
-  let tree=null;
-  const ptxt=document.getElementById('cfg_pipeline').value.trim();
-  const errEl=document.getElementById('cfg_pipeline_err');
-  if(ptxt){
-    try{ tree=JSON.parse(ptxt); errEl.classList.add('hidden'); }
-    catch(e){ errEl.innerText='Invalid pipeline JSON: '+e.message; errEl.classList.remove('hidden'); return; }
-  }
-  const body={oai_endpoint:document.getElementById('cfg_endpoint').value,
-      oai_key:document.getElementById('cfg_apikey').value,
-      oai_model:document.getElementById('cfg_model').value,
-      yolo_size:document.getElementById('cfg_yolo_size').value,
-      pose_kind:document.getElementById('cfg_pose_kind').value,
-      pose_size:document.getElementById('cfg_pose_size').value,
-      oai_system_prompt:document.getElementById('cfg_system').value,
-      oai_actions:oai_actions_cache};
-  if(tree!==null) body.pipeline_tree=tree;
-  await fetch('/api/update_settings',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(body)});
-  updateActionDropdown();
-  document.getElementById('ai_modal').classList.add('hidden');
-}
-async function runLLM(){
-  if(!currentFile) return;
-  const aid=document.getElementById('llm_action_select').value;
-  if(!aid){ alert('Select an action.'); return; }
-  const btn=document.getElementById('btn_run_llm');
-  btn.innerHTML='⏳'; btn.disabled=true;
-  try{
-    const d=await fetch('/api/run_llm',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filename:currentFile,action_id:aid})}).then(r=>r.json());
-    if(d.success){
-      if(d.target==='flag'){
-        currentFlag=d.delete?{delete:true,reason:d.reason}:null;
-        renderFlagBanner(); refreshReviewCount();
-        showToast(d.delete?('🚩 Flagged for deletion: '+(d.reason||'')):'AI says keep.');
-      }
-      else if(d.target==='regions'){ currentRegions=currentRegions.concat(d.regions); drawCanvas(); triggerAutosave(); }
-      else if(d.target==='tags'){
-        const tb=document.getElementById('meta_tags');
-        const cur=tb.value.split(',').map(s=>s.trim()).filter(Boolean);
-        d.tags.forEach(t=>{if(!cur.includes(t))cur.push(t);}); tb.value=cur.join(', '); triggerAutosave();
-      } else {
-        const db=document.getElementById('meta_desc');
-        if(db.value.trim()) db.value+='\n\n'; db.value+=d.description; triggerAutosave();
-      }
-    } else alert('Error: '+d.error);
-  }catch(e){ alert('Network error.'); }
-  btn.innerHTML='✨ AI'; btn.disabled=false;
-}
-async function runAutoTag(){
-  if(!currentFile) return;
-  const btn=document.getElementById('btn_autotag'); btn.innerText='…';
-  const d=await fetch('/api/auto_tag',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename:currentFile,model:document.getElementById('model_selector').value})
-  }).then(r=>r.json());
-  if(d.success){ currentRegions=currentRegions.concat(d.regions); drawCanvas(); triggerAutosave(); }
-  else alert(d.error);
-  btn.innerText='Auto-Tag Image';
-}
-function quickTrain(){
-  fetch('/api/train',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
-  alert('Training started!');
-}
-let currentAnalysis=null;
-function _esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
-async function runPipeline(){
-  if(!currentFile){ alert('Select an image first.'); return; }
-  const btn=document.getElementById('btn_smarttag'); const og=btn.innerText;
-  btn.innerText='🌳 Running…'; btn.disabled=true;
-  try{
-    const d=await fetch('/api/run_pipeline',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filename:currentFile})}).then(r=>r.json());
-    if(d.success){
-      document.getElementById('meta_tags').value=(d.tags||[]).join(', ');
-      document.getElementById('meta_desc').value=d.description||'';
-      currentRegions=d.regions||[];
-      currentAnalysis=d.analysis||null;
-      activeRegionIdx=-1;
-      drawCanvas(); if(popoutOpen) drawPopout(); renderAnalysis(); renderRegionsList();
-      refreshReviewCount();
-      showToast('Smart Tag complete — new boxes are unconfirmed (orange). Middle-click to confirm.');
-    } else { alert('Pipeline error: '+(d.error||'unknown')); }
-  }catch(e){ alert('Network error during pipeline.'); }
-  btn.innerText=og; btn.disabled=false;
-}
-function renderAnalysis(){
-  const panel=document.getElementById('analysis_panel');
-  const body=document.getElementById('analysis_body');
-  const a=currentAnalysis;
-  const hasContent = a && (a.summary || (a.subjects&&a.subjects.length));
-  if(!hasContent){ panel.classList.add('hidden'); body.innerHTML=''; return; }
-  panel.classList.remove('hidden');
-  let html='';
-  if(a.image_type) html+=`<div class="text-teal-300 font-bold">Type: ${_esc(a.image_type)}</div>`;
-  (a.subjects||[]).forEach(s=>{
-    html+=`<div class="border-t border-gray-700 pt-1">
-      <div class="text-blue-300 font-bold">${_esc(s.label||'subject')}${s.is_animal?' 🐾':''}</div>
-      ${s.appearance?`<div><span class="text-gray-500">Appearance:</span> ${_esc(s.appearance)}</div>`:''}
-      ${s.outfit?`<div><span class="text-gray-500">Outfit:</span> ${_esc(s.outfit)}</div>`:''}
-      ${s.detail?`<div><span class="text-gray-500">Detail:</span> ${_esc(s.detail)}</div>`:''}
-      ${(s.tags&&s.tags.length)?`<div class="text-gray-400">${s.tags.map(_esc).join(', ')}</div>`:''}
-    </div>`;
-  });
-  body.innerHTML=html;
-}
-
-// ── Deletion flags + AI review queue ────────────────────────────────────────
-function renderFlagBanner(){
-  const b=document.getElementById('flag_banner'); if(!b) return;
-  if(currentFlag && currentFlag.delete){
-    document.getElementById('flag_reason').innerText=currentFlag.reason||'(no reason given)';
-    b.classList.remove('hidden');
-  } else b.classList.add('hidden');
-}
-function deleteFlaggedCurrent(){
-  if(currentFile && confirm('Delete this image permanently?')) deleteCurrentFile();
-}
-async function clearCurrentFlag(){
-  if(!currentFile) return;
-  await fetch('/api/flag',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename:currentFile,delete:false,reason:''})});
-  currentFlag=null; renderFlagBanner(); refreshReviewCount(); showToast('Flag cleared.');
-}
-async function refreshReviewCount(){
-  try{
-    const d=await fetch('/api/review_list').then(r=>r.json());
-    const b=document.getElementById('review_badge');
-    if(d.total>0){ b.innerText=d.total; b.classList.remove('hidden'); }
-    else b.classList.add('hidden');
-  }catch(e){}
-}
-
-let reviewItems=[], reviewIdx=0;
-async function openReview(){
-  const d=await fetch('/api/review_list').then(r=>r.json());
-  reviewItems=d.items||[]; reviewIdx=0;
-  refreshReviewCount();
-  if(!reviewItems.length){ showToast('No AI suggestions to review.'); return; }
-  document.getElementById('review_modal').classList.remove('hidden');
-  showReviewItem(0);
-}
-function closeReview(){
-  document.getElementById('review_modal').classList.add('hidden');
-  loadGallery(); refreshReviewCount();
-}
-function showReviewItem(i){
-  if(!reviewItems.length){ closeReview(); return; }
-  reviewIdx=Math.max(0,Math.min(reviewItems.length-1,i));
-  const it=reviewItems[reviewIdx];
-  document.getElementById('review_img').src=`/api/file/${encodeURIComponent(it.filename)}?ts=${Date.now()}`;
-  document.getElementById('review_filename').innerText=it.filename;
-  document.getElementById('review_progress').innerText=`${reviewIdx+1} / ${reviewItems.length}`;
-  const fl=document.getElementById('review_flag');
-  if(it.flagged){ document.getElementById('review_reason').innerText=it.reason||'(no reason)'; fl.classList.remove('hidden'); }
-  else fl.classList.add('hidden');
-  const bx=document.getElementById('review_boxes');
-  if(it.unconfirmed>0){ document.getElementById('review_boxcount').innerText=it.unconfirmed; bx.classList.remove('hidden'); }
-  else bx.classList.add('hidden');
-}
-function reviewStep(d){ showReviewItem(reviewIdx+d); }
-function _reviewRemoveCurrent(){
-  reviewItems.splice(reviewIdx,1);
-  if(!reviewItems.length){ closeReview(); return; }
-  if(reviewIdx>=reviewItems.length) reviewIdx=reviewItems.length-1;
-  showReviewItem(reviewIdx);
-}
-async function reviewDelete(){
-  const it=reviewItems[reviewIdx]; if(!it) return;
-  if(!confirm(`Delete "${it.filename.split('/').pop()}" permanently?`)) return;
-  await fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename:it.filename})});
-  if(currentFile===it.filename){ currentFile=null;
-    document.getElementById('editor_panel').classList.add('opacity-50','pointer-events-none'); }
-  showToast('Deleted.'); _reviewRemoveCurrent();
-}
-async function reviewKeep(){
-  const it=reviewItems[reviewIdx]; if(!it) return;
-  await fetch('/api/flag',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename:it.filename,delete:false,reason:''})});
-  it.flagged=false; document.getElementById('review_flag').classList.add('hidden');
-  if(currentFile===it.filename){ currentFlag=null; renderFlagBanner(); }
-  if(it.unconfirmed<=0) _reviewRemoveCurrent();
-  showToast('Kept (flag cleared).');
-}
-async function reviewConfirmBoxes(){
-  const it=reviewItems[reviewIdx]; if(!it) return;
-  await fetch('/api/confirm_all',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename:it.filename})});
-  it.unconfirmed=0; document.getElementById('review_boxes').classList.add('hidden');
-  if(currentFile===it.filename) selectFile(it.filename);
-  if(!it.flagged) _reviewRemoveCurrent();
-  showToast('Boxes confirmed.');
-}
-function reviewOpenEditor(){
-  const it=reviewItems[reviewIdx]; if(!it) return;
-  closeReview(); selectFile(it.filename);
-}
-async function reviewDeleteAllFlagged(){
-  const flagged=reviewItems.filter(x=>x.flagged);
-  if(!flagged.length){ showToast('No flagged items in the queue.'); return; }
-  if(!confirm(`Permanently delete ALL ${flagged.length} flagged image(s)? This cannot be undone.`)) return;
-  await fetch('/api/bulk_delete',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filenames:flagged.map(x=>x.filename)})});
-  showToast(`Deleted ${flagged.length} flagged image(s).`);
-  const d=await fetch('/api/review_list').then(r=>r.json());
-  reviewItems=d.items||[]; reviewIdx=0;
-  if(!reviewItems.length) closeReview(); else showReviewItem(0);
-}
-document.addEventListener('keydown',e=>{
-  if(document.getElementById('review_modal').classList.contains('hidden')) return;
-  const tag=document.activeElement.tagName; if(tag==='INPUT'||tag==='TEXTAREA') return;
-  if(e.key==='ArrowRight') reviewStep(1);
-  else if(e.key==='ArrowLeft') reviewStep(-1);
-  else if(e.key==='Escape') closeReview();
-});
-
-// ── Pose / skeleton overlay ─────────────────────────────────────────────────
-function drawSkeleton(c,dw,dh,scale){
-  const t=document.getElementById('toggle_skeleton');
-  if(!t||!t.checked||!currentPose||!currentPose.people) return;
-  const edges=currentPose.edges||[];
-  c.save();
-  c.lineWidth=2/(scale||1);
-  currentPose.people.forEach(p=>{
-    const kp=p.keypoints||[];
-    c.strokeStyle='#22d3ee';
-    edges.forEach(e=>{
-      const ka=kp[e[0]], kb=kp[e[1]];
-      if(!ka||!kb) return;
-      if((ka.v||0)<0.2||(kb.v||0)<0.2) return;
-      c.beginPath(); c.moveTo(ka.x*dw,ka.y*dh); c.lineTo(kb.x*dw,kb.y*dh); c.stroke();
-    });
-    c.fillStyle='#f0abfc';
-    kp.forEach(k=>{ if((k.v||0)<0.2) return;
-      c.beginPath(); c.arc(k.x*dw,k.y*dh,3/(scale||1),0,7); c.fill(); });
-  });
-  c.restore();
-}
-async function runPose(){
-  if(!currentFile){ alert('Select an image first.'); return; }
-  const btn=document.getElementById('btn_pose'); const og=btn.innerText;
-  btn.innerText='🦴 …'; btn.disabled=true;
-  try{
-    const d=await fetch('/api/pose',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filename:currentFile})}).then(r=>r.json());
-    if(d.success){
-      currentPose=d.pose||null;
-      const t=document.getElementById('toggle_skeleton'); if(t) t.checked=true;
-      drawCanvas(); if(typeof popoutOpen!=='undefined'&&popoutOpen) drawPopout();
-      const n=(d.pose&&d.pose.people)?d.pose.people.length:0;
-      showToast(n?`Pose: ${n} person(s) detected.`:(d.note||'No people detected.'));
-    } else alert('Pose failed: '+(d.error||''));
-  }catch(e){ alert('Network error during pose.'); }
-  btn.innerText=og; btn.disabled=false;
-}
-async function runOCR(){
-  if(!currentFile){ alert('Select an image first.'); return; }
-  const btn=document.getElementById('btn_ocr'); const og=btn.innerText;
-  btn.innerText='🔤 …'; btn.disabled=true;
-  try{
-    const d=await fetch('/api/ocr',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filename:currentFile})}).then(r=>r.json());
-    if(d.success){
-      const lines=d.lines||[];
-      if(!lines.length){ showToast(d.note||(d.engine?'No text found.':'No OCR engine installed.')); }
-      else{
-        lines.forEach(l=>currentRegions.push({class_name:('text: '+l.text).slice(0,48),
-          cx:l.cx,cy:l.cy,w:l.w,h:l.h,confirmed:false}));
-        const ta=document.getElementById('meta_desc');
-        ta.value=(ta.value?ta.value.trim()+'\n\n':'')+'Detected text: '+d.text;
-        drawCanvas(); if(typeof popoutOpen!=='undefined'&&popoutOpen) drawPopout();
-        renderRegionsList(); triggerAutosave();
-        showToast(`OCR (${d.engine}): ${lines.length} line(s) added.`);
-      }
-    } else alert('OCR failed: '+(d.error||''));
-  }catch(e){ alert('Network error during OCR.'); }
-  btn.innerText=og; btn.disabled=false;
-}
-async function bulkPipeline(){
-  const files=[...selectedFiles]; if(!files.length){ showToast('Select some images first.'); return; }
-  if(!confirm(`Run the Smart Tag pipeline on ${files.length} image(s)? This makes many AI calls and can take a while.`)) return;
-  showToast(`Smart Tag running on ${files.length} image(s)…`);
-  try{
-    const d=await fetch('/api/bulk_pipeline',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filenames:files})}).then(r=>r.json());
-    if(d.success){
-      showToast(`Smart Tag done: ${d.done}/${files.length}${d.errors.length?', '+d.errors.length+' errors':''}.`);
-      if(currentFile && files.includes(currentFile)) selectFile(currentFile);
-      loadGallery(); refreshReviewCount();
-    } else alert('Smart Tag failed: '+(d.error||''));
-  }catch(e){ alert('Network error during Smart Tag.'); }
-}
-async function comicPipeline(){
-  if(!comicState.pages.length) return;
-  if(!confirm(`Run Smart Tag on all ${comicState.pages.length} page(s)? This makes many AI calls.`)) return;
-  showToast(`Smart Tag on ${comicState.pages.length} page(s)…`);
-  try{
-    const d=await fetch('/api/bulk_pipeline',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filenames:comicState.pages})}).then(r=>r.json());
-    if(d.success){ showToast(`Smart Tag done: ${d.done}/${comicState.pages.length}.`); refreshReviewCount(); }
-    else alert('Smart Tag failed: '+(d.error||''));
-  }catch(e){ alert('Network error during Smart Tag.'); }
-}
-
-// ── Comics ─────────────────────────────────────────────────────────────────
-let comicState={folder:null, pages:[], idx:0, info:{}};
-async function makeComic(){
-  const folder=currentFolder;
-  if(!folder || folder==='/'){
-    alert('Open a specific folder first (folder dropdown or a 📁 subfolder chip), then Make comic.');
-    return;
-  }
-  if(!confirm(`Package folder "${folder}" as a comic? Its images group into one comic tile.`)) return;
-  const d=await fetch('/api/comic_create',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({folder})}).then(r=>r.json());
-  if(d.success){
-    showToast('Comic created.');
-    currentFolder=''; document.getElementById('folder_select').value='';
-    await loadFolders(); loadGallery(); openComic(d.folder);
-  } else alert('Could not make comic: '+(d.error||''));
-}
-async function openComic(folder){
-  const d=await fetch('/api/comic?folder='+encodeURIComponent(folder)).then(r=>r.json());
-  if(!d.success){ alert('Could not open comic: '+(d.error||'')); return; }
-  comicState={folder, pages:d.pages, idx:0, info:d.comic};
-  document.getElementById('comic_title_h').innerText=d.comic.title||folder.split('/').pop();
-  document.getElementById('comic_title').value=d.comic.title||'';
-  document.getElementById('comic_author').value=d.comic.author||'';
-  document.getElementById('comic_desc').value=d.comic.description||'';
-  document.getElementById('comic_tags').value=(d.comic.tags||[]).join(', ');
-  document.getElementById('comic_chars').value=(d.comic.characters||[]).join(', ');
-  renderComicStrip();
-  showComicPage(0);
-  document.getElementById('comic_modal').classList.remove('hidden');
-}
-function closeComic(){ document.getElementById('comic_modal').classList.add('hidden'); }
-function showComicPage(i){
-  if(!comicState.pages.length) return;
-  comicState.idx=Math.max(0,Math.min(comicState.pages.length-1,i));
-  const p=comicState.pages[comicState.idx];
-  document.getElementById('comic_page_img').src=`/api/file/${encodeURIComponent(p)}?ts=${Date.now()}`;
-  document.getElementById('comic_pageinfo').innerText=`Page ${comicState.idx+1} / ${comicState.pages.length}`;
-  [...document.querySelectorAll('#comic_strip .cstrip')].forEach((el,j)=>{
-    el.classList.toggle('ring-2',j===comicState.idx);
-    el.classList.toggle('ring-purple-400',j===comicState.idx);
-  });
-}
-function comicPage(d){ showComicPage(comicState.idx+d); }
-function renderComicStrip(){
-  const s=document.getElementById('comic_strip'); s.innerHTML='';
-  comicState.pages.forEach((p,j)=>{
-    const im=document.createElement('img');
-    im.src=`/api/thumb/${encodeURIComponent(p)}`;
-    im.className='cstrip h-full w-auto object-cover rounded cursor-pointer flex-shrink-0';
-    im.onclick=()=>showComicPage(j);
-    s.appendChild(im);
-  });
-}
-async function saveComic(){
-  const body={folder:comicState.folder,
-    title:document.getElementById('comic_title').value,
-    author:document.getElementById('comic_author').value,
-    description:document.getElementById('comic_desc').value,
-    tags:document.getElementById('comic_tags').value.split(',').map(s=>s.trim()).filter(Boolean),
-    characters:document.getElementById('comic_chars').value.split(',').map(s=>s.trim()).filter(Boolean)};
-  const d=await fetch('/api/comic_update',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(body)}).then(r=>r.json());
-  if(d.success){ document.getElementById('comic_title_h').innerText=body.title||comicState.folder;
-    showToast('Comic info saved.'); loadGallery(); }
-  else alert('Save failed: '+(d.error||''));
-}
-async function setComicCover(){
-  const cover=comicState.pages[comicState.idx].split('/').pop();
-  const d=await fetch('/api/comic_update',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({folder:comicState.folder,cover})}).then(r=>r.json());
-  if(d.success){ showToast('Cover updated.'); loadGallery(); }
-}
-function openComicPageInEditor(){
-  const p=comicState.pages[comicState.idx];
-  closeComic(); selectFile(p);
-}
-async function unpackageComic(){
-  if(!confirm('Unpackage this comic? Images are kept; it becomes a normal folder.')) return;
-  const d=await fetch('/api/comic_delete',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({folder:comicState.folder})}).then(r=>r.json());
-  if(d.success){ closeComic(); await loadFolders(); loadGallery(); showToast('Comic unpackaged.'); }
-}
-function _boxMethod(){
-  const m=document.getElementById('model_selector').value;
-  return {method: m?'yolo':'llm', model:m};
-}
-async function comicBoxAll(){
-  if(!comicState.pages.length) return;
-  const bm=_boxMethod();
-  showToast(`Boxing ${comicState.pages.length} page(s)…`);
-  const d=await fetch('/api/bulk_box',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filenames:comicState.pages, method:bm.method, model:bm.model})}).then(r=>r.json());
-  if(d.success) showToast(`Boxed ${d.boxed}/${d.done} page(s). Open a page to confirm boxes.`);
-  else alert('Box all failed: '+(d.error||''));
-}
-async function bulkBox(){
-  const files=[...selectedFiles]; if(!files.length) return;
-  const bm=_boxMethod();
-  showToast(`Boxing ${files.length} image(s)…`);
-  const d=await fetch('/api/bulk_box',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filenames:files, method:bm.method, model:bm.model})}).then(r=>r.json());
-  if(d.success){
-    showToast(`Boxed ${d.boxed}/${d.done} image(s)${d.errors.length?', '+d.errors.length+' errors':''}.`);
-    if(currentFile && files.includes(currentFile)) selectFile(currentFile);
-    loadGallery(); refreshReviewCount();
-  } else alert('AI Box failed: '+(d.error||''));
-}
-async function bulkRunAI(){
-  const files=[...selectedFiles]; if(!files.length) return;
-  const sel=document.getElementById('bulk_action_select');
-  const aid=sel.value;
-  if(!aid){ alert('No AI action selected. Add actions in ⚙ Settings.'); return; }
-  const name=sel.selectedOptions[0]?.text||'AI';
-  showToast(`Running "${name}" on ${files.length} image(s)…`);
-  const d=await fetch('/api/bulk_llm',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filenames:files, action_id:aid})}).then(r=>r.json());
-  if(d.success){
-    showToast(`Applied "${name}" to ${d.applied}/${d.done} image(s)${d.errors.length?', '+d.errors.length+' errors':''}.`);
-    if(currentFile && files.includes(currentFile)) selectFile(currentFile);
-    loadGallery(); refreshReviewCount();
-  } else alert('Run AI failed: '+(d.error||''));
-}
-async function comicRunAI(){
-  if(!comicState.pages.length) return;
-  const sel=document.getElementById('comic_action_select');
-  const aid=sel.value;
-  if(!aid){ alert('No AI action selected. Add actions in ⚙ Settings.'); return; }
-  const name=sel.selectedOptions[0]?.text||'AI';
-  showToast(`Running "${name}" on ${comicState.pages.length} page(s)…`);
-  const d=await fetch('/api/bulk_llm',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filenames:comicState.pages, action_id:aid})}).then(r=>r.json());
-  if(d.success) showToast(`Applied "${name}" to ${d.applied}/${d.done} page(s). Open a page to review.`);
-  else alert('Run AI failed: '+(d.error||''));
-}
-document.addEventListener('keydown',e=>{
-  if(document.getElementById('comic_modal').classList.contains('hidden')) return;
-  const tag=document.activeElement.tagName;
-  if(tag==='INPUT'||tag==='TEXTAREA') return;
-  if(e.key==='ArrowRight'){ comicPage(1); }
-  else if(e.key==='ArrowLeft'){ comicPage(-1); }
-  else if(e.key==='Escape'){ closeComic(); }
-});
-function confirmAllRegions(){
-  if(!currentFile) return;
-  let n=0; currentRegions.forEach(b=>{ if(b.confirmed===false){ b.confirmed=true; n++; } });
-  if(n){ drawCanvas(); if(popoutOpen) drawPopout(); triggerAutosave(); showToast(`Confirmed ${n} box(es).`); }
-  else showToast('No unconfirmed boxes.');
-}
-async function toggleAutotag(){
-  const on=document.getElementById('autotag_toggle').checked;
-  await fetch('/api/autotag_toggle',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({enabled:on})});
-  showToast(on?'Background auto-tag enabled.':'Background auto-tag disabled.');
-}
-
-loadGallery();
-loadFolders();
-fetchDedupStatus();
-refreshReviewCount();
-</script>
-</body></html>"""
-
-TRAINING_HTML = """<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"><title>Training</title>
-<script src="/tailwind"></script></head>
-<body class="bg-gray-900 text-white h-screen flex flex-col">
-<div class="p-5 bg-gray-800 border-b border-gray-700 flex justify-between flex-shrink-0">
-  <h1 class="text-2xl font-bold text-purple-400">YOLO11 Training</h1>
-  <a href="/" class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded text-sm">← Back</a>
-</div>
-<div class="flex flex-1 overflow-hidden">
-  <div class="w-72 p-5 bg-gray-800 border-r border-gray-700 overflow-y-auto flex-shrink-0 space-y-3">
-    <div class="bg-indigo-900 p-3 rounded border border-indigo-700">
-      <label class="text-xs font-bold text-indigo-300 block mb-1">Remote Worker IP:Port</label>
-      <input id="remote_ip" type="text" placeholder="192.168.1.50:5000"
-        class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm">
-      <p class="text-xs text-indigo-200 mt-1">Blank = local.</p>
-    </div>
-    <div><label class="text-xs text-gray-400 block mb-1">Base Model</label>
-      <select id="base_model" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-        <option value="yolo11n.pt">yolo11n (Nano)</option>
-        <option value="yolo11s.pt">yolo11s (Small)</option>
-      </select></div>
-    <div><label class="text-xs text-gray-400 block mb-1">Epochs</label>
-      <input id="epochs" type="number" value="100"
-        class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-white text-sm"></div>
-    <div><label class="text-xs text-gray-400 block mb-1">Batch</label>
-      <input id="batch" type="number" value="4"
-        class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-white text-sm"></div>
-    <div><label class="text-xs text-gray-400 block mb-1">Image Size</label>
-      <input id="imgsz" type="number" value="640"
-        class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-white text-sm"></div>
-    <div><label class="text-xs text-gray-400 block mb-1">Device</label>
-      <select id="device" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-white text-sm">
-        <option value="-1">CPU</option><option value="0">GPU 0</option>
-      </select></div>
-    <button onclick="startTraining()"
-      class="w-full bg-purple-600 hover:bg-purple-700 py-2 rounded font-bold">Start</button>
-    <div class="pt-3 border-t border-gray-700">
-      <p class="text-xs text-yellow-400 font-bold">Status:</p>
-      <p id="app_status" class="text-xs text-gray-300 mt-1">Ready.</p>
-    </div>
-  </div>
-  <div class="flex-1 flex flex-col p-4 min-w-0">
-    <p class="text-xs text-gray-500 uppercase mb-2">Live Log</p>
-    <pre id="log_output"
-      class="flex-1 bg-gray-950 border border-gray-700 rounded p-3 text-green-400 font-mono text-xs overflow-y-auto whitespace-pre-wrap"></pre>
-  </div>
-</div>
-<script>
-let hasIp=false;
-async function poll(){
-  try{
-    const s=await fetch('/api/state').then(r=>r.json());
-    document.getElementById('app_status').innerText=s.status_text;
-    if(!hasIp){document.getElementById('remote_ip').value=s.remote_ip;hasIp=true;}
-    const le=document.getElementById('log_output');
-    const atB=le.scrollHeight-le.clientHeight<=le.scrollTop+60;
-    le.innerText=(await fetch('/api/training_log').then(r=>r.json())).log;
-    if(atB) le.scrollTop=le.scrollHeight;
-  }catch(e){}
-}
-function startTraining(){
-  fetch('/api/train',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({base_model:document.getElementById('base_model').value,
-      epochs:document.getElementById('epochs').value,batch:document.getElementById('batch').value,
-      imgsz:document.getElementById('imgsz').value,device:document.getElementById('device').value,
-      remote_ip:document.getElementById('remote_ip').value.trim()})});
-  alert('Job sent!');
-}
-setInterval(poll,1500); poll();
-</script>
-</body></html>"""
+# ── HTML templates ────────────────────────────────────────────────────────--
+# UI templates live in templates.py (imported at top of file).
 
 if __name__=='__main__':
     access_logger.info("Starting background indexer…")

@@ -552,6 +552,10 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
                     ow, oh = (px2 - px1) / W, (py2 - py1) / H
                     _report(f"panel {pi + 1}/{len(panels)}")
                     _pose, subs = detect_subjects_in(pcrop, det, _next_endpoint())
+                    # keep a page-level skeleton if the standalone pose node
+                    # didn't already set one (so pose is never lost)
+                    if _pose and _pose.get("people") and not (ctx.get("pose") or {}).get("people"):
+                        ctx["pose"] = _pose
                     describe_subjects_in(pcrop, subs, steps,
                                          off=(ox, oy, ow, oh), pool=pool)
                     for s in subs:

@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><title>Media Library</title>
+<script src="/tailwind"></script>
+<link rel="stylesheet" href="/web/app.css">
+</head>
+<body class="bg-gray-900 text-white h-screen flex overflow-hidden">
+
+<!-- Left -->
+<div class="flex flex-col h-full rpane bg-gray-900 border-r border-gray-700 z-10"
+     style="width:25%;min-width:240px;max-width:55vw;padding-bottom:20px">
+
+  <div class="p-4 bg-gray-800 border-b border-gray-700 flex justify-between items-center flex-shrink-0">
+    <h1 class="text-xl font-bold text-blue-400">Media Library</h1>
+    <div class="flex gap-3 items-center">
+      <button id="btn_dedup" onclick="runDedup(false)"
+        class="text-xs bg-indigo-600 hover:bg-indigo-500 font-bold px-3 py-1.5 rounded">🔍 Duplicates</button>
+      <button id="btn_review" onclick="openReview()"
+        class="text-xs bg-rose-700 hover:bg-rose-600 font-bold px-3 py-1.5 rounded">🚩 Review AI<span id="review_badge" class="hidden ml-1 bg-rose-900 px-1.5 rounded-full"></span></button>
+      <button id="btn_discover" onclick="discoverObjects()" title="Scan the whole library for untrained objects (depth + heuristics) and group similar ones for bulk tagging"
+        class="text-xs bg-indigo-700 hover:bg-indigo-600 font-bold px-3 py-1.5 rounded">🧩 Discover Objects</button>
+      <span id="dedup_cache_badge" class="hidden text-[10px] text-gray-500 italic"></span>
+      <span id="file_count" class="text-sm text-gray-400">—</span>
+    </div>
+  </div>
+
+  <div class="px-4 py-2 bg-gray-800 border-b border-gray-700 flex gap-2 flex-shrink-0">
+    <select id="folder_select" onchange="onFolderChange()"
+      class="bg-gray-700 rounded border border-gray-600 text-sm text-white px-2 max-w-[34%]">
+      <option value="">All folders</option>
+    </select>
+    <input id="search_input" type="text"
+      placeholder="Search…  try: height:<512  width:>=1024  is:untagged  is:unconfirmed"
+      class="flex-1 p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
+    <button onclick="makeComic()" title="Package the current folder as a comic"
+      class="text-xs bg-purple-700 hover:bg-purple-600 px-2 rounded font-bold whitespace-nowrap">📚 Make comic</button>
+  </div>
+
+  <!-- Bulk action bar — shown only when items are selected -->
+  <div id="bulk_bar"
+    class="hidden px-4 py-2 bg-gray-750 border-b border-gray-600 flex items-center gap-2 flex-shrink-0 flex-wrap">
+    <span id="bulk_count" class="text-xs font-bold text-blue-300 mr-1"></span>
+    <input id="bulk_tag_input" type="text" placeholder="Add tag(s), comma-separated, then Enter"
+      class="flex-1 min-w-[160px] bg-gray-700 text-xs px-2 py-1.5 rounded border border-gray-600 text-white focus:border-blue-400"
+      onkeydown="if(event.key==='Enter') applyBulkTag()">
+    <button onclick="applyBulkTag()"
+      class="text-xs bg-blue-600 hover:bg-blue-500 px-3 py-1.5 rounded font-bold">Tag</button>
+    <button onclick="bulkDelete()"
+      class="text-xs bg-red-700 hover:bg-red-600 px-3 py-1.5 rounded font-bold">🗑 Delete</button>
+    <button onclick="bulkBox()" title="Run AI box detection on every selected image"
+      class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1.5 rounded font-bold">🤖 AI Box</button>
+    <select id="bulk_action_select" title="AI action to run on each selected image"
+      class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-1.5 max-w-[130px]"></select>
+    <button onclick="bulkRunAI()" title="Run the chosen AI action on every selected image"
+      class="text-xs bg-yellow-600 hover:bg-yellow-500 px-3 py-1.5 rounded font-bold">✨ Run AI</button>
+    <button onclick="bulkPipeline()" title="Run the full Smart Tag pipeline on every selected image"
+      class="text-xs bg-teal-600 hover:bg-teal-500 px-3 py-1.5 rounded font-bold">🌳 Smart Tag</button>
+    <button onclick="clearSelection()"
+      class="text-xs bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded ml-auto">✕ Deselect</button>
+  </div>
+
+  <div id="dropzone"
+    class="mx-4 mt-3 mb-1 border-2 border-dashed border-gray-600 rounded-lg p-4 text-center text-gray-400 flex flex-col items-center bg-gray-800 flex-shrink-0">
+    <p class="font-bold text-sm">Drag & Drop Images</p>
+    <p class="text-xs text-gray-500">Stored as lossless .JXL</p>
+    <div class="mt-2 flex items-center gap-2">
+      <input id="upload_folder" type="text" placeholder="folder (opt)"
+        class="bg-gray-700 text-xs px-2 py-1 rounded border border-gray-600 w-28">
+      <button onclick="document.getElementById('file_input').click()"
+        class="bg-blue-600 hover:bg-blue-500 px-3 py-1 rounded text-xs font-bold">Browse</button>
+    </div>
+    <input id="file_input" type="file" multiple class="hidden">
+  </div>
+
+  <!-- Pagination bar -->
+  <div class="flex items-center gap-2 px-4 py-2 flex-shrink-0 text-xs text-gray-400">
+    <button id="btn_prev" onclick="changePage(-1)"
+      class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded disabled:opacity-30">◀ Prev</button>
+    <span id="page_info">Page 1</span>
+    <button id="btn_next" onclick="changePage(1)"
+      class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded disabled:opacity-30">Next ▶</button>
+    <span class="ml-auto" id="showing_info"></span>
+  </div>
+
+  <div class="flex-1 overflow-y-auto px-4 pb-2" id="gallery_scroll">
+    <div id="gallery_grid" class="masonry"></div>
+  </div>
+</div>
+
+<!-- Right: Editor (adaptive — image beside controls when portrait, image above when landscape) -->
+<div id="editor_region" class="flex-1 flex h-full overflow-hidden vertical">
+
+  <!-- IMAGE PANE -->
+  <div id="image_pane" class="flex flex-col bg-gray-900">
+    <div class="px-3 py-2 bg-gray-800 border-b border-gray-700 flex items-center gap-2 flex-shrink-0">
+      <p id="selected_filename" class="text-xs font-mono text-blue-400 truncate flex-1">No file selected</p>
+      <span id="save_indicator" class="text-xs font-bold px-2 py-0.5 rounded bg-gray-900 text-gray-500 hidden"></span>
+    </div>
+    <div id="canvas_container" class="flex-1 bg-black overflow-hidden relative" style="min-height:120px">
+      <canvas id="media_canvas" class="absolute"></canvas>
+    </div>
+    <div class="px-3 py-1 bg-gray-800 border-t border-gray-700 flex justify-between items-center flex-shrink-0">
+      <span class="text-[10px] text-gray-500">Drag: add box · hover to locate</span>
+      <div class="flex items-center gap-2">
+        <button onclick="openPopout()" title="Open in popout for detail labelling"
+          class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-gray-300">⛶ Popout</button>
+        <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
+          <input type="checkbox" id="toggle_regions" checked onchange="drawCanvas()" class="accent-blue-500">
+          Regions
+        </label>
+        <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
+          <input type="checkbox" id="toggle_skeleton" onchange="drawCanvas();if(typeof popoutOpen!=='undefined'&&popoutOpen)drawPopout();" class="accent-cyan-500">
+          Skeleton
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- CONTROLS PANE (its own scroll; never resizes the image) -->
+  <div id="controls_pane" class="overflow-y-auto flex-shrink-0">
+    <div id="editor_panel" class="p-3 flex flex-col gap-3 opacity-50 pointer-events-none">
+      <div class="flex justify-between items-center gap-2">
+        <span class="text-sm font-bold text-gray-300">Editor</span>
+        <div class="flex items-center gap-1">
+          <button onclick="moveCurrentFile()"
+            class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded uppercase font-bold">Move</button>
+          <button onclick="confirmAllRegions()" title="Confirm every unconfirmed box"
+            class="text-[10px] bg-amber-700 hover:bg-amber-600 px-2 py-1 rounded text-white">✓ Confirm all</button>
+          <button id="btn_delete" onclick="deleteCurrentFile()"
+            class="hidden text-red-400 hover:text-red-300 text-xs px-1">Delete</button>
+        </div>
+      </div>
+
+      <div id="flag_banner" class="hidden text-xs bg-red-900/60 border border-red-700 rounded p-2 text-red-200">
+        <div class="font-bold mb-1">🚩 AI suggests deletion</div>
+        <div id="flag_reason" class="mb-2 text-red-300"></div>
+        <div class="flex gap-2">
+          <button onclick="deleteFlaggedCurrent()" class="bg-red-700 hover:bg-red-600 px-2 py-1 rounded font-bold">Delete</button>
+          <button onclick="clearCurrentFlag()" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Keep</button>
+        </div>
+      </div>
+
+      <div id="regions_list"
+        class="hidden max-h-48 overflow-y-auto bg-gray-900 border border-gray-700 rounded p-1 space-y-0.5"></div>
+
+      <div>
+        <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Tags</label>
+        <input id="meta_tags" type="text" oninput="triggerAutosave()"
+          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
+      </div>
+
+      <div>
+        <div class="flex justify-between items-center mb-1">
+          <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Description</label>
+          <div class="flex items-center gap-1">
+            <select id="llm_action_select"
+              class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-0.5 max-w-[130px]"></select>
+            <button onclick="runLLM()" id="btn_run_llm"
+              class="text-xs bg-yellow-600 hover:bg-yellow-500 px-2 py-0.5 rounded font-bold">✨ AI</button>
+          </div>
+        </div>
+        <textarea id="meta_desc" oninput="triggerAutosave()" rows="4"
+          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
+      </div>
+
+      <div id="analysis_panel" class="hidden">
+        <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">AI Analysis</label>
+        <div id="analysis_body"
+          class="text-xs bg-gray-900 border border-gray-700 rounded p-2 space-y-2 max-h-48 overflow-y-auto"></div>
+      </div>
+    </div>
+
+    <!-- AI Tools -->
+    <div class="p-3 flex flex-col gap-2 border-t border-gray-700">
+      <div class="flex justify-between items-center">
+        <h3 class="font-bold text-purple-400 text-sm">AI Tooling</h3>
+        <div class="flex gap-2">
+          <button onclick="document.getElementById('ai_modal').classList.remove('hidden')"
+            class="text-xs bg-gray-700 px-2 py-1 rounded hover:bg-gray-600">⚙ Settings</button>
+          <a href="/training_portal" target="_blank"
+            class="text-xs text-purple-300 bg-gray-700 px-2 py-1 rounded hover:bg-gray-600 border border-purple-800">Trainer ↗</a>
+        </div>
+      </div>
+      <div id="yolo_controls" class="opacity-50 pointer-events-none">
+        <select id="model_selector"
+          class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm mb-1"></select>
+        <button onclick="runAutoTag()" id="btn_autotag"
+          class="w-full bg-indigo-600 hover:bg-indigo-500 py-1.5 rounded font-bold text-sm">Auto-Tag Image</button>
+      </div>
+      <button onclick="runPipeline()" id="btn_smarttag"
+        class="w-full bg-teal-600 hover:bg-teal-500 py-1.5 rounded font-bold text-sm">🌳 Smart Tag (AI pipeline)</button>
+      <div class="grid grid-cols-2 gap-2">
+        <button onclick="runPose()" id="btn_pose"
+          class="bg-cyan-700 hover:bg-cyan-600 py-1.5 rounded font-bold text-sm">🦴 Pose</button>
+        <button onclick="runOCR()" id="btn_ocr"
+          class="bg-sky-700 hover:bg-sky-600 py-1.5 rounded font-bold text-sm">🔤 OCR</button>
+      </div>
+      <button onclick="quickTrain()"
+        class="w-full bg-purple-600 hover:bg-purple-500 py-1.5 rounded font-bold text-sm">Quick Train</button>
+      <label class="flex items-center justify-between text-xs text-gray-300 mt-1 cursor-pointer">
+        <span>Background auto-tag when idle</span>
+        <input type="checkbox" id="autotag_toggle" onchange="toggleAutotag()" class="accent-purple-500">
+      </label>
+      <p class="text-xs text-gray-400">Status: <span id="status_text" class="text-yellow-400">Ready.</span></p>
+    </div>
+  </div>
+</div>
+
+<!-- Dedup Modal -->
+<div id="dedup_modal" class="hidden absolute inset-0 bg-black/80 flex items-center justify-center z-50 p-6">
+  <div class="bg-gray-800 rounded-lg border border-gray-600 shadow-xl w-full max-w-5xl h-[85vh] flex flex-col">
+    <div class="flex justify-between items-start p-5 border-b border-gray-700 flex-shrink-0">
+      <div>
+        <h2 class="text-xl font-bold text-indigo-400">Duplicates</h2>
+        <p class="text-xs text-gray-400 mt-1">"Keep & Merge" consolidates metadata into the highest-res copy.</p>
+        <p id="dedup_cache_info" class="text-xs text-gray-500 mt-1"></p>
+      </div>
+      <div class="flex gap-2 ml-4 flex-shrink-0">
+        <button onclick="runDedup(true)"
+          class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs font-bold text-yellow-400">↺ Rescan</button>
+        <button onclick="document.getElementById('dedup_modal').classList.add('hidden')"
+          class="bg-gray-700 hover:bg-gray-600 px-4 py-1.5 rounded font-bold text-sm">Done</button>
+      </div>
+    </div>
+    <div id="dedup_content" class="flex-1 overflow-y-auto p-4 space-y-4"></div>
+  </div>
+</div>
+
+<!-- Region Modal -->
+<div id="region_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
+  <div class="bg-gray-800 p-6 rounded-lg border border-gray-600 w-72">
+    <h2 class="font-bold mb-3">Region Name</h2>
+    <input id="modal_region_name" type="text"
+      class="w-full p-2 bg-gray-700 rounded border border-gray-600 mb-4 text-white">
+    <div class="flex justify-end gap-2">
+      <button onclick="cancelRegion()" class="bg-gray-600 px-4 py-1.5 rounded text-sm">Cancel</button>
+      <button onclick="saveRegion()" class="bg-blue-600 px-4 py-1.5 rounded text-sm font-bold">Add</button>
+    </div>
+  </div>
+</div>
+
+<!-- AI Settings Modal -->
+<div id="ai_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
+  <div class="bg-gray-800 p-5 rounded-lg border border-gray-600 w-[400px] flex flex-col max-h-[90vh]">
+    <h2 class="font-bold text-purple-400 mb-4 flex-shrink-0">LLM / Vision Settings</h2>
+    <div class="overflow-y-auto flex-1 space-y-3 pr-1">
+      <div><label class="text-xs text-gray-400 block mb-1">Endpoint</label>
+        <input id="cfg_endpoint" type="text" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white"></div>
+      <div><label class="text-xs text-gray-400 block mb-1">API Key</label>
+        <input id="cfg_apikey" type="password" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white"></div>
+      <div><label class="text-xs text-gray-400 block mb-1">Model</label>
+        <input id="cfg_model" type="text" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white"></div>
+      <div><label class="text-xs text-gray-400 block mb-1">Pose &amp; detection models <span class="text-gray-600">(auto-downloaded)</span></label>
+        <div class="grid grid-cols-3 gap-2">
+          <div>
+            <span class="text-[10px] text-gray-500 block mb-0.5">YOLO size</span>
+            <select id="cfg_yolo_size" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+              <option value="n">n · nano</option><option value="s">s · small</option>
+              <option value="m">m · medium</option><option value="l">l · large</option>
+              <option value="x">x · xlarge</option>
+            </select>
+          </div>
+          <div>
+            <span class="text-[10px] text-gray-500 block mb-0.5">Pose type</span>
+            <select id="cfg_pose_kind" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+              <option value="body">Body · 17 pts</option>
+              <option value="wholebody">Whole-body · 133 (hands+face)</option>
+            </select>
+          </div>
+          <div>
+            <span class="text-[10px] text-gray-500 block mb-0.5">Pose size</span>
+            <select id="cfg_pose_size" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+              <option value="n">n · nano</option><option value="s">s · small</option>
+              <option value="m">m · medium</option><option value="l">l · large</option>
+              <option value="x">x · xlarge</option>
+            </select>
+          </div>
+        </div>
+        <p class="text-[10px] text-gray-600 mt-1">Whole-body pose needs <code>rtmlib</code> + <code>onnxruntime</code>; OCR needs <code>rapidocr_onnxruntime</code> or <code>easyocr</code>. Weights download automatically on first use.</p>
+      </div>
+      <div><label class="text-xs text-gray-400 block mb-1">System Prompt</label>
+        <textarea id="cfg_system" rows="2"
+          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea></div>
+      <div class="border-t border-gray-600 pt-3">
+        <div class="flex justify-between items-center mb-2">
+          <label class="text-xs font-bold text-gray-400">Actions</label>
+          <button onclick="addAiAction()"
+            class="text-xs bg-indigo-600 hover:bg-indigo-500 px-2 py-0.5 rounded font-bold">+ Add</button>
+        </div>
+        <div id="actions_container" class="space-y-2"></div>
+      </div>
+      <div class="border-t border-gray-600 pt-3">
+        <label class="text-xs font-bold text-gray-400 block mb-1">Smart Tag pipeline (advanced JSON)</label>
+        <p class="text-[10px] text-gray-500 mb-1">Decision tree run by 🌳 Smart Tag. Edit carefully.</p>
+        <textarea id="cfg_pipeline" rows="6"
+          class="w-full p-2 bg-gray-900 rounded border border-gray-600 text-xs text-white font-mono resize-y"></textarea>
+        <p id="cfg_pipeline_err" class="text-[10px] text-red-400 mt-1 hidden"></p>
+      </div>
+    </div>
+    <div class="flex justify-end gap-2 pt-3 border-t border-gray-700 mt-3 flex-shrink-0">
+      <button onclick="document.getElementById('ai_modal').classList.add('hidden')"
+        class="bg-gray-600 px-4 py-1.5 rounded text-sm">Cancel</button>
+      <button onclick="saveAiSettings()"
+        class="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded text-sm font-bold">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Popout labelling window -->
+<div id="popout_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
+  <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
+    <span id="popout_filename" class="text-xs font-mono text-blue-400 truncate flex-1"></span>
+    <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
+      <input type="checkbox" id="popout_toggle_regions" checked onchange="drawPopout()" class="accent-blue-500">
+      Regions
+    </label>
+    <span class="text-[10px] text-gray-500 hidden sm:inline">Drag:Add · Mid:Rename · Right:Delete · Scroll:Zoom · Click+drag canvas:Pan</span>
+    <button onclick="closePopout()" class="text-gray-400 hover:text-white text-lg leading-none ml-2">✕</button>
+  </div>
+  <!-- Canvas fills remaining space -->
+  <div id="popout_canvas_wrap" class="flex-1 overflow-hidden relative bg-black select-none">
+    <canvas id="popout_canvas" class="absolute top-0 left-0" style="cursor:crosshair"></canvas>
+  </div>
+</div>
+
+<!-- Comic reader -->
+<div id="comic_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
+  <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
+    <span class="text-purple-300 font-bold">📚 <span id="comic_title_h">Comic</span></span>
+    <span id="comic_pageinfo" class="text-xs text-gray-400"></span>
+    <div class="ml-auto flex gap-2 items-center">
+      <select id="comic_action_select" title="AI action to run on every page"
+        class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-1 max-w-[130px]"></select>
+      <button onclick="comicRunAI()"
+        class="text-xs bg-yellow-600 hover:bg-yellow-500 px-3 py-1 rounded font-bold">✨ Run AI</button>
+      <button onclick="comicPipeline()"
+        class="text-xs bg-teal-600 hover:bg-teal-500 px-3 py-1 rounded font-bold">🌳 Smart Tag</button>
+      <button onclick="comicBoxAll()"
+        class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1 rounded font-bold">🤖 Box all pages</button>
+      <button onclick="closeComic()" class="text-gray-400 hover:text-white text-lg leading-none">✕</button>
+    </div>
+  </div>
+  <div class="flex flex-1 overflow-hidden">
+    <div class="w-72 bg-gray-850 border-r border-gray-700 p-3 overflow-y-auto flex-shrink-0 space-y-2">
+      <label class="text-[10px] uppercase text-gray-400 font-bold block">Title</label>
+      <input id="comic_title" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+      <label class="text-[10px] uppercase text-gray-400 font-bold block">Author</label>
+      <input id="comic_author" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+      <label class="text-[10px] uppercase text-gray-400 font-bold block">Description</label>
+      <textarea id="comic_desc" rows="3" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
+      <label class="text-[10px] uppercase text-gray-400 font-bold block">Tags (comma)</label>
+      <input id="comic_tags" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+      <label class="text-[10px] uppercase text-gray-400 font-bold block">Characters (comma)</label>
+      <input id="comic_chars" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+      <button onclick="saveComic()" class="w-full bg-green-600 hover:bg-green-500 py-1.5 rounded font-bold text-sm mt-1">Save comic info</button>
+      <button onclick="setComicCover()" class="w-full bg-gray-700 hover:bg-gray-600 py-1 rounded text-xs">Set current page as cover</button>
+      <button onclick="openComicPageInEditor()" class="w-full bg-indigo-700 hover:bg-indigo-600 py-1 rounded text-xs">Edit current page metadata</button>
+      <button onclick="unpackageComic()" class="w-full bg-red-800 hover:bg-red-700 py-1 rounded text-xs text-red-200">Unpackage comic</button>
+    </div>
+    <div class="flex-1 flex flex-col overflow-hidden">
+      <div id="comic_view" class="flex-1 overflow-auto bg-black flex items-center justify-center relative">
+        <img id="comic_page_img" class="max-h-full max-w-full object-contain" alt="">
+        <button onclick="comicPage(-1)"
+          class="absolute left-2 top-1/2 -translate-y-1/2 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl">‹</button>
+        <button onclick="comicPage(1)"
+          class="absolute right-2 top-1/2 -translate-y-1/2 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl">›</button>
+      </div>
+      <div id="comic_strip" class="h-20 flex gap-1 overflow-x-auto bg-gray-900 border-t border-gray-700 p-1 flex-shrink-0"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Review AI suggestions -->
+<div id="review_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
+  <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
+    <span class="text-rose-300 font-bold">🚩 Review AI suggestions</span>
+    <span id="review_progress" class="text-xs text-gray-400"></span>
+    <div class="ml-auto flex gap-2">
+      <button onclick="reviewDeleteAllFlagged()"
+        class="text-xs bg-red-800 hover:bg-red-700 px-3 py-1 rounded font-bold text-red-200">Delete all flagged…</button>
+      <button onclick="closeReview()" class="text-gray-400 hover:text-white text-lg leading-none">✕</button>
+    </div>
+  </div>
+  <div class="flex flex-1 overflow-hidden">
+    <div class="flex-1 bg-black flex items-center justify-center overflow-hidden relative">
+      <img id="review_img" class="max-h-full max-w-full object-contain" alt="">
+      <button onclick="reviewStep(-1)"
+        class="absolute left-2 top-1/2 -translate-y-1/2 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl">‹</button>
+      <button onclick="reviewStep(1)"
+        class="absolute right-2 top-1/2 -translate-y-1/2 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl">›</button>
+    </div>
+    <div class="w-80 bg-gray-850 border-l border-gray-700 p-4 overflow-y-auto flex-shrink-0 space-y-3">
+      <p id="review_filename" class="text-xs font-mono text-blue-400 break-all"></p>
+      <div id="review_flag" class="hidden bg-red-900/60 border border-red-700 rounded p-2 text-xs text-red-200">
+        <div class="font-bold mb-1">AI suggests deletion</div>
+        <div id="review_reason" class="text-red-300 mb-2"></div>
+        <div class="flex gap-2">
+          <button onclick="reviewDelete()" class="bg-red-700 hover:bg-red-600 px-3 py-1 rounded font-bold">Delete</button>
+          <button onclick="reviewKeep()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded">Keep</button>
+        </div>
+      </div>
+      <div id="review_boxes" class="hidden bg-gray-900 border border-gray-700 rounded p-2 text-xs">
+        <div class="mb-2"><span id="review_boxcount" class="font-bold text-amber-300"></span> unconfirmed box(es)</div>
+        <div class="flex gap-2 flex-wrap">
+          <button onclick="reviewConfirmBoxes()" class="bg-blue-700 hover:bg-blue-600 px-3 py-1 rounded font-bold">Confirm all</button>
+          <button onclick="reviewOpenEditor()" class="bg-indigo-700 hover:bg-indigo-600 px-3 py-1 rounded">Open in editor</button>
+        </div>
+      </div>
+  </div>
+</div>
+
+<div id="discover_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
+  <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
+    <span class="text-indigo-300 font-bold">🧩 Discovered object groups</span>
+    <span id="discover_summary" class="text-xs text-gray-400"></span>
+    <button id="discover_back" onclick="discoverShowGrid()"
+      class="hidden text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded">← All groups</button>
+    <div class="ml-auto flex gap-2">
+      <button onclick="closeDiscover()" class="text-gray-400 hover:text-white text-lg leading-none">✕</button>
+    </div>
+  </div>
+
+  <!-- GRID VIEW: one card per group -->
+  <div id="discover_grid" class="flex-1 overflow-y-auto p-4">
+    <div id="discover_loading" class="hidden text-center text-gray-400 mt-20 animate-pulse">
+      Scanning library…
+    </div>
+    <div id="discover_empty" class="hidden text-center text-gray-500 mt-20">
+      No groups found. Try lowering the min group size or widening similarity, then Re-run.
+    </div>
+    <div id="discover_cards" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3"></div>
+  </div>
+
+  <!-- DETAIL VIEW: expanded single group, prune + name + apply -->
+  <div id="discover_detail" class="hidden flex-1 overflow-hidden flex flex-col">
+    <div class="flex items-center gap-2 px-4 py-2 bg-gray-850 border-b border-gray-700 flex-shrink-0">
+      <span id="detail_title" class="text-sm font-bold text-indigo-300"></span>
+      <span id="detail_count" class="text-xs text-gray-400"></span>
+      <input id="detail_label" type="text" placeholder="name this group, e.g. 'cup of orange juice'"
+        class="flex-1 bg-gray-700 text-sm px-3 py-1.5 rounded border border-gray-600 text-white focus:border-indigo-400">
+      <label class="text-[10px] text-gray-400 flex items-center gap-1">
+        <input id="detail_addbox" type="checkbox" checked> store box</label>
+      <button onclick="discoverApply()"
+        class="text-sm bg-green-700 hover:bg-green-600 px-4 py-1.5 rounded font-bold text-white">Apply to kept</button>
+    </div>
+    <div class="px-4 py-1.5 text-[11px] text-gray-500 flex-shrink-0">
+      Click any object to toggle it out of the group (dimmed = will be skipped). Then name it and Apply.
+    </div>
+    <div id="detail_members" class="flex-1 overflow-y-auto p-4 grid grid-cols-3 md:grid-cols-5 lg:grid-cols-7 gap-2"></div>
+  </div>
+
+  <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-t border-gray-700 flex-shrink-0 text-xs text-gray-400">
+    <label class="flex items-center gap-1">Similarity
+      <input id="discover_eps" type="range" min="0.08" max="0.40" step="0.02" value="0.18"
+        class="w-32" oninput="document.getElementById('discover_eps_v').textContent=this.value">
+      <span id="discover_eps_v">0.18</span>
+    </label>
+    <label class="flex items-center gap-1">Min group size
+      <input id="discover_min" type="number" min="2" max="20" value="2"
+        class="w-14 bg-gray-700 rounded px-1 py-0.5 border border-gray-600 text-white">
+    </label>
+    <label class="flex items-center gap-1" title="Ignore the cache and recompute every image's embeddings">
+      <input id="discover_force" type="checkbox"> force re-scan
+    </label>
+    <button onclick="discoverObjects(true)"
+      class="bg-indigo-700 hover:bg-indigo-600 px-3 py-1 rounded font-bold text-white">Re-run</button>
+    <span class="ml-auto text-[10px] text-gray-500">Click a group card to open, prune, name, and apply.</span>
+  </div>
+</div>
+
+<script src="/web/app.js"></script>
+</body></html>
