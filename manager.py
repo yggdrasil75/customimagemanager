@@ -32,12 +32,36 @@ import imagecodecs
 from dup_heuristics import DuplicateClassifier, classify_pair, extract_features
 import object_grouping as og
 import discover_stages as ds
+import image_index as ii
 try:
     import iqa
 except Exception:
     iqa = None
 from pipeline import DEFAULT_PIPELINE, run_pipeline
 from templates import HTML, TRAINING_HTML
+
+# ── NR-IQA star mapping ───────────────────────────────────────────────────────
+# BRISQUE returns ~0..100 where HIGHER = WORSE. We map it to a 0..5 star scale
+# (higher = better) so the UI can show an intuitive rating. A blank/featureless
+# image (which BRISQUE rates as "perfect" ~0) is forced low so junk doesn't
+# masquerade as five stars. Thresholds are deliberately simple/tunable.
+def brisque_to_stars(bq, blank=False):
+    """Map a raw BRISQUE score (0..~100, higher=worse) to 0..5 stars
+    (higher=better). Returns None if bq is None. Blank images cap at 1 star."""
+    if bq is None:
+        return None
+    bq = max(0.0, min(100.0, float(bq)))
+    # piecewise: <=20 -> 5 stars, >=80 -> 0 stars, linear in between.
+    if bq <= 20.0:
+        stars = 5.0
+    elif bq >= 80.0:
+        stars = 0.0
+    else:
+        stars = 5.0 * (80.0 - bq) / 60.0
+    stars = round(stars * 2) / 2.0          # snap to nearest half-star
+    if blank:
+        stars = min(stars, 1.0)
+    return stars
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 app       = Flask(__name__)
@@ -207,11 +231,22 @@ def _init_db():
         "ALTER TABLE files ADD COLUMN flagged_delete INTEGER DEFAULT 0",
         "ALTER TABLE files ADD COLUMN flag_reason TEXT DEFAULT ''",
         "ALTER TABLE object_embeddings ADD COLUMN emb_dim INTEGER DEFAULT 0",
+        # NR-IQA (BRISQUE) per-image quality. iqa_score is 0..5 stars (NULL =
+        # not yet scored); iqa_brisque keeps the raw BRISQUE number for ref;
+        # iqa_manual=1 means a human set the stars and a rescan must not clobber.
+        "ALTER TABLE files ADD COLUMN iqa_score REAL DEFAULT NULL",
+        "ALTER TABLE files ADD COLUMN iqa_brisque REAL DEFAULT NULL",
+        "ALTER TABLE files ADD COLUMN iqa_manual INTEGER DEFAULT 0",
     ]:
         try:
             db.execute(ddl); db.commit()
         except Exception:
             pass
+    # permanent image-level pipeline tables (embeddings/clusters/heuristics)
+    try:
+        ii.ensure_tables(db)
+    except Exception:
+        pass
 
 _init_db()
 
@@ -306,12 +341,13 @@ def _query_files(search: str, offset: int, limit: int, folder: str = ''):
     if need > 0:
         file_offset = max(0, offset - nc)
         rows = _db().execute(
-            f"SELECT rel_path, tags, description, width, height FROM files{where_sql} "
+            f"SELECT rel_path, tags, description, width, height, iqa_score FROM files{where_sql} "
             f"ORDER BY rel_path LIMIT ? OFFSET ?", (*p, need, file_offset)).fetchall()
         for r in rows:
             entries.append({"kind": "image", "filename": r["rel_path"],
                             "tags": json.loads(r["tags"] or "[]"),
                             "description": r["description"] or "",
+                            "iqa_score": r["iqa_score"],
                             "width": r["width"] or 0, "height": r["height"] or 0})
     return entries, total
 
@@ -1848,7 +1884,12 @@ def api_metadata():
     fp = get_safe_path(MEDIA_DIR, fn)
     if not fp or not os.path.exists(fp): return jsonify({"success":False})
     if d.get("action")=="read":
-        return jsonify({"success":True,"metadata":read_metadata(fp)})
+        meta = read_metadata(fp)
+        row = _db().execute(
+            "SELECT iqa_score, iqa_manual FROM files WHERE rel_path=?", (fn,)).fetchone()
+        meta["iqa_score"]  = row["iqa_score"] if row else None
+        meta["iqa_manual"] = bool(row["iqa_manual"]) if row else False
+        return jsonify({"success":True,"metadata":meta})
     elif d.get("action")=="write":
         ok = write_metadata(fp, d.get("tags",[]), d.get("description",""), d.get("regions",[]))
         return jsonify({"success":ok})
@@ -2855,6 +2896,451 @@ def quality_sweep():
     return jsonify({"success": True, "run_sig": sig, "quality": summary,
                     "flagged": sorted(bad)[:500],
                     "wrote_flags": write_flags})
+
+
+@app.route("/api/iqa_scan", methods=["POST"])
+def iqa_scan():
+    """Run NR-IQA (BRISQUE) and store a 0..5 star quality score on each file row
+    so it can be shown in the list and the detail panel.
+
+    Body:
+      folder    optional; if given, only images in that folder are scored
+                ('/' = library root only). Omitted/'' = whole library.
+      filenames optional explicit list (overrides folder).
+      force     if True, rescore files that already have a score.
+                Manually-set scores (iqa_manual=1) are never overwritten.
+    """
+    if iqa is None or not iqa.available():
+        return jsonify({"success": False,
+                        "error": "IQA model unavailable (BRISQUE files missing "
+                                 "and could not be downloaded)."})
+    body   = request.json or {}
+    folder = (body.get("folder") or "").strip()
+    force  = bool(body.get("force"))
+    filenames = body.get("filenames") or []
+
+    db = _db()
+    if not filenames:
+        clauses = ["(comic_folder IS NULL OR comic_folder='')"]
+        params  = []
+        if folder == '/':
+            clauses.append("rel_path NOT LIKE '%/%'")
+        elif folder:
+            f = folder.strip('/').replace('\\', '/')
+            clauses.append("rel_path LIKE ? AND rel_path NOT LIKE ?")
+            params += [f + '/%', f + '/%/%']
+        where = " WHERE " + " AND ".join(clauses)
+        rows = db.execute(
+            f"SELECT rel_path, iqa_score, iqa_manual FROM files{where}",
+            params).fetchall()
+        filenames = [r["rel_path"] for r in rows
+                     if force or (r["iqa_score"] is None and not r["iqa_manual"])]
+    if not filenames:
+        return jsonify({"success": True, "scored": 0, "total": 0,
+                        "note": "Nothing to score (already scored — use force to rescan)."})
+
+    total = len(filenames)
+    state["discover_cancel"] = False
+    scored = 0
+    for i, fn in enumerate(filenames):
+        if state.get("discover_cancel"):
+            break
+        # never clobber a manual rating
+        row = db.execute(
+            "SELECT iqa_manual FROM files WHERE rel_path=?", (fn,)).fetchone()
+        if row and row["iqa_manual"]:
+            continue
+        fp = get_safe_path(MEDIA_DIR, fn)
+        if not fp or not os.path.exists(fp):
+            continue
+        try:
+            img = read_jxl(fp)
+            img = _to_bgr(img) if img is not None else None
+            if img is not None:
+                img = og.downscale_to_cap(img)
+        except Exception:
+            img = None
+        if img is None:
+            continue
+        r = iqa.assess(img)
+        stars = brisque_to_stars(r.get("brisque"), blank=r.get("blank"))
+        if stars is None:
+            continue
+        db.execute(
+            "UPDATE files SET iqa_score=?, iqa_brisque=? "
+            "WHERE rel_path=? AND COALESCE(iqa_manual,0)=0",
+            (stars, r.get("brisque"), fn))
+        scored += 1
+        if scored % 25 == 0:
+            db.commit()
+        state["status_text"] = f"[IQA] {i+1}/{total} scored…"
+    db.commit()
+    state["status_text"] = f"IQA scan complete — scored {scored} image(s)."
+    return jsonify({"success": True, "scored": scored, "total": total})
+
+
+@app.route("/api/iqa_set", methods=["POST"])
+def iqa_set():
+    """Manually set (or clear) the 0..5 star quality score for one file. A manual
+    score is marked so subsequent automatic scans won't overwrite it."""
+    body  = request.json or {}
+    fn    = body.get("filename", "")
+    stars = body.get("stars", None)
+    fp = get_safe_path(MEDIA_DIR, fn)
+    if not fp or not os.path.exists(fp):
+        return jsonify({"success": False, "error": "File not found."})
+    if stars is None:
+        # clear manual rating -> revert to unscored
+        _db().execute(
+            "UPDATE files SET iqa_score=NULL, iqa_manual=0 WHERE rel_path=?", (fn,))
+    else:
+        try:
+            stars = max(0.0, min(5.0, float(stars)))
+        except Exception:
+            return jsonify({"success": False, "error": "Invalid stars value."})
+        _db().execute(
+            "UPDATE files SET iqa_score=?, iqa_manual=1 WHERE rel_path=?",
+            (stars, fn))
+    _db().commit()
+    return jsonify({"success": True, "stars": stars})
+
+
+# ════════════════════════════ IMAGE-LEVEL PIPELINE ═══════════════════════════
+# A lighter, image-level layer beneath object discovery. Five MANUAL steps, each
+# resumable and reading the previous step's persisted output:
+#   1 depth (reuses object depth stage) 2 embeddings 3 cluster images
+#   4 build heuristics 5 detect objects (object work, scoped per image-cluster).
+# Memory: clustering runs over N image vectors instead of ~15N region vectors.
+
+def _eligible_files():
+    """Whole-library, non-comic, big-enough images — the shared work set."""
+    rows = _db().execute(
+        "SELECT rel_path, width, height FROM files "
+        "WHERE (comic_folder IS NULL OR comic_folder='')").fetchall()
+    return sorted(rp for (rp, w, h) in rows
+                  if not (w and h) or min(w, h) >= og.MIN_IMAGE_PX)
+
+
+def _img_loader(fn):
+    fp = get_safe_path(MEDIA_DIR, fn)
+    if not fp or not os.path.exists(fp):
+        return None
+    img = read_jxl(fp)
+    if img is None:
+        return None
+    return og.downscale_to_cap(_to_bgr(img))
+
+
+def _img_mtime(fn):
+    try:
+        fp = get_safe_path(MEDIA_DIR, fn)
+        return os.path.getmtime(fp) if fp and os.path.exists(fp) else None
+    except Exception:
+        return None
+
+
+def _img_tags(fn):
+    try:
+        fp = get_safe_path(MEDIA_DIR, fn)
+        meta = read_metadata(fp) if fp else None
+        return meta.get("tags", []) if meta else []
+    except Exception:
+        return []
+
+
+def _img_prog(stage, done, total, phase=None):
+    ph = f" {phase}" if phase else ""
+    state["status_text"] = f"[{stage}{ph}] {done}/{total}"
+
+
+def _img_stop():
+    return bool(state.get("discover_cancel"))
+
+
+@app.route("/api/img_depth", methods=["POST"])
+def img_depth():
+    """STEP 1 — generate depth maps for the whole library (resumable). Thin
+    wrapper over the object pipeline's depth stage so both layers share one
+    cached depth map per image."""
+    file_list = _eligible_files()
+    if not file_list:
+        return jsonify({"success": False, "error": "No eligible images found."})
+    depth_model = (state.get("depth_model") or "").strip() or None
+    state["discover_cancel"] = False
+    db = _db()
+    sig = ds.run_sig(file_list)
+    try:
+        ok = ds.stage_depth(db, sig, file_list, _img_loader,
+                            depth_model=depth_model, skip=set(),
+                            progress=_img_prog, should_stop=_img_stop)
+    except Exception as e:
+        access_logger.exception("img_depth failed")
+        return jsonify({"success": False, "error": str(e)})
+    done, total = ds.stage_status(db, sig, "depth", len(file_list))
+    state["status_text"] = "Depth maps complete."
+    return jsonify({"success": bool(ok), "run_sig": sig,
+                    "depth": {"done": done, "total": total}})
+
+
+@app.route("/api/img_embed", methods=["POST"])
+def img_embed():
+    """STEP 2 — one whole-image embedding per image, stored permanently in
+    image_embeddings (resumable; powers clustering AND search). Body: {force?}"""
+    body = request.json or {}
+    force = bool(body.get("force"))
+    file_list = _eligible_files()
+    if not file_list:
+        return jsonify({"success": False, "error": "No eligible images found."})
+    cnn_model = (state.get("grouping_cnn") or "").strip() or None
+    state["discover_cancel"] = False
+    db = _db()
+    try:
+        n = ii.stage_embeddings(db, file_list, _img_loader, cnn_model=cnn_model,
+                                mtime_of=_img_mtime, force=force,
+                                progress=_img_prog, should_stop=_img_stop)
+    except Exception as e:
+        access_logger.exception("img_embed failed")
+        return jsonify({"success": False, "error": str(e)})
+    total = ii.embedding_count(db)
+    state["status_text"] = f"Image embeddings complete — {total} stored."
+    return jsonify({"success": True, "embedded_now": n, "total_embeddings": total})
+
+
+@app.route("/api/img_cluster", methods=["POST"])
+def img_cluster():
+    """STEP 3 — cluster the stored image embeddings (memory-flat). Body:
+    {eps?, min_cluster?}. Writes image_clusters."""
+    body = request.json or {}
+    eps = float(body.get("eps", 0.16))
+    min_cluster = int(body.get("min_cluster", 2))
+    db = _db()
+    if ii.embedding_count(db) == 0:
+        return jsonify({"success": False,
+                        "error": "No image embeddings yet — run step 2 first."})
+    state["discover_cancel"] = False
+    try:
+        n = ii.stage_cluster_images(db, eps=eps, min_cluster=min_cluster,
+                                    progress=_img_prog)
+    except Exception as e:
+        access_logger.exception("img_cluster failed")
+        return jsonify({"success": False, "error": str(e)})
+    state["status_text"] = f"Image clustering complete — {n} clusters."
+    return jsonify({"success": True, "clusters": n,
+                    "embeddings": ii.embedding_count(db)})
+
+
+@app.route("/api/img_heuristics", methods=["POST"])
+def img_heuristics():
+    """STEP 4 — build each cluster's concept map (centroid + tolerance + a
+    suggested tag). The inverse of dup-heuristics: it ignores minor differences
+    and characterises what members share, so outliers stand out. Writes
+    image_cluster_meta and backfills per-image distance-to-centroid."""
+    db = _db()
+    if ii.cluster_count(db) == 0:
+        return jsonify({"success": False,
+                        "error": "No image clusters yet — run step 3 first."})
+    state["discover_cancel"] = False
+    try:
+        summaries = ii.stage_build_heuristics(db, tag_of=_img_tags,
+                                              progress=_img_prog)
+    except Exception as e:
+        access_logger.exception("img_heuristics failed")
+        return jsonify({"success": False, "error": str(e)})
+    state["status_text"] = f"Cluster heuristics built — {len(summaries)} clusters."
+    return jsonify({"success": True, "clusters": summaries[:300],
+                    "n_clusters": len(summaries)})
+
+
+@app.route("/api/img_detect", methods=["POST"])
+def img_detect():
+    """STEP 5 — object detection/clustering scoped PER IMAGE-CLUSTER so the
+    object-level ANN index never spans the whole library at once (the memory fix).
+    For each image cluster we run the existing boxes+cluster stages over just that
+    cluster's images. If heuristics exist, each image's distance-to-centroid is
+    used to process tighter (in-concept) members first. Body:
+      {cluster?: int  — limit to one cluster; default: every cluster}
+       max_regions?, eps?, min_cluster?}"""
+    body = request.json or {}
+    only = body.get("cluster")
+    max_regions = int(body.get("max_regions", 15))
+    eps = float(body.get("eps", 0.18))
+    min_cluster = int(body.get("min_cluster", 2))
+    db = _db()
+    if ii.cluster_count(db) == 0:
+        return jsonify({"success": False,
+                        "error": "No image clusters yet — run step 3 first."})
+
+    # gather cluster -> member images (ordered by tightness when available)
+    if only is not None:
+        rows = db.execute(
+            "SELECT rel_path, label FROM image_clusters "
+            "WHERE label=? ORDER BY COALESCE(dist,1e9)", (int(only),)).fetchall()
+        labels = [int(only)]
+    else:
+        rows = db.execute(
+            "SELECT rel_path, label FROM image_clusters WHERE label>=0 "
+            "ORDER BY label, COALESCE(dist,1e9)").fetchall()
+        labels = sorted({int(r["label"]) for r in rows})
+    members = {}
+    for r in rows:
+        members.setdefault(int(r["label"]), []).append(r["rel_path"])
+    if not members:
+        return jsonify({"success": False, "error": "No clustered images to scan."})
+
+    depth_model = (state.get("depth_model") or "").strip() or None
+    cnn_model = (state.get("grouping_cnn") or "").strip() or None
+    state["discover_cancel"] = False
+
+    per_cluster = []
+    total_objs = 0
+    try:
+        for li, lab in enumerate(labels):
+            if _img_stop():
+                break
+            flist = sorted(members.get(lab, []))
+            if len(flist) < 1:
+                continue
+            sig = ds.run_sig(flist)        # per-cluster run signature
+            state["status_text"] = (f"[detect] cluster {li+1}/{len(labels)} "
+                                    f"({len(flist)} imgs)")
+            # boxes + cluster only within this image-cluster -> bounded memory
+            ds.stage_depth(db, sig, flist, _img_loader, depth_model=depth_model,
+                           skip=set(), progress=_img_prog, should_stop=_img_stop)
+            ds.stage_boxes(db, sig, flist, _img_loader, tag_fn=_img_tags,
+                           cnn_model=cnn_model, max_regions=max_regions,
+                           skip=set(), progress=_img_prog, should_stop=_img_stop)
+            ds.stage_cluster(db, sig, eps=eps, min_cluster=min_cluster,
+                             progress=_img_prog)
+            summary = ds.stage_assign(db, sig, progress=_img_prog)
+            n_obj, _dim = ds.count_objects(db, sig)
+            total_objs += n_obj
+            per_cluster.append({"cluster": lab, "run_sig": sig,
+                               "images": len(flist),
+                               "objects": n_obj,
+                               "object_clusters": summary[:50] if summary else []})
+    except Exception as e:
+        access_logger.exception("img_detect failed")
+        return jsonify({"success": False, "error": str(e)})
+
+    state["status_text"] = "Object detection complete (per image-cluster)."
+    return jsonify({"success": True, "scanned_clusters": len(per_cluster),
+                    "total_objects": total_objs,
+                    "results": per_cluster})
+
+
+@app.route("/api/img_search", methods=["POST"])
+def img_search():
+    """Search/browse the library via the persisted image embeddings. Returns
+    full gallery entries (renderable in the main grid) plus per-result scores.
+
+    Body (one of):
+      query_image: rel_path  — images visually similar to this one
+      cluster:     int       — members of a cluster, tightest (most typical) first
+      outliers:    int       — members of a cluster ordered LEAST typical first
+                               (largest distance-to-centroid = candidate outliers)
+      top_k?                 — max results (default 120)
+    """
+    body = request.json or {}
+    top_k = int(body.get("top_k", 120))
+    db = _db()
+    if ii.embedding_count(db) == 0:
+        return jsonify({"success": False,
+                        "error": "No image embeddings — run step 2 first."})
+
+    # cluster members (tightest first) or outliers (loosest first)
+    cl = body.get("cluster")
+    ol = body.get("outliers")
+    if cl is not None or ol is not None:
+        lab = int(cl if cl is not None else ol)
+        order = "DESC" if ol is not None else "ASC"
+        rows = db.execute(
+            f"SELECT rel_path, dist FROM image_clusters WHERE label=? "
+            f"ORDER BY COALESCE(dist, {'-1' if ol is not None else '1e9'}) {order} "
+            f"LIMIT ?", (lab, top_k)).fetchall()
+        names = [r["rel_path"] for r in rows]
+        dist = {r["rel_path"]: r["dist"] for r in rows}
+        entries = _entries_for_files(names)
+        for e in entries:
+            e["dist"] = dist.get(e["filename"])
+        return jsonify({"success": True, "mode": "outliers" if ol is not None else "cluster",
+                        "label": lab, "count": len(entries), "files": entries})
+
+    qi = body.get("query_image")
+    if not qi:
+        return jsonify({"success": False,
+                        "error": "Provide query_image, cluster, or outliers."})
+    img = _img_loader(qi)
+    if img is None:
+        return jsonify({"success": False, "error": "Query image not found."})
+    cnn_model = (state.get("grouping_cnn") or "").strip() or None
+    hits = ii.search_by_image(db, img, cnn_model=cnn_model, top_k=top_k)
+    score = {n: s for n, s in hits}
+    entries = _entries_for_files([n for n, _ in hits])
+    for e in entries:
+        e["score"] = score.get(e["filename"])
+    return jsonify({"success": True, "mode": "similar", "query": qi,
+                    "count": len(entries), "files": entries})
+
+
+@app.route("/api/img_status", methods=["GET"])
+def img_status():
+    """Progress snapshot for the five image-pipeline steps, for the UI."""
+    db = _db()
+    file_list = _eligible_files()
+    sig = ds.run_sig(file_list) if file_list else ""
+    d_done, d_total = (ds.stage_status(db, sig, "depth", len(file_list))
+                       if file_list else (0, 0))
+    return jsonify({"success": True,
+                    "eligible": len(file_list),
+                    "depth": {"done": d_done, "total": d_total},
+                    "embeddings": ii.embedding_count(db),
+                    "clusters": ii.cluster_count(db),
+                    "heuristics": db.execute(
+                        "SELECT COUNT(*) FROM image_cluster_meta").fetchone()[0]
+                        if _table_exists(db, "image_cluster_meta") else 0})
+
+
+def _entries_for_files(rel_paths):
+    """Build gallery entries (same shape as /api/list) for an explicit, ordered
+    list of rel_paths — used to render image-pipeline search/cluster results in
+    the main gallery. Preserves the given order and silently drops missing rows."""
+    if not rel_paths:
+        return []
+    rows = {}
+    CH = 400
+    for i in range(0, len(rel_paths), CH):
+        chunk = rel_paths[i:i + CH]
+        q = ("SELECT rel_path, tags, description, width, height, iqa_score "
+             "FROM files WHERE rel_path IN (%s)" % ",".join("?" * len(chunk)))
+        for r in _db().execute(q, chunk).fetchall():
+            rows[r["rel_path"]] = r
+    out = []
+    for rp in rel_paths:
+        r = rows.get(rp)
+        if not r:
+            continue
+        out.append({"kind": "image", "filename": r["rel_path"],
+                    "tags": json.loads(r["tags"] or "[]"),
+                    "description": r["description"] or "",
+                    "iqa_score": r["iqa_score"],
+                    "width": r["width"] or 0, "height": r["height"] or 0})
+    return out
+
+
+def _table_exists(db, name):
+    return db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (name,)).fetchone() is not None
+
+
+@app.route("/api/img_cancel", methods=["POST"])
+def img_cancel():
+    """Request cancellation of the currently-running pipeline/discovery step.
+    Long-running stages poll state['discover_cancel'] and stop at the next
+    checkpoint."""
+    state["discover_cancel"] = True
+    state["status_text"] = "Cancel requested — stopping at next checkpoint…"
+    return jsonify({"success": True})
 
 
 @app.route("/api/discover_objects_staged", methods=["POST"])

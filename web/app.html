@@ -9,17 +9,23 @@
 
 <!-- Left -->
 <div class="flex flex-col h-full rpane bg-gray-900 border-r border-gray-700 z-10"
-     style="width:25%;min-width:240px;max-width:55vw;padding-bottom:20px">
+     style="width:32%;min-width:300px;max-width:60vw;padding-bottom:20px">
 
   <div class="p-4 bg-gray-800 border-b border-gray-700 flex justify-between items-center flex-shrink-0">
     <h1 class="text-xl font-bold text-blue-400">Media Library</h1>
-    <div class="flex gap-3 items-center">
+    <div class="flex gap-2 items-center flex-wrap">
       <button id="btn_dedup" onclick="runDedup(false)"
-        class="text-xs bg-indigo-600 hover:bg-indigo-500 font-bold px-3 py-1.5 rounded">🔍 Duplicates</button>
+        class="text-xs bg-indigo-600 hover:bg-indigo-500 font-bold px-2 py-1.5 rounded">Dupes</button>
       <button id="btn_review" onclick="openReview()"
-        class="text-xs bg-rose-700 hover:bg-rose-600 font-bold px-3 py-1.5 rounded">🚩 Review AI<span id="review_badge" class="hidden ml-1 bg-rose-900 px-1.5 rounded-full"></span></button>
+        class="text-xs bg-rose-700 hover:bg-rose-600 font-bold px-2 py-1.5 rounded">Review<span id="review_badge" class="hidden ml-1 bg-rose-900 px-1.5 rounded-full"></span></button>
       <button id="btn_discover" onclick="discoverObjects()" title="Scan the whole library for untrained objects (depth + heuristics) and group similar ones for bulk tagging"
-        class="text-xs bg-indigo-700 hover:bg-indigo-600 font-bold px-3 py-1.5 rounded">🧩 Discover Objects</button>
+        class="text-xs bg-indigo-700 hover:bg-indigo-600 font-bold px-2 py-1.5 rounded">Discover</button>
+      <button id="btn_pipeline" onclick="openPipeline()" title="Image-level pipeline: depth → embeddings → cluster → heuristics → detect (low memory, resumable)"
+        class="text-xs bg-purple-700 hover:bg-purple-600 font-bold px-2 py-1.5 rounded">Pipeline</button>
+      <button id="btn_scan_folder" onclick="iqaScan('folder')" title="Score image quality (NR-IQA / BRISQUE) for the current folder"
+        class="text-xs bg-emerald-700 hover:bg-emerald-600 font-bold px-2 py-1.5 rounded">Scan folder</button>
+      <button id="btn_scan_lib" onclick="iqaScan('library')" title="Score image quality (NR-IQA / BRISQUE) for the whole library"
+        class="text-xs bg-emerald-800 hover:bg-emerald-700 font-bold px-2 py-1.5 rounded">Scan library</button>
       <span id="dedup_cache_badge" class="hidden text-[10px] text-gray-500 italic"></span>
       <span id="file_count" class="text-sm text-gray-400">—</span>
     </div>
@@ -83,6 +89,11 @@
     <span class="ml-auto" id="showing_info"></span>
   </div>
 
+  <div id="filter_banner" class="hidden items-center gap-2 mx-4 mb-2 px-3 py-1.5 rounded bg-purple-900/50 border border-purple-700 text-xs text-purple-200">
+    <span id="filter_banner_text"></span>
+    <button onclick="clearImageFilter()" class="ml-auto bg-purple-700 hover:bg-purple-600 px-2 py-0.5 rounded text-white">Clear ✕</button>
+  </div>
+
   <div class="flex-1 overflow-y-auto px-4 pb-2" id="gallery_scroll">
     <div id="gallery_grid" class="masonry"></div>
   </div>
@@ -123,6 +134,8 @@
       <div class="flex justify-between items-center gap-2">
         <span class="text-sm font-bold text-gray-300">Editor</span>
         <div class="flex items-center gap-1">
+          <button onclick="findSimilarToCurrent()" title="Find visually similar images (needs embeddings — run pipeline step 2)"
+            class="text-[10px] bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded text-white uppercase font-bold">Similar</button>
           <button onclick="moveCurrentFile()"
             class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded uppercase font-bold">Move</button>
           <button onclick="confirmAllRegions()" title="Confirm every unconfirmed box"
@@ -145,9 +158,35 @@
         class="hidden max-h-48 overflow-y-auto bg-gray-900 border border-gray-700 rounded p-1 space-y-0.5"></div>
 
       <div>
-        <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Tags</label>
-        <input id="meta_tags" type="text" oninput="triggerAutosave()"
-          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
+        <div class="flex justify-between items-center mb-1">
+          <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Quality</label>
+          <span id="iqa_manual_badge" class="hidden text-[9px] text-amber-400 uppercase font-bold">manual</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <div id="meta_stars" class="flex items-center gap-0.5 text-xl leading-none select-none"></div>
+          <button onclick="clearStars()" title="Clear rating"
+            class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-gray-300">Clear</button>
+          <span id="iqa_brisque_hint" class="text-[10px] text-gray-500"></span>
+        </div>
+      </div>
+
+      <div>
+        <div class="flex justify-between items-center mb-1">
+          <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Tags</label>
+          <span id="tag_count" class="text-[10px] text-gray-500"></span>
+        </div>
+        <div id="tag_list"
+          class="max-h-40 overflow-y-auto bg-gray-900 border border-gray-600 rounded p-1 flex flex-col gap-0.5"></div>
+        <div class="flex gap-1 mt-1">
+          <input id="tag_add_input" type="text" placeholder="Add tag(s), comma-separated, then Enter"
+            class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600 text-xs text-white focus:border-blue-500"
+            onkeydown="if(event.key==='Enter'){event.preventDefault();addTagsFromInput();}">
+          <button onclick="addTagsFromInput()"
+            class="text-xs bg-blue-600 hover:bg-blue-500 px-3 rounded font-bold">Add</button>
+        </div>
+        <!-- hidden mirror: kept in sync with the tag list so legacy code paths
+             (AI tagging, autosave) can read/write a comma string unchanged. -->
+        <input id="meta_tags" type="hidden">
       </div>
 
       <div>
@@ -407,6 +446,101 @@
           <button onclick="reviewOpenEditor()" class="bg-indigo-700 hover:bg-indigo-600 px-3 py-1 rounded">Open in editor</button>
         </div>
       </div>
+  </div>
+</div>
+
+<div id="pipeline_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
+  <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
+    <span class="text-purple-300 font-bold">Image pipeline</span>
+    <span id="pipeline_eligible" class="text-xs text-gray-400"></span>
+    <div class="ml-auto flex gap-2 items-center">
+      <button onclick="refreshPipelineStatus()" class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded">Refresh</button>
+      <button onclick="cancelPipeline()" class="text-xs bg-rose-800 hover:bg-rose-700 px-3 py-1 rounded">Cancel run</button>
+      <button onclick="closePipeline()" class="text-gray-400 hover:text-white text-lg leading-none">✕</button>
+    </div>
+  </div>
+
+  <div class="flex-1 overflow-y-auto p-4 space-y-3 max-w-3xl mx-auto w-full">
+    <p class="text-[11px] text-gray-500">
+      Each step is manual and resumable, and reads the previous step's saved output.
+      Run them in order. Clustering works on one embedding per image, so it uses far
+      less memory than whole-library object clustering.
+    </p>
+
+    <!-- step 1 -->
+    <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
+      <div class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">1</div>
+      <div class="flex-1">
+        <div class="text-sm font-bold text-gray-200">Generate depth maps</div>
+        <div class="text-[11px] text-gray-500">Depth-Anything per image (cached, shared with object discovery).</div>
+        <div id="pl_depth_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
+      </div>
+      <button id="pl_btn_depth" onclick="plRun('depth')"
+        class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
+    </div>
+
+    <!-- step 2 -->
+    <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
+      <div class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">2</div>
+      <div class="flex-1">
+        <div class="text-sm font-bold text-gray-200">Generate embeddings</div>
+        <div class="text-[11px] text-gray-500">One whole-image embedding each. Stored permanently; also powers search.</div>
+        <div id="pl_embed_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
+      </div>
+      <label class="text-[10px] text-gray-400 flex items-center gap-1"><input id="pl_embed_force" type="checkbox"> force</label>
+      <button id="pl_btn_embed" onclick="plRun('embed')"
+        class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
+    </div>
+
+    <!-- step 3 -->
+    <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
+      <div class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">3</div>
+      <div class="flex-1">
+        <div class="text-sm font-bold text-gray-200">Cluster images</div>
+        <div class="text-[11px] text-gray-500">Group visually-similar images (memory-flat).</div>
+        <div id="pl_cluster_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
+        <div class="flex gap-3 mt-1 text-[10px] text-gray-400">
+          <label class="flex items-center gap-1">eps
+            <input id="pl_eps" type="number" step="0.02" min="0.06" max="0.4" value="0.16"
+              class="w-16 bg-gray-700 rounded px-1 py-0.5 border border-gray-600 text-white"></label>
+          <label class="flex items-center gap-1">min size
+            <input id="pl_min" type="number" min="2" max="50" value="2"
+              class="w-14 bg-gray-700 rounded px-1 py-0.5 border border-gray-600 text-white"></label>
+        </div>
+      </div>
+      <button id="pl_btn_cluster" onclick="plRun('cluster')"
+        class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
+    </div>
+
+    <!-- step 4 -->
+    <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
+      <div class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">4</div>
+      <div class="flex-1">
+        <div class="text-sm font-bold text-gray-200">Build heuristics</div>
+        <div class="text-[11px] text-gray-500">Per-cluster concept map: ignores minor differences, surfaces outliers.</div>
+        <div id="pl_heur_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
+      </div>
+      <button id="pl_btn_heur" onclick="plRun('heuristics')"
+        class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
+    </div>
+
+    <!-- step 5 -->
+    <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
+      <div class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">5</div>
+      <div class="flex-1">
+        <div class="text-sm font-bold text-gray-200">Detect objects</div>
+        <div class="text-[11px] text-gray-500">Object detection scoped per image-cluster — bounded memory, uses the concept maps.</div>
+        <div id="pl_detect_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
+      </div>
+      <button id="pl_btn_detect" onclick="plRun('detect')"
+        class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
+    </div>
+
+    <div id="pl_clusters" class="mt-2"></div>
+  </div>
+
+  <div class="px-4 py-2 bg-gray-800 border-t border-gray-700 flex-shrink-0 text-[11px] text-gray-400">
+    <span id="pl_running" class="text-purple-300"></span>
   </div>
 </div>
 

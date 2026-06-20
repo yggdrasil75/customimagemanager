@@ -4,7 +4,129 @@ let autosaveTO=null, drawing=false, startX=0,startY=0,curX=0,curY=0;
 let pendingBox=null, editingBoxIdx=null;
 let activeRegionIdx=-1, _suppressPaste=false, currentFlag=null, currentPose=null;
 let currentPage=0, totalFiles=0, currentSearch='', currentFolder='', allFolders=[];
+let imageFilter=null;  // active pipeline result set shown in the grid, or null
+let currentTags=[], currentIqa=null, currentIqaManual=false;
 const PAGE=200;
+
+// ── NR-IQA stars ─────────────────────────────────────────────────────────────
+// Compact star badge shown on a gallery tile. score is 0..5 (halves) or null.
+function starBadge(score){
+  if(score===null||score===undefined) return '';
+  const full=Math.floor(score), half=(score-full)>=0.5;
+  let s='★'.repeat(full)+(half?'½':'');
+  if(!s) s='·';
+  return `<span class="iqa-stars" title="Quality: ${score}/5">${s}</span>`;
+}
+
+// Interactive 0..5 star control in the detail panel.
+function renderStars(){
+  const el=document.getElementById('meta_stars'); if(!el) return;
+  const score=currentIqa;
+  let html='';
+  for(let i=1;i<=5;i++){
+    const on=(score!==null&&score!==undefined&&score>=i-0.001);
+    const halfOn=(score!==null&&score!==undefined&&!on&&score>=i-0.5);
+    html+=`<span class="star ${on?'on':''}" data-v="${i}"
+              onclick="setStars(${i})" title="${i} star${i>1?'s':''}">${on?'★':(halfOn?'⯨':'☆')}</span>`;
+  }
+  el.innerHTML=html;
+  document.getElementById('iqa_manual_badge').classList.toggle('hidden',!currentIqaManual);
+  const hint=document.getElementById('iqa_brisque_hint');
+  if(hint) hint.textContent=(score===null||score===undefined)?'unscored':`${score}/5`;
+}
+async function setStars(v){
+  if(!currentFile) return;
+  currentIqa=v; currentIqaManual=true; renderStars();
+  await fetch('/api/iqa_set',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({filename:currentFile,stars:v})}).then(r=>r.json()).catch(()=>{});
+  updateTileStar(currentFile,v);
+}
+async function clearStars(){
+  if(!currentFile) return;
+  currentIqa=null; currentIqaManual=false; renderStars();
+  await fetch('/api/iqa_set',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({filename:currentFile,stars:null})}).then(r=>r.json()).catch(()=>{});
+  updateTileStar(currentFile,null);
+}
+function updateTileStar(fn,score){
+  const tile=document.getElementById('t_'+fn.replace(/[^a-zA-Z0-9]/g,'_'));
+  if(!tile) return;
+  tile.querySelector('.iqa-stars')?.remove();
+  if(score!==null&&score!==undefined){
+    const tmp=document.createElement('div'); tmp.innerHTML=starBadge(score);
+    const node=tmp.firstElementChild; if(node) tile.appendChild(node);
+  }
+}
+
+// ── Tags list box ────────────────────────────────────────────────────────────
+function syncTagMirror(){
+  const m=document.getElementById('meta_tags');
+  if(m) m.value=currentTags.join(', ');
+}
+function renderTags(){
+  const box=document.getElementById('tag_list'); if(!box) return;
+  if(!currentTags.length){
+    box.innerHTML='<div class="text-[11px] text-gray-600 italic px-1 py-0.5">No tags</div>';
+  }else{
+    box.innerHTML=currentTags.map((t,i)=>
+      `<div class="tag-row"><span class="tag-name" title="${_esc(t)}">${_esc(t)}</span>`+
+      `<span class="tag-x" onclick="removeTag(${i})" title="Remove">✕</span></div>`).join('');
+  }
+  const c=document.getElementById('tag_count');
+  if(c) c.textContent=currentTags.length?`${currentTags.length} tag${currentTags.length>1?'s':''}`:'';
+  syncTagMirror();
+}
+function setTags(arr){
+  const seen=new Set(); currentTags=[];
+  (arr||[]).forEach(t=>{t=(t||'').trim(); if(t&&!seen.has(t)){seen.add(t);currentTags.push(t);}});
+  renderTags();
+}
+function removeTag(i){
+  currentTags.splice(i,1); renderTags(); triggerAutosave();
+}
+function addTagsFromInput(){
+  const inp=document.getElementById('tag_add_input'); if(!inp) return;
+  const parts=inp.value.split(',').map(s=>s.trim()).filter(Boolean);
+  let added=false;
+  parts.forEach(t=>{ if(!currentTags.includes(t)){ currentTags.push(t); added=true; } });
+  inp.value='';
+  if(added){ renderTags(); triggerAutosave(); }
+}
+// Adopt whatever legacy code wrote into the hidden mirror (#meta_tags) back into
+// the list box. Call after AI/auto-tag flows that set meta_tags.value directly.
+function adoptMirrorTags(){
+  const m=document.getElementById('meta_tags');
+  if(!m) return;
+  setTags(m.value.split(',').map(s=>s.trim()).filter(Boolean));
+}
+
+// ── NR-IQA scan (folder / library) ───────────────────────────────────────────
+async function iqaScan(scope){
+  const ids=['btn_scan_folder','btn_scan_lib'];
+  const btns=ids.map(i=>document.getElementById(i));
+  const body=(scope==='folder' && currentFolder)?{folder:currentFolder}:{};
+  if(scope==='folder' && !currentFolder){
+    if(!confirm('No folder is selected. Scan the whole library instead?')) return;
+  }
+  btns.forEach(b=>{if(b){b.disabled=true;}});
+  const tgt=document.getElementById(scope==='folder'?'btn_scan_folder':'btn_scan_lib');
+  const orig=tgt?tgt.innerHTML:''; if(tgt) tgt.innerHTML='Scanning…';
+  try{
+    const d=await fetch('/api/iqa_scan',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)}).then(r=>r.json());
+    if(!d.success){ alert('IQA scan failed: '+(d.error||'')); }
+    else{
+      const note=d.note?(' '+d.note):'';
+      document.getElementById('status_text').innerText=
+        `IQA: scored ${d.scored} of ${d.total}.${note}`;
+      loadGallery();   // refresh tiles to show new stars
+    }
+  }catch(e){ alert('Network error during IQA scan.'); }
+  finally{
+    btns.forEach(b=>{if(b){b.disabled=false;}});
+    if(tgt) tgt.innerHTML=orig;
+  }
+}
 
 async function loadFolders(){
   try{
@@ -24,6 +146,9 @@ async function loadFolders(){
 }
 function onFolderChange(){
   currentFolder=document.getElementById('folder_select').value;
+  imageFilter=null;
+  document.getElementById('filter_banner').classList.add('hidden');
+  document.getElementById('filter_banner').classList.remove('flex');
   currentPage=0; loadGallery();
 }
 
@@ -84,15 +209,54 @@ setInterval(fetchState,2500); fetchState();
 let searchDebounce=null;
 document.getElementById('search_input').addEventListener('input',e=>{
   clearTimeout(searchDebounce);
-  searchDebounce=setTimeout(()=>{ currentSearch=e.target.value.trim(); currentPage=0; loadGallery(); },300);
+  searchDebounce=setTimeout(()=>{
+    currentSearch=e.target.value.trim(); currentPage=0;
+    if(imageFilter){ imageFilter=null;
+      document.getElementById('filter_banner').classList.add('hidden');
+      document.getElementById('filter_banner').classList.remove('flex'); }
+    loadGallery();
+  },300);
 });
 
+
 async function loadGallery(){
+  if(imageFilter){ renderImageFilter(); return; }
   const params=new URLSearchParams({page:currentPage,q:currentSearch,folder:currentFolder});
   const data=await fetch('/api/list?'+params).then(r=>r.json());
   totalFiles=data.total;
   renderGallery(data.files);
   updatePager();
+}
+
+// Render a fixed result set (cluster members / similar / outliers) in the grid.
+function renderImageFilter(){
+  const f=imageFilter; if(!f) return;
+  document.getElementById('filter_banner').classList.remove('hidden');
+  document.getElementById('filter_banner').classList.add('flex');
+  document.getElementById('filter_banner_text').textContent=f.text;
+  renderGallery(f.files);
+  document.getElementById('showing_info').innerText=`${f.files.length} result(s)`;
+  document.getElementById('page_info').innerText='Filtered';
+  document.getElementById('btn_prev').disabled=true;
+  document.getElementById('btn_next').disabled=true;
+  document.getElementById('gallery_scroll').scrollTop=0;
+}
+function clearImageFilter(){
+  imageFilter=null;
+  document.getElementById('filter_banner').classList.add('hidden');
+  document.getElementById('filter_banner').classList.remove('flex');
+  loadGallery();
+}
+// Fetch a pipeline result set and show it in the gallery.
+async function showImageFilter(body, text){
+  try{
+    const d=await fetch('/api/img_search',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)}).then(r=>r.json());
+    if(!d.success){ alert('Search failed: '+(d.error||'')); return; }
+    imageFilter={text:`${text} — ${d.count} image(s)`, files:d.files||[]};
+    closePipeline();
+    renderImageFilter();
+  }catch(e){ alert('Network error during search.'); }
 }
 
 function renderGallery(files){
@@ -131,6 +295,7 @@ function renderGallery(files){
     div.innerHTML=`<div class="skeleton"></div>
       <img alt="">
       ${item.tags.length?`<span class="tag-badge">${item.tags.length}</span>`:''}
+      ${starBadge(item.iqa_score)}
       <span class="label">${f.split('/').pop()}</span>
       <span class="sel-check hidden absolute top-1 left-1 w-4 h-4 rounded-full bg-blue-500 border-2 border-white flex items-center justify-center text-[8px] font-bold text-white">✓</span>`;
     grid.appendChild(div);
@@ -239,8 +404,12 @@ async function selectFile(fn){
   const d=await fetch('/api/metadata',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({action:'read',filename:fn})}).then(r=>r.json());
   if(d.success){
-    document.getElementById('meta_tags').value=d.metadata.tags.join(', ');
+    setTags(d.metadata.tags||[]);
     document.getElementById('meta_desc').value=d.metadata.description;
+    currentIqa=(d.metadata.iqa_score===undefined?null:d.metadata.iqa_score);
+    currentIqaManual=!!d.metadata.iqa_manual;
+    renderStars();
+    const ti=document.getElementById('tag_add_input'); if(ti) ti.value='';
     currentRegions=d.metadata.regions||[];
     currentAnalysis=d.metadata.analysis||null;
     currentFlag=d.metadata.flag||null;
@@ -262,7 +431,7 @@ function triggerAutosave(){
 }
 async function saveMetadata(){
   if(!currentFile) return;
-  const tags=document.getElementById('meta_tags').value.split(',').map(s=>s.trim()).filter(Boolean);
+  const tags=currentTags.slice();
   const desc=document.getElementById('meta_desc').value;
   const r=await fetch('/api/metadata',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({action:'write',filename:currentFile,tags,description:desc,regions:currentRegions})
@@ -315,7 +484,7 @@ async function applyBulkTag(){
       const meta = await fetch('/api/metadata',{method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({action:'read',filename:currentFile})}).then(r=>r.json());
-      if(meta.success) document.getElementById('meta_tags').value=meta.metadata.tags.join(', ');
+      if(meta.success) setTags(meta.metadata.tags||[]);
     }
     loadGallery();
   } else {
@@ -1112,9 +1281,8 @@ async function runLLM(){
       }
       else if(d.target==='regions'){ currentRegions=currentRegions.concat(d.regions); drawCanvas(); triggerAutosave(); }
       else if(d.target==='tags'){
-        const tb=document.getElementById('meta_tags');
-        const cur=tb.value.split(',').map(s=>s.trim()).filter(Boolean);
-        d.tags.forEach(t=>{if(!cur.includes(t))cur.push(t);}); tb.value=cur.join(', '); triggerAutosave();
+        d.tags.forEach(t=>{if(!currentTags.includes(t))currentTags.push(t);});
+        renderTags(); triggerAutosave();
       } else {
         const db=document.getElementById('meta_desc');
         if(db.value.trim()) db.value+='\n\n'; db.value+=d.description; triggerAutosave();
@@ -1147,7 +1315,7 @@ async function runPipeline(){
     const d=await fetch('/api/run_pipeline',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({filename:currentFile})}).then(r=>r.json());
     if(d.success){
-      document.getElementById('meta_tags').value=(d.tags||[]).join(', ');
+      setTags(d.tags||[]);
       document.getElementById('meta_desc').value=d.description||'';
       currentRegions=d.regions||[];
       currentAnalysis=d.analysis||null;
@@ -1480,6 +1648,124 @@ async function discoverApply(){
 }
 
 function closeDiscover(){ document.getElementById('discover_modal').classList.add('hidden'); }
+
+// ── Image pipeline (5 manual steps) ──────────────────────────────────────────
+const PL_ENDPOINT={depth:'/api/img_depth',embed:'/api/img_embed',
+  cluster:'/api/img_cluster',heuristics:'/api/img_heuristics',detect:'/api/img_detect'};
+let plBusy=false;
+
+function openPipeline(){
+  document.getElementById('pipeline_modal').classList.remove('hidden');
+  refreshPipelineStatus();
+}
+function closePipeline(){ document.getElementById('pipeline_modal').classList.add('hidden'); }
+
+async function refreshPipelineStatus(){
+  try{
+    const d=await fetch('/api/img_status').then(r=>r.json());
+    if(!d.success) return;
+    document.getElementById('pipeline_eligible').textContent=`${d.eligible} eligible images`;
+    const dp=d.depth||{done:0,total:0};
+    document.getElementById('pl_depth_stat').textContent=`depth: ${dp.done}/${dp.total} chunks done`;
+    document.getElementById('pl_embed_stat').textContent=`embeddings stored: ${d.embeddings}`;
+    document.getElementById('pl_cluster_stat').textContent=`clusters: ${d.clusters}`;
+    document.getElementById('pl_heur_stat').textContent=`concept maps: ${d.heuristics}`;
+  }catch(e){/* ignore */}
+}
+
+async function plRun(step){
+  if(plBusy){ alert('A pipeline step is already running.'); return; }
+  const btn=document.getElementById('pl_btn_'+({depth:'depth',embed:'embed',
+    cluster:'cluster',heuristics:'heur',detect:'detect'})[step]);
+  const body={};
+  if(step==='embed') body.force=document.getElementById('pl_embed_force').checked;
+  if(step==='cluster'){
+    body.eps=parseFloat(document.getElementById('pl_eps').value)||0.16;
+    body.min_cluster=parseInt(document.getElementById('pl_min').value)||2;
+  }
+  plBusy=true;
+  const orig=btn?btn.innerHTML:''; if(btn){btn.disabled=true;btn.innerHTML='…';}
+  document.getElementById('pl_running').textContent=`Running ${step}…`;
+  // poll status while it runs
+  const poll=setInterval(()=>{
+    fetch('/api/state').then(r=>r.json()).then(s=>{
+      if(s&&s.status_text) document.getElementById('pl_running').textContent=s.status_text;
+    }).catch(()=>{});
+  },1200);
+  try{
+    const d=await fetch(PL_ENDPOINT[step],{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+    if(!d.success){ alert(`${step} failed: `+(d.error||'')); }
+    else{
+      if(step==='heuristics'||step==='detect') renderPlClusters(step,d);
+      document.getElementById('pl_running').textContent=`${step} complete.`;
+    }
+  }catch(e){ alert('Network error during '+step); }
+  finally{
+    clearInterval(poll); plBusy=false;
+    if(btn){btn.disabled=false;btn.innerHTML=orig;}
+    refreshPipelineStatus();
+    if(step==='detect') loadGallery();
+  }
+}
+
+function cancelPipeline(){
+  fetch('/api/img_cancel',{method:'POST'}).catch(()=>{});
+  document.getElementById('pl_running').textContent='Cancel requested…';
+}
+
+function renderPlClusters(step,d){
+  const box=document.getElementById('pl_clusters');
+  const list=(step==='heuristics')?(d.clusters||[]):(d.results||[]);
+  if(!list.length){ box.innerHTML=''; return; }
+  let rows;
+  if(step==='heuristics'){
+    rows=list.map(c=>`<tr class="border-t border-gray-700">
+      <td class="px-2 py-1">${c.cluster}</td><td class="px-2 py-1">${c.size}</td>
+      <td class="px-2 py-1 text-gray-300">${_esc(c.suggested||'')}</td>
+      <td class="px-2 py-1 text-gray-500">${c.radius}±${c.spread}</td>
+      <td class="px-2 py-1 flex gap-1">
+        <button class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded"
+          onclick="plViewCluster(${c.cluster})">view</button>
+        <button class="text-[10px] bg-amber-800 hover:bg-amber-700 px-2 py-0.5 rounded"
+          onclick="plViewOutliers(${c.cluster})" title="Members least typical of this cluster">outliers</button>
+      </td></tr>`).join('');
+    box.innerHTML=`<div class="text-xs text-gray-400 mb-1">${list.length} cluster concept maps</div>
+      <table class="w-full text-xs"><thead class="text-gray-500"><tr>
+      <th class="px-2 py-1 text-left">#</th><th class="px-2 py-1 text-left">size</th>
+      <th class="px-2 py-1 text-left">suggested</th><th class="px-2 py-1 text-left">radius±spread</th>
+      <th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  }else{
+    rows=list.map(c=>`<tr class="border-t border-gray-700">
+      <td class="px-2 py-1">${c.cluster}</td><td class="px-2 py-1">${c.images}</td>
+      <td class="px-2 py-1">${c.objects}</td>
+      <td class="px-2 py-1 text-gray-400">${(c.object_clusters||[]).length} object groups</td>
+      <td class="px-2 py-1"><button class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded"
+        onclick="plViewCluster(${c.cluster})">view</button></td></tr>`).join('');
+    box.innerHTML=`<div class="text-xs text-gray-400 mb-1">Detected objects across ${list.length} image-clusters
+      (${d.total_objects} objects total)</div>
+      <table class="w-full text-xs"><thead class="text-gray-500"><tr>
+      <th class="px-2 py-1 text-left">cluster</th><th class="px-2 py-1 text-left">images</th>
+      <th class="px-2 py-1 text-left">objects</th><th class="px-2 py-1 text-left">groups</th>
+      <th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+}
+
+// Find visually-similar images to the currently-open one (uses stored embeddings).
+function findSimilarToCurrent(){
+  if(!currentFile){ return; }
+  showImageFilter({query_image:currentFile,top_k:120},
+    `Similar to ${currentFile.split('/').pop()}`);
+}
+
+// Show a cluster's member images in the main gallery (tightest first).
+function plViewCluster(label){
+  showImageFilter({cluster:label,top_k:300}, `Cluster ${label} · most typical first`);
+}
+// Show a cluster's least-typical members (outlier candidates) first.
+function plViewOutliers(label){
+  showImageFilter({outliers:label,top_k:300}, `Cluster ${label} · outliers first`);
+}
 
 async function comicPipeline(){
   if(!comicState.pages.length) return;
