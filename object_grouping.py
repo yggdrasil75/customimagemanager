@@ -56,9 +56,37 @@ _CNN = {"loaded": False, "model": None, "path": None, "dim": 0}
 
 # ── tunables ──────────────────────────────────────────────────────────────────
 MIN_IMAGE_PX = 256          # skip images whose short side is below this
+MAX_IMAGE_PX = 2048         # HARD cap on the LONG side; downscale before anything
+                            # else. A full-res decode of a few 20k–40k px images,
+                            # held across decode_workers + a gpu_batch, was the
+                            # real OOM (tens of GB per image). Proposals run at
+                            # _WORK=384 and CNN crops at 224, so nothing downstream
+                            # benefits from more than ~2k px. This bounds per-image
+                            # RAM to a few MB regardless of source resolution.
 MIN_BOX_PX = 32             # drop proposal boxes below this on either side
 _WORK = 384                 # working resolution for depth / proposals
 _EMB_FALLBACK_DIM = 64      # cv2-feature embedding length
+
+
+def downscale_to_cap(img, max_px=MAX_IMAGE_PX):
+    """Downscale so the LONGEST side is <= max_px, preserving aspect ratio.
+    Returns the image unchanged if already within the cap. This is the single
+    most important memory guard in the scan: it must run on every image right
+    after decode, before depth/proposals/crops, so no full-resolution giant is
+    ever held in RAM or batched. Never raises; returns the input on any error."""
+    if img is None or not _HAVE_CV2:
+        return img
+    try:
+        h, w = img.shape[:2]
+        long_side = max(h, w)
+        if long_side <= max_px:
+            return img
+        scale = max_px / float(long_side)
+        nw = max(1, int(round(w * scale)))
+        nh = max(1, int(round(h * scale)))
+        return cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+    except Exception:
+        return img
 
 
 # ── torch probe ───────────────────────────────────────────────────────────────
@@ -204,6 +232,15 @@ def depth_map_batch(imgs_bgr, model_path=None):
             d = cv2.resize(arr, (w, h), interpolation=cv2.INTER_CUBIC)
             d = d - d.min()
             out.append((d / (float(d.max()) or 1.0)).astype(np.float32))
+        # Release torch/inp tensors and trim the CPU allocator. On a long CPU
+        # run, torch's caching allocator and malloc arenas otherwise keep every
+        # batch's activation buffers, pinning RSS near 100% even with no leak.
+        del pred, inp, pil
+        try:
+            import ctypes
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
         return out
     except Exception:
         # fall back per-image
@@ -432,6 +469,132 @@ def _finalise_labels(roots, min_cluster, n):
             remap[r] = nxt; nxt += 1
         out[i] = remap[r]
     return out
+
+
+def group_embeddings_streaming(batch_iter, total, dim, eps=0.18, min_cluster=2,
+                               ef=100, M=16, k=24, normalise=True,
+                               progress=None):
+    """Cluster the WHOLE library with bounded RAM by building one HNSW index
+    incrementally from streamed batches.
+
+    This exists because the dataset is too big to hold every embedding in a
+    Python array at once, but clustering must still be GLOBAL: a person's face in
+    image #50 and image #19,000 has to be able to land in the same cluster. A
+    per-batch clustering could never do that. So we keep the clustering global
+    (ONE index over every object) and make only the *feeding* of vectors
+    streaming — each batch is added to the index, then dropped before the next is
+    pulled.
+
+    Memory model:
+      * Python side holds at most ONE batch of rows at a time.
+      * hnswlib keeps its own C++ copy of the vectors + graph — that is the real
+        resident floor (~total * dim * 4 bytes for vectors, plus graph). There is
+        no way around storing the vectors *somewhere* to do global ANN; this puts
+        them in one compact C++ arena instead of millions of Python float objects
+        (the old JSON path) or a duplicated numpy copy.
+      * The neighbour/union-find pass re-streams the same batches a second time,
+        again one batch resident.
+
+    Args:
+      batch_iter: a callable returning a FRESH iterator each time it is called
+                  (it is called twice — once to add, once to query). Each
+                  iteration yields a contiguous float32 ndarray (rows, dim); the
+                  rows are assumed to be in a stable global order, with the i-th
+                  yielded row mapping to global index i.
+      total: total number of object rows that will be yielded (== index size).
+      dim: embedding dimension.
+      eps: cosine-distance threshold (0 = identical; smaller = stricter).
+      min_cluster: groups smaller than this become noise (-1).
+      progress: optional callable(done, total, phase) for UI status.
+
+    Returns a label array (total,), -1 == noise/ungrouped. Falls back to a single
+    empty result on hard failure. Never raises.
+    """
+    if total < min_cluster or dim <= 0:
+        return np.full(max(total, 0), -1, dtype=int)
+    try:
+        import hnswlib
+        import os
+        import gc
+    except Exception:
+        return np.full(total, -1, dtype=int)
+
+    nt = max(1, os.cpu_count() or 1)
+    index = None
+    try:
+        index = hnswlib.Index(space="cosine", dim=dim)
+        index.init_index(max_elements=total, ef_construction=ef, M=M)
+
+        # ── phase 1: ADD every vector, one batch resident at a time ───────────
+        added = 0
+        for batch in batch_iter():
+            if batch is None or len(batch) == 0:
+                continue
+            b = np.ascontiguousarray(batch, np.float32)
+            if normalise:
+                nrm = np.linalg.norm(b, axis=1, keepdims=True)
+                nrm[nrm == 0] = 1.0
+                b = b / nrm
+            ids = np.arange(added, added + len(b))
+            # hnswlib 'cosine' space normalises internally too, but doing it here
+            # keeps the query pass below consistent and cheap.
+            index.add_items(b, ids, num_threads=nt)
+            added += len(b)
+            if progress:
+                progress(added, total, "indexing")
+            del batch, b, ids
+        if added == 0:
+            return np.full(total, -1, dtype=int)
+        index.set_ef(max(ef // 2, k + 1))
+
+        # ── phase 2: QUERY + union-find, again one batch resident ─────────────
+        parent = np.arange(added)
+        def find(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]; a = parent[a]
+            return a
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb: parent[rb] = ra
+
+        kk = min(k, added)
+        base = 0
+        done = 0
+        for batch in batch_iter():
+            if batch is None or len(batch) == 0:
+                continue
+            b = np.ascontiguousarray(batch, np.float32)
+            if normalise:
+                nrm = np.linalg.norm(b, axis=1, keepdims=True)
+                nrm[nrm == 0] = 1.0
+                b = b / nrm
+            labels, dists = index.knn_query(b, k=kk, num_threads=nt)
+            for row_i in range(len(b)):
+                i = base + row_i
+                if i >= added:
+                    break
+                lr, dr = labels[row_i], dists[row_i]
+                for idx_j in range(kk):
+                    j = int(lr[idx_j])
+                    if j != i and dr[idx_j] <= eps:
+                        union(i, j)
+            base += len(b)
+            done += len(b)
+            if progress:
+                progress(done, total, "linking")
+            del batch, b, labels, dists
+        roots = np.fromiter((find(i) for i in range(added)), dtype=int, count=added)
+        return _finalise_labels(roots, min_cluster, added)
+    except Exception:
+        # never crash the app; an empty grouping is a safe degrade
+        return np.full(total, -1, dtype=int)
+    finally:
+        index = None
+        try:
+            import gc
+            gc.collect()
+        except Exception:
+            pass
 
 
 def _hnsw_group(X, eps, min_cluster, ef=100, M=16, k=24):

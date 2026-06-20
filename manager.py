@@ -31,6 +31,11 @@ from ultralytics import YOLO
 import imagecodecs
 from dup_heuristics import DuplicateClassifier, classify_pair, extract_features
 import object_grouping as og
+import discover_stages as ds
+try:
+    import iqa
+except Exception:
+    iqa = None
 from pipeline import DEFAULT_PIPELINE, run_pipeline
 from templates import HTML, TRAINING_HTML
 
@@ -169,7 +174,8 @@ def _init_db():
             sig       TEXT,
             n_boxes   INTEGER,
             boxes     TEXT,
-            embs      TEXT,
+            embs      BLOB,
+            emb_dim   INTEGER DEFAULT 0,
             tags      TEXT,
             created   REAL
         );
@@ -200,6 +206,7 @@ def _init_db():
         "ALTER TABLE files ADD COLUMN comic_folder TEXT DEFAULT ''",
         "ALTER TABLE files ADD COLUMN flagged_delete INTEGER DEFAULT 0",
         "ALTER TABLE files ADD COLUMN flag_reason TEXT DEFAULT ''",
+        "ALTER TABLE object_embeddings ADD COLUMN emb_dim INTEGER DEFAULT 0",
     ]:
         try:
             db.execute(ddl); db.commit()
@@ -2671,51 +2678,280 @@ def _objemb_valid(sig):
     except Exception:
         return {}
 
+def _objemb_save_nocommit(db, rel_path, mtime, sig, boxes, embs, tags):
+    """Write one image's row WITHOUT committing. Used inside a batched
+    transaction by the scan loop; the caller commits once per batch. Embeddings
+    are a raw float32 BLOB plus emb_dim — never JSON (that was the OOM)."""
+    box_json = json.dumps([{k: round(float(b[k]), 5)
+                            for k in ("cx", "cy", "w", "h")} for b in boxes])
+    if embs is not None and len(embs):
+        arr = np.ascontiguousarray(embs, dtype=np.float32)
+        emb_blob = arr.tobytes()
+        emb_dim = int(arr.shape[1])
+    else:
+        emb_blob = b""
+        emb_dim = 0
+    db.execute(
+        "INSERT OR REPLACE INTO object_embeddings "
+        "(rel_path, mtime, sig, n_boxes, boxes, embs, emb_dim, tags, created) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (rel_path, mtime, sig, len(boxes), box_json,
+         sqlite3.Binary(emb_blob), emb_dim,
+         json.dumps(tags or []), time.time()))
+
+
 def _objemb_save(rel_path, mtime, sig, boxes, embs, tags):
-    """Persist one image's embeddings (the checkpoint write). boxes: list of
-    dicts; embs: ndarray (N,D); tags: list."""
+    """Persist one image's embeddings and commit immediately. Convenience
+    wrapper around _objemb_save_nocommit for callers outside the batched scan
+    loop. boxes: list of dicts; embs: ndarray (N,D); tags: list."""
     try:
-        box_json = json.dumps([{k: round(float(b[k]), 5)
-                                for k in ("cx", "cy", "w", "h")} for b in boxes])
-        emb_json = json.dumps([[round(float(x), 6) for x in row] for row in embs]) \
-            if embs is not None and len(embs) else "[]"
-        _db().execute(
-            "INSERT OR REPLACE INTO object_embeddings "
-            "(rel_path, mtime, sig, n_boxes, boxes, embs, tags, created) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (rel_path, mtime, sig, len(boxes), box_json, emb_json,
-             json.dumps(tags or []), time.time()))
-        _db().commit()
+        db = _db()
+        _objemb_save_nocommit(db, rel_path, mtime, sig, boxes, embs, tags)
+        db.commit()
     except Exception as e:
         access_logger.warning(f"objemb_save {rel_path}: {e}")
 
-def _objemb_load_all(sig, rel_paths):
-    """Load cached boxes+embeddings for the given files (current sig). Returns
-    (embeddings_list, items_list) ready for clustering."""
-    import numpy as _np
-    embeddings, items = [], []
+def _objemb_count(sig, rel_paths):
+    """Total object rows + embedding dim for the current sig over rel_paths.
+    Cheap metadata-only scan (no BLOBs read). Returns (total, dim)."""
     if not rel_paths:
-        return embeddings, items
-    CH = 900   # chunk to stay under SQLite variable limit
-    rp_set = set(rel_paths)
+        return 0, 0
+    CH = 900
+    total, dim = 0, 0
     for i in range(0, len(rel_paths), CH):
         chunk = rel_paths[i:i + CH]
         ph = ",".join("?" * len(chunk))
         rows = _db().execute(
-            f"SELECT rel_path, boxes, embs, tags FROM object_embeddings "
+            f"SELECT n_boxes, emb_dim FROM object_embeddings "
             f"WHERE sig=? AND rel_path IN ({ph})", (sig, *chunk)).fetchall()
-        for rp, box_json, emb_json, tag_json in rows:
-            if rp not in rp_set:
+        for nb, d in rows:
+            if d:
+                total += int(nb or 0)
+                if not dim:
+                    dim = int(d)
+    return total, dim
+
+
+def _objemb_stream(sig, rel_paths, dim, img_batch=1000):
+    """Generator over the library's embeddings in a STABLE global order, pulling
+    at most `img_batch` images' rows into RAM at a time, then dropping them.
+
+    Yields (emb_array, items_chunk):
+      emb_array:   contiguous float32 (rows_in_this_chunk, dim)
+      items_chunk: list of {file, tags, box} aligned row-for-row with emb_array
+
+    The order is deterministic: rel_paths are processed in their given order, and
+    within a file the boxes keep their stored order. The same order is produced
+    on every call, so an index built in pass 1 lines up with queries in pass 2.
+
+    Files are queried in fixed-size IN() chunks; we re-sort each chunk back into
+    the requested order because SQLite does not guarantee IN() result order."""
+    import numpy as _np
+    if not rel_paths or dim <= 0:
+        return
+    CH = min(900, max(1, img_batch))
+    rp_index = {rp: i for i, rp in enumerate(rel_paths)}
+    for i in range(0, len(rel_paths), img_batch):
+        window = rel_paths[i:i + img_batch]
+        rows_by_rp = {}
+        for j in range(0, len(window), CH):
+            chunk = window[j:j + CH]
+            ph = ",".join("?" * len(chunk))
+            for rp, box_json, emb_blob, emb_dim, tag_json in _db().execute(
+                f"SELECT rel_path, boxes, embs, emb_dim, tags "
+                f"FROM object_embeddings WHERE sig=? AND rel_path IN ({ph})",
+                    (sig, *chunk)).fetchall():
+                rows_by_rp[rp] = (box_json, emb_blob, emb_dim, tag_json)
+        # assemble this window in the requested (global) order
+        vecs, items = [], []
+        for rp in window:
+            rec = rows_by_rp.get(rp)
+            if not rec:
+                continue
+            box_json, emb_blob, emb_dim, tag_json = rec
+            if not emb_dim or int(emb_dim) != dim:
                 continue
             try:
-                boxes = json.loads(box_json); embs = json.loads(emb_json)
+                boxes = json.loads(box_json)
                 tags = json.loads(tag_json) if tag_json else []
             except Exception:
                 continue
-            for b, e in zip(boxes, embs):
-                embeddings.append(_np.array(e, _np.float32))
+            if isinstance(emb_blob, (bytes, bytearray, memoryview)):
+                a = _np.frombuffer(emb_blob, dtype=_np.float32)
+            else:
+                try:
+                    a = _np.asarray(json.loads(emb_blob), _np.float32).ravel()
+                except Exception:
+                    continue
+            nrows = a.size // dim
+            if nrows == 0:
+                continue
+            a = a[:nrows * dim].reshape(nrows, dim)
+            vecs.append(a)
+            for bi in range(nrows):
+                b = boxes[bi] if bi < len(boxes) else {}
                 items.append({"file": rp, "tags": tags, "box": b})
-    return embeddings, items
+        if vecs:
+            yield _np.concatenate(vecs, axis=0), items
+        # window drops out of scope here before the next pull
+
+
+@app.route("/api/quality_sweep", methods=["POST"])
+def quality_sweep():
+    """Score image quality with NR-IQA (BRISQUE) and flag junk for review,
+    without running the full discovery pipeline. Writes verdicts to
+    files.flagged_delete / flag_reason so results show in the review queue.
+
+    Body:
+      filenames     optional list; default = whole library
+      brisque_bad   optional threshold (higher = stricter; default ~65)
+      flag_junk     write flags to files table (default True)
+      dry_run       if True, score but don't write flags (default False)
+    """
+    if iqa is None or not iqa.available():
+        return jsonify({"success": False,
+                        "error": "IQA model unavailable (BRISQUE files missing "
+                                 "and could not be downloaded)."})
+    body = request.json or {}
+    filenames = body.get("filenames") or []
+    if not filenames:
+        rows = _db().execute(
+            "SELECT rel_path, width, height FROM files "
+            "WHERE (comic_folder IS NULL OR comic_folder='')").fetchall()
+        filenames = sorted(rp for (rp, w, h) in rows
+                           if not (w and h) or min(w, h) >= og.MIN_IMAGE_PX)
+    if not filenames:
+        return jsonify({"success": False, "error": "No eligible images found."})
+
+    brisque_bad = body.get("brisque_bad")
+    brisque_bad = float(brisque_bad) if brisque_bad is not None else None
+    write_flags = bool(body.get("flag_junk", True)) and not body.get("dry_run")
+
+    db = _db()
+    sig = ds.run_sig(filenames)
+
+    def _loader(fn):
+        fp = get_safe_path(MEDIA_DIR, fn)
+        if not fp or not os.path.exists(fp):
+            return None
+        img = read_jxl(fp)
+        return og.downscale_to_cap(_to_bgr(img)) if img is not None else None
+
+    def _prog(stage, done, total, phase=None):
+        state["status_text"] = f"[quality] {done}/{total}"
+
+    state["discover_cancel"] = False
+    try:
+        bad = ds.stage_quality(db, sig, filenames, _loader,
+                               brisque_bad=brisque_bad, write_flags=write_flags,
+                               progress=_prog,
+                               should_stop=lambda: bool(state.get("discover_cancel")))
+    except Exception as e:
+        access_logger.exception("quality sweep failed")
+        return jsonify({"success": False, "error": str(e)})
+
+    summary = ds.quality_summary(db, sig)
+    state["status_text"] = "Quality sweep complete."
+    return jsonify({"success": True, "run_sig": sig, "quality": summary,
+                    "flagged": sorted(bad)[:500],
+                    "wrote_flags": write_flags})
+
+
+@app.route("/api/discover_objects_staged", methods=["POST"])
+def discover_objects_staged():
+    """Staged, checkpointed discovery for very large libraries.
+
+    Runs the requested stages (depth -> boxes -> cluster -> assign), each
+    resumable. Default runs all. Pass {"stages": ["depth"]} to run one at a
+    time. Safe to kill and re-call: finished chunks are skipped.
+
+    Body:
+      stages       list of stage names (default all four, in order)
+      max_regions  proposals per image (default 15)
+      eps          cluster radius (default 0.18)
+      min_cluster  min objects to form a cluster (default 2)
+      chunk        images per checkpointed chunk (default ds.CHUNK)
+    """
+    body = request.json or {}
+    stages = tuple(body.get("stages") or
+                   ("quality", "depth", "boxes", "cluster", "assign"))
+    max_regions = int(body.get("max_regions", 15))
+    eps = float(body.get("eps", 0.18))
+    min_cluster = int(body.get("min_cluster", 2))
+    brisque_bad = body.get("brisque_bad")   # None -> use module default
+    if brisque_bad is not None:
+        brisque_bad = float(brisque_bad)
+    write_flags = bool(body.get("flag_junk", True))
+    if body.get("chunk"):
+        ds.CHUNK = int(body["chunk"])
+
+    # whole-library file list (same gate as the single-pass route)
+    rows = _db().execute(
+        "SELECT rel_path, width, height FROM files "
+        "WHERE (comic_folder IS NULL OR comic_folder='')").fetchall()
+    file_list = sorted(rp for (rp, w, h) in rows
+                       if not (w and h) or min(w, h) >= og.MIN_IMAGE_PX)
+    if not file_list:
+        return jsonify({"success": False, "error": "No eligible images found."})
+
+    depth_model = (state.get("depth_model") or "").strip() or None
+    cnn_model = (state.get("grouping_cnn") or "").strip() or None
+
+    def _loader(fn):
+        fp = get_safe_path(MEDIA_DIR, fn)
+        if not fp or not os.path.exists(fp):
+            return None
+        img = read_jxl(fp)
+        if img is None:
+            return None
+        return og.downscale_to_cap(_to_bgr(img))
+
+    def _tags(fn):
+        try:
+            fp = get_safe_path(MEDIA_DIR, fn)
+            meta = read_metadata(fp) if fp else None
+            return meta.get("tags", []) if meta else []
+        except Exception:
+            return []
+
+    def _prog(stage, done, total, phase=None):
+        ph = f" {phase}" if phase else ""
+        state["status_text"] = f"[{stage}{ph}] {done}/{total}"
+
+    def _stop():
+        return bool(state.get("discover_cancel"))
+
+    state["discover_cancel"] = False
+    sig = ds.run_sig(file_list)
+    db = _db()
+
+    try:
+        summary = ds.run_all(
+            db, file_list, _loader, tag_fn=_tags,
+            depth_model=depth_model, cnn_model=cnn_model,
+            max_regions=max_regions, eps=eps, min_cluster=min_cluster,
+            brisque_bad=brisque_bad, write_flags=write_flags,
+            progress=_prog, should_stop=_stop, stages=stages)
+    except Exception as e:
+        access_logger.exception("staged discovery failed")
+        return jsonify({"success": False, "error": str(e)})
+
+    # report per-stage completion
+    status = {}
+    for st in ("quality", "depth", "boxes", "cluster", "assign"):
+        d, t = ds.stage_status(db, sig, st, len(file_list))
+        status[st] = {"done": d, "total": t}
+    total_objs, dim = ds.count_objects(db, sig)
+    quality = ds.quality_summary(db, sig)
+    state["status_text"] = "Staged discovery complete."
+    return jsonify({"success": True, "run_sig": sig,
+                    "stage_status": status,
+                    "quality": quality,
+                    "iqa_model": ("brisque" if (ds.iqa and ds.iqa.available())
+                                  else "unavailable"),
+                    "total_objects": total_objs,
+                    "clusters": summary[:200] if summary else None})
+
 
 @app.route("/api/discover_objects", methods=["POST"])
 def discover_objects():
@@ -2772,14 +3008,41 @@ def discover_objects():
     mtimes = dict(to_scan)
     scan_names = [fn for fn, _ in to_scan]
 
+    # Decode throttle: the unavoidable transient is the full-res decode buffer
+    # of ONE image (downscale only helps AFTER decode). With several decode
+    # workers, a cluster of very large source images decoding at once is the
+    # OOM. A lightweight gate makes big decodes take turns while small images
+    # stay fully parallel: a worker about to decode acquires the gate, and only
+    # one heavy decode proceeds at a time. Tuned by file size on disk as a cheap
+    # proxy for decoded pixels (no header parse needed).
+    import threading as _threading
+    _big_decode_gate = _threading.Semaphore(1)
+    _BIG_FILE_BYTES = 8 * 1024 * 1024   # treat >8MB JXL as "heavy"
+
     def _loader(fn):
         fp = get_safe_path(MEDIA_DIR, fn)
         if not fp or not os.path.exists(fp):
             return None
-        img = read_jxl(fp)
+        heavy = False
+        try:
+            heavy = os.path.getsize(fp) > _BIG_FILE_BYTES
+        except Exception:
+            pass
+        if heavy:
+            _big_decode_gate.acquire()
+        try:
+            img = read_jxl(fp)
+        finally:
+            if heavy:
+                _big_decode_gate.release()
         if img is None:
             return None
-        return _to_bgr(img)
+        bgr = _to_bgr(img)
+        del img
+        # CRITICAL memory guard: downscale to the long-side cap immediately so no
+        # full-resolution giant is held in the queue/batch. Proposals run at 384
+        # and CNN crops at 224, so nothing downstream loses anything.
+        return og.downscale_to_cap(bgr)
 
     def _file_tags(fn):
         try:
@@ -2792,7 +3055,35 @@ def discover_objects():
     def _prog(d, t):
         state["status_text"] = f"Discovering objects {d}/{t} new…"
 
-    # scan only uncached files; PERSIST each result immediately (checkpoint)
+    # scan only uncached files; PERSIST in batched transactions (checkpoint).
+    #
+    # Per-image commit() was the scan-loop bottleneck: each fsync stalled this
+    # consumer, the producer's bounded queue backed up, and the GPU starved.
+    # We now buffer rows and flush every CKPT_EVERY images in ONE transaction,
+    # so the scanner keeps pulling the next batch while writes drain in bulk.
+    # CKPT_EVERY is small enough that an interrupted run loses at most that many
+    # images of work and resumes from the rest.
+    CKPT_EVERY = 200
+    _pending = []   # list of (fn, mtime, boxes, embs, tags)
+
+    def _flush_ckpt():
+        if not _pending:
+            return
+        try:
+            db = _db()
+            db.execute("BEGIN")
+            for fn_, mt_, boxes_, embs_, tags_ in _pending:
+                _objemb_save_nocommit(db, fn_, mt_, sig, boxes_, embs_, tags_)
+            db.commit()
+        except Exception as e:
+            try:
+                _db().rollback()
+            except Exception:
+                pass
+            access_logger.warning(f"objemb checkpoint flush: {e}")
+        finally:
+            _pending.clear()
+
     for r in og.scan_images(_loader, scan_names, depth_model=depth_model,
                             cnn_model=cnn_model, max_regions=max_regions,
                             gpu_batch=gpu_batch, decode_workers=workers,
@@ -2803,35 +3094,87 @@ def discover_objects():
         if r["skipped"]:
             skipped.append(fn)
             # record an empty row so we don't re-attempt tiny images every run
-            _objemb_save(fn, mtimes.get(fn, 0), sig, [], None, [])
-            continue
-        boxes, embs = r["boxes"], r["embeddings"]
-        tags = _file_tags(fn)
-        # checkpoint write — survives a restart
-        _objemb_save(fn, mtimes.get(fn, 0), sig, boxes or [],
-                     embs if embs is not None else [], tags)
+            _pending.append((fn, mtimes.get(fn, 0), [], None, []))
+        else:
+            boxes, embs = r["boxes"], r["embeddings"]
+            tags = _file_tags(fn)
+            _pending.append((fn, mtimes.get(fn, 0), boxes or [],
+                             embs if embs is not None else [], tags))
+        if len(_pending) >= CKPT_EVERY:
+            _flush_ckpt()
+    _flush_ckpt()   # final partial batch
 
-    # ── cluster from the FULL cache (old + newly scanned) ───────────────────--
+    # ── cluster from the FULL cache (old + newly scanned), STREAMING ────────--
+    # The whole library is clustered as ONE global index so any two matching
+    # objects can join the same cluster regardless of how far apart they are in
+    # the file list. Only the *feeding* is streamed: at most `cluster_img_batch`
+    # images' embeddings are resident at once, then dropped. This keeps RAM
+    # bounded on libraries far too big to load whole, which was the OOM.
     state["status_text"] = "Clustering…"
     import numpy as _np
     valid_files = [fn for fn in filenames
                    if get_safe_path(MEDIA_DIR, fn) and
                    os.path.exists(get_safe_path(MEDIA_DIR, fn))]
-    embeddings, items = _objemb_load_all(sig, valid_files)
-    labels = og.group_embeddings(
-        _np.array(embeddings) if embeddings else _np.zeros((0, 1), _np.float32),
-        min_cluster=int(body.get("min_cluster", 2)),
-        eps=float(body.get("eps", 0.18)))
-    suggestions = og.suggest_cluster_labels(items, labels)
 
+    img_batch = int(body.get("cluster_img_batch",
+                             state.get("discover_cluster_batch", 1000)))
+    total_objs, emb_dim = _objemb_count(sig, valid_files)
+
+    # Clustering needs ONLY the vectors. We stream them in a stable global order
+    # and never materialise the per-object metadata (file/box/tags) during the
+    # cluster passes — that metadata is re-streamed in the SAME order afterwards
+    # to assemble clusters, so peak RAM is just the HNSW index, not a parallel
+    # list of ~1M Python dicts.
+    def _vec_batches():
+        for emb, _it in _objemb_stream(sig, valid_files, emb_dim, img_batch):
+            yield emb
+
+    def _cluster_prog(done, tot, phase):
+        state["status_text"] = f"Clustering ({phase}) {done}/{tot}…"
+
+    if total_objs and emb_dim:
+        labels = og.group_embeddings_streaming(
+            _vec_batches, total=total_objs, dim=emb_dim,
+            eps=float(body.get("eps", 0.18)),
+            min_cluster=int(body.get("min_cluster", 2)),
+            progress=_cluster_prog)
+    else:
+        labels = _np.full(0, -1, dtype=int)
+
+    # ── assemble clusters by RE-STREAMING metadata in the same global order ───
+    # labels[i] corresponds to the i-th vector yielded above; _objemb_stream
+    # yields items in that identical order, so we can zip a running counter
+    # against `labels` without ever holding all items at once. We also tally
+    # tag votes here for the suggested label, in the same single pass.
+    from collections import Counter
+    state["status_text"] = "Building clusters…"
     clusters = {}
-    for it, lab in zip(items, labels):
-        lab = int(lab)
-        if lab < 0:
-            continue
-        clusters.setdefault(lab, {"id": lab, "suggested": suggestions.get(lab, ""),
-                                  "members": []})
-        clusters[lab]["members"].append(it)
+    tag_votes = {}          # cluster_id -> Counter of tags
+    gi = 0                  # global object index, must track labels order
+    n_labels = len(labels)
+    for _emb, items_chunk in _objemb_stream(sig, valid_files, emb_dim, img_batch):
+        for it in items_chunk:
+            if gi >= n_labels:
+                break
+            lab = int(labels[gi]); gi += 1
+            if lab < 0:
+                continue
+            c = clusters.get(lab)
+            if c is None:
+                c = clusters[lab] = {"id": lab, "suggested": "", "members": []}
+                tag_votes[lab] = Counter()
+            c["members"].append(it)
+            for t in (it.get("tags") or []):
+                tag_votes[lab][t.lower().strip()] += 1
+        if gi >= n_labels:
+            break
+
+    # majority-vote suggested label per cluster
+    for lab, c in clusters.items():
+        cnt = tag_votes.get(lab)
+        if cnt:
+            c["suggested"] = cnt.most_common(1)[0][0]
+
     cluster_list = sorted(clusters.values(), key=lambda c: -len(c["members"]))
 
     run_id = hashlib.md5((",".join(filenames) + str(time.time())).encode()).hexdigest()[:12]
@@ -2841,7 +3184,7 @@ def discover_objects():
     while len(_grouping_runs) > 3:
         _grouping_runs.pop(next(iter(_grouping_runs)))
     # free the large intermediates now rather than waiting on GC
-    del embeddings, items, clusters
+    del clusters, tag_votes, labels
     state["status_text"] = "Ready."
     return jsonify({"success": True, "run_id": run_id,
                     "clusters": cluster_list,
