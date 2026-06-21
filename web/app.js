@@ -560,11 +560,8 @@ document.addEventListener('keydown', async e=>{
 
   // Escape: clear selection or close popout
   if(e.key==='Escape'){
-    if(!document.getElementById('discover_modal').classList.contains('hidden')){
-      if(!document.getElementById('discover_detail').classList.contains('hidden')){
-        discoverShowGrid(); return;   // detail -> grid first
-      }
-      closeDiscover(); return;
+    if(!document.getElementById('pipeline_modal').classList.contains('hidden')){
+      closePipeline(); return;
     }
     if(!document.getElementById('popout_modal').classList.contains('hidden')){
       closePopout(); return;
@@ -1534,129 +1531,16 @@ async function bulkPipeline(){
     } else alert('Smart Tag failed: '+(d.error||''));
   }catch(e){ alert('Network error during Smart Tag.'); }
 }
-// ── Object discovery & grouping ─────────────────────────────────────────────
-let discoverRun=null;          // current run id
-let discoverClusters=[];       // [{id, suggested, members:[{file,box}]}]
-let detailCluster=null;        // currently expanded cluster
-let detailRemoved=new Set();   // member indices toggled OUT in the detail view
-
-function cropURL(m){
-  return `/api/crop?file=${encodeURIComponent(m.file)}&cx=${m.box.cx}&cy=${m.box.cy}&w=${m.box.w}&h=${m.box.h}`;
-}
-
-async function discoverObjects(rerun){
-  const eps=parseFloat(document.getElementById('discover_eps')?.value || 0.18);
-  const minc=parseInt(document.getElementById('discover_min')?.value || 2);
-  const force=document.getElementById('discover_force')?.checked || false;
-  document.getElementById('discover_modal').classList.remove('hidden');
-  discoverShowGrid();
-  document.getElementById('discover_summary').textContent='Scanning the whole library…';
-  document.getElementById('discover_cards').innerHTML='';
-  document.getElementById('discover_empty').classList.add('hidden');
-  document.getElementById('discover_loading').classList.remove('hidden');
-  try{
-    // no filenames -> backend scans the whole library
-    const d=await fetch('/api/discover_objects',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({eps, min_cluster:minc, force})}).then(r=>r.json());
-    document.getElementById('discover_loading').classList.add('hidden');
-    if(!d.success){ alert('Discovery failed: '+(d.error||'')); return; }
-    discoverRun=d.run_id; discoverClusters=d.clusters||[];
-    const skip=d.skipped_small?.length?(', '+d.skipped_small.length+' too small'):'';
-    const cache=d.from_cache?(` · ${d.from_cache} from cache, ${d.scanned_new} new`):'';
-    document.getElementById('discover_summary').textContent=
-      `${d.n_objects} objects · ${d.n_clusters} group(s)${cache}${skip}`;
-    renderGrid();
-  }catch(e){
-    document.getElementById('discover_loading').classList.add('hidden');
-    alert('Network error during discovery.');
-  }
-}
-
-function renderGrid(){
-  const wrap=document.getElementById('discover_cards');
-  wrap.innerHTML='';
-  if(!discoverClusters.length){ document.getElementById('discover_empty').classList.remove('hidden'); return; }
-  document.getElementById('discover_empty').classList.add('hidden');
-  discoverClusters.forEach((c,idx)=>{
-    const card=document.createElement('div');
-    card.className='bg-gray-800 border border-gray-700 rounded p-2 cursor-pointer hover:border-indigo-500 transition';
-    const cover=c.members.slice(0,4).map(m=>
-      `<img src="${cropURL(m)}" class="h-16 w-full object-cover rounded" loading="lazy">`).join('');
-    card.innerHTML=`
-      <div class="grid grid-cols-2 gap-1 mb-2">${cover}</div>
-      <div class="flex items-center justify-between">
-        <span class="text-xs font-bold text-indigo-300 truncate">${c.suggested||('Group '+c.id)}</span>
-        <span class="text-[10px] text-gray-400 ml-1 whitespace-nowrap">${c.members.length} obj</span>
-      </div>`;
-    card.onclick=()=>discoverOpen(idx);
-    wrap.appendChild(card);
-  });
-}
-
-function discoverShowGrid(){
-  document.getElementById('discover_grid').classList.remove('hidden');
-  document.getElementById('discover_detail').classList.add('hidden');
-  document.getElementById('discover_back').classList.add('hidden');
-  detailCluster=null;
-}
-
-function discoverOpen(idx){
-  detailCluster=discoverClusters[idx];
-  detailRemoved=new Set();
-  document.getElementById('discover_grid').classList.add('hidden');
-  document.getElementById('discover_detail').classList.remove('hidden');
-  document.getElementById('discover_back').classList.remove('hidden');
-  document.getElementById('detail_title').textContent=detailCluster.suggested?('Group: '+detailCluster.suggested):('Group '+detailCluster.id);
-  document.getElementById('detail_label').value=detailCluster.suggested||'';
-  renderDetail();
-}
-
-function renderDetail(){
-  const wrap=document.getElementById('detail_members');
-  wrap.innerHTML='';
-  detailCluster.members.forEach((m,i)=>{
-    const cell=document.createElement('div');
-    const removed=detailRemoved.has(i);
-    cell.className='relative cursor-pointer rounded overflow-hidden border-2 '+
-      (removed?'border-red-600 opacity-40':'border-transparent hover:border-indigo-400');
-    cell.innerHTML=`<img src="${cropURL(m)}" class="h-20 w-full object-cover" loading="lazy">
-      <span class="absolute top-0.5 right-0.5 text-[9px] bg-black/60 px-1 rounded ${removed?'text-red-300':'text-gray-300'}">${removed?'skip':''}</span>`;
-    cell.onclick=()=>{ if(detailRemoved.has(i)) detailRemoved.delete(i); else detailRemoved.add(i); renderDetail(); };
-    wrap.appendChild(cell);
-  });
-  const kept=detailCluster.members.length-detailRemoved.size;
-  document.getElementById('detail_count').textContent=`${kept} kept / ${detailCluster.members.length}`;
-}
-
-async function discoverApply(){
-  const tag=(document.getElementById('detail_label').value||'').trim();
-  if(!tag){ showToast('Name the group first.'); return; }
-  const addBox=document.getElementById('detail_addbox').checked;
-  const members=detailCluster.members.filter((m,i)=>!detailRemoved.has(i));
-  if(!members.length){ showToast('No objects kept to tag.'); return; }
-  try{
-    const d=await fetch('/api/bulk_tag_cluster',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({run_id:discoverRun, cluster_id:detailCluster.id, tag, add_box:addBox, members})}).then(r=>r.json());
-    if(d.success){
-      showToast(`Tagged ${d.tagged} object(s) as “${tag}”.`);
-      // mark this group done in the grid
-      detailCluster._done=tag;
-      loadGallery(); refreshReviewCount();
-      discoverShowGrid(); renderGrid();
-    } else alert('Tagging failed: '+(d.error||''));
-  }catch(e){ alert('Network error during tagging.'); }
-}
-
-function closeDiscover(){ document.getElementById('discover_modal').classList.add('hidden'); }
 
 // ── Image pipeline (5 manual steps) ──────────────────────────────────────────
 const PL_ENDPOINT={depth:'/api/img_depth',embed:'/api/img_embed',
   cluster:'/api/img_cluster',heuristics:'/api/img_heuristics',detect:'/api/img_detect'};
 let plBusy=false;
 
-function openPipeline(){
+function openPipeline(step){
   document.getElementById('pipeline_modal').classList.remove('hidden');
   refreshPipelineStatus();
+  if(step) plRun(step);
 }
 function closePipeline(){ document.getElementById('pipeline_modal').classList.add('hidden'); }
 

@@ -18,10 +18,16 @@
         class="text-xs bg-indigo-600 hover:bg-indigo-500 font-bold px-2 py-1.5 rounded">Dupes</button>
       <button id="btn_review" onclick="openReview()"
         class="text-xs bg-rose-700 hover:bg-rose-600 font-bold px-2 py-1.5 rounded">Review<span id="review_badge" class="hidden ml-1 bg-rose-900 px-1.5 rounded-full"></span></button>
-      <button id="btn_discover" onclick="discoverObjects()" title="Scan the whole library for untrained objects (depth + heuristics) and group similar ones for bulk tagging"
-        class="text-xs bg-indigo-700 hover:bg-indigo-600 font-bold px-2 py-1.5 rounded">Discover</button>
-      <button id="btn_pipeline" onclick="openPipeline()" title="Image-level pipeline: depth → embeddings → cluster → heuristics → detect (low memory, resumable)"
-        class="text-xs bg-purple-700 hover:bg-purple-600 font-bold px-2 py-1.5 rounded">Pipeline</button>
+      <button id="btn_step_depth" onclick="openPipeline('depth')" title="Step 1 — generate Depth-Anything depth maps per image (cached, resumable)"
+        class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">1·Depth</button>
+      <button id="btn_step_embed" onclick="openPipeline('embed')" title="Step 2 — generate one whole-image embedding each (powers search + clustering)"
+        class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">2·Embed</button>
+      <button id="btn_step_cluster" onclick="openPipeline('cluster')" title="Step 3 — cluster visually-similar images (memory-flat)"
+        class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">3·Cluster</button>
+      <button id="btn_step_heur" onclick="openPipeline('heuristics')" title="Step 4 — build per-cluster heuristic concept maps; surfaces outliers"
+        class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">4·Heuristics</button>
+      <button id="btn_step_detect" onclick="openPipeline('detect')" title="Step 5 — detect objects scoped per cluster using the concept maps (bounded memory)"
+        class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">5·Detect</button>
       <button id="btn_scan_folder" onclick="iqaScan('folder')" title="Score image quality (NR-IQA / BRISQUE) for the current folder"
         class="text-xs bg-emerald-700 hover:bg-emerald-600 font-bold px-2 py-1.5 rounded">Scan folder</button>
       <button id="btn_scan_lib" onclick="iqaScan('library')" title="Score image quality (NR-IQA / BRISQUE) for the whole library"
@@ -454,7 +460,6 @@
     <span class="text-purple-300 font-bold">Image pipeline</span>
     <span id="pipeline_eligible" class="text-xs text-gray-400"></span>
     <div class="ml-auto flex gap-2 items-center">
-      <button onclick="refreshPipelineStatus()" class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded">Refresh</button>
       <button onclick="cancelPipeline()" class="text-xs bg-rose-800 hover:bg-rose-700 px-3 py-1 rounded">Cancel run</button>
       <button onclick="closePipeline()" class="text-gray-400 hover:text-white text-lg leading-none">✕</button>
     </div>
@@ -541,65 +546,6 @@
 
   <div class="px-4 py-2 bg-gray-800 border-t border-gray-700 flex-shrink-0 text-[11px] text-gray-400">
     <span id="pl_running" class="text-purple-300"></span>
-  </div>
-</div>
-
-<div id="discover_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
-  <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
-    <span class="text-indigo-300 font-bold">🧩 Discovered object groups</span>
-    <span id="discover_summary" class="text-xs text-gray-400"></span>
-    <button id="discover_back" onclick="discoverShowGrid()"
-      class="hidden text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded">← All groups</button>
-    <div class="ml-auto flex gap-2">
-      <button onclick="closeDiscover()" class="text-gray-400 hover:text-white text-lg leading-none">✕</button>
-    </div>
-  </div>
-
-  <!-- GRID VIEW: one card per group -->
-  <div id="discover_grid" class="flex-1 overflow-y-auto p-4">
-    <div id="discover_loading" class="hidden text-center text-gray-400 mt-20 animate-pulse">
-      Scanning library…
-    </div>
-    <div id="discover_empty" class="hidden text-center text-gray-500 mt-20">
-      No groups found. Try lowering the min group size or widening similarity, then Re-run.
-    </div>
-    <div id="discover_cards" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3"></div>
-  </div>
-
-  <!-- DETAIL VIEW: expanded single group, prune + name + apply -->
-  <div id="discover_detail" class="hidden flex-1 overflow-hidden flex flex-col">
-    <div class="flex items-center gap-2 px-4 py-2 bg-gray-850 border-b border-gray-700 flex-shrink-0">
-      <span id="detail_title" class="text-sm font-bold text-indigo-300"></span>
-      <span id="detail_count" class="text-xs text-gray-400"></span>
-      <input id="detail_label" type="text" placeholder="name this group, e.g. 'cup of orange juice'"
-        class="flex-1 bg-gray-700 text-sm px-3 py-1.5 rounded border border-gray-600 text-white focus:border-indigo-400">
-      <label class="text-[10px] text-gray-400 flex items-center gap-1">
-        <input id="detail_addbox" type="checkbox" checked> store box</label>
-      <button onclick="discoverApply()"
-        class="text-sm bg-green-700 hover:bg-green-600 px-4 py-1.5 rounded font-bold text-white">Apply to kept</button>
-    </div>
-    <div class="px-4 py-1.5 text-[11px] text-gray-500 flex-shrink-0">
-      Click any object to toggle it out of the group (dimmed = will be skipped). Then name it and Apply.
-    </div>
-    <div id="detail_members" class="flex-1 overflow-y-auto p-4 grid grid-cols-3 md:grid-cols-5 lg:grid-cols-7 gap-2"></div>
-  </div>
-
-  <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-t border-gray-700 flex-shrink-0 text-xs text-gray-400">
-    <label class="flex items-center gap-1">Similarity
-      <input id="discover_eps" type="range" min="0.08" max="0.40" step="0.02" value="0.18"
-        class="w-32" oninput="document.getElementById('discover_eps_v').textContent=this.value">
-      <span id="discover_eps_v">0.18</span>
-    </label>
-    <label class="flex items-center gap-1">Min group size
-      <input id="discover_min" type="number" min="2" max="20" value="2"
-        class="w-14 bg-gray-700 rounded px-1 py-0.5 border border-gray-600 text-white">
-    </label>
-    <label class="flex items-center gap-1" title="Ignore the cache and recompute every image's embeddings">
-      <input id="discover_force" type="checkbox"> force re-scan
-    </label>
-    <button onclick="discoverObjects(true)"
-      class="bg-indigo-700 hover:bg-indigo-600 px-3 py-1 rounded font-bold text-white">Re-run</button>
-    <span class="ml-auto text-[10px] text-gray-500">Click a group card to open, prune, name, and apply.</span>
   </div>
 </div>
 
