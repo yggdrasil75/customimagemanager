@@ -2430,16 +2430,33 @@ def api_comic_delete():
 
 @app.route("/api/review_list")
 def review_list():
-    """Images with pending AI suggestions: a deletion flag and/or unconfirmed boxes."""
-    rows = _db().execute(
+    """Images with pending AI suggestions: a deletion flag and/or unconfirmed boxes.
+
+    Paginated so the queue is no longer capped at 2000. `total` is a real COUNT
+    over the whole queue (used by the UI to size its counter: 1k/10k/100k/1M…),
+    while `items` is one page. Query: offset (default 0), limit (default 500).
+    """
+    db = _db()
+    where = ("WHERE flagged_delete=1 OR COALESCE(unconfirmed_count,0)>0")
+    total = db.execute(f"SELECT COUNT(*) FROM files {where}").fetchone()[0]
+    try:
+        offset = max(0, int(request.args.get("offset", 0)))
+    except Exception:
+        offset = 0
+    try:
+        limit = max(1, min(5000, int(request.args.get("limit", 500))))
+    except Exception:
+        limit = 500
+    rows = db.execute(
         "SELECT rel_path, width, height, flagged_delete, flag_reason, "
         "COALESCE(unconfirmed_count,0) AS uc FROM files "
-        "WHERE flagged_delete=1 OR COALESCE(unconfirmed_count,0)>0 "
-        "ORDER BY flagged_delete DESC, rel_path LIMIT 2000").fetchall()
+        f"{where} ORDER BY flagged_delete DESC, rel_path LIMIT ? OFFSET ?",
+        (limit, offset)).fetchall()
     items = [{"filename": r["rel_path"], "width": r["width"] or 0, "height": r["height"] or 0,
               "flagged": bool(r["flagged_delete"]), "reason": r["flag_reason"] or "",
               "unconfirmed": r["uc"]} for r in rows]
-    return jsonify({"success": True, "items": items, "total": len(items)})
+    return jsonify({"success": True, "items": items, "total": total,
+                    "offset": offset, "limit": limit, "returned": len(items)})
 
 @app.route("/api/flag", methods=["POST"])
 def api_flag():
@@ -2454,6 +2471,59 @@ def api_flag():
     write_metadata(fp, meta["tags"], meta["description"], meta["regions"],
                    flag={"delete": delete, "reason": reason})
     return jsonify({"success": True})
+
+@app.route("/api/review_boxes", methods=["POST"])
+def api_review_boxes():
+    """Apply per-box review decisions to one file in a single write.
+
+    Body: {filename, decisions:[{index, action, name?}, ...]}
+      action 'accept' -> mark that region confirmed=True (keep its name, or
+                         rename if `name` is given)
+      action 'deny'   -> remove that region entirely
+      action 'rename' -> set class_name=name, leave confirmed as-is
+    Indices refer to the regions array as returned by /api/metadata read.
+    Recomputes unconfirmed_count so the queue badge stays accurate.
+    """
+    d = request.json or {}
+    fn = d.get("filename", "")
+    decisions = d.get("decisions", []) or []
+    fp = get_safe_path(MEDIA_DIR, fn)
+    if not fp or not os.path.exists(fp):
+        return jsonify({"success": False, "error": "File not found."})
+    meta = read_metadata(fp)
+    regions = list(meta.get("regions", []))
+
+    by_idx = {}
+    for dec in decisions:
+        try:
+            by_idx[int(dec.get("index"))] = dec
+        except Exception:
+            continue
+
+    kept, accepted, denied = [], 0, 0
+    for i, r in enumerate(regions):
+        dec = by_idx.get(i)
+        if not dec:
+            kept.append(r); continue
+        act = (dec.get("action") or "").lower()
+        nm = (dec.get("name") or "").strip()
+        if act == "deny":
+            denied += 1
+            continue
+        if act == "accept":
+            if nm:
+                r["class_name"] = nm
+            r["confirmed"] = True
+            accepted += 1
+        elif act == "rename" and nm:
+            r["class_name"] = nm
+        kept.append(r)
+
+    write_metadata(fp, meta.get("tags", []), meta.get("description", ""), kept)
+    remaining = sum(1 for r in kept if not r.get("confirmed"))
+    return jsonify({"success": True, "accepted": accepted, "denied": denied,
+                    "remaining_unconfirmed": remaining})
+
 
 @app.route("/api/confirm_all", methods=["POST"])
 def api_confirm_all():
@@ -3724,6 +3794,146 @@ def bulk_tag_cluster():
             errors.append(m["file"])
             access_logger.error(f"bulk_tag_cluster {m['file']}: {e}")
     return jsonify({"success": True, "tagged": touched, "errors": errors})
+
+
+@app.route("/api/staged_clusters")
+def staged_clusters():
+    """Persistent view of the 5-stage discovery results.
+
+    Unlike /api/discover_objects (whose rich member lists live only in the
+    in-memory _grouping_runs and vanish on restart / after the staged path,
+    which never populates them), this rebuilds clusters straight from the
+    on-disk stage_labels + stage_objects tables, so results survive restarts
+    and work for both the staged and single-pass discovery paths.
+
+    Query:
+      run_sig   which discovery run (defaults to the most recent in the DB)
+      limit     max clusters to return (default 60, biggest first)
+      members   max member objects per cluster to return (default 24)
+
+    Each member carries the data /api/crop needs (file + normalised box), so the
+    frontend can show the actual object crop rather than the whole image.
+    """
+    db = _db()
+    sig = request.args.get("run_sig", "").strip()
+    if not sig:
+        row = db.execute(
+            "SELECT run_sig FROM stage_labels "
+            "GROUP BY run_sig ORDER BY COUNT(*) DESC LIMIT 1").fetchone()
+        if not row:
+            return jsonify({"success": True, "run_sig": None, "clusters": [],
+                            "n_clusters": 0, "n_objects": 0})
+        sig = row[0]
+
+    limit = max(1, int(request.args.get("limit", 60)))
+    per = max(1, int(request.args.get("members", 24)))
+
+    # cluster sizes (biggest first) + total objects, cheaply
+    size_rows = db.execute(
+        "SELECT label, COUNT(*) FROM stage_labels "
+        "WHERE run_sig=? AND label>=0 GROUP BY label ORDER BY COUNT(*) DESC "
+        "LIMIT ?", (sig, limit)).fetchall()
+    if not size_rows:
+        return jsonify({"success": True, "run_sig": sig, "clusters": [],
+                        "n_clusters": 0, "n_objects": 0})
+    keep = [int(lab) for (lab, _n) in size_rows]
+    sizes = {int(lab): int(n) for (lab, n) in size_rows}
+
+    # majority-vote suggested tag per kept cluster (reuse the staged summary)
+    suggested = {}
+    try:
+        for s in ds.stage_assign(db, sig):
+            if int(s["cluster"]) in sizes:
+                suggested[int(s["cluster"])] = s.get("suggested", "")
+    except Exception:
+        pass
+
+    # pull a bounded sample of members per kept cluster, each with its box
+    from collections import Counter
+    members = {lab: [] for lab in keep}
+    tag_votes = {lab: Counter() for lab in keep}
+    tags_by_file = {}
+    keepset = set(keep)
+    for rp, box_json, lab in db.execute(
+            "SELECT rel_path, box, label FROM stage_labels "
+            "WHERE run_sig=? AND label>=0", (sig,)):
+        lab = int(lab)
+        if lab not in keepset or len(members[lab]) >= per:
+            continue
+        try:
+            box = json.loads(box_json) if box_json else {}
+        except Exception:
+            box = {}
+        members[lab].append({"file": rp, "box": box})
+
+    n_objects = sum(sizes.values())
+    clusters = [{
+        "id": lab,
+        "size": sizes[lab],
+        "suggested": suggested.get(lab, ""),
+        "members": members[lab],
+        "shown": len(members[lab]),
+    } for lab in keep]
+
+    return jsonify({"success": True, "run_sig": sig, "clusters": clusters,
+                    "n_clusters": len(clusters), "n_objects": n_objects})
+
+
+@app.route("/api/apply_staged_cluster", methods=["POST"])
+def apply_staged_cluster():
+    """Apply a user-given name to confirmed member boxes of a staged cluster.
+
+    Body:
+      name      the label to write (required)
+      members   list of {file, box:{cx,cy,w,h}} the user CONFIRMED (required)
+
+    For each confirmed member we add a region {class_name=name, ...box,
+    confirmed=True} to that file's metadata, plus the name as a file tag. Denied
+    members are simply absent from the list, so nothing is written for them.
+    """
+    body = request.json or {}
+    name = (body.get("name") or "").strip()
+    members = body.get("members") or []
+    if not name:
+        return jsonify({"success": False, "error": "No name given."})
+    if not members:
+        return jsonify({"success": False, "error": "No confirmed members."})
+
+    # group confirmed boxes by file so each file is written once
+    by_file = {}
+    for m in members:
+        f = m.get("file")
+        if not f:
+            continue
+        by_file.setdefault(f, []).append(m.get("box") or {})
+
+    touched, boxes_written, errors = 0, 0, []
+    for fn, boxes in by_file.items():
+        fp = get_safe_path(MEDIA_DIR, fn)
+        if not fp or not os.path.exists(fp):
+            errors.append(fn); continue
+        try:
+            meta = read_metadata(fp)
+            tags = list(meta.get("tags", []))
+            if name not in tags:
+                tags.append(name)
+            regions = list(meta.get("regions", []))
+            for b in boxes:
+                if not all(k in b for k in ("cx", "cy", "w", "h")):
+                    continue
+                regions.append({"class_name": name,
+                                "cx": b["cx"], "cy": b["cy"],
+                                "w": b["w"], "h": b["h"], "confirmed": True})
+                boxes_written += 1
+            write_metadata(fp, tags, meta.get("description", ""), regions,
+                           analysis=meta.get("analysis"), pose=meta.get("pose"))
+            touched += 1
+        except Exception as e:
+            errors.append(fn)
+            access_logger.error(f"apply_staged_cluster {fn}: {e}")
+    return jsonify({"success": True, "files": touched,
+                    "boxes": boxes_written, "errors": errors})
+
 
 def _merge_comic_analyses(folder, page_analyses, summarize=True):
     """Aggregate per-page pipeline analyses into comic-level metadata.

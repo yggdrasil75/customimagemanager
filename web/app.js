@@ -1364,17 +1364,32 @@ async function clearCurrentFlag(){
 }
 async function refreshReviewCount(){
   try{
-    const d=await fetch('/api/review_list').then(r=>r.json());
+    const d=await fetch('/api/review_list?offset=0&limit=1').then(r=>r.json());
     const b=document.getElementById('review_badge');
-    if(d.total>0){ b.innerText=d.total; b.classList.remove('hidden'); }
+    if(d.total>0){ b.innerText=_fmtCount(d.total); b.title=d.total+' pending'; b.classList.remove('hidden'); }
     else b.classList.add('hidden');
   }catch(e){}
 }
 
-let reviewItems=[], reviewIdx=0;
+let reviewItems=[], reviewIdx=0, reviewTotal=0, reviewOffset=0;
+const REVIEW_PAGE=500;
+
+// Counter cap that climbs 1k → 10k → 100k → 1M … so the badge never lies.
+function _scaleCap(n){
+  let cap=1000;
+  while(n>cap) cap*=10;
+  return cap;
+}
+function _fmtCount(n){
+  if(n>=1e6) return (n/1e6).toFixed(n%1e6?1:0)+'M';
+  if(n>=1e3) return (n/1e3).toFixed(n%1e3?1:0)+'k';
+  return ''+n;
+}
+
 async function openReview(){
-  const d=await fetch('/api/review_list').then(r=>r.json());
-  reviewItems=d.items||[]; reviewIdx=0;
+  reviewOffset=0;
+  const d=await fetch(`/api/review_list?offset=0&limit=${REVIEW_PAGE}`).then(r=>r.json());
+  reviewItems=d.items||[]; reviewIdx=0; reviewTotal=d.total||reviewItems.length;
   refreshReviewCount();
   if(!reviewItems.length){ showToast('No AI suggestions to review.'); return; }
   document.getElementById('review_modal').classList.remove('hidden');
@@ -1384,23 +1399,124 @@ function closeReview(){
   document.getElementById('review_modal').classList.add('hidden');
   loadGallery(); refreshReviewCount();
 }
-function showReviewItem(i){
+
+// Pull the next page when the cursor nears the end of the loaded slice.
+async function _maybePageReview(){
+  if(reviewItems.length>=reviewTotal) return;
+  if(reviewIdx < reviewItems.length-50) return;
+  reviewOffset+=REVIEW_PAGE;
+  const d=await fetch(`/api/review_list?offset=${reviewOffset}&limit=${REVIEW_PAGE}`).then(r=>r.json());
+  if(d.items&&d.items.length){ reviewItems=reviewItems.concat(d.items); reviewTotal=d.total||reviewTotal; }
+}
+
+async function showReviewItem(i){
   if(!reviewItems.length){ closeReview(); return; }
   reviewIdx=Math.max(0,Math.min(reviewItems.length-1,i));
+  await _maybePageReview();
   const it=reviewItems[reviewIdx];
-  document.getElementById('review_img').src=`/api/file/${encodeURIComponent(it.filename)}?ts=${Date.now()}`;
   document.getElementById('review_filename').innerText=it.filename;
-  document.getElementById('review_progress').innerText=`${reviewIdx+1} / ${reviewItems.length}`;
+  // progress now reflects the TRUE total, not just the loaded page
+  const pos=reviewOffset>0?reviewIdx+1:reviewIdx+1;
+  document.getElementById('review_progress').innerText=
+    `${_fmtCount(reviewIdx+1)} / ${_fmtCount(reviewTotal)}`;
   const fl=document.getElementById('review_flag');
   if(it.flagged){ document.getElementById('review_reason').innerText=it.reason||'(no reason)'; fl.classList.remove('hidden'); }
   else fl.classList.add('hidden');
-  const bx=document.getElementById('review_boxes');
-  if(it.unconfirmed>0){ document.getElementById('review_boxcount').innerText=it.unconfirmed; bx.classList.remove('hidden'); }
-  else bx.classList.add('hidden');
+  // load the actual boxes for in-place review (no editor trip)
+  await loadReviewBoxes(it);
 }
+
+// ── in-place box review ──────────────────────────────────────────────────────
+let _rvRegions=[], _rvImg=new Image(), _rvDecisions={};
+async function loadReviewBoxes(it){
+  _rvRegions=[]; _rvDecisions={};
+  try{
+    const d=await fetch('/api/metadata',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:'read',filename:it.filename})}).then(r=>r.json());
+    _rvRegions=(d.metadata&&d.metadata.regions)||[];
+  }catch(e){ _rvRegions=[]; }
+  // default decision: unconfirmed boxes pending, confirmed ones left alone
+  _rvRegions.forEach((r,idx)=>{ _rvDecisions[idx]=r.confirmed?'keep':'pending'; });
+  _rvImg=new Image();
+  _rvImg.onload=()=>drawReviewCanvas();
+  _rvImg.src=`/api/file/${encodeURIComponent(it.filename)}?ts=${Date.now()}`;
+  renderReviewBoxPanel();
+}
+
+function drawReviewCanvas(){
+  const cv=document.getElementById('review_canvas');
+  if(!cv||!_rvImg.naturalWidth) return;
+  const host=cv.parentElement;
+  const scale=Math.min(host.clientWidth/_rvImg.naturalWidth, host.clientHeight/_rvImg.naturalHeight);
+  cv.width=_rvImg.naturalWidth*scale; cv.height=_rvImg.naturalHeight*scale;
+  const c=cv.getContext('2d');
+  c.clearRect(0,0,cv.width,cv.height);
+  c.drawImage(_rvImg,0,0,cv.width,cv.height);
+  _rvRegions.forEach((r,idx)=>{
+    const dec=_rvDecisions[idx];
+    const col=dec==='deny'?'#ef4444':dec==='accept'?'#22c55e':dec==='keep'?'#3b82f6':'#f59e0b';
+    const x=(r.cx-r.w/2)*cv.width, y=(r.cy-r.h/2)*cv.height, w=r.w*cv.width, h=r.h*cv.height;
+    c.lineWidth=2; c.strokeStyle=col; c.strokeRect(x,y,w,h);
+    c.fillStyle=col; c.font='12px sans-serif';
+    const lbl=`${idx+1} ${r.class_name||''}`.trim();
+    const tw=c.measureText(lbl).width+6;
+    c.fillRect(x,Math.max(0,y-15),tw,15);
+    c.fillStyle='#000'; c.fillText(lbl,x+3,Math.max(10,y-4));
+  });
+}
+window.addEventListener('resize',()=>{ if(!document.getElementById('review_modal').classList.contains('hidden')) drawReviewCanvas(); });
+
+function renderReviewBoxPanel(){
+  const el=document.getElementById('review_boxlist');
+  if(!el) return;
+  if(!_rvRegions.length){ el.innerHTML='<div class="text-xs text-gray-500">No boxes on this image.</div>'; return; }
+  el.innerHTML=_rvRegions.map((r,idx)=>{
+    const dec=_rvDecisions[idx];
+    const badge=dec==='deny'?'✕ deny':dec==='accept'?'✓ accept':dec==='keep'?'kept':'pending';
+    const bcol=dec==='deny'?'text-red-400':dec==='accept'?'text-emerald-400':dec==='keep'?'text-blue-400':'text-amber-400';
+    return `<div class="flex items-center gap-1 mb-1">
+      <span class="text-[10px] w-4 text-gray-500">${idx+1}</span>
+      <input value="${_esc(r.class_name||'')}" oninput="rvName(${idx},this.value)"
+        class="text-[11px] bg-gray-900 border border-gray-700 rounded px-1 py-0.5 flex-1 min-w-0">
+      <button onclick="rvDecide(${idx},'accept')" title="accept"
+        class="text-[11px] bg-emerald-800 hover:bg-emerald-700 px-1.5 rounded">✓</button>
+      <button onclick="rvDecide(${idx},'deny')" title="deny"
+        class="text-[11px] bg-red-800 hover:bg-red-700 px-1.5 rounded">✕</button>
+      <span class="text-[10px] ${bcol} w-12 text-right">${badge}</span>
+    </div>`;
+  }).join('');
+}
+function rvDecide(idx,act){ _rvDecisions[idx]=act; drawReviewCanvas(); renderReviewBoxPanel(); }
+function rvName(idx,v){ _rvRegions[idx].class_name=v; drawReviewCanvas(); }
+function rvAll(act){ _rvRegions.forEach((_,i)=>_rvDecisions[i]=act); drawReviewCanvas(); renderReviewBoxPanel(); }
+
+async function rvSave(advance){
+  const it=reviewItems[reviewIdx]; if(!it) return;
+  const decisions=[];
+  _rvRegions.forEach((r,idx)=>{
+    const dec=_rvDecisions[idx];
+    if(dec==='accept') decisions.push({index:idx,action:'accept',name:r.class_name});
+    else if(dec==='deny') decisions.push({index:idx,action:'deny'});
+    else if(dec==='keep') decisions.push({index:idx,action:'rename',name:r.class_name});
+  });
+  if(decisions.length){
+    try{
+      const res=await fetch('/api/review_boxes',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({filename:it.filename,decisions})}).then(r=>r.json());
+      it.unconfirmed=res.remaining_unconfirmed??0;
+      if(currentFile===it.filename) selectFile(it.filename);
+    }catch(e){ showToast('Save failed.'); return; }
+  }
+  showToast('Boxes saved.');
+  if(advance){
+    if(!it.flagged && (it.unconfirmed||0)<=0){ _reviewRemoveCurrent(); }
+    else showReviewItem(reviewIdx+1);
+  } else { renderReviewBoxPanel(); }
+}
+
 function reviewStep(d){ showReviewItem(reviewIdx+d); }
 function _reviewRemoveCurrent(){
-  reviewItems.splice(reviewIdx,1);
+  reviewItems.splice(reviewIdx,1); reviewTotal=Math.max(0,reviewTotal-1);
   if(!reviewItems.length){ closeReview(); return; }
   if(reviewIdx>=reviewItems.length) reviewIdx=reviewItems.length-1;
   showReviewItem(reviewIdx);
@@ -1420,38 +1536,24 @@ async function reviewKeep(){
     body:JSON.stringify({filename:it.filename,delete:false,reason:''})});
   it.flagged=false; document.getElementById('review_flag').classList.add('hidden');
   if(currentFile===it.filename){ currentFlag=null; renderFlagBanner(); }
-  if(it.unconfirmed<=0) _reviewRemoveCurrent();
+  if((it.unconfirmed||0)<=0) _reviewRemoveCurrent();
   showToast('Kept (flag cleared).');
-}
-async function reviewConfirmBoxes(){
-  const it=reviewItems[reviewIdx]; if(!it) return;
-  await fetch('/api/confirm_all',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename:it.filename})});
-  it.unconfirmed=0; document.getElementById('review_boxes').classList.add('hidden');
-  if(currentFile===it.filename) selectFile(it.filename);
-  if(!it.flagged) _reviewRemoveCurrent();
-  showToast('Boxes confirmed.');
-}
-function reviewOpenEditor(){
-  const it=reviewItems[reviewIdx]; if(!it) return;
-  closeReview(); selectFile(it.filename);
 }
 async function reviewDeleteAllFlagged(){
   const flagged=reviewItems.filter(x=>x.flagged);
-  if(!flagged.length){ showToast('No flagged items in the queue.'); return; }
+  if(!flagged.length){ showToast('No flagged items in the loaded queue.'); return; }
   if(!confirm(`Permanently delete ALL ${flagged.length} flagged image(s)? This cannot be undone.`)) return;
   await fetch('/api/bulk_delete',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({filenames:flagged.map(x=>x.filename)})});
   showToast(`Deleted ${flagged.length} flagged image(s).`);
-  const d=await fetch('/api/review_list').then(r=>r.json());
-  reviewItems=d.items||[]; reviewIdx=0;
-  if(!reviewItems.length) closeReview(); else showReviewItem(0);
+  openReview();
 }
 document.addEventListener('keydown',e=>{
   if(document.getElementById('review_modal').classList.contains('hidden')) return;
   const tag=document.activeElement.tagName; if(tag==='INPUT'||tag==='TEXTAREA') return;
   if(e.key==='ArrowRight') reviewStep(1);
   else if(e.key==='ArrowLeft') reviewStep(-1);
+  else if(e.key==='a'||e.key==='A') rvSave(true);
   else if(e.key==='Escape') closeReview();
 });
 
@@ -1649,6 +1751,113 @@ function plViewCluster(label){
 // Show a cluster's least-typical members (outlier candidates) first.
 function plViewOutliers(label){
   showImageFilter({outliers:label,top_k:300}, `Cluster ${label} · outliers first`);
+}
+
+// ── persistent staged-discovery results gallery ──────────────────────────────
+// Reads the on-disk stage_labels/stage_objects via /api/staged_clusters and
+// renders each "common object" cluster as a strip of actual object crops.
+// Works after a staged run and after a restart (the in-memory _grouping_runs
+// path does not), and lets you bulk-tag a cluster from what you see.
+function _cropURL(m){
+  const b=m.box||{};
+  const q=new URLSearchParams({file:m.file,
+    cx:b.cx??0.5, cy:b.cy??0.5, w:b.w??1, h:b.h??1});
+  return '/api/crop?'+q.toString();
+}
+
+async function showStagedClusters(){
+  const box=document.getElementById('pl_staged_results');
+  box.innerHTML='<div class="text-xs text-gray-400">Loading results…</div>';
+  let d;
+  try{
+    d=await fetch('/api/staged_clusters?limit=60&members=500').then(r=>r.json());
+  }catch(e){ box.innerHTML='<div class="text-xs text-red-400">Network error.</div>'; return; }
+  if(!d.success){ box.innerHTML=`<div class="text-xs text-red-400">${_esc(d.error||'Failed.')}</div>`; return; }
+  if(!d.clusters.length){
+    box.innerHTML='<div class="text-xs text-gray-400">No clusters yet — run discovery first.</div>';
+    return;
+  }
+  // hold the full member set per cluster so review can confirm/deny each box
+  _stagedRuns=d.run_sig;
+  _stagedClusters={};
+  const head=`<div class="text-xs text-gray-400 mb-2">${d.n_clusters} clusters · `+
+    `${d.n_objects} objects · run <span class="text-gray-500">${_esc(d.run_sig||'')}</span></div>`;
+  const cards=d.clusters.map(c=>{
+    _stagedClusters[c.id]=c;
+    const sug=c.suggested?` · suggested <span class="text-emerald-300">${_esc(c.suggested)}</span>`:'';
+    const more=c.size>c.shown?` <span class="text-gray-500">(showing ${c.shown} of ${c.size})</span>`:'';
+    return `<div class="bg-gray-800 rounded p-2 mb-2 flex items-center justify-between">
+      <div class="text-xs text-gray-300">Cluster ${c.id} · ${c.size} objects${sug}${more}</div>
+      <button class="text-[10px] bg-emerald-700 hover:bg-emerald-600 px-3 py-1 rounded font-bold"
+        onclick="reviewStagedCluster(${c.id})">review</button>
+    </div>`;
+  }).join('');
+  box.innerHTML=head+cards;
+}
+
+// Per-member review: name the cluster, then accept/deny each box. Only accepted
+// boxes get the name written as a confirmed region (via /api/apply_staged_cluster).
+let _stagedRuns=null, _stagedClusters={}, _reviewState={};
+function reviewStagedCluster(cid){
+  const c=_stagedClusters[cid];
+  if(!c){ showToast('Reload results first.'); return; }
+  // default every shown member to accepted
+  _reviewState={cid, name:c.suggested||'', decisions:c.members.map(()=>true), members:c.members};
+  renderReview();
+}
+
+function renderReview(){
+  const box=document.getElementById('pl_staged_results');
+  const s=_reviewState;
+  const tiles=s.members.map((m,i)=>{
+    const ok=s.decisions[i];
+    const ring=ok?'border-emerald-500':'border-red-600 opacity-50';
+    return `<div class="relative flex-shrink-0">
+      <img src="${_cropURL(m)}" loading="lazy" title="${_esc(m.file)}"
+        onclick="toggleReview(${i})"
+        class="w-20 h-20 object-cover rounded border-2 ${ring} cursor-pointer">
+      <div class="absolute top-0 right-0 text-[10px] px-1 rounded-bl ${ok?'bg-emerald-600':'bg-red-700'}">
+        ${ok?'✓':'✕'}</div>
+    </div>`;
+  }).join('');
+  const nAcc=s.decisions.filter(Boolean).length;
+  box.innerHTML=`<div class="bg-gray-800 rounded p-3">
+    <div class="flex items-center gap-2 mb-2">
+      <button onclick="showStagedClusters()" class="text-xs text-gray-400 hover:text-white">← back</button>
+      <span class="text-xs text-gray-300">Reviewing cluster ${s.cid}</span>
+    </div>
+    <div class="flex items-center gap-2 mb-2">
+      <input id="review_name" type="text" placeholder="name this object…"
+        value="${_esc(s.name)}" oninput="_reviewState.name=this.value"
+        class="text-xs bg-gray-900 border border-gray-700 rounded px-2 py-1 flex-1">
+      <button onclick="reviewAll(true)" class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">accept all</button>
+      <button onclick="reviewAll(false)" class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">deny all</button>
+    </div>
+    <div class="text-[11px] text-gray-500 mb-2">Click a box to toggle accept/deny. ${nAcc} accepted.</div>
+    <div class="flex gap-2 flex-wrap mb-3">${tiles||'<span class="text-[11px] text-gray-500">no crops</span>'}</div>
+    <button onclick="applyReview()"
+      class="text-xs bg-emerald-700 hover:bg-emerald-600 px-3 py-1.5 rounded font-bold">
+      Apply name to ${nAcc} box(es)</button>
+  </div>`;
+}
+
+function toggleReview(i){ _reviewState.decisions[i]=!_reviewState.decisions[i]; renderReview(); }
+function reviewAll(v){ _reviewState.decisions=_reviewState.decisions.map(()=>v); renderReview(); }
+
+async function applyReview(){
+  const s=_reviewState;
+  const name=(s.name||'').trim();
+  if(!name){ showToast('Enter a name first.'); return; }
+  const members=s.members.filter((_,i)=>s.decisions[i]);
+  if(!members.length){ showToast('No boxes accepted.'); return; }
+  try{
+    const r=await fetch('/api/apply_staged_cluster',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name,members})}).then(x=>x.json());
+    if(!r.success){ showToast('Failed: '+(r.error||'')); return; }
+    showToast(`"${name}" written to ${r.boxes} box(es) across ${r.files} file(s).`);
+    showStagedClusters();
+  }catch(e){ showToast('Network error.'); }
 }
 
 async function comicPipeline(){
