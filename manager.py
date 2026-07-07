@@ -22,7 +22,7 @@ Key architectural decisions vs the naive version:
 import os, glob, cv2, yaml, subprocess, shutil, sys, numpy as np
 import tempfile, io, time, random, json, threading, logging
 import requests, base64, re, pyexiv2, xml.sax.saxutils as saxutils
-import hashlib, sqlite3
+import hashlib, sqlite3, uuid
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from werkzeug.utils import secure_filename
@@ -33,6 +33,8 @@ from dup_heuristics import DuplicateClassifier, classify_pair, extract_features
 import object_grouping as og
 import discover_stages as ds
 import image_index as ii
+import media_types as mt
+import video_tracks as vt
 try:
     import iqa
 except Exception:
@@ -237,6 +239,10 @@ def _init_db():
         "ALTER TABLE files ADD COLUMN iqa_score REAL DEFAULT NULL",
         "ALTER TABLE files ADD COLUMN iqa_brisque REAL DEFAULT NULL",
         "ALTER TABLE files ADD COLUMN iqa_manual INTEGER DEFAULT 0",
+        # Media type: 'image' (any .jxl, incl. animated ones from gifs) or
+        # 'video' (stored natively). duration is seconds for videos, else NULL.
+        "ALTER TABLE files ADD COLUMN media_kind TEXT DEFAULT 'image'",
+        "ALTER TABLE files ADD COLUMN duration REAL DEFAULT NULL",
     ]:
         try:
             db.execute(ddl); db.commit()
@@ -521,7 +527,17 @@ def read_jxl(path: str) -> np.ndarray | None:
     Never (h,w,1) or (h,w,2), never float/uint16.
     Returns None (with a WARNING, not ERROR) if the file is missing,
     unreadable, or not actually a JXL codestream.
+
+    Videos are handled here too: for a native video file we return a single
+    poster frame (RGB uint8), so every consumer that funnels through read_jxl —
+    indexing, perceptual-hash dedup, thumbnails, embeddings, clustering, IQA —
+    transparently operates on the poster frame without knowing it's a video.
     """
+    if mt.is_video(path):
+        frame = mt.video_poster_frame(path)
+        if frame is None:
+            access_logger.warning(f"read_jxl: could not extract video frame: {path}")
+        return frame
     try:
         with open(path, 'rb') as f:
             header = f.read(12)
@@ -619,6 +635,24 @@ def _sha256(path: str) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+def _set_media_kind(rel_path: str) -> None:
+    """Stamp media_kind ('image'/'video') and, for videos, duration onto the row.
+    Cheap and idempotent; called at the end of every _index_file so the UI knows
+    whether to render <img> or <video>."""
+    try:
+        kind = mt.kind(rel_path)
+        dur = None
+        if kind == 'video':
+            ap = get_safe_path(MEDIA_DIR, rel_path)
+            if ap:
+                dur = mt.video_duration(ap)
+        _db().execute("UPDATE files SET media_kind=?, duration=? WHERE rel_path=?",
+                      (kind, dur, rel_path))
+        _db().commit()
+    except Exception as e:
+        access_logger.warning(f"_set_media_kind {rel_path}: {e}")
+
+
 def _index_file(rel_path: str, force: bool = False) -> bool:
     """
     Compute hashes + read metadata for one file, write to DB.
@@ -643,6 +677,7 @@ def _index_file(rel_path: str, force: bool = False) -> bool:
         if img is None:
             # Undecodable — write stub so we don't retry every run
             _upsert_file(rel_path, mtime, 0, 0, sha, None, None, [], '')
+            _set_media_kind(rel_path)
             return True
 
         h, w  = img.shape[:2]
@@ -662,6 +697,7 @@ def _index_file(rel_path: str, force: bool = False) -> bool:
         _db().execute("UPDATE files SET analysis=?, flagged_delete=?, flag_reason=? WHERE rel_path=?",
                       (json.dumps(_an) if _an else '', fd, fr, rel_path))
         _db().commit()
+        _set_media_kind(rel_path)
         return True
     except Exception as e:
         access_logger.error(f"_index_file {rel_path}: {e}")
@@ -675,7 +711,7 @@ def _build_index_background():
     for root, dirs, filenames in os.walk(MEDIA_DIR):
         dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'runs']
         for f in filenames:
-            if f.startswith('.') or not f.endswith('.jxl'):
+            if f.startswith('.') or not mt.is_library_file(f):
                 continue
             rel = os.path.relpath(os.path.join(root, f), MEDIA_DIR).replace('\\','/')
             batch.append(rel)
@@ -1227,6 +1263,7 @@ def _run_pose(img_bgr):
 # ── character / panel detectors (for the pipeline) ───────────────────────────--
 _person_cache = {"path": None, "model": None}
 _panel_cache = {"path": None, "model": None}
+_video_det_cache = {"path": None, "model": None}
 
 def _detect_obb_or_box(img_bgr, model_path, cache, keep_classes=None,
                        conf=0.25, as_obb=False):
@@ -1392,12 +1429,13 @@ def _comic_json_path(folder):
     return get_safe_path(MEDIA_DIR, rel)
 
 def _auto_pages(folder):
-    """All .jxl filenames directly inside `folder`, sorted (relative names)."""
+    """All asset filenames (.jxl or native video) directly inside `folder`,
+    sorted (relative names)."""
     base = get_safe_path(MEDIA_DIR, folder) if folder else os.path.abspath(MEDIA_DIR)
     if not base or not os.path.isdir(base):
         return []
     return sorted(f for f in os.listdir(base)
-                  if f.endswith('.jxl') and os.path.isfile(os.path.join(base, f)))
+                  if mt.is_library_file(f) and os.path.isfile(os.path.join(base, f)))
 
 def _load_comic_json(folder):
     p = _comic_json_path(folder)
@@ -1749,23 +1787,40 @@ def api_upload():
     os.makedirs(tdir, exist_ok=True)
 
     fname    = secure_filename(file.filename)
-    jxl_name = os.path.splitext(fname)[0] + ".jxl"
-    jxl_path = os.path.join(tdir, jxl_name)
-    rel_path = os.path.relpath(jxl_path, MEDIA_DIR).replace('\\', '/')
+    in_ext   = os.path.splitext(fname)[1].lower()
+    if in_ext not in mt.UPLOAD_EXTS:
+        return jsonify({"success": False, "error_code": "conversion_failed",
+                        "error": f"Unsupported file type '{in_ext}'.",
+                        "detail": "Accepted: images, gifs (→ animated jxl), "
+                                  "and video files."}), 422
 
-    if os.path.exists(jxl_path):
+    # Images/gifs land on disk as <base>.jxl; videos keep their own extension.
+    store_name = mt.stored_name(fname)
+    store_ext  = os.path.splitext(store_name)[1].lower()
+    store_path = os.path.join(tdir, store_name)
+    rel_path   = os.path.relpath(store_path, MEDIA_DIR).replace('\\', '/')
+
+    if os.path.exists(store_path):
         return jsonify({"success": False, "error_code": "filename_exists",
                         "error": f"A file named '{rel_path}' already exists.",
                         "existing_file": rel_path}), 409
 
     with tempfile.TemporaryDirectory() as tmp:
         orig = os.path.join(tmp, fname)
-        jxl  = os.path.join(tmp, "out.jxl")
+        out  = os.path.join(tmp, "out" + store_ext)
         file.save(orig)
         try:
-            if not fname.lower().endswith('.jxl'):
-                cjxl_cmd = ['cjxl', orig, jxl, '-d', '0']
-                if fname.lower().endswith(('.jpg', '.jpeg')):
+            if mt.is_video(fname):
+                # Videos can't be transcoded to JXL — store the original bytes.
+                shutil.copy(orig, out)
+            elif in_ext == '.jxl':
+                shutil.copy(orig, out)
+            else:
+                # cjxl handles both still images and animated GIF/APNG (the
+                # latter producing an ANIMATED jxl). --lossless_jpeg only makes
+                # sense for a real JPEG bitstream, never for gifs.
+                cjxl_cmd = ['cjxl', orig, out, '-d', '0']
+                if in_ext in ('.jpg', '.jpeg'):
                     cjxl_cmd.append('--lossless_jpeg=1')   # bit-exact JPEG transcode
                 result = subprocess.run(cjxl_cmd, capture_output=True, text=True)
                 if result.returncode != 0:
@@ -1774,10 +1829,8 @@ def api_upload():
                         "error": "cjxl conversion failed.",
                         "detail": result.stderr.strip()
                     }), 422
-            else:
-                shutil.copy(orig, jxl)
 
-            sha = _sha256(jxl)
+            sha = _sha256(out)
             dup = _db().execute(
                 "SELECT rel_path FROM files WHERE sha256=?", (sha,)).fetchone()
             if dup:
@@ -1787,10 +1840,10 @@ def api_upload():
                     "existing_file": dup["rel_path"]
                 }), 409
 
-            shutil.move(jxl, jxl_path)
+            shutil.move(out, store_path)
             meta = json.loads(request.form.get("metadata", "{}") or "{}")
             if meta:
-                write_metadata(jxl_path, meta.get("tags", []),
+                write_metadata(store_path, meta.get("tags", []),
                                meta.get("description", ""), meta.get("regions", []))
             if not _index_file(rel_path, force=True):
               print("upload failed")
@@ -1820,7 +1873,7 @@ def api_move():
     if old_path != new_path:
         ob = os.path.splitext(old_path)[0]
         nb = os.path.splitext(new_path)[0]
-        for ext in ('.jxl','.txt','.xmp'):
+        for ext in mt.related_exts(old_path):
             if os.path.exists(ob+ext): shutil.move(ob+ext, nb+ext)
         _delete_file_row(filename)
         new_rel = os.path.relpath(new_path, MEDIA_DIR).replace('\\','/')
@@ -1835,7 +1888,9 @@ def api_move():
 def api_file(filename):
     fp = get_safe_path(MEDIA_DIR, filename)
     if fp and os.path.exists(fp):
-        return send_file(fp, mimetype='image/jxl' if filename.lower().endswith('.jxl') else None)
+        # conditional=True enables HTTP Range requests so <video> can seek/stream
+        # instead of downloading the whole clip up front.
+        return send_file(fp, mimetype=mt.mime_for(filename), conditional=True)
     return "",404
 
 @app.route("/api/thumb/<path:filename>")
@@ -1877,6 +1932,129 @@ def api_crop():
         access_logger.warning(f"api_crop {fn}: {e}")
         return "", 500
 
+@app.route("/api/video_tracks/<path:filename>", methods=["GET"])
+def api_video_tracks_get(filename):
+    """Return the time-indexed bounding-box tracks for a video. Optional ?t=<sec>
+    also returns the interpolated boxes visible at that instant (handy for the
+    overlay / for a quick server-side check)."""
+    fp = get_safe_path(MEDIA_DIR, filename)
+    if not fp or not os.path.exists(fp):
+        return jsonify({"success": False, "error": "not found"}), 404
+    if not mt.is_video(filename):
+        return jsonify({"success": False, "error": "not a video"}), 400
+    doc = vt.load(fp)
+    resp = {"success": True, "tracks": doc["tracks"], "labels": vt.labels(doc)}
+    t = request.args.get("t")
+    if t is not None:
+        try: resp["boxes_at"] = vt.boxes_at(doc, float(t))
+        except ValueError: pass
+    return jsonify(resp)
+
+@app.route("/api/video_tracks/<path:filename>", methods=["POST"])
+def api_video_tracks_set(filename):
+    """Persist the tracks document for a video (whole-document replace). The video
+    file is never touched — only the .tracks.json sidecar."""
+    fp = get_safe_path(MEDIA_DIR, filename)
+    if not fp or not os.path.exists(fp):
+        return jsonify({"success": False, "error": "not found"}), 404
+    if not mt.is_video(filename):
+        return jsonify({"success": False, "error": "not a video"}), 400
+    doc = request.json or {}
+    try:
+        saved = vt.save(fp, doc)
+    except Exception as e:
+        access_logger.warning(f"api_video_tracks_set {filename}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+    # Mirror any person labels into the file's tags so video subjects are
+    # searchable alongside image tags.
+    lbls = vt.labels(saved)
+    if lbls:
+        try:
+            meta = read_metadata(fp)
+            merged = list(dict.fromkeys(meta["tags"] + lbls))
+            if merged != meta["tags"]:
+                write_metadata(fp, merged, meta["description"], meta["regions"])
+        except Exception as e:
+            access_logger.warning(f"api_video_tracks_set tag-sync {filename}: {e}")
+    return jsonify({"success": True, "tracks": saved["tracks"], "labels": lbls})
+
+@app.route("/api/video_detect/<path:filename>", methods=["POST"])
+def api_video_detect(filename):
+    """Sample frames across a video, run the existing COCO YOLO detector on each,
+    and associate detections into tracks (greedy IoU matching per class). Returns
+    proposed tracks/keyframes for the user to validate — nothing is saved here.
+    Works for any COCO class (person, dog, cat, car, …), not just people."""
+    fp = get_safe_path(MEDIA_DIR, filename)
+    if not fp or not os.path.exists(fp):
+        return jsonify({"success": False, "error": "not found"}), 404
+    if not mt.is_video(filename):
+        return jsonify({"success": False, "error": "not a video"}), 400
+
+    dur = mt.video_duration(fp) or 0.0
+    if dur <= 0:
+        return jsonify({"success": False, "error": "could not read video duration"}), 422
+
+    # Sample ~1 frame every 0.5s, capped so long clips stay responsive.
+    n = max(2, min(48, int(dur / 0.5)))
+    times = [dur * i / (n - 1) for i in range(n)]
+    model_path = f"yolo11{_yolo_size()}.pt"
+
+    def iou(a, b):
+        ax1, ay1 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
+        ax2, ay2 = a["cx"] + a["w"] / 2, a["cy"] + a["h"] / 2
+        bx1, by1 = b["cx"] - b["w"] / 2, b["cy"] - b["h"] / 2
+        bx2, by2 = b["cx"] + b["w"] / 2, b["cy"] + b["h"] / 2
+        ix1, iy1, ix2, iy2 = max(ax1, bx1), max(ay1, by1), min(ax2, bx2), min(ay2, by2)
+        iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+        inter = iw * ih
+        ua = a["w"] * a["h"] + b["w"] * b["h"] - inter
+        return inter / ua if ua > 0 else 0.0
+
+    cap = cv2.VideoCapture(fp)
+    if not cap.isOpened():
+        return jsonify({"success": False, "error": "could not open video"}), 422
+
+    tracks = []          # each: {id,label,class_name,keyframes,_last}
+    counters = {}
+    try:
+        for t in times:
+            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            dets = _detect_obb_or_box(frame, model_path, _video_det_cache, conf=0.35)
+            used = set()
+            for d in dets:
+                # match to an existing open track of the same class by best IoU
+                best, best_i = 0.30, -1
+                for i, tr in enumerate(tracks):
+                    if i in used or tr["class_name"] != d["class_name"]:
+                        continue
+                    s = iou(tr["_last"], d)
+                    if s > best:
+                        best, best_i = s, i
+                if best_i >= 0:
+                    tr = tracks[best_i]
+                else:
+                    counters[d["class_name"]] = counters.get(d["class_name"], 0) + 1
+                    idx = counters[d["class_name"]]
+                    tr = {"id": "t_" + uuid.uuid4().hex[:8],
+                          "label": d["class_name"] + (f" {idx}" if idx > 1 else ""),
+                          "class_name": d["class_name"], "keyframes": []}
+                    tracks.append(tr)
+                    best_i = len(tracks) - 1
+                used.add(best_i)
+                tr["keyframes"].append({"t": round(t, 3), "cx": d["cx"], "cy": d["cy"],
+                                        "w": d["w"], "h": d["h"]})
+                tr["_last"] = d
+    finally:
+        cap.release()
+
+    out = [{"id": tr["id"], "label": tr["label"], "class_name": tr["class_name"],
+            "confirmed": False, "keyframes": tr["keyframes"]}
+           for tr in tracks if tr["keyframes"]]
+    return jsonify({"success": True, "tracks": out, "sampled": len(times)})
+
 @app.route("/api/metadata", methods=["POST"])
 def api_metadata():
     d  = request.json
@@ -1900,7 +2078,7 @@ def api_delete():
     fp = get_safe_path(MEDIA_DIR, fn)
     if fp:
         base = os.path.splitext(fp)[0]
-        for ext in ('.jxl','.txt','.xmp'):
+        for ext in mt.related_exts(fp):
             if os.path.exists(base+ext): os.remove(base+ext)
         dp = _thumb_disk_path(fn)
         if os.path.exists(dp): os.remove(dp)
@@ -1945,7 +2123,7 @@ def bulk_delete():
             errors.append(fn); continue
         try:
             base = os.path.splitext(fp)[0]
-            for ext in ('.jxl', '.txt', '.xmp'):
+            for ext in mt.related_exts(fp):
                 if os.path.exists(base + ext): os.remove(base + ext)
             dp = _thumb_disk_path(fn)
             if os.path.exists(dp): os.remove(dp)
@@ -2131,7 +2309,7 @@ def dedup():
         for root, dirs, filenames in os.walk(MEDIA_DIR):
             dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'runs']
             for f in filenames:
-                if f.endswith('.jxl'):
+                if mt.is_library_file(f):
                     files_on_disk.append(
                         os.path.relpath(os.path.join(root, f), MEDIA_DIR).replace('\\', '/'))
         disk_count = len(files_on_disk)
@@ -2345,7 +2523,7 @@ def dedup_merge():
                 op = get_safe_path(MEDIA_DIR, other)
                 if not op: continue
                 base = os.path.splitext(op)[0]
-                for ext in ('.jxl','.txt','.xmp'):
+                for ext in mt.related_exts(op):
                     if os.path.exists(base+ext): os.remove(base+ext)
                 dp = _thumb_disk_path(other)
                 if os.path.exists(dp): os.remove(dp)

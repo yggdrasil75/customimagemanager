@@ -124,6 +124,21 @@
     </div>
     <div id="canvas_container" class="flex-1 bg-black overflow-hidden relative" style="min-height:120px">
       <canvas id="media_canvas" class="absolute"></canvas>
+      <video id="media_video" class="absolute hidden" playsinline
+             style="max-width:100%;max-height:calc(100% - 34px);left:50%;top:calc(50% - 17px);transform:translate(-50%,-50%)"></video>
+      <!-- Box overlay: drawn ON TOP of the pixels, never baked in. Sits below the
+           control bar (z-20 < z-30) so play/scrub are always clickable. -->
+      <svg id="vt_overlay" class="absolute hidden z-20" preserveAspectRatio="none"
+           viewBox="0 0 1 1" style="pointer-events:none"></svg>
+      <!-- Custom video controls, pinned to the bottom, above the overlay. -->
+      <div id="vt_bar" class="absolute hidden z-30 left-0 right-0 bottom-0 h-[34px] px-2
+                 flex items-center gap-2 bg-gray-900/90 border-t border-gray-700">
+        <button id="vt_play" class="text-gray-200 hover:text-white text-sm w-5">▶</button>
+        <input id="vt_seek" type="range" min="0" max="1000" value="0"
+               class="flex-1 h-1 accent-blue-500 cursor-pointer">
+        <span id="vt_time" class="text-[10px] text-gray-400 tabular-nums w-20 text-right">0:00 / 0:00</span>
+        <button id="vt_auto" class="text-[10px] px-1.5 py-0.5 rounded bg-purple-700 hover:bg-purple-600 text-white">Auto-detect</button>
+      </div>
     </div>
     <div class="px-3 py-1 bg-gray-800 border-t border-gray-700 flex justify-between items-center flex-shrink-0">
       <span class="text-[10px] text-gray-500">Drag: add box · hover to locate</span>
@@ -284,8 +299,9 @@
 <div id="region_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
   <div class="bg-gray-800 p-6 rounded-lg border border-gray-600 w-72">
     <h2 class="font-bold mb-3">Region Name</h2>
-    <input id="modal_region_name" type="text"
+    <input id="modal_region_name" type="text" list="vt_labels"
       class="w-full p-2 bg-gray-700 rounded border border-gray-600 mb-4 text-white">
+    <datalist id="vt_labels"></datalist>
     <div class="flex justify-end gap-2">
       <button onclick="cancelRegion()" class="bg-gray-600 px-4 py-1.5 rounded text-sm">Cancel</button>
       <button onclick="saveRegion()" class="bg-blue-600 px-4 py-1.5 rounded text-sm font-bold">Add</button>

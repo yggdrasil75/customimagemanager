@@ -2,6 +2,7 @@
 let currentFile=null, currentRegions=[], oai_actions_cache=[], hasSettings=false;
 let autosaveTO=null, drawing=false, startX=0,startY=0,curX=0,curY=0;
 let pendingBox=null, editingBoxIdx=null;
+let vtTagging=false;   // true while the shared tag modal is tagging a VIDEO box
 let activeRegionIdx=-1, _suppressPaste=false, currentFlag=null, currentPose=null;
 let currentPage=0, totalFiles=0, currentSearch='', currentFolder='', allFolders=[];
 let imageFilter=null;  // active pipeline result set shown in the grid, or null
@@ -160,6 +161,11 @@ let galleryFiles = [];           // current page's file list, in render order
 const canvas=document.getElementById('media_canvas');
 const ctx=canvas.getContext('2d');
 const imgObj=new Image();
+const mediaVideo=document.getElementById('media_video');
+
+// Which stored assets are native videos (everything else is a .jxl image).
+const VIDEO_RE=/\.(mp4|webm|mkv|mov|avi|m4v|mpg|mpeg|wmv|flv|ts|ogv)$/i;
+function isVideoFile(fn){ return VIDEO_RE.test(fn||''); }
 
 // Lazy thumbnail loading via IntersectionObserver
 const io=new IntersectionObserver(entries=>{
@@ -288,12 +294,13 @@ function renderGallery(files){
     div.className='gallery-item';
     div.id=`t_${sid}`;
     div.dataset.filename=f;
-    div.dataset.kind='image';
+    div.dataset.kind=isVideoFile(f)?'video':'image';
     div.dataset.src=`/api/thumb/${encodeURIComponent(f)}`;
     div.addEventListener('click', e => handleGalleryClick(e, f));
     div.style.aspectRatio=(item.width&&item.height)?`${item.width}/${item.height}`:'1/1';
     div.innerHTML=`<div class="skeleton"></div>
       <img alt="">
+      ${isVideoFile(f)?'<span class="absolute inset-0 flex items-center justify-center text-4xl text-white/80 pointer-events-none drop-shadow-lg">▶</span>':''}
       ${item.tags.length?`<span class="tag-badge">${item.tags.length}</span>`:''}
       ${starBadge(item.iqa_score)}
       <span class="label">${f.split('/').pop()}</span>
@@ -400,7 +407,22 @@ async function selectFile(fn){
   document.getElementById('yolo_controls').classList.remove('opacity-50','pointer-events-none');
   document.getElementById('btn_delete').classList.remove('hidden');
   document.getElementById('save_indicator').classList.add('hidden');
-  imgObj.src=`/api/file/${encodeURIComponent(fn)}?ts=${Date.now()}`;
+  if(isVideoFile(fn)){
+    // Native video: use the <video> element, hide the image canvas. Image
+    // region boxes stay hidden; time-indexed video boxes render via vtOverlay.
+    canvas.classList.add('hidden');
+    mediaVideo.classList.remove('hidden');
+    mediaVideo.src=`/api/file/${encodeURIComponent(fn)}?ts=${Date.now()}`;
+    imgObj.removeAttribute('src');
+    vtOverlay.enable(fn);
+  }else{
+    vtOverlay.disable();
+    mediaVideo.pause();
+    mediaVideo.removeAttribute('src');
+    mediaVideo.classList.add('hidden');
+    canvas.classList.remove('hidden');
+    imgObj.src=`/api/file/${encodeURIComponent(fn)}?ts=${Date.now()}`;
+  }
   const d=await fetch('/api/metadata',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({action:'read',filename:fn})}).then(r=>r.json());
   if(d.success){
@@ -682,6 +704,8 @@ document.getElementById('modal_region_name').addEventListener('paste',e=>{
   if(_suppressPaste){ e.preventDefault(); _suppressPaste=false; }
 });
 function saveRegion(){
+  if(vtTagging){ vtOverlay.commitTag(document.getElementById('modal_region_name').value);
+    document.getElementById('region_modal').classList.add('hidden'); return; }
   const name=document.getElementById('modal_region_name').value.trim()||'region';
   if(editingBoxIdx!==null){currentRegions[editingBoxIdx].class_name=name;editingBoxIdx=null;}
   else if(pendingBox){pendingBox.class_name=name;pendingBox.confirmed=true;
@@ -690,6 +714,8 @@ function saveRegion(){
   drawCanvas(); if(popoutOpen) drawPopout(); triggerAutosave();
 }
 function cancelRegion(){
+  if(vtTagging){ vtOverlay.cancelTag();
+    document.getElementById('region_modal').classList.add('hidden'); return; }
   pendingBox=null;editingBoxIdx=null;
   document.getElementById('region_modal').classList.add('hidden'); drawCanvas();
   if(popoutOpen) drawPopout();
@@ -705,6 +731,7 @@ function regionAtCanvas(px,py){
   return -1;
 }
 function setActiveRegion(i){
+  if(isVideoFile(currentFile)){ vtOverlay.setActive(i); return; }
   activeRegionIdx=i;
   const el=document.getElementById('regions_list');
   if(el)[...el.querySelectorAll('.rrow')].forEach((r,j)=>r.classList.toggle('bg-gray-700', j===i));
@@ -712,6 +739,7 @@ function setActiveRegion(i){
 }
 function renderRegionsList(){
   const el=document.getElementById('regions_list'); if(!el) return;
+  if(isVideoFile(currentFile)){ vtOverlay.renderList(el); return; }
   if(!currentRegions.length){ el.innerHTML=''; el.classList.add('hidden'); return; }
   el.classList.remove('hidden');
   el.innerHTML=currentRegions.map((b,i)=>{
@@ -729,14 +757,17 @@ function renderRegionsList(){
   }).join('');
 }
 function renameRegion(i,name){
+  if(isVideoFile(currentFile)){ vtOverlay.rename(i,name); return; }
   if(currentRegions[i]){ currentRegions[i].class_name=(name||'').trim()||'region';
     drawCanvas(); if(popoutOpen) drawPopout(); triggerAutosave(); }
 }
 function confirmRegion(i){
+  if(isVideoFile(currentFile)){ vtOverlay.confirm(i); return; }
   if(currentRegions[i]){ currentRegions[i].confirmed=true;
     drawCanvas(); if(popoutOpen) drawPopout(); triggerAutosave(); }
 }
 function deleteRegion(i){
+  if(isVideoFile(currentFile)){ vtOverlay.remove(i); return; }
   currentRegions.splice(i,1);
   if(activeRegionIdx>=currentRegions.length) activeRegionIdx=-1;
   drawCanvas(); if(popoutOpen) drawPopout(); triggerAutosave();
@@ -2032,3 +2063,248 @@ loadGallery();
 loadFolders();
 fetchDedupStatus();
 refreshReviewCount();
+
+/* ── Video bounding-box overlay ────────────────────────────────────────────────
+   Time-indexed boxes drawn ON TOP of the <video> — pixels are never modified.
+   UX mirrors photo tagging: just drag on the video to draw a box, then the same
+   tag modal pops up. The label is free text (person, dog, car, guitar, …). Draw
+   the same label again at another time to add a keyframe; motion between
+   keyframes is interpolated (matches video_tracks.py). Custom controls live in a
+   bar below the picture so play/scrub always work while boxes are drawable.     */
+const vtOverlay = (() => {
+  const svg   = document.getElementById('vt_overlay');
+  const bar   = document.getElementById('vt_bar');
+  const playB = document.getElementById('vt_play');
+  const seek  = document.getElementById('vt_seek');
+  const timeEl= document.getElementById('vt_time');
+  const autoB = document.getElementById('vt_auto');
+  const dlist = document.getElementById('vt_labels');
+  const cont  = document.getElementById('canvas_container');
+  const NS='http://www.w3.org/2000/svg';
+  const PALETTE=['#f87171','#60a5fa','#34d399','#fbbf24','#c084fc','#22d3ee','#fb923c','#a3e635'];
+  const EPS=0.04;                                   // keyframe time-match tolerance (s)
+
+  let file=null, doc={tracks:[]}, W=1, H=1, saveTimer=null, drag=null, pending=null, selId=null;
+
+  const colorOf= id => PALETTE[Math.max(0,doc.tracks.findIndex(t=>t.id===id))%PALETTE.length];
+  const onKey  = (tr,t)=>tr.keyframes.some(k=>Math.abs(k.t-t)<EPS);
+  const fmt    = s => (isFinite(s)?`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`:'0:00');
+
+  // interpolation — identical to video_tracks.box_at()
+  function boxAt(tr,t){
+    const k=tr.keyframes; if(!k.length||t<k[0].t||t>k[k.length-1].t) return null;
+    let prev=null,nxt=null;
+    for(const kf of k){ if(kf.t<=t) prev=kf; else {nxt=kf;break;} }
+    if(!prev||prev.outside) return null;
+    if(!nxt||prev.t===t) return {cx:prev.cx,cy:prev.cy,w:prev.w,h:prev.h};
+    const f=(t-prev.t)/(nxt.t-prev.t);
+    return {cx:prev.cx+(nxt.cx-prev.cx)*f, cy:prev.cy+(nxt.cy-prev.cy)*f,
+            w:prev.w+(nxt.w-prev.w)*f,     h:prev.h+(nxt.h-prev.h)*f};
+  }
+
+  function layout(){
+    if(svg.classList.contains('hidden')) return;
+    const c=cont.getBoundingClientRect(), v=mediaVideo.getBoundingClientRect();
+    W=Math.max(1,v.width); H=Math.max(1,v.height);
+    svg.style.left=(v.left-c.left)+'px'; svg.style.top=(v.top-c.top)+'px';
+    svg.style.width=W+'px'; svg.style.height=H+'px';
+    svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
+  }
+
+  function rect(x,y,w,h,stroke,dash,sw){
+    const r=document.createElementNS(NS,'rect');
+    r.setAttribute('x',x);r.setAttribute('y',y);r.setAttribute('width',w);r.setAttribute('height',h);
+    r.setAttribute('fill','none');r.setAttribute('stroke',stroke);r.setAttribute('stroke-width',sw||2);
+    if(dash) r.setAttribute('stroke-dasharray',dash); return r;
+  }
+
+  function draw(){
+    if(svg.classList.contains('hidden')) return;
+    layout();
+    while(svg.firstChild) svg.removeChild(svg.firstChild);
+    const t=mediaVideo.currentTime||0;
+    for(const tr of doc.tracks){
+      const b=boxAt(tr,t); if(!b) continue;
+      const col=colorOf(tr.id), sel=tr.id===selId, conf=(tr.confirmed!==false);
+      const x=(b.cx-b.w/2)*W, y=(b.cy-b.h/2)*H, w=b.w*W, h=b.h*H;
+      // Same visual grammar as image regions: solid = confirmed, dashed = pending.
+      svg.appendChild(rect(x,y,w,h,col,conf?null:'6 4',sel?3.5:2));
+      if(tr.label){
+        const fs=13,pad=3,tw=tr.label.length*fs*0.6+pad*2;
+        svg.appendChild(rect(x,Math.max(0,y-fs-pad*2),tw,fs+pad*2,col,null,0)).setAttribute('fill',col);
+        const tx=document.createElementNS(NS,'text');
+        tx.setAttribute('x',x+pad);tx.setAttribute('y',Math.max(fs,y-pad));
+        tx.setAttribute('font-size',fs);tx.setAttribute('font-family','sans-serif');
+        tx.setAttribute('fill','#111');tx.textContent=tr.label;svg.appendChild(tx);
+      }
+    }
+    if(drag&&drag.x1!=null){
+      const x=Math.min(drag.x0,drag.x1)*W,y=Math.min(drag.y0,drag.y1)*H;
+      svg.appendChild(rect(x,y,Math.abs(drag.x1-drag.x0)*W,Math.abs(drag.y1-drag.y0)*H,'#fff','3 3',2));
+    }
+  }
+
+  // Render subjects into the SAME #regions_list pane images use — one row per
+  // track, with the identical status-dot / rename / confirm(✓) / delete(✕) UI.
+  // A "keyframe here" marker (◆/◇) lets you set/clear a box at the current time.
+  function renderList(el){
+    // keep the modal's label autocomplete fresh
+    dlist.innerHTML='';
+    [...new Set(doc.tracks.map(t=>t.label).filter(Boolean))].forEach(l=>{
+      const o=document.createElement('option'); o.value=l; dlist.appendChild(o); });
+
+    if(!doc.tracks.length){ el.innerHTML=''; el.classList.add('hidden'); return; }
+    el.classList.remove('hidden');
+    const t=mediaVideo.currentTime||0;
+    el.innerHTML=doc.tracks.map(tr=>{
+      const conf=(tr.confirmed!==false), here=onKey(tr,t), vis=boxAt(tr,t)!=null;
+      return `<div class="rrow flex items-center gap-1 text-xs px-1 py-0.5 rounded ${tr.id===selId?'bg-gray-700':''}" data-tid="${tr.id}"
+        onmouseenter="setActiveRegion('${tr.id}')" onmouseleave="setActiveRegion(-1)">
+        <span class="inline-block w-2 h-2 rounded-full flex-shrink-0" style="background:${conf?'#3B82F6':'#F59E0B'}"></span>
+        <input class="flex-1 min-w-0 bg-transparent ${vis?'text-white':'text-gray-500'} border-b border-transparent focus:border-gray-500 focus:outline-none"
+          value="${_esc(tr.label||'')}" onchange="renameRegion('${tr.id}', this.value)">
+        <span class="text-[9px] text-gray-500 flex-shrink-0" title="keyframes">${tr.keyframes.length}k</span>
+        <button class="px-1 flex-shrink-0 ${here?'text-blue-400':'text-gray-500'}" title="${here?'remove keyframe at current time':'add keyframe at current time'}"
+          onclick="vtOverlay.toggleKey('${tr.id}')">${here?'◆':'◇'}</button>
+        ${conf?'<span class="text-[9px] text-blue-400 flex-shrink-0">ok</span>'
+              :`<button class="text-amber-400 px-1 flex-shrink-0" title="Confirm subject" onclick="confirmRegion('${tr.id}')">✓</button>`}
+        <button class="text-red-400 px-1 flex-shrink-0" title="Delete subject" onclick="deleteRegion('${tr.id}')">✕</button>
+      </div>`;
+    }).join('');
+  }
+
+  function refresh(){ renderRegionsList(); draw(); }
+
+  // ── tagging: drag → modal (reuses the photo tag modal) ──
+  function pointerNorm(e){
+    const r=svg.getBoundingClientRect();
+    return [Math.min(1,Math.max(0,(e.clientX-r.left)/W)),
+            Math.min(1,Math.max(0,(e.clientY-r.top)/H))];
+  }
+  svg.addEventListener('mousedown',e=>{
+    if(e.button!==0) return;
+    const [x,y]=pointerNorm(e); drag={x0:x,y0:y}; e.preventDefault();
+  });
+  window.addEventListener('mousemove',e=>{
+    if(!drag) return; const [x,y]=pointerNorm(e); drag.x1=x; drag.y1=y; draw();
+  });
+  window.addEventListener('mouseup',e=>{
+    if(!drag) return; const d=drag; drag=null;
+    if(d.x1==null){ draw(); return; }
+    const w=Math.abs(d.x1-d.x0), h=Math.abs(d.y1-d.y0);
+    if(w<0.01||h<0.01){ draw(); return; }
+    // Pre-fill the label if the box was started on top of an existing subject.
+    const t=mediaVideo.currentTime||0; let preset='';
+    for(const tr of doc.tracks){ const b=boxAt(tr,t);
+      if(b&&Math.abs(b.cx-(d.x0+d.x1)/2)<b.w/2&&Math.abs(b.cy-(d.y0+d.y1)/2)<b.h/2){ preset=tr.label; break; } }
+    pending={cx:(d.x0+d.x1)/2,cy:(d.y0+d.y1)/2,w,h,t};
+    openTagModal(preset);
+  });
+  // right-click a box → delete its keyframe at the current time (photo parity)
+  svg.addEventListener('contextmenu',e=>{
+    e.preventDefault(); const [x,y]=pointerNorm(e); const t=mediaVideo.currentTime||0;
+    for(const tr of doc.tracks){ const b=boxAt(tr,t);
+      if(b&&Math.abs(b.cx-x)<b.w/2&&Math.abs(b.cy-y)<b.h/2){
+        tr.keyframes=tr.keyframes.filter(k=>Math.abs(k.t-t)>=EPS);
+        doc.tracks=doc.tracks.filter(x=>x.keyframes.length); refresh(); save(); break; } }
+  });
+
+  function openTagModal(preset){
+    const inp=document.getElementById('modal_region_name');
+    inp.value=preset||''; vtTagging=true;
+    document.getElementById('region_modal').classList.remove('hidden');
+    setTimeout(()=>{ inp.focus(); inp.select(); },80);
+  }
+  // called by the shared saveRegion()/cancelRegion() when vtTagging is on
+  function commitTag(label){
+    vtTagging=false;
+    if(!pending) return;
+    const lbl=(label||'').trim()||'object';
+    let tr=doc.tracks.find(t=>(t.label||'').toLowerCase()===lbl.toLowerCase());
+    if(!tr){ tr={id:'t_'+Math.random().toString(36).slice(2,10),label:lbl,class_name:lbl,confirmed:true,keyframes:[]}; doc.tracks.push(tr); }
+    const t=Math.round(pending.t*1000)/1000;
+    let kf=tr.keyframes.find(k=>Math.abs(k.t-t)<EPS);
+    if(!kf){ kf={t}; tr.keyframes.push(kf); }
+    kf.cx=pending.cx; kf.cy=pending.cy; kf.w=pending.w; kf.h=pending.h; delete kf.outside;
+    tr.keyframes.sort((a,b)=>a.t-b.t); selId=tr.id; pending=null; refresh(); save();
+  }
+  function cancelTag(){ vtTagging=false; pending=null; draw(); }
+
+  // ── custom controls (so drawing never blocks play/scrub) ──
+  playB.onclick=()=>{ mediaVideo.paused?mediaVideo.play():mediaVideo.pause(); };
+  seek.addEventListener('input',()=>{
+    if(mediaVideo.duration) mediaVideo.currentTime=(seek.value/1000)*mediaVideo.duration; });
+  function syncBar(){
+    playB.textContent=mediaVideo.paused?'▶':'❚❚';
+    if(mediaVideo.duration){ seek.value=Math.round((mediaVideo.currentTime/mediaVideo.duration)*1000); }
+    timeEl.textContent=`${fmt(mediaVideo.currentTime)} / ${fmt(mediaVideo.duration)}`;
+  }
+
+  // ── YOLO auto-detect ──
+  autoB.onclick=async()=>{
+    if(!file) return;
+    autoB.disabled=true; const old=autoB.textContent; autoB.textContent='Detecting…';
+    try{
+      const r=await fetch(`/api/video_detect/${encodeURIComponent(file)}`,{method:'POST'}).then(r=>r.json());
+      if(r.success&&r.tracks?.length){
+        // merge proposals in; user validates by keeping/deleting/renaming
+        doc.tracks=doc.tracks.concat(r.tracks); refresh(); save();
+      } else alert(r.error||'No objects detected.');
+    }catch(_){ alert('Auto-detect failed.'); }
+    autoB.textContent=old; autoB.disabled=false;
+  };
+
+  ['timeupdate','loadedmetadata','play'].forEach(ev=>{
+    mediaVideo.addEventListener(ev,()=>{ syncBar(); draw(); }); });
+  // Re-render the list on discrete navigation so the ◇/◆ "keyframe here" markers
+  // and greyed (off-screen) labels stay accurate — but NOT on every timeupdate,
+  // which would steal focus while renaming during playback.
+  ['seeked','pause'].forEach(ev=>{
+    mediaVideo.addEventListener(ev,()=>{ syncBar(); if(!svg.classList.contains('hidden')) renderRegionsList(); }); });
+  window.addEventListener('resize',layout);
+  new ResizeObserver(()=>{ if(!svg.classList.contains('hidden')) draw(); }).observe(cont);
+
+  // ── public API — the shared #regions_list drives these (image parity) ──
+  function trackAt(id){ return doc.tracks.find(t=>t.id===id); }
+  return {
+    async enable(fn){
+      file=fn; selId=null; pending=null; drag=null; doc={tracks:[]};
+      svg.classList.remove('hidden'); bar.classList.remove('hidden');
+      svg.style.pointerEvents='auto'; svg.style.cursor='crosshair';
+      try{ const r=await fetch(`/api/video_tracks/${encodeURIComponent(fn)}`).then(r=>r.json());
+        if(r.success) doc={tracks:r.tracks||[]}; }catch(_){}
+      syncBar(); refresh();
+    },
+    disable(){
+      file=null; pending=null; drag=null; vtTagging=false;
+      svg.classList.add('hidden'); bar.classList.add('hidden');
+      while(svg.firstChild) svg.removeChild(svg.firstChild);
+    },
+    commitTag, cancelTag,
+    renderList,                                   // called by global renderRegionsList()
+    rename(id,name){ const tr=trackAt(id); if(tr){ tr.label=(name||'').trim(); tr.class_name=tr.label||'object'; refresh(); save(); } },
+    confirm(id){ const tr=trackAt(id); if(tr){ tr.confirmed=true; refresh(); save(); } },
+    remove(id){ doc.tracks=doc.tracks.filter(t=>t.id!==id); if(selId===id) selId=null; refresh(); save(); },
+    setActive(id){ selId=(id===-1||id==null)?null:id; draw();
+      const el=document.getElementById('regions_list');
+      if(el)[...el.querySelectorAll('.rrow')].forEach(r=>r.classList.toggle('bg-gray-700', r.dataset.tid===selId)); },
+    toggleKey(id){
+      const tr=trackAt(id); if(!tr) return;
+      const t=Math.round((mediaVideo.currentTime||0)*1000)/1000;
+      const i=tr.keyframes.findIndex(k=>Math.abs(k.t-t)<EPS);
+      if(i>=0){ tr.keyframes.splice(i,1); }
+      else{
+        // seed a keyframe from the interpolated box (or a default centred box)
+        const b=boxAt(tr,t)||{cx:0.5,cy:0.5,w:0.2,h:0.3};
+        tr.keyframes.push({t,cx:b.cx,cy:b.cy,w:b.w,h:b.h}); tr.keyframes.sort((a,b)=>a.t-b.t);
+      }
+      doc.tracks=doc.tracks.filter(x=>x.keyframes.length); refresh(); save();
+    },
+  };
+  function save(){
+    if(!file) return; clearTimeout(saveTimer);
+    saveTimer=setTimeout(()=>{ fetch(`/api/video_tracks/${encodeURIComponent(file)}`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({tracks:doc.tracks})}).catch(()=>{}); },400);
+  }
+})();

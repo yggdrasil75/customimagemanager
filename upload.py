@@ -22,7 +22,12 @@ import requests
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.jxl'}
+# Media the server will accept: still images + gifs (server converts to jxl,
+# animated gifs → animated jxl) and video files (stored natively).
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.jxl', '.gif', '.apng'}
+VIDEO_EXTENSIONS = {'.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v', '.mpg',
+                    '.mpeg', '.wmv', '.flv', '.ts', '.ogv'}
+MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 
 # Error codes the server sends — determines retry behaviour.
 # Permanent: don't retry; the file will never succeed as-is.
@@ -302,15 +307,15 @@ def bulk_upload(
         os.path.join(root, f)
         for root, _, filenames in os.walk(source_dir)
         for f in filenames
-        if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS
+        if os.path.splitext(f)[1].lower() in MEDIA_EXTENSIONS
     ]
     if not files:
-        print("No image files found.")
+        print("No media files found.")
         return 0
 
     endpoint = f"{server_url.rstrip('/')}/api/upload"
     total    = len(files)
-    print(f"[*] Found {total} image(s).  Server: {endpoint}")
+    print(f"[*] Found {total} file(s).  Server: {endpoint}")
     if max_attempts > 1:
         print(f"[*] Retries: up to {max_attempts} attempts, "
               f"{initial_backoff}s initial backoff (exponential).\n")
