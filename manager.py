@@ -35,6 +35,7 @@ import discover_stages as ds
 import image_index as ii
 import media_types as mt
 import video_tracks as vt
+import tiering
 try:
     import iqa
 except Exception:
@@ -2072,6 +2073,33 @@ def api_metadata():
         ok = write_metadata(fp, d.get("tags",[]), d.get("description",""), d.get("regions",[]))
         return jsonify({"success":ok})
 
+# ── Tiered storage ───────────────────────────────────────────────────────────
+@app.route("/api/tiers", methods=["GET"])
+def api_tiers_get():
+    return jsonify({"success": True, "config": tiering.load_cfg()})
+
+@app.route("/api/tiers", methods=["POST"])
+def api_tiers_set():
+    try:
+        cfg = tiering.save_cfg(request.json or {})
+        return jsonify({"success": True, "config": cfg})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+
+@app.route("/api/tiers/status")
+def api_tiers_status():
+    return jsonify({"success": True, **tiering.status()})
+
+@app.route("/api/tiers/rebalance", methods=["POST"])
+def api_tiers_rebalance():
+    tiering.rebalance(block=False)
+    return jsonify({"success": True})
+
+@app.route("/api/tiers/cancel", methods=["POST"])
+def api_tiers_cancel():
+    tiering._state["run"]["cancel"] = True
+    return jsonify({"success": True})
+
 @app.route("/api/delete", methods=["POST"])
 def api_delete():
     fn = request.json.get("filename","")
@@ -2079,7 +2107,7 @@ def api_delete():
     if fp:
         base = os.path.splitext(fp)[0]
         for ext in mt.related_exts(fp):
-            if os.path.exists(base+ext): os.remove(base+ext)
+            if os.path.exists(base+ext): tiering.safe_remove(base+ext)
         dp = _thumb_disk_path(fn)
         if os.path.exists(dp): os.remove(dp)
         with _thumb_lock: _thumb_lru.pop(fn, None)
@@ -2124,7 +2152,7 @@ def bulk_delete():
         try:
             base = os.path.splitext(fp)[0]
             for ext in mt.related_exts(fp):
-                if os.path.exists(base + ext): os.remove(base + ext)
+                if os.path.exists(base + ext): tiering.safe_remove(base + ext)
             dp = _thumb_disk_path(fn)
             if os.path.exists(dp): os.remove(dp)
             with _thumb_lock: _thumb_lru.pop(fn, None)
@@ -2333,8 +2361,8 @@ def dedup():
             abs_p = get_safe_path(MEDIA_DIR, f)
             if abs_p:
                 try:
-                    mt = os.path.getmtime(abs_p)
-                    if f not in db_mtimes or abs(db_mtimes[f] - mt) > 0.01:
+                    mtime = os.path.getmtime(abs_p)
+                    if f not in db_mtimes or abs(db_mtimes[f] - mtime) > 0.01:
                         stale.append(f)
                 except OSError:
                     pass
@@ -2524,7 +2552,7 @@ def dedup_merge():
                 if not op: continue
                 base = os.path.splitext(op)[0]
                 for ext in mt.related_exts(op):
-                    if os.path.exists(base+ext): os.remove(base+ext)
+                    if os.path.exists(base+ext): tiering.safe_remove(base+ext)
                 dp = _thumb_disk_path(other)
                 if os.path.exists(dp): os.remove(dp)
                 with _thumb_lock: _thumb_lru.pop(other,None)
@@ -3729,13 +3757,13 @@ def discover_objects():
         if not fp or not os.path.exists(fp):
             errors.append(fn); continue
         try:
-            mt = os.path.getmtime(fp)
+            mtime = os.path.getmtime(fp)
         except Exception:
-            mt = 0
+            mtime = 0
         # cached and unchanged -> resume/skip (the checkpoint hit)
-        if fn in cached and abs((cached[fn] or 0) - mt) < 1e-6:
+        if fn in cached and abs((cached[fn] or 0) - mtime) < 1e-6:
             continue
-        to_scan.append((fn, mt))
+        to_scan.append((fn, mtime))
 
     state["status_text"] = (f"{len(filenames)-len(to_scan)} cached · "
                             f"scanning {len(to_scan)} new…")
@@ -4816,6 +4844,8 @@ if __name__=='__main__':
     threading.Thread(target=_build_index_background, daemon=True).start()
     access_logger.info("Starting background auto-tagger…")
     threading.Thread(target=_background_autotag_worker, daemon=True).start()
+    access_logger.info("Starting storage tiering worker…")
+    tiering.start(MEDIA_DIR, _db, lambda: _last_activity)
     access_logger.info("Starting background music indexer…")
     threading.Thread(target=_music_index_background, daemon=True).start()
     access_logger.info("Warming pose/OCR models (auto-download)…")
