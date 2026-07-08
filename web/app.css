@@ -47,6 +47,11 @@ canvas{cursor:crosshair;display:block}
 .tag-row .tag-x{cursor:pointer;color:#9ca3af;font-weight:700;line-height:1;padding:0 2px;flex-shrink:0}
 .tag-row .tag-x:hover{color:#f87171}
 .tag-row .tag-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tag-row .tag-edit{color:#e5e7eb;font-size:12px;padding:0}
+.tag-row.tag-unconfirmed{border-style:dashed;border-color:#b45309;background:#2a1f12}
+.tag-row.tag-unconfirmed .tag-edit{color:#fcd34d;font-style:italic}
+.tag-row .tag-ok{cursor:pointer;color:#4ade80;font-weight:700;line-height:1;padding:0 2px;flex-shrink:0}
+.tag-row .tag-ok:hover{color:#86efac}
 #meta_stars .star{cursor:pointer;color:#4b5563;transition:color .08s}
 #meta_stars .star.on{color:#fbbf24}
 #meta_stars:hover .star{color:#4b5563}

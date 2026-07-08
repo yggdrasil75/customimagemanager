@@ -64,22 +64,79 @@ function syncTagMirror(){
   const m=document.getElementById('meta_tags');
   if(m) m.value=currentTags.join(', ');
 }
+// A tag prefixed with '?' is an unconfirmed (AI/auto) suggestion.
+function tagIsConfirmed(t){ return !String(t).startsWith('?'); }
+function tagName(t){ t=String(t); return t.startsWith('?')?t.slice(1):t; }
 function renderTags(){
   const box=document.getElementById('tag_list'); if(!box) return;
   if(!currentTags.length){
     box.innerHTML='<div class="text-[11px] text-gray-600 italic px-1 py-0.5">No tags</div>';
   }else{
-    box.innerHTML=currentTags.map((t,i)=>
-      `<div class="tag-row"><span class="tag-name" title="${_esc(t)}">${_esc(t)}</span>`+
-      `<span class="tag-x" onclick="removeTag(${i})" title="Remove">✕</span></div>`).join('');
+    box.innerHTML=currentTags.map((t,i)=>{
+      const name=tagName(t);
+      const conf=tagIsConfirmed(t);
+      // Inline-editable input (mirrors the box list) so a typo is a one-click fix
+      // instead of delete-and-re-add. Confirmed dot is blue, suggestions amber.
+      return `<div class="rrow tag-row ${conf?'':'tag-unconfirmed'} flex items-center gap-1"
+          title="${conf?'':'Unconfirmed suggestion'}">
+        <span class="inline-block w-2 h-2 rounded-full flex-shrink-0" style="background:${conf?'#3B82F6':'#F59E0B'}"></span>
+        <input class="tag-edit flex-1 min-w-0 bg-transparent border-b border-transparent focus:border-gray-500 focus:outline-none"
+          value="${_esc(name)}" onchange="renameTag(${i}, this.value)">
+        ${conf?'':`<span class="tag-ok flex-shrink-0" onclick="acceptTag(${i})" title="Confirm tag">✓</span>`}
+        <span class="tag-x flex-shrink-0" onclick="removeTag(${i})" title="Remove">✕</span>
+      </div>`;
+    }).join('');
   }
+  const total=currentTags.length;
+  const unconf=currentTags.filter(t=>!tagIsConfirmed(t)).length;
   const c=document.getElementById('tag_count');
-  if(c) c.textContent=currentTags.length?`${currentTags.length} tag${currentTags.length>1?'s':''}`:'';
+  if(c) c.textContent=total?`${total} tag${total>1?'s':''}${unconf?` · ${unconf} unconfirmed`:''}`:'';
+  const btn=document.getElementById('btn_confirm_all_tags');
+  if(btn) btn.style.display=unconf?'inline-block':'none';
   syncTagMirror();
 }
+// Edit a tag's text in place, preserving its confirmed/unconfirmed state.
+function renameTag(i,name){
+  if(i<0||i>=currentTags.length) return;
+  const nm=tagName((name||'').trim());
+  if(!nm){ removeTag(i); return; }                 // cleared -> delete
+  const conf=tagIsConfirmed(currentTags[i]);
+  // If the new name collides with another existing tag, merge (drop this one,
+  // keeping the more-confirmed of the two).
+  const other=currentTags.findIndex((t,j)=>j!==i && tagName(t).toLowerCase()===nm.toLowerCase());
+  if(other>=0){
+    if(conf && !tagIsConfirmed(currentTags[other])) currentTags[other]=nm;
+    currentTags.splice(i,1);
+  }else{
+    currentTags[i]=conf?nm:('?'+nm);
+  }
+  renderTags(); triggerAutosave();
+}
+// Confirm one suggested tag (strip the '?' sentinel) and persist.
+function acceptTag(i){
+  if(i<0||i>=currentTags.length) return;
+  currentTags[i]=tagName(currentTags[i]);
+  renderTags(); triggerAutosave();
+}
+// Reject one suggested tag: remove it and persist.
+function rejectTag(i){
+  currentTags.splice(i,1); renderTags(); triggerAutosave();
+}
+// Confirm every suggested tag on the current file at once.
+function confirmAllTags(){
+  currentTags=currentTags.map(tagName);
+  renderTags(); triggerAutosave();
+}
 function setTags(arr){
-  const seen=new Set(); currentTags=[];
-  (arr||[]).forEach(t=>{t=(t||'').trim(); if(t&&!seen.has(t)){seen.add(t);currentTags.push(t);}});
+  // Dedupe by bare name. If both a confirmed and unconfirmed version of the same
+  // name arrive, keep the confirmed one.
+  const idx=new Map(); currentTags=[];
+  (arr||[]).forEach(t=>{
+    t=(t||'').trim(); if(!t) return;
+    const key=tagName(t).toLowerCase();
+    if(!idx.has(key)){ idx.set(key,currentTags.length); currentTags.push(t); }
+    else if(tagIsConfirmed(t)){ currentTags[idx.get(key)]=t; }   // upgrade to confirmed
+  });
   renderTags();
 }
 function removeTag(i){
@@ -87,11 +144,15 @@ function removeTag(i){
 }
 function addTagsFromInput(){
   const inp=document.getElementById('tag_add_input'); if(!inp) return;
-  const parts=inp.value.split(',').map(s=>s.trim()).filter(Boolean);
-  let added=false;
-  parts.forEach(t=>{ if(!currentTags.includes(t)){ currentTags.push(t); added=true; } });
+  const parts=inp.value.split(',').map(s=>tagName(s.trim())).filter(Boolean);
+  let changed=false;
+  parts.forEach(name=>{
+    const i=currentTags.findIndex(t=>tagName(t).toLowerCase()===name.toLowerCase());
+    if(i<0){ currentTags.push(name); changed=true; }               // new confirmed tag
+    else if(!tagIsConfirmed(currentTags[i])){ currentTags[i]=name; changed=true; } // confirm suggestion
+  });
   inp.value='';
-  if(added){ renderTags(); triggerAutosave(); }
+  if(changed){ renderTags(); triggerAutosave(); }
 }
 // Adopt whatever legacy code wrote into the hidden mirror (#meta_tags) back into
 // the list box. Call after AI/auto-tag flows that set meta_tags.value directly.
@@ -437,6 +498,7 @@ async function selectFile(fn){
     currentFlag=d.metadata.flag||null;
     currentPose=d.metadata.pose||null;
     activeRegionIdx=-1;
+    syncPoseButtons();
     drawCanvas(); renderAnalysis(); renderRegionsList(); renderFlagBanner();
   }
 }
@@ -1309,8 +1371,8 @@ async function runLLM(){
       }
       else if(d.target==='regions'){ currentRegions=currentRegions.concat(d.regions); drawCanvas(); triggerAutosave(); }
       else if(d.target==='tags'){
-        d.tags.forEach(t=>{if(!currentTags.includes(t))currentTags.push(t);});
-        renderTags(); triggerAutosave();
+        setTags((currentTags||[]).concat(d.tags||[]));
+        triggerAutosave();
       } else {
         const db=document.getElementById('meta_desc');
         if(db.value.trim()) db.value+='\n\n'; db.value+=d.description; triggerAutosave();
@@ -1350,7 +1412,7 @@ async function runPipeline(){
       activeRegionIdx=-1;
       drawCanvas(); if(popoutOpen) drawPopout(); renderAnalysis(); renderRegionsList();
       refreshReviewCount();
-      showToast('Smart Tag complete — new boxes are unconfirmed (orange). Middle-click to confirm.');
+      showToast('Smart Tag complete — new boxes and tags are unconfirmed. Middle-click a box or ✓ a tag to confirm.');
     } else { alert('Pipeline error: '+(d.error||'unknown')); }
   }catch(e){ alert('Network error during pipeline.'); }
   btn.innerText=og; btn.disabled=false;
@@ -1620,11 +1682,35 @@ async function runPose(){
     if(d.success){
       currentPose=d.pose||null;
       const t=document.getElementById('toggle_skeleton'); if(t) t.checked=true;
+      syncPoseButtons();
       drawCanvas(); if(typeof popoutOpen!=='undefined'&&popoutOpen) drawPopout();
       const n=(d.pose&&d.pose.people)?d.pose.people.length:0;
       showToast(n?`Pose: ${n} person(s) detected.`:(d.note||'No people detected.'));
     } else alert('Pose failed: '+(d.error||''));
   }catch(e){ alert('Network error during pose.'); }
+  btn.innerText=og; btn.disabled=false;
+}
+// Show the "Remove skeleton" button only when a pose is currently stored.
+function syncPoseButtons(){
+  const rm=document.getElementById('btn_pose_remove');
+  if(rm) rm.style.display=(currentPose&&currentPose.people&&currentPose.people.length)?'block':'none';
+}
+async function removePose(){
+  if(!currentFile){ alert('Select an image first.'); return; }
+  if(!confirm('Delete the stored skeleton for this image? This cannot be undone.')) return;
+  const btn=document.getElementById('btn_pose_remove'); const og=btn.innerText;
+  btn.innerText='🗑 …'; btn.disabled=true;
+  try{
+    const d=await fetch('/api/pose_remove',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({filename:currentFile})}).then(r=>r.json());
+    if(d.success){
+      currentPose=null;
+      const t=document.getElementById('toggle_skeleton'); if(t) t.checked=false;
+      syncPoseButtons();
+      drawCanvas(); if(typeof popoutOpen!=='undefined'&&popoutOpen) drawPopout();
+      showToast('Skeleton removed.');
+    } else alert('Remove failed: '+(d.error||''));
+  }catch(e){ alert('Network error removing skeleton.'); }
   btn.innerText=og; btn.disabled=false;
 }
 async function runOCR(){

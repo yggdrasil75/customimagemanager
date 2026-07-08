@@ -212,6 +212,9 @@
             onkeydown="if(event.key==='Enter'){event.preventDefault();addTagsFromInput();}">
           <button onclick="addTagsFromInput()"
             class="text-xs bg-blue-600 hover:bg-blue-500 px-3 rounded font-bold">Add</button>
+          <button onclick="confirmAllTags()" id="btn_confirm_all_tags" style="display:none"
+            title="Confirm all suggested tags"
+            class="text-xs bg-green-700 hover:bg-green-600 px-3 rounded font-bold">✓ All</button>
         </div>
         <!-- hidden mirror: kept in sync with the tag list so legacy code paths
              (AI tagging, autosave) can read/write a comma string unchanged. -->
@@ -264,6 +267,9 @@
         <button onclick="runOCR()" id="btn_ocr"
           class="bg-sky-700 hover:bg-sky-600 py-1.5 rounded font-bold text-sm">🔤 OCR</button>
       </div>
+      <button onclick="removePose()" id="btn_pose_remove" style="display:none"
+        title="Delete the current (bad) skeleton from this image"
+        class="w-full bg-rose-800 hover:bg-rose-700 py-1.5 rounded font-bold text-sm">🗑 Remove skeleton</button>
       <button onclick="quickTrain()"
         class="w-full bg-purple-600 hover:bg-purple-500 py-1.5 rounded font-bold text-sm">Quick Train</button>
       <button onclick="openTiersModal()"

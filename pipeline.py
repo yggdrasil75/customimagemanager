@@ -133,9 +133,36 @@ def _clamp(b):
 
 def _fmt(s, ctx, subj=None):
     s = s.replace("{image_type}", str(ctx.get("image_type") or "image"))
+    # {known} expands to the caller-supplied context about this file (existing
+    # tags, description, filename, folder) so the model can name a box from
+    # information the app already has before it describes the crop.
+    if "{known}" in s:
+        s = s.replace("{known}", str(ctx.get("known_text") or "(none)"))
     if subj is not None:
         s = s.replace("{label}", str(subj.get("label", "subject")))
     return s
+
+
+def _known_text(known):
+    """Render the caller-supplied `known` dict into a compact prompt block.
+    `known` may carry: names (list), tags (list), description (str),
+    filename (str), folder (str)."""
+    if not known:
+        return ""
+    parts = []
+    names = [n for n in (known.get("names") or []) if n]
+    if names:
+        parts.append("Known character names for this image: " + ", ".join(names) + ".")
+    tags = [t for t in (known.get("tags") or []) if t]
+    if tags:
+        parts.append("Existing tags: " + ", ".join(tags) + ".")
+    if known.get("description"):
+        parts.append("Existing description: " + str(known["description"])[:600])
+    if known.get("filename"):
+        parts.append("Filename: " + str(known["filename"]))
+    if known.get("folder"):
+        parts.append("Folder: " + str(known["folder"]))
+    return "\n".join(parts)
 
 
 def _dedup(seq):
@@ -240,7 +267,8 @@ def match_pose_boxes(boxes, pose, unmatched_box="keep",
 # ── engine ────────────────────────────────────────────────────────────────────
 def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
                  max_boxes=12, max_steps=200, pose_fn=None, ocr_fn=None,
-                 person_fn=None, panel_fn=None, endpoints=None, max_workers=None):
+                 person_fn=None, panel_fn=None, endpoints=None, max_workers=None,
+                 known=None):
     """Execute `tree` against `image_bgr` using the `llm` callable.
 
     Injected detectors (all optional, called as fn(image_bgr)):
@@ -272,6 +300,10 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
 
     ctx = {"image_type": None, "tags": [], "summary": "", "subjects": [],
            "panels": [], "pose": None, "ocr": None}
+    # Caller-supplied facts about this file (names/tags/description/filename/folder)
+    # so a `name` step can label a person box before the crop is described.
+    ctx["known"] = known or {}
+    ctx["known_text"] = _known_text(known)
 
     endpoints = list(endpoints or [])
     parallel = len(endpoints) > 1
@@ -398,6 +430,23 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
                 continue
             _report(f'{subj["label"]}: {st.get("label", st.get("store", "step"))}')
             want = st.get("want", "text")
+            # A `name` step asks the model to pick this subject's name from the
+            # known context (tags/description/filename/folder). Its answer becomes
+            # the subject's `label`, so every later step's {label} is the real
+            # name and the crop is described AS that character.
+            if st.get("type") == "name" or want == "name":
+                ans = call(_fmt(st["prompt"], ctx, subj), crop, "text",
+                           None, endpoint)
+                ans = (ans or "").strip().strip('."\'')
+                # Guard against the model refusing / echoing "unknown".
+                low = ans.lower()
+                if ans and low not in ("unknown", "none", "n/a", "unnamed",
+                                       "no name", "the subject", "subject"):
+                    subj["name"] = ans
+                    subj["label"] = ans          # drives {label} downstream
+                    with _tags_lock:
+                        ctx["tags"].append(ans)   # the name is a tag too
+                continue
             out = call(_fmt(st["prompt"], ctx, subj), crop, want,
                        st.get("choices"), endpoint)
             if want == "boxes":
@@ -622,17 +671,24 @@ DEFAULT_PIPELINE = {
             "id": "per_subject", "type": "for_each_box", "source": "subjects",
             "label": "Describing each character",
             "steps": [
+                {"type": "name", "want": "name", "store": "name", "label": "naming",
+                 "prompt": ("Here is what is already known about the image this crop "
+                            "comes from:\n{known}\n\n"
+                            "If this cropped subject clearly matches one of the known "
+                            "character names above, reply with ONLY that name. If none "
+                            "of them fit this subject, reply with exactly: unknown. "
+                            "Do not guess a new name.")},
                 {"want": "bool", "store": "is_animal", "label": "animal?",
                  "prompt": ("Is the main subject in this cropped image an animal or creature "
                             "(not a human)? Answer yes or no.")},
                 {"want": "text", "store": "appearance", "label": "appearance",
-                 "prompt": ("Describe the appearance of the subject in this crop in detail: "
-                            "body type, face, hair/fur, colors, distinguishing features.")},
+                 "prompt": ("This subject is '{label}'. Describe their appearance in this crop "
+                            "in detail: body type, face, hair/fur, colors, distinguishing features.")},
                 {"want": "text", "store": "outfit", "label": "outfit",
                  "when": {"field": "is_animal", "equals": False},
-                 "prompt": "Describe this subject's clothing, outfit, accessories, and style."},
+                 "prompt": "Describe '{label}'s clothing, outfit, accessories, and style in this crop."},
                 {"want": "text", "store": "detail", "label": "detail",
-                 "prompt": ("Vivid detailed description of this cropped subject: pose, "
+                 "prompt": ("Vivid detailed description of '{label}' in this crop: pose, "
                             "expression, action, notable details.")},
                 {"want": "tags", "store": "tags", "label": "subject tags",
                  "prompt": "Danbooru-style tags for just this cropped subject, comma-separated."},

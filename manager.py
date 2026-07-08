@@ -269,6 +269,30 @@ def _upsert_file(rel_path, mtime, width, height, sha256, phash8, phash32, tags, 
           json.dumps(tags), description))
     _db().commit()
 
+# ── Tag confirmation ──────────────────────────────────────────────────────────
+# Tags are stored as plain strings in a JSON list. To mark a tag "unconfirmed"
+# (an AI/auto suggestion the user hasn't accepted yet) we prefix it with a single
+# '?' sentinel, e.g. "?redhead". This mirrors how boxes carry confirmed=False,
+# survives the JSON-list storage + `tags LIKE` search, and needs no schema change.
+_TAG_UNCONF = '?'
+
+def tag_is_confirmed(tag: str) -> bool:
+    """A tag is unconfirmed iff it starts with the '?' sentinel."""
+    return not str(tag).startswith(_TAG_UNCONF)
+
+def tag_name(tag: str) -> str:
+    """The display/comparison name of a tag, sentinel stripped."""
+    t = str(tag)
+    return t[len(_TAG_UNCONF):] if t.startswith(_TAG_UNCONF) else t
+
+def make_tag(name: str, confirmed: bool = True) -> str:
+    """Build a stored tag string from a bare name + confirmed flag."""
+    n = tag_name(name)   # never double-prefix
+    return n if confirmed else (_TAG_UNCONF + n)
+
+def count_unconfirmed_tags(tags) -> int:
+    return sum(1 for t in (tags or []) if not tag_is_confirmed(t))
+
 def _update_meta(rel_path, tags, description):
     _db().execute(
         "UPDATE files SET tags=?, description=? WHERE rel_path=?",
@@ -307,6 +331,10 @@ def _parse_search(search: str):
             where.append("(tags IS NOT NULL AND tags!='' AND tags!='[]')")
         elif low == 'is:unconfirmed':
             where.append("COALESCE(unconfirmed_count,0) > 0")
+        elif low == 'is:tagunconfirmed':
+            # Unconfirmed tags are stored as JSON strings beginning with '?',
+            # i.e. the substring "?  appears in the tags JSON list.
+            where.append("tags LIKE '%\"?%'")
         else:
             text.append(tok)
     return ' '.join(text).strip(), where, params
@@ -695,8 +723,14 @@ def _index_file(rel_path: str, force: bool = False) -> bool:
         _fl = meta.get('flag')
         fd  = 1 if (_fl and _fl.get('delete')) else 0
         fr  = (_fl.get('reason', '') if _fl else '')
-        _db().execute("UPDATE files SET analysis=?, flagged_delete=?, flag_reason=? WHERE rel_path=?",
-                      (json.dumps(_an) if _an else '', fd, fr, rel_path))
+        # Rebuild the unconfirmed-box count from the sidecar too, otherwise files
+        # with pending (unconfirmed) boxes never re-enter the review queue after a
+        # scan/reindex (review_list filters on unconfirmed_count>0).
+        _uc = sum(1 for r in meta['regions'] if not r.get('confirmed', True))
+        _db().execute(
+            "UPDATE files SET analysis=?, flagged_delete=?, flag_reason=?, "
+            "unconfirmed_count=? WHERE rel_path=?",
+            (json.dumps(_an) if _an else '', fd, fr, _uc, rel_path))
         _db().commit()
         _set_media_kind(rel_path)
         return True
@@ -900,7 +934,12 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
         # same as None — otherwise a pipeline run that produced no skeleton would
         # silently overwrite a good pose written earlier (e.g. by the manual pose
         # button), making it look like "pose isn't being stored".
-        if not (pose and pose.get("people")):
+        # EXCEPTION: an explicit {"clear": True} sentinel means "delete the stored
+        # skeleton" — this is the one way to remove a bad pose (a peopleless pose
+        # alone can't, since it's indistinguishable from "no new pose").
+        if isinstance(pose, dict) and pose.get("clear"):
+            pose = None                       # drop it; don't re-read the sidecar
+        elif not (pose and pose.get("people")):
             pose = _read_pose_from_xmp(xmp_path)
         esc = saxutils.escape
         subj = ("<dc:subject><rdf:Bag>" +
@@ -1700,10 +1739,13 @@ def _apply_llm_action(fp, action):
             write_metadata(fp, meta["tags"], meta["description"], meta["regions"] + new)
     elif target == "tags":
         tags = _llm_call(prompt, bgr, "tags") or []
-        merged, seen = list(meta["tags"]), {t.lower() for t in meta["tags"]}
+        merged = list(meta["tags"])
+        seen = {tag_name(t).lower() for t in meta["tags"]}
         for t in tags:
-            if t and t.lower() not in seen:
-                merged.append(t); seen.add(t.lower())
+            nm = tag_name(t)
+            if nm and nm.lower() not in seen:
+                merged.append(make_tag(nm, confirmed=False))   # AI suggestion → unconfirmed
+                seen.add(nm.lower())
         write_metadata(fp, merged, meta["description"], meta["regions"])
     else:  # description
         text = (_llm_call(prompt, bgr, "text") or "").strip()
@@ -1972,7 +2014,11 @@ def api_video_tracks_set(filename):
     if lbls:
         try:
             meta = read_metadata(fp)
-            merged = list(dict.fromkeys(meta["tags"] + lbls))
+            existing = {tag_name(t).lower() for t in meta["tags"]}
+            merged = list(meta["tags"])
+            for l in lbls:
+                if tag_name(l).lower() not in existing:
+                    merged.append(l); existing.add(tag_name(l).lower())
             if merged != meta["tags"]:
                 write_metadata(fp, merged, meta["description"], meta["regions"])
         except Exception as e:
@@ -2115,6 +2161,52 @@ def api_delete():
         _dedup_remove_file(fn)
     return jsonify({"success":True})
 
+@app.route("/api/tag_review", methods=["POST"])
+def api_tag_review():
+    """Apply a per-tag review decision to one file in a single write.
+
+    Body: { filename, tag, action } where action is:
+      'accept'  -> mark the tag confirmed (strip the '?' sentinel)
+      'reject'  -> remove the tag entirely
+      'unconfirm' -> mark the tag unconfirmed (add the '?' sentinel)
+    Tag is matched by bare name (sentinel-insensitive)."""
+    d = request.json or {}
+    fn = d.get("filename", "")
+    tag = tag_name(d.get("tag", ""))
+    action = d.get("action", "accept")
+    fp = get_safe_path(MEDIA_DIR, fn)
+    if not fp or not os.path.exists(fp):
+        return jsonify({"success": False, "error": "File not found."})
+    if not tag:
+        return jsonify({"success": False, "error": "No tag given."})
+    meta = read_metadata(fp)
+    out, found = [], False
+    for t in meta["tags"]:
+        if tag_name(t).lower() == tag.lower():
+            found = True
+            if action == "reject":
+                continue                                   # drop it
+            out.append(make_tag(tag, confirmed=(action != "unconfirm")))
+        else:
+            out.append(t)
+    if not found and action != "reject":
+        out.append(make_tag(tag, confirmed=(action != "unconfirm")))
+    write_metadata(fp, out, meta["description"], meta["regions"])
+    return jsonify({"success": True, "tags": out,
+                    "remaining_unconfirmed_tags": count_unconfirmed_tags(out)})
+
+@app.route("/api/confirm_all_tags", methods=["POST"])
+def api_confirm_all_tags():
+    """Mark every tag on a file as confirmed (accept all AI tag suggestions)."""
+    fn = (request.json or {}).get("filename", "")
+    fp = get_safe_path(MEDIA_DIR, fn)
+    if not fp or not os.path.exists(fp):
+        return jsonify({"success": False, "error": "File not found."})
+    meta = read_metadata(fp)
+    out = [make_tag(t, confirmed=True) for t in meta["tags"]]
+    write_metadata(fp, out, meta["description"], meta["regions"])
+    return jsonify({"success": True, "tags": out, "confirmed": len(out)})
+
 @app.route("/api/bulk_tag", methods=["POST"])
 def bulk_tag():
     """Add tags to many files at once without touching regions or description."""
@@ -2130,10 +2222,20 @@ def bulk_tag():
             errors.append(fn); continue
         try:
             meta = read_metadata(fp)
-            existing = {t.lower() for t in meta["tags"]}
-            added = [t for t in new_tags if t.lower() not in existing]
-            if added:
-                merged = meta["tags"] + added
+            # Map bare-name -> index so we can upgrade an existing unconfirmed
+            # tag to confirmed when the user explicitly adds the same name.
+            merged = list(meta["tags"])
+            by_name = {tag_name(t).lower(): i for i, t in enumerate(merged)}
+            changed = False
+            for t in new_tags:
+                nm = tag_name(t); key = nm.lower()
+                if key in by_name:
+                    i = by_name[key]
+                    if not tag_is_confirmed(merged[i]):   # confirm the suggestion
+                        merged[i] = make_tag(nm, confirmed=True); changed = True
+                else:
+                    merged.append(make_tag(nm, confirmed=True)); changed = True
+            if changed:
                 write_metadata(fp, merged, meta["description"], meta["regions"])
             updated += 1
         except Exception as e:
@@ -2861,16 +2963,38 @@ def _pipeline_endpoints():
         eps = [single] if single else []
     return eps
 
+def _known_context(fp, meta=None):
+    """Assemble what the app already knows about a file so the pipeline can name
+    person boxes before describing them: existing tags (bare names), description,
+    filename stem, and folder path. Returns a dict consumed by run_pipeline."""
+    if meta is None:
+        meta = read_metadata(fp)
+    rel = os.path.relpath(fp, MEDIA_DIR).replace("\\", "/")
+    folder = os.path.dirname(rel)
+    stem = os.path.splitext(os.path.basename(rel))[0]
+    tag_names = [tag_name(t) for t in meta.get("tags", [])]
+    # Candidate names: existing tags + filename/folder word fragments. The model
+    # decides which (if any) actually match each subject; we only supply hints.
+    frags = re.split(r"[\\/_\-\.\s]+", (stem + " " + folder))
+    candidates = [c for c in (tag_names + frags) if c and len(c) > 1]
+    return {"names": list(dict.fromkeys(candidates)),
+            "tags": tag_names,
+            "description": meta.get("description", ""),
+            "filename": stem,
+            "folder": folder}
+
 def _apply_pipeline_result(fp, analysis):
     """Merge a pipeline analysis into a file's metadata: union tags, append
     detected subjects AND their sub-boxes (clothing/face parts) and any OCR text
     boxes as clamped unconfirmed regions, compose description (+ detected text),
     and persist analysis + pose into the sidecar."""
     meta = read_metadata(fp)
-    tags = list(meta["tags"]); seen = {t.lower() for t in tags}
+    tags = list(meta["tags"]); seen = {tag_name(t).lower() for t in tags}
     for t in analysis.get("tags", []):
-        if t and t.lower() not in seen:
-            tags.append(t); seen.add(t.lower())
+        nm = tag_name(t)
+        if nm and nm.lower() not in seen:
+            tags.append(make_tag(nm, confirmed=False))   # AI suggestion → unconfirmed
+            seen.add(nm.lower())
     regions = list(meta["regions"])
     for s in analysis.get("subjects", []):
         cb = _clamp_box(s.get("box", {}))
@@ -2935,7 +3059,8 @@ def run_pipeline_route():
     try:
         analysis = run_pipeline(tree, bgr, _llm_call, pose_fn=_pose_fn, ocr_fn=_ocr_fn,
                                 person_fn=_person_fn, panel_fn=_panel_fn,
-                                endpoints=_pipeline_endpoints(), progress=_progress)
+                                endpoints=_pipeline_endpoints(), progress=_progress,
+                                known=_known_context(fp))
     except Exception as e:
         state["status_text"] = "Ready."
         return jsonify({"success": False, "error": str(e)})
@@ -2966,7 +3091,8 @@ def bulk_pipeline():
             analysis = run_pipeline(tree, _to_bgr(img), _llm_call,
                                     pose_fn=_pose_fn, ocr_fn=_ocr_fn,
                                     person_fn=_person_fn, panel_fn=_panel_fn,
-                                    endpoints=_pipeline_endpoints(), progress=_prog)
+                                    endpoints=_pipeline_endpoints(), progress=_prog,
+                                    known=_known_context(fp))
             _apply_pipeline_result(fp, analysis)
             done += 1
         except Exception as e:
@@ -4223,7 +4349,8 @@ def comic_pipeline_route():
             analysis = run_pipeline(tree, _to_bgr(img), _llm_call,
                                     pose_fn=_pose_fn, ocr_fn=_ocr_fn,
                                     person_fn=_person_fn, panel_fn=_panel_fn,
-                                    endpoints=_pipeline_endpoints(), progress=_prog)
+                                    endpoints=_pipeline_endpoints(), progress=_prog,
+                                    known=_known_context(fp))
             _apply_pipeline_result(fp, analysis)      # store per-page result too
             page_analyses.append((page, analysis))
         except Exception as e:
@@ -4258,6 +4385,49 @@ def api_pose():
         return jsonify({"success": True, "pose": pose,
                         "note": "No people detected (or pose model unavailable)."})
     return jsonify({"success": True, "pose": pose})
+
+@app.route("/api/pose_remove", methods=["POST"])
+def api_pose_remove():
+    """Remove a bad skeleton/pose from an image.
+
+    Body: { filename, region_index? }
+      - no region_index  -> clear the image-level skeleton entirely.
+      - region_index (int) -> drop the pose attached to that one subject region,
+        leaving the image-level pose and other regions untouched.
+    """
+    d = request.json or {}
+    fn = d.get("filename", "")
+    fp = get_safe_path(MEDIA_DIR, fn)
+    if not fp or not os.path.exists(fp):
+        return jsonify({"success": False, "error": "File not found."})
+    meta = read_metadata(fp)
+    ri = d.get("region_index", None)
+    if ri is None:
+        # Clear the whole-image skeleton. Also strip per-region poses so a bad
+        # skeleton doesn't linger on individual subjects.
+        regions = []
+        for r in meta["regions"]:
+            r = dict(r); r.pop("pose", None); regions.append(r)
+        write_metadata(fp, meta["tags"], meta["description"], regions,
+                       analysis=meta.get("analysis"), pose={"clear": True})
+        return jsonify({"success": True, "cleared": "image"})
+    # Remove the pose from a single subject region.
+    try:
+        ri = int(ri)
+    except Exception:
+        return jsonify({"success": False, "error": "Bad region_index."})
+    regions = [dict(r) for r in meta["regions"]]
+    if ri < 0 or ri >= len(regions):
+        return jsonify({"success": False, "error": "region_index out of range."})
+    regions[ri].pop("pose", None)
+    # Rebuild the image-level pose from the surviving per-subject skeletons so the
+    # stored whole-image pose stays consistent with what's left.
+    people = [r["pose"] for r in regions if r.get("pose")]
+    new_pose = {"kind": "body", "people": people} if people else {"clear": True}
+    write_metadata(fp, meta["tags"], meta["description"], regions,
+                   analysis=meta.get("analysis"), pose=new_pose)
+    return jsonify({"success": True, "cleared": ri,
+                    "remaining_people": len(people)})
 
 @app.route("/api/ocr", methods=["POST"])
 def api_ocr():
