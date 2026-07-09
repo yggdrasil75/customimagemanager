@@ -1,0 +1,240 @@
+"""
+exif_export.py
+==============
+
+Writes edited EXIF/TIFF values back to an image (or its sidecar), validated
+against the schema in exif_fields.py. This is the write counterpart the IPTC
+side doesn't have yet; the editor posts a flat {tag_name: value} patch and this
+module coerces each value to its declared type, drops read-only tags, and hands
+the result to pyexiv2's modify_exif().
+
+Contract mirrors the importer: all pyexiv2 access is wrapped; a bad file or an
+invalid value degrades to a reported error rather than a raised exception, and
+the response lists exactly which tags were written, skipped, or rejected so the
+frontend can surface it.
+
+Safety rules:
+  * Only tags in the schema are considered; unknown tags are ignored (never
+    blindly written).
+  * writable=False tags (geometry/version tags that must track the pixels,
+    binary blobs) are skipped with a reason.
+  * Enumerated values must be one of the declared raw keys.
+  * An empty/None value deletes the tag.
+"""
+
+import os
+import logging
+
+try:
+    import pyexiv2
+except Exception:                      # pragma: no cover - env without pyexiv2
+    pyexiv2 = None
+
+import exif_fields as efields
+
+log = logging.getLogger("exif_export")
+
+
+def _writable_target(filepath):
+    """Pick the path we should write EXIF to. For formats pyexiv2 can open in
+    place we write the file directly; when only a sidecar exists we write that.
+    Falls back to the primary path. (No sidecar is created here — that policy
+    lives in manager.write_metadata; this keeps EXIF writes on whatever already
+    holds the metadata.)"""
+    stem = os.path.splitext(filepath)[0]
+    for p in (filepath, stem + ".xmp", stem + ".exv"):
+        if os.path.exists(p):
+            return p
+    return filepath
+
+
+def _coerce(field, value):
+    """Coerce an incoming JSON value to the field's declared type.
+    Returns (coerced_value, error|None). A None/empty value signals deletion and
+    passes straight through as None."""
+    if value is None or (isinstance(value, str) and value.strip() == ""):
+        return None, None
+
+    dt = field.dtype
+
+    if dt in efields.NUMERIC_TYPES:
+        iv = _to_int(value)
+        if iv is None:
+            return None, f"expected integer, got {value!r}"
+        if field.values is not None and iv not in _enum_int_keys(field):
+            return None, f"{iv} is not a valid value for {field.name}"
+        return iv, None
+
+    if dt == efields.TYPE_RATIONAL:
+        # Accept "num/den" or a plain number.
+        try:
+            if isinstance(value, str) and "/" in value:
+                num, den = value.split("/", 1)
+                int(num); int(den)
+                return value.strip(), None
+            float(value)
+            return f"{int(round(float(value)))}/1", None
+        except (ValueError, TypeError):
+            return None, f"expected rational, got {value!r}"
+
+    # string / undef -> keep as text, honoring enum + length constraints.
+    sv = str(value)
+    if field.values is not None and sv not in field.values:
+        return None, f"{sv!r} is not a valid value for {field.name}"
+    if field.length and len(sv) > field.length:
+        return None, f"{field.name} exceeds max length {field.length}"
+    return sv, None
+
+
+def _to_int(value):
+    try:
+        if isinstance(value, str):
+            v = value.strip()
+            if v.lower().startswith("0x"):
+                return int(v, 16)
+            return int(v)
+        return int(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _enum_int_keys(field):
+    keys = set()
+    for k in field.values.keys():
+        try:
+            keys.add(int(k))
+        except (ValueError, TypeError):
+            pass
+    return keys
+
+
+# ── db_transform converters ──────────────────────────────────────────────────
+# Map a coerced EXIF value to the value stored in its db_field column. Each
+# returns the column value, or None to skip the DB mirror (leave the column
+# untouched) when the EXIF value doesn't map cleanly.
+def _rating_halfstar(v):
+    """Rating (0x4746): 0–10 half-star units -> 0–5 stars (value / 2). Values
+    outside 0–10 are a raw 'likes' count that doesn't map to stars -> skip."""
+    try:
+        iv = int(v)
+    except (ValueError, TypeError):
+        return None
+    if 0 <= iv <= 10:
+        return round(iv / 2)
+    return None            # out-of-range 'likes' rating: don't touch stars
+
+
+def _rating_percent(v):
+    """RatingPercent (0x4749): 0–100 -> 0–5 stars (round(percent / 20)),
+    clamped to the 0–5 range."""
+    try:
+        iv = int(v)
+    except (ValueError, TypeError):
+        return None
+    return max(0, min(5, round(iv / 20)))
+
+
+_DB_TRANSFORMS = {
+    "rating_halfstar": _rating_halfstar,
+    "rating_percent":  _rating_percent,
+}
+
+
+def _apply_db_transform(field, coerced):
+    """Return the value to store in field.db_field for a coerced EXIF value.
+    Applies field.db_transform if set; otherwise stores the coerced value as-is.
+    Returns (value, skip): skip=True means don't write the DB column."""
+    if coerced is None:
+        return None, False                 # deletion -> clear column
+    name = getattr(field, "db_transform", None)
+    if not name:
+        return coerced, False
+    fn = _DB_TRANSFORMS.get(name)
+    if fn is None:
+        return coerced, False
+    out = fn(coerced)
+    if out is None:
+        return None, True                  # doesn't map -> leave column alone
+    return out, False
+
+
+def write_exif(filepath, patch):
+    """Apply a {tag_name: value} patch to the file's EXIF.
+
+    Returns:
+      {
+        "success": bool,
+        "written": [{"tag": "Exif.Image.Compression", "value": 7}, ...],
+        "deleted": ["Exif.Image.CellWidth", ...],
+        "skipped": [{"tag": "ImageWidth", "reason": "read-only"}, ...],
+        "rejected": [{"tag": "Compression", "reason": "42 is not a valid ..."}],
+        "db": {"description": "..."},   # db_field-backed values the caller
+                                        # should persist (e.g. ImageDescription
+                                        # -> files.description); None = delete
+        "target": "/path/written",
+      }
+
+    The `db` map lets the caller mirror DB-backed tags (ImageDescription) into
+    the project database without this module importing the app/DB layer.
+    """
+    result = {"success": False, "written": [], "deleted": [],
+              "skipped": [], "rejected": [], "db": {}, "target": None}
+
+    if pyexiv2 is None:
+        result["error"] = "pyexiv2 unavailable; cannot write EXIF"
+        return result
+
+    to_set = {}      # full 'Exif.Group.Tag' -> coerced value
+    to_del = []      # full 'Exif.Group.Tag'
+
+    for tag_name, value in (patch or {}).items():
+        grp_name, fld = efields.field_by_tagname(tag_name)
+        if fld is None:
+            result["skipped"].append({"tag": tag_name, "reason": "unknown tag"})
+            continue
+        if not fld.writable:
+            result["skipped"].append({"tag": tag_name, "reason": "read-only"})
+            continue
+
+        coerced, err = _coerce(fld, value)
+        if err:
+            result["rejected"].append({"tag": tag_name, "reason": err})
+            continue
+
+        # DB-backed fields (ImageDescription, Rating, RatingPercent) report a
+        # value for the caller to persist. Rating tags run through a transform
+        # (EXIF units -> 0–5 stars); if the value doesn't map, skip the mirror.
+        if fld.db_field:
+            db_val, skip = _apply_db_transform(fld, coerced)
+            if not skip:
+                result["db"][fld.db_field] = db_val
+
+        full = f"Exif.{grp_name}.{fld.name}"
+        if coerced is None:
+            to_del.append(full)
+        else:
+            to_set[full] = coerced
+
+    target = _writable_target(filepath)
+    result["target"] = target
+
+    if not to_set and not to_del:
+        result["success"] = True   # nothing to do, but not an error
+        return result
+
+    try:
+        with pyexiv2.Image(target) as img:
+            if to_set:
+                # pyexiv2 wants string values; stringify ints/rationals.
+                img.modify_exif({k: str(v) for k, v in to_set.items()})
+            if to_del:
+                # Deletion is expressed as an empty-string modify in pyexiv2.
+                img.modify_exif({k: "" for k in to_del})
+        result["written"] = [{"tag": k, "value": v} for k, v in to_set.items()]
+        result["deleted"] = list(to_del)
+        result["success"] = True
+    except Exception as e:
+        log.warning(f"write_exif failed on {target}: {e}")
+        result["error"] = str(e)
+
+    return result

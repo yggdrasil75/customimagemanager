@@ -46,12 +46,29 @@ ANIMATED_INPUT_EXTS = {'.gif', '.apng'}
 # Everything above ends up stored as .jxl. `.jxl` itself is accepted verbatim.
 JXL_INPUT_EXTS = STILL_INPUT_EXTS | ANIMATED_INPUT_EXTS | {'.jxl'}
 
+# Camera RAW inputs. These are NOT transcoded into the library like still images;
+# instead, when raw-keeping is enabled, the original raw is stashed in a hidden
+# store and the derived image (however it was produced) carries a RawDataUniqueID
+# pointing back to it. Raw files are never library assets themselves.
+RAW_INPUT_EXTS = {
+    '.dng', '.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.srf', '.sr2',
+    '.raf', '.rw2', '.orf', '.pef', '.ptx', '.raw', '.rwl', '.iiq', '.3fr',
+    '.fff', '.mef', '.mos', '.mrw', '.x3f', '.erf', '.kdc', '.dcr',
+}
+
+
+def is_raw(path: str) -> bool:
+    return _ext(path) in RAW_INPUT_EXTS
+
+
 # Videos are stored with their ORIGINAL extension (no transcode possible).
 VIDEO_EXTS = {'.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v', '.mpg',
               '.mpeg', '.wmv', '.flv', '.ts', '.ogv'}
 
-# Extensions accepted from an uploader / bulk-upload walk.
-UPLOAD_EXTS = JXL_INPUT_EXTS | VIDEO_EXTS
+# Extensions accepted from an uploader / bulk-upload walk. Raws are accepted so
+# the upload handler can stash them (when keep_raws is on) and derive an image;
+# they are not library assets themselves.
+UPLOAD_EXTS = JXL_INPUT_EXTS | VIDEO_EXTS | RAW_INPUT_EXTS
 
 # Extensions that count as a stored library ASSET on disk (what a MEDIA_DIR walk
 # should pick up). Sidecars (.txt/.xmp) and thumbnails are NOT assets.

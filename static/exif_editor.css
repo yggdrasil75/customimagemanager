@@ -1,0 +1,207 @@
+/* EXIF editor styles.
+   Sibling of iptc_editor.css: same dark palette / scoping approach so it drops
+   into the existing index cleanly. Only the pieces the EXIF editor needs are
+   defined here; everything is scoped under #exif-editor to avoid colliding with
+   app.css or iptc_editor.css. New vs. IPTC: a primary Save button, a read-only
+   field treatment, and a textarea rule for multiline strings. */
+
+#exif-editor {
+  --exif-bg:        #111827;
+  --exif-panel:     #1f2937;
+  --exif-panel-2:   #0b1220;
+  --exif-border:    #374151;
+  --exif-border-2:  #4b5563;
+  --exif-text:      #e5e7eb;
+  --exif-muted:     #9ca3af;
+  --exif-faint:     #6b7280;
+  --exif-accent:    #3b82f6;
+  --exif-accent-2:  #60a5fa;
+  --exif-warn:      #f59e0b;
+  --exif-purple:    #a78bfa;
+
+  color: var(--exif-text);
+  font-size: 13px;
+  line-height: 1.4;
+  background: var(--exif-bg);
+  border: 1px solid var(--exif-border);
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+#exif-editor .exif-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+#exif-editor .exif-head-left { display: flex; align-items: baseline; gap: 10px; }
+#exif-editor .exif-title { font-size: 15px; font-weight: 700; margin: 0; }
+#exif-editor .exif-source {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--exif-faint);
+}
+#exif-editor .exif-head-right {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+#exif-editor .exif-toggle {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--exif-muted); cursor: pointer;
+}
+#exif-editor .exif-toggle input { accent-color: var(--exif-accent); }
+
+#exif-editor .exif-btn {
+  background: var(--exif-panel);
+  border: 1px solid var(--exif-border-2);
+  color: var(--exif-text);
+  border-radius: 5px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+#exif-editor .exif-btn:hover { background: var(--exif-border); }
+#exif-editor .exif-btn-primary {
+  background: var(--exif-accent); border-color: var(--exif-accent);
+  color: #fff; font-weight: 600;
+}
+#exif-editor .exif-btn-primary:hover:not(:disabled) { background: var(--exif-accent-2); }
+#exif-editor .exif-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+#exif-editor .exif-status { font-size: 11px; color: var(--exif-muted); min-width: 60px; }
+#exif-editor .exif-status.ok   { color: #34d399; }
+#exif-editor .exif-status.err  { color: #f87171; }
+
+/* ── Summary ────────────────────────────────────────────────────────────── */
+#exif-editor .exif-summary {
+  font-size: 12px; color: var(--exif-muted);
+  display: flex; gap: 16px; flex-wrap: wrap;
+}
+#exif-editor .exif-summary b { color: var(--exif-text); font-weight: 600; }
+
+/* ── Groups ─────────────────────────────────────────────────────────────── */
+#exif-editor .exif-groups { display: flex; flex-direction: column; gap: 10px; }
+#exif-editor .exif-empty { color: var(--exif-faint); font-style: italic; padding: 8px; }
+#exif-editor .exif-empty code,
+#exif-editor .exif-group-desc code {
+  font-family: ui-monospace, monospace; color: var(--exif-accent-2);
+}
+
+#exif-editor .exif-group {
+  background: var(--exif-panel);
+  border: 1px solid var(--exif-border);
+  border-radius: 6px;
+  padding: 10px;
+}
+#exif-editor .exif-group.is-unmapped { opacity: 0.85; }
+
+#exif-editor .exif-group-head {
+  display: flex; justify-content: space-between; align-items: center;
+  cursor: pointer; user-select: none;
+}
+#exif-editor .exif-group-ifd {
+  font-family: ui-monospace, monospace; font-size: 11px;
+  color: var(--exif-faint); margin-right: 8px;
+}
+#exif-editor .exif-group-title { font-weight: 700; }
+#exif-editor .exif-group-badge {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+  padding: 2px 7px; border-radius: 999px;
+}
+#exif-editor .exif-group-badge.mapped   { background: #14304a; color: var(--exif-accent-2); }
+#exif-editor .exif-group-badge.unmapped { background: #3a2a12; color: var(--exif-warn); }
+
+#exif-editor .exif-group-desc {
+  font-size: 12px; color: var(--exif-muted); margin: 6px 0 8px;
+}
+#exif-editor .exif-group.collapsed .exif-group-desc,
+#exif-editor .exif-group.collapsed .exif-group-fields,
+#exif-editor .exif-group.collapsed .exif-group-unknown { display: none; }
+
+/* ── Fields ─────────────────────────────────────────────────────────────── */
+#exif-editor .exif-group-fields {
+  display: flex; flex-direction: column; gap: 2px;
+}
+#exif-editor .exif-field {
+  padding: 5px 6px; border-radius: 5px;
+  border: 1px solid transparent;
+}
+#exif-editor .exif-field:hover { background: var(--exif-panel-2); }
+#exif-editor .exif-field.is-empty { opacity: 0.55; }
+#exif-editor .exif-field.is-present { border-color: #1e3a5f; }
+#exif-editor .exif-field.is-readonly .exif-field-name { color: var(--exif-muted); }
+
+#exif-editor .exif-field-main {
+  display: grid; grid-template-columns: 220px 1fr; gap: 10px; align-items: center;
+}
+#exif-editor .exif-field-name { font-weight: 600; font-size: 12px; }
+#exif-editor .exif-field-input input,
+#exif-editor .exif-field-input select,
+#exif-editor .exif-field-input textarea {
+  width: 100%;
+  background: var(--exif-panel-2);
+  border: 1px solid var(--exif-border-2);
+  color: var(--exif-text);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+}
+#exif-editor .exif-field-input textarea { resize: vertical; line-height: 1.4; }
+#exif-editor .exif-field-input input:focus,
+#exif-editor .exif-field-input select:focus,
+#exif-editor .exif-field-input textarea:focus {
+  outline: none; border-color: var(--exif-accent);
+}
+#exif-editor .exif-field-input input[readonly],
+#exif-editor .exif-field-input textarea[readonly],
+#exif-editor .exif-field-input select:disabled {
+  color: var(--exif-muted); background: #0a0f1a; cursor: not-allowed;
+}
+#exif-editor .exif-field-input .exif-binary {
+  font-style: italic; color: var(--exif-faint); font-size: 11px;
+  word-break: break-all;
+}
+
+#exif-editor .exif-field-meta {
+  display: flex; gap: 10px; margin-top: 3px; padding-left: 230px;
+  font-size: 10px; color: var(--exif-faint);
+}
+#exif-editor .exif-field-id  { font-family: ui-monospace, monospace; }
+#exif-editor .exif-field-type {
+  text-transform: uppercase; letter-spacing: .04em;
+}
+#exif-editor .exif-field-ro:not(:empty) {
+  text-transform: uppercase; letter-spacing: .05em; color: var(--exif-warn);
+}
+#exif-editor .exif-field-ro.is-generated { color: var(--exif-accent-2); }
+#exif-editor .exif-field-note { font-style: italic; }
+
+/* ── Unknown tags ───────────────────────────────────────────────────────── */
+#exif-editor .exif-group-unknown:not(:empty) {
+  margin-top: 8px; padding-top: 8px;
+  border-top: 1px dashed var(--exif-border);
+}
+#exif-editor .exif-unknown-head {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--exif-purple); margin-bottom: 4px;
+}
+#exif-editor .exif-unknown-row {
+  display: grid; grid-template-columns: 220px 1fr; gap: 10px;
+  font-size: 12px; padding: 2px 6px;
+}
+#exif-editor .exif-unknown-row .k { color: var(--exif-muted); }
+#exif-editor .exif-unknown-row .v {
+  font-family: ui-monospace, monospace; color: var(--exif-text);
+  word-break: break-word;
+}
+
+@media (max-width: 640px) {
+  #exif-editor .exif-field-main,
+  #exif-editor .exif-unknown-row { grid-template-columns: 1fr; }
+  #exif-editor .exif-field-meta { padding-left: 0; }
+}

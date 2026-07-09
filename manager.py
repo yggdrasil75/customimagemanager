@@ -103,6 +103,9 @@ state = {
     "oai_endpoint": "https://api.openai.com/v1/chat/completions",
     "oai_key": "", "oai_model": "gpt-4o-mini",
     "autotag_enabled": False,
+    "keep_raws": False,   # when True, uploaded camera-raw sources are stashed in
+                          # a hidden store and linked to the derived image via
+                          # RawDataUniqueID; hidden from the user for speed.
     "pipeline_tree": DEFAULT_PIPELINE,
     "yolo_size": "n",
     "pose_kind": "body",
@@ -222,6 +225,37 @@ def _init_db():
             created     REAL,
             mtime       REAL
         );
+        -- Per-file edit changelog. Backs undo (ctrl+z) and the EXIF
+        -- ImageHistory (0x9213) view: each row is one reversible change to a
+        -- file's metadata. `seq` orders edits per file; `field` is the logical
+        -- field edited (e.g. 'exif:Compression', 'description'); old/new hold
+        -- the JSON-encoded values so an undo can restore old_value. `undone`
+        -- marks entries already reverted so redo/undo can skip them.
+        CREATE TABLE IF NOT EXISTS file_history (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            rel_path   TEXT NOT NULL,
+            seq        INTEGER NOT NULL,
+            ts         REAL NOT NULL,
+            field      TEXT NOT NULL,
+            old_value  TEXT,
+            new_value  TEXT,
+            undone     INTEGER DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_hist_path ON file_history(rel_path, seq);
+        -- Stored original camera-raw files, kept hidden from the user for speed.
+        -- Keyed by the 16-byte RawDataUniqueID (hex) that the derived image
+        -- carries in EXIF (0xc65d), so opening a raw is a single lookup. path is
+        -- relative to MEDIA_DIR (inside the hidden raw store); orig_name is the
+        -- raw's original filename; derived_rel points back to the library image.
+        CREATE TABLE IF NOT EXISTS raws (
+            uid          TEXT PRIMARY KEY,
+            path         TEXT NOT NULL,
+            orig_name    TEXT,
+            derived_rel  TEXT,
+            sha256       TEXT,
+            added        REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_raws_derived ON raws(derived_rel);
     """)
     db.commit()
     # Migrations for existing DBs
@@ -235,8 +269,10 @@ def _init_db():
         "ALTER TABLE files ADD COLUMN flag_reason TEXT DEFAULT ''",
         "ALTER TABLE object_embeddings ADD COLUMN emb_dim INTEGER DEFAULT 0",
         # NR-IQA (BRISQUE) per-image quality. iqa_score is 0..5 stars (NULL =
-        # not yet scored); iqa_brisque keeps the raw BRISQUE number for ref;
-        # iqa_manual=1 means a human set the stars and a rescan must not clobber.
+        # not yet scored); iqa_brisque keeps the raw BRISQUE number for ref.
+        # iqa_manual is DEPRECATED: user ratings now live in rating/rating_user
+        # (see below); the startup consolidation folds any old iqa_manual stars
+        # into those columns. iqa_score is now BRISQUE-only.
         "ALTER TABLE files ADD COLUMN iqa_score REAL DEFAULT NULL",
         "ALTER TABLE files ADD COLUMN iqa_brisque REAL DEFAULT NULL",
         "ALTER TABLE files ADD COLUMN iqa_manual INTEGER DEFAULT 0",
@@ -244,11 +280,37 @@ def _init_db():
         # 'video' (stored natively). duration is seconds for videos, else NULL.
         "ALTER TABLE files ADD COLUMN media_kind TEXT DEFAULT 'image'",
         "ALTER TABLE files ADD COLUMN duration REAL DEFAULT NULL",
+        # User rating, 0..5 stars (NULL = unrated). Mirrored from EXIF Rating /
+        # RatingPercent by the EXIF editor. rating_user=1 marks it as a genuine
+        # user rating (set in-app, or read from the image's EXIF at upload /
+        # full rebuild) which overrides the preliminary BRISQUE estimate in
+        # iqa_score; rating_user=0/NULL means "no user rating yet".
+        "ALTER TABLE files ADD COLUMN rating INTEGER DEFAULT NULL",
+        "ALTER TABLE files ADD COLUMN rating_user INTEGER DEFAULT 0",
     ]:
         try:
             db.execute(ddl); db.commit()
         except Exception:
             pass
+    # One-time consolidation: iqa_manual is retired in favor of rating_user.
+    # Fold any pre-existing manual IQA ratings (iqa_manual=1) into the unified
+    # rating columns so upgrading users don't lose their hand-set stars. Guarded
+    # so it only runs while the legacy column still exists and only touches rows
+    # not already carrying a user rating. Safe to run every startup (idempotent).
+    try:
+        cols = {r[1] for r in db.execute("PRAGMA table_info(files)").fetchall()}
+        if "iqa_manual" in cols:
+            db.execute(
+                "UPDATE files SET rating=CAST(ROUND(iqa_score) AS INTEGER), "
+                "rating_user=1 "
+                "WHERE COALESCE(iqa_manual,0)=1 AND COALESCE(rating_user,0)=0 "
+                "AND iqa_score IS NOT NULL")
+            # Clear the legacy flag so BRISQUE can re-score iqa_score freely; the
+            # authoritative user rating now lives in rating/rating_user.
+            db.execute("UPDATE files SET iqa_manual=0 WHERE COALESCE(iqa_manual,0)=1")
+            db.commit()
+    except Exception:
+        pass
     # permanent image-level pipeline tables (embeddings/clusters/heuristics)
     try:
         ii.ensure_tables(db)
@@ -298,6 +360,206 @@ def _update_meta(rel_path, tags, description):
         "UPDATE files SET tags=?, description=? WHERE rel_path=?",
         (json.dumps(tags), description, rel_path))
     _db().commit()
+
+
+# ── File edit changelog (undo/redo + EXIF ImageHistory) ──────────────────────
+def _history_record(rel_path, field, old_value, new_value, commit=True):
+    """Append one reversible change to a file's changelog. `field` is a logical
+    field name (e.g. 'exif:Compression', 'description'); old/new are stored
+    JSON-encoded so an undo can restore old_value verbatim. Recording a fresh
+    edit clears any 'redo' tail (entries previously undone) so history stays
+    linear, matching typical ctrl+z semantics."""
+    if old_value == new_value:
+        return                       # no-op edit, don't clutter the log
+    db = _db()
+    # Drop any undone tail — a new edit invalidates the redo stack.
+    db.execute("DELETE FROM file_history WHERE rel_path=? AND undone=1", (rel_path,))
+    row = db.execute(
+        "SELECT COALESCE(MAX(seq),0) AS m FROM file_history WHERE rel_path=?",
+        (rel_path,)).fetchone()
+    seq = (row["m"] if row else 0) + 1
+    db.execute(
+        "INSERT INTO file_history(rel_path, seq, ts, field, old_value, new_value) "
+        "VALUES(?,?,?,?,?,?)",
+        (rel_path, seq, time.time(), field,
+         json.dumps(old_value), json.dumps(new_value)))
+    if commit:
+        db.commit()
+
+
+def _history_entries(rel_path, include_undone=False):
+    """Return a file's changelog as a list of dicts, oldest first."""
+    q = ("SELECT seq, ts, field, old_value, new_value, undone "
+         "FROM file_history WHERE rel_path=?")
+    if not include_undone:
+        q += " AND undone=0"
+    q += " ORDER BY seq"
+    out = []
+    for r in _db().execute(q, (rel_path,)).fetchall():
+        out.append({
+            "seq": r["seq"], "ts": r["ts"], "field": r["field"],
+            "old": json.loads(r["old_value"]) if r["old_value"] is not None else None,
+            "new": json.loads(r["new_value"]) if r["new_value"] is not None else None,
+            "undone": bool(r["undone"]),
+        })
+    return out
+
+
+def _history_undo(rel_path):
+    """Return the most recent not-yet-undone change (so a caller can revert it),
+    marking it undone, or None if there's nothing to undo. The caller is
+    responsible for actually applying old_value back to the file/DB."""
+    db = _db()
+    r = db.execute(
+        "SELECT id, seq, field, old_value, new_value FROM file_history "
+        "WHERE rel_path=? AND undone=0 ORDER BY seq DESC LIMIT 1",
+        (rel_path,)).fetchone()
+    if not r:
+        return None
+    db.execute("UPDATE file_history SET undone=1 WHERE id=?", (r["id"],))
+    db.commit()
+    return {"seq": r["seq"], "field": r["field"],
+            "old": json.loads(r["old_value"]) if r["old_value"] is not None else None,
+            "new": json.loads(r["new_value"]) if r["new_value"] is not None else None}
+
+
+def _history_redo(rel_path):
+    """Return the oldest undone change (so a caller can re-apply new_value),
+    marking it active again, or None if there's nothing to redo."""
+    db = _db()
+    r = db.execute(
+        "SELECT id, seq, field, old_value, new_value FROM file_history "
+        "WHERE rel_path=? AND undone=1 ORDER BY seq ASC LIMIT 1",
+        (rel_path,)).fetchone()
+    if not r:
+        return None
+    db.execute("UPDATE file_history SET undone=0 WHERE id=?", (r["id"],))
+    db.commit()
+    return {"seq": r["seq"], "field": r["field"],
+            "old": json.loads(r["old_value"]) if r["old_value"] is not None else None,
+            "new": json.loads(r["new_value"]) if r["new_value"] is not None else None}
+
+
+def _history_as_imagehistory(rel_path, limit=64):
+    """Render the active changelog as a compact string suitable for EXIF
+    ImageHistory (0x9213): one line per change, most recent last. Trimmed to the
+    last `limit` entries so the tag doesn't grow without bound."""
+    entries = _history_entries(rel_path)[-limit:]
+    lines = []
+    for e in entries:
+        ts = datetime.fromtimestamp(e["ts"]).strftime("%Y-%m-%d %H:%M:%S")
+        lines.append(f"{ts} {e['field']}: {e['old']!r} -> {e['new']!r}")
+    return "\n".join(lines)
+
+
+# ── Hidden raw store (RawDataUniqueID <-> original camera raw) ────────────────
+# When keep_raws is enabled, an uploaded camera-raw source is copied into a
+# hidden directory under MEDIA_DIR and recorded in the `raws` table. The derived
+# library image carries the 16-byte RawDataUniqueID (EXIF 0xc65d) as the lookup
+# key, and OriginalRawFileName (0xc68b) records the raw's original name.
+_RAW_STORE_DIRNAME = ".raws"     # leading dot -> excluded from library walks
+
+
+def _raw_store_dir():
+    d = os.path.join(MEDIA_DIR, _RAW_STORE_DIRNAME)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _new_raw_uid():
+    """A 16-byte unique ID as 32 hex chars, matching the EXIF RawDataUniqueID
+    width (16 bytes)."""
+    import uuid
+    return uuid.uuid4().hex     # 32 hex chars == 16 bytes
+
+
+def _store_raw(raw_src_path, orig_name, derived_rel):
+    """Copy a camera-raw file into the hidden store and record it. Returns the
+    RawDataUniqueID (hex) on success, or None on failure. Best-effort: a failure
+    here must never break an upload."""
+    try:
+        uid = _new_raw_uid()
+        ext = os.path.splitext(orig_name)[1].lower() or ".raw"
+        dest = os.path.join(_raw_store_dir(), uid + ext)
+        shutil.copy(raw_src_path, dest)
+        rel = os.path.relpath(dest, MEDIA_DIR).replace("\\", "/")
+        _db().execute(
+            "INSERT OR REPLACE INTO raws(uid, path, orig_name, derived_rel, "
+            "sha256, added) VALUES(?,?,?,?,?,?)",
+            (uid, rel, orig_name, derived_rel, _sha256(dest), time.time()))
+        _db().commit()
+        return uid
+    except Exception as e:
+        access_logger.warning(f"_store_raw {orig_name}: {e}")
+        return None
+
+
+def _raw_by_uid(uid):
+    """Look up a stored raw by its RawDataUniqueID. Returns the row dict or None."""
+    if not uid:
+        return None
+    r = _db().execute("SELECT * FROM raws WHERE uid=?", (str(uid).strip(),)).fetchone()
+    return dict(r) if r else None
+
+
+def _raw_uid_for_image(rel_path):
+    """Return the RawDataUniqueID linked to a derived library image, preferring
+    the DB link (raws.derived_rel) and falling back to the image's EXIF
+    RawDataUniqueID tag. None if the image has no stored raw."""
+    r = _db().execute(
+        "SELECT uid FROM raws WHERE derived_rel=? ORDER BY added DESC LIMIT 1",
+        (rel_path,)).fetchone()
+    if r:
+        return r["uid"]
+    try:
+        import exif_import
+        fp = os.path.join(MEDIA_DIR, rel_path)
+        edata = exif_import.read_exif(fp)
+        for g in edata.get("groups", []):
+            for f in g.get("fields", []):
+                if f.get("name") == "RawDataUniqueID" and f.get("present"):
+                    return str(f.get("raw")).strip() or None
+    except Exception:
+        pass
+    return None
+
+
+def _link_raw_to_image(raw_src_path, orig_name, derived_rel, derived_abs):
+    """After deriving a library image from a camera raw, set the raw-link EXIF on
+    the derived image:
+      * OriginalRawFileName (0xc68b): set to the raw's name, but ONLY if the
+        derived image doesn't already carry one (never overwrite — an earlier
+        tool may have set it, e.g. a convert-and-convert-back round trip).
+      * RawDataUniqueID (0xc65d): when keep_raws is enabled, stash the raw in the
+        hidden store and write the resulting uid so the raw can be reopened.
+    Best-effort; never raises into the upload path."""
+    try:
+        import exif_export, exif_import
+        patch = {}
+
+        # OriginalRawFileName: only if not already present.
+        existing_name = None
+        try:
+            edata = exif_import.read_exif(derived_abs)
+            for g in edata.get("groups", []):
+                for f in g.get("fields", []):
+                    if f.get("name") == "OriginalRawFileName" and f.get("present"):
+                        existing_name = f.get("raw")
+        except Exception:
+            pass
+        if not existing_name:
+            patch["OriginalRawFileName"] = orig_name
+
+        # RawDataUniqueID + hidden storage, only when the option is on.
+        if state.get("keep_raws"):
+            uid = _store_raw(raw_src_path, orig_name, derived_rel)
+            if uid:
+                patch["RawDataUniqueID"] = uid
+
+        if patch:
+            exif_export.write_exif(derived_abs, patch)
+    except Exception as e:
+        access_logger.warning(f"_link_raw_to_image {orig_name}: {e}")
 
 def _delete_file_row(rel_path):
     _db().execute("DELETE FROM files WHERE rel_path=?", (rel_path,))
@@ -376,13 +638,22 @@ def _query_files(search: str, offset: int, limit: int, folder: str = ''):
     if need > 0:
         file_offset = max(0, offset - nc)
         rows = _db().execute(
-            f"SELECT rel_path, tags, description, width, height, iqa_score FROM files{where_sql} "
+            f"SELECT rel_path, tags, description, width, height, iqa_score, "
+            f"rating, rating_user FROM files{where_sql} "
             f"ORDER BY rel_path LIMIT ? OFFSET ?", (*p, need, file_offset)).fetchall()
         for r in rows:
+            # Effective rating: a genuine user rating (in-app or from image EXIF)
+            # overrides the preliminary BRISQUE estimate; otherwise fall back to
+            # the BRISQUE stars so terrible images are still easy to spot.
+            user_rating = r["rating"] if r["rating_user"] else None
+            eff_rating = user_rating if user_rating is not None else r["iqa_score"]
             entries.append({"kind": "image", "filename": r["rel_path"],
                             "tags": json.loads(r["tags"] or "[]"),
                             "description": r["description"] or "",
                             "iqa_score": r["iqa_score"],
+                            "rating": r["rating"],
+                            "rating_user": bool(r["rating_user"]),
+                            "effective_rating": eff_rating,
                             "width": r["width"] or 0, "height": r["height"] or 0})
     return entries, total
 
@@ -731,6 +1002,14 @@ def _index_file(rel_path: str, force: bool = False) -> bool:
             "UPDATE files SET analysis=?, flagged_delete=?, flag_reason=?, "
             "unconfirmed_count=? WHERE rel_path=?",
             (json.dumps(_an) if _an else '', fd, fr, _uc, rel_path))
+        # A rating stored in the image's EXIF counts as a user rating on
+        # upload/rebuild and overrides any preliminary BRISQUE score. Only set
+        # it when present so a re-index never wipes an in-app rating.
+        _rt = meta.get('rating')
+        if _rt is not None:
+            _db().execute(
+                "UPDATE files SET rating=?, rating_user=1 WHERE rel_path=?",
+                (int(_rt), rel_path))
         _db().commit()
         _set_media_kind(rel_path)
         return True
@@ -780,7 +1059,7 @@ def load_config():
 
 def save_config():
     keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_system_prompt",
-            "oai_actions","autotag_enabled","pipeline_tree","yolo_size","pose_kind","pose_size"]
+            "oai_actions","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size"]
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys}, f, indent=2)
 
@@ -1010,6 +1289,141 @@ def _build_mwg_regions_xml(regions):
           f' xmlns:stArea="{_MWG_ST_NS}"')
     return block, ns
 
+def _set_compressed_bpp(filepath):
+    """Compute EXIF CompressedBitsPerPixel (0x9102) for a just-compressed file
+    and write it. bpp = (file_size_bytes * 8) / (width * height). Best-effort:
+    any failure is logged and swallowed so it never blocks an upload.
+
+    This is a value the app owns (we produced the compressed bitstream), which is
+    why the field is writable/generated in the schema rather than camera-read."""
+    try:
+        import exif_export
+        img = read_jxl(filepath)
+        if img is None:
+            return
+        h, w = img.shape[:2]
+        if not (w and h):
+            return
+        size = os.path.getsize(filepath)
+        bpp = (size * 8.0) / (w * h)
+        # Store as an EXIF rational "num/1000" for ~3-decimal precision.
+        rational = f"{int(round(bpp * 1000))}/1000"
+        exif_export.write_exif(filepath, {"CompressedBitsPerPixel": rational})
+    except Exception as e:
+        access_logger.warning(f"_set_compressed_bpp {filepath}: {e}")
+
+
+def _exif_rating(filepath):
+    """Return a 0–5 star user rating derived from the file's EXIF Rating
+    (0x4746) or RatingPercent (0x4749), or None if neither is present/mappable.
+
+    RatingPercent is preferred when present (it always maps cleanly). Rating's
+    0–10 half-star form maps to stars = value/2; its out-of-range 'likes' form
+    doesn't map and is ignored. This is treated as a *user* rating on ingest, so
+    it overrides any preliminary BRISQUE score."""
+    try:
+        import exif_import, exif_fields, exif_export
+        edata = exif_import.read_exif(filepath)
+        raw = {}
+        for g in edata.get("groups", []):
+            for f in g.get("fields", []):
+                if f.get("present") and f.get("name") in ("Rating", "RatingPercent"):
+                    raw[f["name"]] = f.get("raw")
+        # RatingPercent wins (clean 0–100 -> stars); else fall back to Rating.
+        for name, conv in (("RatingPercent", exif_export._rating_percent),
+                           ("Rating",        exif_export._rating_halfstar)):
+            if name in raw and raw[name] is not None:
+                stars = conv(raw[name])
+                if stars is not None:
+                    return int(stars)
+    except Exception as e:
+        access_logger.warning(f"EXIF rating read {filepath}: {e}")
+    return None
+
+
+def _exif_description(filepath):
+    """Return the file's EXIF ImageDescription (0x010e) as a stripped string, or
+    "" if absent/unreadable. Used as a description fallback when XMP has none, so
+    scanning stores it in the DB `description` column."""
+    try:
+        import exif_import
+        edata = exif_import.read_exif(filepath)
+        for g in edata.get("groups", []):
+            for f in g.get("fields", []):
+                if f.get("name") == "ImageDescription" and f.get("present"):
+                    ev = f.get("raw")
+                    return str(ev).strip() if ev else ""
+    except Exception as e:
+        access_logger.warning(f"EXIF ImageDescription read {filepath}: {e}")
+    return ""
+
+
+def _read_xp_fields(filepath):
+    """Read the Windows Explorer XP tags (0x9c9b-0x9c9f) as strings. Returns a
+    dict with any of: title, comment, author, keywords, subject (missing keys
+    absent). Best-effort; never raises."""
+    out = {}
+    names = {"XPTitle": "title", "XPComment": "comment", "XPAuthor": "author",
+             "XPKeywords": "keywords", "XPSubject": "subject"}
+    try:
+        import exif_import
+        edata = exif_import.read_exif(filepath)
+        for g in edata.get("groups", []):
+            for f in g.get("fields", []):
+                key = names.get(f.get("name"))
+                if key and f.get("present"):
+                    v = f.get("raw")
+                    if v not in (None, ""):
+                        out[key] = str(v).strip()
+    except Exception as e:
+        access_logger.warning(f"XP fields read {filepath}: {e}")
+    return out
+
+
+def _ingest_xp(filepath, tags, desc):
+    """Fold the Windows XP tags into (tags, description, analysis) at scan time,
+    per the project's routing:
+      * XPKeywords -> split on ';'/',' and merged into the existing `tags` list
+        (the single files.tags store), deduped. No separate tag field.
+      * XPComment -> fills the description only when it's otherwise empty, kept as
+        plain text so every existing reader of files.description still works.
+      * XPComment / XPSubject -> recorded as provenance under an 'xp' key in the
+        analysis blob (the existing side-channel), with an 'original field'
+        marker so a rebuild can tell these came from XP tags and never
+        double-imports them. XPSubject is kept here for later use (e.g. auto box
+        naming) without polluting the visible description.
+
+    Returns (tags, description, xp_provenance | None). The caller merges the
+    provenance into whatever analysis it's already writing.
+    """
+    xp = _read_xp_fields(filepath)
+    if not xp:
+        return tags, desc, None
+
+    # Keywords -> the one canonical tags list.
+    if xp.get("keywords"):
+        existing = {tag_name(t).lower() for t in (tags or [])}
+        for kw in re.split(r"[;,]", xp["keywords"]):
+            kw = kw.strip()
+            if kw and kw.lower() not in existing:
+                tags = (tags or []) + [make_tag(kw, confirmed=True)]
+                existing.add(kw.lower())
+
+    # Comment fills an empty description (plain text, no envelope).
+    if not desc and xp.get("comment"):
+        desc = xp["comment"]
+
+    # Provenance for comment/subject -> analysis side-channel.
+    prov = {}
+    if xp.get("comment"):
+        prov["XPComment"] = xp["comment"]
+    if xp.get("subject"):
+        prov["XPSubject"] = xp["subject"]
+    xp_prov = {"xp": prov} if prov else None
+
+    return tags, desc, xp_prov
+
+
 def read_metadata(filepath):
     try:
         tags, desc, regions = [], "", []
@@ -1019,7 +1433,14 @@ def read_metadata(filepath):
         # with pyexiv2, which throws on files without embedded XMP or with
         # unusual JXL data structures.
         if not os.path.exists(xmp_path):
-            return {"tags": [], "description": "", "regions": [], "analysis": None, "flag": None, "pose": None}
+            # No XMP sidecar, but the file itself may still carry an EXIF
+            # ImageDescription (0x010e) / Rating / Windows XP tags worth storing.
+            # exif_import handles the "don't parse JXL directly" caution via its
+            # candidate paths.
+            xtags, xdesc, xprov = _ingest_xp(filepath, [], _exif_description(filepath))
+            return {"tags": xtags, "description": xdesc,
+                    "rating": _exif_rating(filepath),
+                    "regions": [], "analysis": xprov, "flag": None, "pose": None}
 
         try:
             with pyexiv2.Image(xmp_path) as img:
@@ -1048,13 +1469,28 @@ def read_metadata(filepath):
         except Exception:
             pass
 
+        # If XMP carried no description, fall back to EXIF ImageDescription
+        # (0x010e) so scanning stores it in the DB `description` column. XMP
+        # still wins when present, since it's the field the editor writes.
+        if not desc:
+            desc = _exif_description(filepath)
+
+        # Fold in Windows XP tags: keywords -> the one files.tags list, comment
+        # -> empty description, comment/subject provenance -> analysis blob.
+        tags, desc, xprov = _ingest_xp(filepath, tags, desc)
+        analysis = _read_analysis_from_xmp(xmp_path)
+        if xprov:
+            analysis = {**(analysis or {}), **xprov}
+
         return {"tags": tags, "description": desc, "regions": regions,
-                "analysis": _read_analysis_from_xmp(xmp_path),
+                "rating": _exif_rating(filepath),
+                "analysis": analysis,
                 "flag": _read_flag_from_xmp(xmp_path),
                 "pose": _read_pose_from_xmp(xmp_path)}
     except Exception as e:
         access_logger.error(f"read_metadata {filepath}: {e}")
-        return {"tags": [], "description": "", "regions": [], "analysis": None, "flag": None, "pose": None}
+        return {"tags": [], "description": "", "regions": [], "rating": None,
+                "analysis": None, "flag": None, "pose": None}
 
 def write_metadata(filepath, tags, description, regions, analysis=None, flag=None, pose=None):
     try:
@@ -1975,6 +2411,285 @@ def api_iptc_read():
         access_logger.error(f"api_iptc_read {filename}: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+# ── EXIF editor (parallels the IPTC editor above) ───────────────────────────
+# Columns an EXIF db_field is allowed to write. The column name is interpolated
+# into SQL, so this MUST stay a fixed allowlist — never let a tag's db_field
+# reach the query unchecked. Keep in sync with EXIFField.db_field values.
+_EXIF_DB_COLUMNS = {"description", "rating"}
+
+def _resolve_media(filename):
+    """Resolve a rel path under MEDIA_DIR to an abs path, guarding traversal.
+    Returns (abs_path, None) on success or (None, (json, status)) on failure."""
+    if not filename:
+        return None, (jsonify({"success": False, "error": "filename required"}), 400)
+    abs_media = os.path.abspath(MEDIA_DIR)
+    fp = os.path.abspath(os.path.join(MEDIA_DIR, filename))
+    if not (fp == abs_media or fp.startswith(abs_media + os.sep)):
+        return None, (jsonify({"success": False, "error": "invalid path"}), 400)
+    if not os.path.exists(fp):
+        return None, (jsonify({"success": False, "error": "file not found"}), 404)
+    return fp, None
+
+@app.route("/exif_editor")
+def exif_editor_page():
+    """Standalone EXIF editor page (embeddable in the index later).
+    Renders templates/exif_editor.html inside a minimal shell that pulls in the
+    static css/js. Optional ?filename=... auto-loads a file."""
+    tmpl_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
+    frag_path = os.path.join(tmpl_dir, "exif_editor.html")
+    try:
+        fragment = open(frag_path, encoding="utf-8").read()
+    except OSError:
+        return "exif_editor.html template not found", 500
+    fn = request.args.get("filename", "")
+    autoload = (f"<script>window.addEventListener('load',function(){{"
+                f"if(window.exifEditor)exifEditor.load({json.dumps(fn)});}});</script>"
+                if fn else "")
+    shell = (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<title>EXIF Editor</title>"
+        "<link rel='stylesheet' href='/static/exif_editor.css'>"
+        "<style>body{background:#0b1220;margin:0;padding:16px;"
+        "font-family:system-ui,-apple-system,sans-serif;}</style>"
+        "</head><body>"
+        f"{fragment}"
+        "<script src='/static/exif_editor.js'></script>"
+        f"{autoload}"
+        "</body></html>"
+    )
+    return render_template_string(shell)
+
+@app.route("/api/exif/schema")
+def api_exif_schema():
+    """Return the full EXIF field schema (no file needed)."""
+    import exif_fields
+    return jsonify({"success": True, "schema": exif_fields.schema_dict()})
+
+@app.route("/api/exif/read", methods=["POST"])
+def api_exif_read():
+    """Read merged EXIF schema+values for a media file (rel path under
+    MEDIA_DIR). Returns the structure from exif_import.read_exif()."""
+    import exif_import
+    data = request.get_json(force=True, silent=True) or {}
+    fp, err = _resolve_media(data.get("filename", ""))
+    if err:
+        return err
+    try:
+        return jsonify({"success": True, "data": exif_import.read_exif(fp)})
+    except Exception as e:
+        access_logger.error(f"api_exif_read {data.get('filename')}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/api/exif/write", methods=["POST"])
+def api_exif_write():
+    """Apply a {tag_name: value} patch to a media file's EXIF via
+    exif_export.write_exif(). Read-only/unknown tags are skipped server-side."""
+    import exif_export
+    data = request.get_json(force=True, silent=True) or {}
+    fp, err = _resolve_media(data.get("filename", ""))
+    if err:
+        return err
+    patch = data.get("patch") or {}
+    if not isinstance(patch, dict):
+        return jsonify({"success": False, "error": "patch must be an object"}), 400
+    try:
+        rel = os.path.relpath(fp, MEDIA_DIR).replace("\\", "/")
+        # Snapshot the current values of the fields about to change so the
+        # changelog can record old -> new for undo (ctrl+z). Only the tags in
+        # the patch are read back; ImageHistory itself is excluded (it's derived).
+        import exif_import
+        before = {}
+        try:
+            pre = exif_import.read_exif(fp)
+            for g in pre.get("groups", []):
+                for f in g.get("fields", []):
+                    if f.get("name") in patch and f.get("name") != "ImageHistory":
+                        before[f["name"]] = f.get("raw")
+        except Exception:
+            pass
+
+        result = exif_export.write_exif(fp, patch)
+        # Mirror DB-backed EXIF fields (e.g. ImageDescription -> files.description)
+        # into the project database, but only after a successful EXIF write so the
+        # two never diverge. None => clear the column.
+        if result.get("success") and result.get("db"):
+            for col, val in result["db"].items():
+                if col not in _EXIF_DB_COLUMNS:      # guard against odd schema
+                    continue
+                # None -> clear the column (NULL for numeric, "" for text).
+                if val is None:
+                    if col == "rating":
+                        # Clearing the rating drops the user flag too, so a
+                        # later BRISQUE scan can supply a preliminary score.
+                        _db().execute(
+                            "UPDATE files SET rating=NULL, rating_user=0 "
+                            "WHERE rel_path=?", (rel,))
+                        continue
+                    stored = "" if col == "description" else None
+                elif col == "rating":
+                    try:
+                        stored = int(val)
+                    except (ValueError, TypeError):
+                        continue
+                    # A rating set through the editor is a user rating; mark it
+                    # so BRISQUE rescans won't override it.
+                    _db().execute(
+                        "UPDATE files SET rating=?, rating_user=1 WHERE rel_path=?",
+                        (stored, rel))
+                    continue
+                else:
+                    stored = str(val)
+                _db().execute(
+                    f"UPDATE files SET {col}=? WHERE rel_path=?", (stored, rel))
+            _db().commit()
+
+        # Record the edits in the changelog and refresh EXIF ImageHistory so
+        # undo (ctrl+z) and the history view stay current. Done only on success,
+        # and skipped for the ImageHistory field itself (it's derived, not a
+        # user edit). Best-effort: never fail the write over history bookkeeping.
+        if result.get("success"):
+            try:
+                changed = False
+                for tag in [w["tag"].split(".")[-1] for w in result.get("written", [])] \
+                           + [d.split(".")[-1] for d in result.get("deleted", [])]:
+                    if tag == "ImageHistory":
+                        continue
+                    _history_record(rel, f"exif:{tag}",
+                                    before.get(tag), patch.get(tag), commit=False)
+                    changed = True
+                if changed:
+                    _db().commit()
+                    hist = _history_as_imagehistory(rel)
+                    # Write the rendered history back into EXIF ImageHistory.
+                    # Guard against recursion: this write is not itself logged.
+                    exif_export.write_exif(fp, {"ImageHistory": hist})
+            except Exception as e:
+                access_logger.warning(f"exif history {rel}: {e}")
+
+        return jsonify({"success": result.get("success", False), "result": result})
+    except Exception as e:
+        access_logger.error(f"api_exif_write {data.get('filename')}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/api/exif/history", methods=["POST"])
+def api_exif_history():
+    """Return a file's edit changelog (oldest first) for display / the undo UI."""
+    data = request.get_json(force=True, silent=True) or {}
+    fp, err = _resolve_media(data.get("filename", ""))
+    if err:
+        return err
+    rel = os.path.relpath(fp, MEDIA_DIR).replace("\\", "/")
+    include_undone = bool(data.get("include_undone"))
+    return jsonify({"success": True,
+                    "history": _history_entries(rel, include_undone)})
+
+@app.route("/api/exif/undo", methods=["POST"])
+def api_exif_undo():
+    """Undo the most recent EXIF edit on a file (ctrl+z): revert the changed tag
+    to its previous value on disk and in the DB, and refresh ImageHistory."""
+    import exif_export
+    data = request.get_json(force=True, silent=True) or {}
+    fp, err = _resolve_media(data.get("filename", ""))
+    if err:
+        return err
+    rel = os.path.relpath(fp, MEDIA_DIR).replace("\\", "/")
+    entry = _history_undo(rel)
+    if not entry:
+        return jsonify({"success": True, "reverted": None, "note": "nothing to undo"})
+    return _apply_history_step(fp, rel, entry, "old")
+
+@app.route("/api/exif/redo", methods=["POST"])
+def api_exif_redo():
+    """Redo the most recently undone EXIF edit: re-apply the tag's new value."""
+    data = request.get_json(force=True, silent=True) or {}
+    fp, err = _resolve_media(data.get("filename", ""))
+    if err:
+        return err
+    rel = os.path.relpath(fp, MEDIA_DIR).replace("\\", "/")
+    entry = _history_redo(rel)
+    if not entry:
+        return jsonify({"success": True, "reapplied": None, "note": "nothing to redo"})
+    return _apply_history_step(fp, rel, entry, "new")
+
+def _apply_history_step(fp, rel, entry, which):
+    """Apply an undo (which='old') or redo (which='new') changelog step: write
+    the target value back to the file's EXIF (and mirror to the DB where the
+    field is db-backed), then refresh ImageHistory. The write itself is not
+    re-logged, so undo/redo don't create new changelog entries."""
+    import exif_export
+    field = entry["field"]                    # e.g. 'exif:Compression'
+    target = entry[which]
+    if not field.startswith("exif:"):
+        return jsonify({"success": False, "error": f"can't revert field {field}"})
+    tag = field.split(":", 1)[1]
+    try:
+        res = exif_export.write_exif(fp, {tag: target})
+        # Mirror db-backed values (description/rating) so the DB tracks the revert.
+        for col, val in (res.get("db") or {}).items():
+            if col not in _EXIF_DB_COLUMNS:
+                continue
+            if col == "rating":
+                if val is None:
+                    _db().execute("UPDATE files SET rating=NULL, rating_user=0 "
+                                  "WHERE rel_path=?", (rel,))
+                else:
+                    _db().execute("UPDATE files SET rating=?, rating_user=1 "
+                                  "WHERE rel_path=?", (int(val), rel))
+            else:
+                _db().execute(f"UPDATE files SET {col}=? WHERE rel_path=?",
+                              ("" if val is None else str(val), rel))
+        _db().commit()
+        # Refresh ImageHistory to reflect the now-active changelog.
+        try:
+            exif_export.write_exif(fp, {"ImageHistory": _history_as_imagehistory(rel)})
+        except Exception:
+            pass
+        return jsonify({"success": res.get("success", False),
+                        "field": tag, "value": target, "result": res})
+    except Exception as e:
+        access_logger.error(f"history step {rel} {field}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/api/raw/info", methods=["POST"])
+def api_raw_info():
+    """Report whether a library image has a stored original raw, and its details
+    (so the UI can show an 'Open raw' button). Returns has_raw + uid/orig_name."""
+    data = request.get_json(force=True, silent=True) or {}
+    fp, err = _resolve_media(data.get("filename", ""))
+    if err:
+        return err
+    rel = os.path.relpath(fp, MEDIA_DIR).replace("\\", "/")
+    uid = _raw_uid_for_image(rel)
+    row = _raw_by_uid(uid) if uid else None
+    return jsonify({"success": True, "has_raw": bool(row),
+                    "uid": uid if row else None,
+                    "orig_name": row["orig_name"] if row else None})
+
+@app.route("/api/raw/open/<uid>")
+def api_raw_open(uid):
+    """Serve the stored original raw for a given RawDataUniqueID, so a button can
+    open it. The raw lives in the hidden store; this is the only way to reach it
+    (library walks skip the dot-directory)."""
+    row = _raw_by_uid(uid)
+    if not row:
+        return jsonify({"success": False, "error": "raw not found"}), 404
+    abs_path = os.path.abspath(os.path.join(MEDIA_DIR, row["path"]))
+    store = os.path.abspath(_raw_store_dir())
+    # Guard: the resolved path must stay inside the hidden raw store.
+    if not abs_path.startswith(store + os.sep) or not os.path.exists(abs_path):
+        return jsonify({"success": False, "error": "raw file missing"}), 404
+    return send_file(abs_path, as_attachment=True,
+                     download_name=row["orig_name"] or os.path.basename(abs_path))
+
+@app.route("/api/raw/keep", methods=["POST"])
+def api_raw_keep():
+    """Get or set the keep_raws option (store uploaded camera raws hidden)."""
+    if request.method == "POST" and request.json is not None and "enabled" in (request.json or {}):
+        state["keep_raws"] = bool(request.json.get("enabled", False))
+        save_config()
+    return jsonify({"success": True, "enabled": bool(state.get("keep_raws"))})
+
 @app.route("/api/state")
 def api_state():
     return jsonify({k: state[k] for k in
@@ -2045,6 +2760,7 @@ def api_upload():
         orig = os.path.join(tmp, fname)
         out  = os.path.join(tmp, "out" + store_ext)
         file.save(orig)
+        is_raw_src = mt.is_raw(fname)
         try:
             if mt.is_video(fname):
                 # Videos can't be transcoded to JXL — store the original bytes.
@@ -2052,9 +2768,9 @@ def api_upload():
             elif in_ext == '.jxl':
                 shutil.copy(orig, out)
             else:
-                # cjxl handles both still images and animated GIF/APNG (the
-                # latter producing an ANIMATED jxl). --lossless_jpeg only makes
-                # sense for a real JPEG bitstream, never for gifs.
+                # cjxl handles still images, animated GIF/APNG, and (via its raw
+                # support) many camera raws, producing a .jxl. --lossless_jpeg
+                # only makes sense for a real JPEG bitstream.
                 cjxl_cmd = ['cjxl', orig, out, '-d', '0']
                 if in_ext in ('.jpg', '.jpeg'):
                     cjxl_cmd.append('--lossless_jpeg=1')   # bit-exact JPEG transcode
@@ -2077,6 +2793,19 @@ def api_upload():
                 }), 409
 
             shutil.move(out, store_path)
+            # We just (re)compressed to JXL, so we can compute the average bits
+            # per pixel of the result and record it in EXIF CompressedBitsPerPixel
+            # (a value the app owns rather than the camera). Best-effort: never
+            # let it fail the upload.
+            _set_compressed_bpp(store_path)
+
+            # If the source was a camera raw, optionally stash the original raw
+            # (hidden) and link it to this derived image via RawDataUniqueID, and
+            # record OriginalRawFileName — but never overwrite an OriginalRawFileName
+            # a prior tool already set (guards against convert-and-convert-back).
+            if is_raw_src:
+                _link_raw_to_image(orig, fname, rel_path, store_path)
+
             meta = json.loads(request.form.get("metadata", "{}") or "{}")
             if meta:
                 write_metadata(store_path, meta.get("tags", []),
@@ -2304,9 +3033,18 @@ def api_metadata():
     if d.get("action")=="read":
         meta = read_metadata(fp)
         row = _db().execute(
-            "SELECT iqa_score, iqa_manual FROM files WHERE rel_path=?", (fn,)).fetchone()
-        meta["iqa_score"]  = row["iqa_score"] if row else None
-        meta["iqa_manual"] = bool(row["iqa_manual"]) if row else False
+            "SELECT iqa_score, rating, rating_user FROM files WHERE rel_path=?",
+            (fn,)).fetchone()
+        brisque = row["iqa_score"] if row else None
+        user = (row["rating"] if (row and row["rating_user"]) else None)
+        # Effective rating: a user rating (in-app or from image EXIF) overrides
+        # the preliminary BRISQUE estimate. iqa_score/iqa_manual are retained in
+        # the response for the existing UI, derived from the unified columns.
+        meta["iqa_score"]   = user if user is not None else brisque
+        meta["iqa_manual"]  = user is not None
+        meta["brisque"]     = brisque
+        meta["rating"]      = user
+        meta["rating_user"] = user is not None
         return jsonify({"success":True,"metadata":meta})
     elif d.get("action")=="write":
         ok = write_metadata(fp, d.get("tags",[]), d.get("description",""), d.get("regions",[]))
@@ -3503,7 +4241,7 @@ def iqa_scan():
                 ('/' = library root only). Omitted/'' = whole library.
       filenames optional explicit list (overrides folder).
       force     if True, rescore files that already have a score.
-                Manually-set scores (iqa_manual=1) are never overwritten.
+                Files carrying a user rating (rating_user=1) are never scored.
     """
     if iqa is None or not iqa.available():
         return jsonify({"success": False,
@@ -3526,10 +4264,13 @@ def iqa_scan():
             params += [f + '/%', f + '/%/%']
         where = " WHERE " + " AND ".join(clauses)
         rows = db.execute(
-            f"SELECT rel_path, iqa_score, iqa_manual FROM files{where}",
+            f"SELECT rel_path, iqa_score, rating_user FROM files{where}",
             params).fetchall()
+        # Skip files that already have a BRISQUE score (unless force) and always
+        # skip files carrying a user rating — the user rating wins, so there's no
+        # point computing a preliminary score that would be hidden anyway.
         filenames = [r["rel_path"] for r in rows
-                     if force or (r["iqa_score"] is None and not r["iqa_manual"])]
+                     if not r["rating_user"] and (force or r["iqa_score"] is None)]
     if not filenames:
         return jsonify({"success": True, "scored": 0, "total": 0,
                         "note": "Nothing to score (already scored — use force to rescan)."})
@@ -3540,10 +4281,10 @@ def iqa_scan():
     for i, fn in enumerate(filenames):
         if state.get("discover_cancel"):
             break
-        # never clobber a manual rating
+        # never clobber a user rating
         row = db.execute(
-            "SELECT iqa_manual FROM files WHERE rel_path=?", (fn,)).fetchone()
-        if row and row["iqa_manual"]:
+            "SELECT rating_user FROM files WHERE rel_path=?", (fn,)).fetchone()
+        if row and row["rating_user"]:
             continue
         fp = get_safe_path(MEDIA_DIR, fn)
         if not fp or not os.path.exists(fp):
@@ -3563,7 +4304,7 @@ def iqa_scan():
             continue
         db.execute(
             "UPDATE files SET iqa_score=?, iqa_brisque=? "
-            "WHERE rel_path=? AND COALESCE(iqa_manual,0)=0",
+            "WHERE rel_path=? AND COALESCE(rating_user,0)=0",
             (stars, r.get("brisque"), fn))
         scored += 1
         if scored % 25 == 0:
@@ -3576,8 +4317,11 @@ def iqa_scan():
 
 @app.route("/api/iqa_set", methods=["POST"])
 def iqa_set():
-    """Manually set (or clear) the 0..5 star quality score for one file. A manual
-    score is marked so subsequent automatic scans won't overwrite it."""
+    """Set (or clear) the user's 0..5 star rating for one file. This is the
+    manual-rating entry point: it writes the unified `rating`/`rating_user`
+    columns (not iqa_score, which is reserved for the preliminary BRISQUE
+    estimate), so a user rating always overrides BRISQUE and a rescan never
+    clobbers it. Clearing reverts to the BRISQUE preliminary score."""
     body  = request.json or {}
     fn    = body.get("filename", "")
     stars = body.get("stars", None)
@@ -3585,16 +4329,16 @@ def iqa_set():
     if not fp or not os.path.exists(fp):
         return jsonify({"success": False, "error": "File not found."})
     if stars is None:
-        # clear manual rating -> revert to unscored
+        # Clear the user rating -> fall back to the BRISQUE preliminary score.
         _db().execute(
-            "UPDATE files SET iqa_score=NULL, iqa_manual=0 WHERE rel_path=?", (fn,))
+            "UPDATE files SET rating=NULL, rating_user=0 WHERE rel_path=?", (fn,))
     else:
         try:
-            stars = max(0.0, min(5.0, float(stars)))
+            stars = int(max(0, min(5, round(float(stars)))))
         except Exception:
             return jsonify({"success": False, "error": "Invalid stars value."})
         _db().execute(
-            "UPDATE files SET iqa_score=?, iqa_manual=1 WHERE rel_path=?",
+            "UPDATE files SET rating=?, rating_user=1 WHERE rel_path=?",
             (stars, fn))
     _db().commit()
     return jsonify({"success": True, "stars": stars})
@@ -3905,7 +4649,8 @@ def _entries_for_files(rel_paths):
     CH = 400
     for i in range(0, len(rel_paths), CH):
         chunk = rel_paths[i:i + CH]
-        q = ("SELECT rel_path, tags, description, width, height, iqa_score "
+        q = ("SELECT rel_path, tags, description, width, height, iqa_score, "
+             "rating, rating_user "
              "FROM files WHERE rel_path IN (%s)" % ",".join("?" * len(chunk)))
         for r in _db().execute(q, chunk).fetchall():
             rows[r["rel_path"]] = r
@@ -3914,10 +4659,15 @@ def _entries_for_files(rel_paths):
         r = rows.get(rp)
         if not r:
             continue
+        user_rating = r["rating"] if r["rating_user"] else None
+        eff_rating = user_rating if user_rating is not None else r["iqa_score"]
         out.append({"kind": "image", "filename": r["rel_path"],
                     "tags": json.loads(r["tags"] or "[]"),
                     "description": r["description"] or "",
                     "iqa_score": r["iqa_score"],
+                    "rating": r["rating"],
+                    "rating_user": bool(r["rating_user"]),
+                    "effective_rating": eff_rating,
                     "width": r["width"] or 0, "height": r["height"] or 0})
     return out
 

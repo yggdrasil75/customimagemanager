@@ -1,0 +1,67 @@
+<!-- EXIF editor.
+     Sibling of iptc_editor.html; standalone for now, intended to embed in the
+     main index later. Renders every EXIF group from the schema, each field
+     showing its current value, type, and (for enums) a labelled dropdown.
+     Read-only tags (geometry/version) render disabled. Unknown-but-present tags
+     are listed separately so nothing on the file is hidden.
+     Data loads from /api/exif/read?filename=... (merged schema+values from
+     exif_import.read_exif); edits post to /api/exif/write (exif_export). -->
+<div id="exif-editor" class="exif-editor" data-filename="">
+  <header class="exif-head">
+    <div class="exif-head-left">
+      <h2 class="exif-title">EXIF Metadata</h2>
+      <span id="exif-source" class="exif-source" title="File the EXIF data was read from"></span>
+    </div>
+    <div class="exif-head-right">
+      <label class="exif-toggle">
+        <input type="checkbox" id="exif-show-empty">
+        <span>Show empty fields</span>
+      </label>
+      <label class="exif-toggle">
+        <input type="checkbox" id="exif-show-unmapped">
+        <span>Show unmapped groups</span>
+      </label>
+      <button id="exif-reload" class="exif-btn" type="button">Reload</button>
+      <button id="exif-save" class="exif-btn exif-btn-primary" type="button" disabled>Save changes</button>
+      <span id="exif-status" class="exif-status"></span>
+    </div>
+  </header>
+
+  <div id="exif-summary" class="exif-summary"></div>
+
+  <!-- Groups render here. -->
+  <div id="exif-groups" class="exif-groups">
+    <div class="exif-empty">No file loaded. Call <code>exifEditor.load(filename)</code>.</div>
+  </div>
+
+  <!-- Row template cloned per field. -->
+  <template id="exif-field-tmpl">
+    <div class="exif-field">
+      <div class="exif-field-main">
+        <label class="exif-field-name"></label>
+        <div class="exif-field-input"></div>
+      </div>
+      <div class="exif-field-meta">
+        <span class="exif-field-id"></span>
+        <span class="exif-field-type"></span>
+        <span class="exif-field-ro"></span>
+        <span class="exif-field-note"></span>
+      </div>
+    </div>
+  </template>
+
+  <template id="exif-group-tmpl">
+    <section class="exif-group">
+      <header class="exif-group-head">
+        <div>
+          <span class="exif-group-ifd"></span>
+          <span class="exif-group-title"></span>
+        </div>
+        <span class="exif-group-badge"></span>
+      </header>
+      <p class="exif-group-desc"></p>
+      <div class="exif-group-fields"></div>
+      <div class="exif-group-unknown"></div>
+    </section>
+  </template>
+</div>
