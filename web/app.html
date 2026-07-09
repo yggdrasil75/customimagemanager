@@ -1,688 +1,776 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
-<meta charset="UTF-8"><title>Media Library</title>
-<script src="/tailwind"></script>
-<link rel="stylesheet" href="/web/app.css">
+  <meta charset="UTF-8">
+  <title>Media Library</title>
+  <script src="/tailwind"></script>
+  <link rel="stylesheet" href="/web/app.css">
 </head>
+
 <body class="bg-gray-900 text-white h-screen flex overflow-hidden">
 
-<!-- Left -->
-<div class="flex flex-col h-full rpane bg-gray-900 border-r border-gray-700 z-10"
-     style="width:32%;min-width:300px;max-width:60vw;padding-bottom:20px">
+  <!-- Left -->
+  <div class="flex flex-col h-full rpane bg-gray-900 border-r border-gray-700 z-10"
+    style="width:32%;min-width:300px;max-width:60vw;padding-bottom:20px">
 
-  <div class="p-4 bg-gray-800 border-b border-gray-700 flex justify-between items-center flex-shrink-0">
-    <div class="flex items-center gap-3">
-      <h1 class="text-xl font-bold text-blue-400">Media Library</h1>
-      <div class="flex rounded overflow-hidden border border-gray-600 text-xs font-bold">
-        <button id="mode_images" onclick="setMode('images')"
-          class="px-3 py-1 bg-blue-600 text-white">Images</button>
-        <button id="mode_music" onclick="setMode('music')"
-          class="px-3 py-1 bg-gray-700 text-gray-300 hover:bg-gray-600">Music</button>
+    <div class="p-4 bg-gray-800 border-b border-gray-700 flex justify-between items-center flex-shrink-0">
+      <div class="flex items-center gap-3">
+        <h1 class="text-xl font-bold text-blue-400">Media Library</h1>
+        <div class="flex rounded overflow-hidden border border-gray-600 text-xs font-bold">
+          <button id="mode_images" onclick="setMode('images')" class="px-3 py-1 bg-blue-600 text-white">Images</button>
+          <button id="mode_music" onclick="setMode('music')"
+            class="px-3 py-1 bg-gray-700 text-gray-300 hover:bg-gray-600">Music</button>
+        </div>
+      </div>
+      <div class="flex gap-2 items-center flex-wrap">
+        <button id="btn_dedup" onclick="runDedup(false)"
+          class="text-xs bg-indigo-600 hover:bg-indigo-500 font-bold px-2 py-1.5 rounded">Dupes</button>
+        <button id="btn_review" onclick="openReview()"
+          class="text-xs bg-rose-700 hover:bg-rose-600 font-bold px-2 py-1.5 rounded">Review<span id="review_badge"
+            class="hidden ml-1 bg-rose-900 px-1.5 rounded-full"></span></button>
+        <button id="btn_step_depth" onclick="openPipeline('depth')"
+          title="Step 1 — generate Depth-Anything depth maps per image (cached, resumable)"
+          class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">1·Depth</button>
+        <button id="btn_step_embed" onclick="openPipeline('embed')"
+          title="Step 2 — generate one whole-image embedding each (powers search + clustering)"
+          class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">2·Embed</button>
+        <button id="btn_step_cluster" onclick="openPipeline('cluster')"
+          title="Step 3 — cluster visually-similar images (memory-flat)"
+          class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">3·Cluster</button>
+        <button id="btn_step_heur" onclick="openPipeline('heuristics')"
+          title="Step 4 — build per-cluster heuristic concept maps; surfaces outliers"
+          class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">4·Heuristics</button>
+        <button id="btn_step_detect" onclick="openPipeline('detect')"
+          title="Step 5 — detect objects scoped per cluster using the concept maps (bounded memory)"
+          class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">5·Detect</button>
+        <button id="btn_scan_folder" onclick="iqaScan('folder')"
+          title="Score image quality (NR-IQA / BRISQUE) for the current folder"
+          class="text-xs bg-emerald-700 hover:bg-emerald-600 font-bold px-2 py-1.5 rounded">Scan folder</button>
+        <button id="btn_scan_lib" onclick="iqaScan('library')"
+          title="Score image quality (NR-IQA / BRISQUE) for the whole library"
+          class="text-xs bg-emerald-800 hover:bg-emerald-700 font-bold px-2 py-1.5 rounded">Scan library</button>
+        <span id="dedup_cache_badge" class="hidden text-[10px] text-gray-500 italic"></span>
+        <span id="file_count" class="text-sm text-gray-400">—</span>
       </div>
     </div>
-    <div class="flex gap-2 items-center flex-wrap">
-      <button id="btn_dedup" onclick="runDedup(false)"
-        class="text-xs bg-indigo-600 hover:bg-indigo-500 font-bold px-2 py-1.5 rounded">Dupes</button>
-      <button id="btn_review" onclick="openReview()"
-        class="text-xs bg-rose-700 hover:bg-rose-600 font-bold px-2 py-1.5 rounded">Review<span id="review_badge" class="hidden ml-1 bg-rose-900 px-1.5 rounded-full"></span></button>
-      <button id="btn_step_depth" onclick="openPipeline('depth')" title="Step 1 — generate Depth-Anything depth maps per image (cached, resumable)"
-        class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">1·Depth</button>
-      <button id="btn_step_embed" onclick="openPipeline('embed')" title="Step 2 — generate one whole-image embedding each (powers search + clustering)"
-        class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">2·Embed</button>
-      <button id="btn_step_cluster" onclick="openPipeline('cluster')" title="Step 3 — cluster visually-similar images (memory-flat)"
-        class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">3·Cluster</button>
-      <button id="btn_step_heur" onclick="openPipeline('heuristics')" title="Step 4 — build per-cluster heuristic concept maps; surfaces outliers"
-        class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">4·Heuristics</button>
-      <button id="btn_step_detect" onclick="openPipeline('detect')" title="Step 5 — detect objects scoped per cluster using the concept maps (bounded memory)"
-        class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">5·Detect</button>
-      <button id="btn_scan_folder" onclick="iqaScan('folder')" title="Score image quality (NR-IQA / BRISQUE) for the current folder"
-        class="text-xs bg-emerald-700 hover:bg-emerald-600 font-bold px-2 py-1.5 rounded">Scan folder</button>
-      <button id="btn_scan_lib" onclick="iqaScan('library')" title="Score image quality (NR-IQA / BRISQUE) for the whole library"
-        class="text-xs bg-emerald-800 hover:bg-emerald-700 font-bold px-2 py-1.5 rounded">Scan library</button>
-      <span id="dedup_cache_badge" class="hidden text-[10px] text-gray-500 italic"></span>
-      <span id="file_count" class="text-sm text-gray-400">—</span>
+
+    <div class="px-4 py-2 bg-gray-800 border-b border-gray-700 flex gap-2 flex-shrink-0">
+      <select id="folder_select" onchange="onFolderChange()"
+        class="bg-gray-700 rounded border border-gray-600 text-sm text-white px-2 max-w-[34%]">
+        <option value="">All folders</option>
+      </select>
+      <input id="search_input" type="text"
+        placeholder="Search…  try: height:<512  width:>=1024  is:untagged  is:unconfirmed"
+        class="flex-1 p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
+      <button onclick="makeComic()" title="Package the current folder as a comic"
+        class="text-xs bg-purple-700 hover:bg-purple-600 px-2 rounded font-bold whitespace-nowrap">📚 Make
+        comic</button>
+    </div>
+
+    <!-- Bulk action bar — shown only when items are selected -->
+    <div id="bulk_bar"
+      class="hidden px-4 py-2 bg-gray-750 border-b border-gray-600 flex items-center gap-2 flex-shrink-0 flex-wrap">
+      <span id="bulk_count" class="text-xs font-bold text-blue-300 mr-1"></span>
+      <input id="bulk_tag_input" type="text" placeholder="Add tag(s), comma-separated, then Enter"
+        class="flex-1 min-w-[160px] bg-gray-700 text-xs px-2 py-1.5 rounded border border-gray-600 text-white focus:border-blue-400"
+        onkeydown="if(event.key==='Enter') applyBulkTag()">
+      <button onclick="applyBulkTag()"
+        class="text-xs bg-blue-600 hover:bg-blue-500 px-3 py-1.5 rounded font-bold">Tag</button>
+      <button onclick="bulkDelete()" class="text-xs bg-red-700 hover:bg-red-600 px-3 py-1.5 rounded font-bold">🗑
+        Delete</button>
+      <button onclick="bulkBox()" title="Run AI box detection on every selected image"
+        class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1.5 rounded font-bold">🤖 AI Box</button>
+      <select id="bulk_action_select" title="AI action to run on each selected image"
+        class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-1.5 max-w-[130px]"></select>
+      <button onclick="bulkRunAI()" title="Run the chosen AI action on every selected image"
+        class="text-xs bg-yellow-600 hover:bg-yellow-500 px-3 py-1.5 rounded font-bold">✨ Run AI</button>
+      <button onclick="bulkPipeline()" title="Run the full Smart Tag pipeline on every selected image"
+        class="text-xs bg-teal-600 hover:bg-teal-500 px-3 py-1.5 rounded font-bold">🌳 Smart Tag</button>
+      <button onclick="clearSelection()" class="text-xs bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded ml-auto">✕
+        Deselect</button>
+    </div>
+
+    <div id="dropzone"
+      class="mx-4 mt-3 mb-1 border-2 border-dashed border-gray-600 rounded-lg p-4 text-center text-gray-400 flex flex-col items-center bg-gray-800 flex-shrink-0">
+      <p class="font-bold text-sm">Drag & Drop Images</p>
+      <p class="text-xs text-gray-500">Stored as lossless .JXL</p>
+      <div class="mt-2 flex items-center gap-2">
+        <input id="upload_folder" type="text" placeholder="folder (opt)"
+          class="bg-gray-700 text-xs px-2 py-1 rounded border border-gray-600 w-28">
+        <button onclick="document.getElementById('file_input').click()"
+          class="bg-blue-600 hover:bg-blue-500 px-3 py-1 rounded text-xs font-bold">Browse</button>
+      </div>
+      <input id="file_input" type="file" multiple class="hidden">
+    </div>
+
+    <!-- Pagination bar -->
+    <div class="flex items-center gap-2 px-4 py-2 flex-shrink-0 text-xs text-gray-400">
+      <button id="btn_prev" onclick="changePage(-1)"
+        class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded disabled:opacity-30">◀ Prev</button>
+      <span id="page_info">Page 1</span>
+      <button id="btn_next" onclick="changePage(1)"
+        class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded disabled:opacity-30">Next ▶</button>
+      <span class="ml-auto" id="showing_info"></span>
+    </div>
+
+    <div id="filter_banner"
+      class="hidden items-center gap-2 mx-4 mb-2 px-3 py-1.5 rounded bg-purple-900/50 border border-purple-700 text-xs text-purple-200">
+      <span id="filter_banner_text"></span>
+      <button onclick="clearImageFilter()"
+        class="ml-auto bg-purple-700 hover:bg-purple-600 px-2 py-0.5 rounded text-white">Clear ✕</button>
+    </div>
+
+    <div class="flex-1 overflow-y-auto px-4 pb-2" id="gallery_scroll">
+      <div id="gallery_grid" class="masonry"></div>
     </div>
   </div>
 
-  <div class="px-4 py-2 bg-gray-800 border-b border-gray-700 flex gap-2 flex-shrink-0">
-    <select id="folder_select" onchange="onFolderChange()"
-      class="bg-gray-700 rounded border border-gray-600 text-sm text-white px-2 max-w-[34%]">
-      <option value="">All folders</option>
-    </select>
-    <input id="search_input" type="text"
-      placeholder="Search…  try: height:<512  width:>=1024  is:untagged  is:unconfirmed"
-      class="flex-1 p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
-    <button onclick="makeComic()" title="Package the current folder as a comic"
-      class="text-xs bg-purple-700 hover:bg-purple-600 px-2 rounded font-bold whitespace-nowrap">📚 Make comic</button>
-  </div>
+  <!-- Right: Editor (adaptive — image beside controls when portrait, image above when landscape) -->
+  <div id="editor_region" class="flex-1 flex h-full overflow-hidden vertical">
 
-  <!-- Bulk action bar — shown only when items are selected -->
-  <div id="bulk_bar"
-    class="hidden px-4 py-2 bg-gray-750 border-b border-gray-600 flex items-center gap-2 flex-shrink-0 flex-wrap">
-    <span id="bulk_count" class="text-xs font-bold text-blue-300 mr-1"></span>
-    <input id="bulk_tag_input" type="text" placeholder="Add tag(s), comma-separated, then Enter"
-      class="flex-1 min-w-[160px] bg-gray-700 text-xs px-2 py-1.5 rounded border border-gray-600 text-white focus:border-blue-400"
-      onkeydown="if(event.key==='Enter') applyBulkTag()">
-    <button onclick="applyBulkTag()"
-      class="text-xs bg-blue-600 hover:bg-blue-500 px-3 py-1.5 rounded font-bold">Tag</button>
-    <button onclick="bulkDelete()"
-      class="text-xs bg-red-700 hover:bg-red-600 px-3 py-1.5 rounded font-bold">🗑 Delete</button>
-    <button onclick="bulkBox()" title="Run AI box detection on every selected image"
-      class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1.5 rounded font-bold">🤖 AI Box</button>
-    <select id="bulk_action_select" title="AI action to run on each selected image"
-      class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-1.5 max-w-[130px]"></select>
-    <button onclick="bulkRunAI()" title="Run the chosen AI action on every selected image"
-      class="text-xs bg-yellow-600 hover:bg-yellow-500 px-3 py-1.5 rounded font-bold">✨ Run AI</button>
-    <button onclick="bulkPipeline()" title="Run the full Smart Tag pipeline on every selected image"
-      class="text-xs bg-teal-600 hover:bg-teal-500 px-3 py-1.5 rounded font-bold">🌳 Smart Tag</button>
-    <button onclick="clearSelection()"
-      class="text-xs bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded ml-auto">✕ Deselect</button>
-  </div>
-
-  <div id="dropzone"
-    class="mx-4 mt-3 mb-1 border-2 border-dashed border-gray-600 rounded-lg p-4 text-center text-gray-400 flex flex-col items-center bg-gray-800 flex-shrink-0">
-    <p class="font-bold text-sm">Drag & Drop Images</p>
-    <p class="text-xs text-gray-500">Stored as lossless .JXL</p>
-    <div class="mt-2 flex items-center gap-2">
-      <input id="upload_folder" type="text" placeholder="folder (opt)"
-        class="bg-gray-700 text-xs px-2 py-1 rounded border border-gray-600 w-28">
-      <button onclick="document.getElementById('file_input').click()"
-        class="bg-blue-600 hover:bg-blue-500 px-3 py-1 rounded text-xs font-bold">Browse</button>
-    </div>
-    <input id="file_input" type="file" multiple class="hidden">
-  </div>
-
-  <!-- Pagination bar -->
-  <div class="flex items-center gap-2 px-4 py-2 flex-shrink-0 text-xs text-gray-400">
-    <button id="btn_prev" onclick="changePage(-1)"
-      class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded disabled:opacity-30">◀ Prev</button>
-    <span id="page_info">Page 1</span>
-    <button id="btn_next" onclick="changePage(1)"
-      class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded disabled:opacity-30">Next ▶</button>
-    <span class="ml-auto" id="showing_info"></span>
-  </div>
-
-  <div id="filter_banner" class="hidden items-center gap-2 mx-4 mb-2 px-3 py-1.5 rounded bg-purple-900/50 border border-purple-700 text-xs text-purple-200">
-    <span id="filter_banner_text"></span>
-    <button onclick="clearImageFilter()" class="ml-auto bg-purple-700 hover:bg-purple-600 px-2 py-0.5 rounded text-white">Clear ✕</button>
-  </div>
-
-  <div class="flex-1 overflow-y-auto px-4 pb-2" id="gallery_scroll">
-    <div id="gallery_grid" class="masonry"></div>
-  </div>
-</div>
-
-<!-- Right: Editor (adaptive — image beside controls when portrait, image above when landscape) -->
-<div id="editor_region" class="flex-1 flex h-full overflow-hidden vertical">
-
-  <!-- IMAGE PANE -->
-  <div id="image_pane" class="flex flex-col bg-gray-900">
-    <div class="px-3 py-2 bg-gray-800 border-b border-gray-700 flex items-center gap-2 flex-shrink-0">
-      <p id="selected_filename" class="text-xs font-mono text-blue-400 truncate flex-1">No file selected</p>
-      <span id="save_indicator" class="text-xs font-bold px-2 py-0.5 rounded bg-gray-900 text-gray-500 hidden"></span>
-    </div>
-    <div id="canvas_container" class="flex-1 bg-black overflow-hidden relative" style="min-height:120px">
-      <canvas id="media_canvas" class="absolute"></canvas>
-      <video id="media_video" class="absolute hidden" playsinline
-             style="max-width:100%;max-height:calc(100% - 34px);left:50%;top:calc(50% - 17px);transform:translate(-50%,-50%)"></video>
-      <!-- Box overlay: drawn ON TOP of the pixels, never baked in. Sits below the
+    <!-- IMAGE PANE -->
+    <div id="image_pane" class="flex flex-col bg-gray-900">
+      <div class="px-3 py-2 bg-gray-800 border-b border-gray-700 flex items-center gap-2 flex-shrink-0">
+        <p id="selected_filename" class="text-xs font-mono text-blue-400 truncate flex-1">No file selected</p>
+        <span id="save_indicator" class="text-xs font-bold px-2 py-0.5 rounded bg-gray-900 text-gray-500 hidden"></span>
+      </div>
+      <div id="canvas_container" class="flex-1 bg-black overflow-hidden relative" style="min-height:120px">
+        <canvas id="media_canvas" class="absolute"></canvas>
+        <video id="media_video" class="absolute hidden" playsinline
+          style="max-width:100%;max-height:calc(100% - 34px);left:50%;top:calc(50% - 17px);transform:translate(-50%,-50%)"></video>
+        <!-- Box overlay: drawn ON TOP of the pixels, never baked in. Sits below the
            control bar (z-20 < z-30) so play/scrub are always clickable. -->
-      <svg id="vt_overlay" class="absolute hidden z-20" preserveAspectRatio="none"
-           viewBox="0 0 1 1" style="pointer-events:none"></svg>
-      <!-- Custom video controls, pinned to the bottom, above the overlay. -->
-      <div id="vt_bar" class="absolute hidden z-30 left-0 right-0 bottom-0 h-[34px] px-2
+        <svg id="vt_overlay" class="absolute hidden z-20" preserveAspectRatio="none" viewBox="0 0 1 1"
+          style="pointer-events:none"></svg>
+        <!-- Custom video controls, pinned to the bottom, above the overlay. -->
+        <div id="vt_bar" class="absolute hidden z-30 left-0 right-0 bottom-0 h-[34px] px-2
                  flex items-center gap-2 bg-gray-900/90 border-t border-gray-700">
-        <button id="vt_play" class="text-gray-200 hover:text-white text-sm w-5">▶</button>
-        <input id="vt_seek" type="range" min="0" max="1000" value="0"
-               class="flex-1 h-1 accent-blue-500 cursor-pointer">
-        <span id="vt_time" class="text-[10px] text-gray-400 tabular-nums w-20 text-right">0:00 / 0:00</span>
-        <button id="vt_auto" class="text-[10px] px-1.5 py-0.5 rounded bg-purple-700 hover:bg-purple-600 text-white">Auto-detect</button>
-      </div>
-    </div>
-    <div class="px-3 py-1 bg-gray-800 border-t border-gray-700 flex justify-between items-center flex-shrink-0">
-      <span class="text-[10px] text-gray-500">Drag: add box · hover to locate</span>
-      <div class="flex items-center gap-2">
-        <button onclick="openPopout()" title="Open in popout for detail labelling"
-          class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-gray-300">⛶ Popout</button>
-        <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
-          <input type="checkbox" id="toggle_regions" checked onchange="drawCanvas()" class="accent-blue-500">
-          Regions
-        </label>
-        <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
-          <input type="checkbox" id="toggle_skeleton" onchange="drawCanvas();if(typeof popoutOpen!=='undefined'&&popoutOpen)drawPopout();" class="accent-cyan-500">
-          Skeleton
-        </label>
-      </div>
-    </div>
-  </div>
-
-  <!-- CONTROLS PANE (its own scroll; never resizes the image) -->
-  <div id="controls_pane" class="overflow-y-auto flex-shrink-0">
-    <div id="editor_panel" class="p-3 flex flex-col gap-3 opacity-50 pointer-events-none">
-      <div class="flex justify-between items-center gap-2">
-        <span class="text-sm font-bold text-gray-300">Editor</span>
-        <div class="flex items-center gap-1">
-          <button onclick="findSimilarToCurrent()" title="Find visually similar images (needs embeddings — run pipeline step 2)"
-            class="text-[10px] bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded text-white uppercase font-bold">Similar</button>
-          <button onclick="moveCurrentFile()"
-            class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded uppercase font-bold">Move</button>
-          <button onclick="confirmAllRegions()" title="Confirm every unconfirmed box"
-            class="text-[10px] bg-amber-700 hover:bg-amber-600 px-2 py-1 rounded text-white">✓ Confirm all</button>
-          <button id="btn_delete" onclick="deleteCurrentFile()"
-            class="hidden text-red-400 hover:text-red-300 text-xs px-1">Delete</button>
+          <button id="vt_play" class="text-gray-200 hover:text-white text-sm w-5">▶</button>
+          <input id="vt_seek" type="range" min="0" max="1000" value="0"
+            class="flex-1 h-1 accent-blue-500 cursor-pointer">
+          <span id="vt_time" class="text-[10px] text-gray-400 tabular-nums w-20 text-right">0:00 / 0:00</span>
+          <button id="vt_auto"
+            class="text-[10px] px-1.5 py-0.5 rounded bg-purple-700 hover:bg-purple-600 text-white">Auto-detect</button>
         </div>
       </div>
-
-      <div id="flag_banner" class="hidden text-xs bg-red-900/60 border border-red-700 rounded p-2 text-red-200">
-        <div class="font-bold mb-1">🚩 AI suggests deletion</div>
-        <div id="flag_reason" class="mb-2 text-red-300"></div>
-        <div class="flex gap-2">
-          <button onclick="deleteFlaggedCurrent()" class="bg-red-700 hover:bg-red-600 px-2 py-1 rounded font-bold">Delete</button>
-          <button onclick="clearCurrentFlag()" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Keep</button>
-        </div>
-      </div>
-
-      <div id="regions_list"
-        class="hidden max-h-48 overflow-y-auto bg-gray-900 border border-gray-700 rounded p-1 space-y-0.5"></div>
-
-      <div>
-        <div class="flex justify-between items-center mb-1">
-          <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Quality</label>
-          <span id="iqa_manual_badge" class="hidden text-[9px] text-amber-400 uppercase font-bold">manual</span>
-        </div>
+      <div class="px-3 py-1 bg-gray-800 border-t border-gray-700 flex justify-between items-center flex-shrink-0">
+        <span class="text-[10px] text-gray-500">Drag: add box · hover to locate</span>
         <div class="flex items-center gap-2">
-          <div id="meta_stars" class="flex items-center gap-0.5 text-xl leading-none select-none"></div>
-          <button onclick="clearStars()" title="Clear rating"
-            class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-gray-300">Clear</button>
-          <span id="iqa_brisque_hint" class="text-[10px] text-gray-500"></span>
+          <button onclick="openPopout()" title="Open in popout for detail labelling"
+            class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-gray-300">⛶ Popout</button>
+          <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
+            <input type="checkbox" id="toggle_regions" checked onchange="drawCanvas()" class="accent-blue-500">
+            Regions
+          </label>
+          <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
+            <input type="checkbox" id="toggle_skeleton"
+              onchange="drawCanvas();if(typeof popoutOpen!=='undefined'&&popoutOpen)drawPopout();"
+              class="accent-cyan-500">
+            Skeleton
+          </label>
         </div>
       </div>
+    </div>
 
-      <div>
-        <div class="flex justify-between items-center mb-1">
-          <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Tags</label>
-          <span id="tag_count" class="text-[10px] text-gray-500"></span>
-        </div>
-        <div id="tag_list"
-          class="max-h-40 overflow-y-auto bg-gray-900 border border-gray-600 rounded p-1 flex flex-col gap-0.5"></div>
-        <div class="flex gap-1 mt-1">
-          <input id="tag_add_input" type="text" placeholder="Add tag(s), comma-separated, then Enter"
-            class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600 text-xs text-white focus:border-blue-500"
-            onkeydown="if(event.key==='Enter'){event.preventDefault();addTagsFromInput();}">
-          <button onclick="addTagsFromInput()"
-            class="text-xs bg-blue-600 hover:bg-blue-500 px-3 rounded font-bold">Add</button>
-          <button onclick="confirmAllTags()" id="btn_confirm_all_tags" style="display:none"
-            title="Confirm all suggested tags"
-            class="text-xs bg-green-700 hover:bg-green-600 px-3 rounded font-bold">✓ All</button>
-        </div>
-        <!-- hidden mirror: kept in sync with the tag list so legacy code paths
-             (AI tagging, autosave) can read/write a comma string unchanged. -->
-        <input id="meta_tags" type="hidden">
-      </div>
-
-      <div>
-        <div class="flex justify-between items-center mb-1">
-          <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Description</label>
+    <!-- CONTROLS PANE (its own scroll; never resizes the image) -->
+    <div id="controls_pane" class="overflow-y-auto flex-shrink-0">
+      <div id="editor_panel" class="p-3 flex flex-col gap-3 opacity-50 pointer-events-none">
+        <div class="flex justify-between items-center gap-2">
+          <span class="text-sm font-bold text-gray-300">Editor</span>
           <div class="flex items-center gap-1">
-            <select id="llm_action_select"
-              class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-0.5 max-w-[130px]"></select>
-            <button onclick="runLLM()" id="btn_run_llm"
-              class="text-xs bg-yellow-600 hover:bg-yellow-500 px-2 py-0.5 rounded font-bold">✨ AI</button>
+            <button onclick="findSimilarToCurrent()"
+              title="Find visually similar images (needs embeddings — run pipeline step 2)"
+              class="text-[10px] bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded text-white uppercase font-bold">Similar</button>
+            <button onclick="moveCurrentFile()"
+              class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded uppercase font-bold">Move</button>
+            <button onclick="confirmAllRegions()" title="Confirm every unconfirmed box"
+              class="text-[10px] bg-amber-700 hover:bg-amber-600 px-2 py-1 rounded text-white">✓ Confirm all</button>
+            <button id="btn_delete" onclick="deleteCurrentFile()"
+              class="hidden text-red-400 hover:text-red-300 text-xs px-1">Delete</button>
           </div>
         </div>
-        <textarea id="meta_desc" oninput="triggerAutosave()" rows="4"
-          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
-      </div>
 
-      <div id="analysis_panel" class="hidden">
-        <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">AI Analysis</label>
-        <div id="analysis_body"
-          class="text-xs bg-gray-900 border border-gray-700 rounded p-2 space-y-2 max-h-48 overflow-y-auto"></div>
-      </div>
-    </div>
+        <div id="flag_banner" class="hidden text-xs bg-red-900/60 border border-red-700 rounded p-2 text-red-200">
+          <div class="font-bold mb-1">🚩 AI suggests deletion</div>
+          <div id="flag_reason" class="mb-2 text-red-300"></div>
+          <div class="flex gap-2">
+            <button onclick="deleteFlaggedCurrent()"
+              class="bg-red-700 hover:bg-red-600 px-2 py-1 rounded font-bold">Delete</button>
+            <button onclick="clearCurrentFlag()" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Keep</button>
+          </div>
+        </div>
 
-    <!-- AI Tools -->
-    <div class="p-3 flex flex-col gap-2 border-t border-gray-700">
-      <div class="flex justify-between items-center">
-        <h3 class="font-bold text-purple-400 text-sm">AI Tooling</h3>
-        <div class="flex gap-2">
-          <button onclick="document.getElementById('ai_modal').classList.remove('hidden')"
-            class="text-xs bg-gray-700 px-2 py-1 rounded hover:bg-gray-600">⚙ Settings</button>
-          <a href="/training_portal" target="_blank"
-            class="text-xs text-purple-300 bg-gray-700 px-2 py-1 rounded hover:bg-gray-600 border border-purple-800">Trainer ↗</a>
+        <div id="regions_list"
+          class="hidden max-h-48 overflow-y-auto bg-gray-900 border border-gray-700 rounded p-1 space-y-0.5"></div>
+
+        <div>
+          <div class="flex justify-between items-center mb-1">
+            <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Quality</label>
+            <span id="iqa_manual_badge" class="hidden text-[9px] text-amber-400 uppercase font-bold">manual</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <div id="meta_stars" class="flex items-center gap-0.5 text-xl leading-none select-none"></div>
+            <button onclick="clearStars()" title="Clear rating"
+              class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-gray-300">Clear</button>
+            <span id="iqa_brisque_hint" class="text-[10px] text-gray-500"></span>
+          </div>
+        </div>
+
+        <div>
+          <div class="flex justify-between items-center mb-1">
+            <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Tags</label>
+            <span id="tag_count" class="text-[10px] text-gray-500"></span>
+          </div>
+          <div id="tag_list"
+            class="max-h-40 overflow-y-auto bg-gray-900 border border-gray-600 rounded p-1 flex flex-col gap-0.5"></div>
+          <div class="flex gap-1 mt-1">
+            <input id="tag_add_input" type="text" placeholder="Add tag(s), comma-separated, then Enter"
+              class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600 text-xs text-white focus:border-blue-500"
+              onkeydown="if(event.key==='Enter'){event.preventDefault();addTagsFromInput();}">
+            <button onclick="addTagsFromInput()"
+              class="text-xs bg-blue-600 hover:bg-blue-500 px-3 rounded font-bold">Add</button>
+            <button onclick="confirmAllTags()" id="btn_confirm_all_tags" style="display:none"
+              title="Confirm all suggested tags"
+              class="text-xs bg-green-700 hover:bg-green-600 px-3 rounded font-bold">✓ All</button>
+          </div>
+          <!-- hidden mirror: kept in sync with the tag list so legacy code paths
+             (AI tagging, autosave) can read/write a comma string unchanged. -->
+          <input id="meta_tags" type="hidden">
+        </div>
+
+        <div>
+          <div class="flex justify-between items-center mb-1">
+            <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Description</label>
+            <div class="flex items-center gap-1">
+              <select id="llm_action_select"
+                class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-0.5 max-w-[130px]"></select>
+              <button onclick="runLLM()" id="btn_run_llm"
+                class="text-xs bg-yellow-600 hover:bg-yellow-500 px-2 py-0.5 rounded font-bold">✨ AI</button>
+            </div>
+          </div>
+          <textarea id="meta_desc" oninput="triggerAutosave()" rows="4"
+            class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
+        </div>
+
+        <div id="analysis_panel" class="hidden">
+          <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">AI Analysis</label>
+          <div id="analysis_body"
+            class="text-xs bg-gray-900 border border-gray-700 rounded p-2 space-y-2 max-h-48 overflow-y-auto"></div>
         </div>
       </div>
-      <div id="yolo_controls" class="opacity-50 pointer-events-none">
-        <select id="model_selector"
-          class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm mb-1"></select>
-        <button onclick="runAutoTag()" id="btn_autotag"
-          class="w-full bg-indigo-600 hover:bg-indigo-500 py-1.5 rounded font-bold text-sm">Auto-Tag Image</button>
+
+      <!-- AI Tools -->
+      <div class="p-3 flex flex-col gap-2 border-t border-gray-700">
+        <div class="flex justify-between items-center">
+          <h3 class="font-bold text-purple-400 text-sm">AI Tooling</h3>
+          <div class="flex gap-2">
+            <button
+              onclick="document.getElementById('ai_modal').classList.remove('hidden');window.pipelineEditorRefresh&&window.pipelineEditorRefresh()"
+              class="text-xs bg-gray-700 px-2 py-1 rounded hover:bg-gray-600">⚙ Settings</button>
+            <a href="/training_portal" target="_blank"
+              class="text-xs text-purple-300 bg-gray-700 px-2 py-1 rounded hover:bg-gray-600 border border-purple-800">Trainer
+              ↗</a>
+          </div>
+        </div>
+        <div id="yolo_controls" class="opacity-50 pointer-events-none">
+          <select id="model_selector"
+            class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm mb-1"></select>
+          <button onclick="runAutoTag()" id="btn_autotag"
+            class="w-full bg-indigo-600 hover:bg-indigo-500 py-1.5 rounded font-bold text-sm">Auto-Tag Image</button>
+        </div>
+        <button onclick="runPipeline()" id="btn_smarttag"
+          class="w-full bg-teal-600 hover:bg-teal-500 py-1.5 rounded font-bold text-sm">🌳 Smart Tag (AI
+          pipeline)</button>
+        <div class="grid grid-cols-2 gap-2">
+          <button onclick="runPose()" id="btn_pose"
+            class="bg-cyan-700 hover:bg-cyan-600 py-1.5 rounded font-bold text-sm">🦴 Pose</button>
+          <button onclick="runOCR()" id="btn_ocr"
+            class="bg-sky-700 hover:bg-sky-600 py-1.5 rounded font-bold text-sm">🔤 OCR</button>
+        </div>
+        <button onclick="removePose()" id="btn_pose_remove" style="display:none"
+          title="Delete the current (bad) skeleton from this image"
+          class="w-full bg-rose-800 hover:bg-rose-700 py-1.5 rounded font-bold text-sm">🗑 Remove skeleton</button>
+        <button onclick="quickTrain()"
+          class="w-full bg-purple-600 hover:bg-purple-500 py-1.5 rounded font-bold text-sm">Quick Train</button>
+        <button onclick="openTiersModal()"
+          class="w-full bg-gray-700 hover:bg-gray-600 py-1.5 rounded font-bold text-sm border border-amber-700 text-amber-300">🗄
+          Storage Tiers</button>
+        <label class="flex items-center justify-between text-xs text-gray-300 mt-1 cursor-pointer">
+          <span>Background auto-tag when idle</span>
+          <input type="checkbox" id="autotag_toggle" onchange="toggleAutotag()" class="accent-purple-500">
+        </label>
+        <p class="text-xs text-gray-400">Status: <span id="status_text" class="text-yellow-400">Ready.</span></p>
       </div>
-      <button onclick="runPipeline()" id="btn_smarttag"
-        class="w-full bg-teal-600 hover:bg-teal-500 py-1.5 rounded font-bold text-sm">🌳 Smart Tag (AI pipeline)</button>
-      <div class="grid grid-cols-2 gap-2">
-        <button onclick="runPose()" id="btn_pose"
-          class="bg-cyan-700 hover:bg-cyan-600 py-1.5 rounded font-bold text-sm">🦴 Pose</button>
-        <button onclick="runOCR()" id="btn_ocr"
-          class="bg-sky-700 hover:bg-sky-600 py-1.5 rounded font-bold text-sm">🔤 OCR</button>
-      </div>
-      <button onclick="removePose()" id="btn_pose_remove" style="display:none"
-        title="Delete the current (bad) skeleton from this image"
-        class="w-full bg-rose-800 hover:bg-rose-700 py-1.5 rounded font-bold text-sm">🗑 Remove skeleton</button>
-      <button onclick="quickTrain()"
-        class="w-full bg-purple-600 hover:bg-purple-500 py-1.5 rounded font-bold text-sm">Quick Train</button>
-      <button onclick="openTiersModal()"
-        class="w-full bg-gray-700 hover:bg-gray-600 py-1.5 rounded font-bold text-sm border border-amber-700 text-amber-300">🗄 Storage Tiers</button>
-      <label class="flex items-center justify-between text-xs text-gray-300 mt-1 cursor-pointer">
-        <span>Background auto-tag when idle</span>
-        <input type="checkbox" id="autotag_toggle" onchange="toggleAutotag()" class="accent-purple-500">
-      </label>
-      <p class="text-xs text-gray-400">Status: <span id="status_text" class="text-yellow-400">Ready.</span></p>
     </div>
   </div>
-</div>
 
-<!-- Storage Tiers Modal -->
-<div id="tiers_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
-  <div class="bg-gray-800 p-5 rounded-lg border border-gray-600 w-[620px] flex flex-col max-h-[90vh]">
-    <h2 class="font-bold text-amber-300 mb-1 flex-shrink-0">🗄 Storage Tiers</h2>
-    <p class="text-[11px] text-gray-500 mb-3">Order tiers fastest → slowest. Files stay at their normal library paths as symlinks; bytes live on the tier drives. Keep the <code>media/</code> folder itself (links, DB, thumbnails) on your fastest drive. Ratios are normalised, so 5 / 50 / 45 works as percentages.</p>
-    <div class="overflow-y-auto flex-1 pr-1">
-      <label class="flex items-center gap-2 text-sm text-gray-300 mb-3 cursor-pointer">
-        <input type="checkbox" id="tiers_enabled" class="accent-amber-500"> Enable automatic tiering
-      </label>
-      <div class="grid grid-cols-[1fr_2fr_70px_90px_28px] gap-2 text-[10px] text-gray-500 mb-1 px-1">
-        <span>Name</span><span>Path</span><span>Ratio %</span><span>Speed MB/s</span><span></span>
+  <!-- Storage Tiers Modal -->
+  <div id="tiers_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
+    <div class="bg-gray-800 p-5 rounded-lg border border-gray-600 w-[620px] flex flex-col max-h-[90vh]">
+      <h2 class="font-bold text-amber-300 mb-1 flex-shrink-0">🗄 Storage Tiers</h2>
+      <p class="text-[11px] text-gray-500 mb-3">Order tiers fastest → slowest. Files stay at their normal library paths
+        as symlinks; bytes live on the tier drives. Keep the <code>media/</code> folder itself (links, DB, thumbnails)
+        on your fastest drive. Ratios are normalised, so 5 / 50 / 45 works as percentages.</p>
+      <div class="overflow-y-auto flex-1 pr-1">
+        <label class="flex items-center gap-2 text-sm text-gray-300 mb-3 cursor-pointer">
+          <input type="checkbox" id="tiers_enabled" class="accent-amber-500"> Enable automatic tiering
+        </label>
+        <div class="grid grid-cols-[1fr_2fr_70px_90px_28px] gap-2 text-[10px] text-gray-500 mb-1 px-1">
+          <span>Name</span><span>Path</span><span>Ratio %</span><span>Speed MB/s</span><span></span>
+        </div>
+        <div id="tiers_rows" class="space-y-1.5 mb-2"></div>
+        <button onclick="addTierRow()"
+          class="text-xs bg-indigo-600 hover:bg-indigo-500 px-2 py-1 rounded font-bold mb-3">+ Add tier</button>
+        <div class="grid grid-cols-3 gap-2 mb-3">
+          <div><label class="text-[10px] text-gray-500 block mb-0.5">Video headroom ×</label>
+            <input id="tiers_headroom" type="number" step="0.5" min="1"
+              class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          </div>
+          <div><label class="text-[10px] text-gray-500 block mb-0.5">Rebalance every (min)</label>
+            <input id="tiers_interval" type="number" min="1"
+              class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          </div>
+          <div><label class="text-[10px] text-gray-500 block mb-0.5">Copy throttle MB/s</label>
+            <input id="tiers_throttle" type="number" min="1"
+              class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          </div>
+        </div>
+        <div id="tiers_status" class="text-xs text-gray-300 space-y-1 border-t border-gray-700 pt-3"></div>
       </div>
-      <div id="tiers_rows" class="space-y-1.5 mb-2"></div>
-      <button onclick="addTierRow()" class="text-xs bg-indigo-600 hover:bg-indigo-500 px-2 py-1 rounded font-bold mb-3">+ Add tier</button>
-      <div class="grid grid-cols-3 gap-2 mb-3">
-        <div><label class="text-[10px] text-gray-500 block mb-0.5">Video headroom ×</label>
-          <input id="tiers_headroom" type="number" step="0.5" min="1" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white"></div>
-        <div><label class="text-[10px] text-gray-500 block mb-0.5">Rebalance every (min)</label>
-          <input id="tiers_interval" type="number" min="1" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white"></div>
-        <div><label class="text-[10px] text-gray-500 block mb-0.5">Copy throttle MB/s</label>
-          <input id="tiers_throttle" type="number" min="1" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white"></div>
+      <div class="flex justify-between items-center pt-3 border-t border-gray-700 mt-3 flex-shrink-0">
+        <div class="flex gap-2">
+          <button onclick="tiersRebalance()"
+            class="bg-amber-600 hover:bg-amber-500 px-3 py-1.5 rounded text-sm font-bold">Rebalance now</button>
+          <button onclick="tiersCancel()" class="bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded text-sm">Cancel
+            run</button>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="document.getElementById('tiers_modal').classList.add('hidden'); stopTiersPoll()"
+            class="bg-gray-600 px-4 py-1.5 rounded text-sm">Close</button>
+          <button onclick="saveTiersConfig()"
+            class="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded text-sm font-bold">Save</button>
+        </div>
       </div>
-      <div id="tiers_status" class="text-xs text-gray-300 space-y-1 border-t border-gray-700 pt-3"></div>
     </div>
-    <div class="flex justify-between items-center pt-3 border-t border-gray-700 mt-3 flex-shrink-0">
-      <div class="flex gap-2">
-        <button onclick="tiersRebalance()" class="bg-amber-600 hover:bg-amber-500 px-3 py-1.5 rounded text-sm font-bold">Rebalance now</button>
-        <button onclick="tiersCancel()" class="bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded text-sm">Cancel run</button>
+  </div>
+
+  <!-- Dedup Modal -->
+  <div id="dedup_modal" class="hidden absolute inset-0 bg-black/80 flex items-center justify-center z-50 p-6">
+    <div class="bg-gray-800 rounded-lg border border-gray-600 shadow-xl w-full max-w-5xl h-[85vh] flex flex-col">
+      <div class="flex justify-between items-start p-5 border-b border-gray-700 flex-shrink-0">
+        <div>
+          <h2 class="text-xl font-bold text-indigo-400">Duplicates</h2>
+          <p class="text-xs text-gray-400 mt-1">"Keep & Merge" consolidates metadata into the highest-res copy.</p>
+          <p id="dedup_cache_info" class="text-xs text-gray-500 mt-1"></p>
+        </div>
+        <div class="flex gap-2 ml-4 flex-shrink-0">
+          <button onclick="runDedup(true)"
+            class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs font-bold text-yellow-400">↺
+            Rescan</button>
+          <button onclick="document.getElementById('dedup_modal').classList.add('hidden')"
+            class="bg-gray-700 hover:bg-gray-600 px-4 py-1.5 rounded font-bold text-sm">Done</button>
+        </div>
       </div>
-      <div class="flex gap-2">
-        <button onclick="document.getElementById('tiers_modal').classList.add('hidden'); stopTiersPoll()"
-          class="bg-gray-600 px-4 py-1.5 rounded text-sm">Close</button>
-        <button onclick="saveTiersConfig()"
+      <div id="dedup_content" class="flex-1 overflow-y-auto p-4 space-y-4"></div>
+    </div>
+  </div>
+
+  <!-- Region Modal -->
+  <div id="region_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
+    <div class="bg-gray-800 p-6 rounded-lg border border-gray-600 w-72">
+      <h2 class="font-bold mb-3">Region Name</h2>
+      <input id="modal_region_name" type="text" list="vt_labels"
+        class="w-full p-2 bg-gray-700 rounded border border-gray-600 mb-4 text-white">
+      <datalist id="vt_labels"></datalist>
+      <div class="flex justify-end gap-2">
+        <button onclick="cancelRegion()" class="bg-gray-600 px-4 py-1.5 rounded text-sm">Cancel</button>
+        <button onclick="saveRegion()" class="bg-blue-600 px-4 py-1.5 rounded text-sm font-bold">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI Settings Modal -->
+  <div id="ai_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
+    <div class="bg-gray-800 p-5 rounded-lg border border-gray-600 w-[400px] flex flex-col max-h-[90vh]">
+      <h2 class="font-bold text-purple-400 mb-4 flex-shrink-0">LLM / Vision Settings</h2>
+      <div class="overflow-y-auto flex-1 space-y-3 pr-1">
+        <div><label class="text-xs text-gray-400 block mb-1">Endpoint</label>
+          <input id="cfg_endpoint" type="text"
+            class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+        </div>
+        <div><label class="text-xs text-gray-400 block mb-1">API Key</label>
+          <input id="cfg_apikey" type="password"
+            class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+        </div>
+        <div><label class="text-xs text-gray-400 block mb-1">Model</label>
+          <input id="cfg_model" type="text"
+            class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+        </div>
+        <div><label class="text-xs text-gray-400 block mb-1">Pose &amp; detection models <span
+              class="text-gray-600">(auto-downloaded)</span></label>
+          <div class="grid grid-cols-3 gap-2">
+            <div>
+              <span class="text-[10px] text-gray-500 block mb-0.5">YOLO size</span>
+              <select id="cfg_yolo_size"
+                class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+                <option value="n">n · nano</option>
+                <option value="s">s · small</option>
+                <option value="m">m · medium</option>
+                <option value="l">l · large</option>
+                <option value="x">x · xlarge</option>
+              </select>
+            </div>
+            <div>
+              <span class="text-[10px] text-gray-500 block mb-0.5">Pose type</span>
+              <select id="cfg_pose_kind"
+                class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+                <option value="body">Body · 17 pts</option>
+                <option value="wholebody">Whole-body · 133 (hands+face)</option>
+              </select>
+            </div>
+            <div>
+              <span class="text-[10px] text-gray-500 block mb-0.5">Pose size</span>
+              <select id="cfg_pose_size"
+                class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+                <option value="n">n · nano</option>
+                <option value="s">s · small</option>
+                <option value="m">m · medium</option>
+                <option value="l">l · large</option>
+                <option value="x">x · xlarge</option>
+              </select>
+            </div>
+          </div>
+          <p class="text-[10px] text-gray-600 mt-1">Whole-body pose needs <code>rtmlib</code> +
+            <code>onnxruntime</code>; OCR needs <code>rapidocr_onnxruntime</code> or <code>easyocr</code>. Weights
+            download automatically on first use.</p>
+        </div>
+        <div><label class="text-xs text-gray-400 block mb-1">System Prompt</label>
+          <textarea id="cfg_system" rows="2"
+            class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
+        </div>
+        <div class="border-t border-gray-600 pt-3">
+          <div class="flex justify-between items-center mb-2">
+            <label class="text-xs font-bold text-gray-400">Actions</label>
+            <button onclick="addAiAction()"
+              class="text-xs bg-indigo-600 hover:bg-indigo-500 px-2 py-0.5 rounded font-bold">+ Add</button>
+          </div>
+          <div id="actions_container" class="space-y-2"></div>
+        </div>
+        <div class="border-t border-gray-600 pt-3">
+          <label class="text-xs font-bold text-gray-400 block mb-1">Smart Tag pipeline (advanced JSON)</label>
+          <p class="text-[10px] text-gray-500 mb-1">Decision tree run by 🌳 Smart Tag. Edit carefully.</p>
+          <textarea id="cfg_pipeline" rows="6"
+            class="w-full p-2 bg-gray-900 rounded border border-gray-600 text-xs text-white font-mono resize-y"></textarea>
+          <p id="cfg_pipeline_err" class="text-[10px] text-red-400 mt-1 hidden"></p>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 pt-3 border-t border-gray-700 mt-3 flex-shrink-0">
+        <button onclick="document.getElementById('ai_modal').classList.add('hidden')"
+          class="bg-gray-600 px-4 py-1.5 rounded text-sm">Cancel</button>
+        <button onclick="saveAiSettings()"
           class="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded text-sm font-bold">Save</button>
       </div>
     </div>
   </div>
-</div>
 
-<!-- Dedup Modal -->
-<div id="dedup_modal" class="hidden absolute inset-0 bg-black/80 flex items-center justify-center z-50 p-6">
-  <div class="bg-gray-800 rounded-lg border border-gray-600 shadow-xl w-full max-w-5xl h-[85vh] flex flex-col">
-    <div class="flex justify-between items-start p-5 border-b border-gray-700 flex-shrink-0">
-      <div>
-        <h2 class="text-xl font-bold text-indigo-400">Duplicates</h2>
-        <p class="text-xs text-gray-400 mt-1">"Keep & Merge" consolidates metadata into the highest-res copy.</p>
-        <p id="dedup_cache_info" class="text-xs text-gray-500 mt-1"></p>
-      </div>
-      <div class="flex gap-2 ml-4 flex-shrink-0">
-        <button onclick="runDedup(true)"
-          class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs font-bold text-yellow-400">↺ Rescan</button>
-        <button onclick="document.getElementById('dedup_modal').classList.add('hidden')"
-          class="bg-gray-700 hover:bg-gray-600 px-4 py-1.5 rounded font-bold text-sm">Done</button>
-      </div>
+  <!-- Popout labelling window -->
+  <div id="popout_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
+    <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
+      <span id="popout_filename" class="text-xs font-mono text-blue-400 truncate flex-1"></span>
+      <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
+        <input type="checkbox" id="popout_toggle_regions" checked onchange="drawPopout()" class="accent-blue-500">
+        Regions
+      </label>
+      <span class="text-[10px] text-gray-500 hidden sm:inline">Drag:Add · Mid:Rename · Right:Delete · Scroll:Zoom ·
+        Click+drag canvas:Pan</span>
+      <button onclick="closePopout()" class="text-gray-400 hover:text-white text-lg leading-none ml-2">✕</button>
     </div>
-    <div id="dedup_content" class="flex-1 overflow-y-auto p-4 space-y-4"></div>
-  </div>
-</div>
-
-<!-- Region Modal -->
-<div id="region_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
-  <div class="bg-gray-800 p-6 rounded-lg border border-gray-600 w-72">
-    <h2 class="font-bold mb-3">Region Name</h2>
-    <input id="modal_region_name" type="text" list="vt_labels"
-      class="w-full p-2 bg-gray-700 rounded border border-gray-600 mb-4 text-white">
-    <datalist id="vt_labels"></datalist>
-    <div class="flex justify-end gap-2">
-      <button onclick="cancelRegion()" class="bg-gray-600 px-4 py-1.5 rounded text-sm">Cancel</button>
-      <button onclick="saveRegion()" class="bg-blue-600 px-4 py-1.5 rounded text-sm font-bold">Add</button>
+    <!-- Canvas fills remaining space -->
+    <div id="popout_canvas_wrap" class="flex-1 overflow-hidden relative bg-black select-none">
+      <canvas id="popout_canvas" class="absolute top-0 left-0" style="cursor:crosshair"></canvas>
     </div>
   </div>
-</div>
 
-<!-- AI Settings Modal -->
-<div id="ai_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
-  <div class="bg-gray-800 p-5 rounded-lg border border-gray-600 w-[400px] flex flex-col max-h-[90vh]">
-    <h2 class="font-bold text-purple-400 mb-4 flex-shrink-0">LLM / Vision Settings</h2>
-    <div class="overflow-y-auto flex-1 space-y-3 pr-1">
-      <div><label class="text-xs text-gray-400 block mb-1">Endpoint</label>
-        <input id="cfg_endpoint" type="text" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white"></div>
-      <div><label class="text-xs text-gray-400 block mb-1">API Key</label>
-        <input id="cfg_apikey" type="password" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white"></div>
-      <div><label class="text-xs text-gray-400 block mb-1">Model</label>
-        <input id="cfg_model" type="text" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white"></div>
-      <div><label class="text-xs text-gray-400 block mb-1">Pose &amp; detection models <span class="text-gray-600">(auto-downloaded)</span></label>
-        <div class="grid grid-cols-3 gap-2">
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">YOLO size</span>
-            <select id="cfg_yolo_size" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="n">n · nano</option><option value="s">s · small</option>
-              <option value="m">m · medium</option><option value="l">l · large</option>
-              <option value="x">x · xlarge</option>
-            </select>
-          </div>
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Pose type</span>
-            <select id="cfg_pose_kind" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="body">Body · 17 pts</option>
-              <option value="wholebody">Whole-body · 133 (hands+face)</option>
-            </select>
-          </div>
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Pose size</span>
-            <select id="cfg_pose_size" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="n">n · nano</option><option value="s">s · small</option>
-              <option value="m">m · medium</option><option value="l">l · large</option>
-              <option value="x">x · xlarge</option>
-            </select>
-          </div>
+  <!-- Comic reader -->
+  <div id="comic_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
+    <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
+      <span class="text-purple-300 font-bold">📚 <span id="comic_title_h">Comic</span></span>
+      <span id="comic_pageinfo" class="text-xs text-gray-400"></span>
+      <div class="ml-auto flex gap-2 items-center">
+        <select id="comic_action_select" title="AI action to run on every page"
+          class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-1 max-w-[130px]"></select>
+        <button onclick="comicRunAI()" class="text-xs bg-yellow-600 hover:bg-yellow-500 px-3 py-1 rounded font-bold">✨
+          Run AI</button>
+        <button onclick="comicPipeline()" class="text-xs bg-teal-600 hover:bg-teal-500 px-3 py-1 rounded font-bold">🌳
+          Smart Tag</button>
+        <button onclick="comicBoxAll()" class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1 rounded font-bold">🤖 Box
+          all pages</button>
+        <button onclick="closeComic()" class="text-gray-400 hover:text-white text-lg leading-none">✕</button>
+      </div>
+    </div>
+    <div class="flex flex-1 overflow-hidden">
+      <div class="w-72 bg-gray-850 border-r border-gray-700 p-3 overflow-y-auto flex-shrink-0 space-y-2">
+        <label class="text-[10px] uppercase text-gray-400 font-bold block">Title</label>
+        <input id="comic_title" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+        <label class="text-[10px] uppercase text-gray-400 font-bold block">Author</label>
+        <input id="comic_author" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+        <label class="text-[10px] uppercase text-gray-400 font-bold block">Description</label>
+        <textarea id="comic_desc" rows="3"
+          class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
+        <label class="text-[10px] uppercase text-gray-400 font-bold block">Tags (comma)</label>
+        <input id="comic_tags" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+        <label class="text-[10px] uppercase text-gray-400 font-bold block">Characters (comma)</label>
+        <input id="comic_chars" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+        <button onclick="saveComic()"
+          class="w-full bg-green-600 hover:bg-green-500 py-1.5 rounded font-bold text-sm mt-1">Save comic info</button>
+        <button onclick="setComicCover()" class="w-full bg-gray-700 hover:bg-gray-600 py-1 rounded text-xs">Set current
+          page as cover</button>
+        <button onclick="openComicPageInEditor()"
+          class="w-full bg-indigo-700 hover:bg-indigo-600 py-1 rounded text-xs">Edit current page metadata</button>
+        <button onclick="unpackageComic()"
+          class="w-full bg-red-800 hover:bg-red-700 py-1 rounded text-xs text-red-200">Unpackage comic</button>
+      </div>
+      <div class="flex-1 flex flex-col overflow-hidden">
+        <div id="comic_view" class="flex-1 overflow-auto bg-black flex items-center justify-center relative">
+          <img id="comic_page_img" class="max-h-full max-w-full object-contain" alt="">
+          <button onclick="comicPage(-1)"
+            class="absolute left-2 top-1/2 -translate-y-1/2 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl">‹</button>
+          <button onclick="comicPage(1)"
+            class="absolute right-2 top-1/2 -translate-y-1/2 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl">›</button>
         </div>
-        <p class="text-[10px] text-gray-600 mt-1">Whole-body pose needs <code>rtmlib</code> + <code>onnxruntime</code>; OCR needs <code>rapidocr_onnxruntime</code> or <code>easyocr</code>. Weights download automatically on first use.</p>
+        <div id="comic_strip"
+          class="h-20 flex gap-1 overflow-x-auto bg-gray-900 border-t border-gray-700 p-1 flex-shrink-0"></div>
       </div>
-      <div><label class="text-xs text-gray-400 block mb-1">System Prompt</label>
-        <textarea id="cfg_system" rows="2"
-          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea></div>
-      <div class="border-t border-gray-600 pt-3">
-        <div class="flex justify-between items-center mb-2">
-          <label class="text-xs font-bold text-gray-400">Actions</label>
-          <button onclick="addAiAction()"
-            class="text-xs bg-indigo-600 hover:bg-indigo-500 px-2 py-0.5 rounded font-bold">+ Add</button>
-        </div>
-        <div id="actions_container" class="space-y-2"></div>
-      </div>
-      <div class="border-t border-gray-600 pt-3">
-        <label class="text-xs font-bold text-gray-400 block mb-1">Smart Tag pipeline (advanced JSON)</label>
-        <p class="text-[10px] text-gray-500 mb-1">Decision tree run by 🌳 Smart Tag. Edit carefully.</p>
-        <textarea id="cfg_pipeline" rows="6"
-          class="w-full p-2 bg-gray-900 rounded border border-gray-600 text-xs text-white font-mono resize-y"></textarea>
-        <p id="cfg_pipeline_err" class="text-[10px] text-red-400 mt-1 hidden"></p>
-      </div>
-    </div>
-    <div class="flex justify-end gap-2 pt-3 border-t border-gray-700 mt-3 flex-shrink-0">
-      <button onclick="document.getElementById('ai_modal').classList.add('hidden')"
-        class="bg-gray-600 px-4 py-1.5 rounded text-sm">Cancel</button>
-      <button onclick="saveAiSettings()"
-        class="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded text-sm font-bold">Save</button>
     </div>
   </div>
-</div>
 
-<!-- Popout labelling window -->
-<div id="popout_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
-  <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
-    <span id="popout_filename" class="text-xs font-mono text-blue-400 truncate flex-1"></span>
-    <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
-      <input type="checkbox" id="popout_toggle_regions" checked onchange="drawPopout()" class="accent-blue-500">
-      Regions
-    </label>
-    <span class="text-[10px] text-gray-500 hidden sm:inline">Drag:Add · Mid:Rename · Right:Delete · Scroll:Zoom · Click+drag canvas:Pan</span>
-    <button onclick="closePopout()" class="text-gray-400 hover:text-white text-lg leading-none ml-2">✕</button>
-  </div>
-  <!-- Canvas fills remaining space -->
-  <div id="popout_canvas_wrap" class="flex-1 overflow-hidden relative bg-black select-none">
-    <canvas id="popout_canvas" class="absolute top-0 left-0" style="cursor:crosshair"></canvas>
-  </div>
-</div>
-
-<!-- Comic reader -->
-<div id="comic_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
-  <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
-    <span class="text-purple-300 font-bold">📚 <span id="comic_title_h">Comic</span></span>
-    <span id="comic_pageinfo" class="text-xs text-gray-400"></span>
-    <div class="ml-auto flex gap-2 items-center">
-      <select id="comic_action_select" title="AI action to run on every page"
-        class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-1 max-w-[130px]"></select>
-      <button onclick="comicRunAI()"
-        class="text-xs bg-yellow-600 hover:bg-yellow-500 px-3 py-1 rounded font-bold">✨ Run AI</button>
-      <button onclick="comicPipeline()"
-        class="text-xs bg-teal-600 hover:bg-teal-500 px-3 py-1 rounded font-bold">🌳 Smart Tag</button>
-      <button onclick="comicBoxAll()"
-        class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1 rounded font-bold">🤖 Box all pages</button>
-      <button onclick="closeComic()" class="text-gray-400 hover:text-white text-lg leading-none">✕</button>
+  <!-- Review AI suggestions -->
+  <div id="review_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
+    <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
+      <span class="text-rose-300 font-bold">🚩 Review AI suggestions</span>
+      <span id="review_progress" class="text-xs text-gray-400"></span>
+      <div class="ml-auto flex gap-2">
+        <button onclick="reviewDeleteAllFlagged()"
+          class="text-xs bg-red-800 hover:bg-red-700 px-3 py-1 rounded font-bold text-red-200">Delete all
+          flagged…</button>
+        <button onclick="closeReview()" class="text-gray-400 hover:text-white text-lg leading-none">✕</button>
+      </div>
     </div>
-  </div>
-  <div class="flex flex-1 overflow-hidden">
-    <div class="w-72 bg-gray-850 border-r border-gray-700 p-3 overflow-y-auto flex-shrink-0 space-y-2">
-      <label class="text-[10px] uppercase text-gray-400 font-bold block">Title</label>
-      <input id="comic_title" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-      <label class="text-[10px] uppercase text-gray-400 font-bold block">Author</label>
-      <input id="comic_author" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-      <label class="text-[10px] uppercase text-gray-400 font-bold block">Description</label>
-      <textarea id="comic_desc" rows="3" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
-      <label class="text-[10px] uppercase text-gray-400 font-bold block">Tags (comma)</label>
-      <input id="comic_tags" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-      <label class="text-[10px] uppercase text-gray-400 font-bold block">Characters (comma)</label>
-      <input id="comic_chars" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-      <button onclick="saveComic()" class="w-full bg-green-600 hover:bg-green-500 py-1.5 rounded font-bold text-sm mt-1">Save comic info</button>
-      <button onclick="setComicCover()" class="w-full bg-gray-700 hover:bg-gray-600 py-1 rounded text-xs">Set current page as cover</button>
-      <button onclick="openComicPageInEditor()" class="w-full bg-indigo-700 hover:bg-indigo-600 py-1 rounded text-xs">Edit current page metadata</button>
-      <button onclick="unpackageComic()" class="w-full bg-red-800 hover:bg-red-700 py-1 rounded text-xs text-red-200">Unpackage comic</button>
-    </div>
-    <div class="flex-1 flex flex-col overflow-hidden">
-      <div id="comic_view" class="flex-1 overflow-auto bg-black flex items-center justify-center relative">
-        <img id="comic_page_img" class="max-h-full max-w-full object-contain" alt="">
-        <button onclick="comicPage(-1)"
+    <div class="flex flex-1 overflow-hidden">
+      <div class="flex-1 bg-black flex items-center justify-center overflow-hidden relative">
+        <canvas id="review_canvas" class="max-h-full max-w-full"></canvas>
+        <button onclick="reviewStep(-1)"
           class="absolute left-2 top-1/2 -translate-y-1/2 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl">‹</button>
-        <button onclick="comicPage(1)"
+        <button onclick="reviewStep(1)"
           class="absolute right-2 top-1/2 -translate-y-1/2 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl">›</button>
       </div>
-      <div id="comic_strip" class="h-20 flex gap-1 overflow-x-auto bg-gray-900 border-t border-gray-700 p-1 flex-shrink-0"></div>
-    </div>
-  </div>
-</div>
-
-<!-- Review AI suggestions -->
-<div id="review_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
-  <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
-    <span class="text-rose-300 font-bold">🚩 Review AI suggestions</span>
-    <span id="review_progress" class="text-xs text-gray-400"></span>
-    <div class="ml-auto flex gap-2">
-      <button onclick="reviewDeleteAllFlagged()"
-        class="text-xs bg-red-800 hover:bg-red-700 px-3 py-1 rounded font-bold text-red-200">Delete all flagged…</button>
-      <button onclick="closeReview()" class="text-gray-400 hover:text-white text-lg leading-none">✕</button>
-    </div>
-  </div>
-  <div class="flex flex-1 overflow-hidden">
-    <div class="flex-1 bg-black flex items-center justify-center overflow-hidden relative">
-      <canvas id="review_canvas" class="max-h-full max-w-full"></canvas>
-      <button onclick="reviewStep(-1)"
-        class="absolute left-2 top-1/2 -translate-y-1/2 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl">‹</button>
-      <button onclick="reviewStep(1)"
-        class="absolute right-2 top-1/2 -translate-y-1/2 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl">›</button>
-    </div>
-    <div class="w-80 bg-gray-850 border-l border-gray-700 p-4 overflow-y-auto flex-shrink-0 space-y-3">
-      <p id="review_filename" class="text-xs font-mono text-blue-400 break-all"></p>
-      <div id="review_flag" class="hidden bg-red-900/60 border border-red-700 rounded p-2 text-xs text-red-200">
-        <div class="font-bold mb-1">AI suggests deletion</div>
-        <div id="review_reason" class="text-red-300 mb-2"></div>
-        <div class="flex gap-2">
-          <button onclick="reviewDelete()" class="bg-red-700 hover:bg-red-600 px-3 py-1 rounded font-bold">Delete</button>
-          <button onclick="reviewKeep()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded">Keep</button>
-        </div>
-      </div>
-      <div id="review_boxpanel" class="bg-gray-900 border border-gray-700 rounded p-2 text-xs">
-        <div class="flex items-center justify-between mb-2">
-          <span class="font-bold text-amber-300">Boxes</span>
-          <div class="flex gap-1">
-            <button onclick="rvAll('accept')" class="bg-emerald-800 hover:bg-emerald-700 px-2 py-0.5 rounded text-[10px]">accept all</button>
-            <button onclick="rvAll('deny')" class="bg-red-800 hover:bg-red-700 px-2 py-0.5 rounded text-[10px]">deny all</button>
+      <div class="w-80 bg-gray-850 border-l border-gray-700 p-4 overflow-y-auto flex-shrink-0 space-y-3">
+        <p id="review_filename" class="text-xs font-mono text-blue-400 break-all"></p>
+        <div id="review_flag" class="hidden bg-red-900/60 border border-red-700 rounded p-2 text-xs text-red-200">
+          <div class="font-bold mb-1">AI suggests deletion</div>
+          <div id="review_reason" class="text-red-300 mb-2"></div>
+          <div class="flex gap-2">
+            <button onclick="reviewDelete()"
+              class="bg-red-700 hover:bg-red-600 px-3 py-1 rounded font-bold">Delete</button>
+            <button onclick="reviewKeep()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded">Keep</button>
           </div>
         </div>
-        <div id="review_boxlist" class="max-h-64 overflow-y-auto"></div>
-        <div class="flex gap-2 mt-2">
-          <button onclick="rvSave(false)" class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded flex-1">Save</button>
-          <button onclick="rvSave(true)" class="bg-emerald-700 hover:bg-emerald-600 px-3 py-1 rounded font-bold flex-1" title="shortcut: A">Save &amp; next</button>
+        <div id="review_boxpanel" class="bg-gray-900 border border-gray-700 rounded p-2 text-xs">
+          <div class="flex items-center justify-between mb-2">
+            <span class="font-bold text-amber-300">Boxes</span>
+            <div class="flex gap-1">
+              <button onclick="rvAll('accept')"
+                class="bg-emerald-800 hover:bg-emerald-700 px-2 py-0.5 rounded text-[10px]">accept all</button>
+              <button onclick="rvAll('deny')" class="bg-red-800 hover:bg-red-700 px-2 py-0.5 rounded text-[10px]">deny
+                all</button>
+            </div>
+          </div>
+          <div id="review_boxlist" class="max-h-64 overflow-y-auto"></div>
+          <div class="flex gap-2 mt-2">
+            <button onclick="rvSave(false)" class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded flex-1">Save</button>
+            <button onclick="rvSave(true)"
+              class="bg-emerald-700 hover:bg-emerald-600 px-3 py-1 rounded font-bold flex-1" title="shortcut: A">Save
+              &amp; next</button>
+          </div>
         </div>
       </div>
-  </div>
-</div>
-
-<div id="pipeline_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
-  <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
-    <span class="text-purple-300 font-bold">Image pipeline</span>
-    <span id="pipeline_eligible" class="text-xs text-gray-400"></span>
-    <div class="ml-auto flex gap-2 items-center">
-      <button onclick="cancelPipeline()" class="text-xs bg-rose-800 hover:bg-rose-700 px-3 py-1 rounded">Cancel run</button>
-      <button onclick="closePipeline()" class="text-gray-400 hover:text-white text-lg leading-none">✕</button>
-    </div>
-  </div>
-
-  <div class="flex-1 overflow-y-auto p-4 space-y-3 max-w-3xl mx-auto w-full">
-    <p class="text-[11px] text-gray-500">
-      Each step is manual and resumable, and reads the previous step's saved output.
-      Run them in order. Clustering works on one embedding per image, so it uses far
-      less memory than whole-library object clustering.
-    </p>
-
-    <!-- step 1 -->
-    <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
-      <div class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">1</div>
-      <div class="flex-1">
-        <div class="text-sm font-bold text-gray-200">Generate depth maps</div>
-        <div class="text-[11px] text-gray-500">Depth-Anything per image (cached, shared with object discovery).</div>
-        <div id="pl_depth_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
-      </div>
-      <button id="pl_btn_depth" onclick="plRun('depth')"
-        class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
     </div>
 
-    <!-- step 2 -->
-    <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
-      <div class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">2</div>
-      <div class="flex-1">
-        <div class="text-sm font-bold text-gray-200">Generate embeddings</div>
-        <div class="text-[11px] text-gray-500">One whole-image embedding each. Stored permanently; also powers search.</div>
-        <div id="pl_embed_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
-      </div>
-      <label class="text-[10px] text-gray-400 flex items-center gap-1"><input id="pl_embed_force" type="checkbox"> force</label>
-      <button id="pl_btn_embed" onclick="plRun('embed')"
-        class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
-    </div>
-
-    <!-- step 3 -->
-    <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
-      <div class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">3</div>
-      <div class="flex-1">
-        <div class="text-sm font-bold text-gray-200">Cluster images</div>
-        <div class="text-[11px] text-gray-500">Group visually-similar images (memory-flat).</div>
-        <div id="pl_cluster_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
-        <div class="flex gap-3 mt-1 text-[10px] text-gray-400">
-          <label class="flex items-center gap-1">eps
-            <input id="pl_eps" type="number" step="0.02" min="0.06" max="0.4" value="0.16"
-              class="w-16 bg-gray-700 rounded px-1 py-0.5 border border-gray-600 text-white"></label>
-          <label class="flex items-center gap-1">min size
-            <input id="pl_min" type="number" min="2" max="50" value="2"
-              class="w-14 bg-gray-700 rounded px-1 py-0.5 border border-gray-600 text-white"></label>
+    <div id="pipeline_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
+      <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
+        <span class="text-purple-300 font-bold">Image pipeline</span>
+        <span id="pipeline_eligible" class="text-xs text-gray-400"></span>
+        <div class="ml-auto flex gap-2 items-center">
+          <button onclick="cancelPipeline()" class="text-xs bg-rose-800 hover:bg-rose-700 px-3 py-1 rounded">Cancel
+            run</button>
+          <button onclick="closePipeline()" class="text-gray-400 hover:text-white text-lg leading-none">✕</button>
         </div>
       </div>
-      <button id="pl_btn_cluster" onclick="plRun('cluster')"
-        class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
-    </div>
 
-    <!-- step 4 -->
-    <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
-      <div class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">4</div>
-      <div class="flex-1">
-        <div class="text-sm font-bold text-gray-200">Build heuristics</div>
-        <div class="text-[11px] text-gray-500">Per-cluster concept map: ignores minor differences, surfaces outliers.</div>
-        <div id="pl_heur_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
+      <div class="flex-1 overflow-y-auto p-4 space-y-3 max-w-3xl mx-auto w-full">
+        <p class="text-[11px] text-gray-500">
+          Each step is manual and resumable, and reads the previous step's saved output.
+          Run them in order. Clustering works on one embedding per image, so it uses far
+          less memory than whole-library object clustering.
+        </p>
+
+        <!-- step 1 -->
+        <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
+          <div
+            class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">
+            1</div>
+          <div class="flex-1">
+            <div class="text-sm font-bold text-gray-200">Generate depth maps</div>
+            <div class="text-[11px] text-gray-500">Depth-Anything per image (cached, shared with object discovery).
+            </div>
+            <div id="pl_depth_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
+          </div>
+          <button id="pl_btn_depth" onclick="plRun('depth')"
+            class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
+        </div>
+
+        <!-- step 2 -->
+        <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
+          <div
+            class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">
+            2</div>
+          <div class="flex-1">
+            <div class="text-sm font-bold text-gray-200">Generate embeddings</div>
+            <div class="text-[11px] text-gray-500">One whole-image embedding each. Stored permanently; also powers
+              search.</div>
+            <div id="pl_embed_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
+          </div>
+          <label class="text-[10px] text-gray-400 flex items-center gap-1"><input id="pl_embed_force" type="checkbox">
+            force</label>
+          <button id="pl_btn_embed" onclick="plRun('embed')"
+            class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
+        </div>
+
+        <!-- step 3 -->
+        <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
+          <div
+            class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">
+            3</div>
+          <div class="flex-1">
+            <div class="text-sm font-bold text-gray-200">Cluster images</div>
+            <div class="text-[11px] text-gray-500">Group visually-similar images (memory-flat).</div>
+            <div id="pl_cluster_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
+            <div class="flex gap-3 mt-1 text-[10px] text-gray-400">
+              <label class="flex items-center gap-1">eps
+                <input id="pl_eps" type="number" step="0.02" min="0.06" max="0.4" value="0.16"
+                  class="w-16 bg-gray-700 rounded px-1 py-0.5 border border-gray-600 text-white"></label>
+              <label class="flex items-center gap-1">min size
+                <input id="pl_min" type="number" min="2" max="50" value="2"
+                  class="w-14 bg-gray-700 rounded px-1 py-0.5 border border-gray-600 text-white"></label>
+            </div>
+          </div>
+          <button id="pl_btn_cluster" onclick="plRun('cluster')"
+            class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
+        </div>
+
+        <!-- step 4 -->
+        <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
+          <div
+            class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">
+            4</div>
+          <div class="flex-1">
+            <div class="text-sm font-bold text-gray-200">Build heuristics</div>
+            <div class="text-[11px] text-gray-500">Per-cluster concept map: ignores minor differences, surfaces
+              outliers.</div>
+            <div id="pl_heur_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
+          </div>
+          <button id="pl_btn_heur" onclick="plRun('heuristics')"
+            class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
+        </div>
+
+        <!-- step 5 -->
+        <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
+          <div
+            class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">
+            5</div>
+          <div class="flex-1">
+            <div class="text-sm font-bold text-gray-200">Detect objects</div>
+            <div class="text-[11px] text-gray-500">Object detection scoped per image-cluster — bounded memory, uses the
+              concept maps.</div>
+            <div id="pl_detect_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
+          </div>
+          <button id="pl_btn_detect" onclick="plRun('detect')"
+            class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
+        </div>
+
+        <div class="mt-3 flex items-center gap-2">
+          <button onclick="showStagedClusters()"
+            class="text-xs bg-emerald-700 hover:bg-emerald-600 px-3 py-1.5 rounded font-bold">View results</button>
+          <span class="text-[11px] text-gray-500">Show discovered common-object clusters (persisted, survives
+            restart).</span>
+        </div>
+        <div id="pl_clusters" class="mt-2"></div>
+        <div id="pl_staged_results" class="mt-3"></div>
       </div>
-      <button id="pl_btn_heur" onclick="plRun('heuristics')"
-        class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
-    </div>
 
-    <!-- step 5 -->
-    <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
-      <div class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">5</div>
-      <div class="flex-1">
-        <div class="text-sm font-bold text-gray-200">Detect objects</div>
-        <div class="text-[11px] text-gray-500">Object detection scoped per image-cluster — bounded memory, uses the concept maps.</div>
-        <div id="pl_detect_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
+      <div class="px-4 py-2 bg-gray-800 border-t border-gray-700 flex-shrink-0 text-[11px] text-gray-400">
+        <span id="pl_running" class="text-purple-300"></span>
       </div>
-      <button id="pl_btn_detect" onclick="plRun('detect')"
-        class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
     </div>
 
-    <div class="mt-3 flex items-center gap-2">
-      <button onclick="showStagedClusters()"
-        class="text-xs bg-emerald-700 hover:bg-emerald-600 px-3 py-1.5 rounded font-bold">View results</button>
-      <span class="text-[11px] text-gray-500">Show discovered common-object clusters (persisted, survives restart).</span>
-    </div>
-    <div id="pl_clusters" class="mt-2"></div>
-    <div id="pl_staged_results" class="mt-3"></div>
-  </div>
+    <!-- ════════════ MUSIC MODE ════════════ -->
+    <div id="music_pane" class="hidden absolute inset-0 z-20 bg-gray-900 text-white flex flex-col">
+      <!-- toolbar -->
+      <div class="p-3 bg-gray-800 border-b border-gray-700 flex items-center gap-2 flex-wrap flex-shrink-0">
+        <div class="flex rounded overflow-hidden border border-gray-600 text-xs font-bold">
+          <button id="mm_back" onclick="setMode('images')" class="px-3 py-1 bg-gray-700 hover:bg-gray-600">←
+            Images</button>
+          <button id="mm_music" class="px-3 py-1 bg-blue-600">Music</button>
+        </div>
+        <div class="flex rounded overflow-hidden border border-gray-600 text-xs font-bold ml-2">
+          <button id="mtab_artists" onclick="musicView('artists')" class="px-3 py-1 bg-blue-600">Artists</button>
+          <button id="mtab_albums" onclick="musicView('albums')"
+            class="px-3 py-1 bg-gray-700 hover:bg-gray-600">Albums</button>
+          <button id="mtab_songs" onclick="musicView('songs')"
+            class="px-3 py-1 bg-gray-700 hover:bg-gray-600">Songs</button>
+          <button id="mtab_clusters" onclick="musicView('clusters')"
+            class="px-3 py-1 bg-gray-700 hover:bg-gray-600">Clusters</button>
+        </div>
+        <input id="music_search" type="text" placeholder="Search title / artist / album / genre / tag…"
+          oninput="musicSearchDebounced()"
+          class="flex-1 min-w-[180px] bg-gray-700 rounded border border-gray-600 text-sm px-3 py-1">
+        <button onclick="musicReindex()" title="Scan media folder for audio (resumable)"
+          class="text-xs bg-indigo-600 hover:bg-indigo-500 font-bold px-2 py-1.5 rounded">Reindex</button>
+        <button onclick="musicEmbed()" title="Generate audio embeddings for clustering & shuffle"
+          class="text-xs bg-purple-700 hover:bg-purple-600 font-bold px-2 py-1.5 rounded">Embed</button>
+        <button onclick="musicCluster()" title="Cluster tracks by sound"
+          class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">Cluster</button>
+        <span id="music_stat" class="text-xs text-gray-400">—</span>
+      </div>
 
-  <div class="px-4 py-2 bg-gray-800 border-t border-gray-700 flex-shrink-0 text-[11px] text-gray-400">
-    <span id="pl_running" class="text-purple-300"></span>
-  </div>
-</div>
+      <div class="flex flex-1 overflow-hidden">
+        <!-- list -->
+        <div id="music_list" class="flex-1 overflow-auto p-3"></div>
+        <!-- detail / editor -->
+        <div id="music_detail" class="w-[360px] border-l border-gray-700 bg-gray-850 overflow-auto p-4 hidden">
+        </div>
+      </div>
 
-<!-- ════════════ MUSIC MODE ════════════ -->
-<div id="music_pane" class="hidden absolute inset-0 z-20 bg-gray-900 text-white flex flex-col">
-  <!-- toolbar -->
-  <div class="p-3 bg-gray-800 border-b border-gray-700 flex items-center gap-2 flex-wrap flex-shrink-0">
-    <div class="flex rounded overflow-hidden border border-gray-600 text-xs font-bold">
-      <button id="mm_back" onclick="setMode('images')" class="px-3 py-1 bg-gray-700 hover:bg-gray-600">← Images</button>
-      <button id="mm_music" class="px-3 py-1 bg-blue-600">Music</button>
+      <!-- player bar -->
+      <div id="music_player_bar"
+        class="hidden flex-shrink-0 bg-gray-800 border-t border-gray-700 p-2 flex items-center gap-3">
+        <div class="flex-1 min-w-0">
+          <div id="np_title" class="text-sm font-bold truncate">—</div>
+          <div id="np_sub" class="text-xs text-gray-400 truncate">—</div>
+        </div>
+        <button onclick="playPrev()" class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">⏮</button>
+        <button onclick="playNext()" class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">⏭</button>
+        <button id="shuffle_song_btn" onclick="shuffleByCurrent('song')" title="Shuffle by this song's sound"
+          class="text-xs bg-emerald-700 hover:bg-emerald-600 font-bold px-2 py-1 rounded">Shuffle by song</button>
+        <button id="shuffle_artist_btn" onclick="shuffleByCurrent('artist')" title="Shuffle by this artist's sound"
+          class="text-xs bg-emerald-800 hover:bg-emerald-700 font-bold px-2 py-1 rounded">Shuffle by artist</button>
+        <audio id="audio_el" controls class="h-8"></audio>
+      </div>
     </div>
-    <div class="flex rounded overflow-hidden border border-gray-600 text-xs font-bold ml-2">
-      <button id="mtab_artists" onclick="musicView('artists')" class="px-3 py-1 bg-blue-600">Artists</button>
-      <button id="mtab_albums"  onclick="musicView('albums')"  class="px-3 py-1 bg-gray-700 hover:bg-gray-600">Albums</button>
-      <button id="mtab_songs"   onclick="musicView('songs')"   class="px-3 py-1 bg-gray-700 hover:bg-gray-600">Songs</button>
-      <button id="mtab_clusters" onclick="musicView('clusters')" class="px-3 py-1 bg-gray-700 hover:bg-gray-600">Clusters</button>
-    </div>
-    <input id="music_search" type="text" placeholder="Search title / artist / album / genre / tag…"
-      oninput="musicSearchDebounced()"
-      class="flex-1 min-w-[180px] bg-gray-700 rounded border border-gray-600 text-sm px-3 py-1">
-    <button onclick="musicReindex()" title="Scan media folder for audio (resumable)"
-      class="text-xs bg-indigo-600 hover:bg-indigo-500 font-bold px-2 py-1.5 rounded">Reindex</button>
-    <button onclick="musicEmbed()" title="Generate audio embeddings for clustering & shuffle"
-      class="text-xs bg-purple-700 hover:bg-purple-600 font-bold px-2 py-1.5 rounded">Embed</button>
-    <button onclick="musicCluster()" title="Cluster tracks by sound"
-      class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">Cluster</button>
-    <span id="music_stat" class="text-xs text-gray-400">—</span>
-  </div>
 
-  <div class="flex flex-1 overflow-hidden">
-    <!-- list -->
-    <div id="music_list" class="flex-1 overflow-auto p-3"></div>
-    <!-- detail / editor -->
-    <div id="music_detail" class="w-[360px] border-l border-gray-700 bg-gray-850 overflow-auto p-4 hidden">
-    </div>
-  </div>
+    <script src="/web/app.js"></script>
+    <script src="/web/music.js"></script>
+</body>
 
-  <!-- player bar -->
-  <div id="music_player_bar" class="hidden flex-shrink-0 bg-gray-800 border-t border-gray-700 p-2 flex items-center gap-3">
-    <div class="flex-1 min-w-0">
-      <div id="np_title" class="text-sm font-bold truncate">—</div>
-      <div id="np_sub" class="text-xs text-gray-400 truncate">—</div>
-    </div>
-    <button onclick="playPrev()" class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">⏮</button>
-    <button onclick="playNext()" class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">⏭</button>
-    <button id="shuffle_song_btn" onclick="shuffleByCurrent('song')" title="Shuffle by this song's sound"
-      class="text-xs bg-emerald-700 hover:bg-emerald-600 font-bold px-2 py-1 rounded">Shuffle by song</button>
-    <button id="shuffle_artist_btn" onclick="shuffleByCurrent('artist')" title="Shuffle by this artist's sound"
-      class="text-xs bg-emerald-800 hover:bg-emerald-700 font-bold px-2 py-1 rounded">Shuffle by artist</button>
-    <audio id="audio_el" controls class="h-8"></audio>
-  </div>
-</div>
-
-<script src="/web/app.js"></script>
-<script src="/web/music.js"></script>
-</body></html>
+</html>

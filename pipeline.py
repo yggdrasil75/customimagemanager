@@ -565,57 +565,55 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
             ctx["panels"] = [cb for cb in (_clamp(b) for b in panels[:max_boxes]) if cb]
             cur = node.get("next")
 
-        elif ntype == "for_each_box":
-            if parallel:
-                with ThreadPoolExecutor(max_workers=n_workers) as pool:
-                    describe_subjects_in(image_bgr, ctx["subjects"],
-                                         node.get("steps", []), pool=pool)
-            else:
-                describe_subjects_in(image_bgr, ctx["subjects"], node.get("steps", []))
-            cur = node.get("next")
-
-        elif ntype == "for_each_panel":
-            # For each detected panel: crop it, detect+pose+describe characters
-            # INSIDE the panel, then remap every box back to full-page coords so
-            # subjects/sub-boxes are stored in one consistent space. Subjects from
-            # all panels are concatenated into ctx['subjects']. Panels are walked
-            # sequentially; the characters WITHIN each panel fan out across the
-            # endpoint pool (avoids nested-pool deadlock, and subjects are the
-            # numerous unit that dominates runtime).
+        elif ntype in ("for_each", "for_each_box", "for_each_panel"):
             steps = node.get("steps", [])
-            det = node.get("detect", {})          # detect_persons-style options
-            H, W = image_bgr.shape[:2]
-            panels = ctx.get("panels") or []
-            if not panels:                        # no panels -> treat whole image as one
-                panels = [{"cx": .5, "cy": .5, "w": 1.0, "h": 1.0}]
-            all_subjects = []
-            pool = ThreadPoolExecutor(max_workers=n_workers) if parallel else None
-            try:
-                for pi, panel in enumerate(panels):
-                    px1, py1, px2, py2 = _crop_rect(H, W, panel, 0.0)
-                    if px2 - px1 < 8 or py2 - py1 < 8:
-                        continue
-                    pcrop = image_bgr[py1:py2, px1:px2]
-                    # panel origin/size in PAGE-normalised units, for remapping
-                    ox, oy = px1 / W, py1 / H
-                    ow, oh = (px2 - px1) / W, (py2 - py1) / H
-                    _report(f"panel {pi + 1}/{len(panels)}")
-                    _pose, subs = detect_subjects_in(pcrop, det, _next_endpoint())
-                    # keep a page-level skeleton if the standalone pose node
-                    # didn't already set one (so pose is never lost)
-                    if _pose and _pose.get("people") and not (ctx.get("pose") or {}).get("people"):
-                        ctx["pose"] = _pose
-                    describe_subjects_in(pcrop, subs, steps,
-                                         off=(ox, oy, ow, oh), pool=pool)
-                    for s in subs:
-                        s["panel"] = pi
-                        s["box"] = _strip_name(_region_to_page(
-                            {**s["box"], "class_name": s["label"]}, ox, oy, ow, oh))
-                    all_subjects.extend(subs)
-            finally:
-                if pool is not None:
-                    pool.shutdown(wait=True)
-            ctx["subjects"] = all_subjects
+            source = node.get("source", "panels" if ntype == "for_each_panel"
+                              else "subjects")
+
+            if source == "subjects":
+                # describe subjects already in context; no cropping / remap
+                if parallel:
+                    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                        describe_subjects_in(image_bgr, ctx.get("subjects", []),
+                                             steps, pool=pool)
+                else:
+                    describe_subjects_in(image_bgr, ctx.get("subjects", []), steps)
+            else:
+                # region source: crop each region, detect+describe inside it,
+                # remap boxes back to page space. Per the design decision, an
+                # empty region list produces NO subjects (no whole-image
+                # fallback).
+                det = node.get("detect", {})      # detect_persons-style options
+                H, W = image_bgr.shape[:2]
+                regions = ctx.get(source) or []
+                all_subjects = []
+                pool = ThreadPoolExecutor(max_workers=n_workers) if parallel else None
+                try:
+                    for ri, region in enumerate(regions):
+                        rx1, ry1, rx2, ry2 = _crop_rect(H, W, region, 0.0)
+                        if rx2 - rx1 < 8 or ry2 - ry1 < 8:
+                            continue
+                        rcrop = image_bgr[ry1:ry2, rx1:rx2]
+                        # region origin/size in PAGE-normalised units, for remap
+                        ox, oy = rx1 / W, ry1 / H
+                        ow, oh = (rx2 - rx1) / W, (ry2 - ry1) / H
+                        _report(f"{source} {ri + 1}/{len(regions)}")
+                        _pose, subs = detect_subjects_in(rcrop, det, _next_endpoint())
+                        # keep a page-level skeleton if a standalone pose node
+                        # didn't already set one (so pose is never lost)
+                        if _pose and _pose.get("people") and not (ctx.get("pose") or {}).get("people"):
+                            ctx["pose"] = _pose
+                        describe_subjects_in(rcrop, subs, steps,
+                                             off=(ox, oy, ow, oh), pool=pool)
+                        for s in subs:
+                            s["panel"] = ri       # region index (kept as "panel")
+                            s["box"] = _strip_name(_region_to_page(
+                                {**s["box"], "class_name": s["label"]}, ox, oy, ow, oh))
+                        all_subjects.extend(subs)
+                finally:
+                    if pool is not None:
+                        pool.shutdown(wait=True)
+                ctx["subjects"] = all_subjects
             cur = node.get("next")
 
         else:
@@ -668,7 +666,7 @@ DEFAULT_PIPELINE = {
             "next": "per_subject"
         },
         {
-            "id": "per_subject", "type": "for_each_box", "source": "subjects",
+            "id": "per_subject", "type": "for_each", "source": "subjects",
             "label": "Describing each character",
             "steps": [
                 {"type": "name", "want": "name", "store": "name", "label": "naming",
