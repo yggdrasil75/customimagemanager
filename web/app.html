@@ -204,6 +204,48 @@
         <div id="regions_list"
           class="hidden max-h-48 overflow-y-auto bg-gray-900 border border-gray-700 rounded p-1 space-y-0.5"></div>
 
+        <!-- Per-region editor: description + tags for the currently selected box. -->
+        <div id="region_editor" class="hidden bg-gray-900 border border-blue-800 rounded p-2 space-y-2">
+          <div class="flex justify-between items-center">
+            <label class="text-[10px] font-bold text-blue-300 uppercase tracking-wider">
+              Region <span id="region_editor_name" class="text-white normal-case"></span>
+            </label>
+            <div class="flex items-center gap-2">
+              <span id="region_editor_uuid" class="text-[9px] text-gray-600 font-mono"
+                title="Shared-database UUID"></span>
+              <button onclick="closeRegionEditor()" title="Close region editor"
+                class="text-[11px] text-gray-400 hover:text-white px-1">✕</button>
+            </div>
+          </div>
+
+          <div>
+            <div class="flex justify-between items-center mb-1">
+              <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Region Tags</label>
+              <span id="region_tag_count" class="text-[10px] text-gray-500"></span>
+            </div>
+            <div id="region_tag_list"
+              class="max-h-32 overflow-y-auto bg-gray-950 border border-gray-700 rounded p-1 flex flex-col gap-0.5"></div>
+            <div class="flex gap-1 mt-1">
+              <input id="region_tag_add_input" type="text"
+                placeholder="Add region tag(s), comma-separated"
+                class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600 text-xs text-white focus:border-blue-500"
+                onkeydown="if(event.key==='Enter'){event.preventDefault();addRegionTagsFromInput();}">
+              <button onclick="addRegionTagsFromInput()"
+                class="text-xs bg-blue-600 hover:bg-blue-500 px-3 rounded font-bold">Add</button>
+              <button onclick="confirmAllRegionTags()" id="btn_confirm_all_region_tags" style="display:none"
+                title="Confirm all generated region tags"
+                class="text-xs bg-green-700 hover:bg-green-600 px-3 rounded font-bold">✓ All</button>
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Region Description</label>
+            <textarea id="region_desc" rows="2"
+              oninput="onRegionDescInput()"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
+          </div>
+        </div>
+
         <div>
           <div class="flex justify-between items-center mb-1">
             <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Quality</label>
@@ -219,7 +261,8 @@
 
         <div>
           <div class="flex justify-between items-center mb-1">
-            <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Tags</label>
+            <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider"
+              title="Whole-image tags plus every region's tags, combined">Tags <span class="text-gray-600 normal-case">(image + regions)</span></label>
             <span id="tag_count" class="text-[10px] text-gray-500"></span>
           </div>
           <div id="tag_list"

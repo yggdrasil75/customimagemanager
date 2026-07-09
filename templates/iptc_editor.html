@@ -1,0 +1,64 @@
+<!-- IPTC editor.
+     Standalone for now; intended to be embedded in the main index later.
+     Renders every record from the schema, each field showing its current value,
+     type, and (for enums) a labelled dropdown. Unknown-but-present tags are
+     listed separately so nothing on the file is hidden.
+     Data is loaded from /api/iptc/read?filename=... which returns the merged
+     schema+values structure from iptc_import.read_iptc(). -->
+<div id="iptc-editor" class="iptc-editor" data-filename="">
+  <header class="iptc-head">
+    <div class="iptc-head-left">
+      <h2 class="iptc-title">IPTC Metadata</h2>
+      <span id="iptc-source" class="iptc-source" title="File the IPTC data was read from"></span>
+    </div>
+    <div class="iptc-head-right">
+      <label class="iptc-toggle">
+        <input type="checkbox" id="iptc-show-empty">
+        <span>Show empty fields</span>
+      </label>
+      <label class="iptc-toggle">
+        <input type="checkbox" id="iptc-show-unmapped">
+        <span>Show unmapped records</span>
+      </label>
+      <button id="iptc-reload" class="iptc-btn" type="button">Reload</button>
+      <span id="iptc-status" class="iptc-status"></span>
+    </div>
+  </header>
+
+  <div id="iptc-summary" class="iptc-summary"></div>
+
+  <!-- Records render here. -->
+  <div id="iptc-records" class="iptc-records">
+    <div class="iptc-empty">No file loaded. Call <code>iptcEditor.load(filename)</code>.</div>
+  </div>
+
+  <!-- Row template cloned per field. -->
+  <template id="iptc-field-tmpl">
+    <div class="iptc-field">
+      <div class="iptc-field-main">
+        <label class="iptc-field-name"></label>
+        <div class="iptc-field-input"></div>
+      </div>
+      <div class="iptc-field-meta">
+        <span class="iptc-field-id"></span>
+        <span class="iptc-field-type"></span>
+        <span class="iptc-field-note"></span>
+      </div>
+    </div>
+  </template>
+
+  <template id="iptc-record-tmpl">
+    <section class="iptc-record">
+      <header class="iptc-record-head">
+        <div>
+          <span class="iptc-record-num"></span>
+          <span class="iptc-record-title"></span>
+        </div>
+        <span class="iptc-record-badge"></span>
+      </header>
+      <p class="iptc-record-desc"></p>
+      <div class="iptc-record-fields"></div>
+      <div class="iptc-record-unknown"></div>
+    </section>
+  </template>
+</div>

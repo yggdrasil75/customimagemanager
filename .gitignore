@@ -1,2 +1,7 @@
 /venv
 /media
+/__pycache__
+/static/tailwindcss.js
+*.pt
+/logs
+app_config.json

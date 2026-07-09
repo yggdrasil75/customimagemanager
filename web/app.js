@@ -4,6 +4,9 @@ let autosaveTO=null, drawing=false, startX=0,startY=0,curX=0,curY=0;
 let pendingBox=null, editingBoxIdx=null;
 let vtTagging=false;   // true while the shared tag modal is tagging a VIDEO box
 let activeRegionIdx=-1, _suppressPaste=false, currentFlag=null, currentPose=null;
+// selectedRegionIdx is the PINNED region whose tags/description are being edited
+// in the per-region editor (distinct from activeRegionIdx, which is hover-only).
+let selectedRegionIdx=-1;
 let currentPage=0, totalFiles=0, currentSearch='', currentFolder='', allFolders=[];
 let imageFilter=null;  // active pipeline result set shown in the grid, or null
 let currentTags=[], currentIqa=null, currentIqaManual=false;
@@ -87,10 +90,42 @@ function renderTags(){
       </div>`;
     }).join('');
   }
+  // Append a read-only rollup of every region's tags so the whole-image Tags
+  // box is the combined view (image tags + region tags). Region tags are edited
+  // in the per-region editor; here they're shown with their region name and are
+  // click-to-jump into that region's editor.
+  const regionRows=[];
+  (currentRegions||[]).forEach((b,ri)=>{
+    (b.region_tags||[]).forEach(t=>{
+      const name=rtagName(t), conf=rtagIsConfirmed(t), pending=rtagIsPending(t);
+      const dot=conf?'#3B82F6':(pending?'#F59E0B':'#6B7280');
+      regionRows.push(`<div class="rrow tag-row flex items-center gap-1 opacity-90 cursor-pointer"
+          title="Region tag on “${_esc(b.class_name||'region')}” — click to edit"
+          onclick="selectRegion(${ri})">
+        <span class="inline-block w-2 h-2 rounded-full flex-shrink-0" style="background:${dot}"></span>
+        <span class="flex-1 min-w-0 truncate">${_esc(name)}</span>
+        <span class="text-[9px] text-purple-400 flex-shrink-0">▢ ${_esc(b.class_name||'region')}</span>
+      </div>`);
+    });
+  });
+  if(regionRows.length){
+    const box2=document.getElementById('tag_list');
+    if(box2 && !currentTags.length) box2.innerHTML='';
+    if(box2) box2.innerHTML += '<div class="text-[9px] text-gray-600 uppercase tracking-wider px-1 pt-1 border-t border-gray-800 mt-1">Region tags</div>'
+                              + regionRows.join('');
+  }
+  const rtCount=regionRows.length;
   const total=currentTags.length;
   const unconf=currentTags.filter(t=>!tagIsConfirmed(t)).length;
   const c=document.getElementById('tag_count');
-  if(c) c.textContent=total?`${total} tag${total>1?'s':''}${unconf?` · ${unconf} unconfirmed`:''}`:'';
+  if(c){
+    const parts=[];
+    if(total) parts.push(`${total} image`);
+    if(rtCount) parts.push(`${rtCount} region`);
+    let txt=parts.join(' + ');
+    if(unconf) txt+=` · ${unconf} unconfirmed`;
+    c.textContent=txt;
+  }
   const btn=document.getElementById('btn_confirm_all_tags');
   if(btn) btn.style.display=unconf?'inline-block':'none';
   syncTagMirror();
@@ -498,6 +533,8 @@ async function selectFile(fn){
     currentFlag=d.metadata.flag||null;
     currentPose=d.metadata.pose||null;
     activeRegionIdx=-1;
+    selectedRegionIdx=-1;
+    closeRegionEditor();
     syncPoseButtons();
     drawCanvas(); renderAnalysis(); renderRegionsList(); renderFlagBanner();
   }
@@ -769,11 +806,16 @@ function saveRegion(){
   if(vtTagging){ vtOverlay.commitTag(document.getElementById('modal_region_name').value);
     document.getElementById('region_modal').classList.add('hidden'); return; }
   const name=document.getElementById('modal_region_name').value.trim()||'region';
-  if(editingBoxIdx!==null){currentRegions[editingBoxIdx].class_name=name;editingBoxIdx=null;}
+  let openIdx=-1;
+  if(editingBoxIdx!==null){currentRegions[editingBoxIdx].class_name=name;openIdx=editingBoxIdx;editingBoxIdx=null;}
   else if(pendingBox){pendingBox.class_name=name;pendingBox.confirmed=true;
-    currentRegions.push(pendingBox);pendingBox=null;}
+    pendingBox.region_tags=pendingBox.region_tags||[];
+    pendingBox.region_description=pendingBox.region_description||'';
+    pendingBox.uuid=pendingBox.uuid||null;   // backend assigns on save
+    currentRegions.push(pendingBox);openIdx=currentRegions.length-1;pendingBox=null;}
   document.getElementById('region_modal').classList.add('hidden');
   drawCanvas(); if(popoutOpen) drawPopout(); triggerAutosave();
+  if(openIdx>=0) selectRegion(openIdx);   // jump straight into region tag/desc editing
 }
 function cancelRegion(){
   if(vtTagging){ vtOverlay.cancelTag();
@@ -806,15 +848,20 @@ function renderRegionsList(){
   el.classList.remove('hidden');
   el.innerHTML=currentRegions.map((b,i)=>{
     const conf=(b.confirmed!==false);
-    return `<div class="rrow flex items-center gap-1 text-xs px-1 py-0.5 rounded ${i===activeRegionIdx?'bg-gray-700':''}"
-      onmouseenter="setActiveRegion(${i})" onmouseleave="setActiveRegion(-1)">
+    const sel=(i===selectedRegionIdx);
+    const rtags=(b.region_tags||[]).length;
+    return `<div class="rrow flex items-center gap-1 text-xs px-1 py-0.5 rounded cursor-pointer
+        ${sel?'ring-1 ring-blue-500 bg-gray-800':(i===activeRegionIdx?'bg-gray-700':'')}"
+      onmouseenter="setActiveRegion(${i})" onmouseleave="setActiveRegion(-1)"
+      onclick="selectRegion(${i})">
       <span class="w-5 text-right text-gray-500 flex-shrink-0">${i+1}</span>
       <span class="inline-block w-2 h-2 rounded-full flex-shrink-0" style="background:${conf?'#3B82F6':'#F59E0B'}"></span>
       <input class="flex-1 min-w-0 bg-transparent text-white border-b border-transparent focus:border-gray-500 focus:outline-none"
-        value="${_esc(b.class_name)}" onchange="renameRegion(${i}, this.value)">
+        value="${_esc(b.class_name)}" onclick="event.stopPropagation()" onchange="renameRegion(${i}, this.value)">
+      ${rtags?`<span class="text-[9px] text-gray-500 flex-shrink-0" title="${rtags} region tag(s)">${rtags}🏷</span>`:''}
       ${conf?'<span class="text-[9px] text-blue-400 flex-shrink-0">ok</span>'
-            :`<button class="text-amber-400 px-1 flex-shrink-0" title="Confirm" onclick="confirmRegion(${i})">✓</button>`}
-      <button class="text-red-400 px-1 flex-shrink-0" title="Delete" onclick="deleteRegion(${i})">✕</button>
+            :`<button class="text-amber-400 px-1 flex-shrink-0" title="Confirm" onclick="event.stopPropagation();confirmRegion(${i})">✓</button>`}
+      <button class="text-red-400 px-1 flex-shrink-0" title="Delete" onclick="event.stopPropagation();deleteRegion(${i})">✕</button>
     </div>`;
   }).join('');
 }
@@ -832,7 +879,127 @@ function deleteRegion(i){
   if(isVideoFile(currentFile)){ vtOverlay.remove(i); return; }
   currentRegions.splice(i,1);
   if(activeRegionIdx>=currentRegions.length) activeRegionIdx=-1;
+  if(selectedRegionIdx===i){ selectedRegionIdx=-1; closeRegionEditor(); }
+  else if(selectedRegionIdx>i){ selectedRegionIdx--; }
   drawCanvas(); if(popoutOpen) drawPopout(); triggerAutosave();
+}
+
+// ── Per-region editor (description + booru tags for one box) ─────────────────
+// A region tag is an object {tag, generated, confirmed?}:
+//   generated:false            -> user-added, always treated confirmed
+//   generated:true, no confirm -> AI suggestion, not yet confirmed
+//   generated:true, confirmed  -> AI suggestion the user resolved (true/false)
+function rtagName(t){ return (typeof t==='string')?t:(t&&t.tag)||''; }
+function rtagIsConfirmed(t){
+  if(typeof t==='string') return true;
+  if(!t.generated) return true;                 // user-added
+  return t.confirmed===true;                     // generated: only if explicitly true
+}
+function rtagIsPending(t){ return t && t.generated===true && (t.confirmed===undefined||t.confirmed===null); }
+
+function selectRegion(i){
+  if(i<0||i>=currentRegions.length){ closeRegionEditor(); return; }
+  selectedRegionIdx=i;
+  setActiveRegion(i);
+  renderRegionsList();
+  renderRegionEditor();
+  renderTags();                 // combined view highlights change
+}
+function closeRegionEditor(){
+  selectedRegionIdx=-1;
+  const ed=document.getElementById('region_editor');
+  if(ed) ed.classList.add('hidden');
+  renderRegionsList(); renderTags();
+}
+function renderRegionEditor(){
+  const ed=document.getElementById('region_editor');
+  if(!ed) return;
+  const b=currentRegions[selectedRegionIdx];
+  if(!b){ ed.classList.add('hidden'); return; }
+  b.region_tags = b.region_tags||[];
+  ed.classList.remove('hidden');
+  document.getElementById('region_editor_name').textContent = b.class_name||'region';
+  const uidEl=document.getElementById('region_editor_uuid');
+  uidEl.textContent = b.uuid ? b.uuid.slice(0,8) : '(id on save)';
+  document.getElementById('region_desc').value = b.region_description||'';
+  renderRegionTags();
+}
+function renderRegionTags(){
+  const box=document.getElementById('region_tag_list');
+  const b=currentRegions[selectedRegionIdx];
+  if(!box||!b) return;
+  const tags=b.region_tags||[];
+  if(!tags.length){
+    box.innerHTML='<div class="text-[11px] text-gray-600 italic px-1 py-0.5">No region tags</div>';
+  }else{
+    box.innerHTML=tags.map((t,i)=>{
+      const name=rtagName(t), conf=rtagIsConfirmed(t), pending=rtagIsPending(t);
+      const dot=conf?'#3B82F6':(pending?'#F59E0B':'#6B7280');
+      const title=pending?'Generated suggestion — confirm or reject':(t.generated?'Generated':'User-added');
+      return `<div class="rrow tag-row ${pending?'tag-unconfirmed':''} flex items-center gap-1" title="${title}">
+        <span class="inline-block w-2 h-2 rounded-full flex-shrink-0" style="background:${dot}"></span>
+        <input class="tag-edit flex-1 min-w-0 bg-transparent border-b border-transparent focus:border-gray-500 focus:outline-none"
+          value="${_esc(name)}" onchange="renameRegionTag(${i}, this.value)">
+        ${pending?`<span class="tag-ok flex-shrink-0" onclick="acceptRegionTag(${i})" title="Confirm">✓</span>
+                   <span class="tag-x flex-shrink-0 text-amber-500" onclick="rejectRegionTag(${i})" title="Mark false">✗</span>`:''}
+        <span class="tag-x flex-shrink-0" onclick="removeRegionTag(${i})" title="Remove">✕</span>
+      </div>`;
+    }).join('');
+  }
+  const pend=tags.filter(rtagIsPending).length;
+  const c=document.getElementById('region_tag_count');
+  if(c) c.textContent = tags.length?`${tags.length} tag${tags.length>1?'s':''}${pend?` · ${pend} pending`:''}`:'';
+  const btn=document.getElementById('btn_confirm_all_region_tags');
+  if(btn) btn.style.display = pend?'inline-block':'none';
+}
+function _curRegion(){ return currentRegions[selectedRegionIdx]; }
+function onRegionDescInput(){
+  const b=_curRegion(); if(!b) return;
+  b.region_description=document.getElementById('region_desc').value;
+  triggerAutosave();
+}
+function addRegionTagsFromInput(){
+  const b=_curRegion(); if(!b) return;
+  const inp=document.getElementById('region_tag_add_input'); if(!inp) return;
+  b.region_tags=b.region_tags||[];
+  const parts=inp.value.split(',').map(s=>s.trim()).filter(Boolean);
+  let changed=false;
+  parts.forEach(name=>{
+    const i=b.region_tags.findIndex(t=>rtagName(t).toLowerCase()===name.toLowerCase());
+    if(i<0){ b.region_tags.push({tag:name,generated:false}); changed=true; }  // user-added
+    else if(rtagIsPending(b.region_tags[i])){ b.region_tags[i].confirmed=true; changed=true; }
+  });
+  inp.value='';
+  if(changed){ renderRegionTags(); renderTags(); triggerAutosave(); }
+}
+function renameRegionTag(i,name){
+  const b=_curRegion(); if(!b) return;
+  const nm=(name||'').trim();
+  if(!nm){ removeRegionTag(i); return; }
+  const t=b.region_tags[i];
+  if(typeof t==='string') b.region_tags[i]={tag:nm,generated:false};
+  else t.tag=nm;
+  renderRegionTags(); renderTags(); triggerAutosave();
+}
+function acceptRegionTag(i){       // confirm a generated suggestion as TRUE
+  const b=_curRegion(); if(!b) return;
+  const t=b.region_tags[i]; if(t&&typeof t==='object') t.confirmed=true;
+  renderRegionTags(); renderTags(); triggerAutosave();
+}
+function rejectRegionTag(i){       // mark a generated suggestion as FALSE (keep the record)
+  const b=_curRegion(); if(!b) return;
+  const t=b.region_tags[i]; if(t&&typeof t==='object') t.confirmed=false;
+  renderRegionTags(); renderTags(); triggerAutosave();
+}
+function removeRegionTag(i){       // drop the tag entirely
+  const b=_curRegion(); if(!b) return;
+  b.region_tags.splice(i,1);
+  renderRegionTags(); renderTags(); triggerAutosave();
+}
+function confirmAllRegionTags(){
+  const b=_curRegion(); if(!b) return;
+  (b.region_tags||[]).forEach(t=>{ if(rtagIsPending(t)) t.confirmed=true; });
+  renderRegionTags(); renderTags(); triggerAutosave();
 }
 
 // ── Popout labelling window ────────────────────────────────────────────────

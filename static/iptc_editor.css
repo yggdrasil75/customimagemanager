@@ -1,0 +1,188 @@
+/* IPTC editor styles.
+   Dark palette matched to the main app (gray-900/blue accents) so it drops into
+   the existing index cleanly when embedded. Scoped under #iptc-editor to avoid
+   colliding with app.css. */
+
+#iptc-editor {
+  --iptc-bg:        #111827;
+  --iptc-panel:     #1f2937;
+  --iptc-panel-2:   #0b1220;
+  --iptc-border:    #374151;
+  --iptc-border-2:  #4b5563;
+  --iptc-text:      #e5e7eb;
+  --iptc-muted:     #9ca3af;
+  --iptc-faint:     #6b7280;
+  --iptc-accent:    #3b82f6;
+  --iptc-accent-2:  #60a5fa;
+  --iptc-warn:      #f59e0b;
+  --iptc-purple:    #a78bfa;
+
+  color: var(--iptc-text);
+  font-size: 13px;
+  line-height: 1.4;
+  background: var(--iptc-bg);
+  border: 1px solid var(--iptc-border);
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+#iptc-editor .iptc-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+#iptc-editor .iptc-head-left { display: flex; align-items: baseline; gap: 10px; }
+#iptc-editor .iptc-title { font-size: 15px; font-weight: 700; margin: 0; }
+#iptc-editor .iptc-source {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--iptc-faint);
+}
+#iptc-editor .iptc-head-right {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+#iptc-editor .iptc-toggle {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--iptc-muted); cursor: pointer;
+}
+#iptc-editor .iptc-toggle input { accent-color: var(--iptc-accent); }
+
+#iptc-editor .iptc-btn {
+  background: var(--iptc-panel);
+  border: 1px solid var(--iptc-border-2);
+  color: var(--iptc-text);
+  border-radius: 5px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+#iptc-editor .iptc-btn:hover { background: var(--iptc-border); }
+
+#iptc-editor .iptc-status { font-size: 11px; color: var(--iptc-muted); min-width: 60px; }
+#iptc-editor .iptc-status.ok   { color: #34d399; }
+#iptc-editor .iptc-status.err  { color: #f87171; }
+
+/* ── Summary ────────────────────────────────────────────────────────────── */
+#iptc-editor .iptc-summary {
+  font-size: 12px; color: var(--iptc-muted);
+  display: flex; gap: 16px; flex-wrap: wrap;
+}
+#iptc-editor .iptc-summary b { color: var(--iptc-text); font-weight: 600; }
+
+/* ── Records ────────────────────────────────────────────────────────────── */
+#iptc-editor .iptc-records { display: flex; flex-direction: column; gap: 10px; }
+#iptc-editor .iptc-empty { color: var(--iptc-faint); font-style: italic; padding: 8px; }
+#iptc-editor .iptc-empty code,
+#iptc-editor .iptc-record-desc code {
+  font-family: ui-monospace, monospace; color: var(--iptc-accent-2);
+}
+
+#iptc-editor .iptc-record {
+  background: var(--iptc-panel);
+  border: 1px solid var(--iptc-border);
+  border-radius: 6px;
+  padding: 10px;
+}
+#iptc-editor .iptc-record.is-unmapped { opacity: 0.85; }
+
+#iptc-editor .iptc-record-head {
+  display: flex; justify-content: space-between; align-items: center;
+  cursor: pointer; user-select: none;
+}
+#iptc-editor .iptc-record-num {
+  font-family: ui-monospace, monospace; font-size: 11px;
+  color: var(--iptc-faint); margin-right: 8px;
+}
+#iptc-editor .iptc-record-title { font-weight: 700; }
+#iptc-editor .iptc-record-badge {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+  padding: 2px 7px; border-radius: 999px;
+}
+#iptc-editor .iptc-record-badge.mapped   { background: #14304a; color: var(--iptc-accent-2); }
+#iptc-editor .iptc-record-badge.unmapped { background: #3a2a12; color: var(--iptc-warn); }
+
+#iptc-editor .iptc-record-desc {
+  font-size: 12px; color: var(--iptc-muted); margin: 6px 0 8px;
+}
+#iptc-editor .iptc-record.collapsed .iptc-record-desc,
+#iptc-editor .iptc-record.collapsed .iptc-record-fields,
+#iptc-editor .iptc-record.collapsed .iptc-record-unknown { display: none; }
+
+/* ── Fields ─────────────────────────────────────────────────────────────── */
+#iptc-editor .iptc-record-fields {
+  display: flex; flex-direction: column; gap: 2px;
+}
+#iptc-editor .iptc-field {
+  padding: 5px 6px; border-radius: 5px;
+  border: 1px solid transparent;
+}
+#iptc-editor .iptc-field:hover { background: var(--iptc-panel-2); }
+#iptc-editor .iptc-field.is-empty { opacity: 0.55; }
+#iptc-editor .iptc-field.is-present { border-color: #1e3a5f; }
+
+#iptc-editor .iptc-field-main {
+  display: grid; grid-template-columns: 200px 1fr; gap: 10px; align-items: center;
+}
+#iptc-editor .iptc-field-name { font-weight: 600; font-size: 12px; }
+#iptc-editor .iptc-field-input input,
+#iptc-editor .iptc-field-input select {
+  width: 100%;
+  background: var(--iptc-panel-2);
+  border: 1px solid var(--iptc-border-2);
+  color: var(--iptc-text);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+}
+#iptc-editor .iptc-field-input input:focus,
+#iptc-editor .iptc-field-input select:focus {
+  outline: none; border-color: var(--iptc-accent);
+}
+#iptc-editor .iptc-field-input input[readonly] {
+  color: var(--iptc-muted); background: #0a0f1a; cursor: not-allowed;
+}
+#iptc-editor .iptc-field-input .iptc-binary {
+  font-style: italic; color: var(--iptc-faint); font-size: 11px;
+}
+
+#iptc-editor .iptc-field-meta {
+  display: flex; gap: 10px; margin-top: 3px; padding-left: 210px;
+  font-size: 10px; color: var(--iptc-faint);
+}
+#iptc-editor .iptc-field-id  { font-family: ui-monospace, monospace; }
+#iptc-editor .iptc-field-type {
+  text-transform: uppercase; letter-spacing: .04em;
+}
+#iptc-editor .iptc-field-note { font-style: italic; }
+
+/* ── Unknown tags ───────────────────────────────────────────────────────── */
+#iptc-editor .iptc-record-unknown:not(:empty) {
+  margin-top: 8px; padding-top: 8px;
+  border-top: 1px dashed var(--iptc-border);
+}
+#iptc-editor .iptc-unknown-head {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--iptc-purple); margin-bottom: 4px;
+}
+#iptc-editor .iptc-unknown-row {
+  display: grid; grid-template-columns: 200px 1fr; gap: 10px;
+  font-size: 12px; padding: 2px 6px;
+}
+#iptc-editor .iptc-unknown-row .k { color: var(--iptc-muted); }
+#iptc-editor .iptc-unknown-row .v {
+  font-family: ui-monospace, monospace; color: var(--iptc-text);
+  word-break: break-word;
+}
+
+@media (max-width: 640px) {
+  #iptc-editor .iptc-field-main,
+  #iptc-editor .iptc-unknown-row { grid-template-columns: 1fr; }
+  #iptc-editor .iptc-field-meta { padding-left: 0; }
+}

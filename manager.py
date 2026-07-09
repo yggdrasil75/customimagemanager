@@ -859,6 +859,157 @@ def _read_pose_from_xmp(xmp_path):
         access_logger.warning(f"_read_pose_from_xmp {xmp_path}: {e}")
         return None
 
+# ── Region metadata (MWG-RS) ────────────────────────────────────────────────
+# We store regions in the MWG Regions schema (Xmp.mwg-rs.*), which gives us
+# richer per-region fields than the legacy Xmp.iptcExt.ImageRegion bag:
+#
+#   Area         -> normalized rectangle (x/y are the CENTER in MWG, w/h the size)
+#   Name         -> region label / class name
+#   Type         -> "confirmed" or "unconfirmed" (AI box state)
+#   SeeAlso      -> a filter link that selects images sharing this region name
+#   BarCodeValue -> a UUID for cross-database identification
+#   Description  -> JSON: {"description": str, "tags": [{"tag","generated","confirmed"}]}
+#
+# The Description JSON encodes booru-style per-region tags. A tag with
+# generated==true is AI-produced and carries a `confirmed` bool; a tag without
+# `generated` (or generated==false) is user-added and always treated confirmed.
+_MWG_RS_NS = "http://www.metadataworkinggroup.com/schemas/regions/"
+_MWG_ST_NS = "http://www.metadataworkinggroup.com/schemas/regions/type/"
+
+def _region_filter_link(name):
+    # A stable link others can use to filter the shared library by region name.
+    from urllib.parse import quote
+    return f"cim:region?name={quote(str(name or ''))}"
+
+def _region_desc_to_json(region):
+    """Serialize a region's per-region tags + description to the JSON blob
+    that lives in mwg-rs:Description."""
+    tags = []
+    for t in region.get("region_tags", []) or []:
+        if isinstance(t, str):
+            tags.append({"tag": t, "generated": False})
+            continue
+        entry = {"tag": t.get("tag", ""), "generated": bool(t.get("generated", False))}
+        if entry["generated"]:
+            # only generated tags carry a confirmed flag; absence == not-yet-confirmed
+            if "confirmed" in t and t["confirmed"] is not None:
+                entry["confirmed"] = bool(t["confirmed"])
+        tags.append(entry)
+    payload = {"description": region.get("region_description", "") or "", "tags": tags}
+    return json.dumps(payload, ensure_ascii=False)
+
+def _region_desc_from_json(raw):
+    """Parse the mwg-rs:Description JSON blob back into (description, tags list).
+    Tolerant of empty / malformed / plain-text values."""
+    if not raw:
+        return "", []
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        # Legacy or hand-edited: treat the whole thing as free-text description.
+        return str(raw), []
+    if not isinstance(obj, dict):
+        return "", []
+    tags = []
+    for t in obj.get("tags", []) or []:
+        if isinstance(t, str):
+            tags.append({"tag": t, "generated": False})
+            continue
+        gen = bool(t.get("generated", False))
+        entry = {"tag": t.get("tag", ""), "generated": gen}
+        if gen and "confirmed" in t and t["confirmed"] is not None:
+            entry["confirmed"] = bool(t["confirmed"])
+        tags.append(entry)
+    return str(obj.get("description", "") or ""), tags
+
+def _parse_mwg_regions(xmp):
+    """Read regions from Xmp.mwg-rs.Regions. Returns [] if none present."""
+    regions = []
+    base = "Xmp.mwg-rs.Regions/mwg-rs:RegionList"
+    indices = sorted({int(re.search(r'\[(\d+)\]', k).group(1))
+                      for k in xmp.keys()
+                      if k.startswith(base + '[') and re.search(r'\[(\d+)\]', k)})
+    for idx in indices:
+        p = f'{base}[{idx}]'
+        try:
+            cx = float(xmp.get(f'{p}/mwg-rs:Area/stArea:x', 0))
+            cy = float(xmp.get(f'{p}/mwg-rs:Area/stArea:y', 0))
+            w  = float(xmp.get(f'{p}/mwg-rs:Area/stArea:w', 0))
+            h  = float(xmp.get(f'{p}/mwg-rs:Area/stArea:h', 0))
+        except Exception:
+            continue
+        if not (w > 0 and h > 0):
+            continue
+        rtype = str(xmp.get(f'{p}/mwg-rs:Type', '')).lower()
+        rdesc_raw = xmp.get(f'{p}/mwg-rs:Description', '')
+        rdesc, rtags = _region_desc_from_json(rdesc_raw)
+        regions.append({
+            "class_name": xmp.get(f'{p}/mwg-rs:Name', 'object'),
+            "cx": cx, "cy": cy, "w": w, "h": h,
+            "confirmed": rtype != 'unconfirmed',
+            "uuid": str(xmp.get(f'{p}/mwg-rs:BarCodeValue', '')) or None,
+            "region_description": rdesc,
+            "region_tags": rtags,
+        })
+    return regions
+
+def _parse_legacy_iptc_regions(xmp):
+    """Fallback reader for old Xmp.iptcExt.ImageRegion sidecars, so existing
+    labels aren't lost after the MWG-RS migration."""
+    regions = []
+    indices = {re.search(r'\[(\d+)\]', k).group(1)
+               for k in xmp.keys() if 'ImageRegion[' in k and re.search(r'\[(\d+)\]', k)}
+    for idx in indices:
+        p = f'Xmp.iptcExt.ImageRegion[{idx}]'
+        try:
+            w  = float(xmp.get(f'{p}/iptcExt:RegionBoundary/iptcExt:rbW', 0))
+            h  = float(xmp.get(f'{p}/iptcExt:RegionBoundary/iptcExt:rbH', 0))
+            lf = float(xmp.get(f'{p}/iptcExt:RegionBoundary/iptcExt:rbX', 0))
+            tp = float(xmp.get(f'{p}/iptcExt:RegionBoundary/iptcExt:rbY', 0))
+            if w > 0 and h > 0:
+                rid = str(xmp.get(f'{p}/iptcExt:rId', '')).lower()
+                regions.append({"class_name": xmp.get(f'{p}/iptcExt:RegionName', 'object'),
+                                "cx": lf+w/2, "cy": tp+h/2, "w": w, "h": h,
+                                "confirmed": rid != 'unconfirmed',
+                                "uuid": None, "region_description": "", "region_tags": []})
+        except Exception:
+            pass
+    return regions
+
+def _build_mwg_regions_xml(regions):
+    """Emit the <mwg-rs:Regions> block. Returns ('', ns_attrs) when empty."""
+    if not regions:
+        return "", ""
+    esc = saxutils.escape
+    items = []
+    for b in regions:
+        rid = 'confirmed' if b.get('confirmed', True) else 'unconfirmed'
+        name = esc(b.get("class_name", "object"))
+        uid  = b.get("uuid") or str(uuid.uuid4())
+        b["uuid"] = uid   # persist back so the frontend keeps a stable id
+        desc_json = esc(_region_desc_to_json(b))
+        see_also  = esc(_region_filter_link(b.get("class_name")))
+        items.append(
+            f'<rdf:li rdf:parseType="Resource">'
+            f'<mwg-rs:Name>{name}</mwg-rs:Name>'
+            f'<mwg-rs:Type>{rid}</mwg-rs:Type>'
+            f'<mwg-rs:BarCodeValue>{esc(uid)}</mwg-rs:BarCodeValue>'
+            f'<mwg-rs:SeeAlso>{see_also}</mwg-rs:SeeAlso>'
+            f'<mwg-rs:Description>{desc_json}</mwg-rs:Description>'
+            f'<mwg-rs:Area rdf:parseType="Resource">'
+            f'<stArea:x>{b["cx"]:.6f}</stArea:x><stArea:y>{b["cy"]:.6f}</stArea:y>'
+            f'<stArea:w>{b["w"]:.6f}</stArea:w><stArea:h>{b["h"]:.6f}</stArea:h>'
+            f'<stArea:unit>normalized</stArea:unit>'
+            f'</mwg-rs:Area>'
+            f'</rdf:li>')
+    block = ('<mwg-rs:Regions rdf:parseType="Resource">'
+             '<mwg-rs:RegionList><rdf:Bag>' + "".join(items) +
+             '</rdf:Bag></mwg-rs:RegionList>'
+             '</mwg-rs:Regions>')
+    ns = (f' xmlns:mwg-rs="{_MWG_RS_NS}"'
+          f' xmlns:stArea="{_MWG_ST_NS}"')
+    return block, ns
+
 def read_metadata(filepath):
     try:
         tags, desc, regions = [], "", []
@@ -880,24 +1031,10 @@ def read_metadata(filepath):
         val  = xmp.get('Xmp.dc.subject', [])
         tags = val if isinstance(val, list) else ([val] if val else [])
 
-        indices = {re.search(r'\[(\d+)\]', k).group(1)
-                   for k in xmp.keys() if 'ImageRegion[' in k and re.search(r'\[(\d+)\]', k)}
-        for idx in indices:
-            p = f'Xmp.iptcExt.ImageRegion[{idx}]'
-            try:
-                w  = float(xmp.get(f'{p}/iptcExt:RegionBoundary/iptcExt:rbW', 0))
-                h  = float(xmp.get(f'{p}/iptcExt:RegionBoundary/iptcExt:rbH', 0))
-                lf = float(xmp.get(f'{p}/iptcExt:RegionBoundary/iptcExt:rbX', 0))
-                tp = float(xmp.get(f'{p}/iptcExt:RegionBoundary/iptcExt:rbY', 0))
-                if w > 0 and h > 0:
-                    # rId carries our confirmed flag; legacy boxes (no rId)
-                    # are treated as confirmed so existing labels aren't lost.
-                    rid = str(xmp.get(f'{p}/iptcExt:rId', '')).lower()
-                    regions.append({"class_name": xmp.get(f'{p}/iptcExt:RegionName', 'object'),
-                                    "cx": lf+w/2, "cy": tp+h/2, "w": w, "h": h,
-                                    "confirmed": rid != 'unconfirmed'})
-            except Exception:
-                pass
+        # Prefer MWG-RS; fall back to legacy iptcExt sidecars so old labels load.
+        regions = _parse_mwg_regions(xmp)
+        if not regions:
+            regions = _parse_legacy_iptc_regions(xmp)
 
         # Also try regex parse for description (more robust than pyexiv2 for this field)
         try:
@@ -948,22 +1085,7 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
         desc_x = (f'<dc:description><rdf:Alt>'
                   f'<rdf:li xml:lang="x-default">{esc(description)}</rdf:li>'
                   f'</rdf:Alt></dc:description>') if description else ""
-        reg_x = ""
-        if regions:
-            reg_x = "<iptcExt:ImageRegion><rdf:Bag>"
-            for b in regions:
-                rx,ry = b['cx']-b['w']/2, b['cy']-b['h']/2
-                rid = 'confirmed' if b.get('confirmed', True) else 'unconfirmed'
-                reg_x += (f'<rdf:li rdf:parseType="Resource">'
-                           f'<iptcExt:RegionName>{esc(b["class_name"])}</iptcExt:RegionName>'
-                           f'<iptcExt:rId>{rid}</iptcExt:rId>'
-                           f'<iptcExt:RegionBoundary rdf:parseType="Resource">'
-                           f'<iptcExt:rbShape>rectangle</iptcExt:rbShape>'
-                           f'<iptcExt:rbUnit>relative</iptcExt:rbUnit>'
-                           f'<iptcExt:rbX>{rx:.6f}</iptcExt:rbX><iptcExt:rbY>{ry:.6f}</iptcExt:rbY>'
-                           f'<iptcExt:rbW>{b["w"]:.6f}</iptcExt:rbW><iptcExt:rbH>{b["h"]:.6f}</iptcExt:rbH>'
-                           f'</iptcExt:RegionBoundary></rdf:li>')
-            reg_x += "</rdf:Bag></iptcExt:ImageRegion>"
+        reg_x, reg_ns = _build_mwg_regions_xml(regions)
         mm_x = ""
         if analysis:
             mm_x += f'<mm:analysis>{_b64dump(analysis)}</mm:analysis>'
@@ -977,8 +1099,7 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
                f'<x:xmpmeta xmlns:x="adobe:ns:meta/">'
                f'<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
                f'<rdf:Description rdf:about="" '
-               f'xmlns:dc="http://purl.org/dc/elements/1.1/" '
-               f'xmlns:iptcExt="http://iptc.org/std/Iptc4xmpExt/2008-02-29/"{mm_ns}>'
+               f'xmlns:dc="http://purl.org/dc/elements/1.1/"{reg_ns}{mm_ns}>'
                f'{subj}{desc_x}{reg_x}{mm_x}'
                f'</rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>')
         with open(xmp_path, 'w', encoding='utf-8') as f:
@@ -1781,6 +1902,78 @@ def web_asset(filename):
         return "", 404
     mime = "text/css" if filename.endswith(".css") else "application/javascript"
     return send_file(fp, mimetype=mime)
+
+@app.route("/static/<path:filename>")
+def static_asset(filename):
+    """Serve editor assets from the static/ directory (css/js only), guarded
+    against path traversal — mirrors web_asset."""
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+    if ("/" in filename or "\\" in filename or ".." in filename
+            or not filename.endswith((".css", ".js"))):
+        return "", 404
+    fp = os.path.join(static_dir, filename)
+    if not os.path.isfile(fp):
+        return "", 404
+    mime = "text/css" if filename.endswith(".css") else "application/javascript"
+    return send_file(fp, mimetype=mime)
+
+@app.route("/iptc_editor")
+def iptc_editor_page():
+    """Standalone IPTC editor page (will be embeddable in the index later).
+    Renders the templates/iptc_editor.html fragment inside a minimal shell that
+    pulls in the static css/js. Optional ?filename=... auto-loads a file."""
+    tmpl_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
+    frag_path = os.path.join(tmpl_dir, "iptc_editor.html")
+    try:
+        fragment = open(frag_path, encoding="utf-8").read()
+    except OSError:
+        return "iptc_editor.html template not found", 500
+    fn = request.args.get("filename", "")
+    autoload = (f"<script>window.addEventListener('load',function(){{"
+                f"if(window.iptcEditor)iptcEditor.load({json.dumps(fn)});}});</script>"
+                if fn else "")
+    shell = (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<title>IPTC Editor</title>"
+        "<link rel='stylesheet' href='/static/iptc_editor.css'>"
+        "<style>body{background:#0b1220;margin:0;padding:16px;"
+        "font-family:system-ui,-apple-system,sans-serif;}</style>"
+        "</head><body>"
+        f"{fragment}"
+        "<script src='/static/iptc_editor.js'></script>"
+        f"{autoload}"
+        "</body></html>"
+    )
+    return render_template_string(shell)
+
+@app.route("/api/iptc/schema")
+def api_iptc_schema():
+    """Return the full IPTC field schema (no file needed)."""
+    import iptc_fields
+    return jsonify({"success": True, "schema": iptc_fields.schema_dict()})
+
+@app.route("/api/iptc/read", methods=["POST"])
+def api_iptc_read():
+    """Read merged IPTC schema+values for a media file (by rel path under
+    MEDIA_DIR). Returns the structure from iptc_import.read_iptc()."""
+    import iptc_import
+    data = request.get_json(force=True, silent=True) or {}
+    filename = data.get("filename", "")
+    if not filename:
+        return jsonify({"success": False, "error": "filename required"}), 400
+    # Resolve safely under MEDIA_DIR (no traversal outside the library).
+    abs_media = os.path.abspath(MEDIA_DIR)
+    fp = os.path.abspath(os.path.join(MEDIA_DIR, filename))
+    if not (fp == abs_media or fp.startswith(abs_media + os.sep)):
+        return jsonify({"success": False, "error": "invalid path"}), 400
+    if not os.path.exists(fp):
+        return jsonify({"success": False, "error": "file not found"}), 404
+    try:
+        return jsonify({"success": True, "data": iptc_import.read_iptc(fp)})
+    except Exception as e:
+        access_logger.error(f"api_iptc_read {filename}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route("/api/state")
 def api_state():
