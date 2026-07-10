@@ -1,0 +1,188 @@
+/* XMP editor styles.
+   Dark palette matched to the main app (gray-900/blue accents) so it drops into
+   the existing index cleanly when embedded. Scoped under #xmp-editor to avoid
+   colliding with app.css. */
+
+#xmp-editor {
+  --xmp-bg:        #111827;
+  --xmp-panel:     #1f2937;
+  --xmp-panel-2:   #0b1220;
+  --xmp-border:    #374151;
+  --xmp-border-2:  #4b5563;
+  --xmp-text:      #e5e7eb;
+  --xmp-muted:     #9ca3af;
+  --xmp-faint:     #6b7280;
+  --xmp-accent:    #3b82f6;
+  --xmp-accent-2:  #60a5fa;
+  --xmp-warn:      #f59e0b;
+  --xmp-purple:    #a78bfa;
+
+  color: var(--xmp-text);
+  font-size: 13px;
+  line-height: 1.4;
+  background: var(--xmp-bg);
+  border: 1px solid var(--xmp-border);
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+#xmp-editor .xmp-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+#xmp-editor .xmp-head-left { display: flex; align-items: baseline; gap: 10px; }
+#xmp-editor .xmp-title { font-size: 15px; font-weight: 700; margin: 0; }
+#xmp-editor .xmp-source {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--xmp-faint);
+}
+#xmp-editor .xmp-head-right {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+#xmp-editor .xmp-toggle {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--xmp-muted); cursor: pointer;
+}
+#xmp-editor .xmp-toggle input { accent-color: var(--xmp-accent); }
+
+#xmp-editor .xmp-btn {
+  background: var(--xmp-panel);
+  border: 1px solid var(--xmp-border-2);
+  color: var(--xmp-text);
+  border-radius: 5px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+#xmp-editor .xmp-btn:hover { background: var(--xmp-border); }
+
+#xmp-editor .xmp-status { font-size: 11px; color: var(--xmp-muted); min-width: 60px; }
+#xmp-editor .xmp-status.ok   { color: #34d399; }
+#xmp-editor .xmp-status.err  { color: #f87171; }
+
+/* ── Summary ────────────────────────────────────────────────────────────── */
+#xmp-editor .xmp-summary {
+  font-size: 12px; color: var(--xmp-muted);
+  display: flex; gap: 16px; flex-wrap: wrap;
+}
+#xmp-editor .xmp-summary b { color: var(--xmp-text); font-weight: 600; }
+
+/* ── Records ────────────────────────────────────────────────────────────── */
+#xmp-editor .xmp-records { display: flex; flex-direction: column; gap: 10px; }
+#xmp-editor .xmp-empty { color: var(--xmp-faint); font-style: italic; padding: 8px; }
+#xmp-editor .xmp-empty code,
+#xmp-editor .xmp-record-desc code {
+  font-family: ui-monospace, monospace; color: var(--xmp-accent-2);
+}
+
+#xmp-editor .xmp-record {
+  background: var(--xmp-panel);
+  border: 1px solid var(--xmp-border);
+  border-radius: 6px;
+  padding: 10px;
+}
+#xmp-editor .xmp-record.is-unmapped { opacity: 0.85; }
+
+#xmp-editor .xmp-record-head {
+  display: flex; justify-content: space-between; align-items: center;
+  cursor: pointer; user-select: none;
+}
+#xmp-editor .xmp-record-num {
+  font-family: ui-monospace, monospace; font-size: 11px;
+  color: var(--xmp-faint); margin-right: 8px;
+}
+#xmp-editor .xmp-record-title { font-weight: 700; }
+#xmp-editor .xmp-record-badge {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+  padding: 2px 7px; border-radius: 999px;
+}
+#xmp-editor .xmp-record-badge.mapped   { background: #14304a; color: var(--xmp-accent-2); }
+#xmp-editor .xmp-record-badge.unmapped { background: #3a2a12; color: var(--xmp-warn); }
+
+#xmp-editor .xmp-record-desc {
+  font-size: 12px; color: var(--xmp-muted); margin: 6px 0 8px;
+}
+#xmp-editor .xmp-record.collapsed .xmp-record-desc,
+#xmp-editor .xmp-record.collapsed .xmp-record-fields,
+#xmp-editor .xmp-record.collapsed .xmp-record-unknown { display: none; }
+
+/* ── Fields ─────────────────────────────────────────────────────────────── */
+#xmp-editor .xmp-record-fields {
+  display: flex; flex-direction: column; gap: 2px;
+}
+#xmp-editor .xmp-field {
+  padding: 5px 6px; border-radius: 5px;
+  border: 1px solid transparent;
+}
+#xmp-editor .xmp-field:hover { background: var(--xmp-panel-2); }
+#xmp-editor .xmp-field.is-empty { opacity: 0.55; }
+#xmp-editor .xmp-field.is-present { border-color: #1e3a5f; }
+
+#xmp-editor .xmp-field-main {
+  display: grid; grid-template-columns: 200px 1fr; gap: 10px; align-items: center;
+}
+#xmp-editor .xmp-field-name { font-weight: 600; font-size: 12px; }
+#xmp-editor .xmp-field-input input,
+#xmp-editor .xmp-field-input select {
+  width: 100%;
+  background: var(--xmp-panel-2);
+  border: 1px solid var(--xmp-border-2);
+  color: var(--xmp-text);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+}
+#xmp-editor .xmp-field-input input:focus,
+#xmp-editor .xmp-field-input select:focus {
+  outline: none; border-color: var(--xmp-accent);
+}
+#xmp-editor .xmp-field-input input[readonly] {
+  color: var(--xmp-muted); background: #0a0f1a; cursor: not-allowed;
+}
+#xmp-editor .xmp-field-input .xmp-binary {
+  font-style: italic; color: var(--xmp-faint); font-size: 11px;
+}
+
+#xmp-editor .xmp-field-meta {
+  display: flex; gap: 10px; margin-top: 3px; padding-left: 210px;
+  font-size: 10px; color: var(--xmp-faint);
+}
+#xmp-editor .xmp-field-id  { font-family: ui-monospace, monospace; }
+#xmp-editor .xmp-field-type {
+  text-transform: uppercase; letter-spacing: .04em;
+}
+#xmp-editor .xmp-field-note { font-style: italic; }
+
+/* ── Unknown tags ───────────────────────────────────────────────────────── */
+#xmp-editor .xmp-record-unknown:not(:empty) {
+  margin-top: 8px; padding-top: 8px;
+  border-top: 1px dashed var(--xmp-border);
+}
+#xmp-editor .xmp-unknown-head {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--xmp-purple); margin-bottom: 4px;
+}
+#xmp-editor .xmp-unknown-row {
+  display: grid; grid-template-columns: 200px 1fr; gap: 10px;
+  font-size: 12px; padding: 2px 6px;
+}
+#xmp-editor .xmp-unknown-row .k { color: var(--xmp-muted); }
+#xmp-editor .xmp-unknown-row .v {
+  font-family: ui-monospace, monospace; color: var(--xmp-text);
+  word-break: break-word;
+}
+
+@media (max-width: 640px) {
+  #xmp-editor .xmp-field-main,
+  #xmp-editor .xmp-unknown-row { grid-template-columns: 1fr; }
+  #xmp-editor .xmp-field-meta { padding-left: 0; }
+}

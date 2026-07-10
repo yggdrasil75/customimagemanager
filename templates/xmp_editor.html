@@ -1,0 +1,65 @@
+<!-- XMP editor (read-only for the acdsee namespace).
+     Standalone for now; intended to be embedded in the main index later, like
+     the IPTC/EXIF editors. Renders every namespace from the schema, each field
+     showing its current value, type, cardinality, and (for enums) a labelled
+     value. Fields that fold into our own description/tags/rating are badged.
+     Unknown-but-present tags are listed separately so nothing on the file is
+     hidden. Data is loaded from /api/xmp/read (POST {filename}) which returns
+     the merged schema+values structure from xmp_import.read_xmp(). -->
+<div id="xmp-editor" class="xmp-editor" data-filename="">
+  <header class="xmp-head">
+    <div class="xmp-head-left">
+      <h2 class="xmp-title">XMP Metadata</h2>
+      <span id="xmp-source" class="xmp-source" title="File the XMP data was read from"></span>
+    </div>
+    <div class="xmp-head-right">
+      <label class="xmp-toggle">
+        <input type="checkbox" id="xmp-show-empty">
+        <span>Show empty fields</span>
+      </label>
+      <label class="xmp-toggle">
+        <input type="checkbox" id="xmp-show-unmapped">
+        <span>Show unmapped namespaces</span>
+      </label>
+      <button id="xmp-reload" class="xmp-btn" type="button">Reload</button>
+      <span id="xmp-status" class="xmp-status"></span>
+    </div>
+  </header>
+
+  <div id="xmp-summary" class="xmp-summary"></div>
+
+  <!-- Namespaces render here. -->
+  <div id="xmp-namespaces" class="xmp-namespaces">
+    <div class="xmp-empty">No file loaded. Call <code>xmpEditor.load(filename)</code>.</div>
+  </div>
+
+  <!-- Row template cloned per field. -->
+  <template id="xmp-field-tmpl">
+    <div class="xmp-field">
+      <div class="xmp-field-main">
+        <label class="xmp-field-name"></label>
+        <div class="xmp-field-input"></div>
+      </div>
+      <div class="xmp-field-meta">
+        <span class="xmp-field-type"></span>
+        <span class="xmp-field-feeds"></span>
+        <span class="xmp-field-note"></span>
+      </div>
+    </div>
+  </template>
+
+  <template id="xmp-namespace-tmpl">
+    <section class="xmp-namespace">
+      <header class="xmp-namespace-head">
+        <div>
+          <span class="xmp-namespace-ns"></span>
+          <span class="xmp-namespace-title"></span>
+        </div>
+        <span class="xmp-namespace-badge"></span>
+      </header>
+      <p class="xmp-namespace-desc"></p>
+      <div class="xmp-namespace-fields"></div>
+      <div class="xmp-namespace-unknown"></div>
+    </section>
+  </template>
+</div>

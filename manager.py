@@ -151,7 +151,11 @@ def _init_db():
             phash8      BLOB,
             phash32     BLOB,
             tags        TEXT,
-            description TEXT DEFAULT ''
+            description TEXT DEFAULT '',
+            artist      TEXT DEFAULT '',
+            language    TEXT DEFAULT '',
+            event       TEXT DEFAULT '',
+            catalog_sets TEXT DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_sha256 ON files(sha256);
         CREATE INDEX IF NOT EXISTS idx_tags   ON files(tags);
@@ -287,6 +291,15 @@ def _init_db():
         # iqa_score; rating_user=0/NULL means "no user rating yet".
         "ALTER TABLE files ADD COLUMN rating INTEGER DEFAULT NULL",
         "ALTER TABLE files ADD COLUMN rating_user INTEGER DEFAULT 0",
+        # Artist/author (dc:creator) and language (dc:language). language is set
+        # when the image likely contains foreign-language text, so it's worth
+        # retaining. Both are read from XMP dc on ingest; empty string = unknown.
+        "ALTER TABLE files ADD COLUMN artist TEXT DEFAULT ''",
+        "ALTER TABLE files ADD COLUMN language TEXT DEFAULT ''",
+        # Event (Expression Media Event) and catalog sets (photo-shoot grouping).
+        # Both read from XMP on ingest but editable in-app; empty = unset.
+        "ALTER TABLE files ADD COLUMN event TEXT DEFAULT ''",
+        "ALTER TABLE files ADD COLUMN catalog_sets TEXT DEFAULT ''",
     ]:
         try:
             db.execute(ddl); db.commit()
@@ -1010,6 +1023,26 @@ def _index_file(rel_path: str, force: bool = False) -> bool:
             _db().execute(
                 "UPDATE files SET rating=?, rating_user=1 WHERE rel_path=?",
                 (int(_rt), rel_path))
+        # dc:creator -> artist, dc:language -> language. Only overwrite when we
+        # actually read a value, so a re-index doesn't wipe an in-app edit.
+        _artist = meta.get('artist') or ''
+        _lang = meta.get('language') or ''
+        if _artist:
+            _db().execute("UPDATE files SET artist=? WHERE rel_path=?",
+                          (_artist, rel_path))
+        if _lang:
+            _db().execute("UPDATE files SET language=? WHERE rel_path=?",
+                          (_lang, rel_path))
+        # Expression Media Event / CatalogSets. Only overwrite when we read a
+        # value so a re-index doesn't wipe an in-app edit.
+        _ev = meta.get('event') or ''
+        _cs = meta.get('catalog_sets') or ''
+        if _ev:
+            _db().execute("UPDATE files SET event=? WHERE rel_path=?",
+                          (_ev, rel_path))
+        if _cs:
+            _db().execute("UPDATE files SET catalog_sets=? WHERE rel_path=?",
+                          (_cs, rel_path))
         _db().commit()
         _set_media_kind(rel_path)
         return True
@@ -1424,48 +1457,131 @@ def _ingest_xp(filepath, tags, desc):
     return tags, desc, xp_prov
 
 
+def _regions_overlap(a, b, iou_thresh=0.5, center_thresh=0.04):
+    """True if two regions (MWG dicts with center cx/cy + size w/h, normalized)
+    describe the same box. The same face labelled in MWG vs acdsee-rs vs iptcExt
+    won't have identical coordinates — rounding and top-left/center conversions
+    drift them apart — so we treat them as the same region when either their
+    boxes overlap substantially (IoU) or their centers are very close AND their
+    sizes are similar. Comparison is geometry-only; labels are reconciled by the
+    caller's source precedence."""
+    # Center proximity + similar size: cheap catch for near-identical boxes.
+    if (abs(a["cx"] - b["cx"]) <= center_thresh and
+            abs(a["cy"] - b["cy"]) <= center_thresh and
+            abs(a["w"] - b["w"]) <= center_thresh * 2 and
+            abs(a["h"] - b["h"]) <= center_thresh * 2):
+        return True
+    # IoU on the two axis-aligned boxes (convert center+size -> edges).
+    ax1, ay1 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
+    ax2, ay2 = a["cx"] + a["w"] / 2, a["cy"] + a["h"] / 2
+    bx1, by1 = b["cx"] - b["w"] / 2, b["cy"] - b["h"] / 2
+    bx2, by2 = b["cx"] + b["w"] / 2, b["cy"] + b["h"] / 2
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return False
+    union = a["w"] * a["h"] + b["w"] * b["h"] - inter
+    return union > 0 and (inter / union) >= iou_thresh
+
+
+def _merge_region(keep, incoming):
+    """Fold `incoming` into an already-kept region without losing information.
+    `keep` comes from the higher-precedence source, so its geometry and label
+    win; we only backfill fields it left empty (description/tags/uuid) and OR in
+    a confirmed=True (a box confirmed in any source is confirmed)."""
+    if not keep.get("class_name") or keep["class_name"] == "object":
+        if incoming.get("class_name") and incoming["class_name"] != "object":
+            keep["class_name"] = incoming["class_name"]
+    if not keep.get("region_description") and incoming.get("region_description"):
+        keep["region_description"] = incoming["region_description"]
+    if not keep.get("region_tags") and incoming.get("region_tags"):
+        keep["region_tags"] = incoming["region_tags"]
+    if not keep.get("uuid") and incoming.get("uuid"):
+        keep["uuid"] = incoming["uuid"]
+    keep["confirmed"] = bool(keep.get("confirmed")) or bool(incoming.get("confirmed"))
+    return keep
+
+
+def _merge_regions(*sources):
+    """Merge region lists from multiple standards (MWG-RS, legacy iptcExt,
+    acdsee-rs) into one deduplicated list. Sources are passed in PRECEDENCE
+    order — richest/most-authoritative first (MWG, then acdsee-rs, then legacy)
+    — so when the same box appears in several, the first source's geometry and
+    label win and later ones only backfill missing fields. We write only MWG-RS
+    back out, so this is purely an import-time reconciliation."""
+    merged = []
+    for src in sources:
+        for r in src or []:
+            for existing in merged:
+                if _regions_overlap(existing, r):
+                    _merge_region(existing, r)
+                    break
+            else:
+                merged.append(dict(r))
+    return merged
+
+
 def read_metadata(filepath):
     try:
         tags, desc, regions = [], "", []
         xmp_path = os.path.splitext(filepath)[0] + '.xmp'
 
-        # Only read XMP from a sidecar — never try to parse a JXL directly
-        # with pyexiv2, which throws on files without embedded XMP or with
-        # unusual JXL data structures.
-        if not os.path.exists(xmp_path):
-            # No XMP sidecar, but the file itself may still carry an EXIF
+        # Read XMP from the best available source: a .xmp sidecar if present,
+        # otherwise the XMP packet embedded in the file itself (RAW/DNG/JPEG all
+        # commonly carry one). Previously we bailed to EXIF-only whenever there
+        # was no sidecar, which silently dropped embedded XMP — dc:subject,
+        # regions, acdsee, crd, everything. JXL is guarded inside the resolver.
+        import xmp_import
+        xmp, xmp_source, xmp_xml = xmp_import.resolve_xmp(filepath)
+
+        if not xmp:
+            # No XMP anywhere, but the file may still carry an EXIF
             # ImageDescription (0x010e) / Rating / Windows XP tags worth storing.
             # exif_import handles the "don't parse JXL directly" caution via its
             # candidate paths.
             xtags, xdesc, xprov = _ingest_xp(filepath, [], _exif_description(filepath))
             return {"tags": xtags, "description": xdesc,
                     "rating": _exif_rating(filepath),
+                    "artist": "", "language": "",
+                    "event": "", "catalog_sets": "",
                     "regions": [], "analysis": xprov, "flag": None, "pose": None}
-
-        try:
-            with pyexiv2.Image(xmp_path) as img:
-                xmp = img.read_xmp()
-        except Exception as e:
-            access_logger.warning(f"pyexiv2 failed on {xmp_path}: {e}")
-            xmp = {}
 
         val  = xmp.get('Xmp.dc.subject', [])
         tags = val if isinstance(val, list) else ([val] if val else [])
 
-        # Prefer MWG-RS; fall back to legacy iptcExt sidecars so old labels load.
-        regions = _parse_mwg_regions(xmp)
-        if not regions:
-            regions = _parse_legacy_iptc_regions(xmp)
-
-        # Also try regex parse for description (more robust than pyexiv2 for this field)
+        # Import regions from ALL standards present and deduplicate — the same
+        # face can be tagged in more than one (MWG-RS, legacy iptcExt, ACDSee),
+        # and we don't want either duplicates or dropped boxes. Precedence
+        # (richest first): MWG-RS, then acdsee-rs, then legacy iptcExt. We still
+        # only write MWG-RS back out; this is import-time reconciliation only.
         try:
-            xml = open(xmp_path, encoding='utf-8', errors='replace').read()
-            m = re.search(r'<dc:description>\s*<rdf:Alt>\s*<rdf:li[^>]*>(.*?)</rdf:li>',
-                          xml, re.DOTALL)
-            if m:
-                extracted = saxutils.unescape(m.group(1).strip())
-                if extracted:
-                    desc = extracted
+            import xmp_import
+            acd_regions = xmp_import.read_acdsee_regions(filepath)
+        except Exception as e:
+            access_logger.warning(f"acdsee region fold {filepath}: {e}")
+            acd_regions = []
+        regions = _merge_regions(
+            _parse_mwg_regions(xmp),
+            acd_regions,
+            _parse_legacy_iptc_regions(xmp),
+        )
+
+        # Also try regex parse for description (more robust than pyexiv2 for this
+        # field). Work off the resolved XMP packet (sidecar OR embedded), not a
+        # sidecar-only read, so embedded-XMP files get the same treatment.
+        try:
+            xml = xmp_xml
+            if not xml and os.path.exists(xmp_path):
+                xml = open(xmp_path, encoding='utf-8', errors='replace').read()
+            if xml:
+                m = re.search(r'<dc:description>\s*<rdf:Alt>\s*<rdf:li[^>]*>(.*?)</rdf:li>',
+                              xml, re.DOTALL)
+                if m:
+                    extracted = saxutils.unescape(m.group(1).strip())
+                    if extracted:
+                        desc = extracted
         except Exception:
             pass
 
@@ -1482,14 +1598,59 @@ def read_metadata(filepath):
         if xprov:
             analysis = {**(analysis or {}), **xprov}
 
+        # Fold in retrieval-only XMP that maps to our fields (acdsee:Caption and
+        # crd:Description -> description; acdsee:Keywords -> tags; acdsee:Rating
+        # -> rating when EXIF gave none). Best-effort — never break a scan.
+        acd_rating = None
+        acd_event, acd_catsets = "", ""
+        try:
+            import xmp_import
+            acd = xmp_import.folded_values(filepath)
+            for kw in acd.get("tags", []):
+                if kw not in tags:
+                    tags.append(kw)
+            if acd.get("description"):
+                # The regex path above may already have set `desc` from
+                # dc:description; folded_values can surface the same text (its
+                # description precedence includes dc). Only append when it adds
+                # something new, so a lone dc:description isn't folded twice.
+                fold_desc = acd["description"]
+                if not desc:
+                    desc = fold_desc
+                elif fold_desc not in desc:
+                    desc = f"{desc}\n{fold_desc}".strip()
+            acd_rating = acd.get("rating")
+            acd_event = acd.get("event") or ""
+            acd_catsets = ", ".join(acd.get("catalog_sets") or [])
+        except Exception as e:
+            access_logger.warning(f"acdsee fold {filepath}: {e}")
+
+        rating = _exif_rating(filepath)
+        if rating is None:
+            rating = acd_rating
+
+        # dc:creator -> artist, dc:language -> language (new columns). Stored as
+        # comma-joined strings since dc allows multiple; empty = unknown.
+        artist, language = "", ""
+        try:
+            dcx = xmp_import.dc_extras(filepath)
+            artist = ", ".join(dcx.get("creator") or [])
+            language = ", ".join(dcx.get("language") or [])
+        except Exception as e:
+            access_logger.warning(f"dc_extras {filepath}: {e}")
+
         return {"tags": tags, "description": desc, "regions": regions,
-                "rating": _exif_rating(filepath),
+                "rating": rating,
+                "artist": artist, "language": language,
+                "event": acd_event, "catalog_sets": acd_catsets,
                 "analysis": analysis,
                 "flag": _read_flag_from_xmp(xmp_path),
                 "pose": _read_pose_from_xmp(xmp_path)}
     except Exception as e:
         access_logger.error(f"read_metadata {filepath}: {e}")
         return {"tags": [], "description": "", "regions": [], "rating": None,
+                "artist": "", "language": "",
+                "event": "", "catalog_sets": "",
                 "analysis": None, "flag": None, "pose": None}
 
 def write_metadata(filepath, tags, description, regions, analysis=None, flag=None, pose=None):
@@ -2409,6 +2570,65 @@ def api_iptc_read():
         return jsonify({"success": True, "data": iptc_import.read_iptc(fp)})
     except Exception as e:
         access_logger.error(f"api_iptc_read {filename}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+# ── XMP editor (parallels the IPTC editor above; acdsee is read-only) ───────
+@app.route("/xmp_editor")
+def xmp_editor_page():
+    """Standalone XMP editor page (embeddable in the index later).
+    Renders templates/xmp_editor.html inside a minimal shell that pulls in the
+    static css/js. Optional ?filename=... auto-loads a file."""
+    tmpl_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
+    frag_path = os.path.join(tmpl_dir, "xmp_editor.html")
+    try:
+        fragment = open(frag_path, encoding="utf-8").read()
+    except OSError:
+        return "xmp_editor.html template not found", 500
+    fn = request.args.get("filename", "")
+    autoload = (f"<script>window.addEventListener('load',function(){{"
+                f"if(window.xmpEditor)xmpEditor.load({json.dumps(fn)});}});</script>"
+                if fn else "")
+    shell = (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<title>XMP Editor</title>"
+        "<link rel='stylesheet' href='/static/xmp_editor.css'>"
+        "<style>body{background:#0b1220;margin:0;padding:16px;"
+        "font-family:system-ui,-apple-system,sans-serif;}</style>"
+        "</head><body>"
+        f"{fragment}"
+        "<script src='/static/xmp_editor.js'></script>"
+        f"{autoload}"
+        "</body></html>"
+    )
+    return render_template_string(shell)
+
+@app.route("/api/xmp/schema")
+def api_xmp_schema():
+    """Return the full XMP field schema (no file needed)."""
+    import xmp_fields
+    return jsonify({"success": True, "schema": xmp_fields.schema_dict()})
+
+@app.route("/api/xmp/read", methods=["POST"])
+def api_xmp_read():
+    """Read merged XMP schema+values for a media file (by rel path under
+    MEDIA_DIR). Returns the structure from xmp_import.read_xmp()."""
+    import xmp_import
+    data = request.get_json(force=True, silent=True) or {}
+    filename = data.get("filename", "")
+    if not filename:
+        return jsonify({"success": False, "error": "filename required"}), 400
+    # Resolve safely under MEDIA_DIR (no traversal outside the library).
+    abs_media = os.path.abspath(MEDIA_DIR)
+    fp = os.path.abspath(os.path.join(MEDIA_DIR, filename))
+    if not (fp == abs_media or fp.startswith(abs_media + os.sep)):
+        return jsonify({"success": False, "error": "invalid path"}), 400
+    if not os.path.exists(fp):
+        return jsonify({"success": False, "error": "file not found"}), 404
+    try:
+        return jsonify({"success": True, "data": xmp_import.read_xmp(fp)})
+    except Exception as e:
+        access_logger.error(f"api_xmp_read {filename}: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 # ── EXIF editor (parallels the IPTC editor above) ───────────────────────────
