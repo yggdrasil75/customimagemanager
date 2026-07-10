@@ -34,6 +34,7 @@ except Exception:                      # pragma: no cover - env without pyexiv2
     pyexiv2 = None
 
 import xmp_fields as xfields
+import iptc_fields as ifields
 
 log = logging.getLogger("xmp_import")
 
@@ -347,6 +348,252 @@ def dc_extras(filepath):
     dates = [str(x) for x in _as_list(raw.get("Xmp.dc.date")) if str(x).strip()]
     date = min(dates) if dates else None   # ISO 8601 sorts chronologically
     return {"creator": creator, "date": date, "language": language}
+
+
+# ── IPTC Extension (iptcExt) folds ──────────────────────────────────────────
+# Three things the ingest path pulls out of the IPTC Extension schema:
+#   * artist       — ArtworkCreator and Creator/CreatorName join dc:creator as
+#                    sources for our artist column.
+#   * ai_generated — the AI-provenance fields (and a synthetic DigitalSourceType)
+#                    flip a simple boolean flag; we don't store the detail.
+#   * regions      — DataOnScreen text regions fold into the MWG-RS region store.
+# All three read the same resolved XMP; the field DEFINITIONS (and which props
+# feed what) live in iptc_fields via xmp_fields' feed_map — these functions just
+# know how to extract the values.
+
+def iptcext_creators(filepath):
+    """Return artist-name strings from the IPTC Extension schema:
+    ArtworkCreator (AOCreator) and Creator's Name (CreatorName). Both are
+    surfaced as extra sources for our artist column, joining dc:creator.
+
+    CreatorName is a lang-alt per struct entry, flattened by pyexiv2 as
+    'Xmp.iptcExt.CreatorName[n]'; ArtworkCreator is a plain string list
+    'Xmp.iptcExt.ArtworkCreator[n]'. Returns [] when neither is present.
+    """
+    raw, _ = _read_raw_xmp(filepath)
+    if not raw:
+        return []
+    names = []
+    for key, val in raw.items():
+        ns, prop = _split_tag(key)
+        if ns != "iptcExt":
+            continue
+        # Match the property and its flattened-array forms (prop or prop[n]).
+        base = prop.split("[", 1)[0] if prop else prop
+        if base in ("ArtworkCreator", "CreatorName"):
+            text = _langalt_text(val)
+            if text and text.strip():
+                names.append(text.strip())
+    # De-dupe preserving order.
+    seen, out = set(), []
+    for n in names:
+        if n not in seen:
+            seen.add(n); out.append(n)
+    return out
+
+
+def iptcext_model_age(filepath):
+    """Return the model age from IPTC Extension ModelAge, or None.
+
+    ModelAge is an integer list (one per model shown). We store a single number,
+    so we take the MINIMUM present — the most cautious reading when several ages
+    are given. Non-integer / empty values are ignored. None when absent.
+    """
+    raw, _ = _read_raw_xmp(filepath)
+    if not raw:
+        return None
+    ages = []
+    for key, val in raw.items():
+        ns, prop = _split_tag(key)
+        if ns != "iptcExt" or not prop:
+            continue
+        if prop.split("[", 1)[0] == "ModelAge":
+            for v in _as_list(val):
+                try:
+                    ages.append(int(str(v).strip()))
+                except (TypeError, ValueError):
+                    continue
+    return min(ages) if ages else None
+
+
+def iptcext_persons(filepath):
+    """Return the names of people shown, from IPTC Extension PersonInImage and
+    the richer PersonInImageWDetails (its PersonInImageName lang-alt leaf).
+
+    Flat name list — the plain PersonInImage carries no face box (those live in
+    ImageRegion / DataOnScreen), so like Expression Media's People these fold
+    into both our persons column and the tag list. De-duped, order-preserving.
+    [] when none present.
+    """
+    raw, _ = _read_raw_xmp(filepath)
+    if not raw:
+        return []
+    names = []
+    for key, val in raw.items():
+        ns, prop = _split_tag(key)
+        if ns != "iptcExt" or not prop:
+            continue
+        base = prop.split("[", 1)[0]
+        # PersonInImage = flat string list; PersonInImageName = lang-alt leaf of
+        # the WDetails struct. Both are person names.
+        if base == "PersonInImage":
+            for v in _as_list(val):
+                s = str(v).strip()
+                if s:
+                    names.append(s)
+        elif base == "PersonInImageName":
+            s = _langalt_text(val).strip()
+            if s:
+                names.append(s)
+    seen, out = set(), []
+    for n in names:
+        if n not in seen:
+            seen.add(n); out.append(n)
+    return out
+
+
+def prism_extras(filepath):
+    """Extract the PRISM fields that map to our columns:
+      * genre      — prism:Genre (image genre) -> our genre column
+      * alt_of     — prism:HasAlternative + prism:IsAlternativeOf (variant links)
+                     -> our alt_of column (union of both directions)
+      * page_count — prism:PageCount (int) -> our page_count column
+    (prism:Keyword -> tags is handled by folded_values, not here.)
+
+    Returns {"genre": [str,...], "alt_of": [str,...], "page_count": int|None}.
+    Lists are de-duped, order-preserving. Missing come back as [] / None.
+    """
+    raw, _ = _read_raw_xmp(filepath)
+    if not raw:
+        return {"genre": [], "alt_of": [], "page_count": None}
+
+    def _strs(*keys):
+        out, seen = [], set()
+        for k in keys:
+            for v in _as_list(raw.get(k)):
+                s = str(v).strip()
+                if s and s not in seen:
+                    seen.add(s); out.append(s)
+        return out
+
+    genre = _strs("Xmp.prism.Genre")
+    alt_of = _strs("Xmp.prism.HasAlternative", "Xmp.prism.IsAlternativeOf")
+    page_count = None
+    pc = raw.get("Xmp.prism.PageCount")
+    if pc is not None:
+        try:
+            page_count = int(str(_as_list(pc)[0]).strip())
+        except (TypeError, ValueError, IndexError):
+            page_count = None
+    return {"genre": genre, "alt_of": alt_of, "page_count": page_count}
+
+
+def is_ai_generated(filepath):
+    """True if the file's IPTC Extension metadata marks it as AI-generated.
+
+    Triggers on either:
+      * any of the AI-provenance fields carrying a value
+        (AIPromptInformation / AIPromptWriterName / AISystemUsed /
+         AISystemVersionUsed), or
+      * a DigitalSourceType whose IRI indicates a synthetic/AI origin
+        (see iptc_fields.AI_DIGITAL_SOURCE_MARKERS). A plain scan/original
+        DigitalSourceType does NOT trigger it.
+
+    Returns False when there's no XMP or no AI signal. We only need the boolean;
+    the prompt/system detail is left in the schema for inspection, not stored.
+    """
+    raw, _ = _read_raw_xmp(filepath)
+    if not raw:
+        return False
+    AI_FIELDS = ("AIPromptInformation", "AIPromptWriterName",
+                 "AISystemUsed", "AISystemVersionUsed")
+    for key, val in raw.items():
+        ns, prop = _split_tag(key)
+        if ns != "iptcExt" or not prop:
+            continue
+        base = prop.split("[", 1)[0]
+        if base in AI_FIELDS:
+            if str(_langalt_text(val)).strip():
+                return True
+        elif base == "DigitalSourceType":
+            iri = str(_langalt_text(val)).strip().lower()
+            if any(m in iri for m in ifields.AI_DIGITAL_SOURCE_MARKERS):
+                return True
+    return False
+
+
+# ── DataOnScreen (iptcExt TextRegion) -> MWG-RS ─────────────────────────────
+# IPTC Extension DataOnScreen is a repeating TextRegion struct: each has a
+# RegionText plus a Region (Area struct). Unlike acdsee-rs (center-based), the
+# IPTC Area X/Y is the TOP-LEFT corner with W/H the size, all normalized — the
+# same convention as the legacy iptcExt ImageRegion path — so we convert to the
+# center-based MWG dict (cx = x + w/2, cy = y + h/2). RegionText becomes the
+# region label so on-screen text is searchable alongside other regions. These
+# import unconfirmed (they're extracted metadata, not user-placed boxes).
+_DOS_BASE = "Xmp.iptcExt.DataOnScreen"
+
+
+def _parse_dataonscreen_regions(xmp):
+    """Read Xmp.iptcExt.DataOnScreen text regions and return them in the MWG
+    region dict shape (same as manager._parse_mwg_regions). Returns [] if none.
+
+    pyexiv2 flattens the struct; per index n the leaves are:
+      DataOnScreen[n]/iptcExt:Region/iptcExt:{X,Y,W,H,Unit,D}
+      DataOnScreen[n]/iptcExt:RegionText
+    We tolerate both the nested struct path and the pre-flattened
+    'DataOnScreenRegionX' leaf names ExifTool sometimes reports.
+    """
+    import re
+    indices = sorted({int(m.group(1))
+                      for k in xmp.keys()
+                      if k.startswith(_DOS_BASE + "[")
+                      for m in [re.search(r"\[(\d+)\]", k)] if m})
+    regions = []
+    for idx in indices:
+        p = f"{_DOS_BASE}[{idx}]"
+
+        def _g(*suffixes):
+            for s in suffixes:
+                v = xmp.get(p + s)
+                if v is not None and str(v).strip() != "":
+                    return v
+            return None
+
+        try:
+            x = float(_g("/iptcExt:Region/iptcExt:X", "/iptcExt:RegionX"))
+            y = float(_g("/iptcExt:Region/iptcExt:Y", "/iptcExt:RegionY"))
+            w = float(_g("/iptcExt:Region/iptcExt:W", "/iptcExt:RegionW"))
+            h = float(_g("/iptcExt:Region/iptcExt:H", "/iptcExt:RegionH"))
+        except (TypeError, ValueError):
+            continue
+        if not (w > 0 and h > 0):
+            continue
+        text = _g("/iptcExt:RegionText", "/iptcExt:Region/iptcExt:RegionText")
+        label = str(text).strip() if text else ""
+        regions.append({
+            # Top-left (IPTC) -> center (MWG).
+            "class_name": label or "text",
+            "cx": x + w / 2.0, "cy": y + h / 2.0, "w": w, "h": h,
+            "confirmed": False,
+            "uuid": None,
+            "region_description": label,
+            "region_tags": [],
+        })
+    return regions
+
+
+def read_dataonscreen_regions(filepath):
+    """Convenience wrapper: read the file's XMP and return converted DataOnScreen
+    text regions (MWG dict shape). [] when there are none / pyexiv2 unavailable.
+    The ingest path folds these into the merged region list."""
+    raw, _ = _read_raw_xmp(filepath)
+    if not raw:
+        return []
+    try:
+        return _parse_dataonscreen_regions(raw)
+    except Exception as e:
+        log.warning(f"DataOnScreen region parse failed on {filepath}: {e}")
+        return []
 
 
 # ── ACDSee regions (acdsee-rs) -> MWG-RS ────────────────────────────────────

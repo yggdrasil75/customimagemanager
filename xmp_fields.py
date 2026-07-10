@@ -32,6 +32,13 @@ reference (factual field definitions).
 from dataclasses import dataclass, field
 from typing import Optional
 
+# IPTC's XMP namespaces (Iptc4xmpCore / Iptc4xmpExt) are defined in iptc_fields
+# alongside the legacy IIM records, so the IPTC schema lives in one place. We
+# build the XMPField lists from that module's factories (no import cycle: it
+# doesn't import us — we pass our XMPField class and TYPE_* constants in).
+import iptc_fields
+import mwg_fields
+
 
 # ── Data / value types ──────────────────────────────────────────────────────
 # Short strings so the frontend can choose an input widget per type. XMP adds a
@@ -1065,6 +1072,180 @@ HDRGAINMAP_FIELDS = [
 ]
 
 
+# ── prism namespace (PRISM 3.0 publishing metadata) ─────────────────────────
+# Publishing Requirements for Industry Standard Metadata. A large namespace,
+# mostly journal/magazine publishing fields irrelevant to this catalog — those
+# are surfaced read-only. Four fields ARE useful and are wired to our columns:
+#   * Genre          -> feeds "genre" (image genre; new genre column)
+#   * Keyword        -> feeds "tags"  (rolled into our booru tags on ingest)
+#   * HasAlternative / IsAlternativeOf -> feeds "alt_of" (variant links, for
+#       "same image, different color accents" style variants; new alt_of column)
+#   * PageCount      -> feeds "page_count", and unlike everything else here it's
+#       WRITABLE: we write prism:PageCount into a comic's cover page when a comic
+#       is created/updated, and read it back for the page count. (writable=True)
+# The many struct fields (AlternateTitle, Channel, dates, URL, etc.) are
+# flattened leaves surfaced read-only. Value transcribed from the PRISM 3.0 spec
+# (https://www.w3.org/Submission/2020/SUBM-prism-20200910/prism-basic.html).
+PRISM_FIELDS = [
+    XMPField("AcademicField",        TYPE_STRING, is_list=True),
+    XMPField("AggregateIssueNumber", TYPE_INTEGER, is_list=True),
+    XMPField("AggregationType",      TYPE_STRING, is_list=True),
+    XMPField("AlternateTitle",       TYPE_STRING, is_list=True,
+             note="Struct root (prismAlternateTitle+)."),
+    XMPField("AlternateTitleA-lang",     TYPE_STRING, is_list=True),
+    XMPField("AlternateTitleA-platform", TYPE_STRING, is_list=True),
+    XMPField("AlternateTitleText",       TYPE_STRING, is_list=True),
+    XMPField("BlogTitle",            TYPE_STRING),
+    XMPField("BlogURL",              TYPE_STRING),
+    XMPField("BookEdition",          TYPE_STRING),
+    XMPField("ByteCount",            TYPE_INTEGER),
+    XMPField("Channel",              TYPE_STRING, is_list=True,
+             note="Struct root (prismChannel+)."),
+    XMPField("ChannelA-lang",        TYPE_STRING, is_list=True),
+    XMPField("ChannelChannel",       TYPE_STRING, is_list=True),
+    XMPField("ChannelSubchannel1",   TYPE_STRING, is_list=True),
+    XMPField("ChannelSubchannel2",   TYPE_STRING, is_list=True),
+    XMPField("ChannelSubchannel3",   TYPE_STRING, is_list=True),
+    XMPField("ChannelSubchannel4",   TYPE_STRING, is_list=True),
+    XMPField("ComplianceProfile",    TYPE_STRING, values={"three": "Three"}),
+    XMPField("ContentType",          TYPE_STRING),
+    XMPField("CopyrightYear",        TYPE_STRING),
+    XMPField("CorporateEntity",      TYPE_STRING, is_list=True),
+    XMPField("CoverDate",            TYPE_DATE),
+    XMPField("CoverDisplayDate",     TYPE_STRING),
+    XMPField("CreationDate",         TYPE_DATE),
+    XMPField("DateRecieved",         TYPE_DATE),
+    XMPField("Device",               TYPE_STRING),
+    XMPField("Distributor",          TYPE_STRING),
+    XMPField("DOI",                  TYPE_STRING),
+    XMPField("Edition",              TYPE_STRING),
+    XMPField("EIssn",                TYPE_STRING),
+    XMPField("EndingPage",           TYPE_STRING),
+    XMPField("Event",                TYPE_STRING, is_list=True),
+    XMPField("Genre",                TYPE_STRING, is_list=True, feeds="genre",
+             note="Image genre — folded into our genre column on ingest."),
+    XMPField("HasAlternative",       TYPE_STRING, is_list=True, feeds="alt_of",
+             note="Links to alternative versions (variants) — folded into alt_of."),
+    XMPField("HasCorrection",        TYPE_STRING,
+             note="Struct root (prismHasCorrection)."),
+    XMPField("HasCorrectionA-lang",     TYPE_STRING),
+    XMPField("HasCorrectionA-platform", TYPE_STRING),
+    XMPField("HasCorrectionText",       TYPE_STRING),
+    XMPField("HasTranslation",       TYPE_STRING, is_list=True),
+    XMPField("Industry",             TYPE_STRING, is_list=True),
+    XMPField("IsAlternativeOf",      TYPE_STRING, is_list=True, feeds="alt_of",
+             note="Links to the image this is a variant of — folded into alt_of."),
+    XMPField("ISBN",                 TYPE_STRING, is_list=True),
+    XMPField("IsCorrectionOf",       TYPE_STRING, is_list=True),
+    XMPField("ISSN",                 TYPE_STRING),
+    XMPField("IssueIdentifier",      TYPE_STRING),
+    XMPField("IssueName",            TYPE_STRING),
+    XMPField("IssueTeaser",          TYPE_STRING),
+    XMPField("IssueType",            TYPE_STRING),
+    XMPField("IsTranslationOf",      TYPE_STRING),
+    XMPField("Keyword",              TYPE_STRING, is_list=True, feeds="tags",
+             note="Rolled into our booru tags on ingest."),
+    XMPField("KillDate",             TYPE_STRING, note="Struct root (prismKillDate)."),
+    XMPField("KillDateA-platform",   TYPE_STRING),
+    XMPField("KillDateDate",         TYPE_DATE),
+    XMPField("Link",                 TYPE_STRING, is_list=True),
+    XMPField("Location",             TYPE_STRING, is_list=True),
+    XMPField("ModificationDate",     TYPE_DATE),
+    XMPField("NationalCatalogNumber", TYPE_STRING),
+    XMPField("Number",               TYPE_STRING),
+    XMPField("Object",               TYPE_STRING, is_list=True),
+    XMPField("OffSaleDate",          TYPE_STRING, is_list=True,
+             note="Struct root (prismOffSaleDate+)."),
+    XMPField("OffSaleDateA-platform", TYPE_STRING, is_list=True),
+    XMPField("OffSaleDateDate",      TYPE_DATE, is_list=True),
+    XMPField("OnSaleDate",           TYPE_STRING, is_list=True,
+             note="Struct root (prismOnSaleDate+)."),
+    XMPField("OnSaleDateA-platform", TYPE_STRING, is_list=True),
+    XMPField("OnSaleDateDate",       TYPE_DATE, is_list=True),
+    XMPField("OnSaleDay",            TYPE_STRING, is_list=True,
+             note="Struct root (prismOnSaleDay+)."),
+    XMPField("OnSaleDayA-platform",  TYPE_STRING, is_list=True),
+    XMPField("OnSaleDayDay",         TYPE_STRING, is_list=True),
+    XMPField("Organization",         TYPE_STRING, is_list=True),
+    XMPField("OriginPlatform",       TYPE_STRING, is_list=True, values={
+        "broadcast": "Broadcast", "email": "E-Mail", "mobile": "Mobile",
+        "other": "Other", "print": "Print",
+        "recordableMedia": "Recordable Media", "web": "Web",
+    }),
+    XMPField("PageCount",            TYPE_INTEGER, writable=True, feeds="page_count",
+             note="Number of pages. Bidirectional: written into a comic's cover "
+                  "page when a comic is created/updated; read back for page count."),
+    XMPField("PageProgressionDirection", TYPE_STRING, values={
+        "LTR": "Left to Right", "RTL": "Right to Left"}),
+    XMPField("PageRange",            TYPE_STRING, is_list=True),
+    XMPField("Person",               TYPE_STRING),
+    XMPField("Platform",             TYPE_STRING),
+    XMPField("ProductCode",          TYPE_STRING),
+    XMPField("Profession",           TYPE_STRING),
+    XMPField("PublicationDate",      TYPE_STRING, is_list=True,
+             note="Struct root (prismPublicationDate+)."),
+    XMPField("PublicationDateA-platform", TYPE_STRING, is_list=True),
+    XMPField("PublicationDateDate",  TYPE_DATE, is_list=True),
+    XMPField("PublicationDisplayDate", TYPE_STRING, is_list=True,
+             note="Struct root (prismPublicationDate+)."),
+    XMPField("PublicationDisplayDateA-platform", TYPE_STRING, is_list=True),
+    XMPField("PublicationDisplayDateDate", TYPE_DATE, is_list=True),
+    XMPField("PublicationName",      TYPE_STRING),
+    XMPField("PublishingFrequency",  TYPE_STRING),
+    XMPField("Rating",               TYPE_STRING,
+             note="PRISM content rating (string) — NOT our star rating; read-only."),
+    XMPField("SamplePageRange",      TYPE_STRING),
+    XMPField("Section",              TYPE_STRING),
+    XMPField("SellingAgency",        TYPE_STRING),
+    XMPField("SeriesNumber",         TYPE_INTEGER),
+    XMPField("SeriesTitle",          TYPE_STRING),
+    XMPField("Sport",                TYPE_STRING),
+    XMPField("StartingPage",         TYPE_STRING),
+    XMPField("Subsection1",          TYPE_STRING),
+    XMPField("Subsection2",          TYPE_STRING),
+    XMPField("Subsection3",          TYPE_STRING),
+    XMPField("Subsection4",          TYPE_STRING),
+    XMPField("Subtitle",             TYPE_STRING),
+    XMPField("SupplementDisplayID",  TYPE_STRING),
+    XMPField("SupplementStartingPage", TYPE_STRING),
+    XMPField("SupplementTitle",      TYPE_STRING),
+    XMPField("Teaser",               TYPE_STRING, is_list=True),
+    XMPField("Ticker",               TYPE_STRING, is_list=True),
+    XMPField("TimePeriod",           TYPE_STRING),
+    XMPField("URL",                  TYPE_STRING, is_list=True,
+             note="Struct root (prismUrl+)."),
+    XMPField("URLA-platform",        TYPE_STRING, is_list=True),
+    XMPField("URLUrl",               TYPE_STRING, is_list=True),
+    XMPField("UspsNumber",           TYPE_STRING),
+    XMPField("VersionIdentifier",    TYPE_STRING),
+    XMPField("Volume",               TYPE_STRING),
+    XMPField("WordCount",            TYPE_INTEGER),
+]
+
+
+# ── iptcCore namespace (IPTC Core) ──────────────────────────────────────────
+# Defined in iptc_fields.py (with the rest of the IPTC schema) and built here
+# via its factory, passing in our XMPField class and the TYPE_* map it needs.
+_IPTC_TYPE_MAP = {
+    "string":  TYPE_STRING,
+    "langalt": TYPE_LANGALT,
+    "seq":     TYPE_SEQ,
+    "integer": TYPE_INTEGER,
+    "date":    TYPE_DATE,
+    "real":    TYPE_REAL,
+    "bool":    TYPE_BOOL,
+}
+IPTCCORE_FIELDS = iptc_fields.build_iptc_core_fields(XMPField, _IPTC_TYPE_MAP)
+IPTCEXT_FIELDS = iptc_fields.build_iptc_ext_fields(XMPField, _IPTC_TYPE_MAP)
+
+# MWG namespaces (mwg-rs / mwg-coll / mwg-kw) are defined in mwg_fields.py
+# (with the Composite reconciliation reference and the region XML shape) and
+# built here via its factories, same as IPTC.
+MWG_RS_FIELDS   = mwg_fields.build_mwg_rs_fields(XMPField, _IPTC_TYPE_MAP)
+MWG_COLL_FIELDS = mwg_fields.build_mwg_coll_fields(XMPField, _IPTC_TYPE_MAP)
+MWG_KW_FIELDS   = mwg_fields.build_mwg_kw_fields(XMPField, _IPTC_TYPE_MAP)
+
+
 XMP_NAMESPACES = [
     XMPNamespace(
         "acdsee", "ACDSee",
@@ -1194,6 +1375,46 @@ XMP_NAMESPACES = [
         "Apple HDR GainMap image metadata. Retrieval-only.",
         uri="http://ns.apple.com/HDRGainMap/1.0/",
         fields=HDRGAINMAP_FIELDS, mapped=True,
+    ),
+    XMPNamespace(
+        iptc_fields.IPTCCORE_NS, iptc_fields.IPTCCORE_TITLE,
+        iptc_fields.IPTCCORE_DESCRIPTION,
+        uri=iptc_fields.IPTCCORE_URI,
+        fields=IPTCCORE_FIELDS, mapped=True,
+    ),
+    XMPNamespace(
+        iptc_fields.IPTCEXT_NS, iptc_fields.IPTCEXT_TITLE,
+        iptc_fields.IPTCEXT_DESCRIPTION,
+        uri=iptc_fields.IPTCEXT_URI,
+        fields=IPTCEXT_FIELDS, mapped=True,
+    ),
+    XMPNamespace(
+        "prism", "PRISM (publishing)",
+        "Publishing Requirements for Industry Standard Metadata 3.0. Mostly "
+        "journal/magazine publishing fields, surfaced read-only. Genre feeds our "
+        "genre column, Keyword rolls into tags, HasAlternative/IsAlternativeOf "
+        "feed the alt_of variant links, and PageCount is bidirectional (written "
+        "into a comic's cover page, read back for the page count).",
+        uri="http://prismstandard.org/namespaces/basic/3.0/",
+        fields=PRISM_FIELDS, mapped=True,
+    ),
+    XMPNamespace(
+        mwg_fields.MWG_RS_NS, mwg_fields.MWG_RS_TITLE,
+        mwg_fields.MWG_RS_DESCRIPTION,
+        uri=mwg_fields.MWG_RS_URI,
+        fields=MWG_RS_FIELDS, mapped=True,
+    ),
+    XMPNamespace(
+        mwg_fields.MWG_COLL_NS, mwg_fields.MWG_COLL_TITLE,
+        mwg_fields.MWG_COLL_DESCRIPTION,
+        uri=mwg_fields.MWG_COLL_URI,
+        fields=MWG_COLL_FIELDS, mapped=True,
+    ),
+    XMPNamespace(
+        mwg_fields.MWG_KW_NS, mwg_fields.MWG_KW_TITLE,
+        mwg_fields.MWG_KW_DESCRIPTION,
+        uri=mwg_fields.MWG_KW_URI,
+        fields=MWG_KW_FIELDS, mapped=True,
     ),
 ]
 

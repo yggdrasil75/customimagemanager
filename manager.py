@@ -300,6 +300,27 @@ def _init_db():
         # Both read from XMP on ingest but editable in-app; empty = unset.
         "ALTER TABLE files ADD COLUMN event TEXT DEFAULT ''",
         "ALTER TABLE files ADD COLUMN catalog_sets TEXT DEFAULT ''",
+        # AI-generated marker. Set to 1 when the file's IPTC Extension metadata
+        # carries AI-provenance fields (AIPrompt*/AISystem*) or a synthetic
+        # DigitalSourceType. Simple boolean — we don't store the prompt/system
+        # detail, just whether the image is AI-generated. 0 = not (or unknown).
+        "ALTER TABLE files ADD COLUMN ai_generated INTEGER DEFAULT 0",
+        # Model age (IPTC Extension ModelAge). The minimum age when several are
+        # given. NULL = unknown. Read-only source; surfaced for reference.
+        "ALTER TABLE files ADD COLUMN model_age INTEGER DEFAULT NULL",
+        # People shown in the image (IPTC Extension PersonInImage /
+        # PersonInImageWDetails Name). Comma-joined names; also folded into the
+        # tags list so tag-based search finds them. Empty = none/unknown.
+        "ALTER TABLE files ADD COLUMN persons TEXT DEFAULT ''",
+        # Image genre (PRISM Genre). Comma-joined; read-only source. Empty = none.
+        "ALTER TABLE files ADD COLUMN genre TEXT DEFAULT ''",
+        # Variant links (PRISM HasAlternative / IsAlternativeOf) — pointers to
+        # alternate versions of the same image ("same shot, blue accents"). Stored
+        # as a comma-joined list of link strings/URLs/identifiers. Read-only.
+        "ALTER TABLE files ADD COLUMN alt_of TEXT DEFAULT ''",
+        # Page count (PRISM PageCount). Bidirectional: written into a comic's
+        # cover page on comic create/update; read back here. NULL = unknown.
+        "ALTER TABLE files ADD COLUMN page_count INTEGER DEFAULT NULL",
     ]:
         try:
             db.execute(ddl); db.commit()
@@ -1043,6 +1064,40 @@ def _index_file(rel_path: str, force: bool = False) -> bool:
         if _cs:
             _db().execute("UPDATE files SET catalog_sets=? WHERE rel_path=?",
                           (_cs, rel_path))
+        # AI-generated marker. Only set it to 1 when the metadata says so; never
+        # clear it on re-index, so a detected AI origin sticks and any future
+        # in-app toggle isn't wiped by a rescan of a file lacking the fields.
+        if meta.get('ai_generated'):
+            _db().execute("UPDATE files SET ai_generated=1 WHERE rel_path=?",
+                          (rel_path,))
+        # Model age (IPTC Extension ModelAge). Only overwrite when we read one,
+        # so a re-index of a file without it doesn't wipe a stored value.
+        _ma = meta.get('model_age')
+        if _ma is not None:
+            _db().execute("UPDATE files SET model_age=? WHERE rel_path=?",
+                          (int(_ma), rel_path))
+        # People shown (IPTC Extension PersonInImage). The names are also in
+        # meta['tags'] (written by _upsert_file); this stores the dedicated
+        # persons column. Only overwrite when we read some, so a re-index of a
+        # file without them doesn't wipe an in-app edit.
+        _pers = meta.get('persons') or ''
+        if _pers:
+            _db().execute("UPDATE files SET persons=? WHERE rel_path=?",
+                          (_pers, rel_path))
+        # PRISM Genre / variant links / page count. Only overwrite when read, so
+        # a re-index of a file without them doesn't wipe an in-app value.
+        _gen = meta.get('genre') or ''
+        _alt = meta.get('alt_of') or ''
+        _pc  = meta.get('page_count')
+        if _gen:
+            _db().execute("UPDATE files SET genre=? WHERE rel_path=?",
+                          (_gen, rel_path))
+        if _alt:
+            _db().execute("UPDATE files SET alt_of=? WHERE rel_path=?",
+                          (_alt, rel_path))
+        if _pc is not None:
+            _db().execute("UPDATE files SET page_count=? WHERE rel_path=?",
+                          (int(_pc), rel_path))
         _db().commit()
         _set_media_kind(rel_path)
         return True
@@ -1171,6 +1226,25 @@ def _read_pose_from_xmp(xmp_path):
         access_logger.warning(f"_read_pose_from_xmp {xmp_path}: {e}")
         return None
 
+# PRISM namespace, used to persist prism:PageCount in our sidecars (the one
+# PRISM field we write — bidirectional for comics).
+_PRISM_NS = "http://prismstandard.org/namespaces/basic/3.0/"
+
+def _read_page_count_from_xmp(xmp_path):
+    """Pull prism:PageCount back out of a sidecar as an int, or None."""
+    try:
+        if not os.path.exists(xmp_path):
+            return None
+        text = open(xmp_path, encoding="utf-8", errors="replace").read()
+        # Both the attribute form (prism:PageCount="12") and element form
+        # (<prism:PageCount>12</prism:PageCount>) are accepted.
+        m = (re.search(r'prism:PageCount\s*=\s*"(\d+)"', text) or
+             re.search(r'<prism:PageCount>\s*(\d+)\s*</prism:PageCount>', text))
+        return int(m.group(1)) if m else None
+    except Exception as e:
+        access_logger.warning(f"_read_page_count_from_xmp {xmp_path}: {e}")
+        return None
+
 # ── Region metadata (MWG-RS) ────────────────────────────────────────────────
 # We store regions in the MWG Regions schema (Xmp.mwg-rs.*), which gives us
 # richer per-region fields than the legacy Xmp.iptcExt.ImageRegion bag:
@@ -1185,8 +1259,9 @@ def _read_pose_from_xmp(xmp_path):
 # The Description JSON encodes booru-style per-region tags. A tag with
 # generated==true is AI-produced and carries a `confirmed` bool; a tag without
 # `generated` (or generated==false) is user-added and always treated confirmed.
-_MWG_RS_NS = "http://www.metadataworkinggroup.com/schemas/regions/"
-_MWG_ST_NS = "http://www.metadataworkinggroup.com/schemas/regions/type/"
+import mwg_fields
+_MWG_RS_NS = mwg_fields.MWG_RS_URI
+_MWG_ST_NS = mwg_fields.MWG_ST_URI
 
 def _region_filter_link(name):
     # A stable link others can use to filter the shared library by region name.
@@ -1235,92 +1310,76 @@ def _region_desc_from_json(raw):
     return str(obj.get("description", "") or ""), tags
 
 def _parse_mwg_regions(xmp):
-    """Read regions from Xmp.mwg-rs.Regions. Returns [] if none present."""
-    regions = []
-    base = "Xmp.mwg-rs.Regions/mwg-rs:RegionList"
-    indices = sorted({int(re.search(r'\[(\d+)\]', k).group(1))
-                      for k in xmp.keys()
-                      if k.startswith(base + '[') and re.search(r'\[(\d+)\]', k)})
-    for idx in indices:
-        p = f'{base}[{idx}]'
-        try:
-            cx = float(xmp.get(f'{p}/mwg-rs:Area/stArea:x', 0))
-            cy = float(xmp.get(f'{p}/mwg-rs:Area/stArea:y', 0))
-            w  = float(xmp.get(f'{p}/mwg-rs:Area/stArea:w', 0))
-            h  = float(xmp.get(f'{p}/mwg-rs:Area/stArea:h', 0))
-        except Exception:
-            continue
-        if not (w > 0 and h > 0):
-            continue
-        rtype = str(xmp.get(f'{p}/mwg-rs:Type', '')).lower()
-        rdesc_raw = xmp.get(f'{p}/mwg-rs:Description', '')
-        rdesc, rtags = _region_desc_from_json(rdesc_raw)
-        regions.append({
-            "class_name": xmp.get(f'{p}/mwg-rs:Name', 'object'),
-            "cx": cx, "cy": cy, "w": w, "h": h,
-            "confirmed": rtype != 'unconfirmed',
-            "uuid": str(xmp.get(f'{p}/mwg-rs:BarCodeValue', '')) or None,
-            "region_description": rdesc,
-            "region_tags": rtags,
-        })
-    return regions
+    """Read regions from Xmp.mwg-rs.Regions. Returns [] if none present.
+    The mwg-rs RDF shape now lives in mwg_fields; we pass in our app-specific
+    Description-JSON decoder."""
+    return mwg_fields.parse_region_list(xmp, _region_desc_from_json)
 
 def _parse_legacy_iptc_regions(xmp):
-    """Fallback reader for old Xmp.iptcExt.ImageRegion sidecars, so existing
-    labels aren't lost after the MWG-RS migration."""
+    """Reader for Xmp.iptcExt.ImageRegion regions, folded into the MWG-RS model.
+
+    Handles both the modern IPTC Extension ImageRegion struct (v1.5+; boundary
+    leaves RegionBoundary/RbX,RbY,RbW,RbH, RbShape, RbUnit, plus a lang-alt Name
+    and RId) AND the older ExifTool lowercase form (RegionBoundary/rbX.. +
+    RegionName) so existing sidecars written before the naming change aren't lost.
+
+    Geometry: IPTC's RbX/RbY are the TOP-LEFT corner, RbW/RbH the size — the same
+    convention as the old path — so we convert to the center-based MWG dict
+    (cx = x + w/2). Units: 'relative' (0..1) maps directly; 'pixel' can't be
+    normalized here without the image dimensions, so pixel-unit regions are
+    skipped (they'll be re-derived from MWG/other sources). Non-rectangle shapes
+    (circle/polygon) have no center+w/h representation and are skipped too. A
+    region whose RId (or old rId) is 'unconfirmed' imports unconfirmed."""
     regions = []
     indices = {re.search(r'\[(\d+)\]', k).group(1)
                for k in xmp.keys() if 'ImageRegion[' in k and re.search(r'\[(\d+)\]', k)}
-    for idx in indices:
+    for idx in sorted(indices, key=lambda s: int(s)):
         p = f'Xmp.iptcExt.ImageRegion[{idx}]'
+        rb = f'{p}/iptcExt:RegionBoundary'
+
+        def _g(*keys, default=None):
+            """First non-empty value among alternative flattened key spellings."""
+            for k in keys:
+                v = xmp.get(k)
+                if v is not None and str(v).strip() != "":
+                    return v
+            return default
+
+        # Shape / unit (modern only; old form was implicitly rectangle/relative).
+        shape = str(_g(f'{rb}/iptcExt:RbShape', default='rectangle')).lower()
+        unit  = str(_g(f'{rb}/iptcExt:RbUnit', default='relative')).lower()
+        if shape and shape != 'rectangle':
+            continue                      # circle/polygon don't fit the box model
+        if unit and unit not in ('relative', ''):
+            continue                      # pixel units need image dims we lack here
         try:
-            w  = float(xmp.get(f'{p}/iptcExt:RegionBoundary/iptcExt:rbW', 0))
-            h  = float(xmp.get(f'{p}/iptcExt:RegionBoundary/iptcExt:rbH', 0))
-            lf = float(xmp.get(f'{p}/iptcExt:RegionBoundary/iptcExt:rbX', 0))
-            tp = float(xmp.get(f'{p}/iptcExt:RegionBoundary/iptcExt:rbY', 0))
-            if w > 0 and h > 0:
-                rid = str(xmp.get(f'{p}/iptcExt:rId', '')).lower()
-                regions.append({"class_name": xmp.get(f'{p}/iptcExt:RegionName', 'object'),
-                                "cx": lf+w/2, "cy": tp+h/2, "w": w, "h": h,
-                                "confirmed": rid != 'unconfirmed',
-                                "uuid": None, "region_description": "", "region_tags": []})
-        except Exception:
-            pass
+            w  = float(_g(f'{rb}/iptcExt:RbW', f'{rb}/iptcExt:rbW', default=0))
+            h  = float(_g(f'{rb}/iptcExt:RbH', f'{rb}/iptcExt:rbH', default=0))
+            lf = float(_g(f'{rb}/iptcExt:RbX', f'{rb}/iptcExt:rbX', default=0))
+            tp = float(_g(f'{rb}/iptcExt:RbY', f'{rb}/iptcExt:rbY', default=0))
+        except (TypeError, ValueError):
+            continue
+        if not (w > 0 and h > 0):
+            continue
+        rid = str(_g(f'{p}/iptcExt:RId', f'{p}/iptcExt:rId', default='')).lower()
+        # Name is a lang-alt in the modern struct; take x-default or first entry.
+        name = _g(f'{p}/iptcExt:Name/rdf:Alt/rdf:li[1]',
+                  f'{p}/iptcExt:Name',
+                  f'{p}/iptcExt:RegionName', default='object')
+        regions.append({"class_name": str(name) or 'object',
+                        "cx": lf + w / 2, "cy": tp + h / 2, "w": w, "h": h,
+                        "confirmed": rid != 'unconfirmed',
+                        "uuid": None, "region_description": "", "region_tags": []})
     return regions
 
 def _build_mwg_regions_xml(regions):
-    """Emit the <mwg-rs:Regions> block. Returns ('', ns_attrs) when empty."""
-    if not regions:
-        return "", ""
-    esc = saxutils.escape
-    items = []
-    for b in regions:
-        rid = 'confirmed' if b.get('confirmed', True) else 'unconfirmed'
-        name = esc(b.get("class_name", "object"))
-        uid  = b.get("uuid") or str(uuid.uuid4())
-        b["uuid"] = uid   # persist back so the frontend keeps a stable id
-        desc_json = esc(_region_desc_to_json(b))
-        see_also  = esc(_region_filter_link(b.get("class_name")))
-        items.append(
-            f'<rdf:li rdf:parseType="Resource">'
-            f'<mwg-rs:Name>{name}</mwg-rs:Name>'
-            f'<mwg-rs:Type>{rid}</mwg-rs:Type>'
-            f'<mwg-rs:BarCodeValue>{esc(uid)}</mwg-rs:BarCodeValue>'
-            f'<mwg-rs:SeeAlso>{see_also}</mwg-rs:SeeAlso>'
-            f'<mwg-rs:Description>{desc_json}</mwg-rs:Description>'
-            f'<mwg-rs:Area rdf:parseType="Resource">'
-            f'<stArea:x>{b["cx"]:.6f}</stArea:x><stArea:y>{b["cy"]:.6f}</stArea:y>'
-            f'<stArea:w>{b["w"]:.6f}</stArea:w><stArea:h>{b["h"]:.6f}</stArea:h>'
-            f'<stArea:unit>normalized</stArea:unit>'
-            f'</mwg-rs:Area>'
-            f'</rdf:li>')
-    block = ('<mwg-rs:Regions rdf:parseType="Resource">'
-             '<mwg-rs:RegionList><rdf:Bag>' + "".join(items) +
-             '</rdf:Bag></mwg-rs:RegionList>'
-             '</mwg-rs:Regions>')
-    ns = (f' xmlns:mwg-rs="{_MWG_RS_NS}"'
-          f' xmlns:stArea="{_MWG_ST_NS}"')
-    return block, ns
+    """Emit the <mwg-rs:Regions> block. Returns ('', ns_attrs) when empty.
+    The mwg-rs RDF shape lives in mwg_fields; we inject our app-specific bits
+    (Description-JSON encoder, SeeAlso filter link, uuid factory)."""
+    return mwg_fields.build_region_list_xml(
+        regions, saxutils.escape,
+        _region_desc_to_json, _region_filter_link,
+        lambda: str(uuid.uuid4()))
 
 def _set_compressed_bpp(filepath):
     """Compute EXIF CompressedBitsPerPixel (0x9102) for a just-compressed file
@@ -1546,26 +1605,38 @@ def read_metadata(filepath):
                     "rating": _exif_rating(filepath),
                     "artist": "", "language": "",
                     "event": "", "catalog_sets": "",
+                    "ai_generated": False, "model_age": None, "persons": "",
+                    "genre": "", "alt_of": "", "page_count": None,
                     "regions": [], "analysis": xprov, "flag": None, "pose": None}
 
         val  = xmp.get('Xmp.dc.subject', [])
         tags = val if isinstance(val, list) else ([val] if val else [])
 
         # Import regions from ALL standards present and deduplicate — the same
-        # face can be tagged in more than one (MWG-RS, legacy iptcExt, ACDSee),
-        # and we don't want either duplicates or dropped boxes. Precedence
-        # (richest first): MWG-RS, then acdsee-rs, then legacy iptcExt. We still
-        # only write MWG-RS back out; this is import-time reconciliation only.
+        # face can be tagged in more than one (MWG-RS, legacy iptcExt, ACDSee,
+        # iptcExt DataOnScreen text boxes), and we don't want either duplicates
+        # or dropped boxes. Precedence (richest first): MWG-RS, then acdsee-rs,
+        # then legacy iptcExt, then DataOnScreen (extracted on-screen text, the
+        # least authoritative). We still only write MWG-RS back out; this is
+        # import-time reconciliation only.
         try:
             import xmp_import
             acd_regions = xmp_import.read_acdsee_regions(filepath)
         except Exception as e:
             access_logger.warning(f"acdsee region fold {filepath}: {e}")
             acd_regions = []
+        # IPTC Extension DataOnScreen text regions fold into the same region
+        # store so on-screen text boxes live alongside face/object regions.
+        try:
+            dos_regions = xmp_import.read_dataonscreen_regions(filepath)
+        except Exception as e:
+            access_logger.warning(f"dataonscreen region fold {filepath}: {e}")
+            dos_regions = []
         regions = _merge_regions(
             _parse_mwg_regions(xmp),
             acd_regions,
             _parse_legacy_iptc_regions(xmp),
+            dos_regions,
         )
 
         # Also try regex parse for description (more robust than pyexiv2 for this
@@ -1625,24 +1696,96 @@ def read_metadata(filepath):
         except Exception as e:
             access_logger.warning(f"acdsee fold {filepath}: {e}")
 
+        # MWG folds. mwg-coll Collections -> catalog_sets; mwg-kw hierarchical
+        # keyword leaves -> tags. These are struct-flattened under paths the
+        # generic feed_map loop can't name-match, so fold them explicitly from
+        # the raw XMP using the mwg_fields helpers.
+        try:
+            _raw_xmp, _ = xmp_import._read_raw_xmp(filepath)
+            if _raw_xmp:
+                mwg_sets = mwg_fields.parse_collections(_raw_xmp)
+                if mwg_sets:
+                    existing = [s for s in acd_catsets.split(", ") if s]
+                    for s in mwg_sets:
+                        if s not in existing:
+                            existing.append(s)
+                    acd_catsets = ", ".join(existing)
+                for kw in mwg_fields.parse_keyword_leaves(_raw_xmp):
+                    if kw not in tags:
+                        tags.append(kw)
+        except Exception as e:
+            access_logger.warning(f"mwg fold {filepath}: {e}")
+
         rating = _exif_rating(filepath)
         if rating is None:
             rating = acd_rating
 
-        # dc:creator -> artist, dc:language -> language (new columns). Stored as
-        # comma-joined strings since dc allows multiple; empty = unknown.
+        # Artist sources, in precedence order: dc:creator, then IPTC Extension
+        # ArtworkCreator / Creator(Name). dc:language -> language. Stored as
+        # comma-joined strings since all allow multiple; empty = unknown. We
+        # union the sources (de-duped, order-preserving) rather than let one win,
+        # since a file can name the same person in dc and iptcExt.
         artist, language = "", ""
         try:
             dcx = xmp_import.dc_extras(filepath)
-            artist = ", ".join(dcx.get("creator") or [])
+            creators = list(dcx.get("creator") or [])
             language = ", ".join(dcx.get("language") or [])
+            try:
+                for c in xmp_import.iptcext_creators(filepath):
+                    if c not in creators:
+                        creators.append(c)
+            except Exception as e:
+                access_logger.warning(f"iptcext_creators {filepath}: {e}")
+            artist = ", ".join(creators)
         except Exception as e:
             access_logger.warning(f"dc_extras {filepath}: {e}")
+
+        # AI-generation marker from IPTC Extension (AIPrompt*/AISystem* or a
+        # synthetic DigitalSourceType). Simple boolean; best-effort.
+        ai_generated = False
+        try:
+            ai_generated = xmp_import.is_ai_generated(filepath)
+        except Exception as e:
+            access_logger.warning(f"is_ai_generated {filepath}: {e}")
+
+        # IPTC Extension ModelAge -> model_age column (minimum when several).
+        model_age = None
+        try:
+            model_age = xmp_import.iptcext_model_age(filepath)
+        except Exception as e:
+            access_logger.warning(f"model_age {filepath}: {e}")
+
+        # IPTC Extension PersonInImage -> persons column, and folded into tags
+        # (flat names, no boxes) so tag search finds them too.
+        persons = ""
+        try:
+            plist = xmp_import.iptcext_persons(filepath)
+            persons = ", ".join(plist)
+            for p in plist:
+                if p not in tags:
+                    tags.append(p)
+        except Exception as e:
+            access_logger.warning(f"persons {filepath}: {e}")
+
+        # PRISM extras: Genre -> genre column, HasAlternative/IsAlternativeOf ->
+        # alt_of column, PageCount -> page_count. (prism:Keyword -> tags is
+        # already folded via folded_values above.)
+        genre, alt_of, page_count = "", "", None
+        try:
+            px = xmp_import.prism_extras(filepath)
+            genre = ", ".join(px.get("genre") or [])
+            alt_of = ", ".join(px.get("alt_of") or [])
+            page_count = px.get("page_count")
+        except Exception as e:
+            access_logger.warning(f"prism_extras {filepath}: {e}")
 
         return {"tags": tags, "description": desc, "regions": regions,
                 "rating": rating,
                 "artist": artist, "language": language,
                 "event": acd_event, "catalog_sets": acd_catsets,
+                "ai_generated": ai_generated, "model_age": model_age,
+                "persons": persons,
+                "genre": genre, "alt_of": alt_of, "page_count": page_count,
                 "analysis": analysis,
                 "flag": _read_flag_from_xmp(xmp_path),
                 "pose": _read_pose_from_xmp(xmp_path)}
@@ -1651,9 +1794,11 @@ def read_metadata(filepath):
         return {"tags": [], "description": "", "regions": [], "rating": None,
                 "artist": "", "language": "",
                 "event": "", "catalog_sets": "",
+                "ai_generated": False, "model_age": None, "persons": "",
+                "genre": "", "alt_of": "", "page_count": None,
                 "analysis": None, "flag": None, "pose": None}
 
-def write_metadata(filepath, tags, description, regions, analysis=None, flag=None, pose=None):
+def write_metadata(filepath, tags, description, regions, analysis=None, flag=None, pose=None, page_count=None):
     try:
         _sync_yolo(filepath, regions)
         xmp_path = os.path.splitext(filepath)[0] + '.xmp'
@@ -1663,6 +1808,10 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
             analysis = _read_analysis_from_xmp(xmp_path)
         if flag is None:
             flag = _read_flag_from_xmp(xmp_path)
+        # Preserve an existing prism:PageCount unless the caller passes a new one,
+        # so ordinary edits don't drop a comic's stored page count.
+        if page_count is None:
+            page_count = _read_page_count_from_xmp(xmp_path)
         # Preserve an existing skeleton when the caller passes nothing usable.
         # IMPORTANT: treat an empty/peopleless pose ({} or {"people": []}) the
         # same as None — otherwise a pipeline run that produced no skeleton would
@@ -1692,12 +1841,20 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
         if pose and pose.get("people"):
             mm_x += f'<mm:pose>{_b64dump(pose)}</mm:pose>'
         mm_ns = f' xmlns:mm="{_MM_NS}"' if mm_x else ''
+        # prism:PageCount as an element (only when we have a value).
+        prism_x = ""
+        if page_count is not None:
+            try:
+                prism_x = f'<prism:PageCount>{int(page_count)}</prism:PageCount>'
+            except (TypeError, ValueError):
+                prism_x = ""
+        prism_ns = f' xmlns:prism="{_PRISM_NS}"' if prism_x else ''
         xmp = (f'<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>'
                f'<x:xmpmeta xmlns:x="adobe:ns:meta/">'
                f'<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
                f'<rdf:Description rdf:about="" '
-               f'xmlns:dc="http://purl.org/dc/elements/1.1/"{reg_ns}{mm_ns}>'
-               f'{subj}{desc_x}{reg_x}{mm_x}'
+               f'xmlns:dc="http://purl.org/dc/elements/1.1/"{reg_ns}{mm_ns}{prism_ns}>'
+               f'{subj}{desc_x}{reg_x}{mm_x}{prism_x}'
                f'</rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>')
         with open(xmp_path, 'w', encoding='utf-8') as f:
             f.write(xmp)
@@ -1711,6 +1868,13 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
             "UPDATE files SET tags=?, description=?, unconfirmed_count=?, "
             "autotag_done=1, analysis=?, flagged_delete=?, flag_reason=? WHERE rel_path=?",
             (json.dumps(tags), description, unconf, analysis_txt, fd, fr, rel))
+        # Keep the page_count column in sync with what we just wrote (or preserved).
+        if page_count is not None:
+            try:
+                _db().execute("UPDATE files SET page_count=? WHERE rel_path=?",
+                              (int(page_count), rel))
+            except (TypeError, ValueError):
+                pass
         _db().commit()
         return True
     except Exception as e:
@@ -2224,6 +2388,30 @@ def _set_comic_membership(folder):
         "UPDATE files SET comic_folder=? WHERE rel_path LIKE ? AND rel_path NOT LIKE ?",
         (folder, folder + '/%', folder + '/%/%'))
     _db().commit()
+
+def _write_comic_page_count(folder, data):
+    """Write prism:PageCount (the number of pages) into the comic's COVER page
+    XMP sidecar, so the count travels with the file. Best-effort: reads the
+    cover's current metadata and re-writes it with the page count added, leaving
+    tags/description/regions untouched. No-op if the cover file can't be resolved.
+
+    This is the write half of PageCount's bidirectional handling; the read half
+    is prism_extras() / _read_page_count_from_xmp() feeding the page_count column.
+    """
+    try:
+        pages = _comic_ordered_pages(folder, data)
+        if not pages:
+            return
+        cover = data.get("cover") or pages[0]
+        cover_rel = f"{folder}/{cover}" if folder else cover
+        fp = get_safe_path(MEDIA_DIR, cover_rel)
+        if not fp or not os.path.exists(fp):
+            return
+        meta = read_metadata(fp)
+        write_metadata(fp, meta.get("tags", []), meta.get("description", ""),
+                       meta.get("regions", []), page_count=len(pages))
+    except Exception as e:
+        access_logger.warning(f"_write_comic_page_count {folder}: {e}")
 
 def _upsert_comic_row(folder, data):
     pages = data.get("pages") or _auto_pages(folder)
@@ -3858,6 +4046,7 @@ def api_comic_create():
         return jsonify({"success": False, "error": "Could not write comic.json."})
     _upsert_comic_row(folder, data)
     _set_comic_membership(folder)
+    _write_comic_page_count(folder, data)
     return jsonify({"success": True, "folder": folder})
 
 @app.route("/api/comic_update", methods=["POST"])
@@ -3873,6 +4062,7 @@ def api_comic_update():
     data["schema"] = COMIC_SCHEMA
     _write_comic_json(folder, data)
     _upsert_comic_row(folder, data)
+    _write_comic_page_count(folder, data)
     return jsonify({"success": True})
 
 @app.route("/api/comic_delete", methods=["POST"])
