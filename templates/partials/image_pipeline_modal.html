@@ -1,0 +1,116 @@
+    <div id="pipeline_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
+      <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
+        <span class="text-purple-300 font-bold">Image pipeline</span>
+        <span id="pipeline_eligible" class="text-xs text-gray-400"></span>
+        <div class="ml-auto flex gap-2 items-center">
+          <button onclick="cancelPipeline()" class="text-xs bg-rose-800 hover:bg-rose-700 px-3 py-1 rounded">Cancel
+            run</button>
+          <button onclick="closePipeline()" class="text-gray-400 hover:text-white text-lg leading-none">✕</button>
+        </div>
+      </div>
+
+      <div class="flex-1 overflow-y-auto p-4 space-y-3 max-w-3xl mx-auto w-full">
+        <p class="text-[11px] text-gray-500">
+          Each step is manual and resumable, and reads the previous step's saved output.
+          Run them in order. Clustering works on one embedding per image, so it uses far
+          less memory than whole-library object clustering.
+        </p>
+
+        <!-- step 1 -->
+        <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
+          <div
+            class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">
+            1</div>
+          <div class="flex-1">
+            <div class="text-sm font-bold text-gray-200">Generate depth maps</div>
+            <div class="text-[11px] text-gray-500">Depth-Anything per image (cached, shared with object discovery).
+            </div>
+            <div id="pl_depth_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
+          </div>
+          <button id="pl_btn_depth" onclick="plRun('depth')"
+            class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
+        </div>
+
+        <!-- step 2 -->
+        <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
+          <div
+            class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">
+            2</div>
+          <div class="flex-1">
+            <div class="text-sm font-bold text-gray-200">Generate embeddings</div>
+            <div class="text-[11px] text-gray-500">One whole-image embedding each. Stored permanently; also powers
+              search.</div>
+            <div id="pl_embed_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
+          </div>
+          <label class="text-[10px] text-gray-400 flex items-center gap-1"><input id="pl_embed_force" type="checkbox">
+            force</label>
+          <button id="pl_btn_embed" onclick="plRun('embed')"
+            class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
+        </div>
+
+        <!-- step 3 -->
+        <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
+          <div
+            class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">
+            3</div>
+          <div class="flex-1">
+            <div class="text-sm font-bold text-gray-200">Cluster images</div>
+            <div class="text-[11px] text-gray-500">Group visually-similar images (memory-flat).</div>
+            <div id="pl_cluster_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
+            <div class="flex gap-3 mt-1 text-[10px] text-gray-400">
+              <label class="flex items-center gap-1">eps
+                <input id="pl_eps" type="number" step="0.02" min="0.06" max="0.4" value="0.16"
+                  class="w-16 bg-gray-700 rounded px-1 py-0.5 border border-gray-600 text-white"></label>
+              <label class="flex items-center gap-1">min size
+                <input id="pl_min" type="number" min="2" max="50" value="2"
+                  class="w-14 bg-gray-700 rounded px-1 py-0.5 border border-gray-600 text-white"></label>
+            </div>
+          </div>
+          <button id="pl_btn_cluster" onclick="plRun('cluster')"
+            class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
+        </div>
+
+        <!-- step 4 -->
+        <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
+          <div
+            class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">
+            4</div>
+          <div class="flex-1">
+            <div class="text-sm font-bold text-gray-200">Build heuristics</div>
+            <div class="text-[11px] text-gray-500">Per-cluster concept map: ignores minor differences, surfaces
+              outliers.</div>
+            <div id="pl_heur_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
+          </div>
+          <button id="pl_btn_heur" onclick="plRun('heuristics')"
+            class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
+        </div>
+
+        <!-- step 5 -->
+        <div class="bg-gray-850 border border-gray-700 rounded p-3 flex items-center gap-3">
+          <div
+            class="w-6 h-6 rounded-full bg-purple-700 text-white text-xs font-bold flex items-center justify-center flex-shrink-0">
+            5</div>
+          <div class="flex-1">
+            <div class="text-sm font-bold text-gray-200">Detect objects</div>
+            <div class="text-[11px] text-gray-500">Object detection scoped per image-cluster — bounded memory, uses the
+              concept maps.</div>
+            <div id="pl_detect_stat" class="text-[11px] text-purple-300 mt-0.5">—</div>
+          </div>
+          <button id="pl_btn_detect" onclick="plRun('detect')"
+            class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">Run</button>
+        </div>
+
+        <div class="mt-3 flex items-center gap-2">
+          <button onclick="showStagedClusters()"
+            class="text-xs bg-emerald-700 hover:bg-emerald-600 px-3 py-1.5 rounded font-bold">View results</button>
+          <span class="text-[11px] text-gray-500">Show discovered common-object clusters (persisted, survives
+            restart).</span>
+        </div>
+        <div id="pl_clusters" class="mt-2"></div>
+        <div id="pl_staged_results" class="mt-3"></div>
+      </div>
+
+      <div class="px-4 py-2 bg-gray-800 border-t border-gray-700 flex-shrink-0 text-[11px] text-gray-400">
+        <span id="pl_running" class="text-purple-300"></span>
+      </div>
+    </div>

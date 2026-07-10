@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Media Library</title>
+  <script src="/tailwind"></script>
+  <link rel="stylesheet" href="/web/app.css">
+</head>
+
+<body class="bg-gray-900 text-white h-screen flex overflow-hidden">
+
+  <!-- Left column: its own header on top, then the search/gallery pane -->
+  <div class="flex flex-col h-full rpane bg-gray-900 border-r border-gray-700 z-10"
+    style="width:32%;min-width:300px;max-width:60vw;padding-bottom:20px">
+    {% include 'partials/header.html' %}
+    {% include 'partials/left_pane.html' %}
+  </div>
+
+  <!-- Right: editor region (shared media viewer + controls) -->
+  <div id="editor_region" class="flex-1 flex h-full overflow-hidden vertical">
+    {% include 'partials/image_viewer.html' %}
+    {% include 'partials/controls_pane.html' %}
+  </div>
+
+  <!-- Modals -->
+  {% include 'partials/tiers_modal.html' %}
+  {% include 'partials/dedup_modal.html' %}
+  {% include 'partials/region_modal.html' %}
+  {% include 'partials/settings_modal.html' %}
+  {% include 'partials/ai_pipeline_settings_modal.html' %}
+  {% include 'partials/popout_modal.html' %}
+  {% include 'partials/comic_modal.html' %}
+  {% include 'partials/review_modal.html' %}
+  {% include 'partials/image_pipeline_modal.html' %}
+  {% include 'partials/music_pane.html' %}
+
+  <!-- Shared globals first, then per-area modules -->
+  <script src="/static/globals.js"></script>
+  <script src="/static/viewer.js"></script>
+  <script src="/static/gallery.js"></script>
+  <script src="/static/editor.js"></script>
+  <script src="/static/ai_tools.js"></script>
+  <script src="/static/dedup.js"></script>
+  <script src="/static/review.js"></script>
+  <script src="/static/comic.js"></script>
+  <script src="/static/tiers.js"></script>
+  <script src="/static/image_pipeline.js"></script>
+  <script src="/static/init.js"></script>
+  <script src="/web/pipeline_edtor.js"></script>
+  <script src="/web/music.js"></script>
+</body>
+
+</html>

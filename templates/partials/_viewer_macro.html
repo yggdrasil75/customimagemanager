@@ -1,0 +1,58 @@
+{# Reusable image/video viewer.
+
+   Both the main editor pane and the AI-review modal mount THIS same markup so
+   they share one draw/box/video-scrub code path (see static/viewer.js). The
+   `p` argument is an id prefix so the two instances don't collide:
+     - main pane  → p = ''      (ids stay media_canvas, vt_bar, … unchanged)
+     - review     → p = 'rv_'   (ids become rv_media_canvas, rv_vt_bar, …)
+
+   `chrome` toggles the surrounding filename bar + footer controls (the review
+   modal supplies its own header, so it passes chrome=False). #}
+{% macro media_viewer(p='', chrome=True, pane_class='flex flex-col bg-gray-900', pane_id=None) %}
+<div id="{{ pane_id or (p ~ 'image_pane') }}" class="{{ pane_class }}" data-viewer="{{ p }}">
+  {% if chrome %}
+  <div class="px-3 py-2 bg-gray-800 border-b border-gray-700 flex items-center gap-2 flex-shrink-0">
+    <p id="{{ p }}selected_filename" class="text-xs font-mono text-blue-400 truncate flex-1">No file selected</p>
+    <span id="{{ p }}save_indicator" class="text-xs font-bold px-2 py-0.5 rounded bg-gray-900 text-gray-500 hidden"></span>
+  </div>
+  {% endif %}
+  <div id="{{ p }}canvas_container" class="flex-1 bg-black overflow-hidden relative" style="min-height:120px">
+    <canvas id="{{ p }}media_canvas" class="absolute"></canvas>
+    <video id="{{ p }}media_video" class="absolute hidden" playsinline
+      style="max-width:100%;max-height:calc(100% - 34px);left:50%;top:calc(50% - 17px);transform:translate(-50%,-50%)"></video>
+    <!-- Box overlay: drawn ON TOP of the pixels, never baked in. Sits below the
+         control bar (z-20 < z-30) so play/scrub are always clickable. -->
+    <svg id="{{ p }}vt_overlay" class="absolute hidden z-20" preserveAspectRatio="none" viewBox="0 0 1 1"
+      style="pointer-events:none"></svg>
+    <!-- Custom video controls, pinned to the bottom, above the overlay. -->
+    <div id="{{ p }}vt_bar" class="absolute hidden z-30 left-0 right-0 bottom-0 h-[34px] px-2
+             flex items-center gap-2 bg-gray-900/90 border-t border-gray-700">
+      <button id="{{ p }}vt_play" class="text-gray-200 hover:text-white text-sm w-5">▶</button>
+      <input id="{{ p }}vt_seek" type="range" min="0" max="1000" value="0"
+        class="flex-1 h-1 accent-blue-500 cursor-pointer">
+      <span id="{{ p }}vt_time" class="text-[10px] text-gray-400 tabular-nums w-20 text-right">0:00 / 0:00</span>
+      <button id="{{ p }}vt_auto"
+        class="text-[10px] px-1.5 py-0.5 rounded bg-purple-700 hover:bg-purple-600 text-white">Auto-detect</button>
+    </div>
+  </div>
+  {% if chrome %}
+  <div class="px-3 py-1 bg-gray-800 border-t border-gray-700 flex justify-between items-center flex-shrink-0">
+    <span class="text-[10px] text-gray-500">Drag: add box · hover to locate</span>
+    <div class="flex items-center gap-2">
+      <button onclick="openPopout()" title="Open in popout for detail labelling"
+        class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-gray-300">⛶ Popout</button>
+      <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
+        <input type="checkbox" id="{{ p }}toggle_regions" checked onchange="drawCanvas()" class="accent-blue-500">
+        Regions
+      </label>
+      <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
+        <input type="checkbox" id="{{ p }}toggle_skeleton"
+          onchange="drawCanvas();if(typeof popoutOpen!=='undefined'&&popoutOpen)drawPopout();"
+          class="accent-cyan-500">
+        Skeleton
+      </label>
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endmacro %}

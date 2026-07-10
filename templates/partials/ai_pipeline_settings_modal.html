@@ -1,0 +1,29 @@
+{# Smart Tag pipeline settings — split out of the LLM settings modal so the
+   decision tree can be worked on on its own. pipeline_editor.js mounts its
+   visual node editor beside #cfg_pipeline (its parentElement), so keeping that
+   textarea here is all that's needed; openPipelineSettings() calls
+   window.pipelineEditorRefresh() after showing this modal. saveAiSettings()
+   still reads #cfg_pipeline, so Save/Cancel live here too. #}
+<div id="ai_pipeline_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
+  <div class="bg-gray-800 p-5 rounded-lg border border-gray-600 w-[560px] flex flex-col max-h-[90vh]">
+    <div class="flex justify-between items-center mb-3 flex-shrink-0">
+      <h2 class="font-bold text-teal-300">🌳 Smart Tag pipeline</h2>
+      <span class="text-[10px] text-gray-500">decision tree run by 🌳 Smart Tag</span>
+    </div>
+    <div class="overflow-y-auto flex-1 pr-1">
+      <div class="border border-gray-600 rounded p-3">
+        <label class="text-xs font-bold text-gray-400 block mb-1">Pipeline (advanced JSON)</label>
+        <p class="text-[10px] text-gray-500 mb-1">Edit visually below, or toggle to raw JSON. Edit carefully.</p>
+        <textarea id="cfg_pipeline" rows="10"
+          class="w-full p-2 bg-gray-900 rounded border border-gray-600 text-xs text-white font-mono resize-y"></textarea>
+        <p id="cfg_pipeline_err" class="text-[10px] text-red-400 mt-1 hidden"></p>
+      </div>
+    </div>
+    <div class="flex justify-end gap-2 pt-3 border-t border-gray-700 mt-3 flex-shrink-0">
+      <button onclick="document.getElementById('ai_pipeline_modal').classList.add('hidden')"
+        class="bg-gray-600 px-4 py-1.5 rounded text-sm">Close</button>
+      <button onclick="saveAiSettings()"
+        class="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded text-sm font-bold">Save</button>
+    </div>
+  </div>
+</div>

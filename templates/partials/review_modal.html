@@ -1,0 +1,55 @@
+{% from 'partials/_viewer_macro.html' import media_viewer %}
+{# AI review modal. The center now mounts the SHARED media viewer (prefix
+   'rv_', no chrome) instead of a bespoke <canvas id="review_canvas">, so the
+   review flow gets the same box overlay + video scrubbing as the main pane. #}
+<div id="review_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
+  <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
+    <span class="text-rose-300 font-bold">🚩 Review AI suggestions</span>
+    <span id="review_progress" class="text-xs text-gray-400"></span>
+    <div class="ml-auto flex gap-2">
+      <button onclick="reviewDeleteAllFlagged()"
+        class="text-xs bg-red-800 hover:bg-red-700 px-3 py-1 rounded font-bold text-red-200">Delete all
+        flagged…</button>
+      <button onclick="closeReview()" class="text-gray-400 hover:text-white text-lg leading-none">✕</button>
+    </div>
+  </div>
+  <div class="flex flex-1 overflow-hidden">
+    <div class="flex-1 bg-black flex items-center justify-center overflow-hidden relative">
+      {{ media_viewer(p='rv_', chrome=False, pane_class='w-full h-full flex flex-col', pane_id='review_viewer') }}
+      <button onclick="reviewStep(-1)"
+        class="absolute left-2 top-1/2 -translate-y-1/2 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl z-40">‹</button>
+      <button onclick="reviewStep(1)"
+        class="absolute right-2 top-1/2 -translate-y-1/2 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl z-40">›</button>
+    </div>
+    <div class="w-80 bg-gray-850 border-l border-gray-700 p-4 overflow-y-auto flex-shrink-0 space-y-3">
+      <p id="review_filename" class="text-xs font-mono text-blue-400 break-all"></p>
+      <div id="review_flag" class="hidden bg-red-900/60 border border-red-700 rounded p-2 text-xs text-red-200">
+        <div class="font-bold mb-1">AI suggests deletion</div>
+        <div id="review_reason" class="text-red-300 mb-2"></div>
+        <div class="flex gap-2">
+          <button onclick="reviewDelete()"
+            class="bg-red-700 hover:bg-red-600 px-3 py-1 rounded font-bold">Delete</button>
+          <button onclick="reviewKeep()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded">Keep</button>
+        </div>
+      </div>
+      <div id="review_boxpanel" class="bg-gray-900 border border-gray-700 rounded p-2 text-xs">
+        <div class="flex items-center justify-between mb-2">
+          <span class="font-bold text-amber-300">Boxes</span>
+          <div class="flex gap-1">
+            <button onclick="rvAll('accept')"
+              class="bg-emerald-800 hover:bg-emerald-700 px-2 py-0.5 rounded text-[10px]">accept all</button>
+            <button onclick="rvAll('deny')" class="bg-red-800 hover:bg-red-700 px-2 py-0.5 rounded text-[10px]">deny
+              all</button>
+          </div>
+        </div>
+        <div id="review_boxlist" class="max-h-64 overflow-y-auto"></div>
+        <div class="flex gap-2 mt-2">
+          <button onclick="rvSave(false)" class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded flex-1">Save</button>
+          <button onclick="rvSave(true)"
+            class="bg-emerald-700 hover:bg-emerald-600 px-3 py-1 rounded font-bold flex-1" title="shortcut: A">Save
+            &amp; next</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

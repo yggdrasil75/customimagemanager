@@ -1,0 +1,4 @@
+{% from 'partials/_viewer_macro.html' import media_viewer %}
+{# Main editor viewer — the primary instance (empty prefix keeps the original
+   ids: media_canvas, vt_bar, toggle_regions, …). Mounted inside #editor_region. #}
+{{ media_viewer(p='', chrome=True) }}

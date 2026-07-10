@@ -1,0 +1,172 @@
+    <div id="controls_pane" class="overflow-y-auto flex-shrink-0">
+      <div id="editor_panel" class="p-3 flex flex-col gap-3 opacity-50 pointer-events-none">
+        <div class="flex justify-between items-center gap-2">
+          <span class="text-sm font-bold text-gray-300">Editor</span>
+          <div class="flex items-center gap-1">
+            <button onclick="findSimilarToCurrent()"
+              title="Find visually similar images (needs embeddings — run pipeline step 2)"
+              class="text-[10px] bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded text-white uppercase font-bold">Similar</button>
+            <button onclick="moveCurrentFile()"
+              class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded uppercase font-bold">Move</button>
+            <button onclick="confirmAllRegions()" title="Confirm every unconfirmed box"
+              class="text-[10px] bg-amber-700 hover:bg-amber-600 px-2 py-1 rounded text-white">✓ Confirm all</button>
+            <button id="btn_delete" onclick="deleteCurrentFile()"
+              class="hidden text-red-400 hover:text-red-300 text-xs px-1">Delete</button>
+          </div>
+        </div>
+
+        <div id="flag_banner" class="hidden text-xs bg-red-900/60 border border-red-700 rounded p-2 text-red-200">
+          <div class="font-bold mb-1">🚩 AI suggests deletion</div>
+          <div id="flag_reason" class="mb-2 text-red-300"></div>
+          <div class="flex gap-2">
+            <button onclick="deleteFlaggedCurrent()"
+              class="bg-red-700 hover:bg-red-600 px-2 py-1 rounded font-bold">Delete</button>
+            <button onclick="clearCurrentFlag()" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Keep</button>
+          </div>
+        </div>
+
+        <div id="regions_list"
+          class="hidden max-h-48 overflow-y-auto bg-gray-900 border border-gray-700 rounded p-1 space-y-0.5"></div>
+
+        <!-- Per-region editor: description + tags for the currently selected box. -->
+        <div id="region_editor" class="hidden bg-gray-900 border border-blue-800 rounded p-2 space-y-2">
+          <div class="flex justify-between items-center">
+            <label class="text-[10px] font-bold text-blue-300 uppercase tracking-wider">
+              Region <span id="region_editor_name" class="text-white normal-case"></span>
+            </label>
+            <div class="flex items-center gap-2">
+              <span id="region_editor_uuid" class="text-[9px] text-gray-600 font-mono"
+                title="Shared-database UUID"></span>
+              <button onclick="closeRegionEditor()" title="Close region editor"
+                class="text-[11px] text-gray-400 hover:text-white px-1">✕</button>
+            </div>
+          </div>
+
+          <div>
+            <div class="flex justify-between items-center mb-1">
+              <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Region Tags</label>
+              <span id="region_tag_count" class="text-[10px] text-gray-500"></span>
+            </div>
+            <div id="region_tag_list"
+              class="max-h-32 overflow-y-auto bg-gray-950 border border-gray-700 rounded p-1 flex flex-col gap-0.5"></div>
+            <div class="flex gap-1 mt-1">
+              <input id="region_tag_add_input" type="text"
+                placeholder="Add region tag(s), comma-separated"
+                class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600 text-xs text-white focus:border-blue-500"
+                onkeydown="if(event.key==='Enter'){event.preventDefault();addRegionTagsFromInput();}">
+              <button onclick="addRegionTagsFromInput()"
+                class="text-xs bg-blue-600 hover:bg-blue-500 px-3 rounded font-bold">Add</button>
+              <button onclick="confirmAllRegionTags()" id="btn_confirm_all_region_tags" style="display:none"
+                title="Confirm all generated region tags"
+                class="text-xs bg-green-700 hover:bg-green-600 px-3 rounded font-bold">✓ All</button>
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Region Description</label>
+            <textarea id="region_desc" rows="2"
+              oninput="onRegionDescInput()"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
+          </div>
+        </div>
+
+        <div>
+          <div class="flex justify-between items-center mb-1">
+            <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Quality</label>
+            <span id="iqa_manual_badge" class="hidden text-[9px] text-amber-400 uppercase font-bold">manual</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <div id="meta_stars" class="flex items-center gap-0.5 text-xl leading-none select-none"></div>
+            <button onclick="clearStars()" title="Clear rating"
+              class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-gray-300">Clear</button>
+            <span id="iqa_brisque_hint" class="text-[10px] text-gray-500"></span>
+          </div>
+        </div>
+
+        <div>
+          <div class="flex justify-between items-center mb-1">
+            <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider"
+              title="Whole-image tags plus every region's tags, combined">Tags <span class="text-gray-600 normal-case">(image + regions)</span></label>
+            <span id="tag_count" class="text-[10px] text-gray-500"></span>
+          </div>
+          <div id="tag_list"
+            class="max-h-40 overflow-y-auto bg-gray-900 border border-gray-600 rounded p-1 flex flex-col gap-0.5"></div>
+          <div class="flex gap-1 mt-1">
+            <input id="tag_add_input" type="text" placeholder="Add tag(s), comma-separated, then Enter"
+              class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600 text-xs text-white focus:border-blue-500"
+              onkeydown="if(event.key==='Enter'){event.preventDefault();addTagsFromInput();}">
+            <button onclick="addTagsFromInput()"
+              class="text-xs bg-blue-600 hover:bg-blue-500 px-3 rounded font-bold">Add</button>
+            <button onclick="confirmAllTags()" id="btn_confirm_all_tags" style="display:none"
+              title="Confirm all suggested tags"
+              class="text-xs bg-green-700 hover:bg-green-600 px-3 rounded font-bold">✓ All</button>
+          </div>
+          <!-- hidden mirror: kept in sync with the tag list so legacy code paths
+             (AI tagging, autosave) can read/write a comma string unchanged. -->
+          <input id="meta_tags" type="hidden">
+        </div>
+
+        <div>
+          <div class="flex justify-between items-center mb-1">
+            <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Description</label>
+            <div class="flex items-center gap-1">
+              <select id="llm_action_select"
+                class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-0.5 max-w-[130px]"></select>
+              <button onclick="runLLM()" id="btn_run_llm"
+                class="text-xs bg-yellow-600 hover:bg-yellow-500 px-2 py-0.5 rounded font-bold">✨ AI</button>
+            </div>
+          </div>
+          <textarea id="meta_desc" oninput="triggerAutosave()" rows="4"
+            class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
+        </div>
+
+        <div id="analysis_panel" class="hidden">
+          <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">AI Analysis</label>
+          <div id="analysis_body"
+            class="text-xs bg-gray-900 border border-gray-700 rounded p-2 space-y-2 max-h-48 overflow-y-auto"></div>
+        </div>
+      </div>
+
+      <!-- AI Tools -->
+      <div class="p-3 flex flex-col gap-2 border-t border-gray-700">
+        <div class="flex justify-between items-center">
+          <h3 class="font-bold text-purple-400 text-sm">AI Tooling</h3>
+          <div class="flex gap-2">
+            <button
+              onclick="document.getElementById('ai_modal').classList.remove('hidden');window.pipelineEditorRefresh&&window.pipelineEditorRefresh()"
+              class="text-xs bg-gray-700 px-2 py-1 rounded hover:bg-gray-600">⚙ Settings</button>
+            <a href="/training_portal" target="_blank"
+              class="text-xs text-purple-300 bg-gray-700 px-2 py-1 rounded hover:bg-gray-600 border border-purple-800">Trainer
+              ↗</a>
+          </div>
+        </div>
+        <div id="yolo_controls" class="opacity-50 pointer-events-none">
+          <select id="model_selector"
+            class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm mb-1"></select>
+          <button onclick="runAutoTag()" id="btn_autotag"
+            class="w-full bg-indigo-600 hover:bg-indigo-500 py-1.5 rounded font-bold text-sm">Auto-Tag Image</button>
+        </div>
+        <button onclick="runPipeline()" id="btn_smarttag"
+          class="w-full bg-teal-600 hover:bg-teal-500 py-1.5 rounded font-bold text-sm">🌳 Smart Tag (AI
+          pipeline)</button>
+        <div class="grid grid-cols-2 gap-2">
+          <button onclick="runPose()" id="btn_pose"
+            class="bg-cyan-700 hover:bg-cyan-600 py-1.5 rounded font-bold text-sm">🦴 Pose</button>
+          <button onclick="runOCR()" id="btn_ocr"
+            class="bg-sky-700 hover:bg-sky-600 py-1.5 rounded font-bold text-sm">🔤 OCR</button>
+        </div>
+        <button onclick="removePose()" id="btn_pose_remove" style="display:none"
+          title="Delete the current (bad) skeleton from this image"
+          class="w-full bg-rose-800 hover:bg-rose-700 py-1.5 rounded font-bold text-sm">🗑 Remove skeleton</button>
+        <button onclick="quickTrain()"
+          class="w-full bg-purple-600 hover:bg-purple-500 py-1.5 rounded font-bold text-sm">Quick Train</button>
+        <button onclick="openTiersModal()"
+          class="w-full bg-gray-700 hover:bg-gray-600 py-1.5 rounded font-bold text-sm border border-amber-700 text-amber-300">🗄
+          Storage Tiers</button>
+        <label class="flex items-center justify-between text-xs text-gray-300 mt-1 cursor-pointer">
+          <span>Background auto-tag when idle</span>
+          <input type="checkbox" id="autotag_toggle" onchange="toggleAutotag()" class="accent-purple-500">
+        </label>
+        <p class="text-xs text-gray-400">Status: <span id="status_text" class="text-yellow-400">Ready.</span></p>
+      </div>
+    </div>

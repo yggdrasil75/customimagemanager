@@ -26,7 +26,7 @@ import hashlib, sqlite3, uuid
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from werkzeug.utils import secure_filename
-from flask import Flask, render_template_string, request, jsonify, send_file, Response
+from flask import Flask, render_template, render_template_string, request, jsonify, send_file, Response
 from ultralytics import YOLO
 import imagecodecs
 from dup_heuristics import DuplicateClassifier, classify_pair, extract_features
@@ -2318,7 +2318,7 @@ def _touch_activity():
     _last_activity = time.time()
 
 @app.route("/")
-def index(): return render_template_string(HTML)
+def index(): return render_template("app.html")
 
 @app.route("/training_portal")
 def training_portal(): return render_template_string(TRAINING_HTML)

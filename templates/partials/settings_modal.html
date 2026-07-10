@@ -1,0 +1,82 @@
+{# LLM / Vision settings. The Smart Tag pipeline editor lives in its own modal
+   now (partials/ai_pipeline_modal.html) so it can be worked on independently;
+   this modal keeps endpoint / model / prompt / actions only. #}
+<div id="ai_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
+  <div class="bg-gray-800 p-5 rounded-lg border border-gray-600 w-[400px] flex flex-col max-h-[90vh]">
+    <div class="flex justify-between items-center mb-4 flex-shrink-0">
+      <h2 class="font-bold text-purple-400">LLM / Vision Settings</h2>
+      <button onclick="openPipelineSettings()" title="Edit the Smart Tag decision tree"
+        class="text-xs bg-teal-700 hover:bg-teal-600 px-2 py-1 rounded font-bold">🌳 Pipeline…</button>
+    </div>
+    <div class="overflow-y-auto flex-1 space-y-3 pr-1">
+      <div><label class="text-xs text-gray-400 block mb-1">Endpoint</label>
+        <input id="cfg_endpoint" type="text"
+          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+      </div>
+      <div><label class="text-xs text-gray-400 block mb-1">API Key</label>
+        <input id="cfg_apikey" type="password"
+          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+      </div>
+      <div><label class="text-xs text-gray-400 block mb-1">Model</label>
+        <input id="cfg_model" type="text"
+          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+      </div>
+      <div><label class="text-xs text-gray-400 block mb-1">Pose &amp; detection models <span
+            class="text-gray-600">(auto-downloaded)</span></label>
+        <div class="grid grid-cols-3 gap-2">
+          <div>
+            <span class="text-[10px] text-gray-500 block mb-0.5">YOLO size</span>
+            <select id="cfg_yolo_size"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+              <option value="n">n · nano</option>
+              <option value="s">s · small</option>
+              <option value="m">m · medium</option>
+              <option value="l">l · large</option>
+              <option value="x">x · xlarge</option>
+            </select>
+          </div>
+          <div>
+            <span class="text-[10px] text-gray-500 block mb-0.5">Pose type</span>
+            <select id="cfg_pose_kind"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+              <option value="body">Body · 17 pts</option>
+              <option value="wholebody">Whole-body · 133 (hands+face)</option>
+            </select>
+          </div>
+          <div>
+            <span class="text-[10px] text-gray-500 block mb-0.5">Pose size</span>
+            <select id="cfg_pose_size"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+              <option value="n">n · nano</option>
+              <option value="s">s · small</option>
+              <option value="m">m · medium</option>
+              <option value="l">l · large</option>
+              <option value="x">x · xlarge</option>
+            </select>
+          </div>
+        </div>
+        <p class="text-[10px] text-gray-600 mt-1">Whole-body pose needs <code>rtmlib</code> +
+          <code>onnxruntime</code>; OCR needs <code>rapidocr_onnxruntime</code> or <code>easyocr</code>. Weights
+          download automatically on first use.</p>
+      </div>
+      <div><label class="text-xs text-gray-400 block mb-1">System Prompt</label>
+        <textarea id="cfg_system" rows="2"
+          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
+      </div>
+      <div class="border-t border-gray-600 pt-3">
+        <div class="flex justify-between items-center mb-2">
+          <label class="text-xs font-bold text-gray-400">Actions</label>
+          <button onclick="addAiAction()"
+            class="text-xs bg-indigo-600 hover:bg-indigo-500 px-2 py-0.5 rounded font-bold">+ Add</button>
+        </div>
+        <div id="actions_container" class="space-y-2"></div>
+      </div>
+    </div>
+    <div class="flex justify-end gap-2 pt-3 border-t border-gray-700 mt-3 flex-shrink-0">
+      <button onclick="document.getElementById('ai_modal').classList.add('hidden')"
+        class="bg-gray-600 px-4 py-1.5 rounded text-sm">Cancel</button>
+      <button onclick="saveAiSettings()"
+        class="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded text-sm font-bold">Save</button>
+    </div>
+  </div>
+</div>

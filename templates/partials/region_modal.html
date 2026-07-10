@@ -1,0 +1,12 @@
+  <div id="region_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
+    <div class="bg-gray-800 p-6 rounded-lg border border-gray-600 w-72">
+      <h2 class="font-bold mb-3">Region Name</h2>
+      <input id="modal_region_name" type="text" list="vt_labels"
+        class="w-full p-2 bg-gray-700 rounded border border-gray-600 mb-4 text-white">
+      <datalist id="vt_labels"></datalist>
+      <div class="flex justify-end gap-2">
+        <button onclick="cancelRegion()" class="bg-gray-600 px-4 py-1.5 rounded text-sm">Cancel</button>
+        <button onclick="saveRegion()" class="bg-blue-600 px-4 py-1.5 rounded text-sm font-bold">Add</button>
+      </div>
+    </div>
+  </div>

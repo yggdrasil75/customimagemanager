@@ -1,0 +1,48 @@
+  <div id="tiers_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
+    <div class="bg-gray-800 p-5 rounded-lg border border-gray-600 w-[620px] flex flex-col max-h-[90vh]">
+      <h2 class="font-bold text-amber-300 mb-1 flex-shrink-0">🗄 Storage Tiers</h2>
+      <p class="text-[11px] text-gray-500 mb-3">Order tiers fastest → slowest. Files stay at their normal library paths
+        as symlinks; bytes live on the tier drives. Keep the <code>media/</code> folder itself (links, DB, thumbnails)
+        on your fastest drive. Ratios are normalised, so 5 / 50 / 45 works as percentages.</p>
+      <div class="overflow-y-auto flex-1 pr-1">
+        <label class="flex items-center gap-2 text-sm text-gray-300 mb-3 cursor-pointer">
+          <input type="checkbox" id="tiers_enabled" class="accent-amber-500"> Enable automatic tiering
+        </label>
+        <div class="grid grid-cols-[1fr_2fr_70px_90px_28px] gap-2 text-[10px] text-gray-500 mb-1 px-1">
+          <span>Name</span><span>Path</span><span>Ratio %</span><span>Speed MB/s</span><span></span>
+        </div>
+        <div id="tiers_rows" class="space-y-1.5 mb-2"></div>
+        <button onclick="addTierRow()"
+          class="text-xs bg-indigo-600 hover:bg-indigo-500 px-2 py-1 rounded font-bold mb-3">+ Add tier</button>
+        <div class="grid grid-cols-3 gap-2 mb-3">
+          <div><label class="text-[10px] text-gray-500 block mb-0.5">Video headroom ×</label>
+            <input id="tiers_headroom" type="number" step="0.5" min="1"
+              class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          </div>
+          <div><label class="text-[10px] text-gray-500 block mb-0.5">Rebalance every (min)</label>
+            <input id="tiers_interval" type="number" min="1"
+              class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          </div>
+          <div><label class="text-[10px] text-gray-500 block mb-0.5">Copy throttle MB/s</label>
+            <input id="tiers_throttle" type="number" min="1"
+              class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          </div>
+        </div>
+        <div id="tiers_status" class="text-xs text-gray-300 space-y-1 border-t border-gray-700 pt-3"></div>
+      </div>
+      <div class="flex justify-between items-center pt-3 border-t border-gray-700 mt-3 flex-shrink-0">
+        <div class="flex gap-2">
+          <button onclick="tiersRebalance()"
+            class="bg-amber-600 hover:bg-amber-500 px-3 py-1.5 rounded text-sm font-bold">Rebalance now</button>
+          <button onclick="tiersCancel()" class="bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded text-sm">Cancel
+            run</button>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="document.getElementById('tiers_modal').classList.add('hidden'); stopTiersPoll()"
+            class="bg-gray-600 px-4 py-1.5 rounded text-sm">Close</button>
+          <button onclick="saveTiersConfig()"
+            class="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded text-sm font-bold">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
