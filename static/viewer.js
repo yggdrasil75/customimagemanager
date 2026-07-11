@@ -412,7 +412,7 @@ const mainViewer   = makeViewer('');
 const reviewViewer = makeViewer('rv_');
 
 // Re-export the main viewer's members as the original globals so every existing
-// call site (selectFile, editor.js, ai_tools.js, pipeline_edtor.js, …) keeps
+// call site (selectFile, editor.js, ai_tools.js, pipeline_editor.js, …) keeps
 // working unchanged.
 const canvas     = mainViewer.canvas;
 const ctx        = mainViewer.ctx;
