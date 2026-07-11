@@ -43,6 +43,8 @@ MWG_RS_URI   = "http://www.metadataworkinggroup.com/schemas/regions/"
 MWG_ST_URI   = "http://www.metadataworkinggroup.com/schemas/regions/type/"  # stArea/stDim
 MWG_COLL_URI = "http://www.metadataworkinggroup.com/schemas/collections/"
 MWG_KW_URI   = "http://www.metadataworkinggroup.com/schemas/keywords/"
+# App-owned namespace for our mwg-rs:Extensions leaves (currently: Confirmed).
+CIM_EXT_URI  = "https://github.com/yggdrasil75/customimagemanager/ns/regions/"
 
 MWG_RS_TITLE   = "MWG Regions"
 MWG_COLL_TITLE = "MWG Collections"
@@ -149,7 +151,12 @@ _RS_FOCUSUSAGE = {
     "EvaluatedUsed": "Evaluated, Used",
     "NotEvaluatedNotUsed": "Not Evaluated, Not Used",
 }
-_RS_TYPE = {"BarCode": "BarCode", "Face": "Face", "Focus": "Focus", "Pet": "Pet"}
+# The 4 MWG-spec predefined Type values, plus app-added defaults. Type is a
+# free string in the spec, so these are just the dropdown seeds — users can add
+# their own (e.g. "Full body", "Background object") and any string round-trips.
+_RS_TYPE = {"BarCode": "BarCode", "Face": "Face", "Focus": "Focus", "Pet": "Pet",
+            "Full body": "Full body", "Background object": "Background object",
+            "Body Part": "Body Part"}
 
 # (name, kind, is_list, feeds, values, note)
 _MWG_RS_FIELDS = [
@@ -175,7 +182,8 @@ _MWG_RS_FIELDS = [
     ("RegionDescription", "string", True, "regions", None,
      "RegionStruct.Description — holds our per-region tag/description JSON."),
     ("RegionExtensions", "string", True, None, None,
-     "RegionStruct.Extensions (open struct; no predefined leaves)."),
+     "RegionStruct.Extensions (open struct). We store cim:Confirmed here — the "
+     "AI box confirmed/unconfirmed flag, moved off Type."),
     ("RegionFocusUsage", "string", True, None, _RS_FOCUSUSAGE,
      "RegionStruct.FocusUsage."),
     ("RegionName", "string", True, "regions", None,
@@ -185,8 +193,11 @@ _MWG_RS_FIELDS = [
     ("RegionSeeAlso", "string", True, "regions", None,
      "RegionStruct.SeeAlso — our region-name filter link."),
     ("RegionType", "string", True, "regions", _RS_TYPE,
-     "RegionStruct.Type. We overload this with 'confirmed'/'unconfirmed' for AI "
-     "box state in our own sidecars, alongside the spec's Face/Focus/Pet/BarCode."),
+     "RegionStruct.Type — the region type. Free string; the spec predefines "
+     "Face/Focus/Pet/BarCode and we seed a few more (Full body, Background "
+     "object) as editable dropdown defaults. The confirmed/unconfirmed AI box "
+     "flag now lives in Extensions (cim:Confirmed); legacy sidecars that stored "
+     "it here are still read on import."),
 ]
 
 _MWG_COLL_FIELDS = [
@@ -279,12 +290,28 @@ def parse_region_list(xmp, desc_from_json):
             continue
         if not (w > 0 and h > 0):
             continue
-        rtype = str(xmp.get(f'{p}/mwg-rs:Type', '')).lower()
-        rdesc, rtags = desc_from_json(xmp.get(f'{p}/mwg-rs:Description', ''))
+        rtype = xmp.get(f'{p}/mwg-rs:Type', '') or ''
+        rdesc, rtags, rclass = desc_from_json(xmp.get(f'{p}/mwg-rs:Description', ''))
+        # Confirmed now lives in the Extensions open-struct (cim:Confirmed).
+        # Legacy files stored it as Type == 'unconfirmed'; fall back to that so
+        # sidecars written before this change still import correctly (and their
+        # Type isn't mistaken for a real region type).
+        conf_raw = xmp.get(f'{p}/mwg-rs:Extensions/cim:Confirmed', None)
+        if conf_raw is not None:
+            confirmed = str(conf_raw).strip().lower() not in ('false', '0', 'no', '')
+        else:
+            confirmed = str(rtype).strip().lower() != 'unconfirmed'
+        if str(rtype).strip().lower() in ('confirmed', 'unconfirmed'):
+            rtype = ''            # legacy overload value, not a real type
+        # Instance name lives in mwg-rs:Name ("jill"); the class ("girl") rides
+        # in the Description JSON. Fall back to Name for class on legacy files.
+        inst_name = xmp.get(f'{p}/mwg-rs:Name', '') or ''
         regions.append({
-            "class_name": xmp.get(f'{p}/mwg-rs:Name', 'object'),
+            "class_name": rclass or inst_name or 'object',
+            "region_name": inst_name,
+            "region_type": rtype,
             "cx": cx, "cy": cy, "w": w, "h": h,
-            "confirmed": rtype != 'unconfirmed',
+            "confirmed": confirmed,
             "uuid": str(xmp.get(f'{p}/mwg-rs:BarCodeValue', '')) or None,
             "region_description": rdesc,
             "region_tags": rtags,
@@ -307,16 +334,29 @@ def build_region_list_xml(regions, esc, desc_to_json, see_also_link, new_uuid):
         return "", ""
     items = []
     for b in regions:
-        rid = 'confirmed' if b.get('confirmed', True) else 'unconfirmed'
-        name = esc(b.get("class_name", "object"))
+        confirmed = b.get('confirmed', True)
+        # mwg-rs:Name = the individual/instance name ("jill"); fall back to the
+        # class ("girl") when no instance name is set so Name is never empty.
+        inst = b.get("region_name") or b.get("class_name", "object")
+        name = esc(inst)
+        # mwg-rs:Type = the real region type ("Face", "Full body", …). Emitted
+        # only when set, so we don't write empty type elements.
+        rtype = (b.get("region_type") or "").strip()
+        type_el = f'<mwg-rs:Type>{esc(rtype)}</mwg-rs:Type>' if rtype else ''
         uid = b.get("uuid") or new_uuid()
         b["uuid"] = uid
         desc_json = esc(desc_to_json(b))
         see_also = esc(see_also_link(b.get("class_name")))
+        # Extensions is an open struct; we stash the app-specific confirmed flag
+        # here (cim:Confirmed) now that Type carries the real region type.
+        ext_el = (f'<mwg-rs:Extensions rdf:parseType="Resource">'
+                  f'<cim:Confirmed>{"true" if confirmed else "false"}</cim:Confirmed>'
+                  f'</mwg-rs:Extensions>')
         items.append(
             f'<rdf:li rdf:parseType="Resource">'
             f'<mwg-rs:Name>{name}</mwg-rs:Name>'
-            f'<mwg-rs:Type>{rid}</mwg-rs:Type>'
+            f'{type_el}'
+            f'{ext_el}'
             f'<mwg-rs:BarCodeValue>{esc(uid)}</mwg-rs:BarCodeValue>'
             f'<mwg-rs:SeeAlso>{see_also}</mwg-rs:SeeAlso>'
             f'<mwg-rs:Description>{desc_json}</mwg-rs:Description>'
@@ -331,7 +371,8 @@ def build_region_list_xml(regions, esc, desc_to_json, see_also_link, new_uuid):
              '</rdf:Bag></mwg-rs:RegionList>'
              '</mwg-rs:Regions>')
     ns = (f' xmlns:mwg-rs="{MWG_RS_URI}"'
-          f' xmlns:stArea="{MWG_ST_URI}"')
+          f' xmlns:stArea="{MWG_ST_URI}"'
+          f' xmlns:cim="{CIM_EXT_URI}"')
     return block, ns
 
 

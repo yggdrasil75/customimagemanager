@@ -79,6 +79,31 @@
             </div>
           </div>
 
+          <div class="flex gap-2">
+            <div class="flex-1">
+              <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1"
+                title="The individual's name — mwg-rs:Name (e.g. 'jill'). The class ('girl') is the region label above.">Name</label>
+              <input id="region_name" type="text" placeholder="e.g. jill"
+                oninput="onRegionNameInput()"
+                class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
+            </div>
+            <div class="flex-1">
+              <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1"
+                title="mwg-rs:Type. Pick a preset or type your own.">Type</label>
+              <input id="region_type" list="region_type_options" placeholder="type…"
+                oninput="onRegionTypeInput()"
+                class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
+              <datalist id="region_type_options">
+                <option value="Face"></option>
+                <option value="Pet"></option>
+                <option value="Focus"></option>
+                <option value="BarCode"></option>
+                <option value="Full body"></option>
+                <option value="Background object"></option>
+              </datalist>
+            </div>
+          </div>
+
           <div>
             <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Region Description</label>
             <textarea id="region_desc" rows="2"

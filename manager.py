@@ -1283,20 +1283,25 @@ def _region_desc_to_json(region):
                 entry["confirmed"] = bool(t["confirmed"])
         tags.append(entry)
     payload = {"description": region.get("region_description", "") or "", "tags": tags}
+    cls = region.get("class_name", "") or ""
+    if cls and cls != (region.get("region_name", "") or ""):
+        payload["class"] = cls
     return json.dumps(payload, ensure_ascii=False)
 
 def _region_desc_from_json(raw):
-    """Parse the mwg-rs:Description JSON blob back into (description, tags list).
+    """Parse the mwg-rs:Description JSON blob back into
+    (description, tags list, class_str). class_str is '' when the blob carries
+    no explicit class (caller falls back to the instance Name).
     Tolerant of empty / malformed / plain-text values."""
     if not raw:
-        return "", []
+        return "", [], ""
     try:
         obj = json.loads(raw)
     except Exception:
         # Legacy or hand-edited: treat the whole thing as free-text description.
-        return str(raw), []
+        return str(raw), [], ""
     if not isinstance(obj, dict):
-        return "", []
+        return "", [], ""
     tags = []
     for t in obj.get("tags", []) or []:
         if isinstance(t, str):
@@ -1307,7 +1312,7 @@ def _region_desc_from_json(raw):
         if gen and "confirmed" in t and t["confirmed"] is not None:
             entry["confirmed"] = bool(t["confirmed"])
         tags.append(entry)
-    return str(obj.get("description", "") or ""), tags
+    return str(obj.get("description", "") or ""), tags, str(obj.get("class", "") or "")
 
 def _parse_mwg_regions(xmp):
     """Read regions from Xmp.mwg-rs.Regions. Returns [] if none present.

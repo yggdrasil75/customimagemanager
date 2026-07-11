@@ -7,6 +7,8 @@ function saveRegion(){
   else if(pendingBox){pendingBox.class_name=name;pendingBox.confirmed=true;
     pendingBox.region_tags=pendingBox.region_tags||[];
     pendingBox.region_description=pendingBox.region_description||'';
+    pendingBox.region_name=pendingBox.region_name||'';   // instance name (mwg-rs:Name)
+    pendingBox.region_type=pendingBox.region_type||'';   // region type (mwg-rs:Type)
     pendingBox.uuid=pendingBox.uuid||null;   // backend assigns on save
     currentRegions.push(pendingBox);openIdx=currentRegions.length-1;pendingBox=null;}
   document.getElementById('region_modal').classList.add('hidden');
@@ -118,6 +120,8 @@ function renderRegionEditor(){
   const uidEl=document.getElementById('region_editor_uuid');
   uidEl.textContent = b.uuid ? b.uuid.slice(0,8) : '(id on save)';
   document.getElementById('region_desc').value = b.region_description||'';
+  const rn=document.getElementById('region_name'); if(rn) rn.value=b.region_name||'';
+  const rt=document.getElementById('region_type'); if(rt) rt.value=b.region_type||'';
   renderRegionTags();
 }
 function renderRegionTags(){
@@ -152,6 +156,16 @@ function _curRegion(){ return currentRegions[selectedRegionIdx]; }
 function onRegionDescInput(){
   const b=_curRegion(); if(!b) return;
   b.region_description=document.getElementById('region_desc').value;
+  triggerAutosave();
+}
+function onRegionNameInput(){       // instance name -> mwg-rs:Name ("jill")
+  const b=_curRegion(); if(!b) return;
+  b.region_name=document.getElementById('region_name').value;
+  triggerAutosave();
+}
+function onRegionTypeInput(){       // region type -> mwg-rs:Type
+  const b=_curRegion(); if(!b) return;
+  b.region_type=document.getElementById('region_type').value;
   triggerAutosave();
 }
 function addRegionTagsFromInput(){
