@@ -1,4 +1,21 @@
-    <div id="controls_pane" class="overflow-y-auto flex-shrink-0">
+    <div id="controls_pane" class="flex flex-col flex-shrink-0 overflow-hidden">
+      <!-- Tab bar -->
+      <div id="controls_tabs" class="flex flex-shrink-0 border-b border-gray-700 bg-gray-800 text-xs font-bold">
+        <button data-tab="main" onclick="setControlsTab('main')"
+          class="controls-tab px-3 py-2 text-white border-b-2 border-blue-500">Editor</button>
+        <button data-tab="exif" onclick="setControlsTab('exif')"
+          class="controls-tab px-3 py-2 text-gray-400 border-b-2 border-transparent hover:text-white">EXIF</button>
+        <button data-tab="iptc" onclick="setControlsTab('iptc')"
+          class="controls-tab px-3 py-2 text-gray-400 border-b-2 border-transparent hover:text-white">IPTC</button>
+        <button data-tab="xmp" onclick="setControlsTab('xmp')"
+          class="controls-tab px-3 py-2 text-gray-400 border-b-2 border-transparent hover:text-white">XMP</button>
+      </div>
+
+      <!-- Tab panes -->
+      <div id="controls_tab_bodies" class="flex-1 overflow-hidden">
+
+      <!-- Tab 1: existing editor + AI tooling -->
+      <div id="controls_pane_main" class="controls-tab-pane h-full overflow-y-auto">
       <div id="editor_panel" class="p-3 flex flex-col gap-3 opacity-50 pointer-events-none">
         <div class="flex justify-between items-center gap-2">
           <span class="text-sm font-bold text-gray-300">Editor</span>
@@ -132,9 +149,6 @@
         <div class="flex justify-between items-center">
           <h3 class="font-bold text-purple-400 text-sm">AI Tooling</h3>
           <div class="flex gap-2">
-            <button
-              onclick="document.getElementById('ai_modal').classList.remove('hidden');window.pipelineEditorRefresh&&window.pipelineEditorRefresh()"
-              class="text-xs bg-gray-700 px-2 py-1 rounded hover:bg-gray-600">⚙ Settings</button>
             <a href="/training_portal" target="_blank"
               class="text-xs text-purple-300 bg-gray-700 px-2 py-1 rounded hover:bg-gray-600 border border-purple-800">Trainer
               ↗</a>
@@ -169,4 +183,22 @@
         </label>
         <p class="text-xs text-gray-400">Status: <span id="status_text" class="text-yellow-400">Ready.</span></p>
       </div>
+      </div><!-- /#controls_pane_main -->
+
+      <!-- Tab 2: EXIF -->
+      <div id="controls_pane_exif" class="controls-tab-pane hidden h-full overflow-y-auto p-3">
+        {% include 'exif_editor.html' %}
+      </div>
+
+      <!-- Tab 3: IPTC -->
+      <div id="controls_pane_iptc" class="controls-tab-pane hidden h-full overflow-y-auto p-3">
+        {% include 'iptc_editor.html' %}
+      </div>
+
+      <!-- Tab 4: XMP -->
+      <div id="controls_pane_xmp" class="controls-tab-pane hidden h-full overflow-y-auto p-3">
+        {% include 'xmp_editor.html' %}
+      </div>
+
+      </div><!-- /#controls_tab_bodies -->
     </div>

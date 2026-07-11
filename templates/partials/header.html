@@ -35,6 +35,10 @@
           title="Score image quality (NR-IQA / BRISQUE) for the whole library"
           class="text-xs bg-emerald-800 hover:bg-emerald-700 font-bold px-2 py-1.5 rounded">Scan library</button>
         <span id="dedup_cache_badge" class="hidden text-[10px] text-gray-500 italic"></span>
+        <button id="btn_settings"
+          onclick="document.getElementById('ai_modal').classList.remove('hidden');window.pipelineEditorRefresh&&window.pipelineEditorRefresh()"
+          title="LLM / Vision settings"
+          class="text-xs bg-gray-700 hover:bg-gray-600 font-bold px-2 py-1.5 rounded">⚙ Settings</button>
         <span id="file_count" class="text-sm text-gray-400">—</span>
       </div>
     </div>
