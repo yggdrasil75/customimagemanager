@@ -97,7 +97,22 @@ function makeViewer(prefix, opts) {
     }
   }
 
-  imgObj.onload = () => { if (isMain) applyEditorLayout(); else drawCanvas(); };
+  // Choose side-by-side vs stacked layout based on image orientation, then
+  // draw. Only the main editor pane has an #editor_region to toggle; the
+  // review viewer just needs the redraw.
+  function applyEditorLayout() {
+    const reg = isMain ? document.getElementById('editor_region') : null;
+    if (reg) {
+      let vertical = true;
+      if (imgObj.naturalWidth && imgObj.naturalHeight)
+        vertical = imgObj.naturalHeight >= imgObj.naturalWidth; // portrait/square → side-by-side
+      reg.classList.toggle('vertical', vertical);
+      reg.classList.toggle('horizontal', !vertical);
+    }
+    requestAnimationFrame(() => { if (imgObj.width) drawCanvas(); });
+  }
+
+  imgObj.onload = () => { applyEditorLayout(); };
 
   // ── canvas box-editing events (MAIN pane only — review is read-only draw) ──
   if (isMain) {
@@ -385,8 +400,16 @@ function makeViewer(prefix, opts) {
     mediaVideo.pause(); mediaVideo.removeAttribute('src'); mediaVideo.classList.add('hidden');
     canvas.classList.remove('hidden');
     if (!isMain) { self.regions = regions || []; self.decisions = decisions || {}; }
+    // Always draw via onload (wired above). Clear src first so re-selecting the
+    // same url still re-fires load, and use decode() as a cache-hit fallback
+    // for browsers that don't re-fire onload on an already-decoded image.
+    imgObj.onload = () => { applyEditorLayout(); };
+    if (imgObj.src === url) imgObj.removeAttribute('src');
     imgObj.src = url;
-    if (imgObj.complete && imgObj.width) drawCanvas();
+    if (imgObj.complete && imgObj.naturalWidth) {
+      (imgObj.decode ? imgObj.decode().catch(() => {}) : Promise.resolve())
+        .then(() => applyEditorLayout());
+    }
   };
   // Load a video (time-indexed boxes via the overlay).
   self.showVideo = function (url, fn) {
