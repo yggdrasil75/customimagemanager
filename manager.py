@@ -602,6 +602,33 @@ def _delete_file_row(rel_path):
     _db().execute("DELETE FROM object_embeddings WHERE rel_path=?", (rel_path,))
     _db().commit()
 
+def _purge_file_everywhere(rel_path):
+    """Remove EVERY DB trace of a file across all rel_path-keyed tables.
+
+    _delete_file_row only clears `files` + `object_embeddings`; a file deleted
+    on disk also leaves rows in file_history and (via image_index) in
+    image_embeddings / image_clusters. Left behind, those stale rows are why a
+    deleted-on-disk file still shows up as a blank tile. This is the single
+    place that knows the full set of dependent tables, so both the delete route
+    and the reconcile scan stay consistent.
+
+    Each DELETE is guarded independently: image_index tables may not exist yet
+    on an older DB, and we never want cleanup of one table to abort the rest.
+    """
+    db = _db()
+    for sql in (
+        "DELETE FROM files             WHERE rel_path=?",
+        "DELETE FROM object_embeddings WHERE rel_path=?",
+        "DELETE FROM file_history      WHERE rel_path=?",
+        "DELETE FROM image_embeddings  WHERE rel_path=?",
+        "DELETE FROM image_clusters    WHERE rel_path=?",
+    ):
+        try:
+            db.execute(sql, (rel_path,))
+        except Exception as e:
+            access_logger.debug(f"_purge_file_everywhere {rel_path}: {e}")
+    db.commit()
+
 def _get_file_row(rel_path):
     return _db().execute("SELECT * FROM files WHERE rel_path=?", (rel_path,)).fetchone()
 
@@ -1128,12 +1155,42 @@ def _build_index_background():
         with ThreadPoolExecutor(max_workers=8) as ex:
             for updated in ex.map(_index_file, batch):
                 if updated: count += 1
-    state["status_text"] = f"Ready. (indexed {count} new/changed files)"
+    # Self-heal: drop DB rows whose backing file no longer exists on disk.
+    try:
+        removed = _reconcile_deleted()
+        if removed:
+            state["status_text"] = (f"Ready. (indexed {count} new/changed, "
+                                    f"purged {removed} deleted)")
+            access_logger.info(f"Reconcile purged {removed} deleted files")
+        else:
+            state["status_text"] = f"Ready. (indexed {count} new/changed files)"
+    except Exception as e:
+        access_logger.error(f"reconcile: {e}")
+        state["status_text"] = f"Ready. (indexed {count} new/changed files)"
     access_logger.info(f"Background index complete: {count} files updated")
     try:
         _scan_comics()
     except Exception as e:
         access_logger.error(f"comic scan: {e}")
+
+def _reconcile_deleted():
+    """Walk the `files` table and purge every row whose backing file is gone
+    from disk. Complements _build_index_background (which only ADDS or UPDATES
+    files that exist): together they make the DB an exact mirror of disk.
+
+    Returns the number of files purged. mtime-changed / externally-edited files
+    are handled by the normal index pass — _index_file already re-reads any file
+    whose on-disk mtime differs from the stored one — so this only concerns
+    itself with disappearances.
+    """
+    rows = _db().execute("SELECT rel_path FROM files").fetchall()
+    removed = 0
+    for (rel_path,) in rows:
+        abs_path = get_safe_path(MEDIA_DIR, rel_path)
+        if not abs_path or not os.path.exists(abs_path):
+            _purge_file_everywhere(rel_path)
+            removed += 1
+    return removed
 
 # ── Config / classes ──────────────────────────────────────────────────────────
 def load_config():
@@ -3501,9 +3558,19 @@ def api_delete():
         dp = _thumb_disk_path(fn)
         if os.path.exists(dp): os.remove(dp)
         with _thumb_lock: _thumb_lru.pop(fn, None)
-        _delete_file_row(fn)
+        _purge_file_everywhere(fn)
         _dedup_remove_file(fn)
     return jsonify({"success":True})
+
+@app.route("/api/reconcile", methods=["POST"])
+def api_reconcile():
+    """Purge DB rows for files deleted on disk. Externally-edited files are
+    picked up by re-indexing (mtime change), so trigger both a reconcile and a
+    background re-index. Returns how many stale rows were purged."""
+    removed = _reconcile_deleted()
+    # kick off a normal index pass so externally-edited files get re-read
+    threading.Thread(target=_build_index_background, daemon=True).start()
+    return jsonify({"success": True, "purged": removed})
 
 @app.route("/api/tag_review", methods=["POST"])
 def api_tag_review():

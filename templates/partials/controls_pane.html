@@ -206,6 +206,10 @@
           <span>Background auto-tag when idle</span>
           <input type="checkbox" id="autotag_toggle" onchange="toggleAutotag()" class="accent-purple-500">
         </label>
+        <button onclick="reconcileLibrary()" id="btn_reconcile"
+          title="Purge DB entries for files deleted on disk and re-read externally edited files"
+          class="w-full bg-gray-700 hover:bg-gray-600 py-1.5 rounded font-bold text-sm border border-teal-700 text-teal-300">🔄
+          Sync with disk</button>
         <p class="text-xs text-gray-400">Status: <span id="status_text" class="text-yellow-400">Ready.</span></p>
       </div>
       </div><!-- /#controls_pane_main -->

@@ -213,6 +213,29 @@ const io=new IntersectionObserver(entries=>{
   });
 },{rootMargin:'300px'});
 
+// ── Sync with disk ──────────────────────────────────────────────────────────
+// Purge DB rows for files deleted on disk and trigger a re-index (which re-reads
+// externally edited files via their changed mtime). Fixes blank tiles left behind
+// when a file is removed or edited outside the app.
+async function reconcileLibrary(){
+  const btn=document.getElementById('btn_reconcile');
+  if(btn){btn.disabled=true;btn.classList.add('opacity-50');}
+  try{
+    const d=await fetch('/api/reconcile',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json());
+    if(d&&d.success){
+      const st=document.getElementById('status_text');
+      if(st) st.innerText=`Synced — purged ${d.purged} deleted; re-indexing…`;
+      if(typeof loadGallery==='function') loadGallery();
+    }
+  }catch(e){
+    const st=document.getElementById('status_text');
+    if(st) st.innerText='Sync failed: '+e;
+  }finally{
+    if(btn){btn.disabled=false;btn.classList.remove('opacity-50');}
+  }
+}
+
 // ── Polling ────────────────────────────────────────────────────────────────
 async function fetchState(){
   try{
