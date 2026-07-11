@@ -100,7 +100,7 @@ access_logger.addHandler(logging.StreamHandler())
 state = {
     "classes": ["object"], "available_models": [],
     "status_text": "Ready.", "remote_ip": "",
-    "oai_endpoint": "https://api.openai.com/v1/chat/completions",
+    "oai_endpoint": "http://localhost:5001/v1/chat/completions",
     "oai_key": "", "oai_model": "gpt-4o-mini",
     "autotag_enabled": False,
     "keep_raws": False,   # when True, uploaded camera-raw sources are stashed in
