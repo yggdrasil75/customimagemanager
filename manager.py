@@ -4412,7 +4412,17 @@ def _apply_pipeline_result(fp, analysis):
     for s in analysis.get("subjects", []):
         cb = _clamp_box(s.get("box", {}))
         if cb:
+            # class_name = the detector class ("girl"); region_name = the
+            # name the naming step produced ("jill" or a descriptor like
+            # "tall girl"). Keep them distinct so the class rides in the
+            # Description JSON and Name carries the instance.
             reg = {"class_name": s.get("label", "subject"),
+                   "region_name": s.get("name", ""),
+                   "region_type": s.get("region_type", ""),
+                   "region_description": s.get("description", ""),
+                   "region_tags": [{"tag": tag_name(t), "generated": True,
+                                    "confirmed": False}
+                                   for t in s.get("tags", []) if tag_name(t)],
                    "cx": cb["cx"], "cy": cb["cy"], "w": cb["w"], "h": cb["h"],
                    "confirmed": False}
             if s.get("needs_review"):

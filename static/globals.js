@@ -10,6 +10,7 @@ let selectedRegionIdx=-1;
 let currentPage=0, totalFiles=0, currentSearch='', currentFolder='', allFolders=[];
 let imageFilter=null;  // active pipeline result set shown in the grid, or null
 let currentTags=[], currentIqa=null, currentIqaManual=false;
+let PAGE=200
 // ── NR-IQA stars ─────────────────────────────────────────────────────────────
 // Compact star badge shown on a gallery tile. score is 0..5 (halves) or null.
 function starBadge(score){

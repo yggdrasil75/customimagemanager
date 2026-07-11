@@ -672,10 +672,17 @@ DEFAULT_PIPELINE = {
                 {"type": "name", "want": "name", "store": "name", "label": "naming",
                  "prompt": ("Here is what is already known about the image this crop "
                             "comes from:\n{known}\n\n"
-                            "If this cropped subject clearly matches one of the known "
-                            "character names above, reply with ONLY that name. If none "
-                            "of them fit this subject, reply with exactly: unknown. "
-                            "Do not guess a new name.")},
+                            "Give a short name or descriptor for this cropped subject. "
+                            "If it clearly matches one of the known character names "
+                            "above, use that name. Otherwise give a brief apt "
+                            "descriptor (e.g. 'tall girl', 'man in blue'). Reply with "
+                            "ONLY the name or descriptor, nothing else.")},
+                {"want": "choice", "store": "region_type", "label": "region type",
+                 "choices": ["Face", "Full body", "Pet", "Body Part",
+                             "Background object"],
+                 "prompt": ("What kind of region is this crop? Pick the best fit: "
+                            "Face (a face), Full body (a whole person/character), "
+                            "Pet (an animal), Body Part, or Background object.")},
                 {"want": "bool", "store": "is_animal", "label": "animal?",
                  "prompt": ("Is the main subject in this cropped image an animal or creature "
                             "(not a human)? Answer yes or no.")},
@@ -690,6 +697,10 @@ DEFAULT_PIPELINE = {
                             "expression, action, notable details.")},
                 {"want": "tags", "store": "tags", "label": "subject tags",
                  "prompt": "Danbooru-style tags for just this cropped subject, comma-separated."},
+                {"want": "text", "store": "description", "label": "region description",
+                 "prompt": ("Write a concise description of '{label}' in this crop for "
+                            "the region metadata: who/what it is, appearance, outfit, "
+                            "and notable details, in one short paragraph.")},
                 {"want": "boxes", "store": "boxes", "label": "Detecting clothes",
                  "when": {"field": "is_animal", "equals": False},
                  "prompt": ("Detect individual pieces of clothing on this subject. Highly "
