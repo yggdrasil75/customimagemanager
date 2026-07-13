@@ -1,6 +1,9 @@
 // init.js — bootstrap calls (run after all modules are defined).
-loadGallery();
+// The gallery grid now lives in a modal, so we don't populate it on boot — the
+// Gallery tab shows the folder browser and the grid loads when the modal opens.
 loadFolders();
+loadImageAlbums();
+setPane('gallery');
 fetchDedupStatus();
 refreshReviewCount();
 

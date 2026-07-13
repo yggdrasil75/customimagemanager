@@ -260,6 +260,29 @@ def _init_db():
             added        REAL
         );
         CREATE INDEX IF NOT EXISTS idx_raws_derived ON raws(derived_rel);
+
+        -- ── Albums ──────────────────────────────────────────────────────────
+        -- Album-level metadata that has nowhere to live inside an image file
+        -- (cover choice, description, creation time). Membership itself is NOT
+        -- authoritative here: it is rebuilt from each file's XMP
+        -- mwg-coll:Collections on scan, so the sidecars remain the portable
+        -- source of truth and nothing breaks when the library moves machines.
+        CREATE TABLE IF NOT EXISTS albums (
+            name        TEXT PRIMARY KEY,
+            description TEXT DEFAULT '',
+            cover       TEXT DEFAULT '',
+            created     REAL
+        );
+        -- Denormalised membership index. An image may appear in many rows here
+        -- (many-to-many). Rebuilt from XMP; safe to drop and regenerate.
+        CREATE TABLE IF NOT EXISTS album_members (
+            album    TEXT NOT NULL,
+            rel_path TEXT NOT NULL,
+            added    REAL,
+            PRIMARY KEY (album, rel_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_album_members_album ON album_members(album);
+        CREATE INDEX IF NOT EXISTS idx_album_members_file  ON album_members(rel_path);
     """)
     db.commit()
     # Migrations for existing DBs
@@ -321,6 +344,12 @@ def _init_db():
         # Page count (PRISM PageCount). Bidirectional: written into a comic's
         # cover page on comic create/update; read back here. NULL = unknown.
         "ALTER TABLE files ADD COLUMN page_count INTEGER DEFAULT NULL",
+        # Albums. An image can be in MANY albums, so this is a JSON list of
+        # album names — the DB is only a CACHE. The portable source of truth is
+        # the XMP sidecar's mwg-coll:Collections block, which write_metadata
+        # emits and read_metadata folds back, so moving a library to a new
+        # machine and reindexing restores every album membership.
+        "ALTER TABLE files ADD COLUMN albums TEXT DEFAULT '[]'",
     ]:
         try:
             db.execute(ddl); db.commit()
@@ -662,19 +691,30 @@ def _parse_search(search: str):
             text.append(tok)
     return ' '.join(text).strip(), where, params
 
-def _query_files(search: str, offset: int, limit: int, folder: str = ''):
+def _query_files(search: str, offset: int, limit: int, folder: str = '', album: str = ''):
     """Return (entries, total). Entries are typed dicts: comics first (one cover
     tile each), then ordinary non-comic images. Comic pages are hidden from the
-    flat list via files.comic_folder."""
+    flat list via files.comic_folder.
+
+    When `album` is given the result set is restricted to that album's members,
+    and comics are suppressed — an album is a flat set of images, and paging a
+    mixed comic/image list inside one would just confuse the count."""
     text, where, params = _parse_search(search)
 
     # --- comics (few; fetched whole, shown first) ---
-    comic_entries = _query_comics(text, folder)
+    # Skip entirely when filtering to an album (see docstring).
+    comic_entries = [] if album else _query_comics(text, folder)
     nc = len(comic_entries)
 
     # --- ordinary images, excluding comic pages ---
     clauses, p = list(where), list(params)
     clauses.append("(comic_folder IS NULL OR comic_folder='')")
+    if album:
+        # Membership lives in album_members; a subquery keeps this composable
+        # with the existing folder/search clauses rather than needing a JOIN.
+        clauses.append(
+            "rel_path IN (SELECT rel_path FROM album_members WHERE album=?)")
+        p.append(album)
     if folder == '/':
         clauses.append("rel_path NOT LIKE '%/%'")
     elif folder:
@@ -1091,6 +1131,13 @@ def _index_file(rel_path: str, force: bool = False) -> bool:
         if _cs:
             _db().execute("UPDATE files SET catalog_sets=? WHERE rel_path=?",
                           (_cs, rel_path))
+        # Albums (mwg-coll:Collections) -> the album caches. This is the step
+        # that makes album membership portable: copy the media + sidecars to a
+        # new machine, reindex, and every album rebuilds itself from the files.
+        # Unlike the fields above we sync UNCONDITIONALLY — an empty list is a
+        # meaningful state ("in no albums"), not a missing value, so skipping it
+        # would strand files in albums they'd been removed from.
+        _sync_album_cache(rel_path, meta.get('albums') or [])
         # AI-generated marker. Only set it to 1 when the metadata says so; never
         # clear it on re-index, so a detected AI origin sticks and any future
         # in-app toggle isn't wiped by a rescan of a file lacking the fields.
@@ -1286,6 +1333,58 @@ def _read_pose_from_xmp(xmp_path):
 # PRISM namespace, used to persist prism:PageCount in our sidecars (the one
 # PRISM field we write — bidirectional for comics).
 _PRISM_NS = "http://prismstandard.org/namespaces/basic/3.0/"
+
+# MWG Collections namespace. This is the standards-blessed home for "which
+# named collections does this image belong to" — i.e. our albums. We already
+# READ it (mwg_fields.parse_collections folds it into catalog_sets); now we
+# WRITE it too, so albums live in the file's own sidecar and survive a move to
+# a new system. Using the standard (rather than a private mm: blob) also means
+# Lightroom/digiKam/ExifTool can see our albums.
+_MWG_COLL_NS = "http://www.metadataworkinggroup.com/schemas/collections/"
+
+
+def _read_albums_from_xmp(filepath):
+    """Return the album names for a file straight from its XMP, or [].
+
+    Reads the resolved XMP packet (sidecar OR embedded) so an image that
+    arrives from another machine with collections baked into the file itself
+    still lands in the right albums. Best-effort: never raises."""
+    try:
+        import xmp_import
+        xmp, _src, _xml = xmp_import.resolve_xmp(filepath)
+        if not xmp:
+            return []
+        return mwg_fields.parse_collections(xmp)
+    except Exception as e:
+        access_logger.warning(f"album read {filepath}: {e}")
+        return []
+
+
+def _build_mwg_collections_xml(albums):
+    """Serialise album names as an mwg-coll:Collections bag.
+
+    Returns (xml, ns_attr) mirroring _build_mwg_regions_xml's contract, so
+    write_metadata can splice it in without special-casing. Each entry is a
+    CollectionInfo struct with a CollectionName; we omit CollectionURI since we
+    have no meaningful URI to give (the field is optional in the spec)."""
+    names = [str(a).strip() for a in (albums or []) if str(a).strip()]
+    # De-dupe, order-preserving — an image must not appear twice in one album.
+    seen, uniq = set(), []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            uniq.append(n)
+    if not uniq:
+        return "", ""
+    esc = saxutils.escape
+    items = "".join(
+        f'<rdf:li rdf:parseType="Resource">'
+        f'<mwg-coll:CollectionName>{esc(n)}</mwg-coll:CollectionName>'
+        f'</rdf:li>'
+        for n in uniq)
+    xml = (f'<mwg-coll:Collections><rdf:Bag>{items}</rdf:Bag>'
+           f'</mwg-coll:Collections>')
+    return xml, f' xmlns:mwg-coll="{_MWG_COLL_NS}"'
 
 def _read_page_count_from_xmp(xmp_path):
     """Pull prism:PageCount back out of a sidecar as an int, or None."""
@@ -1669,6 +1768,7 @@ def read_metadata(filepath):
                     "event": "", "catalog_sets": "",
                     "ai_generated": False, "model_age": None, "persons": "",
                     "genre": "", "alt_of": "", "page_count": None,
+                    "albums": [],
                     "regions": [], "analysis": xprov, "flag": None, "pose": None}
 
         val  = xmp.get('Xmp.dc.subject', [])
@@ -1841,6 +1941,14 @@ def read_metadata(filepath):
         except Exception as e:
             access_logger.warning(f"prism_extras {filepath}: {e}")
 
+        # Albums from mwg-coll:Collections. Parsed off the XMP packet we already
+        # resolved above (sidecar or embedded) — no extra file read.
+        try:
+            albums = mwg_fields.parse_collections(xmp)
+        except Exception as e:
+            access_logger.warning(f"album fold {filepath}: {e}")
+            albums = []
+
         return {"tags": tags, "description": desc, "regions": regions,
                 "rating": rating,
                 "artist": artist, "language": language,
@@ -1848,6 +1956,7 @@ def read_metadata(filepath):
                 "ai_generated": ai_generated, "model_age": model_age,
                 "persons": persons,
                 "genre": genre, "alt_of": alt_of, "page_count": page_count,
+                "albums": albums,
                 "analysis": analysis,
                 "flag": _read_flag_from_xmp(xmp_path),
                 "pose": _read_pose_from_xmp(xmp_path)}
@@ -1858,12 +1967,148 @@ def read_metadata(filepath):
                 "event": "", "catalog_sets": "",
                 "ai_generated": False, "model_age": None, "persons": "",
                 "genre": "", "alt_of": "", "page_count": None,
+                "albums": [],
                 "analysis": None, "flag": None, "pose": None}
 
-def write_metadata(filepath, tags, description, regions, analysis=None, flag=None, pose=None, page_count=None):
+# ── Albums ────────────────────────────────────────────────────────────────────
+# Membership is many-to-many: one image can sit in any number of albums. The
+# XMP sidecar (mwg-coll:Collections) is the source of truth; the `files.albums`
+# column and the `album_members` table are caches rebuilt from it, which is what
+# makes a library survive being copied to a new system.
+
+def _sync_album_cache(rel_path, albums):
+    """Point the DB caches at `albums` for one file. Does NOT commit — callers
+    batch their commits (write_metadata and the scanner both do)."""
+    names = []
+    seen = set()
+    for a in (albums or []):
+        s = str(a).strip()
+        if s and s not in seen:
+            seen.add(s)
+            names.append(s)
+    db = _db()
+    db.execute("UPDATE files SET albums=? WHERE rel_path=?",
+               (json.dumps(names), rel_path))
+    # Rewrite this file's membership rows wholesale — simpler and less
+    # error-prone than diffing, and the row count per file is tiny.
+    db.execute("DELETE FROM album_members WHERE rel_path=?", (rel_path,))
+    now = time.time()
+    for n in names:
+        # Auto-create the album row on first sight so albums that arrive purely
+        # from a sidecar (e.g. a library copied in from another machine) show up
+        # in the album list without any manual step.
+        db.execute("INSERT OR IGNORE INTO albums(name, description, cover, created) "
+                   "VALUES (?,'','',?)", (n, now))
+        db.execute("INSERT OR IGNORE INTO album_members(album, rel_path, added) "
+                   "VALUES (?,?,?)", (n, rel_path, now))
+
+
+def _file_albums(rel_path):
+    """Album names for one file, from the DB cache."""
+    row = _db().execute("SELECT albums FROM files WHERE rel_path=?",
+                        (rel_path,)).fetchone()
+    if not row:
+        return []
+    try:
+        return json.loads(row["albums"] or "[]")
+    except Exception:
+        return []
+
+
+def _set_file_albums(rel_path, albums):
+    """Write a file's album list through to its XMP sidecar (and the cache).
+
+    Goes via write_metadata so the rest of the packet (tags, regions, analysis,
+    pose…) is preserved rather than clobbered."""
+    fp = get_safe_path(MEDIA_DIR, rel_path)
+    if not fp or not os.path.exists(fp):
+        return False
+    meta = read_metadata(fp)
+    return write_metadata(
+        fp, meta.get("tags", []), meta.get("description", ""),
+        meta.get("regions", []), analysis=meta.get("analysis"),
+        flag=meta.get("flag"), pose=meta.get("pose"),
+        page_count=meta.get("page_count"), albums=albums)
+
+
+def _album_add(rel_paths, album):
+    """Add many files to one album. Returns the number actually changed."""
+    album = str(album).strip()
+    if not album:
+        return 0
+    n = 0
+    for rp in rel_paths:
+        cur = _file_albums(rp)
+        if album in cur:
+            continue                     # already a member; nothing to write
+        if _set_file_albums(rp, cur + [album]):
+            n += 1
+    _db().execute("INSERT OR IGNORE INTO albums(name, description, cover, created) "
+                  "VALUES (?,'','',?)", (album, time.time()))
+    _db().commit()
+    return n
+
+
+def _album_remove(rel_paths, album):
+    """Remove many files from one album. Returns the number actually changed."""
+    album = str(album).strip()
+    n = 0
+    for rp in rel_paths:
+        cur = _file_albums(rp)
+        if album not in cur:
+            continue
+        if _set_file_albums(rp, [a for a in cur if a != album]):
+            n += 1
+    _db().commit()
+    return n
+
+
+def _album_list():
+    """Every album with its member count and a cover, newest-populated first.
+
+    The cover is the album's explicit cover when set and still present,
+    otherwise the first member by path so the list always has a thumbnail."""
+    rows = _db().execute("""
+        SELECT a.name, a.description, a.cover, a.created,
+               COUNT(m.rel_path) AS n
+        FROM albums a
+        LEFT JOIN album_members m ON m.album = a.name
+        GROUP BY a.name
+        ORDER BY a.name COLLATE NOCASE
+    """).fetchall()
+    out = []
+    for r in rows:
+        cover = r["cover"] or ""
+        if cover:
+            # Drop a stale cover (file deleted / moved) rather than serving a 404.
+            ok = _db().execute(
+                "SELECT 1 FROM album_members WHERE album=? AND rel_path=?",
+                (r["name"], cover)).fetchone()
+            if not ok:
+                cover = ""
+        if not cover:
+            first = _db().execute(
+                "SELECT rel_path FROM album_members WHERE album=? "
+                "ORDER BY rel_path LIMIT 1", (r["name"],)).fetchone()
+            cover = first["rel_path"] if first else ""
+        out.append({"name": r["name"], "description": r["description"] or "",
+                    "cover": cover, "count": r["n"], "created": r["created"]})
+    return out
+
+
+def write_metadata(filepath, tags, description, regions, analysis=None, flag=None, pose=None, page_count=None,
+                   albums=None):
     try:
         _sync_yolo(filepath, regions)
         xmp_path = os.path.splitext(filepath)[0] + '.xmp'
+        # Preserve existing album membership on an ordinary save. This one is
+        # critical: we rewrite the whole XMP packet from scratch on every write,
+        # so if a plain tag/description edit didn't re-emit the collections
+        # block, it would silently drop the image out of every album it was in.
+        # albums=None means "don't touch"; pass an explicit list (incl. []) to
+        # actually change membership.
+        if albums is None:
+            albums = _read_albums_from_xmp(filepath)
         # Preserve any existing analysis/flag/pose when this is an ordinary save
         # that didn't pass them in (tag/description/region edits).
         if analysis is None:
@@ -1911,12 +2156,14 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
             except (TypeError, ValueError):
                 prism_x = ""
         prism_ns = f' xmlns:prism="{_PRISM_NS}"' if prism_x else ''
+        # Albums -> mwg-coll:Collections (the portable source of truth).
+        coll_x, coll_ns = _build_mwg_collections_xml(albums)
         xmp = (f'<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>'
                f'<x:xmpmeta xmlns:x="adobe:ns:meta/">'
                f'<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
                f'<rdf:Description rdf:about="" '
-               f'xmlns:dc="http://purl.org/dc/elements/1.1/"{reg_ns}{mm_ns}{prism_ns}>'
-               f'{subj}{desc_x}{reg_x}{mm_x}{prism_x}'
+               f'xmlns:dc="http://purl.org/dc/elements/1.1/"{reg_ns}{mm_ns}{prism_ns}{coll_ns}>'
+               f'{subj}{desc_x}{reg_x}{mm_x}{prism_x}{coll_x}'
                f'</rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>')
         with open(xmp_path, 'w', encoding='utf-8') as f:
             f.write(xmp)
@@ -1937,6 +2184,9 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
                               (int(page_count), rel))
             except (TypeError, ValueError):
                 pass
+        # Mirror the albums we just wrote into the DB cache so the album view is
+        # correct without waiting for a rescan. The sidecar stays authoritative.
+        _sync_album_cache(rel, albums)
         _db().commit()
         return True
     except Exception as e:
@@ -3189,10 +3439,132 @@ def api_folders():
 def api_list():
     search = request.args.get("q","").strip()
     folder = request.args.get("folder","").strip()
+    album  = request.args.get("album","").strip()
     page   = max(0, int(request.args.get("page",0)))
-    entries, total = _query_files(search, page * PAGE_SIZE, PAGE_SIZE, folder)
+    entries, total = _query_files(search, page * PAGE_SIZE, PAGE_SIZE, folder, album)
     return jsonify({"success":True,"files":entries,"total":total,
                     "page":page,"page_size":PAGE_SIZE})
+
+# ── Albums ───────────────────────────────────────────────────────────────────
+# Album membership is stored in each image's XMP (mwg-coll:Collections) and only
+# cached in the DB, so everything here writes through to the sidecars.
+
+@app.route("/api/albums")
+def api_albums():
+    """List every album with a member count and a cover thumbnail."""
+    return jsonify({"success": True, "albums": _album_list()})
+
+
+@app.route("/api/albums/create", methods=["POST"])
+def api_album_create():
+    """Create an empty album (optionally seeded with files)."""
+    d = request.json or {}
+    name = str(d.get("name", "")).strip()
+    if not name:
+        return jsonify({"success": False, "error": "Album name required."}), 400
+    exists = _db().execute("SELECT 1 FROM albums WHERE name=?", (name,)).fetchone()
+    if exists:
+        return jsonify({"success": False, "error": "An album with that name already exists."}), 409
+    _db().execute("INSERT INTO albums(name, description, cover, created) VALUES (?,?,?,?)",
+                  (name, str(d.get("description", "")), "", time.time()))
+    _db().commit()
+    files = d.get("files") or []
+    added = _album_add(files, name) if files else 0
+    return jsonify({"success": True, "name": name, "added": added})
+
+
+@app.route("/api/albums/delete", methods=["POST"])
+def api_album_delete():
+    """Delete an album. Removes the collection from every member's XMP; the
+    images themselves are never touched."""
+    d = request.json or {}
+    name = str(d.get("name", "")).strip()
+    if not name:
+        return jsonify({"success": False, "error": "Album name required."}), 400
+    members = [r["rel_path"] for r in _db().execute(
+        "SELECT rel_path FROM album_members WHERE album=?", (name,)).fetchall()]
+    _album_remove(members, name)
+    _db().execute("DELETE FROM album_members WHERE album=?", (name,))
+    _db().execute("DELETE FROM albums WHERE name=?", (name,))
+    _db().commit()
+    return jsonify({"success": True, "removed": len(members)})
+
+
+@app.route("/api/albums/rename", methods=["POST"])
+def api_album_rename():
+    """Rename an album, rewriting the collection name in every member's XMP."""
+    d = request.json or {}
+    old = str(d.get("name", "")).strip()
+    new = str(d.get("new_name", "")).strip()
+    if not old or not new:
+        return jsonify({"success": False, "error": "Both names are required."}), 400
+    if old == new:
+        return jsonify({"success": True, "changed": 0})
+    if _db().execute("SELECT 1 FROM albums WHERE name=?", (new,)).fetchone():
+        return jsonify({"success": False, "error": "An album with that name already exists."}), 409
+    members = [r["rel_path"] for r in _db().execute(
+        "SELECT rel_path FROM album_members WHERE album=?", (old,)).fetchall()]
+    # Rewrite each member's sidecar, preserving position in its album list.
+    changed = 0
+    for rp in members:
+        cur = _file_albums(rp)
+        nxt = [new if a == old else a for a in cur]
+        if _set_file_albums(rp, nxt):
+            changed += 1
+    row = _db().execute("SELECT description, cover, created FROM albums WHERE name=?",
+                        (old,)).fetchone()
+    if row:
+        _db().execute("INSERT OR IGNORE INTO albums(name, description, cover, created) "
+                      "VALUES (?,?,?,?)",
+                      (new, row["description"], row["cover"], row["created"]))
+    _db().execute("DELETE FROM albums WHERE name=?", (old,))
+    _db().execute("DELETE FROM album_members WHERE album=?", (old,))
+    _db().commit()
+    return jsonify({"success": True, "changed": changed})
+
+
+@app.route("/api/albums/add", methods=["POST"])
+def api_album_add():
+    """Add one or more files to an album (creating it if new)."""
+    d = request.json or {}
+    name = str(d.get("album", "")).strip()
+    files = d.get("files") or []
+    if not name or not files:
+        return jsonify({"success": False, "error": "Album and files are required."}), 400
+    return jsonify({"success": True, "added": _album_add(files, name)})
+
+
+@app.route("/api/albums/remove", methods=["POST"])
+def api_album_remove():
+    """Remove one or more files from an album."""
+    d = request.json or {}
+    name = str(d.get("album", "")).strip()
+    files = d.get("files") or []
+    if not name or not files:
+        return jsonify({"success": False, "error": "Album and files are required."}), 400
+    return jsonify({"success": True, "removed": _album_remove(files, name)})
+
+
+@app.route("/api/albums/set_cover", methods=["POST"])
+def api_album_set_cover():
+    """Pin a specific member image as the album's cover tile."""
+    d = request.json or {}
+    name = str(d.get("album", "")).strip()
+    cover = str(d.get("cover", "")).strip()
+    if not name:
+        return jsonify({"success": False, "error": "Album name required."}), 400
+    _db().execute("UPDATE albums SET cover=? WHERE name=?", (cover, name))
+    _db().commit()
+    return jsonify({"success": True})
+
+
+@app.route("/api/albums/of", methods=["POST"])
+def api_albums_of():
+    """Which albums is this file in? Powers the per-image album chips."""
+    d = request.json or {}
+    fn = str(d.get("filename", "")).strip()
+    return jsonify({"success": True, "albums": _file_albums(fn),
+                    "all": [a["name"] for a in _album_list()]})
 
 @app.route("/api/upload", methods=["POST"])
 def api_upload():

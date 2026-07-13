@@ -1,0 +1,23 @@
+<!-- Tab 2: Albums. A flat list; clicking a row opens the gallery modal
+         filtered to that album's members. -->
+    <div id="albums_pane" class="hidden flex-1 flex flex-col overflow-hidden">
+
+      <!-- toolbar -->
+      <div class="px-4 py-2 bg-gray-800 border-b border-gray-700 flex gap-2 flex-shrink-0">
+        <input id="album_search" type="text" placeholder="Filter albums…"
+          oninput="renderImageAlbums()"
+          class="flex-1 p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
+        <button onclick="createAlbumPrompt()"
+          class="text-xs bg-blue-600 hover:bg-blue-500 px-3 rounded font-bold whitespace-nowrap">+ New album</button>
+      </div>
+
+      <!-- list -->
+      <div class="flex-1 overflow-y-auto px-4 py-3" id="albums_scroll">
+        <div id="albums_list" class="flex flex-col gap-2"></div>
+        <div id="albums_empty" class="hidden text-center text-gray-500 text-sm py-10">
+          <p class="font-bold mb-1">No albums yet</p>
+          <p class="text-xs">Select images in the Gallery tab and use “Add to album”,<br>
+            or create an empty album above.</p>
+        </div>
+      </div>
+    </div>

@@ -1,11 +1,6 @@
-    <div id="music_pane" class="hidden absolute inset-0 z-20 bg-gray-900 text-white flex flex-col">
+    <div id="music_pane" class="hidden flex-1 bg-gray-900 text-white flex flex-col overflow-hidden">
       <!-- toolbar -->
       <div class="p-3 bg-gray-800 border-b border-gray-700 flex items-center gap-2 flex-wrap flex-shrink-0">
-        <div class="flex rounded overflow-hidden border border-gray-600 text-xs font-bold">
-          <button id="mm_back" onclick="setMode('images')" class="px-3 py-1 bg-gray-700 hover:bg-gray-600">←
-            Images</button>
-          <button id="mm_music" class="px-3 py-1 bg-blue-600">Music</button>
-        </div>
         <div class="flex rounded overflow-hidden border border-gray-600 text-xs font-bold ml-2">
           <button id="mtab_artists" onclick="musicView('artists')" class="px-3 py-1 bg-blue-600">Artists</button>
           <button id="mtab_albums" onclick="musicView('albums')"

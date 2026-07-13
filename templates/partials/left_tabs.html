@@ -1,0 +1,16 @@
+<!-- Left-pane tabs. Replaces the old Images/Music pills that lived in the
+         header. Tab 1 = full gallery, tab 2 = albums, tab 3 = music. -->
+    <div class="flex bg-gray-800 border-b border-gray-700 flex-shrink-0 text-sm font-bold">
+      <button id="tab_gallery" onclick="setPane('gallery')"
+        class="flex-1 px-4 py-2 border-b-2 border-blue-500 text-blue-400 bg-gray-750">
+        Gallery
+      </button>
+      <button id="tab_albums" onclick="setPane('albums')"
+        class="flex-1 px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-gray-200 hover:bg-gray-750">
+        Albums <span id="album_count_badge" class="ml-1 text-[10px] text-gray-500"></span>
+      </button>
+      <button id="tab_music" onclick="setPane('music')"
+        class="flex-1 px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-gray-200 hover:bg-gray-750">
+        Music
+      </button>
+    </div>

@@ -1,0 +1,18 @@
+<!-- Tab 1: the full gallery. The grid itself lives in the gallery MODAL
+         (partials/gallery_modal.html); this pane is the folder browser that
+         opens it. Clicking a folder opens the modal scoped to that folder;
+         "Open full gallery" opens it unscoped. -->
+    <div id="gallery_pane" class="flex-1 flex flex-col overflow-hidden">
+
+      <div class="px-4 py-2 bg-gray-800 border-b border-gray-700 flex gap-2 flex-shrink-0">
+        <input id="folder_filter" type="text" placeholder="Filter folders…" oninput="renderFolderList()"
+          class="flex-1 p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
+        <button onclick="openGalleryModal()"
+          class="text-xs bg-blue-600 hover:bg-blue-500 px-3 rounded font-bold whitespace-nowrap">Open full
+          gallery</button>
+      </div>
+
+      <div class="flex-1 overflow-y-auto px-4 py-3">
+        <div id="folder_list" class="flex flex-col gap-1"></div>
+      </div>
+    </div>

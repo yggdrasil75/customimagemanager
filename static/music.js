@@ -10,13 +10,16 @@ let musicQueueIdx = -1;
 let _musicSearchTimer = null;
 
 function setMode(mode) {
+  // The Images/Music header pills are gone — the left pane is tabbed now, so
+  // pane switching lives in panes.js (setPane). This is kept as a thin
+  // delegating shim because music_pane.html and music.js still call setMode().
+  // Guard the call: panes.js may not have loaded yet in some orderings.
+  if (typeof setPane === 'function') {
+    setPane(mode === 'music' ? 'music' : 'gallery');
+    return;
+  }
   musicMode = (mode === 'music');
-  document.getElementById('music_pane').classList.toggle('hidden', !musicMode);
-  // toggle the header pills
-  document.getElementById('mode_images').className =
-    'px-3 py-1 ' + (musicMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-blue-600 text-white');
-  document.getElementById('mode_music').className =
-    'px-3 py-1 ' + (musicMode ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600');
+  document.getElementById('music_pane')?.classList.toggle('hidden', !musicMode);
   if (musicMode) { musicRefreshStatus(); musicView(musicCurrentView); }
 }
 

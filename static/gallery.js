@@ -40,6 +40,8 @@ async function loadFolders(){
       sel.appendChild(o);
     });
     sel.value=prev;
+    // The Gallery tab's folder browser is fed by the same data.
+    if(typeof renderFolderList==='function') renderFolderList();
   }catch(e){}
 }
 function onFolderChange(){
@@ -68,6 +70,12 @@ document.getElementById('search_input').addEventListener('input',e=>{
 async function loadGallery(){
   if(imageFilter){ renderImageFilter(); return; }
   const params=new URLSearchParams({page:currentPage,q:currentSearch,folder:currentFolder});
+  // When the gallery modal was opened from an album, scope the listing to that
+  // album's members. The server ANDs this with the normal search/folder terms,
+  // so searching *within* an album still works.
+  if(typeof galleryModalMode!=='undefined' && galleryModalMode==='album' && currentAlbum){
+    params.set('album', currentAlbum);
+  }
   const data=await fetch('/api/list?'+params).then(r=>r.json());
   totalFiles=data.total;
   renderGallery(data.files);
