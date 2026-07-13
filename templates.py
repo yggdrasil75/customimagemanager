@@ -1,7 +1,7 @@
 """templates.py — loads the UI from real .html/.css/.js files in web/.
 
-The HTML shells (web/app.html, web/training.html) link their stylesheet and
-script via <link href="/web/app.css"> and <script src="/web/app.js">. Those
+The HTML shells (templates/app.html, web/training.html) link their stylesheet and
+script via <link href="/templates/app.css"> and <script src="/templates/app.js">. Those
 static assets are served by the /web/<file> route registered in manager.py.
 
 `HTML` and `TRAINING_HTML` are read once at import so index()/training_portal()
@@ -10,7 +10,7 @@ files and restarting picks up the changes (or call reload() in a dev reloader).
 """
 import os
 
-WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 
 def _read(name):
     with open(os.path.join(WEB_DIR, name), "r", encoding="utf-8") as f:
