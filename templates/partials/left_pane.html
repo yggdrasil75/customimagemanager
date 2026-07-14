@@ -1,69 +1,11 @@
-    <div class="px-4 py-2 bg-gray-800 border-b border-gray-700 flex gap-2 flex-shrink-0">
-      <select id="folder_select" onchange="onFolderChange()"
-        class="bg-gray-700 rounded border border-gray-600 text-sm text-white px-2 max-w-[34%]">
-        <option value="">All folders</option>
-      </select>
-      <input id="search_input" type="text"
-        placeholder="Search…  try: height:<512  width:>=1024  is:untagged  is:unconfirmed"
-        class="flex-1 p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
-      <button onclick="makeComic()" title="Package the current folder as a comic"
-        class="text-xs bg-purple-700 hover:bg-purple-600 px-2 rounded font-bold whitespace-nowrap">📚 Make
-        comic</button>
-    </div>
-
-    <!-- Bulk action bar — shown only when items are selected -->
-    <div id="bulk_bar"
-      class="hidden px-4 py-2 bg-gray-750 border-b border-gray-600 flex items-center gap-2 flex-shrink-0 flex-wrap">
-      <span id="bulk_count" class="text-xs font-bold text-blue-300 mr-1"></span>
-      <input id="bulk_tag_input" type="text" placeholder="Add tag(s), comma-separated, then Enter"
-        class="flex-1 min-w-[160px] bg-gray-700 text-xs px-2 py-1.5 rounded border border-gray-600 text-white focus:border-blue-400"
-        onkeydown="if(event.key==='Enter') applyBulkTag()">
-      <button onclick="applyBulkTag()"
-        class="text-xs bg-blue-600 hover:bg-blue-500 px-3 py-1.5 rounded font-bold">Tag</button>
-      <button onclick="bulkDelete()" class="text-xs bg-red-700 hover:bg-red-600 px-3 py-1.5 rounded font-bold">🗑
-        Delete</button>
-      <button onclick="bulkBox()" title="Run AI box detection on every selected image"
-        class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1.5 rounded font-bold">🤖 AI Box</button>
-      <select id="bulk_action_select" title="AI action to run on each selected image"
-        class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-1.5 max-w-[130px]"></select>
-      <button onclick="bulkRunAI()" title="Run the chosen AI action on every selected image"
-        class="text-xs bg-yellow-600 hover:bg-yellow-500 px-3 py-1.5 rounded font-bold">✨ Run AI</button>
-      <button onclick="bulkPipeline()" title="Run the full Smart Tag pipeline on every selected image"
-        class="text-xs bg-teal-600 hover:bg-teal-500 px-3 py-1.5 rounded font-bold">🌳 Smart Tag</button>
-      <button onclick="clearSelection()" class="text-xs bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded ml-auto">✕
-        Deselect</button>
-    </div>
-
-    <div id="dropzone"
-      class="mx-4 mt-3 mb-1 border-2 border-dashed border-gray-600 rounded-lg p-4 text-center text-gray-400 flex flex-col items-center bg-gray-800 flex-shrink-0">
-      <p class="font-bold text-sm">Drag & Drop Images</p>
-      <p class="text-xs text-gray-500">Stored as lossless .JXL</p>
-      <div class="mt-2 flex items-center gap-2">
-        <input id="upload_folder" type="text" placeholder="folder (opt)"
-          class="bg-gray-700 text-xs px-2 py-1 rounded border border-gray-600 w-28">
-        <button onclick="document.getElementById('file_input').click()"
-          class="bg-blue-600 hover:bg-blue-500 px-3 py-1 rounded text-xs font-bold">Browse</button>
-      </div>
-      <input id="file_input" type="file" multiple class="hidden">
-    </div>
-
-    <!-- Pagination bar -->
-    <div class="flex items-center gap-2 px-4 py-2 flex-shrink-0 text-xs text-gray-400">
-      <button id="btn_prev" onclick="changePage(-1)"
-        class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded disabled:opacity-30">◀ Prev</button>
-      <span id="page_info">Page 1</span>
-      <button id="btn_next" onclick="changePage(1)"
-        class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded disabled:opacity-30">Next ▶</button>
-      <span class="ml-auto" id="showing_info"></span>
-    </div>
-
-    <div id="filter_banner"
-      class="hidden items-center gap-2 mx-4 mb-2 px-3 py-1.5 rounded bg-purple-900/50 border border-purple-700 text-xs text-purple-200">
-      <span id="filter_banner_text"></span>
-      <button onclick="clearImageFilter()"
-        class="ml-auto bg-purple-700 hover:bg-purple-600 px-2 py-0.5 rounded text-white">Clear ✕</button>
-    </div>
-
-    <div class="flex-1 overflow-y-auto px-4 pb-2" id="gallery_scroll">
-      <div id="gallery_grid" class="masonry"></div>
-    </div>
+<!-- Left pane = tab bar + the three panes (gallery / albums / music).
+     The gallery pane owns the image grid and all its chrome (folder picker,
+     search, upload, bulk bar, pager). These used to be duplicated into a
+     gallery modal as well, which put two elements with each id in the DOM
+     (#folder_select, #gallery_grid, …) — getElementById returned the wrong one,
+     so loadFolders() populated a <select> nobody could see. There is now exactly
+     one of each, and the grid lives here, beside the editor. -->
+{% include 'partials/left_tabs.html' %}
+{% include 'partials/gallery_pane.html' %}
+{% include 'partials/albums_pane.html' %}
+{% include 'partials/music_pane.html' %}

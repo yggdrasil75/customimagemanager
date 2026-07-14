@@ -52,49 +52,6 @@ function setPane(pane) {
   }
 }
 
-// ── Back-compat ─────────────────────────────────────────────────────────────
-// music.js keeps a setMode() that simply delegates to setPane(), so old call
-// sites ("← Images", etc.) keep working without a monkey-patch here.
-
-// ── Folder browser (Gallery tab) ────────────────────────────────────────────
-// The gallery grid itself is in the modal; this pane just lists folders and
-// opens the modal scoped to whichever one you click.
-function renderFolderList() {
-  const box = document.getElementById('folder_list');
-  if (!box) return;
-  const q = (document.getElementById('folder_filter')?.value || '').toLowerCase();
-  const rows = (allFolders || []).filter(f => !q || f.path.toLowerCase().includes(q));
-
-  box.innerHTML = '';
-
-  // "All images" pseudo-row, always first.
-  const total = (allFolders || []).reduce((n, f) => n + (f.count || 0), 0);
-  box.appendChild(folderRow('', 'All images', total, '🗂'));
-
-  rows.forEach(f => {
-    box.appendChild(folderRow(f.path, f.path === '/' ? '(root)' : f.path, f.count, '📁'));
-  });
-
-  if (!rows.length && q) {
-    const d = document.createElement('div');
-    d.className = 'text-xs text-gray-500 italic px-2 py-3';
-    d.textContent = 'No folders match that filter.';
-    box.appendChild(d);
-  }
-}
-
-function folderRow(path, label, count, icon) {
-  const d = document.createElement('div');
-  d.className = 'flex items-center gap-2 px-3 py-2 rounded bg-gray-800 hover:bg-gray-750 ' +
-    'border border-gray-700 hover:border-blue-600 cursor-pointer';
-  d.onclick = () => openGalleryModal(path);
-  d.innerHTML =
-    `<span class="text-base">${icon}</span>` +
-    `<span class="flex-1 text-sm truncate" title="${escapeHtml(label)}">${escapeHtml(label)}</span>` +
-    `<span class="text-xs text-gray-500">${count}</span>`;
-  return d;
-}
-
 // Reset the gallery multi-selection defensively. clearSelection() lives in
 // gallery.js and touches the selectedFiles Set from globals.js; if either is
 // unavailable we must NOT let that abort the caller, since the important work
@@ -111,32 +68,22 @@ function escapeHtml(s) {
   ));
 }
 
-// ── Gallery modal ───────────────────────────────────────────────────────────
-// One modal, two modes:
-//   openGalleryModal(folder)      -> normal browsing, folder picker + upload on
-//   openAlbumGallery(album)       -> album-filtered, folder picker + upload off
-let galleryModalMode = 'gallery';   // 'gallery' | 'album'
+// ── Album scoping (no modal) ────────────────────────────────────────────────
+// The grid lives inline in the Gallery pane. Albums don't open an overlay; they
+// switch to the Gallery tab and scope that same grid to the album's members, so
+// clicking a tile still loads it into the editor on the right. Browsing an album
+// and marking images up works exactly like browsing a folder.
+//
+// loadGallery() reads these two to decide whether to send ?album=.
+let galleryModalMode = 'gallery';   // 'gallery' | 'album'  (name kept: gallery.js reads it)
 let currentAlbum = '';              // active album when mode === 'album'
 
 function openGalleryModal(folder) {
-  galleryModalMode = 'gallery';
-  currentAlbum = '';
-
-  // Leaving album mode: drop the album filter and restore normal browsing.
+  exitAlbumView(false);
   currentFolder = (folder === undefined || folder === null) ? '' : folder;
   const sel = document.getElementById('folder_select');
   if (sel) sel.value = currentFolder;
-
-  document.getElementById('gallery_modal_title').textContent = 'Gallery';
-  document.getElementById('gallery_modal_sub').textContent =
-    currentFolder ? currentFolder : '';
-  document.getElementById('gallery_album_bar').classList.add('hidden');
-  document.getElementById('gallery_album_bar').classList.remove('flex');
-
-  // Folder picker, upload and comic-packing only make sense outside an album.
-  toggleGalleryChrome(true);
-
-  showGalleryModal();
+  setPane('gallery');
   currentPage = 0;
   safeClearSelection();
   loadGallery();
@@ -151,49 +98,46 @@ function openAlbumGallery(album) {
   currentSearch = '';
   const si = document.getElementById('search_input');
   if (si) si.value = '';
+  const sel = document.getElementById('folder_select');
+  if (sel) sel.value = '';
 
-  document.getElementById('gallery_modal_title').textContent = 'Album';
-  document.getElementById('gallery_modal_sub').textContent = album;
-  document.getElementById('gallery_album_name').textContent = album;
+  const nm = document.getElementById('gallery_album_name');
+  if (nm) nm.textContent = album;
   const bar = document.getElementById('gallery_album_bar');
-  bar.classList.remove('hidden');
-  bar.classList.add('flex');
+  if (bar) { bar.classList.remove('hidden'); bar.classList.add('flex'); }
 
+  // The folder picker and comic packer are meaningless inside an album.
   toggleGalleryChrome(false);
 
-  showGalleryModal();
+  setPane('gallery');
   currentPage = 0;
   safeClearSelection();
   loadGallery();
 }
 
-// Show/hide the bits of gallery chrome that are meaningless inside an album.
-function toggleGalleryChrome(show) {
-  const ids = ['folder_select', 'dropzone', 'btn_make_comic'];
-  ids.forEach(id => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.classList.toggle('hidden', !show);
-  });
-}
-
-function showGalleryModal() {
-  document.getElementById('gallery_modal').classList.remove('hidden');
-}
-
-function closeGalleryModal() {
-  document.getElementById('gallery_modal').classList.add('hidden');
-  safeClearSelection();
-  // Coming back from an album, refresh the list so counts/covers reflect any
-  // removals made while it was open.
-  if (galleryModalMode === 'album') loadImageAlbums();
+// Drop the album filter and go back to normal folder browsing.
+// reload=false is used when a caller is about to call loadGallery() itself.
+function exitAlbumView(reload = true) {
+  const wasAlbum = (galleryModalMode === 'album');
   galleryModalMode = 'gallery';
   currentAlbum = '';
+
+  const bar = document.getElementById('gallery_album_bar');
+  if (bar) { bar.classList.add('hidden'); bar.classList.remove('flex'); }
+  toggleGalleryChrome(true);
+
+  if (wasAlbum) {
+    safeClearSelection();
+    // Counts/covers may have changed while the album was open.
+    if (typeof loadImageAlbums === 'function') loadImageAlbums();
+    if (reload) { currentPage = 0; loadGallery(); }
+  }
 }
 
-// Esc closes the modal, matching the app's other modals.
-document.addEventListener('keydown', e => {
-  if (e.key !== 'Escape') return;
-  const m = document.getElementById('gallery_modal');
-  if (m && !m.classList.contains('hidden')) closeGalleryModal();
-});
+// Show/hide the bits of gallery chrome that are meaningless inside an album.
+function toggleGalleryChrome(show) {
+  ['folder_select', 'btn_make_comic'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('hidden', !show);
+  });
+}

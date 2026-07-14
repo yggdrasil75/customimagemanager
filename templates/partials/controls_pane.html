@@ -32,6 +32,18 @@
           </div>
         </div>
 
+        <!-- Albums this image belongs to. Chips are click-to-remove; the button
+             opens a picker of existing albums (or creates a new one). -->
+        <div class="flex flex-col gap-1 border-t border-gray-800 pt-2">
+          <div class="flex items-center gap-2">
+            <span class="text-[10px] text-gray-500 uppercase tracking-wider font-bold">Albums</span>
+            <span id="album_chip_count" class="text-[10px] text-gray-600"></span>
+            <button id="btn_add_to_album" onclick="addCurrentToAlbum()" title="Add this image to an album"
+              class="ml-auto text-[10px] bg-fuchsia-700 hover:bg-fuchsia-600 px-2 py-1 rounded text-white uppercase font-bold">+ Add to album</button>
+          </div>
+          <div id="album_chips" class="flex flex-wrap gap-1"></div>
+        </div>
+
         <div id="flag_banner" class="hidden text-xs bg-red-900/60 border border-red-700 rounded p-2 text-red-200">
           <div class="font-bold mb-1">🚩 AI suggests deletion</div>
           <div id="flag_reason" class="mb-2 text-red-300"></div>

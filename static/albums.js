@@ -213,3 +213,111 @@ async function albumSetCoverSelected() {
     await loadImageAlbums();
   } catch (e) { alert('Network error setting cover.'); }
 }
+// ── Per-image albums (right-hand editor pane) ───────────────────────────────
+// Powered by /api/albums/of, which returns both this file's albums and the full
+// album list. Kept separate from the bulk-bar flow above: that one acts on the
+// gallery's `selectedFiles` Set, this one acts on the single `currentFile`.
+
+// Cache of the current file's albums so a chip removal doesn't need a refetch.
+let currentFileAlbums = [];
+
+async function refreshCurrentFileAlbums() {
+  const box = document.getElementById('album_chips');
+  const cnt = document.getElementById('album_chip_count');
+  if (!box) return;
+
+  if (!currentFile) {
+    currentFileAlbums = [];
+    box.innerHTML = '';
+    if (cnt) cnt.textContent = '';
+    return;
+  }
+
+  try {
+    const d = await fetch('/api/albums/of', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: currentFile })
+    }).then(r => r.json());
+    if (!d.success) return;
+    currentFileAlbums = d.albums || [];
+    renderAlbumChips();
+  } catch (e) { /* non-fatal */ }
+}
+
+function renderAlbumChips() {
+  const box = document.getElementById('album_chips');
+  const cnt = document.getElementById('album_chip_count');
+  if (!box) return;
+
+  box.innerHTML = '';
+  if (cnt) cnt.textContent = currentFileAlbums.length ? `(${currentFileAlbums.length})` : '';
+
+  if (!currentFileAlbums.length) {
+    box.innerHTML = '<span class="text-[10px] text-gray-600 italic">Not in any album</span>';
+    return;
+  }
+
+  currentFileAlbums.forEach(name => {
+    const chip = document.createElement('span');
+    chip.className = 'inline-flex items-center gap-1 text-[10px] bg-fuchsia-900/60 border ' +
+      'border-fuchsia-700 text-fuchsia-100 px-2 py-0.5 rounded-full';
+    chip.innerHTML =
+      `<span class="cursor-pointer hover:underline" title="Open this album">${escapeHtml(name)}</span>` +
+      `<span class="cursor-pointer text-fuchsia-300 hover:text-white font-bold" title="Remove from this album">✕</span>`;
+    // Clicking the name scopes the gallery grid to that album (openAlbumGallery
+    // switches to the Gallery tab itself); the ✕ removes just this image.
+    chip.children[0].onclick = () => openAlbumGallery(name);
+    chip.children[1].onclick = () => removeCurrentFromAlbum(name);
+    box.appendChild(chip);
+  });
+}
+
+async function addCurrentToAlbum() {
+  if (!currentFile) { alert('Open an image first.'); return; }
+
+  // Make sure the album list is fresh before we offer it.
+  if (!allAlbums.length) await loadImageAlbums();
+
+  const names = allAlbums.map(a => a.name);
+  const listed = names.length ? `Existing albums:\n  ${names.join('\n  ')}\n\n` : '';
+  const name = prompt(`${listed}Add this image to which album?\n(type a new name to create it)`);
+  if (name === null) return;
+  const n = name.trim();
+  if (!n) return;
+
+  if (currentFileAlbums.includes(n)) {
+    alert(`This image is already in “${n}”.`);
+    return;
+  }
+
+  try {
+    const d = await fetch('/api/albums/add', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ album: n, files: [currentFile] })
+    }).then(r => r.json());
+    if (!d.success) { alert(d.error || 'Could not add to album.'); return; }
+
+    currentFileAlbums.push(n);
+    renderAlbumChips();
+    await loadImageAlbums();           // refresh counts + tab badge
+    const st = document.getElementById('status_text');
+    if (st) st.innerText = `Added to album “${n}”.`;
+  } catch (e) { alert('Network error adding to album.'); }
+}
+
+async function removeCurrentFromAlbum(name) {
+  if (!currentFile) return;
+  try {
+    const d = await fetch('/api/albums/remove', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ album: name, files: [currentFile] })
+    }).then(r => r.json());
+    if (!d.success) { alert(d.error || 'Could not remove from album.'); return; }
+
+    currentFileAlbums = currentFileAlbums.filter(a => a !== name);
+    renderAlbumChips();
+    await loadImageAlbums();
+    // If we're currently looking at that album, it just lost a member.
+    if (galleryModalMode === 'album' && currentAlbum === name) loadGallery();
+  } catch (e) { alert('Network error removing from album.'); }
+}

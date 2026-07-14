@@ -2,8 +2,12 @@
 // Talks to /api/music/*. Kept separate from app.js so the image manager is
 // untouched; only setMode() bridges the two.
 
-let musicMode = false;
-let musicCurrentView = 'artists';
+// NOTE: panes.js (the tab controller) reads/writes these via `window.` because
+// it loads BEFORE this file. Top-level `let` creates a script-scope binding that
+// is NOT the same slot as window.musicMode, so the two would silently diverge.
+// Declaring them as explicit globals keeps panes.js and music.js on one binding.
+window.musicMode = false;
+window.musicCurrentView = 'artists';
 let musicCtx = { artist: '', album: '', cluster: '' };   // active drill-down filter
 let musicQueue = [];      // current playlist (array of song dicts)
 let musicQueueIdx = -1;
@@ -18,15 +22,15 @@ function setMode(mode) {
     setPane(mode === 'music' ? 'music' : 'gallery');
     return;
   }
-  musicMode = (mode === 'music');
-  document.getElementById('music_pane')?.classList.toggle('hidden', !musicMode);
-  if (musicMode) { musicRefreshStatus(); musicView(musicCurrentView); }
+  window.musicMode = (mode === 'music');
+  document.getElementById('music_pane')?.classList.toggle('hidden', !window.musicMode);
+  if (window.musicMode) { musicRefreshStatus(); musicView(window.musicCurrentView); }
 }
 
 function musicSearchDebounced() {
   clearTimeout(_musicSearchTimer);
   _musicSearchTimer = setTimeout(() => {
-    if (musicCurrentView !== 'songs') musicView('songs');
+    if (window.musicCurrentView !== 'songs') musicView('songs');
     else loadSongs();
   }, 250);
 }
@@ -46,16 +50,16 @@ async function musicRefreshStatus() {
     // keep polling while a background job runs
     if (s.indexing || s.embedding || s.clustering) {
       setTimeout(musicRefreshStatus, 1500);
-      if (musicMode) refreshCurrentView();
+      if (window.musicMode) refreshCurrentView();
     }
   } catch (e) {}
 }
 
 function refreshCurrentView() {
-  if (musicCurrentView === 'artists') loadArtists();
-  else if (musicCurrentView === 'albums') loadAlbums();
-  else if (musicCurrentView === 'songs') loadSongs();
-  else if (musicCurrentView === 'clusters') loadClusters();
+  if (window.musicCurrentView === 'artists') loadArtists();
+  else if (window.musicCurrentView === 'albums') loadAlbums();
+  else if (window.musicCurrentView === 'songs') loadSongs();
+  else if (window.musicCurrentView === 'clusters') loadClusters();
 }
 
 function _setTab(view) {
@@ -66,7 +70,7 @@ function _setTab(view) {
 }
 
 function musicView(view) {
-  musicCurrentView = view;
+  window.musicCurrentView = view;
   _setTab(view);
   if (view === 'artists') { musicCtx = { artist: '', album: '', cluster: '' }; loadArtists(); }
   else if (view === 'albums')  loadAlbums();
@@ -91,7 +95,7 @@ async function loadArtists() {
 }
 function drillArtist(name) {
   musicCtx = { artist: name, album: '', cluster: '' };
-  musicCurrentView = 'albums'; _setTab('albums'); loadAlbums();
+  window.musicCurrentView = 'albums'; _setTab('albums'); loadAlbums();
 }
 
 // ── browse: albums ──────────────────────────────────────────────
@@ -116,7 +120,7 @@ async function loadAlbums() {
 }
 function drillAlbum(album, artist) {
   musicCtx = { artist: artist, album: album, cluster: '' };
-  musicCurrentView = 'songs'; _setTab('songs'); loadSongs();
+  window.musicCurrentView = 'songs'; _setTab('songs'); loadSongs();
 }
 
 // ── browse: songs ───────────────────────────────────────────────
@@ -199,7 +203,7 @@ async function loadClusters() {
 }
 function drillCluster(cluster) {
   musicCtx = { artist: '', album: '', cluster: String(cluster) };
-  musicCurrentView = 'songs'; _setTab('songs'); loadSongs();
+  window.musicCurrentView = 'songs'; _setTab('songs'); loadSongs();
 }
 
 // ── player ──────────────────────────────────────────────────────
@@ -229,7 +233,7 @@ async function shuffleByCurrent(kind) {
   }).then(r => r.json());
   if (!d.success) { showToastM(d.error || 'Shuffle failed.'); return; }
   musicQueue = d.playlist; musicQueueIdx = -1;
-  musicCurrentView = 'songs'; _setTab('songs');
+  window.musicCurrentView = 'songs'; _setTab('songs');
   renderSongTable(document.getElementById('music_list'), d.playlist, d.playlist.length);
   showToastM(`Shuffled ${d.playlist.length} tracks by ${kind}.`);
   playFromQueue(0);

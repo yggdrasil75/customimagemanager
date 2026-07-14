@@ -31,24 +31,37 @@ async function loadFolders(){
     const d=await fetch('/api/folders').then(r=>r.json());
     allFolders=d.folders||[];
     const sel=document.getElementById('folder_select');
-    const prev=sel.value;
-    sel.innerHTML='<option value="">All folders</option>';
-    allFolders.forEach(f=>{
-      const o=document.createElement('option');
-      o.value=f.path;
-      o.text=(f.path==='/'?'(root)':f.path)+`  (${f.count})`;
-      sel.appendChild(o);
-    });
-    sel.value=prev;
+    if(sel){
+      // Rebuild, then restore the selection from `currentFolder` — the app's
+      // single source of truth — NOT from the <select>'s own value. On a fresh
+      // load the options don't exist yet, so the old `prev = sel.value` read was
+      // always '' and, worse, assigning a value that isn't an <option> yet is a
+      // no-op: the picker fell out of sync with currentFolder and only righted
+      // itself once you manually picked a folder and picked "All folders" back.
+      sel.innerHTML='<option value="">All folders</option>';
+      allFolders.forEach(f=>{
+        const o=document.createElement('option');
+        o.value=f.path;
+        o.text=(f.path==='/'?'(root)':f.path)+`  (${f.count})`;
+        sel.appendChild(o);
+      });
+      // If the remembered folder disappeared from disk, fall back to All folders
+      // instead of leaving the select blank.
+      const has=(currentFolder==='')||allFolders.some(f=>f.path===currentFolder);
+      if(!has) currentFolder='';
+      sel.value=currentFolder;
+    }
     // The Gallery tab's folder browser is fed by the same data.
     if(typeof renderFolderList==='function') renderFolderList();
   }catch(e){}
 }
 function onFolderChange(){
-  currentFolder=document.getElementById('folder_select').value;
+  const sel=document.getElementById('folder_select');
+  if(!sel) return;
+  currentFolder=sel.value;
   imageFilter=null;
-  document.getElementById('filter_banner').classList.add('hidden');
-  document.getElementById('filter_banner').classList.remove('flex');
+  const fb=document.getElementById('filter_banner');
+  if(fb){ fb.classList.add('hidden'); fb.classList.remove('flex'); }
   currentPage=0; loadGallery();
 }
 
@@ -255,6 +268,9 @@ async function selectFile(fn){
   document.getElementById('yolo_controls').classList.remove('opacity-50','pointer-events-none');
   document.getElementById('btn_delete').classList.remove('hidden');
   document.getElementById('save_indicator').classList.add('hidden');
+  // Repopulate the editor pane's album chips for this file (fire-and-forget:
+  // it must not block the image/metadata load below).
+  if(typeof refreshCurrentFileAlbums==='function') refreshCurrentFileAlbums();
   if(isVideoFile(fn)){
     // Native video: use the <video> element, hide the image canvas. Image
     // region boxes stay hidden; time-indexed video boxes render via vtOverlay.
