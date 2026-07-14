@@ -26,17 +26,39 @@ async function loadFaces() {
     const d = await r.json();
     _faceClusters = d.clusters || [];
 
-    document.getElementById('faces_warn')
-      ?.classList.toggle('hidden', !!d.identity);
+    const warn = document.getElementById('faces_warn');
+    if (warn) {
+      warn.classList.toggle('hidden', !!d.identity);
+      if (!d.identity) {
+        warn.textContent =
+          'insightface unavailable — clustering by appearance only, so the same '
+          + 'person will split across pose/lighting. Install it with: '
+          + 'pip install insightface onnxruntime';
+      }
+    }
     const badge = document.getElementById('face_count_badge');
     if (badge) badge.textContent = _faceClusters.length || '';
     document.getElementById('faces_status').textContent =
       `${_faceClusters.length} cluster(s) · ${d.unclustered} unclustered`;
 
     if (!_faceClusters.length) {
-      el.innerHTML = `<div class="text-xs text-gray-500 p-3">
-        No faces yet. Enable <b>Background face/person boxing</b> in Settings,
-        or hit <b>Rescan all</b>.</div>`;
+      // Distinguish "nothing scanned yet" from "scanned, found nothing" --
+      // previously both showed the same dead-end message.
+      let p = null;
+      try { p = await (await fetch('/api/faces/progress')).json(); } catch (e) {}
+      if (p && p.pending > 0) {
+        el.innerHTML = `<div class="text-xs text-gray-500 p-3">
+          Scan in progress — ${p.done}/${p.total} image(s) done.</div>`;
+        if (!_facePoll) _facePoll = setInterval(pollFaceProgress, 2000);
+      } else if (p && p.faces > 0) {
+        el.innerHTML = `<div class="text-xs text-gray-500 p-3">
+          ${p.faces} face(s) cached but no cluster formed yet. A cluster needs at
+          least 2 similar faces — hit <b>Recluster</b>, or loosen
+          <b>face_cluster_eps</b> in Settings.</div>`;
+      } else {
+        el.innerHTML = `<div class="text-xs text-gray-500 p-3">
+          No faces yet. Hit <b>Rescan all</b> to scan the library.</div>`;
+      }
       return;
     }
 
@@ -94,12 +116,55 @@ async function reclusterFaces() {
   loadFaces();
 }
 
+// Rescan is a BACKGROUND job -- firing it and stopping is why the status text
+// looked frozen. Poll /api/faces/progress until the queue drains, then reload.
+let _facePoll = null;
+
+function stopFacePoll() {
+  if (_facePoll) { clearInterval(_facePoll); _facePoll = null; }
+}
+
+async function pollFaceProgress() {
+  let d;
+  try {
+    d = await (await fetch('/api/faces/progress')).json();
+  } catch (e) { return; }
+
+  const st = document.getElementById('faces_status');
+  const app = document.getElementById('status_text');
+  if (!st) { stopFacePoll(); return; }
+
+  if (d.pending > 0) {
+    let msg = `Scanning ${d.done}/${d.total} · ${d.faces} face(s) cached`;
+    // Only the opportunistic scanner waits for idle. A forced run (Rescan all)
+    // never does, so never tell the user we're waiting when we aren't.
+    if (!d.forced && d.idle_wait > 0) msg += ` · waiting ${d.idle_wait}s for idle`;
+    st.textContent = msg;
+    if (app) app.textContent = d.status || msg;
+  } else {
+    stopFacePoll();
+    st.textContent = 'Scan complete.';
+    loadFaces();
+  }
+}
+
 async function rescanFaces() {
   if (!confirm('Re-detect faces across the whole library? Runs in the background when idle.')) return;
-  await fetch('/api/faces/scan', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rescan: true })
-  });
-  document.getElementById('faces_status').textContent = 'Rescan queued (runs when idle).';
+  const st = document.getElementById('faces_status');
+  st.textContent = 'Queueing rescan…';
+  let d;
+  try {
+    d = await (await fetch('/api/faces/scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rescan: true })
+    })).json();
+  } catch (e) {
+    st.textContent = 'Rescan failed to start.';
+    return;
+  }
+  st.textContent = `Scanning ${d.pending || 0} image(s)…`;
+  stopFacePoll();
+  _facePoll = setInterval(pollFaceProgress, 2000);
+  pollFaceProgress();
 }

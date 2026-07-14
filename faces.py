@@ -43,6 +43,7 @@ FACE_MODEL_NAME = "yolov11n-face.pt"
 MIN_FACE_PX = 32          # below this a face carries too little identity signal
 DEFAULT_EPS = 0.28        # cosine distance; ArcFace identities are tight
 FALLBACK_EPS = 0.18       # appearance embeddings need a stricter radius
+MATCH_IOU    = 0.35       # min overlap to bind an insightface det to a YOLO box
 
 _insight = {"checked": False, "app": None}
 _lock = threading.Lock()
@@ -114,42 +115,95 @@ def have_identity_embedder():
     return _load_insight() is not None
 
 
+def _as_bgr(img):
+    """Coerce any decoded array to 3-channel uint8 BGR, or None."""
+    try:
+        import cv2
+    except Exception:
+        return img
+    if img is None or getattr(img, "size", 0) == 0:
+        return None
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    elif img.ndim == 3 and img.shape[2] != 3:
+        c = img.shape[2]
+        if c in (1, 2):
+            img = cv2.cvtColor(img[:, :, 0], cv2.COLOR_GRAY2BGR)
+        elif c == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        else:
+            img = img[:, :, :3]
+    if img.dtype != np.uint8:
+        img = np.clip(img, 0, 255).astype(np.uint8)
+    return img
+
+
+def _iou(a, b):
+    """IoU between two normalised center-form boxes."""
+    ax1, ay1 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
+    ax2, ay2 = a["cx"] + a["w"] / 2, a["cy"] + a["h"] / 2
+    bx1, by1 = b["cx"] - b["w"] / 2, b["cy"] - b["h"] / 2
+    bx2, by2 = b["cx"] + b["w"] / 2, b["cy"] + b["h"] / 2
+    ix = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    iy = max(0.0, min(ay2, by2) - max(ay1, by1))
+    inter = ix * iy
+    union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+    return inter / union if union > 0 else 0.0
+
+
 def embed_faces(img_bgr, boxes):
     """Embed each face crop. `boxes` are normalised center-form dicts.
 
     Returns (vectors, mode) where mode is 'arcface' or 'appearance'. Vectors are
     L2-normalised so cosine distance == what group_embeddings expects.
+
+    We run insightface ONCE over the whole image rather than per-crop. Its
+    pipeline is detect -> 5-point landmark -> similarity-transform to a 112x112
+    canonical face -> ArcFace. Handing it a pre-cropped face means it must
+    re-detect inside a tight crop, which frequently fails (no margin, no
+    context) and returns nothing -- which is why the old per-crop path produced
+    all-None vectors and silently fell through to 'appearance'. Detecting on the
+    full frame gives it the context it wants; we then match its detections back
+    to the YOLO boxes by IoU so the caller's box list stays authoritative.
     """
     if img_bgr is None or not boxes:
         return [], "none"
 
+    # Same 3-channel expectation as YOLO: insightface's detector and ArcFace head
+    # both assume BGR uint8. Callers should hand us BGR already, but guard here
+    # so an RGBA/grayscale array degrades to a correct embed rather than a shape
+    # error deep in onnxruntime.
+    img_bgr = _as_bgr(img_bgr)
+    if img_bgr is None:
+        return [], "none"
+
     app = _load_insight()
-    H, W = img_bgr.shape[:2]
 
     if app is not None:
-        vecs = []
-        for b in boxes:
-            try:
-                x1 = int((b["cx"] - b["w"] / 2) * W)
-                y1 = int((b["cy"] - b["h"] / 2) * H)
-                x2 = int((b["cx"] + b["w"] / 2) * W)
-                y2 = int((b["cy"] + b["h"] / 2) * H)
-                # pad ~20%: ArcFace wants some margin around the crop
-                px, py = int((x2 - x1) * 0.2), int((y2 - y1) * 0.2)
-                x1, y1 = max(0, x1 - px), max(0, y1 - py)
-                x2, y2 = min(W, x2 + px), min(H, y2 + py)
-                crop = img_bgr[y1:y2, x1:x2]
-                if crop.size == 0:
-                    vecs.append(None); continue
-                got = app.get(crop)
-                if not got:
-                    vecs.append(None); continue
-                v = np.asarray(got[0].normed_embedding, dtype=np.float32)
-                vecs.append(v)
-            except Exception:
-                vecs.append(None)
-        if any(v is not None for v in vecs):
-            return vecs, "arcface"
+        try:
+            found = app.get(img_bgr)          # full-image detect + align + embed
+        except Exception:
+            found = []
+        if found:
+            H, W = img_bgr.shape[:2]
+            dets = []
+            for f in found:
+                x1, y1, x2, y2 = [float(v) for v in f.bbox]
+                dets.append(({"cx": ((x1 + x2) / 2) / max(1, W),
+                              "cy": ((y1 + y2) / 2) / max(1, H),
+                              "w": (x2 - x1) / max(1, W),
+                              "h": (y2 - y1) / max(1, H)},
+                             np.asarray(f.normed_embedding, dtype=np.float32)))
+            vecs = []
+            for b in boxes:
+                best, best_iou = None, 0.0
+                for db, v in dets:
+                    i = _iou(b, db)
+                    if i > best_iou:
+                        best, best_iou = v, i
+                vecs.append(best if best_iou >= MATCH_IOU else None)
+            if any(v is not None for v in vecs):
+                return vecs, "arcface"
 
     # Degraded: appearance-only. Clusters WILL split the same person across
     # pose/lighting; the UI surfaces this so the user knows why.
@@ -173,6 +227,17 @@ def cluster(vectors, mode="arcface", min_cluster=2, eps=None):
     keep = [(i, v) for i, v in enumerate(vectors) if v is not None]
     if len(keep) < min_cluster:
         return [-1] * len(vectors)
+    # Vectors of differing width mean the cache mixes arcface (512-d) with
+    # appearance embeddings. They are not the same space and comparing them
+    # yields garbage clusters, so keep only the majority width.
+    widths = {}
+    for _, v in keep:
+        widths[len(v)] = widths.get(len(v), 0) + 1
+    if len(widths) > 1:
+        dom = max(widths, key=widths.get)
+        keep = [(i, v) for i, v in keep if len(v) == dom]
+        if len(keep) < min_cluster:
+            return [-1] * len(vectors)
     if eps is None:
         eps = DEFAULT_EPS if mode == "arcface" else FALLBACK_EPS
     X = np.asarray([v for _, v in keep], dtype=np.float32)

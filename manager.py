@@ -2536,8 +2536,30 @@ def _detect_obb_or_box(img_bgr, model_path, cache, keep_classes=None,
                        conf=0.25, as_obb=False):
     """Run a YOLO (optionally OBB) model and return normalised center-form boxes
     [{class_name,cx,cy,w,h}]. OBB results are reduced to their axis-aligned
-    enclosing box (the rest of the pipeline assumes upright crops). Never raises."""
+    enclosing box (the rest of the pipeline assumes upright crops). Never raises.
+
+    Coerces the input to 3-channel BGR first. YOLO's first conv layer is built
+    for exactly 3 channels, so an RGBA or grayscale array blows up with a shape
+    mismatch deep in torch rather than anything actionable. Guarding at this
+    choke point means no caller can reintroduce that, whatever read_jxl returns.
+    """
     try:
+        if img_bgr is None or getattr(img_bgr, "size", 0) == 0:
+            return []
+        if img_bgr.ndim == 2:                       # grayscale
+            img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_GRAY2BGR)
+        elif img_bgr.ndim == 3 and img_bgr.shape[2] != 3:
+            c = img_bgr.shape[2]
+            if c == 1:
+                img_bgr = cv2.cvtColor(img_bgr[:, :, 0], cv2.COLOR_GRAY2BGR)
+            elif c == 2:                            # gray + alpha
+                img_bgr = cv2.cvtColor(img_bgr[:, :, 0], cv2.COLOR_GRAY2BGR)
+            elif c == 4:                            # BGRA/RGBA -> drop alpha
+                img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_BGRA2BGR)
+            else:
+                img_bgr = img_bgr[:, :, :3]
+        if img_bgr.dtype != np.uint8:
+            img_bgr = np.clip(img_bgr, 0, 255).astype(np.uint8)
         if cache["path"] != model_path:
             cache["model"] = YOLO(model_path); cache["path"] = model_path
         res = cache["model"](img_bgr, verbose=False, conf=conf)
@@ -2619,6 +2641,15 @@ def _run_faces(img_bgr):
 
 # ── Background face / person boxing + clustering ───────────────────────────────
 _face_bg_cache = {"path": None, "model": None}
+# set whenever new embeddings land; the worker reclusters once the queue drains
+_face_dirty = {"v": False}
+# A MANUAL "Rescan all" is an explicit instruction, so it must bypass the idle
+# gate entirely -- the user is by definition active at the moment they click it,
+# so waiting for idle means waiting forever while they watch. `_face_force` runs
+# the queue flat out; `_face_wake` lets us start within ms instead of sitting in
+# the loop's 15s sleep.
+_face_force = {"v": False}
+_face_wake = threading.Event()
 
 def _face_regions_for(img, rel):
     """Detect faces + people in one image. Returns MWG-shaped region dicts,
@@ -2654,54 +2685,104 @@ def _cache_faces(rel, img, regions):
     for r, v in zip(fboxes, vecs):
         if v is None:
             continue
-        db.execute(
-            """INSERT OR IGNORE INTO face_regions
-               (rel_path,cx,cy,w,h,embedding,embed_mode)
-               VALUES (?,?,?,?,?,?,?)""",
-            (rel, round(r["cx"], 5), round(r["cy"], 5),
-             round(r["w"], 5), round(r["h"], 5),
-             np.asarray(v, np.float32).tobytes(), mode))
+        cx, cy = round(r["cx"], 5), round(r["cy"], 5)
+        w, h   = round(r["w"], 5), round(r["h"], 5)
+        blob   = np.asarray(v, np.float32).tobytes()
+        # A rescan must be able to CORRECT a row (e.g. an appearance-mode vector
+        # written before insightface was installed). INSERT OR IGNORE could not:
+        # it left the stale embedding in place forever. Update in place instead,
+        # but never clobber a confirmed name -- MWG stays the source of truth.
+        cur = db.execute(
+            "SELECT id FROM face_regions WHERE rel_path=? AND cx=? AND cy=?",
+            (rel, cx, cy)).fetchone()
+        if cur:
+            db.execute(
+                "UPDATE face_regions SET w=?,h=?,embedding=?,embed_mode=? WHERE id=?",
+                (w, h, blob, mode, cur[0]))
+        else:
+            db.execute(
+                """INSERT INTO face_regions
+                   (rel_path,cx,cy,w,h,embedding,embed_mode)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (rel, cx, cy, w, h, blob, mode))
     db.commit()
 
 
 def _background_face_worker():
-    """Idle-time face/person boxing. Writes MWG regions immediately (so a crash
-    never loses work) and caches embeddings for clustering."""
+    """Face/person boxing. Writes MWG regions immediately (so a crash never loses
+    work) and caches embeddings for clustering.
+
+    Two modes:
+      forced (user hit "Rescan all") -- run flat out, ignore the idle gate.
+      opportunistic (face_bg_enabled) -- only work while the user is idle.
+    """
     IDLE_SECS, BATCH = 60, 6
     while True:
-        time.sleep(15)
+        # Sleep interruptibly: a manual rescan sets the event and we start now
+        # rather than up to 15s later.
+        _face_wake.wait(timeout=15)
+        _face_wake.clear()
         try:
-            if not state.get("face_bg_enabled"):
+            forced = _face_force["v"]
+            if not forced and not state.get("face_bg_enabled"):
                 continue
-            if time.time() - _last_activity < IDLE_SECS:
+            # The idle gate exists so opportunistic scanning doesn't fight the
+            # user for CPU. A forced run is the user ASKING for that CPU, so it
+            # does not apply.
+            if not forced and time.time() - _last_activity < IDLE_SECS:
                 continue
 
             rows = _db().execute(
                 "SELECT rel_path FROM files WHERE COALESCE(face_done,0)=0 LIMIT ?",
                 (BATCH,)).fetchall()
             if not rows:
-                state["status_text"] = "Face scan: all caught up."
-                time.sleep(45)
+                # Queue drained. Cluster once, then idle -- without this the
+                # embeddings sat in the DB and no cluster ever appeared in the UI.
+                if _face_dirty["v"]:
+                    state["status_text"] = "Face scan: clustering…"
+                    n = _recluster()
+                    _face_dirty["v"] = False
+                    state["status_text"] = f"Face scan: done ({n} cluster(s))."
+                elif forced:
+                    state["status_text"] = "Face scan: complete."
+                else:
+                    state["status_text"] = "Face scan: all caught up."
+                _face_force["v"] = False      # forced run is finished
+                if not forced:
+                    time.sleep(45)
                 continue
 
-            state["status_text"] = f"Face scan: {len(rows)} image(s)…"
+            left = _db().execute(
+                "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
+            state["status_text"] = (
+                f"Face scan: {left} image(s) left…" if forced
+                else f"Face scan (idle): {left} image(s) left…")
             for (rel,) in rows:
-                if time.time() - _last_activity < IDLE_SECS:
-                    break                      # user is back — yield
+                if not _face_force["v"] and time.time() - _last_activity < IDLE_SECS:
+                    break                      # user is back — yield (opportunistic only)
                 abs_p = get_safe_path(MEDIA_DIR, rel)
                 if not abs_p or not os.path.exists(abs_p):
                     _mark_face_done(rel); continue
                 img = read_jxl(abs_p)
                 if img is None:
                     _mark_face_done(rel); continue
+                # read_jxl may hand back (h,w), (h,w,3) or (h,w,4) -- it says so
+                # in its own docstring. Every other consumer funnels through
+                # _to_bgr; this worker did not, so an RGBA image reached YOLO
+                # with 4 channels ("expected input[1,4,...] to have 3 channels").
+                # A grayscale image would have failed the same way with 1.
+                bgr = _to_bgr(img)
 
-                found = _face_regions_for(img, rel)
+                found = _face_regions_for(bgr, rel)
                 if found:
                     meta = read_metadata(abs_p)
                     merged = _merge_regions(meta["regions"], found)
                     write_metadata(abs_p, meta["tags"], meta["description"], merged)
-                    _cache_faces(rel, img, found)
+                    _cache_faces(rel, bgr, found)
+                    _face_dirty["v"] = True
                 _mark_face_done(rel)
+            if _face_force["v"]:
+                _face_wake.set()      # keep the forced run going without a pause
         except Exception as e:
             access_logger.error(f"face worker: {e}")
             time.sleep(30)
@@ -2720,15 +2801,30 @@ def _recluster():
         "WHERE embedding IS NOT NULL").fetchall()
     if not rows:
         return 0
-    ids   = [r[0] for r in rows]
-    vecs  = [np.frombuffer(r[1], dtype=np.float32) for r in rows]
-    mode  = rows[0][2] or "arcface"
-    eps   = state.get("face_cluster_eps") or None
-    labels = facelib.cluster(vecs, mode=mode, eps=eps)
+    eps = state.get("face_cluster_eps") or None
+    # Cluster each embed_mode SEPARATELY. arcface (512-d identity) and appearance
+    # vectors live in different spaces with different radii; letting rows[0]
+    # pick one mode for the whole table meant a single stale row could apply the
+    # wrong eps to everything (or crash the matmul on a dim mismatch).
+    by_mode = {}
+    for rid, blob, m, _n, _c in rows:
+        by_mode.setdefault(m or "arcface", []).append(
+            (rid, np.frombuffer(blob, dtype=np.float32)))
 
     db = _db()
-    for i, lab in zip(ids, labels):
-        db.execute("UPDATE face_regions SET cluster_id=? WHERE id=?", (int(lab), i))
+    total, base = 0, 0
+    for mode, items in by_mode.items():
+        ids  = [i for i, _ in items]
+        vecs = [v for _, v in items]
+        labels = facelib.cluster(vecs, mode=mode, eps=eps)
+        for i, lab in zip(ids, labels):
+            lab = int(lab)
+            # offset so cluster ids stay unique across modes
+            db.execute("UPDATE face_regions SET cluster_id=? WHERE id=?",
+                       (lab + base if lab >= 0 else -1, i))
+        used = len({l for l in labels if l >= 0})
+        base += used
+        total += used
     # propagate confirmed names across each cluster as a suggestion
     for (lab,) in db.execute(
             "SELECT DISTINCT cluster_id FROM face_regions WHERE cluster_id>=0").fetchall():
@@ -2739,7 +2835,7 @@ def _recluster():
             db.execute("UPDATE face_regions SET name=? WHERE cluster_id=? "
                        "AND confirmed=0", (known[0], lab))
     db.commit()
-    return len({l for l in labels if l >= 0})
+    return total
 
 # ── OCR ─────────────────────────────────────────────────────────────────────--
 _ocr_cache = {"engine": None, "reader": None}
@@ -3134,9 +3230,17 @@ def _apply_llm_action(fp, action):
     return True
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
+# Endpoints that are POLLED by a UI on a timer. These must NOT count as user
+# activity: the idle workers only run after IDLE_SECS of quiet, so a tab polling
+# every 2s would keep _last_activity permanently fresh and starve them forever.
+# (This is why an open Faces tab could sit at "queued" and never advance.)
+_POLL_PATHS = {"/api/state", "/api/faces/progress"}
+
 @app.before_request
 def _touch_activity():
     global _last_activity
+    if request.path in _POLL_PATHS:
+        return
     _last_activity = time.time()
 
 @app.route("/")
@@ -3600,13 +3704,59 @@ def api_face_clusters():
 
 @app.route("/api/faces/scan", methods=["POST"])
 def api_face_scan():
-    """Force a rescan (clears face_done) or just recluster what's cached."""
+    """Force a rescan (clears face_done) or just recluster what's cached.
+
+    A rescan used to be a no-op in practice: it reset face_done and returned,
+    but nothing consumed the queue (the worker thread was never started) and
+    _cache_faces' INSERT OR IGNORE meant even a working rescan could not correct
+    a stale embedding. Both are fixed; here we additionally drop unconfirmed
+    cached rows so a rescan genuinely re-derives them.
+    """
     d = request.json or {}
     if d.get("rescan"):
-        _db().execute("UPDATE files SET face_done=0"); _db().commit()
-        return jsonify({"success": True, "status": "rescanning"})
+        db = _db()
+        db.execute("UPDATE files SET face_done=0")
+        # Keep confirmed faces (they carry user-entered names, and MWG has them
+        # anyway); drop the rest so re-detection starts from a clean slate.
+        db.execute("DELETE FROM face_regions WHERE COALESCE(confirmed,0)=0")
+        db.commit()
+        _face_dirty["v"] = True
+        # Clicking the button is an explicit instruction: run NOW, at full speed,
+        # regardless of the idle gate or the face_bg_enabled setting (which only
+        # governs *opportunistic* background scanning). Previously this just
+        # queued work behind a 60s-idle gate the user could never satisfy while
+        # they were sitting there watching the pane.
+        _face_force["v"] = True
+        _face_wake.set()
+        pending = db.execute(
+            "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
+        state["status_text"] = f"Face scan: starting ({pending} image(s))…"
+        return jsonify({"success": True, "status": "rescanning", "pending": pending,
+                        "forced": True})
     n = _recluster()
+    _face_dirty["v"] = False
     return jsonify({"success": True, "clusters": n})
+
+
+@app.route("/api/faces/progress")
+def api_face_progress():
+    """Poll target for the Faces tab: how much of the library is still queued."""
+    db = _db()
+    pending = db.execute(
+        "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
+    total = db.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+    cached = db.execute("SELECT COUNT(*) FROM face_regions").fetchone()[0]
+    forced = bool(_face_force["v"])
+    # idle_wait is only meaningful for the opportunistic scanner; a forced run
+    # never waits, so report 0 rather than a countdown the UI would show as a
+    # delay that isn't happening.
+    idle_wait = 0 if forced else max(0, int(60 - (time.time() - _last_activity)))
+    return jsonify({"success": True, "pending": pending, "total": total,
+                    "faces": cached, "done": total - pending,
+                    "enabled": bool(state.get("face_bg_enabled")),
+                    "forced": forced, "idle_wait": idle_wait,
+                    "identity": facelib.have_identity_embedder(),
+                    "status": state.get("status_text", "")})
 
 
 @app.route("/api/faces/name", methods=["POST"])
@@ -7073,6 +7223,8 @@ if __name__=='__main__':
     tiering.start(MEDIA_DIR, _db, lambda: _last_activity)
     access_logger.info("Starting background music indexer…")
     threading.Thread(target=_music_index_background, daemon=True).start()
+    access_logger.info("Starting background face worker…")
+    threading.Thread(target=_background_face_worker, daemon=True).start()
     access_logger.info("Warming pose/OCR models (auto-download)…")
     threading.Thread(target=_warm_models, daemon=True).start()
     access_logger.info("Serving on :8000")
