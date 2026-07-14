@@ -4,18 +4,44 @@
 
 let _faceClusters = [];
 
-function faceChip(f, size = 56) {
-  const zx = 1 / Math.max(f.w, 0.01);
-  const zy = 1 / Math.max(f.h, 0.01);
-  const z = Math.min(zx, zy) * 0.9;
-  return `<div class="relative overflow-hidden rounded bg-gray-900 flex-shrink-0"
-               style="width:${size}px;height:${size}px">
-      <img src="/api/thumb/${encodeURI(f.rel)}" loading="lazy"
-           style="position:absolute;width:${z * 100}%;height:${z * 100}%;
-                  left:${50 - f.cx * z * 100}%;top:${50 - f.cy * z * 100}%;
-                  object-fit:cover;transform:translate(-0%,-0%)">
-    </div>`;
+function faceChip(f, size = 56, pad = 1.6) {
+  // Crop a normalised face box out of the full thumbnail.
+  //
+  // The old version scaled the <img> to z*100% and then set
+  //   left: 50 - cx*z*100
+  // mixing two different reference frames: `left` is a % of the CONTAINER, but
+  // the offset needed is a fraction of the SCALED IMAGE (which is z x bigger).
+  // It was off by a factor of z, so any zoomed-in face (z is 10-20x for a small
+  // face) got pushed clean outside the 56px box -- hence blank chips. It also
+  // forced a square aspect on a 3:2 photo, which is why the ones that did land
+  // were squashed / half-rendered.
+  //
+  // background-size + background-position is the right primitive here: sizes are
+  // relative to the element, and `background-position: X% Y%` aligns the X% point
+  // of the IMAGE to the X% point of the BOX -- exactly the mapping we want, and
+  // it stays correct whatever the source aspect ratio is.
+  const bw = Math.max(f.w, 0.01) * pad;    // widen the box a little: a tight crop
+  const bh = Math.max(f.h, 0.01) * pad;    // cuts the chin/hair off and reads badly
+  const zx = 100 / bw;                     // background-size, % of the chip
+  const zy = 100 / bh;
+
+  // Map the face centre to the centre of the chip. With background-position the
+  // percentage is "align this % of the image to that % of the box", so we need
+  // the face centre expressed as a fraction of the OVERFLOW, not of the image:
+  //   pos% = c / (1 - b)   clamped, since b == 1 means no overflow (divide by 0)
+  const px = bw >= 1 ? 50 : clamp01((f.cx - bw / 2) / (1 - bw)) * 100;
+  const py = bh >= 1 ? 50 : clamp01((f.cy - bh / 2) / (1 - bh)) * 100;
+
+  const url = '/api/thumb/' + encodeURI(f.rel);
+  return `<div class="rounded bg-gray-900 flex-shrink-0 bg-no-repeat"
+               title="${(f.rel || '').replace(/"/g, '&quot;')}"
+               style="width:${size}px;height:${size}px;
+                      background-image:url('${url}');
+                      background-size:${zx}% ${zy}%;
+                      background-position:${px}% ${py}%"></div>`;
 }
+
+function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 
 async function loadFaces() {
   const el = document.getElementById('faces_list');
@@ -55,6 +81,26 @@ async function loadFaces() {
           ${p.faces} face(s) cached but no cluster formed yet. A cluster needs at
           least 2 similar faces — hit <b>Recluster</b>, or loosen
           <b>face_cluster_eps</b> in Settings.</div>`;
+      } else if (p && p.model_error) {
+        // The whole library can scan "clean" with zero faces simply because the
+        // detector never downloaded. That used to render as the cheerful
+        // "Hit Rescan all" message below, so a dead weights URL was invisible:
+        // every image got marked done, the table stayed empty, and the pane
+        // implied the user just hadn't started yet.
+        el.innerHTML = `<div class="text-xs text-red-300 p-3 bg-red-950/40
+            border border-red-800 rounded">
+          <b>Face detector unavailable.</b> No faces can be found until this is
+          fixed — a scan will "succeed" on every image and detect nothing.
+          <div class="text-red-400/80 mt-1 font-mono text-[10px]">
+            ${p.model_error}</div>
+          <div class="text-gray-400 mt-1">Check the network allowlist, or drop a
+            <code>*-face.pt</code> into <code>./models</code> and pick it under
+            <b>Face model</b> in Settings.</div></div>`;
+      } else if (p && p.done > 0 && p.pending === 0) {
+        el.innerHTML = `<div class="text-xs text-gray-500 p-3">
+          Scanned ${p.done} image(s) and found no faces. If that's wrong, the
+          detector may be too small — try a larger <b>Face size</b> in Settings,
+          then <b>Rescan all</b>.</div>`;
       } else {
         el.innerHTML = `<div class="text-xs text-gray-500 p-3">
           No faces yet. Hit <b>Rescan all</b> to scan the library.</div>`;

@@ -110,7 +110,9 @@ state = {
     "yolo_size": "n",
     "face_bg_enabled": False,      # background face/person boxing
     "face_bg_custom": False,       # ALSO run our trained model in the background
-    "face_model": "",              # '' -> auto-fetch community weights
+    "face_model": "",              # '' -> auto-fetch community weights at face_size
+    "face_size": "n",              # yolov11 face detector size; INDEPENDENT of
+                                   # yolo_size, which only drives the object models
     "person_model": "",            # '' -> stock COCO YOLO 'person'
     "face_cluster_eps": 0.0,       # 0 -> use faces.py default for the embed mode
     "pose_kind": "body",
@@ -1282,7 +1284,7 @@ def load_config():
 def save_config():
     keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_system_prompt",
             "oai_actions","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size",
-            "face_bg_enabled","face_bg_custom","face_model","person_model","face_cluster_eps",
+            "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","face_cluster_eps",
             "iqa_model"]
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys}, f, indent=2)
@@ -2457,6 +2459,13 @@ def _pose_size():
 def _yolo_size():
     s = (state.get("yolo_size") or "n").lower()
     return s if s in _SIZES else "n"
+def _face_size():
+    # Faces get their own size knob: the object detector and the face detector
+    # have different cost/recall tradeoffs, and 'n' misses small/profile faces --
+    # exactly the ones cluster density depends on. faces.py clamps 'x' (which the
+    # face release does not publish) down to 'l'.
+    s = (state.get("face_size") or "n").lower()
+    return s if s in _SIZES else "n"
 
 def _run_pose_yolo(img_bgr):
     """Body pose via YOLO11 pose (COCO-17). Model auto-downloads on first use."""
@@ -2632,7 +2641,10 @@ def _run_faces(img_bgr):
     signal to tag usefully. Empty if no model configured."""
     fm = (state.get("face_model") or "").strip()
     if not fm:
-        fm = facelib.ensure_face_model()   # community weights -> ./models
+        # An explicit face_model wins; otherwise resolve from the face_size
+        # setting. This used to call ensure_face_model() with no argument, which
+        # hardcoded the 'n' weights -- so the size dropdown did nothing for faces.
+        fm = facelib.ensure_face_model(_face_size())   # -> ./models
     if not fm:
         return []
     boxes = _detect_obb_or_box(img_bgr, fm, _face_cache)
@@ -3763,6 +3775,11 @@ def api_face_progress():
                     "enabled": bool(state.get("face_bg_enabled")),
                     "forced": forced, "idle_wait": idle_wait,
                     "identity": facelib.have_identity_embedder(),
+                    # '' when healthy. Non-empty means the detector never loaded,
+                    # so every image will scan clean with zero faces -- the pane
+                    # must say so rather than report a cheerful "all caught up".
+                    "model_error": facelib.face_model_error(),
+                    "face_size": _face_size(),
                     "status": state.get("status_text", "")})
 
 
@@ -3818,14 +3835,21 @@ def api_state():
         ("classes","available_models","status_text","remote_ip",
          "oai_endpoint","oai_key","oai_model","oai_system_prompt","oai_actions",
          "autotag_enabled","pipeline_tree","yolo_size","pose_kind","pose_size",
-         "face_bg_enabled","face_bg_custom","face_model","person_model",
+         "face_bg_enabled","face_bg_custom","face_model","face_size","person_model",
          "face_cluster_eps","model_groups","iqa_model")})
 
 @app.route("/api/update_settings", methods=["POST"])
 def update_settings():
     d = request.json
+    # A face_size change means the NEXT detect must load different weights. The
+    # detector is memoised by path in _face_cache, and _run_faces resolves the
+    # path from the setting, so the cache would keep serving the old model until
+    # a restart. Drop it here.
+    if "face_size" in d and d["face_size"] != state.get("face_size"):
+        _face_cache["path"] = None
+        _face_cache["model"] = None
     for k in ("oai_endpoint","oai_key","oai_model","oai_system_prompt","oai_actions","pipeline_tree","yolo_size","pose_kind","pose_size",
-              "face_bg_enabled","face_bg_custom","face_model","person_model","face_cluster_eps","iqa_model"):
+              "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","face_cluster_eps","iqa_model"):
         if k in d: state[k] = d[k]
     # Switching the NR-IQA model only re-points the module; the new weights load
     # lazily on the next scan, so this stays a cheap settings save.

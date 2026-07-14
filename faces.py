@@ -35,18 +35,33 @@ MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
 # Community YOLO face weights. Ultralytics' zoo has no official face model, so we
 # pull from a GitHub release (allowlisted) rather than the Ultralytics CDN.
-FACE_MODEL_URL = (
-    "https://github.com/akanametov/yolo-face/releases/download/v0.0.0/yolov11n-face.pt"
-)
-FACE_MODEL_NAME = "yolov11n-face.pt"
+#
+# The tag is 1.0.0. It was previously v0.0.0, which does not exist -- every fetch
+# 404'd, ensure_face_model() swallowed it and returned '', _run_faces() read that
+# as "no model configured", and every image was marked face_done with zero
+# detections. The face table stayed empty and clustering had nothing to cluster.
+FACE_MODEL_REPO = "https://github.com/akanametov/yolo-face/releases/download/1.0.0"
+
+# yolov11 face weights ship n/s/m/l -- there is NO 'x' variant, even though the
+# shared size selector offers one. Asking for a file that isn't published 404s,
+# so resolve through face_model_name() rather than formatting a name blindly.
+FACE_SIZES = ("n", "s", "m", "l")
+_SIZE_ORDER = ("n", "s", "m", "l", "x")
+
+MIN_MODEL_BYTES = 1_000_000   # a real .pt is megabytes; smaller == error page
 
 MIN_FACE_PX = 32          # below this a face carries too little identity signal
-DEFAULT_EPS = 0.28        # cosine distance; ArcFace identities are tight
-FALLBACK_EPS = 0.18       # appearance embeddings need a stricter radius
+DEFAULT_EPS = 0.60        # cosine distance; ArcFace identities are tight
+FALLBACK_EPS = 0.25       # appearance embeddings need a stricter radius
 MATCH_IOU    = 0.35       # min overlap to bind an insightface det to a YOLO box
 
 _insight = {"checked": False, "app": None}
 _lock = threading.Lock()
+
+# Last face-model download failure, surfaced to the UI. Previously a dead URL was
+# indistinguishable from "user configured no model", so the pane cheerfully
+# reported "all caught up" over an empty table.
+_face_model_error = {"v": ""}
 
 
 # ── model discovery ───────────────────────────────────────────────────────────
@@ -72,24 +87,66 @@ def list_models():
     return out
 
 
-def ensure_face_model():
-    """Return a path to a face detector, downloading the community weights on
-    first use. Returns '' when unavailable (offline) — caller falls back."""
+def face_model_name(size="n"):
+    """Resolve a requested size to a yolov11 face weight file that EXISTS.
+
+    The size selector offers n/s/m/l/x for parity with the detection models, but
+    the face release publishes no 'x'. Clamp down to the largest published size
+    instead of formatting a name that 404s.
+    """
+    size = (size or "n").lower()
+    if size not in FACE_SIZES:
+        want = _SIZE_ORDER.index(size) if size in _SIZE_ORDER else 0
+        cand = [s for s in FACE_SIZES if _SIZE_ORDER.index(s) <= want]
+        size = cand[-1] if cand else FACE_SIZES[0]
+    return f"yolov11{size}-face.pt"
+
+
+def face_model_error():
+    """Last download failure, for the UI to surface. '' when healthy."""
+    return _face_model_error["v"]
+
+
+def ensure_face_model(size="n"):
+    """Return a path to the face detector for `size`, downloading it on first
+    use. Returns '' when unavailable (offline / bad URL) — caller falls back.
+
+    Each size caches under its own filename, so switching the setting fetches the
+    new weights once and keeps the old ones for a switch back. We no longer just
+    grab list_models()['face'][0]: that returned whatever happened to be in
+    ./models first, so changing the size setting silently kept using the old
+    weights.
+    """
     ensure_models_dir()
-    existing = list_models()["face"]
-    if existing:
-        return existing[0]
-    dest = os.path.join(MODELS_DIR, FACE_MODEL_NAME)
+    name = face_model_name(size)
+    dest = os.path.join(MODELS_DIR, name)
+    if os.path.exists(dest):
+        _face_model_error["v"] = ""
+        return dest
+    url = f"{FACE_MODEL_REPO}/{name}"
     try:
         import urllib.request
         with _lock:
             if os.path.exists(dest):
                 return dest
             tmp = dest + ".part"
-            urllib.request.urlretrieve(FACE_MODEL_URL, tmp)
+            urllib.request.urlretrieve(url, tmp)
+            # A CDN 404 still writes an HTML error page to disk, so urlretrieve
+            # "succeeding" proves nothing. Size-check before we commit the name.
+            n = os.path.getsize(tmp)
+            if n < MIN_MODEL_BYTES:
+                os.remove(tmp)
+                raise RuntimeError(f"got {n} bytes, not a model (bad URL?)")
             os.replace(tmp, dest)
+        _face_model_error["v"] = ""
         return dest
-    except Exception:
+    except Exception as e:
+        _face_model_error["v"] = f"{name}: {e}"
+        try:
+            if os.path.exists(dest + ".part"):
+                os.remove(dest + ".part")
+        except Exception:
+            pass
         return ""
 
 
@@ -266,27 +323,21 @@ def cluster(vectors, mode="arcface", min_cluster=2, eps=None):
         out[orig_i] = int(lab)
     return out
 
-
 SMALL_N = 20000   # exact O(n^2) cosine is fine (and better) below this
-
-
 def _cosine_union_find(X, eps, min_cluster):
     """Exact cosine-radius union-find on unit vectors. Chunked so it never
     allocates a full n x n matrix."""
     n = len(X)
     parent = list(range(n))
-
     def find(i):
         while parent[i] != i:
             parent[i] = parent[parent[i]]; i = parent[i]
         return i
-
     def union(a, b):
         ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[max(ra, rb)] = min(ra, rb)
+        if ra != rb: parent[max(ra, rb)] = min(ra, rb)
 
-    thresh = 1.0 - eps          # cosine SIMILARITY cutoff
+    thresh = 1.0 - eps
     CH = 512
     for s in range(0, n, CH):
         sims = X[s:s + CH] @ X.T          # (chunk, n) — bounded

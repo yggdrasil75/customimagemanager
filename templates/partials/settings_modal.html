@@ -99,6 +99,17 @@
             </select>
           </div>
           <div>
+            <span class="text-[10px] text-gray-500 block mb-0.5">Face size
+              <span class="text-gray-600">(auto only)</span></span>
+            <select id="cfg_face_size"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+              <option value="n">n · nano</option>
+              <option value="s">s · small</option>
+              <option value="m">m · medium</option>
+              <option value="l">l · large</option>
+            </select>
+          </div>
+          <div>
             <span class="text-[10px] text-gray-500 block mb-0.5">Person model</span>
             <select id="cfg_person_model"
               class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
@@ -106,6 +117,11 @@
             </select>
           </div>
         </div>
+        <p class="text-[10px] text-gray-600 mt-1">Larger face models catch small and
+          profile faces that <code>n</code> misses &mdash; those extra detections are
+          what let a cluster hold together. Changing the size needs a
+          <b>Rescan all</b> to pick them up. Ignored when a Face model is chosen
+          explicitly. (yolov11-face ships n/s/m/l; there is no x.)</p>
         <p id="cfg_face_mode" class="text-[10px] text-gray-500 mt-2"></p>
       </div>
       <div class="border-t border-gray-600 pt-3">

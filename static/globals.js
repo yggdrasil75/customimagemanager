@@ -273,6 +273,21 @@ async function fetchState(){
       _fill('cfg_face_model', s.face_model, (_g.face||[]).concat(_g.custom||[]));
       _fill('cfg_person_model', s.person_model,
             (_g.trained||[]).concat(_g.custom||[]));
+      const _fs=document.getElementById('cfg_face_size');
+      if(_fs){
+        _fs.value=s.face_size||'n';
+        // face_size only drives the AUTO download path; an explicitly chosen face
+        // model already pins its own size, so disable the knob rather than let it
+        // sit there implying it does something.
+        const _fm=document.getElementById('cfg_face_model');
+        const _syncFaceSize=()=>{
+          const auto=!(_fm && _fm.value);
+          _fs.disabled=!auto;
+          _fs.classList.toggle('opacity-40', !auto);
+        };
+        if(_fm) _fm.addEventListener('change', _syncFaceSize);
+        _syncFaceSize();
+      }
       document.getElementById('cfg_pose_kind').value=s.pose_kind||'body';
       document.getElementById('cfg_pose_size').value=s.pose_size||'n';
       document.getElementById('cfg_system').value=s.oai_system_prompt||'';
