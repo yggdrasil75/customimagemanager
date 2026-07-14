@@ -84,7 +84,9 @@ def _ensure_tables(db):
     db.execute("""CREATE TABLE IF NOT EXISTS stage_quality(
         run_sig   TEXT NOT NULL,
         rel_path  TEXT NOT NULL,
-        brisque   REAL,
+        brisque   REAL,        -- native score of whichever model ran (name is historical)
+        quality   REAL,        -- normalized 0..1, higher = better; comparable across models
+        model     TEXT,        -- which NR-IQA model produced the score
         sharpness REAL,
         edges     REAL,
         bad       INTEGER DEFAULT 0,
@@ -265,7 +267,8 @@ def clear_derivatives():
 # ──────────────────────────── STAGE 0: quality ───────────────────────────────
 
 def stage_quality(db, sig, file_list, loader, work_px=og._WORK,
-                  brisque_bad=None, write_flags=True, skip_bad_downstream=True,
+                  brisque_bad=None, quality_bad=None, iqa_model=None,
+                  write_flags=True, skip_bad_downstream=True,
                   progress=None, should_stop=None):
     """Score every image with NR-IQA (BRISQUE + structural guard) and record a
     junk verdict. Runs FIRST so later stages can skip images destined for
@@ -295,7 +298,7 @@ def stage_quality(db, sig, file_list, loader, work_px=og._WORK,
         if should_stop and should_stop():
             return _collect_bad(db, sig)
 
-        rows = []   # (rel_path, brisque, sharpness, edges, bad, reason)
+        rows = []   # (rel_path, raw, quality, model, sharpness, edges, bad, reason)
         for fn in names:
             img = _load_variant(fn, work_px)
             if img is None:
@@ -304,20 +307,24 @@ def stage_quality(db, sig, file_list, loader, work_px=og._WORK,
                     img = og.downscale_to_cap(img, work_px)
                     _save_variant(fn, work_px, img)
             if img is None:
-                rows.append((fn, None, 0.0, 0.0, 0, "unreadable"))
+                rows.append((fn, None, None, None, 0.0, 0.0, 0, "unreadable"))
                 continue
-            r = iqa.assess(img, brisque_bad=brisque_bad)
-            rows.append((fn, r["brisque"], r["sharpness"], r["edges"],
+            # quality_bad is on the normalized 0..1 scale and works for any model;
+            # brisque_bad is the legacy BRISQUE-native threshold, still honoured.
+            r = iqa.assess(img, quality_bad=quality_bad,
+                           brisque_bad=brisque_bad, model_id=iqa_model)
+            rows.append((fn, r["raw"], r["quality"], r["model"],
+                         r["sharpness"], r["edges"],
                          1 if r["bad"] else 0, r["reason"]))
             del img
 
         db.execute("BEGIN")
-        for fn, bq, sh, ed, bad, reason in rows:
+        for fn, raw, q, model, sh, ed, bad, reason in rows:
             db.execute(
                 "INSERT OR REPLACE INTO stage_quality"
-                "(run_sig,rel_path,brisque,sharpness,edges,bad,reason) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (sig, fn, bq, sh, ed, bad, reason))
+                "(run_sig,rel_path,brisque,quality,model,sharpness,edges,bad,reason) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (sig, fn, raw, q, model, sh, ed, bad, reason))
         db.commit()
 
         if write_flags:
@@ -665,7 +672,7 @@ def stage_assign(db, sig, progress=None):
 
 def run_all(db, file_list, loader, tag_fn=None, depth_model=None,
             cnn_model=None, max_regions=15, eps=0.18, min_cluster=2,
-            brisque_bad=None, write_flags=True,
+            brisque_bad=None, quality_bad=None, iqa_model=None, write_flags=True,
             progress=None, should_stop=None,
             stages=("quality", "depth", "boxes", "cluster", "assign")):
     """Run the requested stages in order. Each is independently resumable, so
@@ -681,6 +688,7 @@ def run_all(db, file_list, loader, tag_fn=None, depth_model=None,
 
     if "quality" in stages:
         skip = stage_quality(db, sig, file_list, loader, brisque_bad=brisque_bad,
+                             quality_bad=quality_bad, iqa_model=iqa_model,
                              write_flags=write_flags, progress=progress,
                              should_stop=should_stop)
 

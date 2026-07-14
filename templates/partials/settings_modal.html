@@ -21,6 +21,23 @@
         <input id="cfg_model" type="text"
           class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
       </div>
+      <div><label class="text-xs text-gray-400 block mb-1">AI rating model <span
+            class="text-gray-600">(NR-IQA &mdash; no-reference)</span></label>
+        <select id="cfg_iqa_model"
+          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          <!-- populated from /api/iqa_models; grouped by speed class -->
+        </select>
+        <p id="cfg_iqa_note" class="text-[10px] text-gray-500 mt-1"></p>
+        <p class="text-[10px] text-gray-600 mt-1">
+          <b class="text-emerald-500">fast</b> = no neural net, fine for bulk scans &middot;
+          <b class="text-amber-500">balanced</b> = light network, CPU-friendly &middot;
+          <b class="text-rose-500">accurate</b> = transformer-scale, best human
+          correlation, wants a GPU. Anything beyond BRISQUE needs
+          <code>pyiqa</code> (+ <code>torch</code>); weights download on first use.
+          Changing the model marks existing AI ratings stale &mdash; the next
+          scan re-scores them.
+        </p>
+      </div>
       <div><label class="text-xs text-gray-400 block mb-1">Pose &amp; detection models <span
             class="text-gray-600">(auto-downloaded)</span></label>
         <div class="grid grid-cols-3 gap-2">

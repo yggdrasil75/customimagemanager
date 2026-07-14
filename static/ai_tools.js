@@ -33,6 +33,60 @@ function updateActionDropdown(){
     if(prev&&[...sel.options].some(o=>o.value===prev)) sel.value=prev;
   });
 }
+// ── NR-IQA model picker ──────────────────────────────────────────────────────
+// Populates the settings dropdown from /api/iqa_models. The registry is
+// no-reference-only (full-reference metrics like SSIM/LPIPS need a pristine
+// original to compare against, which we don't have), and every entry carries a
+// speed class so you can trade throughput for accuracy with your eyes open.
+const IQA_SPEED_LABEL={fast:'\u26a1 fast',balanced:'\u2696 balanced',accurate:'\ud83c\udfaf accurate'};
+let iqaModelsCache=[];
+
+async function loadIqaModels(selected){
+  const sel=document.getElementById('cfg_iqa_model');
+  if(!sel) return;
+  try{
+    const d=await fetch('/api/iqa_models').then(r=>r.json());
+    if(!d.success){ sel.innerHTML='<option value="brisque">BRISQUE (legacy)</option>'; return; }
+    iqaModelsCache=d.models||[];
+    sel.innerHTML='';
+    // group by speed so "fast vs accurate" is visible at a glance
+    ['fast','balanced','accurate'].forEach(sp=>{
+      const inGroup=iqaModelsCache.filter(m=>m.speed===sp);
+      if(!inGroup.length) return;
+      const g=document.createElement('optgroup');
+      g.label=IQA_SPEED_LABEL[sp]||sp;
+      inGroup.forEach(m=>{
+        const o=document.createElement('option');
+        o.value=m.id;
+        // an unavailable model stays visible but disabled, so the list doubles as
+        // documentation of what you'd get by installing pyiqa.
+        o.text=m.label+(m.available?'':'  \u2014 needs deps');
+        o.disabled=!m.available;
+        g.appendChild(o);
+      });
+      sel.appendChild(g);
+    });
+    sel.value=selected||d.active||'brisque';
+    if(!sel.value) sel.value='brisque';
+    renderIqaNote();
+  }catch(e){
+    sel.innerHTML='<option value="brisque">BRISQUE (legacy)</option>';
+  }
+}
+
+function renderIqaNote(){
+  const sel=document.getElementById('cfg_iqa_model');
+  const note=document.getElementById('cfg_iqa_note');
+  if(!sel||!note) return;
+  const m=iqaModelsCache.find(x=>x.id===sel.value);
+  if(!m){ note.innerText=''; return; }
+  note.innerText=m.note+(m.available?'':('  ('+(m.reason||'unavailable')+')'));
+}
+
+document.addEventListener('change',e=>{
+  if(e.target&&e.target.id==='cfg_iqa_model') renderIqaNote();
+});
+
 async function saveAiSettings(){
   oai_actions_cache=[...document.querySelectorAll('.action-row')].map(r=>({
     id:r.dataset.id, name:r.querySelector('.act-name').value.trim()||'Action',
@@ -49,6 +103,7 @@ async function saveAiSettings(){
       oai_key:document.getElementById('cfg_apikey').value,
       oai_model:document.getElementById('cfg_model').value,
       yolo_size:document.getElementById('cfg_yolo_size').value,
+      iqa_model:document.getElementById('cfg_iqa_model')?.value||'brisque',
       face_bg_enabled:!!document.getElementById('cfg_face_bg')?.checked,
       face_bg_custom:!!document.getElementById('cfg_face_custom')?.checked,
       face_model:document.getElementById('cfg_face_model')?.value||'',

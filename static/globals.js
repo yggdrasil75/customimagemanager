@@ -254,6 +254,7 @@ async function fetchState(){
       document.getElementById('cfg_apikey').value=s.oai_key;
       document.getElementById('cfg_model').value=s.oai_model;
       document.getElementById('cfg_yolo_size').value=s.yolo_size||'n';
+      loadIqaModels(s.iqa_model||'brisque');
       // faces / people
       const _fb=document.getElementById('cfg_face_bg');
       if(_fb) _fb.checked=!!s.face_bg_enabled;

@@ -45,27 +45,25 @@ from pipeline import DEFAULT_PIPELINE, run_pipeline
 from templates import HTML, TRAINING_HTML
 
 # ── NR-IQA star mapping ───────────────────────────────────────────────────────
-# BRISQUE returns ~0..100 where HIGHER = WORSE. We map it to a 0..5 star scale
-# (higher = better) so the UI can show an intuitive rating. A blank/featureless
-# image (which BRISQUE rates as "perfect" ~0) is forced low so junk doesn't
-# masquerade as five stars. Thresholds are deliberately simple/tunable.
+# iqa.assess() now returns a NORMALIZED quality in 0..1 (higher = better) no
+# matter which model is selected, so the star mapping no longer needs to know
+# about BRISQUE's inverted 0..100 range. Blank/featureless images are capped at
+# 1 star by iqa.to_stars() so junk can't masquerade as five.
+def quality_to_stars(q, blank=False):
+    """Map normalized quality (0..1, higher=better) to 0..5 stars."""
+    if iqa is None:
+        return None
+    return iqa.to_stars(q, blank=blank)
+
+
 def brisque_to_stars(bq, blank=False):
-    """Map a raw BRISQUE score (0..~100, higher=worse) to 0..5 stars
-    (higher=better). Returns None if bq is None. Blank images cap at 1 star."""
+    """DEPRECATED shim kept for old callers. Takes a raw BRISQUE score
+    (0..100, higher=worse) and maps it to 0..5 stars. New code should use
+    quality_to_stars() with the normalized score from iqa.assess()."""
     if bq is None:
         return None
     bq = max(0.0, min(100.0, float(bq)))
-    # piecewise: <=20 -> 5 stars, >=80 -> 0 stars, linear in between.
-    if bq <= 20.0:
-        stars = 5.0
-    elif bq >= 80.0:
-        stars = 0.0
-    else:
-        stars = 5.0 * (80.0 - bq) / 60.0
-    stars = round(stars * 2) / 2.0          # snap to nearest half-star
-    if blank:
-        stars = min(stars, 1.0)
-    return stars
+    return quality_to_stars(1.0 - bq / 100.0, blank=blank)
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 app       = Flask(__name__)
@@ -108,6 +106,7 @@ state = {
                           # a hidden store and linked to the derived image via
                           # RawDataUniqueID; hidden from the user for speed.
     "pipeline_tree": DEFAULT_PIPELINE,
+    "iqa_model": "brisque",        # NR-IQA model id; see iqa.MODELS
     "yolo_size": "n",
     "face_bg_enabled": False,      # background face/person boxing
     "face_bg_custom": False,       # ALSO run our trained model in the background
@@ -326,6 +325,9 @@ def _init_db():
         # into those columns. iqa_score is now BRISQUE-only.
         "ALTER TABLE files ADD COLUMN iqa_score REAL DEFAULT NULL",
         "ALTER TABLE files ADD COLUMN iqa_brisque REAL DEFAULT NULL",
+        # Which NR-IQA model produced iqa_score, so a model switch can
+        # invalidate/re-scan only the rows scored by the old one.
+        "ALTER TABLE files ADD COLUMN iqa_model TEXT DEFAULT NULL",
         "ALTER TABLE files ADD COLUMN iqa_manual INTEGER DEFAULT 0",
         # Media type: 'image' (any .jxl, incl. animated ones from gifs) or
         # 'video' (stored natively). duration is seconds for videos, else NULL.
@@ -1272,11 +1274,16 @@ def load_config():
                     if k in state: state[k] = v
         except Exception as e:
             access_logger.error(f"load_config: {e}")
+    # Point the iqa module at the persisted model choice. Weights (if any) load
+    # lazily on first score, so this does not slow down startup.
+    if iqa is not None:
+        state["iqa_model"] = iqa.set_model(state.get("iqa_model", "brisque"))
 
 def save_config():
     keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_system_prompt",
             "oai_actions","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size",
-            "face_bg_enabled","face_bg_custom","face_model","person_model","face_cluster_eps"]
+            "face_bg_enabled","face_bg_custom","face_model","person_model","face_cluster_eps",
+            "iqa_model"]
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys}, f, indent=2)
 
@@ -3812,14 +3819,18 @@ def api_state():
          "oai_endpoint","oai_key","oai_model","oai_system_prompt","oai_actions",
          "autotag_enabled","pipeline_tree","yolo_size","pose_kind","pose_size",
          "face_bg_enabled","face_bg_custom","face_model","person_model",
-         "face_cluster_eps","model_groups")})
+         "face_cluster_eps","model_groups","iqa_model")})
 
 @app.route("/api/update_settings", methods=["POST"])
 def update_settings():
     d = request.json
     for k in ("oai_endpoint","oai_key","oai_model","oai_system_prompt","oai_actions","pipeline_tree","yolo_size","pose_kind","pose_size",
-              "face_bg_enabled","face_bg_custom","face_model","person_model","face_cluster_eps"):
+              "face_bg_enabled","face_bg_custom","face_model","person_model","face_cluster_eps","iqa_model"):
         if k in d: state[k] = d[k]
+    # Switching the NR-IQA model only re-points the module; the new weights load
+    # lazily on the next scan, so this stays a cheap settings save.
+    if "iqa_model" in d and iqa is not None:
+        state["iqa_model"] = iqa.set_model(state["iqa_model"])
     save_config(); return jsonify({"success": True})
 
 @app.route("/api/folders")
@@ -5493,6 +5504,22 @@ def quality_sweep():
                     "wrote_flags": write_flags})
 
 
+@app.route("/api/iqa_models")
+def api_iqa_models():
+    """NR-IQA model registry for the settings dropdown.
+
+    Every entry is a NO-REFERENCE model (full-reference metrics like SSIM/LPIPS
+    need a pristine original to compare against, which we don't have). Each
+    carries a `speed` class — fast / balanced / accurate — and an `available`
+    flag so the UI can grey out models whose deps aren't installed.
+    """
+    if iqa is None:
+        return jsonify({"success": False, "error": "iqa module unavailable",
+                        "models": [], "active": None})
+    return jsonify({"success": True, "models": iqa.list_models(),
+                    "active": iqa.get_model()})
+
+
 @app.route("/api/iqa_scan", methods=["POST"])
 def iqa_scan():
     """Run NR-IQA (BRISQUE) and store a 0..5 star quality score on each file row
@@ -5526,13 +5553,18 @@ def iqa_scan():
             params += [f + '/%', f + '/%/%']
         where = " WHERE " + " AND ".join(clauses)
         rows = db.execute(
-            f"SELECT rel_path, iqa_score, rating_user FROM files{where}",
+            f"SELECT rel_path, iqa_score, rating_user, iqa_model FROM files{where}",
             params).fetchall()
-        # Skip files that already have a BRISQUE score (unless force) and always
-        # skip files carrying a user rating — the user rating wins, so there's no
-        # point computing a preliminary score that would be hidden anyway.
+        # Skip files that already have a score from the CURRENTLY SELECTED model
+        # (unless force). A score left behind by a different model is stale — the
+        # numbers aren't comparable across models — so we re-score it. Always skip
+        # files carrying a user rating: the user rating wins, so there's no point
+        # computing a preliminary score that would be hidden anyway.
+        active = iqa.get_model()
         filenames = [r["rel_path"] for r in rows
-                     if not r["rating_user"] and (force or r["iqa_score"] is None)]
+                     if not r["rating_user"]
+                     and (force or r["iqa_score"] is None
+                          or (r["iqa_model"] or "brisque") != active)]
     if not filenames:
         return jsonify({"success": True, "scored": 0, "total": 0,
                         "note": "Nothing to score (already scored — use force to rescan)."})
@@ -5561,13 +5593,17 @@ def iqa_scan():
         if img is None:
             continue
         r = iqa.assess(img)
-        stars = brisque_to_stars(r.get("brisque"), blank=r.get("blank"))
+        # `quality` is normalized 0..1 (higher=better) for EVERY model, so the
+        # star mapping is identical whether this was BRISQUE or MUSIQ. iqa_brisque
+        # keeps the model's raw number for display/debugging (the column name is
+        # historical — it now holds whichever model's native score).
+        stars = quality_to_stars(r.get("quality"), blank=r.get("blank"))
         if stars is None:
             continue
         db.execute(
-            "UPDATE files SET iqa_score=?, iqa_brisque=? "
+            "UPDATE files SET iqa_score=?, iqa_brisque=?, iqa_model=? "
             "WHERE rel_path=? AND COALESCE(rating_user,0)=0",
-            (stars, r.get("brisque"), fn))
+            (stars, r.get("raw"), r.get("model"), fn))
         scored += 1
         if scored % 25 == 0:
             db.commit()
@@ -6040,7 +6076,7 @@ def discover_objects_staged():
     return jsonify({"success": True, "run_sig": sig,
                     "stage_status": status,
                     "quality": quality,
-                    "iqa_model": ("brisque" if (ds.iqa and ds.iqa.available())
+                    "iqa_model": (ds.iqa.get_model() if (ds.iqa and ds.iqa.available())
                                   else "unavailable"),
                     "total_objects": total_objs,
                     "clusters": summary[:200] if summary else None})
