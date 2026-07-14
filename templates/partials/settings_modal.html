@@ -2,13 +2,13 @@
    now (partials/ai_pipeline_modal.html) so it can be worked on independently;
    this modal keeps endpoint / model / prompt / actions only. #}
 <div id="ai_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
-  <div class="bg-gray-800 p-5 rounded-lg border border-gray-600 w-[400px] flex flex-col max-h-[90vh]">
+  <div class="bg-gray-800 p-6 rounded-lg border border-gray-600 w-[880px] max-w-[95vw] flex flex-col max-h-[90vh]">
     <div class="flex justify-between items-center mb-4 flex-shrink-0">
       <h2 class="font-bold text-purple-400">LLM / Vision Settings</h2>
       <button onclick="openPipelineSettings()" title="Edit the Smart Tag decision tree"
         class="text-xs bg-teal-700 hover:bg-teal-600 px-2 py-1 rounded font-bold">🌳 Pipeline…</button>
     </div>
-    <div class="overflow-y-auto flex-1 space-y-3 pr-1">
+    <div class="overflow-y-auto flex-1 grid grid-cols-2 gap-x-6 gap-y-3 pr-1 items-start">
       <div><label class="text-xs text-gray-400 block mb-1">Endpoint</label>
         <input id="cfg_endpoint" type="text"
           class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
@@ -62,6 +62,34 @@
       <div><label class="text-xs text-gray-400 block mb-1">System Prompt</label>
         <textarea id="cfg_system" rows="2"
           class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
+      </div>
+      <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
+        <label class="text-xs text-purple-300 font-bold block mb-2">Faces &amp; People</label>
+        <div class="grid grid-cols-2 gap-3">
+          <label class="flex items-center gap-2 text-sm text-gray-300">
+            <input id="cfg_face_bg" type="checkbox" class="accent-purple-500">
+            Background face/person boxing
+          </label>
+          <label class="flex items-center gap-2 text-sm text-gray-300">
+            <input id="cfg_face_custom" type="checkbox" class="accent-purple-500">
+            Also run our trained model
+          </label>
+          <div>
+            <span class="text-[10px] text-gray-500 block mb-0.5">Face model</span>
+            <select id="cfg_face_model"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+              <option value="">Auto (download community weights)</option>
+            </select>
+          </div>
+          <div>
+            <span class="text-[10px] text-gray-500 block mb-0.5">Person model</span>
+            <select id="cfg_person_model"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+              <option value="">Common (COCO · person)</option>
+            </select>
+          </div>
+        </div>
+        <p id="cfg_face_mode" class="text-[10px] text-gray-500 mt-2"></p>
       </div>
       <div class="border-t border-gray-600 pt-3">
         <div class="flex justify-between items-center mb-2">

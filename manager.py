@@ -28,6 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from werkzeug.utils import secure_filename
 from flask import Flask, render_template, render_template_string, request, jsonify, send_file, Response
 from ultralytics import YOLO
+import faces as facelib
 import imagecodecs
 from dup_heuristics import DuplicateClassifier, classify_pair, extract_features
 import object_grouping as og
@@ -108,6 +109,11 @@ state = {
                           # RawDataUniqueID; hidden from the user for speed.
     "pipeline_tree": DEFAULT_PIPELINE,
     "yolo_size": "n",
+    "face_bg_enabled": False,      # background face/person boxing
+    "face_bg_custom": False,       # ALSO run our trained model in the background
+    "face_model": "",              # '' -> auto-fetch community weights
+    "person_model": "",            # '' -> stock COCO YOLO 'person'
+    "face_cluster_eps": 0.0,       # 0 -> use faces.py default for the embed mode
     "pose_kind": "body",
     "pose_size": "n",
     "oai_system_prompt": "You are an expert image analysis AI. Provide concise, highly detailed, and accurate responses.",
@@ -159,6 +165,23 @@ def _init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_sha256 ON files(sha256);
         CREATE INDEX IF NOT EXISTS idx_tags   ON files(tags);
+
+        -- Face detections + identity embeddings. This is a CACHE: names and
+        -- confirmations are written straight to MWG-rs regions in the image, so
+        -- dropping this table only costs recompute, never data.
+        CREATE TABLE IF NOT EXISTS face_regions (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            rel_path   TEXT NOT NULL,
+            cx REAL, cy REAL, w REAL, h REAL,
+            embedding  BLOB,          -- float32 L2-normalised
+            embed_mode TEXT DEFAULT '',   -- arcface | appearance
+            cluster_id INTEGER DEFAULT -1,
+            name       TEXT DEFAULT '',   -- mirrors the MWG region name
+            confirmed  INTEGER DEFAULT 0,
+            UNIQUE(rel_path, cx, cy, w, h)
+        );
+        CREATE INDEX IF NOT EXISTS idx_face_cluster ON face_regions(cluster_id);
+        CREATE INDEX IF NOT EXISTS idx_face_rel     ON face_regions(rel_path);
 
         CREATE TABLE IF NOT EXISTS dedup_groups (
             id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -290,6 +313,7 @@ def _init_db():
         "ALTER TABLE dedup_groups ADD COLUMN scores TEXT NOT NULL DEFAULT '[]'",
         "ALTER TABLE files ADD COLUMN unconfirmed_count INTEGER DEFAULT 0",
         "ALTER TABLE files ADD COLUMN autotag_done INTEGER DEFAULT 0",
+        "ALTER TABLE files ADD COLUMN face_done INTEGER DEFAULT 0",
         "ALTER TABLE files ADD COLUMN analysis TEXT DEFAULT ''",
         "ALTER TABLE files ADD COLUMN comic_folder TEXT DEFAULT ''",
         "ALTER TABLE files ADD COLUMN flagged_delete INTEGER DEFAULT 0",
@@ -1251,7 +1275,8 @@ def load_config():
 
 def save_config():
     keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_system_prompt",
-            "oai_actions","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size"]
+            "oai_actions","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size",
+            "face_bg_enabled","face_bg_custom","face_model","person_model","face_cluster_eps"]
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys}, f, indent=2)
 
@@ -1266,9 +1291,17 @@ def save_classes():
         f.writelines(c+'\n' for c in state["classes"])
 
 def populate_model_selector():
-    state["available_models"] = sorted(
+    """Trained runs + anything in ./models. 'available_models' stays the flat
+    list older code expects; 'model_groups' is the structured view the settings
+    UI uses (common / ours / face / custom)."""
+    trained = sorted(
         glob.glob(os.path.join(MEDIA_DIR, "runs/detect/train*/weights/best.pt")),
         key=os.path.getmtime)
+    groups = facelib.list_models()
+    groups["trained"] = trained
+    groups["common"] = [f"yolo11{_s}.pt" for _s in ("n", "s", "m", "l", "x")]
+    state["model_groups"] = groups
+    state["available_models"] = trained + groups["face"] + groups["custom"]
 
 load_config(); load_classes(); populate_model_selector()
 
@@ -2543,7 +2576,8 @@ def _run_person(img_bgr):
     """Detect characters. Prefers a configured OBB model; else the COCO 'person'
     class from the standard YOLO detector. Empty list lets the pipeline fall back
     to the LLM (e.g. stylised art, non-human creatures)."""
-    obb = (state.get("person_obb_model") or "").strip()
+    obb = ((state.get("person_model") or "")
+           or (state.get("person_obb_model") or "")).strip()
     if obb:
         boxes = _detect_obb_or_box(img_bgr, obb, _person_cache, as_obb=True)
         if boxes:
@@ -2569,6 +2603,8 @@ def _run_faces(img_bgr):
     signal to tag usefully. Empty if no model configured."""
     fm = (state.get("face_model") or "").strip()
     if not fm:
+        fm = facelib.ensure_face_model()   # community weights -> ./models
+    if not fm:
         return []
     boxes = _detect_obb_or_box(img_bgr, fm, _face_cache)
     H, W = img_bgr.shape[:2]
@@ -2579,6 +2615,131 @@ def _run_faces(img_bgr):
         b["class_name"] = "face"
         out.append(b)
     return out
+
+
+# ── Background face / person boxing + clustering ───────────────────────────────
+_face_bg_cache = {"path": None, "model": None}
+
+def _face_regions_for(img, rel):
+    """Detect faces + people in one image. Returns MWG-shaped region dicts,
+    all UNCONFIRMED (the user promotes them from the Faces tab)."""
+    out = []
+    for b in _run_faces(img):
+        out.append({"class_name": "face", "region_name": "",
+                    "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
+                    "confirmed": False, "region_tags": [], "region_description": ""})
+    for b in _run_person(img):
+        out.append({"class_name": "person", "region_name": "",
+                    "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
+                    "confirmed": False, "region_tags": [], "region_description": ""})
+    if state.get("face_bg_custom"):
+        models = (state.get("model_groups") or {}).get("trained") or []
+        if models:
+            for b in _detect_obb_or_box(img, models[-1], _face_bg_cache):
+                out.append({"class_name": b["class_name"], "region_name": "",
+                            "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
+                            "confirmed": False, "region_tags": [],
+                            "region_description": ""})
+    return out
+
+
+def _cache_faces(rel, img, regions):
+    """Embed the face boxes and cache them. Existing rows (which may already
+    carry a confirmed name from MWG) are left alone."""
+    fboxes = [r for r in regions if r["class_name"] == "face"]
+    if not fboxes:
+        return
+    vecs, mode = facelib.embed_faces(img, fboxes)
+    db = _db()
+    for r, v in zip(fboxes, vecs):
+        if v is None:
+            continue
+        db.execute(
+            """INSERT OR IGNORE INTO face_regions
+               (rel_path,cx,cy,w,h,embedding,embed_mode)
+               VALUES (?,?,?,?,?,?,?)""",
+            (rel, round(r["cx"], 5), round(r["cy"], 5),
+             round(r["w"], 5), round(r["h"], 5),
+             np.asarray(v, np.float32).tobytes(), mode))
+    db.commit()
+
+
+def _background_face_worker():
+    """Idle-time face/person boxing. Writes MWG regions immediately (so a crash
+    never loses work) and caches embeddings for clustering."""
+    IDLE_SECS, BATCH = 60, 6
+    while True:
+        time.sleep(15)
+        try:
+            if not state.get("face_bg_enabled"):
+                continue
+            if time.time() - _last_activity < IDLE_SECS:
+                continue
+
+            rows = _db().execute(
+                "SELECT rel_path FROM files WHERE COALESCE(face_done,0)=0 LIMIT ?",
+                (BATCH,)).fetchall()
+            if not rows:
+                state["status_text"] = "Face scan: all caught up."
+                time.sleep(45)
+                continue
+
+            state["status_text"] = f"Face scan: {len(rows)} image(s)…"
+            for (rel,) in rows:
+                if time.time() - _last_activity < IDLE_SECS:
+                    break                      # user is back — yield
+                abs_p = get_safe_path(MEDIA_DIR, rel)
+                if not abs_p or not os.path.exists(abs_p):
+                    _mark_face_done(rel); continue
+                img = read_jxl(abs_p)
+                if img is None:
+                    _mark_face_done(rel); continue
+
+                found = _face_regions_for(img, rel)
+                if found:
+                    meta = read_metadata(abs_p)
+                    merged = _merge_regions(meta["regions"], found)
+                    write_metadata(abs_p, meta["tags"], meta["description"], merged)
+                    _cache_faces(rel, img, found)
+                _mark_face_done(rel)
+        except Exception as e:
+            access_logger.error(f"face worker: {e}")
+            time.sleep(30)
+
+
+def _mark_face_done(rel):
+    _db().execute("UPDATE files SET face_done=1 WHERE rel_path=?", (rel,))
+    _db().commit()
+
+
+def _recluster():
+    """Recluster every cached face embedding. Confirmed names win: a cluster
+    containing a confirmed face inherits that name as its suggestion."""
+    rows = _db().execute(
+        "SELECT id,embedding,embed_mode,name,confirmed FROM face_regions "
+        "WHERE embedding IS NOT NULL").fetchall()
+    if not rows:
+        return 0
+    ids   = [r[0] for r in rows]
+    vecs  = [np.frombuffer(r[1], dtype=np.float32) for r in rows]
+    mode  = rows[0][2] or "arcface"
+    eps   = state.get("face_cluster_eps") or None
+    labels = facelib.cluster(vecs, mode=mode, eps=eps)
+
+    db = _db()
+    for i, lab in zip(ids, labels):
+        db.execute("UPDATE face_regions SET cluster_id=? WHERE id=?", (int(lab), i))
+    # propagate confirmed names across each cluster as a suggestion
+    for (lab,) in db.execute(
+            "SELECT DISTINCT cluster_id FROM face_regions WHERE cluster_id>=0").fetchall():
+        known = db.execute(
+            "SELECT name FROM face_regions WHERE cluster_id=? AND confirmed=1 "
+            "AND name<>'' LIMIT 1", (lab,)).fetchone()
+        if known:
+            db.execute("UPDATE face_regions SET name=? WHERE cluster_id=? "
+                       "AND confirmed=0", (known[0], lab))
+    db.commit()
+    return len({l for l in labels if l >= 0})
 
 # ── OCR ─────────────────────────────────────────────────────────────────────--
 _ocr_cache = {"engine": None, "reader": None}
@@ -3410,17 +3571,104 @@ def api_raw_keep():
         save_config()
     return jsonify({"success": True, "enabled": bool(state.get("keep_raws"))})
 
+
+# ── Faces API ─────────────────────────────────────────────────────────────────
+@app.route("/api/faces/clusters")
+def api_face_clusters():
+    """Clusters for the Faces tab, biggest first. Unnamed clusters lead."""
+    rows = _db().execute(
+        "SELECT cluster_id, COUNT(*), "
+        "       COALESCE(MAX(name),''), MAX(confirmed), MAX(embed_mode) "
+        "FROM face_regions WHERE cluster_id>=0 "
+        "GROUP BY cluster_id ORDER BY COUNT(*) DESC").fetchall()
+    clusters = []
+    for cid, n, name, conf, mode in rows:
+        sample = _db().execute(
+            "SELECT rel_path,cx,cy,w,h FROM face_regions "
+            "WHERE cluster_id=? LIMIT 9", (cid,)).fetchall()
+        clusters.append({
+            "id": cid, "count": n, "name": name or "",
+            "confirmed": bool(conf), "mode": mode or "",
+            "faces": [{"rel": r[0], "cx": r[1], "cy": r[2], "w": r[3], "h": r[4]}
+                      for r in sample]})
+    clusters.sort(key=lambda c: (bool(c["name"]), -c["count"]))
+    singles = _db().execute(
+        "SELECT COUNT(*) FROM face_regions WHERE cluster_id<0").fetchone()[0]
+    return jsonify({"clusters": clusters, "unclustered": singles,
+                    "identity": facelib.have_identity_embedder()})
+
+
+@app.route("/api/faces/scan", methods=["POST"])
+def api_face_scan():
+    """Force a rescan (clears face_done) or just recluster what's cached."""
+    d = request.json or {}
+    if d.get("rescan"):
+        _db().execute("UPDATE files SET face_done=0"); _db().commit()
+        return jsonify({"success": True, "status": "rescanning"})
+    n = _recluster()
+    return jsonify({"success": True, "clusters": n})
+
+
+@app.route("/api/faces/name", methods=["POST"])
+def api_face_name():
+    """Bulk-name a cluster. Writes the name into every MWG region it covers —
+    metadata is the source of truth, the DB is only the cache."""
+    d = request.json or {}
+    cid  = int(d.get("cluster_id", -1))
+    name = (d.get("name") or "").strip()
+    if cid < 0 or not name:
+        return jsonify({"success": False, "error": "cluster_id and name required"})
+
+    rows = _db().execute(
+        "SELECT rel_path,cx,cy,w,h FROM face_regions WHERE cluster_id=?",
+        (cid,)).fetchall()
+    touched = 0
+    for rel, cx, cy, w, h in rows:
+        abs_p = get_safe_path(MEDIA_DIR, rel)
+        if not abs_p or not os.path.exists(abs_p):
+            continue
+        meta = read_metadata(abs_p)
+        hit = False
+        for r in meta["regions"]:
+            if (r.get("class_name") == "face"
+                    and abs(r["cx"] - cx) < 1e-3 and abs(r["cy"] - cy) < 1e-3):
+                r["region_name"] = name
+                r["confirmed"]   = True
+                hit = True
+        if hit:
+            write_metadata(abs_p, meta["tags"], meta["description"], meta["regions"])
+            touched += 1
+
+    _db().execute(
+        "UPDATE face_regions SET name=?, confirmed=1 WHERE cluster_id=?",
+        (name, cid))
+    _db().commit()
+    return jsonify({"success": True, "named": touched})
+
+
+@app.route("/api/faces/split", methods=["POST"])
+def api_face_split():
+    """Kick a wrong face out of its cluster (back to unclustered)."""
+    d = request.json or {}
+    _db().execute("UPDATE face_regions SET cluster_id=-1 WHERE id=?",
+                  (int(d.get("id", -1)),))
+    _db().commit()
+    return jsonify({"success": True})
+
 @app.route("/api/state")
 def api_state():
     return jsonify({k: state[k] for k in
         ("classes","available_models","status_text","remote_ip",
          "oai_endpoint","oai_key","oai_model","oai_system_prompt","oai_actions",
-         "autotag_enabled","pipeline_tree","yolo_size","pose_kind","pose_size")})
+         "autotag_enabled","pipeline_tree","yolo_size","pose_kind","pose_size",
+         "face_bg_enabled","face_bg_custom","face_model","person_model",
+         "face_cluster_eps","model_groups")})
 
 @app.route("/api/update_settings", methods=["POST"])
 def update_settings():
     d = request.json
-    for k in ("oai_endpoint","oai_key","oai_model","oai_system_prompt","oai_actions","pipeline_tree","yolo_size","pose_kind","pose_size"):
+    for k in ("oai_endpoint","oai_key","oai_model","oai_system_prompt","oai_actions","pipeline_tree","yolo_size","pose_kind","pose_size",
+              "face_bg_enabled","face_bg_custom","face_model","person_model","face_cluster_eps"):
         if k in d: state[k] = d[k]
     save_config(); return jsonify({"success": True})
 

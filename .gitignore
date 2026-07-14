@@ -5,3 +5,4 @@
 *.pt
 /logs
 app_config.json
+models/

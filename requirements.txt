@@ -7,3 +7,7 @@ imagecodecs
 rtmlib
 rapidocr_onnxruntime
 easyocr
+mutagen
+hnswlib
+insightface
+onnxruntime

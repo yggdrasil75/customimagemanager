@@ -254,6 +254,24 @@ async function fetchState(){
       document.getElementById('cfg_apikey').value=s.oai_key;
       document.getElementById('cfg_model').value=s.oai_model;
       document.getElementById('cfg_yolo_size').value=s.yolo_size||'n';
+      // faces / people
+      const _fb=document.getElementById('cfg_face_bg');
+      if(_fb) _fb.checked=!!s.face_bg_enabled;
+      const _fc=document.getElementById('cfg_face_custom');
+      if(_fc) _fc.checked=!!s.face_bg_custom;
+      const _g=s.model_groups||{};
+      const _fill=(id,cur,list,label)=>{
+        const el=document.getElementById(id); if(!el) return;
+        el.querySelectorAll('option:not(:first-child)').forEach(o=>o.remove());
+        (list||[]).forEach(p=>{
+          const o=document.createElement('option');
+          o.value=p; o.textContent=p.split('/').pop();
+          if(p===cur) o.selected=true; el.appendChild(o);
+        });
+      };
+      _fill('cfg_face_model', s.face_model, (_g.face||[]).concat(_g.custom||[]));
+      _fill('cfg_person_model', s.person_model,
+            (_g.trained||[]).concat(_g.custom||[]));
       document.getElementById('cfg_pose_kind').value=s.pose_kind||'body';
       document.getElementById('cfg_pose_size').value=s.pose_size||'n';
       document.getElementById('cfg_system').value=s.oai_system_prompt||'';
