@@ -275,30 +275,37 @@ async function selectFile(fn){
     // Native video: use the <video> element, hide the image canvas. Image
     // region boxes stay hidden; time-indexed video boxes render via vtOverlay.
     canvas.classList.add('hidden');
+    // Clear any leftover animated-JXL <img>; otherwise it stays stacked on top
+    // of the <video> (absolute, object-fit:contain) and hides it entirely.
+    if(typeof mediaAnim!=='undefined'&&mediaAnim){ mediaAnim.classList.add('hidden'); mediaAnim.removeAttribute('src'); }
     mediaVideo.classList.remove('hidden');
     mediaVideo.src=`/api/file/${encodeURIComponent(fn)}?ts=${Date.now()}`;
     imgObj.removeAttribute('src');
     vtOverlay.enable(fn);
   }else{
     vtOverlay.disable();
+    if(typeof mainViewer!=='undefined'&&mainViewer.strip) mainViewer.strip.disable();
     mediaVideo.pause();
     mediaVideo.removeAttribute('src');
     mediaVideo.classList.add('hidden');
     const url=`/api/file/${encodeURIComponent(fn)}?ts=${Date.now()}`;
     // Show the still on the canvas immediately (fast, and it's what most files
-    // are), then ask the backend whether this asset actually animates. If it
-    // does, swap to the live <img> so the browser plays the frames -- a canvas
-    // snapshot can only ever show one. Guard against the user having moved on
-    // to another file before the probe returns.
+    // are), then ask the backend whether this asset animates and how long it is.
+    // Routing:
+    //   still            -> stays on the canvas (already shown)
+    //   animated <=cutoff -> boxable filmstrip (showAnimatedStrip)
+    //   animated >cutoff  -> treated as a video (showVideo)
+    // Guard against the user having moved on before the probe returns.
     if(typeof mediaAnim!=='undefined'&&mediaAnim){ mediaAnim.classList.add('hidden'); mediaAnim.removeAttribute('src'); }
     canvas.classList.remove('hidden');
     imgObj.src=url;
     fetch(`/api/is_animated/${encodeURIComponent(fn)}`)
       .then(r=>r.json())
       .then(d=>{
-        if(d && d.animated && currentFile===fn && typeof mainViewer!=='undefined'){
-          mainViewer.showAnimated(url);
-        }
+        if(!d || !d.animated || currentFile!==fn || typeof mainViewer==='undefined') return;
+        // Long animations are transcoded to real video at UPLOAD, so any animated
+        // JXL still in the library is short enough for the boxable filmstrip.
+        mainViewer.showAnimatedStrip(fn);
       })
       .catch(()=>{});
   }

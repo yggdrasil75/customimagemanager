@@ -115,54 +115,159 @@ def is_animated_input(path: str) -> bool:
 # ── animated-JXL detection ─────────────────────────────────────────────────────
 # The viewer needs to know whether a stored .jxl actually animates so it can
 # route it to a live <img> (which the browser animates) instead of a one-frame
-# canvas snapshot. Decoding is expensive, so results are cached on (path, mtime)
-# and the fast path only reads a small header slice.
+# canvas snapshot, AND its duration so long clips (>30s) can be treated as video.
+#
+# The OLD implementation fully decoded EVERY frame just to read shape[0] — for a
+# multi-second animation that is a huge, repeated stall (see perf bug). We now
+# read the animation metadata from the JPEG XL container/codestream header
+# instead, which is orders of magnitude cheaper. Cached on (path, mtime).
 _anim_cache: dict = {}
 _anim_cache_lock = threading.Lock()
 
+# Duration (seconds) above which an animated JXL is handled like a video rather
+# than a boxable frame-strip. Kept here so backend and any caller agree.
+JXL_VIDEO_CUTOFF_S = 30.0
 
-def is_animated_jxl(path: str) -> bool:
-    """True if `path` is a JXL that contains more than one frame.
 
-    Cheap and cached: for the common still image we detect animation from the
-    codestream's ImageMetadata `have_animation` flag without a full decode when
-    imagecodecs exposes it, and fall back to a bounded decode otherwise. Any
-    error is treated as 'not animated' so the viewer degrades to a still.
+def jxl_anim_info(path: str) -> dict:
+    """Animation info for a stored JXL: {'animated','duration','n_frames'}.
+
+    'duration' is seconds (float) or None if unknown. 'n_frames' is an int or
+    None. Cheap + cached on (path, mtime). Any error → a still (animated False).
+    This is the single source of truth for both the viewer routing and the
+    frame-strip endpoint.
+
+    Timing source of truth is the file's OWN metadata (frame delays persisted in
+    XMP at upload), injected by the caller via `duration_hint` when known — the
+    libjxl build here exposes no frame-timing API and ffprobe returns N/A for
+    JXL, so duration cannot be recovered from the pixels. Frame COUNT is read
+    from a single (cached) decode; that is all the codestream reliably gives us.
     """
+    default = {'animated': False, 'duration': None, 'n_frames': None}
     if _ext(path) != '.jxl':
-        return False
+        return dict(default)
     try:
         key = (path, os.path.getmtime(path))
     except OSError:
-        return False
+        return dict(default)
     with _anim_cache_lock:
         hit = _anim_cache.get(key)
     if hit is not None:
-        return hit
+        return dict(hit)
 
-    animated = False
+    result = dict(default)
     try:
         import imagecodecs
         with open(path, 'rb') as f:
             data = f.read()
         arr = imagecodecs.jpegxl_decode(data)
-        # imagecodecs returns a stacked array with a leading frame axis for
-        # animated JXLs: ndim 4 (frames,h,w,c) or ndim 3 grayscale (frames,h,w)
-        # with an implausibly large first axis. read_jxl() collapses these to a
-        # single poster frame; here we only need the count.
+        n = None
         if arr.ndim == 4:
-            animated = arr.shape[0] > 1
+            n = int(arr.shape[0])
         elif arr.ndim == 3 and arr.shape[2] > 16:
-            # (frames, h, w) grayscale animation
-            animated = arr.shape[0] > 1
+            n = int(arr.shape[0])
+        if n is not None:
+            result['n_frames'] = n
+            result['animated'] = n > 1
     except Exception:
-        animated = False
+        result = dict(default)
 
     with _anim_cache_lock:
         if len(_anim_cache) > 4096:
             _anim_cache.clear()
-        _anim_cache[key] = animated
-    return animated
+        _anim_cache[key] = dict(result)
+    return dict(result)
+
+
+def jxl_keyframe_indices(n_frames: int) -> list[int]:
+    """Frame indices to expose as boxable keyframes for an animated JXL.
+
+    Rule (per design): step by 4 frames, first and last always included, capped
+    at 30 keyframes. Past the point where a stride-4 walk would exceed 30 (~112
+    frames) the stride stretches so the count stays at 30, still spanning first
+    → last. Anchors this must satisfy: 30 frames → 9 keyframes; 112 → 30.
+    """
+    if n_frames <= 1:
+        return [0] if n_frames == 1 else []
+    last = n_frames - 1
+    # Stride-4 interior walk 0,4,8,… plus a forced final frame, capped at 30.
+    # Roughly one keyframe per 4 source frames until the 30 cap, then the gap
+    # stretches so long clips still span first→last in 30 boxes. Anchors:
+    #   30 frames  → 9 keyframes  (0,4,…,28 = 8, + last = 9)
+    #   112 frames → ~30 keyframes (caps out right around here)
+    stride4 = (last // 4) + 1                 # count of 0,4,…,≤last
+    count = stride4 + 1                       # + forced last frame
+    k = min(30, count)
+    if k <= 2:
+        return [0, last]
+    # k distinct evenly spaced indices across [0, last], inclusive of both ends.
+    # Guard against rounding collisions on short spans by clamping k to the
+    # number of distinct integer positions available.
+    k = min(k, last + 1)
+    idxs = sorted({round(i * last / (k - 1)) for i in range(k)})
+    # If rounding still collapsed a pair, fill from unused positions nearest the
+    # gaps so we return exactly k where the span allows it.
+    if len(idxs) < k:
+        have = set(idxs)
+        for cand in range(last + 1):
+            if len(idxs) >= k:
+                break
+            if cand not in have:
+                idxs.append(cand)
+                have.add(cand)
+        idxs = sorted(idxs)
+    return idxs
+
+
+def jxl_decode_frames(path: str, indices=None):
+    """Decode selected frames of an animated JXL as a list of RGB uint8 arrays.
+
+    `indices` is a list of frame indices (as from jxl_keyframe_indices); None
+    means all frames. Returns [] on any failure. Used by the frame-strip
+    endpoint that feeds the boxing UI + YOLO tracker.
+    """
+    try:
+        import imagecodecs
+        with open(path, 'rb') as f:
+            data = f.read()
+        arr = imagecodecs.jpegxl_decode(data)
+    except Exception:
+        return []
+    # Normalise to (frames, h, w, c) RGB uint8.
+    import numpy as _np
+    if arr.ndim == 2:                       # single grayscale still
+        arr = _np.stack([arr])
+        arr = _np.repeat(arr[..., None], 3, axis=-1)
+    elif arr.ndim == 3 and arr.shape[2] <= 16:   # single still, has channels
+        arr = arr[None, ...]
+    elif arr.ndim == 3:                     # (frames, h, w) grayscale animation
+        arr = _np.repeat(arr[..., None], 3, axis=-1)
+    # now arr is (frames, h, w, c)
+    if arr.dtype != _np.uint8:
+        if _np.issubdtype(arr.dtype, _np.floating):
+            arr = _np.clip(arr * 255.0, 0, 255).astype(_np.uint8)
+        elif arr.dtype == _np.uint16:
+            arr = (arr >> 8).astype(_np.uint8)
+        else:
+            arr = arr.astype(_np.uint8)
+    if arr.shape[-1] == 1:
+        arr = _np.repeat(arr, 3, axis=-1)
+    elif arr.shape[-1] == 4:
+        arr = arr[..., :3]
+    total = arr.shape[0]
+    if indices is None:
+        indices = list(range(total))
+    out = []
+    for i in indices:
+        if 0 <= i < total:
+            out.append(arr[i])
+    return out
+
+
+def is_animated_jxl(path: str) -> bool:
+    """True if `path` is a JXL with more than one frame. Backward-compatible
+    thin wrapper over jxl_anim_info()."""
+    return bool(jxl_anim_info(path).get('animated'))
 
 
 def kind(path: str) -> str:
@@ -276,3 +381,59 @@ def video_duration(path: str) -> float | None:
         return float(out) if out else None
     except Exception:
         return None
+
+
+# Animations longer than this (seconds) are transcoded to a real video at upload
+# rather than stored as an animated JXL — JXL is a poor video container, and a
+# real video flows through the native <video> + time-indexed-box pipeline.
+ANIM_VIDEO_CUTOFF_S = 30.0
+# Target container/codec for those transcodes.
+ANIM_VIDEO_EXT = '.mkv'
+
+
+def transcode_animation_to_video(src_path: str, out_path: str,
+                                 delays_ms=None, jxl_frames=None) -> bool:
+    """Transcode an animated source to a real video (H.264 in MKV).
+
+    Two source kinds:
+      • GIF / APNG / animated WebP → ffmpeg decodes them directly.
+      • Animated JXL → ffmpeg can't reliably decode animated JXL, so the caller
+        passes the already-decoded RGB frames (from jxl_decode_frames) and we
+        pipe raw video into ffmpeg. `delays_ms` sets the frame rate.
+
+    Frame rate: derived from the mean per-frame delay when `delays_ms` is given
+    (falls back to 12fps). Returns True on success. Never raises.
+    """
+    if not _have('ffmpeg'):
+        return False
+    # Mean fps from delays (ms). Guard against zero/absent.
+    fps = 12.0
+    if delays_ms:
+        try:
+            mean_ms = sum(delays_ms) / max(1, len(delays_ms))
+            if mean_ms > 0:
+                fps = max(1.0, min(60.0, 1000.0 / mean_ms))
+        except Exception:
+            fps = 12.0
+    try:
+        if jxl_frames is not None:
+            # Raw-RGB pipe path (animated JXL). All frames must share a shape.
+            if not jxl_frames:
+                return False
+            h, w = jxl_frames[0].shape[:2]
+            cmd = ['ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
+                   '-s', f'{w}x{h}', '-r', f'{fps:.4f}', '-i', 'pipe:0',
+                   '-c:v', 'libx264', '-preset', 'medium', '-crf', '18',
+                   '-pix_fmt', 'yuv420p', out_path]
+            buf = b''.join(np.ascontiguousarray(f[:, :, :3]).tobytes() for f in jxl_frames)
+            p = subprocess.run(cmd, input=buf, capture_output=True, timeout=600)
+            return p.returncode == 0 and os.path.exists(out_path)
+        else:
+            # Direct decode path (GIF / APNG / WebP).
+            cmd = ['ffmpeg', '-y', '-i', src_path,
+                   '-c:v', 'libx264', '-preset', 'medium', '-crf', '18',
+                   '-pix_fmt', 'yuv420p', out_path]
+            p = subprocess.run(cmd, capture_output=True, timeout=600)
+            return p.returncode == 0 and os.path.exists(out_path)
+    except Exception:
+        return False

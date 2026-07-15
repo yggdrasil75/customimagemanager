@@ -386,6 +386,148 @@ function makeViewer(prefix, opts) {
   self.drawCanvas = drawCanvas;
   self.vtOverlay = vt;
 
+  // ── animated-JXL filmstrip (approach B: box on sampled frames) ──────────────
+  // Owns the ~30 keyframe frames of an animated JXL. Clicking a thumbnail paints
+  // that frame onto the canvas via showImage(), so ALL existing box editing (the
+  // canvas mouse handlers, region rows, tag modal) applies unchanged. Each drawn
+  // box is a keyframe at its frame's time; boxes for the same object across
+  // frames form a track. "Track boxes" asks the backend to fill every drawn box
+  // across all frames with YOLO. Main pane only — review never boxes.
+  const strip = (function () {
+    const bar    = P('strip_bar');
+    const thumbs = P('strip_thumbs');
+    const posEl  = P('strip_pos');
+    const playB  = P('strip_play');
+    const trackB = P('strip_track');
+    // Guard: markup may be absent (older templates) — degrade to no strip.
+    if (!bar || !thumbs) {
+      return { enable() {}, disable() { }, active: () => false, frameT: () => null };
+    }
+    let file = null;
+    let frames = [];      // [{index, t, jpeg(dataURL)}]
+    let cur = -1;         // current frame idx into `frames`
+    let playing = false;
+
+    function active() { return file != null; }
+    // The time to stamp on a box drawn right now (the current frame's t).
+    function frameT() { return (cur >= 0 && frames[cur]) ? frames[cur].t : null; }
+
+    function renderThumbs() {
+      thumbs.innerHTML = '';
+      frames.forEach((f, i) => {
+        const im = document.createElement('img');
+        im.src = f.jpeg;
+        im.className = 'h-[44px] w-auto rounded cursor-pointer flex-shrink-0 border-2 ' +
+          (i === cur ? 'border-blue-500' : 'border-transparent');
+        im.title = `frame ${f.index + 1}`;
+        im.onclick = () => selectFrame(i);
+        thumbs.appendChild(im);
+      });
+    }
+
+    function selectFrame(i) {
+      if (i < 0 || i >= frames.length) return;
+      stopPlay();
+      cur = i;
+      posEl.textContent = `frame ${frames[i].index + 1} / ${frames.length}`;
+      // Paint this frame onto the canvas as a still; the box editor takes over.
+      // Regions stay in currentRegions; drawCanvas re-renders them over the frame.
+      canvas.classList.remove('hidden');
+      if (mediaAnim) mediaAnim.classList.add('hidden');
+      self.showImage(frames[i].jpeg);
+      [...thumbs.children].forEach((c, k) =>
+        c.classList.toggle('border-blue-500', k === i) ||
+        c.classList.toggle('border-transparent', k !== i));
+    }
+
+    function startPlay() {
+      // Swap to the live animated <img> so the browser plays real frames.
+      if (!mediaAnim) return;
+      playing = true; playB.textContent = '❚❚ Pause';
+      canvas.classList.add('hidden');
+      mediaAnim.classList.remove('hidden');
+      mediaAnim.src = `/api/file/${encodeURIComponent(file)}?ts=${Date.now()}`;
+    }
+    function stopPlay() {
+      if (!playing) return;
+      playing = false; playB.textContent = '▶ Play';
+      if (mediaAnim) { mediaAnim.classList.add('hidden'); mediaAnim.removeAttribute('src'); }
+      canvas.classList.remove('hidden');
+    }
+    playB.onclick = () => { playing ? stopPlay() : startPlay(); };
+
+    trackB.onclick = async () => {
+      if (!file || !currentRegions.length) { alert('Draw at least one box first.'); return; }
+      // Build tracks from currentRegions. A region carries its frame time in
+      // ._t (stamped at draw time); regions sharing a class_name are one track.
+      const byClass = {};
+      currentRegions.forEach(b => {
+        const cls = b.class_name || 'object';
+        (byClass[cls] = byClass[cls] || []).push(b);
+      });
+      const tracks = Object.entries(byClass).map(([cls, boxes]) => ({
+        id: 't_' + Math.random().toString(36).slice(2, 10),
+        label: cls, class_name: cls,
+        keyframes: boxes.map(b => ({
+          t: (b._t != null ? b._t : (frameT() || 0)),
+          cx: b.cx, cy: b.cy, w: b.w, h: b.h,
+        })),
+      }));
+      const old = trackB.textContent; trackB.disabled = true; trackB.textContent = 'Tracking…';
+      try {
+        const r = await fetch(`/api/jxl_track/${encodeURIComponent(file)}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tracks }),
+        }).then(r => r.json());
+        if (r.success && r.tracks) {
+          // Replace currentRegions with the tracked keyframes, tagging each with
+          // its frame time so re-tracking/saving keeps them frame-anchored.
+          const flat = [];
+          r.tracks.forEach(tr => tr.keyframes.forEach(k => flat.push({
+            class_name: tr.class_name, confirmed: tr.confirmed !== false,
+            cx: k.cx, cy: k.cy, w: k.w, h: k.h, _t: k.t,
+          })));
+          currentRegions.length = 0; currentRegions.push(...flat);
+          if (typeof renderRegionsList === 'function') renderRegionsList();
+          drawCanvas();
+          if (typeof triggerAutosave === 'function') triggerAutosave();
+        } else {
+          alert(r.error || 'Tracking failed.');
+        }
+      } catch (_) { alert('Tracking request failed.'); }
+      trackB.textContent = old; trackB.disabled = false;
+    };
+
+    return {
+      active, frameT,
+      async enable(fn) {
+        file = fn; frames = []; cur = -1; stopPlay();
+        bar.classList.remove('hidden');
+        thumbs.innerHTML = '<span class="text-[10px] text-gray-500 px-2">Loading frames…</span>';
+        try {
+          const r = await fetch(`/api/jxl_frames/${encodeURIComponent(fn)}`).then(r => r.json());
+          if (!r.success || !r.frames?.length) {
+            thumbs.innerHTML = '<span class="text-[10px] text-red-400 px-2">Could not load frames.</span>';
+            return;
+          }
+          // jpeg payloads arrive base64; wrap as data URLs once.
+          frames = r.frames.map(f => ({ index: f.index, t: f.t, jpeg: 'data:image/jpeg;base64,' + f.jpeg }));
+          renderThumbs();
+          selectFrame(0);
+        } catch (_) {
+          thumbs.innerHTML = '<span class="text-[10px] text-red-400 px-2">Frame load error.</span>';
+        }
+      },
+      disable() {
+        stopPlay();
+        file = null; frames = []; cur = -1;
+        bar.classList.add('hidden');
+        thumbs.innerHTML = '';
+      },
+    };
+  })();
+  self.strip = strip;
+
   // Layout observers (main pane only — review sizes to its flex container).
   if (isMain) {
     new ResizeObserver(() => { if (currentFile && imgObj.width) requestAnimationFrame(drawCanvas); })
@@ -421,6 +563,7 @@ function makeViewer(prefix, opts) {
   // switch back to a still to edit boxes.
   self.showAnimated = function (url) {
     vt.disable();
+    if (self.strip) self.strip.disable();
     mediaVideo.pause(); mediaVideo.removeAttribute('src'); mediaVideo.classList.add('hidden');
     imgObj.removeAttribute('src');
     canvas.classList.add('hidden');
@@ -428,9 +571,19 @@ function makeViewer(prefix, opts) {
     mediaAnim.classList.remove('hidden');
     mediaAnim.src = url;
   };
+  // Load an animated JXL in BOXABLE mode: the filmstrip loads sampled frames and
+  // paints frame 0 onto the canvas so the normal box editor applies. Used for
+  // animated JXLs at or under the duration cutoff; longer ones go to showVideo.
+  self.showAnimatedStrip = function (fn) {
+    vt.disable();
+    mediaVideo.pause(); mediaVideo.removeAttribute('src'); mediaVideo.classList.add('hidden');
+    if (!self.strip) { self.showAnimated(`/api/file/${encodeURIComponent(fn)}`); return; }
+    self.strip.enable(fn);   // paints frame 0 to the canvas via showImage
+  };
   // Load a video (time-indexed boxes via the overlay).
   self.showVideo = function (url, fn) {
     canvas.classList.add('hidden');
+    if (self.strip) self.strip.disable();
     if (mediaAnim) { mediaAnim.removeAttribute('src'); mediaAnim.classList.add('hidden'); }
     mediaVideo.classList.remove('hidden');
     mediaVideo.src = url;

@@ -1401,6 +1401,58 @@ def _read_pose_from_xmp(xmp_path):
         access_logger.warning(f"_read_pose_from_xmp {xmp_path}: {e}")
         return None
 
+def _read_anim_delays_from_xmp(xmp_path):
+    """Pull animation frame delays back out of a sidecar, or None.
+
+    Returns {"delays_ms":[...],"duration_ms":N,"n_frames":N} — the timing for an
+    animated JXL, captured from the source GIF/APNG at upload. This is the
+    portable duration source the viewer uses to decide boxable-strip vs. video.
+    """
+    try:
+        if not os.path.exists(xmp_path):
+            return None
+        text = open(xmp_path, encoding="utf-8", errors="replace").read()
+        m = re.search(r'<mm:animDelays>(.*?)</mm:animDelays>', text, re.DOTALL)
+        if not m:
+            return None
+        return json.loads(base64.b64decode(m.group(1)).decode("utf-8"))
+    except Exception as e:
+        access_logger.warning(f"_read_anim_delays_from_xmp {xmp_path}: {e}")
+        return None
+
+def _extract_anim_delays(src_path):
+    """Read per-frame delays (ms) from a source GIF/APNG/WebP via Pillow.
+
+    Returns {"delays_ms":[...],"duration_ms":total,"n_frames":n} or None for a
+    non-animated / unreadable source. Called at upload BEFORE cjxl runs, since
+    cjxl collapses the timing we want to keep. Best-effort: never raises."""
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        im = Image.open(src_path)
+        n = getattr(im, "n_frames", 1)
+        if n <= 1:
+            return None
+        delays = []
+        for i in range(n):
+            im.seek(i)
+            # GIF/WebP store per-frame duration in ms in info['duration'];
+            # APNG exposes it the same way through Pillow. Default to a sane
+            # ~10fps (100ms) when a frame omits it.
+            d = im.info.get("duration", 100)
+            try:
+                d = int(round(float(d)))
+            except (TypeError, ValueError):
+                d = 100
+            delays.append(max(0, d))
+        total = sum(delays)
+        return {"delays_ms": delays, "duration_ms": total, "n_frames": n}
+    except Exception as e:
+        access_logger.warning(f"_extract_anim_delays {src_path}: {e}")
+        return None
+
 # PRISM namespace, used to persist prism:PageCount in our sidecars (the one
 # PRISM field we write — bidirectional for comics).
 _PRISM_NS = "http://prismstandard.org/namespaces/basic/3.0/"
@@ -2159,7 +2211,7 @@ def _album_list():
 
 
 def write_metadata(filepath, tags, description, regions, analysis=None, flag=None, pose=None, page_count=None,
-                   albums=None):
+                   albums=None, anim_delays=None):
     try:
         _sync_yolo(filepath, regions)
         xmp_path = os.path.splitext(filepath)[0] + '.xmp'
@@ -2193,6 +2245,11 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
             pose = None                       # drop it; don't re-read the sidecar
         elif not (pose and pose.get("people")):
             pose = _read_pose_from_xmp(xmp_path)
+        # Preserve stored animation frame delays (animated JXL timing) unless the
+        # caller supplies new ones — this is the portable source of truth for a
+        # clip's duration, so an ordinary tag/region edit must not drop it.
+        if anim_delays is None:
+            anim_delays = _read_anim_delays_from_xmp(xmp_path)
         esc = saxutils.escape
         subj = ("<dc:subject><rdf:Bag>" +
                 "".join(f"<rdf:li>{esc(t)}</rdf:li>" for t in tags) +
@@ -2209,6 +2266,11 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
             mm_x += f'<mm:flag>{_b64dump(flag)}</mm:flag>'
         if pose and pose.get("people"):
             mm_x += f'<mm:pose>{_b64dump(pose)}</mm:pose>'
+        # Animation frame delays: a small JSON blob {"delays_ms":[...],
+        # "duration_ms":N,"n_frames":N} base64'd like the other mm: payloads.
+        # Lives in the file's own XMP so it survives a move and a DB wipe.
+        if anim_delays and (anim_delays.get("delays_ms") or anim_delays.get("duration_ms")):
+            mm_x += f'<mm:animDelays>{_b64dump(anim_delays)}</mm:animDelays>'
         mm_ns = f' xmlns:mm="{_MM_NS}"' if mm_x else ''
         # prism:PageCount as an element (only when we have a value).
         prism_x = ""
@@ -4042,8 +4104,68 @@ def api_upload():
         out  = os.path.join(tmp, "out" + store_ext)
         file.save(orig)
         is_raw_src = mt.is_raw(fname)
+        # Capture per-frame animation timing from the SOURCE now, while it still
+        # exists — cjxl collapses it. Meaningful for animated GIF/APNG/WebP and,
+        # separately, animated JXL sources. Still images/videos yield None.
+        anim_delays = None
+        if not is_raw_src and not mt.is_video(fname):
+            if in_ext in ('.gif', '.apng', '.png', '.webp'):
+                anim_delays = _extract_anim_delays(orig)
+            elif in_ext == '.jxl':
+                # Animated JXL: frame count from the codestream; per-frame timing
+                # isn't recoverable from libjxl here, so duration is estimated at
+                # a nominal rate purely to apply the >30s video cutoff. The strip
+                # UI doesn't rely on exact ms for a short clip.
+                _ji = mt.jxl_anim_info(orig)
+                if _ji.get('animated') and _ji.get('n_frames'):
+                    n = int(_ji['n_frames'])
+                    per = 100  # nominal 10fps when true timing is unknown
+                    anim_delays = {"delays_ms": [per] * n, "duration_ms": per * n,
+                                   "n_frames": n, "estimated": True}
+
+        # Decide whether this animation is too long to keep as an animated JXL.
+        # If so, transcode to a real video (MKV) and store THAT natively — JXL is
+        # a poor video container, and a video flows through the <video> + video
+        # box-tracking pipeline. This re-points the stored name/ext/path.
+        transcode_to_video = False
+        if anim_delays and not mt.is_video(fname):
+            dur_s = (anim_delays.get("duration_ms") or 0) / 1000.0
+            if dur_s > mt.ANIM_VIDEO_CUTOFF_S:
+                transcode_to_video = True
+
+        if transcode_to_video:
+            base = os.path.splitext(store_name)[0]
+            store_name = base + mt.ANIM_VIDEO_EXT
+            store_ext  = mt.ANIM_VIDEO_EXT
+            store_path = os.path.join(tdir, store_name)
+            rel_path   = os.path.relpath(store_path, MEDIA_DIR).replace('\\', '/')
+            out        = os.path.join(tmp, "out" + store_ext)
+            if os.path.exists(store_path):
+                return jsonify({"success": False, "error_code": "filename_exists",
+                                "error": f"A file named '{rel_path}' already exists.",
+                                "existing_file": rel_path}), 409
+
         try:
-            if mt.is_video(fname):
+            if transcode_to_video:
+                # Long animation → real video. Animated JXL can't be fed to
+                # ffmpeg directly (unreliable animated-JXL decode), so decode its
+                # frames via imagecodecs and pipe raw RGB; GIF/APNG/WebP decode in
+                # ffmpeg directly. Frame rate comes from the captured delays.
+                jxl_frames = None
+                if in_ext == '.jxl':
+                    jxl_frames = mt.jxl_decode_frames(orig)  # all frames
+                ok = mt.transcode_animation_to_video(
+                    orig, out, delays_ms=anim_delays.get("delays_ms"),
+                    jxl_frames=jxl_frames)
+                if not ok:
+                    return jsonify({
+                        "success": False, "error_code": "conversion_failed",
+                        "error": "Animation-to-video transcode failed.",
+                        "detail": f"Could not transcode '{fname}' to video."
+                    }), 422
+                # Timing now lives in the video itself; no XMP delays needed.
+                anim_delays = None
+            elif mt.is_video(fname):
                 # Videos can't be transcoded to JXL — store the original bytes.
                 shutil.copy(orig, out)
             elif in_ext == '.jxl':
@@ -4105,9 +4227,13 @@ def api_upload():
                 _link_raw_to_image(orig, fname, rel_path, store_path)
 
             meta = json.loads(request.form.get("metadata", "{}") or "{}")
-            if meta:
+            if meta or anim_delays:
+                # Persist user metadata AND/OR the captured animation timing. When
+                # only delays exist we still write, so an animated JXL's duration
+                # is never lost just because it arrived without tags.
                 write_metadata(store_path, meta.get("tags", []),
-                               meta.get("description", ""), meta.get("regions", []))
+                               meta.get("description", ""), meta.get("regions", []),
+                               anim_delays=anim_delays)
             if not _index_file(rel_path, force=True):
               print("upload failed")
             # If uploaded into an existing comic folder, hide it from the flat list
@@ -4162,16 +4288,172 @@ def api_thumb(filename):
     if not fp or not os.path.exists(fp): return "",404
     return serve_thumb(filename, fp)
 
+def _jxl_duration_s(fp):
+    """Duration (seconds) of an animated JXL from its portable XMP timing, or
+    None. The libjxl build here can't recover frame timing from pixels, so the
+    delays captured at upload are the source of truth."""
+    d = _read_anim_delays_from_xmp(os.path.splitext(fp)[0] + '.xmp')
+    if d and d.get("duration_ms"):
+        try:
+            return float(d["duration_ms"]) / 1000.0
+        except (TypeError, ValueError):
+            return None
+    return None
+
 @app.route("/api/is_animated/<path:filename>")
 def api_is_animated(filename):
-    """Report whether a stored asset is animated so the viewer can route it to a
-    live <img> (which the browser animates) instead of a one-frame canvas
-    snapshot. Result is cached per (path, mtime) in media_types, so repeated
-    selections of the same file are free."""
+    """Report whether a stored asset is animated, plus its duration and whether
+    it should be treated as a video (>30s), so the viewer can route it to a
+    boxable frame-strip, a live <img>, or the native video path. Cached per
+    (path, mtime) in media_types for the animated flag; duration comes from the
+    file's own XMP timing."""
     fp = get_safe_path(MEDIA_DIR, filename)
     if not fp or not os.path.exists(fp):
         return jsonify({"animated": False}), 404
-    return jsonify({"animated": bool(mt.is_animated_jxl(fp))})
+    info = mt.jxl_anim_info(fp)
+    animated = bool(info.get("animated"))
+    dur = _jxl_duration_s(fp) if animated else None
+    as_video = bool(dur is not None and dur > mt.JXL_VIDEO_CUTOFF_S)
+    return jsonify({
+        "animated": animated,
+        "n_frames": info.get("n_frames"),
+        "duration": dur,
+        "as_video": as_video,
+    })
+
+@app.route("/api/jxl_frames/<path:filename>")
+def api_jxl_frames(filename):
+    """Return the boxable keyframe strip for an animated JXL: a list of frames
+    (index + normalised time t in [0,1]) plus a JPEG for each, so the viewer can
+    let the user box on representative frames. Frames chosen by
+    mt.jxl_keyframe_indices (step-4, capped at 30). Times are derived from the
+    per-frame delays in XMP when available, else evenly spaced by frame index."""
+    fp = get_safe_path(MEDIA_DIR, filename)
+    if not fp or not os.path.exists(fp) or not mt.is_jxl(fp):
+        return jsonify({"success": False, "error": "not found"}), 404
+    info = mt.jxl_anim_info(fp)
+    if not info.get("animated"):
+        return jsonify({"success": False, "error": "not animated"}), 400
+    n = info.get("n_frames") or 0
+    idxs = mt.jxl_keyframe_indices(n)
+    # Per-frame timestamps (seconds), from XMP delays if we have them.
+    delays = _read_anim_delays_from_xmp(os.path.splitext(fp)[0] + '.xmp')
+    dl = (delays or {}).get("delays_ms")
+    total_ms = (delays or {}).get("duration_ms")
+    def t_of(i):
+        if dl and total_ms:
+            return sum(dl[:i]) / total_ms if total_ms else (i / max(1, n - 1))
+        return i / max(1, n - 1)
+    frames = mt.jxl_decode_frames(fp, idxs)
+    out_frames = []
+    for k, i in enumerate(idxs):
+        if k >= len(frames):
+            break
+        rgb = frames[k]
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        ok, buf = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 82])
+        if not ok:
+            continue
+        out_frames.append({
+            "index": int(i),
+            "t": round(float(t_of(i)), 5),
+            "jpeg": base64.b64encode(buf.tobytes()).decode("ascii"),
+        })
+    return jsonify({"success": True, "n_frames": n, "frames": out_frames})
+
+@app.route("/api/jxl_track/<path:filename>", methods=["POST"])
+def api_jxl_track(filename):
+    """Track every user-defined box across the keyframe strip of an animated JXL.
+
+    Input JSON: {"tracks":[{id,label,class_name,keyframes:[{t,cx,cy,w,h}]}]}.
+    For each track we run the existing COCO YOLO detector on every keyframe and
+    associate detections to that track by class + IoU against its nearest user
+    box, filling in a keyframe at each frame time. Objects YOLO can't detect
+    keep only the boxes the user drew (honest: no fabricated motion). Mirrors the
+    detect+greedy-IoU approach of api_video_detect. Nothing is persisted here —
+    the client saves via the normal region-save path."""
+    fp = get_safe_path(MEDIA_DIR, filename)
+    if not fp or not os.path.exists(fp) or not mt.is_jxl(fp):
+        return jsonify({"success": False, "error": "not found"}), 404
+    info = mt.jxl_anim_info(fp)
+    if not info.get("animated"):
+        return jsonify({"success": False, "error": "not animated"}), 400
+    body = request.get_json(silent=True) or {}
+    in_tracks = body.get("tracks") or []
+    if not in_tracks:
+        return jsonify({"success": False, "error": "no boxes to track"}), 400
+
+    n = info.get("n_frames") or 0
+    idxs = mt.jxl_keyframe_indices(n)
+    frames = mt.jxl_decode_frames(fp, idxs)
+    if not frames:
+        return jsonify({"success": False, "error": "decode failed"}), 422
+
+    delays = _read_anim_delays_from_xmp(os.path.splitext(fp)[0] + '.xmp')
+    dl = (delays or {}).get("delays_ms")
+    total_ms = (delays or {}).get("duration_ms")
+    def t_of(i):
+        if dl and total_ms:
+            return sum(dl[:i]) / total_ms if total_ms else (i / max(1, n - 1))
+        return i / max(1, n - 1)
+    times = [t_of(i) for i in idxs]
+
+    def iou(a, b):
+        ax1, ay1 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
+        ax2, ay2 = a["cx"] + a["w"] / 2, a["cy"] + a["h"] / 2
+        bx1, by1 = b["cx"] - b["w"] / 2, b["cy"] - b["h"] / 2
+        bx2, by2 = b["cx"] + b["w"] / 2, b["cy"] + b["h"] / 2
+        ix1, iy1, ix2, iy2 = max(ax1, bx1), max(ay1, by1), min(ax2, bx2), min(ay2, by2)
+        iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+        inter = iw * ih
+        ua = a["w"] * a["h"] + b["w"] * b["h"] - inter
+        return inter / ua if ua > 0 else 0.0
+
+    model_path = f"yolo11{_yolo_size()}.pt"
+    # Detect once per keyframe, reused across all tracks.
+    dets_by_frame = []
+    for rgb in frames:
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        dets_by_frame.append(_detect_obb_or_box(bgr, model_path, _video_det_cache, conf=0.30))
+
+    out = []
+    for tr in in_tracks:
+        kfs = tr.get("keyframes") or []
+        if not kfs:
+            continue
+        cls = (tr.get("class_name") or tr.get("label") or "").strip()
+        # The user's boxes stay as anchors; we add detected positions between/around
+        # them for the same object. Seed "expected" position from the nearest user
+        # keyframe at each frame time, then pick the detection best matching it.
+        user_kfs = sorted(kfs, key=lambda k: k.get("t", 0))
+        def nearest_user(t):
+            return min(user_kfs, key=lambda k: abs(k.get("t", 0) - t))
+        merged = {round(k.get("t", 0), 5): dict(cx=k["cx"], cy=k["cy"], w=k["w"], h=k["h"], _user=True)
+                  for k in user_kfs}
+        for fi, t in enumerate(times):
+            tk = round(t, 5)
+            if tk in merged:            # user already fixed this frame
+                continue
+            exp = nearest_user(t)
+            best, best_s = None, 0.20
+            for d in dets_by_frame[fi]:
+                if cls and d["class_name"].lower() != cls.lower():
+                    continue
+                s = iou(exp, d)
+                if s > best_s:
+                    best, best_s = d, s
+            if best is not None:
+                merged[tk] = dict(cx=best["cx"], cy=best["cy"], w=best["w"], h=best["h"], _user=False)
+        kf_out = [dict(t=t, cx=v["cx"], cy=v["cy"], w=v["w"], h=v["h"])
+                  for t, v in sorted(merged.items())]
+        out.append({
+            "id": tr.get("id") or ("t_" + uuid.uuid4().hex[:8]),
+            "label": tr.get("label") or cls or "object",
+            "class_name": cls or "object",
+            "confirmed": bool(tr.get("confirmed", False)),
+            "keyframes": kf_out,
+        })
+    return jsonify({"success": True, "tracks": out})
 
 @app.route("/api/crop")
 def api_crop():

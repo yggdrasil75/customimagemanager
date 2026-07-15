@@ -10,6 +10,11 @@ function saveRegion(){
     pendingBox.region_name=pendingBox.region_name||'';   // instance name (mwg-rs:Name)
     pendingBox.region_type=pendingBox.region_type||'';   // region type (mwg-rs:Type)
     pendingBox.uuid=pendingBox.uuid||null;   // backend assigns on save
+    // If boxing on an animated-JXL filmstrip frame, anchor this box to that
+    // frame's time so YOLO tracking and re-selection stay frame-aware.
+    if(typeof mainViewer!=='undefined'&&mainViewer.strip&&mainViewer.strip.active()){
+      const ft=mainViewer.strip.frameT(); if(ft!=null) pendingBox._t=ft;
+    }
     currentRegions.push(pendingBox);openIdx=currentRegions.length-1;pendingBox=null;}
   document.getElementById('region_modal').classList.add('hidden');
   drawCanvas(); if(popoutOpen) drawPopout(); triggerAutosave();
