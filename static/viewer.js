@@ -32,6 +32,7 @@ function makeViewer(prefix, opts) {
     isMain,
     canvas: P('media_canvas'),
     mediaVideo: P('media_video'),
+    mediaAnim: P('media_anim'),
     imgObj: new Image(),
     // review-only state
     regions: [],
@@ -40,6 +41,7 @@ function makeViewer(prefix, opts) {
   };
   self.ctx = self.canvas.getContext('2d');
   const canvas = self.canvas, mediaVideo = self.mediaVideo, imgObj = self.imgObj, ctx = self.ctx;
+  const mediaAnim = self.mediaAnim;
 
   // ── which regions/toggles this instance draws ──
   function regionsFor() { return isMain ? currentRegions : self.regions; }
@@ -398,6 +400,7 @@ function makeViewer(prefix, opts) {
   self.showImage = function (url, regions, decisions) {
     vt.disable();
     mediaVideo.pause(); mediaVideo.removeAttribute('src'); mediaVideo.classList.add('hidden');
+    if (mediaAnim) { mediaAnim.removeAttribute('src'); mediaAnim.classList.add('hidden'); }
     canvas.classList.remove('hidden');
     if (!isMain) { self.regions = regions || []; self.decisions = decisions || {}; }
     // Always draw via onload (wired above). Clear src first so re-selecting the
@@ -411,9 +414,24 @@ function makeViewer(prefix, opts) {
         .then(() => applyEditorLayout());
     }
   };
+  // Load an ANIMATED image (animated JXL/GIF/APNG/WebP). A canvas snapshot can
+  // only ever show one frame, so animated assets are shown through a real DOM
+  // <img> the browser animates natively. Region/skeleton overlays are not drawn
+  // over animated content (they are frame-specific and would fight the motion);
+  // switch back to a still to edit boxes.
+  self.showAnimated = function (url) {
+    vt.disable();
+    mediaVideo.pause(); mediaVideo.removeAttribute('src'); mediaVideo.classList.add('hidden');
+    imgObj.removeAttribute('src');
+    canvas.classList.add('hidden');
+    if (!mediaAnim) { self.showImage(url); return; }  // fallback if markup absent
+    mediaAnim.classList.remove('hidden');
+    mediaAnim.src = url;
+  };
   // Load a video (time-indexed boxes via the overlay).
   self.showVideo = function (url, fn) {
     canvas.classList.add('hidden');
+    if (mediaAnim) { mediaAnim.removeAttribute('src'); mediaAnim.classList.add('hidden'); }
     mediaVideo.classList.remove('hidden');
     mediaVideo.src = url;
     imgObj.removeAttribute('src');
@@ -441,6 +459,7 @@ const canvas     = mainViewer.canvas;
 const ctx        = mainViewer.ctx;
 const imgObj     = mainViewer.imgObj;
 const mediaVideo = mainViewer.mediaVideo;
+const mediaAnim  = mainViewer.mediaAnim;
 const vtOverlay  = mainViewer.vtOverlay;
 function drawCanvas() { return mainViewer.drawCanvas(); }
 

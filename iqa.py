@@ -61,12 +61,19 @@ pipeline never hard-fails.
 import os
 import threading
 import numpy as np
+import urllib.request
+import torch
 
 try:
     import cv2
     _HAVE_CV2 = True
 except Exception:
     _HAVE_CV2 = False
+try:
+    import pyiqa
+    _HAVE_IQA = True
+except Exception:
+    _HAVE_IQA = False
 
 
 # ── model registry ────────────────────────────────────────────────────────────
@@ -184,7 +191,7 @@ def list_models():
 
     Never raises: probing availability must not take the app down.
     """
-    have_pyiqa = _have_pyiqa()
+    have_pyiqa = _HAVE_IQA
     out = []
     for m in MODELS:
         if m["backend"] == "opencv":
@@ -199,14 +206,6 @@ def list_models():
             "lower_better": m["lower_better"],
         })
     return out
-
-
-def _have_pyiqa():
-    try:
-        import pyiqa  # noqa: F401
-        return True
-    except Exception:
-        return False
 
 
 # ── active model selection ────────────────────────────────────────────────────
@@ -258,7 +257,6 @@ def _ensure_brisque_files():
         return True
     try:
         os.makedirs(MODEL_DIR, exist_ok=True)
-        import urllib.request
         for url, path in ((_MODEL_URL, _MODEL_FILE), (_RANGE_URL, _RANGE_FILE)):
             if not os.path.exists(path):
                 urllib.request.urlretrieve(url, path)
@@ -293,11 +291,7 @@ def _build_pyiqa(spec):
 
     pyiqa wants a float RGB NCHW tensor in 0..1; we hold the torch import inside
     so a torch-less install never pays for it."""
-    try:
-        import torch
-        import pyiqa
-    except Exception:
-        return None
+    if not _HAVE_IQA return False
 
     try:
         dev = "cuda" if torch.cuda.is_available() else "cpu"

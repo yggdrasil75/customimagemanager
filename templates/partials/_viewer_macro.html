@@ -18,6 +18,12 @@
   {% endif %}
   <div id="{{ p }}canvas_container" class="flex-1 bg-black overflow-hidden relative" style="min-height:120px">
     <canvas id="{{ p }}media_canvas" class="absolute"></canvas>
+    <!-- Live image element for ANIMATED content (animated JXL / GIF / APNG /
+         WebP). A <canvas> drawImage only ever captures one frame, so animated
+         assets must be shown through a real DOM <img> the browser can animate.
+         Stills continue to go through the canvas so box/skeleton overlays work. -->
+    <img id="{{ p }}media_anim" class="absolute hidden" alt=""
+      style="max-width:100%;max-height:100%;left:50%;top:50%;transform:translate(-50%,-50%);object-fit:contain">
     <video id="{{ p }}media_video" class="absolute hidden" playsinline
       style="max-width:100%;max-height:calc(100% - 34px);left:50%;top:calc(50% - 17px);transform:translate(-50%,-50%)"></video>
     <!-- Box overlay: drawn ON TOP of the pixels, never baked in. Sits below the

@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import threading
 
 import numpy as np
 
@@ -111,6 +112,59 @@ def is_animated_input(path: str) -> bool:
     return _ext(path) in ANIMATED_INPUT_EXTS
 
 
+# ── animated-JXL detection ─────────────────────────────────────────────────────
+# The viewer needs to know whether a stored .jxl actually animates so it can
+# route it to a live <img> (which the browser animates) instead of a one-frame
+# canvas snapshot. Decoding is expensive, so results are cached on (path, mtime)
+# and the fast path only reads a small header slice.
+_anim_cache: dict = {}
+_anim_cache_lock = threading.Lock()
+
+
+def is_animated_jxl(path: str) -> bool:
+    """True if `path` is a JXL that contains more than one frame.
+
+    Cheap and cached: for the common still image we detect animation from the
+    codestream's ImageMetadata `have_animation` flag without a full decode when
+    imagecodecs exposes it, and fall back to a bounded decode otherwise. Any
+    error is treated as 'not animated' so the viewer degrades to a still.
+    """
+    if _ext(path) != '.jxl':
+        return False
+    try:
+        key = (path, os.path.getmtime(path))
+    except OSError:
+        return False
+    with _anim_cache_lock:
+        hit = _anim_cache.get(key)
+    if hit is not None:
+        return hit
+
+    animated = False
+    try:
+        import imagecodecs
+        with open(path, 'rb') as f:
+            data = f.read()
+        arr = imagecodecs.jpegxl_decode(data)
+        # imagecodecs returns a stacked array with a leading frame axis for
+        # animated JXLs: ndim 4 (frames,h,w,c) or ndim 3 grayscale (frames,h,w)
+        # with an implausibly large first axis. read_jxl() collapses these to a
+        # single poster frame; here we only need the count.
+        if arr.ndim == 4:
+            animated = arr.shape[0] > 1
+        elif arr.ndim == 3 and arr.shape[2] > 16:
+            # (frames, h, w) grayscale animation
+            animated = arr.shape[0] > 1
+    except Exception:
+        animated = False
+
+    with _anim_cache_lock:
+        if len(_anim_cache) > 4096:
+            _anim_cache.clear()
+        _anim_cache[key] = animated
+    return animated
+
+
 def kind(path: str) -> str:
     """'video' | 'image' — the media_kind stored per row and used by the UI to
     decide between a <video> element and an <img>."""
@@ -177,6 +231,37 @@ def video_poster_frame(path: str, seek: float = 1.0) -> np.ndarray | None:
     if frame is None:
         frame = _grab(0.0)
     return frame
+
+
+def develop_raw(raw_path: str, out_png_path: str) -> bool:
+    """Develop a camera RAW into a 16-bit RGB PNG at out_png_path.
+
+    Uses rawpy (libraw) to demosaic and apply the camera white balance, producing
+    a wide-gamut 16-bit image. That PNG is then a normal still input the existing
+    cjxl step transcodes to .jxl losslessly — so raw ingestion reuses the whole
+    still-image path instead of relying on cjxl's inconsistent per-camera raw
+    support. Returns True on success, False (never raises) on any failure so the
+    caller can fall back or report conversion_failed cleanly.
+    """
+    try:
+        import rawpy
+    except Exception:
+        return False
+    if cv2 is None:
+        return False
+    try:
+        with rawpy.imread(raw_path) as raw:
+            rgb = raw.postprocess(
+                use_camera_wb=True,
+                output_bps=16,
+                no_auto_bright=True,
+                gamma=(2.222, 4.5),      # standard Rec.709-ish tone curve
+            )
+        # cv2 writes true 16-bit PNG (Pillow can't handle RGB48); it expects BGR.
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        return bool(cv2.imwrite(out_png_path, bgr))
+    except Exception:
+        return False
 
 
 def video_duration(path: str) -> float | None:

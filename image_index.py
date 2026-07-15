@@ -56,6 +56,7 @@ import struct
 import numpy as np
 
 import object_grouping as og
+from collections import Counter
 
 
 # ── schema ────────────────────────────────────────────────────────────────────
@@ -231,7 +232,7 @@ def _bruteforce_cluster(db, dim, total, eps, min_cluster, prog=None):
         if prog:
             prog(hi, n, "linking")
     roots = np.array([find(i) for i in range(n)], dtype=int)
-    from collections import Counter
+    
     counts = Counter(roots.tolist())
     keep = {root: idx for idx, (root, c) in enumerate(
         sorted(counts.items(), key=lambda kv: -kv[1])) if c >= min_cluster}
@@ -341,7 +342,7 @@ def stage_build_heuristics(db, tag_of=None, margin=2.0, progress=None):
         # suggested tag: majority vote across members' tags (ignore minor diffs)
         suggested = ""
         if tag_of:
-            from collections import Counter
+            
             c = Counter()
             for m in members:
                 for t in (tag_of(m["rel_path"]) or []):

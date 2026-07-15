@@ -22,8 +22,10 @@ Key architectural decisions vs the naive version:
 import os, glob, cv2, yaml, subprocess, shutil, sys, numpy as np
 import tempfile, io, time, random, json, threading, logging
 import requests, base64, re, pyexiv2, xml.sax.saxutils as saxutils
-import hashlib, sqlite3, uuid
+import hashlib, sqlite3, uuid, math, mimetypes, functools
+import urllib.request, urllib.parse
 from datetime import datetime
+from collections import OrderedDict, Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from werkzeug.utils import secure_filename
 from flask import Flask, render_template, render_template_string, request, jsonify, send_file, Response
@@ -37,12 +39,25 @@ import image_index as ii
 import media_types as mt
 import video_tracks as vt
 import tiering
+import music_index as mi
+import exif_import, exif_export, exif_fields
+import xmp_import, xmp_fields
+import iptc_import, iptc_fields
+import mwg_fields
 try:
     import iqa
 except Exception:
     iqa = None
 from pipeline import DEFAULT_PIPELINE, run_pipeline
 from templates import HTML, TRAINING_HTML
+
+try:
+    from rtmlib import Wholebody
+    _HAVE_WHOLEBODY = True
+except Exception as e:
+    _HAVE_WHOLEBODY = False
+
+import easyocr
 
 # ── NR-IQA star mapping ───────────────────────────────────────────────────────
 # iqa.assess() now returns a NORMALIZED quality in 0..1 (higher = better) no
@@ -131,6 +146,13 @@ state = {
 _thumb_lru: dict = {}
 _thumb_lock = threading.Lock()
 LRU_MAX = 512
+
+@functools.lru_cache(maxsize=48)          # arrays are large; keep this modest
+def _decode_cached(path, mtime):
+    arr = _decode_jxl_uncached(path)
+    if arr is not None:
+        arr.flags.writeable = False
+    return arr
 
 # ── SQLite ─────────────────────────────────────────────────────────────────────
 # Each thread gets its own connection (check_same_thread=False + thread-local).
@@ -560,7 +582,6 @@ def _raw_store_dir():
 def _new_raw_uid():
     """A 16-byte unique ID as 32 hex chars, matching the EXIF RawDataUniqueID
     width (16 bytes)."""
-    import uuid
     return uuid.uuid4().hex     # 32 hex chars == 16 bytes
 
 
@@ -603,7 +624,6 @@ def _raw_uid_for_image(rel_path):
     if r:
         return r["uid"]
     try:
-        import exif_import
         fp = os.path.join(MEDIA_DIR, rel_path)
         edata = exif_import.read_exif(fp)
         for g in edata.get("groups", []):
@@ -625,7 +645,6 @@ def _link_raw_to_image(raw_src_path, orig_name, derived_rel, derived_abs):
         hidden store and write the resulting uid so the raw can be reopened.
     Best-effort; never raises into the upload path."""
     try:
-        import exif_export, exif_import
         patch = {}
 
         # OriginalRawFileName: only if not already present.
@@ -968,26 +987,36 @@ def read_jxl(path: str) -> np.ndarray | None:
             access_logger.warning(f"read_jxl: could not extract video frame: {path}")
         return frame
     try:
+        return _decode_cached(path, os.path.getmtime(path))
+    except OSError:
+        access_logger.warning(f"read_jxl: file missing: {path}")
+        return None
+
+
+def _decode_jxl_uncached(path: str) -> np.ndarray | None:
+    """Actually decode+normalise a JXL from disk (no cache). See read_jxl."""
+    try:
+        # One open, one read: slurp the whole file once, sniff the magic from
+        # the in-memory buffer, then decode from the same buffer.
         with open(path, 'rb') as f:
-            header = f.read(12)
-        if len(header) < 2:
+            data = f.read()
+        if len(data) < 2:
             access_logger.warning(f"read_jxl: file too small: {path}")
             return None
         # JXL magic: bare codestream starts with FF 0A,
         # container (ISOBMFF) starts with 00 00 00 0C 4A 58 4C 20
-        is_bare      = header[:2] == b'\xff\x0a'
-        is_container = header[4:8] == b'JXL '
+        is_bare      = data[:2] == b'\xff\x0a'
+        is_container = data[4:8] == b'JXL '
         if not (is_bare or is_container):
             access_logger.warning(
-                f"read_jxl: not a JXL file (magic={header[:8].hex()}): {path}")
+                f"read_jxl: not a JXL file (magic={data[:8].hex()}): {path}")
             return None
 
-        with open(path, 'rb') as f:
-            img = imagecodecs.jpegxl_decode(f.read())
+        img = imagecodecs.jpegxl_decode(data)
 
         while img.ndim > 3:
             img = img[0]
-            
+
         if img.ndim == 3 and img.shape[2] > 16:
             # likely (frames, h, w) for animated grayscale
             img = img[0]
@@ -1392,7 +1421,6 @@ def _read_albums_from_xmp(filepath):
     arrives from another machine with collections baked into the file itself
     still lands in the right albums. Best-effort: never raises."""
     try:
-        import xmp_import
         xmp, _src, _xml = xmp_import.resolve_xmp(filepath)
         if not xmp:
             return []
@@ -1457,14 +1485,13 @@ def _read_page_count_from_xmp(xmp_path):
 # The Description JSON encodes booru-style per-region tags. A tag with
 # generated==true is AI-produced and carries a `confirmed` bool; a tag without
 # `generated` (or generated==false) is user-added and always treated confirmed.
-import mwg_fields
+
 _MWG_RS_NS = mwg_fields.MWG_RS_URI
 _MWG_ST_NS = mwg_fields.MWG_ST_URI
 
 def _region_filter_link(name):
     # A stable link others can use to filter the shared library by region name.
-    from urllib.parse import quote
-    return f"cim:region?name={quote(str(name or ''))}"
+    return f"cim:region?name={urllib.parse.quote(str(name or ''))}"
 
 def _region_desc_to_json(region):
     """Serialize a region's per-region tags + description to the JSON blob
@@ -1592,7 +1619,6 @@ def _set_compressed_bpp(filepath):
     This is a value the app owns (we produced the compressed bitstream), which is
     why the field is writable/generated in the schema rather than camera-read."""
     try:
-        import exif_export
         img = read_jxl(filepath)
         if img is None:
             return
@@ -1617,7 +1643,6 @@ def _exif_rating(filepath):
     doesn't map and is ignored. This is treated as a *user* rating on ingest, so
     it overrides any preliminary BRISQUE score."""
     try:
-        import exif_import, exif_fields, exif_export
         edata = exif_import.read_exif(filepath)
         raw = {}
         for g in edata.get("groups", []):
@@ -1641,7 +1666,6 @@ def _exif_description(filepath):
     "" if absent/unreadable. Used as a description fallback when XMP has none, so
     scanning stores it in the DB `description` column."""
     try:
-        import exif_import
         edata = exif_import.read_exif(filepath)
         for g in edata.get("groups", []):
             for f in g.get("fields", []):
@@ -1661,7 +1685,6 @@ def _read_xp_fields(filepath):
     names = {"XPTitle": "title", "XPComment": "comment", "XPAuthor": "author",
              "XPKeywords": "keywords", "XPSubject": "subject"}
     try:
-        import exif_import
         edata = exif_import.read_exif(filepath)
         for g in edata.get("groups", []):
             for f in g.get("fields", []):
@@ -1795,7 +1818,6 @@ def read_metadata(filepath):
         # commonly carry one). Previously we bailed to EXIF-only whenever there
         # was no sidecar, which silently dropped embedded XMP — dc:subject,
         # regions, acdsee, crd, everything. JXL is guarded inside the resolver.
-        import xmp_import
         xmp, xmp_source, xmp_xml = xmp_import.resolve_xmp(filepath)
 
         if not xmp:
@@ -1824,7 +1846,6 @@ def read_metadata(filepath):
         # least authoritative). We still only write MWG-RS back out; this is
         # import-time reconciliation only.
         try:
-            import xmp_import
             acd_regions = xmp_import.read_acdsee_regions(filepath)
         except Exception as e:
             access_logger.warning(f"acdsee region fold {filepath}: {e}")
@@ -1879,7 +1900,6 @@ def read_metadata(filepath):
         acd_rating = None
         acd_event, acd_catsets = "", ""
         try:
-            import xmp_import
             acd = xmp_import.folded_values(filepath)
             for kw in acd.get("tags", []):
                 if kw not in tags:
@@ -2370,7 +2390,6 @@ def _pixel_similarity_score(diff_mean: float, threshold: float = 15.0) -> float:
     diff=15  → 0.0  (at the acceptance threshold)
     Above threshold is clamped to 0.
     """
-    import math
     if diff_mean <= 0:
         return 1.0
     if diff_mean >= threshold:
@@ -2503,9 +2522,7 @@ def _run_pose_wholebody(img_bgr):
     """Whole-body pose (133 keypoints incl. hands + face) via RTMPose / rtmlib.
     ONNX weights auto-download on first use. Returns None if rtmlib is absent so
     the caller can fall back to the YOLO body model."""
-    try:
-        from rtmlib import Wholebody
-    except Exception as e:
+    if not _HAVE_WHOLEBODY:
         access_logger.warning(f"rtmlib not installed (whole-body pose): {e}")
         return None
     try:
@@ -2891,7 +2908,7 @@ def _run_ocr(img_bgr):
         if _ocr_cache["engine"] == "easy":
             reader = _ocr_cache["reader"]
         else:
-            import easyocr
+            
             reader = easyocr.Reader(["en"], gpu=False); _ocr_cache.update(engine="easy", reader=reader)
         lines = []
         for box, text, score in reader.readtext(img_bgr):
@@ -3092,9 +3109,8 @@ def _normalize_endpoint(endpoint):
     """Auto-complete a base URL to the OpenAI chat-completions path."""
     endpoint = (endpoint or "").strip()
     if endpoint:
-        from urllib.parse import urlparse
         base = endpoint.rstrip('/')
-        path = urlparse(base).path
+        path = urllib.parse.urlparse(base).path
         if path == '':
             endpoint = base + '/v1/chat/completions'
         elif path == '/v1':
@@ -3272,7 +3288,6 @@ def training_portal(): return render_template_string(TRAINING_HTML)
 def web_asset(filename):
     """Serve the UI's static assets (css/js) from the web/ directory next to
     this module. Restricted to .css/.js and guarded against path traversal."""
-    import mimetypes
     web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
     # only allow simple filenames with safe extensions
     if ("/" in filename or "\\" in filename or ".." in filename
@@ -3331,14 +3346,12 @@ def iptc_editor_page():
 @app.route("/api/iptc/schema")
 def api_iptc_schema():
     """Return the full IPTC field schema (no file needed)."""
-    import iptc_fields
     return jsonify({"success": True, "schema": iptc_fields.schema_dict()})
 
 @app.route("/api/iptc/read", methods=["POST"])
 def api_iptc_read():
     """Read merged IPTC schema+values for a media file (by rel path under
     MEDIA_DIR). Returns the structure from iptc_import.read_iptc()."""
-    import iptc_import
     data = request.get_json(force=True, silent=True) or {}
     filename = data.get("filename", "")
     if not filename:
@@ -3390,14 +3403,12 @@ def xmp_editor_page():
 @app.route("/api/xmp/schema")
 def api_xmp_schema():
     """Return the full XMP field schema (no file needed)."""
-    import xmp_fields
     return jsonify({"success": True, "schema": xmp_fields.schema_dict()})
 
 @app.route("/api/xmp/read", methods=["POST"])
 def api_xmp_read():
     """Read merged XMP schema+values for a media file (by rel path under
     MEDIA_DIR). Returns the structure from xmp_import.read_xmp()."""
-    import xmp_import
     data = request.get_json(force=True, silent=True) or {}
     filename = data.get("filename", "")
     if not filename:
@@ -3467,14 +3478,12 @@ def exif_editor_page():
 @app.route("/api/exif/schema")
 def api_exif_schema():
     """Return the full EXIF field schema (no file needed)."""
-    import exif_fields
     return jsonify({"success": True, "schema": exif_fields.schema_dict()})
 
 @app.route("/api/exif/read", methods=["POST"])
 def api_exif_read():
     """Read merged EXIF schema+values for a media file (rel path under
     MEDIA_DIR). Returns the structure from exif_import.read_exif()."""
-    import exif_import
     data = request.get_json(force=True, silent=True) or {}
     fp, err = _resolve_media(data.get("filename", ""))
     if err:
@@ -3489,7 +3498,6 @@ def api_exif_read():
 def api_exif_write():
     """Apply a {tag_name: value} patch to a media file's EXIF via
     exif_export.write_exif(). Read-only/unknown tags are skipped server-side."""
-    import exif_export
     data = request.get_json(force=True, silent=True) or {}
     fp, err = _resolve_media(data.get("filename", ""))
     if err:
@@ -3502,7 +3510,6 @@ def api_exif_write():
         # Snapshot the current values of the fields about to change so the
         # changelog can record old -> new for undo (ctrl+z). Only the tags in
         # the patch are read back; ImageHistory itself is excluded (it's derived).
-        import exif_import
         before = {}
         try:
             pre = exif_import.read_exif(fp)
@@ -3592,7 +3599,6 @@ def api_exif_history():
 def api_exif_undo():
     """Undo the most recent EXIF edit on a file (ctrl+z): revert the changed tag
     to its previous value on disk and in the DB, and refresh ImageHistory."""
-    import exif_export
     data = request.get_json(force=True, silent=True) or {}
     fp, err = _resolve_media(data.get("filename", ""))
     if err:
@@ -3621,7 +3627,6 @@ def _apply_history_step(fp, rel, entry, which):
     the target value back to the file's EXIF (and mirror to the DB where the
     field is db-backed), then refresh ImageHistory. The write itself is not
     re-logged, so undo/redo don't create new changelog entries."""
-    import exif_export
     field = entry["field"]                    # e.g. 'exif:Compression'
     target = entry[which]
     if not field.startswith("exif:"):
@@ -4018,6 +4023,7 @@ def api_upload():
         return jsonify({"success": False, "error_code": "conversion_failed",
                         "error": f"Unsupported file type '{in_ext}'.",
                         "detail": "Accepted: images, gifs (→ animated jxl), "
+                                  "camera raws (→ developed to jxl), "
                                   "and video files."}), 422
 
     # Images/gifs land on disk as <base>.jxl; videos keep their own extension.
@@ -4043,11 +4049,26 @@ def api_upload():
             elif in_ext == '.jxl':
                 shutil.copy(orig, out)
             else:
-                # cjxl handles still images, animated GIF/APNG, and (via its raw
-                # support) many camera raws, producing a .jxl. --lossless_jpeg
-                # only makes sense for a real JPEG bitstream.
-                cjxl_cmd = ['cjxl', orig, out, '-d', '0']
-                if in_ext in ('.jpg', '.jpeg'):
+                # For camera raws, develop with rawpy (libraw) into an
+                # intermediate 16-bit PNG first, then transcode THAT to .jxl.
+                # This is far more reliable than feeding the raw straight to
+                # cjxl, whose per-camera raw support is spotty.
+                cjxl_src = orig
+                if is_raw_src:
+                    dev_png = os.path.join(tmp, "developed.png")
+                    if not mt.develop_raw(orig, dev_png):
+                        return jsonify({
+                            "success": False, "error_code": "conversion_failed",
+                            "error": "RAW development failed.",
+                            "detail": f"Could not develop '{fname}' with rawpy."
+                        }), 422
+                    cjxl_src = dev_png
+
+                # cjxl handles still images and animated GIF/APNG, producing a
+                # .jxl. --lossless_jpeg only makes sense for a real JPEG
+                # bitstream (never for a developed raw / png).
+                cjxl_cmd = ['cjxl', cjxl_src, out, '-d', '0']
+                if not is_raw_src and in_ext in ('.jpg', '.jpeg'):
                     cjxl_cmd.append('--lossless_jpeg=1')   # bit-exact JPEG transcode
                 result = subprocess.run(cjxl_cmd, capture_output=True, text=True)
                 if result.returncode != 0:
@@ -4138,6 +4159,17 @@ def api_thumb(filename):
     fp = get_safe_path(MEDIA_DIR, filename)
     if not fp or not os.path.exists(fp): return "",404
     return serve_thumb(filename, fp)
+
+@app.route("/api/is_animated/<path:filename>")
+def api_is_animated(filename):
+    """Report whether a stored asset is animated so the viewer can route it to a
+    live <img> (which the browser animates) instead of a one-frame canvas
+    snapshot. Result is cached per (path, mtime) in media_types, so repeated
+    selections of the same file are free."""
+    fp = get_safe_path(MEDIA_DIR, filename)
+    if not fp or not os.path.exists(fp):
+        return jsonify({"animated": False}), 404
+    return jsonify({"animated": bool(mt.is_animated_jxl(fp))})
 
 @app.route("/api/crop")
 def api_crop():
@@ -5417,7 +5449,6 @@ def _objemb_stream(sig, rel_paths, dim, img_batch=1000):
 
     Files are queried in fixed-size IN() chunks; we re-sort each chunk back into
     the requested order because SQLite does not guarantee IN() result order."""
-    import numpy as _np
     if not rel_paths or dim <= 0:
         return
     CH = min(900, max(1, img_batch))
@@ -5448,10 +5479,10 @@ def _objemb_stream(sig, rel_paths, dim, img_batch=1000):
             except Exception:
                 continue
             if isinstance(emb_blob, (bytes, bytearray, memoryview)):
-                a = _np.frombuffer(emb_blob, dtype=_np.float32)
+                a = np.frombuffer(emb_blob, dtype=np.float32)
             else:
                 try:
-                    a = _np.asarray(json.loads(emb_blob), _np.float32).ravel()
+                    a = np.asarray(json.loads(emb_blob), np.float32).ravel()
                 except Exception:
                     continue
             nrows = a.size // dim
@@ -5463,7 +5494,7 @@ def _objemb_stream(sig, rel_paths, dim, img_batch=1000):
                 b = boxes[bi] if bi < len(boxes) else {}
                 items.append({"file": rp, "tags": tags, "box": b})
         if vecs:
-            yield _np.concatenate(vecs, axis=0), items
+            yield np.concatenate(vecs, axis=0), items
         # window drops out of scope here before the next pull
 
 
@@ -6168,8 +6199,7 @@ def discover_objects():
     # stay fully parallel: a worker about to decode acquires the gate, and only
     # one heavy decode proceeds at a time. Tuned by file size on disk as a cheap
     # proxy for decoded pixels (no header parse needed).
-    import threading as _threading
-    _big_decode_gate = _threading.Semaphore(1)
+    _big_decode_gate = threading.Semaphore(1)
     _BIG_FILE_BYTES = 8 * 1024 * 1024   # treat >8MB JXL as "heavy"
 
     def _loader(fn):
@@ -6264,7 +6294,6 @@ def discover_objects():
     # images' embeddings are resident at once, then dropped. This keeps RAM
     # bounded on libraries far too big to load whole, which was the OOM.
     state["status_text"] = "Clustering…"
-    import numpy as _np
     valid_files = [fn for fn in filenames
                    if get_safe_path(MEDIA_DIR, fn) and
                    os.path.exists(get_safe_path(MEDIA_DIR, fn))]
@@ -6292,14 +6321,13 @@ def discover_objects():
             min_cluster=int(body.get("min_cluster", 2)),
             progress=_cluster_prog)
     else:
-        labels = _np.full(0, -1, dtype=int)
+        labels = np.full(0, -1, dtype=int)
 
     # ── assemble clusters by RE-STREAMING metadata in the same global order ───
     # labels[i] corresponds to the i-th vector yielded above; _objemb_stream
     # yields items in that identical order, so we can zip a running counter
     # against `labels` without ever holding all items at once. We also tally
     # tag votes here for the suggested label, in the same single pass.
-    from collections import Counter
     state["status_text"] = "Building clusters…"
     clusters = {}
     tag_votes = {}          # cluster_id -> Counter of tags
@@ -6446,7 +6474,6 @@ def staged_clusters():
         pass
 
     # pull a bounded sample of members per kept cluster, each with its box
-    from collections import Counter
     members = {lab: [] for lab in keep}
     tag_votes = {lab: Counter() for lab in keep}
     tags_by_file = {}
@@ -6949,7 +6976,6 @@ def _background_autotag_worker():
 # Self-contained: all music logic lives behind /api/music/* and music_index.py.
 # Audio is organised + tagged in place (no lossless shrink exists), unlike images.
 # ══════════════════════════════════════════════════════════════════════════════
-import music_index as mi
 
 try:
     mi.ensure_tables(_db())

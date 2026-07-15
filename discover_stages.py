@@ -39,12 +39,26 @@ invalidates only what changed, not the whole run.
 
 import os, gc, json, time, hashlib, sqlite3
 import numpy as np
+import shutil
+from collections import Counter
 
 import object_grouping as og
 try:
     import iqa
 except Exception:
     iqa = None
+try:
+    import torch
+except Exception:
+    torch = None
+try:
+    import ctypes
+except Exception:
+    ctypes = None
+try:
+    import cv2
+except Exception:
+    cv2 = None
 
 # How many images per checkpointed chunk. Small enough that a crash loses little
 # work and RAM stays flat; large enough that model-call overhead is amortised.
@@ -156,13 +170,11 @@ def _trim_allocator():
     long run. Call between chunks."""
     gc.collect()
     try:
-        import torch
         if hasattr(torch, "cuda") and torch.cuda.is_available():
             torch.cuda.empty_cache()
     except Exception:
         pass
     try:
-        import ctypes
         ctypes.CDLL("libc.so.6").malloc_trim(0)
     except Exception:
         pass
@@ -204,7 +216,6 @@ def _save_variant(rel_path, work_px, img_bgr):
     p = _variant_path(rel_path, work_px)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     try:
-        import cv2
         cv2.imwrite(p, img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])
     except Exception:
         pass
@@ -215,7 +226,6 @@ def _load_variant(rel_path, work_px):
     if not os.path.exists(p):
         return None
     try:
-        import cv2
         return cv2.imread(p, cv2.IMREAD_COLOR)
     except Exception:
         return None
@@ -257,7 +267,6 @@ def _evict_variant(rel_path, work_px):
 def clear_derivatives():
     """Delete the entire derivative cache (variants + depth). Use to reclaim
     disk once discovery is fully done and you won't re-cluster."""
-    import shutil
     try:
         shutil.rmtree(DERIV_DIR)
     except Exception:
@@ -633,7 +642,6 @@ def stage_assign(db, sig, progress=None):
     """Summarise clusters: member counts and a suggested tag per cluster by
     majority vote of members' existing tags. Cheap; reads stage_labels +
     stage_objects tags. Returns a list of cluster summaries (no big RAM)."""
-    from collections import Counter
     _ensure_tables(db)
 
     # tags per file (small): rel_path -> tag list

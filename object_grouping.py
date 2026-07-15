@@ -38,9 +38,14 @@ SIZE RULES (per the feature spec)
 """
 
 import os
+import gc
 import json
 import math
+import queue
+import threading
+import functools
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     import cv2
@@ -48,12 +53,12 @@ try:
 except Exception:
     _HAVE_CV2 = False
 
-# Heavy, optional. Imported lazily inside the functions that need them so the
-# module imports instantly on a CPU box with none of this installed.
-_TORCH = {"checked": False, "ok": False}
 _DEPTH = {"loaded": False, "model": None, "proc": None, "path": None}
 _CNN = {"loaded": False, "model": None, "path": None, "dim": 0}
-
+try:
+    import torch
+except Exception:
+    torch = None
 # ── tunables ──────────────────────────────────────────────────────────────────
 MIN_IMAGE_PX = 256          # skip images whose short side is below this
 MAX_IMAGE_PX = 2048         # HARD cap on the LONG side; downscale before anything
@@ -89,24 +94,13 @@ def downscale_to_cap(img, max_px=MAX_IMAGE_PX):
         return img
 
 
-# ── torch probe ───────────────────────────────────────────────────────────────
-def _have_torch():
-    if not _TORCH["checked"]:
-        try:
-            import torch  # noqa
-            _TORCH["ok"] = True
-        except Exception:
-            _TORCH["ok"] = False
-        _TORCH["checked"] = True
-    return _TORCH["ok"]
 
 
 def has_gpu():
     """True if a CUDA device is usable. Cheap and cached by torch internally."""
-    if not _have_torch():
+    if torch is None:
         return False
     try:
-        import torch
         return bool(torch.cuda.is_available())
     except Exception:
         return False
@@ -139,7 +133,7 @@ def _load_depth(model_path=None):
         _DEPTH["model"] = None
         return False
     try:
-        import torch
+        torch = _get_torch()
         from transformers import AutoImageProcessor, AutoModelForDepthEstimation
         proc = AutoImageProcessor.from_pretrained(mid)
         model = AutoModelForDepthEstimation.from_pretrained(mid)
@@ -175,7 +169,7 @@ def depth_map(img_bgr, model_path=None):
     try:
         h, w = img_bgr.shape[:2]
         if _load_depth(model_path):
-            import torch
+            torch = _get_torch()
             from PIL import Image
             rgb = cv2.cvtColor(img_bgr[:, :, :3], cv2.COLOR_BGR2RGB)
             pil = Image.fromarray(rgb)
@@ -216,7 +210,7 @@ def depth_map_batch(imgs_bgr, model_path=None):
                 out.append(None)
         return out
     try:
-        import torch
+        torch = _get_torch()
         from PIL import Image
         pil = [Image.fromarray(cv2.cvtColor(im[:, :, :3], cv2.COLOR_BGR2RGB))
                for im in imgs_bgr]
@@ -311,7 +305,7 @@ def _load_cnn(model_path=None):
         _CNN["model"] = None
         return False
     try:
-        import torch
+        torch = _get_torch()
         import timm
         model = timm.create_model(arch, pretrained=True, num_classes=0)
         model.eval()
@@ -327,7 +321,7 @@ def _load_cnn(model_path=None):
 def _cnn_embed(crops_bgr):
     """Embed a list of BGR crops with the CNN backbone -> (N, dim) float32.
     Assumes _load_cnn() already succeeded."""
-    import torch
+    torch = _get_torch()
     import torch.nn.functional as F
     xs = []
     for c in crops_bgr:
@@ -514,8 +508,6 @@ def group_embeddings_streaming(batch_iter, total, dim, eps=0.18, min_cluster=2,
         return np.full(max(total, 0), -1, dtype=int)
     try:
         import hnswlib
-        import os
-        import gc
     except Exception:
         return np.full(total, -1, dtype=int)
 
@@ -591,7 +583,6 @@ def group_embeddings_streaming(batch_iter, total, dim, eps=0.18, min_cluster=2,
     finally:
         index = None
         try:
-            import gc
             gc.collect()
         except Exception:
             pass
@@ -605,8 +596,6 @@ def _hnsw_group(X, eps, min_cluster, ef=100, M=16, k=24):
     (110k×256d: ~25s threaded vs minutes single-threaded). `k` neighbours per
     point bounds how many same-cluster links we can find."""
     import hnswlib
-    import os
-    import gc
     n, dim = X.shape
     nt = max(1, os.cpu_count() or 1)
     index = None
@@ -754,10 +743,6 @@ def scan_images(loader, names, depth_model=None, cnn_model=None, max_regions=40,
     Yields per-image dicts: {name, boxes, embeddings, skipped, error}. Streaming
     so the caller can accumulate without holding every decoded image in RAM.
     Never raises for a single bad image — that image yields error=True."""
-    import queue
-    import threading
-    from concurrent.futures import ThreadPoolExecutor
-
     total = len(names)
     done = [0]
     q = queue.Queue(maxsize=max(8, gpu_batch * 3))   # bounded -> backpressure

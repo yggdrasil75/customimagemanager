@@ -11,3 +11,5 @@ mutagen
 hnswlib
 insightface
 onnxruntime
+pyiqa
+rawpy

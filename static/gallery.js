@@ -284,8 +284,23 @@ async function selectFile(fn){
     mediaVideo.pause();
     mediaVideo.removeAttribute('src');
     mediaVideo.classList.add('hidden');
+    const url=`/api/file/${encodeURIComponent(fn)}?ts=${Date.now()}`;
+    // Show the still on the canvas immediately (fast, and it's what most files
+    // are), then ask the backend whether this asset actually animates. If it
+    // does, swap to the live <img> so the browser plays the frames -- a canvas
+    // snapshot can only ever show one. Guard against the user having moved on
+    // to another file before the probe returns.
+    if(typeof mediaAnim!=='undefined'&&mediaAnim){ mediaAnim.classList.add('hidden'); mediaAnim.removeAttribute('src'); }
     canvas.classList.remove('hidden');
-    imgObj.src=`/api/file/${encodeURIComponent(fn)}?ts=${Date.now()}`;
+    imgObj.src=url;
+    fetch(`/api/is_animated/${encodeURIComponent(fn)}`)
+      .then(r=>r.json())
+      .then(d=>{
+        if(d && d.animated && currentFile===fn && typeof mainViewer!=='undefined'){
+          mainViewer.showAnimated(url);
+        }
+      })
+      .catch(()=>{});
   }
   const d=await fetch('/api/metadata',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({action:'read',filename:fn})}).then(r=>r.json());

@@ -277,17 +277,6 @@ class DuplicateClassifier:
         self.w, self.b, self.trained = w, b, True
         return True
 
-# ── Crop-aware comparison ─────────────────────────────────────────────────────
-# XMP (crd:Crop*) can tell us an image is a CROP of a larger original: the crop
-# box is the normalized sub-rectangle of the original frame that was kept. A tight
-# crop looks globally very different from its source — different framing, so the
-# pixel-diff features above read "not a duplicate" — yet it IS derived from it.
-#
-# The fix: when we know image B is a crop with box (x,y,w,h) in A's frame, don't
-# compare B against all of A; compare B against A's corresponding sub-region. If B
-# is genuinely a crop of A, that sub-region and B are near-identical and the normal
-# features then correctly say "duplicate". crop_box comes from
-# xmp_import.crop_box(); this module stays dependency-free by taking the plain box.
 def _crop_subregion(img, box):
     """Return the sub-image of `img` covered by a normalized crop box
     {x,y,w,h} (each 0..1, top-left origin), or the whole image if the box is
@@ -307,21 +296,7 @@ def _crop_subregion(img, box):
         return img
 
 
-def classify_crop_pair(model, img_a, img_b, box_a=None, box_b=None,
-                       threshold=0.5):
-    """Crop-aware variant of classify_pair.
-
-    box_a / box_b are optional normalized crop boxes ({x,y,w,h}) from
-    xmp_import.crop_box(), describing how each image was cropped from its
-    ORIGINAL frame. At most one image is usually a crop; the other's box is None.
-
-    We align by cropping the NON-cropped image to the cropped one's box, then run
-    the standard features on the aligned pair. Returns
-    (is_dup, prob, features, aligned) where `aligned` flags that a crop box was
-    actually applied — useful for the caller to know the verdict used crop info.
-
-    Never raises; falls back to the plain classify_pair on any trouble.
-    """
+def classify_crop_pair(model, img_a, img_b, box_a=None, box_b=None, threshold=0.5):
     try:
         a, b = img_a, img_b
         aligned = False

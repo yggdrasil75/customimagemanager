@@ -256,37 +256,6 @@ def schema_dict():
         ]
     }
 
-
-# ════════════════════════════════════════════════════════════════════════════
-# IPTC Core / Extension — the XMP side
-# ════════════════════════════════════════════════════════════════════════════
-# The IPTC schema has two homes: the legacy IIM records above (Iptc.*, keyed by
-# numeric dataset) and the modern XMP namespaces (Iptc4xmpCore / Iptc4xmpExt).
-# Since the IPTC field *definitions* logically belong together, the XMP-side
-# IPTC namespaces are defined *here* rather than duplicated in xmp_fields.py.
-#
-# xmp_fields.py owns the XMPField dataclass and the TYPE_* constants for XMP, so
-# to avoid an import cycle (xmp_fields already reaches for this module) we don't
-# import XMPField here. Instead each namespace is described as plain data plus a
-# `build_*` factory that takes the XMPField class as an argument. xmp_fields.py
-# calls these builders and registers the results in XMP_NAMESPACES.
-#
-# On-disk prefixes:
-#   Iptc4xmpCore  -> ExifTool family-1 group "XMP-iptcCore" (token "iptcCore")
-#   Iptc4xmpExt   -> ExifTool family-1 group "XMP-iptcExt"  (token "iptcExt")
-#
-# Struct handling follows the acdsee-rs convention already used in xmp_fields:
-# pyexiv2 flattens XMP structs into leaf properties, so we list the struct root
-# plus each flattened leaf (ExifTool's "string_" type = a flattened struct
-# member). The CreatorContactInfo (ContactInfo) struct is the only struct in
-# IPTC Core; its leaves are surfaced under names like
-# "CreatorContactInfoCiAdrCity" the way pyexiv2 reports them.
-#
-# All IPTC Core fields are surfaced read-only for now (feeds=None): none map
-# onto the description/tags/rating/regions targets the ingest path recognizes.
-# Values below are transcribed from the public IPTC Core XMP spec as published
-# in the ExifTool XMP-iptcCore tag reference (factual field definitions).
-
 IPTCCORE_NS = "iptcCore"
 IPTCCORE_URI = "http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/"
 IPTCCORE_TITLE = "IPTC Core"

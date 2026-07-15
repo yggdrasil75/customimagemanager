@@ -30,6 +30,8 @@ import threading
 import numpy as np
 
 import object_grouping as og
+import urllib.request
+import cv2
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
@@ -125,7 +127,6 @@ def ensure_face_model(size="n"):
         return dest
     url = f"{FACE_MODEL_REPO}/{name}"
     try:
-        import urllib.request
         with _lock:
             if os.path.exists(dest):
                 return dest
@@ -174,10 +175,6 @@ def have_identity_embedder():
 
 def _as_bgr(img):
     """Coerce any decoded array to 3-channel uint8 BGR, or None."""
-    try:
-        import cv2
-    except Exception:
-        return img
     if img is None or getattr(img, "size", 0) == 0:
         return None
     if img.ndim == 2:
