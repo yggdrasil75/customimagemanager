@@ -291,7 +291,7 @@ def _build_pyiqa(spec):
 
     pyiqa wants a float RGB NCHW tensor in 0..1; we hold the torch import inside
     so a torch-less install never pays for it."""
-    if not _HAVE_IQA return False
+    if not _HAVE_IQA: return None
 
     try:
         dev = "cuda" if torch.cuda.is_available() else "cpu"
