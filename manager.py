@@ -4070,6 +4070,8 @@ def api_upload():
                 cjxl_cmd = ['cjxl', cjxl_src, out, '-d', '0']
                 if not is_raw_src and in_ext in ('.jpg', '.jpeg'):
                     cjxl_cmd.append('--lossless_jpeg=1')   # bit-exact JPEG transcode
+                else:
+                    cjxl_cmd.append('--container=0')       # bare codestream, not BMFF
                 result = subprocess.run(cjxl_cmd, capture_output=True, text=True)
                 if result.returncode != 0:
                     return jsonify({

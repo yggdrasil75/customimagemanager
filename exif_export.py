@@ -35,6 +35,11 @@ import exif_fields as efields
 log = logging.getLogger("exif_export")
 
 
+_JXL_REPACKAGE_EXTS = {".jxl"}
+# Substring that identifies the specific Exiv2 error worth repackaging for.
+_BMFF_WRITE_ERR = "BMFF"
+
+
 def _writable_target(filepath):
     """Pick the path we should write EXIF to. For formats pyexiv2 can open in
     place we write the file directly; when only a sidecar exists we write that.
@@ -222,7 +227,7 @@ def write_exif(filepath, patch):
         result["success"] = True   # nothing to do, but not an error
         return result
 
-    try:
+    def _do_write():
         with pyexiv2.Image(target) as img:
             if to_set:
                 # pyexiv2 wants string values; stringify ints/rationals.
@@ -230,11 +235,68 @@ def write_exif(filepath, patch):
             if to_del:
                 # Deletion is expressed as an empty-string modify in pyexiv2.
                 img.modify_exif({k: "" for k in to_del})
+
+    try:
+        _do_write()
         result["written"] = [{"tag": k, "value": v} for k, v in to_set.items()]
         result["deleted"] = list(to_del)
         result["success"] = True
     except Exception as e:
+        # A container-form (ISOBMFF) JXL can't take an Exif write. New uploads
+        # are bare, but legacy files may still be containered — repackage this
+        # one to a bare codestream in place, then retry the write once.
+        if (_BMFF_WRITE_ERR in str(e)
+                and os.path.splitext(target)[1].lower() in _JXL_REPACKAGE_EXTS
+                and _repackage_jxl_bare(target)):
+            try:
+                _do_write()
+                result["written"] = [{"tag": k, "value": v} for k, v in to_set.items()]
+                result["deleted"] = list(to_del)
+                result["success"] = True
+                result["repackaged"] = True
+                log.info(f"repackaged container JXL to bare and wrote Exif: {target}")
+                return result
+            except Exception as e2:
+                e = e2   # report the retry's failure below
         log.warning(f"write_exif failed on {target}: {e}")
         result["error"] = str(e)
 
     return result
+
+
+def _repackage_jxl_bare(path):
+    """Rewrite a container (ISOBMFF) JXL in place as a bare codestream so Exiv2
+    can write Exif into it. Transcodes to a temp file with cjxl --container=0,
+    then atomically replaces the original. Lossless (-d 0). Returns True on
+    success, False (leaving the original untouched) on any failure.
+
+    Note: this drops any metadata that lived only in the container's boxes. For
+    this app that's acceptable — the whole point is that the app is about to
+    (re)write the Exif it cares about — and it only ever runs as a last-resort
+    fallback for legacy containered files.
+    """
+    import shutil, subprocess, tempfile
+    if shutil.which("cjxl") is None:
+        log.warning("cannot repackage JXL: cjxl not found on PATH")
+        return False
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(suffix=".jxl", dir=d)
+    os.close(fd)
+    try:
+        r = subprocess.run(["cjxl", path, tmp, "-d", "0", "--container=0"],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or not os.path.getsize(tmp):
+            log.warning(f"cjxl repackage failed for {path}: {r.stderr.strip()}")
+            return False
+        os.replace(tmp, path)   # atomic within the same directory
+        tmp = None
+        return True
+    except Exception as e:
+        log.warning(f"repackage_jxl_bare error for {path}: {e}")
+        return False
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass

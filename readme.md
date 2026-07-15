@@ -36,6 +36,13 @@ set your own image tags.
 set tags per person in the image as well.
 ai pipeline tagging (let gemma try to make bounds for you)
 
+has: detect, classify, pose.
+todo: segment, semantic, obb, track. 
+improve:  
+pose uses wholebody, which is good for limited occlusion. need to use crowdpose for heavy occlusion. and an automatic switch.  
+switch from coco-2017 based yolo to objects365 based. or openimages v7 based.
+
+
 
 storage tiering:
 allow you to set nvme storage for thumbnails, hdd for videos, potentially slower hdds for low bitrate videos
