@@ -29,14 +29,6 @@ function cancelRegion(){
 }
 
 // ── Regions list (reliable confirm/edit even when boxes overlap) ────────────
-function regionAtCanvas(px,py){
-  for(let i=currentRegions.length-1;i>=0;i--){
-    const b=currentRegions[i];
-    const x=(b.cx-b.w/2)*canvas.width, y=(b.cy-b.h/2)*canvas.height;
-    if(px>=x&&px<=x+b.w*canvas.width&&py>=y&&py<=y+b.h*canvas.height) return i;
-  }
-  return -1;
-}
 function setActiveRegion(i){
   if(isVideoFile(currentFile)){ vtOverlay.setActive(i); return; }
   activeRegionIdx=i;

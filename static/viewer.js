@@ -15,6 +15,14 @@
 // editing state, and helpers like _esc / renderRegionsList / setActiveRegion
 // that the MAIN viewer drives). The review viewer runs in a self-contained mode
 // (its own regions + decisions) and does not touch that shared editing state.
+function regionAtCanvas(px,py){
+  for(let i=currentRegions.length-1;i>=0;i--){
+    const b=currentRegions[i];
+    const x=(b.cx-b.w/2)*canvas.width, y=(b.cy-b.h/2)*canvas.height;
+    if(px>=x&&px<=x+b.w*canvas.width&&py>=y&&py<=y+b.h*canvas.height) return i;
+  }
+  return -1;
+}
 
 function makeViewer(prefix, opts) {
   opts = opts || {};
@@ -102,15 +110,20 @@ function makeViewer(prefix, opts) {
   // Choose side-by-side vs stacked layout based on image orientation, then
   // draw. Only the main editor pane has an #editor_region to toggle; the
   // review viewer just needs the redraw.
-  function applyEditorLayout() {
+  // Toggle the #editor_region between side-by-side (vertical) and stacked
+  // (horizontal) based on the media's orientation. Shared by images, videos,
+  // and animated assets so every media type places the right/bottom pane the
+  // same way. w/h of 0 (unknown) falls back to side-by-side.
+  function applyMediaLayout(w, h) {
     const reg = isMain ? document.getElementById('editor_region') : null;
-    if (reg) {
-      let vertical = true;
-      if (imgObj.naturalWidth && imgObj.naturalHeight)
-        vertical = imgObj.naturalHeight >= imgObj.naturalWidth; // portrait/square → side-by-side
-      reg.classList.toggle('vertical', vertical);
-      reg.classList.toggle('horizontal', !vertical);
-    }
+    if (!reg) return;
+    const vertical = !(w && h) || h >= w; // portrait/square/unknown → side-by-side
+    reg.classList.toggle('vertical', vertical);
+    reg.classList.toggle('horizontal', !vertical);
+  }
+
+  function applyEditorLayout() {
+    applyMediaLayout(imgObj.naturalWidth, imgObj.naturalHeight);
     requestAnimationFrame(() => { if (imgObj.width) drawCanvas(); });
   }
 
@@ -569,6 +582,8 @@ function makeViewer(prefix, opts) {
     canvas.classList.add('hidden');
     if (!mediaAnim) { self.showImage(url); return; }  // fallback if markup absent
     mediaAnim.classList.remove('hidden');
+    mediaAnim.onload = () =>
+      applyMediaLayout(mediaAnim.naturalWidth, mediaAnim.naturalHeight);
     mediaAnim.src = url;
   };
   // Load an animated JXL in BOXABLE mode: the filmstrip loads sampled frames and
@@ -584,11 +599,23 @@ function makeViewer(prefix, opts) {
   self.showVideo = function (url, fn) {
     canvas.classList.add('hidden');
     if (self.strip) self.strip.disable();
-    if (mediaAnim) { mediaAnim.removeAttribute('src'); mediaAnim.classList.add('hidden'); }
+    if (mediaAnim) {
+      // Clearing src stops an animated <img> (GIF/APNG/animated JXL/WebP) from
+      // continuing to decode/animate while hidden behind the video.
+      mediaAnim.removeAttribute('src');
+      mediaAnim.classList.add('hidden');
+      mediaAnim.onload = null;
+    }
     mediaVideo.classList.remove('hidden');
     mediaVideo.src = url;
     imgObj.removeAttribute('src');
     vt.enable(fn);
+    // Videos should drive the right/bottom pane placement just like images do,
+    // using the media's own orientation. Wait for metadata so we know its
+    // dimensions, then apply the same layout toggle.
+    applyMediaLayout(mediaVideo.videoWidth, mediaVideo.videoHeight);
+    mediaVideo.onloadedmetadata = () =>
+      applyMediaLayout(mediaVideo.videoWidth, mediaVideo.videoHeight);
   };
   self.setRegions = function (regions, decisions) {
     self.regions = regions || self.regions;
