@@ -2956,7 +2956,8 @@ def _run_ocr(img_bgr):
             ocr = _ocr_cache["reader"]
         else:
             from rapidocr_onnxruntime import RapidOCR
-            ocr = RapidOCR(); _ocr_cache.update(engine="rapid", reader=ocr)
+            ocr = RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)
+            _ocr_cache.update(engine="rapid", reader=ocr)
         res, _ = ocr(img_bgr)
         lines = []
         for box, text, score in (res or []):
