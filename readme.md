@@ -4,6 +4,7 @@ clone this repo
 
 save this file to static as tailwindcss.js: https://cdn.tailwindcss.com/3.4.17
 ```
+apt install build-essential libjxl-dev
 git clone https://github.com/yggdrasil75/customimagemanager
 cd customimagemanager
 wget https://cdn.tailwindcss.com/3.4.17 -O static/tailwindcss.js
