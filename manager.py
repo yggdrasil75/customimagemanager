@@ -3775,12 +3775,13 @@ def api_face_clusters():
     clusters = []
     for cid, n, name, conf, mode in rows:
         sample = _db().execute(
-            "SELECT rel_path,cx,cy,w,h FROM face_regions "
-            "WHERE cluster_id=? LIMIT 9", (cid,)).fetchall()
+            "SELECT id,rel_path,cx,cy,w,h FROM face_regions "
+            "WHERE cluster_id=? LIMIT 30", (cid,)).fetchall()
         clusters.append({
             "id": cid, "count": n, "name": name or "",
             "confirmed": bool(conf), "mode": mode or "",
-            "faces": [{"rel": r[0], "cx": r[1], "cy": r[2], "w": r[3], "h": r[4]}
+            "faces": [{"id": r[0], "rel": r[1], "cx": r[2], "cy": r[3],
+                       "w": r[4], "h": r[5]}
                       for r in sample]})
     clusters.sort(key=lambda c: (bool(c["name"]), -c["count"]))
     singles = _db().execute(
@@ -3892,10 +3893,33 @@ def api_face_name():
 def api_face_split():
     """Kick a wrong face out of its cluster (back to unclustered)."""
     d = request.json or {}
-    _db().execute("UPDATE face_regions SET cluster_id=-1 WHERE id=?",
-                  (int(d.get("id", -1)),))
-    _db().commit()
-    return jsonify({"success": True})
+    ids = d.get("ids")
+    if ids is None:
+        one = int(d.get("id", -1))
+        ids = [one] if one >= 0 else []
+    ids = [int(i) for i in ids if int(i) >= 0]
+    if not ids:
+        return jsonify({"success": False, "error": "no face id(s) given"})
+
+    db = _db()
+    ph = ",".join("?" * len(ids))
+    if d.get("mode") == "new":
+        # Allocate a fresh cluster_id above the current max so it can't collide.
+        top = db.execute(
+            "SELECT COALESCE(MAX(cluster_id), -1) FROM face_regions").fetchone()[0]
+        new_id = int(top) + 1
+        # A carved-off group is a user decision, not the clusterer's guess, so
+        # clear name/confirmed — they'll name it themselves in the new row.
+        db.execute(
+            f"UPDATE face_regions SET cluster_id=?, name='', confirmed=0 "
+            f"WHERE id IN ({ph})", (new_id, *ids))
+        db.commit()
+        return jsonify({"success": True, "cluster_id": new_id, "moved": len(ids)})
+
+    db.execute(
+        f"UPDATE face_regions SET cluster_id=-1 WHERE id IN ({ph})", ids)
+    db.commit()
+    return jsonify({"success": True, "moved": len(ids)})
 
 @app.route("/api/state")
 def api_state():

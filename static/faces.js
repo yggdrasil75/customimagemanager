@@ -33,12 +33,39 @@ function faceChip(f, size = 56, pad = 1.6) {
   const py = bh >= 1 ? 50 : clamp01((f.cy - bh / 2) / (1 - bh)) * 100;
 
   const url = '/api/thumb/' + encodeURI(f.rel);
-  return `<div class="rounded bg-gray-900 flex-shrink-0 bg-no-repeat"
-               title="${(f.rel || '').replace(/"/g, '&quot;')}"
-               style="width:${size}px;height:${size}px;
-                      background-image:url('${url}');
-                      background-size:${zx}% ${zy}%;
-                      background-position:${px}% ${py}%"></div>`;
+  const relAttr = (f.rel || '').replace(/"/g, '&quot;');
+  const sel = _faceSel.has(f.id);
+  // The chip is a positioned wrapper so the ✕ (deny) and the selection ring can
+  // overlay the crop. Click the crop → open the full image; the ✕ denies just
+  // this face; the checkbox marks it for "split off as new person".
+  return `<div class="relative flex-shrink-0 group" style="width:${size}px;height:${size}px">
+      <div class="w-full h-full rounded bg-gray-900 bg-no-repeat cursor-zoom-in
+                  ${sel ? 'ring-2 ring-purple-400' : ''}"
+           title="${relAttr}\nclick to open in the viewer"
+           onclick="viewFaceImage('${relAttr}')"
+           style="background-image:url('${url}');
+                  background-size:${zx}% ${zy}%;
+                  background-position:${px}% ${py}%"></div>
+      <button title="Not this person — remove from cluster"
+              onclick="event.stopPropagation();denyFace(${f.id})"
+              class="absolute -top-1 -right-1 w-4 h-4 leading-none rounded-full
+                     bg-red-700 hover:bg-red-600 text-white text-[10px] font-bold
+                     opacity-0 group-hover:opacity-100 transition">×</button>
+      <input type="checkbox" ${sel ? 'checked' : ''}
+             title="Select — split these off as a separate person"
+             onclick="event.stopPropagation();toggleFaceSel(${f.id})"
+             class="absolute -bottom-1 -left-1 w-3.5 h-3.5 accent-purple-500
+                    opacity-0 group-hover:opacity-100
+                    ${sel ? '!opacity-100' : ''}">
+    </div>`;
+}
+
+// Faces the user has checked for "split into a new cluster", across all clusters.
+let _faceSel = new Set();
+
+function toggleFaceSel(id) {
+  if (_faceSel.has(id)) _faceSel.delete(id); else _faceSel.add(id);
+  loadFaces();
 }
 
 function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
@@ -123,13 +150,26 @@ async function loadFaces() {
             Name all
           </button>
         </div>
-        <div class="flex gap-1 flex-wrap">
+        <div class="flex gap-1.5 flex-wrap">
           ${c.faces.map(f => faceChip(f)).join('')}
           ${c.count > c.faces.length
             ? `<div class="w-14 h-14 flex items-center justify-center text-[10px]
                           text-gray-500 bg-gray-900 rounded">
                  +${c.count - c.faces.length}</div>` : ''}
         </div>
+        ${(() => {
+          const n = c.faces.filter(f => _faceSel.has(f.id)).length;
+          return n ? `<div class="flex items-center gap-2 mt-2 pt-2
+                              border-t border-gray-700">
+              <span class="text-[10px] text-purple-300">${n} selected</span>
+              <button onclick="splitSelected(${c.id})"
+                class="text-xs bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded font-bold">
+                Split into new person
+              </button>
+              <button onclick="clearFaceSel()"
+                class="text-xs text-gray-400 hover:text-gray-200 px-1">clear</button>
+            </div>` : '';
+        })()}
       </div>`).join('');
   } catch (e) {
     el.innerHTML = '<div class="text-xs text-red-400 p-2">Failed to load faces.</div>';
@@ -150,6 +190,64 @@ async function nameCluster(cid) {
   document.getElementById('faces_status').textContent =
     d.success ? `Named ${d.named} image(s).` : (d.error || 'Failed.');
   loadFaces();
+}
+
+async function denyFace(id) {
+  // Kick one wrong face out of its cluster (back to unclustered).
+  document.getElementById('faces_status').textContent = 'Removing face…';
+  try {
+    await fetch('/api/faces/split', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+  } catch (e) {
+    document.getElementById('faces_status').textContent = 'Remove failed.';
+    return;
+  }
+  _faceSel.delete(id);
+  loadFaces();
+}
+
+function clearFaceSel() { _faceSel.clear(); loadFaces(); }
+
+async function splitSelected(cid) {
+  // Carve the checked faces out of this cluster into a fresh one — for when
+  // insightface merged two similar people. Only send ids from THIS cluster.
+  const cluster = _faceClusters.find(c => c.id === cid);
+  const ids = (cluster ? cluster.faces : [])
+    .map(f => f.id).filter(id => _faceSel.has(id));
+  if (!ids.length) return;
+  document.getElementById('faces_status').textContent = 'Splitting…';
+  let d;
+  try {
+    d = await (await fetch('/api/faces/split', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, mode: 'new' })
+    })).json();
+  } catch (e) {
+    document.getElementById('faces_status').textContent = 'Split failed.';
+    return;
+  }
+  ids.forEach(id => _faceSel.delete(id));
+  document.getElementById('faces_status').textContent =
+    d.success ? `Split ${d.moved} face(s) into a new person.` : (d.error || 'Failed.');
+  loadFaces();
+}
+
+// ── Open a face's source image in the app's main viewer ─────────────────────
+// A face crop rarely gives you enough to name someone confidently, so clicking
+// a chip loads the whole image into the same viewer the gallery uses — with its
+// region boxes, editor panel, etc. No separate lightbox.
+function viewFaceImage(rel) {
+  if (typeof selectFile === 'function') {
+    selectFile(rel);
+  } else {
+    // Should not happen in the app, but don't die silently if faces.js somehow
+    // loads without the gallery viewer present.
+    window.open('/api/file/' + encodeURI(rel), '_blank');
+  }
 }
 
 async function reclusterFaces() {
