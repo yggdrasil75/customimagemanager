@@ -66,14 +66,22 @@ def is_raw(path: str) -> bool:
 VIDEO_EXTS = {'.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v', '.mpg',
               '.mpeg', '.wmv', '.flv', '.ts', '.ogv'}
 
+# Audio is stored NATIVELY, exactly like video — there's no lossless shrink for
+# audio, so we only organise + tag in place (see music_index.py). Kept in sync
+# with music_index.MUSIC_EXTS, MINUS the containers that overlap with video
+# (.mp4, .m4a are treated as video here so a real video is never misfiled as a
+# track). A pure-audio .m4a will still index fine on the music side.
+AUDIO_EXTS = {'.mp3', '.flac', '.aac', '.ogg', '.oga', '.opus',
+              '.wav', '.wma', '.aiff', '.aif'}
+
 # Extensions accepted from an uploader / bulk-upload walk. Raws are accepted so
 # the upload handler can stash them (when keep_raws is on) and derive an image;
 # they are not library assets themselves.
-UPLOAD_EXTS = JXL_INPUT_EXTS | VIDEO_EXTS | RAW_INPUT_EXTS
+UPLOAD_EXTS = JXL_INPUT_EXTS | VIDEO_EXTS | RAW_INPUT_EXTS | AUDIO_EXTS
 
 # Extensions that count as a stored library ASSET on disk (what a MEDIA_DIR walk
 # should pick up). Sidecars (.txt/.xmp) and thumbnails are NOT assets.
-LIBRARY_EXTS = {'.jxl'} | VIDEO_EXTS
+LIBRARY_EXTS = {'.jxl'} | VIDEO_EXTS | AUDIO_EXTS
 
 # Sidecars that travel next to every asset (metadata / tags / regions).
 # .tracks.json holds time-indexed video bounding boxes (see video_tracks.py).
@@ -96,6 +104,10 @@ def _ext(path: str) -> str:
 
 def is_video(path: str) -> bool:
     return _ext(path) in VIDEO_EXTS
+
+
+def is_audio(path: str) -> bool:
+    return _ext(path) in AUDIO_EXTS
 
 
 def is_jxl(path: str) -> bool:
@@ -285,9 +297,50 @@ def mime_for(path: str) -> str | None:
 
 def stored_name(input_filename: str) -> str:
     """The on-disk name an uploaded file will take. Images/gifs become <base>.jxl;
-    videos keep their original extension."""
+    videos and audio keep their original extension."""
     base, ext = os.path.splitext(input_filename)
-    return input_filename if ext.lower() in VIDEO_EXTS else base + '.jxl'
+    keep = VIDEO_EXTS | AUDIO_EXTS
+    return input_filename if ext.lower() in keep else base + '.jxl'
+
+
+# ── content sniffing (for misnamed / extension-less uploads) ──────────────────
+# Maps a real, supported extension onto a file whose name lies about its type.
+# Signatures are checked against the first ~16 bytes. Only formats the pipeline
+# can actually handle are listed; anything unrecognised returns None and the
+# caller rejects it cleanly.
+def sniff_ext(path: str) -> str | None:
+    """Best-effort: return a supported extension inferred from file CONTENT, or
+    None if the bytes don't match anything we accept. Used only when the given
+    filename's extension isn't already a known upload type."""
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(16)
+    except Exception:
+        return None
+    if len(head) < 4:
+        return None
+
+    # Images
+    if head[:3] == b'\xff\xd8\xff':                      return '.jpg'
+    if head[:8] == b'\x89PNG\r\n\x1a\n':                 return '.png'
+    if head[:6] in (b'GIF87a', b'GIF89a'):               return '.gif'
+    if head[:2] == b'BM':                                return '.bmp'
+    if head[:4] == b'RIFF' and head[8:12] == b'WEBP':    return '.webp'
+    if head[:2] == b'\xff\x0a' or head[:12] == \
+       b'\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a':          return '.jxl'
+    # Video / container
+    if head[4:8] == b'ftyp':                             return '.mp4'
+    if head[:4] == b'\x1a\x45\xdf\xa3':                  return '.mkv'  # also .webm
+    if head[:4] == b'RIFF' and head[8:12] == b'AVI ':    return '.avi'
+    if head[:3] == b'FLV':                               return '.flv'
+    # Audio
+    if head[:3] == b'ID3' or head[:2] in (b'\xff\xfb', b'\xff\xf3',
+                                          b'\xff\xf2'):  return '.mp3'
+    if head[:4] == b'fLaC':                              return '.flac'
+    if head[:4] == b'OggS':                              return '.ogg'
+    if head[:4] == b'RIFF' and head[8:12] == b'WAVE':    return '.wav'
+    if head[:4] == b'FORM':                              return '.aiff'
+    return None
 
 
 def related_exts(primary_path: str) -> list[str]:

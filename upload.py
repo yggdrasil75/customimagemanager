@@ -19,6 +19,85 @@ from typing import Optional
 
 import requests
 
+# Streaming multipart: passing a file handle to requests' files= reads the WHOLE
+# file into memory to build the request body, which OOMs on large videos (a 13GB
+# camcorder clip is loaded fully, sometimes alongside the server's copy on the
+# same box). MultipartEncoder streams the body straight off disk with O(1) peak
+# memory. It ships with requests-toolbelt; if that isn't installed we fall back
+# to a tiny hand-rolled streaming encoder so large uploads still don't buffer.
+try:
+    from requests_toolbelt.multipart.encoder import MultipartEncoder  # type: ignore
+    _HAVE_TOOLBELT = True
+except Exception:                              # pragma: no cover
+    MultipartEncoder = None                    # type: ignore
+    _HAVE_TOOLBELT = False
+
+
+class _StreamingMultipart:
+    """Minimal streaming multipart/form-data body (fallback for when
+    requests-toolbelt is absent). Yields the preamble, then the file in fixed
+    chunks read lazily from disk, then the epilogue — so the file is never fully
+    held in memory. requests accepts any iterable as `data=` and streams it."""
+
+    _CHUNK = 1024 * 1024  # 1 MiB
+
+    def __init__(self, fields: dict, file_field: str, filepath: str, filename: str):
+        self.boundary = "----cimuploader" + os.urandom(16).hex()
+        self._filepath = filepath
+        pre = []
+        for name, value in fields.items():
+            pre.append(
+                f"--{self.boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n"
+            )
+        pre.append(
+            f"--{self.boundary}\r\n"
+            f'Content-Disposition: form-data; name="{file_field}"; '
+            f'filename="{filename}"\r\n'
+            f"Content-Type: application/octet-stream\r\n\r\n"
+        )
+        self._preamble = "".join(pre).encode("utf-8")
+        self._epilogue = f"\r\n--{self.boundary}--\r\n".encode("utf-8")
+        self.content_type = f"multipart/form-data; boundary={self.boundary}"
+        self.len = (len(self._preamble)
+                    + os.path.getsize(filepath)
+                    + len(self._epilogue))
+
+    def __iter__(self):
+        yield self._preamble
+        with open(self._filepath, "rb") as fh:
+            while True:
+                chunk = fh.read(self._CHUNK)
+                if not chunk:
+                    break
+                yield chunk
+        yield self._epilogue
+
+
+def _post_streaming(endpoint, filepath, fname, form_data, timeout):
+    """POST a file as a streamed multipart body without loading it into memory."""
+    if _HAVE_TOOLBELT:
+        fh = open(filepath, "rb")
+        try:
+            fields = dict(form_data)
+            fields["file"] = (fname, fh, "application/octet-stream")
+            enc = MultipartEncoder(fields=fields)
+            return requests.post(
+                endpoint, data=enc,
+                headers={"Content-Type": enc.content_type},
+                timeout=timeout,
+            )
+        finally:
+            fh.close()
+    body = _StreamingMultipart(form_data, "file", filepath, fname)
+    return requests.post(
+        endpoint, data=body,
+        headers={"Content-Type": body.content_type,
+                 "Content-Length": str(body.len)},
+        timeout=timeout,
+    )
+
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -27,13 +106,23 @@ import requests
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.jxl', '.gif', '.apng'}
 VIDEO_EXTENSIONS = {'.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v', '.mpg',
                     '.mpeg', '.wmv', '.flv', '.ts', '.ogv'}
+# Audio: stored natively by the server (organised + tagged in place, never
+# transcoded). Mirrors server media_types.AUDIO_EXTS — the video-overlapping
+# containers (.mp4/.m4a) stay classified as video so a real video is never
+# misfiled as a track.
+AUDIO_EXTENSIONS = {'.mp3', '.flac', '.aac', '.ogg', '.oga', '.opus',
+                    '.wav', '.wma', '.aiff', '.aif'}
 # Camera raws: the server develops these into jxl on upload (via rawpy).
 RAW_EXTENSIONS = {
     '.dng', '.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.srf', '.sr2',
     '.raf', '.rw2', '.orf', '.pef', '.ptx', '.raw', '.rwl', '.iiq', '.3fr',
     '.fff', '.mef', '.mos', '.mrw', '.x3f', '.erf', '.kdc', '.dcr',
 }
-MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | RAW_EXTENSIONS
+MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | RAW_EXTENSIONS | AUDIO_EXTENSIONS
+
+# Files we never want to walk even in --aggressive mode: sidecars and the
+# uploader's own bookkeeping. Everything else is fair game when aggressive.
+NON_MEDIA_EXTENSIONS = {'.txt', '.xmp', '.json', '.md', '.ini', '.log', '.db'}
 
 # Error codes the server sends — determines retry behaviour.
 # Permanent: don't retry; the file will never succeed as-is.
@@ -162,16 +251,14 @@ def upload_file(
 
     for attempt in range(1, max_attempts + 1):
         try:
-            with open(filepath, 'rb') as fh:
-                form_data = {'folder': folder}
-                if metadata:
-                    form_data['metadata'] = json.dumps(metadata)
-                resp = requests.post(
-                    endpoint,
-                    files={'file': (fname, fh)},
-                    data=form_data,
-                    timeout=180,
-                )
+            form_data = {'folder': folder}
+            if metadata:
+                form_data['metadata'] = json.dumps(metadata)
+            # Stream the file off disk instead of buffering it — a 13GB video
+            # uploads with ~1 MiB peak memory instead of loading fully (twice,
+            # counting the server's copy on a shared box).
+            resp = _post_streaming(endpoint, filepath, fname, form_data,
+                                   timeout=180)
 
             # Parse response
             try:
@@ -295,6 +382,18 @@ def print_summary(results: list[UploadResult], verbose_duplicates: bool) -> None
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def _should_upload(fname: str, aggressive: bool) -> bool:
+    ext = os.path.splitext(fname)[1].lower()
+    if aggressive:
+        # Upload anything that isn't obviously a sidecar / bookkeeping file, even
+        # if it has no extension or a wrong one — the server will try to convert
+        # it and reject cleanly (conversion_failed) if it truly can't.
+        if fname == "classes.txt":
+            return False
+        return ext not in NON_MEDIA_EXTENSIONS
+    return ext in MEDIA_EXTENSIONS
+
+
 def bulk_upload(
     source_dir:      str,
     server_url:      str,
@@ -302,6 +401,7 @@ def bulk_upload(
     max_attempts:    int,
     initial_backoff: float,
     verbose_dupes:   bool,
+    aggressive:      bool = False,
 ) -> int:
     source_dir = os.path.abspath(source_dir)
     if not os.path.isdir(source_dir):
@@ -313,11 +413,15 @@ def bulk_upload(
         os.path.join(root, f)
         for root, _, filenames in os.walk(source_dir)
         for f in filenames
-        if os.path.splitext(f)[1].lower() in MEDIA_EXTENSIONS
+        if _should_upload(f, aggressive)
     ]
     if not files:
         print("No media files found.")
         return 0
+
+    if aggressive:
+        print("[*] Aggressive mode: uploading all non-sidecar files, including "
+              "misnamed / extension-less ones (server will attempt conversion).")
 
     endpoint = f"{server_url.rstrip('/')}/api/upload"
     total    = len(files)
@@ -377,6 +481,10 @@ def main() -> None:
         help="Initial retry backoff in seconds (doubles each attempt).")
     parser.add_argument("--verbose-duplicates", action="store_true",
         help="List every duplicate with its existing server path in the summary.")
+    parser.add_argument("--aggressive", action="store_true",
+        help="Upload every file (except sidecars), including ones with a wrong "
+             "or missing extension, and let the server try to convert them. "
+             "Useful for recovering misnamed media.")
     args = parser.parse_args()
 
     sys.exit(bulk_upload(
@@ -386,6 +494,7 @@ def main() -> None:
         max_attempts    = args.retries,
         initial_backoff = args.backoff,
         verbose_dupes   = args.verbose_duplicates,
+        aggressive      = args.aggressive,
     ))
 
 

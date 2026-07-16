@@ -4106,28 +4106,45 @@ def api_upload():
 
     fname    = secure_filename(file.filename)
     in_ext   = os.path.splitext(fname)[1].lower()
-    if in_ext not in mt.UPLOAD_EXTS:
-        return jsonify({"success": False, "error_code": "conversion_failed",
-                        "error": f"Unsupported file type '{in_ext}'.",
-                        "detail": "Accepted: images, gifs (→ animated jxl), "
-                                  "camera raws (→ developed to jxl), "
-                                  "and video files."}), 422
-
-    # Images/gifs land on disk as <base>.jxl; videos keep their own extension.
-    store_name = mt.stored_name(fname)
-    store_ext  = os.path.splitext(store_name)[1].lower()
-    store_path = os.path.join(tdir, store_name)
-    rel_path   = os.path.relpath(store_path, MEDIA_DIR).replace('\\', '/')
-
-    if os.path.exists(store_path):
-        return jsonify({"success": False, "error_code": "filename_exists",
-                        "error": f"A file named '{rel_path}' already exists.",
-                        "existing_file": rel_path}), 409
+    unknown_type = in_ext not in mt.UPLOAD_EXTS
 
     with tempfile.TemporaryDirectory() as tmp:
-        orig = os.path.join(tmp, fname)
-        out  = os.path.join(tmp, "out" + store_ext)
+        # Save first (streamed to disk by Werkzeug), so an unknown/absent
+        # extension can be recovered by sniffing the actual bytes. This is what
+        # lets the client's --aggressive mode rescue misnamed files.
+        orig = os.path.join(tmp, fname or "upload.bin")
         file.save(orig)
+
+        if unknown_type:
+            sniffed = mt.sniff_ext(orig)
+            if sniffed is None:
+                return jsonify({"success": False, "error_code": "conversion_failed",
+                                "error": f"Unsupported file type '{in_ext}'.",
+                                "detail": "Accepted: images, gifs (→ animated jxl), "
+                                          "camera raws (→ developed to jxl), "
+                                          "video, and audio files. Content did "
+                                          "not match any known type either."}), 422
+            # Correct the name/extension to the sniffed real type and carry on.
+            base = os.path.splitext(fname)[0] if in_ext else fname
+            fname  = (base or "upload") + sniffed
+            in_ext = sniffed
+            new_orig = os.path.join(tmp, fname)
+            if new_orig != orig:
+                os.rename(orig, new_orig)
+                orig = new_orig
+
+        # Images/gifs land on disk as <base>.jxl; video/audio keep their ext.
+        store_name = mt.stored_name(fname)
+        store_ext  = os.path.splitext(store_name)[1].lower()
+        store_path = os.path.join(tdir, store_name)
+        rel_path   = os.path.relpath(store_path, MEDIA_DIR).replace('\\', '/')
+        out        = os.path.join(tmp, "out" + store_ext)
+
+        if os.path.exists(store_path):
+            return jsonify({"success": False, "error_code": "filename_exists",
+                            "error": f"A file named '{rel_path}' already exists.",
+                            "existing_file": rel_path}), 409
+
         is_raw_src = mt.is_raw(fname)
         # Capture per-frame animation timing from the SOURCE now, while it still
         # exists — cjxl collapses it. Meaningful for animated GIF/APNG/WebP and,
@@ -4190,8 +4207,10 @@ def api_upload():
                     }), 422
                 # Timing now lives in the video itself; no XMP delays needed.
                 anim_delays = None
-            elif mt.is_video(fname):
-                # Videos can't be transcoded to JXL — store the original bytes.
+            elif mt.is_video(fname) or mt.is_audio(fname):
+                # Videos and audio can't be transcoded to JXL — store the
+                # original bytes. Audio is organised + tagged in place by the
+                # music indexer (music_index.py); it never enters the image DB.
                 shutil.copy(orig, out)
             elif in_ext == '.jxl':
                 shutil.copy(orig, out)
@@ -4238,6 +4257,20 @@ def api_upload():
                 }), 409
 
             shutil.move(out, store_path)
+
+            # Audio is not an image asset: skip bpp/XMP/image-index entirely and
+            # let the music indexer pick it up (it walks MEDIA_DIR for MUSIC_EXTS
+            # and is resumable, so this is a cheap incremental scan).
+            if mt.is_audio(fname):
+                try:
+                    # Resumable + self-guarding: no-ops if a scan is already
+                    # running, and skips unchanged tracks otherwise.
+                    threading.Thread(target=_music_index_background,
+                                     daemon=True).start()
+                except Exception as e:
+                    access_logger.warning(f"music reindex after upload: {e}")
+                return jsonify({"success": True, "filename": rel_path}), 200
+
             # We just (re)compressed to JXL, so we can compute the average bits
             # per pixel of the result and record it in EXIF CompressedBitsPerPixel
             # (a value the app owns rather than the camera). Best-effort: never
