@@ -18,12 +18,14 @@ function setPane(pane) {
   const isAlbums = (pane === 'albums');
   const isGallery = (pane === 'gallery');
   const isFaces = (pane === 'faces');
+  const isReview = (pane === 'review');
 
   // Panes
   document.getElementById('gallery_pane')?.classList.toggle('hidden', !isGallery);
   document.getElementById('albums_pane')?.classList.toggle('hidden', !isAlbums);
   document.getElementById('music_pane')?.classList.toggle('hidden', !isMusic);
   document.getElementById('faces_pane')?.classList.toggle('hidden', !isFaces);
+  document.getElementById('review_pane')?.classList.toggle('hidden', !isReview);
 
   // Tab chrome
   const on = 'flex-1 px-4 py-2 border-b-2 border-blue-500 text-blue-400 bg-gray-750';
@@ -32,11 +34,14 @@ function setPane(pane) {
   const a = document.getElementById('tab_albums');
   const m = document.getElementById('tab_music');
   const f = document.getElementById('tab_faces');
+  const rv = document.getElementById('tab_review');
   if (g) g.className = isGallery ? on : off;
   if (a) a.className = isAlbums ? on : off;
   if (m) m.className = isMusic ? on : off;
   if (f) f.className = isFaces ? on : off;
+  if (rv) rv.className = isReview ? on : off;
   if (isFaces && typeof loadFaces === 'function') loadFaces();
+  if (isReview && typeof loadReviewPane === 'function') loadReviewPane();
 
   // The album badge lives inside the Albums tab, so restore it after the
   // className swap above (which doesn't touch children, but the count may be

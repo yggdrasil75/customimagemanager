@@ -19,12 +19,136 @@ async function refreshReviewCount(){
   try{
     const d=await fetch('/api/review_list?offset=0&limit=1').then(r=>r.json());
     const b=document.getElementById('review_badge');
-    if(d.total>0){ b.innerText=_fmtCount(d.total); b.title=d.total+' pending'; b.classList.remove('hidden'); }
-    else b.classList.add('hidden');
+    if(b){
+      if(d.total>0){ b.innerText=_fmtCount(d.total); b.title=d.total+' pending'; b.classList.remove('hidden'); }
+      else b.classList.add('hidden');
+    }
+    // The Review TAB badge mirrors the header button's badge.
+    const tb=document.getElementById('review_tab_badge');
+    if(tb) tb.innerText = d.total>0 ? _fmtCount(d.total) : '';
   }catch(e){}
 }
 
+// ── Grouped review PANE (Review tab) ─────────────────────────────────────────
+// A cleaner home for the review queue than a single flat modal: the queue is
+// split into the three kinds of pending work — delete / box / tag — each shown
+// as its own thumbnail group (mirroring the Faces tab layout). Clicking a
+// thumbnail opens the existing full review modal positioned on that item.
+const REVIEW_GROUPS=[
+  {key:'delete', title:'Delete queue', hint:'AI flagged these for deletion',
+   accent:'text-red-300', border:'border-red-800'},
+  {key:'box',    title:'Box queue',    hint:'Images with unconfirmed detection boxes',
+   accent:'text-amber-300', border:'border-amber-800'},
+  {key:'tag',    title:'Tag queue',    hint:'Images with unconfirmed tags',
+   accent:'text-emerald-300', border:'border-emerald-800'},
+];
+const REVIEW_PANE_PER_GROUP=120;   // thumbnails shown before the "+N more" tile
+
+function _reviewStatus(t){
+  const el=document.getElementById('review_pane_status');
+  if(el) el.textContent=t||'';
+}
+
+async function loadReviewPane(){
+  const list=document.getElementById('review_pane_list');
+  if(!list) return;
+  list.innerHTML='<div class="text-xs text-gray-500 p-2">Loading…</div>';
+  _reviewStatus('');
+  let counts={delete:0,box:0,tag:0}, total=0;
+  try{
+    const head=await fetch('/api/review_list?offset=0&limit=1').then(r=>r.json());
+    counts=head.counts||counts; total=head.total||0;
+  }catch(e){
+    list.innerHTML='<div class="text-xs text-red-400 p-2">Failed to load review queue.</div>';
+    return;
+  }
+  refreshReviewCount();
+  if(!total){
+    list.innerHTML='<div class="text-xs text-gray-500 p-3">Nothing to review — no delete flags, unconfirmed boxes, or unconfirmed tags.</div>';
+    _reviewStatus('0 pending');
+    return;
+  }
+  _reviewStatus(`${total} item(s) pending`);
+  // Fetch each non-empty group's first page in parallel.
+  const wanted=REVIEW_GROUPS.filter(g=>(counts[g.key]||0)>0);
+  const pages=await Promise.all(wanted.map(g=>
+    fetch(`/api/review_list?queue=${g.key}&offset=0&limit=${REVIEW_PANE_PER_GROUP}`)
+      .then(r=>r.json()).catch(()=>({items:[],total:0}))));
+  list.innerHTML=wanted.map((g,i)=>
+    _renderReviewGroup(g, pages[i].items||[], counts[g.key]||0)).join('') || '';
+}
+
+function _reviewThumb(it, queue){
+  const rel=(it.filename||'');
+  const relAttr=rel.replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  const url='/api/thumb/'+encodeURI(rel);
+  // A small corner badge shows how much is pending on THIS item for the group.
+  let badge='';
+  if(queue==='box' && it.unconfirmed>0) badge=it.unconfirmed;
+  else if(queue==='tag' && it.unconfirmed_tags>0) badge=it.unconfirmed_tags;
+  const badgeHtml = badge!=='' ?
+    `<span class="absolute -top-1 -right-1 min-w-4 h-4 px-1 leading-4 text-center
+       rounded-full bg-gray-900/90 border border-gray-600 text-[10px] text-gray-200">${badge}</span>` : '';
+  const flagRing = queue==='delete' ? 'ring-1 ring-red-600' : '';
+  return `<div class="relative flex-shrink-0 group" style="width:72px;height:72px"
+       title="${relAttr}\nclick to review this item">
+      <div class="w-full h-full rounded bg-gray-900 bg-center bg-cover cursor-zoom-in ${flagRing}"
+           onclick="openReviewAt('${relAttr}')"
+           style="background-image:url('${url}')"></div>
+      ${badgeHtml}
+    </div>`;
+}
+
+function _renderReviewGroup(g, items, total){
+  const shown=items.length;
+  const more=total-shown;
+  const chips=items.map(it=>_reviewThumb(it,g.key)).join('');
+  const moreTile = more>0 ?
+    `<div class="w-[72px] h-[72px] flex items-center justify-center text-[11px]
+       text-gray-500 bg-gray-900 rounded cursor-pointer hover:text-gray-300"
+       onclick="openReviewQueue('${g.key}')" title="Open the full ${g.title.toLowerCase()}">
+       +${_fmtCount(more)}</div>` : '';
+  return `<div class="bg-gray-800 rounded border ${g.border} p-2">
+      <div class="flex items-center gap-2 mb-2">
+        <span class="font-bold text-sm ${g.accent}">${g.title}</span>
+        <span class="text-[10px] text-gray-500">${_fmtCount(total)}</span>
+        <span class="text-[10px] text-gray-500 ml-1 truncate">${g.hint}</span>
+        <button onclick="openReviewQueue('${g.key}')"
+          class="ml-auto text-[11px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded">
+          Review all</button>
+      </div>
+      <div class="flex gap-1.5 flex-wrap">${chips}${moreTile}</div>
+    </div>`;
+}
+
+// Open the full review modal starting on a specific file. Loads the whole queue
+// (as openReview does) then jumps the cursor to the requested item.
+async function openReviewAt(filename){
+  await openReview();
+  if(document.getElementById('review_modal').classList.contains('hidden')) return;
+  const idx=reviewItems.findIndex(x=>x.filename===filename);
+  if(idx>=0) showReviewItem(idx);
+}
+
+// Open the modal scoped to one queue (delete/box/tag). Reuses the modal's
+// paging machinery but seeds it from the queue-filtered endpoint so the user
+// only steps through that bucket.
+async function openReviewQueue(queue){
+  reviewQueueFilter=queue||'';
+  reviewOffset=0;
+  const q=reviewQueueFilter?`&queue=${reviewQueueFilter}`:'';
+  const d=await fetch(`/api/review_list?offset=0&limit=${REVIEW_PAGE}${q}`).then(r=>r.json());
+  reviewItems=d.items||[]; reviewIdx=0; reviewTotal=d.total||reviewItems.length;
+  refreshReviewCount();
+  if(!reviewItems.length){ showToast('Nothing to review in this queue.'); return; }
+  document.getElementById('review_modal').classList.remove('hidden');
+  showReviewItem(0);
+}
+
 let reviewItems=[], reviewIdx=0, reviewTotal=0, reviewOffset=0;
+// When the modal was opened from a single queue group (delete/box/tag) this
+// holds that queue key so paging stays within the same bucket; '' = all.
+let reviewQueueFilter='';
 const REVIEW_PAGE=500;
 
 // Counter cap that climbs 1k → 10k → 100k → 1M … so the badge never lies.
@@ -40,6 +164,7 @@ function _fmtCount(n){
 }
 
 async function openReview(){
+  reviewQueueFilter='';
   reviewOffset=0;
   const d=await fetch(`/api/review_list?offset=0&limit=${REVIEW_PAGE}`).then(r=>r.json());
   reviewItems=d.items||[]; reviewIdx=0; reviewTotal=d.total||reviewItems.length;
@@ -51,6 +176,10 @@ async function openReview(){
 function closeReview(){
   document.getElementById('review_modal').classList.add('hidden');
   loadGallery(); refreshReviewCount();
+  // If the Review tab is the one on screen, re-render its groups so counts and
+  // thumbnails reflect whatever was just decided in the modal.
+  if(typeof currentPane!=='undefined' && currentPane==='review'
+     && typeof loadReviewPane==='function') loadReviewPane();
 }
 
 // Pull the next page when the cursor nears the end of the loaded slice.
@@ -58,7 +187,8 @@ async function _maybePageReview(){
   if(reviewItems.length>=reviewTotal) return;
   if(reviewIdx < reviewItems.length-50) return;
   reviewOffset+=REVIEW_PAGE;
-  const d=await fetch(`/api/review_list?offset=${reviewOffset}&limit=${REVIEW_PAGE}`).then(r=>r.json());
+  const q=reviewQueueFilter?`&queue=${reviewQueueFilter}`:'';
+  const d=await fetch(`/api/review_list?offset=${reviewOffset}&limit=${REVIEW_PAGE}${q}`).then(r=>r.json());
   if(d.items&&d.items.length){ reviewItems=reviewItems.concat(d.items); reviewTotal=d.total||reviewTotal; }
 }
 

@@ -5340,8 +5340,29 @@ def review_list():
     while `items` is one page. Query: offset (default 0), limit (default 500).
     """
     db = _db()
-    where = ("WHERE flagged_delete=1 OR COALESCE(unconfirmed_count,0)>0")
+    # The review queue spans three independent kinds of pending work, any of
+    # which can put a file in the queue:
+    #   • delete queue — flagged_delete=1
+    #   • box queue    — unconfirmed_count>0 (unconfirmed regions)
+    #   • tag queue    — tags JSON carries a '?'-sentinel (unconfirmed) tag
+    # The tag test mirrors the `is:tagunconfirmed` search filter.
+    tag_pred = "tags LIKE '%\"?%'"
+    where = (f"WHERE flagged_delete=1 OR COALESCE(unconfirmed_count,0)>0 OR {tag_pred}")
     total = db.execute(f"SELECT COUNT(*) FROM files {where}").fetchone()[0]
+
+    # Per-queue totals so the pane can label its groups without walking the
+    # whole (possibly huge) queue on the client. These overlap: one file may be
+    # counted in more than one bucket.
+    counts = {
+        "delete": db.execute(
+            "SELECT COUNT(*) FROM files WHERE flagged_delete=1").fetchone()[0],
+        "box": db.execute(
+            "SELECT COUNT(*) FROM files WHERE COALESCE(unconfirmed_count,0)>0"
+        ).fetchone()[0],
+        "tag": db.execute(
+            f"SELECT COUNT(*) FROM files WHERE {tag_pred}").fetchone()[0],
+    }
+
     try:
         offset = max(0, int(request.args.get("offset", 0)))
     except Exception:
@@ -5350,15 +5371,38 @@ def review_list():
         limit = max(1, min(5000, int(request.args.get("limit", 500))))
     except Exception:
         limit = 500
+
+    # Optional queue filter: ?queue=delete|box|tag returns just that bucket
+    # (with a matching `total`), which is what the grouped review pane pages
+    # through one group at a time.
+    queue = (request.args.get("queue", "") or "").lower()
+    q_where = {
+        "delete": "WHERE flagged_delete=1",
+        "box": "WHERE COALESCE(unconfirmed_count,0)>0",
+        "tag": f"WHERE {tag_pred}",
+    }.get(queue)
+    if q_where:
+        where = q_where
+        total = db.execute(f"SELECT COUNT(*) FROM files {where}").fetchone()[0]
+
     rows = db.execute(
-        "SELECT rel_path, width, height, flagged_delete, flag_reason, "
+        "SELECT rel_path, width, height, flagged_delete, flag_reason, tags, "
         "COALESCE(unconfirmed_count,0) AS uc FROM files "
         f"{where} ORDER BY flagged_delete DESC, rel_path LIMIT ? OFFSET ?",
         (limit, offset)).fetchall()
+
+    def _tag_uc(raw):
+        try:
+            return count_unconfirmed_tags(json.loads(raw) if raw else [])
+        except Exception:
+            return 0
+
     items = [{"filename": r["rel_path"], "width": r["width"] or 0, "height": r["height"] or 0,
               "flagged": bool(r["flagged_delete"]), "reason": r["flag_reason"] or "",
-              "unconfirmed": r["uc"]} for r in rows]
+              "unconfirmed": r["uc"], "unconfirmed_tags": _tag_uc(r["tags"])}
+             for r in rows]
     return jsonify({"success": True, "items": items, "total": total,
+                    "counts": counts, "queue": queue or "all",
                     "offset": offset, "limit": limit, "returned": len(items)})
 
 @app.route("/api/flag", methods=["POST"])
