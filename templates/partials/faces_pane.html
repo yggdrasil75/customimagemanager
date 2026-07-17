@@ -1,5 +1,12 @@
 {# Faces pane: clustered identities for bulk naming. Names written here go
-   straight into MWG-rs regions; the SQLite cluster cache is disposable. #}
+   straight into MWG-rs regions; the SQLite cluster cache is disposable.
+
+   Two sub-sections stacked in one scroll area:
+     * FACES  — ArcFace identity clusters (the original pane).
+     * BODIES — torchreid (OSNet) re-id clusters of the 'person' boxes, each
+                associated with a face cluster by in-image containment. Only
+                rendered when body re-id is enabled in Settings; the toggle here
+                flips that setting without leaving the pane. #}
 <div id="faces_pane" class="hidden flex-1 flex flex-col overflow-hidden">
   <div class="flex items-center gap-2 p-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
     <button onclick="rescanFaces()"
@@ -10,12 +17,24 @@
       class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded font-bold">
       Recluster
     </button>
+    <label title="Also embed each person box with torchreid re-id and cluster
+bodies, associating them with faces. Re-detects the library when first enabled."
+      class="flex items-center gap-1 text-[11px] text-gray-300 ml-2 cursor-pointer select-none">
+      <input type="checkbox" id="body_enable_cb" onchange="toggleBodyEnabled(this.checked)"
+             class="accent-purple-500">
+      Body re-id
+    </label>
     <span id="faces_status" class="text-[11px] text-gray-500 ml-auto"></span>
   </div>
   <div id="faces_warn"
     class="hidden text-[11px] bg-yellow-900/40 text-yellow-300 px-3 py-1.5 border-b border-yellow-800">
     insightface not installed — clustering by appearance only. The same person
     may split across several clusters. <code>pip install insightface onnxruntime</code>
+  </div>
+  <div id="bodies_warn"
+    class="hidden text-[11px] bg-yellow-900/40 text-yellow-300 px-3 py-1.5 border-b border-yellow-800">
+    torchreid not installed — body clustering falls back to appearance only, so
+    the same outfit may split across clusters. <code>pip install torchreid</code>
   </div>
   <div id="faces_list" class="flex-1 overflow-y-auto p-2 space-y-2"></div>
 </div>

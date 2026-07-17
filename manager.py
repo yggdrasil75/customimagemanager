@@ -31,6 +31,7 @@ from werkzeug.utils import secure_filename
 from flask import Flask, render_template, render_template_string, request, jsonify, send_file, Response
 from ultralytics import YOLO
 import faces as facelib
+import bodies as bodylib
 import imagecodecs
 from dup_heuristics import DuplicateClassifier, classify_pair, extract_features
 import object_grouping as og
@@ -138,6 +139,9 @@ state = {
                                    # yolo_size, which only drives the object models
     "person_model": "",            # '' -> stock COCO YOLO 'person'
     "face_cluster_eps": 0.0,       # 0 -> use faces.py default for the embed mode
+    "body_enabled": False,         # embed person boxes with torchreid re-id and
+                                   # cluster bodies + associate them with faces
+    "body_cluster_eps": 0.0,       # 0 -> use bodies.py default for the embed mode
     "pose_kind": "body",
     "pose_size": "n",
     "oai_system_prompt": "You are an expert image analysis AI. Provide concise, highly detailed, and accurate responses.",
@@ -213,6 +217,28 @@ def _init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_face_cluster ON face_regions(cluster_id);
         CREATE INDEX IF NOT EXISTS idx_face_rel     ON face_regions(rel_path);
+
+        -- Body (person) re-id detections + embeddings. Same CACHE contract as
+        -- face_regions: names/confirmations mirror MWG-rs 'person' regions in
+        -- the image, so dropping this table costs only recompute. face_id links
+        -- a body to the face_regions row that sits inside it (same image,
+        -- containment >= threshold), NULL when no face co-occurs. This link is
+        -- how a body cluster inherits/associates with a face identity.
+        CREATE TABLE IF NOT EXISTS body_regions (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            rel_path   TEXT NOT NULL,
+            cx REAL, cy REAL, w REAL, h REAL,
+            embedding  BLOB,          -- float32 L2-normalised
+            embed_mode TEXT DEFAULT '',   -- reid | appearance
+            cluster_id INTEGER DEFAULT -1,
+            face_id    INTEGER DEFAULT NULL,  -- FK-ish -> face_regions.id (same image)
+            name       TEXT DEFAULT '',   -- mirrors the MWG person region name
+            confirmed  INTEGER DEFAULT 0,
+            UNIQUE(rel_path, cx, cy, w, h)
+        );
+        CREATE INDEX IF NOT EXISTS idx_body_cluster ON body_regions(cluster_id);
+        CREATE INDEX IF NOT EXISTS idx_body_rel     ON body_regions(rel_path);
+        CREATE INDEX IF NOT EXISTS idx_body_face    ON body_regions(face_id);
 
         CREATE TABLE IF NOT EXISTS dedup_groups (
             id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -345,6 +371,10 @@ def _init_db():
         "ALTER TABLE files ADD COLUMN unconfirmed_count INTEGER DEFAULT 0",
         "ALTER TABLE files ADD COLUMN autotag_done INTEGER DEFAULT 0",
         "ALTER TABLE files ADD COLUMN face_done INTEGER DEFAULT 0",
+        # Body re-id scanning shares the face worker's queue but tracks its own
+        # completion so enabling body clustering later re-scans only what needs
+        # a body embedding, without re-running (already-done) face detection.
+        "ALTER TABLE files ADD COLUMN body_done INTEGER DEFAULT 0",
         "ALTER TABLE files ADD COLUMN analysis TEXT DEFAULT ''",
         "ALTER TABLE files ADD COLUMN comic_folder TEXT DEFAULT ''",
         "ALTER TABLE files ADD COLUMN flagged_delete INTEGER DEFAULT 0",
@@ -1325,6 +1355,7 @@ def save_config():
     keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt",
             "oai_actions","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size",
             "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","face_cluster_eps",
+            "body_enabled","body_cluster_eps",
             "iqa_model","auth"]
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys}, f, indent=2)
@@ -2826,6 +2857,59 @@ def _cache_faces(rel, img, regions):
     db.commit()
 
 
+def _cache_bodies(rel, img, regions):
+    """Embed the person boxes with re-id and cache them, then bind each body to
+    the face_regions row that sits inside it (same image). Mirrors _cache_faces:
+    existing rows are updated in place, never clobbering a confirmed name.
+
+    The face rows are looked up from the DB (they were just written by
+    _cache_faces in the same worker pass), so the association survives a crash
+    between the two calls — on the next run the bodies re-bind to the cached
+    faces by geometry.
+    """
+    pboxes = [r for r in regions if r["class_name"] == "person"]
+    if not pboxes:
+        return
+    vecs, mode = bodylib.embed_bodies(img, pboxes)
+    db = _db()
+
+    # Pull this image's cached face boxes so we can associate by containment.
+    face_rows = db.execute(
+        "SELECT id,cx,cy,w,h FROM face_regions WHERE rel_path=?", (rel,)).fetchall()
+    faces_geom = [{"id": r[0], "cx": r[1], "cy": r[2], "w": r[3], "h": r[4]}
+                  for r in face_rows]
+    pairs = bodylib.associate_faces_bodies(faces_geom, pboxes)  # (face_idx, body_idx)
+    body_to_face = {bi: faces_geom[fi]["id"] for fi, bi in pairs}
+
+    for idx, (r, v) in enumerate(zip(pboxes, vecs)):
+        if v is None:
+            continue
+        cx, cy = round(r["cx"], 5), round(r["cy"], 5)
+        w, h   = round(r["w"], 5), round(r["h"], 5)
+        blob   = np.asarray(v, np.float32).tobytes()
+        fid    = body_to_face.get(idx)
+        cur = db.execute(
+            "SELECT id FROM body_regions WHERE rel_path=? AND cx=? AND cy=?",
+            (rel, cx, cy)).fetchone()
+        if cur:
+            db.execute(
+                "UPDATE body_regions SET w=?,h=?,embedding=?,embed_mode=?,face_id=? "
+                "WHERE id=?",
+                (w, h, blob, mode, fid, cur[0]))
+        else:
+            db.execute(
+                """INSERT INTO body_regions
+                   (rel_path,cx,cy,w,h,embedding,embed_mode,face_id)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (rel, cx, cy, w, h, blob, mode, fid))
+    db.commit()
+
+
+def _mark_body_done(rel):
+    _db().execute("UPDATE files SET body_done=1 WHERE rel_path=?", (rel,))
+    _db().commit()
+
+
 def _background_face_worker():
     """Face/person boxing. Writes MWG regions immediately (so a crash never loses
     work) and caches embeddings for clustering.
@@ -2897,8 +2981,15 @@ def _background_face_worker():
                     merged = _merge_regions(meta["regions"], found)
                     write_metadata(abs_p, meta["tags"], meta["description"], merged)
                     _cache_faces(rel, bgr, found)
+                    # Body re-id runs in the same pass so a person crop is
+                    # embedded from the same decoded image. Gated on body_enabled
+                    # so users who only want faces pay nothing.
+                    if state.get("body_enabled"):
+                        _cache_bodies(rel, bgr, found)
                     _face_dirty["v"] = True
                 _mark_face_done(rel)
+                if state.get("body_enabled"):
+                    _mark_body_done(rel)
             if _face_force["v"]:
                 _face_wake.set()      # keep the forced run going without a pause
         except Exception as e:
@@ -2952,6 +3043,73 @@ def _recluster():
         if known:
             db.execute("UPDATE face_regions SET name=? WHERE cluster_id=? "
                        "AND confirmed=0", (known[0], lab))
+    db.commit()
+
+    if state.get("body_enabled"):
+        _recluster_bodies()
+    return total
+
+
+def _recluster_bodies():
+    """Cluster cached body (person) re-id embeddings, then let each body cluster
+    inherit a face-cluster name via the per-image face<->body links.
+
+    Kept separate from faces: re-id and ArcFace occupy different spaces with
+    different radii, and body clusters are named through their associated face
+    identity (or a user-entered name), never by comparing the two vector types.
+    """
+    rows = _db().execute(
+        "SELECT id,embedding,embed_mode,name,confirmed FROM body_regions "
+        "WHERE embedding IS NOT NULL").fetchall()
+    if not rows:
+        return 0
+    eps = state.get("body_cluster_eps") or None
+    by_mode = {}
+    for rid, blob, m, _n, _c in rows:
+        by_mode.setdefault(m or "reid", []).append(
+            (rid, np.frombuffer(blob, dtype=np.float32)))
+
+    db = _db()
+    total, base = 0, 0
+    for mode, items in by_mode.items():
+        ids  = [i for i, _ in items]
+        vecs = [v for _, v in items]
+        # faces.cluster is embed-agnostic (unit vectors + cosine), so reuse it;
+        # bodies.py supplies the mode-appropriate eps defaults via _mode_eps.
+        e = eps if eps else (bodylib.BODY_EPS_REID if mode == "reid"
+                             else bodylib.BODY_EPS_APPEARANCE)
+        labels = facelib.cluster(vecs, mode=mode, eps=e)
+        for i, lab in zip(ids, labels):
+            lab = int(lab)
+            db.execute("UPDATE body_regions SET cluster_id=? WHERE id=?",
+                       (lab + base if lab >= 0 else -1, i))
+        used = len({l for l in labels if l >= 0})
+        base += used
+        total += used
+
+    # Confirmed body names win within their own cluster (same as faces).
+    for (lab,) in db.execute(
+            "SELECT DISTINCT cluster_id FROM body_regions WHERE cluster_id>=0").fetchall():
+        known = db.execute(
+            "SELECT name FROM body_regions WHERE cluster_id=? AND confirmed=1 "
+            "AND name<>'' LIMIT 1", (lab,)).fetchone()
+        if known:
+            db.execute("UPDATE body_regions SET name=? WHERE cluster_id=? "
+                       "AND confirmed=0", (known[0], lab))
+            continue
+        # No confirmed body name -> borrow the majority associated FACE name.
+        # Each body may link to a face row (face_id); that face row carries the
+        # face cluster's (possibly suggested) name. The most common such name in
+        # this body cluster is the natural suggestion, and is exactly the
+        # "associate faces and bodies together" payoff.
+        face_name = db.execute(
+            "SELECT f.name, COUNT(*) c FROM body_regions b "
+            "JOIN face_regions f ON f.id=b.face_id "
+            "WHERE b.cluster_id=? AND f.name<>'' "
+            "GROUP BY f.name ORDER BY c DESC LIMIT 1", (lab,)).fetchone()
+        if face_name:
+            db.execute("UPDATE body_regions SET name=? WHERE cluster_id=? "
+                       "AND confirmed=0", (face_name[0], lab))
     db.commit()
     return total
 
@@ -3908,6 +4066,72 @@ def api_face_clusters():
                     "identity": facelib.have_identity_embedder()})
 
 
+@app.route("/api/bodies/clusters")
+def api_body_clusters():
+    """Body (re-id) clusters for the Faces tab, biggest first. Each cluster
+    reports how many of its members are linked to a face (associated) so the UI
+    can show the face<->body binding strength."""
+    rows = _db().execute(
+        "SELECT cluster_id, COUNT(*), "
+        "       COALESCE(MAX(name),''), MAX(confirmed), MAX(embed_mode), "
+        "       SUM(CASE WHEN face_id IS NOT NULL THEN 1 ELSE 0 END) "
+        "FROM body_regions WHERE cluster_id>=0 "
+        "GROUP BY cluster_id ORDER BY COUNT(*) DESC").fetchall()
+    clusters = []
+    for cid, n, name, conf, mode, linked in rows:
+        sample = _db().execute(
+            "SELECT id,rel_path,cx,cy,w,h,face_id FROM body_regions "
+            "WHERE cluster_id=? LIMIT 30", (cid,)).fetchall()
+        clusters.append({
+            "id": cid, "count": n, "name": name or "",
+            "confirmed": bool(conf), "mode": mode or "",
+            "linked_faces": int(linked or 0),
+            "bodies": [{"id": r[0], "rel": r[1], "cx": r[2], "cy": r[3],
+                        "w": r[4], "h": r[5], "face_id": r[6]}
+                       for r in sample]})
+    clusters.sort(key=lambda c: (bool(c["name"]), -c["count"]))
+    singles = _db().execute(
+        "SELECT COUNT(*) FROM body_regions WHERE cluster_id<0").fetchone()[0]
+    return jsonify({"clusters": clusters, "unclustered": singles,
+                    "enabled": bool(state.get("body_enabled")),
+                    "identity": bodylib.have_body_embedder()})
+
+
+@app.route("/api/bodies/name", methods=["POST"])
+def api_body_name():
+    """Bulk-name a body cluster. Writes the name into every MWG 'person' region
+    it covers (metadata is the source of truth), same contract as face naming."""
+    d = request.json or {}
+    cid  = int(d.get("cluster_id", -1))
+    name = (d.get("name") or "").strip()
+    if cid < 0 or not name:
+        return jsonify({"success": False, "error": "cluster_id and name required"})
+    rows = _db().execute(
+        "SELECT rel_path,cx,cy,w,h FROM body_regions WHERE cluster_id=?",
+        (cid,)).fetchall()
+    touched = 0
+    for rel, cx, cy, w, h in rows:
+        abs_p = get_safe_path(MEDIA_DIR, rel)
+        if not abs_p or not os.path.exists(abs_p):
+            continue
+        meta = read_metadata(abs_p)
+        hit = False
+        for r in meta["regions"]:
+            if (r.get("class_name") == "person"
+                    and abs(r["cx"] - cx) < 1e-3 and abs(r["cy"] - cy) < 1e-3):
+                r["region_name"] = name
+                r["confirmed"]   = True
+                hit = True
+        if hit:
+            write_metadata(abs_p, meta["tags"], meta["description"], meta["regions"])
+            touched += 1
+    _db().execute(
+        "UPDATE body_regions SET name=?, confirmed=1 WHERE cluster_id=?",
+        (name, cid))
+    _db().commit()
+    return jsonify({"success": True, "named": touched})
+
+
 @app.route("/api/faces/scan", methods=["POST"])
 def api_face_scan():
     """Force a rescan (clears face_done) or just recluster what's cached.
@@ -3921,10 +4145,11 @@ def api_face_scan():
     d = request.json or {}
     if d.get("rescan"):
         db = _db()
-        db.execute("UPDATE files SET face_done=0")
+        db.execute("UPDATE files SET face_done=0, body_done=0")
         # Keep confirmed faces (they carry user-entered names, and MWG has them
         # anyway); drop the rest so re-detection starts from a clean slate.
         db.execute("DELETE FROM face_regions WHERE COALESCE(confirmed,0)=0")
+        db.execute("DELETE FROM body_regions WHERE COALESCE(confirmed,0)=0")
         db.commit()
         _face_dirty["v"] = True
         # Clicking the button is an explicit instruction: run NOW, at full speed,
@@ -4039,6 +4264,38 @@ def api_face_split():
     db.commit()
     return jsonify({"success": True, "moved": len(ids)})
 
+
+@app.route("/api/bodies/split", methods=["POST"])
+def api_body_split():
+    """Kick a wrong body out of its cluster (back to unclustered), or carve a
+    selection into a new cluster. Same contract as /api/faces/split."""
+    d = request.json or {}
+    ids = d.get("ids")
+    if ids is None:
+        one = int(d.get("id", -1))
+        ids = [one] if one >= 0 else []
+    ids = [int(i) for i in ids if int(i) >= 0]
+    if not ids:
+        return jsonify({"success": False, "error": "no body id(s) given"})
+
+    db = _db()
+    ph = ",".join("?" * len(ids))
+    if d.get("mode") == "new":
+        top = db.execute(
+            "SELECT COALESCE(MAX(cluster_id), -1) FROM body_regions").fetchone()[0]
+        new_id = int(top) + 1
+        db.execute(
+            f"UPDATE body_regions SET cluster_id=?, name='', confirmed=0 "
+            f"WHERE id IN ({ph})", (new_id, *ids))
+        db.commit()
+        return jsonify({"success": True, "cluster_id": new_id, "moved": len(ids)})
+
+    db.execute(
+        f"UPDATE body_regions SET cluster_id=-1 WHERE id IN ({ph})", ids)
+    db.commit()
+    return jsonify({"success": True, "moved": len(ids)})
+
+
 @app.route("/api/state")
 def api_state():
     return jsonify({k: state[k] for k in
@@ -4046,7 +4303,7 @@ def api_state():
          "oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions",
          "autotag_enabled","pipeline_tree","yolo_size","pose_kind","pose_size",
          "face_bg_enabled","face_bg_custom","face_model","face_size","person_model",
-         "face_cluster_eps","model_groups","iqa_model")})
+         "face_cluster_eps","body_enabled","body_cluster_eps","model_groups","iqa_model")})
 
 @app.route("/api/update_settings", methods=["POST"])
 def update_settings():
@@ -4059,7 +4316,8 @@ def update_settings():
         _face_cache["path"] = None
         _face_cache["model"] = None
     for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","pipeline_tree","yolo_size","pose_kind","pose_size",
-              "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","face_cluster_eps","iqa_model"):
+              "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","face_cluster_eps",
+              "body_enabled","body_cluster_eps","iqa_model"):
         if k in d: state[k] = d[k]
     # Switching the NR-IQA model only re-points the module; the new weights load
     # lazily on the next scan, so this stays a cheap settings save.

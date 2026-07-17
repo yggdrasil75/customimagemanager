@@ -174,6 +174,9 @@ async function loadFaces() {
   } catch (e) {
     el.innerHTML = '<div class="text-xs text-red-400 p-2">Failed to load faces.</div>';
   }
+  // Body (re-id) clusters render into their own block appended after the faces.
+  // Kept in a separate loader so a body-side failure never blanks the faces.
+  loadBodies();
 }
 
 async function nameCluster(cid) {
@@ -311,4 +314,226 @@ async function rescanFaces() {
   stopFacePoll();
   _facePoll = setInterval(pollFaceProgress, 2000);
   pollFaceProgress();
+}
+// ─────────────────────────────────────────────────────────────────────────────
+// Body (re-id) clusters
+// ─────────────────────────────────────────────────────────────────────────────
+// torchreid/OSNet clusters the 'person' boxes the face worker already produces.
+// Each body row may link to a face_regions row that sits inside it (same image),
+// which is how a body cluster inherits/associates a face identity. The UI mirrors
+// the faces section: bulk-name a whole cluster, deny a stray body, split a
+// selection into a new cluster.
+
+let _bodyClusters = [];
+let _bodySel = new Set();
+
+function toggleBodySel(id) {
+  if (_bodySel.has(id)) _bodySel.delete(id); else _bodySel.add(id);
+  loadFaces();
+}
+function clearBodySel() { _bodySel.clear(); loadFaces(); }
+
+// A body chip crops the person box out of the shared thumbnail. Person boxes are
+// tall (roughly 1:2..1:3), so unlike faceChip we render a portrait chip and use
+// the same background-size/position math, which is aspect-agnostic. A small ring
+// on the chip signals "this body is associated with a face" (face_id set).
+function bodyChip(b, w = 40, h = 72, pad = 1.15) {
+  const bw = Math.max(b.w, 0.01) * pad;
+  const bh = Math.max(b.h, 0.01) * pad;
+  const zx = 100 / bw;
+  const zy = 100 / bh;
+  const px = bw >= 1 ? 50 : clamp01((b.cx - bw / 2) / (1 - bw)) * 100;
+  const py = bh >= 1 ? 50 : clamp01((b.cy - bh / 2) / (1 - bh)) * 100;
+  const url = '/api/thumb/' + encodeURI(b.rel);
+  const relAttr = (b.rel || '').replace(/"/g, '&quot;');
+  const sel = _bodySel.has(b.id);
+  const linked = b.face_id != null;
+  const linkRing = linked ? 'ring-1 ring-emerald-500/70' : '';
+  return `<div class="relative flex-shrink-0 group" style="width:${w}px;height:${h}px">
+      <div class="w-full h-full rounded bg-gray-900 bg-no-repeat cursor-zoom-in
+                  ${sel ? 'ring-2 ring-purple-400' : linkRing}"
+           title="${relAttr}${linked ? '\nlinked to a face' : '\nno face linked'}\nclick to open in the viewer"
+           onclick="viewFaceImage('${relAttr}')"
+           style="background-image:url('${url}');
+                  background-size:${zx}% ${zy}%;
+                  background-position:${px}% ${py}%"></div>
+      ${linked ? `<span title="Associated with a face"
+              class="absolute -top-1 -left-1 w-3 h-3 rounded-full bg-emerald-600
+                     border border-gray-900"></span>` : ''}
+      <button title="Not this person — remove from cluster"
+              onclick="event.stopPropagation();denyBody(${b.id})"
+              class="absolute -top-1 -right-1 w-4 h-4 leading-none rounded-full
+                     bg-red-700 hover:bg-red-600 text-white text-[10px] font-bold
+                     opacity-0 group-hover:opacity-100 transition">×</button>
+      <input type="checkbox" ${sel ? 'checked' : ''}
+             title="Select — split these off as a separate person"
+             onclick="event.stopPropagation();toggleBodySel(${b.id})"
+             class="absolute -bottom-1 -left-1 w-3.5 h-3.5 accent-purple-500
+                    opacity-0 group-hover:opacity-100
+                    ${sel ? '!opacity-100' : ''}">
+    </div>`;
+}
+
+async function loadBodies() {
+  // Anchor: everything body-related lives in a single block appended to the end
+  // of #faces_list, so re-rendering faces (which rebuilds that container) drops
+  // the old body block and we rebuild it here.
+  const list = document.getElementById('faces_list');
+  if (!list) return;
+  let block = document.getElementById('bodies_block');
+  if (!block) {
+    block = document.createElement('div');
+    block.id = 'bodies_block';
+    block.className = 'space-y-2';
+    list.appendChild(block);
+  }
+
+  let d;
+  try {
+    d = await (await fetch('/api/bodies/clusters')).json();
+  } catch (e) {
+    block.innerHTML = '';
+    return;
+  }
+
+  // Keep the enable checkbox in sync with the server-side setting.
+  const cb = document.getElementById('body_enable_cb');
+  if (cb) cb.checked = !!d.enabled;
+  const bwarn = document.getElementById('bodies_warn');
+  if (bwarn) bwarn.classList.toggle('hidden', !d.enabled || !!d.identity);
+
+  if (!d.enabled) { block.innerHTML = ''; return; }
+
+  _bodyClusters = d.clusters || [];
+
+  const header = `<div class="flex items-center gap-2 pt-3 mt-1 border-t border-gray-700">
+      <span class="text-xs font-bold text-gray-300">Bodies (re-id)</span>
+      <span class="text-[10px] text-gray-500">${_bodyClusters.length} cluster(s)
+        · ${d.unclustered} unclustered${d.identity ? '' : ' · appearance-only'}</span>
+    </div>`;
+
+  if (!_bodyClusters.length) {
+    block.innerHTML = header + `<div class="text-xs text-gray-500 p-2">
+      No body clusters yet. Bodies are embedded during the face scan when
+      <b>Body re-id</b> is on — hit <b>Rescan all</b>, then <b>Recluster</b>.</div>`;
+    return;
+  }
+
+  block.innerHTML = header + _bodyClusters.map(c => `
+    <div class="bg-gray-800 rounded border ${c.confirmed
+        ? 'border-green-700' : 'border-gray-700'} p-2">
+      <div class="flex items-center gap-2 mb-2">
+        <input value="${(c.name || '').replace(/"/g, '&quot;')}"
+               placeholder="Whose body/outfit is this?" id="bname_${c.id}"
+               onkeydown="if(event.key==='Enter')nameBodyCluster(${c.id})"
+               class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600
+                      text-sm text-white">
+        <span title="${c.linked_faces} of these are associated with a face"
+              class="text-[10px] ${c.linked_faces ? 'text-emerald-400' : 'text-gray-500'}">
+          ${c.linked_faces ? '⛓ ' + c.linked_faces + '/' : ''}${c.count}</span>
+        <button onclick="nameBodyCluster(${c.id})"
+          class="text-xs bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded font-bold">
+          Name all
+        </button>
+      </div>
+      <div class="flex gap-1.5 flex-wrap">
+        ${c.bodies.map(b => bodyChip(b)).join('')}
+        ${c.count > c.bodies.length
+          ? `<div class="w-10 h-[72px] flex items-center justify-center text-[10px]
+                        text-gray-500 bg-gray-900 rounded">
+               +${c.count - c.bodies.length}</div>` : ''}
+      </div>
+      ${(() => {
+        const n = c.bodies.filter(b => _bodySel.has(b.id)).length;
+        return n ? `<div class="flex items-center gap-2 mt-2 pt-2
+                            border-t border-gray-700">
+            <span class="text-[10px] text-purple-300">${n} selected</span>
+            <button onclick="splitSelectedBodies(${c.id})"
+              class="text-xs bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded font-bold">
+              Split into new person
+            </button>
+            <button onclick="clearBodySel()"
+              class="text-xs text-gray-400 hover:text-gray-200 px-1">clear</button>
+          </div>` : '';
+      })()}
+    </div>`).join('');
+}
+
+async function nameBodyCluster(cid) {
+  const input = document.getElementById('bname_' + cid);
+  const name = (input?.value || '').trim();
+  if (!name) return;
+  document.getElementById('faces_status').textContent = 'Writing body names…';
+  const r = await fetch('/api/bodies/name', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cluster_id: cid, name })
+  });
+  const d = await r.json();
+  document.getElementById('faces_status').textContent =
+    d.success ? `Named ${d.named} image(s).` : (d.error || 'Failed.');
+  loadFaces();
+}
+
+// Deny/split reuse the same /api/bodies/split contract as faces (id / ids+mode).
+async function denyBody(id) {
+  document.getElementById('faces_status').textContent = 'Removing body…';
+  try {
+    await fetch('/api/bodies/split', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+  } catch (e) {
+    document.getElementById('faces_status').textContent = 'Remove failed.';
+    return;
+  }
+  _bodySel.delete(id);
+  loadFaces();
+}
+
+async function splitSelectedBodies(cid) {
+  const cluster = _bodyClusters.find(c => c.id === cid);
+  const ids = (cluster ? cluster.bodies : [])
+    .map(b => b.id).filter(id => _bodySel.has(id));
+  if (!ids.length) return;
+  document.getElementById('faces_status').textContent = 'Splitting…';
+  let d;
+  try {
+    d = await (await fetch('/api/bodies/split', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, mode: 'new' })
+    })).json();
+  } catch (e) {
+    document.getElementById('faces_status').textContent = 'Split failed.';
+    return;
+  }
+  ids.forEach(id => _bodySel.delete(id));
+  document.getElementById('faces_status').textContent =
+    d.success ? `Split ${d.moved} body(ies) into a new person.` : (d.error || 'Failed.');
+  loadFaces();
+}
+
+// Flip the server-side body_enabled setting from the pane. Enabling it means the
+// library must be re-scanned to embed bodies, so we offer a rescan right away.
+async function toggleBodyEnabled(on) {
+  document.getElementById('faces_status').textContent =
+    on ? 'Enabling body re-id…' : 'Disabling body re-id…';
+  try {
+    await fetch('/api/update_settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body_enabled: !!on })
+    });
+  } catch (e) {
+    document.getElementById('faces_status').textContent = 'Setting failed.';
+    return;
+  }
+  if (on && confirm('Body re-id enabled. Rescan the library now to embed bodies?\n'
+      + '(Bodies are only embedded on images scanned while this is on.)')) {
+    rescanFaces();
+  } else {
+    loadFaces();
+  }
 }
