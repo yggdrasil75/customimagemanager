@@ -13,3 +13,4 @@ insightface
 onnxruntime
 pyiqa
 rawpy
+ldap3

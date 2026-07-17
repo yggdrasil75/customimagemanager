@@ -1,0 +1,22 @@
+{# Sign-in card. Talks to /api/auth/config and /api/auth/login.
+   On first run (no accounts yet) the first credentials entered create the
+   initial administrator; the copy switches to reflect that. #}
+<div class="bg-gray-800 p-8 rounded-lg border border-gray-600 w-[340px] max-w-[92vw] shadow-2xl">
+  <h1 class="font-bold text-lg text-purple-400 mb-1">Media Library</h1>
+  <p id="login_sub" class="text-sm text-gray-400 mb-5">Sign in to continue</p>
+
+  <label class="text-xs text-gray-400 block mb-1" for="login_user">Username</label>
+  <input id="login_user" autocomplete="username" autofocus
+    class="w-full p-2 mb-3 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+
+  <label class="text-xs text-gray-400 block mb-1" for="login_pass">Password</label>
+  <input id="login_pass" type="password" autocomplete="current-password"
+    class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+
+  <button id="login_go"
+    class="mt-5 w-full py-2 bg-purple-700 hover:bg-purple-600 disabled:opacity-60
+           rounded font-bold text-sm">Sign in</button>
+
+  <div id="login_err" class="text-red-400 text-sm min-h-[18px] mt-3"></div>
+  <div id="login_hint" class="text-gray-500 text-[11px] mt-2 leading-relaxed"></div>
+</div>

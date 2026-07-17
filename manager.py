@@ -40,6 +40,7 @@ import media_types as mt
 import video_tracks as vt
 import tiering
 import music_index as mi
+import auth as _auth
 import exif_import, exif_export, exif_fields
 import xmp_import, xmp_fields
 import iptc_import, iptc_fields
@@ -121,6 +122,12 @@ state = {
                           # a hidden store and linked to the derived image via
                           # RawDataUniqueID; hidden from the user for speed.
     "pipeline_tree": DEFAULT_PIPELINE,
+    "auth": {                          # user management; see auth.py for schema
+        "enabled": True,
+        "mode": "local",              # "local" | "ldap" | "both"
+        "session_days": 14,
+        "ldap": {},
+    },
     "iqa_model": "brisque",        # NR-IQA model id; see iqa.MODELS
     "yolo_size": "n",
     "face_bg_enabled": False,      # background face/person boxing
@@ -1317,7 +1324,7 @@ def save_config():
     keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_system_prompt",
             "oai_actions","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size",
             "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","face_cluster_eps",
-            "iqa_model"]
+            "iqa_model","auth"]
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys}, f, indent=2)
 
@@ -1345,6 +1352,15 @@ def populate_model_selector():
     state["available_models"] = trained + groups["face"] + groups["custom"]
 
 load_config(); load_classes(); populate_model_selector()
+
+# ── authentication / user management ──────────────────────────────────────────
+# Installed here (after _db and config are ready) so its before_request gate is
+# the first hook to run. All routes except /login and /api/auth/* are protected.
+_authmgr = _auth.Auth(
+    app, _db,
+    get_cfg=lambda: state.get("auth"),
+    save_cfg=save_config,
+).install()
 
 # ── XMP metadata ──────────────────────────────────────────────────────────────
 # The structured AI analysis is stored in the sidecar (the portable source of
