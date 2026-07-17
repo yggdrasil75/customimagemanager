@@ -400,6 +400,9 @@ def _init_db():
         # emits and read_metadata folds back, so moving a library to a new
         # machine and reindexing restores every album membership.
         "ALTER TABLE files ADD COLUMN albums TEXT DEFAULT '[]'",
+        "ALTER TABLE albums ADD COLUMN description TEXT DEFAULT ''",
+        "ALTER TABLE albums ADD COLUMN cover TEXT DEFAULT ''",
+        "ALTER TABLE albums ADD COLUMN created REAL",
     ]:
         try:
             db.execute(ddl); db.commit()
