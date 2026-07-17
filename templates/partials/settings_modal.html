@@ -21,6 +21,11 @@
         <input id="cfg_model" type="text"
           class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
       </div>
+      <div><label class="text-xs text-gray-400 block mb-1">Embedding model
+          <span class="text-gray-600">(blank = local CNN, no text search)</span></label>
+        <input id="cfg_embed_model" type="text" placeholder="e.g. clip-ViT-B-32"
+          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+      </div>
       <div><label class="text-xs text-gray-400 block mb-1">AI rating model <span
             class="text-gray-600">(NR-IQA &mdash; no-reference)</span></label>
         <select id="cfg_iqa_model"

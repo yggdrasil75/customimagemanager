@@ -23,6 +23,12 @@
       class="text-xs bg-emerald-800 hover:bg-emerald-700 px-2 py-1 rounded font-bold">
       Rate library
     </button>
+    <button id="btn_embed_lib" onclick="embedLibrary(false)"
+      title="Generate embeddings for the whole library (OAI endpoint if configured, else local). Powers similarity + text search."
+      class="text-xs bg-purple-800 hover:bg-purple-700 px-2 py-1 rounded font-bold">
+      Generate embeddings
+    </button>
+    <span id="embed_backend_badge" class="text-[10px] text-gray-500 italic"></span>
     <span id="review_pane_status" class="text-[11px] text-gray-500 ml-auto"></span>
   </div>
   <div id="review_pane_list" class="flex-1 overflow-y-auto p-2 space-y-3"></div>

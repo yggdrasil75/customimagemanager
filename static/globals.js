@@ -253,6 +253,7 @@ async function fetchState(){
       document.getElementById('cfg_endpoint').value=s.oai_endpoint;
       document.getElementById('cfg_apikey').value=s.oai_key;
       document.getElementById('cfg_model').value=s.oai_model;
+      document.getElementById('cfg_embed_model').value=s.oai_embed_model||'';
       document.getElementById('cfg_yolo_size').value=s.yolo_size||'n';
       loadIqaModels(s.iqa_model||'brisque');
       // faces / people

@@ -475,8 +475,8 @@ def assess(img_bgr, quality_bad=None, blank_std=None, low_edge_density=None,
     lum_std, edge_density = _structure(img_bgr)
     is_blank = (lum_std < bs) or (edge_density < le)
 
-    raw = score(img_bgr, model_id)
-    q = _normalize(raw, spec)
+    q = quality(img_bgr, model_id)
+    # q = _normalize(raw, spec)
     poor = (q is not None) and (q < qb)
 
     reasons = []

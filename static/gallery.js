@@ -88,6 +88,13 @@ async function loadGallery(){
     params.set('album', currentAlbum);
   }
   const data=await fetch('/api/list?'+params).then(r=>r.json());
+  if(data.success===false){
+    // Semantic search (sem:/~ prefix) can fail with a helpful message; show it
+    // and clear the grid rather than silently rendering nothing.
+    if(typeof showToast==='function') showToast(data.error||'Search failed.');
+    totalFiles=0; renderGallery([]); updatePager();
+    return;
+  }
   totalFiles=data.total;
   renderGallery(data.files);
   updatePager();
@@ -443,5 +450,27 @@ async function bulkRate(){
       if(currentFile && files.includes(currentFile)) selectFile(currentFile);
     }
   }catch(e){ alert('Network error during rating.'); }
+  finally{ if(btn){ btn.disabled=false; btn.innerHTML=orig; } }
+}
+
+// Embed just the selected images. Reuses /api/library_embed, which accepts an
+// explicit `files` list and always re-embeds (force). Per-selection cousin of
+// the Review tab's "Generate embeddings" button; prefers the OAI endpoint.
+async function bulkEmbed(){
+  const files=[...selectedFiles];
+  if(!files.length) return;
+  const btn=document.querySelector('#bulk_bar button[onclick="bulkEmbed()"]');
+  const orig=btn?btn.innerHTML:''; if(btn){ btn.disabled=true; btn.innerHTML='Embedding…'; }
+  try{
+    const d=await fetch('/api/library_embed',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({files, force:true})}).then(r=>r.json());
+    if(!d.success){ alert('Embed selected failed: '+(d.error||'')); }
+    else{
+      document.getElementById('status_text').innerText=
+        `Embeddings (${d.backend}): ${d.embedded_now}/${files.length} selected.`;
+      showToast(`Re-embedded ${d.embedded_now}/${files.length} selected (${d.backend}).`);
+    }
+  }catch(e){ alert('Network error during embedding.'); }
   finally{ if(btn){ btn.disabled=false; btn.innerHTML=orig; } }
 }

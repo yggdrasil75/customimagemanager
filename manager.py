@@ -117,6 +117,7 @@ state = {
     "status_text": "Ready.", "remote_ip": "",
     "oai_endpoint": "http://localhost:5001/v1/chat/completions",
     "oai_key": "", "oai_model": "gpt-4o-mini",
+    "oai_embed_model": "",
     "autotag_enabled": False,
     "keep_raws": False,   # when True, uploaded camera-raw sources are stashed in
                           # a hidden store and linked to the derived image via
@@ -1321,7 +1322,7 @@ def load_config():
         state["iqa_model"] = iqa.set_model(state.get("iqa_model", "brisque"))
 
 def save_config():
-    keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_system_prompt",
+    keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt",
             "oai_actions","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size",
             "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","face_cluster_eps",
             "iqa_model","auth"]
@@ -3219,6 +3220,104 @@ def _llm_request(messages, tools=None, tool_choice=None, timeout=600, endpoint=N
     r.raise_for_status()
     return r.json()["choices"][0]["message"]
 
+# ── OAI-compatible embeddings ────────────────────────────────────────────────
+# Preferred over the local CNN because a multimodal (CLIP-style) embedding model
+# puts image and text vectors in ONE space, which is what makes library text
+# search possible. Everything degrades safely: if no embed model is configured
+# or the server errors, callers fall back to the local path.
+def _embed_endpoint():
+    """Derive the embeddings URL from the chat endpoint: truncate to the /v1
+    base and append /embeddings (…/v1/chat/completions -> …/v1/embeddings)."""
+    base = (state.get("oai_endpoint") or "").strip()
+    if not base:
+        return ""
+    for suffix in ("/chat/completions", "/completions"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    base = base.rstrip("/")
+    if base.endswith("/v1"):
+        return base + "/embeddings"
+    return base + "/v1/embeddings"
+
+
+def _oai_embed_enabled():
+    """True when an OAI embedding model is configured (text search needs this)."""
+    return bool((state.get("oai_embed_model") or "").strip()) and bool(_embed_endpoint())
+
+
+def _oai_embed_model():
+    return (state.get("oai_embed_model") or "").strip()
+
+
+def _oai_embed_tag():
+    """Model tag stored alongside each vector so mismatched spaces never mix.
+    Prefixed 'oai:' to distinguish OAI vectors from local-CNN vectors."""
+    return "oai:" + _oai_embed_model()
+
+
+def _oai_embed_request(inputs, timeout=120):
+    """POST an OpenAI-style /v1/embeddings request. `inputs` is a list whose
+    items are either plain strings (text) or {"image": b64} dicts (multimodal
+    servers accept an image field or a data-URL string, depending on the impl).
+    Returns a list of float32 numpy vectors aligned with `inputs`, or raises."""
+    endpoint = _embed_endpoint()
+    model = _oai_embed_model()
+    if not endpoint or not model:
+        raise RuntimeError("OAI embeddings not configured")
+    key = (state.get("oai_key") or "").strip()
+    hdrs = {"Content-Type": "application/json"}
+    if key:
+        hdrs["Authorization"] = f"Bearer {key}"
+    payload = {"model": model, "input": inputs}
+    r = requests.post(endpoint, headers=hdrs, json=payload, timeout=timeout)
+    r.raise_for_status()
+    data = r.json().get("data", [])
+    # preserve request order
+    data = sorted(data, key=lambda d: d.get("index", 0))
+    return [np.asarray(d["embedding"], np.float32) for d in data]
+
+
+def _oai_embed_image(img_bgr, timeout=120):
+    """Embed one image via the OAI endpoint. Sends a data-URL string, which the
+    common multimodal servers (and OpenAI-compatible CLIP shims) accept in the
+    `input` field. Returns an L2-normalised float32 vector, or None on failure."""
+    if img_bgr is None:
+        return None
+    try:
+        ok, buf = cv2.imencode(".jpg", img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        if not ok:
+            return None
+        b64 = base64.b64encode(buf.tobytes()).decode()
+        vecs = _oai_embed_request([f"data:image/jpeg;base64,{b64}"], timeout=timeout)
+        if not vecs:
+            return None
+        v = vecs[0]
+        n = np.linalg.norm(v)
+        return (v / n).astype(np.float32) if n else v.astype(np.float32)
+    except Exception:
+        access_logger.exception("OAI image embed failed")
+        return None
+
+
+def _oai_embed_text(text, timeout=60):
+    """Embed a text query via the OAI endpoint for library text search. Returns
+    an L2-normalised float32 vector, or None on failure."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        vecs = _oai_embed_request([text], timeout=timeout)
+        if not vecs:
+            return None
+        v = vecs[0]
+        n = np.linalg.norm(v)
+        return (v / n).astype(np.float32) if n else v.astype(np.float32)
+    except Exception:
+        access_logger.exception("OAI text embed failed")
+        return None
+
+
 _BOX_TOOL = [{"type": "function", "function": {
     "name": "create_bounding_boxes",
     "description": "Bounding boxes normalised 0..1",
@@ -3944,7 +4043,7 @@ def api_face_split():
 def api_state():
     return jsonify({k: state[k] for k in
         ("classes","available_models","status_text","remote_ip",
-         "oai_endpoint","oai_key","oai_model","oai_system_prompt","oai_actions",
+         "oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions",
          "autotag_enabled","pipeline_tree","yolo_size","pose_kind","pose_size",
          "face_bg_enabled","face_bg_custom","face_model","face_size","person_model",
          "face_cluster_eps","model_groups","iqa_model")})
@@ -3959,7 +4058,7 @@ def update_settings():
     if "face_size" in d and d["face_size"] != state.get("face_size"):
         _face_cache["path"] = None
         _face_cache["model"] = None
-    for k in ("oai_endpoint","oai_key","oai_model","oai_system_prompt","oai_actions","pipeline_tree","yolo_size","pose_kind","pose_size",
+    for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","pipeline_tree","yolo_size","pose_kind","pose_size",
               "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","face_cluster_eps","iqa_model"):
         if k in d: state[k] = d[k]
     # Switching the NR-IQA model only re-points the module; the new weights load
@@ -3985,9 +4084,80 @@ def api_list():
     folder = request.args.get("folder","").strip()
     album  = request.args.get("album","").strip()
     page   = max(0, int(request.args.get("page",0)))
+
+    # Semantic search lives INSIDE the normal gallery search: a query prefixed
+    # with "sem:" (or "~") ranks the library by text→image embedding similarity
+    # instead of the SQL keyword match. Falls back with a helpful error if OAI
+    # embeddings aren't available. Folder/album scope still applies.
+    sem = None
+    if search.lower().startswith("sem:"):
+        sem = search[4:].strip()
+    elif search.startswith("~"):
+        sem = search[1:].strip()
+    if sem is not None:
+        entries, total, err = _semantic_list(sem, page * PAGE_SIZE, PAGE_SIZE,
+                                              folder, album)
+        if err:
+            return jsonify({"success": False, "error": err,
+                            "files": [], "total": 0, "page": page,
+                            "page_size": PAGE_SIZE})
+        return jsonify({"success": True, "files": entries, "total": total,
+                        "page": page, "page_size": PAGE_SIZE, "mode": "semantic"})
+
     entries, total = _query_files(search, page * PAGE_SIZE, PAGE_SIZE, folder, album)
     return jsonify({"success":True,"files":entries,"total":total,
                     "page":page,"page_size":PAGE_SIZE})
+
+
+def _semantic_list(query, offset, limit, folder='', album=''):
+    """Rank the library by text→image embedding similarity for the gallery
+    search. Returns (entries, total, error). `error` is a user-facing string when
+    semantic search can't run (no OAI model, or stored vectors aren't OAI)."""
+    if not query:
+        return [], 0, "Empty semantic query."
+    db = _db()
+    if ii.embedding_count(db) == 0:
+        return [], 0, "No embeddings yet — generate library embeddings first."
+    if not _oai_embed_enabled():
+        return [], 0, "Semantic search needs an OAI embedding model (set it in Settings)."
+    stored_tag = ii.embedding_model_tag(db)
+    if not (stored_tag and str(stored_tag).startswith("oai:")):
+        return [], 0, ("Stored embeddings are local (image-only). Regenerate with "
+                       "OAI to enable text search.")
+    if stored_tag != _oai_embed_tag():
+        return [], 0, (f"Stored embeddings use '{stored_tag}', not the current model. "
+                       "Regenerate to search.")
+    qv = _oai_embed_text(query)
+    if qv is None:
+        return [], 0, "Failed to embed the query text."
+
+    # Pull a generous ranked set, then apply folder/album scope + paging in
+    # Python so the ordering stays by similarity.
+    hits = ii.search_by_vector(db, qv, top_k=2000)
+    names = [n for n, _ in hits]
+    score = {n: s for n, s in hits}
+
+    if folder:
+        pref = folder.rstrip("/") + "/"
+        names = [n for n in names if n.startswith(pref)]
+    if album:
+        rows = db.execute(
+            "SELECT rel_path FROM album_members WHERE album=?", (album,)).fetchall()
+        members = {r["rel_path"] for r in rows}
+        names = [n for n in names if n in members]
+
+    total = len(names)
+    page_names = names[offset:offset + limit]
+    entries = _entries_for_files(page_names)
+    # _entries_for_files may reorder; restore similarity order and attach scores.
+    by_name = {e["filename"]: e for e in entries}
+    ordered = []
+    for n in page_names:
+        e = by_name.get(n)
+        if e:
+            e["score"] = score.get(n)
+            ordered.append(e)
+    return ordered, total, None
 
 # ── Albums ───────────────────────────────────────────────────────────────────
 # Album membership is stored in each image's XMP (mwg-coll:Collections) and only
@@ -6201,6 +6371,77 @@ def img_embed():
     total = ii.embedding_count(db)
     state["status_text"] = f"Image embeddings complete — {total} stored."
     return jsonify({"success": True, "embedded_now": n, "total_embeddings": total})
+
+
+@app.route("/api/library_embed", methods=["POST"])
+def library_embed():
+    """Generate (or regenerate) library embeddings for the Review tab.
+
+    Prefers the OAI embedding endpoint when a model is configured (image + text
+    share a space, enabling text search); otherwise falls back to the local CNN.
+
+    Body:
+      files?:  [rel_path, …]  — limit to these images (the multiselect case);
+                                omitted -> the whole eligible library
+      force?:  bool           — re-embed even if already cached for this model
+    """
+    body = request.json or {}
+    force = bool(body.get("force"))
+    sel = body.get("files") or None
+
+    if sel:
+        # keep only known-eligible files, preserve caller order
+        eligible = set(_eligible_files())
+        file_list = [f for f in sel if f in eligible]
+    else:
+        file_list = _eligible_files()
+    if not file_list:
+        return jsonify({"success": False, "error": "No eligible images found."})
+
+    state["discover_cancel"] = False
+    db = _db()
+    use_oai = _oai_embed_enabled()
+    try:
+        if use_oai:
+            tag = _oai_embed_tag()
+            n = ii.stage_embeddings_with(
+                db, file_list, _img_loader, _oai_embed_image, tag,
+                mtime_of=_img_mtime, force=force,
+                progress=_img_prog, should_stop=_img_stop)
+        else:
+            cnn_model = (state.get("grouping_cnn") or "").strip() or None
+            n = ii.stage_embeddings(
+                db, file_list, _img_loader, cnn_model=cnn_model,
+                mtime_of=_img_mtime, force=force,
+                progress=_img_prog, should_stop=_img_stop)
+    except Exception as e:
+        access_logger.exception("library_embed failed")
+        return jsonify({"success": False, "error": str(e)})
+
+    total = ii.embedding_count(db)
+    backend = "oai" if use_oai else "local"
+    text_search = bool(use_oai)
+    state["status_text"] = (
+        f"Library embeddings ({backend}) — {n} new, {total} stored.")
+    return jsonify({"success": True, "embedded_now": n,
+                    "total_embeddings": total, "backend": backend,
+                    "scope": "selected" if sel else "library",
+                    "text_search": text_search})
+
+
+@app.route("/api/embed_status")
+def embed_status():
+    """Small status probe for the Review-tab button: whether OAI embeddings are
+    configured (so text search is possible) and what's currently stored."""
+    db = _db()
+    stored_tag = ii.embedding_model_tag(db)
+    return jsonify({
+        "oai_available": _oai_embed_enabled(),
+        "oai_model": _oai_embed_model(),
+        "stored_model": stored_tag,
+        "stored_is_oai": bool(stored_tag and str(stored_tag).startswith("oai:")),
+        "total": ii.embedding_count(db),
+    })
 
 
 @app.route("/api/img_cluster", methods=["POST"])

@@ -5,22 +5,6 @@
       <div class="flex gap-2 items-center flex-wrap">
         <button id="btn_dedup" onclick="runDedup(false)"
           class="text-xs bg-indigo-600 hover:bg-indigo-500 font-bold px-2 py-1.5 rounded">Dupes</button>
-        
-        <button id="btn_step_depth" onclick="openPipeline('depth')"
-          title="Step 1 — generate Depth-Anything depth maps per image (cached, resumable)"
-          class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">1·Depth</button>
-        <button id="btn_step_embed" onclick="openPipeline('embed')"
-          title="Step 2 — generate one whole-image embedding each (powers search + clustering)"
-          class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">2·Embed</button>
-        <button id="btn_step_cluster" onclick="openPipeline('cluster')"
-          title="Step 3 — cluster visually-similar images (memory-flat)"
-          class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">3·Cluster</button>
-        <button id="btn_step_heur" onclick="openPipeline('heuristics')"
-          title="Step 4 — build per-cluster heuristic concept maps; surfaces outliers"
-          class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">4·Heuristics</button>
-        <button id="btn_step_detect" onclick="openPipeline('detect')"
-          title="Step 5 — detect objects scoped per cluster using the concept maps (bounded memory)"
-          class="text-xs bg-purple-800 hover:bg-purple-700 font-bold px-2 py-1.5 rounded">5·Detect</button>
         <span id="dedup_cache_badge" class="hidden text-[10px] text-gray-500 italic"></span>
         <button id="btn_settings"
           onclick="document.getElementById('ai_modal').classList.remove('hidden');window.pipelineEditorRefresh&&window.pipelineEditorRefresh()"

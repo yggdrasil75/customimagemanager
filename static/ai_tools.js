@@ -102,6 +102,7 @@ async function saveAiSettings(){
   const body={oai_endpoint:document.getElementById('cfg_endpoint').value,
       oai_key:document.getElementById('cfg_apikey').value,
       oai_model:document.getElementById('cfg_model').value,
+      oai_embed_model:document.getElementById('cfg_embed_model')?.value||'',
       yolo_size:document.getElementById('cfg_yolo_size').value,
       iqa_model:document.getElementById('cfg_iqa_model')?.value||'brisque',
       face_bg_enabled:!!document.getElementById('cfg_face_bg')?.checked,

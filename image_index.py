@@ -168,6 +168,56 @@ def stage_embeddings(db, file_list, loader, cnn_model=None, mtime_of=None,
     return embedded
 
 
+def stage_embeddings_with(db, file_list, loader, embed_fn, model_tag,
+                          mtime_of=None, force=False, progress=None,
+                          should_stop=None):
+    """Like stage_embeddings but delegates the actual vectorisation to `embed_fn`
+    (img_bgr -> L2-normalised float32 vector | None) and stamps rows with
+    `model_tag`. Used for the OAI embedding path so the stored `model` reflects
+    the OAI model (e.g. 'oai:clip-…'); resumability keys on that same tag, so
+    switching embedding models re-embeds cleanly. Returns count embedded."""
+    ensure_tables(db)
+    total = len(file_list)
+    done = 0
+    embedded = 0
+    pending = []
+    for rel_path in file_list:
+        if should_stop and should_stop():
+            break
+        done += 1
+        mt = mtime_of(rel_path) if mtime_of else None
+        if not force and _have_embedding(db, rel_path, model_tag, mt):
+            if progress and done % 50 == 0:
+                progress("embeddings", done, total, "cached")
+            continue
+        img = None
+        try:
+            img = loader(rel_path)
+        except Exception:
+            img = None
+        vec = embed_fn(img) if img is not None else None
+        if vec is not None:
+            vec = _normalise(np.asarray(vec, np.float32))
+            pending.append((rel_path, len(vec), _pack(vec), model_tag, mt, time.time()))
+            embedded += 1
+        if len(pending) >= 64:
+            _flush_embeddings(db, pending); pending = []
+        if progress:
+            progress("embeddings", done, total, "embedding")
+    if pending:
+        _flush_embeddings(db, pending)
+    return embedded
+
+
+def embedding_model_tag(db):
+    """The model tag currently stored (or None if the table is empty). Lets the
+    UI tell whether stored vectors are OAI (text-searchable) or local-CNN."""
+    row = db.execute(
+        "SELECT model FROM image_embeddings WHERE model IS NOT NULL LIMIT 1"
+    ).fetchone()
+    return row["model"] if row else None
+
+
 def _flush_embeddings(db, rows):
     db.executemany(
         "INSERT OR REPLACE INTO image_embeddings"
