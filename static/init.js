@@ -4,6 +4,7 @@
 loadFolders();
 loadImageAlbums();
 setPane('gallery');
+loadGallery();
 fetchDedupStatus();
 refreshReviewCount();
 

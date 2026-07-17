@@ -1,14 +1,12 @@
 // ── NR-IQA scan (folder / library) ───────────────────────────────────────────
 async function iqaScan(scope){
-  const ids=['btn_scan_folder','btn_scan_lib'];
-  const btns=ids.map(i=>document.getElementById(i));
-  const body=(scope==='folder' && currentFolder)?{folder:currentFolder}:{};
-  if(scope==='folder' && !currentFolder){
-    if(!confirm('No folder is selected. Scan the whole library instead?')) return;
-  }
+  // Only whole-library rating remains (the per-folder scan was removed along
+  // with its header button); any caller scope is treated as 'library'.
+  const tgt=document.getElementById('btn_scan_lib');
+  const btns=[tgt];
+  const body={};
   btns.forEach(b=>{if(b){b.disabled=true;}});
-  const tgt=document.getElementById(scope==='folder'?'btn_scan_folder':'btn_scan_lib');
-  const orig=tgt?tgt.innerHTML:''; if(tgt) tgt.innerHTML='Scanning…';
+  const orig=tgt?tgt.innerHTML:''; if(tgt) tgt.innerHTML='Rating…';
   try{
     const d=await fetch('/api/iqa_scan',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify(body)}).then(r=>r.json());
@@ -421,4 +419,29 @@ async function bulkDelete(){
   } else {
     alert('Bulk delete error.');
   }
+}
+
+// Rate just the selected images. Reuses /api/iqa_scan, which accepts an explicit
+// `filenames` list (overriding folder scope). This is the per-selection cousin
+// of the Review tab's "Rate library" button.
+async function bulkRate(){
+  const files=[...selectedFiles];
+  if(!files.length) return;
+  const btn=document.querySelector('#bulk_bar button[onclick="bulkRate()"]');
+  const orig=btn?btn.innerHTML:''; if(btn){ btn.disabled=true; btn.innerHTML='Rating…'; }
+  try{
+    const d=await fetch('/api/iqa_scan',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({filenames:files})}).then(r=>r.json());
+    if(!d.success){ alert('Rate selected failed: '+(d.error||'')); }
+    else{
+      const note=d.note?(' '+d.note):'';
+      document.getElementById('status_text').innerText=
+        `IQA: scored ${d.scored} of ${d.total}.${note}`;
+      // Refresh tiles so the new stars show; keep the current selection intact.
+      loadGallery();
+      if(currentFile && files.includes(currentFile)) selectFile(currentFile);
+    }
+  }catch(e){ alert('Network error during rating.'); }
+  finally{ if(btn){ btn.disabled=false; btn.innerHTML=orig; } }
 }

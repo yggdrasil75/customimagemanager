@@ -91,9 +91,9 @@ function _reviewThumb(it, queue){
        rounded-full bg-gray-900/90 border border-gray-600 text-[10px] text-gray-200">${badge}</span>` : '';
   const flagRing = queue==='delete' ? 'ring-1 ring-red-600' : '';
   return `<div class="relative flex-shrink-0 group" style="width:72px;height:72px"
-       title="${relAttr}\nclick to review this item">
+       title="${relAttr}\nclick to open in the editor">
       <div class="w-full h-full rounded bg-gray-900 bg-center bg-cover cursor-zoom-in ${flagRing}"
-           onclick="openReviewAt('${relAttr}')"
+           onclick="selectFile('${relAttr}')"
            style="background-image:url('${url}')"></div>
       ${badgeHtml}
     </div>`;
@@ -119,15 +119,6 @@ function _renderReviewGroup(g, items, total){
       </div>
       <div class="flex gap-1.5 flex-wrap">${chips}${moreTile}</div>
     </div>`;
-}
-
-// Open the full review modal starting on a specific file. Loads the whole queue
-// (as openReview does) then jumps the cursor to the requested item.
-async function openReviewAt(filename){
-  await openReview();
-  if(document.getElementById('review_modal').classList.contains('hidden')) return;
-  const idx=reviewItems.findIndex(x=>x.filename===filename);
-  if(idx>=0) showReviewItem(idx);
 }
 
 // Open the modal scoped to one queue (delete/box/tag). Reuses the modal's
