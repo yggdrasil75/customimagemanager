@@ -343,6 +343,57 @@ def sniff_ext(path: str) -> str | None:
     return None
 
 
+# Extensions that are interchangeable enough that a "mismatch" between the
+# filename and the sniffed content is not worth correcting. Sniffing can only
+# see a container's magic, not which codec is inside it, so these must not be
+# treated as a rename-worthy disagreement.
+_EXT_ALIASES = [
+    {'.jpg', '.jpeg'},
+    {'.aiff', '.aif'},
+    {'.mkv', '.webm'},                 # both are Matroska (EBML) containers
+    {'.mp4', '.m4v', '.mov'},          # all ISOBMFF ('ftyp')
+    {'.ogg', '.oga', '.opus', '.ogv'}, # all Ogg ('OggS')
+    {'.png', '.apng'},                 # APNG is a PNG with extra chunks
+]
+
+
+def ext_matches(declared: str, sniffed: str) -> bool:
+    """True if a declared extension and a sniffed one describe the same thing.
+    Treats known container/codec aliases (.jpg/.jpeg, .mkv/.webm, ...) as equal
+    so we never 'correct' an extension that was already right."""
+    d, s = (declared or '').lower(), (sniffed or '').lower()
+    if d == s:
+        return True
+    return any(d in grp and s in grp for grp in _EXT_ALIASES)
+
+
+def reconcile_ext(path: str, filename: str):
+    """Reconcile a filename's extension against the file's actual CONTENT.
+
+    Returns (corrected_filename, sniffed_ext, status) where status is one of:
+
+      'ok'          - the extension agrees with the bytes (or is an alias of
+                      them); filename is returned unchanged.
+      'corrected'   - the bytes say something else and we know what; the
+                      returned filename carries the real extension.
+      'unknown'     - the bytes match no format we support. filename is
+                      unchanged and sniffed_ext is None. The caller decides
+                      whether to reject (unknown declared ext) or proceed on
+                      trust (declared ext was already supported — e.g. a raw,
+                      which has no signature in our table).
+
+    This never renames on disk and never raises; it only reports.
+    """
+    declared = _ext(filename)
+    sniffed = sniff_ext(path)
+    if sniffed is None:
+        return filename, None, 'unknown'
+    if declared and ext_matches(declared, sniffed):
+        return filename, sniffed, 'ok'
+    base = os.path.splitext(filename)[0] if declared else filename
+    return (base or 'upload') + sniffed, sniffed, 'corrected'
+
+
 def related_exts(primary_path: str) -> list[str]:
     """Every extension that should move/delete together with an asset: its own
     primary extension plus the sidecars. Using this instead of a hard-coded

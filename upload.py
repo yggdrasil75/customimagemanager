@@ -11,13 +11,18 @@ import os
 import sys
 import time
 import argparse
+import getpass
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
 import requests
+
+# Must match auth.COOKIE_NAME on the server.
+COOKIE_NAME = "cim_session"
 
 # Streaming multipart: passing a file handle to requests' files= reads the WHOLE
 # file into memory to build the request body, which OOMs on large videos (a 13GB
@@ -31,6 +36,157 @@ try:
 except Exception:                              # pragma: no cover
     MultipartEncoder = None                    # type: ignore
     _HAVE_TOOLBELT = False
+
+
+class AuthError(Exception):
+    """Raised when the uploader cannot obtain or refresh a server session."""
+
+
+class Session:
+    """Holds the uploader's authenticated connection to the server.
+
+    The server (auth.py) uses cookie-based server-side sessions plus a CSRF
+    token that every non-GET request must echo in `X-CSRF-Token`. Uploads are
+    POSTs, so both are mandatory once auth is enabled.
+
+    Three things this has to get right:
+
+    * ONE session shared by all worker threads. requests.Session is documented
+      as not fully thread-safe, but our use is narrow (concurrent POSTs reading
+      an already-populated cookie jar), and sharing is what lets every worker
+      reuse the connection pool. All *mutation* (login / re-login) is done under
+      a lock, so workers never observe a half-updated jar.
+
+    * Re-login on expiry. A big bulk run can outlive the session (default 14
+      days is generous, but an admin can revoke, or the server can restart and
+      drop its session table). A 401 mid-run must not fail thousands of files,
+      so a worker that sees one triggers a single re-login and retries.
+
+    * Auth being OFF must still work. If the server reports auth disabled we
+      never send credentials and behave exactly like the old uploader.
+    """
+
+    def __init__(self, base_url: str, username: str = "", password: str = "",
+                 verify: bool = True):
+        self.base_url = base_url.rstrip("/")
+        self.username = username
+        self.password = password
+        self.http = requests.Session()
+        self.http.verify = verify
+        self.csrf = ""
+        self.auth_enabled = False
+        self.user = None
+        # Guards login/re-login. Workers hold it only briefly.
+        self._lock = threading.Lock()
+        # Bumped on every successful login. A worker records the value it used;
+        # if a re-login already happened while it was in flight, its 401 is
+        # stale and it just retries instead of logging in a second time.
+        self._generation = 0
+
+    # -- server capability ---------------------------------------------------
+    def probe(self) -> dict:
+        """Ask the server whether auth is on. Public endpoint, no session
+        needed. A server too old to have /api/auth/config (404) is treated as
+        auth-disabled, so this uploader still works against older deployments."""
+        url = f"{self.base_url}/api/auth/config"
+        try:
+            r = self.http.get(url, timeout=30)
+        except requests.exceptions.RequestException as e:
+            raise AuthError(f"cannot reach server at {self.base_url}: {e}")
+        if r.status_code == 404:
+            self.auth_enabled = False
+            return {"enabled": False, "mode": "none", "legacy": True}
+        try:
+            cfg = r.json()
+        except Exception:
+            raise AuthError(
+                f"unexpected response from {url} (HTTP {r.status_code}); "
+                "is --url pointing at the Media Manager?")
+        self.auth_enabled = bool(cfg.get("enabled"))
+        return cfg
+
+    # -- login ---------------------------------------------------------------
+    def login(self) -> None:
+        """Authenticate and store the session cookie + CSRF token."""
+        with self._lock:
+            self._login_locked()
+
+    def _login_locked(self) -> None:
+        if not self.username:
+            raise AuthError(
+                "server requires authentication but no username was given "
+                "(use --username, or set CIM_USERNAME)")
+        url = f"{self.base_url}/api/auth/login"
+        try:
+            r = self.http.post(
+                url, json={"username": self.username, "password": self.password},
+                timeout=60)
+        except requests.exceptions.RequestException as e:
+            raise AuthError(f"login request failed: {e}")
+
+        if r.status_code == 401:
+            raise AuthError(f"invalid credentials for user {self.username!r}")
+        if r.status_code != 200:
+            detail = ""
+            try:
+                detail = r.json().get("error", "")
+            except Exception:
+                detail = (r.text or "").strip()[:200]
+            raise AuthError(f"login failed (HTTP {r.status_code})"
+                            + (f": {detail}" if detail else ""))
+        try:
+            body = r.json()
+        except Exception:
+            raise AuthError("login succeeded but response was not JSON")
+
+        self.csrf = body.get("csrf", "")
+        self.user = body.get("user")
+        if not self.csrf:
+            raise AuthError("login succeeded but server returned no CSRF token")
+        if COOKIE_NAME not in self.http.cookies:
+            raise AuthError("login succeeded but no session cookie was set")
+        self._generation += 1
+
+    def relogin(self, seen_generation: int) -> bool:
+        """Re-authenticate after a 401, unless another thread already did.
+
+        Returns True if a usable session exists afterwards. `seen_generation` is
+        the value the caller captured before its request; if the current
+        generation has moved past it, someone else already refreshed and the
+        caller should simply retry.
+        """
+        with self._lock:
+            if self._generation != seen_generation:
+                return True          # already refreshed by another worker
+            try:
+                self._login_locked()
+                return True
+            except AuthError as e:
+                log_error(f"re-authentication failed: {e}")
+                return False
+
+    # -- request helpers -----------------------------------------------------
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    def headers(self) -> dict:
+        """Headers for a state-changing request (adds CSRF when authenticated)."""
+        return {"X-CSRF-Token": self.csrf} if self.csrf else {}
+
+    def logout(self) -> None:
+        """Best-effort session teardown so we don't leave rows in auth_sessions."""
+        if not self.csrf:
+            return
+        try:
+            self.http.post(f"{self.base_url}/api/auth/logout",
+                           headers=self.headers(), timeout=15)
+        except requests.exceptions.RequestException:
+            pass
+
+
+def log_error(msg: str) -> None:
+    print(f"  [!] {msg}", file=sys.stderr)
 
 
 class _StreamingMultipart:
@@ -75,28 +231,30 @@ class _StreamingMultipart:
         yield self._epilogue
 
 
-def _post_streaming(endpoint, filepath, fname, form_data, timeout):
-    """POST a file as a streamed multipart body without loading it into memory."""
+def _post_streaming(session, endpoint, filepath, fname, form_data, timeout):
+    """POST a file as a streamed multipart body without loading it into memory.
+
+    Goes through the Session's requests.Session so the auth cookie rides along,
+    and merges in the CSRF header the server demands on non-GET requests.
+    """
+    http = session.http
     if _HAVE_TOOLBELT:
         fh = open(filepath, "rb")
         try:
             fields = dict(form_data)
             fields["file"] = (fname, fh, "application/octet-stream")
             enc = MultipartEncoder(fields=fields)
-            return requests.post(
-                endpoint, data=enc,
-                headers={"Content-Type": enc.content_type},
-                timeout=timeout,
-            )
+            headers = {"Content-Type": enc.content_type}
+            headers.update(session.headers())
+            return http.post(endpoint, data=enc, headers=headers,
+                             timeout=timeout)
         finally:
             fh.close()
     body = _StreamingMultipart(form_data, "file", filepath, fname)
-    return requests.post(
-        endpoint, data=body,
-        headers={"Content-Type": body.content_type,
-                 "Content-Length": str(body.len)},
-        timeout=timeout,
-    )
+    headers = {"Content-Type": body.content_type,
+               "Content-Length": str(body.len)}
+    headers.update(session.headers())
+    return http.post(endpoint, data=body, headers=headers, timeout=timeout)
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -137,6 +295,10 @@ PERMANENT_ERROR_CODES = {
 TEMPORARY_ERROR_CODES = {
     "server_error",       # unhandled exception on server
 }
+# Auth failures are their own class: not permanent (a fresh login usually fixes
+# them) but not blind-retryable either — retrying without re-authenticating just
+# burns attempts. These are handled by re-login + retry inside upload_file.
+AUTH_STATUS_CODES = {401, 403}
 # Any HTTP 5xx or network error is also treated as temporary.
 
 
@@ -235,6 +397,7 @@ def upload_file(
     endpoint:        str,
     max_attempts:    int,
     initial_backoff: float,
+    session:         "Session",
 ) -> UploadResult:
     rel_dir = os.path.relpath(os.path.dirname(filepath), source_dir)
     folder  = rel_dir.replace('\\', '/') if rel_dir != "." else ""
@@ -257,8 +420,11 @@ def upload_file(
             # Stream the file off disk instead of buffering it — a 13GB video
             # uploads with ~1 MiB peak memory instead of loading fully (twice,
             # counting the server's copy on a shared box).
-            resp = _post_streaming(endpoint, filepath, fname, form_data,
-                                   timeout=180)
+            # Capture the session generation BEFORE sending, so a 401 can be
+            # told apart from "another thread already re-logged in".
+            gen = session.generation
+            resp = _post_streaming(session, endpoint, filepath, fname,
+                                   form_data, timeout=180)
 
             # Parse response
             try:
@@ -267,10 +433,17 @@ def upload_file(
                 body = {}
 
             if resp.status_code == 200 and body.get('success'):
+                # The server may have corrected a mislabeled extension; surface
+                # that rather than silently reporting a plain success.
+                corrected = body.get('corrected_extension') or {}
+                note = ""
+                if corrected:
+                    note = (f"  [type corrected {corrected.get('from') or '(none)'}"
+                            f" → {corrected.get('to')}]")
                 return UploadResult(
                     filepath=filepath,
                     outcome=Outcome.SUCCESS,
-                    message=f"→ {body.get('filename', fname)}",
+                    message=f"→ {body.get('filename', fname)}{note}",
                     attempts=attempt,
                 )
 
@@ -278,6 +451,26 @@ def upload_file(
             error_msg  = body.get('error', f"HTTP {resp.status_code}")
             detail     = body.get('detail', '')
             existing   = body.get('existing_file')
+
+            # Session expired / revoked / CSRF rejected. Re-authenticate once
+            # and retry — otherwise a long run that outlives its session would
+            # fail every remaining file. This MUST be checked before the generic
+            # 4xx branch below, which would otherwise mark it permanently
+            # skipped and silently drop the file.
+            if resp.status_code in AUTH_STATUS_CODES and session.auth_enabled:
+                if session.relogin(gen):
+                    last_error = f"session expired; re-authenticated ({error_msg})"
+                    last_code  = "auth_retry"
+                    # Retry immediately: this isn't server load, it's a
+                    # credential refresh, so backoff would just waste time.
+                    continue
+                return UploadResult(
+                    filepath=filepath,
+                    outcome=Outcome.FAILED,
+                    message="authentication failed and could not be renewed",
+                    error_code="auth_failed",
+                    attempts=attempt,
+                )
 
             # Duplicate — permanent, specific outcome
             if error_code in ('exact_duplicate', 'filename_exists'):
@@ -402,11 +595,45 @@ def bulk_upload(
     initial_backoff: float,
     verbose_dupes:   bool,
     aggressive:      bool = False,
+    username:        str = "",
+    password:        str = "",
+    verify_tls:      bool = True,
 ) -> int:
     source_dir = os.path.abspath(source_dir)
     if not os.path.isdir(source_dir):
         print(f"Error: '{source_dir}' is not a directory.")
         return 2
+
+    # Establish the session BEFORE walking the tree, so a bad password fails in
+    # one second instead of after enumerating 200k files and then 401-ing on
+    # every one of them.
+    session = Session(server_url, username, password, verify=verify_tls)
+    try:
+        cfg = session.probe()
+    except AuthError as e:
+        print(f"Error: {e}")
+        return 2
+
+    if session.auth_enabled:
+        if cfg.get("needs_bootstrap"):
+            print("[*] Server has no users yet — this login will create the "
+                  "initial admin account.")
+        if not session.username:
+            print("Error: server requires authentication. Pass --username "
+                  "(and --password, or set CIM_PASSWORD, or be prompted).")
+            return 2
+        try:
+            session.login()
+        except AuthError as e:
+            print(f"Error: {e}")
+            return 2
+        who = (session.user or {}).get("username", session.username)
+        admin = " (admin)" if (session.user or {}).get("is_admin") else ""
+        print(f"[*] Authenticated as {who}{admin} (mode: {cfg.get('mode','?')}).")
+    elif username:
+        # Credentials supplied but the server doesn't want them. Say so rather
+        # than silently ignoring the flag — it usually means --url is wrong.
+        print("[*] Server has authentication disabled; ignoring --username.")
 
     classes_map = load_classes(source_dir)
     files = [
@@ -439,7 +666,7 @@ def bulk_upload(
         futures = {
             ex.submit(
                 upload_file, fp, source_dir, classes_map,
-                endpoint, max_attempts, initial_backoff
+                endpoint, max_attempts, initial_backoff, session
             ): fp
             for fp in files
         }
@@ -453,6 +680,9 @@ def bulk_upload(
             fname = os.path.basename(r.filepath)
             atts  = f" (attempt {r.attempts})" if r.attempts > 1 else ""
             print(f"  [{completed:>{len(str(total))}}/{total}] {icon} {fname}{atts}  {r.message}")
+
+    # Release the server-side session instead of leaving it to expire.
+    session.logout()
 
     print_summary(results, verbose_dupes)
 
@@ -485,7 +715,51 @@ def main() -> None:
         help="Upload every file (except sidecars), including ones with a wrong "
              "or missing extension, and let the server try to convert them. "
              "Useful for recovering misnamed media.")
+
+    auth_group = parser.add_argument_group("authentication")
+    auth_group.add_argument("--username", default=os.environ.get("CIM_USERNAME", ""),
+        help="Username for servers with authentication enabled. "
+             "Defaults to $CIM_USERNAME.")
+    auth_group.add_argument("--password", default=None,
+        help="Password. Prefer $CIM_PASSWORD or the interactive prompt — a "
+             "password passed here is visible in ps output and shell history.")
+    auth_group.add_argument("--password-file", default=None,
+        help="Read the password from this file (first line). Safer than "
+             "--password for scripts and cron jobs.")
+    auth_group.add_argument("--no-verify-tls", action="store_true",
+        help="Skip TLS certificate verification (self-signed https servers).")
     args = parser.parse_args()
+
+    # Password resolution, most to least secure:
+    #   --password-file  ->  $CIM_PASSWORD  ->  --password  ->  interactive
+    # Only prompt when we have a username, a tty, and nothing else supplied;
+    # otherwise a cron job would hang forever waiting on stdin.
+    password = ""
+    if args.password_file:
+        try:
+            with open(args.password_file, "r", encoding="utf-8") as fh:
+                password = fh.readline().strip()
+        except OSError as e:
+            print(f"Error: cannot read --password-file: {e}")
+            sys.exit(2)
+    elif os.environ.get("CIM_PASSWORD"):
+        password = os.environ["CIM_PASSWORD"]
+    elif args.password is not None:
+        password = args.password
+    elif args.username and sys.stdin.isatty():
+        try:
+            password = getpass.getpass(f"Password for {args.username}: ")
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            sys.exit(2)
+
+    if args.no_verify_tls:
+        # Silence the per-request InsecureRequestWarning spam; the user opted in.
+        try:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        except Exception:
+            pass
 
     sys.exit(bulk_upload(
         source_dir      = args.source_dir,
@@ -495,6 +769,9 @@ def main() -> None:
         initial_backoff = args.backoff,
         verbose_dupes   = args.verbose_duplicates,
         aggressive      = args.aggressive,
+        username        = args.username,
+        password        = password,
+        verify_tls      = not args.no_verify_tls,
     ))
 
 

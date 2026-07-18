@@ -24,6 +24,7 @@ import tempfile, io, time, random, json, threading, logging
 import requests, base64, re, pyexiv2, xml.sax.saxutils as saxutils
 import hashlib, sqlite3, uuid, math, mimetypes, functools
 import urllib.request, urllib.parse
+import atexit
 from datetime import datetime
 from collections import OrderedDict, Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -180,15 +181,67 @@ def _decode_cached(path, mtime):
 # Each thread gets its own connection (check_same_thread=False + thread-local).
 _db_local = threading.local()
 
+# Every open connection we've handed out, so stragglers can be closed at exit.
+# NOTE: sqlite3.Connection is not weakref-able, so this is a strong-ref dict
+# keyed by id(); _db_close() removes entries, keeping it bounded by the number
+# of *live* connections rather than growing with every thread ever created.
+_all_conns = {}
+_all_conns_lock = threading.Lock()
+
 def _db() -> sqlite3.Connection:
-    if not getattr(_db_local, 'conn', None):
+    conn = getattr(_db_local, 'conn', None)
+    if conn is None:
         conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA cache_size=-32000")   # 32 MB page cache
         conn.row_factory = sqlite3.Row
         _db_local.conn = conn
-    return _db_local.conn
+        with _all_conns_lock:
+            _all_conns[id(conn)] = conn
+    return conn
+
+def _db_close():
+    """Release this thread's connection.
+
+    MUST be called by any pooled/short-lived worker thread that touched _db().
+    A thread-local connection is otherwise orphaned when its thread dies -- the
+    Connection object stays alive but unreachable, holding fds for the db, the
+    -wal and the -shm file until process exit.
+    """
+    conn = getattr(_db_local, 'conn', None)
+    if conn is not None:
+        _db_local.conn = None
+        with _all_conns_lock:
+            _all_conns.pop(id(conn), None)
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def _db_release_pool(ex, n_workers):
+    """Close the DB connection held by each worker thread in `ex`.
+
+    ex.map over a range >= n_workers doesn't *guarantee* every thread runs the
+    finalizer, but ThreadPoolExecutor hands work to idle threads round-robin, so
+    oversubscribing by 4x reliably drains a pool this size. Anything missed is
+    caught by the atexit sweep.
+    """
+    try:
+        list(ex.map(lambda _: _db_close(), range(n_workers * 4)))
+    except Exception:
+        pass
+
+@atexit.register
+def _db_close_all():
+    with _all_conns_lock:
+        conns = list(_all_conns.values())
+        _all_conns.clear()
+    for c in conns:
+        try:
+            c.close()
+        except Exception:
+            pass
 
 def _init_db():
     db = _db()
@@ -421,6 +474,11 @@ def _init_db():
         # Both read from XMP on ingest but editable in-app; empty = unset.
         "ALTER TABLE files ADD COLUMN event TEXT DEFAULT ''",
         "ALTER TABLE files ADD COLUMN catalog_sets TEXT DEFAULT ''",
+        # Last XMP/sidecar write error for this file, NULL when the most recent
+        # write succeeded. Exists because a failed metadata write was previously
+        # only ever reported to a log nobody reads — this makes the failure
+        # queryable, survives a restart, and lets the UI badge affected files.
+        "ALTER TABLE files ADD COLUMN metadata_error TEXT DEFAULT NULL",
         # AI-generated marker. Set to 1 when the file's IPTC Extension metadata
         # carries AI-provenance fields (AIPrompt*/AISystem*) or a synthetic
         # DigitalSourceType. Simple boolean — we don't store the prompt/system
@@ -1292,24 +1350,28 @@ def _build_index_background():
     state["status_text"] = "Indexing library…"
     count = 0
     batch = []
-    for root, dirs, filenames in os.walk(MEDIA_DIR):
-        dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'runs']
-        for f in filenames:
-            if f.startswith('.') or not mt.is_library_file(f):
-                continue
-            rel = os.path.relpath(os.path.join(root, f), MEDIA_DIR).replace('\\','/')
-            batch.append(rel)
-            if len(batch) >= 64:
-                with ThreadPoolExecutor(max_workers=8) as ex:
+    # One pool for the entire walk. Creating a pool per 64-file batch spawned a
+    # fresh set of 8 threads each time; every one opened its own thread-local
+    # SQLite connection that was never closed. At 500k files that was ~62k
+    # orphaned connections (x3 fds each under WAL) -> "too many open files".
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for root, dirs, filenames in os.walk(MEDIA_DIR):
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'runs']
+            for f in filenames:
+                if f.startswith('.') or not mt.is_library_file(f):
+                    continue
+                rel = os.path.relpath(os.path.join(root, f), MEDIA_DIR).replace('\\','/')
+                batch.append(rel)
+                if len(batch) >= 64:
                     for updated in ex.map(_index_file, batch):
                         if updated:
                             count += 1
-                batch = []
-                state["status_text"] = f"Indexing… {count} updated so far"
-    if batch:
-        with ThreadPoolExecutor(max_workers=8) as ex:
+                    batch = []
+                    state["status_text"] = f"Indexing… {count} updated so far"
+        if batch:
             for updated in ex.map(_index_file, batch):
                 if updated: count += 1
+        _db_release_pool(ex, 8)
     # Self-heal: drop DB rows whose backing file no longer exists on disk.
     try:
         removed = _reconcile_deleted()
@@ -2350,8 +2412,27 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
                f'xmlns:dc="http://purl.org/dc/elements/1.1/"{reg_ns}{mm_ns}{prism_ns}{coll_ns}>'
                f'{subj}{desc_x}{reg_x}{mm_x}{prism_x}{coll_x}'
                f'</rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>')
-        with open(xmp_path, 'w', encoding='utf-8') as f:
-            f.write(xmp)
+        # Write the sidecar ATOMICALLY. The old in-place open('w') truncated the
+        # existing XMP before writing; if anything failed mid-write (disk full,
+        # encode error, kill) the file was left truncated or empty and the
+        # image's metadata was simply gone. Write to a temp file in the same
+        # directory, then os.replace() — either the old packet survives intact or
+        # the new one lands whole, never a half of either.
+        _xmp_dir = os.path.dirname(xmp_path) or "."
+        _fd, _tmp_xmp = tempfile.mkstemp(suffix=".xmp.tmp", dir=_xmp_dir)
+        try:
+            with os.fdopen(_fd, 'w', encoding='utf-8') as f:
+                f.write(xmp)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(_tmp_xmp, xmp_path)
+            _tmp_xmp = None
+        finally:
+            if _tmp_xmp and os.path.exists(_tmp_xmp):
+                try:
+                    os.remove(_tmp_xmp)
+                except OSError:
+                    pass
         rel = os.path.relpath(filepath, MEDIA_DIR).replace('\\','/')
         unconf = sum(1 for r in regions if not r.get('confirmed', True))
         analysis_txt = json.dumps(analysis) if analysis else ''
@@ -2373,10 +2454,76 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
         # correct without waiting for a rescan. The sidecar stays authoritative.
         _sync_album_cache(rel, albums)
         _db().commit()
+        _clear_metadata_failure(filepath)   # this file is healthy again
         return True
     except Exception as e:
-        access_logger.error(f"write_metadata {filepath}: {e}")
+        # This used to be a one-line log and a `False` that ~every caller threw
+        # away, so a failed metadata write looked exactly like a successful one
+        # from the UI. Now: full traceback (so the cause is diagnosable rather
+        # than just "it broke"), and the failure is recorded where something
+        # other than a log reader will see it.
+        access_logger.error(
+            f"write_metadata FAILED for {filepath}: {type(e).__name__}: {e}",
+            exc_info=True)
+        _record_metadata_failure(filepath, e)
         return False
+
+
+# ── metadata-write failure surface ────────────────────────────────────────────
+# Nobody reads logs. A failed XMP write therefore has to be visible somewhere the
+# app itself looks, so the UI can flag it and a later retry can find it.
+_metadata_failures = {}
+_metadata_failures_lock = threading.Lock()
+_METADATA_FAILURE_MAX = 500
+
+
+def _record_metadata_failure(filepath, exc):
+    """Remember that an XMP write failed for this file. Best-effort and never
+    raises — it runs inside an exception handler."""
+    try:
+        rel = os.path.relpath(filepath, MEDIA_DIR).replace('\\', '/')
+    except Exception:
+        rel = str(filepath)
+    entry = {"rel_path": rel, "error": f"{type(exc).__name__}: {exc}",
+             "when": time.time()}
+    try:
+        with _metadata_failures_lock:
+            if len(_metadata_failures) >= _METADATA_FAILURE_MAX:
+                _metadata_failures.pop(next(iter(_metadata_failures)), None)
+            _metadata_failures[rel] = entry
+    except Exception:
+        pass
+    # Also mark the row so the gallery can render a warning badge without
+    # consulting in-process state (survives a restart; DB is the durable copy).
+    try:
+        _db().execute(
+            "UPDATE files SET metadata_error=? WHERE rel_path=?",
+            (entry["error"], rel))
+        _db().commit()
+    except Exception:
+        pass          # column may not exist yet on an old DB; log already fired
+
+
+def _clear_metadata_failure(filepath):
+    """Drop a recorded failure after a subsequent write succeeds."""
+    try:
+        rel = os.path.relpath(filepath, MEDIA_DIR).replace('\\', '/')
+    except Exception:
+        return
+    with _metadata_failures_lock:
+        _metadata_failures.pop(rel, None)
+    try:
+        _db().execute(
+            "UPDATE files SET metadata_error=NULL WHERE rel_path=?", (rel,))
+    except Exception:
+        pass
+
+
+def metadata_failures():
+    """Current unresolved metadata-write failures, newest first."""
+    with _metadata_failures_lock:
+        return sorted(_metadata_failures.values(),
+                      key=lambda e: e["when"], reverse=True)
 
 def _sync_yolo(filepath, regions):
     # Only CONFIRMED boxes become YOLO training labels.
@@ -3824,6 +3971,35 @@ def exif_editor_page():
     )
     return render_template_string(shell)
 
+@app.route("/api/metadata/failures")
+def api_metadata_failures():
+    """List files whose most recent XMP/sidecar write failed.
+
+    The point of this endpoint is that metadata write failures are otherwise
+    invisible: write_metadata returns False and almost every caller ignores it,
+    so the UI happily reports 'saved' for a file whose sidecar never landed.
+    Polling this lets the frontend show a real warning.
+
+    Merges the durable DB record with in-process state so failures are still
+    reported if the DB column is missing on an older database.
+    """
+    out = {}
+    try:
+        rows = _db().execute(
+            "SELECT rel_path, metadata_error FROM files "
+            "WHERE metadata_error IS NOT NULL AND metadata_error != ''"
+        ).fetchall()
+        for r in rows:
+            out[r["rel_path"]] = {"rel_path": r["rel_path"],
+                                  "error": r["metadata_error"], "when": None}
+    except Exception as e:
+        access_logger.warning(f"metadata failures query: {e}")
+    for e in metadata_failures():
+        out[e["rel_path"]] = e
+    items = sorted(out.values(), key=lambda x: (x["when"] or 0), reverse=True)
+    return jsonify({"success": True, "count": len(items), "failures": items})
+
+
 @app.route("/api/exif/schema")
 def api_exif_schema():
     """Return the full EXIF field schema (no file needed)."""
@@ -4568,6 +4744,9 @@ def api_upload():
     fname    = secure_filename(file.filename)
     in_ext   = os.path.splitext(fname)[1].lower()
     unknown_type = in_ext not in mt.UPLOAD_EXTS
+    # Set to the original (wrong) extension if content-sniffing had to correct
+    # it; reported back to the client so the rename is visible, not silent.
+    corrected_from = None
 
     with tempfile.TemporaryDirectory() as tmp:
         # Save first (streamed to disk by Werkzeug), so an unknown/absent
@@ -4576,19 +4755,47 @@ def api_upload():
         orig = os.path.join(tmp, fname or "upload.bin")
         file.save(orig)
 
-        if unknown_type:
-            sniffed = mt.sniff_ext(orig)
-            if sniffed is None:
-                return jsonify({"success": False, "error_code": "conversion_failed",
-                                "error": f"Unsupported file type '{in_ext}'.",
-                                "detail": "Accepted: images, gifs (→ animated jxl), "
-                                          "camera raws (→ developed to jxl), "
-                                          "video, and audio files. Content did "
-                                          "not match any known type either."}), 422
-            # Correct the name/extension to the sniffed real type and carry on.
-            base = os.path.splitext(fname)[0] if in_ext else fname
-            fname  = (base or "upload") + sniffed
+        # ALWAYS reconcile the declared extension against the actual bytes —
+        # not just when the extension is unrecognised. A file named ".png" that
+        # is really a JPEG has a perfectly valid-looking extension, so the old
+        # `if unknown_type:` guard skipped sniffing entirely and handed the
+        # mislabeled file straight to cjxl, which dies with "The file contains
+        # data of an unknown image type". Correcting here means the type is
+        # right before any downstream tool (cjxl, pyexiv2, the XMP writer) ever
+        # sees it, and the mismatch is reported instead of failing obscurely.
+        fixed_name, sniffed, sniff_status = mt.reconcile_ext(orig, fname)
+
+        if sniff_status == 'unknown' and unknown_type:
+            # Extension is unsupported AND the content matches nothing we know.
+            # Nothing to fall back on: reject cleanly.
+            return jsonify({"success": False, "error_code": "conversion_failed",
+                            "error": f"Unsupported file type '{in_ext}'.",
+                            "detail": "Accepted: images, gifs (→ animated jxl), "
+                                      "camera raws (→ developed to jxl), "
+                                      "video, and audio files. Content did "
+                                      "not match any known type either."}), 422
+
+        if sniff_status == 'unknown':
+            # Declared extension IS supported but has no signature in our table.
+            # Camera raws are the normal case here (TIFF-ish, vendor-specific),
+            # so proceed on the declared type — but leave a trail, because this
+            # is also what a truncated or corrupt upload looks like.
+            access_logger.info(
+                f"upload: could not sniff content of '{fname}'; "
+                f"proceeding on declared extension '{in_ext}'")
+
+        elif sniff_status == 'corrected':
+            # The bytes disagree with the name and we know what they really are.
+            # Rename to the true type so the rest of the pipeline routes it
+            # correctly, and record it loudly — a silent rename is how "why is
+            # my png a jpeg" tickets happen.
+            access_logger.warning(
+                f"upload: '{fname}' is labeled '{in_ext or '(none)'}' but its "
+                f"content is '{sniffed}'; correcting extension to '{sniffed}'")
+            corrected_from = in_ext
+            fname  = fixed_name
             in_ext = sniffed
+            unknown_type = False
             new_orig = os.path.join(tmp, fname)
             if new_orig != orig:
                 os.rename(orig, new_orig)
@@ -4730,7 +4937,11 @@ def api_upload():
                                      daemon=True).start()
                 except Exception as e:
                     access_logger.warning(f"music reindex after upload: {e}")
-                return jsonify({"success": True, "filename": rel_path}), 200
+                resp = {"success": True, "filename": rel_path}
+                if corrected_from is not None:
+                    resp["corrected_extension"] = {"from": corrected_from,
+                                                   "to": in_ext}
+                return jsonify(resp), 200
 
             # We just (re)compressed to JXL, so we can compute the average bits
             # per pixel of the result and record it in EXIF CompressedBitsPerPixel
@@ -4759,7 +4970,11 @@ def api_upload():
             up_folder = os.path.dirname(rel_path)
             if up_folder and _load_comic_json(up_folder) is not None:
                 _set_comic_membership(up_folder)
-            return jsonify({"success": True, "filename": rel_path}), 200
+            resp = {"success": True, "filename": rel_path}
+            if corrected_from is not None:
+                resp["corrected_extension"] = {"from": corrected_from,
+                                               "to": in_ext}
+            return jsonify(resp), 200
 
         except Exception as e:
             access_logger.error(f"Upload error for {fname}: {e}", exc_info=True)
@@ -5523,6 +5738,7 @@ def dedup():
             state["status_text"] = f"Dedup 1/4: Indexing {len(stale)} new/changed files…"
             with ThreadPoolExecutor(max_workers=8) as ex:
                 list(ex.map(_index_file, stale))
+                _db_release_pool(ex, 8)
 
         hashed_count = _db().execute(
             "SELECT COUNT(*) FROM files WHERE phash8 IS NOT NULL").fetchone()[0]
@@ -5644,6 +5860,7 @@ def dedup():
                     idxs, scores = result
                     verified_members.append([rows[i]["rel_path"] for i in idxs])
                     verified_scores.append(scores)
+            _db_release_pool(ex, 4)
 
         # Final checkpoint — verified groups with scores
         _dedup_save_groups(
