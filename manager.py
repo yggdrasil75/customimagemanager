@@ -142,6 +142,16 @@ state = {
     "body_enabled": False,         # embed person boxes with torchreid re-id and
                                    # cluster bodies + associate them with faces
     "body_cluster_eps": 0.0,       # 0 -> use bodies.py default for the embed mode
+    "object_proposals": "sam",  # proposer for object discovery/grouping:
+                                   # "heuristic" | "sam". Read by /api/state and
+                                   # persisted by save_config(), so it must exist
+                                   # up front -- the call sites use state.get()
+                                   # with a "heuristic" fallback, so that is the
+                                   # default here too.
+    "model_groups": {},            # filled in by populate_model_selector() at
+                                   # startup; declared here so /api/state and
+                                   # save_config() can never KeyError on a
+                                   # request that lands before/without it.
     "pose_kind": "body",
     "pose_size": "n",
     "oai_system_prompt": "You are an expert image analysis AI. Provide concise, highly detailed, and accurate responses.",
@@ -1358,7 +1368,7 @@ def save_config():
             "body_enabled","body_cluster_eps","object_proposals",
             "iqa_model","auth"]
     with open(CFG_FILE, 'w') as f:
-        json.dump({k: state[k] for k in keys}, f, indent=2)
+        json.dump({k: state[k] for k in keys if k in state}, f, indent=2)
 
 def load_classes():
     p = os.path.join(MEDIA_DIR, "classes.txt")
@@ -4298,7 +4308,10 @@ def api_body_split():
 
 @app.route("/api/state")
 def api_state():
-    return jsonify({k: state[k] for k in
+    # state.get(), not state[k]: this endpoint is the whole UI's bootstrap, so a
+    # single missing/renamed setting should degrade one control, not 500 the
+    # entire front-end.
+    return jsonify({k: state.get(k) for k in
         ("classes","available_models","status_text","remote_ip",
          "oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions",
          "autotag_enabled","pipeline_tree","yolo_size","pose_kind","pose_size",
