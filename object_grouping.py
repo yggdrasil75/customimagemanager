@@ -241,14 +241,57 @@ def depth_map_batch(imgs_bgr, model_path=None):
         return [depth_map(im, model_path) for im in imgs_bgr]
 
 
-def propose_regions(img_bgr, depth=None, max_regions=40):
-    """Find candidate object boxes without a trained model.
+# Proposal source: "heuristic" (saliency+contours, the original) or "sam"
+# (Segment Anything, sharper boundaries). Set once by the discovery entrypoints
+# from the `object_proposals` setting; propose_regions dispatches on it so no
+# call site in discover_stages has to change. Kept module-level (not a param)
+# precisely so the many existing propose_regions() callers keep working.
+_PROPOSAL_SOURCE = "heuristic"
 
-    Combines a saliency-ish foreground mask with contour detection. When a depth
-    map is supplied, depth discontinuities sharpen object boundaries (an object
-    sitting in front of a background pops out as a depth step). Returns a list of
-    normalised boxes [{cx,cy,w,h, area, depth_mean}], already filtered by
-    MIN_BOX_PX. Never raises."""
+
+def set_proposal_source(source):
+    """Select the region-proposal backend for subsequent propose_regions calls.
+    'sam' routes through sam_proposals (falling back to heuristic if SAM is
+    unavailable); anything else uses the built-in heuristic proposer."""
+    global _PROPOSAL_SOURCE
+    _PROPOSAL_SOURCE = "sam" if (source or "").lower() == "sam" else "heuristic"
+    return _PROPOSAL_SOURCE
+
+
+def proposal_source():
+    return _PROPOSAL_SOURCE
+
+
+def propose_regions(img_bgr, depth=None, max_regions=40, seed_boxes=None):
+    """Find candidate object boxes without a trained detector.
+
+    Dispatches to the configured proposal source. With the SAM source, masks
+    respect object boundaries (far cleaner crops than the heuristic); YOLO
+    `seed_boxes` (known-class detections) are kept verbatim and de-duplicated
+    against SAM masks so YOLO covers what it knows and SAM covers the long tail.
+
+    Returns normalised boxes [{cx,cy,w,h, area, depth_mean, _px}], filtered by
+    MIN_BOX_PX, biggest first. Never raises."""
+    if _PROPOSAL_SOURCE == "sam":
+        try:
+            import sam_proposals
+            return sam_proposals.propose(img_bgr, depth=depth,
+                                         max_regions=max_regions,
+                                         seed_boxes=seed_boxes)
+        except Exception:
+            # Any import/runtime problem with SAM must never break discovery;
+            # fall through to the heuristic proposer below.
+            pass
+    return _propose_regions_heuristic(img_bgr, depth=depth,
+                                      max_regions=max_regions,
+                                      seed_boxes=seed_boxes)
+
+
+def _propose_regions_heuristic(img_bgr, depth=None, max_regions=40,
+                               seed_boxes=None):
+    """Original saliency + contour proposer. When `seed_boxes` (YOLO detections)
+    are supplied they are emitted verbatim and heuristic boxes overlapping them
+    are dropped, mirroring the SAM path's seeding behaviour."""
     if img_bgr is None or not _HAVE_CV2:
         return []
     try:
@@ -284,6 +327,57 @@ def propose_regions(img_bgr, depth=None, max_regions=40):
                           "w": w / W, "h": h / H,
                           "area": area / img_area, "depth_mean": dmean,
                           "_px": (x, y, x2, y2)})
+
+        # YOLO seed boxes: emit verbatim as high-confidence proposals and drop
+        # any heuristic box that overlaps a seed (same object). Mirrors the SAM
+        # path so "YOLO handles what it knows" holds regardless of source.
+        seed_px = []
+        if seed_boxes:
+            for s in seed_boxes:
+                try:
+                    sx1 = int(round((s["cx"] - s["w"] / 2) * W))
+                    sy1 = int(round((s["cy"] - s["h"] / 2) * H))
+                    sx2 = int(round((s["cx"] + s["w"] / 2) * W))
+                    sy2 = int(round((s["cy"] + s["h"] / 2) * H))
+                except Exception:
+                    continue
+                sx1, sy1 = max(0, sx1), max(0, sy1)
+                sx2, sy2 = min(W, sx2), min(H, sy2)
+                if not _box_ok(sx1, sy1, sx2, sy2):
+                    continue
+                seed_px.append(((sx1, sy1, sx2, sy2),
+                                s.get("class_name") or s.get("seed_class")))
+
+            def _iou(a, b):
+                ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+                iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+                inter = ix * iy
+                if inter <= 0:
+                    return 0.0
+                ua = ((a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter)
+                return inter / ua if ua > 0 else 0.0
+
+            if seed_px:
+                boxes = [b for b in boxes
+                         if all(_iou(b["_px"], sp) <= 0.55 for sp, _c in seed_px)]
+                seed_dicts = []
+                for (sx1, sy1, sx2, sy2), scls in seed_px:
+                    sa = (sx2 - sx1) * (sy2 - sy1)
+                    if sa > 0.9 * img_area:
+                        continue
+                    sd = (float(depth[sy1:sy2, sx1:sx2].mean())
+                          if depth is not None else 0.0)
+                    d = {"cx": (sx1 + sx2) / 2 / W, "cy": (sy1 + sy2) / 2 / H,
+                         "w": (sx2 - sx1) / W, "h": (sy2 - sy1) / H,
+                         "area": sa / img_area, "depth_mean": sd,
+                         "_px": (sx1, sy1, sx2, sy2)}
+                    if scls:
+                        # Mark provenance so downstream can tell a known-class
+                        # YOLO seed from a discovered proposal.
+                        d["seed_class"] = scls
+                    seed_dicts.append(d)
+                boxes = seed_dicts + boxes
+
         # biggest first, capped
         boxes.sort(key=lambda b: b["area"], reverse=True)
         return boxes[:max_regions]

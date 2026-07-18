@@ -444,7 +444,7 @@ def stage_depth(db, sig, file_list, loader, depth_model=None,
 
 def stage_boxes(db, sig, file_list, loader, tag_fn=None, cnn_model=None,
                 max_regions=15, work_px=og._WORK, skip=None, progress=None,
-                should_stop=None):
+                should_stop=None, seed_fn=None):
     """Propose regions and embed them for every image, using cached depth.
 
     max_regions defaults to 15 (not 40): most of the 40 proposals were tiny
@@ -454,6 +454,11 @@ def stage_boxes(db, sig, file_list, loader, tag_fn=None, cnn_model=None,
     rel_paths (junk flagged by the quality stage) recorded as empty rows so they
     never enter clustering. Iterating the full file_list keeps chunk offsets
     stable for resume. Resumable.
+
+    `seed_fn(rel_path) -> [box dicts]` optionally supplies known-class (YOLO)
+    detections for an image. Those boxes are proposed verbatim and suppress
+    overlapping generated proposals, so YOLO covers the classes it knows and the
+    proposer only has to cover the long tail.
     """
     _ensure_tables(db)
     skip = skip or set()
@@ -488,7 +493,15 @@ def stage_boxes(db, sig, file_list, loader, tag_fn=None, cnn_model=None,
                 rows.append((fn, 0, "[]", b"", 0, "[]"))
                 continue
             depth = _load_depth_cached(sig, fn, work_px)
-            boxes = og.propose_regions(work, depth=depth, max_regions=max_regions)
+            seeds = None
+            if seed_fn:
+                try:
+                    seeds = seed_fn(fn) or None
+                except Exception:
+                    seeds = None
+            boxes = og.propose_regions(work, depth=depth,
+                                       max_regions=max_regions,
+                                       seed_boxes=seeds)
             if boxes:
                 embs = og.embed_regions(work, boxes, depth=depth,
                                         cnn_model=cnn_model)
@@ -681,7 +694,7 @@ def stage_assign(db, sig, progress=None):
 def run_all(db, file_list, loader, tag_fn=None, depth_model=None,
             cnn_model=None, max_regions=15, eps=0.18, min_cluster=2,
             brisque_bad=None, quality_bad=None, iqa_model=None, write_flags=True,
-            progress=None, should_stop=None,
+            progress=None, should_stop=None, seed_fn=None,
             stages=("quality", "depth", "boxes", "cluster", "assign")):
     """Run the requested stages in order. Each is independently resumable, so
     calling run_all again after a crash continues where it stopped. Returns the
@@ -708,7 +721,8 @@ def run_all(db, file_list, loader, tag_fn=None, depth_model=None,
     if "boxes" in stages:
         ok = stage_boxes(db, sig, file_list, loader, tag_fn=tag_fn,
                          cnn_model=cnn_model, max_regions=max_regions,
-                         skip=skip, progress=progress, should_stop=should_stop)
+                         skip=skip, progress=progress, should_stop=should_stop,
+                         seed_fn=seed_fn)
         if not ok:
             return None
     if "cluster" in stages:

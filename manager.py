@@ -1355,7 +1355,7 @@ def save_config():
     keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt",
             "oai_actions","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size",
             "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","face_cluster_eps",
-            "body_enabled","body_cluster_eps",
+            "body_enabled","body_cluster_eps","object_proposals",
             "iqa_model","auth"]
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys}, f, indent=2)
@@ -4303,7 +4303,8 @@ def api_state():
          "oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions",
          "autotag_enabled","pipeline_tree","yolo_size","pose_kind","pose_size",
          "face_bg_enabled","face_bg_custom","face_model","face_size","person_model",
-         "face_cluster_eps","body_enabled","body_cluster_eps","model_groups","iqa_model")})
+         "face_cluster_eps","body_enabled","body_cluster_eps","object_proposals",
+         "model_groups","iqa_model")})
 
 @app.route("/api/update_settings", methods=["POST"])
 def update_settings():
@@ -4317,7 +4318,7 @@ def update_settings():
         _face_cache["model"] = None
     for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","pipeline_tree","yolo_size","pose_kind","pose_size",
               "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","face_cluster_eps",
-              "body_enabled","body_cluster_eps","iqa_model"):
+              "body_enabled","body_cluster_eps","object_proposals","iqa_model"):
         if k in d: state[k] = d[k]
     # Switching the NR-IQA model only re-points the module; the new weights load
     # lazily on the next scan, so this stays a cheap settings save.
@@ -6199,10 +6200,17 @@ def bulk_pipeline():
 # bulk-tag them by id without recomputing. Keyed by run id.
 _grouping_runs = {}
 
-def _discover_sig(depth_model, cnn_model, max_regions):
+def _discover_sig(depth_model, cnn_model, max_regions, proposals=None):
     """Fingerprint of the params that affect embeddings. Changing any of these
-    invalidates cached rows so they get recomputed rather than mixed."""
-    raw = f"{depth_model or '-'}|{cnn_model or '-'}|{max_regions}|gpu={og.has_gpu()}"
+    invalidates cached rows so they get recomputed rather than mixed.
+
+    `proposals` is part of the key because SAM and the heuristic proposer emit
+    different boxes for the same image — reusing heuristic-era cached embeddings
+    after switching to SAM would silently mix two incompatible box sets in one
+    cluster space."""
+    src = (proposals or og.proposal_source() or "heuristic")
+    raw = (f"{depth_model or '-'}|{cnn_model or '-'}|{max_regions}"
+           f"|prop={src}|gpu={og.has_gpu()}")
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
 def _objemb_valid(sig):
@@ -6970,6 +6978,10 @@ def discover_objects_staged():
     if brisque_bad is not None:
         brisque_bad = float(brisque_bad)
     write_flags = bool(body.get("flag_junk", True))
+    # Seed proposals with existing known-class (YOLO) regions by default, so
+    # discovery spends its budget on unnamed objects rather than re-proposing
+    # what the detector already labelled.
+    use_seeds = bool(body.get("yolo_seeds", True))
     if body.get("chunk"):
         ds.CHUNK = int(body["chunk"])
 
@@ -6984,6 +6996,13 @@ def discover_objects_staged():
 
     depth_model = (state.get("depth_model") or "").strip() or None
     cnn_model = (state.get("grouping_cnn") or "").strip() or None
+    # Region-proposal backend: 'sam' -> Segment Anything (sharper boxes, falls
+    # back to heuristic if unavailable); anything else -> the heuristic proposer.
+    # Body may override per-run so a one-off SAM run doesn't require a settings
+    # save. Set on object_grouping so every propose_regions call in the staged
+    # pipeline picks it up without a signature change.
+    og.set_proposal_source(body.get("proposals")
+                           or state.get("object_proposals") or "heuristic")
 
     def _loader(fn):
         fp = get_safe_path(MEDIA_DIR, fn)
@@ -6999,6 +7018,33 @@ def discover_objects_staged():
             fp = get_safe_path(MEDIA_DIR, fn)
             meta = read_metadata(fp) if fp else None
             return meta.get("tags", []) if meta else []
+        except Exception:
+            return []
+
+    def _seeds(fn):
+        """Known-class detections already on the image (YOLO/pose/face regions
+        written by the normal tagging pipeline), fed to the proposer as
+        high-confidence seeds. They're kept verbatim and suppress overlapping
+        generated proposals, so discovery spends its budget on the UNNAMED long
+        tail instead of re-proposing objects YOLO already labelled."""
+        if not use_seeds:
+            return []
+        try:
+            fp = get_safe_path(MEDIA_DIR, fn)
+            meta = read_metadata(fp) if fp else None
+            if not meta:
+                return []
+            out = []
+            for r in meta.get("regions", []) or []:
+                try:
+                    if not r.get("class_name"):
+                        continue
+                    out.append({"cx": float(r["cx"]), "cy": float(r["cy"]),
+                                "w": float(r["w"]), "h": float(r["h"]),
+                                "class_name": r.get("class_name")})
+                except Exception:
+                    continue
+            return out
         except Exception:
             return []
 
@@ -7019,7 +7065,8 @@ def discover_objects_staged():
             depth_model=depth_model, cnn_model=cnn_model,
             max_regions=max_regions, eps=eps, min_cluster=min_cluster,
             brisque_bad=brisque_bad, write_flags=write_flags,
-            progress=_prog, should_stop=_stop, stages=stages)
+            progress=_prog, should_stop=_stop, stages=stages,
+            seed_fn=_seeds)
     except Exception as e:
         access_logger.exception("staged discovery failed")
         return jsonify({"success": False, "error": str(e)})
@@ -7032,9 +7079,25 @@ def discover_objects_staged():
     total_objs, dim = ds.count_objects(db, sig)
     quality = ds.quality_summary(db, sig)
     state["status_text"] = "Staged discovery complete."
+    # Surface which proposer actually ran. og.proposal_source() is what was
+    # REQUESTED; sam_proposals.status() is non-empty when SAM was requested but
+    # unavailable and the run silently fell back to the heuristic proposer —
+    # otherwise a user would see mediocre clusters and never learn why.
+    prop_src = og.proposal_source()
+    sam_err = ""
+    if prop_src == "sam":
+        try:
+            import sam_proposals
+            sam_err = sam_proposals.status()
+        except Exception as e:
+            sam_err = str(e)
     return jsonify({"success": True, "run_sig": sig,
                     "stage_status": status,
                     "quality": quality,
+                    "proposals": prop_src,
+                    "proposals_effective": ("heuristic" if sam_err else prop_src),
+                    "sam_error": sam_err,
+                    "yolo_seeds": use_seeds,
                     "iqa_model": (ds.iqa.get_model() if (ds.iqa and ds.iqa.available())
                                   else "unavailable"),
                     "total_objects": total_objs,
@@ -7065,6 +7128,11 @@ def discover_objects():
     depth_model = (state.get("depth_model") or "").strip() or None
     cnn_model = (state.get("grouping_cnn") or "").strip() or None
     max_regions = int(body.get("max_regions", 40))
+    # Select the proposal backend before the cache signature is computed, so a
+    # heuristic<->SAM switch invalidates cached embeddings instead of mixing
+    # incompatible box sets.
+    og.set_proposal_source(body.get("proposals")
+                           or state.get("object_proposals") or "heuristic")
     if not filenames:
         return jsonify({"success": False, "error": "No eligible images found."})
 
