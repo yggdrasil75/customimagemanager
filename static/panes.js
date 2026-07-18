@@ -40,8 +40,22 @@ function setPane(pane) {
   if (m) m.className = isMusic ? on : off;
   if (f) f.className = isFaces ? on : off;
   if (rv) rv.className = isReview ? on : off;
-  if (isFaces && typeof loadFaces === 'function') loadFaces();
-  if (isReview && typeof loadReviewPane === 'function') loadReviewPane();
+  // Only (re)load a pane's list when it has actually been switched INTO, and
+  // only if it isn't already populated. setPane() gets called for plenty of
+  // reasons that aren't a tab change (badge refreshes, init, returning from a
+  // modal); reloading unconditionally rebuilt the list and threw the user's
+  // scroll position back to the top mid-edit. Use the pane's own Refresh
+  // button, or an explicit action, to force a rebuild.
+  const _fresh = (pane !== window._lastPane);
+  if (isFaces && typeof loadFaces === 'function') {
+    const l = document.getElementById('faces_list');
+    if (_fresh && (!l || !l.children.length)) loadFaces();
+  }
+  if (isReview && typeof loadReviewPane === 'function') {
+    const l = document.getElementById('review_pane_list');
+    if (_fresh && (!l || !l.children.length)) loadReviewPane();
+  }
+  window._lastPane = pane;
 
   // The album badge lives inside the Albums tab, so restore it after the
   // className swap above (which doesn't touch children, but the count may be

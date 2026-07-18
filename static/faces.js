@@ -63,12 +63,78 @@ function faceChip(f, size = 56, pad = 1.6) {
 // Faces the user has checked for "split into a new cluster", across all clusters.
 let _faceSel = new Set();
 
+// Repaint only the cluster that changed. Selection state lives entirely in the
+// client (_faceSel), so checking a box never needs a server round-trip -- and
+// never needs to rebuild the other clusters, which is what used to reset scroll.
+function _repaintFaceCluster(cid) {
+  const c = _faceClusters.find(x => x.id === cid);
+  const el = document.getElementById('fcluster_' + cid);
+  if (!c || !el) { keepScroll('faces_list', loadFaces); return; }
+  // Preserve keyboard focus/caret across the repaint: naming a cluster from the
+  // input would otherwise blur it mid-typing.
+  const act = document.activeElement;
+  const wasName = act && act.id === 'fname_' + cid;
+  const selStart = wasName ? act.selectionStart : null;
+  replaceNode(el, _renderFaceCluster(c));
+  if (wasName) {
+    const next = document.getElementById('fname_' + cid);
+    if (next) {
+      next.focus();
+      try { next.setSelectionRange(selStart, selStart); } catch (e) {}
+    }
+  }
+}
+function _faceClusterOf(id) {
+  const c = _faceClusters.find(x => (x.faces || []).some(f => f.id === id));
+  return c ? c.id : null;
+}
+
 function toggleFaceSel(id) {
   if (_faceSel.has(id)) _faceSel.delete(id); else _faceSel.add(id);
-  loadFaces();
+  const cid = _faceClusterOf(id);
+  if (cid != null) _repaintFaceCluster(cid); else keepScroll('faces_list', loadFaces);
 }
 
 function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+function _renderFaceCluster(c) {
+  return `
+      <div id="fcluster_${c.id}" class="bg-gray-800 rounded border ${c.confirmed
+          ? 'border-green-700' : 'border-gray-700'} p-2">
+        <div class="flex items-center gap-2 mb-2">
+          <input value="${(c.name || '').replace(/"/g, '&quot;')}"
+                 placeholder="Who is this?" id="fname_${c.id}"
+                 onkeydown="if(event.key==='Enter')nameCluster(${c.id})"
+                 class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600
+                        text-sm text-white">
+          <span class="text-[10px] text-gray-500">${c.count}</span>
+          <button onclick="nameCluster(${c.id})"
+            class="text-xs bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded font-bold">
+            Name all
+          </button>
+        </div>
+        <div class="flex gap-1.5 flex-wrap">
+          ${c.faces.map(f => faceChip(f)).join('')}
+          ${c.count > c.faces.length
+            ? `<div class="w-14 h-14 flex items-center justify-center text-[10px]
+                          text-gray-500 bg-gray-900 rounded">
+                 +${c.count - c.faces.length}</div>` : ''}
+        </div>
+        ${(() => {
+          const n = c.faces.filter(f => _faceSel.has(f.id)).length;
+          return n ? `<div class="flex items-center gap-2 mt-2 pt-2
+                              border-t border-gray-700">
+              <span class="text-[10px] text-purple-300">${n} selected</span>
+              <button onclick="splitSelected(${c.id})"
+                class="text-xs bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded font-bold">
+                Split into new person
+              </button>
+              <button onclick="clearFaceSel()"
+                class="text-xs text-gray-400 hover:text-gray-200 px-1">clear</button>
+            </div>` : '';
+        })()}
+      </div>`;
+}
 
 async function loadFaces() {
   const el = document.getElementById('faces_list');
@@ -135,42 +201,7 @@ async function loadFaces() {
       return;
     }
 
-    el.innerHTML = _faceClusters.map(c => `
-      <div class="bg-gray-800 rounded border ${c.confirmed
-          ? 'border-green-700' : 'border-gray-700'} p-2">
-        <div class="flex items-center gap-2 mb-2">
-          <input value="${(c.name || '').replace(/"/g, '&quot;')}"
-                 placeholder="Who is this?" id="fname_${c.id}"
-                 onkeydown="if(event.key==='Enter')nameCluster(${c.id})"
-                 class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600
-                        text-sm text-white">
-          <span class="text-[10px] text-gray-500">${c.count}</span>
-          <button onclick="nameCluster(${c.id})"
-            class="text-xs bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded font-bold">
-            Name all
-          </button>
-        </div>
-        <div class="flex gap-1.5 flex-wrap">
-          ${c.faces.map(f => faceChip(f)).join('')}
-          ${c.count > c.faces.length
-            ? `<div class="w-14 h-14 flex items-center justify-center text-[10px]
-                          text-gray-500 bg-gray-900 rounded">
-                 +${c.count - c.faces.length}</div>` : ''}
-        </div>
-        ${(() => {
-          const n = c.faces.filter(f => _faceSel.has(f.id)).length;
-          return n ? `<div class="flex items-center gap-2 mt-2 pt-2
-                              border-t border-gray-700">
-              <span class="text-[10px] text-purple-300">${n} selected</span>
-              <button onclick="splitSelected(${c.id})"
-                class="text-xs bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded font-bold">
-                Split into new person
-              </button>
-              <button onclick="clearFaceSel()"
-                class="text-xs text-gray-400 hover:text-gray-200 px-1">clear</button>
-            </div>` : '';
-        })()}
-      </div>`).join('');
+    el.innerHTML = _faceClusters.map(c => _renderFaceCluster(c)).join('');
   } catch (e) {
     el.innerHTML = '<div class="text-xs text-red-400 p-2">Failed to load faces.</div>';
   }
@@ -192,7 +223,11 @@ async function nameCluster(cid) {
   const d = await r.json();
   document.getElementById('faces_status').textContent =
     d.success ? `Named ${d.named} image(s).` : (d.error || 'Failed.');
-  loadFaces();
+  // Naming touches exactly one cluster: update it locally and repaint just that
+  // card, so the list doesn't rebuild (and scroll back to the top) under you.
+  const c = _faceClusters.find(x => x.id === cid);
+  if (d.success && c) { c.name = name; c.confirmed = true; _repaintFaceCluster(cid); }
+  else if (!d.success) keepScroll('faces_list', loadFaces);
 }
 
 async function denyFace(id) {
@@ -209,10 +244,28 @@ async function denyFace(id) {
     return;
   }
   _faceSel.delete(id);
-  loadFaces();
+  // Remove the face locally rather than refetching everything: the server has
+  // already applied the change, and a full reload would jump us to the top.
+  const cid = _faceClusterOf(id);
+  const c = cid != null ? _faceClusters.find(x => x.id === cid) : null;
+  if (c) {
+    c.faces = c.faces.filter(f => f.id !== id);
+    c.count = Math.max(0, (c.count || 1) - 1);
+    document.getElementById('faces_status').textContent = 'Face removed.';
+    if (c.faces.length) _repaintFaceCluster(cid);
+    else keepScroll('faces_list', loadFaces);   // cluster is gone; full reload
+  } else {
+    keepScroll('faces_list', loadFaces);
+  }
 }
 
-function clearFaceSel() { _faceSel.clear(); loadFaces(); }
+function clearFaceSel() {
+  const touched = _faceClusters
+    .filter(c => (c.faces || []).some(f => _faceSel.has(f.id)))
+    .map(c => c.id);
+  _faceSel.clear();
+  touched.forEach(_repaintFaceCluster);
+}
 
 async function splitSelected(cid) {
   // Carve the checked faces out of this cluster into a fresh one — for when
@@ -236,7 +289,7 @@ async function splitSelected(cid) {
   ids.forEach(id => _faceSel.delete(id));
   document.getElementById('faces_status').textContent =
     d.success ? `Split ${d.moved} face(s) into a new person.` : (d.error || 'Failed.');
-  loadFaces();
+  keepScroll('faces_list', loadFaces);
 }
 
 // ── Open a face's source image in the app's main viewer ─────────────────────
@@ -329,9 +382,9 @@ let _bodySel = new Set();
 
 function toggleBodySel(id) {
   if (_bodySel.has(id)) _bodySel.delete(id); else _bodySel.add(id);
-  loadFaces();
+  keepScroll('faces_list', loadBodies);
 }
-function clearBodySel() { _bodySel.clear(); loadFaces(); }
+function clearBodySel() { _bodySel.clear(); keepScroll('faces_list', loadBodies); }
 
 // A body chip crops the person box out of the shared thumbnail. Person boxes are
 // tall (roughly 1:2..1:3), so unlike faceChip we render a portrait chip and use
@@ -420,7 +473,7 @@ async function loadBodies() {
   }
 
   block.innerHTML = header + _bodyClusters.map(c => `
-    <div class="bg-gray-800 rounded border ${c.confirmed
+    <div id="bcluster_${c.id}" class="bg-gray-800 rounded border ${c.confirmed
         ? 'border-green-700' : 'border-gray-700'} p-2">
       <div class="flex items-center gap-2 mb-2">
         <input value="${(c.name || '').replace(/"/g, '&quot;')}"
@@ -472,7 +525,10 @@ async function nameBodyCluster(cid) {
   const d = await r.json();
   document.getElementById('faces_status').textContent =
     d.success ? `Named ${d.named} image(s).` : (d.error || 'Failed.');
-  loadFaces();
+  const c = _bodyClusters.find(x => x.id === cid);
+  const el = document.getElementById('bcluster_' + cid);
+  if (d.success && c && el) { c.name = name; c.confirmed = true; }
+  keepScroll('faces_list', loadBodies);
 }
 
 // Deny/split reuse the same /api/bodies/split contract as faces (id / ids+mode).
@@ -489,7 +545,7 @@ async function denyBody(id) {
     return;
   }
   _bodySel.delete(id);
-  loadFaces();
+  keepScroll('faces_list', loadBodies);
 }
 
 async function splitSelectedBodies(cid) {
@@ -512,7 +568,7 @@ async function splitSelectedBodies(cid) {
   ids.forEach(id => _bodySel.delete(id));
   document.getElementById('faces_status').textContent =
     d.success ? `Split ${d.moved} body(ies) into a new person.` : (d.error || 'Failed.');
-  loadFaces();
+  keepScroll('faces_list', loadFaces);
 }
 
 // Flip the server-side body_enabled setting from the pane. Enabling it means the
@@ -534,6 +590,6 @@ async function toggleBodyEnabled(on) {
       + '(Bodies are only embedded on images scanned while this is on.)')) {
     rescanFaces();
   } else {
-    loadFaces();
+    keepScroll('faces_list', loadFaces);
   }
 }

@@ -204,7 +204,7 @@ function closeReview(){
   // If the Review tab is the one on screen, re-render its groups so counts and
   // thumbnails reflect whatever was just decided in the modal.
   if(typeof currentPane!=='undefined' && currentPane==='review'
-     && typeof loadReviewPane==='function') loadReviewPane();
+     && typeof loadReviewPane==='function') keepScroll('review_pane_list', loadReviewPane);
 }
 
 // Pull the next page when the cursor nears the end of the loaded slice.

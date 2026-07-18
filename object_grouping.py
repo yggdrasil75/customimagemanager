@@ -246,7 +246,7 @@ def depth_map_batch(imgs_bgr, model_path=None):
 # from the `object_proposals` setting; propose_regions dispatches on it so no
 # call site in discover_stages has to change. Kept module-level (not a param)
 # precisely so the many existing propose_regions() callers keep working.
-_PROPOSAL_SOURCE = "heuristic"
+_PROPOSAL_SOURCE = "sam"
 
 
 def set_proposal_source(source):
