@@ -1,4 +1,5 @@
-// panes.js — the left-pane tab controller (Gallery / Albums / Music).
+// panes.js — the left-pane tab controller (Gallery / Albums / Faces / Review /
+// Music / Books).
 //
 // Replaces the old header Images|Music pill pair. The three tabs are:
 //   gallery  — folder browser; opens the gallery modal
@@ -15,6 +16,7 @@ function setPane(pane) {
   currentPane = pane;
 
   const isMusic = (pane === 'music');
+  const isBooks = (pane === 'books');
   const isAlbums = (pane === 'albums');
   const isGallery = (pane === 'gallery');
   const isFaces = (pane === 'faces');
@@ -26,6 +28,7 @@ function setPane(pane) {
   document.getElementById('music_pane')?.classList.toggle('hidden', !isMusic);
   document.getElementById('faces_pane')?.classList.toggle('hidden', !isFaces);
   document.getElementById('review_pane')?.classList.toggle('hidden', !isReview);
+  document.getElementById('books_pane')?.classList.toggle('hidden', !isBooks);
 
   // Tab chrome
   const on = 'flex-1 px-4 py-2 border-b-2 border-blue-500 text-blue-400 bg-gray-750';
@@ -35,11 +38,13 @@ function setPane(pane) {
   const m = document.getElementById('tab_music');
   const f = document.getElementById('tab_faces');
   const rv = document.getElementById('tab_review');
+  const bk = document.getElementById('tab_books');
   if (g) g.className = isGallery ? on : off;
   if (a) a.className = isAlbums ? on : off;
   if (m) m.className = isMusic ? on : off;
   if (f) f.className = isFaces ? on : off;
   if (rv) rv.className = isReview ? on : off;
+  if (bk) bk.className = isBooks ? on : off;
   // Only (re)load a pane's list when it has actually been switched INTO, and
   // only if it isn't already populated. setPane() gets called for plenty of
   // reasons that aren't a tab change (badge refreshes, init, returning from a
@@ -72,6 +77,22 @@ function setPane(pane) {
     if (typeof musicRefreshStatus === 'function') musicRefreshStatus();
     if (typeof musicView === 'function') {
       musicView(window.musicCurrentView || 'artists');
+    }
+  }
+
+  // Books. Same temporal-dead-zone caution as music above: books.js also loads
+  // after this file, so everything goes through typeof checks.
+  //
+  // NOTE: leaving the Books TAB does not close an open book. The reader lives
+  // in the centre pane, which is independent of the left pane — you can browse
+  // the gallery with a book still open beside it, exactly as you can leave an
+  // image loaded while flicking through albums. closeBook() is the only thing
+  // that puts the centre pane back to images.
+  if (isBooks) {
+    if (typeof booksRefreshStatus === 'function') booksRefreshStatus();
+    const l = document.getElementById('books_list');
+    if (_fresh && (!l || !l.children.length) && typeof booksReload === 'function') {
+      booksReload();
     }
   }
 }

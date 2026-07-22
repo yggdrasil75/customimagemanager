@@ -1,0 +1,185 @@
+<!-- Book-mode controls pane.
+
+     This is the "hide the impossible sections" half of the request. Rather than
+     litter the image editor with conditionals, book mode swaps in its OWN pane
+     body and setMediaMode() hides the tabs that can't apply.
+
+     What's gone, and why:
+       EXIF / IPTC / XMP tabs  — those are image container formats. An epub has
+                                 no EXIF. (An OPF has metadata, which is what
+                                 the Book tab below is.)
+       Regions / boxes / pose  — nothing to draw a bounding box on in a text
+                                 flow. Comics DO get panel boxes eventually, but
+                                 that belongs to the image pipeline on extracted
+                                 pages, not here.
+       YOLO / auto-tag / OCR   — same reason. OCR is offered for scanned PDFs
+                                 and comics only (see the Comic block).
+       Faces, quality stars    — no faces in a text file; IQA is a pixel metric.
+       Albums                  — books use Series + Shelves instead.
+
+     What replaces them: bibliographic metadata, reading state, and text tools. -->
+<div id="controls_pane_book" class="controls-tab-pane hidden h-full overflow-y-auto">
+  <div id="book_panel" class="p-3 flex flex-col gap-3">
+
+    <div class="flex justify-between items-center gap-2">
+      <span class="text-sm font-bold text-gray-300">Book</span>
+      <div class="flex items-center gap-1">
+        <button onclick="booksFindSimilar()" title="Find books that read like this one"
+          class="text-[10px] bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded text-white uppercase font-bold">Similar</button>
+        <a id="book_download" href="#" download
+          class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded uppercase font-bold">Download</a>
+      </div>
+    </div>
+
+    <!-- format / status strip -->
+    <div class="flex items-center gap-2 text-[10px] flex-wrap">
+      <span id="book_fmt_badge" class="px-1.5 py-0.5 rounded bg-gray-700 text-gray-200 font-mono uppercase">—</span>
+      <span id="book_kind_badge" class="px-1.5 py-0.5 rounded bg-gray-700 text-gray-300">—</span>
+      <span id="book_size_badge" class="text-gray-500"></span>
+      <span id="book_text_badge" class="ml-auto"></span>
+    </div>
+
+    <!-- a text-extraction failure is actionable, so say what to do about it -->
+    <div id="book_text_warn"
+      class="hidden text-xs bg-amber-900/50 border border-amber-700 rounded p-2 text-amber-200">
+      <div class="font-bold mb-1">Text unavailable</div>
+      <div id="book_text_warn_msg" class="mb-2 text-amber-300"></div>
+      <button onclick="booksExtractCurrent()"
+        class="bg-amber-700 hover:bg-amber-600 px-2 py-1 rounded font-bold text-white">Retry extraction</button>
+    </div>
+
+    <!-- reading progress -->
+    <div class="border-t border-gray-800 pt-2">
+      <div class="flex justify-between items-center mb-1">
+        <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Progress</label>
+        <span id="book_progress_label" class="text-[10px] text-gray-500">—</span>
+      </div>
+      <div class="h-1.5 bg-gray-900 rounded overflow-hidden border border-gray-700">
+        <div id="book_progress_bar" class="h-full bg-emerald-600" style="width:0%"></div>
+      </div>
+      <div class="flex gap-1 mt-1">
+        <button onclick="booksMarkUnread()"
+          class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded">Mark unread</button>
+        <button onclick="booksMarkRead()"
+          class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded">Mark finished</button>
+      </div>
+    </div>
+
+    <!-- bibliographic metadata -->
+    <div class="border-t border-gray-800 pt-2 flex flex-col gap-2">
+      <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Title</label>
+      <input id="book_title" type="text" oninput="booksAutosave()"
+        class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
+
+      <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Authors
+        <span class="text-gray-600 normal-case">(one per line)</span></label>
+      <textarea id="book_authors" rows="2" oninput="booksAutosave()"
+        class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
+
+      <div class="flex gap-2">
+        <div class="flex-1">
+          <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Series</label>
+          <input id="book_series" type="text" list="book_series_options" oninput="booksAutosave()"
+            class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          <datalist id="book_series_options"></datalist>
+        </div>
+        <div class="w-16">
+          <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">#</label>
+          <input id="book_series_index" type="number" step="0.5" oninput="booksAutosave()"
+            class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+        </div>
+      </div>
+
+      <div class="flex gap-2">
+        <div class="flex-1">
+          <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Published</label>
+          <input id="book_published" type="text" placeholder="YYYY-MM-DD" oninput="booksAutosave()"
+            class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+        </div>
+        <div class="flex-1">
+          <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Language</label>
+          <input id="book_language" type="text" oninput="booksAutosave()"
+            class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+        </div>
+      </div>
+
+      <div class="flex gap-2">
+        <div class="flex-1">
+          <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Publisher</label>
+          <input id="book_publisher" type="text" oninput="booksAutosave()"
+            class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+        </div>
+        <div class="flex-1">
+          <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">ISBN</label>
+          <input id="book_isbn" type="text" oninput="booksAutosave()"
+            class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+        </div>
+      </div>
+    </div>
+
+    <!-- rating -->
+    <div>
+      <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Rating</label>
+      <div class="flex items-center gap-2">
+        <div id="book_stars" class="flex items-center gap-0.5 text-xl leading-none select-none"></div>
+        <button onclick="booksClearRating()"
+          class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-gray-300">Clear</button>
+      </div>
+    </div>
+
+    <!-- tags: same interaction as the image editor, different store -->
+    <div>
+      <div class="flex justify-between items-center mb-1">
+        <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Tags</label>
+        <span id="book_tag_count" class="text-[10px] text-gray-500"></span>
+      </div>
+      <div id="book_tag_list"
+        class="max-h-40 overflow-y-auto bg-gray-900 border border-gray-600 rounded p-1 flex flex-col gap-0.5"></div>
+      <div class="flex gap-1 mt-1">
+        <input id="book_tag_input" type="text" placeholder="Add tag(s), comma-separated, then Enter"
+          class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600 text-xs text-white focus:border-blue-500"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();booksAddTags();}">
+        <button onclick="booksAddTags()"
+          class="text-xs bg-blue-600 hover:bg-blue-500 px-3 rounded font-bold">Add</button>
+      </div>
+      <div id="book_subjects" class="mt-1 flex flex-wrap gap-1"></div>
+    </div>
+
+    <!-- description / blurb -->
+    <div>
+      <div class="flex justify-between items-center mb-1">
+        <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Description</label>
+        <button onclick="booksSummarize()" id="btn_book_summarize"
+          title="Summarise this book with the configured LLM"
+          class="text-xs bg-yellow-600 hover:bg-yellow-500 px-2 py-0.5 rounded font-bold">✨ AI</button>
+      </div>
+      <textarea id="book_description" rows="5" oninput="booksAutosave()"
+        class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
+    </div>
+
+    <!-- bookmarks & notes -->
+    <div class="border-t border-gray-800 pt-2">
+      <div class="flex justify-between items-center mb-1">
+        <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Bookmarks</label>
+        <button onclick="addBookmark()"
+          class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded">+ Add</button>
+      </div>
+      <div id="book_bookmarks" class="flex flex-col gap-0.5 max-h-40 overflow-y-auto"></div>
+    </div>
+
+    <!-- comic-only: the one place the image pipeline still applies -->
+    <div id="book_comic_tools" class="hidden border-t border-gray-700 pt-2 flex flex-col gap-2">
+      <h3 class="font-bold text-purple-400 text-sm">Comic tools</h3>
+      <p class="text-[10px] text-gray-500">
+        Pages are images, so the image pipeline can run over them. Results are
+        stored against the book, not against loose files.
+      </p>
+      <button onclick="booksComicOCR()"
+        class="w-full bg-sky-700 hover:bg-sky-600 py-1.5 rounded font-bold text-sm">🔤 OCR pages</button>
+      <button onclick="booksComicPanels()"
+        class="w-full bg-teal-600 hover:bg-teal-500 py-1.5 rounded font-bold text-sm">🔲 Detect panels</button>
+    </div>
+
+    <p class="text-xs text-gray-400">Status: <span id="book_status_text" class="text-yellow-400">Ready.</span></p>
+  </div>
+</div>

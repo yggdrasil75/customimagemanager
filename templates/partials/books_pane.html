@@ -1,0 +1,71 @@
+<!-- Books pane — the left-column browser for books & comics.
+
+     Mirrors music_pane.html's structure (toolbar + view pills + list) rather
+     than gallery_pane.html's, because a book library is browsed by facet
+     (author / series / shelf) far more than it is scrolled as a grid. The
+     "Shelf" view IS a cover grid for when you do want to browse visually.
+
+     Selecting a book calls openBook(), which swaps the centre pane from the
+     image viewer to the reader and puts the controls pane into book mode. -->
+<div id="books_pane" class="hidden flex-1 bg-gray-900 text-white flex flex-col overflow-hidden">
+
+  <!-- toolbar -->
+  <div class="p-3 bg-gray-800 border-b border-gray-700 flex items-center gap-2 flex-wrap flex-shrink-0">
+    <div class="flex rounded overflow-hidden border border-gray-600 text-xs font-bold">
+      <button id="btab_shelf" onclick="booksView('shelf')" class="px-3 py-1 bg-blue-600">Shelf</button>
+      <button id="btab_authors" onclick="booksView('authors')"
+        class="px-3 py-1 bg-gray-700 hover:bg-gray-600">Authors</button>
+      <button id="btab_series" onclick="booksView('series')"
+        class="px-3 py-1 bg-gray-700 hover:bg-gray-600">Series</button>
+      <button id="btab_comics" onclick="booksView('comics')"
+        class="px-3 py-1 bg-gray-700 hover:bg-gray-600">Comics</button>
+    </div>
+
+    <input id="books_search" type="text" placeholder="Search title / author / series / tag…"
+      oninput="booksSearchDebounced()"
+      class="flex-1 min-w-[160px] bg-gray-700 rounded border border-gray-600 text-sm px-3 py-1">
+
+    <label class="flex items-center gap-1 text-[10px] text-gray-300 cursor-pointer"
+      title="Search the TEXT of every book by meaning, not just the metadata. Needs passage embeddings.">
+      <input type="checkbox" id="books_semantic" class="accent-purple-500">
+      <span class="uppercase font-bold tracking-wider">Passages</span>
+    </label>
+
+    <select id="books_sort" onchange="booksReload()"
+      class="bg-gray-700 rounded border border-gray-600 text-xs px-1 py-1">
+      <option value="title">Title</option>
+      <option value="added">Recently added</option>
+      <option value="series">Series order</option>
+      <option value="size">Size</option>
+    </select>
+  </div>
+
+  <!-- worker bar -->
+  <div class="px-3 py-1.5 bg-gray-850 border-b border-gray-700 flex items-center gap-2 flex-wrap
+              flex-shrink-0 text-[10px]">
+    <button onclick="booksReindex()" title="Scan the media folder for books (resumable)"
+      class="bg-indigo-600 hover:bg-indigo-500 font-bold px-2 py-1 rounded">Reindex</button>
+    <button onclick="booksExtract()" title="Extract reading text from every book that lacks it"
+      class="bg-sky-700 hover:bg-sky-600 font-bold px-2 py-1 rounded">Extract text</button>
+    <button onclick="booksEmbed()" title="Embed passages so you can search by meaning"
+      class="bg-purple-700 hover:bg-purple-600 font-bold px-2 py-1 rounded">Embed</button>
+    <button id="btn_book_triage" onclick="openTriageModal()"
+      title="Files that might be books — we won't guess, so you decide"
+      class="hidden bg-amber-700 hover:bg-amber-600 font-bold px-2 py-1 rounded">
+      Triage <span id="triage_badge"></span>
+    </button>
+    <span id="books_stat" class="text-gray-400">—</span>
+    <span id="books_warn" class="text-amber-400"></span>
+  </div>
+
+  <div class="flex flex-1 overflow-hidden">
+    <div id="books_list" class="flex-1 overflow-auto p-3"></div>
+  </div>
+
+  <div id="books_pager"
+    class="hidden flex-shrink-0 bg-gray-800 border-t border-gray-700 p-2 flex items-center justify-center gap-3 text-xs">
+    <button onclick="booksPage(-1)" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">‹ Prev</button>
+    <span id="books_page_label" class="text-gray-400">—</span>
+    <button onclick="booksPage(1)" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Next ›</button>
+  </div>
+</div>

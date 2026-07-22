@@ -18,3 +18,9 @@ torchreid
 numpy
 gdown
 segment-anything
+pymupdf
+rarfile
+py7zr
+python-docx
+striprtf
+ 

@@ -74,10 +74,57 @@ VIDEO_EXTS = {'.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v', '.mpg',
 AUDIO_EXTS = {'.mp3', '.flac', '.aac', '.ogg', '.oga', '.opus',
               '.wav', '.wma', '.aiff', '.aif'}
 
+# Books & comics are stored NATIVELY, like video and audio — there is no
+# universal book container worth transcoding into, and re-encoding someone's
+# purchased epub would be both lossy and rude. See book_index.py, which owns
+# everything that knows what a book actually IS.
+#
+# IMPORTANT: unlike every other set in this module, membership here does NOT
+# imply "this file is a book". Several of these extensions are ambiguous —
+# `.txt` is also this app's tag sidecar, `.htm(l)` is also a saved webpage,
+# `.pdb` is also a generic Palm database. Extension is only the FIRST of three
+# layers; book_index.classify() applies content sniffing and directory context
+# before anything is treated as a book, and parks the undecidable cases in a
+# triage queue rather than guessing. Use `is_book_candidate()` here, then
+# book_index.classify() for the real answer.
+try:
+    import book_index as _bi
+    BOOK_EXTS = set(_bi.BOOK_EXTS)
+    UNAMBIGUOUS_BOOK_EXTS = set(_bi.UNAMBIGUOUS_BOOK_EXTS)
+except Exception:                          # book support optional at import time
+    UNAMBIGUOUS_BOOK_EXTS = {
+        '.epub', '.mobi', '.azw', '.azw3', '.kf8', '.kfx', '.lit', '.fb2',
+        '.lrf', '.lrx', '.chm', '.ceb', '.docx', '.rtf',
+        '.cbz', '.cbr', '.cb7', '.cbt', '.cba',
+    }
+    BOOK_EXTS = UNAMBIGUOUS_BOOK_EXTS | {
+        '.pdf', '.txt', '.htm', '.html', '.doc', '.pdb', '.pkg', '.opf',
+    }
+
+
+def is_book_candidate(path: str) -> bool:
+    """True if the extension puts this file in the running for being a book.
+
+    NOT a claim that it IS one — see the note above. This is the cheap first
+    filter a directory walk uses before paying for a content sniff.
+    """
+    return _ext(path) in BOOK_EXTS
+
+
+def is_book(path: str) -> bool:
+    """True for extensions that are unambiguously a book/comic. Safe to use for
+    routing decisions (which viewer, which mime); the ambiguous half of
+    BOOK_EXTS deliberately returns False here."""
+    return _ext(path) in UNAMBIGUOUS_BOOK_EXTS
+
+
 # Extensions accepted from an uploader / bulk-upload walk. Raws are accepted so
 # the upload handler can stash them (when keep_raws is on) and derive an image;
-# they are not library assets themselves.
-UPLOAD_EXTS = JXL_INPUT_EXTS | VIDEO_EXTS | RAW_INPUT_EXTS | AUDIO_EXTS
+# they are not library assets themselves. Only the UNAMBIGUOUS book extensions
+# are accepted on upload: accepting `.txt` here would mean every dragged-in tag
+# sidecar became a "book" the moment someone bulk-uploaded a folder.
+UPLOAD_EXTS = (JXL_INPUT_EXTS | VIDEO_EXTS | RAW_INPUT_EXTS | AUDIO_EXTS
+               | UNAMBIGUOUS_BOOK_EXTS)
 
 # Extensions that count as a stored library ASSET on disk (what a MEDIA_DIR walk
 # should pick up). Sidecars (.txt/.xmp) and thumbnails are NOT assets.
@@ -283,24 +330,84 @@ def is_animated_jxl(path: str) -> bool:
 
 
 def kind(path: str) -> str:
-    """'video' | 'image' — the media_kind stored per row and used by the UI to
-    decide between a <video> element and an <img>."""
-    return 'video' if is_video(path) else 'image'
+    """'video' | 'audio' | 'book' | 'image' — the media_kind stored per row and
+    used by the UI to decide which centre-pane viewer to mount (a <video>, the
+    audio player, the book reader, or the canvas).
+
+    Books only report 'book' for the unambiguous extensions; an ambiguous `.txt`
+    reports 'image' here and never reaches this function in practice, because
+    the image walk filters on LIBRARY_EXTS first.
+    """
+    if is_video(path):
+        return 'video'
+    if is_audio(path):
+        return 'audio'
+    if is_book(path):
+        return 'book'
+    return 'image'
 
 
 def mime_for(path: str) -> str | None:
     e = _ext(path)
     if e == '.jxl':
         return 'image/jxl'
-    return _VIDEO_MIME.get(e)
+    v = _VIDEO_MIME.get(e)
+    if v:
+        return v
+    return _BOOK_MIME.get(e) if e in BOOK_EXTS else None
 
 
 def stored_name(input_filename: str) -> str:
     """The on-disk name an uploaded file will take. Images/gifs become <base>.jxl;
-    videos and audio keep their original extension."""
+    video, audio and books keep their original extension.
+
+    Books are stored verbatim for the same reason video and audio are: there is
+    no universal book container worth transcoding into, and re-encoding
+    someone's purchased epub would be lossy, would break the DRM-free copy they
+    paid for, and would destroy the publisher metadata the book indexer reads.
+
+    Only the UNAMBIGUOUS book extensions are kept. An uploaded `.txt` would
+    still become `.jxl` here -- which never happens in practice, because `.txt`
+    is deliberately absent from UPLOAD_EXTS so a dragged-in tag sidecar can
+    never be mistaken for a book. Text books are ingested by the book indexer
+    walking MEDIA_DIR, where the three-layer classifier can see their context.
+    """
     base, ext = os.path.splitext(input_filename)
-    keep = VIDEO_EXTS | AUDIO_EXTS
+    keep = VIDEO_EXTS | AUDIO_EXTS | UNAMBIGUOUS_BOOK_EXTS
     return input_filename if ext.lower() in keep else base + '.jxl'
+
+
+# Mime types for serving a book straight to the browser (Download button, or an
+# external/OPDS reader). The in-app reader never uses these -- it gets rendered
+# page images or sanitized HTML instead.
+_BOOK_MIME = {
+    '.epub': 'application/epub+zip',
+    '.pdf': 'application/pdf',
+    '.mobi': 'application/x-mobipocket-ebook',
+    '.azw': 'application/vnd.amazon.ebook',
+    '.azw3': 'application/vnd.amazon.ebook',
+    '.kf8': 'application/vnd.amazon.ebook',
+    '.kfx': 'application/vnd.amazon.ebook',
+    '.fb2': 'application/x-fictionbook+xml',
+    '.lit': 'application/x-ms-reader',
+    '.chm': 'application/vnd.ms-htmlhelp',
+    '.lrf': 'application/x-sony-bbeb',
+    '.lrx': 'application/x-sony-bbeb',
+    '.rtf': 'application/rtf',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.doc': 'application/msword',
+    '.opf': 'application/oebps-package+xml',
+    '.pdb': 'application/vnd.palm',
+    '.ceb': 'application/vnd.founder.ceb',
+    '.cbz': 'application/vnd.comicbook+zip',
+    '.cbr': 'application/vnd.comicbook-rar',
+    '.cb7': 'application/x-cb7',
+    '.cbt': 'application/x-cbt',
+    '.cba': 'application/x-cba',
+    '.txt': 'text/plain; charset=utf-8',
+    '.htm': 'text/html; charset=utf-8',
+    '.html': 'text/html; charset=utf-8',
+}
 
 
 # ── content sniffing (for misnamed / extension-less uploads) ──────────────────

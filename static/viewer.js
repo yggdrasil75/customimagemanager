@@ -645,3 +645,12 @@ function drawCanvas() { return mainViewer.drawCanvas(); }
 
 const VIDEO_RE = /\.(mp4|webm|mkv|mov|avi|m4v|mpg|mpeg|wmv|flv|ts|ogv)$/i;
 function isVideoFile(fn) { return VIDEO_RE.test(fn || ''); }
+
+// Books. Deliberately only the UNAMBIGUOUS extensions — the same split the
+// server draws in media_types.UNAMBIGUOUS_BOOK_EXTS. A `.txt` or `.html` in the
+// library might be a book, but it might equally be this app's tag sidecar or a
+// saved webpage, and only the server (which can see the file's bytes and its
+// neighbours) is in a position to know. The gallery gets the answer from the
+// server's `kind` field on each entry instead of guessing from the name here.
+const BOOK_RE = /\.(epub|mobi|azw3?|kf8|kfx|lit|fb2|lrf|lrx|chm|ceb|docx|rtf|pdf|cbz|cbr|cb7|cbt|cba)$/i;
+function isBookFile(fn) { return BOOK_RE.test(fn || ''); }

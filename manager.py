@@ -29,7 +29,7 @@ from datetime import datetime
 from collections import OrderedDict, Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from werkzeug.utils import secure_filename
-from flask import Flask, render_template, render_template_string, request, jsonify, send_file, Response
+from flask import Flask, render_template, render_template_string, request, jsonify, send_file, Response, g
 from ultralytics import YOLO
 import faces as facelib
 import bodies as bodylib
@@ -42,6 +42,7 @@ import media_types as mt
 import video_tracks as vt
 import tiering
 import music_index as mi
+import book_routes
 import auth as _auth
 import exif_import, exif_export, exif_fields
 import xmp_import, xmp_fields
@@ -807,6 +808,15 @@ def _purge_file_everywhere(rel_path):
         "DELETE FROM file_history      WHERE rel_path=?",
         "DELETE FROM image_embeddings  WHERE rel_path=?",
         "DELETE FROM image_clusters    WHERE rel_path=?",
+        # Book tables. A book is keyed by rel_path across all six; leaving these
+        # behind is how a deleted book keeps showing up on the shelf with a
+        # broken cover, and how its bookmarks resurrect if you re-add the file.
+        "DELETE FROM books             WHERE rel_path=?",
+        "DELETE FROM book_authors      WHERE rel_path=?",
+        "DELETE FROM book_sections     WHERE rel_path=?",
+        "DELETE FROM book_chunks       WHERE rel_path=?",
+        "DELETE FROM book_progress     WHERE rel_path=?",
+        "DELETE FROM book_bookmarks    WHERE rel_path=?",
     ):
         try:
             db.execute(sql, (rel_path,))
@@ -857,9 +867,12 @@ def _query_files(search: str, offset: int, limit: int, folder: str = '', album: 
     mixed comic/image list inside one would just confuse the count."""
     text, where, params = _parse_search(search)
 
-    # --- comics (few; fetched whole, shown first) ---
-    # Skip entirely when filtering to an album (see docstring).
+    # --- comics + books (few; fetched whole, shown first) ---
+    # Skip entirely when filtering to an album (see docstring): an album is a
+    # flat set of images, and books/comics aren't album members.
     comic_entries = [] if album else _query_comics(text, folder)
+    book_entries = [] if album else _query_books(text, folder)
+    comic_entries = comic_entries + book_entries
     nc = len(comic_entries)
 
     # --- ordinary images, excluding comic pages ---
@@ -1389,6 +1402,15 @@ def _build_index_background():
         _scan_comics()
     except Exception as e:
         access_logger.error(f"comic scan: {e}")
+    # Books ride along with the same startup pass. Its own walk is resumable and
+    # skips unchanged mtimes, so on a warm library this costs one os.walk and
+    # nothing else — but it means a book dropped into the media folder while the
+    # server was down is on the shelf by the time the image index finishes,
+    # rather than waiting for someone to press Reindex.
+    try:
+        book_routes.reconcile()
+    except Exception as e:
+        access_logger.error(f"book reconcile: {e}")
 
 def _reconcile_deleted():
     """Walk the `files` table and purge every row whose backing file is gone
@@ -3502,6 +3524,58 @@ def _query_comics(text, folder):
         })
     return out
 
+def _query_books(text, folder):
+    """Book/comic entries matching the folder scope + free text.
+
+    Deliberately mirrors _query_comics: books are NOT in the `files` table (that
+    table is the image DB -- perceptual hashes, MWG regions, IQA -- and putting
+    an epub in it would create a stub row with NULL phashes that dedup and the
+    thumbnailer then have to special-case forever). They live in `books`, and
+    the flat list stitches them in the same way comic covers already are.
+
+    This is what makes a mixed folder work: drop `series/vol1.cbz` next to
+    `series/cover.jpg` and the gallery shows both, rather than silently hiding
+    half the folder because it isn't pixels.
+    """
+    if not _table_exists(_db(), "books"):
+        return []
+    clauses, p = [], []
+    if folder == '/':
+        clauses.append("rel_path NOT LIKE '%/%'")
+    elif folder:
+        f = folder.strip('/').replace('\\', '/')
+        clauses.append("rel_path LIKE ? AND rel_path NOT LIKE ?")
+        p += [f + '/%', f + '/%/%']
+    if text:
+        like = f"%{text}%"
+        clauses.append("(title LIKE ? OR authors LIKE ? OR series LIKE ? "
+                       "OR tags LIKE ? OR subjects LIKE ?)")
+        p += [like] * 5
+    where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = _db().execute(
+        f"SELECT rel_path,title,authors,kind,fmt,page_count,cover,tags,rating "
+        f"FROM books{where_sql} ORDER BY sort_title COLLATE NOCASE", p).fetchall()
+    out = []
+    for r in rows:
+        out.append({
+            "kind": "book",
+            "filename": r["rel_path"],
+            "rel_path": r["rel_path"],
+            "title": r["title"] or r["rel_path"].split('/')[-1],
+            "authors": json.loads(r["authors"] or "[]"),
+            "book_kind": r["kind"],
+            "fmt": r["fmt"],
+            "page_count": r["page_count"] or 0,
+            "has_cover": bool(r["cover"]),
+            "tags": json.loads(r["tags"] or "[]"),
+            "iqa_score": None,
+            # Book covers are 2:3-ish; comics vary. The grid needs *an* aspect
+            # ratio up front or every tile reflows once its image loads.
+            "width": 2, "height": 3,
+        })
+    return out
+
+
 # ── LLM helpers (shared by actions + pipeline) ────────────────────────────────
 def _normalize_endpoint(endpoint):
     """Auto-complete a base URL to the OpenAI chat-completions path."""
@@ -4875,10 +4949,11 @@ def api_upload():
                     }), 422
                 # Timing now lives in the video itself; no XMP delays needed.
                 anim_delays = None
-            elif mt.is_video(fname) or mt.is_audio(fname):
-                # Videos and audio can't be transcoded to JXL — store the
+            elif mt.is_video(fname) or mt.is_audio(fname) or mt.is_book(fname):
+                # Video, audio and books can't be transcoded to JXL — store the
                 # original bytes. Audio is organised + tagged in place by the
-                # music indexer (music_index.py); it never enters the image DB.
+                # music indexer (music_index.py) and books by the book indexer
+                # (book_routes); neither ever enters the image DB.
                 shutil.copy(orig, out)
             elif in_ext == '.jxl':
                 shutil.copy(orig, out)
@@ -4915,6 +4990,18 @@ def api_upload():
                     }), 422
 
             sha = _sha256(out)
+            # Books aren't in `files`, so the image dedup query below would never
+            # see an epub you already have. Check the book library by content
+            # hash instead — re-uploading the same book from a second device is
+            # the single most common way a book library grows duplicates.
+            if mt.is_book(fname):
+                bdup = book_routes.sha_exists(sha)
+                if bdup:
+                    return jsonify({
+                        "success": False, "error_code": "exact_duplicate",
+                        "error": "This book is already in the library.",
+                        "existing_file": bdup
+                    }), 409
             dup = _db().execute(
                 "SELECT rel_path FROM files WHERE sha256=?", (sha,)).fetchone()
             if dup:
@@ -4925,6 +5012,22 @@ def api_upload():
                 }), 409
 
             shutil.move(out, store_path)
+
+            # Books are not image assets either: no bpp, no XMP regions, no
+            # image index. Index the ONE file synchronously so the uploader's
+            # response means "it's in the library and readable", rather than
+            # kicking off a whole-tree walk per uploaded file — a 3000-book
+            # bulk upload would otherwise start 3000 full scans.
+            if mt.is_book(fname):
+                try:
+                    book_routes.index_one(rel_path)
+                except Exception as e:
+                    access_logger.warning(f"book index after upload: {e}")
+                resp = {"success": True, "filename": rel_path, "media_kind": "book"}
+                if corrected_from is not None:
+                    resp["corrected_extension"] = {"from": corrected_from,
+                                                   "to": in_ext}
+                return jsonify(resp), 200
 
             # Audio is not an image asset: skip bpp/XMP/image-index entirely and
             # let the music indexer pick it up (it walks MEDIA_DIR for MUSIC_EXTS
@@ -4998,8 +5101,18 @@ def api_move():
         nb = os.path.splitext(new_path)[0]
         for ext in mt.related_exts(old_path):
             if os.path.exists(ob+ext): shutil.move(ob+ext, nb+ext)
-        _delete_file_row(filename)
         new_rel = os.path.relpath(new_path, MEDIA_DIR).replace('\\','/')
+        # A book's rel_path is its primary key across six tables (books,
+        # book_authors, book_sections, book_chunks, book_progress,
+        # book_bookmarks). Moving the file without repointing them silently
+        # orphans the extracted text, every bookmark, and how far you'd read.
+        if mt.is_book(old_path):
+            try:
+                book_routes.rename_book(filename, new_rel)
+            except Exception as e:
+                access_logger.error(f"book move {filename}: {e}")
+            return jsonify({"success": True})
+        _delete_file_row(filename)
         if not _index_file(new_rel, force=True):
           print("move failed")
         mv_folder = os.path.dirname(new_rel)
@@ -8499,6 +8612,35 @@ def music_shuffle():
     return jsonify({"success": True, "playlist": playlist})
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# BOOKS & COMICS
+# ══════════════════════════════════════════════════════════════════════════════
+# Unlike the music block above, the book endpoints live in their own module.
+# manager.py is already 8.5k lines; a twelfth inline feature block would not
+# have made it more maintainable. Everything book_routes needs from here is
+# handed over explicitly, so there's no import cycle and no second copy of the
+# DB/config logic.
+#
+# The `books` table and its friends are created by book_routes.register().
+
+book_routes.register(app, {
+    "db":            _db,
+    "media_dir":     MEDIA_DIR,
+    "safe_path":     get_safe_path,
+    "logger":        access_logger,
+    # Passage search reuses the SAME OAI embedding model the images use, so a
+    # library configured for semantic image search gets book search for free.
+    "embed_text":    _oai_embed_text,
+    "embed_enabled": _oai_embed_enabled,
+    "embed_tag":     _oai_embed_tag,
+    "llm_request":   _llm_request,
+    # Reading position is per-user: two people sharing a library should not
+    # fight over one bookmark. auth.py puts the current user on flask.g; when
+    # auth is disabled g.user is None and everyone shares the '' bucket.
+    "current_user":  lambda: (getattr(g, "user", None) or {}).get("username", ""),
+})
+
+
 # ── HTML templates ────────────────────────────────────────────────────────--
 # UI templates live in templates.py (imported at top of file).
 
@@ -8511,6 +8653,8 @@ if __name__=='__main__':
     tiering.start(MEDIA_DIR, _db, lambda: _last_activity)
     access_logger.info("Starting background music indexer…")
     threading.Thread(target=_music_index_background, daemon=True).start()
+    access_logger.info("Starting background book indexer…")
+    book_routes.start_background()
     access_logger.info("Starting background face worker…")
     threading.Thread(target=_background_face_worker, daemon=True).start()
     access_logger.info("Warming pose/OCR models (auto-download)…")

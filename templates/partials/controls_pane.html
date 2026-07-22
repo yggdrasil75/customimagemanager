@@ -9,6 +9,9 @@
           class="controls-tab px-3 py-2 text-gray-400 border-b-2 border-transparent hover:text-white">IPTC</button>
         <button data-tab="xmp" onclick="setControlsTab('xmp')"
           class="controls-tab px-3 py-2 text-gray-400 border-b-2 border-transparent hover:text-white">XMP</button>
+
+        <button data-tab="book" onclick="setControlsTab('book')"
+          class="controls-tab hidden px-3 py-2 text-white border-b-2 border-blue-500">Book</button>
       </div>
 
       <!-- Tab panes -->
@@ -240,6 +243,9 @@
       <div id="controls_pane_xmp" class="controls-tab-pane hidden h-full overflow-y-auto p-3">
         {% include 'xmp_editor.html' %}
       </div>
+
+      <!-- Tab 5: Book (book mode only) -->
+      {% include 'partials/book_controls.html' %}
 
       </div><!-- /#controls_tab_bodies -->
     </div>

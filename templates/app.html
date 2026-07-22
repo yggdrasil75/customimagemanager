@@ -23,6 +23,8 @@
   <!-- Right: editor region (shared media viewer + controls) -->
   <div id="editor_region" class="flex-1 flex h-full overflow-hidden vertical">
     {% include 'partials/image_viewer.html' %}
+    {# Book mode swaps this in for the image viewer — same slot, same geometry. #}
+    {% include 'partials/book_reader.html' %}
     {% include 'partials/controls_pane.html' %}
   </div>
 
@@ -36,6 +38,7 @@
   {% include 'partials/comic_modal.html' %}
   {% include 'partials/review_modal.html' %}
   {% include 'partials/image_pipeline_modal.html' %}
+  {% include 'partials/book_triage_modal.html' %}
 
   <!-- Shared globals first, then per-area modules -->
   <script src="/static/auth.js"></script>
@@ -60,6 +63,8 @@
   <script src="/static/controls_tabs.js"></script>
   <script src="/static/pipeline_editor.js"></script>
   <script src="/static/music.js"></script>
+  <script src="/static/books.js"></script>
+  <script src="/static/reader.js"></script>
 </body>
 
 </html>

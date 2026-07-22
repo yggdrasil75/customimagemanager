@@ -203,10 +203,66 @@ canvas {
   flex-direction: column
 }
 
-#image_pane {
+#image_pane,
+#book_reader {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0
+}
+
+/* The reader occupies the same slot as the image viewer, so it must inherit the
+   same flex behaviour in BOTH editor_region orientations — otherwise switching
+   to book mode in the horizontal (stacked) layout collapses it to zero height.
+   Tailwind's flex-1 is `flex:1 1 0%`, which is close but not identical to the
+   `auto` basis #image_pane relies on, so it's set explicitly here rather than
+   left to a utility class. */
+
+/* Reading surface. The measure is capped in ch (set by reader.js from the
+   Measure slider) and centred; the column gap only matters in two-up mode. */
+#reader_content {
+  transition: font-size .12s ease, background .15s ease, color .15s ease;
+  scroll-behavior: smooth;
+}
+
+#reader_content p {
+  margin: 0 0 .85em;
+  text-align: justify;
+  hyphens: auto;
+}
+
+#reader_content h1,
+#reader_content h2,
+#reader_content h3 {
+  font-weight: 700;
+  line-height: 1.25;
+  margin: 1.4em 0 .6em;
+  text-align: left;
+}
+
+#reader_content blockquote {
+  margin: 1em 0 1em 1.5em;
+  padding-left: .9em;
+  border-left: 2px solid currentColor;
+  opacity: .8;
+}
+
+#reader_content img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Break-inside avoidance keeps a heading from being orphaned at the foot of a
+   column in two-up mode. */
+#reader_content h1,
+#reader_content h2,
+#reader_content h3,
+#reader_content blockquote {
+  break-inside: avoid;
+}
+
+.reader-page {
+  image-rendering: auto;
+  box-shadow: 0 0 18px rgba(0, 0, 0, .6);
 }
 
 #controls_pane {

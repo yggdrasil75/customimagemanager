@@ -1,0 +1,148 @@
+<!-- Book reader — the centre-pane swap.
+
+     #editor_region normally holds the image viewer (#image_pane) beside the
+     controls pane. In book mode setMediaMode('book') hides #image_pane and
+     shows this instead; the controls pane stays put but switches its own body
+     (see book_controls.html). Same geometry, different centre.
+
+     Two readers live in here because there are genuinely two kinds of book:
+
+       #reader_flow  — epub/txt/html/mobi/…  sanitized HTML in a CSS-columns
+                       box. Font size, family, width, theme and 1/2-column
+                       layout are all reader-side; nothing round-trips.
+       #reader_paged — pdf/cb*.  Server-rendered page images. Single page or
+                       two-up spread, fit-width / fit-height / actual size.
+
+     Both share the header, the seek bar and the keyboard handler. -->
+<div id="book_reader" class="hidden flex-1 flex flex-col bg-gray-900 min-w-0">
+
+  <!-- header -->
+  <div class="px-3 py-2 bg-gray-800 border-b border-gray-700 flex items-center gap-2 flex-shrink-0">
+    <button onclick="closeBook()" title="Back to the image viewer"
+      class="text-xs text-gray-400 hover:text-white px-1">‹ Close</button>
+    <div class="min-w-0 flex-1">
+      <p id="reader_title" class="text-xs font-bold text-blue-400 truncate">No book open</p>
+      <p id="reader_sub" class="text-[10px] text-gray-500 truncate">—</p>
+    </div>
+    <button id="reader_toc_btn" onclick="toggleToc()" title="Table of contents"
+      class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">☰ Contents</button>
+    <button onclick="addBookmark()" title="Bookmark this position"
+      class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">🔖</button>
+    <button onclick="toggleReaderSettings()" title="Typography & layout"
+      class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Aa</button>
+  </div>
+
+  <!-- typography / layout popover -->
+  <div id="reader_settings"
+    class="hidden flex-shrink-0 bg-gray-850 border-b border-gray-700 p-3 grid grid-cols-2 gap-3 text-xs">
+    <label class="flex flex-col gap-1" data-reader="flow">
+      <span class="text-[10px] uppercase tracking-wider text-gray-400 font-bold">Font size</span>
+      <input type="range" id="rs_font" min="12" max="32" value="18" oninput="applyReaderStyle()"
+        class="accent-blue-500">
+    </label>
+    <label class="flex flex-col gap-1" data-reader="flow">
+      <span class="text-[10px] uppercase tracking-wider text-gray-400 font-bold">Line height</span>
+      <input type="range" id="rs_leading" min="120" max="220" value="165" oninput="applyReaderStyle()"
+        class="accent-blue-500">
+    </label>
+    <label class="flex flex-col gap-1" data-reader="flow">
+      <span class="text-[10px] uppercase tracking-wider text-gray-400 font-bold">Typeface</span>
+      <select id="rs_family" onchange="applyReaderStyle()"
+        class="bg-gray-700 rounded border border-gray-600 px-1 py-1">
+        <option value="Georgia, 'Iowan Old Style', serif">Serif</option>
+        <option value="system-ui, -apple-system, sans-serif">Sans</option>
+        <option value="'Iowan Old Style', 'Palatino Linotype', serif">Old style</option>
+        <option value="ui-monospace, 'Cascadia Code', monospace">Mono</option>
+      </select>
+    </label>
+    <label class="flex flex-col gap-1" data-reader="flow">
+      <span class="text-[10px] uppercase tracking-wider text-gray-400 font-bold">Columns</span>
+      <select id="rs_columns" onchange="applyReaderStyle()"
+        class="bg-gray-700 rounded border border-gray-600 px-1 py-1">
+        <option value="1">Single</option>
+        <option value="2">Two-up</option>
+      </select>
+    </label>
+    <label class="flex flex-col gap-1" data-reader="flow">
+      <span class="text-[10px] uppercase tracking-wider text-gray-400 font-bold">Measure</span>
+      <input type="range" id="rs_measure" min="30" max="100" value="68" oninput="applyReaderStyle()"
+        class="accent-blue-500">
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-[10px] uppercase tracking-wider text-gray-400 font-bold">Theme</span>
+      <select id="rs_theme" onchange="applyReaderStyle()"
+        class="bg-gray-700 rounded border border-gray-600 px-1 py-1">
+        <option value="dark">Dark</option>
+        <option value="sepia">Sepia</option>
+        <option value="light">Light</option>
+        <option value="black">OLED black</option>
+      </select>
+    </label>
+    <label class="flex flex-col gap-1" data-reader="paged">
+      <span class="text-[10px] uppercase tracking-wider text-gray-400 font-bold">Page fit</span>
+      <select id="rs_fit" onchange="applyReaderStyle()"
+        class="bg-gray-700 rounded border border-gray-600 px-1 py-1">
+        <option value="width">Fit width</option>
+        <option value="height">Fit height</option>
+        <option value="actual">Actual size</option>
+      </select>
+    </label>
+    <label class="flex flex-col gap-1" data-reader="paged">
+      <span class="text-[10px] uppercase tracking-wider text-gray-400 font-bold">Spread</span>
+      <select id="rs_spread" onchange="applyReaderStyle()"
+        class="bg-gray-700 rounded border border-gray-600 px-1 py-1">
+        <option value="1">Single page</option>
+        <option value="2">Two-page spread</option>
+        <option value="2r">Two-page (right-to-left)</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="flex flex-1 overflow-hidden min-h-0">
+
+    <!-- table of contents -->
+    <div id="reader_toc"
+      class="hidden w-[220px] flex-shrink-0 border-r border-gray-700 bg-gray-850 overflow-auto p-2 text-xs">
+    </div>
+
+    <div class="flex-1 flex flex-col min-w-0 relative">
+
+      <!-- flow reader: sanitized HTML in a columns box -->
+      <div id="reader_flow" class="hidden flex-1 overflow-hidden relative">
+        <div id="reader_content" class="h-full overflow-auto px-8 py-6 mx-auto"></div>
+        <button onclick="readerNudge(-1)" title="Previous"
+          class="absolute left-0 top-0 h-full w-10 opacity-0 hover:opacity-100 transition
+                 bg-gradient-to-r from-black/60 to-transparent text-white text-lg">‹</button>
+        <button onclick="readerNudge(1)" title="Next"
+          class="absolute right-0 top-0 h-full w-10 opacity-0 hover:opacity-100 transition
+                 bg-gradient-to-l from-black/60 to-transparent text-white text-lg">›</button>
+      </div>
+
+      <!-- paged reader: server-rendered page images -->
+      <div id="reader_paged" class="hidden flex-1 overflow-auto bg-black">
+        <div id="reader_pages" class="min-h-full flex items-center justify-center gap-1 p-2"></div>
+      </div>
+
+      <!-- an empty state that says what to do, rather than a blank box -->
+      <div id="reader_empty" class="flex-1 flex items-center justify-center text-center p-8">
+        <div class="text-gray-500 text-sm max-w-sm">
+          <div class="text-4xl mb-3">📖</div>
+          <p id="reader_empty_msg">Pick a book from the Books tab.</p>
+          <button id="reader_empty_action" onclick="readerEmptyAction()"
+            class="hidden mt-3 bg-sky-700 hover:bg-sky-600 px-3 py-1.5 rounded text-white text-xs font-bold">
+            Extract text now
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- footer: position + seek -->
+  <div class="px-3 py-1.5 bg-gray-800 border-t border-gray-700 flex items-center gap-2 flex-shrink-0">
+    <button onclick="readerNudge(-1)" class="text-xs text-gray-300 hover:text-white w-5">‹</button>
+    <input id="reader_seek" type="range" min="0" max="1000" value="0" oninput="readerSeek(this.value)"
+      class="flex-1 h-1 accent-blue-500 cursor-pointer">
+    <button onclick="readerNudge(1)" class="text-xs text-gray-300 hover:text-white w-5">›</button>
+    <span id="reader_pos" class="text-[10px] text-gray-400 tabular-nums w-32 text-right">—</span>
+  </div>
+</div>

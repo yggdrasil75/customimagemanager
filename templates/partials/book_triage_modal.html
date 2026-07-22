@@ -1,0 +1,33 @@
+<!-- Book triage modal.
+
+     The indexer refuses to guess on ambiguous files (a 3 KB .txt that could be
+     a tag sidecar or a drabble; a .html that could be a story or a saved
+     webpage; a .pdb that could be a Palm memo). Those land here with the reason
+     and a text preview so a human can answer in one glance.
+
+     "Apply to all like this" is the important button: an ao3 dump produces
+     thousands of files that are ambiguous for the SAME reason, and answering
+     them one at a time is not a real workflow. -->
+<div id="book_triage_modal"
+  class="hidden fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-6">
+  <div class="bg-gray-900 border border-gray-700 rounded-lg w-full max-w-4xl max-h-[85vh] flex flex-col">
+
+    <div class="px-4 py-3 border-b border-gray-700 flex items-center gap-3 flex-shrink-0">
+      <h2 class="font-bold text-amber-400">Is this a book?</h2>
+      <span id="triage_count" class="text-xs text-gray-500">—</span>
+      <span class="text-[10px] text-gray-600 flex-1">
+        These files could be books, but the extension and content don't settle it.
+        Rather than misfile them silently, we ask once.
+      </span>
+      <button onclick="closeTriageModal()" class="text-gray-400 hover:text-white px-2">✕</button>
+    </div>
+
+    <div id="triage_list" class="flex-1 overflow-auto p-3 flex flex-col gap-2"></div>
+
+    <div class="px-4 py-2 border-t border-gray-700 flex items-center gap-2 flex-shrink-0 text-xs">
+      <span class="text-gray-500 flex-1">Decisions are remembered — a rescan won't ask again.</span>
+      <button onclick="closeTriageModal()"
+        class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded font-bold">Done</button>
+    </div>
+  </div>
+</div>

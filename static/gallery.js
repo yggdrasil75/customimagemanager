@@ -132,7 +132,10 @@ async function showImageFilter(body, text){
 }
 
 function renderGallery(files){
-  galleryFiles = files.filter(x=>x.kind!=='comic');
+  // Books and comics are not part of the image multi-select / bulk-op set:
+  // "confirm all boxes" or "run pose" over an epub is meaningless, and letting
+  // them into galleryFiles would put them in range of every bulk action.
+  galleryFiles = files.filter(x=>x.kind!=='comic' && x.kind!=='book');
   io.disconnect();
   const grid=document.getElementById('gallery_grid');
   grid.innerHTML='';
@@ -152,6 +155,27 @@ function renderGallery(files){
         <span class="label">${_esc(item.title)}</span>`;
       grid.appendChild(div);
       if(cover) io.observe(div);
+      return;
+    }
+    if(item.kind==='book'){
+      // A book tile in the folder browser. Clicking it opens the reader in the
+      // centre pane rather than loading it into the image editor — that's the
+      // whole point of the media-mode swap.
+      const div=document.createElement('div');
+      div.className='gallery-item';
+      div.dataset.kind='book';
+      div.dataset.filename=item.rel_path;
+      if(item.has_cover) div.dataset.src=`/api/books/cover/${encodeURI(item.rel_path)}`;
+      div.addEventListener('click',()=>openBook(item.rel_path));
+      div.style.aspectRatio='2/3';
+      const icon=item.book_kind==='comic'?'📚':'📖';
+      div.innerHTML=`<div class="skeleton"></div>
+        ${item.has_cover?'<img alt="">':`<div class="absolute inset-0 flex items-center justify-center text-4xl">${icon}</div>`}
+        <span class="comic-badge">${icon} ${(item.fmt||'').toUpperCase()}</span>
+        ${item.tags.length?`<span class="tag-badge">${item.tags.length}</span>`:''}
+        <span class="label">${_esc(item.title)}</span>`;
+      grid.appendChild(div);
+      if(item.has_cover) io.observe(div);
       return;
     }
     const f=item.filename;
@@ -261,6 +285,14 @@ function refreshSelectionUI(){
 
 // ── File select (single) ───────────────────────────────────────────────────
 async function selectFile(fn){
+  // A book is not an image. Everything below this line assumes a decodable
+  // pixel surface — it reads /api/metadata (which decodes the file), pokes the
+  // canvas, and enables the YOLO controls. Handing it an epub produces a broken
+  // editor and a 500 in the log, so route to the reader and stop here.
+  if(typeof isBookFile==='function' && isBookFile(fn)){
+    if(typeof openBook==='function') openBook(fn);
+    return;
+  }
   currentFile=fn;
   // Clear multi-selection visual when opening single file
   document.querySelectorAll('.gallery-item').forEach(e=>{

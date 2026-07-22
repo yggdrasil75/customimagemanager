@@ -260,7 +260,7 @@ def _post_streaming(session, endpoint, filepath, fname, form_data, timeout):
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 # Media the server will accept: still images + gifs (server converts to jxl,
-# animated gifs → animated jxl) and video files (stored natively).
+# animated gifs → animated jxl), video, audio and books (all stored natively).
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.jxl', '.gif', '.apng'}
 VIDEO_EXTENSIONS = {'.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v', '.mpg',
                     '.mpeg', '.wmv', '.flv', '.ts', '.ogv'}
@@ -276,7 +276,30 @@ RAW_EXTENSIONS = {
     '.raf', '.rw2', '.orf', '.pef', '.ptx', '.raw', '.rwl', '.iiq', '.3fr',
     '.fff', '.mef', '.mos', '.mrw', '.x3f', '.erf', '.kdc', '.dcr',
 }
-MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | RAW_EXTENSIONS | AUDIO_EXTENSIONS
+# Books & comics: stored natively by the server, exactly like video and audio.
+#
+# ONLY the unambiguous extensions are here, mirroring
+# media_types.UNAMBIGUOUS_BOOK_EXTS. The server accepts nothing else, and the
+# reason is worth stating because it looks like an omission:
+#
+#   .txt  is also this app's tag-sidecar format
+#   .htm(l) is also a saved webpage, or one chapter of an unpacked epub
+#   .pdb  is also a generic Palm database
+#   .opf  is a manifest whose *folder* is the book
+#   .doc  is any OLE2 compound document
+#
+# Deciding those needs the file's bytes AND its neighbours on disk, which is a
+# judgement only the server can make (book_index.classify). Uploading them
+# blindly would turn every tag sidecar in a source tree into a "book". Put text
+# books directly in the media folder and let the server's indexer classify them
+# in context; that path has the triage queue for the genuinely ambiguous ones.
+BOOK_EXTENSIONS = {
+    '.epub', '.mobi', '.azw', '.azw3', '.kf8', '.kfx', '.lit', '.fb2',
+    '.lrf', '.lrx', '.chm', '.ceb', '.docx', '.rtf', '.pdf',
+    '.cbz', '.cbr', '.cb7', '.cbt', '.cba',
+}
+MEDIA_EXTENSIONS = (IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | RAW_EXTENSIONS
+                    | AUDIO_EXTENSIONS | BOOK_EXTENSIONS)
 
 # Files we never want to walk even in --aggressive mode: sidecars and the
 # uploader's own bookkeeping. Everything else is fair game when aggressive.
@@ -340,6 +363,17 @@ def parse_sidecar(filepath: str, classes_map: list[str]) -> tuple:
       3. Fallback:             entire file content as description
     """
     sidecar = os.path.splitext(filepath)[0] + ".txt"
+    # A .txt book is its own "sidecar" by this naming rule — `moby.txt` would
+    # have the entire novel read in as its description, and a YOLO-format parse
+    # attempt on 200 KB of prose on top. Never let a file be its own sidecar.
+    if os.path.abspath(sidecar) == os.path.abspath(filepath):
+        return [], "", []
+    # Books carry their own metadata (epub OPF, ComicInfo.xml, MOBI EXTH, PDF
+    # info dict), which the server reads on ingest. A .txt beside a .epub is far
+    # more likely to be a stray note than tags for that book, and letting it
+    # through would overwrite real publisher metadata with a filename dump.
+    if os.path.splitext(filepath)[1].lower() in BOOK_EXTENSIONS:
+        return [], "", []
     if not os.path.exists(sidecar):
         return [], "", []
     try:
