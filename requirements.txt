@@ -23,4 +23,4 @@ rarfile
 py7zr
 python-docx
 striprtf
- 
+waitress

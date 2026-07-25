@@ -8644,7 +8644,9 @@ book_routes.register(app, {
 # ── HTML templates ────────────────────────────────────────────────────────--
 # UI templates live in templates.py (imported at top of file).
 
+
 if __name__=='__main__':
+    from waitress import serve
     access_logger.info("Starting background indexer…")
     threading.Thread(target=_build_index_background, daemon=True).start()
     access_logger.info("Starting background auto-tagger…")
@@ -8660,4 +8662,4 @@ if __name__=='__main__':
     access_logger.info("Warming pose/OCR models (auto-download)…")
     threading.Thread(target=_warm_models, daemon=True).start()
     access_logger.info("Serving on :8000")
-    app.run(host='0.0.0.0', port=8000, debug=False, threaded=True)
+    serve(app, host='0.0.0.0', port=8000, threads=8, connection_limit=200, channel_timeout=120)
