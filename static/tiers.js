@@ -29,8 +29,35 @@ async function openTiersModal() {
     { name: 'nvme', ratio: 5,  speed_mbps: 3000 },
     { name: 'ssd',  ratio: 50, speed_mbps: 500 },
     { name: 'hdd',  ratio: 45, speed_mbps: 150 }]).forEach(addTierRow);
+  loadPacksSettings();
   refreshTiersStatus();
-  _tiersPoll = setInterval(refreshTiersStatus, 4000);
+  refreshPacksStatus();
+  _tiersPoll = setInterval(() => { refreshTiersStatus(); refreshPacksStatus(); }, 4000);
+}
+
+function loadPacksSettings() {
+  // Pack config lives in /api/state under "packs".
+  const apply = (p) => {
+    p = p || {};
+    const set = (id, v) => { const el = document.getElementById(id); if (el != null && v != null) el.value = v; };
+    const chk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+    chk('packs_enabled', p.enabled);
+    chk('packs_auto', p.auto_migrate);
+    set('packs_size_mb', Math.round((p.pack_bytes ?? (1 << 30)) / (1024 * 1024)));
+    set('packs_max_open', p.max_open_packs ?? 16);
+    set('packs_idle', p.idle_sec ?? 60);
+  };
+  fetch('/api/state').then(r => r.json()).then(s => apply(s.packs)).catch(() => apply({}));
+}
+
+function collectPacksConfig() {
+  return {
+    enabled: document.getElementById('packs_enabled').checked,
+    auto_migrate: document.getElementById('packs_auto').checked,
+    pack_bytes: (parseInt(document.getElementById('packs_size_mb').value) || 1024) * 1024 * 1024,
+    max_open_packs: parseInt(document.getElementById('packs_max_open').value) || 16,
+    idle_sec: parseInt(document.getElementById('packs_idle').value) || 60,
+  };
 }
 
 function stopTiersPoll() { clearInterval(_tiersPoll); _tiersPoll = null; }
@@ -55,9 +82,45 @@ async function saveTiersConfig() {
   const r = await fetch('/api/tiers', { method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(collectTiersConfig()) }).then(r => r.json()).catch(() => null);
+  // Pack settings go through the general settings endpoint, under "packs".
+  const pr = await fetch('/api/update_settings', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ packs: collectPacksConfig() }) }).then(r => r.json()).catch(() => null);
   document.getElementById('status_text').textContent =
-    r?.success ? 'Tier config saved.' : 'Failed to save tier config.';
+    (r?.success && pr?.success) ? 'Storage settings saved.' : 'Failed to save some storage settings.';
   refreshTiersStatus();
+  refreshPacksStatus();
+}
+
+async function packsRun(job) {
+  const label = { all: 'Convert', compact: 'Compact', unpack: 'Unpack' }[job] || job;
+  if (job === 'unpack' && !confirm('Unpack every packed file back to loose files on disk? This can take a while.')) return;
+  const r = await fetch('/api/packs/run', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ job }) }).then(r => r.json()).catch(() => null);
+  document.getElementById('status_text').textContent =
+    r?.success ? `${label} started.` : `Could not start ${label.toLowerCase()} (packing disabled?).`;
+  refreshPacksStatus();
+}
+
+async function packsCancel() {
+  await fetch('/api/packs/cancel', { method: 'POST' }).catch(() => {});
+  refreshPacksStatus();
+}
+
+async function refreshPacksStatus() {
+  const el = document.getElementById('packs_status');
+  if (!el) return;
+  const r = await fetch('/api/packs/status').then(r => r.json()).catch(() => null);
+  if (!r) { el.textContent = 'Status unavailable.'; return; }
+  if (!r.enabled) { el.innerHTML = '<span class="text-gray-500">Packing disabled.</span>'; return; }
+  const run = r.run || {}, st = r.store || {};
+  let html = `<div class="text-gray-400">Worker: <span class="text-yellow-400">${run.phase || 'idle'}</span>` +
+    (run.active ? ` — ${run.packed || 0} packed, ${run.skipped || 0} skipped` : '') +
+    (run.errors ? `, <span class="text-red-400">${run.errors} errors</span>` : '') + `</div>`;
+  html += `<div class="text-gray-400">${st.blobs || 0} blobs in ${st.packs || 0} packs` +
+    ` (${fmtBytes(st.pack_bytes)}, ${st.garbage_pct != null ? st.garbage_pct : 0}% reclaimable)</div>`;
+  el.innerHTML = html;
 }
 
 function fmtBytes(b) {

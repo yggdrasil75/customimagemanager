@@ -167,17 +167,63 @@
       <div id="book_bookmarks" class="flex flex-col gap-0.5 max-h-40 overflow-y-auto"></div>
     </div>
 
-    <!-- comic-only: the one place the image pipeline still applies -->
+    <!-- paged-book only: the one place the image pipeline still applies.
+         Panels first, then OCR: lines get bound to whichever panel contains
+         them, so detection order is what makes the transcript readable rather
+         than one undifferentiated block of text per page. -->
     <div id="book_comic_tools" class="hidden border-t border-gray-700 pt-2 flex flex-col gap-2">
       <h3 class="font-bold text-purple-400 text-sm">Comic tools</h3>
       <p class="text-[10px] text-gray-500">
         Pages are images, so the image pipeline can run over them. Results are
-        stored against the book, not against loose files.
+        stored per page against the book, not against loose files.
       </p>
-      <button onclick="booksComicOCR()"
-        class="w-full bg-sky-700 hover:bg-sky-600 py-1.5 rounded font-bold text-sm">🔤 OCR pages</button>
-      <button onclick="booksComicPanels()"
-        class="w-full bg-teal-600 hover:bg-teal-500 py-1.5 rounded font-bold text-sm">🔲 Detect panels</button>
+
+      <div id="comic_summary" class="text-[10px] text-gray-400 leading-relaxed"></div>
+
+      <div class="flex flex-col gap-1 text-[10px] text-gray-400">
+        <label class="flex items-center gap-1.5 cursor-pointer" title="Manga and
+          other right-to-left comics: reverses panel order within each row.">
+          <input type="checkbox" id="comic_rtl" class="accent-purple-500">
+          Right-to-left (manga)
+        </label>
+        <label class="flex items-center gap-1.5 cursor-pointer" title="Crops and
+          upscales each panel before reading it. Several times slower, but comic
+          lettering is small and full-page OCR often misses it.">
+          <input type="checkbox" id="comic_per_panel" class="accent-purple-500">
+          OCR per panel (slower, more accurate)
+        </label>
+        <label class="flex items-center gap-1.5 cursor-pointer" title="Redo pages
+          that already have results instead of skipping them.">
+          <input type="checkbox" id="comic_force" class="accent-purple-500">
+          Redo pages already done
+        </label>
+      </div>
+
+      <button id="btn_comic_both" onclick="booksComicBoth()"
+        class="w-full bg-purple-700 hover:bg-purple-600 py-1.5 rounded font-bold text-sm">
+        ▦🔤 Detect panels + OCR</button>
+      <div class="flex gap-1">
+        <button id="btn_comic_panels" onclick="booksComicPanels()"
+          class="flex-1 bg-teal-600 hover:bg-teal-500 py-1.5 rounded font-bold text-xs">
+          ▦ Panels only</button>
+        <button id="btn_comic_ocr" onclick="booksComicOCR()"
+          class="flex-1 bg-sky-700 hover:bg-sky-600 py-1.5 rounded font-bold text-xs">
+          🔤 OCR only</button>
+      </div>
+
+      <button id="comic_cancel" onclick="booksComicCancel()"
+        class="hidden w-full bg-red-800 hover:bg-red-700 py-1 rounded text-xs">
+        ✕ Cancel run</button>
+      <button id="comic_transcript_btn" onclick="booksComicTranscript()"
+        class="hidden w-full bg-gray-700 hover:bg-gray-600 py-1 rounded text-xs">
+        📄 View transcript</button>
+
+      <label class="flex items-center gap-1.5 text-[10px] text-gray-400 cursor-pointer">
+        <input type="checkbox" id="comic_show_panels" onchange="togglePanelOverlay()"
+          class="accent-teal-500">
+        Show panel overlay in reader
+      </label>
+      <p id="comic_status" class="text-[10px] text-yellow-400">Ready.</p>
     </div>
 
     <p class="text-xs text-gray-400">Status: <span id="book_status_text" class="text-yellow-400">Ready.</span></p>

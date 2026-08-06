@@ -664,6 +664,33 @@ def ensure_tables(db):
         );
         CREATE INDEX IF NOT EXISTS idx_bmark ON book_bookmarks(rel_path);
 
+        -- Per-page comic analysis: panel boxes and OCR text. Only paged books
+        -- get rows here, and only once someone asks for the analysis — a
+        -- library of 300 volumes is ~60k pages and detecting them all up front
+        -- would be hours of work nobody requested.
+        --
+        -- `panels` and `lines` are JSON. Boxes are normalised (cx,cy,w,h), the
+        -- same convention MWG regions use on the image side, so a panel can be
+        -- drawn by the same overlay code without conversion. `text` is the
+        -- flattened reading-order transcript, kept denormalised because that is
+        -- what search and the LLM want and rebuilding it from `lines` on every
+        -- read would mean re-running the ordering logic in two places.
+        CREATE TABLE IF NOT EXISTS book_pages (
+            rel_path  TEXT,
+            page      INTEGER,
+            w         INTEGER,          -- source page size, for overlay scaling
+            h         INTEGER,
+            panels    TEXT DEFAULT '[]',
+            lines     TEXT DEFAULT '[]',
+            text      TEXT DEFAULT '',
+            panel_src TEXT DEFAULT '',  -- model | contour | contour+split | xycut | page
+            engine    TEXT DEFAULT '',  -- which OCR engine produced `lines`
+            rtl       INTEGER DEFAULT 0,
+            updated   REAL,
+            PRIMARY KEY (rel_path, page)
+        );
+        CREATE INDEX IF NOT EXISTS idx_bpage_path ON book_pages(rel_path);
+
         -- The triage queue: files we refused to guess about. `decision` is
         -- NULL until a human answers; then 'book' or 'not_book'.
         CREATE TABLE IF NOT EXISTS book_triage (

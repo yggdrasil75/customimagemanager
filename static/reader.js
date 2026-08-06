@@ -91,6 +91,7 @@ async function openReader(book, jumpSection) {
 
 function closeReader() {
   saveReaderPosition(true);
+  _analysisCache.clear();
   readerBook = null;
   _rd('reader_flow').classList.add('hidden');
   _rd('reader_paged').classList.add('hidden');
@@ -201,10 +202,16 @@ async function showPage(n) {
     : [n];
   if (rtl) nums.reverse();
 
+  // Each page is wrapped so the panel overlay has something to sit on. The
+  // wrapper takes its size from the image, so the overlay tracks whatever the
+  // fit setting does without anyone measuring pixels.
   wrap.innerHTML = nums.map(i => `
-    <img src="/api/books/page/${encodeURI(readerBook.rel_path)}?n=${i}"
-         data-page="${i}" alt="page ${i + 1}"
-         class="reader-page block" style="${_pageFitStyle()}">`).join('');
+    <div class="relative inline-block flex-shrink-0" data-pagewrap="${i}">
+      <img src="/api/books/page/${encodeURI(readerBook.rel_path)}?n=${i}"
+           data-page="${i}" alt="page ${i + 1}"
+           class="reader-page block" style="${_pageFitStyle()}">
+      <div data-overlay="${i}" class="absolute inset-0 hidden"></div>
+    </div>`).join('');
 
   // Prefetch the next turn so a page flip on a spinning disk isn't a stall.
   const ahead = n + _spreadStep();
@@ -212,6 +219,93 @@ async function showPage(n) {
     new Image().src = `/api/books/page/${encodeURI(readerBook.rel_path)}?n=${ahead}`;
   }
   updateReaderPosition();
+  reloadPageAnalysis();
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * PANEL OVERLAY
+ *
+ * Draws stored panel boxes over the page and binds each one's OCR text to it.
+ * Boxes are normalised, so they're positioned in percentages and stay correct
+ * under fit-width, fit-height, actual size and two-up spreads without the
+ * overlay ever needing to know the rendered size of the image.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+const _analysisCache = new Map();     // "rel|page" -> analysis
+
+function panelOverlayOn() {
+  return !!document.getElementById('comic_show_panels')?.checked;
+}
+
+function togglePanelOverlay() { reloadPageAnalysis(); }
+
+async function _pageAnalysis(page) {
+  const key = `${readerBook.rel_path}|${page}`;
+  if (_analysisCache.has(key)) return _analysisCache.get(key);
+  try {
+    const d = await fetch('/api/books/comic/page?rel_path='
+      + encodeURIComponent(readerBook.rel_path) + '&n=' + page).then(r => r.json());
+    _analysisCache.set(key, d);
+    return d;
+  } catch (e) { return null; }
+}
+
+/** Re-draw overlays for whatever pages are on screen. Called after a page turn
+ *  and after an analysis run finishes. */
+async function reloadPageAnalysis(force) {
+  if (!readerBook || readerMode !== 'paged') return;
+  if (force) _analysisCache.clear();
+  const on = panelOverlayOn();
+  for (const box of document.querySelectorAll('[data-overlay]')) {
+    const page = parseInt(box.dataset.overlay, 10);
+    box.classList.toggle('hidden', !on);
+    if (!on) { box.innerHTML = ''; continue; }
+    const d = await _pageAnalysis(page);
+    _drawPanels(box, d);
+  }
+}
+
+function _drawPanels(box, d) {
+  if (!d || !d.analysed || !d.panels?.length) {
+    box.innerHTML = '<div class="absolute left-1 top-1 text-[10px] bg-black/70 '
+                  + 'text-gray-400 px-1.5 py-0.5 rounded">no panel data</div>';
+    return;
+  }
+  const byPanel = {};
+  (d.lines || []).forEach(l => {
+    if (l.panel >= 0 && (l.text || '').trim())
+      (byPanel[l.panel] ||= []).push(l.text.trim());
+  });
+  box.innerHTML = d.panels.map((p, i) => {
+    const left = ((p.cx - p.w / 2) * 100).toFixed(3);
+    const top = ((p.cy - p.h / 2) * 100).toFixed(3);
+    const w = (p.w * 100).toFixed(3);
+    const h = (p.h * 100).toFixed(3);
+    const text = (byPanel[i] || []).join(' ');
+    const title = text ? `Panel ${p.order + 1}\n${text}` : `Panel ${p.order + 1}`;
+    return `<div class="absolute border-2 border-teal-400/80 rounded-sm
+                        hover:bg-teal-400/20 transition-colors group"
+                 style="left:${left}%;top:${top}%;width:${w}%;height:${h}%"
+                 title="${_escAttr(title)}">
+              <span class="absolute -top-0.5 -left-0.5 bg-teal-400 text-black
+                           text-[10px] font-bold px-1 rounded-sm leading-tight">
+                ${p.order + 1}</span>
+              ${text ? `<div class="absolute inset-x-0 bottom-0 bg-black/80 text-teal-100
+                                     text-[10px] leading-tight p-1 opacity-0
+                                     group-hover:opacity-100 transition-opacity
+                                     max-h-full overflow-hidden pointer-events-none">
+                          ${_escAttr(text)}</div>` : ''}
+            </div>`;
+  }).join('')
+  + `<div class="absolute right-1 top-1 text-[10px] bg-black/70 text-teal-300
+                 px-1.5 py-0.5 rounded pointer-events-none">
+       ${d.panels.length} panels${d.engine ? ' · ' + d.engine : ''}${d.rtl ? ' · RTL' : ''}
+     </div>`;
+}
+
+function _escAttr(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 function _pageFitStyle() {

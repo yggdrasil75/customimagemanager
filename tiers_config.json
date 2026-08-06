@@ -1,0 +1,9 @@
+{
+  "enabled": false,
+  "tiers": [],
+  "video_headroom": 4,
+  "hysteresis": 0.05,
+  "interval_sec": 3600,
+  "throttle_mbps": 200,
+  "idle_sec": 120
+}

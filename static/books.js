@@ -94,6 +94,7 @@ async function booksRefreshStatus() {
     if (s.indexing) txt = `Scanning… ${s.indexed}/${s.total}`;
     else if (s.extracting) txt = `Extracting text… ${s.ext_done}/${s.ext_total}`;
     else if (s.embedding) txt = `Embedding passages… ${s.emb_done}/${s.emb_total}`;
+    else if (s.comic) txt = `Comic ${s.comic_stage}… ${s.comic_done}/${s.comic_total}`;
     const stat = _bq('books_stat');
     if (stat) stat.textContent = txt;
 
@@ -113,7 +114,7 @@ async function booksRefreshStatus() {
     }
 
     // Keep polling while a worker is running.
-    if (s.indexing || s.extracting || s.embedding) {
+    if (s.indexing || s.extracting || s.embedding || s.comic) {
       setTimeout(booksRefreshStatus, 1500);
     }
   } catch (e) { /* non-fatal */ }
@@ -393,7 +394,16 @@ function fillBookControls(b) {
   if (!ok) _bq('book_text_warn_msg').textContent =
     b.text_error || 'Text has not been extracted yet.';
 
-  _bq('book_comic_tools').classList.toggle('hidden', b.kind !== 'comic');
+  // Panel/OCR tools apply to anything with page images, which is `reader ===
+  // 'paged'` — a scanned PDF qualifies even when it wasn't classified as a
+  // comic, and gating on kind alone would hide the tools on exactly those.
+  const paged = b.reader === 'paged';
+  _bq('book_comic_tools').classList.toggle('hidden', !paged);
+  if (paged) {
+    _comicStatus('Ready.');
+    _comicToggleRunning(false);
+    _comicSummary().then(renderComicSummary);
+  }
 
   renderBookStars(b.rating || 0);
   renderBookTags(b.tags || []);
@@ -585,14 +595,153 @@ async function booksSummarize() {
   }
 }
 
-function booksComicOCR() {
-  const st = _bq('book_status_text');
-  if (st) st.textContent = 'Comic OCR runs over extracted pages — not wired up yet.';
+/* ══════════════════════════════════════════════════════════════════════════
+ * COMIC TOOLS — panel detection & OCR over a paged book
+ *
+ * The work happens server-side, one page at a time, and results are stored per
+ * page. Everything here is either "start a job", "poll it", or "show what came
+ * back". The reader draws the overlay itself (reader.js) from the same stored
+ * data, so a page analysed once needs no further round-trip to display.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+let comicPollTimer = null;
+
+function _comicOpts() {
+  return {
+    rtl: !!_bq('comic_rtl')?.checked,
+    per_panel: !!_bq('comic_per_panel')?.checked,
+    force: !!_bq('comic_force')?.checked,
+  };
 }
 
-function booksComicPanels() {
-  const st = _bq('book_status_text');
-  if (st) st.textContent = 'Panel detection runs over extracted pages — not wired up yet.';
+function booksComicPanels() { return _comicRun('panels'); }
+function booksComicOCR()    { return _comicRun('ocr'); }
+function booksComicBoth()   { return _comicRun('both'); }
+
+async function _comicRun(mode) {
+  if (!currentBook) return;
+  if (currentBook.reader !== 'paged') {
+    _comicStatus('Only paged books (PDF / cb*) have pages to analyse.');
+    return;
+  }
+  const body = { rel_path: currentBook.rel_path, mode, ..._comicOpts() };
+  // OCR without a panel pass reuses stored panels; warn if there aren't any,
+  // because the lines would all land unplaced and the transcript would be one
+  // undifferentiated blob.
+  if (mode === 'ocr') {
+    const s = await _comicSummary();
+    if (s && !s.with_panels) {
+      if (!confirm('No panels detected yet. OCR will still read the text, but '
+                 + 'nothing will be grouped by panel.\n\nRun panel detection first?')) {
+        // fall through and OCR anyway
+      } else {
+        return _comicRun('both');
+      }
+    }
+  }
+  const d = await fetch('/api/books/comic/analyze', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(r => r.json()).catch(() => ({ success: false, error: 'request failed' }));
+  if (!d.success) { _comicStatus(d.error || 'Could not start.'); return; }
+  _comicStatus('Started…');
+  booksRefreshStatus();
+  _comicPoll();
+}
+
+async function booksComicCancel() {
+  await fetch('/api/books/comic/cancel', { method: 'POST' });
+  _comicStatus('Cancelling…');
+}
+
+function _comicStatus(msg) {
+  const st = _bq('comic_status');
+  if (st) st.textContent = msg;
+  const bst = _bq('book_status_text');
+  if (bst) bst.textContent = msg;
+}
+
+async function _comicSummary() {
+  if (!currentBook) return null;
+  try {
+    const d = await fetch('/api/books/comic/summary?rel_path='
+                          + encodeURIComponent(currentBook.rel_path))
+      .then(r => r.json());
+    return d.success ? d : null;
+  } catch (e) { return null; }
+}
+
+function _comicPoll() {
+  clearTimeout(comicPollTimer);
+  comicPollTimer = setTimeout(async () => {
+    const [st, sum] = await Promise.all([
+      fetch('/api/books/status').then(r => r.json()).catch(() => null),
+      _comicSummary()
+    ]);
+    const s = st?.state || {};
+    if (s.comic) {
+      _comicStatus(`${s.comic_stage}… page ${s.comic_done} / ${s.comic_total}`);
+      _comicPoll();
+    } else {
+      renderComicSummary(sum);
+      if (s.last_error) _comicStatus(s.last_error);
+      // Refresh the overlay for the page currently on screen.
+      // force: the run just wrote new rows, so the cached analysis is stale.
+      if (typeof reloadPageAnalysis === 'function') reloadPageAnalysis(true);
+    }
+    _comicToggleRunning(!!s.comic);
+  }, 1200);
+}
+
+function _comicToggleRunning(running) {
+  _bq('comic_cancel')?.classList.toggle('hidden', !running);
+  ['btn_comic_panels', 'btn_comic_ocr', 'btn_comic_both'].forEach(id => {
+    const b = _bq(id);
+    if (b) { b.disabled = running; b.classList.toggle('opacity-50', running); }
+  });
+}
+
+function renderComicSummary(s) {
+  const el = _bq('comic_summary');
+  if (!el) return;
+  if (!s || !s.page_count) { el.textContent = ''; return; }
+  // Reading direction is a property of the book, not of this visit. Restoring
+  // it stops an OCR-only re-run from quietly flipping a manga back to LTR.
+  const rtlBox = _bq('comic_rtl');
+  if (rtlBox && s.with_panels) rtlBox.checked = !!s.rtl;
+  const pct = n => Math.round((n / s.page_count) * 100);
+  el.innerHTML =
+    `<span class="${s.with_panels ? 'text-teal-400' : 'text-gray-600'}">`
+    + `▦ panels ${s.with_panels}/${s.page_count} (${pct(s.with_panels)}%)</span> · `
+    + `<span class="${s.with_ocr ? 'text-sky-400' : 'text-gray-600'}">`
+    + `🔤 ocr ${s.with_ocr}/${s.page_count} (${pct(s.with_ocr)}%)</span>`;
+  if (!s.ocr_available) {
+    el.innerHTML += '<div class="text-amber-400 mt-0.5">No OCR engine on the '
+                  + 'server — install rapidocr_onnxruntime or easyocr.</div>';
+  }
+  const tbtn = _bq('comic_transcript_btn');
+  if (tbtn) tbtn.classList.toggle('hidden', !s.with_text);
+}
+
+async function booksComicTranscript() {
+  if (!currentBook) return;
+  const url = '/api/books/comic/text?format=txt&rel_path='
+            + encodeURIComponent(currentBook.rel_path);
+  const txt = await fetch(url).then(r => r.text());
+  if (!txt.trim()) { _comicStatus('No text stored yet.'); return; }
+  const w = window.open('', '_blank');
+  if (w) {
+    w.document.title = (currentBook.title || 'transcript') + ' — transcript';
+    const pre = w.document.createElement('pre');
+    pre.style.cssText = 'white-space:pre-wrap;font:13px/1.5 ui-monospace,monospace;'
+                      + 'padding:24px;background:#111;color:#ddd;margin:0;min-height:100vh';
+    pre.textContent = txt;
+    w.document.body.style.margin = '0';
+    w.document.body.appendChild(pre);
+  } else {
+    navigator.clipboard?.writeText(txt);
+    _comicStatus('Popup blocked — transcript copied to clipboard.');
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

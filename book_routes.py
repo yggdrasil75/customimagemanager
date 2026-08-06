@@ -56,8 +56,14 @@ book_state = {
     "indexing": False, "indexed": 0, "total": 0,
     "extracting": False, "ext_done": 0, "ext_total": 0,
     "embedding": False, "emb_done": 0, "emb_total": 0,
+    "comic": False, "comic_done": 0, "comic_total": 0,
+    "comic_book": "", "comic_stage": "",
     "status": "idle", "last_error": "",
 }
+
+# Set to ask the running comic job to stop. A 400-page volume with per-panel
+# OCR is a long job, and starting one you can't stop is a trap.
+_comic_cancel = threading.Event()
 
 
 def _db():
@@ -499,6 +505,129 @@ def _extract_background(force=False):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Comic pages — panel detection + OCR
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _page_row(rel_path, n):
+    return _db().execute("SELECT * FROM book_pages WHERE rel_path=? AND page=?",
+                         (rel_path, n)).fetchone()
+
+
+def _save_page(rel_path, n, res):
+    _db().execute("""
+        INSERT INTO book_pages(rel_path,page,w,h,panels,lines,text,
+                               panel_src,engine,rtl,updated)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(rel_path,page) DO UPDATE SET
+            w=excluded.w, h=excluded.h, panels=excluded.panels,
+            lines=excluded.lines, text=excluded.text,
+            panel_src=excluded.panel_src, engine=excluded.engine,
+            rtl=excluded.rtl, updated=excluded.updated
+    """, (rel_path, n, res.get("w", 0), res.get("h", 0),
+          json.dumps(res.get("panels", [])), json.dumps(res.get("lines", [])),
+          res.get("text", ""), res.get("panel_src", ""), res.get("engine", ""),
+          1 if res.get("rtl") else 0, time.time()))
+    _db().commit()
+
+
+def _comic_background(rel_path, do_panels, do_ocr, force, rtl, per_panel):
+    """Analyse every page of one comic.
+
+    Runs page by page and commits each result as it lands. That matters more
+    than it looks: these jobs take minutes to hours, and a crash or a restart at
+    page 280 should cost one page, not the whole run. It also means the reader
+    can show overlays for the pages already done while the rest is still going.
+    """
+    import comic_pages as cp
+    if book_state["comic"]:
+        return
+    _comic_cancel.clear()
+    book_state.update(comic=True, comic_done=0, comic_total=0,
+                      comic_book=rel_path, status="comic",
+                      comic_stage="panels+ocr" if (do_panels and do_ocr)
+                      else ("panels" if do_panels else "ocr"))
+    try:
+        row = _db().execute("SELECT fmt, reader, page_count FROM books "
+                            "WHERE rel_path=?", (rel_path,)).fetchone()
+        if not row or row["reader"] != "paged":
+            book_state["last_error"] = "Not a paged book."
+            return
+        ap = _abs(rel_path)
+        if not ap or not os.path.exists(ap):
+            book_state["last_error"] = "File missing."
+            return
+
+        fmt = row["fmt"]
+        # List the archive once. Reopening it per page turns an O(n) job into
+        # O(n^2) on formats where listing means scanning the container.
+        names = None if fmt == "pdf" else bi.comic_page_names(ap, fmt)
+        total = (row["page_count"] or 0) if fmt == "pdf" else len(names or [])
+        if not total:
+            book_state["last_error"] = (
+                f"No pages readable from this {fmt} — rarfile / py7zr may be missing.")
+            return
+        book_state["comic_total"] = total
+
+        panel_fn = CTX.get("panel_fn") if do_panels else None
+        ocr_fn = CTX.get("ocr_fn") if do_ocr else None
+        if do_ocr and ocr_fn is None:
+            book_state["last_error"] = "No OCR engine wired up."
+            return
+
+        for n in range(total):
+            if _comic_cancel.is_set():
+                book_state["last_error"] = f"Cancelled at page {n} of {total}."
+                break
+            try:
+                prev = _page_row(rel_path, n)
+                if prev and not force:
+                    # Already have what's being asked for? Skip the page.
+                    have_p = bool(json.loads(prev["panels"] or "[]"))
+                    have_o = bool(prev["engine"])
+                    if (not do_panels or have_p) and (not do_ocr or have_o):
+                        book_state["comic_done"] = n + 1
+                        continue
+                bgr = cp.page_bgr(ap, fmt, n, page_names=names)
+                if bgr is None:
+                    book_state["comic_done"] = n + 1
+                    continue
+                # An OCR-only re-run reuses panels found earlier rather than
+                # paying for detection twice.
+                known = None
+                page_rtl = rtl
+                if not do_panels and prev:
+                    known = json.loads(prev["panels"] or "[]")
+                    # Reading direction belongs to the panels, not to this run.
+                    # Without this an OCR pass over a manga silently reorders it
+                    # left-to-right, and the transcript comes out scrambled with
+                    # nothing on screen to explain why.
+                    page_rtl = bool(prev["rtl"])
+                res = cp.analyze_page(
+                    bgr, panel_fn=panel_fn, ocr_fn=ocr_fn,
+                    do_panels=do_panels, do_ocr=do_ocr,
+                    rtl=page_rtl, per_panel=per_panel, known_panels=known)
+                if not do_panels and prev:
+                    # Preserve the stored panels; analyze_page echoed them back
+                    # but didn't re-derive them.
+                    res["panel_src"] = prev["panel_src"] or "cached"
+                if not do_ocr and prev:
+                    res["lines"] = json.loads(prev["lines"] or "[]")
+                    res["text"] = prev["text"] or ""
+                    res["engine"] = prev["engine"] or ""
+                _save_page(rel_path, n, res)
+            except Exception as e:
+                _log().error(f"comic page {rel_path}#{n}: {e}")
+            book_state["comic_done"] = n + 1
+        book_state["status"] = "idle"
+    except Exception as e:
+        book_state["last_error"] = str(e)
+        _log().error(f"comic job {rel_path}: {e}")
+    finally:
+        book_state.update(comic=False, comic_book="", comic_stage="")
+        CTX.get("db_close", lambda: None)()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Embeddings
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -839,6 +968,133 @@ def register(app, ctx: dict):
         mime = {".png": "image/png", ".webp": "image/webp", ".gif": "image/gif",
                 ".jxl": "image/jxl", ".avif": "image/avif"}.get(ext, "image/jpeg")
         return Response(data, mimetype=mime)
+
+    # ── comic pages: panels + OCR ────────────────────────────────────────────
+    @app.route("/api/books/comic/analyze", methods=["POST"])
+    def books_comic_analyze():
+        """Kick off panel detection and/or OCR over a comic's pages.
+
+        `mode` is 'panels', 'ocr' or 'both'. OCR without panels is legal and
+        reuses whatever panels are already stored, so the usual flow — detect
+        panels, eyeball a page, then OCR — doesn't redetect.
+        """
+        d = request.json or {}
+        rp = d.get("rel_path", "")
+        mode = d.get("mode", "both")
+        if book_state["comic"]:
+            busy = book_state["comic_book"] or "another book"
+            return jsonify({"success": False,
+                            "error": f"Already analysing {busy}. Cancel it first."})
+        row = _db().execute("SELECT reader, kind FROM books WHERE rel_path=?",
+                            (rp,)).fetchone()
+        if not row:
+            return jsonify({"success": False, "error": "not found"}), 404
+        if row["reader"] != "paged":
+            return jsonify({"success": False,
+                            "error": "Only paged books (pdf / cb*) have pages to analyse."})
+        do_panels = mode in ("panels", "both")
+        do_ocr = mode in ("ocr", "both")
+        if do_ocr and not CTX.get("ocr_fn"):
+            return jsonify({"success": False,
+                            "error": "No OCR engine available on the server."})
+        threading.Thread(
+            target=_comic_background,
+            args=(rp, do_panels, do_ocr, bool(d.get("force")),
+                  bool(d.get("rtl")), bool(d.get("per_panel"))),
+            daemon=True).start()
+        return jsonify({"success": True})
+
+    @app.route("/api/books/comic/cancel", methods=["POST"])
+    def books_comic_cancel():
+        _comic_cancel.set()
+        return jsonify({"success": True})
+
+    @app.route("/api/books/comic/page")
+    def books_comic_page():
+        """Stored analysis for one page — what the reader overlay draws."""
+        rp = request.args.get("rel_path", "")
+        n = int(request.args.get("n", 0))
+        r = _page_row(rp, n)
+        if not r:
+            return jsonify({"success": True, "analysed": False,
+                            "panels": [], "lines": [], "text": ""})
+        return jsonify({"success": True, "analysed": True,
+                        "page": n, "w": r["w"], "h": r["h"],
+                        "panels": json.loads(r["panels"] or "[]"),
+                        "lines": json.loads(r["lines"] or "[]"),
+                        "text": r["text"] or "",
+                        "panel_src": r["panel_src"], "engine": r["engine"],
+                        "rtl": bool(r["rtl"])})
+
+    @app.route("/api/books/comic/summary")
+    def books_comic_summary():
+        """How much of this comic has been analysed, for the controls pane."""
+        rp = request.args.get("rel_path", "")
+        c = _db().execute(
+            "SELECT COUNT(*) pages, "
+            "SUM(CASE WHEN panels!='[]' THEN 1 ELSE 0 END) with_panels, "
+            "SUM(CASE WHEN engine!='' THEN 1 ELSE 0 END) with_ocr, "
+            "SUM(CASE WHEN text!='' THEN 1 ELSE 0 END) with_text, "
+            "MAX(rtl) rtl "
+            "FROM book_pages WHERE rel_path=?", (rp,)).fetchone()
+        tot = _db().execute("SELECT page_count FROM books WHERE rel_path=?",
+                            (rp,)).fetchone()
+        return jsonify({"success": True,
+                        "pages": c["pages"] or 0,
+                        "with_panels": c["with_panels"] or 0,
+                        "with_ocr": c["with_ocr"] or 0,
+                        "with_text": c["with_text"] or 0,
+                        "page_count": (tot["page_count"] if tot else 0) or 0,
+                        "rtl": bool(c["rtl"]),
+                        "running": bool(book_state["comic"]),
+                        "ocr_available": bool(CTX.get("ocr_fn"))})
+
+    @app.route("/api/books/comic/text")
+    def books_comic_text():
+        """The whole transcript, in reading order. Also the thing worth feeding
+        to an LLM or a search index."""
+        rp = request.args.get("rel_path", "")
+        rows = _db().execute(
+            "SELECT page, text FROM book_pages WHERE rel_path=? AND text!='' "
+            "ORDER BY page", (rp,)).fetchall()
+        if request.args.get("format") == "txt":
+            body = "\n\n".join(f"── page {r['page'] + 1} ──\n{r['text']}"
+                               for r in rows)
+            return Response(body, mimetype="text/plain; charset=utf-8")
+        return jsonify({"success": True,
+                        "pages": [{"page": r["page"], "text": r["text"]}
+                                  for r in rows]})
+
+    @app.route("/api/books/comic/panels", methods=["POST"])
+    def books_comic_set_panels():
+        """Replace one page's panels by hand.
+
+        Detection is good, not perfect, and a wrong panel box quietly misfiles
+        every OCR line inside it. Letting someone correct a page is cheaper than
+        chasing the last few percent of detector accuracy.
+        """
+        import comic_pages as cp
+        d = request.json or {}
+        rp = d.get("rel_path", "")
+        n = int(d.get("page", 0))
+        rtl = bool(d.get("rtl"))
+        panels = cp.order_panels([
+            {"cx": float(p["cx"]), "cy": float(p["cy"]),
+             "w": float(p["w"]), "h": float(p["h"])}
+            for p in (d.get("panels") or [])], rtl)
+        prev = _page_row(rp, n)
+        lines = json.loads(prev["lines"] or "[]") if prev else []
+        # Rebind existing OCR lines to the corrected panels — that's the whole
+        # point of fixing a box, so it shouldn't need a re-run of OCR.
+        for ln in lines:
+            ln["panel"] = cp._assign_panel(ln, panels)
+        _save_page(rp, n, {
+            "w": prev["w"] if prev else 0, "h": prev["h"] if prev else 0,
+            "panels": panels, "lines": lines,
+            "text": cp.build_text(panels, lines, rtl),
+            "panel_src": "manual",
+            "engine": prev["engine"] if prev else "", "rtl": rtl})
+        return jsonify({"success": True, "panels": panels})
 
     @app.route("/api/books/download/<path:rel_path>")
     def books_download(rel_path):

@@ -1,4 +1,4 @@
-  <div id="tiers_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
+<div id="tiers_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
     <div class="bg-gray-800 p-5 rounded-lg border border-gray-600 w-[620px] flex flex-col max-h-[90vh]">
       <h2 class="font-bold text-amber-300 mb-1 flex-shrink-0">🗄 Storage Tiers</h2>
       <p class="text-[11px] text-gray-500 mb-3">Order tiers fastest → slowest. Files stay at their normal library paths
@@ -29,6 +29,47 @@
           </div>
         </div>
         <div id="tiers_status" class="text-xs text-gray-300 space-y-1 border-t border-gray-700 pt-3"></div>
+
+        <div class="border-t border-gray-700 pt-3 mt-3">
+          <h3 class="font-bold text-sky-300 mb-1">📦 Small-file packing</h3>
+          <p class="text-[11px] text-gray-500 mb-2">Folds images and their sidecars (everything except video) into
+            large <code>.packs/</code> archives to cut inode count and open file descriptors. The packs are the
+            source of truth; the database is only a rebuildable cache. Videos and tiered (symlinked) files are left
+            alone.</p>
+          <label class="flex items-center gap-2 text-sm text-gray-300 mb-2 cursor-pointer">
+            <input type="checkbox" id="packs_enabled" class="accent-sky-500"> Enable packing
+          </label>
+          <label class="flex items-center gap-2 text-sm text-gray-300 mb-2 cursor-pointer">
+            <input type="checkbox" id="packs_auto" class="accent-sky-500"> Auto-migrate in the background when idle
+          </label>
+          <div class="grid grid-cols-3 gap-2 mb-2">
+            <div><label class="text-[10px] text-gray-500 block mb-0.5">Pack size (MB)</label>
+              <input id="packs_size_mb" type="number" min="16" step="16"
+                class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+            </div>
+            <div><label class="text-[10px] text-gray-500 block mb-0.5">Max open packs</label>
+              <input id="packs_max_open" type="number" min="1"
+                class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+            </div>
+            <div><label class="text-[10px] text-gray-500 block mb-0.5">Idle before migrate (s)</label>
+              <input id="packs_idle" type="number" min="0"
+                class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+            </div>
+          </div>
+          <p class="text-[10px] text-gray-600 mb-2">Pack size and max-open-packs apply the next time the app starts;
+            the auto-migrate and idle settings take effect immediately.</p>
+          <div class="flex gap-2 mb-2">
+            <button onclick="packsRun('all')"
+              class="text-xs bg-sky-700 hover:bg-sky-600 px-2 py-1 rounded font-bold">Convert now</button>
+            <button onclick="packsRun('compact')"
+              class="text-xs bg-sky-800 hover:bg-sky-700 px-2 py-1 rounded font-bold">Compact</button>
+            <button onclick="packsRun('unpack')"
+              class="text-xs bg-gray-600 hover:bg-gray-500 px-2 py-1 rounded font-bold">Unpack all</button>
+            <button onclick="packsCancel()"
+              class="text-xs bg-gray-600 hover:bg-gray-500 px-2 py-1 rounded">Cancel</button>
+          </div>
+          <div id="packs_status" class="text-xs text-gray-300 space-y-1"></div>
+        </div>
       </div>
       <div class="flex justify-between items-center pt-3 border-t border-gray-700 mt-3 flex-shrink-0">
         <div class="flex gap-2">
