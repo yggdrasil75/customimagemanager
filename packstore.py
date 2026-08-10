@@ -70,6 +70,69 @@ from contextlib import contextmanager
 
 log = logging.getLogger("packstore")
 
+_O_BINARY = getattr(os, "O_BINARY", 0)   # 0x8000 on Windows, absent on POSIX
+
+if hasattr(os, "pread"):
+    def _pread(fd, length, offset):
+        return os.pread(fd, length, offset)
+else:
+    import msvcrt
+    import ctypes
+    from ctypes import wintypes
+
+    _seek_lock = threading.Lock()
+
+    class _OVERLAPPED(ctypes.Structure):
+        _fields_ = [("Internal", ctypes.c_void_p),
+                    ("InternalHigh", ctypes.c_void_p),
+                    ("Offset", wintypes.DWORD),
+                    ("OffsetHigh", wintypes.DWORD),
+                    ("hEvent", wintypes.HANDLE)]
+
+    _ReadFile = ctypes.windll.kernel32.ReadFile
+    _ReadFile.argtypes = [wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+                          ctypes.POINTER(wintypes.DWORD),
+                          ctypes.POINTER(_OVERLAPPED)]
+    _ReadFile.restype = wintypes.BOOL
+    _ERROR_HANDLE_EOF = 38
+
+    def _pread_seek(fd, length, offset):
+        with _seek_lock:
+            os.lseek(fd, offset, os.SEEK_SET)
+            return os.read(fd, length)
+
+    def _pread(fd, length, offset):
+        if length <= 0:
+            return b""
+        try:
+            handle = msvcrt.get_osfhandle(fd)
+        except OSError:
+            raise
+        except Exception:
+            return _pread_seek(fd, length, offset)
+        buf = ctypes.create_string_buffer(length)
+        got = 0
+        while got < length:
+            ov = _OVERLAPPED()
+            pos = offset + got
+            ov.Offset = pos & 0xFFFFFFFF
+            ov.OffsetHigh = (pos >> 32) & 0xFFFFFFFF
+            n = wintypes.DWORD(0)
+            ok = _ReadFile(handle,
+                           ctypes.byref(buf, got),
+                           length - got,
+                           ctypes.byref(n),
+                           ctypes.byref(ov))
+            if not ok:
+                err = ctypes.get_last_error() or ctypes.GetLastError()
+                if err == _ERROR_HANDLE_EOF:
+                    break
+                raise OSError(0, f"ReadFile failed (winerror {err})", None, err)
+            if n.value == 0:            # EOF
+                break
+            got += n.value
+        return buf.raw[:got]
+
 # Local file header signature and struct (PK\x03\x04).
 _LFH_SIG = b"PK\x03\x04"
 _LFH = struct.Struct("<4sHHHHHIIIHH")   # sig, ver, flags, method, mtime, mdate,
@@ -149,11 +212,11 @@ class PackStore:
             fd = self._fds.get(pack_id)
             if fd is None:
                 try:
-                    fd = os.open(self.pack_path(pack_id), os.O_RDONLY)
+                    fd = os.open(self.pack_path(pack_id), os.O_RDONLY | _O_BINARY)
                 except OSError as e:
                     if e.errno == errno.EMFILE:
                         self._evict_locked(force=True)
-                        fd = os.open(self.pack_path(pack_id), os.O_RDONLY)
+                        fd = os.open(self.pack_path(pack_id), os.O_RDONLY | _O_BINARY)
                     else:
                         raise
                 self._fds[pack_id] = fd
@@ -358,11 +421,11 @@ class PackStore:
             return False
         try:
             with self._pack_fd(pack_id) as fd:
-                raw = os.pread(fd, _LFH_LEN, hdr_off)
+                raw = _pread(fd, _LFH_LEN, hdr_off)
                 if len(raw) < _LFH_LEN or raw[:4] != _LFH_SIG:
                     return False
                 (_s,_v,_f,_m,_tm,_dt,_c,_cs,usize,nlen,elen) = _LFH.unpack(raw)
-                name = os.pread(fd, nlen, hdr_off + _LFH_LEN)
+                name = _pread(fd, nlen, hdr_off + _LFH_LEN)
         except OSError:
             return False
         return name == kb and (hdr_off + _LFH_LEN + nlen + elen) == offset
@@ -467,7 +530,7 @@ class PackStore:
             return b""
         try:
             with self._pack_fd(pack_id) as fd:
-                data = os.pread(fd, length, offset)
+                data = _pread(fd, length, offset)
         except OSError as e:
             log.error("read %s pack %d: %s", key, pack_id, e)
             self._cache_drop(key)
