@@ -3778,7 +3778,7 @@ def _run_ocr(img_bgr):
 
 _barcode_cache = {"path": None, "model": None}
 
-def _barcode_detect(img_bgr):
+def _barcode_model_path():
     """YOLO pass for barcode boxes, or None when no model is configured.
 
     None (not []) is deliberate: it means "no detector", which makes
@@ -3786,7 +3786,27 @@ def _barcode_detect(img_bgr):
     mean "a detector ran and found nothing", which is a different answer.
     """
     mp = (state.get("barcode_model") or "").strip()
-    if not mp:
+    if mp:
+        return mp
+    try:
+        for p in sorted(glob.glob(os.path.join(facelib.MODELS_DIR, "*.pt"))):
+            base = os.path.basename(p).lower()
+            if "barcode" in base or "qr" in base:
+                return p
+    except Exception as e:
+        access_logger.warning(f"barcode model autodiscover: {e}")
+    return ""
+
+
+def _barcode_detect():
+    """Detector callback for barcodes.scan, or None to use its built-in one.
+
+    None (not []) is deliberate: it means "no model", which makes scan use its
+    gradient detector. An empty list would mean "a model ran and found
+    nothing", which is a different answer and suppresses the fallback.
+    """
+    mp = _barcode_model_path()
+    if not mp or not os.path.exists(mp):
         return None
     conf = float(state.get("barcode_conf", 0.25) or 0.25)
     return lambda bgr: _detect_obb_or_box(bgr, mp, _barcode_cache, conf=conf)
@@ -3795,7 +3815,7 @@ def _barcode_detect(img_bgr):
 def _run_barcodes(img_bgr, deep=True):
     """Find and decode barcodes. Never raises."""
     try:
-        return barcodes.scan(img_bgr, _barcode_detect(img_bgr), deep=deep,
+        return barcodes.scan(img_bgr, _barcode_detect(), deep=deep,
                              min_conf=float(state.get("barcode_conf", 0.25) or 0.25))
     except Exception as e:
         access_logger.error(f"barcode scan: {e}")

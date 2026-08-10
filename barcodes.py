@@ -304,6 +304,104 @@ def decode_crop(crop: np.ndarray, *, deep: bool = True) -> dict | None:
 
 # ── scan ────────────────────────────────────────────────────────────────────
 
+def _grad_boxes(gray: np.ndarray, mode: str) -> list[tuple]:
+    """Candidate rects from directional gradient energy.
+
+    mode "1d" keeps regions where gradient along one axis dominates the other
+    (parallel bars); "2d" keeps regions strong on both (matrix codes).
+    """
+    gx = cv2.convertScaleAbs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3))
+    gy = cv2.convertScaleAbs(cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3))
+    if mode == "1d":
+        # Both polarities: bars may run vertically or horizontally.
+        mask = cv2.max(cv2.subtract(gx, gy), cv2.subtract(gy, gx))
+        kernel = (21, 7)
+    else:
+        mask = cv2.min(gx, gy)
+        kernel = (11, 11)
+    mask = cv2.blur(mask, (9, 9))
+    _, mask = cv2.threshold(mask, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    # Close along the bar direction to fuse individual bars into one blob, then
+    # open to drop the thin gradient noise that edges and text leave behind.
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
+                            cv2.getStructuringElement(cv2.MORPH_RECT, kernel))
+    if mode == "1d":
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
+                                cv2.getStructuringElement(cv2.MORPH_RECT,
+                                                          kernel[::-1]))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
+                            cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)))
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return [cv2.boundingRect(c) for c in cnts]
+
+
+def detect_cv(bgr: np.ndarray) -> list[dict]:
+    """Locate probable barcodes with no model. Returns detector-shaped boxes.
+
+    Tuned to over-produce rather than under-produce: a candidate that isn't a
+    barcode costs one failed decode, while a missed one costs the whole code.
+    Callers are expected to drop CV candidates that fail to decode (see scan) —
+    unlike YOLO boxes, a heuristic box with no payload is more likely a text
+    block than a damaged barcode.
+    """
+    H, W = bgr.shape[:2]
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    frame_area = float(W * H)
+    out = []
+
+    # QR/DataMatrix: OpenCV can locate these without decoding them, which is
+    # more precise than any gradient heuristic, so try it first.
+    try:
+        ok, pts = cv2.QRCodeDetector().detectMulti(gray)
+        if ok and pts is not None:
+            for quad in pts:
+                b = _box_from_quad([[p[0], p[1]] for p in quad], W, H)
+                if b:
+                    out.append({**b, "class_name": "qr", "conf": None})
+    except Exception as e:
+        log.debug("cv QR locate failed: %s", e)
+
+    for mode in ("1d", "2d"):
+        for (x, y, w, h) in _grad_boxes(gray, mode):
+            area = float(w * h)
+            if area < frame_area * 0.0004 or area > frame_area * 0.7:
+                continue
+            if w < 24 or h < 12:
+                continue
+            ar = w / float(h)
+            if mode == "1d":
+                # Bars are wider than tall, or taller than wide when rotated.
+                if not (1.4 <= ar <= 12.0 or 1 / 12.0 <= ar <= 1 / 1.4):
+                    continue
+            else:
+                if not (0.5 <= ar <= 2.0):
+                    continue
+            out.append({"cx": (x + w / 2) / W, "cy": (y + h / 2) / H,
+                        "w": w / W, "h": h / H,
+                        "class_name": "barcode", "conf": None})
+
+    # Merge heavily-overlapping candidates: the 1-D and 2-D passes often both
+    # fire on the same code, and a duplicate crop is wasted decode time.
+    merged: list[dict] = []
+    for c in sorted(out, key=lambda d: -d["w"] * d["h"]):
+        if not any(_iou(c, m) > 0.5 for m in merged):
+            merged.append(c)
+    return merged
+
+
+def _iou(a: dict, b: dict) -> float:
+    ax1, ay1 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
+    ax2, ay2 = a["cx"] + a["w"] / 2, a["cy"] + a["h"] / 2
+    bx1, by1 = b["cx"] - b["w"] / 2, b["cy"] - b["h"] / 2
+    bx2, by2 = b["cx"] + b["w"] / 2, b["cy"] + b["h"] / 2
+    iw = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    ih = max(0.0, min(ay2, by2) - max(ay1, by1))
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    union = a["w"] * a["h"] + b["w"] * b["h"] - inter
+    return inter / union if union > 0 else 0.0
+
 def scan(bgr: np.ndarray, detect_fn=None, *, deep: bool = True,
          min_conf: float = 0.25) -> dict:
     """Detect barcodes with YOLO, then decode each one.
@@ -320,12 +418,13 @@ def scan(bgr: np.ndarray, detect_fn=None, *, deep: bool = True,
     appears in `codes`, decoded or not.
     """
     if bgr is None or getattr(bgr, "size", 0) == 0:
-        return {"engine": None, "codes": [], "detected": 0, "decoded": 0,
-                "note": "empty image"}
+        return {"engine": None, "detector": None, "codes": [], "detected": 0,
+                "decoded": 0, "note": "empty image"}
     bgr = _as_bgr(bgr)
     engine = "zxing-cpp" if has_zxing() else "opencv"
 
     boxes = []
+    detector = "yolo"
     if detect_fn is not None:
         try:
             for b in detect_fn(bgr) or []:
@@ -337,43 +436,57 @@ def scan(bgr: np.ndarray, detect_fn=None, *, deep: bool = True,
                     boxes.append(b)
         except Exception as e:
             log.error("barcode detect_fn failed: %s", e)
+    if not boxes:
+        # No model configured, or it found nothing. The gradient detector needs
+        # no weights, so this is a real second attempt rather than a apology.
+        detector = "cv" if detect_fn is None else "cv (yolo found nothing)"
+        try:
+            boxes = detect_cv(bgr)
+        except Exception as e:
+            log.error("detect_cv failed: %s", e)
+            boxes = []
 
     codes = []
+    heuristic = detector.startswith("cv")
     if boxes:
         for b in boxes:
             crop, _, _ = _crop(bgr, b)
             hit = decode_crop(crop, deep=deep) if crop is not None else None
+            if hit is None and heuristic:
+                continue
             codes.append(_make_code(b, hit))
-        note = ""
-    else:
-        # No detector, or it found nothing. Fall back to decoding the whole
-        # frame: this only reads codes big and clean enough to be found without
-        # help, but it means the feature still does something useful before a
-        # barcode model is configured.
-        #
-        # Geometry here comes from the decoder's own corner quad, since there
-        # is no detector box to use instead. The image is untransformed on this
-        # path, so those coordinates are directly usable — unlike in the crop
-        # path, where the retry ladder has rotated and padded things.
-        H, W = bgr.shape[:2]
-        hits = _decode_once(bgr)
-        if deep and not hits:
-            hits = _decode_once(cv2.bitwise_not(bgr))
-        for h in hits:
-            codes.append(_make_code(_box_from_quad(h.get("quad"), W, H),
-                                    {**h, "via": "whole-frame"}))
+
+    H, W = bgr.shape[:2]
+    hits = _decode_once(bgr)
+    if deep and not hits:
+        hits = _decode_once(cv2.bitwise_not(bgr))
+    seen = {c["value"] for c in codes if c.get("value")}
+    n_before = len(codes)
+    for h in hits:
+        if h.get("value") in seen:
+            continue
+        seen.add(h.get("value"))
+        codes.append(_make_code(_box_from_quad(h.get("quad"), W, H),
+                                {**h, "via": "whole-frame"}))
+
+    if len(codes) > n_before and not detector.endswith("+frame"):
+        detector += "+frame"
+
+    if not codes:
+        note = "No barcodes found."
         if detect_fn is None:
-            note = ("No barcode model configured — decoded the whole frame "
-                    "instead. Set one in Settings to catch small or angled "
-                    "codes.")
-        elif not codes:
-            note = ("No barcodes detected. If the model you selected isn't a "
-                    "barcode model, its classes won't match.")
-        else:
-            note = "Detector found nothing; decoded the whole frame instead."
+            note += (" Scanned with the built-in detector; a trained barcode "
+                     "model in Settings will do better on small or angled codes.")
+    elif heuristic and detect_fn is not None:
+        note = ("Your barcode model found nothing — fell back to the built-in "
+                "detector. If the model you selected isn't a barcode model, its "
+                "classes won't match.")
+    else:
+        note = ""
 
     codes.sort(key=lambda c: (c["cy"], c["cx"]))
-    return {"engine": engine, "codes": codes, "detected": len(codes),
+    return {"engine": engine, "detector": detector, "codes": codes,
+            "detected": len(codes),
             "decoded": sum(1 for c in codes if c["decoded"]), "note": note}
 
 

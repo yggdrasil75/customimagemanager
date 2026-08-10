@@ -125,18 +125,10 @@
             <span class="text-[10px] text-gray-500 block mb-0.5">Barcode model</span>
             <select id="cfg_barcode_model"
               class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="">None (decode whole frame)</option>
+              <option value="">Auto (built-in detector)</option>
             </select>
           </div>
         </div>
-        <p class="text-[10px] text-gray-600 mt-1">The barcode model localises codes so
-          each one can be cropped and decoded on its own. Without it, a scan can only
-          read codes already large and clean enough to be found in the full frame, so
-          small or angled ones are missed. Any YOLO detect model whose classes are
-          named <code>barcode</code>, <code>qr</code>, <code>ean</code> and the like
-          will work &mdash; including one from <b>Quick Train</b> on your own boxes.
-          Codes that are detected but can't be decoded are still marked, so a blurred
-          barcode leaves a record of where it is.</p>
         <p class="text-[10px] text-gray-600 mt-1">Larger face models catch small and
           profile faces that <code>n</code> misses &mdash; those extra detections are
           what let a cluster hold together. Changing the size needs a

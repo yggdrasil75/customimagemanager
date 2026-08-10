@@ -316,7 +316,8 @@ async function runBarcodes(){
         // their photos need to be sharper, which "1 barcode" would hide.
         const undec=d.detected-d.decoded;
         showToast(`Barcodes: ${d.detected} found, ${d.decoded} decoded`
-          +(undec?` (${undec} not readable)`:'')+`.`);
+          +(undec?` (${undec} not readable)`:'')
+          +(d.detector?` · ${d.detector}`:'')+`.`);
       }
       if(d.note) console.info('barcodes:',d.note);
     } else alert('Barcode scan failed: '+(d.error||''));
