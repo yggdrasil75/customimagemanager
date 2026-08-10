@@ -199,11 +199,16 @@ _db_local = threading.local()
 # of *live* connections rather than growing with every thread ever created.
 _all_conns = {}
 _all_conns_lock = threading.Lock()
+DB_BUSY_TIMEOUT_MS = 30000
 
 def _db() -> sqlite3.Connection:
     conn = getattr(_db_local, 'conn', None)
     if conn is None:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False,
+                               timeout=DB_BUSY_TIMEOUT_MS / 1000.0)
+        # busy_timeout FIRST: switching journal modes itself needs a brief
+        # exclusive lock, so on a busy library even this pragma could fail.
+        conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA cache_size=-32000")   # 32 MB page cache
@@ -212,6 +217,56 @@ def _db() -> sqlite3.Connection:
         with _all_conns_lock:
             _all_conns[id(conn)] = conn
     return conn
+
+
+def _db_retry(fn, *args, attempts=6, **kwargs):
+    """Run `fn` (a self-contained write transaction) retrying SQLITE_BUSY.
+
+    busy_timeout covers a writer waiting on a lock, but NOT the case where a
+    deferred transaction has to upgrade read->write after someone else committed
+    -- SQLite returns SQLITE_BUSY there immediately, no waiting. So the caller
+    still needs to be able to start over. `fn` must therefore be idempotent and
+    must own its own commit; on a busy error we roll back before retrying so the
+    connection never keeps a half-finished transaction (and its write lock).
+    """
+    for i in range(attempts):
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.OperationalError as e:
+            msg = str(e).lower()
+            if "locked" not in msg and "busy" not in msg:
+                raise
+            try:
+                _db().rollback()
+            except Exception:
+                pass
+            if i == attempts - 1:
+                raise
+            # Exponential backoff, jittered so contending workers don't
+            # resynchronise and collide again on the next attempt.
+            time.sleep(min(2.0, 0.05 * (2 ** i)) * (1.0 + random.random() * 0.25))
+
+
+@app.teardown_request
+def _db_rollback_leaked(exc=None):
+    """Safety net: never let a request thread finish holding the write lock.
+
+    A handler that runs an INSERT/UPDATE/DELETE and returns without committing
+    leaves an open transaction on its thread-local connection. Because
+    _all_conns holds a strong reference, that connection is never collected --
+    so the write lock survives the thread and every later write in the process
+    fails with "database is locked" until a restart. Uncommitted work at the end
+    of a request is lost either way; releasing the lock is strictly better.
+    """
+    conn = getattr(_db_local, 'conn', None)
+    if conn is not None and conn.in_transaction:
+        try:
+            conn.rollback()
+            access_logger.warning(
+                "rolled back an uncommitted transaction left open by %s",
+                getattr(request, 'path', '?'))
+        except Exception:
+            pass
 
 # ── Pack store ────────────────────────────────────────────────────────────────
 # Images + sidecars (everything but video) fold into 1 GiB append packs under
@@ -464,6 +519,11 @@ def _db_close():
         _db_local.conn = None
         with _all_conns_lock:
             _all_conns.pop(id(conn), None)
+        try:
+            if conn.in_transaction:
+                conn.rollback()
+        except Exception:
+            pass
         try:
             conn.close()
         except Exception:
@@ -2765,23 +2825,23 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
         analysis_txt = json.dumps(analysis) if analysis else ''
         fd = 1 if flag_on and flag.get("delete") else 0
         fr = (flag.get("reason", "") if flag_on else "")
-        # Any write marks the file "handled" so the background tagger skips it.
-        _db().execute(
-            "UPDATE files SET tags=?, description=?, unconfirmed_count=?, "
-            "autotag_done=1, analysis=?, flagged_delete=?, flag_reason=? WHERE rel_path=?",
-            (json.dumps(tags), description, unconf, analysis_txt, fd, fr, rel))
-        # Keep the page_count column in sync with what we just wrote (or preserved).
-        if page_count is not None:
-            try:
-                _db().execute("UPDATE files SET page_count=? WHERE rel_path=?",
-                              (int(page_count), rel))
-            except (TypeError, ValueError):
-                pass
-        # Mirror the albums we just wrote into the DB cache so the album view is
-        # correct without waiting for a rescan. The sidecar stays authoritative.
-        _sync_album_cache(rel, albums)
-        _db().commit()
-        _clear_metadata_failure(filepath)   # this file is healthy again
+        def _write_row():
+            db = _db()
+            db.execute(
+                "UPDATE files SET tags=?, description=?, unconfirmed_count=?, "
+                "autotag_done=1, analysis=?, flagged_delete=?, flag_reason=? WHERE rel_path=?",
+                (json.dumps(tags), description, unconf, analysis_txt, fd, fr, rel))
+            if page_count is not None:
+                try:
+                    db.execute("UPDATE files SET page_count=? WHERE rel_path=?",
+                               (int(page_count), rel))
+                except (TypeError, ValueError):
+                    pass
+            _sync_album_cache(rel, albums)
+            _clear_metadata_failure(filepath, defer_commit=True)
+            db.commit()
+
+        _db_retry(_write_row)
         return True
     except Exception as e:
         # This used to be a one-line log and a `False` that ~every caller threw
@@ -2831,8 +2891,7 @@ def _record_metadata_failure(filepath, exc):
         pass          # column may not exist yet on an old DB; log already fired
 
 
-def _clear_metadata_failure(filepath):
-    """Drop a recorded failure after a subsequent write succeeds."""
+def _clear_metadata_failure(filepath, defer_commit=False):
     try:
         rel = os.path.relpath(filepath, MEDIA_DIR).replace('\\', '/')
     except Exception:
@@ -2842,8 +2901,15 @@ def _clear_metadata_failure(filepath):
     try:
         _db().execute(
             "UPDATE files SET metadata_error=NULL WHERE rel_path=?", (rel,))
+        if not defer_commit:
+            _db().commit()
     except Exception:
-        pass
+        # Even on failure, don't walk away holding the lock.
+        if not defer_commit:
+            try:
+                _db().rollback()
+            except Exception:
+                pass
 
 
 def metadata_failures():
