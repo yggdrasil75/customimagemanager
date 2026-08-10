@@ -209,6 +209,9 @@
           <button onclick="runOCR()" id="btn_ocr"
             class="bg-sky-700 hover:bg-sky-600 py-1.5 rounded font-bold text-sm">🔤 OCR</button>
         </div>
+        <button onclick="runBarcodes()" id="btn_barcodes"
+          title="Detect barcodes and QR codes with the configured YOLO model, then decode each one. Codes that are found but can't be read are still marked, so you keep a note of where they are."
+          class="w-full bg-amber-700 hover:bg-amber-600 py-1.5 rounded font-bold text-sm">▥ Scan barcodes</button>
         <button onclick="removePose()" id="btn_pose_remove" style="display:none"
           title="Delete the current (bad) skeleton from this image"
           class="w-full bg-rose-800 hover:bg-rose-700 py-1.5 rounded font-bold text-sm">🗑 Remove skeleton</button>

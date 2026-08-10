@@ -50,6 +50,7 @@ import exif_import, exif_export, exif_fields
 import xmp_import, xmp_fields
 import iptc_import, iptc_fields
 import mwg_fields
+import barcodes
 try:
     import iqa
 except Exception:
@@ -1744,7 +1745,7 @@ def save_config():
             "oai_actions","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size",
             "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","face_cluster_eps",
             "body_enabled","body_cluster_eps","object_proposals",
-            "iqa_model","auth"]
+            "barcode_model","barcode_conf", "iqa_model","auth"]
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys if k in state}, f, indent=2)
 
@@ -2276,6 +2277,16 @@ def _merge_region(keep, incoming):
         keep["region_tags"] = incoming["region_tags"]
     if not keep.get("uuid") and incoming.get("uuid"):
         keep["uuid"] = incoming["uuid"]
+    # Only MWG-RS carries a barcode payload, so a region merged in from a legacy
+    # source can only ever add one, never contradict it. Backfilling keeps the
+    # payload when the legacy box happens to win on geometry.
+    for k in ("barcode_value", "barcode_format"):
+        if not keep.get(k) and incoming.get(k):
+            keep[k] = incoming[k]
+    if not keep.get("barcode_binary") and incoming.get("barcode_binary"):
+        keep["barcode_binary"] = True
+    if not keep.get("region_type") and incoming.get("region_type"):
+        keep["region_type"] = incoming["region_type"]
     keep["confirmed"] = bool(keep.get("confirmed")) or bool(incoming.get("confirmed"))
     return keep
 
@@ -3699,6 +3710,33 @@ def _run_ocr(img_bgr):
     return {"engine": None, "text": "", "lines": [],
             "note": "No OCR engine installed (pip install rapidocr_onnxruntime, or easyocr)."}
 
+_barcode_cache = {"path": None, "model": None}
+
+def _barcode_detect(img_bgr):
+    """YOLO pass for barcode boxes, or None when no model is configured.
+
+    None (not []) is deliberate: it means "no detector", which makes
+    barcodes.scan fall back to decoding the whole frame. An empty list would
+    mean "a detector ran and found nothing", which is a different answer.
+    """
+    mp = (state.get("barcode_model") or "").strip()
+    if not mp:
+        return None
+    conf = float(state.get("barcode_conf", 0.25) or 0.25)
+    return lambda bgr: _detect_obb_or_box(bgr, mp, _barcode_cache, conf=conf)
+
+
+def _run_barcodes(img_bgr, deep=True):
+    """Find and decode barcodes. Never raises."""
+    try:
+        return barcodes.scan(img_bgr, _barcode_detect(), deep=deep,
+                             min_conf=float(state.get("barcode_conf", 0.25) or 0.25))
+    except Exception as e:
+        access_logger.error(f"barcode scan: {e}")
+        return {"engine": None, "codes": [], "detected": 0, "decoded": 0,
+                "note": f"Barcode scan failed: {e}"}
+
+
 def _warm_models():
     """Pre-trigger model downloads so pose/OCR weights fetch automatically in the
     background instead of on the first user click."""
@@ -4926,6 +4964,7 @@ def api_state():
          "autotag_enabled","pipeline_tree","yolo_size","pose_kind","pose_size",
          "face_bg_enabled","face_bg_custom","face_model","face_size","person_model",
          "face_cluster_eps","body_enabled","body_cluster_eps","object_proposals",
+         "barcode_model","barcode_conf",
          "model_groups","iqa_model","packs")})
 
 @app.route("/api/update_settings", methods=["POST"])
@@ -4938,9 +4977,16 @@ def update_settings():
     if "face_size" in d and d["face_size"] != state.get("face_size"):
         _face_cache["path"] = None
         _face_cache["model"] = None
+    # Same reasoning for the barcode detector: _detect_obb_or_box memoises by
+    # path, so pointing the setting at a different model has no effect until
+    # the cache is dropped.
+    if "barcode_model" in d and d["barcode_model"] != state.get("barcode_model"):
+        _barcode_cache["path"] = None
+        _barcode_cache["model"] = None
     for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","pipeline_tree","yolo_size","pose_kind","pose_size",
               "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","face_cluster_eps",
-              "body_enabled","body_cluster_eps","object_proposals","iqa_model"):
+              "body_enabled","body_cluster_eps","object_proposals","iqa_model",
+              "barcode_model","barcode_conf"):
         if k in d: state[k] = d[k]
     # Switching the NR-IQA model only re-points the module; the new weights load
     # lazily on the next scan, so this stays a cheap settings save.
@@ -8463,6 +8509,22 @@ def api_ocr():
     res = _run_ocr(_to_bgr(img))
     state["status_text"] = "Ready."
     return jsonify({"success": True, **res})
+
+@app.route("/api/barcodes", methods=["POST"])
+def api_barcodes():
+    fn = request.json.get("filename", "")
+    fp = get_safe_path(MEDIA_DIR, fn)
+    if not fp or not os.path.exists(fp):
+        return jsonify({"success": False, "error": "File not found."})
+    img = read_jxl(fp)
+    if img is None:
+        return jsonify({"success": False, "error": "Decode failed."})
+    state["status_text"] = "Scanning for barcodes…"
+    res = _run_barcodes(_to_bgr(img), deep=bool(request.json.get("deep", True)))
+    state["status_text"] = "Ready."
+    return jsonify({"success": True, "regions": barcodes.to_regions(res),
+                    "summary": barcodes.summary_text(res), **res})
+
 
 @app.route("/api/auto_tag", methods=["POST"])
 def auto_tag():

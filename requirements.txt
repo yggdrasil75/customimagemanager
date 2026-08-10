@@ -24,3 +24,4 @@ py7zr
 python-docx
 striprtf
 waitress
+zxing-cpp

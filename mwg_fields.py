@@ -306,6 +306,9 @@ def parse_region_list(xmp, desc_from_json):
         # Instance name lives in mwg-rs:Name ("jill"); the class ("girl") rides
         # in the Description JSON. Fall back to Name for class on legacy files.
         inst_name = xmp.get(f'{p}/mwg-rs:Name', '') or ''
+        bc_val = xmp.get(f'{p}/mwg-rs:Extensions/cim:BarCodeValue', '') or ''
+        bc_fmt = xmp.get(f'{p}/mwg-rs:Extensions/cim:BarCodeFormat', '') or ''
+        bc_bin = xmp.get(f'{p}/mwg-rs:Extensions/cim:BarCodeBinary', '') or ''
         regions.append({
             "class_name": rclass or inst_name or 'object',
             "region_name": inst_name,
@@ -315,6 +318,9 @@ def parse_region_list(xmp, desc_from_json):
             "uuid": str(xmp.get(f'{p}/mwg-rs:BarCodeValue', '')) or None,
             "region_description": rdesc,
             "region_tags": rtags,
+            "barcode_value": str(bc_val),
+            "barcode_format": str(bc_fmt),
+            "barcode_binary": str(bc_bin).strip().lower() in ('true', '1', 'yes'),
         })
     return regions
 
@@ -349,9 +355,18 @@ def build_region_list_xml(regions, esc, desc_to_json, see_also_link, new_uuid):
         see_also = esc(see_also_link(b.get("class_name")))
         # Extensions is an open struct; we stash the app-specific confirmed flag
         # here (cim:Confirmed) now that Type carries the real region type.
-        ext_el = (f'<mwg-rs:Extensions rdf:parseType="Resource">'
-                  f'<cim:Confirmed>{"true" if confirmed else "false"}</cim:Confirmed>'
-                  f'</mwg-rs:Extensions>')
+        ext_parts = [f'<cim:Confirmed>{"true" if confirmed else "false"}</cim:Confirmed>']
+        bc_val = b.get("barcode_value")
+        if bc_val:
+            ext_parts.append(f'<cim:BarCodeValue>{esc(str(bc_val))}</cim:BarCodeValue>')
+            if b.get("barcode_binary"):
+                ext_parts.append('<cim:BarCodeBinary>true</cim:BarCodeBinary>')
+        bc_fmt = b.get("barcode_format")
+        if bc_fmt:
+            ext_parts.append(f'<cim:BarCodeFormat>{esc(str(bc_fmt))}</cim:BarCodeFormat>')
+        ext_el = ('<mwg-rs:Extensions rdf:parseType="Resource">'
+                  + "".join(ext_parts) +
+                  '</mwg-rs:Extensions>')
         items.append(
             f'<rdf:li rdf:parseType="Resource">'
             f'<mwg-rs:Name>{name}</mwg-rs:Name>'
