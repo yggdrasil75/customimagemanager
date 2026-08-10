@@ -3729,7 +3729,7 @@ def _barcode_detect(img_bgr):
 def _run_barcodes(img_bgr, deep=True):
     """Find and decode barcodes. Never raises."""
     try:
-        return barcodes.scan(img_bgr, _barcode_detect(), deep=deep,
+        return barcodes.scan(img_bgr, _barcode_detect(img_bgr), deep=deep,
                              min_conf=float(state.get("barcode_conf", 0.25) or 0.25))
     except Exception as e:
         access_logger.error(f"barcode scan: {e}")
