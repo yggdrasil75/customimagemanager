@@ -216,6 +216,29 @@ def _thumb_lru_drop(rel_path: str) -> None:
         if old is not None:
             _thumb_lru_bytes -= len(old[1])
 
+_meta_cache: "OrderedDict[str, tuple]" = OrderedDict()
+_meta_cache_lock = threading.Lock()
+META_CACHE_MAX = 4096
+
+def _meta_cache_get(rel_path: str, mtime: float):
+    with _meta_cache_lock:
+        entry = _meta_cache.get(rel_path)
+        if entry is not None and entry[0] == mtime:
+            _meta_cache.move_to_end(rel_path)
+            return entry[1]
+    return None
+
+def _meta_cache_put(rel_path: str, mtime: float, meta: dict) -> None:
+    with _meta_cache_lock:
+        _meta_cache[rel_path] = (mtime, meta)
+        _meta_cache.move_to_end(rel_path)
+        while len(_meta_cache) > META_CACHE_MAX:
+            _meta_cache.popitem(last=False)
+
+def _meta_cache_drop(rel_path: str) -> None:
+    with _meta_cache_lock:
+        _meta_cache.pop(rel_path, None)
+
 @functools.lru_cache(maxsize=48)          # arrays are large; keep this modest
 def _decode_cached(path, mtime):
     arr = _decode_jxl_uncached(path)
@@ -243,7 +266,7 @@ DB_BUSY_TIMEOUT_MS = 30000
 # oversubscribing it several times over.
 _CPUS = os.cpu_count() or 8
 WSGI_THREADS = max(8, min(32, _CPUS // 2))
-CJXL_THREADS = max(1, _CPUS // WSGI_THREADS)
+CJXL_THREADS = max(1, _CPUS // 4)
 
 def _db() -> sqlite3.Connection:
     conn = getattr(_db_local, 'conn', None)
@@ -703,6 +726,25 @@ def _init_db():
             stage         TEXT,
             created       REAL
         );
+
+        -- Durable ingest queue. The upload request only spools the raw bytes
+        -- here and returns; a worker pool drains it and runs the heavy
+        -- convert/index chain. Survives restart: rows in 'pending'/'processing'
+        -- are requeued at boot, and the spooled original is re-read from disk.
+        CREATE TABLE IF NOT EXISTS upload_queue (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            spool_path  TEXT NOT NULL,     -- raw uploaded bytes on disk
+            orig_name   TEXT NOT NULL,     -- filename as the client sent it
+            folder      TEXT NOT NULL DEFAULT '',
+            metadata    TEXT NOT NULL DEFAULT '{}',
+            status      TEXT NOT NULL DEFAULT 'pending',  -- pending|processing|done|error
+            attempts    INTEGER NOT NULL DEFAULT 0,
+            error       TEXT DEFAULT '',
+            rel_path    TEXT DEFAULT '',   -- set once processed
+            created     REAL NOT NULL,
+            updated     REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_uq_status ON upload_queue(status, id);
 
         -- Persistent "never group these two together" pairs.
         -- Stored with a < b so lookups are a single normalised query.
@@ -1350,8 +1392,11 @@ def _dedup_save_groups(groups_by_kind):
 
 def _dedup_load_groups():
     """Returns list of {kind, members, scores} dicts, filtering deleted members."""
-    rows = _db().execute(
+    db = _db()
+    rows = db.execute(
         "SELECT kind, members, scores FROM dedup_groups ORDER BY id").fetchall()
+    # One scan instead of one SELECT per member across every group (N+1 -> 1).
+    live = {r[0] for r in db.execute("SELECT rel_path FROM files").fetchall()}
     out = []
     for row in rows:
         members = json.loads(row["members"])
@@ -1359,8 +1404,7 @@ def _dedup_load_groups():
         # Pair members with scores, drop deleted files
         paired = list(zip(members, scores)) if len(scores) == len(members) \
                  else [(m, None) for m in members]
-        live_pairs = [(m, s) for m, s in paired
-                      if _db().execute("SELECT 1 FROM files WHERE rel_path=?", (m,)).fetchone()]
+        live_pairs = [(m, s) for m, s in paired if m in live]
         if len(live_pairs) > 1:
             live_m, live_s = zip(*live_pairs)
             out.append({"kind": row["kind"],
@@ -2815,6 +2859,11 @@ def _album_list():
 def write_metadata(filepath, tags, description, regions, analysis=None, flag=None, pose=None, page_count=None,
                    albums=None, anim_delays=None):
     try:
+        try:
+            _meta_cache_drop(
+                os.path.relpath(filepath, MEDIA_DIR).replace('\\', '/'))
+        except Exception:
+            pass
         _sync_yolo(filepath, regions)
         xmp_path = os.path.splitext(filepath)[0] + '.xmp'
         # Preserve existing album membership on an ordinary save. This one is
@@ -3119,9 +3168,9 @@ def _thumb_from_array(img) -> bytes | None:
 def _make_thumb_bytes(abs_path: str) -> bytes | None:
     return _thumb_from_array(read_jxl(abs_path))
 
-def serve_thumb(rel_path: str, abs_path: str):
-    # mtime via packio: a packed original has no disk file to stat.
-    mtime = packio.getmtime(abs_path)
+def serve_thumb(rel_path: str, abs_path: str, mtime: float | None = None):
+    if mtime is None:
+        mtime = packio.getmtime(abs_path)
 
     # 1. In-process LRU — encoded bytes, no pack lookup, no syscall.
     data = _thumb_lru_get(rel_path, mtime)
@@ -3737,28 +3786,37 @@ def _recluster():
         ids  = [i for i, _ in items]
         vecs = [v for _, v in items]
         labels = facelib.cluster(vecs, mode=mode, eps=eps)
-        for i, lab in zip(ids, labels):
-            lab = int(lab)
-            # offset so cluster ids stay unique across modes
-            db.execute("UPDATE face_regions SET cluster_id=? WHERE id=?",
-                       (lab + base if lab >= 0 else -1, i))
+        # offset so cluster ids stay unique across modes
+        db.executemany("UPDATE face_regions SET cluster_id=? WHERE id=?",
+                       [(int(lab) + base if int(lab) >= 0 else -1, i)
+                        for i, lab in zip(ids, labels)])
         used = len({l for l in labels if l >= 0})
         base += used
         total += used
     # propagate confirmed names across each cluster as a suggestion
-    for (lab,) in db.execute(
-            "SELECT DISTINCT cluster_id FROM face_regions WHERE cluster_id>=0").fetchall():
-        known = db.execute(
-            "SELECT name FROM face_regions WHERE cluster_id=? AND confirmed=1 "
-            "AND name<>'' LIMIT 1", (lab,)).fetchone()
-        if known:
-            db.execute("UPDATE face_regions SET name=? WHERE cluster_id=? "
-                       "AND confirmed=0", (known[0], lab))
+    _propagate_cluster_names(db, "face_regions")
     db.commit()
 
     if state.get("body_enabled"):
         _recluster_bodies()
     return total
+
+
+def _propagate_cluster_names(db, table):
+    """Copy each cluster's confirmed name onto its unconfirmed rows as a
+    suggestion. Returns the set of cluster_ids that got a name (so callers with
+    extra fallback logic can skip them). Shared by face and body reclustering."""
+    named = set()
+    for (lab,) in db.execute(
+            f"SELECT DISTINCT cluster_id FROM {table} WHERE cluster_id>=0").fetchall():
+        known = db.execute(
+            f"SELECT name FROM {table} WHERE cluster_id=? AND confirmed=1 "
+            "AND name<>'' LIMIT 1", (lab,)).fetchone()
+        if known:
+            db.execute(f"UPDATE {table} SET name=? WHERE cluster_id=? "
+                       "AND confirmed=0", (known[0], lab))
+            named.add(lab)
+    return named
 
 
 def _recluster_bodies():
@@ -3790,23 +3848,18 @@ def _recluster_bodies():
         e = eps if eps else (bodylib.BODY_EPS_REID if mode == "reid"
                              else bodylib.BODY_EPS_APPEARANCE)
         labels = facelib.cluster(vecs, mode=mode, eps=e)
-        for i, lab in zip(ids, labels):
-            lab = int(lab)
-            db.execute("UPDATE body_regions SET cluster_id=? WHERE id=?",
-                       (lab + base if lab >= 0 else -1, i))
+        db.executemany("UPDATE body_regions SET cluster_id=? WHERE id=?",
+                       [(int(lab) + base if int(lab) >= 0 else -1, i)
+                        for i, lab in zip(ids, labels)])
         used = len({l for l in labels if l >= 0})
         base += used
         total += used
 
     # Confirmed body names win within their own cluster (same as faces).
+    named = _propagate_cluster_names(db, "body_regions")
     for (lab,) in db.execute(
             "SELECT DISTINCT cluster_id FROM body_regions WHERE cluster_id>=0").fetchall():
-        known = db.execute(
-            "SELECT name FROM body_regions WHERE cluster_id=? AND confirmed=1 "
-            "AND name<>'' LIMIT 1", (lab,)).fetchone()
-        if known:
-            db.execute("UPDATE body_regions SET name=? WHERE cluster_id=? "
-                       "AND confirmed=0", (known[0], lab))
+        if lab in named:
             continue
         # No confirmed body name -> borrow the majority associated FACE name.
         # Each body may link to a face row (face_id); that face row carries the
@@ -4879,28 +4932,50 @@ def api_raw_keep():
 
 
 # ── Faces API ─────────────────────────────────────────────────────────────────
+def _cluster_summary(table, extra_cols, sample_cols, sample_key, row_to_sample,
+                     extra_to_fields=None, sample_limit=30):
+    """Shared face/body cluster listing. One aggregate query for counts/names and
+    one windowed query for up-to-N samples per cluster, instead of a per-cluster
+    sample SELECT (N+1 -> 2 queries total)."""
+    db = _db()
+    agg_extra = (", " + extra_cols) if extra_cols else ""
+    rows = db.execute(
+        f"SELECT cluster_id, COUNT(*), COALESCE(MAX(name),''), "
+        f"       MAX(confirmed), MAX(embed_mode){agg_extra} "
+        f"FROM {table} WHERE cluster_id>=0 "
+        "GROUP BY cluster_id ORDER BY COUNT(*) DESC").fetchall()
+    # Pull all samples in one pass, ranked within each cluster.
+    samples = {}
+    for r in db.execute(
+            f"SELECT {sample_cols} FROM ("
+            f"  SELECT {sample_cols}, ROW_NUMBER() OVER "
+            "        (PARTITION BY cluster_id ORDER BY id) rn "
+            f"  FROM {table} WHERE cluster_id>=0) "
+            f"WHERE rn<=?", (sample_limit,)).fetchall():
+        samples.setdefault(r[-1], []).append(r)
+    clusters = []
+    for row in rows:
+        cid, n, name, conf, mode = row[0], row[1], row[2], row[3], row[4]
+        entry = {"id": cid, "count": n, "name": name or "",
+                 "confirmed": bool(conf), "mode": mode or "",
+                 sample_key: [row_to_sample(r) for r in samples.get(cid, [])]}
+        if extra_to_fields:
+            entry.update(extra_to_fields(row))
+        clusters.append(entry)
+    clusters.sort(key=lambda c: (bool(c["name"]), -c["count"]))
+    singles = db.execute(
+        f"SELECT COUNT(*) FROM {table} WHERE cluster_id<0").fetchone()[0]
+    return clusters, singles
+
+
 @app.route("/api/faces/clusters")
 def api_face_clusters():
     """Clusters for the Faces tab, biggest first. Unnamed clusters lead."""
-    rows = _db().execute(
-        "SELECT cluster_id, COUNT(*), "
-        "       COALESCE(MAX(name),''), MAX(confirmed), MAX(embed_mode) "
-        "FROM face_regions WHERE cluster_id>=0 "
-        "GROUP BY cluster_id ORDER BY COUNT(*) DESC").fetchall()
-    clusters = []
-    for cid, n, name, conf, mode in rows:
-        sample = _db().execute(
-            "SELECT id,rel_path,cx,cy,w,h FROM face_regions "
-            "WHERE cluster_id=? LIMIT 30", (cid,)).fetchall()
-        clusters.append({
-            "id": cid, "count": n, "name": name or "",
-            "confirmed": bool(conf), "mode": mode or "",
-            "faces": [{"id": r[0], "rel": r[1], "cx": r[2], "cy": r[3],
-                       "w": r[4], "h": r[5]}
-                      for r in sample]})
-    clusters.sort(key=lambda c: (bool(c["name"]), -c["count"]))
-    singles = _db().execute(
-        "SELECT COUNT(*) FROM face_regions WHERE cluster_id<0").fetchone()[0]
+    clusters, singles = _cluster_summary(
+        "face_regions", "",
+        "id,rel_path,cx,cy,w,h,cluster_id", "faces",
+        lambda r: {"id": r[0], "rel": r[1], "cx": r[2], "cy": r[3],
+                   "w": r[4], "h": r[5]})
     return jsonify({"clusters": clusters, "unclustered": singles,
                     "identity": facelib.have_identity_embedder()})
 
@@ -4910,27 +4985,13 @@ def api_body_clusters():
     """Body (re-id) clusters for the Faces tab, biggest first. Each cluster
     reports how many of its members are linked to a face (associated) so the UI
     can show the face<->body binding strength."""
-    rows = _db().execute(
-        "SELECT cluster_id, COUNT(*), "
-        "       COALESCE(MAX(name),''), MAX(confirmed), MAX(embed_mode), "
-        "       SUM(CASE WHEN face_id IS NOT NULL THEN 1 ELSE 0 END) "
-        "FROM body_regions WHERE cluster_id>=0 "
-        "GROUP BY cluster_id ORDER BY COUNT(*) DESC").fetchall()
-    clusters = []
-    for cid, n, name, conf, mode, linked in rows:
-        sample = _db().execute(
-            "SELECT id,rel_path,cx,cy,w,h,face_id FROM body_regions "
-            "WHERE cluster_id=? LIMIT 30", (cid,)).fetchall()
-        clusters.append({
-            "id": cid, "count": n, "name": name or "",
-            "confirmed": bool(conf), "mode": mode or "",
-            "linked_faces": int(linked or 0),
-            "bodies": [{"id": r[0], "rel": r[1], "cx": r[2], "cy": r[3],
-                        "w": r[4], "h": r[5], "face_id": r[6]}
-                       for r in sample]})
-    clusters.sort(key=lambda c: (bool(c["name"]), -c["count"]))
-    singles = _db().execute(
-        "SELECT COUNT(*) FROM body_regions WHERE cluster_id<0").fetchone()[0]
+    clusters, singles = _cluster_summary(
+        "body_regions",
+        "SUM(CASE WHEN face_id IS NOT NULL THEN 1 ELSE 0 END)",
+        "id,rel_path,cx,cy,w,h,face_id,cluster_id", "bodies",
+        lambda r: {"id": r[0], "rel": r[1], "cx": r[2], "cy": r[3],
+                   "w": r[4], "h": r[5], "face_id": r[6]},
+        extra_to_fields=lambda row: {"linked_faces": int(row[5] or 0)})
     return jsonify({"clusters": clusters, "unclustered": singles,
                     "enabled": bool(state.get("body_enabled")),
                     "identity": bodylib.have_body_embedder()})
@@ -5399,6 +5460,95 @@ def api_albums_of():
 
 @app.route("/api/upload", methods=["POST"])
 def api_upload():
+    """Accept phase only: durably spool the raw bytes + enqueue, then return
+    immediately. The heavy convert/index chain runs in the queue worker pool.
+    This keeps each Pi's request short (bounded by disk write, not by cjxl), so
+    many devices can ingest concurrently without saturating the WSGI threads.
+
+    The response keeps the old success shape plus queued=True, and `filename` is
+    the *predicted* stored rel_path so existing clients that read it still work.
+    """
+    if 'file' not in request.files:
+        return jsonify({"success": False, "error_code": "no_file",
+                        "error": "No file part in request."}), 400
+    file   = request.files['file']
+    folder = request.form.get("folder", "").strip()
+    tdir   = get_safe_path(MEDIA_DIR, folder) if folder else MEDIA_DIR
+    if not tdir:
+        return jsonify({"success": False, "error_code": "bad_folder",
+                        "error": "Folder path is outside media directory."}), 400
+
+    orig_name = secure_filename(file.filename) or "upload.bin"
+    # Spool the raw upload to a durable dir (survives restart). Stream straight
+    # to disk — no decode, no cjxl — so the request cost is just the write.
+    os.makedirs(_UPLOAD_SPOOL_DIR, exist_ok=True)
+    fd, spool_path = tempfile.mkstemp(dir=_UPLOAD_SPOOL_DIR, prefix="up-",
+                                      suffix="-" + orig_name)
+    os.close(fd)
+    file.save(spool_path)
+
+    metadata = request.form.get("metadata", "{}") or "{}"
+    now = time.time()
+
+    # Predict where this will land, so we can short-circuit obvious duplicates
+    # before spending a worker + cjxl on something that only fails filename_exists.
+    try:
+        pred = os.path.relpath(os.path.join(tdir, mt.stored_name(orig_name)),
+                               MEDIA_DIR).replace('\\', '/')
+    except Exception:
+        pred = orig_name
+
+    # Already in the library on disk? Nothing to do — report it like the pipeline
+    # would, without queuing a doomed job. (Content-level dupes under a different
+    # name are still caught by the sha check inside the conversion pipeline.)
+    pred_abs = os.path.join(MEDIA_DIR, pred)
+    if os.path.exists(pred_abs) or packio.is_packed(pred_abs):
+        return jsonify({"success": True, "queued": False, "duplicate": True,
+                        "filename": pred, "existing_file": pred}), 200
+
+    def _enqueue():
+        db = _db()
+        # Same name already waiting/processing? Collapse the duplicate re-POST
+        # into the existing job rather than adding a second doomed row.
+        dup = db.execute(
+            "SELECT id FROM upload_queue WHERE orig_name=? AND folder=? "
+            "AND status IN ('pending','processing') LIMIT 1",
+            (orig_name, folder)).fetchone()
+        if dup is not None:
+            return ("dup", dup["id"])
+        cur = db.execute(
+            "INSERT INTO upload_queue"
+            "(spool_path, orig_name, folder, metadata, status, created, updated) "
+            "VALUES(?,?,?,?,'pending',?,?)",
+            (spool_path, orig_name, folder, metadata, now, now))
+        db.commit()
+        return ("new", cur.lastrowid)
+    try:
+        kind, qid = _db_retry(_enqueue)
+    except Exception as e:
+        try: os.remove(spool_path)
+        except OSError: pass
+        access_logger.error(f"upload enqueue failed for {orig_name}: {e}")
+        return jsonify({"success": False, "error_code": "server_error",
+                        "error": "Could not queue upload."}), 500
+
+    if kind == "dup":
+        # A job for this name is already in flight; drop the redundant spool.
+        try: os.remove(spool_path)
+        except OSError: pass
+        return jsonify({"success": True, "queued": False, "duplicate": True,
+                        "queue_id": qid, "filename": pred}), 200
+
+    _upload_workers_wake()
+    return jsonify({"success": True, "queued": True, "queue_id": qid,
+                    "filename": pred}), 202
+
+
+def _run_upload():
+    """The full convert+index pipeline for one upload. Reads the file and form
+    from the *current request context* exactly as before. The queue worker calls
+    this inside a rebuilt request context (see _process_upload_job), so this body
+    is unchanged whether it runs from a live HTTP request or a drained queue."""
     if 'file' not in request.files:
         return jsonify({"success": False, "error_code": "no_file",
                         "error": "No file part in request."}), 400
@@ -5686,6 +5836,254 @@ def api_upload():
             return jsonify({"success": False, "error_code": "server_error",
                             "error": str(e)}), 500
 
+
+# ── Durable upload queue + worker pool ────────────────────────────────────────
+# The upload request spools raw bytes and enqueues; these workers drain the
+# queue and run the (slow) convert/index chain — cjxl parallelism lives here, not
+# on the request threads. Sized so parallel encoders stay near the core count.
+_UPLOAD_SPOOL_DIR   = os.path.join(os.path.dirname(DB_PATH), "upload_spool")
+_UPLOAD_WORKERS     = max(1, min(WSGI_THREADS, _CPUS))
+_upload_wake        = threading.Event()
+_upload_started     = threading.Event()   # guards one-time pool start
+
+
+def _upload_workers_wake():
+    _upload_wake.set()
+
+
+def _claim_upload_job():
+    """Atomically take the oldest pending job. Returns a Row or None. The
+    UPDATE...WHERE status='pending' guard means two workers can never claim the
+    same row: the second sees zero rows changed and moves on."""
+    def _claim():
+        db = _db()
+        db.rollback()
+        rows = db.execute(
+            "SELECT id FROM upload_queue WHERE status='pending' "
+            "ORDER BY attempts ASC, id ASC LIMIT ?", (_UPLOAD_WORKERS,)).fetchall()
+        if not rows:
+            return None
+        target = rows[random.randrange(len(rows))]["id"]
+        n = db.execute(
+            "UPDATE upload_queue SET status='processing', attempts=attempts+1, "
+            "updated=? WHERE id=? AND status='pending'",
+            (time.time(), target)).rowcount
+        db.commit()
+        if not n:
+            return "retry"        # lost the race; caller loops again
+        return db.execute("SELECT * FROM upload_queue WHERE id=?",
+                          (target,)).fetchone()
+    while True:
+        got = _db_retry(_claim)
+        if got != "retry":
+            return got
+
+
+def _process_upload_job(job):
+    """Run the heavy pipeline for one queued job by replaying it through
+    _run_upload inside a rebuilt request context — so the entire existing
+    convert/index/dedup body is reused verbatim, no request object required."""
+    spool_path = job["spool_path"]
+    try:
+        with open(spool_path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        return False, f"spool missing: {e}", ""
+
+    # Rebuild exactly the multipart form _run_upload expects.
+    ctx = app.test_request_context(
+        "/api/upload", method="POST",
+        data={"file": (io.BytesIO(data), job["orig_name"]),
+              "folder": job["folder"] or "",
+              "metadata": job["metadata"] or "{}"},
+        content_type="multipart/form-data")
+    with ctx:
+        resp = _run_upload()
+        body, code = (resp if isinstance(resp, tuple) else (resp, 200))
+        payload = body.get_json(silent=True) or {}
+    ok = bool(payload.get("success")) and code < 400
+    if ok:
+        return True, "", payload.get("filename", "")
+    # A duplicate / filename-clash isn't a retryable error — it's terminal-done.
+    if payload.get("error_code") in ("exact_duplicate", "filename_exists"):
+        return True, payload.get("error_code", ""), payload.get("existing_file", "")
+    return False, payload.get("error", "unknown") or "unknown", ""
+
+
+def _finish_upload_job(job_id, ok, err, rel_path):
+    def _fin():
+        db = _db()
+        db.execute(
+            "UPDATE upload_queue SET status=?, error=?, rel_path=?, updated=? "
+            "WHERE id=?",
+            ("done" if ok else "error", err[:500], rel_path, time.time(), job_id))
+        db.commit()
+    _db_retry(_fin)
+
+
+def _upload_worker_loop():
+    while True:
+        job = None
+        try:
+            job = _claim_upload_job()
+        except Exception as e:
+            access_logger.error(f"upload queue claim failed: {e}")
+        if job is None:
+            # Nothing pending: sleep until woken by a new enqueue (or a periodic
+            # tick, so a job left 'processing' by a crashed worker still drains).
+            _upload_wake.wait(timeout=5.0)
+            _upload_wake.clear()
+            continue
+        try:
+            ok, err, rel = _process_upload_job(job)
+        except Exception as e:
+            ok, err, rel = False, str(e), ""
+            access_logger.error(f"upload job {job['id']} crashed: {e}",
+                                exc_info=True)
+        # Retry transient failures a few times before parking as 'error'.
+        if not ok and job["attempts"] < 3:
+            def _requeue():
+                db = _db()
+                db.execute("UPDATE upload_queue SET status='pending', error=?, "
+                           "updated=? WHERE id=?",
+                           (err[:500], time.time(), job["id"]))
+                db.commit()
+            try: _db_retry(_requeue)
+            except Exception: pass
+            time.sleep(min(5.0, 0.5 * job["attempts"]))
+            continue
+        _finish_upload_job(job["id"], ok, err, rel)
+        if ok:
+            try: os.remove(job["spool_path"])
+            except OSError: pass
+
+
+_upload_threads = []   # live worker Thread objects, for liveness reporting
+
+
+def _start_upload_workers():
+    if _upload_started.is_set():
+        return
+    _upload_started.set()
+    try:
+        os.makedirs(_UPLOAD_SPOOL_DIR, exist_ok=True)
+    except Exception as e:
+        access_logger.error(f"upload spool dir create failed: {e}")
+    # Requeue anything left mid-flight by a restart: 'processing' rows had a
+    # worker that never finished; their spooled originals are still on disk.
+    def _requeue_stale():
+        db = _db()
+        db.execute("UPDATE upload_queue SET status='pending', updated=? "
+                   "WHERE status='processing'", (time.time(),))
+        db.commit()
+    try:
+        _db_retry(_requeue_stale)
+    except Exception as e:
+        access_logger.error(f"upload queue boot requeue failed: {e}")
+    # Spawn the pool. Wrap each thread body so a crash on the very first
+    # iteration is loud, not silent — a dead worker that logged nothing is
+    # exactly what "151 pending, 0 processing, 0 errors" looks like.
+    for i in range(_UPLOAD_WORKERS):
+        def _guarded(n=i):
+            access_logger.info(f"upload worker {n} started")
+            try:
+                _upload_worker_loop()
+            except Exception as e:
+                access_logger.error(f"upload worker {n} died: {e}", exc_info=True)
+        t = threading.Thread(target=_guarded, daemon=True, name=f"upload-w{i}")
+        t.start()
+        _upload_threads.append(t)
+    _upload_workers_wake()
+    access_logger.info(f"upload pool: {len(_upload_threads)} threads spawned")
+
+
+@app.route("/api/upload/queue")
+def api_upload_queue_status():
+    """Queue depth by status — lets the Pis or an admin see backlog/health."""
+    db = _db()
+    rows = db.execute(
+        "SELECT status, COUNT(*) c FROM upload_queue GROUP BY status").fetchall()
+    counts = {r["status"]: r["c"] for r in rows}
+    # Any job that failed or is stuck retrying, newest first, with its error.
+    errs = db.execute(
+        "SELECT id, orig_name, folder, status, attempts, error, spool_path "
+        "FROM upload_queue WHERE status IN ('error','pending','processing') "
+        "OR error<>'' ORDER BY updated DESC LIMIT 100"
+    ).fetchall()
+    err_out = []
+    lost = 0
+    for r in [dict(x) for x in errs]:
+        recoverable = bool(r.get("spool_path") and os.path.exists(r["spool_path"]))
+        if r["status"] == "error" and not recoverable:
+            lost += 1
+        r["spool_present"] = recoverable
+        r.pop("spool_path", None)
+        err_out.append(r)
+    return jsonify({"success": True, "counts": counts,
+                    "pending": counts.get("pending", 0),
+                    "processing": counts.get("processing", 0),
+                    "error": counts.get("error", 0),
+                    "done": counts.get("done", 0),
+                    "lost": lost,   # errored jobs whose original bytes are gone
+                    "workers": _UPLOAD_WORKERS,
+                    "workers_alive": sum(1 for t in _upload_threads if t.is_alive()),
+                    "workers_started": _upload_started.is_set(),
+                    "jobs": err_out})
+
+
+@app.route("/api/upload/retry", methods=["POST"])
+def api_upload_retry():
+    """Requeue errored jobs whose spooled original still exists. Pass {"id": N}
+    for one job, or nothing to retry every recoverable errored job. Jobs whose
+    spool is gone are reported as unrecoverable rather than silently skipped."""
+    want = (request.json or {}).get("id") if request.is_json else None
+    db = _db()
+    q = "SELECT id, spool_path FROM upload_queue WHERE status='error'"
+    params = ()
+    if want is not None:
+        q += " AND id=?"; params = (want,)
+    rows = db.execute(q, params).fetchall()
+    requeued, unrecoverable = [], []
+    for r in rows:
+        if r["spool_path"] and os.path.exists(r["spool_path"]):
+            def _rq(_id=r["id"]):
+                d = _db()
+                d.execute("UPDATE upload_queue SET status='pending', attempts=0, "
+                          "error='', updated=? WHERE id=?", (time.time(), _id))
+                d.commit()
+            try:
+                _db_retry(_rq); requeued.append(r["id"])
+            except Exception as e:
+                access_logger.error(f"retry requeue {r['id']}: {e}")
+        else:
+            unrecoverable.append(r["id"])
+    if requeued:
+        _upload_workers_wake()
+    return jsonify({"success": True, "requeued": requeued,
+                    "unrecoverable": unrecoverable})
+
+
+@app.route("/api/upload/discard", methods=["POST"])
+def api_upload_discard():
+    """Intentionally drop a parked-error job and its spooled bytes. Explicit,
+    never automatic — the only sanctioned way an errored original is deleted."""
+    _id = (request.json or {}).get("id")
+    if _id is None:
+        return jsonify({"success": False, "error": "id required"}), 400
+    db = _db()
+    row = db.execute("SELECT spool_path FROM upload_queue WHERE id=?",
+                     (_id,)).fetchone()
+    if row is None:
+        return jsonify({"success": False, "error": "no such job"}), 404
+    if row["spool_path"]:
+        try: os.remove(row["spool_path"])
+        except OSError: pass
+    def _del():
+        d = _db(); d.execute("DELETE FROM upload_queue WHERE id=?", (_id,)); d.commit()
+    _db_retry(_del)
+    return jsonify({"success": True, "discarded": _id})
+
+
 @app.route("/api/move", methods=["POST"])
 def api_move():
     filename   = request.json.get("filename","")
@@ -5794,8 +6192,13 @@ def api_packs_rebuild():
 @app.route("/api/thumb/<path:filename>")
 def api_thumb(filename):
     fp = get_safe_path(MEDIA_DIR, filename)
-    if not fp or not packio.exists(fp): return "",404
-    return serve_thumb(filename, fp)
+    if not fp: return "",404
+    try:
+        mtime = os.stat(fp).st_mtime
+    except OSError:
+        if not packio.is_packed(fp): return "",404
+        mtime = None
+    return serve_thumb(filename, fp, mtime)
 
 def _jxl_duration_s(fp):
     """Duration (seconds) of an animated JXL from its portable XMP timing, or
@@ -6131,7 +6534,13 @@ def api_metadata():
     fp = get_safe_path(MEDIA_DIR, fn)
     if not fp or not os.path.exists(fp): return jsonify({"success":False})
     if d.get("action")=="read":
-        meta = read_metadata(fp)
+        mt_ = packio.getmtime(fp)
+        meta = _meta_cache_get(fn, mt_)
+        if meta is None:
+            meta = read_metadata(fp)
+            _meta_cache_put(fn, mt_, meta)
+        meta = dict(meta)   # per-request copy: the rating fields below are
+                            # request-specific and must not mutate the cached dict
         row = _db().execute(
             "SELECT iqa_score, rating, rating_user FROM files WHERE rel_path=?",
             (fn,)).fetchone()
@@ -6148,6 +6557,7 @@ def api_metadata():
         return jsonify({"success":True,"metadata":meta})
     elif d.get("action")=="write":
         ok = write_metadata(fp, d.get("tags",[]), d.get("description",""), d.get("regions",[]))
+        _meta_cache_drop(fn)
         return jsonify({"success":ok})
 
 # ── Tiered storage ───────────────────────────────────────────────────────────
@@ -9345,6 +9755,8 @@ if __name__=='__main__':
     book_routes.start_background()
     access_logger.info("Starting background face worker…")
     threading.Thread(target=_background_face_worker, daemon=True).start()
+    access_logger.info(f"Starting upload queue ({_UPLOAD_WORKERS} workers)…")
+    _start_upload_workers()
     access_logger.info("Warming pose/OCR models (auto-download)…")
     threading.Thread(target=_warm_models, daemon=True).start()
     access_logger.info("Serving on :8000")

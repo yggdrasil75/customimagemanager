@@ -246,6 +246,7 @@ async function loadReviewBoxes(it){
   try{
     const d=await fetch('/api/metadata',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({action:'read',filename:it.filename})}).then(r=>r.json());
+    if(document.getElementById('review_filename').innerText!==it.filename) return;
     _rvRegions=(d.metadata&&d.metadata.regions)||[];
   }catch(e){ _rvRegions=[]; }
   // default decision: unconfirmed boxes pending, confirmed ones left alone

@@ -598,15 +598,12 @@ class PackStore:
         if loc is not None:
             self._cache_drop(key)
         for pid in sorted(self._present_pack_ids(), reverse=True):
-            hit = None
             for m in self.pack_index(pid):
                 if m["key"] == key:
-                    hit = m
-            if hit is not None:
-                if hit["length"] == 0:                 # tombstone / empty
-                    return None
-                self._cache_put(key, pid, hit["offset"], hit["length"], hit["crc32"])
-                return (pid, hit["offset"], hit["length"], hit["crc32"])
+                    if m["length"] == 0:               # tombstone / empty
+                        return None
+                    self._cache_put(key, pid, m["offset"], m["length"], m["crc32"])
+                    return (pid, m["offset"], m["length"], m["crc32"])
         return None
 
     def _present_pack_ids(self):
@@ -660,7 +657,9 @@ class PackStore:
                 self._seal_locked(pid)
                 pid, psize = self._open_pack()
             path = self.pack_path(pid)
-            old = self._resolve(key)
+            old = self._cache_get(key)
+            if old is not None and old[3] == _TOMB_MARK:
+                old = None
             with open(path, "ab") as f:
                 _hdr_off, payload_off = self._append_member(f, name, data, crc, mtime)
                 f.flush()

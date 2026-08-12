@@ -284,6 +284,7 @@ function refreshSelectionUI(){
 }
 
 // ── File select (single) ───────────────────────────────────────────────────
+let _selectSeq=0;   // bumped each selectFile call; a load applies only if still latest
 async function selectFile(fn){
   // A book is not an image. Everything below this line assumes a decodable
   // pixel surface — it reads /api/metadata (which decodes the file), pokes the
@@ -293,6 +294,7 @@ async function selectFile(fn){
     if(typeof openBook==='function') openBook(fn);
     return;
   }
+  const _mySeq=++_selectSeq;
   currentFile=fn;
   // Clear multi-selection visual when opening single file
   document.querySelectorAll('.gallery-item').forEach(e=>{
@@ -335,6 +337,7 @@ async function selectFile(fn){
     // Guard against the user having moved on before the probe returns.
     if(typeof mediaAnim!=='undefined'&&mediaAnim){ mediaAnim.classList.add('hidden'); mediaAnim.removeAttribute('src'); }
     canvas.classList.remove('hidden');
+    imgObj.dataset.file=fn;
     imgObj.src=url;
     fetch(`/api/is_animated/${encodeURIComponent(fn)}`)
       .then(r=>r.json())
@@ -348,6 +351,7 @@ async function selectFile(fn){
   }
   const d=await fetch('/api/metadata',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({action:'read',filename:fn})}).then(r=>r.json());
+  if(_mySeq!==_selectSeq) return;
   if(d.success){
     setTags(d.metadata.tags||[]);
     document.getElementById('meta_desc').value=d.metadata.description;
@@ -363,7 +367,10 @@ async function selectFile(fn){
     selectedRegionIdx=-1;
     closeRegionEditor();
     syncPoseButtons();
-    drawCanvas(); renderAnalysis(); renderRegionsList(); renderFlagBanner();
+    drawCanvas();
+    renderAnalysis();
+    renderRegionsList();
+    renderFlagBanner();
   }
 }
 
