@@ -178,9 +178,43 @@ state = {
 }
 
 # In-memory thumbnail LRU (hot files only; disk cache handles the rest)
-_thumb_lru: dict = {}
+_thumb_lru: "OrderedDict[str, tuple]" = OrderedDict()
 _thumb_lock = threading.Lock()
-LRU_MAX = 512
+_thumb_lru_bytes = 0
+THUMB_LRU_BYTES = 2 << 30           # 2 GiB ≈ 100k+ thumbnails
+LRU_MAX = 512                       # retained: legacy references elsewhere
+
+
+def _thumb_lru_put(rel_path: str, mtime: float, data: bytes) -> None:
+    """Insert under the byte budget, evicting oldest first. Caller must NOT
+    hold _thumb_lock."""
+    global _thumb_lru_bytes
+    with _thumb_lock:
+        old = _thumb_lru.pop(rel_path, None)
+        if old is not None:
+            _thumb_lru_bytes -= len(old[1])
+        _thumb_lru[rel_path] = (mtime, data)
+        _thumb_lru_bytes += len(data)
+        while _thumb_lru_bytes > THUMB_LRU_BYTES and _thumb_lru:
+            _k, (_m, d) = _thumb_lru.popitem(last=False)
+            _thumb_lru_bytes -= len(d)
+
+
+def _thumb_lru_get(rel_path: str, mtime: float):
+    with _thumb_lock:
+        entry = _thumb_lru.get(rel_path)
+        if entry is not None and entry[0] == mtime:
+            _thumb_lru.move_to_end(rel_path)
+            return entry[1]
+    return None
+
+
+def _thumb_lru_drop(rel_path: str) -> None:
+    global _thumb_lru_bytes
+    with _thumb_lock:
+        old = _thumb_lru.pop(rel_path, None)
+        if old is not None:
+            _thumb_lru_bytes -= len(old[1])
 
 @functools.lru_cache(maxsize=48)          # arrays are large; keep this modest
 def _decode_cached(path, mtime):
@@ -200,6 +234,16 @@ _db_local = threading.local()
 _all_conns = {}
 _all_conns_lock = threading.Lock()
 DB_BUSY_TIMEOUT_MS = 30000
+
+# ── Server thread budget ──────────────────────────────────────────────────────
+# WSGI_THREADS is the real ingest concurrency: waitress queues every request
+# past it, and a deep queue is what eventually trips connection_limit and makes
+# the server stop accepting connections. CJXL_THREADS bounds each encoder
+# subprocess so WSGI_THREADS x CJXL_THREADS stays near the core count instead of
+# oversubscribing it several times over.
+_CPUS = os.cpu_count() or 8
+WSGI_THREADS = max(8, min(32, _CPUS // 2))
+CJXL_THREADS = max(1, _CPUS // WSGI_THREADS)
 
 def _db() -> sqlite3.Connection:
     conn = getattr(_db_local, 'conn', None)
@@ -281,7 +325,16 @@ def _pack_cfg():
     predates. Read live so a settings change takes effect without a restart of
     anything that calls this."""
     defaults = {"enabled": True, "pack_bytes": 1 << 30, "max_open_packs": 16,
-                "auto_migrate": True, "migrate_interval_sec": 900, "idle_sec": 60}
+                "auto_migrate": True, "migrate_interval_sec": 900, "idle_sec": 60,
+                # In-memory extracted-blob cache. 8 GiB is a starting point, not
+                # a ceiling — on a host with 100 GB this can go far higher, and
+                # the only cost of doing so is resident memory.
+                "cache_bytes": 8 << 30,
+                "cache_item_max": 32 << 20,
+                # Pull thumbnails into memory at startup instead of waiting for
+                # a user to page through the grid and fault each one in.
+                "preload_thumbs": True,
+                "preload_bytes": 4 << 30}
     cfg = dict(defaults)
     cfg.update(state.get("packs") or {})
     return cfg
@@ -295,7 +348,9 @@ def _init_packstore():
         _packstore = packstore.PackStore(
             os.path.join(MEDIA_DIR, ".packs"), _db,
             pack_bytes=int(cfg["pack_bytes"]),
-            max_open_packs=int(cfg["max_open_packs"]))
+            max_open_packs=int(cfg["max_open_packs"]),
+            cache_bytes=int(cfg["cache_bytes"]),
+            cache_item_max=int(cfg["cache_item_max"]))
         _packstore.recover()
         # If packs exist on disk but the cache is empty or stale (fresh DB,
         # copied library, deleted library.db), repopulate the location cache
@@ -312,6 +367,26 @@ def _init_packstore():
             access_logger.warning(f"pack cache check failed: {e}")
         packio.attach(MEDIA_DIR, _packstore, enabled=True, is_video=mt.is_video)
         access_logger.info("pack store ready")
+
+        # Warm the blob cache with thumbnails before anyone asks for one. This
+        # runs on its own thread so startup is not blocked, and reads each pack
+        # in offset order — one sequential pass per archive instead of the
+        # scattered per-thumbnail preads the grid would otherwise generate.
+        # Thumbnails only: originals are large, rarely re-read, and would evict
+        # thousands of grid cells to cache one full-size view.
+        if cfg.get("preload_thumbs", True):
+            def _warm_blob_cache():
+                try:
+                    t0 = time.time()
+                    res = _packstore.preload(prefix=".thumbs/",
+                                             max_bytes=int(cfg["preload_bytes"]))
+                    access_logger.info(
+                        f"blob cache warmed: {res['loaded']} thumbnails, "
+                        f"{res['bytes']/1048576:.0f} MB in {time.time()-t0:.1f}s")
+                except Exception as e:
+                    access_logger.warning(f"blob cache preload failed: {e}")
+            threading.Thread(target=_warm_blob_cache, daemon=True,
+                             name="blob-preload").start()
     except Exception as e:
         _packstore = None
         access_logger.error(f"pack store init failed, using loose files: {e}")
@@ -1555,7 +1630,8 @@ def _set_media_kind(rel_path: str) -> None:
         access_logger.warning(f"_set_media_kind {rel_path}: {e}")
 
 
-def _index_file(rel_path: str, force: bool = False) -> bool:
+def _index_file(rel_path: str, force: bool = False,
+                known_sha: str | None = None) -> bool:
     """
     Compute hashes + read metadata for one file, write to DB.
     Skips if mtime unchanged (unless force=True).
@@ -1573,7 +1649,7 @@ def _index_file(rel_path: str, force: bool = False) -> bool:
         if not force and row and abs(row['mtime'] - mtime) < 0.01:
             return False   # up-to-date
 
-        sha = _sha256(abs_path)
+        sha = known_sha or _sha256(abs_path)
         img = read_jxl(abs_path)
 
         if img is None:
@@ -1586,6 +1662,22 @@ def _index_file(rel_path: str, force: bool = False) -> bool:
         gray  = _to_gray(img)
         ph8   = _ahash_bytes(gray, 8)
         ph32  = _ahash_bytes(gray, 32)
+
+        # Build the thumbnail HERE, from the array we already have decoded.
+        # Generating it on first view costs a full decode of the original on a
+        # request thread; generating it here costs a resize and a JPEG encode,
+        # because the decode is already paid for. On a library that grows
+        # continuously the grid is always showing recent images, so "generate on
+        # first view" meant every page of new kits was a wall of cold misses.
+        try:
+            _t = _thumb_from_array(img)
+            if _t is not None:
+                _thumb_put(rel_path, _t, mtime)
+                _thumb_lru_put(rel_path, mtime, _t)
+        except Exception as e:
+            # A thumbnail is derived data; failing to build one must never fail
+            # the index of the image itself.
+            access_logger.warning(f"thumb at index {rel_path}: {e}")
 
         meta  = read_metadata(abs_path)
         _upsert_file(rel_path, mtime, w, h, sha, ph8, ph32,
@@ -2163,7 +2255,7 @@ def _build_mwg_regions_xml(regions):
         _region_desc_to_json, _region_filter_link,
         lambda: str(uuid.uuid4()))
 
-def _set_compressed_bpp(filepath):
+def _set_compressed_bpp(filepath, width=None, height=None):
     """Compute EXIF CompressedBitsPerPixel (0x9102) for a just-compressed file
     and write it. bpp = (file_size_bytes * 8) / (width * height). Best-effort:
     any failure is logged and swallowed so it never blocks an upload.
@@ -2171,12 +2263,12 @@ def _set_compressed_bpp(filepath):
     This is a value the app owns (we produced the compressed bitstream), which is
     why the field is writable/generated in the schema rather than camera-read."""
     try:
-        img = read_jxl(filepath)
-        if img is None:
-            return
-        h, w = img.shape[:2]
+        w, h = width, height
         if not (w and h):
-            return
+            img = read_jxl(filepath)
+            if img is None:
+                return
+            h, w = img.shape[:2]
         size = os.path.getsize(filepath)
         bpp = (size * 8.0) / (w * h)
         # Store as an EXIF rational "num/1000" for ~3-decimal precision.
@@ -2975,7 +3067,9 @@ def _thumb_put(rel_path: str, data: bytes, mtime: float) -> None:
     st = packio.store()
     if st is not None:
         try:
-            st.put(_thumb_key(rel_path, mtime), data)
+            # durable=False: a thumbnail lost to a crash is rebuilt from the
+            # original on next view, so an fsync here only serialises writers.
+            st.put(_thumb_key(rel_path, mtime), data, durable=False)
             return
         except Exception as e:
             access_logger.warning(f"thumb put {rel_path}: {e}")
@@ -3002,37 +3096,42 @@ def _thumb_drop(rel_path: str) -> None:
     try:
         if os.path.exists(dp): os.remove(dp)
     except OSError: pass
-    with _thumb_lock: _thumb_lru.pop(rel_path, None)
+    _thumb_lru_drop(rel_path)
 
-def _make_thumb_bytes(abs_path: str) -> bytes | None:
-    img = read_jxl(abs_path)
-    if img is None: return None
-    h,w = img.shape[:2]
-    if max(h,w) > 400:
-        s   = 400/max(h,w)
-        img = cv2.resize(img,(int(w*s),int(h*s)),interpolation=cv2.INTER_AREA)
+def _thumb_from_array(img) -> bytes | None:
+    """Encode an already-decoded image array as thumbnail JPEG bytes.
+
+    Split out of _make_thumb_bytes so callers that have just decoded the image
+    for another reason — indexing, in particular — can produce the thumbnail
+    without decoding it a second time."""
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    if max(h, w) > 400:
+        s = 400 / max(h, w)
+        img = cv2.resize(img, (int(w*s), int(h*s)), interpolation=cv2.INTER_AREA)
     bgr = _to_bgr(img)
     ok, buf = cv2.imencode('.jpg', bgr,
                            [cv2.IMWRITE_JPEG_PROGRESSIVE,1, cv2.IMWRITE_JPEG_QUALITY,80])
     return buf.tobytes() if ok else None
 
+
+def _make_thumb_bytes(abs_path: str) -> bytes | None:
+    return _thumb_from_array(read_jxl(abs_path))
+
 def serve_thumb(rel_path: str, abs_path: str):
     # mtime via packio: a packed original has no disk file to stat.
     mtime = packio.getmtime(abs_path)
 
-    # 1. In-memory LRU
-    with _thumb_lock:
-        entry = _thumb_lru.get(rel_path)
-        if entry and entry[0] == mtime:
-            return send_file(io.BytesIO(entry[1]), mimetype='image/jpeg')
+    # 1. In-process LRU — encoded bytes, no pack lookup, no syscall.
+    data = _thumb_lru_get(rel_path, mtime)
+    if data is not None:
+        return send_file(io.BytesIO(data), mimetype='image/jpeg')
 
     # 2. Pack store / legacy disk cache
     data = _thumb_get(rel_path, mtime)
     if data:
-        with _thumb_lock:
-            if len(_thumb_lru) >= LRU_MAX:
-                _thumb_lru.pop(next(iter(_thumb_lru)))
-            _thumb_lru[rel_path] = (mtime, data)
+        _thumb_lru_put(rel_path, mtime, data)
         return send_file(io.BytesIO(data), mimetype='image/jpeg')
 
     # 3. Generate
@@ -3042,10 +3141,7 @@ def serve_thumb(rel_path: str, abs_path: str):
         if raw is None: return "", 404
         return send_file(io.BytesIO(raw), mimetype='image/jxl')
     _thumb_put(rel_path, data, mtime)
-    with _thumb_lock:
-        if len(_thumb_lru) >= LRU_MAX:
-            _thumb_lru.pop(next(iter(_thumb_lru)))
-        _thumb_lru[rel_path] = (mtime, data)
+    _thumb_lru_put(rel_path, mtime, data)
     return send_file(io.BytesIO(data), mimetype='image/jpeg')
 
 # ── Dedup – numpy matrix hamming ───────────────────────────────────────────────
@@ -5475,7 +5571,8 @@ def api_upload():
                 # cjxl handles still images and animated GIF/APNG, producing a
                 # .jxl. --lossless_jpeg only makes sense for a real JPEG
                 # bitstream (never for a developed raw / png).
-                cjxl_cmd = ['cjxl', cjxl_src, out, '-d', '0']
+                cjxl_cmd = ['cjxl', cjxl_src, out, '-d', '0',
+                            f'--num_threads={CJXL_THREADS}']
                 if not is_raw_src and in_ext in ('.jpg', '.jpeg'):
                     cjxl_cmd.append('--lossless_jpeg=1')   # bit-exact JPEG transcode
                 else:
@@ -5545,12 +5642,6 @@ def api_upload():
                                                    "to": in_ext}
                 return jsonify(resp), 200
 
-            # We just (re)compressed to JXL, so we can compute the average bits
-            # per pixel of the result and record it in EXIF CompressedBitsPerPixel
-            # (a value the app owns rather than the camera). Best-effort: never
-            # let it fail the upload.
-            _set_compressed_bpp(store_path)
-
             # If the source was a camera raw, optionally stash the original raw
             # (hidden) and link it to this derived image via RawDataUniqueID, and
             # record OriginalRawFileName — but never overwrite an OriginalRawFileName
@@ -5559,15 +5650,27 @@ def api_upload():
                 _link_raw_to_image(orig, fname, rel_path, store_path)
 
             meta = json.loads(request.form.get("metadata", "{}") or "{}")
-            if meta or anim_delays:
-                # Persist user metadata AND/OR the captured animation timing. When
-                # only delays exist we still write, so an animated JXL's duration
-                # is never lost just because it arrived without tags.
-                write_metadata(store_path, meta.get("tags", []),
-                               meta.get("description", ""), meta.get("regions", []),
-                               anim_delays=anim_delays)
-            if not _index_file(rel_path, force=True):
-              print("upload failed")
+            write_metadata(store_path, meta.get("tags", []),
+                           meta.get("description", ""), meta.get("regions", []),
+                           anim_delays=anim_delays)
+
+            if not _index_file(rel_path, force=True, known_sha=sha):
+                access_logger.error(f"upload: indexing failed for {rel_path}; "
+                                    f"rolling back")
+                for p in (store_path, os.path.splitext(store_path)[0] + '.xmp'):
+                    try:
+                        if os.path.exists(p):
+                            os.remove(p)
+                    except OSError as e:
+                        access_logger.error(f"upload rollback {p}: {e}")
+                _delete_file_row(rel_path)
+                return jsonify({"success": False, "error_code": "index_failed",
+                                "error": "File stored but could not be indexed; "
+                                         "upload rolled back."}), 500
+
+            _row = _get_file_row(rel_path)
+            if _row is not None:
+                _set_compressed_bpp(store_path, _row["width"], _row["height"])
             # If uploaded into an existing comic folder, hide it from the flat list
             up_folder = os.path.dirname(rel_path)
             if up_folder and _load_comic_json(up_folder) is not None:
@@ -5650,6 +5753,17 @@ def api_packs_status():
             stats["garbage_pct"] = round(
                 100.0 * stats["garbage_bytes"] / stats["pack_bytes"], 1)
         out["store"] = stats
+        # The number that actually tells you whether the in-memory cache is
+        # earning its RAM on YOUR traffic. Watch hit_rate under real browsing;
+        # if it's low, raise cache_bytes / preload_bytes in pack settings.
+        try:
+            out["blob_cache"] = st.cache_stats()
+        except Exception:
+            pass
+    with _thumb_lock:
+        out["thumb_lru"] = {"entries": len(_thumb_lru),
+                            "bytes": _thumb_lru_bytes,
+                            "budget": THUMB_LRU_BYTES}
     return jsonify(out)
 
 @app.route("/api/packs/run", methods=["POST"])
@@ -9234,4 +9348,5 @@ if __name__=='__main__':
     access_logger.info("Warming pose/OCR models (auto-download)…")
     threading.Thread(target=_warm_models, daemon=True).start()
     access_logger.info("Serving on :8000")
-    serve(app, host='0.0.0.0', port=8000, threads=8, connection_limit=200, channel_timeout=120)
+    serve(app, host='0.0.0.0', port=8000, threads=WSGI_THREADS, connection_limit=1000,
+    channel_timeout=300, channel_request_lookahead=1)

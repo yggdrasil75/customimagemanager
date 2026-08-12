@@ -40,6 +40,18 @@ _JXL_REPACKAGE_EXTS = {".jxl"}
 # Substring that identifies the specific Exiv2 error worth repackaging for.
 _BMFF_WRITE_ERR = "BMFF"
 
+# Minimal valid XMP packet, used to seed a sidecar for formats we refuse to
+# write Exif into directly (JXL). Exiv2 will populate it on the first write.
+_EMPTY_XMP = (
+    '<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>\n'
+    '<x:xmpmeta xmlns:x="adobe:ns:meta/">\n'
+    ' <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
+    '  <rdf:Description rdf:about=""/>\n'
+    ' </rdf:RDF>\n'
+    '</x:xmpmeta>\n'
+    '<?xpacket end="w"?>\n'
+)
+
 
 def _writable_target(filepath):
     """Pick the path we should write EXIF to. For formats pyexiv2 can open in
@@ -48,6 +60,27 @@ def _writable_target(filepath):
     lives in manager.write_metadata; this keeps EXIF writes on whatever already
     holds the metadata.)"""
     stem = os.path.splitext(filepath)[0]
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext == ".jxl":
+        for p in (stem + ".xmp", stem + ".exv"):
+            if os.path.exists(p):
+                return p
+        # No sidecar yet: make an empty one rather than mangling the image.
+        # An XMP packet with no properties is valid and is what write_metadata
+        # would have produced a moment later anyway. Only for loose files — a
+        # packed image's sidecar belongs in the pack, so leave that to the
+        # normal path rather than scattering a loose .xmp beside it.
+        if not os.path.exists(filepath):
+            return filepath
+        try:
+            with open(stem + ".xmp", "x", encoding="utf-8") as fh:
+                fh.write(_EMPTY_XMP)
+            return stem + ".xmp"
+        except FileExistsError:
+            return stem + ".xmp"
+        except OSError as e:
+            log.warning(f"could not create sidecar for {filepath}: {e}")
+            return filepath
     for p in (filepath, stem + ".xmp", stem + ".exv"):
         if os.path.exists(p):
             return p
@@ -164,7 +197,7 @@ def _apply_db_transform(field, coerced):
     return out, False
 
 
-def write_exif(filepath, patch):
+def write_exif(filepath, patch, allow_repackage=False):
     """Apply a {tag_name: value} patch to the file's EXIF.
 
     Returns:
@@ -246,7 +279,8 @@ def write_exif(filepath, patch):
         # A container-form (ISOBMFF) JXL can't take an Exif write. New uploads
         # are bare, but legacy files may still be containered — repackage this
         # one to a bare codestream in place, then retry the write once.
-        if (_BMFF_WRITE_ERR in str(e)
+        if (allow_repackage
+                and _BMFF_WRITE_ERR in str(e)
                 and os.path.splitext(target)[1].lower() in _JXL_REPACKAGE_EXTS
                 and _repackage_jxl_bare(target)):
             try:

@@ -143,6 +143,22 @@ PACK_BYTES_DEFAULT = 1 << 30
 MAX_INLINE_BYTES = 200 << 20
 MAX_OPEN_PACKS = 16
 
+# ── In-memory blob cache ─────────────────────────────────────────────────────
+# Extracted pack members held in the process, keyed by pack key. A hit skips
+# _resolve (an OrderedDict under a contended lock, plus a possible SQLite
+# query), skips _verify_loc (TWO preads: local header, then the name field),
+# and skips the payload pread. Three syscalls and a lock become one dict
+# lookup.
+#
+# CACHE_BYTES_DEFAULT is deliberately large. A host with 100 GB of RAM running
+# a 512-entry thumbnail LRU is leaving the machine idle; this is the tier that
+# actually uses it. Tune via PackStore(cache_bytes=...).
+CACHE_BYTES_DEFAULT = 8 << 30            # 8 GiB
+# Per-item ceiling. Without it a handful of full-size originals (up to
+# MAX_INLINE_BYTES = 200 MB each) would evict tens of thousands of thumbnails
+# to serve one grid cell. Raise it if you serve originals more than grids.
+CACHE_ITEM_MAX_DEFAULT = 32 << 20        # 32 MiB
+
 # A tombstone is a zero-length member; combined with a reserved crc marker in
 # our cache it reads as "deleted". In the zip itself it is simply an empty file.
 _TOMB_MARK = 0xDEAD5313                  # sentinel crc we store in the cache row
@@ -157,7 +173,9 @@ def _dos_datetime(ts: float):
 
 class PackStore:
     def __init__(self, pack_dir, db_factory, pack_bytes=PACK_BYTES_DEFAULT,
-                 max_open_packs=MAX_OPEN_PACKS, max_inline_bytes=MAX_INLINE_BYTES):
+                 max_open_packs=MAX_OPEN_PACKS, max_inline_bytes=MAX_INLINE_BYTES,
+                 cache_bytes=CACHE_BYTES_DEFAULT,
+                 cache_item_max=CACHE_ITEM_MAX_DEFAULT):
         self.pack_dir = os.path.abspath(pack_dir)
         self._db_factory = db_factory
         self.pack_bytes = int(pack_bytes)
@@ -172,6 +190,18 @@ class PackStore:
         self._loc_cache = OrderedDict()
         self._loc_max = 131072
         self._loc_lock = threading.Lock()
+
+        # Extracted blobs, key -> (bytes, crc32). LRU by byte budget, not by
+        # entry count: entries here range from 8 KB thumbnails to 32 MB
+        # originals, so counting entries would size the cache wrong by three
+        # orders of magnitude depending on what happened to be browsed.
+        self.cache_bytes = int(cache_bytes)
+        self.cache_item_max = int(cache_item_max)
+        self._blob_cache = OrderedDict()
+        self._blob_bytes = 0
+        self._blob_lock = threading.Lock()
+        self._blob_stats = {"hits": 0, "misses": 0, "evictions": 0,
+                            "inserts": 0, "skipped_large": 0}
 
         self._ensure_cache_table()
 
@@ -369,6 +399,135 @@ class PackStore:
             latest[m["key"]] = m
         return list(latest.values())
 
+    # ── in-memory blob cache ─────────────────────────────────────────────────
+    def _blob_get(self, key):
+        with self._blob_lock:
+            entry = self._blob_cache.get(key)
+            if entry is None:
+                self._blob_stats["misses"] += 1
+                return None
+            self._blob_cache.move_to_end(key)
+            self._blob_stats["hits"] += 1
+            return entry
+
+    def _blob_put(self, key, data, crc):
+        n = len(data)
+        if n > self.cache_item_max:
+            with self._blob_lock:
+                self._blob_stats["skipped_large"] += 1
+            return
+        with self._blob_lock:
+            old = self._blob_cache.pop(key, None)
+            if old is not None:
+                self._blob_bytes -= len(old[0])
+            self._blob_cache[key] = (data, crc)
+            self._blob_bytes += n
+            self._blob_stats["inserts"] += 1
+            while self._blob_bytes > self.cache_bytes and self._blob_cache:
+                _k, (d, _c) = self._blob_cache.popitem(last=False)
+                self._blob_bytes -= len(d)
+                self._blob_stats["evictions"] += 1
+
+    def _blob_drop(self, key):
+        with self._blob_lock:
+            old = self._blob_cache.pop(key, None)
+            if old is not None:
+                self._blob_bytes -= len(old[0])
+
+    def _blob_rename(self, old_key, new_key):
+        with self._blob_lock:
+            entry = self._blob_cache.pop(old_key, None)
+            if entry is None:
+                return
+            self._blob_bytes -= len(entry[0])
+            gone = self._blob_cache.pop(new_key, None)
+            if gone is not None:
+                self._blob_bytes -= len(gone[0])
+            self._blob_cache[new_key] = entry
+            self._blob_bytes += len(entry[0])
+
+    def blob_cache_clear(self):
+        """Drop everything. Called after compaction, which rewrites packs and
+        moves every offset — cached bytes stay valid by key, but clearing is the
+        honest thing to do when the underlying archive has been rebuilt."""
+        with self._blob_lock:
+            self._blob_cache.clear()
+            self._blob_bytes = 0
+
+    def cache_stats(self):
+        with self._blob_lock:
+            s = dict(self._blob_stats)
+            total = s["hits"] + s["misses"]
+            s.update(entries=len(self._blob_cache), bytes=self._blob_bytes,
+                     budget=self.cache_bytes,
+                     hit_rate=(s["hits"] / total) if total else 0.0,
+                     fill=(self._blob_bytes / self.cache_bytes)
+                          if self.cache_bytes else 0.0)
+        return s
+
+    def preload(self, prefix=None, max_bytes=None, predicate=None):
+        """Pull pack members into the blob cache ahead of demand.
+
+        This is the "extract the pack into memory" path. It walks each pack's
+        central directory and reads members sequentially — one pass over the
+        archive in offset order rather than thousands of scattered preads
+        driven by whatever order the UI happens to request thumbnails in.
+
+        prefix:    only load keys starting with this (e.g. ".thumbs/") so a
+                   grid page becomes pure memory without dragging in
+                   full-size originals nobody asked for.
+        max_bytes: stop after this much. Defaults to the cache budget.
+        predicate: optional callable(key) -> bool for finer selection.
+
+        Returns {"loaded": n, "bytes": n}. Safe to call on a live store and
+        safe to call repeatedly; already-cached keys are skipped.
+        """
+        budget = self.cache_bytes if max_bytes is None else int(max_bytes)
+        loaded = 0
+        total = 0
+        for pid in sorted(self._present_pack_ids()):
+            try:
+                members = self.pack_index(pid)
+            except Exception as e:
+                log.warning("preload: pack %s index failed: %s", pid, e)
+                continue
+            # Offset order = sequential read of the archive.
+            for m in sorted(members, key=lambda x: x["offset"]):
+                if total >= budget:
+                    log.info("preload: budget reached (%d bytes, %d blobs)",
+                             total, loaded)
+                    return {"loaded": loaded, "bytes": total}
+                key = m["key"]
+                length = m["length"]
+                if length == 0:                      # tombstone
+                    continue
+                if length > self.cache_item_max:
+                    continue
+                if prefix is not None and not key.startswith(prefix):
+                    continue
+                if predicate is not None and not predicate(key):
+                    continue
+                with self._blob_lock:
+                    if key in self._blob_cache:
+                        continue
+                loc = self._cache_get(key)
+                if loc is None or loc[0] != pid or loc[1] != m["offset"]:
+                    # Superseded by a copy in another pack (or not yet in the
+                    # location cache); skip rather than cache stale bytes.
+                    continue
+                try:
+                    with self._pack_fd(pid) as fd:
+                        data = _pread(fd, length, m["offset"])
+                except OSError:
+                    continue
+                if len(data) != length:
+                    continue
+                self._blob_put(key, data, m["crc32"])
+                loaded += 1
+                total += length
+        log.info("preload: %d blobs, %.1f MB resident", loaded, total / 1048576)
+        return {"loaded": loaded, "bytes": total}
+
     # ── location cache ───────────────────────────────────────────────────────
     def _cache_get(self, key):
         with self._loc_lock:
@@ -483,7 +642,7 @@ class PackStore:
         return nxt, 0
 
     # ── writing ──────────────────────────────────────────────────────────────
-    def put(self, key, data, mtime=None):
+    def put(self, key, data, mtime=None, durable=True):
         if not isinstance(data, (bytes, bytearray, memoryview)):
             raise TypeError("data must be bytes")
         data = bytes(data)
@@ -505,7 +664,8 @@ class PackStore:
             with open(path, "ab") as f:
                 _hdr_off, payload_off = self._append_member(f, name, data, crc, mtime)
                 f.flush()
-                os.fsync(f.fileno())
+                if durable:
+                    os.fsync(f.fileno())
             new_size = payload_off + len(data)
             if old is not None:
                 self._db().execute(
@@ -515,6 +675,7 @@ class PackStore:
                                (new_size, pid))
             self._db().commit()
             self._cache_put(key, pid, payload_off, len(data), crc)
+            self._blob_put(key, data, crc)
             if new_size >= self.pack_bytes:
                 self._seal_locked(pid)
         return {"key": key, "pack_id": pid, "offset": payload_off,
@@ -522,6 +683,19 @@ class PackStore:
 
     # ── reading ──────────────────────────────────────────────────────────────
     def get(self, key, verify=False):
+        # Checked BEFORE _resolve on purpose. _resolve takes _loc_lock (and may
+        # hit SQLite), then _verify_loc issues two preads to re-read the local
+        # header and name. A cached blob skips all of it — the read path becomes
+        # a single dict lookup with no syscall and no contended lock.
+        entry = self._blob_get(key)
+        if entry is not None:
+            data, ccrc = entry
+            if verify and (zlib.crc32(data) & 0xFFFFFFFF) != ccrc:
+                log.error("crc mismatch (cached) %s", key)
+                self._blob_drop(key)
+            else:
+                return data
+
         loc = self._resolve(key)
         if loc is None:
             return None
@@ -534,14 +708,17 @@ class PackStore:
         except OSError as e:
             log.error("read %s pack %d: %s", key, pack_id, e)
             self._cache_drop(key)
+            self._blob_drop(key)
             return None
         if len(data) != length:
             log.error("short read %s: %d/%d", key, len(data), length)
             self._cache_drop(key)
+            self._blob_drop(key)
             return None
         if verify and (zlib.crc32(data) & 0xFFFFFFFF) != crc:
             log.error("crc mismatch %s", key)
             return None
+        self._blob_put(key, data, crc)
         return data
 
     # ── deletion / rename ────────────────────────────────────────────────────
@@ -560,6 +737,9 @@ class PackStore:
             # mark absent in the cache with the tombstone sentinel
             with self._loc_lock:
                 self._loc_cache[key] = (loc[0], 0, 0, _TOMB_MARK)
+            # Drop the resident bytes too, or a deleted image would keep being
+            # served from RAM for as long as it took to fall out of the LRU.
+            self._blob_drop(key)
             try:
                 self._db().execute(
                     "UPDATE blob_locations SET length=0, crc32=? WHERE key=?",
@@ -596,6 +776,7 @@ class PackStore:
         append is clean. Sealed packs are immutable and trusted."""
         with self._loc_lock:
             self._loc_cache.clear()
+        self.blob_cache_clear()
         healed = 0
         for pid in self._list_pack_ids():
             path = self.pack_path(pid)
@@ -642,6 +823,10 @@ class PackStore:
         db.execute("DELETE FROM pack_files")
         with self._loc_lock:
             self._loc_cache.clear()
+        # Every offset is being re-derived from the archives; resident bytes
+        # were keyed off the old resolution, so drop them rather than reason
+        # about which survived.
+        self.blob_cache_clear()
         final = {}
         for pid in self._list_pack_ids():
             path = self.pack_path(pid)
