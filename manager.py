@@ -64,8 +64,6 @@ def _getmtime_loose(path):
     except OSError:
         return 0.0
 
-def _never(*_a, **_k):
-    return False
 import book_routes
 import auth as _auth
 import exif_import, exif_export, exif_fields
@@ -1629,16 +1627,6 @@ def _enumerate_library():
             if rel not in seen:
                 seen.add(rel)
                 yield rel
-    st = None
-    if st is not None:
-        for key in st.all_keys():
-            if key.startswith('.thumbs/'):
-                continue
-            if not mt.is_library_file(key):
-                continue
-            if key not in seen:
-                seen.add(key)
-                yield key
 
 
 def _reconcile_deleted():
@@ -2835,14 +2823,9 @@ def _thumb_key(rel_path: str, mtime: float | None = None) -> str:
     return f"{base}#{int(mtime)}"
 
 def _thumb_get(rel_path: str, mtime: float) -> bytes | None:
-    """Fresh cached thumbnail bytes, or None. Pack first, then legacy disk.
-    Freshness is by key: a mismatched mtime yields a different key that isn't
-    present, so there is no timestamp comparison and no mtime column needed."""
-    st = None
-    if st is not None:
-        data = st.get(_thumb_key(rel_path, mtime))
-        if data:
-            return data
+    """Fresh cached thumbnail bytes from the disk cache, or None. Freshness is
+    by key: a mismatched mtime yields a different key that isn't present, so
+    there is no timestamp comparison and no mtime column needed."""
     dp = _thumb_disk_path(rel_path)
     try:
         if os.path.getmtime(dp) >= mtime:
@@ -2852,34 +2835,14 @@ def _thumb_get(rel_path: str, mtime: float) -> bytes | None:
     return None
 
 def _thumb_put(rel_path: str, data: bytes, mtime: float) -> None:
-    st = None
-    if st is not None:
-        try:
-            # durable=False: a thumbnail lost to a crash is rebuilt from the
-            # original on next view, so an fsync here only serialises writers.
-            st.put(_thumb_key(rel_path, mtime), data, durable=False)
-            return
-        except Exception as e:
-            access_logger.warning(f"thumb put {rel_path}: {e}")
     try:
         with open(_thumb_disk_path(rel_path), 'wb') as f: f.write(data)
     except Exception:
         pass
 
 def _thumb_drop(rel_path: str) -> None:
-    """Invalidate every cached thumbnail for a source path, across all mtime
-    variants of the key. Called when the source image changes or is removed."""
-    st = None
-    if st is not None:
-        prefix = ".thumbs/" + _thumb_name(rel_path)   # matches base and base#mtime
-        try:
-            keys = [r[0] for r in st._db().execute(
-                "SELECT key FROM blob_locations WHERE key=? OR key LIKE ?",
-                (prefix, prefix + "#%")).fetchall()]
-            for k in keys:
-                st.delete(k)
-        except Exception:
-            pass
+    """Invalidate the cached thumbnail for a source path. Called when the source
+    image changes or is removed."""
     dp = _thumb_disk_path(rel_path)
     try:
         if os.path.exists(dp): os.remove(dp)
@@ -2911,12 +2874,12 @@ def serve_thumb(rel_path: str, abs_path: str, mtime: float | None = None):
     if mtime is None:
         mtime = _getmtime_loose(abs_path)
 
-    # 1. In-process LRU — encoded bytes, no pack lookup, no syscall.
+    # 1. In-process LRU — encoded bytes, no disk lookup, no syscall.
     data = _thumb_lru_get(rel_path, mtime)
     if data is not None:
         return send_file(io.BytesIO(data), mimetype='image/jpeg')
 
-    # 2. Pack store / legacy disk cache
+    # 2. Disk cache
     data = _thumb_get(rel_path, mtime)
     if data:
         _thumb_lru_put(rel_path, mtime, data)
@@ -4947,7 +4910,7 @@ def api_state():
          "face_bg_enabled","face_bg_custom","face_model","face_size","person_model",
          "face_cluster_eps","body_enabled","body_cluster_eps","object_proposals",
          "barcode_model","barcode_conf",
-         "model_groups","iqa_model","packs")})
+         "model_groups","iqa_model")})
 
 @app.route("/api/update_settings", methods=["POST"])
 def update_settings():
@@ -4974,14 +4937,6 @@ def update_settings():
     # lazily on the next scan, so this stays a cheap settings save.
     if "iqa_model" in d and iqa is not None:
         state["iqa_model"] = iqa.set_model(state["iqa_model"])
-    # Pack settings are a nested block; merge rather than replace so a UI that
-    # only sends one toggle doesn't wipe the rest. max_open_packs/pack_bytes are
-    # read at store construction, so those two take effect on next start; the
-    # migration flags (auto_migrate, interval, idle) are read live by the daemon.
-    if "packs" in d and isinstance(d["packs"], dict):
-        merged = dict(_pack_cfg())
-        merged.update({k: v for k, v in d["packs"].items() if k in merged})
-        state["packs"] = merged
     save_config(); return jsonify({"success": True})
 
 @app.route("/api/folders")
@@ -5840,8 +5795,7 @@ def api_move():
         nb = os.path.splitext(new_path)[0]
         for ext in mt.related_exts(old_path):
             src, dst = ob + ext, nb + ext
-            if _never(src): os.rename(src, dst)
-            elif os.path.exists(src): shutil.move(src, dst)
+            if os.path.exists(src): shutil.move(src, dst)
         new_rel = os.path.relpath(new_path, MEDIA_DIR).replace('\\','/')
         # A book's rel_path is its primary key across six tables (books,
         # book_authors, book_sections, book_chunks, book_progress,
@@ -6221,23 +6175,10 @@ def _fast_metadata(fn, fp):
         "SELECT tags, description, artist, language, event, catalog_sets "
         "FROM files WHERE rel_path=?", (fn,)).fetchone()
     if row is None:
-        # Not indexed yet — must read the file. Loose reads directly; a packed
-        # original is materialized to a temp file for the XMP readers.
+        # Not indexed yet — read the file's XMP directly.
         if os.path.exists(fp):
             return read_metadata(fp)
-        data = _read_bytes_loose(fp)
-        if data is None:
-            return {"tags": [], "description": "", "regions": []}
-        tmp = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                    suffix=os.path.splitext(fp)[1], delete=False) as tf:
-                tf.write(data); tmp = tf.name
-            return read_metadata(tmp)
-        finally:
-            if tmp:
-                try: os.remove(tmp)
-                except OSError: pass
+        return {"tags": [], "description": "", "regions": []}
 
     def _loads(v, default):
         if not v:
@@ -6270,23 +6211,14 @@ def _fast_metadata(fn, fp):
                 })
         except Exception:
             pass  # table may not exist in older DBs
-    if not regions:
+
+    # Face/body tables only hold detector output. Manually drawn / object boxes
+    # are written to the XMP sidecar but never inserted into those tables, so the
+    # fast path above returns nothing for them. When the DB has no region rows,
+    # fall back to the sidecar (the authoritative store for all region types).
+    if not regions and os.path.exists(fp):
         try:
-            if os.path.exists(fp):
-                regions = read_metadata(fp).get("regions", []) or []
-            elif os.path.exists(fp):
-                data = _read_bytes_loose(fp)
-                if data is not None:
-                    tmp = None
-                    try:
-                        with tempfile.NamedTemporaryFile(
-                                suffix=os.path.splitext(fp)[1], delete=False) as tf:
-                            tf.write(data); tmp = tf.name
-                        regions = read_metadata(tmp).get("regions", []) or []
-                    finally:
-                        if tmp:
-                            try: os.remove(tmp)
-                            except OSError: pass
+            regions = read_metadata(fp).get("regions", []) or []
         except Exception:
             pass
 
@@ -6373,8 +6305,7 @@ def api_delete():
         base = os.path.splitext(fp)[0]
         for ext in mt.related_exts(fp):
             member = base + ext
-            if _never(member): os.remove(member)
-            elif os.path.exists(member): tiering.safe_remove(member)
+            if os.path.exists(member): tiering.safe_remove(member)
         _thumb_drop(fn)
         _purge_file_everywhere(fn)
         _dedup_remove_file(fn)
@@ -6484,8 +6415,7 @@ def bulk_delete():
             base = os.path.splitext(fp)[0]
             for ext in mt.related_exts(fp):
                 member = base + ext
-                if _never(member): os.remove(member)
-                elif os.path.exists(member): tiering.safe_remove(member)
+                if os.path.exists(member): tiering.safe_remove(member)
             _thumb_drop(fn)
             _delete_file_row(fn)
             _dedup_remove_file(fn)
@@ -6882,8 +6812,7 @@ def dedup_merge():
                 base = os.path.splitext(op)[0]
                 for ext in mt.related_exts(op):
                     member = base + ext
-                    if _never(member): os.remove(member)
-                    elif os.path.exists(member): tiering.safe_remove(member)
+                    if os.path.exists(member): tiering.safe_remove(member)
                 _thumb_drop(other)
                 _delete_file_row(other)
                 _dedup_remove_file(other)
@@ -9441,13 +9370,6 @@ def music_stream(filename):
     fp = get_safe_path(MEDIA_DIR, filename)
     if not fp or not os.path.exists(fp):
         return jsonify({"success": False, "error": "not found"}), 404
-    if _never(fp):
-        data = _read_bytes_loose(fp)
-        if data is None:
-            return jsonify({"success": False, "error": "not found"}), 404
-        return send_file(io.BytesIO(data), mimetype=mt.mime_for(filename),
-                         conditional=True, etag=False,
-                         last_modified=_getmtime_loose(fp))
     return send_file(fp, conditional=True)
 
 
