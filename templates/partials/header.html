@@ -6,6 +6,9 @@
         <button id="btn_dedup" onclick="runDedup(false)"
           class="text-xs bg-indigo-600 hover:bg-indigo-500 font-bold px-2 py-1.5 rounded">Dupes</button>
         <span id="dedup_cache_badge" class="hidden text-[10px] text-gray-500 italic"></span>
+        <button id="btn_gdl" onclick="gdlOpen()"
+          title="Fetch media + metadata from a gallery-dl-supported site"
+          class="text-xs bg-emerald-700 hover:bg-emerald-600 font-bold px-2 py-1.5 rounded">⬇ Fetch</button>
         <button id="btn_settings"
           onclick="document.getElementById('ai_modal').classList.remove('hidden');window.pipelineEditorRefresh&&window.pipelineEditorRefresh()"
           title="LLM / Vision settings"

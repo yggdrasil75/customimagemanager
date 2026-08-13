@@ -91,12 +91,17 @@ try:
     import book_index as _bi
     BOOK_EXTS = set(_bi.BOOK_EXTS)
     UNAMBIGUOUS_BOOK_EXTS = set(_bi.UNAMBIGUOUS_BOOK_EXTS)
+    # Books that may be accepted on upload: the unambiguous ones plus the
+    # kind-ambiguous ones (e.g. .pdf) that carry a reliable magic signature.
+    # Signature-ambiguous exts (.txt/.htm/…) are intentionally not uploadable.
+    UPLOADABLE_BOOK_EXTS = set(_bi.UPLOADABLE_BOOK_EXTS)
 except Exception:                          # book support optional at import time
     UNAMBIGUOUS_BOOK_EXTS = {
         '.epub', '.mobi', '.azw', '.azw3', '.kf8', '.kfx', '.lit', '.fb2',
         '.lrf', '.lrx', '.chm', '.ceb', '.docx', '.rtf',
         '.cbz', '.cbr', '.cb7', '.cbt', '.cba',
     }
+    UPLOADABLE_BOOK_EXTS = UNAMBIGUOUS_BOOK_EXTS | {'.pdf'}
     BOOK_EXTS = UNAMBIGUOUS_BOOK_EXTS | {
         '.pdf', '.txt', '.htm', '.html', '.doc', '.pdb', '.pkg', '.opf',
     }
@@ -118,13 +123,21 @@ def is_book(path: str) -> bool:
     return _ext(path) in UNAMBIGUOUS_BOOK_EXTS
 
 
+def is_uploadable_book(path: str) -> bool:
+    """True for any book extension accepted on upload — the unambiguous books
+    plus the kind-ambiguous ones (like .pdf) that are identified by content.
+    Use this (not is_book) in the upload pipeline to route a file to the
+    store-original-bytes path instead of the image transcoder."""
+    return _ext(path) in UPLOADABLE_BOOK_EXTS
+
+
 # Extensions accepted from an uploader / bulk-upload walk. Raws are accepted so
 # the upload handler can stash them (when keep_raws is on) and derive an image;
 # they are not library assets themselves. Only the UNAMBIGUOUS book extensions
 # are accepted on upload: accepting `.txt` here would mean every dragged-in tag
 # sidecar became a "book" the moment someone bulk-uploaded a folder.
 UPLOAD_EXTS = (JXL_INPUT_EXTS | VIDEO_EXTS | RAW_INPUT_EXTS | AUDIO_EXTS
-               | UNAMBIGUOUS_BOOK_EXTS)
+               | UPLOADABLE_BOOK_EXTS)
 
 # Extensions that count as a stored library ASSET on disk (what a MEDIA_DIR walk
 # should pick up). Sidecars (.txt/.xmp) and thumbnails are NOT assets.
@@ -373,7 +386,7 @@ def stored_name(input_filename: str) -> str:
     walking MEDIA_DIR, where the three-layer classifier can see their context.
     """
     base, ext = os.path.splitext(input_filename)
-    keep = VIDEO_EXTS | AUDIO_EXTS | UNAMBIGUOUS_BOOK_EXTS
+    keep = VIDEO_EXTS | AUDIO_EXTS | UPLOADABLE_BOOK_EXTS
     return input_filename if ext.lower() in keep else base + '.jxl'
 
 
@@ -447,6 +460,7 @@ def sniff_ext(path: str) -> str | None:
     if head[:4] == b'OggS':                              return '.ogg'
     if head[:4] == b'RIFF' and head[8:12] == b'WAVE':    return '.wav'
     if head[:4] == b'FORM':                              return '.aiff'
+    if head[:5] == b'%PDF-':                             return '.pdf'
     return None
 
 

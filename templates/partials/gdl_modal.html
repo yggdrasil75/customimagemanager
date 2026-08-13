@@ -1,0 +1,77 @@
+{# gallery-dl ingest. Paste a gallery URL; the first time a site is seen you map
+   which gallery-dl metadata field feeds tags vs description, then fetch pulls
+   the media through the normal upload pipeline with that metadata attached. #}
+<div id="gdl_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
+  <div class="bg-gray-800 p-6 rounded-lg border border-gray-600 w-[720px] max-w-[95vw] flex flex-col max-h-[90vh]">
+    <div class="flex justify-between items-center mb-4 flex-shrink-0">
+      <h2 class="font-bold text-emerald-400">Fetch with gallery-dl</h2>
+      <button onclick="document.getElementById('gdl_modal').classList.add('hidden')"
+        class="text-gray-400 hover:text-white text-lg leading-none">&times;</button>
+    </div>
+
+    <p id="gdl_missing" class="hidden text-xs text-amber-400 mb-3">
+      gallery-dl isn't installed. Run <code class="bg-gray-900 px-1 rounded">pip install gallery-dl</code> and reload.
+    </p>
+
+    <div class="overflow-y-auto flex-1 pr-1 space-y-4">
+      <div>
+        <label class="text-xs text-gray-400 block mb-1">Gallery / post URL</label>
+        <div class="flex gap-2">
+          <input id="gdl_url" type="text" placeholder="https://danbooru.donmai.us/posts?tags=..."
+            class="flex-1 p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          <button onclick="gdlDiscover()"
+            class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1 rounded font-bold whitespace-nowrap">Check fields</button>
+        </div>
+        <p class="text-[10px] text-gray-600 mt-1">
+          Any <a href="https://gdl-org.github.io/docs/supported.html" target="_blank"
+            class="text-teal-500 underline">gallery-dl-supported site</a>. Checking fields doesn't download anything.
+        </p>
+      </div>
+
+      <div>
+        <label class="text-xs text-gray-400 block mb-1">Save into folder <span class="text-gray-600">(optional)</span></label>
+        <input id="gdl_folder" type="text" placeholder="booru/danbooru"
+          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+      </div>
+
+      {# Field mapping — populated after "Check fields". First time per site you
+         pick the source field; the choice is saved and reused. #}
+      <div id="gdl_mapping" class="hidden border-t border-gray-700 pt-3 space-y-3">
+        <p class="text-xs text-gray-400">Site: <b id="gdl_site" class="text-emerald-400"></b>
+          <span id="gdl_mapping_known" class="hidden text-[10px] text-gray-500">(saved mapping loaded — change and save to update)</span>
+        </p>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">Tags come from</label>
+            <select id="gdl_map_tags"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white"></select>
+          </div>
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">Description comes from</label>
+            <select id="gdl_map_desc"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white"></select>
+          </div>
+        </div>
+        <button onclick="gdlSaveMapping()"
+          class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded font-bold">Save mapping for this site</button>
+
+        <div>
+          <label class="text-xs text-gray-400 block mb-1">gallery-dl options for this site
+            <span class="text-gray-600">(optional, one <code>key=value</code> per line)</span></label>
+          <textarea id="gdl_opts" rows="2" placeholder="danbooru.username=me&#10;danbooru.api-key=..."
+            class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-xs text-white font-mono"></textarea>
+          <p class="text-[10px] text-gray-600 mt-1">
+            Your global gallery-dl config isn't used (metadata is kept complete), so put any
+            login/API keys or cookies options a site needs here. Saved with the mapping.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <div class="flex justify-between items-center mt-4 flex-shrink-0 border-t border-gray-700 pt-3">
+      <span id="gdl_status" class="text-xs text-gray-400"></span>
+      <button id="gdl_fetch_btn" onclick="gdlFetch()"
+        class="text-sm bg-emerald-700 hover:bg-emerald-600 px-4 py-2 rounded font-bold">Fetch &amp; ingest</button>
+    </div>
+  </div>
+</div>

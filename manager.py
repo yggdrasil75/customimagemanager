@@ -71,6 +71,7 @@ import xmp_import, xmp_fields
 import iptc_import, iptc_fields
 import mwg_fields
 import barcodes
+import gdl
 try:
     import iqa
 except Exception:
@@ -97,15 +98,6 @@ def quality_to_stars(q, blank=False):
         return None
     return iqa.to_stars(q, blank=blank)
 
-
-def brisque_to_stars(bq, blank=False):
-    """DEPRECATED shim kept for old callers. Takes a raw BRISQUE score
-    (0..100, higher=worse) and maps it to 0..5 stars. New code should use
-    quality_to_stars() with the normalized score from iqa.assess()."""
-    if bq is None:
-        return None
-    bq = max(0.0, min(100.0, float(bq)))
-    return quality_to_stars(1.0 - bq / 100.0, blank=blank)
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 app       = Flask(__name__)
@@ -179,6 +171,8 @@ state = {
                                    # request that lands before/without it.
     "pose_kind": "body",
     "pose_size": "n",
+    "gdl_sites": {},
+    "gdl_opts": {}, 
     "oai_system_prompt": "You are an expert image analysis AI. Provide concise, highly detailed, and accurate responses.",
     "oai_actions": [
         {"id":"1","name":"Describe Scene","prompt":"Describe the overall scene, lighting, and composition in a detailed paragraph.","target":"description"},
@@ -1386,15 +1380,8 @@ def _ahash_bytes(gray: np.ndarray, size: int) -> bytes:
     return np.packbits(bits).tobytes()
 
 def _sha256(path: str) -> str:
-    h = hashlib.sha256()
-    data = _read_bytes_loose(path)
-    if data is not None:
-        h.update(data)
-        return h.hexdigest()
     with open(path, 'rb') as f:
-        for chunk in iter(lambda: f.read(65536), b''):
-            h.update(chunk)
-    return h.hexdigest()
+        return hashlib.file_digest(f, 'sha256').hexdigest()
 
 def _set_media_kind(rel_path: str) -> None:
     """Stamp media_kind ('image'/'video') and, for videos, duration onto the row.
@@ -1668,7 +1655,7 @@ def save_config():
             "oai_actions","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size",
             "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","face_cluster_eps",
             "body_enabled","body_cluster_eps","object_proposals",
-            "barcode_model","barcode_conf", "iqa_model","auth"]
+            "barcode_model","barcode_conf", "iqa_model","auth","gdl_sites","gdl_opts"]
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys if k in state}, f, indent=2)
 
@@ -3911,17 +3898,25 @@ def _query_books(text, folder):
 
 
 # ── LLM helpers (shared by actions + pipeline) ────────────────────────────────
+def _oai_v1_base(endpoint):
+    """Reduce any OpenAI-compatible URL to its `.../v1` base (no trailing
+    slash), stripping a known operation suffix if present. '' -> ''.
+    e.g. 'host/v1/chat/completions' -> 'host/v1', bare 'host' -> 'host'."""
+    base = (endpoint or "").strip().rstrip('/')
+    if not base:
+        return ""
+    for suffix in ("/chat/completions", "/completions", "/embeddings"):
+        if base.endswith(suffix):
+            return base[: -len(suffix)]
+    return base
+
 def _normalize_endpoint(endpoint):
     """Auto-complete a base URL to the OpenAI chat-completions path."""
-    endpoint = (endpoint or "").strip()
-    if endpoint:
-        base = endpoint.rstrip('/')
-        path = urllib.parse.urlparse(base).path
-        if path == '':
-            endpoint = base + '/v1/chat/completions'
-        elif path == '/v1':
-            endpoint = base + '/chat/completions'
-    return endpoint
+    base = _oai_v1_base(endpoint)
+    if not base:
+        return ""
+    return base + ("/chat/completions" if base.endswith("/v1")
+                   else "/v1/chat/completions")
 
 def _llm_request(messages, tools=None, tool_choice=None, timeout=600, endpoint=None):
     """Low-level OpenAI-compatible chat call. Returns the message dict or raises.
@@ -3951,17 +3946,10 @@ def _llm_request(messages, tools=None, tool_choice=None, timeout=600, endpoint=N
 def _embed_endpoint():
     """Derive the embeddings URL from the chat endpoint: truncate to the /v1
     base and append /embeddings (…/v1/chat/completions -> …/v1/embeddings)."""
-    base = (state.get("oai_endpoint") or "").strip()
+    base = _oai_v1_base(state.get("oai_endpoint"))
     if not base:
         return ""
-    for suffix in ("/chat/completions", "/completions"):
-        if base.endswith(suffix):
-            base = base[: -len(suffix)]
-            break
-    base = base.rstrip("/")
-    if base.endswith("/v1"):
-        return base + "/embeddings"
-    return base + "/v1/embeddings"
+    return base + ("/embeddings" if base.endswith("/v1") else "/v1/embeddings")
 
 
 def _oai_embed_enabled():
@@ -5388,7 +5376,7 @@ def _run_upload():
                     }), 422
                 # Timing now lives in the video itself; no XMP delays needed.
                 anim_delays = None
-            elif mt.is_video(fname) or mt.is_audio(fname) or mt.is_book(fname):
+            elif mt.is_video(fname) or mt.is_audio(fname) or mt.is_uploadable_book(fname):
                 # Video, audio and books can't be transcoded to JXL — store the
                 # original bytes. Audio is organised + tagged in place by the
                 # music indexer (music_index.py) and books by the book indexer
@@ -5776,6 +5764,133 @@ def api_upload_discard():
         d = _db(); d.execute("DELETE FROM upload_queue WHERE id=?", (_id,)); d.commit()
     _db_retry(_del)
     return jsonify({"success": True, "discarded": _id})
+
+@app.route("/api/gdl/available")
+def api_gdl_available():
+    """Whether the gallery-dl binary is installed, so the UI can tell the user
+    to `pip install gallery-dl` instead of failing on first use."""
+    return jsonify({"success": True, "available": gdl.available()})
+
+@app.route("/api/gdl/fields", methods=["POST"])
+def api_gdl_fields():
+    """Discover a URL's metadata fields WITHOUT downloading, plus its saved
+    mapping/opts if we've seen the site before. Drives the first-time setup UI."""
+    url = (request.json or {}).get("url", "").strip()
+    if not url:
+        return jsonify({"success": False, "error": "url required"}), 400
+    # We don't know the site until discovery runs, so we can only apply the
+    # global ("") opts here; site-specific auth (if the site needs it just to
+    # list) can be added and re-checked once the category is known.
+    opts = list(state.get("gdl_opts", {}).get("", []))
+    try:
+        info = gdl.discover_fields(url, opts=opts)
+    except gdl.GdlError as e:
+        return jsonify({"success": False, "error": str(e)}), 502
+    site = info["site"]
+    return jsonify({"success": True, "site": site, "fields": info["fields"],
+                    "mapping": state.get("gdl_sites", {}).get(site, {}),
+                    "opts": state.get("gdl_opts", {}).get(site, [])})
+
+@app.route("/api/gdl/config", methods=["GET", "POST"])
+def api_gdl_config():
+    """GET all saved site mappings + opts; POST {site, mapping, opts?} to save."""
+    if request.method == "GET":
+        return jsonify({"success": True, "sites": state.get("gdl_sites", {}),
+                        "opts": state.get("gdl_opts", {})})
+    d = request.json or {}
+    site = (d.get("site") or "").strip()
+    if not site:
+        return jsonify({"success": False, "error": "site required"}), 400
+    sites = dict(state.get("gdl_sites", {}))
+    sites[site] = d.get("mapping", {}) or {}
+    state["gdl_sites"] = sites
+    if "opts" in d:
+        opts = dict(state.get("gdl_opts", {}))
+        # Accept either a list or a newline/comma string of KEY=VALUE lines.
+        raw = d.get("opts") or []
+        if isinstance(raw, str):
+            raw = [x.strip() for x in raw.replace(",", "\n").splitlines()]
+        opts[site] = [x for x in raw if x]
+        state["gdl_opts"] = opts
+    save_config()
+    return jsonify({"success": True})
+
+@app.route("/api/gdl/fetch", methods=["POST"])
+def api_gdl_fetch():
+    """Download a URL with gallery-dl and enqueue each file for ingest, mapping
+    its gallery-dl metadata onto tags/description via the site's saved mapping.
+    Returns immediately with the number of files queued; the existing upload
+    workers do the heavy convert/index."""
+    d = request.json or {}
+    url    = (d.get("url") or "").strip()
+    folder = (d.get("folder") or "").strip()
+    if not url:
+        return jsonify({"success": False, "error": "url required"}), 400
+    tdir = get_safe_path(MEDIA_DIR, folder) if folder else MEDIA_DIR
+    if not tdir:
+        return jsonify({"success": False, "error": "bad folder"}), 400
+
+    sites = state.get("gdl_sites", {})  # per-file mapping resolved via category
+    all_opts = state.get("gdl_opts", {})
+    os.makedirs(_UPLOAD_SPOOL_DIR, exist_ok=True)
+
+    # Download-time opts = global ("") + this site's. Opts are keyed by the
+    # gallery-dl category (same key the UI saves under and the per-file mapping
+    # uses). The category isn't in a search/user URL, so we resolve it up front
+    # with a cheap `-j` — but only when site-specific opts actually exist, so the
+    # common "global login only" case pays nothing extra. A resolve miss just
+    # means global-only opts, which is the safe default.
+    dl_opts = list(all_opts.get("", []))
+    site_specific = {k: v for k, v in all_opts.items() if k}
+    if site_specific:
+        try:
+            cat = gdl.site_of(url, opts=dl_opts)
+        except gdl.GdlError:
+            cat = ""
+        dl_opts += list(all_opts.get(cat, []))
+
+    # gallery-dl downloads into a throwaway dir; we copy each file into the
+    # durable upload spool and enqueue it, then drop the temp dir.
+    # ponytail: synchronous download inside the request. Fine for interactive
+    # single-gallery pulls; make it a background job if huge multi-page rips
+    # start blocking the WSGI thread too long.
+    queued, now = 0, time.time()
+    tmp = tempfile.mkdtemp(prefix="gdl-")
+    try:
+        for media_path, meta in gdl.download(url, tmp, opts=dl_opts):
+            mapping = sites.get(meta.get("category", ""), {})
+            packet  = gdl.apply_mapping(meta, mapping)
+            orig    = secure_filename(os.path.basename(media_path)) or "gdl.bin"
+            fd, spool = tempfile.mkstemp(dir=_UPLOAD_SPOOL_DIR,
+                                         prefix="up-", suffix="-" + orig)
+            os.close(fd)
+            shutil.copyfile(media_path, spool)
+            meta_json = json.dumps(packet)
+            def _enq(sp=spool, on=orig, mj=meta_json):
+                db = _db()
+                cur = db.execute(
+                    "INSERT INTO upload_queue"
+                    "(spool_path, orig_name, folder, metadata, status, created, updated) "
+                    "VALUES(?,?,?,?,'pending',?,?)",
+                    (sp, on, folder, mj, now, now))
+                db.commit()
+                return cur.lastrowid
+            try:
+                _db_retry(_enq)
+                queued += 1
+            except Exception as e:
+                try: os.remove(spool)
+                except OSError: pass
+                access_logger.error(f"gdl enqueue failed for {orig}: {e}")
+    except gdl.GdlError as e:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return jsonify({"success": False, "error": str(e)}), 502
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    if queued:
+        _upload_workers_wake()
+    return jsonify({"success": True, "queued": queued}), 202
 
 
 @app.route("/api/move", methods=["POST"])

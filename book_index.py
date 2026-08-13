@@ -101,17 +101,38 @@ UNAMBIGUOUS_BOOK_EXTS = {
 } | COMIC_ARCHIVE_EXTS
 
 # Formats that are books *sometimes*. Each has a dedicated rule in classify().
-AMBIGUOUS_BOOK_EXTS = {
-    '.pdf',      # book | comic | scanned junk    → accepted, kind decided later
+#
+# Two distinct flavours of ambiguity live here, and they must not be conflated:
+#
+#  - KIND-ambiguous: the file is definitely a document, we just don't yet know
+#    whether it's a book, a comic, or scanned junk. It carries a reliable magic
+#    signature, so it can be identified from its bytes alone; classify() only
+#    refines the *kind* later. These are safe to accept from an uploader.
+#
+#  - SIGNATURE-ambiguous: the extension collides with something that isn't a
+#    book at all (a tag sidecar, a webpage, a generic OLE2/Palm blob) AND has no
+#    signature that distinguishes the book case. These can only be resolved with
+#    directory context, so they must NOT be accepted blind on upload — only the
+#    MEDIA_DIR walk, which can see that context, may classify them.
+KIND_AMBIGUOUS_BOOK_EXTS = {
+    '.pdf',      # book | comic | scanned junk    → sniffable ('%PDF-'), kind TBD
+    '.doc',      # book | any OLE2 compound file
+}
+SIGNATURE_AMBIGUOUS_BOOK_EXTS = {
     '.txt',      # book | this app's tag sidecar
     '.htm', '.html',  # book | webpage | epub innards
-    '.doc',      # book | any OLE2 compound file
     '.pdb',      # book | any Palm database
     '.pkg',      # book | macOS installer
     '.opf',      # a book's manifest — the FOLDER is the book
 }
+AMBIGUOUS_BOOK_EXTS = KIND_AMBIGUOUS_BOOK_EXTS | SIGNATURE_AMBIGUOUS_BOOK_EXTS
 
 BOOK_EXTS = UNAMBIGUOUS_BOOK_EXTS | AMBIGUOUS_BOOK_EXTS
+
+# Book extensions accepted from an uploader: the unambiguous ones plus the
+# kind-ambiguous ones (which are identifiable by content). Signature-ambiguous
+# extensions are deliberately excluded — see above.
+UPLOADABLE_BOOK_EXTS = UNAMBIGUOUS_BOOK_EXTS | KIND_AMBIGUOUS_BOOK_EXTS
 
 # Extensions this app already writes as sidecars next to library assets. A .txt
 # whose basename matches one of these assets is a tag sidecar, never a book.
