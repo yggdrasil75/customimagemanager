@@ -41,9 +41,31 @@ import image_index as ii
 import media_types as mt
 import video_tracks as vt
 import tiering
-import packstore
-import packio
 import music_index as mi
+
+
+# ── loose-disk file helpers (formerly routed through packio) ─────────────────
+# Everything lives as ordinary files on disk now; these keep the old call sites
+# terse and null-safe.
+def _read_bytes_loose(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+def _read_text_loose(path, encoding="utf-8", errors="replace"):
+    data = _read_bytes_loose(path)
+    return None if data is None else data.decode(encoding, errors)
+
+def _getmtime_loose(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+def _never(*_a, **_k):
+    return False
 import book_routes
 import auth as _auth
 import exif_import, exif_export, exif_fields
@@ -159,14 +181,6 @@ state = {
                                    # request that lands before/without it.
     "pose_kind": "body",
     "pose_size": "n",
-    "packs": {                         # small-file packing (see packstore.py).
-        "enabled": True,               # fold images+sidecars into 1GiB packs
-        "pack_bytes": 1 << 30,         # target size of each pack file
-        "max_open_packs": 16,          # ceiling on pooled read descriptors
-        "auto_migrate": True,          # run background migration when idle
-        "migrate_interval_sec": 900,   # how often the idle check fires
-        "idle_sec": 60,                # server must be quiet this long first
-    },
     "oai_system_prompt": "You are an expert image analysis AI. Provide concise, highly detailed, and accurate responses.",
     "oai_actions": [
         {"id":"1","name":"Describe Scene","prompt":"Describe the overall scene, lighting, and composition in a detailed paragraph.","target":"description"},
@@ -334,275 +348,6 @@ def _db_rollback_leaked(exc=None):
                 getattr(request, 'path', '?'))
         except Exception:
             pass
-
-# ── Pack store ────────────────────────────────────────────────────────────────
-# Images + sidecars (everything but video) fold into 1 GiB append packs under
-# MEDIA_DIR/.packs. The packs are the source of truth; library.db is only a
-# rebuildable read cache. packio checks the pack then falls back to loose disk,
-# so a half-migrated or disabled library behaves as before. All tuning lives in
-# state["packs"] (the app's settings), never in environment variables.
-_packstore = None
-
-def _pack_cfg():
-    """Current pack settings, with defaults for any key an older config on disk
-    predates. Read live so a settings change takes effect without a restart of
-    anything that calls this."""
-    defaults = {"enabled": True, "pack_bytes": 1 << 30, "max_open_packs": 16,
-                "auto_migrate": True, "migrate_interval_sec": 900, "idle_sec": 60,
-                # In-memory extracted-blob cache. 8 GiB is a starting point, not
-                # a ceiling — on a host with 100 GB this can go far higher, and
-                # the only cost of doing so is resident memory.
-                "cache_bytes": 8 << 30,
-                "cache_item_max": 32 << 20,
-                # Pull thumbnails into memory at startup instead of waiting for
-                # a user to page through the grid and fault each one in.
-                "preload_thumbs": True,
-                "preload_bytes": 4 << 30}
-    cfg = dict(defaults)
-    cfg.update(state.get("packs") or {})
-    return cfg
-
-def _init_packstore():
-    global _packstore
-    cfg = _pack_cfg()
-    if not cfg["enabled"] or _packstore is not None:
-        return _packstore
-    try:
-        _packstore = packstore.PackStore(
-            os.path.join(MEDIA_DIR, ".packs"), _db,
-            pack_bytes=int(cfg["pack_bytes"]),
-            max_open_packs=int(cfg["max_open_packs"]),
-            cache_bytes=int(cfg["cache_bytes"]),
-            cache_item_max=int(cfg["cache_item_max"]))
-        _packstore.recover()
-        # If packs exist on disk but the cache is empty or stale (fresh DB,
-        # copied library, deleted library.db), repopulate the location cache
-        # from the packs' own indexes. Cheap when the cache is already warm
-        # (rebuild is only forced when the two disagree on pack presence).
-        try:
-            have_packs = bool(_packstore._list_pack_ids())
-            cached = _packstore._db().execute(
-                "SELECT COUNT(*) FROM blob_locations").fetchone()[0]
-            if have_packs and cached == 0:
-                access_logger.info("pack cache empty but packs present; rebuilding")
-                _packstore.rebuild_cache()
-        except Exception as e:
-            access_logger.warning(f"pack cache check failed: {e}")
-        packio.attach(MEDIA_DIR, _packstore, enabled=True, is_video=mt.is_video)
-        access_logger.info("pack store ready")
-
-        # Warm the blob cache with thumbnails before anyone asks for one. This
-        # runs on its own thread so startup is not blocked, and reads each pack
-        # in offset order — one sequential pass per archive instead of the
-        # scattered per-thumbnail preads the grid would otherwise generate.
-        # Thumbnails only: originals are large, rarely re-read, and would evict
-        # thousands of grid cells to cache one full-size view.
-        if cfg.get("preload_thumbs", True):
-            def _warm_blob_cache():
-                try:
-                    t0 = time.time()
-                    res = _packstore.preload(prefix=".thumbs/",
-                                             max_bytes=int(cfg["preload_bytes"]))
-                    access_logger.info(
-                        f"blob cache warmed: {res['loaded']} thumbnails, "
-                        f"{res['bytes']/1048576:.0f} MB in {time.time()-t0:.1f}s")
-                except Exception as e:
-                    access_logger.warning(f"blob cache preload failed: {e}")
-            threading.Thread(target=_warm_blob_cache, daemon=True,
-                             name="blob-preload").start()
-    except Exception as e:
-        _packstore = None
-        access_logger.error(f"pack store init failed, using loose files: {e}")
-    return _packstore
-
-
-# ── Pack migration worker ─────────────────────────────────────────────────────
-# Folds the existing library into packs in the background, only while the server
-# is idle, so it never competes with a browsing user. Resumable (per-file, skips
-# what is already packed) and reversible (unpack job). Skips videos and the
-# infrastructure files that live under MEDIA_DIR.
-_pack_run = {"active": False, "phase": "idle", "scanned": 0, "packed": 0,
-             "skipped": 0, "errors": 0, "bytes": 0, "cancel": False,
-             "last_run": None, "job": None}
-_PACK_SKIP_DIRS  = {".packs", ".thumbs"}
-_PACK_SKIP_FILES = {"library.db", "library.db-wal", "library.db-shm",
-                    "classes.txt", "dup_model.json", "app_config.json",
-                    "tiers_config.json"}
-
-def _pack_idle(idle_sec=None):
-    if idle_sec is None:
-        idle_sec = _pack_cfg()["idle_sec"]
-    return (time.time() - _last_activity) >= idle_sec
-
-def _pack_wait_idle():
-    while not _pack_idle():
-        if _pack_run["cancel"]:
-            return False
-        time.sleep(2)
-    return not _pack_run["cancel"]
-
-def _pack_migrate_media():
-    """Convert an existing library into packs.
-
-    Driven by the `files` table, not a blind filesystem walk: the table is what
-    the app treats as the library, so we only pack things it already knows
-    about (a not-yet-indexed file on disk must stay loose until a scan sees it,
-    or packing would hide it). For each indexed primary file we also pack its
-    sidecars (.xmp/.txt/.tracks.json) that share the stem. Resumable — already
-    packed members are skipped — and idle-gated.
-    """
-    _pack_run["phase"] = "media"
-    # snapshot the key list so we don't hold a cursor across the whole (slow,
-    # idle-waiting) migration; new files indexed meanwhile get the next pass.
-    try:
-        rows = _db().execute("SELECT rel_path FROM files").fetchall()
-    except Exception as e:
-        access_logger.error(f"pack migrate: cannot read files table: {e}")
-        return
-    for (rel_path,) in rows:
-        if _pack_run["cancel"]:
-            return
-        primary = os.path.join(MEDIA_DIR, rel_path)
-        # members = the primary plus any sidecars sharing its stem
-        members = [primary]
-        base = os.path.splitext(primary)[0]
-        try:
-            for ext in mt.related_exts(primary):
-                members.append(base + ext)
-        except Exception:
-            pass
-        for p in members:
-            if _pack_run["cancel"]:
-                return
-            _pack_run["scanned"] += 1
-            # Only pack a real, loose, packable file. Skip: already packed,
-            # missing, a symlink (tiered object — tiering owns those), video.
-            if packio.is_packed(p):
-                _pack_run["skipped"] += 1
-                continue
-            if not os.path.exists(p) or os.path.islink(p):
-                _pack_run["skipped"] += 1
-                continue
-            if not packio.is_packable(p):
-                _pack_run["skipped"] += 1
-                continue
-            if not _pack_wait_idle():
-                return
-            try:
-                sz = os.path.getsize(p)
-                if packio.pack_file(p):
-                    _pack_run["packed"] += 1
-                    _pack_run["bytes"] += sz
-                else:
-                    _pack_run["skipped"] += 1
-            except Exception as e:
-                access_logger.warning(f"pack {p}: {e}")
-                _pack_run["errors"] += 1
-
-def _pack_migrate_thumbs():
-    """Fold loose legacy thumbnails into the store."""
-    if not os.path.isdir(THUMB_DIR):
-        return
-    _pack_run["phase"] = "thumbs"
-    st = packio.store()
-    for n in os.listdir(THUMB_DIR):
-        if _pack_run["cancel"]:
-            return
-        p = os.path.join(THUMB_DIR, n)
-        if not os.path.isfile(p):
-            continue
-        key = ".thumbs/" + n
-        _pack_run["scanned"] += 1
-        try:
-            if st.has(key):
-                os.remove(p); _pack_run["skipped"] += 1; continue
-            if not _pack_wait_idle():
-                return
-            with open(p, "rb") as f:
-                data = f.read()
-            if data:
-                st.put(key, data, mtime=os.path.getmtime(p))
-                if st.get(key) != data:
-                    raise IOError("verify failed")
-            os.remove(p)
-            _pack_run["packed"] += 1
-        except Exception as e:
-            access_logger.warning(f"thumb pack {n}: {e}")
-            _pack_run["errors"] += 1
-
-def _pack_unpack_all():
-    """Reverse conversion: restore every packed blob to a loose file. Iterates
-    the packs' OWN indexes (the source of truth), not blob_locations (a cache
-    that may be stale/incomplete), so nothing is left stranded in a pack."""
-    _pack_run["phase"] = "unpacking"
-    st = packio.store()
-    if st is None:
-        return
-    seen = set()
-    for pid in st._present_pack_ids():
-        for e in st.pack_index(pid):
-            key = e["key"]
-            if key in seen:
-                continue
-            seen.add(key)
-            if _pack_run["cancel"]:
-                return
-            # skip tombstones (empty members) and thumbnail cache entries
-            if e["length"] == 0:
-                continue
-            if key.startswith(".thumbs/"):
-                st.delete(key)
-                continue
-            ap = get_safe_path(MEDIA_DIR, key)
-            if ap and packio.unpack_file(ap):
-                _pack_run["packed"] += 1
-            else:
-                _pack_run["errors"] += 1
-
-def _run_pack_job(job):
-    if _pack_run["active"]:
-        return
-    _pack_run.update(active=True, phase="starting", scanned=0, packed=0,
-                     skipped=0, errors=0, bytes=0, cancel=False, job=job)
-    try:
-        st = packio.store()
-        if job in ("all", "thumbs"):
-            _pack_migrate_thumbs()
-        if job in ("all", "media"):
-            _pack_migrate_media()
-        if job == "unpack":
-            _pack_unpack_all()
-        if job in ("all", "compact") and st:
-            _pack_run["phase"] = "compact"
-            st.compact(should_continue=lambda: not _pack_run["cancel"])
-        if job == "unpack" and st:
-            _pack_run["phase"] = "compact"
-            st.compact(min_garbage_ratio=0.0,
-                       should_continue=lambda: not _pack_run["cancel"])
-        _pack_run["phase"] = "cancelled" if _pack_run["cancel"] else "idle"
-    except Exception as e:
-        access_logger.error(f"pack job {job} failed: {e}")
-        _pack_run["phase"] = f"error: {e}"
-    finally:
-        _pack_run["active"] = False
-        _pack_run["last_run"] = time.time()
-
-def _run_pack_job_bg(job="all"):
-    threading.Thread(target=_run_pack_job, args=(job,), daemon=True).start()
-
-def _packmigrate_start():
-    def loop():
-        while True:
-            cfg = _pack_cfg()
-            time.sleep(max(60, int(cfg["migrate_interval_sec"])))
-            cfg = _pack_cfg()          # re-read so a settings change is honored
-            if not cfg["auto_migrate"]:
-                continue
-            if packio.enabled() and not _pack_run["active"] and \
-                    _pack_idle(cfg["idle_sec"]):
-                _run_pack_job("all")
-    threading.Thread(target=loop, daemon=True).start()
-
 
 def _db_close():
     """Release this thread's connection.
@@ -1537,11 +1282,9 @@ def read_jxl(path: str) -> np.ndarray | None:
             access_logger.warning(f"read_jxl: could not extract video frame: {path}")
         return frame
     try:
-        # packio.getmtime, not os.path.getmtime: a packed file has no loose
-        # inode to stat. This mtime only keys the decode LRU; the bytes come
-        # from packio.read_bytes inside _decode_jxl_uncached.
-        mtime = packio.getmtime(path)
-        if mtime == 0.0 and not packio.exists(path):
+        # mtime keys the decode LRU; 0.0 means missing.
+        mtime = _getmtime_loose(path)
+        if mtime == 0.0 and not os.path.exists(path):
             access_logger.warning(f"read_jxl: file missing: {path}")
             return None
         return _decode_cached(path, mtime)
@@ -1553,9 +1296,8 @@ def read_jxl(path: str) -> np.ndarray | None:
 def _decode_jxl_uncached(path: str) -> np.ndarray | None:
     """Actually decode+normalise a JXL from disk (no cache). See read_jxl."""
     try:
-        # packio resolves the bytes whether the path is a loose file or folded
-        # into a pack; the magic sniff below then works identically on both.
-        data = packio.read_bytes(path)
+        # Read the raw bytes; the magic sniff below decides the decoder.
+        data = _read_bytes_loose(path)
         if data is None:
             access_logger.warning(f"read_jxl: unreadable: {path}")
             return None
@@ -1647,7 +1389,7 @@ def _ahash_bytes(gray: np.ndarray, size: int) -> bytes:
 
 def _sha256(path: str) -> str:
     h = hashlib.sha256()
-    data = packio.read_bytes(path)
+    data = _read_bytes_loose(path)
     if data is not None:
         h.update(data)
         return h.hexdigest()
@@ -1685,10 +1427,10 @@ def _index_file(rel_path: str, force: bool = False,
     Returns True if the DB was updated.
     """
     abs_path = get_safe_path(MEDIA_DIR, rel_path)
-    if not abs_path or not packio.exists(abs_path):
+    if not abs_path or not os.path.exists(abs_path):
         return False
     try:
-        mtime = packio.getmtime(abs_path)
+        mtime = _getmtime_loose(abs_path)
         row   = _get_file_row(rel_path)
         if not force and row and abs(row['mtime'] - mtime) < 0.01:
             return False   # up-to-date
@@ -1887,7 +1629,7 @@ def _enumerate_library():
             if rel not in seen:
                 seen.add(rel)
                 yield rel
-    st = packio.store()
+    st = None
     if st is not None:
         for key in st.all_keys():
             if key.startswith('.thumbs/'):
@@ -1914,10 +1656,7 @@ def _reconcile_deleted():
     removed = 0
     for (rel_path,) in rows:
         abs_path = get_safe_path(MEDIA_DIR, rel_path)
-        # packio.exists is true for a packed file (no loose inode) as well as a
-        # loose one; using os.path.exists here would purge every packed file's
-        # row and orphan its bytes.
-        if not abs_path or not packio.exists(abs_path):
+        if not abs_path or not os.path.exists(abs_path):
             _purge_file_everywhere(rel_path)
             removed += 1
     return removed
@@ -1995,9 +1734,9 @@ def _embed_analysis_xml(analysis):
 def _read_analysis_from_xmp(xmp_path):
     """Pull the structured analysis dict back out of a sidecar, or None."""
     try:
-        if not packio.exists(xmp_path):
+        if not os.path.exists(xmp_path):
             return None
-        text = packio.read_text(xmp_path) or ""
+        text = _read_text_loose(xmp_path) or ""
         m = re.search(r'<mm:analysis>(.*?)</mm:analysis>', text, re.DOTALL)
         if not m:
             return None
@@ -2012,9 +1751,9 @@ def _b64dump(obj):
 def _read_flag_from_xmp(xmp_path):
     """Pull the AI deletion flag {delete, reason} back out of a sidecar, or None."""
     try:
-        if not packio.exists(xmp_path):
+        if not os.path.exists(xmp_path):
             return None
-        text = packio.read_text(xmp_path) or ""
+        text = _read_text_loose(xmp_path) or ""
         m = re.search(r'<mm:flag>(.*?)</mm:flag>', text, re.DOTALL)
         if not m:
             return None
@@ -2026,9 +1765,9 @@ def _read_flag_from_xmp(xmp_path):
 def _read_pose_from_xmp(xmp_path):
     """Pull the pose/skeleton keypoints back out of a sidecar, or None."""
     try:
-        if not packio.exists(xmp_path):
+        if not os.path.exists(xmp_path):
             return None
-        text = packio.read_text(xmp_path) or ""
+        text = _read_text_loose(xmp_path) or ""
         m = re.search(r'<mm:pose>(.*?)</mm:pose>', text, re.DOTALL)
         if not m:
             return None
@@ -2045,9 +1784,9 @@ def _read_anim_delays_from_xmp(xmp_path):
     portable duration source the viewer uses to decide boxable-strip vs. video.
     """
     try:
-        if not packio.exists(xmp_path):
+        if not os.path.exists(xmp_path):
             return None
-        text = packio.read_text(xmp_path) or ""
+        text = _read_text_loose(xmp_path) or ""
         m = re.search(r'<mm:animDelays>(.*?)</mm:animDelays>', text, re.DOTALL)
         if not m:
             return None
@@ -2147,9 +1886,9 @@ def _build_mwg_collections_xml(albums):
 def _read_page_count_from_xmp(xmp_path):
     """Pull prism:PageCount back out of a sidecar as an int, or None."""
     try:
-        if not packio.exists(xmp_path):
+        if not os.path.exists(xmp_path):
             return None
-        text = packio.read_text(xmp_path) or ""
+        text = _read_text_loose(xmp_path) or ""
         # Both the attribute form (prism:PageCount="12") and element form
         # (<prism:PageCount>12</prism:PageCount>) are accepted.
         m = (re.search(r'prism:PageCount\s*=\s*"(\d+)"', text) or
@@ -2568,7 +2307,7 @@ def read_metadata(filepath):
         try:
             xml = xmp_xml
             if not xml and os.path.exists(xmp_path):
-                xml = packio.read_text(xmp_path) or ""
+                xml = _read_text_loose(xmp_path) or ""
             if xml:
                 m = re.search(r'<dc:description>\s*<rdf:Alt>\s*<rdf:li[^>]*>(.*?)</rdf:li>',
                               xml, re.DOTALL)
@@ -3099,7 +2838,7 @@ def _thumb_get(rel_path: str, mtime: float) -> bytes | None:
     """Fresh cached thumbnail bytes, or None. Pack first, then legacy disk.
     Freshness is by key: a mismatched mtime yields a different key that isn't
     present, so there is no timestamp comparison and no mtime column needed."""
-    st = packio.store()
+    st = None
     if st is not None:
         data = st.get(_thumb_key(rel_path, mtime))
         if data:
@@ -3113,7 +2852,7 @@ def _thumb_get(rel_path: str, mtime: float) -> bytes | None:
     return None
 
 def _thumb_put(rel_path: str, data: bytes, mtime: float) -> None:
-    st = packio.store()
+    st = None
     if st is not None:
         try:
             # durable=False: a thumbnail lost to a crash is rebuilt from the
@@ -3130,7 +2869,7 @@ def _thumb_put(rel_path: str, data: bytes, mtime: float) -> None:
 def _thumb_drop(rel_path: str) -> None:
     """Invalidate every cached thumbnail for a source path, across all mtime
     variants of the key. Called when the source image changes or is removed."""
-    st = packio.store()
+    st = None
     if st is not None:
         prefix = ".thumbs/" + _thumb_name(rel_path)   # matches base and base#mtime
         try:
@@ -3170,7 +2909,7 @@ def _make_thumb_bytes(abs_path: str) -> bytes | None:
 
 def serve_thumb(rel_path: str, abs_path: str, mtime: float | None = None):
     if mtime is None:
-        mtime = packio.getmtime(abs_path)
+        mtime = _getmtime_loose(abs_path)
 
     # 1. In-process LRU — encoded bytes, no pack lookup, no syscall.
     data = _thumb_lru_get(rel_path, mtime)
@@ -3186,7 +2925,7 @@ def serve_thumb(rel_path: str, abs_path: str, mtime: float | None = None):
     # 3. Generate
     data = _make_thumb_bytes(abs_path)
     if data is None:
-        raw = packio.read_bytes(abs_path)
+        raw = _read_bytes_loose(abs_path)
         if raw is None: return "", 404
         return send_file(io.BytesIO(raw), mimetype='image/jxl')
     _thumb_put(rel_path, data, mtime)
@@ -5502,7 +5241,7 @@ def api_upload():
     # would, without queuing a doomed job. (Content-level dupes under a different
     # name are still caught by the sha check inside the conversion pipeline.)
     pred_abs = os.path.join(MEDIA_DIR, pred)
-    if os.path.exists(pred_abs) or packio.is_packed(pred_abs):
+    if os.path.exists(pred_abs):
         return jsonify({"success": True, "queued": False, "duplicate": True,
                         "filename": pred, "existing_file": pred}), 200
 
@@ -6101,7 +5840,7 @@ def api_move():
         nb = os.path.splitext(new_path)[0]
         for ext in mt.related_exts(old_path):
             src, dst = ob + ext, nb + ext
-            if packio.is_packed(src): packio.rename(src, dst)
+            if _never(src): os.rename(src, dst)
             elif os.path.exists(src): shutil.move(src, dst)
         new_rel = os.path.relpath(new_path, MEDIA_DIR).replace('\\','/')
         # A book's rel_path is its primary key across six tables (books,
@@ -6127,67 +5866,11 @@ def api_file(filename):
     fp = get_safe_path(MEDIA_DIR, filename)
     if not fp:
         return "",404
-    if packio.is_packed(fp):
-        # Packed image: serve from memory. This is also what keeps concurrent
-        # requests from each holding a descriptor — the pack fd is pooled.
-        data = packio.read_bytes(fp)
-        if data is None: return "",404
-        return send_file(io.BytesIO(data), mimetype=mt.mime_for(filename),
-                         conditional=True, etag=False,
-                         last_modified=packio.getmtime(fp))
     if os.path.exists(fp):
         # conditional=True enables HTTP Range requests so <video> can seek/stream
         # instead of downloading the whole clip up front.
         return send_file(fp, mimetype=mt.mime_for(filename), conditional=True)
     return "",404
-
-@app.route("/api/packs/status")
-def api_packs_status():
-    st = packio.store()
-    out = {"enabled": packio.enabled(), "run": dict(_pack_run)}
-    if st:
-        stats = st.stats()
-        if stats["pack_bytes"]:
-            stats["garbage_pct"] = round(
-                100.0 * stats["garbage_bytes"] / stats["pack_bytes"], 1)
-        out["store"] = stats
-        # The number that actually tells you whether the in-memory cache is
-        # earning its RAM on YOUR traffic. Watch hit_rate under real browsing;
-        # if it's low, raise cache_bytes / preload_bytes in pack settings.
-        try:
-            out["blob_cache"] = st.cache_stats()
-        except Exception:
-            pass
-    with _thumb_lock:
-        out["thumb_lru"] = {"entries": len(_thumb_lru),
-                            "bytes": _thumb_lru_bytes,
-                            "budget": THUMB_LRU_BYTES}
-    return jsonify(out)
-
-@app.route("/api/packs/run", methods=["POST"])
-def api_packs_run():
-    job = (request.json or {}).get("job", "all")
-    if job not in ("all", "media", "thumbs", "compact", "unpack"):
-        return jsonify({"success": False, "error": "unknown job"}), 400
-    if not packio.enabled():
-        return jsonify({"success": False, "error": "pack store disabled"}), 400
-    _run_pack_job_bg(job)
-    return jsonify({"success": True, "job": job})
-
-@app.route("/api/packs/cancel", methods=["POST"])
-def api_packs_cancel():
-    _pack_run["cancel"] = True
-    return jsonify({"success": True})
-
-@app.route("/api/packs/rebuild", methods=["POST"])
-def api_packs_rebuild():
-    """Rebuild the location cache from the packs' own bytes — disaster recovery
-    if library.db is lost or stale but the packs remain. The packs are the
-    source of truth; this just repopulates the read cache from them."""
-    st = packio.store()
-    if st is None:
-        return jsonify({"success": False, "error": "pack store disabled"}), 400
-    return jsonify({"success": True, "blobs": st.rebuild_cache()})
 
 @app.route("/api/thumb/<path:filename>")
 def api_thumb(filename):
@@ -6196,8 +5879,7 @@ def api_thumb(filename):
     try:
         mtime = os.stat(fp).st_mtime
     except OSError:
-        if not packio.is_packed(fp): return "",404
-        mtime = None
+        return "",404
     return serve_thumb(filename, fp, mtime)
 
 def _jxl_duration_s(fp):
@@ -6220,7 +5902,7 @@ def api_is_animated(filename):
     (path, mtime) in media_types for the animated flag; duration comes from the
     file's own XMP timing."""
     fp = get_safe_path(MEDIA_DIR, filename)
-    if not fp or not packio.exists(fp):
+    if not fp or not os.path.exists(fp):
         return jsonify({"animated": False}), 404
     info = mt.jxl_anim_info(fp)
     animated = bool(info.get("animated"))
@@ -6543,7 +6225,7 @@ def _fast_metadata(fn, fp):
         # original is materialized to a temp file for the XMP readers.
         if os.path.exists(fp):
             return read_metadata(fp)
-        data = packio.read_bytes(fp)
+        data = _read_bytes_loose(fp)
         if data is None:
             return {"tags": [], "description": "", "regions": []}
         tmp = None
@@ -6588,6 +6270,26 @@ def _fast_metadata(fn, fp):
                 })
         except Exception:
             pass  # table may not exist in older DBs
+    if not regions:
+        try:
+            if os.path.exists(fp):
+                regions = read_metadata(fp).get("regions", []) or []
+            elif os.path.exists(fp):
+                data = _read_bytes_loose(fp)
+                if data is not None:
+                    tmp = None
+                    try:
+                        with tempfile.NamedTemporaryFile(
+                                suffix=os.path.splitext(fp)[1], delete=False) as tf:
+                            tf.write(data); tmp = tf.name
+                        regions = read_metadata(tmp).get("regions", []) or []
+                    finally:
+                        if tmp:
+                            try: os.remove(tmp)
+                            except OSError: pass
+        except Exception:
+            pass
+
 
     return {
         "tags": tags,
@@ -6608,9 +6310,9 @@ def api_metadata():
     d  = request.json
     fn = d.get("filename","")
     fp = get_safe_path(MEDIA_DIR, fn)
-    if not fp or not packio.exists(fp): return jsonify({"success":False})
+    if not fp or not os.path.exists(fp): return jsonify({"success":False})
     if d.get("action")=="read":
-        mt_ = packio.getmtime(fp)
+        mt_ = _getmtime_loose(fp)
         meta = _meta_cache_get(fn, mt_)
         if meta is None:
             meta = _fast_metadata(fn, fp)
@@ -6671,7 +6373,7 @@ def api_delete():
         base = os.path.splitext(fp)[0]
         for ext in mt.related_exts(fp):
             member = base + ext
-            if packio.is_packed(member): packio.remove(member)
+            if _never(member): os.remove(member)
             elif os.path.exists(member): tiering.safe_remove(member)
         _thumb_drop(fn)
         _purge_file_everywhere(fn)
@@ -6782,7 +6484,7 @@ def bulk_delete():
             base = os.path.splitext(fp)[0]
             for ext in mt.related_exts(fp):
                 member = base + ext
-                if packio.is_packed(member): packio.remove(member)
+                if _never(member): os.remove(member)
                 elif os.path.exists(member): tiering.safe_remove(member)
             _thumb_drop(fn)
             _delete_file_row(fn)
@@ -6986,7 +6688,7 @@ def dedup():
             abs_p = get_safe_path(MEDIA_DIR, f)
             if abs_p:
                 try:
-                    mtime = packio.getmtime(abs_p)
+                    mtime = _getmtime_loose(abs_p)
                     if f not in db_mtimes or abs(db_mtimes[f] - mtime) > 0.01:
                         stale.append(f)
                 except OSError:
@@ -7180,7 +6882,7 @@ def dedup_merge():
                 base = os.path.splitext(op)[0]
                 for ext in mt.related_exts(op):
                     member = base + ext
-                    if packio.is_packed(member): packio.remove(member)
+                    if _never(member): os.remove(member)
                     elif os.path.exists(member): tiering.safe_remove(member)
                 _thumb_drop(other)
                 _delete_file_row(other)
@@ -8054,7 +7756,7 @@ def _img_loader(fn):
 def _img_mtime(fn):
     try:
         fp = get_safe_path(MEDIA_DIR, fn)
-        return packio.getmtime(fp) if fp and packio.exists(fp) else None
+        return _getmtime_loose(fp) if fp and os.path.exists(fp) else None
     except Exception:
         return None
 
@@ -8635,10 +8337,10 @@ def discover_objects():
     to_scan = []
     for fn in filenames:
         fp = get_safe_path(MEDIA_DIR, fn)
-        if not fp or not packio.exists(fp):
+        if not fp or not os.path.exists(fp):
             errors.append(fn); continue
         try:
-            mtime = packio.getmtime(fp)
+            mtime = _getmtime_loose(fp)
         except Exception:
             mtime = 0
         # cached and unchanged -> resume/skip (the checkpoint hit)
@@ -9737,15 +9439,15 @@ def music_meta():
 def music_stream(filename):
     """Serve the audio file for the in-browser player (supports range)."""
     fp = get_safe_path(MEDIA_DIR, filename)
-    if not fp or not packio.exists(fp):
+    if not fp or not os.path.exists(fp):
         return jsonify({"success": False, "error": "not found"}), 404
-    if packio.is_packed(fp):
-        data = packio.read_bytes(fp)
+    if _never(fp):
+        data = _read_bytes_loose(fp)
         if data is None:
             return jsonify({"success": False, "error": "not found"}), 404
         return send_file(io.BytesIO(data), mimetype=mt.mime_for(filename),
                          conditional=True, etag=False,
-                         last_modified=packio.getmtime(fp))
+                         last_modified=_getmtime_loose(fp))
     return send_file(fp, conditional=True)
 
 
@@ -9818,13 +9520,8 @@ if __name__=='__main__':
     threading.Thread(target=_build_index_background, daemon=True).start()
     access_logger.info("Starting background auto-tagger…")
     threading.Thread(target=_background_autotag_worker, daemon=True).start()
-    _init_packstore()
     access_logger.info("Starting storage tiering worker…")
     tiering.start(MEDIA_DIR, _db, lambda: _last_activity)
-    if packio.enabled():
-        access_logger.info("Starting pack migration worker…")
-        _packmigrate_start()
-        atexit.register(lambda: _packstore and _packstore.close())
     access_logger.info("Starting background music indexer…")
     threading.Thread(target=_music_index_background, daemon=True).start()
     access_logger.info("Starting background book indexer…")

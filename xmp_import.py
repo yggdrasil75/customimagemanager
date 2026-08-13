@@ -35,7 +35,6 @@ except Exception:                      # pragma: no cover - env without pyexiv2
 
 import xmp_fields as xfields
 import iptc_fields as ifields
-import packexiv
 
 log = logging.getLogger("xmp_import")
 
@@ -93,7 +92,7 @@ def resolve_xmp(filepath):
         return {}, None, ""
     for p in _candidate_paths(filepath):
         try:
-            with packexiv.open_image(p) as img:
+            with pyexiv2.Image(p) as img:
                 raw = img.read_xmp()
                 xml = ""
                 try:

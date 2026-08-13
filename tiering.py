@@ -50,7 +50,6 @@ deletes/moves that bypassed safe_remove, e.g. cross-device shutil.move).
 """
 
 import os, io, json, time, uuid, shutil, threading, logging
-import packio
 
 log = logging.getLogger("tiering")
 if not log.handlers:
@@ -167,7 +166,7 @@ def _collect_files(db, media_dir, cfg):
         try:
             # Bill the logical content size, not the inode: a packed file has
             # no disk file, and even before packing os.stat would miss it.
-            size = packio.getsize(ap) if packio.enabled() else os.stat(ap).st_size
+            size = os.stat(ap).st_size
         except OSError:
             continue
         kind = (r["media_kind"] or "image")

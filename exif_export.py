@@ -31,7 +31,6 @@ except Exception:                      # pragma: no cover - env without pyexiv2
     pyexiv2 = None
 
 import exif_fields as efields
-import packexiv
 
 log = logging.getLogger("exif_export")
 
@@ -262,7 +261,7 @@ def write_exif(filepath, patch, allow_repackage=False):
         return result
 
     def _do_write():
-        with packexiv.open_image(target, write=True) as img:
+        with pyexiv2.Image(target) as img:
             if to_set:
                 # pyexiv2 wants string values; stringify ints/rationals.
                 img.modify_exif({k: str(v) for k, v in to_set.items()})
