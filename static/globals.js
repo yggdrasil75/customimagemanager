@@ -1,5 +1,5 @@
 // ── State ──────────────────────────────────────────────────────────────────
-let currentFile=null, currentRegions=[], oai_actions_cache=[], hasSettings=false;
+let currentFile=null, currentRegions=[], currentRegionsFile=null, oai_actions_cache=[], hasSettings=false;
 let autosaveTO=null, drawing=false, startX=0,startY=0,curX=0,curY=0;
 let pendingBox=null, editingBoxIdx=null;
 let vtTagging=false;   // true while the shared tag modal is tagging a VIDEO box

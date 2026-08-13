@@ -353,6 +353,7 @@ async function selectFile(fn){
     body:JSON.stringify({action:'read',filename:fn})}).then(r=>r.json());
   if(_mySeq!==_selectSeq) return;
   if(d.success){
+    currentRegionsFile=fn;
     setTags(d.metadata.tags||[]);
     document.getElementById('meta_desc').value=d.metadata.description;
     currentIqa=(d.metadata.iqa_score===undefined?null:d.metadata.iqa_score);

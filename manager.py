@@ -6220,7 +6220,7 @@ def api_is_animated(filename):
     (path, mtime) in media_types for the animated flag; duration comes from the
     file's own XMP timing."""
     fp = get_safe_path(MEDIA_DIR, filename)
-    if not fp or not os.path.exists(fp):
+    if not fp or not packio.exists(fp):
         return jsonify({"animated": False}), 404
     info = mt.jxl_anim_info(fp)
     animated = bool(info.get("animated"))
@@ -6527,17 +6527,93 @@ def api_video_detect(filename):
            for tr in tracks if tr["keyframes"]]
     return jsonify({"success": True, "tracks": out, "sampled": len(times)})
 
+def _fast_metadata(fn, fp):
+    """Fast path for the metadata read used on every image open. Tags and
+    description are written to the `files` table at index time, and face/body
+    boxes live in the region tables — so the common case needs zero file I/O.
+    Only fall back to the slow full-file XMP parse when the DB has no row (an
+    un-indexed file), so a normal library never pays the multi-MB materialize +
+    triple XMP pass that made this take ~30s per packed 4K image."""
+    db = _db()
+    row = db.execute(
+        "SELECT tags, description, artist, language, event, catalog_sets "
+        "FROM files WHERE rel_path=?", (fn,)).fetchone()
+    if row is None:
+        # Not indexed yet — must read the file. Loose reads directly; a packed
+        # original is materialized to a temp file for the XMP readers.
+        if os.path.exists(fp):
+            return read_metadata(fp)
+        data = packio.read_bytes(fp)
+        if data is None:
+            return {"tags": [], "description": "", "regions": []}
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                    suffix=os.path.splitext(fp)[1], delete=False) as tf:
+                tf.write(data); tmp = tf.name
+            return read_metadata(tmp)
+        finally:
+            if tmp:
+                try: os.remove(tmp)
+                except OSError: pass
+
+    def _loads(v, default):
+        if not v:
+            return default
+        try:
+            j = json.loads(v)
+            return j if isinstance(j, type(default)) else default
+        except Exception:
+            # tags may be stored as a plain comma string in older rows
+            return [t.strip() for t in v.split(",") if t.strip()] \
+                   if isinstance(default, list) else default
+
+    tags = _loads(row["tags"], [])
+
+    # Regions from the face/body cache (this is what the editor draws). Names and
+    # confirmations here mirror the MWG regions written into the image, so this
+    # is authoritative for the boxes the UI needs.
+    regions = []
+    for tbl in ("face_regions", "body_regions"):
+        try:
+            for rr in db.execute(
+                    f"SELECT cx, cy, w, h, name, confirmed FROM {tbl} "
+                    "WHERE rel_path=?", (fn,)).fetchall():
+                regions.append({
+                    "cx": rr["cx"], "cy": rr["cy"], "w": rr["w"], "h": rr["h"],
+                    "class_name": rr["name"] or ("face" if tbl == "face_regions"
+                                                 else "person"),
+                    "name": rr["name"] or "",
+                    "confirmed": bool(rr["confirmed"]),
+                })
+        except Exception:
+            pass  # table may not exist in older DBs
+
+    return {
+        "tags": tags,
+        "description": row["description"] or "",
+        "artist": row["artist"] or "",
+        "language": row["language"] or "",
+        "event": row["event"] or "",
+        "catalog_sets": row["catalog_sets"] or "",
+        "regions": regions,
+        "analysis": None, "flag": None, "pose": None,
+        "ai_generated": False, "model_age": None, "persons": "",
+        "genre": "", "alt_of": "", "page_count": None, "albums": [],
+    }
+
+
 @app.route("/api/metadata", methods=["POST"])
 def api_metadata():
     d  = request.json
     fn = d.get("filename","")
     fp = get_safe_path(MEDIA_DIR, fn)
-    if not fp or not os.path.exists(fp): return jsonify({"success":False})
+    if not fp or not packio.exists(fp): return jsonify({"success":False})
     if d.get("action")=="read":
         mt_ = packio.getmtime(fp)
         meta = _meta_cache_get(fn, mt_)
         if meta is None:
-            meta = read_metadata(fp)
+            meta = _fast_metadata(fn, fp)
             _meta_cache_put(fn, mt_, meta)
         meta = dict(meta)   # per-request copy: the rating fields below are
                             # request-specific and must not mutate the cached dict
