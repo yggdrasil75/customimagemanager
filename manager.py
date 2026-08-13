@@ -3030,8 +3030,16 @@ WHOLEBODY_EDGES = (COCO_SKELETON
                    + _hand_edges(91) + _hand_edges(112))                 # finger chains
 WHOLEBODY_NAMES = COCO_KP_NAMES + [f"kp{i}" for i in range(17, 133)]
 
-_pose_cache = {"path": None, "model": None}
-_wholebody_cache = {"mode": None, "model": None}
+@functools.lru_cache(maxsize=4)
+def _load_yolo(model_path):
+    """Memoised YOLO loader. maxsize>1 so alternating detectors (e.g. person
+    then face in one pipeline pass) don't thrash. Invalidate with
+    _load_yolo.cache_clear() when a *setting* repoints a model path."""
+    return YOLO(model_path)
+
+@functools.lru_cache(maxsize=2)
+def _load_wholebody(mode):
+    return Wholebody(mode=mode, backend="onnxruntime", device="cpu")
 
 _SIZES = ("n", "s", "m", "l", "x")
 def _pose_size():
@@ -3054,9 +3062,7 @@ def _run_pose_yolo(img_bgr):
     base = {"model": model_path, "kind": "body",
             "names": COCO_KP_NAMES, "edges": COCO_SKELETON, "people": []}
     try:
-        if _pose_cache["path"] != model_path:
-            _pose_cache["model"] = YOLO(model_path); _pose_cache["path"] = model_path
-        res = _pose_cache["model"](img_bgr, verbose=False)
+        res = _load_yolo(model_path)(img_bgr, verbose=False)
         if not res or res[0].keypoints is None:
             return base
         kp = res[0].keypoints
@@ -3090,10 +3096,7 @@ def _run_pose_wholebody(img_bgr):
     try:
         mode = {"n":"lite","s":"lite","m":"balanced",
                 "l":"performance","x":"performance"}.get(_pose_size(), "balanced")
-        if _wholebody_cache["mode"] != mode:
-            _wholebody_cache["model"] = Wholebody(mode=mode, backend="onnxruntime", device="cpu")
-            _wholebody_cache["mode"] = mode
-        kpts, scores = _wholebody_cache["model"](img_bgr)
+        kpts, scores = _load_wholebody(mode)(img_bgr)
         kpts = np.asarray(kpts); scores = np.asarray(scores)
         H, W = img_bgr.shape[:2]
         people = []
@@ -3123,11 +3126,8 @@ def _run_pose(img_bgr):
     return _run_pose_yolo(img_bgr)
 
 # ── character / panel detectors (for the pipeline) ───────────────────────────--
-_person_cache = {"path": None, "model": None}
-_panel_cache = {"path": None, "model": None}
-_video_det_cache = {"path": None, "model": None}
 
-def _detect_obb_or_box(img_bgr, model_path, cache, keep_classes=None,
+def _detect_obb_or_box(img_bgr, model_path, keep_classes=None,
                        conf=0.25, as_obb=False):
     """Run a YOLO (optionally OBB) model and return normalised center-form boxes
     [{class_name,cx,cy,w,h}]. OBB results are reduced to their axis-aligned
@@ -3155,9 +3155,7 @@ def _detect_obb_or_box(img_bgr, model_path, cache, keep_classes=None,
                 img_bgr = img_bgr[:, :, :3]
         if img_bgr.dtype != np.uint8:
             img_bgr = np.clip(img_bgr, 0, 255).astype(np.uint8)
-        if cache["path"] != model_path:
-            cache["model"] = YOLO(model_path); cache["path"] = model_path
-        res = cache["model"](img_bgr, verbose=False, conf=conf)
+        res = _load_yolo(model_path)(img_bgr, verbose=False, conf=conf)
         if not res:
             return []
         r = res[0]; H, W = img_bgr.shape[:2]
@@ -3196,11 +3194,11 @@ def _run_person(img_bgr):
     obb = ((state.get("person_model") or "")
            or (state.get("person_obb_model") or "")).strip()
     if obb:
-        boxes = _detect_obb_or_box(img_bgr, obb, _person_cache, as_obb=True)
+        boxes = _detect_obb_or_box(img_bgr, obb, as_obb=True)
         if boxes:
             return boxes
     model_path = f"yolo11{_yolo_size()}.pt"
-    return _detect_obb_or_box(img_bgr, model_path, _person_cache,
+    return _detect_obb_or_box(img_bgr, model_path,
                               keep_classes={"person"})
 
 def _run_panels(img_bgr):
@@ -3209,9 +3207,8 @@ def _run_panels(img_bgr):
     pm = (state.get("panel_model") or "").strip()
     if not pm:
         return []
-    return _detect_obb_or_box(img_bgr, pm, _panel_cache, as_obb=True)
+    return _detect_obb_or_box(img_bgr, pm, as_obb=True)
 
-_face_cache = {"path": None, "model": None}
 
 def _run_faces(img_bgr):
     """Detect faces with a configured YOLO face model (e.g. yolov8n-face.pt).
@@ -3226,7 +3223,7 @@ def _run_faces(img_bgr):
         fm = facelib.ensure_face_model(_face_size())   # -> ./models
     if not fm:
         return []
-    boxes = _detect_obb_or_box(img_bgr, fm, _face_cache)
+    boxes = _detect_obb_or_box(img_bgr, fm)
     H, W = img_bgr.shape[:2]
     out = []
     for b in boxes:
@@ -3238,7 +3235,6 @@ def _run_faces(img_bgr):
 
 
 # ── Background face / person boxing + clustering ───────────────────────────────
-_face_bg_cache = {"path": None, "model": None}
 # set whenever new embeddings land; the worker reclusters once the queue drains
 _face_dirty = {"v": False}
 # A MANUAL "Rescan all" is an explicit instruction, so it must bypass the idle
@@ -3264,7 +3260,7 @@ def _face_regions_for(img, rel):
     if state.get("face_bg_custom"):
         models = (state.get("model_groups") or {}).get("trained") or []
         if models:
-            for b in _detect_obb_or_box(img, models[-1], _face_bg_cache):
+            for b in _detect_obb_or_box(img, models[-1]):
                 out.append({"class_name": b["class_name"], "region_name": "",
                             "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
                             "confirmed": False, "region_tags": [],
@@ -3567,7 +3563,14 @@ def _recluster_bodies():
     return total
 
 # ── OCR ─────────────────────────────────────────────────────────────────────--
-_ocr_cache = {"engine": None, "reader": None}
+@functools.lru_cache(maxsize=1)
+def _load_rapidocr():
+    from rapidocr_onnxruntime import RapidOCR
+    return RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)
+
+@functools.lru_cache(maxsize=1)
+def _load_easyocr():
+    return easyocr.Reader(["en"], gpu=False)
 
 def _ocr_line(text, score, x1, y1, x2, y2, W, H):
     cx = ((x1 + x2) / 2) / max(1, W); cy = ((y1 + y2) / 2) / max(1, H)
@@ -3583,12 +3586,7 @@ def _run_ocr(img_bgr):
     H, W = img_bgr.shape[:2]
     # RapidOCR (preferred: lightweight onnxruntime, models ship with the wheel)
     try:
-        if _ocr_cache["engine"] == "rapid":
-            ocr = _ocr_cache["reader"]
-        else:
-            from rapidocr_onnxruntime import RapidOCR
-            ocr = RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)
-            _ocr_cache.update(engine="rapid", reader=ocr)
+        ocr = _load_rapidocr()
         res, _ = ocr(img_bgr)
         lines = []
         for box, text, score in (res or []):
@@ -3599,11 +3597,7 @@ def _run_ocr(img_bgr):
         access_logger.warning(f"rapidocr unavailable: {e}")
     # EasyOCR (auto-downloads detection + recognition models on first use)
     try:
-        if _ocr_cache["engine"] == "easy":
-            reader = _ocr_cache["reader"]
-        else:
-            
-            reader = easyocr.Reader(["en"], gpu=False); _ocr_cache.update(engine="easy", reader=reader)
+        reader = _load_easyocr()
         lines = []
         for box, text, score in reader.readtext(img_bgr):
             xs = [p[0] for p in box]; ys = [p[1] for p in box]
@@ -3614,7 +3608,6 @@ def _run_ocr(img_bgr):
     return {"engine": None, "text": "", "lines": [],
             "note": "No OCR engine installed (pip install rapidocr_onnxruntime, or easyocr)."}
 
-_barcode_cache = {"path": None, "model": None}
 
 def _barcode_model_path():
     """YOLO pass for barcode boxes, or None when no model is configured.
@@ -3647,7 +3640,7 @@ def _barcode_detect():
     if not mp or not os.path.exists(mp):
         return None
     conf = float(state.get("barcode_conf", 0.25) or 0.25)
-    return lambda bgr: _detect_obb_or_box(bgr, mp, _barcode_cache, conf=conf)
+    return lambda bgr: _detect_obb_or_box(bgr, mp, conf=conf)
 
 
 def _run_barcodes(img_bgr, deep=True):
@@ -3900,8 +3893,7 @@ def _query_books(text, folder):
 # ── LLM helpers (shared by actions + pipeline) ────────────────────────────────
 def _oai_v1_base(endpoint):
     """Reduce any OpenAI-compatible URL to its `.../v1` base (no trailing
-    slash), stripping a known operation suffix if present. '' -> ''.
-    e.g. 'host/v1/chat/completions' -> 'host/v1', bare 'host' -> 'host'."""
+    slash), stripping a known operation suffix if present. '' -> ''."""
     base = (endpoint or "").strip().rstrip('/')
     if not base:
         return ""
@@ -4908,14 +4900,12 @@ def update_settings():
     # path from the setting, so the cache would keep serving the old model until
     # a restart. Drop it here.
     if "face_size" in d and d["face_size"] != state.get("face_size"):
-        _face_cache["path"] = None
-        _face_cache["model"] = None
+        _load_yolo.cache_clear()
     # Same reasoning for the barcode detector: _detect_obb_or_box memoises by
     # path, so pointing the setting at a different model has no effect until
     # the cache is dropped.
     if "barcode_model" in d and d["barcode_model"] != state.get("barcode_model"):
-        _barcode_cache["path"] = None
-        _barcode_cache["model"] = None
+        _load_yolo.cache_clear()
     for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","pipeline_tree","yolo_size","pose_kind","pose_size",
               "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","face_cluster_eps",
               "body_enabled","body_cluster_eps","object_proposals","iqa_model",
@@ -6077,7 +6067,7 @@ def api_jxl_track(filename):
     dets_by_frame = []
     for rgb in frames:
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        dets_by_frame.append(_detect_obb_or_box(bgr, model_path, _video_det_cache, conf=0.30))
+        dets_by_frame.append(_detect_obb_or_box(bgr, model_path, conf=0.30))
 
     out = []
     for tr in in_tracks:
@@ -6245,7 +6235,7 @@ def api_video_detect(filename):
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
-            dets = _detect_obb_or_box(frame, model_path, _video_det_cache, conf=0.35)
+            dets = _detect_obb_or_box(frame, model_path, conf=0.35)
             used = set()
             for d in dets:
                 # match to an existing open track of the same class by best IoU
@@ -7178,7 +7168,7 @@ def bulk_box():
     if method == "llm" and (not state.get("oai_endpoint") or not state.get("oai_model")):
         return jsonify({"success": False, "error": "LLM not configured."})
 
-    yolo = YOLO(model) if method == "yolo" else None
+    yolo = _load_yolo(model) if method == "yolo" else None
     done, boxed, errors = 0, 0, []
     total = len(filenames)
     for fn in filenames:
@@ -8968,7 +8958,7 @@ def auto_tag():
     try:
         img = read_jxl(fp)
         if img is None: raise Exception("Decode failed")
-        results = YOLO(model_path)(img, verbose=False, conf=0.25)
+        results = _load_yolo(model_path)(img, verbose=False, conf=0.25)
         regions = []
         if results[0].boxes:
             for box in results[0].boxes:
@@ -9129,7 +9119,6 @@ def autotag_toggle():
     save_config()
     return jsonify({"success": True, "enabled": state["autotag_enabled"]})
 
-_autotag_cache = {"path": None, "model": None}
 
 def _background_autotag_worker():
     """When the app is idle and a trained model exists, walk through files that
@@ -9146,10 +9135,7 @@ def _background_autotag_worker():
             if not models:
                 continue
             model_path = models[-1]   # newest by mtime
-            if _autotag_cache["path"] != model_path:
-                _autotag_cache["model"] = YOLO(model_path)
-                _autotag_cache["path"]  = model_path
-            mdl = _autotag_cache["model"]
+            mdl = _load_yolo(model_path)
 
             rows = _db().execute(
                 "SELECT rel_path FROM files WHERE COALESCE(autotag_done,0)=0 LIMIT ?",
