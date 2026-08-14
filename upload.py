@@ -432,9 +432,11 @@ def upload_file(
     max_attempts:    int,
     initial_backoff: float,
     session:         "Session",
+    dest:            str = "",
 ) -> UploadResult:
     rel_dir = os.path.relpath(os.path.dirname(filepath), source_dir)
-    folder  = rel_dir.replace('\\', '/') if rel_dir != "." else ""
+    parts   = [p for p in (dest, rel_dir if rel_dir != "." else "") if p]
+    folder  = "/".join(parts).replace('\\', '/')
     fname   = os.path.basename(filepath)
 
     regions, description, tags = parse_sidecar(filepath, classes_map)
@@ -632,15 +634,18 @@ def bulk_upload(
     username:        str = "",
     password:        str = "",
     verify_tls:      bool = True,
+    dest:            str = "",
 ) -> int:
     source_dir = os.path.abspath(source_dir)
     if not os.path.isdir(source_dir):
         print(f"Error: '{source_dir}' is not a directory.")
         return 2
 
-    # Establish the session BEFORE walking the tree, so a bad password fails in
-    # one second instead of after enumerating 200k files and then 401-ing on
-    # every one of them.
+    dest = "/".join(
+        s for s in dest.replace('\\', '/').split('/')
+        if s and s not in ('.', '..')
+    )
+
     session = Session(server_url, username, password, verify=verify_tls)
     try:
         cfg = session.probe()
@@ -700,7 +705,7 @@ def bulk_upload(
         futures = {
             ex.submit(
                 upload_file, fp, source_dir, classes_map,
-                endpoint, max_attempts, initial_backoff, session
+                endpoint, max_attempts, initial_backoff, session, dest
             ): fp
             for fp in files
         }
@@ -737,6 +742,10 @@ def main() -> None:
         help="Local folder to upload (recursively).")
     parser.add_argument("--url", default="http://localhost:8000",
         help="Base URL of the Media Manager server.")
+    parser.add_argument("--dest", default="",
+        help="Destination folder on the server to nest uploads under. The "
+             "source's own subfolders are preserved beneath it, e.g. "
+             "--dest myphotos uploads photos/cat.jpg to myphotos/photos/cat.jpg.")
     parser.add_argument("--workers", type=int, default=8,
         help="Number of concurrent uploads.")
     parser.add_argument("--retries", type=int, default=3,
@@ -806,6 +815,7 @@ def main() -> None:
         username        = args.username,
         password        = password,
         verify_tls      = not args.no_verify_tls,
+        dest            = args.dest,
     ))
 
 

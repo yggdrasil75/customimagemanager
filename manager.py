@@ -190,6 +190,12 @@ _thumb_lru_bytes = 0
 THUMB_LRU_BYTES = 2 << 30           # 2 GiB ≈ 100k+ thumbnails
 LRU_MAX = 512                       # retained: legacy references elsewhere
 
+def _rel(path: str) -> str:
+    """!
+    @brief Convert an absolute path to a forward-slash rel_path under MEDIA_DIR.
+    @return The DB-canonical relative path.
+    """
+    return os.path.relpath(path, MEDIA_DIR).replace('\\', '/')
 
 def _thumb_lru_put(rel_path: str, mtime: float, data: bytes) -> None:
     """Insert under the byte budget, evicting oldest first. Caller must NOT
@@ -867,7 +873,7 @@ def _store_raw(raw_src_path, orig_name, derived_rel):
         ext = os.path.splitext(orig_name)[1].lower() or ".raw"
         dest = os.path.join(_raw_store_dir(), uid + ext)
         shutil.copy(raw_src_path, dest)
-        rel = os.path.relpath(dest, MEDIA_DIR).replace("\\", "/")
+        rel = _rel(dest)
         _db().execute(
             "INSERT OR REPLACE INTO raws(uid, path, orig_name, derived_rel, "
             "sha256, added) VALUES(?,?,?,?,?,?)",
@@ -1610,7 +1616,7 @@ def _enumerate_library():
         for f in filenames:
             if f.startswith('.') or not mt.is_library_file(f):
                 continue
-            rel = os.path.relpath(os.path.join(root, f), MEDIA_DIR).replace('\\', '/')
+            rel = _rel(os.path.join(root, f))
             if rel not in seen:
                 seen.add(rel)
                 yield rel
@@ -1706,50 +1712,36 @@ def _embed_analysis_xml(analysis):
     raw = base64.b64encode(json.dumps(analysis).encode("utf-8")).decode("ascii")
     return f' xmlns:mm="{_MM_NS}"', f'<mm:analysis>{raw}</mm:analysis>'
 
-def _read_analysis_from_xmp(xmp_path):
-    """Pull the structured analysis dict back out of a sidecar, or None."""
+def _read_mm_tag(xmp_path, tag):
+    """Pull a base64+JSON payload stored under <mm:TAG> in a sidecar, or None.
+    Every mm: block is written the same way (see _b64dump), so every reader is
+    this one function differing only by tag name."""
     try:
         if not os.path.exists(xmp_path):
             return None
         text = _read_text_loose(xmp_path) or ""
-        m = re.search(r'<mm:analysis>(.*?)</mm:analysis>', text, re.DOTALL)
+        m = re.search(rf'<mm:{tag}>(.*?)</mm:{tag}>', text, re.DOTALL)
         if not m:
             return None
         return json.loads(base64.b64decode(m.group(1)).decode("utf-8"))
     except Exception as e:
-        access_logger.warning(f"_read_analysis_from_xmp {xmp_path}: {e}")
+        access_logger.warning(f"_read_mm_tag({tag}) {xmp_path}: {e}")
         return None
+
+def _read_analysis_from_xmp(xmp_path):
+    """Pull the structured analysis dict back out of a sidecar, or None."""
+    return _read_mm_tag(xmp_path, "analysis")
 
 def _b64dump(obj):
     return base64.b64encode(json.dumps(obj).encode("utf-8")).decode("ascii")
 
 def _read_flag_from_xmp(xmp_path):
     """Pull the AI deletion flag {delete, reason} back out of a sidecar, or None."""
-    try:
-        if not os.path.exists(xmp_path):
-            return None
-        text = _read_text_loose(xmp_path) or ""
-        m = re.search(r'<mm:flag>(.*?)</mm:flag>', text, re.DOTALL)
-        if not m:
-            return None
-        return json.loads(base64.b64decode(m.group(1)).decode("utf-8"))
-    except Exception as e:
-        access_logger.warning(f"_read_flag_from_xmp {xmp_path}: {e}")
-        return None
+    return _read_mm_tag(xmp_path, "flag")
 
 def _read_pose_from_xmp(xmp_path):
     """Pull the pose/skeleton keypoints back out of a sidecar, or None."""
-    try:
-        if not os.path.exists(xmp_path):
-            return None
-        text = _read_text_loose(xmp_path) or ""
-        m = re.search(r'<mm:pose>(.*?)</mm:pose>', text, re.DOTALL)
-        if not m:
-            return None
-        return json.loads(base64.b64decode(m.group(1)).decode("utf-8"))
-    except Exception as e:
-        access_logger.warning(f"_read_pose_from_xmp {xmp_path}: {e}")
-        return None
+    return _read_mm_tag(xmp_path, "pose")
 
 def _read_anim_delays_from_xmp(xmp_path):
     """Pull animation frame delays back out of a sidecar, or None.
@@ -1758,17 +1750,7 @@ def _read_anim_delays_from_xmp(xmp_path):
     animated JXL, captured from the source GIF/APNG at upload. This is the
     portable duration source the viewer uses to decide boxable-strip vs. video.
     """
-    try:
-        if not os.path.exists(xmp_path):
-            return None
-        text = _read_text_loose(xmp_path) or ""
-        m = re.search(r'<mm:animDelays>(.*?)</mm:animDelays>', text, re.DOTALL)
-        if not m:
-            return None
-        return json.loads(base64.b64decode(m.group(1)).decode("utf-8"))
-    except Exception as e:
-        access_logger.warning(f"_read_anim_delays_from_xmp {xmp_path}: {e}")
-        return None
+    return _read_mm_tag(xmp_path, "animDelays")
 
 def _extract_anim_delays(src_path):
     """Read per-frame delays (ms) from a source GIF/APNG/WebP via Pillow.
@@ -1941,27 +1923,18 @@ def _region_desc_from_json(raw):
         tags.append(entry)
     return str(obj.get("description", "") or ""), tags, str(obj.get("class", "") or "")
 
-def _parse_mwg_regions(xmp):
-    """Read regions from Xmp.mwg-rs.Regions. Returns [] if none present.
-    The mwg-rs RDF shape now lives in mwg_fields; we pass in our app-specific
-    Description-JSON decoder."""
+def _parse_mwg_regions(xmp: dict) -> list:
+    """!
+    @brief Read regions from Xmp.mwg-rs.Regions.
+    @return Region list, or [] if none present.
+    """
     return mwg_fields.parse_region_list(xmp, _region_desc_from_json)
 
-def _parse_legacy_iptc_regions(xmp):
-    """Reader for Xmp.iptcExt.ImageRegion regions, folded into the MWG-RS model.
-
-    Handles both the modern IPTC Extension ImageRegion struct (v1.5+; boundary
-    leaves RegionBoundary/RbX,RbY,RbW,RbH, RbShape, RbUnit, plus a lang-alt Name
-    and RId) AND the older ExifTool lowercase form (RegionBoundary/rbX.. +
-    RegionName) so existing sidecars written before the naming change aren't lost.
-
-    Geometry: IPTC's RbX/RbY are the TOP-LEFT corner, RbW/RbH the size — the same
-    convention as the old path — so we convert to the center-based MWG dict
-    (cx = x + w/2). Units: 'relative' (0..1) maps directly; 'pixel' can't be
-    normalized here without the image dimensions, so pixel-unit regions are
-    skipped (they'll be re-derived from MWG/other sources). Non-rectangle shapes
-    (circle/polygon) have no center+w/h representation and are skipped too. A
-    region whose RId (or old rId) is 'unconfirmed' imports unconfirmed."""
+def _parse_legacy_iptc_regions(xmp: dict) -> list:
+    """!
+    @brief Read Xmp.iptcExt.ImageRegion regions, folded into the MWG-RS model.
+    @return Center-form region dicts; non-rectangle and pixel-unit regions skipped.
+    """
     regions = []
     indices = {re.search(r'\[(\d+)\]', k).group(1)
                for k in xmp.keys() if 'ImageRegion[' in k and re.search(r'\[(\d+)\]', k)}
@@ -1970,14 +1943,13 @@ def _parse_legacy_iptc_regions(xmp):
         rb = f'{p}/iptcExt:RegionBoundary'
 
         def _g(*keys, default=None):
-            """First non-empty value among alternative flattened key spellings."""
+            """! @brief First non-empty value among alternative key spellings."""
             for k in keys:
                 v = xmp.get(k)
                 if v is not None and str(v).strip() != "":
                     return v
             return default
 
-        # Shape / unit (modern only; old form was implicitly rectangle/relative).
         shape = str(_g(f'{rb}/iptcExt:RbShape', default='rectangle')).lower()
         unit  = str(_g(f'{rb}/iptcExt:RbUnit', default='relative')).lower()
         if shape and shape != 'rectangle':
@@ -1994,7 +1966,6 @@ def _parse_legacy_iptc_regions(xmp):
         if not (w > 0 and h > 0):
             continue
         rid = str(_g(f'{p}/iptcExt:RId', f'{p}/iptcExt:rId', default='')).lower()
-        # Name is a lang-alt in the modern struct; take x-default or first entry.
         name = _g(f'{p}/iptcExt:Name/rdf:Alt/rdf:li[1]',
                   f'{p}/iptcExt:Name',
                   f'{p}/iptcExt:RegionName', default='object')
@@ -2004,22 +1975,21 @@ def _parse_legacy_iptc_regions(xmp):
                         "uuid": None, "region_description": "", "region_tags": []})
     return regions
 
-def _build_mwg_regions_xml(regions):
-    """Emit the <mwg-rs:Regions> block. Returns ('', ns_attrs) when empty.
-    The mwg-rs RDF shape lives in mwg_fields; we inject our app-specific bits
-    (Description-JSON encoder, SeeAlso filter link, uuid factory)."""
+def _build_mwg_regions_xml(regions: list) -> tuple[str, str]:
+    """!
+    @brief Emit the <mwg-rs:Regions> XML block.
+    @return (xml, ns_attrs); xml is '' when there are no regions.
+    """
     return mwg_fields.build_region_list_xml(
         regions, saxutils.escape,
         _region_desc_to_json, _region_filter_link,
         lambda: str(uuid.uuid4()))
 
-def _set_compressed_bpp(filepath, width=None, height=None):
-    """Compute EXIF CompressedBitsPerPixel (0x9102) for a just-compressed file
-    and write it. bpp = (file_size_bytes * 8) / (width * height). Best-effort:
-    any failure is logged and swallowed so it never blocks an upload.
-
-    This is a value the app owns (we produced the compressed bitstream), which is
-    why the field is writable/generated in the schema rather than camera-read."""
+def _set_compressed_bpp(filepath: str, width: int | None = None,
+                        height: int | None = None) -> None:
+    """!
+    @brief Compute and write EXIF CompressedBitsPerPixel for a compressed file.
+    """
     try:
         w, h = width, height
         if not (w and h):
@@ -2029,21 +1999,17 @@ def _set_compressed_bpp(filepath, width=None, height=None):
             h, w = img.shape[:2]
         size = os.path.getsize(filepath)
         bpp = (size * 8.0) / (w * h)
-        # Store as an EXIF rational "num/1000" for ~3-decimal precision.
-        rational = f"{int(round(bpp * 1000))}/1000"
+        rational = f"{int(round(bpp * 1000))}/1000"   # EXIF rational num/1000
         exif_export.write_exif(filepath, {"CompressedBitsPerPixel": rational})
     except Exception as e:
         access_logger.warning(f"_set_compressed_bpp {filepath}: {e}")
 
 
-def _exif_rating(filepath):
-    """Return a 0–5 star user rating derived from the file's EXIF Rating
-    (0x4746) or RatingPercent (0x4749), or None if neither is present/mappable.
-
-    RatingPercent is preferred when present (it always maps cleanly). Rating's
-    0–10 half-star form maps to stars = value/2; its out-of-range 'likes' form
-    doesn't map and is ignored. This is treated as a *user* rating on ingest, so
-    it overrides any preliminary BRISQUE score."""
+def _exif_rating(filepath: str) -> int | None:
+    """!
+    @brief Map the file's EXIF Rating/RatingPercent to a 0–5 star rating.
+    @return Star rating, or None if neither tag is present or mappable.
+    """
     try:
         edata = exif_import.read_exif(filepath)
         raw = {}
@@ -2063,10 +2029,11 @@ def _exif_rating(filepath):
     return None
 
 
-def _exif_description(filepath):
-    """Return the file's EXIF ImageDescription (0x010e) as a stripped string, or
-    "" if absent/unreadable. Used as a description fallback when XMP has none, so
-    scanning stores it in the DB `description` column."""
+def _exif_description(filepath: str) -> str:
+    """!
+    @brief Read the file's EXIF ImageDescription as a stripped string.
+    @return The description, or "" if absent or unreadable.
+    """
     try:
         edata = exif_import.read_exif(filepath)
         for g in edata.get("groups", []):
@@ -2079,10 +2046,11 @@ def _exif_description(filepath):
     return ""
 
 
-def _read_xp_fields(filepath):
-    """Read the Windows Explorer XP tags (0x9c9b-0x9c9f) as strings. Returns a
-    dict with any of: title, comment, author, keywords, subject (missing keys
-    absent). Best-effort; never raises."""
+def _read_xp_fields(filepath: str) -> dict:
+    """!
+    @brief Read the Windows Explorer XP EXIF tags.
+    @return Dict with any present keys: title, comment, author, keywords, subject.
+    """
     out = {}
     names = {"XPTitle": "title", "XPComment": "comment", "XPAuthor": "author",
              "XPKeywords": "keywords", "XPSubject": "subject"}
@@ -2100,27 +2068,15 @@ def _read_xp_fields(filepath):
     return out
 
 
-def _ingest_xp(filepath, tags, desc):
-    """Fold the Windows XP tags into (tags, description, analysis) at scan time,
-    per the project's routing:
-      * XPKeywords -> split on ';'/',' and merged into the existing `tags` list
-        (the single files.tags store), deduped. No separate tag field.
-      * XPComment -> fills the description only when it's otherwise empty, kept as
-        plain text so every existing reader of files.description still works.
-      * XPComment / XPSubject -> recorded as provenance under an 'xp' key in the
-        analysis blob (the existing side-channel), with an 'original field'
-        marker so a rebuild can tell these came from XP tags and never
-        double-imports them. XPSubject is kept here for later use (e.g. auto box
-        naming) without polluting the visible description.
-
-    Returns (tags, description, xp_provenance | None). The caller merges the
-    provenance into whatever analysis it's already writing.
+def _ingest_xp(filepath: str, tags: list, desc: str) -> tuple[list, str, dict | None]:
+    """!
+    @brief Fold Windows XP EXIF tags into scan-time metadata.
+    @return (tags, description, xp_provenance) where provenance is None if no XP tags.
     """
     xp = _read_xp_fields(filepath)
     if not xp:
         return tags, desc, None
 
-    # Keywords -> the one canonical tags list.
     if xp.get("keywords"):
         existing = {tag_name(t).lower() for t in (tags or [])}
         for kw in re.split(r"[;,]", xp["keywords"]):
@@ -2129,11 +2085,9 @@ def _ingest_xp(filepath, tags, desc):
                 tags = (tags or []) + [make_tag(kw, confirmed=True)]
                 existing.add(kw.lower())
 
-    # Comment fills an empty description (plain text, no envelope).
     if not desc and xp.get("comment"):
         desc = xp["comment"]
 
-    # Provenance for comment/subject -> analysis side-channel.
     prov = {}
     if xp.get("comment"):
         prov["XPComment"] = xp["comment"]
@@ -2144,21 +2098,19 @@ def _ingest_xp(filepath, tags, desc):
     return tags, desc, xp_prov
 
 
-def _regions_overlap(a, b, iou_thresh=0.5, center_thresh=0.04):
-    """True if two regions (MWG dicts with center cx/cy + size w/h, normalized)
-    describe the same box. The same face labelled in MWG vs acdsee-rs vs iptcExt
-    won't have identical coordinates — rounding and top-left/center conversions
-    drift them apart — so we treat them as the same region when either their
-    boxes overlap substantially (IoU) or their centers are very close AND their
-    sizes are similar. Comparison is geometry-only; labels are reconciled by the
-    caller's source precedence."""
-    # Center proximity + similar size: cheap catch for near-identical boxes.
+def _regions_overlap(a: dict, b: dict, iou_thresh: float = 0.5,
+                     center_thresh: float = 0.04) -> bool:
+    """!
+    @brief Test whether two regions describe the same box.
+    @param a First region (normalized center-form: cx, cy, w, h).
+    @param b Second region, same form.
+    @return True if the boxes match by center proximity or IoU threshold.
+    """
     if (abs(a["cx"] - b["cx"]) <= center_thresh and
             abs(a["cy"] - b["cy"]) <= center_thresh and
             abs(a["w"] - b["w"]) <= center_thresh * 2 and
             abs(a["h"] - b["h"]) <= center_thresh * 2):
         return True
-    # IoU on the two axis-aligned boxes (convert center+size -> edges).
     ax1, ay1 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
     ax2, ay2 = a["cx"] + a["w"] / 2, a["cy"] + a["h"] / 2
     bx1, by1 = b["cx"] - b["w"] / 2, b["cy"] - b["h"] / 2
@@ -2173,11 +2125,13 @@ def _regions_overlap(a, b, iou_thresh=0.5, center_thresh=0.04):
     return union > 0 and (inter / union) >= iou_thresh
 
 
-def _merge_region(keep, incoming):
-    """Fold `incoming` into an already-kept region without losing information.
-    `keep` comes from the higher-precedence source, so its geometry and label
-    win; we only backfill fields it left empty (description/tags/uuid) and OR in
-    a confirmed=True (a box confirmed in any source is confirmed)."""
+def _merge_region(keep: dict, incoming: dict) -> dict:
+    """!
+    @brief Backfill a region's empty fields from a lower-precedence duplicate.
+    @param keep Higher-precedence region; mutated in place and returned.
+    @param incoming Lower-precedence region whose fields fill gaps in keep.
+    @return keep, with missing fields filled and confirmed OR-ed in.
+    """
     if not keep.get("class_name") or keep["class_name"] == "object":
         if incoming.get("class_name") and incoming["class_name"] != "object":
             keep["class_name"] = incoming["class_name"]
@@ -2187,9 +2141,6 @@ def _merge_region(keep, incoming):
         keep["region_tags"] = incoming["region_tags"]
     if not keep.get("uuid") and incoming.get("uuid"):
         keep["uuid"] = incoming["uuid"]
-    # Only MWG-RS carries a barcode payload, so a region merged in from a legacy
-    # source can only ever add one, never contradict it. Backfilling keeps the
-    # payload when the legacy box happens to win on geometry.
     for k in ("barcode_value", "barcode_format"):
         if not keep.get(k) and incoming.get(k):
             keep[k] = incoming[k]
@@ -2201,13 +2152,12 @@ def _merge_region(keep, incoming):
     return keep
 
 
-def _merge_regions(*sources):
-    """Merge region lists from multiple standards (MWG-RS, legacy iptcExt,
-    acdsee-rs) into one deduplicated list. Sources are passed in PRECEDENCE
-    order — richest/most-authoritative first (MWG, then acdsee-rs, then legacy)
-    — so when the same box appears in several, the first source's geometry and
-    label win and later ones only backfill missing fields. We write only MWG-RS
-    back out, so this is purely an import-time reconciliation."""
+def _merge_regions(*sources: list) -> list:
+    """!
+    @brief Deduplicate region lists across metadata standards.
+    @param sources Region lists in precedence order; earlier sources win on conflict.
+    @return One merged list with overlapping boxes collapsed.
+    """
     merged = []
     for src in sources:
         for r in src or []:
@@ -2220,23 +2170,17 @@ def _merge_regions(*sources):
     return merged
 
 
-def read_metadata(filepath):
+def read_metadata(filepath: str) -> dict:
+    """!
+    @brief Read all tags, description, rating, regions and folded XMP/EXIF fields for a file.
+    @return Metadata dict; falls back to EXIF-only when no XMP is present.
+    """
     try:
         tags, desc, regions = [], "", []
         xmp_path = os.path.splitext(filepath)[0] + '.xmp'
-
-        # Read XMP from the best available source: a .xmp sidecar if present,
-        # otherwise the XMP packet embedded in the file itself (RAW/DNG/JPEG all
-        # commonly carry one). Previously we bailed to EXIF-only whenever there
-        # was no sidecar, which silently dropped embedded XMP — dc:subject,
-        # regions, acdsee, crd, everything. JXL is guarded inside the resolver.
         xmp, xmp_source, xmp_xml = xmp_import.resolve_xmp(filepath)
 
         if not xmp:
-            # No XMP anywhere, but the file may still carry an EXIF
-            # ImageDescription (0x010e) / Rating / Windows XP tags worth storing.
-            # exif_import handles the "don't parse JXL directly" caution via its
-            # candidate paths.
             xtags, xdesc, xprov = _ingest_xp(filepath, [], _exif_description(filepath))
             return {"tags": xtags, "description": xdesc,
                     "rating": _exif_rating(filepath),
@@ -2250,20 +2194,11 @@ def read_metadata(filepath):
         val  = xmp.get('Xmp.dc.subject', [])
         tags = val if isinstance(val, list) else ([val] if val else [])
 
-        # Import regions from ALL standards present and deduplicate — the same
-        # face can be tagged in more than one (MWG-RS, legacy iptcExt, ACDSee,
-        # iptcExt DataOnScreen text boxes), and we don't want either duplicates
-        # or dropped boxes. Precedence (richest first): MWG-RS, then acdsee-rs,
-        # then legacy iptcExt, then DataOnScreen (extracted on-screen text, the
-        # least authoritative). We still only write MWG-RS back out; this is
-        # import-time reconciliation only.
         try:
             acd_regions = xmp_import.read_acdsee_regions(filepath)
         except Exception as e:
             access_logger.warning(f"acdsee region fold {filepath}: {e}")
             acd_regions = []
-        # IPTC Extension DataOnScreen text regions fold into the same region
-        # store so on-screen text boxes live alongside face/object regions.
         try:
             dos_regions = xmp_import.read_dataonscreen_regions(filepath)
         except Exception as e:
@@ -2276,9 +2211,6 @@ def read_metadata(filepath):
             dos_regions,
         )
 
-        # Also try regex parse for description (more robust than pyexiv2 for this
-        # field). Work off the resolved XMP packet (sidecar OR embedded), not a
-        # sidecar-only read, so embedded-XMP files get the same treatment.
         try:
             xml = xmp_xml
             if not xml and os.path.exists(xmp_path):
@@ -2293,22 +2225,14 @@ def read_metadata(filepath):
         except Exception:
             pass
 
-        # If XMP carried no description, fall back to EXIF ImageDescription
-        # (0x010e) so scanning stores it in the DB `description` column. XMP
-        # still wins when present, since it's the field the editor writes.
         if not desc:
             desc = _exif_description(filepath)
 
-        # Fold in Windows XP tags: keywords -> the one files.tags list, comment
-        # -> empty description, comment/subject provenance -> analysis blob.
         tags, desc, xprov = _ingest_xp(filepath, tags, desc)
         analysis = _read_analysis_from_xmp(xmp_path)
         if xprov:
             analysis = {**(analysis or {}), **xprov}
 
-        # Fold in retrieval-only XMP that maps to our fields (acdsee:Caption and
-        # crd:Description -> description; acdsee:Keywords -> tags; acdsee:Rating
-        # -> rating when EXIF gave none). Best-effort — never break a scan.
         acd_rating = None
         acd_event, acd_catsets = "", ""
         try:
@@ -2317,10 +2241,6 @@ def read_metadata(filepath):
                 if kw not in tags:
                     tags.append(kw)
             if acd.get("description"):
-                # The regex path above may already have set `desc` from
-                # dc:description; folded_values can surface the same text (its
-                # description precedence includes dc). Only append when it adds
-                # something new, so a lone dc:description isn't folded twice.
                 fold_desc = acd["description"]
                 if not desc:
                     desc = fold_desc
@@ -2332,10 +2252,6 @@ def read_metadata(filepath):
         except Exception as e:
             access_logger.warning(f"acdsee fold {filepath}: {e}")
 
-        # MWG folds. mwg-coll Collections -> catalog_sets; mwg-kw hierarchical
-        # keyword leaves -> tags. These are struct-flattened under paths the
-        # generic feed_map loop can't name-match, so fold them explicitly from
-        # the raw XMP using the mwg_fields helpers.
         try:
             _raw_xmp, _ = xmp_import._read_raw_xmp(filepath)
             if _raw_xmp:
@@ -2356,11 +2272,6 @@ def read_metadata(filepath):
         if rating is None:
             rating = acd_rating
 
-        # Artist sources, in precedence order: dc:creator, then IPTC Extension
-        # ArtworkCreator / Creator(Name). dc:language -> language. Stored as
-        # comma-joined strings since all allow multiple; empty = unknown. We
-        # union the sources (de-duped, order-preserving) rather than let one win,
-        # since a file can name the same person in dc and iptcExt.
         artist, language = "", ""
         try:
             dcx = xmp_import.dc_extras(filepath)
@@ -2376,23 +2287,18 @@ def read_metadata(filepath):
         except Exception as e:
             access_logger.warning(f"dc_extras {filepath}: {e}")
 
-        # AI-generation marker from IPTC Extension (AIPrompt*/AISystem* or a
-        # synthetic DigitalSourceType). Simple boolean; best-effort.
         ai_generated = False
         try:
             ai_generated = xmp_import.is_ai_generated(filepath)
         except Exception as e:
             access_logger.warning(f"is_ai_generated {filepath}: {e}")
 
-        # IPTC Extension ModelAge -> model_age column (minimum when several).
         model_age = None
         try:
             model_age = xmp_import.iptcext_model_age(filepath)
         except Exception as e:
             access_logger.warning(f"model_age {filepath}: {e}")
 
-        # IPTC Extension PersonInImage -> persons column, and folded into tags
-        # (flat names, no boxes) so tag search finds them too.
         persons = ""
         try:
             plist = xmp_import.iptcext_persons(filepath)
@@ -2403,9 +2309,6 @@ def read_metadata(filepath):
         except Exception as e:
             access_logger.warning(f"persons {filepath}: {e}")
 
-        # PRISM extras: Genre -> genre column, HasAlternative/IsAlternativeOf ->
-        # alt_of column, PageCount -> page_count. (prism:Keyword -> tags is
-        # already folded via folded_values above.)
         genre, alt_of, page_count = "", "", None
         try:
             px = xmp_import.prism_extras(filepath)
@@ -2450,35 +2353,30 @@ def read_metadata(filepath):
 # column and the `album_members` table are caches rebuilt from it, which is what
 # makes a library survive being copied to a new system.
 
-def _sync_album_cache(rel_path, albums):
-    """Point the DB caches at `albums` for one file. Does NOT commit — callers
-    batch their commits (write_metadata and the scanner both do)."""
-    names = []
-    seen = set()
-    for a in (albums or []):
-        s = str(a).strip()
-        if s and s not in seen:
-            seen.add(s)
-            names.append(s)
+def _sync_album_cache(rel_path: str, albums: list) -> None:
+    """!
+    @brief Point the DB album caches (files.albums + album_members) at `albums` for one file.
+    @note Does not commit; callers batch their commits.
+    """
+    names = list(dict.fromkeys(
+        s for a in (albums or []) if (s := str(a).strip())))
     db = _db()
     db.execute("UPDATE files SET albums=? WHERE rel_path=?",
                (json.dumps(names), rel_path))
-    # Rewrite this file's membership rows wholesale — simpler and less
-    # error-prone than diffing, and the row count per file is tiny.
     db.execute("DELETE FROM album_members WHERE rel_path=?", (rel_path,))
     now = time.time()
     for n in names:
-        # Auto-create the album row on first sight so albums that arrive purely
-        # from a sidecar (e.g. a library copied in from another machine) show up
-        # in the album list without any manual step.
         db.execute("INSERT OR IGNORE INTO albums(name, description, cover, created) "
                    "VALUES (?,'','',?)", (n, now))
         db.execute("INSERT OR IGNORE INTO album_members(album, rel_path, added) "
                    "VALUES (?,?,?)", (n, rel_path, now))
 
 
-def _file_albums(rel_path):
-    """Album names for one file, from the DB cache."""
+def _file_albums(rel_path: str) -> list:
+    """!
+    @brief Album names for one file, from the DB cache.
+    @return List of album names, or [] if none/unreadable.
+    """
     row = _db().execute("SELECT albums FROM files WHERE rel_path=?",
                         (rel_path,)).fetchone()
     if not row:
@@ -2489,11 +2387,11 @@ def _file_albums(rel_path):
         return []
 
 
-def _set_file_albums(rel_path, albums):
-    """Write a file's album list through to its XMP sidecar (and the cache).
-
-    Goes via write_metadata so the rest of the packet (tags, regions, analysis,
-    pose…) is preserved rather than clobbered."""
+def _set_file_albums(rel_path: str, albums: list) -> bool:
+    """!
+    @brief Write a file's album list through to its XMP sidecar and the DB cache.
+    @return True on success, False if the file is missing.
+    """
     fp = get_safe_path(MEDIA_DIR, rel_path)
     if not fp or not os.path.exists(fp):
         return False
@@ -2505,43 +2403,53 @@ def _set_file_albums(rel_path, albums):
         page_count=meta.get("page_count"), albums=albums)
 
 
-def _album_add(rel_paths, album):
-    """Add many files to one album. Returns the number actually changed."""
-    album = str(album).strip()
-    if not album:
-        return 0
+def _album_apply(rel_paths: list, transform) -> int:
+    """!
+    @brief Apply a membership change to many files, writing only those that change.
+    @param transform Maps a file's current album list to its new one.
+    @return Number of files actually changed.
+    """
     n = 0
     for rp in rel_paths:
         cur = _file_albums(rp)
-        if album in cur:
-            continue                     # already a member; nothing to write
-        if _set_file_albums(rp, cur + [album]):
+        new = transform(cur)
+        if new != cur and _set_file_albums(rp, new):
             n += 1
+    return n
+
+
+def _album_add(rel_paths: list, album: str) -> int:
+    """!
+    @brief Add many files to one album.
+    @return Number of files actually changed.
+    """
+    album = str(album).strip()
+    if not album:
+        return 0
+    n = _album_apply(rel_paths, lambda cur: cur if album in cur else cur + [album])
     _db().execute("INSERT OR IGNORE INTO albums(name, description, cover, created) "
                   "VALUES (?,'','',?)", (album, time.time()))
     _db().commit()
     return n
 
 
-def _album_remove(rel_paths, album):
-    """Remove many files from one album. Returns the number actually changed."""
+def _album_remove(rel_paths: list, album: str) -> int:
+    """!
+    @brief Remove many files from one album.
+    @return Number of files actually changed.
+    """
     album = str(album).strip()
-    n = 0
-    for rp in rel_paths:
-        cur = _file_albums(rp)
-        if album not in cur:
-            continue
-        if _set_file_albums(rp, [a for a in cur if a != album]):
-            n += 1
+    n = _album_apply(rel_paths, lambda cur: [a for a in cur if a != album])
     _db().commit()
     return n
 
 
-def _album_list():
-    """Every album with its member count and a cover, newest-populated first.
-
-    The cover is the album's explicit cover when set and still present,
-    otherwise the first member by path so the list always has a thumbnail."""
+def _album_list() -> list:
+    """!
+    @brief List every album with its member count and a cover thumbnail.
+    @return Album dicts (name, description, cover, count, created); cover falls
+            back to the first member when unset or stale.
+    """
     rows = _db().execute("""
         SELECT a.name, a.description, a.cover, a.created,
                COUNT(m.rel_path) AS n
@@ -2554,7 +2462,6 @@ def _album_list():
     for r in rows:
         cover = r["cover"] or ""
         if cover:
-            # Drop a stale cover (file deleted / moved) rather than serving a 404.
             ok = _db().execute(
                 "SELECT 1 FROM album_members WHERE album=? AND rel_path=?",
                 (r["name"], cover)).fetchone()
@@ -2570,49 +2477,36 @@ def _album_list():
     return out
 
 
-def write_metadata(filepath, tags, description, regions, analysis=None, flag=None, pose=None, page_count=None,
-                   albums=None, anim_delays=None):
+def write_metadata(filepath: str, tags: list, description: str, regions: list,
+                   analysis: dict | None = None, flag: dict | None = None,
+                   pose: dict | None = None, page_count: int | None = None,
+                   albums: list | None = None, anim_delays: dict | None = None) -> bool:
+    """!
+    @brief Write a file's full metadata packet to its XMP sidecar and DB row atomically.
+    @param pose Pass {"clear": True} to delete a stored skeleton; None preserves the existing one.
+    @param albums None preserves current membership; an explicit list (incl. []) replaces it.
+    @return True on success, False on failure (also recorded in the failure surface).
+    """
     try:
         try:
             _meta_cache_drop(
-                os.path.relpath(filepath, MEDIA_DIR).replace('\\', '/'))
+                _rel(filepath))
         except Exception:
             pass
         _sync_yolo(filepath, regions)
         xmp_path = os.path.splitext(filepath)[0] + '.xmp'
-        # Preserve existing album membership on an ordinary save. This one is
-        # critical: we rewrite the whole XMP packet from scratch on every write,
-        # so if a plain tag/description edit didn't re-emit the collections
-        # block, it would silently drop the image out of every album it was in.
-        # albums=None means "don't touch"; pass an explicit list (incl. []) to
-        # actually change membership.
         if albums is None:
             albums = _read_albums_from_xmp(filepath)
-        # Preserve any existing analysis/flag/pose when this is an ordinary save
-        # that didn't pass them in (tag/description/region edits).
         if analysis is None:
             analysis = _read_analysis_from_xmp(xmp_path)
         if flag is None:
             flag = _read_flag_from_xmp(xmp_path)
-        # Preserve an existing prism:PageCount unless the caller passes a new one,
-        # so ordinary edits don't drop a comic's stored page count.
         if page_count is None:
             page_count = _read_page_count_from_xmp(xmp_path)
-        # Preserve an existing skeleton when the caller passes nothing usable.
-        # IMPORTANT: treat an empty/peopleless pose ({} or {"people": []}) the
-        # same as None — otherwise a pipeline run that produced no skeleton would
-        # silently overwrite a good pose written earlier (e.g. by the manual pose
-        # button), making it look like "pose isn't being stored".
-        # EXCEPTION: an explicit {"clear": True} sentinel means "delete the stored
-        # skeleton" — this is the one way to remove a bad pose (a peopleless pose
-        # alone can't, since it's indistinguishable from "no new pose").
         if isinstance(pose, dict) and pose.get("clear"):
-            pose = None                       # drop it; don't re-read the sidecar
+            pose = None
         elif not (pose and pose.get("people")):
             pose = _read_pose_from_xmp(xmp_path)
-        # Preserve stored animation frame delays (animated JXL timing) unless the
-        # caller supplies new ones — this is the portable source of truth for a
-        # clip's duration, so an ordinary tag/region edit must not drop it.
         if anim_delays is None:
             anim_delays = _read_anim_delays_from_xmp(xmp_path)
         esc = saxutils.escape
@@ -2631,13 +2525,9 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
             mm_x += f'<mm:flag>{_b64dump(flag)}</mm:flag>'
         if pose and pose.get("people"):
             mm_x += f'<mm:pose>{_b64dump(pose)}</mm:pose>'
-        # Animation frame delays: a small JSON blob {"delays_ms":[...],
-        # "duration_ms":N,"n_frames":N} base64'd like the other mm: payloads.
-        # Lives in the file's own XMP so it survives a move and a DB wipe.
         if anim_delays and (anim_delays.get("delays_ms") or anim_delays.get("duration_ms")):
             mm_x += f'<mm:animDelays>{_b64dump(anim_delays)}</mm:animDelays>'
         mm_ns = f' xmlns:mm="{_MM_NS}"' if mm_x else ''
-        # prism:PageCount as an element (only when we have a value).
         prism_x = ""
         if page_count is not None:
             try:
@@ -2645,7 +2535,6 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
             except (TypeError, ValueError):
                 prism_x = ""
         prism_ns = f' xmlns:prism="{_PRISM_NS}"' if prism_x else ''
-        # Albums -> mwg-coll:Collections (the portable source of truth).
         coll_x, coll_ns = _build_mwg_collections_xml(albums)
         xmp = (f'<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>'
                f'<x:xmpmeta xmlns:x="adobe:ns:meta/">'
@@ -2654,12 +2543,6 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
                f'xmlns:dc="http://purl.org/dc/elements/1.1/"{reg_ns}{mm_ns}{prism_ns}{coll_ns}>'
                f'{subj}{desc_x}{reg_x}{mm_x}{prism_x}{coll_x}'
                f'</rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>')
-        # Write the sidecar ATOMICALLY. The old in-place open('w') truncated the
-        # existing XMP before writing; if anything failed mid-write (disk full,
-        # encode error, kill) the file was left truncated or empty and the
-        # image's metadata was simply gone. Write to a temp file in the same
-        # directory, then os.replace() — either the old packet survives intact or
-        # the new one lands whole, never a half of either.
         _xmp_dir = os.path.dirname(xmp_path) or "."
         _fd, _tmp_xmp = tempfile.mkstemp(suffix=".xmp.tmp", dir=_xmp_dir)
         try:
@@ -2675,7 +2558,7 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
                     os.remove(_tmp_xmp)
                 except OSError:
                     pass
-        rel = os.path.relpath(filepath, MEDIA_DIR).replace('\\','/')
+        rel = _rel(filepath)
         unconf = sum(1 for r in regions if not r.get('confirmed', True))
         analysis_txt = json.dumps(analysis) if analysis else ''
         fd = 1 if flag_on and flag.get("delete") else 0
@@ -2699,11 +2582,6 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
         _db_retry(_write_row)
         return True
     except Exception as e:
-        # This used to be a one-line log and a `False` that ~every caller threw
-        # away, so a failed metadata write looked exactly like a successful one
-        # from the UI. Now: full traceback (so the cause is diagnosable rather
-        # than just "it broke"), and the failure is recorded where something
-        # other than a log reader will see it.
         access_logger.error(
             f"write_metadata FAILED for {filepath}: {type(e).__name__}: {e}",
             exc_info=True)
@@ -2712,18 +2590,18 @@ def write_metadata(filepath, tags, description, regions, analysis=None, flag=Non
 
 
 # ── metadata-write failure surface ────────────────────────────────────────────
-# Nobody reads logs. A failed XMP write therefore has to be visible somewhere the
-# app itself looks, so the UI can flag it and a later retry can find it.
 _metadata_failures = {}
 _metadata_failures_lock = threading.Lock()
 _METADATA_FAILURE_MAX = 500
 
 
-def _record_metadata_failure(filepath, exc):
-    """Remember that an XMP write failed for this file. Best-effort and never
-    raises — it runs inside an exception handler."""
+def _record_metadata_failure(filepath: str, exc: Exception) -> None:
+    """!
+    @brief Record that an XMP write failed for a file, in memory and on its DB row.
+    @note Best-effort; never raises (runs inside an exception handler).
+    """
     try:
-        rel = os.path.relpath(filepath, MEDIA_DIR).replace('\\', '/')
+        rel = _rel(filepath)
     except Exception:
         rel = str(filepath)
     entry = {"rel_path": rel, "error": f"{type(exc).__name__}: {exc}",
@@ -2735,20 +2613,21 @@ def _record_metadata_failure(filepath, exc):
             _metadata_failures[rel] = entry
     except Exception:
         pass
-    # Also mark the row so the gallery can render a warning badge without
-    # consulting in-process state (survives a restart; DB is the durable copy).
     try:
         _db().execute(
             "UPDATE files SET metadata_error=? WHERE rel_path=?",
             (entry["error"], rel))
         _db().commit()
     except Exception:
-        pass          # column may not exist yet on an old DB; log already fired
+        pass
 
 
-def _clear_metadata_failure(filepath, defer_commit=False):
+def _clear_metadata_failure(filepath: str, defer_commit: bool = False) -> None:
+    """!
+    @brief Clear a recorded metadata-write failure for a file.
+    """
     try:
-        rel = os.path.relpath(filepath, MEDIA_DIR).replace('\\', '/')
+        rel = _rel(filepath)
     except Exception:
         return
     with _metadata_failures_lock:
@@ -2759,7 +2638,6 @@ def _clear_metadata_failure(filepath, defer_commit=False):
         if not defer_commit:
             _db().commit()
     except Exception:
-        # Even on failure, don't walk away holding the lock.
         if not defer_commit:
             try:
                 _db().rollback()
@@ -2767,8 +2645,11 @@ def _clear_metadata_failure(filepath, defer_commit=False):
                 pass
 
 
-def metadata_failures():
-    """Current unresolved metadata-write failures, newest first."""
+def metadata_failures() -> list:
+    """!
+    @brief Current unresolved metadata-write failures, newest first.
+    @return List of failure entries sorted by time descending.
+    """
     with _metadata_failures_lock:
         return sorted(_metadata_failures.values(),
                       key=lambda e: e["when"], reverse=True)
@@ -3781,7 +3662,7 @@ def _scan_comics():
     for root, dirs, files in os.walk(MEDIA_DIR):
         dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'runs']
         if 'comic.json' in files:
-            rel = os.path.relpath(root, MEDIA_DIR).replace('\\', '/')
+            rel = _rel(root)
             if rel == '.':
                 continue   # don't treat the whole library as one comic
             data = _load_comic_json(rel)
@@ -4419,7 +4300,7 @@ def api_exif_write():
     if not isinstance(patch, dict):
         return jsonify({"success": False, "error": "patch must be an object"}), 400
     try:
-        rel = os.path.relpath(fp, MEDIA_DIR).replace("\\", "/")
+        rel = _rel(fp)
         # Snapshot the current values of the fields about to change so the
         # changelog can record old -> new for undo (ctrl+z). Only the tags in
         # the patch are read back; ImageHistory itself is excluded (it's derived).
@@ -4503,7 +4384,7 @@ def api_exif_history():
     fp, err = _resolve_media(data.get("filename", ""))
     if err:
         return err
-    rel = os.path.relpath(fp, MEDIA_DIR).replace("\\", "/")
+    rel = _rel(fp)
     include_undone = bool(data.get("include_undone"))
     return jsonify({"success": True,
                     "history": _history_entries(rel, include_undone)})
@@ -4516,7 +4397,7 @@ def api_exif_undo():
     fp, err = _resolve_media(data.get("filename", ""))
     if err:
         return err
-    rel = os.path.relpath(fp, MEDIA_DIR).replace("\\", "/")
+    rel = _rel(fp)
     entry = _history_undo(rel)
     if not entry:
         return jsonify({"success": True, "reverted": None, "note": "nothing to undo"})
@@ -4529,7 +4410,7 @@ def api_exif_redo():
     fp, err = _resolve_media(data.get("filename", ""))
     if err:
         return err
-    rel = os.path.relpath(fp, MEDIA_DIR).replace("\\", "/")
+    rel = _rel(fp)
     entry = _history_redo(rel)
     if not entry:
         return jsonify({"success": True, "reapplied": None, "note": "nothing to redo"})
@@ -4581,7 +4462,7 @@ def api_raw_info():
     fp, err = _resolve_media(data.get("filename", ""))
     if err:
         return err
-    rel = os.path.relpath(fp, MEDIA_DIR).replace("\\", "/")
+    rel = _rel(fp)
     uid = _raw_uid_for_image(rel)
     row = _raw_by_uid(uid) if uid else None
     return jsonify({"success": True, "has_raw": bool(row),
@@ -5296,7 +5177,7 @@ def _run_upload():
         store_name = mt.stored_name(fname)
         store_ext  = os.path.splitext(store_name)[1].lower()
         store_path = os.path.join(tdir, store_name)
-        rel_path   = os.path.relpath(store_path, MEDIA_DIR).replace('\\', '/')
+        rel_path   = _rel(store_path)
         out        = os.path.join(tmp, "out" + store_ext)
 
         if os.path.exists(store_path):
@@ -5339,7 +5220,7 @@ def _run_upload():
             store_name = base + mt.ANIM_VIDEO_EXT
             store_ext  = mt.ANIM_VIDEO_EXT
             store_path = os.path.join(tdir, store_name)
-            rel_path   = os.path.relpath(store_path, MEDIA_DIR).replace('\\', '/')
+            rel_path   = _rel(store_path)
             out        = os.path.join(tmp, "out" + store_ext)
             if os.path.exists(store_path):
                 return jsonify({"success": False, "error_code": "filename_exists",
@@ -5952,7 +5833,7 @@ def api_move():
         for ext in mt.related_exts(old_path):
             src, dst = ob + ext, nb + ext
             if os.path.exists(src): shutil.move(src, dst)
-        new_rel = os.path.relpath(new_path, MEDIA_DIR).replace('\\','/')
+        new_rel = _rel(new_path)
         # A book's rel_path is its primary key across six tables (books,
         # book_authors, book_sections, book_chunks, book_progress,
         # book_bookmarks). Moving the file without repointing them silently
@@ -7327,7 +7208,7 @@ def _known_context(fp, meta=None):
     filename stem, and folder path. Returns a dict consumed by run_pipeline."""
     if meta is None:
         meta = read_metadata(fp)
-    rel = os.path.relpath(fp, MEDIA_DIR).replace("\\", "/")
+    rel = _rel(fp)
     folder = os.path.dirname(rel)
     stem = os.path.splitext(os.path.basename(rel))[0]
     tag_names = [tag_name(t) for t in meta.get("tags", [])]
@@ -9292,7 +9173,7 @@ def _music_index_background(force=False):
             for f in files:
                 if os.path.splitext(f)[1].lower() in mi.MUSIC_EXTS:
                     ap = os.path.join(root, f)
-                    rp = os.path.relpath(ap, MEDIA_DIR).replace('\\', '/')
+                    rp = _rel(ap)
                     paths.append((rp, ap))
         music_state["total"] = len(paths)
         music_state["indexed"] = 0
