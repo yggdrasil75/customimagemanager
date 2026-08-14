@@ -91,7 +91,19 @@ def _fresh_config(opts):
     """Clear any loaded user config and return the scoped-options context
     manager to apply `opts` for the call. Caller uses it as a `with` block."""
     _gconfig.clear()
-    return _gconfig.apply(_opts_to_kvlist(opts))
+    return _gconfig.apply(_DEFAULT_INCLUDES + _opts_to_kvlist(opts))
+
+
+# Ask extractors that gate extra metadata behind an "includes" list to hand it
+# over — most importantly `notes` (translation/annotation boxes on e621,
+# danbooru, gelbooru, …), which is what the "regions" mapping target consumes.
+# Without this the field never appears in discovery and is never populated at
+# fetch, so a regions mapping would silently produce nothing. Set before user
+# opts so a site that names a different include, or a user who wants to turn it
+# off, can override it.
+_DEFAULT_INCLUDES = [
+    (("extractor",), "metadata", "notes,pools,tags"),
+]
 
 
 def _flatten(obj, prefix=""):
@@ -165,7 +177,7 @@ def download(url, dest, opts=None):
     ]
     with _lock:
         _gconfig.clear()
-        with _gconfig.apply(pin + _opts_to_kvlist(opts)):
+        with _gconfig.apply(_DEFAULT_INCLUDES + pin + _opts_to_kvlist(opts)):
             job = DownloadJob(url)
             job.run()
             err = job.exception
@@ -200,25 +212,146 @@ def _read_sidecar(media_path):
 
 
 def apply_mapping(meta, mapping):
-    """Turn a gallery-dl metadata dict into the library's own packet using a
-    saved per-site mapping: {"tags": "<field>", "description": "<field>", ...}.
+    """Turn a gallery-dl metadata dict into the library's ingest packet using a
+    saved per-site mapping of {source_field: target}.
 
-    A mapped tags field that is a list becomes the tag list; a scalar is split
-    on commas/whitespace. description/other targets are stringified. Unmapped
-    or missing source fields are simply skipped."""
-    out = {"tags": [], "description": ""}
-    for target, src in (mapping or {}).items():
-        if not src or src not in meta:
+    `target` is one of:
+      "tags"        - source becomes tags. A list is used as-is; a scalar is
+                      split on commas/whitespace. Multiple sources mapped to
+                      "tags" are concatenated (deduped, order preserved).
+      "description" - source is appended to the description (newline-joined when
+                      several sources map here). Non-str is JSON-stringified.
+      "regions"     - source is a list of booru "note" dicts
+                      ({x,y,width,height,body}); each becomes a normalized region
+                      box (cx/cy/w/h in 0..1 + the note text as its description).
+                      Needs the post's own width/height to normalize; those are
+                      read from meta ("width"/"height", or "image_width"/... ).
+      "exif:<Tag>"  - source is written to the named EXIF tag (e.g.
+                      "exif:Artist", "exif:ImageDescription"). Collected into an
+                      "exif" patch dict {TagName: value} that the ingest side
+                      hands to exif_export.write_exif(), which validates the tag,
+                      coerces the type, and silently skips unknown/read-only
+                      tags. This opens up ~all of the EXIF schema as targets.
+      "xmp:<Token>" - source is written to the named XMP property (e.g.
+                      "xmp:Xmp.dc.creator", "xmp:dc.rights"). Collected into an
+                      "xmp" patch dict {token: value} handed to
+                      xmp_export.write_xmp(), which validates against the schema,
+                      coerces by type, and MERGES into the sidecar the core
+                      write already produced. Opens up ~all of the XMP schema
+                      (dc, iptcCore, iptcExt, cc, prism, …) as targets.
+                      (iptc: is reserved for when an IPTC writer exists.)
+      anything else - passthrough: stored under that key in the packet verbatim,
+                      so extra booru fields can ride along untouched.
+
+    Every discovered field can therefore be routed somewhere (or left unmapped,
+    which just skips it). Unknown/missing source fields are skipped, never fatal.
+    """
+    out = {"tags": [], "description": "", "regions": [], "exif": {}, "xmp": {}}
+    descs = []
+    for src, target in (mapping or {}).items():
+        if not src or not target or target == "ignore" or src not in meta:
             continue
         val = meta[src]
         if target == "tags":
-            if isinstance(val, list):
-                out["tags"] = [str(t).strip() for t in val if str(t).strip()]
-            else:
-                out["tags"] = [t for t in str(val).replace(",", " ").split() if t]
+            out["tags"] += _as_tags(val)
+        elif target == "description":
+            descs.append(val if isinstance(val, str) else json.dumps(val,
+                         ensure_ascii=False))
+        elif target == "regions":
+            out["regions"] += _notes_to_regions(val, meta)
+        elif target.startswith("exif:"):
+            tag = target[len("exif:"):]
+            if tag:
+                # write_exif wants scalars; join lists (booru tag lists) into a
+                # space-separated string, leave scalars as-is for it to coerce.
+                out["exif"][tag] = (" ".join(str(v) for v in val)
+                                    if isinstance(val, list) else val)
+        elif target.startswith("xmp:"):
+            tok = target[len("xmp:"):]
+            if tok:
+                # write_xmp coerces per the property's type (list vs scalar vs
+                # lang-alt), so pass the raw value through unchanged.
+                out["xmp"][tok] = val
         else:
-            out[target] = val if isinstance(val, str) else json.dumps(val)
+            out[target] = val if isinstance(val, str) else json.dumps(val,
+                          ensure_ascii=False)
+
+    # dedupe tags, preserve first-seen order
+    seen, deduped = set(), []
+    for t in out["tags"]:
+        if t not in seen:
+            seen.add(t); deduped.append(t)
+    out["tags"] = deduped
+    if descs:
+        out["description"] = "\n".join(d for d in descs if d)
+    # drop empty structural keys so they don't override existing file metadata
+    if not out["regions"]:
+        out.pop("regions")
+    if not out["exif"]:
+        out.pop("exif")
+    if not out["xmp"]:
+        out.pop("xmp")
     return out
+
+
+def _as_tags(val):
+    """A source value → list of tag strings."""
+    if isinstance(val, list):
+        return [str(t).strip() for t in val if str(t).strip()]
+    return [t for t in str(val).replace(",", " ").split() if t]
+
+
+def _notes_to_regions(notes, meta):
+    """Convert a list of booru note/translation dicts into region boxes.
+
+    Booru notes give pixel coords {x, y, width, height, body} against the full
+    image; the app's regions are normalized center-form (cx, cy, w, h in 0..1)
+    with a text description. We normalize using the post's own pixel dimensions
+    (several key spellings seen across sites). Notes without usable geometry are
+    skipped rather than emitted at bad coordinates.
+    """
+    if not isinstance(notes, list):
+        return []
+    iw = _first_num(meta, ("width", "image_width", "file.width", "file_width"))
+    ih = _first_num(meta, ("height", "image_height", "file.height", "file_height"))
+    if not iw or not ih:
+        return []  # can't place boxes without image dimensions
+    regions = []
+    for n in notes:
+        if not isinstance(n, dict):
+            continue
+        x = _num(n.get("x")); y = _num(n.get("y"))
+        w = _num(n.get("width")); h = _num(n.get("height"))
+        if None in (x, y, w, h) or w <= 0 or h <= 0:
+            continue
+        body = n.get("body") or n.get("text") or ""
+        regions.append({
+            "cx": max(0.0, min(1.0, (x + w / 2) / iw)),
+            "cy": max(0.0, min(1.0, (y + h / 2) / ih)),
+            "w":  max(0.0, min(1.0, w / iw)),
+            "h":  max(0.0, min(1.0, h / ih)),
+            "class_name": "translation",
+            "region_name": (str(body)[:60] or "note"),
+            "region_desc": str(body),
+            "confirmed": True,
+        })
+    return regions
+
+
+def _num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_num(meta, keys):
+    for k in keys:
+        if k in meta:
+            n = _num(meta[k])
+            if n:
+                return n
+    return None
 
 
 if __name__ == "__main__":
@@ -230,12 +363,57 @@ if __name__ == "__main__":
          "note": {"body": "hi"}}
     fm = _flatten(m)
     assert fm["note.body"] == "hi"
-    mapped = apply_mapping(fm, {"tags": "tag_string", "description": "rating"})
+    mapped = apply_mapping(fm, {"tag_string": "tags", "rating": "description"})
     assert mapped["tags"] == ["1girl", "solo", "blue_sky"], mapped
     assert mapped["description"] == "s", mapped
 
     assert apply_mapping({"tags": ["a", "b"]}, {"tags": "tags"})["tags"] == ["a", "b"]
-    assert apply_mapping({}, {"tags": "nope"})["tags"] == []
+    assert apply_mapping({}, {"nope": "tags"})["tags"] == []
+    assert apply_mapping({"x": "1"}, {"x": "ignore"}) == {"tags": [], "description": ""}
+
+    # multiple sources → tags: concatenated + deduped, order preserved
+    multi = apply_mapping(
+        {"a": "1girl solo", "b": ["solo", "sky"]},
+        {"a": "tags", "b": "tags"})
+    assert multi["tags"] == ["1girl", "solo", "sky"], multi
+
+    # multiple sources → description: newline-joined
+    dd = apply_mapping({"c": "char note", "d": "artist note"},
+                       {"c": "description", "d": "description"})
+    assert dd["description"] == "char note\nartist note", dd
+
+    # passthrough target keeps arbitrary fields
+    pt = apply_mapping({"src": "http://x/y"}, {"src": "source_url"})
+    assert pt["source_url"] == "http://x/y", pt
+
+    # exif: target collects into an exif patch; list source is space-joined
+    ex = apply_mapping({"author": "bob", "chars": ["a", "b"]},
+                       {"author": "exif:Artist", "chars": "exif:XPKeywords"})
+    assert ex["exif"] == {"Artist": "bob", "XPKeywords": "a b"}, ex
+    # no exif mappings -> no exif key
+    assert "exif" not in apply_mapping({"a": "1"}, {"a": "tags"})
+
+    # xmp: target collects into an xmp patch, raw value preserved for write_xmp
+    xm = apply_mapping({"artist": "bob", "chars": ["a", "b"]},
+                       {"artist": "xmp:Xmp.dc.creator", "chars": "xmp:dc.subject"})
+    assert xm["xmp"] == {"Xmp.dc.creator": "bob", "dc.subject": ["a", "b"]}, xm
+    assert "xmp" not in apply_mapping({"a": "1"}, {"a": "tags"})
+
+    # notes → regions: e621-style {x,y,width,height,body} normalized to cx/cy/w/h
+    notes_meta = {
+        "width": 100, "height": 200,
+        "notes": [{"x": 10, "y": 20, "width": 30, "height": 40, "body": "hi"},
+                  {"x": 0, "y": 0, "width": 0, "height": 5}],  # bad geom -> skip
+    }
+    rr = apply_mapping(notes_meta, {"notes": "regions"})
+    assert len(rr["regions"]) == 1, rr
+    r = rr["regions"][0]
+    assert abs(r["cx"] - 0.25) < 1e-9 and abs(r["cy"] - 0.20) < 1e-9, r
+    assert abs(r["w"] - 0.30) < 1e-9 and abs(r["h"] - 0.20) < 1e-9, r
+    assert r["region_desc"] == "hi" and r["class_name"] == "translation", r
+    # no dimensions -> no regions, and empty regions key is dropped
+    assert "regions" not in apply_mapping({"notes": [{"x":1,"y":1,"width":1,"height":1}]},
+                                          {"notes": "regions"})
 
     kv = _opts_to_kvlist(["extractor.danbooru.username=me", "bad", "n=5",
                           "flag=true"])

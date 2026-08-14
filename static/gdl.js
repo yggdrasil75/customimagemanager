@@ -1,10 +1,52 @@
 // gallery-dl ingest UI. Talks to /api/gdl/*.
 // Flow: paste URL -> "Check fields" discovers the site's metadata fields (no
-// download) -> pick/confirm which field feeds tags/description -> "Fetch"
-// downloads and queues each file through the normal upload pipeline.
+// download) -> for EACH field pick where it goes (ignore/tags/description/
+// regions/custom) -> "Fetch" downloads and queues each file through the normal
+// upload pipeline.
 
 let _gdlFields = [];   // current site's available fields
 let _gdlSite   = "";   // current site's extractor category
+let _gdlTargetOpts = null;  // cached <option> HTML for the target dropdowns
+let _gdlXmpTokens  = [];    // all XMP tokens, for the per-row datalist typeahead
+
+// Base targets every field can go to. EXIF tags are appended (grouped) and an
+// "XMP property…" sentinel is added; picking it reveals a token typeahead.
+const _GDL_TARGETS = [
+  ['ignore', 'Ignore'],
+  ['tags', 'Tags'],
+  ['description', 'Description'],
+  ['regions', 'Regions (translation/note boxes)'],
+];
+const _GDL_XMP_SENTINEL = '__xmp__';
+
+// Build (and cache) the shared <option> markup for a target <select>: the base
+// targets, an <optgroup> of writable EXIF tags ("exif:<Tag>"), and an "XMP
+// property…" sentinel. Also caches the flat XMP token list for the datalist.
+async function _gdlTargetOptionsHTML() {
+  if (_gdlTargetOpts !== null) return _gdlTargetOpts;
+  let base = _GDL_TARGETS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
+  let exif = '';
+  try {
+    const t = await fetch('/api/gdl/targets').then(r => r.json()).catch(() => null);
+    for (const g of (t?.exif_groups || [])) {
+      const opts = g.tags.map(tag =>
+        `<option value="exif:${tag}">${tag}</option>`).join('');
+      exif += `<optgroup label="EXIF · ${g.group}">${opts}</optgroup>`;
+    }
+    for (const g of (t?.xmp_groups || [])) _gdlXmpTokens.push(...(g.tokens || []));
+    // one shared datalist for every row's XMP token input
+    if (_gdlXmpTokens.length && !document.getElementById('gdl_xmp_tokens')) {
+      const dl = document.createElement('datalist');
+      dl.id = 'gdl_xmp_tokens';
+      dl.innerHTML = _gdlXmpTokens.map(t => `<option value="${t}">`).join('');
+      document.body.appendChild(dl);
+    }
+  } catch (_) { /* EXIF/XMP targets are optional; base targets still work */ }
+  const xmpOpt = _gdlXmpTokens.length
+    ? `<option value="${_GDL_XMP_SENTINEL}">XMP property…</option>` : '';
+  _gdlTargetOpts = base + exif + xmpOpt;
+  return _gdlTargetOpts;
+}
 
 function _gdlStatus(msg, kind) {
   const el = document.getElementById('gdl_status');
@@ -17,18 +59,55 @@ function _gdlStatus(msg, kind) {
 async function gdlOpen() {
   document.getElementById('gdl_modal').classList.remove('hidden');
   _gdlStatus('');
-  // Warn up front if the binary is missing, rather than at fetch time.
   const a = await fetch('/api/gdl/available').then(r => r.json()).catch(() => null);
   document.getElementById('gdl_missing').classList.toggle('hidden', !!a?.available);
 }
 
-// Fill a <select> with the discovered fields; preselect `chosen` if given, and
-// always offer a blank "(none)" so a target can be left unmapped.
-function _gdlFillSelect(id, chosen) {
-  const sel = document.getElementById(id);
-  sel.innerHTML = '<option value="">(none)</option>' +
-    _gdlFields.map(f => `<option value="${f}">${f}</option>`).join('');
-  if (chosen && _gdlFields.includes(chosen)) sel.value = chosen;
+// Guess a sensible default target for a field the first time a site is seen.
+function _gdlGuessTarget(field) {
+  const f = field.toLowerCase();
+  if (/(^|[._])notes?$/.test(f)) return 'regions';         // e621-style boxes
+  if (/tag/.test(f)) return 'tags';
+  if (/desc|caption|title|body|comment/.test(f)) return 'description';
+  return 'ignore';
+}
+
+// Build one row per field: "<field>  ->  [target dropdown] [xmp token input]".
+// `saved` is the site's stored {field: target} map (empty for a new site).
+// A target of "xmp:<Token>" selects the "XMP property…" sentinel and pre-fills
+// the token input; on save the input's value is re-prefixed with "xmp:".
+async function _gdlRenderRows(saved) {
+  const wrap = document.getElementById('gdl_rows');
+  wrap.innerHTML = '';
+  const optsHTML = await _gdlTargetOptionsHTML();
+  _gdlFields.forEach(field => {
+    const chosen = saved[field] ?? _gdlGuessTarget(field);
+    const isXmp = typeof chosen === 'string' && chosen.startsWith('xmp:');
+    const row = document.createElement('div');
+    row.className = 'flex items-center gap-2 py-0.5';
+    row.innerHTML =
+      `<code class="flex-1 text-xs text-gray-300 truncate" title="${field}">${field}</code>` +
+      `<select data-field="${field}"
+         class="gdl-map-sel w-56 p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white">
+         ${optsHTML}</select>` +
+      `<input class="gdl-xmp-tok w-52 p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white font-mono hidden"
+         list="gdl_xmp_tokens" placeholder="Xmp.dc.creator">`;
+    const sel = row.querySelector('select');
+    const tok = row.querySelector('input');
+    // reveal/hide the token input as the sentinel is (de)selected
+    sel.addEventListener('change', () => {
+      tok.classList.toggle('hidden', sel.value !== _GDL_XMP_SENTINEL);
+    });
+    if (isXmp) {
+      sel.value = _GDL_XMP_SENTINEL;
+      tok.value = chosen.slice('xmp:'.length);
+      tok.classList.remove('hidden');
+    } else {
+      sel.value = chosen;
+      if (sel.value !== chosen) sel.value = 'ignore';  // saved target no longer offered
+    }
+    wrap.appendChild(row);
+  });
 }
 
 async function gdlDiscover() {
@@ -43,23 +122,29 @@ async function gdlDiscover() {
   _gdlFields = r.fields;
   _gdlSite   = r.site;
   document.getElementById('gdl_site').textContent = r.site || '(unknown)';
-  const known = r.mapping && Object.keys(r.mapping).length > 0;
-  document.getElementById('gdl_mapping_known').classList.toggle('hidden', !known);
-  // Default guesses when the site is new: first field that looks tag/desc-ish.
-  const guessTags = _gdlFields.find(f => /tag/i.test(f)) || '';
-  const guessDesc = _gdlFields.find(f => /desc|caption|title|body/i.test(f)) || '';
-  _gdlFillSelect('gdl_map_tags', r.mapping?.tags ?? guessTags);
-  _gdlFillSelect('gdl_map_desc', r.mapping?.description ?? guessDesc);
+  const saved = r.mapping || {};
+  document.getElementById('gdl_mapping_known').classList.toggle(
+    'hidden', Object.keys(saved).length === 0);
+  await _gdlRenderRows(saved);
   document.getElementById('gdl_opts').value = (r.opts || []).join('\n');
   document.getElementById('gdl_mapping').classList.remove('hidden');
   _gdlStatus(`${_gdlFields.length} fields found.`, 'ok');
 }
 
 function _gdlCurrentMapping() {
-  return {
-    tags: document.getElementById('gdl_map_tags').value,
-    description: document.getElementById('gdl_map_desc').value,
-  };
+  const out = {};
+  document.querySelectorAll('.gdl-map-sel').forEach(sel => {
+    const field = sel.dataset.field;
+    if (!sel.value || sel.value === 'ignore') return;
+    if (sel.value === _GDL_XMP_SENTINEL) {
+      const tok = sel.parentElement.querySelector('.gdl-xmp-tok');
+      const t = (tok?.value || '').trim();
+      if (t) out[field] = 'xmp:' + t;
+    } else {
+      out[field] = sel.value;
+    }
+  });
+  return out;
 }
 
 async function gdlSaveMapping() {

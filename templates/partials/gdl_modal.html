@@ -34,23 +34,26 @@
           class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
       </div>
 
-      {# Field mapping — populated after "Check fields". First time per site you
-         pick the source field; the choice is saved and reused. #}
+      {# Field mapping — populated after "Check fields". Every field the site
+         exposes gets its own row; route each to tags/description/regions or
+         leave it ignored. Saved per-site and reused. #}
       <div id="gdl_mapping" class="hidden border-t border-gray-700 pt-3 space-y-3">
         <p class="text-xs text-gray-400">Site: <b id="gdl_site" class="text-emerald-400"></b>
           <span id="gdl_mapping_known" class="hidden text-[10px] text-gray-500">(saved mapping loaded — change and save to update)</span>
         </p>
-        <div class="grid grid-cols-2 gap-4">
-          <div>
-            <label class="text-xs text-gray-400 block mb-1">Tags come from</label>
-            <select id="gdl_map_tags"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white"></select>
+        <div>
+          <div class="flex items-center gap-2 pb-1 mb-1 border-b border-gray-700 text-[10px] uppercase tracking-wide text-gray-500">
+            <span class="flex-1">gallery-dl field</span><span class="w-56">maps to</span>
           </div>
-          <div>
-            <label class="text-xs text-gray-400 block mb-1">Description comes from</label>
-            <select id="gdl_map_desc"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white"></select>
-          </div>
+          {# one row per discovered field is injected here by gdl.js #}
+          <div id="gdl_rows" class="max-h-64 overflow-y-auto pr-1"></div>
+          <p class="text-[10px] text-gray-600 mt-1">
+            Route each field to <b class="text-gray-500">Tags</b>,
+            <b class="text-gray-500">Description</b>, an <b class="text-gray-500">EXIF</b> tag,
+            an <b class="text-gray-500">XMP</b> property (dc, iptcCore, cc, prism, …),
+            or <b class="text-gray-500">Regions</b> (note/translation boxes, e.g. e621 <code>notes</code>).
+            Unlisted fields are ignored.
+          </p>
         </div>
         <button onclick="gdlSaveMapping()"
           class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded font-bold">Save mapping for this site</button>

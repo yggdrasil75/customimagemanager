@@ -67,7 +67,7 @@ def _getmtime_loose(path):
 import book_routes
 import auth as _auth
 import exif_import, exif_export, exif_fields
-import xmp_import, xmp_fields
+import xmp_import, xmp_fields, xmp_export
 import iptc_import, iptc_fields
 import mwg_fields
 import barcodes
@@ -5475,6 +5475,26 @@ def _run_upload():
             write_metadata(store_path, meta.get("tags", []),
                            meta.get("description", ""), meta.get("regions", []),
                            anim_delays=anim_delays)
+            exif_patch = meta.get("exif")
+            if exif_patch:
+                try:
+                    exif_export.write_exif(store_path, exif_patch)
+                except Exception as e:
+                    access_logger.error(
+                        f"upload: exif patch failed for {rel_path}: {e}")
+
+            # XMP patch MUST run after write_metadata: that call rewrites the
+            # whole .xmp sidecar from scratch, so writing XMP earlier would be
+            # wiped. write_xmp merges into the existing sidecar via pyexiv2,
+            # validates each token against the schema, and skips unknown ones,
+            # so a bad mapping can't fail the upload.
+            xmp_patch = meta.get("xmp")
+            if xmp_patch:
+                try:
+                    xmp_export.write_xmp(store_path, xmp_patch)
+                except Exception as e:
+                    access_logger.error(
+                        f"upload: xmp patch failed for {rel_path}: {e}")
 
             if not _index_file(rel_path, force=True, known_sha=sha):
                 access_logger.error(f"upload: indexing failed for {rel_path}; "
@@ -5760,6 +5780,37 @@ def api_gdl_available():
     """Whether the gallery-dl binary is installed, so the UI can tell the user
     to `pip install gallery-dl` instead of failing on first use."""
     return jsonify({"success": True, "available": gdl.available()})
+
+@app.route("/api/gdl/targets")
+def api_gdl_targets():
+    """The set of destinations a gallery-dl field can map to. Beyond the three
+    ingest slots (tags/description/regions), any writable EXIF tag and any XMP
+    property the app's schemas expose are offered as "exif:<Tag>" / "xmp:<Token>".
+    Static (schema-derived), so the UI fetches it once. IPTC isn't listed: the
+    app has no general IPTC writer yet, and offering unwritable targets would be
+    a lie."""
+    exif_groups, xmp_groups = [], []
+    try:
+        for g in exif_fields.schema_dict().get("groups", []):
+            tags = [f["name"] for f in g.get("fields", []) if f.get("writable")]
+            if tags:
+                exif_groups.append({"group": g.get("title") or g.get("name") or "EXIF",
+                                    "tags": tags})
+    except Exception as e:
+        access_logger.error(f"gdl targets exif: {e}")
+    try:
+        # XMP: we expose the whole schema (not just its conservative `writable`
+        # flag) as "xmp:Xmp.<ns>.<Name>" tokens, grouped by namespace. write_xmp
+        # validates tokens, so listing all real ones is safe and useful.
+        for ns in xmp_fields.schema_dict().get("namespaces", []):
+            toks = [f"Xmp.{ns['ns']}.{f['name']}" for f in ns.get("fields", [])]
+            if toks:
+                xmp_groups.append({"group": ns.get("title") or ns["ns"],
+                                   "ns": ns["ns"], "tokens": toks})
+    except Exception as e:
+        access_logger.error(f"gdl targets xmp: {e}")
+    return jsonify({"success": True, "exif_groups": exif_groups,
+                    "xmp_groups": xmp_groups})
 
 @app.route("/api/gdl/fields", methods=["POST"])
 def api_gdl_fields():
