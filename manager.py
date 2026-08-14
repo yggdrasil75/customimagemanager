@@ -2899,16 +2899,15 @@ def _run_pose(img_bgr):
 
 # ── character / panel detectors (for the pipeline) ───────────────────────────--
 
-def _detect_obb_or_box(img_bgr, model_path, keep_classes=None,
-                       conf=0.25, as_obb=False):
-    """Run a YOLO (optionally OBB) model and return normalised center-form boxes
-    [{class_name,cx,cy,w,h}]. OBB results are reduced to their axis-aligned
-    enclosing box (the rest of the pipeline assumes upright crops). Never raises.
-
-    Coerces the input to 3-channel BGR first. YOLO's first conv layer is built
-    for exactly 3 channels, so an RGBA or grayscale array blows up with a shape
-    mismatch deep in torch rather than anything actionable. Guarding at this
-    choke point means no caller can reintroduce that, whatever read_jxl returns.
+def _detect_obb_or_box(img_bgr, model_path: str, keep_classes: set | None = None,
+                       conf: float = 0.25, as_obb: bool = False) -> list:
+    """!
+    @brief Run a YOLO (optionally OBB) model and return normalised center-form boxes.
+    @param keep_classes If set, only boxes whose class name is in it are returned.
+    @param as_obb Reduce oriented boxes to their axis-aligned enclosing box.
+    @return List of {class_name, cx, cy, w, h}; [] on empty input or failure.
+    @note Input is coerced to 3-channel uint8 BGR first, since YOLO's first conv
+          layer requires exactly 3 channels.
     """
     try:
         if img_bgr is None or getattr(img_bgr, "size", 0) == 0:
@@ -2939,8 +2938,7 @@ def _detect_obb_or_box(img_bgr, model_path, keep_classes=None,
                 cid = int(obb.cls[i].item()); name = names.get(cid, str(cid))
                 if keep_classes and name not in keep_classes:
                     continue
-                # xyxyxyxy -> axis-aligned enclosing box, normalised
-                pts = obb.xyxyxyxy[i].cpu().numpy().reshape(-1, 2)
+                pts = obb.xyxyxyxy[i].cpu().numpy().reshape(-1, 2)   # -> AA enclosing box
                 x1, y1 = pts[:, 0].min() / W, pts[:, 1].min() / H
                 x2, y2 = pts[:, 0].max() / W, pts[:, 1].max() / H
                 out.append({"class_name": name, "cx": (x1 + x2) / 2,
@@ -2959,10 +2957,11 @@ def _detect_obb_or_box(img_bgr, model_path, keep_classes=None,
         access_logger.error(f"detect({model_path}): {e}")
         return []
 
-def _run_person(img_bgr):
-    """Detect characters. Prefers a configured OBB model; else the COCO 'person'
-    class from the standard YOLO detector. Empty list lets the pipeline fall back
-    to the LLM (e.g. stylised art, non-human creatures)."""
+def _run_person(img_bgr) -> list:
+    """!
+    @brief Detect characters via a configured OBB model, else the COCO 'person' class.
+    @return Center-form boxes; [] lets the pipeline fall back to the LLM.
+    """
     obb = ((state.get("person_model") or "")
            or (state.get("person_obb_model") or "")).strip()
     if obb:
@@ -2970,28 +2969,26 @@ def _run_person(img_bgr):
         if boxes:
             return boxes
     model_path = f"yolo11{_yolo_size()}.pt"
-    return _detect_obb_or_box(img_bgr, model_path,
-                              keep_classes={"person"})
+    return _detect_obb_or_box(img_bgr, model_path, keep_classes={"person"})
 
-def _run_panels(img_bgr):
-    """Detect comic panels via a configured panel model (OBB or box). Empty if
-    none configured -> pipeline can fall back to an LLM prompt."""
+def _run_panels(img_bgr) -> list:
+    """!
+    @brief Detect comic panels via a configured panel model (OBB or box).
+    @return Center-form boxes; [] if no model configured.
+    """
     pm = (state.get("panel_model") or "").strip()
     if not pm:
         return []
     return _detect_obb_or_box(img_bgr, pm, as_obb=True)
 
 
-def _run_faces(img_bgr):
-    """Detect faces with a configured YOLO face model (e.g. yolov8n-face.pt).
-    Returns normalised boxes [{class_name:'face',cx,cy,w,h}]. Boxes below the
-    object-grouping minimum (32px) are dropped — sub-32px faces carry too little
-    signal to tag usefully. Empty if no model configured."""
+def _run_faces(img_bgr) -> list:
+    """!
+    @brief Detect faces via a configured (or size-resolved) YOLO face model.
+    @return Boxes [{class_name:'face',cx,cy,w,h}] with sub-32px faces dropped; [] if none.
+    """
     fm = (state.get("face_model") or "").strip()
     if not fm:
-        # An explicit face_model wins; otherwise resolve from the face_size
-        # setting. This used to call ensure_face_model() with no argument, which
-        # hardcoded the 'n' weights -- so the size dropdown did nothing for faces.
         fm = facelib.ensure_face_model(_face_size())   # -> ./models
     if not fm:
         return []
@@ -3017,9 +3014,11 @@ _face_dirty = {"v": False}
 _face_force = {"v": False}
 _face_wake = threading.Event()
 
-def _face_regions_for(img, rel):
-    """Detect faces + people in one image. Returns MWG-shaped region dicts,
-    all UNCONFIRMED (the user promotes them from the Faces tab)."""
+def _face_regions_for(img, rel: str) -> list:
+    """!
+    @brief Detect faces + people (+ optional custom model) in one image.
+    @return MWG-shaped region dicts, all unconfirmed (user promotes them in the Faces tab).
+    """
     out = []
     for b in _run_faces(img):
         out.append({"class_name": "face", "region_name": "",
@@ -3040,89 +3039,67 @@ def _face_regions_for(img, rel):
     return out
 
 
-def _cache_faces(rel, img, regions):
-    """Embed the face boxes and cache them. Existing rows (which may already
-    carry a confirmed name from MWG) are left alone."""
-    fboxes = [r for r in regions if r["class_name"] == "face"]
-    if not fboxes:
-        return
-    vecs, mode = facelib.embed_faces(img, fboxes)
+def _upsert_region_embeddings(table: str, rel: str, boxes: list, vecs: list,
+                              mode: str, extra=None) -> None:
+    """!
+    @brief Update-or-insert embedding rows for one image into a *_regions table.
+    @param table Target table ('face_regions' or 'body_regions').
+    @param extra Optional list, one entry per box, of {column: value} to also write (e.g. face_id).
+    @note Rows are matched on (rel_path, cx, cy) and updated in place so a rescan can
+          correct a stale vector without clobbering a confirmed name.
+    """
     db = _db()
-    for r, v in zip(fboxes, vecs):
+    for i, (r, v) in enumerate(zip(boxes, vecs)):
         if v is None:
             continue
         cx, cy = round(r["cx"], 5), round(r["cy"], 5)
         w, h   = round(r["w"], 5), round(r["h"], 5)
         blob   = np.asarray(v, np.float32).tobytes()
-        # A rescan must be able to CORRECT a row (e.g. an appearance-mode vector
-        # written before insightface was installed). INSERT OR IGNORE could not:
-        # it left the stale embedding in place forever. Update in place instead,
-        # but never clobber a confirmed name -- MWG stays the source of truth.
+        cols   = {"w": w, "h": h, "embedding": blob, "embed_mode": mode}
+        if extra and extra[i]:
+            cols.update(extra[i])
         cur = db.execute(
-            "SELECT id FROM face_regions WHERE rel_path=? AND cx=? AND cy=?",
+            f"SELECT id FROM {table} WHERE rel_path=? AND cx=? AND cy=?",
             (rel, cx, cy)).fetchone()
         if cur:
-            db.execute(
-                "UPDATE face_regions SET w=?,h=?,embedding=?,embed_mode=? WHERE id=?",
-                (w, h, blob, mode, cur[0]))
+            sets = ",".join(f"{c}=?" for c in cols)
+            db.execute(f"UPDATE {table} SET {sets} WHERE id=?",
+                       (*cols.values(), cur[0]))
         else:
-            db.execute(
-                """INSERT INTO face_regions
-                   (rel_path,cx,cy,w,h,embedding,embed_mode)
-                   VALUES (?,?,?,?,?,?,?)""",
-                (rel, cx, cy, w, h, blob, mode))
+            allcols = ["rel_path", "cx", "cy", *cols]
+            ph = ",".join("?" * len(allcols))
+            db.execute(f"INSERT INTO {table} ({','.join(allcols)}) VALUES ({ph})",
+                       (rel, cx, cy, *cols.values()))
     db.commit()
 
 
-def _cache_bodies(rel, img, regions):
-    """Embed the person boxes with re-id and cache them, then bind each body to
-    the face_regions row that sits inside it (same image). Mirrors _cache_faces:
-    existing rows are updated in place, never clobbering a confirmed name.
+def _cache_faces(rel: str, img, regions: list) -> None:
+    """! @brief Embed and cache the face boxes for one image (confirmed names untouched)."""
+    fboxes = [r for r in regions if r["class_name"] == "face"]
+    if not fboxes:
+        return
+    vecs, mode = facelib.embed_faces(img, fboxes)
+    _upsert_region_embeddings("face_regions", rel, fboxes, vecs, mode)
 
-    The face rows are looked up from the DB (they were just written by
-    _cache_faces in the same worker pass), so the association survives a crash
-    between the two calls — on the next run the bodies re-bind to the cached
-    faces by geometry.
-    """
+
+def _cache_bodies(rel: str, img, regions: list) -> None:
+    """! @brief Embed and cache person boxes, binding each to the face row it contains."""
     pboxes = [r for r in regions if r["class_name"] == "person"]
     if not pboxes:
         return
     vecs, mode = bodylib.embed_bodies(img, pboxes)
-    db = _db()
-
-    # Pull this image's cached face boxes so we can associate by containment.
-    face_rows = db.execute(
+    face_rows = _db().execute(
         "SELECT id,cx,cy,w,h FROM face_regions WHERE rel_path=?", (rel,)).fetchall()
     faces_geom = [{"id": r[0], "cx": r[1], "cy": r[2], "w": r[3], "h": r[4]}
                   for r in face_rows]
     pairs = bodylib.associate_faces_bodies(faces_geom, pboxes)  # (face_idx, body_idx)
     body_to_face = {bi: faces_geom[fi]["id"] for fi, bi in pairs}
-
-    for idx, (r, v) in enumerate(zip(pboxes, vecs)):
-        if v is None:
-            continue
-        cx, cy = round(r["cx"], 5), round(r["cy"], 5)
-        w, h   = round(r["w"], 5), round(r["h"], 5)
-        blob   = np.asarray(v, np.float32).tobytes()
-        fid    = body_to_face.get(idx)
-        cur = db.execute(
-            "SELECT id FROM body_regions WHERE rel_path=? AND cx=? AND cy=?",
-            (rel, cx, cy)).fetchone()
-        if cur:
-            db.execute(
-                "UPDATE body_regions SET w=?,h=?,embedding=?,embed_mode=?,face_id=? "
-                "WHERE id=?",
-                (w, h, blob, mode, fid, cur[0]))
-        else:
-            db.execute(
-                """INSERT INTO body_regions
-                   (rel_path,cx,cy,w,h,embedding,embed_mode,face_id)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (rel, cx, cy, w, h, blob, mode, fid))
-    db.commit()
+    extra = [{"face_id": body_to_face.get(i)} for i in range(len(pboxes))]
+    _upsert_region_embeddings("body_regions", rel, pboxes, vecs, mode, extra)
 
 
-def _mark_body_done(rel):
+def _mark_body_done(rel: str) -> None:
+    """! @brief Mark a file's body-embedding pass complete."""
     _db().execute("UPDATE files SET body_done=1 WHERE rel_path=?", (rel,))
     _db().commit()
 
@@ -3337,14 +3314,18 @@ def _recluster_bodies():
 # ── OCR ─────────────────────────────────────────────────────────────────────--
 @functools.lru_cache(maxsize=1)
 def _load_rapidocr():
+    """! @brief Memoised RapidOCR reader (ONNX, models bundled with the wheel)."""
     from rapidocr_onnxruntime import RapidOCR
     return RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)
 
 @functools.lru_cache(maxsize=1)
 def _load_easyocr():
+    """! @brief Memoised EasyOCR reader (models auto-download on first use)."""
     return easyocr.Reader(["en"], gpu=False)
 
-def _ocr_line(text, score, x1, y1, x2, y2, W, H):
+def _ocr_line(text: str, score: float, x1: float, y1: float, x2: float, y2: float,
+              W: int, H: int) -> dict:
+    """! @brief Normalise one OCR detection (pixel box → clamped center-form line dict)."""
     cx = ((x1 + x2) / 2) / max(1, W); cy = ((y1 + y2) / 2) / max(1, H)
     w = (x2 - x1) / max(1, W); h = (y2 - y1) / max(1, H)
     cb = _clamp_box({"cx": cx, "cy": cy, "w": w, "h": h}) or {"cx": cx, "cy": cy, "w": w, "h": h}
@@ -3352,11 +3333,12 @@ def _ocr_line(text, score, x1, y1, x2, y2, W, H):
             "cx": round(cb["cx"], 4), "cy": round(cb["cy"], 4),
             "w": round(cb["w"], 4), "h": round(cb["h"], 4)}
 
-def _run_ocr(img_bgr):
-    """Read text from an image. Tries RapidOCR (ONNX, models bundled) then
-    EasyOCR (auto-downloads). Returns {engine,text,lines:[{text,conf,box}]}."""
+def _run_ocr(img_bgr) -> dict:
+    """!
+    @brief Read text from an image, trying RapidOCR then EasyOCR.
+    @return {engine, text, lines:[{text,conf,box}]}; engine None if neither is installed.
+    """
     H, W = img_bgr.shape[:2]
-    # RapidOCR (preferred: lightweight onnxruntime, models ship with the wheel)
     try:
         ocr = _load_rapidocr()
         res, _ = ocr(img_bgr)
@@ -3367,7 +3349,6 @@ def _run_ocr(img_bgr):
         return {"engine": "rapidocr", "text": " ".join(l["text"] for l in lines), "lines": lines}
     except Exception as e:
         access_logger.warning(f"rapidocr unavailable: {e}")
-    # EasyOCR (auto-downloads detection + recognition models on first use)
     try:
         reader = _load_easyocr()
         lines = []
@@ -3381,12 +3362,10 @@ def _run_ocr(img_bgr):
             "note": "No OCR engine installed (pip install rapidocr_onnxruntime, or easyocr)."}
 
 
-def _barcode_model_path():
-    """YOLO pass for barcode boxes, or None when no model is configured.
-
-    None (not []) is deliberate: it means "no detector", which makes
-    barcodes.scan fall back to decoding the whole frame. An empty list would
-    mean "a detector ran and found nothing", which is a different answer.
+def _barcode_model_path() -> str:
+    """!
+    @brief Resolve the configured or auto-discovered barcode YOLO model path.
+    @return Model path, or "" if none is configured or found.
     """
     mp = (state.get("barcode_model") or "").strip()
     if mp:
@@ -3402,11 +3381,11 @@ def _barcode_model_path():
 
 
 def _barcode_detect():
-    """Detector callback for barcodes.scan, or None to use its built-in one.
-
-    None (not []) is deliberate: it means "no model", which makes scan use its
-    gradient detector. An empty list would mean "a model ran and found
-    nothing", which is a different answer and suppresses the fallback.
+    """!
+    @brief Build a detector callback for barcodes.scan.
+    @return A bgr→boxes callable, or None to make scan use its built-in gradient detector.
+    @note None (not []) is deliberate: [] would mean "a model ran and found nothing",
+          which suppresses the fallback.
     """
     mp = _barcode_model_path()
     if not mp or not os.path.exists(mp):
@@ -3415,8 +3394,11 @@ def _barcode_detect():
     return lambda bgr: _detect_obb_or_box(bgr, mp, conf=conf)
 
 
-def _run_barcodes(img_bgr, deep=True):
-    """Find and decode barcodes. Never raises."""
+def _run_barcodes(img_bgr, deep: bool = True) -> dict:
+    """!
+    @brief Find and decode barcodes; never raises.
+    @return barcodes.scan result, or an error dict with engine None on failure.
+    """
     try:
         return barcodes.scan(img_bgr, _barcode_detect(), deep=deep,
                              min_conf=float(state.get("barcode_conf", 0.25) or 0.25))
@@ -3426,18 +3408,19 @@ def _run_barcodes(img_bgr, deep=True):
                 "note": f"Barcode scan failed: {e}"}
 
 
-def _warm_models():
-    """Pre-trigger model downloads so pose/OCR weights fetch automatically in the
-    background instead of on the first user click."""
+def _warm_models() -> None:
+    """! @brief Pre-trigger pose/OCR model downloads in the background."""
     dummy = np.zeros((64, 64, 3), np.uint8)
     for fn in (lambda: _run_pose(dummy), lambda: _run_ocr(dummy)):
         try: fn()
         except Exception: pass
 
 
-def _clamp_box(b):
-    """Clamp a normalised center-form box to the image bounds. New dict or None.
-    Prevents the off-screen boxes some models occasionally emit."""
+def _clamp_box(b: dict) -> dict | None:
+    """!
+    @brief Clamp a normalised center-form box to the image bounds.
+    @return A new box dict, or None if the input is malformed or clamps to empty.
+    """
     try:
         cx, cy, w, h = float(b["cx"]), float(b["cy"]), float(b["w"]), float(b["h"])
     except (KeyError, TypeError, ValueError):
@@ -8694,7 +8677,7 @@ def api_pose():
     if not pose_data.get("people"):
         return jsonify({"success": True, "pose": pose_data,
                         "note": "No people detected (or pose model unavailable)."})
-    return jsonify({"success": True, "pose": pose})
+    return jsonify({"success": True, "pose": pose_data})
 
 @app.route("/api/pose_remove", methods=["POST"])
 def api_pose_remove():
