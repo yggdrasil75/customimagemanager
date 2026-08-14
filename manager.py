@@ -102,8 +102,8 @@ def quality_to_stars(q, blank=False):
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 app       = Flask(__name__)
 MEDIA_DIR = "media"
-THUMB_DIR = os.path.join(MEDIA_DIR, ".thumbs")
 DB_PATH   = os.path.join(MEDIA_DIR, "library.db")
+THUMB_DB  = os.path.join(MEDIA_DIR, "thumbs.db")   # disposable BLOB cache
 CFG_FILE  = "app_config.json"
 PAGE_SIZE = 200          # items per /api/list page
 
@@ -115,7 +115,7 @@ _dup_model     = DuplicateClassifier.load(DUP_MODEL_PATH)
 _last_activity = time.time()
 
 os.makedirs(MEDIA_DIR, exist_ok=True)
-os.makedirs(THUMB_DIR,  exist_ok=True)
+shutil.rmtree(os.path.join(MEDIA_DIR, ".thumbs"), ignore_errors=True)  # retired loose cache
 os.makedirs("logs",     exist_ok=True)
 
 _log_fmt = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
@@ -137,38 +137,26 @@ state = {
     "oai_key": "", "oai_model": "gpt-4o-mini",
     "oai_embed_model": "",
     "autotag_enabled": False,
-    "keep_raws": False,   # when True, uploaded camera-raw sources are stashed in
-                          # a hidden store and linked to the derived image via
-                          # RawDataUniqueID; hidden from the user for speed.
+    "keep_raws": False,
     "pipeline_tree": DEFAULT_PIPELINE,
-    "auth": {                          # user management; see auth.py for schema
+    "auth": {
         "enabled": True,
-        "mode": "local",              # "local" | "ldap" | "both"
+        "mode": "local",
         "session_days": 14,
         "ldap": {},
     },
-    "iqa_model": "brisque",        # NR-IQA model id; see iqa.MODELS
+    "iqa_model": "brisque",
     "yolo_size": "n",
-    "face_bg_enabled": False,      # background face/person boxing
-    "face_bg_custom": False,       # ALSO run our trained model in the background
-    "face_model": "",              # '' -> auto-fetch community weights at face_size
-    "face_size": "n",              # yolov11 face detector size; INDEPENDENT of
-                                   # yolo_size, which only drives the object models
-    "person_model": "",            # '' -> stock COCO YOLO 'person'
-    "face_cluster_eps": 0.0,       # 0 -> use faces.py default for the embed mode
-    "body_enabled": False,         # embed person boxes with torchreid re-id and
-                                   # cluster bodies + associate them with faces
-    "body_cluster_eps": 0.0,       # 0 -> use bodies.py default for the embed mode
-    "object_proposals": "sam",  # proposer for object discovery/grouping:
-                                   # "heuristic" | "sam". Read by /api/state and
-                                   # persisted by save_config(), so it must exist
-                                   # up front -- the call sites use state.get()
-                                   # with a "heuristic" fallback, so that is the
-                                   # default here too.
-    "model_groups": {},            # filled in by populate_model_selector() at
-                                   # startup; declared here so /api/state and
-                                   # save_config() can never KeyError on a
-                                   # request that lands before/without it.
+    "face_bg_enabled": False,
+    "face_bg_custom": False,
+    "face_model": "",
+    "face_size": "n",
+    "person_model": "",
+    "face_cluster_eps": 0.0,
+    "body_enabled": False,
+    "body_cluster_eps": 0.0,
+    "object_proposals": "sam",
+    "model_groups": {},
     "pose_kind": "body",
     "pose_size": "n",
     "gdl_sites": {},
@@ -2654,8 +2642,10 @@ def metadata_failures() -> list:
         return sorted(_metadata_failures.values(),
                       key=lambda e: e["when"], reverse=True)
 
-def _sync_yolo(filepath, regions):
-    # Only CONFIRMED boxes become YOLO training labels.
+def _sync_yolo(filepath: str, regions: list) -> None:
+    """!
+    @brief Write a file's confirmed regions out as a YOLO label .txt (or remove it).
+    """
     confirmed = [r for r in regions if r.get('confirmed', True)]
     for r in confirmed:
         if r['class_name'] not in state["classes"]:
@@ -2671,58 +2661,65 @@ def _sync_yolo(filepath, regions):
             f.write(f"{cid} {r['cx']:.6f} {r['cy']:.6f} {r['w']:.6f} {r['h']:.6f}\n")
 
 # ── Thumbnails ─────────────────────────────────────────────────────────────────
-def _thumb_name(rel_path: str) -> str:
-    return rel_path.replace('/','__').replace('\\','__') + ".jpg"
+_thumbdb_local = threading.local()
 
-def _thumb_disk_path(rel_path: str) -> str:
-    """Legacy loose thumbnail location. Still read for a half-migrated library;
-    new thumbnails go into the pack under a .thumbs/ key instead."""
-    return os.path.join(THUMB_DIR, _thumb_name(rel_path))
-
-def _thumb_key(rel_path: str, mtime: float | None = None) -> str:
-    """Store key for a thumbnail. The source image's mtime is folded into the
-    key, so a regenerated source produces a NEW key and the stale thumbnail is
-    simply never looked up (and gets reclaimed as garbage on the next compact).
-    This is how freshness works without an mtime column in the location cache —
-    the cache is a pure key->offset map and stores no timestamps."""
-    base = ".thumbs/" + _thumb_name(rel_path)
-    if mtime is None:
-        return base
-    return f"{base}#{int(mtime)}"
+def _thumbdb() -> sqlite3.Connection:
+    """! @brief Thread-local connection to the thumbnail BLOB cache."""
+    conn = getattr(_thumbdb_local, 'conn', None)
+    if conn is None:
+        conn = sqlite3.connect(THUMB_DB, check_same_thread=False,
+                               timeout=DB_BUSY_TIMEOUT_MS / 1000.0)
+        conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=-32000")
+        conn.execute("CREATE TABLE IF NOT EXISTS thumbs("
+                     "rel_path TEXT PRIMARY KEY, mtime REAL, data BLOB)")
+        conn.commit()
+        _thumbdb_local.conn = conn
+        with _all_conns_lock:
+            _all_conns[id(conn)] = conn
+    return conn
 
 def _thumb_get(rel_path: str, mtime: float) -> bytes | None:
-    """Fresh cached thumbnail bytes from the disk cache, or None. Freshness is
-    by key: a mismatched mtime yields a different key that isn't present, so
-    there is no timestamp comparison and no mtime column needed."""
-    dp = _thumb_disk_path(rel_path)
+    """!
+    @brief Read cached thumbnail bytes if at least as new as the source.
+    @return JPEG bytes, or None if absent or stale.
+    """
     try:
-        if os.path.getmtime(dp) >= mtime:
-            with open(dp, 'rb') as f: return f.read()
-    except OSError:
-        pass
-    return None
+        row = _thumbdb().execute(
+            "SELECT data FROM thumbs WHERE rel_path=? AND mtime>=?",
+            (rel_path, mtime)).fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
 
 def _thumb_put(rel_path: str, data: bytes, mtime: float) -> None:
+    """! @brief Store thumbnail bytes in the cache (best-effort, upsert)."""
     try:
-        with open(_thumb_disk_path(rel_path), 'wb') as f: f.write(data)
+        db = _thumbdb()
+        db.execute("INSERT INTO thumbs(rel_path, mtime, data) VALUES(?,?,?) "
+                   "ON CONFLICT(rel_path) DO UPDATE SET mtime=excluded.mtime, "
+                   "data=excluded.data", (rel_path, mtime, data))
+        db.commit()
     except Exception:
         pass
 
 def _thumb_drop(rel_path: str) -> None:
-    """Invalidate the cached thumbnail for a source path. Called when the source
-    image changes or is removed."""
-    dp = _thumb_disk_path(rel_path)
+    """! @brief Invalidate a source file's cached thumbnail (cache + LRU)."""
     try:
-        if os.path.exists(dp): os.remove(dp)
-    except OSError: pass
+        db = _thumbdb()
+        db.execute("DELETE FROM thumbs WHERE rel_path=?", (rel_path,))
+        db.commit()
+    except Exception:
+        pass
     _thumb_lru_drop(rel_path)
 
 def _thumb_from_array(img) -> bytes | None:
-    """Encode an already-decoded image array as thumbnail JPEG bytes.
-
-    Split out of _make_thumb_bytes so callers that have just decoded the image
-    for another reason — indexing, in particular — can produce the thumbnail
-    without decoding it a second time."""
+    """!
+    @brief Encode an already-decoded image array as thumbnail JPEG bytes.
+    @return JPEG bytes (max dim 400px), or None if img is None.
+    """
     if img is None:
         return None
     h, w = img.shape[:2]
@@ -2736,25 +2733,27 @@ def _thumb_from_array(img) -> bytes | None:
 
 
 def _make_thumb_bytes(abs_path: str) -> bytes | None:
+    """! @brief Decode a file and encode its thumbnail JPEG bytes."""
     return _thumb_from_array(read_jxl(abs_path))
 
 def serve_thumb(rel_path: str, abs_path: str, mtime: float | None = None):
+    """!
+    @brief Serve a thumbnail via LRU, then BLOB cache, then on-demand generation.
+    @return A Flask JPEG response, or the raw file / 404 when no thumbnail can be made.
+    """
     if mtime is None:
         mtime = _getmtime_loose(abs_path)
 
-    # 1. In-process LRU — encoded bytes, no disk lookup, no syscall.
-    data = _thumb_lru_get(rel_path, mtime)
+    data = _thumb_lru_get(rel_path, mtime)          # 1. in-process LRU
     if data is not None:
         return send_file(io.BytesIO(data), mimetype='image/jpeg')
 
-    # 2. Disk cache
-    data = _thumb_get(rel_path, mtime)
+    data = _thumb_get(rel_path, mtime)              # 2. BLOB cache
     if data:
         _thumb_lru_put(rel_path, mtime, data)
         return send_file(io.BytesIO(data), mimetype='image/jpeg')
 
-    # 3. Generate
-    data = _make_thumb_bytes(abs_path)
+    data = _make_thumb_bytes(abs_path)              # 3. generate
     if data is None:
         raw = _read_bytes_loose(abs_path)
         if raw is None: return "", 404
@@ -2765,15 +2764,10 @@ def serve_thumb(rel_path: str, abs_path: str, mtime: float | None = None):
 
 # ── Dedup – numpy matrix hamming ───────────────────────────────────────────────
 def _find_similar_pairs(blobs: list[bytes], threshold: int) -> list[tuple[int,int]]:
-    """
-    Return all pairs (i,j), i<j, where hamming(blobs[i], blobs[j]) <= threshold.
-
-    Chunked upper-triangle scan.  Never allocates more than
-      CHUNK_ROWS × n × L*8 bytes for the XOR intermediate.
-    With CHUNK_ROWS=64, n=100k, L=8:  64 × 100k × 64 bits = 51 MB peak — safe.
-
-    The full bits matrix is n × L*8 bytes: 100k × 64 = 6.4 MB for the 8-bit pass,
-    12.8 MB for the 32-bit pass.
+    """!
+    @brief Find all index pairs whose hash blobs are within a Hamming threshold.
+    @param threshold Maximum Hamming distance for a pair to count as similar.
+    @return List of (i, j) with i < j and hamming(blobs[i], blobs[j]) <= threshold.
     """
     n = len(blobs)
     if n == 0:
@@ -2782,9 +2776,8 @@ def _find_similar_pairs(blobs: list[bytes], threshold: int) -> list[tuple[int,in
     bits = np.unpackbits(
         np.frombuffer(b''.join(blobs), dtype=np.uint8).reshape(n, L),
         axis=1
-    ).astype(np.uint8)          # (n, L*8), always fits in RAM
+    ).astype(np.uint8)
 
-    # Chunk size so XOR intermediate ≤ ~64 MB
     bits_per_row  = L * 8
     target_bytes  = 64 * 1024 * 1024
     CHUNK = max(1, min(256, target_bytes // max(1, n * bits_per_row)))
@@ -2794,25 +2787,16 @@ def _find_similar_pairs(blobs: list[bytes], threshold: int) -> list[tuple[int,in
     for i0 in range(0, n, CHUNK):
         i1  = min(i0 + CHUNK, n)
         seg = bits[i0:i1]                    # (c, L*8)
-        # Compare each row in seg against all rows with index > current row
-        # to stay in the upper triangle.
-        # We compare seg[k] against bits[i0+k+1 .. n-1].
-        # To vectorise over the whole chunk at once we compare against all of
-        # bits[i0+1 .. n-1] and then mask the lower triangle out:
-        rest  = bits[i0 + 1:]                # (n-i0-1, L*8)
+        rest  = bits[i0 + 1:]                # upper triangle: rows after i0
         if rest.shape[0] == 0:
             break
-        # (c, n-i0-1, L*8) XOR — peak memory c × (n-i0-1) × L*8 bytes
         xor  = seg[:, None, :] ^ rest[None, :, :]
         dist = xor.sum(axis=2)               # (c, n-i0-1)
 
         c = i1 - i0
         for local_k in range(c):
             global_i = i0 + local_k
-            # rest[0] corresponds to global index i0+1
-            # rest[local_k] corresponds to global index i0+local_k+1 (first valid j)
-            # We want j > global_i, i.e. rest_idx >= local_k
-            row = dist[local_k, local_k:]    # distances from global_i to global_i+1..n-1
+            row = dist[local_k, local_k:]    # distances to global_i+1 .. n-1
             hits = np.where(row <= threshold)[0]
             for h in hits.tolist():
                 pairs.append((global_i, global_i + 1 + h))
