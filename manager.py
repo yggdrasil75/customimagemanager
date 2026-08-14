@@ -79,12 +79,6 @@ except Exception:
 from pipeline import DEFAULT_PIPELINE, run_pipeline
 from templates import HTML, TRAINING_HTML
 
-try:
-    from rtmlib import Wholebody
-    _HAVE_WHOLEBODY = True
-except Exception as e:
-    _HAVE_WHOLEBODY = False
-
 import easyocr
 
 # ── NR-IQA star mapping ───────────────────────────────────────────────────────
@@ -2804,18 +2798,11 @@ def _find_similar_pairs(blobs: list[bytes], threshold: int) -> list[tuple[int,in
     return pairs
 
 def _pixel_similarity_score(diff_mean: float, threshold: float = 15.0) -> float:
-    """
-    Convert a mean absolute pixel difference (0 = identical, threshold = barely similar)
-    to a 0–1 similarity score using a log scale.
-
-    Log scaling spreads apart scores for very-similar images (where linear
-    would cluster them all near 100%) while compressing the less-interesting
-    middle range.
-
-    diff=0   → 1.0  (identical pixels)
-    diff=7.5 → ~0.59 (log midpoint)
-    diff=15  → 0.0  (at the acceptance threshold)
-    Above threshold is clamped to 0.
+    """!
+    @brief Convert a mean absolute pixel difference to a 0–1 similarity score.
+    @param diff_mean Mean absolute pixel difference (0 = identical).
+    @param threshold Difference at and above which similarity is 0.
+    @return Log-scaled similarity: 1.0 at diff 0, ~0.59 at the log midpoint, 0.0 at/above threshold.
     """
     if diff_mean <= 0:
         return 1.0
@@ -2824,8 +2811,9 @@ def _pixel_similarity_score(diff_mean: float, threshold: float = 15.0) -> float:
     return 1.0 - math.log(1.0 + diff_mean) / math.log(1.0 + threshold)
 
 
-def yolo_train_worker(abs_folder, dataset_dir, yaml_path,
-                      epochs, batch, imgsz, device, base_model):
+def yolo_train_worker(abs_folder: str, dataset_dir: str, yaml_path: str,
+                      epochs: int, batch: int, imgsz: int, device, base_model: str) -> None:
+    """! @brief Run a local YOLO training subprocess and refresh the model list on completion."""
     try:
         training_logger.info("Starting LOCAL YOLO Training")
         script = ("import sys\nfrom ultralytics import YOLO\n"
@@ -2844,7 +2832,9 @@ def yolo_train_worker(abs_folder, dataset_dir, yaml_path,
         state["status_text"] = f"Training error: {e}"
         training_logger.error(e)
 
-def remote_yolo_train_worker(abs_folder, dataset_dir, config, remote_ip):
+def remote_yolo_train_worker(abs_folder: str, dataset_dir: str, config: dict,
+                             remote_ip: str) -> None:
+    """! @brief Zip the dataset, run YOLO training on a remote host, and fetch the weights back."""
     zip_p = os.path.join(abs_folder,"yolo_dataset.zip")
     try:
         state["status_text"] = f"Zipping → {remote_ip}…"
@@ -2859,14 +2849,14 @@ def remote_yolo_train_worker(abs_folder, dataset_dir, config, remote_ip):
             time.sleep(3)
             s = requests.get(f"http://{remote_ip}/api/status/{job_id}",timeout=10).json()
             if s.get('log'):
-                open("logs/training.log","w").write(s['log'])
+                with open("logs/training.log","w") as lf: lf.write(s['log'])
             if s.get('status') in ('completed','failed'): break
         if s.get('status')=='completed':
             dl = requests.get(f"http://{remote_ip}/api/download/{job_id}",timeout=60)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             td = os.path.join(abs_folder,f"runs/detect/train_remote_{ts}/weights")
             os.makedirs(td,exist_ok=True)
-            open(os.path.join(td,"best.pt"),'wb').write(dl.content)
+            with open(os.path.join(td,"best.pt"),'wb') as wf: wf.write(dl.content)
             populate_model_selector()
             state["status_text"] = "Remote training done!"
         else:
@@ -2876,35 +2866,16 @@ def remote_yolo_train_worker(abs_folder, dataset_dir, config, remote_ip):
     finally:
         if os.path.exists(zip_p): os.remove(zip_p)
 
-# ── Pose / skeleton ───────────────────────────────────────────────────────────
-COCO_KP_NAMES = ["nose","left_eye","right_eye","left_ear","right_ear",
-                 "left_shoulder","right_shoulder","left_elbow","right_elbow",
-                 "left_wrist","right_wrist","left_hip","right_hip",
-                 "left_knee","right_knee","left_ankle","right_ankle"]
-COCO_SKELETON = [[5,7],[7,9],[6,8],[8,10],[5,6],[5,11],[6,12],[11,12],
-                 [11,13],[13,15],[12,14],[14,16],[0,1],[0,2],[1,3],[2,4],[0,5],[0,6]]
-
-def _hand_edges(base):
-    chains = [[0,1,2,3,4],[0,5,6,7,8],[0,9,10,11,12],[0,13,14,15,16],[0,17,18,19,20]]
-    return [[base+a, base+b] for ch in chains for a, b in zip(ch, ch[1:])]
-
-# COCO-WholeBody-133: 0-16 body, 17-22 feet, 23-90 face, 91-111 L-hand, 112-132 R-hand
-WHOLEBODY_EDGES = (COCO_SKELETON
-                   + [[15,17],[15,18],[15,19],[16,20],[16,21],[16,22]]   # feet
-                   + [[9,91],[10,112]]                                   # wrist → hand root
-                   + _hand_edges(91) + _hand_edges(112))                 # finger chains
-WHOLEBODY_NAMES = COCO_KP_NAMES + [f"kp{i}" for i in range(17, 133)]
+# ── Pose / skeleton: extracted to pose.py ─────────────────────────────────────
+import pose
 
 @functools.lru_cache(maxsize=4)
 def _load_yolo(model_path):
-    """Memoised YOLO loader. maxsize>1 so alternating detectors (e.g. person
-    then face in one pipeline pass) don't thrash. Invalidate with
-    _load_yolo.cache_clear() when a *setting* repoints a model path."""
+    """! 
+    @brief Memoised YOLO loader; maxsize>1 so alternating detectors don't thrash.
+    @note Invalidate with _load_yolo.cache_clear() when a setting repoints a model path.
+    """
     return YOLO(model_path)
-
-@functools.lru_cache(maxsize=2)
-def _load_wholebody(mode):
-    return Wholebody(mode=mode, backend="onnxruntime", device="cpu")
 
 _SIZES = ("n", "s", "m", "l", "x")
 def _pose_size():
@@ -2921,74 +2892,10 @@ def _face_size():
     s = (state.get("face_size") or "n").lower()
     return s if s in _SIZES else "n"
 
-def _run_pose_yolo(img_bgr):
-    """Body pose via YOLO11 pose (COCO-17). Model auto-downloads on first use."""
-    model_path = f"yolo11{_pose_size()}-pose.pt"
-    base = {"model": model_path, "kind": "body",
-            "names": COCO_KP_NAMES, "edges": COCO_SKELETON, "people": []}
-    try:
-        res = _load_yolo(model_path)(img_bgr, verbose=False)
-        if not res or res[0].keypoints is None:
-            return base
-        kp = res[0].keypoints
-        xyn = kp.xyn; conf = kp.conf
-        try: xyn = xyn.cpu().numpy()
-        except Exception: xyn = np.asarray(xyn)
-        if conf is not None:
-            try: conf = conf.cpu().numpy()
-            except Exception: conf = np.asarray(conf)
-        for pi in range(xyn.shape[0]):
-            pts = []
-            for ki in range(min(17, xyn.shape[1])):
-                v = float(conf[pi, ki]) if conf is not None else 1.0
-                pts.append({"x": round(max(0.0, min(1.0, float(xyn[pi, ki, 0]))), 4),
-                            "y": round(max(0.0, min(1.0, float(xyn[pi, ki, 1]))), 4),
-                            "v": round(v, 3)})
-            if pts:
-                base["people"].append({"keypoints": pts})
-        return base
-    except Exception as e:
-        access_logger.error(f"pose(yolo): {e}")
-        return base
-
-def _run_pose_wholebody(img_bgr):
-    """Whole-body pose (133 keypoints incl. hands + face) via RTMPose / rtmlib.
-    ONNX weights auto-download on first use. Returns None if rtmlib is absent so
-    the caller can fall back to the YOLO body model."""
-    if not _HAVE_WHOLEBODY:
-        access_logger.warning(f"rtmlib not installed (whole-body pose): {e}")
-        return None
-    try:
-        mode = {"n":"lite","s":"lite","m":"balanced",
-                "l":"performance","x":"performance"}.get(_pose_size(), "balanced")
-        kpts, scores = _load_wholebody(mode)(img_bgr)
-        kpts = np.asarray(kpts); scores = np.asarray(scores)
-        H, W = img_bgr.shape[:2]
-        people = []
-        for pi in range(kpts.shape[0]):
-            pts = []
-            for ki in range(kpts.shape[1]):
-                x = float(kpts[pi, ki, 0]) / max(1, W)
-                y = float(kpts[pi, ki, 1]) / max(1, H)
-                v = float(scores[pi, ki]) if scores is not None else 1.0
-                pts.append({"x": round(max(0.0, min(1.0, x)), 4),
-                            "y": round(max(0.0, min(1.0, y)), 4), "v": round(v, 3)})
-            people.append({"keypoints": pts})
-        return {"model": f"rtmpose-wholebody({mode})", "kind": "wholebody",
-                "names": WHOLEBODY_NAMES, "edges": WHOLEBODY_EDGES, "people": people}
-    except Exception as e:
-        access_logger.error(f"pose(wholebody): {e}")
-        return None
-
 def _run_pose(img_bgr):
-    """Estimate a skeleton using the configured backend. Whole-body (RTMPose,
-    133 pts with hands/face) when selected and available; otherwise YOLO11 body
-    pose (COCO-17). Never raises."""
-    if (state.get("pose_kind") or "body").lower() == "wholebody":
-        wb = _run_pose_wholebody(img_bgr)
-        if wb is not None:
-            return wb   # else fall through to body pose
-    return _run_pose_yolo(img_bgr)
+    """! @brief Backward-compatible shim; delegates to pose.run_pose."""
+    return pose.run_pose(img_bgr)
+
 
 # ── character / panel detectors (for the pipeline) ───────────────────────────--
 
@@ -8780,12 +8687,12 @@ def api_pose():
     if img is None:
         return jsonify({"success": False, "error": "Decode failed."})
     state["status_text"] = "Estimating pose…"
-    pose = _run_pose(_to_bgr(img))
+    pose_data = _run_pose(_to_bgr(img))
     meta = read_metadata(fp)
-    write_metadata(fp, meta["tags"], meta["description"], meta["regions"], pose=pose)
+    write_metadata(fp, meta["tags"], meta["description"], meta["regions"], pose=pose_data)
     state["status_text"] = "Ready."
-    if not pose.get("people"):
-        return jsonify({"success": True, "pose": pose,
+    if not pose_data.get("people"):
+        return jsonify({"success": True, "pose": pose_data,
                         "note": "No people detected (or pose model unavailable)."})
     return jsonify({"success": True, "pose": pose})
 
