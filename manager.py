@@ -155,6 +155,11 @@ state = {
     "pose_size": "n",
     "gdl_sites": {},
     "gdl_opts": {}, 
+    "gdl_auth": {},   # per-site credentials, keyed by extractor category (like
+                      # gdl_opts). Each value: {"method": "userpass"|"cookies_text"
+                      # |"cookies_browser"|"none", "username","password",
+                      # "cookies_text","browser"}. Compiled to gallery-dl opts (+
+                      # a cookies.txt file) at fetch time by _gdl_compile_auth.
     "oai_system_prompt": "You are an expert image analysis AI. Provide concise, highly detailed, and accurate responses.",
     "oai_actions": [
         {"id":"1","name":"Describe Scene","prompt":"Describe the overall scene, lighting, and composition in a detailed paragraph.","target":"description"},
@@ -470,6 +475,26 @@ def _init_db():
             updated     REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_uq_status ON upload_queue(status, id);
+
+        -- gallery-dl DOWNLOAD queue. One row per URL the user asks to fetch.
+        -- A background worker runs gallery-dl for each pending row, streams the
+        -- resulting files into upload_queue (the ingest queue above), and tracks
+        -- progress here. `total` is filled once the download resolves how many
+        -- files it produced; `downloaded` counts files handed to upload_queue.
+        CREATE TABLE IF NOT EXISTS gdl_queue (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            url         TEXT NOT NULL,
+            folder      TEXT NOT NULL DEFAULT '',
+            status      TEXT NOT NULL DEFAULT 'pending',  -- pending|downloading|done|error|canceled
+            total       INTEGER NOT NULL DEFAULT 0,       -- files gallery-dl produced (0 until known)
+            downloaded  INTEGER NOT NULL DEFAULT 0,       -- files enqueued for ingest so far
+            attempts    INTEGER NOT NULL DEFAULT 0,
+            error       TEXT DEFAULT '',
+            site        TEXT DEFAULT '',                  -- extractor category, once resolved
+            created     REAL NOT NULL,
+            updated     REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_gq_status ON gdl_queue(status, id);
 
         -- Persistent "never group these two together" pairs.
         -- Stored with a < b so lookups are a single normalised query.
@@ -1643,7 +1668,7 @@ def save_config():
             "oai_actions","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size",
             "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","face_cluster_eps",
             "body_enabled","body_cluster_eps","object_proposals",
-            "barcode_model","barcode_conf", "iqa_model","auth","gdl_sites","gdl_opts"]
+            "barcode_model","barcode_conf", "iqa_model","auth","gdl_sites","gdl_opts","gdl_auth"]
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys if k in state}, f, indent=2)
 
@@ -5408,6 +5433,319 @@ def _upload_worker_loop():
 _upload_threads = []   # live worker Thread objects, for liveness reporting
 
 
+# ── gallery-dl download queue ────────────────────────────────────────────────
+# A URL the user wants fetched becomes a row in gdl_queue. One background worker
+# claims pending rows one at a time (downloads are network- and disk-heavy;
+# running many in parallel mostly just trips site rate limits), runs gallery-dl,
+# streams each produced file into the upload_queue for the normal ingest, and
+# records progress. Mirrors the upload-worker pattern: atomic claim, wake event,
+# boot-time requeue of anything left mid-flight.
+_gdl_wake      = threading.Event()
+_gdl_started   = threading.Event()
+_gdl_cancels   = set()               # ids the user asked to cancel mid-download
+_gdl_cancels_lk = threading.Lock()
+
+
+def _gdl_workers_wake():
+    _gdl_wake.set()
+
+
+def _gdl_mark_cancel(qid):
+    with _gdl_cancels_lk:
+        _gdl_cancels.add(qid)
+
+
+def _gdl_is_canceled(qid):
+    with _gdl_cancels_lk:
+        return qid in _gdl_cancels
+
+
+def _gdl_clear_cancel(qid):
+    with _gdl_cancels_lk:
+        _gdl_cancels.discard(qid)
+
+
+def _claim_gdl_job():
+    """Atomically take the oldest pending download. Returns a Row or None.
+    Single worker, but the guarded UPDATE keeps it correct even if that ever
+    changes."""
+    def _claim():
+        db = _db()
+        db.rollback()
+        row = db.execute(
+            "SELECT id FROM gdl_queue WHERE status='pending' "
+            "ORDER BY id ASC LIMIT 1").fetchone()
+        if not row:
+            return None
+        qid = row["id"]
+        n = db.execute(
+            "UPDATE gdl_queue SET status='downloading', attempts=attempts+1, "
+            "updated=? WHERE id=? AND status='pending'",
+            (time.time(), qid)).rowcount
+        db.commit()
+        if not n:
+            return "retry"
+        return db.execute("SELECT * FROM gdl_queue WHERE id=?", (qid,)).fetchone()
+    while True:
+        got = _db_retry(_claim)
+        if got != "retry":
+            return got
+
+
+def _gdl_update(qid, **cols):
+    """Patch a gdl_queue row (status/total/downloaded/error/site)."""
+    if not cols:
+        return
+    cols["updated"] = time.time()
+    sets = ", ".join(f"{k}=?" for k in cols)
+    vals = list(cols.values()) + [qid]
+    def _upd():
+        db = _db()
+        db.execute(f"UPDATE gdl_queue SET {sets} WHERE id=?", vals)
+        db.commit()
+    try:
+        _db_retry(_upd)
+    except Exception as e:
+        access_logger.error(f"gdl_queue update {qid} failed: {e}")
+
+
+_GDL_COOKIE_DIR = os.path.join(os.path.dirname(DB_PATH), "gdl_cookies")
+
+
+def _gdl_compile_auth(site):
+    """Turn a site's saved auth blob into gallery-dl opt strings.
+
+    - userpass       -> extractor.<site>.username / .password
+    - cookies_text   -> write the pasted Netscape cookies.txt to a per-site file
+                        and point extractor.<site>.cookies at it
+    - cookies_browser-> extractor.<site>.cookies = ["<browser>"] (cookies-from-
+                        browser; gallery-dl reads the browser's cookie store)
+    - none/unknown   -> nothing
+
+    site "" (global) applies to every fetch; a real category scopes to that site.
+    Returns a list of "path.key=value" opt strings (same shape gdl expects).
+    """
+    auth = state.get("gdl_auth", {}).get(site) or {}
+    method = auth.get("method", "none")
+    ns = f"extractor.{site}" if site else "extractor"
+    opts = []
+    if method == "userpass":
+        u, p = (auth.get("username") or "").strip(), auth.get("password") or ""
+        if u:
+            opts.append(f"{ns}.username={u}")
+            opts.append(f"{ns}.password={p}")
+    elif method == "cookies_text":
+        text = auth.get("cookies_text") or ""
+        if text.strip():
+            path = _gdl_write_cookie_file(site or "_global", text)
+            if path:
+                opts.append(f"{ns}.cookies={json.dumps(path)}")
+    elif method == "cookies_browser":
+        br = (auth.get("browser") or "").strip()
+        if br:
+            # gallery-dl wants a list: ["firefox"] etc. JSON-encode so the opt
+            # parser coerces it to a real list, not the string "['firefox']".
+            opts.append(f"{ns}.cookies={json.dumps([br])}")
+    return opts
+
+
+def _gdl_write_cookie_file(key, text):
+    """Persist pasted cookies to a stable per-site file gallery-dl can read.
+    Returns the path, or '' on failure. Overwritten each save so edits take."""
+    try:
+        os.makedirs(_GDL_COOKIE_DIR, exist_ok=True)
+        safe = secure_filename(key) or "site"
+        path = os.path.join(_GDL_COOKIE_DIR, f"{safe}.txt")
+        # If the paste isn't already Netscape format, normalize a simple
+        # "name=value; name2=value2" header-style string into it.
+        body = text if "\t" in text or text.lstrip().startswith("# ") \
+            else _gdl_cookiestring_to_netscape(text)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.chmod(path, 0o600)
+        return path
+    except Exception as e:
+        access_logger.error(f"gdl cookie file write failed for {key}: {e}")
+        return ""
+
+
+def _gdl_cookiestring_to_netscape(s):
+    """Convert a browser 'Cookie:' header ("a=1; b=2") into a minimal Netscape
+    cookies.txt. Domain is left as a wildcard-ish '.' with a far-future expiry;
+    gallery-dl only needs name/value for most booru auth, and the extractor sets
+    the domain it sends them to. Lines without '=' are skipped."""
+    lines = ["# Netscape HTTP Cookie File",
+             "# generated from pasted cookie string"]
+    for pair in s.replace("\n", ";").split(";"):
+        pair = pair.strip()
+        if "=" not in pair:
+            continue
+        name, _, value = pair.partition("=")
+        name, value = name.strip(), value.strip()
+        if not name:
+            continue
+        # domain \t includeSubdomains \t path \t secure \t expiry \t name \t value
+        lines.append(f".\tTRUE\t/\tFALSE\t2147483647\t{name}\t{value}")
+    return "\n".join(lines) + "\n"
+
+
+def _gdl_auth_public(site):
+    """A site's saved auth with secrets redacted, safe to send to the browser.
+    Reports the method, username, and browser, plus flags for whether a password
+    or cookie blob is on file — never the password or cookie text itself."""
+    a = state.get("gdl_auth", {}).get(site) or {}
+    return {
+        "method":       a.get("method", "none"),
+        "username":     a.get("username", ""),
+        "browser":      a.get("browser", ""),
+        "has_password": bool(a.get("password")),
+        "has_cookies":  bool(a.get("cookies_text")),
+    }
+
+
+def _gdl_resolve_opts(url):
+    """Download-time gallery-dl opts for a URL: global ("") plus this site's,
+    keyed by extractor category (same logic the old sync fetch used). Includes
+    compiled auth (username/password, cookies) for both scopes."""
+    all_opts = state.get("gdl_opts", {})
+    dl_opts = list(all_opts.get("", [])) + _gdl_compile_auth("")
+    # site-specific opts/auth need the category; resolve it if anything exists.
+    has_site = ({k: v for k, v in all_opts.items() if k} or
+                {k: v for k, v in state.get("gdl_auth", {}).items() if k})
+    if has_site:
+        try:
+            cat = gdl.site_of(url, opts=dl_opts)
+        except gdl.GdlError:
+            cat = ""
+        if cat:
+            dl_opts += list(all_opts.get(cat, [])) + _gdl_compile_auth(cat)
+    return dl_opts
+
+
+def _process_gdl_job(job):
+    """Run gallery-dl for one queued URL, enqueuing each produced file into the
+    upload queue. Returns (ok, error). Updates downloaded/total as it goes and
+    honours a mid-download cancel between files."""
+    qid, url, folder = job["id"], job["url"], job["folder"]
+    sites = state.get("gdl_sites", {})
+    dl_opts = _gdl_resolve_opts(url)
+    os.makedirs(_UPLOAD_SPOOL_DIR, exist_ok=True)
+
+    tmp = tempfile.mkdtemp(prefix="gdl-")
+    downloaded, now = 0, time.time()
+    canceled = False
+    site_seen = {"cat": ""}
+
+    def _on_file(media_path, meta):
+        # Called by gdl.download the moment each file (and its sidecar) lands, so
+        # ingest overlaps with the still-running download instead of waiting for
+        # the whole gallery. We spool + enqueue + wake the upload workers here.
+        nonlocal downloaded
+        if not site_seen["cat"]:
+            site_seen["cat"] = meta.get("category", "")
+        mapping = sites.get(meta.get("category", ""), {})
+        packet  = gdl.apply_mapping(meta, mapping)
+        orig    = secure_filename(os.path.basename(media_path)) or "gdl.bin"
+        fd, spool = tempfile.mkstemp(dir=_UPLOAD_SPOOL_DIR,
+                                     prefix="up-", suffix="-" + orig)
+        os.close(fd)
+        shutil.copyfile(media_path, spool)
+        meta_json = json.dumps(packet)
+        def _enq(sp=spool, on=orig, mj=meta_json):
+            db = _db()
+            db.execute(
+                "INSERT INTO upload_queue"
+                "(spool_path, orig_name, folder, metadata, status, created, updated) "
+                "VALUES(?,?,?,?,'pending',?,?)",
+                (sp, on, folder, mj, now, now))
+            db.commit()
+        try:
+            _db_retry(_enq)
+            downloaded += 1
+            _gdl_update(qid, downloaded=downloaded)   # live count, per file
+            _upload_workers_wake()                    # ingest starts right away
+        except Exception as e:
+            try: os.remove(spool)
+            except OSError: pass
+            access_logger.error(f"gdl enqueue failed for {orig}: {e}")
+
+    try:
+        gen = gdl.download(url, tmp, opts=dl_opts, on_file=_on_file)
+        try:
+            for _media_path, _meta in gen:
+                # on_file already handled ingest; this loop just paces the stream
+                # and gives us a cancel checkpoint between files.
+                if _gdl_is_canceled(qid):
+                    canceled = True
+                    break
+        finally:
+            gen.close()      # release gdl's lock/config context if we broke early
+        if canceled:
+            return False, "canceled"
+        _gdl_update(qid, downloaded=downloaded, total=downloaded,
+                    site=site_seen["cat"])
+        return True, ""
+    except gdl.GdlError as e:
+        return False, str(e)
+    except Exception as e:
+        access_logger.error(f"gdl job {qid} crashed: {e}", exc_info=True)
+        return False, str(e)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _gdl_worker_loop():
+    while True:
+        job = None
+        try:
+            job = _claim_gdl_job()
+        except Exception as e:
+            access_logger.error(f"gdl queue claim failed: {e}")
+        if job is None:
+            _gdl_wake.wait(timeout=5.0)
+            _gdl_wake.clear()
+            continue
+        qid = job["id"]
+        if _gdl_is_canceled(qid):
+            _gdl_update(qid, status="canceled")
+            _gdl_clear_cancel(qid)
+            continue
+        ok, err = _process_gdl_job(job)
+        if err == "canceled" or _gdl_is_canceled(qid):
+            _gdl_update(qid, status="canceled", error="")
+            _gdl_clear_cancel(qid)
+            continue
+        if not ok and job["attempts"] < 3:
+            _gdl_update(qid, status="pending", error=err[:500])
+            time.sleep(min(10.0, 1.0 * job["attempts"]))
+            continue
+        _gdl_update(qid, status="done" if ok else "error", error=err[:500])
+
+
+def _start_gdl_workers():
+    if _gdl_started.is_set():
+        return
+    _gdl_started.set()
+    # Requeue anything left 'downloading' by a restart.
+    def _requeue_stale():
+        db = _db()
+        db.execute("UPDATE gdl_queue SET status='pending', updated=? "
+                   "WHERE status='downloading'", (time.time(),))
+        db.commit()
+    try:
+        _db_retry(_requeue_stale)
+    except Exception as e:
+        access_logger.error(f"gdl queue boot requeue failed: {e}")
+    def _guarded():
+        access_logger.info("gdl download worker started")
+        try:
+            _gdl_worker_loop()
+        except Exception as e:
+            access_logger.error(f"gdl worker died: {e}", exc_info=True)
+    threading.Thread(target=_guarded, daemon=True, name="gdl-dl").start()
+    _gdl_workers_wake()
+
+
 def _start_upload_workers():
     if _upload_started.is_set():
         return
@@ -5574,10 +5912,10 @@ def api_gdl_fields():
     url = (request.json or {}).get("url", "").strip()
     if not url:
         return jsonify({"success": False, "error": "url required"}), 400
-    # We don't know the site until discovery runs, so we can only apply the
-    # global ("") opts here; site-specific auth (if the site needs it just to
-    # list) can be added and re-checked once the category is known.
-    opts = list(state.get("gdl_opts", {}).get("", []))
+    # We don't know the site until discovery runs, so we apply the global ("")
+    # opts and compiled global auth here; site-specific auth can be added and
+    # re-checked once the category is known.
+    opts = list(state.get("gdl_opts", {}).get("", [])) + _gdl_compile_auth("")
     try:
         info = gdl.discover_fields(url, opts=opts)
     except gdl.GdlError as e:
@@ -5585,7 +5923,8 @@ def api_gdl_fields():
     site = info["site"]
     return jsonify({"success": True, "site": site, "fields": info["fields"],
                     "mapping": state.get("gdl_sites", {}).get(site, {}),
-                    "opts": state.get("gdl_opts", {}).get(site, [])})
+                    "opts": state.get("gdl_opts", {}).get(site, []),
+                    "auth": _gdl_auth_public(site)})
 
 @app.route("/api/gdl/config", methods=["GET", "POST"])
 def api_gdl_config():
@@ -5608,85 +5947,138 @@ def api_gdl_config():
             raw = [x.strip() for x in raw.replace(",", "\n").splitlines()]
         opts[site] = [x for x in raw if x]
         state["gdl_opts"] = opts
+    if "auth" in d:
+        # Structured credentials: {method, username, password, cookies_text,
+        # browser}. Stored per site; compiled to opts (+ a cookies file) at
+        # fetch time. An empty/none method clears the site's saved auth.
+        auth = dict(state.get("gdl_auth", {}))
+        blob = d.get("auth") or {}
+        if isinstance(blob, dict) and blob.get("method", "none") != "none":
+            prev = auth.get(site, {})
+            # Blank secret means "keep what's on file" — the UI omits/blanks the
+            # password and cookie text when they're unchanged, so we don't wipe
+            # a saved credential on every mapping save.
+            password = blob.get("password") or (
+                prev.get("password", "") if blob.get("method") == "userpass" else "")
+            cookies = blob.get("cookies_text") or (
+                prev.get("cookies_text", "") if blob.get("method") == "cookies_text" else "")
+            auth[site] = {
+                "method":       blob.get("method", "none"),
+                "username":     blob.get("username", ""),
+                "password":     password,
+                "cookies_text": cookies,
+                "browser":      blob.get("browser", ""),
+            }
+        else:
+            auth.pop(site, None)
+        state["gdl_auth"] = auth
     save_config()
     return jsonify({"success": True})
 
 @app.route("/api/gdl/fetch", methods=["POST"])
 def api_gdl_fetch():
-    """Download a URL with gallery-dl and enqueue each file for ingest, mapping
-    its gallery-dl metadata onto tags/description via the site's saved mapping.
-    Returns immediately with the number of files queued; the existing upload
-    workers do the heavy convert/index."""
-    d = request.json or {}
-    url    = (d.get("url") or "").strip()
+    """Add a URL to the gallery-dl download queue and return immediately. A
+    background worker downloads it and streams the files into the ingest queue;
+    poll /api/gdl/queue for progress. Accepts one url or a list of urls (handy
+    for an artist's several blogs — queue them all, let it dedup on ingest)."""
+    d = request.get_json(silent=True) or request.form or {}
+    # Accept: urls as a list, urls as a newline/comma string, or a single url.
+    raw = d.get("urls")
+    if isinstance(raw, str):
+        raw = raw.replace(",", "\n").split("\n")
+    elif raw is None:
+        one = (d.get("url") or "").strip()
+        raw = [one] if one else []
+    urls = [u.strip() for u in raw if isinstance(u, str) and u.strip()]
     folder = (d.get("folder") or "").strip()
-    if not url:
-        return jsonify({"success": False, "error": "url required"}), 400
-    tdir = get_safe_path(MEDIA_DIR, folder) if folder else MEDIA_DIR
-    if not tdir:
+    if not urls:
+        return jsonify({"success": False, "error": "url(s) required"}), 400
+    if folder and not get_safe_path(MEDIA_DIR, folder):
         return jsonify({"success": False, "error": "bad folder"}), 400
 
-    sites = state.get("gdl_sites", {})  # per-file mapping resolved via category
-    all_opts = state.get("gdl_opts", {})
-    os.makedirs(_UPLOAD_SPOOL_DIR, exist_ok=True)
-
-    # Download-time opts = global ("") + this site's. Opts are keyed by the
-    # gallery-dl category (same key the UI saves under and the per-file mapping
-    # uses). The category isn't in a search/user URL, so we resolve it up front
-    # with a cheap `-j` — but only when site-specific opts actually exist, so the
-    # common "global login only" case pays nothing extra. A resolve miss just
-    # means global-only opts, which is the safe default.
-    dl_opts = list(all_opts.get("", []))
-    site_specific = {k: v for k, v in all_opts.items() if k}
-    if site_specific:
+    now = time.time()
+    ids = []
+    def _add(u):
+        db = _db()
+        cur = db.execute(
+            "INSERT INTO gdl_queue(url, folder, status, created, updated) "
+            "VALUES(?,?,'pending',?,?)", (u, folder, now, now))
+        db.commit()
+        return cur.lastrowid
+    for u in urls:
         try:
-            cat = gdl.site_of(url, opts=dl_opts)
-        except gdl.GdlError:
-            cat = ""
-        dl_opts += list(all_opts.get(cat, []))
+            ids.append(_db_retry(_add, u=u))
+        except Exception as e:
+            access_logger.error(f"gdl queue add failed for {u}: {e}")
+    _gdl_workers_wake()
+    return jsonify({"success": True, "queued": len(ids), "ids": ids}), 202
 
-    # gallery-dl downloads into a throwaway dir; we copy each file into the
-    # durable upload spool and enqueue it, then drop the temp dir.
-    # ponytail: synchronous download inside the request. Fine for interactive
-    # single-gallery pulls; make it a background job if huge multi-page rips
-    # start blocking the WSGI thread too long.
-    queued, now = 0, time.time()
-    tmp = tempfile.mkdtemp(prefix="gdl-")
+
+@app.route("/api/gdl/queue")
+def api_gdl_queue():
+    """The download queue: recent rows plus a status tally. Drives the queue UI."""
+    def _q():
+        db = _db()
+        rows = db.execute(
+            "SELECT id, url, folder, status, total, downloaded, error, site, "
+            "created, updated FROM gdl_queue ORDER BY id DESC LIMIT 200").fetchall()
+        tally = db.execute(
+            "SELECT status, COUNT(*) c FROM gdl_queue GROUP BY status").fetchall()
+        return rows, tally
     try:
-        for media_path, meta in gdl.download(url, tmp, opts=dl_opts):
-            mapping = sites.get(meta.get("category", ""), {})
-            packet  = gdl.apply_mapping(meta, mapping)
-            orig    = secure_filename(os.path.basename(media_path)) or "gdl.bin"
-            fd, spool = tempfile.mkstemp(dir=_UPLOAD_SPOOL_DIR,
-                                         prefix="up-", suffix="-" + orig)
-            os.close(fd)
-            shutil.copyfile(media_path, spool)
-            meta_json = json.dumps(packet)
-            def _enq(sp=spool, on=orig, mj=meta_json):
-                db = _db()
-                cur = db.execute(
-                    "INSERT INTO upload_queue"
-                    "(spool_path, orig_name, folder, metadata, status, created, updated) "
-                    "VALUES(?,?,?,?,'pending',?,?)",
-                    (sp, on, folder, mj, now, now))
-                db.commit()
-                return cur.lastrowid
-            try:
-                _db_retry(_enq)
-                queued += 1
-            except Exception as e:
-                try: os.remove(spool)
-                except OSError: pass
-                access_logger.error(f"gdl enqueue failed for {orig}: {e}")
-    except gdl.GdlError as e:
-        shutil.rmtree(tmp, ignore_errors=True)
-        return jsonify({"success": False, "error": str(e)}), 502
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        rows, tally = _db_retry(_q)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+    return jsonify({
+        "success": True,
+        "items": [dict(r) for r in rows],
+        "counts": {r["status"]: r["c"] for r in tally},
+    })
 
-    if queued:
-        _upload_workers_wake()
-    return jsonify({"success": True, "queued": queued}), 202
+
+@app.route("/api/gdl/queue/<int:qid>/cancel", methods=["POST"])
+def api_gdl_queue_cancel(qid):
+    """Cancel a queued or in-progress download. Pending rows flip to canceled
+    immediately; an in-flight one is flagged and stops between files."""
+    def _cancel():
+        db = _db()
+        row = db.execute("SELECT status FROM gdl_queue WHERE id=?", (qid,)).fetchone()
+        if not row:
+            return "missing"
+        if row["status"] == "pending":
+            db.execute("UPDATE gdl_queue SET status='canceled', updated=? WHERE id=?",
+                       (time.time(), qid))
+            db.commit()
+            return "canceled"
+        if row["status"] == "downloading":
+            return "flag"
+        return row["status"]
+    try:
+        res = _db_retry(_cancel)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+    if res == "missing":
+        return jsonify({"success": False, "error": "not found"}), 404
+    if res == "flag":
+        _gdl_mark_cancel(qid)      # worker will stop between files
+    return jsonify({"success": True, "status": "canceling" if res == "flag" else res})
+
+
+@app.route("/api/gdl/queue/clear", methods=["POST"])
+def api_gdl_queue_clear():
+    """Remove finished rows (done/error/canceled) from the queue view. Does not
+    touch pending/downloading rows or anything already in the ingest queue."""
+    def _clear():
+        db = _db()
+        n = db.execute("DELETE FROM gdl_queue WHERE status IN "
+                       "('done','error','canceled')").rowcount
+        db.commit()
+        return n
+    try:
+        n = _db_retry(_clear)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+    return jsonify({"success": True, "removed": n})
 
 
 @app.route("/api/move", methods=["POST"])
@@ -9359,6 +9751,8 @@ if __name__=='__main__':
     threading.Thread(target=_background_face_worker, daemon=True).start()
     access_logger.info(f"Starting upload queue ({_UPLOAD_WORKERS} workers)…")
     _start_upload_workers()
+    access_logger.info("Starting gallery-dl download queue…")
+    _start_gdl_workers()
     access_logger.info("Warming pose/OCR models (auto-download)…")
     threading.Thread(target=_warm_models, daemon=True).start()
     access_logger.info("Serving on :8000")

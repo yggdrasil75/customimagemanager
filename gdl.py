@@ -32,6 +32,7 @@ module lock serialises gdl calls so concurrent requests don't clobber each
 other's settings.
 """
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -41,6 +42,8 @@ import gallery_dl.config as _gconfig
 from gallery_dl import exception as _gexc
 from gallery_dl.extractor import find as _find_extractor
 from gallery_dl.job import DataJob, DownloadJob
+
+_log = logging.getLogger("gdl")
 
 # Media extensions gallery-dl may drop next to its .json sidecars. Anything not
 # in here (its own .json, .txt notes) is ignored when pairing files to metadata.
@@ -134,7 +137,6 @@ def discover_fields(url, opts=None, resolve=2):
         job = DataJob(url, file=None, resolve=resolve)
         job.run()
         meta_dicts = list(job.data_meta)
-        err = job.exception
 
     fields, site = set(), ""
     for kw in meta_dicts:
@@ -158,35 +160,78 @@ def site_of(url, opts=None):
     return getattr(extr, "category", "") if extr else ""
 
 
-def download(url, dest, opts=None):
-    """Download everything at `url` into `dest` (flat, with JSON sidecars) via a
-    DownloadJob, then yield (media_path, metadata_dict) for each file. `dest`
-    should be an empty/temp dir owned by the caller."""
+def download(url, dest, opts=None, on_file=None):
     os.makedirs(dest, exist_ok=True)
     if not _find_extractor(url):
         raise GdlError(f"No gallery-dl extractor matches that URL: {url}")
 
     # Force our output dir, a flat layout (no per-site subfolders), and a
-    # full-metadata JSON sidecar per file. These sit under ("extractor",) so
-    # they apply to whatever extractor the URL resolves to.
+    # full-metadata JSON sidecar per file.
     pin = [
         (("extractor",), "base-directory", dest),
         (("extractor",), "directory", []),
         (("extractor",), "postprocessors",
          [{"name": "metadata", "mode": "json"}]),
     ]
+
+    # Run the (synchronous, blocking) DownloadJob on a background thread and
+    # watch `dest` for finished files from this one. gallery-dl writes each
+    # media file and its .json sidecar as it goes, so a media file whose sidecar
+    # already exists is complete and safe to hand off — no gallery-dl internals
+    # or per-version hook APIs involved, just the filesystem it's producing.
+    err_box = {}
+
+    def _run_job():
+        try:
+            job = DownloadJob(url)
+            job.run()
+        except Exception as e:                        # surfaced after join
+            err_box["err"] = e
+
     with _lock:
         _gconfig.clear()
         with _gconfig.apply(_DEFAULT_INCLUDES + pin + _opts_to_kvlist(opts)):
-            job = DownloadJob(url)
-            job.run()
-            err = job.exception
+            worker = threading.Thread(target=_run_job, name="gdl-job", daemon=True)
+            worker.start()
 
-    media = _pair_media(dest)
-    if not media:
+            seen = set()
+            # Poll while the job runs, yielding each file once its sidecar lands.
+            while worker.is_alive():
+                for mpath, meta in _ready_files(dest, seen):
+                    if on_file:
+                        try:
+                            on_file(mpath, meta)
+                        except Exception as e:
+                            _log.warning("gdl on_file failed for %s: %s", mpath, e)
+                    yield mpath, meta
+                worker.join(timeout=0.5)
+            # Final sweep: catch the last file(s) finished between polls, and any
+            # media whose sidecar never appeared (fall back to the file itself).
+            for mpath, meta in _ready_files(dest, seen, final=True):
+                if on_file:
+                    try:
+                        on_file(mpath, meta)
+                    except Exception as e:
+                        _log.warning("gdl on_file failed for %s: %s", mpath, e)
+                yield mpath, meta
+
+    err = err_box.get("err")
+    if not seen:
         raise GdlError(str(err) if err else "gallery-dl downloaded nothing.")
-    for mpath in media:
-        yield mpath, _read_sidecar(mpath)
+
+
+def _ready_files(dest, seen, final=False):
+    """Yield (media_path, metadata) for media files in `dest` not yet in `seen`.
+    Normally a file is 'ready' only once its .json sidecar exists (so we don't
+    grab a half-written download); on the `final` sweep we take remaining media
+    regardless, reading an empty sidecar if none was written."""
+    for mpath in _pair_media(dest):
+        if mpath in seen:
+            continue
+        has_side = os.path.exists(mpath + ".json")
+        if has_side or final:
+            seen.add(mpath)
+            yield mpath, _read_sidecar(mpath)
 
 
 def _pair_media(root):
@@ -219,6 +264,13 @@ def apply_mapping(meta, mapping):
       "tags"        - source becomes tags. A list is used as-is; a scalar is
                       split on commas/whitespace. Multiple sources mapped to
                       "tags" are concatenated (deduped, order preserved).
+      "tags:<pfx>"  - same as "tags", but every tag from this source is prefixed
+                      with <pfx> for provenance, e.g. "tags:character:" turns
+                      ["reimu","marisa"] into ["character:reimu","character:marisa"],
+                      and "tags:artist_" gives ["artist_bob"]. The prefix is
+                      literal text (whatever follows the first colon), so you
+                      choose the separator. Dedup happens after prefixing, so the
+                      same tag under two different prefixes is kept.
       "description" - source is appended to the description (newline-joined when
                       several sources map here). Non-str is JSON-stringified.
       "regions"     - source is a list of booru "note" dicts
@@ -252,8 +304,10 @@ def apply_mapping(meta, mapping):
         if not src or not target or target == "ignore" or src not in meta:
             continue
         val = meta[src]
-        if target == "tags":
-            out["tags"] += _as_tags(val)
+        if target == "tags" or target.startswith("tags:"):
+            # "tags" → no prefix; "tags:<pfx>" → literal prefix on each tag.
+            prefix = target[len("tags:"):] if target.startswith("tags:") else ""
+            out["tags"] += [prefix + t for t in _as_tags(val)]
         elif target == "description":
             descs.append(val if isinstance(val, str) else json.dumps(val,
                          ensure_ascii=False))
@@ -376,6 +430,17 @@ if __name__ == "__main__":
         {"a": "1girl solo", "b": ["solo", "sky"]},
         {"a": "tags", "b": "tags"})
     assert multi["tags"] == ["1girl", "solo", "sky"], multi
+
+    # tags:<prefix> prefixes each tag; same tag under different prefixes kept
+    pfx = apply_mapping(
+        {"chars": ["reimu", "marisa"], "artist": "zun", "general": ["solo"]},
+        {"chars": "tags:character:", "artist": "tags:artist_", "general": "tags"})
+    assert "character:reimu" in pfx["tags"] and "character:marisa" in pfx["tags"], pfx
+    assert "artist_zun" in pfx["tags"] and "solo" in pfx["tags"], pfx
+    # a bare-tag and same value prefixed coexist (dedup is post-prefix)
+    coex = apply_mapping({"a": ["x"], "b": ["x"]},
+                         {"a": "tags", "b": "tags:src:"})
+    assert coex["tags"] == ["x", "src:x"], coex
 
     # multiple sources → description: newline-joined
     dd = apply_mapping({"c": "char note", "d": "artist note"},

@@ -29,6 +29,18 @@
       </div>
 
       <div>
+        <label class="text-xs text-gray-400 block mb-1">URLs to queue
+          <span class="text-gray-600">(one per line — e.g. an artist's several blogs)</span></label>
+        <textarea id="gdl_urls" rows="3"
+          placeholder="https://site-a.com/artist&#10;https://site-b.com/artist&#10;https://site-c.com/artist"
+          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white font-mono"></textarea>
+        <p class="text-[10px] text-gray-600 mt-1">
+          Each URL becomes its own queue job. Duplicate files across blogs are caught at ingest,
+          so queueing all three is safe. Leave blank to queue the single URL above.
+        </p>
+      </div>
+
+      <div>
         <label class="text-xs text-gray-400 block mb-1">Save into folder <span class="text-gray-600">(optional)</span></label>
         <input id="gdl_folder" type="text" placeholder="booru/danbooru"
           class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
@@ -48,25 +60,88 @@
           {# one row per discovered field is injected here by gdl.js #}
           <div id="gdl_rows" class="max-h-64 overflow-y-auto pr-1"></div>
           <p class="text-[10px] text-gray-600 mt-1">
-            Route each field to <b class="text-gray-500">Tags</b>,
+            Route each field to <b class="text-gray-500">Tags</b>
+            (with an optional <b class="text-gray-500">prefix</b> like <code>character:</code> for provenance),
             <b class="text-gray-500">Description</b>, an <b class="text-gray-500">EXIF</b> tag,
             an <b class="text-gray-500">XMP</b> property (dc, iptcCore, cc, prism, …),
             or <b class="text-gray-500">Regions</b> (note/translation boxes, e.g. e621 <code>notes</code>).
             Unlisted fields are ignored.
           </p>
         </div>
-        <button onclick="gdlSaveMapping()"
-          class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded font-bold">Save mapping for this site</button>
+        {# ── Login / auth for this site ────────────────────────────────
+           Most sites tie an API/rate limit to an account. Pick a method; it's
+           saved per site and applied to fetches. Secrets aren't sent back to
+           the browser once saved (you'll see "on file" instead). #}
+        <div class="border-t border-gray-700 pt-2">
+          <label class="text-xs text-gray-400 block mb-1">Login for this site</label>
+          <select id="gdl_auth_method" onchange="gdlAuthMethodChange()"
+            class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-xs text-white mb-2">
+            <option value="none">None (public)</option>
+            <option value="userpass">Username &amp; password</option>
+            <option value="cookies_text">Cookies (paste / clipboard)</option>
+            <option value="cookies_browser">Cookies from a browser</option>
+          </select>
 
-        <div>
-          <label class="text-xs text-gray-400 block mb-1">gallery-dl options for this site
-            <span class="text-gray-600">(optional, one <code>key=value</code> per line)</span></label>
-          <textarea id="gdl_opts" rows="2" placeholder="danbooru.username=me&#10;danbooru.api-key=..."
-            class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-xs text-white font-mono"></textarea>
+          {# username/password #}
+          <div id="gdl_auth_userpass" class="hidden space-y-2 mb-2">
+            <input id="gdl_auth_user" type="text" placeholder="username"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-xs text-white">
+            <input id="gdl_auth_pass" type="password" placeholder="password"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-xs text-white">
+          </div>
+
+          {# cookies pasted / from clipboard #}
+          <div id="gdl_auth_cookies" class="hidden space-y-2 mb-2">
+            <textarea id="gdl_auth_cookies_text" rows="3"
+              placeholder="Paste cookies.txt (Netscape) or a &quot;name=value; name2=value2&quot; string"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-[11px] text-white font-mono"></textarea>
+            <button onclick="gdlPasteCookies()"
+              class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Paste all cookies from clipboard</button>
+            <p id="gdl_auth_cookies_state" class="text-[10px] text-gray-600"></p>
+          </div>
+
+          {# cookies from an installed browser #}
+          <div id="gdl_auth_browser" class="hidden space-y-2 mb-2">
+            <select id="gdl_auth_browser_sel"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-xs text-white">
+              <option value="firefox">Firefox</option>
+              <option value="chrome">Chrome</option>
+              <option value="chromium">Chromium</option>
+              <option value="edge">Edge</option>
+              <option value="brave">Brave</option>
+              <option value="vivaldi">Vivaldi</option>
+              <option value="opera">Opera</option>
+              <option value="safari">Safari</option>
+            </select>
+            <p class="text-[10px] text-gray-600">Reads that browser's cookie store on the server host. The browser must be
+              installed and logged in on the machine running this app.</p>
+          </div>
+          <button onclick="gdlSaveAuth()"
+            class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded font-bold">Save login</button>
+        </div>
+
+        <details class="mt-1">
+          <summary class="text-[10px] text-gray-500 cursor-pointer">Advanced: raw gallery-dl options</summary>
+          <textarea id="gdl_opts" rows="2" placeholder="danbooru.api-key=...&#10;extractor.timeout=30"
+            class="w-full mt-1 p-2 bg-gray-700 rounded border border-gray-600 text-xs text-white font-mono"></textarea>
           <p class="text-[10px] text-gray-600 mt-1">
-            Your global gallery-dl config isn't used (metadata is kept complete), so put any
-            login/API keys or cookies options a site needs here. Saved with the mapping.
+            One <code>key=value</code> per line. Global gallery-dl config isn't used, so anything
+            beyond login goes here. Saved with the mapping.
           </p>
+        </details>
+      </div>
+
+      {# Download queue — live status of URLs being fetched. Populated by
+         gdlQueuePoll(); each row shows status and downloaded/total counts. #}
+      <div class="border-t border-gray-700 pt-3">
+        <div class="flex items-center justify-between mb-1">
+          <span class="text-xs text-gray-400">Download queue
+            <span id="gdl_q_counts" class="text-[10px] text-gray-600"></span></span>
+          <button onclick="gdlQueueClear()"
+            class="text-[10px] text-gray-500 hover:text-gray-300">clear finished</button>
+        </div>
+        <div id="gdl_queue" class="max-h-48 overflow-y-auto space-y-1 text-xs">
+          <div class="text-gray-600 text-[10px]">Nothing queued yet.</div>
         </div>
       </div>
     </div>
@@ -74,7 +149,7 @@
     <div class="flex justify-between items-center mt-4 flex-shrink-0 border-t border-gray-700 pt-3">
       <span id="gdl_status" class="text-xs text-gray-400"></span>
       <button id="gdl_fetch_btn" onclick="gdlFetch()"
-        class="text-sm bg-emerald-700 hover:bg-emerald-600 px-4 py-2 rounded font-bold">Fetch &amp; ingest</button>
+        class="text-sm bg-emerald-700 hover:bg-emerald-600 px-4 py-2 rounded font-bold">Add to queue</button>
     </div>
   </div>
 </div>
