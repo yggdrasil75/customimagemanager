@@ -3141,27 +3141,19 @@ def _mark_body_done(rel: str) -> None:
     _db().commit()
 
 
-def _background_face_worker():
-    """Face/person boxing. Writes MWG regions immediately (so a crash never loses
-    work) and caches embeddings for clustering.
-
-    Two modes:
-      forced (user hit "Rescan all") -- run flat out, ignore the idle gate.
-      opportunistic (face_bg_enabled) -- only work while the user is idle.
+def _background_face_worker() -> None:
+    """!
+    @brief Idle-gated worker: box faces/people, cache embeddings, cluster when the queue drains.
+    @note Forced mode (user "Rescan all") ignores the idle gate; opportunistic mode only runs while idle.
     """
     IDLE_SECS, BATCH = 60, 6
     while True:
-        # Sleep interruptibly: a manual rescan sets the event and we start now
-        # rather than up to 15s later.
-        _face_wake.wait(timeout=15)
+        _face_wake.wait(timeout=15)          # interruptible: a manual rescan wakes us immediately
         _face_wake.clear()
         try:
             forced = _face_force["v"]
             if not forced and not state.get("face_bg_enabled"):
                 continue
-            # The idle gate exists so opportunistic scanning doesn't fight the
-            # user for CPU. A forced run is the user ASKING for that CPU, so it
-            # does not apply.
             if not forced and time.time() - _last_activity < IDLE_SECS:
                 continue
 
@@ -3169,8 +3161,6 @@ def _background_face_worker():
                 "SELECT rel_path FROM files WHERE COALESCE(face_done,0)=0 LIMIT ?",
                 (BATCH,)).fetchall()
             if not rows:
-                # Queue drained. Cluster once, then idle -- without this the
-                # embeddings sat in the DB and no cluster ever appeared in the UI.
                 if _face_dirty["v"]:
                     state["status_text"] = "Face scan: clustering…"
                     n = _recluster()
@@ -3180,7 +3170,7 @@ def _background_face_worker():
                     state["status_text"] = "Face scan: complete."
                 else:
                     state["status_text"] = "Face scan: all caught up."
-                _face_force["v"] = False      # forced run is finished
+                _face_force["v"] = False
                 if not forced:
                     time.sleep(45)
                 continue
@@ -3199,12 +3189,7 @@ def _background_face_worker():
                 img = read_jxl(abs_p)
                 if img is None:
                     _mark_face_done(rel); continue
-                # read_jxl may hand back (h,w), (h,w,3) or (h,w,4) -- it says so
-                # in its own docstring. Every other consumer funnels through
-                # _to_bgr; this worker did not, so an RGBA image reached YOLO
-                # with 4 channels ("expected input[1,4,...] to have 3 channels").
-                # A grayscale image would have failed the same way with 1.
-                bgr = _to_bgr(img)
+                bgr = _to_bgr(img)             # read_jxl may return gray/RGBA; YOLO needs 3-channel BGR
 
                 found = _face_regions_for(bgr, rel)
                 if found:
@@ -3212,11 +3197,8 @@ def _background_face_worker():
                     merged = _merge_regions(meta["regions"], found)
                     write_metadata(abs_p, meta["tags"], meta["description"], merged)
                     _cache_faces(rel, bgr, found)
-                    # Body re-id runs in the same pass so a person crop is
-                    # embedded from the same decoded image. Gated on body_enabled
-                    # so users who only want faces pay nothing.
                     if state.get("body_enabled"):
-                        _cache_bodies(rel, bgr, found)
+                        _cache_bodies(rel, bgr, found)   # same decoded image, gated on body_enabled
                     _face_dirty["v"] = True
                 _mark_face_done(rel)
                 if state.get("body_enabled"):
@@ -3228,27 +3210,29 @@ def _background_face_worker():
             time.sleep(30)
 
 
-def _mark_face_done(rel):
+def _mark_face_done(rel: str) -> None:
+    """! @brief Mark a file's face-boxing pass complete."""
     _db().execute("UPDATE files SET face_done=1 WHERE rel_path=?", (rel,))
     _db().commit()
 
 
-def _recluster():
-    """Recluster every cached face embedding. Confirmed names win: a cluster
-    containing a confirmed face inherits that name as its suggestion."""
+def _recluster_table(table: str, default_mode: str, eps_for) -> int:
+    """!
+    @brief Cluster every cached embedding in a *_regions table, per embed_mode.
+    @param default_mode embed_mode assumed for rows that stored none.
+    @param eps_for Callable mode -> eps (clustering radius) for that vector space.
+    @return Total number of clusters assigned across all modes.
+    @note Modes are clustered separately (identity and appearance vectors occupy
+          different spaces); cluster ids are base-offset so they stay unique across modes.
+    """
     rows = _db().execute(
-        "SELECT id,embedding,embed_mode,name,confirmed FROM face_regions "
+        f"SELECT id,embedding,embed_mode,name,confirmed FROM {table} "
         "WHERE embedding IS NOT NULL").fetchall()
     if not rows:
         return 0
-    eps = state.get("face_cluster_eps") or None
-    # Cluster each embed_mode SEPARATELY. arcface (512-d identity) and appearance
-    # vectors live in different spaces with different radii; letting rows[0]
-    # pick one mode for the whole table meant a single stale row could apply the
-    # wrong eps to everything (or crash the matmul on a dim mismatch).
     by_mode = {}
     for rid, blob, m, _n, _c in rows:
-        by_mode.setdefault(m or "arcface", []).append(
+        by_mode.setdefault(m or default_mode, []).append(
             (rid, np.frombuffer(blob, dtype=np.float32)))
 
     db = _db()
@@ -3256,27 +3240,36 @@ def _recluster():
     for mode, items in by_mode.items():
         ids  = [i for i, _ in items]
         vecs = [v for _, v in items]
-        labels = facelib.cluster(vecs, mode=mode, eps=eps)
-        # offset so cluster ids stay unique across modes
-        db.executemany("UPDATE face_regions SET cluster_id=? WHERE id=?",
+        labels = facelib.cluster(vecs, mode=mode, eps=eps_for(mode))
+        db.executemany(f"UPDATE {table} SET cluster_id=? WHERE id=?",
                        [(int(lab) + base if int(lab) >= 0 else -1, i)
                         for i, lab in zip(ids, labels)])
         used = len({l for l in labels if l >= 0})
         base += used
         total += used
-    # propagate confirmed names across each cluster as a suggestion
+    return total
+
+
+def _recluster() -> int:
+    """!
+    @brief Recluster every cached face embedding; confirmed names seed cluster suggestions.
+    @return Number of face clusters found.
+    """
+    eps = state.get("face_cluster_eps") or None
+    total = _recluster_table("face_regions", "arcface", lambda _m: eps)
+    db = _db()
     _propagate_cluster_names(db, "face_regions")
     db.commit()
-
     if state.get("body_enabled"):
         _recluster_bodies()
     return total
 
 
-def _propagate_cluster_names(db, table):
-    """Copy each cluster's confirmed name onto its unconfirmed rows as a
-    suggestion. Returns the set of cluster_ids that got a name (so callers with
-    extra fallback logic can skip them). Shared by face and body reclustering."""
+def _propagate_cluster_names(db, table: str) -> set:
+    """!
+    @brief Copy each cluster's confirmed name onto its unconfirmed rows as a suggestion.
+    @return Set of cluster_ids that received a name (for callers with extra fallback logic).
+    """
     named = set()
     for (lab,) in db.execute(
             f"SELECT DISTINCT cluster_id FROM {table} WHERE cluster_id>=0").fetchall():
@@ -3290,53 +3283,24 @@ def _propagate_cluster_names(db, table):
     return named
 
 
-def _recluster_bodies():
-    """Cluster cached body (person) re-id embeddings, then let each body cluster
-    inherit a face-cluster name via the per-image face<->body links.
-
-    Kept separate from faces: re-id and ArcFace occupy different spaces with
-    different radii, and body clusters are named through their associated face
-    identity (or a user-entered name), never by comparing the two vector types.
+def _recluster_bodies() -> int:
+    """!
+    @brief Cluster cached body re-id embeddings; unnamed clusters borrow their associated face name.
+    @return Number of body clusters found.
     """
-    rows = _db().execute(
-        "SELECT id,embedding,embed_mode,name,confirmed FROM body_regions "
-        "WHERE embedding IS NOT NULL").fetchall()
-    if not rows:
-        return 0
     eps = state.get("body_cluster_eps") or None
-    by_mode = {}
-    for rid, blob, m, _n, _c in rows:
-        by_mode.setdefault(m or "reid", []).append(
-            (rid, np.frombuffer(blob, dtype=np.float32)))
+    def eps_for(mode):
+        return eps if eps else (bodylib.BODY_EPS_REID if mode == "reid"
+                                else bodylib.BODY_EPS_APPEARANCE)
+    total = _recluster_table("body_regions", "reid", eps_for)
 
     db = _db()
-    total, base = 0, 0
-    for mode, items in by_mode.items():
-        ids  = [i for i, _ in items]
-        vecs = [v for _, v in items]
-        # faces.cluster is embed-agnostic (unit vectors + cosine), so reuse it;
-        # bodies.py supplies the mode-appropriate eps defaults via _mode_eps.
-        e = eps if eps else (bodylib.BODY_EPS_REID if mode == "reid"
-                             else bodylib.BODY_EPS_APPEARANCE)
-        labels = facelib.cluster(vecs, mode=mode, eps=e)
-        db.executemany("UPDATE body_regions SET cluster_id=? WHERE id=?",
-                       [(int(lab) + base if int(lab) >= 0 else -1, i)
-                        for i, lab in zip(ids, labels)])
-        used = len({l for l in labels if l >= 0})
-        base += used
-        total += used
-
-    # Confirmed body names win within their own cluster (same as faces).
     named = _propagate_cluster_names(db, "body_regions")
     for (lab,) in db.execute(
             "SELECT DISTINCT cluster_id FROM body_regions WHERE cluster_id>=0").fetchall():
         if lab in named:
             continue
-        # No confirmed body name -> borrow the majority associated FACE name.
-        # Each body may link to a face row (face_id); that face row carries the
-        # face cluster's (possibly suggested) name. The most common such name in
-        # this body cluster is the natural suggestion, and is exactly the
-        # "associate faces and bodies together" payoff.
+        # No confirmed body name -> borrow the majority associated face name via face_id.
         face_name = db.execute(
             "SELECT f.name, COUNT(*) c FROM body_regions b "
             "JOIN face_regions f ON f.id=b.face_id "
@@ -3477,20 +3441,24 @@ def _clamp_box(b: dict) -> dict | None:
 # the files.comic_folder column are caches rebuilt from it on index.
 COMIC_SCHEMA = "mm.comic/1"
 
-def _comic_json_path(folder):
+def _comic_json_path(folder: str) -> str:
+    """! @brief Resolve a folder's comic.json path (safe-joined under MEDIA_DIR)."""
     rel = (folder + "/comic.json") if folder else "comic.json"
     return get_safe_path(MEDIA_DIR, rel)
 
-def _auto_pages(folder):
-    """All asset filenames (.jxl or native video) directly inside `folder`,
-    sorted (relative names)."""
+def _auto_pages(folder: str) -> list:
+    """!
+    @brief List library asset filenames directly inside a folder, sorted.
+    @return Relative filenames (images/video); [] if the folder is missing.
+    """
     base = get_safe_path(MEDIA_DIR, folder) if folder else os.path.abspath(MEDIA_DIR)
     if not base or not os.path.isdir(base):
         return []
     return sorted(f for f in os.listdir(base)
                   if mt.is_library_file(f) and os.path.isfile(os.path.join(base, f)))
 
-def _load_comic_json(folder):
+def _load_comic_json(folder: str) -> dict | None:
+    """! @brief Load a folder's comic.json, or None if absent/unreadable."""
     p = _comic_json_path(folder)
     if not p or not os.path.exists(p):
         return None
@@ -3501,7 +3469,8 @@ def _load_comic_json(folder):
         access_logger.warning(f"_load_comic_json {folder}: {e}")
         return None
 
-def _write_comic_json(folder, data):
+def _write_comic_json(folder: str, data: dict) -> bool:
+    """! @brief Write a folder's comic.json. @return True on success."""
     p = _comic_json_path(folder)
     if not p:
         return False
@@ -3510,9 +3479,8 @@ def _write_comic_json(folder, data):
         json.dump(data, f, indent=2, ensure_ascii=False)
     return True
 
-def _set_comic_membership(folder):
-    """Flag every page file in `folder` as belonging to this comic so it drops
-    out of the normal flat gallery (and clear stragglers that were removed)."""
+def _set_comic_membership(folder: str) -> None:
+    """! @brief Flag a folder's page files as comic members so they leave the flat gallery."""
     if not folder:
         return
     _db().execute(
@@ -3520,14 +3488,10 @@ def _set_comic_membership(folder):
         (folder, folder + '/%', folder + '/%/%'))
     _db().commit()
 
-def _write_comic_page_count(folder, data):
-    """Write prism:PageCount (the number of pages) into the comic's COVER page
-    XMP sidecar, so the count travels with the file. Best-effort: reads the
-    cover's current metadata and re-writes it with the page count added, leaving
-    tags/description/regions untouched. No-op if the cover file can't be resolved.
-
-    This is the write half of PageCount's bidirectional handling; the read half
-    is prism_extras() / _read_page_count_from_xmp() feeding the page_count column.
+def _write_comic_page_count(folder: str, data: dict) -> None:
+    """!
+    @brief Write prism:PageCount into the comic's cover-page XMP so the count travels with the file.
+    @note Best-effort; leaves tags/description/regions untouched. No-op if the cover can't be resolved.
     """
     try:
         pages = _comic_ordered_pages(folder, data)
@@ -3592,15 +3556,26 @@ def _scan_comics():
 def _comic_folder_set():
     return {r["folder"] for r in _db().execute("SELECT folder FROM comics").fetchall()}
 
-def _query_comics(text, folder):
-    """Comic cover entries matching the folder scope + free text."""
-    clauses, p = [], []
+def _folder_scope_clause(column: str, folder: str) -> tuple[list, list]:
+    """!
+    @brief Build the SQL clause(s) restricting `column` to one folder's direct children.
+    @param column Path column to scope ('folder' for comics, 'rel_path' for books).
+    @return (clauses, params) — '/' means top level only; a folder means its immediate children.
+    """
     if folder == '/':
-        clauses.append("folder NOT LIKE '%/%'")
-    elif folder:
+        return [f"{column} NOT LIKE '%/%'"], []
+    if folder:
         f = folder.strip('/').replace('\\', '/')
-        clauses.append("(folder LIKE ? AND folder NOT LIKE ?)")
-        p += [f + '/%', f + '/%/%']
+        return [f"({column} LIKE ? AND {column} NOT LIKE ?)"], [f + '/%', f + '/%/%']
+    return [], []
+
+
+def _query_comics(text: str, folder: str) -> list:
+    """!
+    @brief Comic cover entries matching the folder scope and free-text search.
+    @return List of comic dicts (kind='comic') with cover dimensions resolved.
+    """
+    clauses, p = _folder_scope_clause("folder", folder)
     if text:
         like = f"%{text}%"
         clauses.append("(folder LIKE ? OR title LIKE ? OR tags LIKE ? OR characters LIKE ?)")
@@ -3630,28 +3605,16 @@ def _query_comics(text, folder):
         })
     return out
 
-def _query_books(text, folder):
-    """Book/comic entries matching the folder scope + free text.
-
-    Deliberately mirrors _query_comics: books are NOT in the `files` table (that
-    table is the image DB -- perceptual hashes, MWG regions, IQA -- and putting
-    an epub in it would create a stub row with NULL phashes that dedup and the
-    thumbnailer then have to special-case forever). They live in `books`, and
-    the flat list stitches them in the same way comic covers already are.
-
-    This is what makes a mixed folder work: drop `series/vol1.cbz` next to
-    `series/cover.jpg` and the gallery shows both, rather than silently hiding
-    half the folder because it isn't pixels.
+def _query_books(text: str, folder: str) -> list:
+    """!
+    @brief Book entries matching the folder scope and free-text search.
+    @return List of book dicts (kind='book'); [] if the books table is absent.
+    @note Mirrors _query_comics; books live in their own table (not `files`) and
+          are stitched into the same flat list so mixed folders show both.
     """
     if not _table_exists(_db(), "books"):
         return []
-    clauses, p = [], []
-    if folder == '/':
-        clauses.append("rel_path NOT LIKE '%/%'")
-    elif folder:
-        f = folder.strip('/').replace('\\', '/')
-        clauses.append("rel_path LIKE ? AND rel_path NOT LIKE ?")
-        p += [f + '/%', f + '/%/%']
+    clauses, p = _folder_scope_clause("rel_path", folder)
     if text:
         like = f"%{text}%"
         clauses.append("(title LIKE ? OR authors LIKE ? OR series LIKE ? "
@@ -5330,6 +5293,7 @@ def _run_upload():
 # on the request threads. Sized so parallel encoders stay near the core count.
 _UPLOAD_SPOOL_DIR   = os.path.join(os.path.dirname(DB_PATH), "upload_spool")
 _UPLOAD_WORKERS     = max(1, min(WSGI_THREADS, _CPUS))
+_UPLOAD_STALE_SECS  = 300
 _upload_wake        = threading.Event()
 _upload_started     = threading.Event()   # guards one-time pool start
 
@@ -5339,14 +5303,21 @@ def _upload_workers_wake():
 
 
 def _claim_upload_job():
-    """Atomically take the oldest pending job. Returns a Row or None. The
-    UPDATE...WHERE status='pending' guard means two workers can never claim the
-    same row: the second sees zero rows changed and moves on."""
+    """!
+    @brief Atomically claim the oldest pending job whose destination is free.
+    @return A queue Row, or None if nothing is claimable.
+    @note Two rows for the same (orig_name, folder) never run at once: a pending
+          row is skipped while another row for the same destination is
+          'processing', which is what prevented the two-workers-same-file race.
+    """
     def _claim():
         db = _db()
         db.rollback()
         rows = db.execute(
-            "SELECT id FROM upload_queue WHERE status='pending' "
+            "SELECT id FROM upload_queue q WHERE status='pending' "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM upload_queue p WHERE p.status='processing' "
+            "  AND p.orig_name=q.orig_name AND IFNULL(p.folder,'')=IFNULL(q.folder,'')) "
             "ORDER BY attempts ASC, id ASC LIMIT ?", (_UPLOAD_WORKERS,)).fetchall()
         if not rows:
             return None
@@ -5366,18 +5337,32 @@ def _claim_upload_job():
             return got
 
 
-def _process_upload_job(job):
-    """Run the heavy pipeline for one queued job by replaying it through
-    _run_upload inside a rebuilt request context — so the entire existing
-    convert/index/dedup body is reused verbatim, no request object required."""
+# Error codes that are a genuine, handled verdict on the file itself — retrying
+# the identical bytes cannot change the result, so these are terminal.
+_TERMINAL_UPLOAD_CODES = frozenset({
+    "exact_duplicate", "filename_exists",   # already in the library
+    "conversion_failed",                    # undecodable = corrupt / invalid format
+    "no_file", "bad_folder",                # malformed request; identical retry is pointless
+})
+
+
+def _process_upload_job(job) -> tuple[str, str, str]:
+    """!
+    @brief Run the convert/index pipeline for one queued job.
+    @return (outcome, detail, rel_path) where outcome is 'done', 'failed'
+            (terminal, known-bad file), or 'retry' (transient — try again later).
+    @note Only a handled verdict on the file (duplicate, corrupt, invalid format)
+          is terminal. Collisions, DB locks and unknown errors are 'retry' so a
+          good file is never dropped.
+    """
     spool_path = job["spool_path"]
     try:
         with open(spool_path, "rb") as f:
             data = f.read()
     except OSError as e:
-        return False, f"spool missing: {e}", ""
+        # Spool genuinely gone -> nothing to retry from. Terminal.
+        return "failed", f"spool missing: {e}", ""
 
-    # Rebuild exactly the multipart form _run_upload expects.
     ctx = app.test_request_context(
         "/api/upload", method="POST",
         data={"file": (io.BytesIO(data), job["orig_name"]),
@@ -5388,16 +5373,22 @@ def _process_upload_job(job):
         resp = _run_upload()
         body, code = (resp if isinstance(resp, tuple) else (resp, 200))
         payload = body.get_json(silent=True) or {}
-    ok = bool(payload.get("success")) and code < 400
-    if ok:
-        return True, "", payload.get("filename", "")
-    # A duplicate / filename-clash isn't a retryable error — it's terminal-done.
-    if payload.get("error_code") in ("exact_duplicate", "filename_exists"):
-        return True, payload.get("error_code", ""), payload.get("existing_file", "")
-    return False, payload.get("error", "unknown") or "unknown", ""
+
+    if bool(payload.get("success")) and code < 400:
+        return "done", "", payload.get("filename", "")
+
+    ecode = payload.get("error_code") or ""
+    if ecode in ("exact_duplicate", "filename_exists"):
+        # Already in the library (possibly just written by a colliding worker).
+        return "done", "", payload.get("existing_file", "")
+    if ecode in _TERMINAL_UPLOAD_CODES:
+        return "failed", payload.get("error", ecode) or ecode, ""
+    # server_error / index_failed / unknown -> transient. Retry.
+    return "retry", payload.get("error", ecode or "unknown") or "unknown", ""
 
 
-def _finish_upload_job(job_id, ok, err, rel_path):
+def _finish_upload_job(job_id, ok: bool, err: str, rel_path: str) -> None:
+    """! @brief Write a terminal outcome (done|error) for a job."""
     def _fin():
         db = _db()
         db.execute(
@@ -5416,31 +5407,32 @@ def _upload_worker_loop():
         except Exception as e:
             access_logger.error(f"upload queue claim failed: {e}")
         if job is None:
-            # Nothing pending: sleep until woken by a new enqueue (or a periodic
-            # tick, so a job left 'processing' by a crashed worker still drains).
             _upload_wake.wait(timeout=5.0)
             _upload_wake.clear()
             continue
         try:
-            ok, err, rel = _process_upload_job(job)
+            outcome, detail, rel = _process_upload_job(job)
         except Exception as e:
-            ok, err, rel = False, str(e), ""
+            # An unhandled crash is transient by definition — retry, never park.
+            outcome, detail, rel = "retry", str(e), ""
             access_logger.error(f"upload job {job['id']} crashed: {e}",
                                 exc_info=True)
-        # Retry transient failures a few times before parking as 'error'.
-        if not ok and job["attempts"] < 3:
+
+        if outcome == "retry":
             def _requeue():
                 db = _db()
                 db.execute("UPDATE upload_queue SET status='pending', error=?, "
                            "updated=? WHERE id=?",
-                           (err[:500], time.time(), job["id"]))
+                           (detail[:500], time.time(), job["id"]))
                 db.commit()
             try: _db_retry(_requeue)
             except Exception: pass
-            time.sleep(min(5.0, 0.5 * job["attempts"]))
+            time.sleep(min(30.0, 0.5 * max(1, job["attempts"])))   # capped backoff
             continue
-        _finish_upload_job(job["id"], ok, err, rel)
-        if ok:
+
+        # Terminal: 'done' or 'failed' (known-bad file).
+        _finish_upload_job(job["id"], outcome == "done", detail, rel)
+        if outcome == "done":
             try: os.remove(job["spool_path"])
             except OSError: pass
 
