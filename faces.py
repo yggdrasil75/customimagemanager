@@ -78,7 +78,7 @@ def list_models():
     common : stock COCO YOLO (person class) — auto-downloaded by ultralytics
     face   : face detectors in ./models
     custom : anything else the user dropped in ./models
-    trained: our own runs/detect/*/weights/best.pt (filled in by manager)
+    trained: our own models/ours/**/*.pt (filled in by manager)
     """
     ensure_models_dir()
     out = {"common": [], "face": [], "custom": []}

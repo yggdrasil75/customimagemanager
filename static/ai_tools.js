@@ -110,6 +110,7 @@ async function saveAiSettings(){
       face_model:document.getElementById('cfg_face_model')?.value||'',
       face_size:document.getElementById('cfg_face_size')?.value||'n',
       person_model:document.getElementById('cfg_person_model')?.value||'',
+      our_model:document.getElementById('cfg_our_model')?.value||'',
       barcode_model:document.getElementById('cfg_barcode_model')?.value||'',
       pose_kind:document.getElementById('cfg_pose_kind').value,
       pose_size:document.getElementById('cfg_pose_size').value,

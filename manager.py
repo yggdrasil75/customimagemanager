@@ -96,6 +96,7 @@ def quality_to_stars(q, blank=False):
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 app       = Flask(__name__)
 MEDIA_DIR = "media"
+MODELS_DIR = "models"
 DB_PATH   = os.path.join(MEDIA_DIR, "library.db")
 THUMB_DB  = os.path.join(MEDIA_DIR, "thumbs.db")   # disposable BLOB cache
 CFG_FILE  = "app_config.json"
@@ -109,6 +110,7 @@ _dup_model     = DuplicateClassifier.load(DUP_MODEL_PATH)
 _last_activity = time.time()
 
 os.makedirs(MEDIA_DIR, exist_ok=True)
+os.makedirs(MODELS_DIR, exist_ok=True)
 shutil.rmtree(os.path.join(MEDIA_DIR, ".thumbs"), ignore_errors=True)  # retired loose cache
 os.makedirs("logs",     exist_ok=True)
 
@@ -146,6 +148,7 @@ state = {
     "face_model": "",
     "face_size": "n",
     "person_model": "",
+    "our_model": "",
     "face_cluster_eps": 0.0,
     "body_enabled": False,
     "body_cluster_eps": 0.0,
@@ -1666,7 +1669,7 @@ def load_config():
 def save_config():
     keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt",
             "oai_actions","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size",
-            "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","face_cluster_eps",
+            "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","our_model","face_cluster_eps",
             "body_enabled","body_cluster_eps","object_proposals",
             "barcode_model","barcode_conf", "iqa_model","auth","gdl_sites","gdl_opts","gdl_auth"]
     with open(CFG_FILE, 'w') as f:
@@ -1687,7 +1690,7 @@ def populate_model_selector():
     list older code expects; 'model_groups' is the structured view the settings
     UI uses (common / ours / face / custom)."""
     trained = sorted(
-        glob.glob(os.path.join(MEDIA_DIR, "runs/detect/train*/weights/best.pt")),
+        glob.glob(os.path.join(MODELS_DIR, "**", "*.pt"), recursive=True),
         key=os.path.getmtime)
     groups = facelib.list_models()
     groups["trained"] = trained
@@ -2848,9 +2851,11 @@ def yolo_train_worker(abs_folder: str, dataset_dir: str, yaml_path: str,
                   "YOLO(bm).train(data=yp,epochs=ep,batch=bt,imgsz=sz,device=dv)\n")
         cmd = [sys.executable,"-c",script,yaml_path,base_model,
                str(epochs),str(batch),str(imgsz),str(device)]
+        run_dir = os.path.abspath(MODELS_DIR)
+        os.makedirs(run_dir, exist_ok=True)
         with open("logs/training.log","w") as lf:
             lf.write(f"[{datetime.now()}] YOLO Training Started\n"); lf.flush()
-            subprocess.run(cmd,check=True,cwd=abs_folder,stdout=lf,stderr=subprocess.STDOUT)
+            subprocess.run(cmd,check=True,cwd=run_dir,stdout=lf,stderr=subprocess.STDOUT)
         populate_model_selector()
         state["status_text"] = "Training Complete!"
     except Exception as e:
@@ -2879,7 +2884,7 @@ def remote_yolo_train_worker(abs_folder: str, dataset_dir: str, config: dict,
         if s.get('status')=='completed':
             dl = requests.get(f"http://{remote_ip}/api/download/{job_id}",timeout=60)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            td = os.path.join(abs_folder,f"runs/detect/train_remote_{ts}/weights")
+            td = os.path.join(os.path.abspath(MODELS_DIR),f"runs/detect/train_remote_{ts}/weights")
             os.makedirs(td,exist_ok=True)
             with open(os.path.join(td,"best.pt"),'wb') as wf: wf.write(dl.content)
             populate_model_selector()
@@ -2900,6 +2905,8 @@ def _load_yolo(model_path):
     @brief Memoised YOLO loader; maxsize>1 so alternating detectors don't thrash.
     @note Invalidate with _load_yolo.cache_clear() when a setting repoints a model path.
     """
+    if not os.path.dirname(model_path):
+        model_path = os.path.join(MODELS_DIR, model_path)
     return YOLO(model_path)
 
 _SIZES = ("n", "s", "m", "l", "x")
@@ -3055,8 +3062,13 @@ def _face_regions_for(img, rel: str) -> list:
                     "confirmed": False, "region_tags": [], "region_description": ""})
     if state.get("face_bg_custom"):
         models = (state.get("model_groups") or {}).get("trained") or []
-        if models:
-            for b in _detect_obb_or_box(img, models[-1]):
+        chosen = (state.get("our_model") or "").strip()
+        if chosen and chosen in models:
+            model_path = chosen
+        else:
+            model_path = models[-1] if models else None
+        if model_path:
+            for b in _detect_obb_or_box(img, model_path):
                 out.append({"class_name": b["class_name"], "region_name": "",
                             "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
                             "confirmed": False, "region_tags": [],
@@ -4667,7 +4679,7 @@ def api_state():
         ("classes","available_models","status_text","remote_ip",
          "oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions",
          "autotag_enabled","pipeline_tree","yolo_size","pose_kind","pose_size",
-         "face_bg_enabled","face_bg_custom","face_model","face_size","person_model",
+         "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","our_model",
          "face_cluster_eps","body_enabled","body_cluster_eps","object_proposals",
          "barcode_model","barcode_conf",
          "model_groups","iqa_model")})
@@ -4686,8 +4698,11 @@ def update_settings():
     # the cache is dropped.
     if "barcode_model" in d and d["barcode_model"] != state.get("barcode_model"):
         _load_yolo.cache_clear()
+    # Same for the "our"/trained model: _detect_obb_or_box memoises by path.
+    if "our_model" in d and d["our_model"] != state.get("our_model"):
+        _load_yolo.cache_clear()
     for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","pipeline_tree","yolo_size","pose_kind","pose_size",
-              "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","face_cluster_eps",
+              "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","our_model","face_cluster_eps",
               "body_enabled","body_cluster_eps","object_proposals","iqa_model",
               "barcode_model","barcode_conf"):
         if k in d: state[k] = d[k]

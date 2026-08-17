@@ -274,6 +274,8 @@ async function fetchState(){
       _fill('cfg_face_model', s.face_model, (_g.face||[]).concat(_g.custom||[]));
       _fill('cfg_person_model', s.person_model,
             (_g.trained||[]).concat(_g.custom||[]));
+      _fill('cfg_our_model', s.our_model,
+            (_g.trained||[]).concat(_g.custom||[]));
       _fill('cfg_barcode_model', s.barcode_model,
             (_g.trained||[]).concat(_g.custom||[]));
       const _fs=document.getElementById('cfg_face_size');
