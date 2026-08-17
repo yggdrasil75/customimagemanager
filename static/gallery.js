@@ -78,8 +78,18 @@ document.getElementById('search_input').addEventListener('input',e=>{
 });
 
 
+function syncUrl(){
+  const p=new URLSearchParams();
+  if(currentPage) p.set('page',currentPage);
+  if(currentSearch) p.set('q',currentSearch);
+  if(currentFolder) p.set('folder',currentFolder);
+  const qs=p.toString();
+  history.replaceState(null,'',qs?('?'+qs):location.pathname);
+}
+
 async function loadGallery(){
   if(imageFilter){ renderImageFilter(); return; }
+  syncUrl();
   const params=new URLSearchParams({page:currentPage,q:currentSearch,folder:currentFolder});
   // When the gallery modal was opened from an album, scope the listing to that
   // album's members. The server ANDs this with the normal search/folder terms,
