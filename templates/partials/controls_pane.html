@@ -209,6 +209,9 @@
           <button onclick="runOCR()" id="btn_ocr"
             class="bg-sky-700 hover:bg-sky-600 py-1.5 rounded font-bold text-sm">🔤 OCR</button>
         </div>
+        <button onclick="runSegment()" id="btn_segment"
+          title="Run the selected background segmentation (YOLO-seg) model on this image and add masked regions for the whitelisted classes (Settings ▸ Segmentation)."
+          class="w-full bg-fuchsia-700 hover:bg-fuchsia-600 py-1.5 rounded font-bold text-sm">🎭 Segment (YOLO)</button>
         <button onclick="runBarcodes()" id="btn_barcodes"
           title="Detect barcodes and QR codes with the configured YOLO model, then decode each one. Codes that are found but can't be read are still marked, so you keep a note of where they are."
           class="w-full bg-amber-700 hover:bg-amber-600 py-1.5 rounded font-bold text-sm">▥ Scan barcodes</button>

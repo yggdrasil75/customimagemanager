@@ -5,6 +5,11 @@
         <input type="checkbox" id="popout_toggle_regions" checked onchange="drawPopout()" class="accent-blue-500">
         Regions
       </label>
+      <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer"
+        title="Show fine segmentation masks on regions that have one">
+        <input type="checkbox" id="popout_toggle_masks" checked onchange="drawPopout()" class="accent-fuchsia-500">
+        Masks
+      </label>
       <span class="text-[10px] text-gray-500 hidden sm:inline">Drag:Add · Mid:Rename · Right:Delete · Scroll:Zoom ·
         Click+drag canvas:Pan</span>
       <button onclick="closePopout()" class="text-gray-400 hover:text-white text-lg leading-none ml-2">✕</button>

@@ -65,6 +65,8 @@
             Delete</button>
           <button onclick="bulkBox()" title="Run AI box detection on every selected image"
             class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1.5 rounded font-bold">🤖 AI Box</button>
+          <button onclick="bulkSegment()" title="Run the background segmentation (YOLO-seg) model on every selected image, adding masked regions for the whitelisted classes"
+            class="text-xs bg-fuchsia-700 hover:bg-fuchsia-600 px-3 py-1.5 rounded font-bold">🎭 Segment</button>
           <select id="bulk_action_select" title="AI action to run on each selected image"
             class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-1.5 max-w-[130px]"></select>
           <button onclick="bulkRunAI()" title="Run the chosen AI action on every selected image"

@@ -422,6 +422,27 @@ async function runOCR(){
   }catch(e){ alert('Network error during OCR.'); }
   btn.innerText=og; btn.disabled=false;
 }
+async function runSegment(){
+  if(!currentFile){ alert('Select an image first.'); return; }
+  const btn=document.getElementById('btn_segment'); const og=btn.innerText;
+  btn.innerText='🎭 …'; btn.disabled=true;
+  try{
+    const d=await fetch('/api/segment',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({filename:currentFile})}).then(r=>r.json());
+    if(d.success){
+      const regs=d.regions||[];
+      if(!regs.length){ showToast(d.note||'No objects segmented.'); }
+      else{
+        regs.forEach(r=>currentRegions.push({class_name:r.class_name,
+          cx:r.cx,cy:r.cy,w:r.w,h:r.h,confirmed:false,mask_svg:r.mask_svg}));
+        drawCanvas(); if(typeof popoutOpen!=='undefined'&&popoutOpen) drawPopout();
+        renderRegionsList(); triggerAutosave();
+        showToast(`Segment: ${regs.length} region(s) added.`);
+      }
+    } else alert('Segment failed: '+(d.error||''));
+  }catch(e){ alert('Network error during segmentation.'); }
+  btn.innerText=og; btn.disabled=false;
+}
 async function runBarcodes(){
   if(!currentFile){ alert('Select an image first.'); return; }
   const btn=document.getElementById('btn_barcodes'); const og=btn.innerText;

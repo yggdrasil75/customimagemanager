@@ -1,3 +1,40 @@
+const _maskPathCache = new Map();
+function maskPath2D(d, dw, dh) {
+  if (!d) return null;
+  const key = d + '|' + Math.round(dw) + 'x' + Math.round(dh);
+  const hit = _maskPathCache.get(key);
+  if (hit !== undefined) return hit;
+  let path = null;
+  try {
+    path = new Path2D();
+    const toks = d.match(/[MLCZz]|-?\d*\.?\d+(?:[eE][-+]?\d+)?/g) || [];
+    let i = 0;
+    const num = () => parseFloat(toks[i++]);
+    while (i < toks.length) {
+      const c = toks[i++];
+      if (c === 'M') { path.moveTo(num() * dw, num() * dh); }
+      else if (c === 'L') { path.lineTo(num() * dw, num() * dh); }
+      else if (c === 'C') {
+        const x1 = num() * dw, y1 = num() * dh, x2 = num() * dw, y2 = num() * dh,
+              x = num() * dw, y = num() * dh;
+        path.bezierCurveTo(x1, y1, x2, y2, x, y);
+      } else if (c === 'Z' || c === 'z') { path.closePath(); }
+      // stray number without a command: skip it
+    }
+  } catch (e) { path = null; }
+  if (_maskPathCache.size > 200) _maskPathCache.clear();  // bound the cache
+  _maskPathCache.set(key, path);
+  return path;
+}
+
+// Pick which of the three stored scan variants to draw. Centerline is the
+// balanced default; fall back to whichever exists.
+function maskD(b) {
+  const m = b && b.mask_svg;
+  if (!m) return '';
+  return m.centerline || m.overscan || m.underscan || '';
+}
+
 function regionAtCanvas(px,py){
   for(let i=currentRegions.length-1;i>=0;i--){
     const b=currentRegions[i];
@@ -66,6 +103,23 @@ function makeViewer(prefix, opts) {
               : dec === 'keep' ? '#3b82f6' : '#f59e0b';
         }
         ctx.strokeStyle = col; ctx.lineWidth = active ? 3 : 1.5;
+        // Fine segmentation mask (if present and Masks toggle is on): translucent
+        // fill + solid outline in the region colour, under the box/label.
+        const masksOn = (function(){ const t = P('toggle_masks'); return !t || t.checked; })();
+        if (masksOn) {
+          const md = maskD(b);
+          if (md) {
+            const mp = maskPath2D(md, dw, dh);
+            if (mp) {
+              ctx.save();
+              ctx.globalAlpha = active ? 0.35 : 0.22;
+              ctx.fillStyle = col; ctx.fill(mp, 'evenodd');
+              ctx.globalAlpha = 1; ctx.lineWidth = active ? 2.5 : 1.5;
+              ctx.strokeStyle = col; ctx.stroke(mp);
+              ctx.restore();
+            }
+          }
+        }
         ctx.setLineDash(conf || !isMain ? (isMain ? [] : []) : [5, 4]);
         if (isMain && !conf) ctx.setLineDash([5, 4]);
         ctx.strokeRect(x, y, w, h); ctx.setLineDash([]);

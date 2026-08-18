@@ -144,11 +144,7 @@ def _get_sam(model_id):
     model = None
     try:
         from ultralytics import SAM, FastSAM
-        # A user-dropped checkpoint under models/seg/sam wins; otherwise use the
-        # registry's weights name and let ultralytics download it.
-        weights = seg_models.sam_weights_path(model_id)
-        if not (weights and os.path.exists(weights)):
-            weights = entry.get("weights")
+        weights = seg_models.sam_weights_ref(model_id)
         model = (FastSAM if family == "fastsam" else SAM)(weights)
     except Exception:
         model = None

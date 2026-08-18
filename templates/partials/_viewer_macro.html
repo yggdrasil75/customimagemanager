@@ -71,6 +71,11 @@
         <input type="checkbox" id="{{ p }}toggle_regions" checked onchange="drawCanvas()" class="accent-blue-500">
         Regions
       </label>
+      <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer"
+        title="Show fine segmentation masks (SVG) on regions that have one">
+        <input type="checkbox" id="{{ p }}toggle_masks" checked onchange="drawCanvas()" class="accent-fuchsia-500">
+        Masks
+      </label>
       <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
         <input type="checkbox" id="{{ p }}toggle_skeleton"
           onchange="drawCanvas();if(typeof popoutOpen!=='undefined'&&popoutOpen)drawPopout();"

@@ -524,3 +524,23 @@ async function bulkEmbed(){
   }catch(e){ alert('Network error during embedding.'); }
   finally{ if(btn){ btn.disabled=false; btn.innerHTML=orig; } }
 }
+
+async function bulkSegment(){
+  const files=[...selectedFiles];
+  if(!files.length) return;
+  const btn=document.querySelector('#bulk_bar button[onclick="bulkSegment()"]');
+  const orig=btn?btn.innerHTML:''; if(btn){ btn.disabled=true; btn.innerHTML='🎭 …'; }
+  showToast(`Segmenting ${files.length} image(s)…`);
+  try{
+    const d=await fetch('/api/bulk_segment',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({filenames:files})}).then(r=>r.json());
+    if(!d.success){ alert('Segment failed: '+(d.error||'')); }
+    else{
+      showToast(`Segmented ${d.segmented}/${d.done} image(s)${d.errors.length?', '+d.errors.length+' errors':''}.`);
+      if(currentFile && files.includes(currentFile)) selectFile(currentFile);
+      loadGallery(); refreshReviewCount();
+    }
+  }catch(e){ alert('Network error during segmentation.'); }
+  finally{ if(btn){ btn.disabled=false; btn.innerHTML=orig; } }
+}

@@ -322,17 +322,35 @@ def sam_weights_path(model_id):
     return _sam_weight_path(sam_info(model_id))
 
 
+def sam_weights_ref(model_id):
+    """The path to hand ultralytics for a SAM id. Built-ins point at
+    models/seg/sam/<name> (dir created) so ultralytics' auto-download lands in
+    the discovery folder rather than the cwd — matching the YOLO-seg convention
+    and the normal loader's use of MODELS_DIR. A discovered/custom file keeps its
+    own full path."""
+    entry = sam_info(model_id)
+    w = entry.get("weights", "")
+    if entry.get("custom") or not w:
+        return w
+    try:
+        os.makedirs(SAM_DIR, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.join(SAM_DIR, w)
+
+
 def yolo_weights_ref(model_id):
     """The ultralytics weights reference for a YOLO-seg id: a discovered file's
     full path, else the auto-download model name."""
     e = yolo_seg_info(model_id)
     w = e.get("weights", "")
-    if e.get("custom"):
+    if e.get("custom") or not w:
         return w
-    # built-in: prefer a local copy under models/seg/yolo if the user dropped
-    # one, else the bare name for ultralytics to fetch.
-    local = os.path.join(YOLO_DIR, w)
-    return local if os.path.exists(local) else w
+    try:
+        os.makedirs(YOLO_DIR, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.join(YOLO_DIR, w)
 
 
 # ── "what to segment" class filter ────────────────────────────────────────────
@@ -347,32 +365,9 @@ def weights_present(model_id):
     download' without triggering the fetch. Never raises."""
     try:
         ref = yolo_weights_ref(model_id)
-        if os.path.exists(ref):
-            return True
-        # ultralytics stashes auto-downloaded weights in its settings 'weights_dir'
-        # (default ~/.config/Ultralytics or the cwd). Check the common spots for a
-        # bare model name so a prior download counts as present.
-        name = os.path.basename(ref)
-        for base in _ultralytics_weight_dirs():
-            if os.path.exists(os.path.join(base, name)):
-                return True
+        return bool(ref) and os.path.exists(ref)
     except Exception:
-        pass
-    return False
-
-
-def _ultralytics_weight_dirs():
-    """Directories ultralytics may have cached downloaded weights in."""
-    dirs = [os.getcwd()]
-    try:
-        from ultralytics.utils import SETTINGS  # type: ignore
-        wd = SETTINGS.get("weights_dir")
-        if wd:
-            dirs.append(str(wd))
-    except Exception:
-        pass
-    dirs.append(os.path.expanduser("~/.config/Ultralytics"))
-    return dirs
+        return False
 
 
 def class_catalog(model_id, download=False):

@@ -3911,6 +3911,59 @@ def _compose_description(analysis, existing=""):
             parts.append(" ".join(seg))
     return "\n\n".join(p for p in parts if p) or existing
 
+def _segment_regions(bgr, query):
+    """Run the AI-tools segmenter (SAM/FastSAM) for `query` on a BGR image and
+    return unconfirmed region dicts (box + mask_svg), or []. Shared by the batch
+    action runner and the interactive run_llm endpoint so both take the SAM path
+    instead of falling through to the vision LLM. Never raises."""
+    if seg_runtime is None:
+        return []
+    query = (query or "").strip()
+    sam_id = state.get("sam_model")
+    insts = []
+    try:
+        mode = seg_runtime.sam_text_mode(sam_id)
+        if mode and query:
+            # SAM 3 or FastSAM: hand the text straight to the model.
+            insts = seg_runtime.segment_text(bgr, query, model_id=sam_id) or []
+        else:
+            # SAM 2.1 / MobileSAM: no text path. Use the LLM only as a rough
+            # locator — a loose box around the subject — then let SAM produce
+            # the actual mask; the mask's bounds, not the LLM box, are stored.
+            rough = _llm_call(
+                (query or "the main subject") +
+                "\n\nReturn a rough bounding box (normalised 0..1) around "
+                "each instance. It only needs to loosely contain the "
+                "subject; precision is not required.", bgr, "boxes") or []
+            seed = []
+            for b in rough:
+                try:
+                    seed.append({"class_name": query or b.get("class_name", "object"),
+                                 "cx": float(b["cx"]), "cy": float(b["cy"]),
+                                 "w": float(b["w"]), "h": float(b["h"])})
+                except Exception:
+                    pass
+            if seed:
+                insts = seg_runtime.segment_boxes(bgr, seed, model_id=sam_id) or []
+    except Exception:
+        insts = []
+    new = []
+    for inst in insts:
+        if not inst.get("mask_svg"):
+            continue
+        new.append({"class_name": inst.get("class_name") or query or "object",
+                    "cx": inst["cx"], "cy": inst["cy"],
+                    "w": inst["w"], "h": inst["h"],
+                    "confirmed": False, "region_tags": [],
+                    "region_description": "", "mask_svg": inst["mask_svg"]})
+    for n in new:
+        if n["class_name"] not in state["classes"]:
+            state["classes"].append(n["class_name"])
+    if new:
+        save_classes()
+    return new
+
+
 def _apply_llm_action(fp, action):
     """Run one configured AI action against a file and merge the result into its
     metadata (tags appended/deduped, description appended, boxes added as
@@ -3934,49 +3987,8 @@ def _apply_llm_action(fp, action):
         if seg_runtime is None:
             return True
         query = (prompt or "").strip()
-        sam_id = state.get("sam_model")
-        insts = []
-        try:
-            mode = seg_runtime.sam_text_mode(sam_id)
-            if mode and query:
-                # SAM 3 or FastSAM: hand the text straight to the model.
-                insts = seg_runtime.segment_text(bgr, query, model_id=sam_id) or []
-            else:
-                # SAM 2.1 / MobileSAM: no text path. Use the LLM only as a rough
-                # locator — a loose box around the subject — then let SAM produce
-                # the actual mask; the mask's bounds, not the LLM box, are stored.
-                rough = _llm_call(
-                    (query or "the main subject") +
-                    "\n\nReturn a rough bounding box (normalised 0..1) around "
-                    "each instance. It only needs to loosely contain the "
-                    "subject; precision is not required.", bgr, "boxes") or []
-                seed = []
-                for b in rough:
-                    try:
-                        seed.append({"class_name": query or b.get("class_name", "object"),
-                                     "cx": float(b["cx"]), "cy": float(b["cy"]),
-                                     "w": float(b["w"]), "h": float(b["h"])})
-                    except Exception:
-                        pass
-                if seed:
-                    insts = seg_runtime.segment_boxes(
-                        bgr, seed, model_id=sam_id) or []
-        except Exception:
-            insts = []
-        new = []
-        for inst in insts:
-            if not inst.get("mask_svg"):
-                continue
-            new.append({"class_name": inst.get("class_name") or query or "object",
-                        "cx": inst["cx"], "cy": inst["cy"],
-                        "w": inst["w"], "h": inst["h"],
-                        "confirmed": False, "region_tags": [],
-                        "region_description": "", "mask_svg": inst["mask_svg"]})
+        new = _segment_regions(bgr, query)
         if new:
-            for n in new:
-                if n["class_name"] not in state["classes"]:
-                    state["classes"].append(n["class_name"])
-            save_classes()
             write_metadata(fp, meta["tags"], meta["description"],
                            _merge_regions(meta["regions"], new))
         return True
@@ -6704,6 +6716,24 @@ def _fast_metadata(fn, fp):
         except Exception:
             pass
 
+    _side_xmp = os.path.splitext(fp)[0] + '.xmp'
+    if regions and os.path.exists(_side_xmp):
+        try:
+            side = read_metadata(fp).get("regions", []) or []
+            masked = [s for s in side if s.get("mask_svg")]
+            for s in masked:
+                best, best_iou = None, 0.0
+                for r in regions:
+                    if r.get("mask_svg"):
+                        continue
+                    iou = _iou_center(r, s)
+                    if iou > best_iou:
+                        best, best_iou = r, iou
+                if best is not None and best_iou >= 0.5:
+                    best["mask_svg"] = s["mask_svg"]
+        except Exception:
+            pass
+
     pose = None
     try:
         pose = _read_pose_from_xmp(os.path.splitext(fp)[0] + '.xmp')
@@ -7598,6 +7628,64 @@ def bulk_box():
             access_logger.error(f"bulk_box {fn}: {e}")
     state["status_text"] = "Ready."
     return jsonify({"success": True, "done": done, "boxed": boxed, "errors": errors})
+
+@app.route("/api/bulk_segment", methods=["POST"])
+def bulk_segment():
+    """Run the selected YOLO-seg (background) model over many files, writing
+    masked regions (mask_svg in each region's Extensions) UNCONFIRMED. Mirrors
+    bulk_box but produces masks instead of plain boxes. Body: {filenames,
+    classes?} - classes overrides the saved whitelist for this run."""
+    if seg_runtime is None or seg_models is None:
+        return jsonify({"success": False, "error": "Segmentation unavailable."})
+    filenames = request.json.get("filenames", [])
+    model_id = state.get("bg_seg_model") or seg_models.YOLO_SEG_DEFAULT
+    sel = request.json.get("classes")
+    if sel is None:
+        sel = state.get("bg_seg_classes") or []
+    try:
+        cids = seg_models.wanted_class_ids(model_id, sel)
+    except Exception:
+        cids = None
+    if not seg_models.weights_present(model_id):
+        state["status_text"] = "Downloading segmentation model..."
+    done, segmented, errors = 0, 0, []
+    total = len(filenames)
+    for fn in filenames:
+        fp = get_safe_path(MEDIA_DIR, fn)
+        if not fp or not os.path.exists(fp):
+            errors.append(fn); continue
+        try:
+            img = read_jxl(fp)
+            if img is None:
+                errors.append(fn); continue
+            insts = seg_runtime.segment_background(
+                _to_bgr(img), model_id=model_id, class_ids=cids) or []
+            new = []
+            for inst in insts:
+                if not inst.get("mask_svg"):
+                    continue
+                new.append({"class_name": inst.get("class_name", "object"),
+                            "cx": inst["cx"], "cy": inst["cy"],
+                            "w": inst["w"], "h": inst["h"],
+                            "confirmed": False, "mask_svg": inst["mask_svg"]})
+            if new:
+                meta = read_metadata(fp)
+                for n in new:
+                    if n["class_name"] not in state["classes"]:
+                        state["classes"].append(n["class_name"])
+                save_classes()
+                write_metadata(fp, meta["tags"], meta["description"],
+                               _merge_regions(meta["regions"], new))
+                segmented += 1
+            done += 1
+            state["status_text"] = f"Segment: {done}/{total} ({segmented} done)..."
+        except Exception as e:
+            errors.append(fn)
+            access_logger.error(f"bulk_segment {fn}: {e}")
+    state["status_text"] = "Ready."
+    return jsonify({"success": True, "done": done, "segmented": segmented,
+                    "errors": errors})
+
 
 @app.route("/api/bulk_llm", methods=["POST"])
 def bulk_llm():
@@ -9409,6 +9497,61 @@ def api_barcodes():
                     "summary": barcodes.summary_text(res), **res})
 
 
+@app.route("/api/segment", methods=["POST"])
+def api_segment():
+    """Run the selected YOLO-seg (background) model on one image on demand and
+    return masked regions, so the user can trigger class-aware segmentation
+    manually from the AI Tools panel instead of waiting for the idle worker.
+
+    Body: {filename, classes?}. `classes` (optional list of class names) overrides
+    the saved whitelist for this run; omitted -> use state['bg_seg_classes']
+    ([] = every class the model knows). Returns regions with mask_svg attached;
+    the client adds them to the canvas and autosaves (same flow as OCR/pose).
+    """
+    if seg_runtime is None or seg_models is None:
+        return jsonify({"success": False, "error": "Segmentation unavailable."})
+    fn = request.json.get("filename", "")
+    fp = get_safe_path(MEDIA_DIR, fn)
+    if not fp or not os.path.exists(fp):
+        return jsonify({"success": False, "error": "File not found."})
+    img = read_jxl(fp)
+    if img is None:
+        return jsonify({"success": False, "error": "Decode failed."})
+    model_id = state.get("bg_seg_model") or seg_models.YOLO_SEG_DEFAULT
+    if not seg_models.weights_present(model_id):
+        state["status_text"] = "Downloading segmentation model…"
+    sel = request.json.get("classes")
+    if sel is None:
+        sel = state.get("bg_seg_classes") or []
+    try:
+        cids = seg_models.wanted_class_ids(model_id, sel)
+    except Exception:
+        cids = None
+    state["status_text"] = "Segmenting…"
+    try:
+        insts = seg_runtime.segment_background(
+            _to_bgr(img), model_id=model_id, class_ids=cids) or []
+    except Exception as e:
+        state["status_text"] = "Ready."
+        return jsonify({"success": False, "error": f"Segment failed: {e}"})
+    state["status_text"] = "Ready."
+    regions = []
+    for inst in insts:
+        if not inst.get("mask_svg"):
+            continue
+        regions.append({
+            "class_name": inst.get("class_name", "object"),
+            "cx": inst["cx"], "cy": inst["cy"], "w": inst["w"], "h": inst["h"],
+            "confirmed": False, "mask_svg": inst["mask_svg"],
+            "score": inst.get("score")})
+    note = ""
+    if not regions:
+        note = ("No objects segmented." if seg_models.weights_present(model_id)
+                else "Model not downloaded yet, or no objects found.")
+    return jsonify({"success": True, "regions": regions, "model": model_id,
+                    "count": len(regions), "note": note})
+
+
 @app.route("/api/auto_tag", methods=["POST"])
 def auto_tag():
     model_path = request.json.get("model")
@@ -9461,6 +9604,13 @@ def run_llm():
             write_metadata(fp, meta["tags"], meta["description"], meta["regions"],
                            flag={"delete":delete,"reason":reason})
             return jsonify({"success":True,"target":"flag","delete":delete,"reason":reason})
+        if action["target"]=="segment":
+            new = _segment_regions(_to_bgr(img), action.get("prompt",""))
+            if new:
+                meta=read_metadata(fp)
+                write_metadata(fp, meta["tags"], meta["description"],
+                               _merge_regions(meta["regions"], new))
+            return jsonify({"success":True,"target":"regions","regions":new})
         _,buf = cv2.imencode('.jpg',_to_bgr(img),[cv2.IMWRITE_JPEG_QUALITY,85])
         b64 = base64.b64encode(buf.tobytes()).decode()
         hdrs = {"Content-Type":"application/json"}
