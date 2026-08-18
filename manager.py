@@ -6710,6 +6710,11 @@ def _fast_metadata(fn, fp):
         except Exception:
             pass
 
+    pose = None
+    try:
+        pose = _read_pose_from_xmp(os.path.splitext(fp)[0] + '.xmp')
+    except Exception:
+        pass
 
     return {
         "tags": tags,
@@ -6719,7 +6724,7 @@ def _fast_metadata(fn, fp):
         "event": row["event"] or "",
         "catalog_sets": row["catalog_sets"] or "",
         "regions": regions,
-        "analysis": None, "flag": None, "pose": None,
+        "analysis": None, "flag": None, "pose": pose,
         "ai_generated": False, "model_age": None, "persons": "",
         "genre": "", "alt_of": "", "page_count": None, "albums": [],
     }
