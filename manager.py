@@ -6256,12 +6256,59 @@ def api_move():
             _set_comic_membership(mv_folder)
     return jsonify({"success":True})
 
+_FULLJPG_LRU: "OrderedDict[tuple[str,float], bytes]" = OrderedDict()
+_FULLJPG_LRU_LOCK = threading.Lock()
+_FULLJPG_LRU_MAX = 32
+
+def _fulljpg_lru_get(rel_path: str, mtime: float) -> bytes | None:
+    key = (rel_path, mtime)
+    with _FULLJPG_LRU_LOCK:
+        data = _FULLJPG_LRU.get(key)
+        if data is not None:
+            _FULLJPG_LRU.move_to_end(key)
+        return data
+
+def _fulljpg_lru_put(rel_path: str, mtime: float, data: bytes) -> None:
+    key = (rel_path, mtime)
+    with _FULLJPG_LRU_LOCK:
+        _FULLJPG_LRU[key] = data
+        _FULLJPG_LRU.move_to_end(key)
+        while len(_FULLJPG_LRU) > _FULLJPG_LRU_MAX:
+            _FULLJPG_LRU.popitem(last=False)
+
+def _full_jpeg_bytes(abs_path: str) -> bytes | None:
+    """! @brief Decode a still JXL and encode it as full-resolution JPEG bytes."""
+    img = read_jxl(abs_path)
+    if img is None:
+        return None
+    bgr = _to_bgr(img)
+    ok, buf = cv2.imencode('.jpg', bgr,
+                           [cv2.IMWRITE_JPEG_PROGRESSIVE, 1,
+                            cv2.IMWRITE_JPEG_QUALITY, 90])
+    return buf.tobytes() if ok else None
+
+def _client_supports_jxl() -> bool:
+    """! @brief True if the requesting browser advertises JXL in its Accept header."""
+    return 'image/jxl' in (request.headers.get('Accept') or '')
+
 @app.route("/api/file/<path:filename>")
 def api_file(filename):
     fp = get_safe_path(MEDIA_DIR, filename)
     if not fp:
         return "",404
     if os.path.exists(fp):
+        if (mt.is_jxl(fp) and not mt.is_video(fp)
+                and not _client_supports_jxl()
+                and 'Range' not in request.headers):
+            mtime = _getmtime_loose(fp)
+            data = _fulljpg_lru_get(filename, mtime)
+            if data is None:
+                data = _full_jpeg_bytes(fp)
+                if data is not None:
+                    _fulljpg_lru_put(filename, mtime, data)
+            if data is not None:
+                return send_file(io.BytesIO(data), mimetype='image/jpeg')
+            # decode failed → fall through to serving the raw file
         # conditional=True enables HTTP Range requests so <video> can seek/stream
         # instead of downloading the whole clip up front.
         return send_file(fp, mimetype=mt.mime_for(filename), conditional=True)
