@@ -10019,5 +10019,5 @@ if __name__=='__main__':
     access_logger.info("Warming pose/OCR models (auto-download)…")
     threading.Thread(target=_warm_models, daemon=True).start()
     access_logger.info("Serving on :8000")
-    serve(app, host='0.0.0.0', port=8000, threads=WSGI_THREADS, connection_limit=1000,
+    serve(app, host='0.0.0.0', port=8000, threads=state["wsgi_threads"], connection_limit=1000,
     channel_timeout=300, channel_request_lookahead=1)
