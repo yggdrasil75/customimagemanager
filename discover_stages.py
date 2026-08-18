@@ -2,7 +2,7 @@
 discover_stages.py
 ==================
 
-Staged, checkpointed object-discovery for very large libraries (100k–1M+ images).
+Staged, checkpointed object-discovery for very large libraries (100k-1M+ images).
 
 WHY STAGES
 ----------

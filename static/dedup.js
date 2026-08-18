@@ -227,7 +227,7 @@ async function removeFromGroup(btn){
 }
 async function bulkResolveAll() {
   const thresholdPct = parseFloat(document.getElementById('autoresolve_threshold')?.value ?? 100);
-  const threshold    = thresholdPct / 100;   // convert to 0–1 to match stored scoresq
+  const threshold    = thresholdPct / 100;   // convert to 0-1 to match stored scoresq
   let resolved=0, skipped=0;
 
   while(true){

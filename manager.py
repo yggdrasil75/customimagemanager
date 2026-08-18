@@ -1008,11 +1008,11 @@ def _get_file_row(rel_path):
 
 _FILTER_RE = re.compile(r'(width|height)\s*(<=|>=|<|>|=)\s*(\d+)$', re.I)
 
-def _parse_search(search: str):
-    """Pull structured filters out of free text.
-        width:<512  height:>=1024  width:=800
-        is:untagged  is:tagged  is:unconfirmed
-    Returns (free_text, [sql_clause...], [param...])."""
+def _parse_search(search: str) -> tuple[str, list, list]:
+    """!
+    @brief Pull structured filters (width:/height: comparisons, is: flags) out of free text.
+    @return (free_text, [sql_clause...], [param...]).
+    """
     text, where, params = [], [], []
     for tok in search.split():
         m = _FILTER_RE.match(tok)
@@ -1029,46 +1029,34 @@ def _parse_search(search: str):
         elif low == 'is:unconfirmed':
             where.append("COALESCE(unconfirmed_count,0) > 0")
         elif low == 'is:tagunconfirmed':
-            # Unconfirmed tags are stored as JSON strings beginning with '?',
-            # i.e. the substring "?  appears in the tags JSON list.
-            where.append("tags LIKE '%\"?%'")
+            where.append("tags LIKE '%\"?%'")     # unconfirmed tags are JSON strings starting with '?'
         else:
             text.append(tok)
     return ' '.join(text).strip(), where, params
 
-def _query_files(search: str, offset: int, limit: int, folder: str = '', album: str = ''):
-    """Return (entries, total). Entries are typed dicts: comics first (one cover
-    tile each), then ordinary non-comic images. Comic pages are hidden from the
-    flat list via files.comic_folder.
-
-    When `album` is given the result set is restricted to that album's members,
-    and comics are suppressed — an album is a flat set of images, and paging a
-    mixed comic/image list inside one would just confuse the count."""
+def _query_files(search: str, offset: int, limit: int,
+                 folder: str = '', album: str = '') -> tuple[list, int]:
+    """!
+    @brief Page the flat gallery: comics/books first (one cover tile each), then images.
+    @param album If given, restrict to that album's members and suppress comics/books.
+    @return (entries, total) where entries are typed dicts (kind='comic'|'book'|'image').
+    """
     text, where, params = _parse_search(search)
 
-    # --- comics + books (few; fetched whole, shown first) ---
-    # Skip entirely when filtering to an album (see docstring): an album is a
-    # flat set of images, and books/comics aren't album members.
     comic_entries = [] if album else _query_comics(text, folder)
     book_entries = [] if album else _query_books(text, folder)
     comic_entries = comic_entries + book_entries
     nc = len(comic_entries)
 
-    # --- ordinary images, excluding comic pages ---
     clauses, p = list(where), list(params)
     clauses.append("(comic_folder IS NULL OR comic_folder='')")
     if album:
-        # Membership lives in album_members; a subquery keeps this composable
-        # with the existing folder/search clauses rather than needing a JOIN.
         clauses.append(
             "rel_path IN (SELECT rel_path FROM album_members WHERE album=?)")
         p.append(album)
-    if folder == '/':
-        clauses.append("rel_path NOT LIKE '%/%'")
-    elif folder:
-        f = folder.strip('/').replace('\\', '/')
-        clauses.append("rel_path LIKE ? AND rel_path NOT LIKE ?")
-        p += [f + '/%', f + '/%/%']
+    fclauses, fp = _folder_scope_clause("rel_path", folder)
+    clauses += fclauses
+    p += fp
     if text:
         like = f"%{text}%"
         clauses.append("(rel_path LIKE ? OR tags LIKE ? OR description LIKE ?)")
@@ -1079,10 +1067,8 @@ def _query_files(search: str, offset: int, limit: int, folder: str = '', album: 
     total = nc + total_files
 
     entries = []
-    # comic slice
     if offset < nc:
         entries.extend(comic_entries[offset:offset + limit])
-    # fill remainder with images
     need = limit - len(entries)
     if need > 0:
         file_offset = max(0, offset - nc)
@@ -1091,9 +1077,7 @@ def _query_files(search: str, offset: int, limit: int, folder: str = '', album: 
             f"rating, rating_user FROM files{where_sql} "
             f"ORDER BY rel_path LIMIT ? OFFSET ?", (*p, need, file_offset)).fetchall()
         for r in rows:
-            # Effective rating: a genuine user rating (in-app or from image EXIF)
-            # overrides the preliminary BRISQUE estimate; otherwise fall back to
-            # the BRISQUE stars so terrible images are still easy to spot.
+            # A genuine user rating (in-app or EXIF) overrides the BRISQUE estimate.
             user_rating = r["rating"] if r["rating_user"] else None
             eff_rating = user_rating if user_rating is not None else r["iqa_score"]
             entries.append({"kind": "image", "filename": r["rel_path"],
@@ -1108,9 +1092,11 @@ def _query_files(search: str, offset: int, limit: int, folder: str = '', album: 
 
 # ── Dedup checkpoint helpers ──────────────────────────────────────────────────
 def _dedup_checkpoint_get():
+    """! @brief The single dedup-progress checkpoint row, or None."""
     return _db().execute("SELECT * FROM dedup_checkpoint WHERE id=1").fetchone()
 
-def _dedup_checkpoint_set(file_count, hashed_count, stage):
+def _dedup_checkpoint_set(file_count: int, hashed_count: int, stage: str) -> None:
+    """! @brief Upsert the dedup-progress checkpoint."""
     _db().execute("""
         INSERT INTO dedup_checkpoint(id,file_count,hashed_count,stage,created)
         VALUES(1,?,?,?,?)
@@ -1122,16 +1108,22 @@ def _dedup_checkpoint_set(file_count, hashed_count, stage):
     """, (file_count, hashed_count, stage, time.time()))
     _db().commit()
 
-def _dedup_checkpoint_clear():
+def _dedup_checkpoint_clear() -> None:
+    """! @brief Drop the dedup checkpoint and all stored groups."""
     _db().execute("DELETE FROM dedup_checkpoint")
     _db().execute("DELETE FROM dedup_groups")
     _db().commit()
 
-def _dedup_save_groups(groups_by_kind):
-    """
-    groups_by_kind: list of (kind, members_list, scores_list).
-    scores_list: one float per member (0.0–1.0).  Pass [] to store no scores.
-    Replaces all stored groups.
+def _pair_members_scores(members: list, scores: list) -> list:
+    """! @brief Zip members with scores, or pair each member with None on length mismatch."""
+    if len(scores) == len(members):
+        return list(zip(members, scores))
+    return [(m, None) for m in members]
+
+def _dedup_save_groups(groups_by_kind: list) -> None:
+    """!
+    @brief Replace all stored dedup groups.
+    @param groups_by_kind List of (kind, members_list, scores_list); scores 0.0-1.0, or [] for none.
     """
     db = _db()
     db.execute("DELETE FROM dedup_groups")
@@ -1143,21 +1135,20 @@ def _dedup_save_groups(groups_by_kind):
     )
     db.commit()
 
-def _dedup_load_groups():
-    """Returns list of {kind, members, scores} dicts, filtering deleted members."""
+def _dedup_load_groups() -> list:
+    """!
+    @brief Load stored dedup groups, dropping deleted members and singleton groups.
+    @return List of {kind, members, scores}.
+    """
     db = _db()
     rows = db.execute(
         "SELECT kind, members, scores FROM dedup_groups ORDER BY id").fetchall()
-    # One scan instead of one SELECT per member across every group (N+1 -> 1).
-    live = {r[0] for r in db.execute("SELECT rel_path FROM files").fetchall()}
+    live = {r[0] for r in db.execute("SELECT rel_path FROM files").fetchall()}  # one scan, not N+1
     out = []
     for row in rows:
         members = json.loads(row["members"])
         scores  = json.loads(row["scores"] or "[]")
-        # Pair members with scores, drop deleted files
-        paired = list(zip(members, scores)) if len(scores) == len(members) \
-                 else [(m, None) for m in members]
-        live_pairs = [(m, s) for m, s in paired if m in live]
+        live_pairs = [(m, s) for m, s in _pair_members_scores(members, scores) if m in live]
         if len(live_pairs) > 1:
             live_m, live_s = zip(*live_pairs)
             out.append({"kind": row["kind"],
@@ -1165,8 +1156,8 @@ def _dedup_load_groups():
                         "scores":  list(live_s)})
     return out
 
-def _dedup_remove_file(rel_path):
-    """Prunes a deleted/merged file from every stored group."""
+def _dedup_remove_file(rel_path: str) -> None:
+    """! @brief Prune a deleted/merged file from every stored group."""
     rows = _db().execute("SELECT id, members, scores FROM dedup_groups").fetchall()
     db = _db()
     for row in rows:
@@ -1174,9 +1165,7 @@ def _dedup_remove_file(rel_path):
         if rel_path not in members:
             continue
         scores = json.loads(row["scores"] or "[]")
-        paired = list(zip(members, scores)) if len(scores) == len(members) \
-                 else [(m, None) for m in members]
-        paired = [(m, s) for m, s in paired if m != rel_path]
+        paired = [(m, s) for m, s in _pair_members_scores(members, scores) if m != rel_path]
         if len(paired) > 1:
             new_m, new_s = zip(*paired)
             db.execute("UPDATE dedup_groups SET members=?, scores=? WHERE id=?",
@@ -1186,11 +1175,11 @@ def _dedup_remove_file(rel_path):
     db.commit()
 
 def _excl_key(a: str, b: str) -> tuple[str, str]:
-    """Normalise pair so a < b, for consistent PRIMARY KEY lookups."""
+    """! @brief Order a pair so a < b, for consistent composite-key lookups."""
     return (a, b) if a < b else (b, a)
 
 def _add_exclusions(file: str, others: list[str]) -> None:
-    """Record that `file` must not be grouped with any of `others`."""
+    """! @brief Record that `file` must never be grouped with any of `others`."""
     db = _db()
     db.executemany(
         "INSERT OR IGNORE INTO dedup_exclusions(a,b) VALUES(?,?)",
@@ -1199,13 +1188,14 @@ def _add_exclusions(file: str, others: list[str]) -> None:
     db.commit()
 
 def _is_excluded(a: str, b: str) -> bool:
+    """! @brief Whether a pair is on the never-group exclusion list."""
     ka, kb = _excl_key(a, b)
     return bool(_db().execute(
         "SELECT 1 FROM dedup_exclusions WHERE a=? AND b=?", (ka, kb)
     ).fetchone())
 
 def _load_exclusion_set() -> set[tuple[str, str]]:
-    """Load all exclusion pairs as a set for O(1) lookup during scan."""
+    """! @brief All exclusion pairs as a set for O(1) lookup during a scan."""
     rows = _db().execute("SELECT a, b FROM dedup_exclusions").fetchall()
     return {(r["a"], r["b"]) for r in rows}
 
@@ -2017,7 +2007,7 @@ def _set_compressed_bpp(filepath: str, width: int | None = None,
 
 def _exif_rating(filepath: str) -> int | None:
     """!
-    @brief Map the file's EXIF Rating/RatingPercent to a 0–5 star rating.
+    @brief Map the file's EXIF Rating/RatingPercent to a 0-5 star rating.
     @return Star rating, or None if neither tag is present or mappable.
     """
     try:
@@ -2027,7 +2017,7 @@ def _exif_rating(filepath: str) -> int | None:
             for f in g.get("fields", []):
                 if f.get("present") and f.get("name") in ("Rating", "RatingPercent"):
                     raw[f["name"]] = f.get("raw")
-        # RatingPercent wins (clean 0–100 -> stars); else fall back to Rating.
+        # RatingPercent wins (clean 0-100 -> stars); else fall back to Rating.
         for name, conv in (("RatingPercent", exif_export._rating_percent),
                            ("Rating",        exif_export._rating_halfstar)):
             if name in raw and raw[name] is not None:
@@ -2784,7 +2774,7 @@ def serve_thumb(rel_path: str, abs_path: str, mtime: float | None = None):
     _thumb_lru_put(rel_path, mtime, data)
     return send_file(io.BytesIO(data), mimetype='image/jpeg')
 
-# ── Dedup – numpy matrix hamming ───────────────────────────────────────────────
+# ── Dedup - numpy matrix hamming ───────────────────────────────────────────────
 def _find_similar_pairs(blobs: list[bytes], threshold: int) -> list[tuple[int,int]]:
     """!
     @brief Find all index pairs whose hash blobs are within a Hamming threshold.
@@ -2827,7 +2817,7 @@ def _find_similar_pairs(blobs: list[bytes], threshold: int) -> list[tuple[int,in
 
 def _pixel_similarity_score(diff_mean: float, threshold: float = 15.0) -> float:
     """!
-    @brief Convert a mean absolute pixel difference to a 0–1 similarity score.
+    @brief Convert a mean absolute pixel difference to a 0-1 similarity score.
     @param diff_mean Mean absolute pixel difference (0 = identical).
     @param threshold Difference at and above which similarity is 0.
     @return Log-scaled similarity: 1.0 at diff 0, ~0.59 at the log midpoint, 0.0 at/above threshold.
@@ -3531,8 +3521,8 @@ def _comic_ordered_pages(folder, data=None):
     ordered = [p for p in declared if p in auto] + [p for p in auto if p not in declared]
     return ordered
 
-def _scan_comics():
-    """Walk MEDIA_DIR for comic.json files and rebuild the comics cache."""
+def _scan_comics() -> None:
+    """! @brief Walk MEDIA_DIR for comic.json files and rebuild the comics cache."""
     found = {}
     for root, dirs, files in os.walk(MEDIA_DIR):
         dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'runs']
@@ -3553,7 +3543,8 @@ def _scan_comics():
     _db().commit()
     access_logger.info(f"Comic scan: {len(found)} comic(s)")
 
-def _comic_folder_set():
+def _comic_folder_set() -> set:
+    """! @brief Set of all folders currently registered as comics."""
     return {r["folder"] for r in _db().execute("SELECT folder FROM comics").fetchall()}
 
 def _folder_scope_clause(column: str, folder: str) -> tuple[list, list]:

@@ -216,7 +216,7 @@ function updatePager(){
   document.getElementById('page_info').innerText=`Page ${currentPage+1} / ${pages}`;
   document.getElementById('file_count').innerText=`${totalFiles} files`;
   const start=currentPage*PAGE+1, end=Math.min((currentPage+1)*PAGE,totalFiles);
-  document.getElementById('showing_info').innerText=`Showing ${start}–${end}`;
+  document.getElementById('showing_info').innerText=`Showing ${start}-${end}`;
   document.getElementById('btn_prev').disabled=currentPage===0;
   document.getElementById('btn_next').disabled=(currentPage+1)>=pages;
 }

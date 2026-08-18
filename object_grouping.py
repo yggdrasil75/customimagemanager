@@ -62,7 +62,7 @@ except Exception:
 # ── tunables ──────────────────────────────────────────────────────────────────
 MIN_IMAGE_PX = 256          # skip images whose short side is below this
 MAX_IMAGE_PX = 2048         # HARD cap on the LONG side; downscale before anything
-                            # else. A full-res decode of a few 20k–40k px images,
+                            # else. A full-res decode of a few 20k-40k px images,
                             # held across decode_workers + a gpu_batch, was the
                             # real OOM (tens of GB per image). Proposals run at
                             # _WORK=384 and CNN crops at 224, so nothing downstream

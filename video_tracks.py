@@ -26,7 +26,7 @@ Semantics of ``boxes_at(t)``:
     (subject not on screen), so nothing is drawn until the next keyframe.
   • Exactly on a keyframe returns that box (unless it's ``outside``).
 
-Coordinates are normalized 0–1 (cx, cy = box centre; w, h = size), identical to
+Coordinates are normalized 0-1 (cx, cy = box centre; w, h = size), identical to
 the image region model, so the same overlay math draws both.
 """
 from __future__ import annotations

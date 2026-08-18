@@ -151,8 +151,8 @@ def _enum_int_keys(field):
 # returns the column value, or None to skip the DB mirror (leave the column
 # untouched) when the EXIF value doesn't map cleanly.
 def _rating_halfstar(v):
-    """Rating (0x4746): 0–10 half-star units -> 0–5 stars (value / 2). Values
-    outside 0–10 are a raw 'likes' count that doesn't map to stars -> skip."""
+    """Rating (0x4746): 0-10 half-star units -> 0-5 stars (value / 2). Values
+    outside 0-10 are a raw 'likes' count that doesn't map to stars -> skip."""
     try:
         iv = int(v)
     except (ValueError, TypeError):
@@ -163,8 +163,8 @@ def _rating_halfstar(v):
 
 
 def _rating_percent(v):
-    """RatingPercent (0x4749): 0–100 -> 0–5 stars (round(percent / 20)),
-    clamped to the 0–5 range."""
+    """RatingPercent (0x4749): 0-100 -> 0-5 stars (round(percent / 20)),
+    clamped to the 0-5 range."""
     try:
         iv = int(v)
     except (ValueError, TypeError):
@@ -241,7 +241,7 @@ def write_exif(filepath, patch, allow_repackage=False):
 
         # DB-backed fields (ImageDescription, Rating, RatingPercent) report a
         # value for the caller to persist. Rating tags run through a transform
-        # (EXIF units -> 0–5 stars); if the value doesn't map, skip the mirror.
+        # (EXIF units -> 0-5 stars); if the value doesn't map, skip the mirror.
         if fld.db_field:
             db_val, skip = _apply_db_transform(fld, coerced)
             if not skip:

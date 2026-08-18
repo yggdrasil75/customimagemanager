@@ -3,11 +3,11 @@ User management, authentication and authorization.
 ========================================================================
 Two authentication backends, selectable per-deployment via app_config.json:
 
-  * "local" – users stored in SQLite, passwords hashed with werkzeug
+  * "local" - users stored in SQLite, passwords hashed with werkzeug
               (pbkdf2). Good for personal / test use. Ships with a
               first-run bootstrap that creates an admin account.
 
-  * "ldap"  – bind against a corporate LDAP / Active Directory server.
+  * "ldap"  - bind against a corporate LDAP / Active Directory server.
               No passwords are ever stored locally. Group membership can
               be mapped to the local "admin" role. Good for company AD.
 

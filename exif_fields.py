@@ -574,15 +574,15 @@ IMAGE_FIELDS = [
     EXIFField(0x03e7, "USPTOMiscellaneous", TYPE_BINARY, writable=False,
               note="USPTO-specific; read-only"),
 
-    # ── Rating tags: mapped onto the project's 0–5 star rating (db-backed) ──
-    # Rating (0x4746) is Windows-style. Per the spec note: when 0–10 it encodes
+    # ── Rating tags: mapped onto the project's 0-5 star rating (db-backed) ──
+    # Rating (0x4746) is Windows-style. Per the spec note: when 0-10 it encodes
     # half-stars (1 = half star, 2 = one star), so stars = value / 2; values >10
     # or <0 are a "total likes" style rating that doesn't map cleanly to stars,
-    # so we leave those as raw. RatingPercent (0x4749) is 0–100 and always maps
+    # so we leave those as raw. RatingPercent (0x4749) is 0-100 and always maps
     # to stars = round(percent / 20). Both mirror to the DB `rating` column.
     EXIFField(0x4746, "Rating", TYPE_INT16, db_field="rating",
               db_transform="rating_halfstar",
-              note="0–5 star rating (stored as 0–10 half-star units; 1=½★, "
+              note="0-5 star rating (stored as 0-10 half-star units; 1=½★, "
                    "2=★). Values >10 or <0 are a raw 'likes' count"),
     EXIFField(0x4747, "XP_DIP_XML", TYPE_BINARY, writable=False,
               note="Microsoft XP DIP XML; read-only"),
@@ -590,10 +590,10 @@ IMAGE_FIELDS = [
               note="Microsoft Stitch info; read-only"),
     EXIFField(0x4749, "RatingPercent", TYPE_INT16, db_field="rating",
               db_transform="rating_percent",
-              note="0–100 rating; always maps to a 0–5 star rating "
+              note="0-100 rating; always maps to a 0-5 star rating "
                    "(stars = round(percent / 20))"),
 
-    # ── Microsoft obscure tags 0x5001–0x5011: read-only, hidden when absent ─
+    # ── Microsoft obscure tags 0x5001-0x5011: read-only, hidden when absent ─
     EXIFField(0x5001, "ResolutionXUnit",           TYPE_BINARY, writable=False,
               note="Microsoft; read-only"),
     EXIFField(0x5002, "ResolutionYUnit",           TYPE_BINARY, writable=False,
@@ -801,7 +801,7 @@ IMAGE_FIELDS = [
                    "profile M, 2=shared data, 3=B&W JBIG2, 4=JBIG2 profile M); "
                    "read-only"),
     EXIFField(0x8780, "MultiProfiles", TYPE_INT32, writable=False,
-              note="TIFF-FX multi-profile flags (bits 0–10: profiles S/F/J/C/L/"
+              note="TIFF-FX multi-profile flags (bits 0-10: profiles S/F/J/C/L/"
                    "M/T, res/image width, N-layer profile M, shared data, JBIG2 "
                    "profile M); read-only"),
     EXIFField(0x8781, "SharedData", TYPE_BINARY, writable=False, note="TIFF-FX; read-only"),
