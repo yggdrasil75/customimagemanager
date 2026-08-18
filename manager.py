@@ -108,7 +108,7 @@ MODELS_DIR = "models"
 DB_PATH   = os.path.join(MEDIA_DIR, "library.db")
 THUMB_DB  = os.path.join(MEDIA_DIR, "thumbs.db")   # disposable BLOB cache
 CFG_FILE  = "app_config.json"
-PAGE_SIZE = 200          # items per /api/list page
+COMIC_SCHEMA = "mm.comic/1"
 
 DUP_MODEL_PATH = os.path.join(MEDIA_DIR, "dup_model.json")
 _dup_model     = DuplicateClassifier.load(DUP_MODEL_PATH)
@@ -168,6 +168,11 @@ state = {
     "model_groups": {},
     "pose_kind": "body",
     "pose_size": "n",
+    "page_size": 200,
+    "thumb_lru_bytes": 2 << 30,
+    "meta_cache_max": 4096,
+    "wsgi_threads": max(8, min(32, (os.cpu_count() or 8) // 2)),
+    "cjxl_threads": max(1, (os.cpu_count() or 8) // 4),
     "gdl_sites": {},
     "gdl_opts": {}, 
     "gdl_auth": {},
@@ -185,8 +190,6 @@ state = {
 _thumb_lru: "OrderedDict[str, tuple]" = OrderedDict()
 _thumb_lock = threading.Lock()
 _thumb_lru_bytes = 0
-THUMB_LRU_BYTES = 2 << 30           # 2 GiB ≈ 100k+ thumbnails
-LRU_MAX = 512                       # retained: legacy references elsewhere
 
 def _rel(path: str) -> str:
     """!
@@ -205,7 +208,7 @@ def _thumb_lru_put(rel_path: str, mtime: float, data: bytes) -> None:
             _thumb_lru_bytes -= len(old[1])
         _thumb_lru[rel_path] = (mtime, data)
         _thumb_lru_bytes += len(data)
-        while _thumb_lru_bytes > THUMB_LRU_BYTES and _thumb_lru:
+        while _thumb_lru_bytes > state["thumb_lru_bytes"] and _thumb_lru:
             _k, (_m, d) = _thumb_lru.popitem(last=False)
             _thumb_lru_bytes -= len(d)
 
@@ -228,7 +231,6 @@ def _thumb_lru_drop(rel_path: str) -> None:
 
 _meta_cache: "OrderedDict[str, tuple]" = OrderedDict()
 _meta_cache_lock = threading.Lock()
-META_CACHE_MAX = 4096
 
 def _meta_cache_get(rel_path: str, mtime: float):
     with _meta_cache_lock:
@@ -242,7 +244,7 @@ def _meta_cache_put(rel_path: str, mtime: float, meta: dict) -> None:
     with _meta_cache_lock:
         _meta_cache[rel_path] = (mtime, meta)
         _meta_cache.move_to_end(rel_path)
-        while len(_meta_cache) > META_CACHE_MAX:
+        while len(_meta_cache) > state["meta_cache_max"]:
             _meta_cache.popitem(last=False)
 
 def _meta_cache_drop(rel_path: str) -> None:
@@ -267,16 +269,6 @@ _db_local = threading.local()
 _all_conns = {}
 _all_conns_lock = threading.Lock()
 DB_BUSY_TIMEOUT_MS = 30000
-
-# ── Server thread budget ──────────────────────────────────────────────────────
-# WSGI_THREADS is the real ingest concurrency: waitress queues every request
-# past it, and a deep queue is what eventually trips connection_limit and makes
-# the server stop accepting connections. CJXL_THREADS bounds each encoder
-# subprocess so WSGI_THREADS x CJXL_THREADS stays near the core count instead of
-# oversubscribing it several times over.
-_CPUS = os.cpu_count() or 8
-WSGI_THREADS = max(8, min(32, _CPUS // 2))
-CJXL_THREADS = max(1, _CPUS // 4)
 
 def _db() -> sqlite3.Connection:
     conn = getattr(_db_local, 'conn', None)
@@ -1051,6 +1043,8 @@ def _query_files(search: str, offset: int, limit: int,
     """
     text, where, params = _parse_search(search)
 
+    # comics + books (few; fetched whole, shown first). Skipped for an album:
+    # an album is a flat image set, and books/comics aren't album members.
     comic_entries = [] if album else _query_comics(text, folder)
     book_entries = [] if album else _query_books(text, folder)
     comic_entries = comic_entries + book_entries
@@ -1662,7 +1656,8 @@ def save_config():
             "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","our_model","face_cluster_eps",
             "body_enabled","body_cluster_eps","object_proposals",
             "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
-            "barcode_model","barcode_conf", "iqa_model","auth","gdl_sites","gdl_opts","gdl_auth"]
+            "barcode_model","barcode_conf", "iqa_model","auth","gdl_sites","gdl_opts","gdl_auth",
+            "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads"]
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys if k in state}, f, indent=2)
 
@@ -3504,7 +3499,6 @@ def _clamp_box(b: dict) -> dict | None:
 # A comic = a folder of page images + comic-level metadata. The metadata lives
 # in <folder>/comic.json (the portable source of truth); the `comics` table and
 # the files.comic_folder column are caches rebuilt from it on index.
-COMIC_SCHEMA = "mm.comic/1"
 
 def _comic_json_path(folder: str) -> str:
     """! @brief Resolve a folder's comic.json path (safe-joined under MEDIA_DIR)."""
@@ -4834,18 +4828,18 @@ def api_list():
     elif search.startswith("~"):
         sem = search[1:].strip()
     if sem is not None:
-        entries, total, err = _semantic_list(sem, page * PAGE_SIZE, PAGE_SIZE,
+        entries, total, err = _semantic_list(sem, page * state["page_size"], state["page_size"],
                                               folder, album)
         if err:
             return jsonify({"success": False, "error": err,
                             "files": [], "total": 0, "page": page,
-                            "page_size": PAGE_SIZE})
+                            "page_size": state["page_size"]})
         return jsonify({"success": True, "files": entries, "total": total,
-                        "page": page, "page_size": PAGE_SIZE, "mode": "semantic"})
+                        "page": page, "page_size": state["page_size"], "mode": "semantic"})
 
-    entries, total = _query_files(search, page * PAGE_SIZE, PAGE_SIZE, folder, album)
+    entries, total = _query_files(search, page * state["page_size"], state["page_size"], folder, album)
     return jsonify({"success":True,"files":entries,"total":total,
-                    "page":page,"page_size":PAGE_SIZE})
+                    "page":page,"page_size": state["page_size"]})
 
 
 def _semantic_list(query, offset, limit, folder='', album=''):
@@ -5283,7 +5277,7 @@ def _run_upload():
                 # .jxl. --lossless_jpeg only makes sense for a real JPEG
                 # bitstream (never for a developed raw / png).
                 cjxl_cmd = ['cjxl', cjxl_src, out, '-d', '0',
-                            f'--num_threads={CJXL_THREADS}']
+                            f'--num_threads={state["cjxl_threads"]}']
                 if not is_raw_src and in_ext in ('.jpg', '.jpeg'):
                     cjxl_cmd.append('--lossless_jpeg=1')   # bit-exact JPEG transcode
                 else:
@@ -5423,7 +5417,7 @@ def _run_upload():
 # queue and run the (slow) convert/index chain — cjxl parallelism lives here, not
 # on the request threads. Sized so parallel encoders stay near the core count.
 _UPLOAD_SPOOL_DIR   = os.path.join(os.path.dirname(DB_PATH), "upload_spool")
-_UPLOAD_WORKERS     = max(1, min(WSGI_THREADS, _CPUS))
+_UPLOAD_WORKERS     = max(1, min(state["wsgi_threads"], os.cpu_count() or 8))
 _UPLOAD_STALE_SECS  = 300
 _upload_wake        = threading.Event()
 _upload_started     = threading.Event()   # guards one-time pool start
