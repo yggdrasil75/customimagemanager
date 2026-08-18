@@ -76,6 +76,14 @@ try:
     import iqa
 except Exception:
     iqa = None
+try:
+    import seg_models
+except Exception:
+    seg_models = None
+try:
+    import seg_runtime
+except Exception:
+    seg_runtime = None
 from pipeline import DEFAULT_PIPELINE, run_pipeline
 from templates import HTML, TRAINING_HTML
 
@@ -153,16 +161,16 @@ state = {
     "body_enabled": False,
     "body_cluster_eps": 0.0,
     "object_proposals": "sam",
+    "sam_model": "sam2.1_b",
+    "bg_seg_enabled": False,
+    "bg_seg_model": "yolov26n-seg",
+    "bg_seg_classes": [],
     "model_groups": {},
     "pose_kind": "body",
     "pose_size": "n",
     "gdl_sites": {},
     "gdl_opts": {}, 
-    "gdl_auth": {},   # per-site credentials, keyed by extractor category (like
-                      # gdl_opts). Each value: {"method": "userpass"|"cookies_text"
-                      # |"cookies_browser"|"none", "username","password",
-                      # "cookies_text","browser"}. Compiled to gallery-dl opts (+
-                      # a cookies.txt file) at fetch time by _gdl_compile_auth.
+    "gdl_auth": {},
     "oai_system_prompt": "You are an expert image analysis AI. Provide concise, highly detailed, and accurate responses.",
     "oai_actions": [
         {"id":"1","name":"Describe Scene","prompt":"Describe the overall scene, lighting, and composition in a detailed paragraph.","target":"description"},
@@ -1200,10 +1208,12 @@ def _load_exclusion_set() -> set[tuple[str, str]]:
     return {(r["a"], r["b"]) for r in rows}
 
 # ── Duplicate heuristic: learn from user feedback ─────────────────────────────
-def _record_dup_sample(img_a, img_b, label):
-    """Store a feature vector + label so the model can learn from this pair.
-    Called at merge time (label 1) and exclude time (label 0) — we capture the
-    features *now* because one of the files may be deleted moments later."""
+def _record_dup_sample(img_a, img_b, label: int) -> None:
+    """!
+    @brief Store a feature vector + label from a user merge/exclude decision.
+    @param label 1 at merge time, 0 at exclude time.
+    @note Features are captured now because one file may be deleted moments later.
+    """
     try:
         f = extract_features(img_a, img_b)
         if f is None:
@@ -1215,9 +1225,11 @@ def _record_dup_sample(img_a, img_b, label):
     except Exception as e:
         access_logger.warning(f"_record_dup_sample: {e}")
 
-def _retrain_dup_model(min_samples=8):
-    """Refit the duplicate classifier from accumulated feedback. No-op until
-    there are enough samples."""
+def _retrain_dup_model(min_samples: int = 8) -> bool:
+    """!
+    @brief Refit the duplicate classifier from accumulated feedback.
+    @return True if retrained and saved; False if too few samples or on error.
+    """
     try:
         rows = _db().execute("SELECT feat,label FROM dup_samples").fetchall()
         if len(rows) < min_samples:
@@ -1232,13 +1244,11 @@ def _retrain_dup_model(min_samples=8):
         access_logger.error(f"_retrain_dup_model: {e}")
     return False
 
-def _dedup_is_stale(disk_count):
-    """
-    A cached result is stale if:
-    - No checkpoint exists
-    - The library has grown by more than 1% since the scan
-      (new files may have duplicates we haven't seen)
-    We do NOT invalidate just because files were deleted — _dedup_remove_file handles that.
+def _dedup_is_stale(disk_count: int) -> bool:
+    """!
+    @brief Whether the cached dedup result should be recomputed.
+    @return True if no valid checkpoint exists or the library grew >1% since the scan.
+    @note Deletions don't invalidate the cache; _dedup_remove_file handles those.
     """
     cp = _dedup_checkpoint_get()
     if not cp or cp["stage"] not in ("exact", "perceptual", "verified"):
@@ -1250,29 +1260,22 @@ def _dedup_is_stale(disk_count):
     return growth > 0.01   # >1% new files → rescan
 
 # ── Path safety ────────────────────────────────────────────────────────────────
-def get_safe_path(base_dir, user_path):
+def get_safe_path(base_dir: str, user_path: str) -> str | None:
+    """!
+    @brief Resolve user_path under base_dir, rejecting directory traversal.
+    @return The absolute path, or None if it would escape base_dir.
+    """
     abs_base   = os.path.abspath(base_dir)
     abs_target = os.path.abspath(os.path.join(base_dir, user_path.lstrip('\\/')))
     return abs_target if os.path.commonpath([abs_base, abs_target]) == abs_base else None
 
 # ── JXL decode ─────────────────────────────────────────────────────────────────
 def read_jxl(path: str) -> np.ndarray | None:
-    """
-    Decode a JXL file and return a normalised uint8 ndarray.
-
-    All callers receive one of:
-      (h, w)        — grayscale
-      (h, w, 3)     — RGB
-      (h, w, 4)     — RGBA
-
-    Never (h,w,1) or (h,w,2), never float/uint16.
-    Returns None (with a WARNING, not ERROR) if the file is missing,
-    unreadable, or not actually a JXL codestream.
-
-    Videos are handled here too: for a native video file we return a single
-    poster frame (RGB uint8), so every consumer that funnels through read_jxl —
-    indexing, perceptual-hash dedup, thumbnails, embeddings, clustering, IQA —
-    transparently operates on the poster frame without knowing it's a video.
+    """!
+    @brief Decode a JXL (or a video's poster frame) to a normalised uint8 ndarray.
+    @return (h,w) gray, (h,w,3) RGB, or (h,w,4) RGBA — never (h,w,1)/(h,w,2) or float/uint16;
+            None (logged as warning) if missing, unreadable, or not a JXL.
+    @note Videos return a single RGB poster frame so every read_jxl consumer works on them transparently.
     """
     if mt.is_video(path):
         frame = mt.video_poster_frame(path)
@@ -1280,8 +1283,7 @@ def read_jxl(path: str) -> np.ndarray | None:
             access_logger.warning(f"read_jxl: could not extract video frame: {path}")
         return frame
     try:
-        # mtime keys the decode LRU; 0.0 means missing.
-        mtime = _getmtime_loose(path)
+        mtime = _getmtime_loose(path)          # keys the decode LRU; 0.0 means missing
         if mtime == 0.0 and not os.path.exists(path):
             access_logger.warning(f"read_jxl: file missing: {path}")
             return None
@@ -1292,9 +1294,11 @@ def read_jxl(path: str) -> np.ndarray | None:
 
 
 def _decode_jxl_uncached(path: str) -> np.ndarray | None:
-    """Actually decode+normalise a JXL from disk (no cache). See read_jxl."""
+    """!
+    @brief Decode and normalise a JXL from disk without the cache.
+    @return uint8 ndarray in the read_jxl channel contract, or None on failure.
+    """
     try:
-        # Read the raw bytes; the magic sniff below decides the decoder.
         data = _read_bytes_loose(path)
         if data is None:
             access_logger.warning(f"read_jxl: unreadable: {path}")
@@ -1302,8 +1306,7 @@ def _decode_jxl_uncached(path: str) -> np.ndarray | None:
         if len(data) < 2:
             access_logger.warning(f"read_jxl: file too small: {path}")
             return None
-        # JXL magic: bare codestream starts with FF 0A,
-        # container (ISOBMFF) starts with 00 00 00 0C 4A 58 4C 20
+        # JXL magic: bare codestream FF 0A; ISOBMFF container 00 00 00 0C 'JXL '
         is_bare      = data[:2] == b'\xff\x0a'
         is_container = data[4:8] == b'JXL '
         if not (is_bare or is_container):
@@ -1315,12 +1318,8 @@ def _decode_jxl_uncached(path: str) -> np.ndarray | None:
 
         while img.ndim > 3:
             img = img[0]
-
         if img.ndim == 3 and img.shape[2] > 16:
-            # likely (frames, h, w) for animated grayscale
             img = img[0]
-
-        # ── dtype → uint8 ────────────────────────────────────────────────
         if img.dtype != np.uint8:
             if np.issubdtype(img.dtype, np.floating):
                 img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
@@ -1329,55 +1328,47 @@ def _decode_jxl_uncached(path: str) -> np.ndarray | None:
             else:
                 img = img.astype(np.uint8)
 
-        # ── channel count normalisation ───────────────────────────────────
         if img.ndim == 3:
             c = img.shape[2]
-            if c == 1:
-                img = img[:, :, 0]      # (h,w,1) → (h,w)
-            elif c == 2:
-                img = img[:, :, 0]      # grayscale+alpha → drop alpha
+            if c == 1 or c == 2:
+                img = img[:, :, 0]              # (h,w,1) or gray+alpha → (h,w)
             elif c > 4:
-                img = img[:, :, :4]     # keep at most RGBA
-
+                img = img[:, :, :4]             # keep at most RGBA
         return img
     except Exception as e:
         access_logger.warning(f"read_jxl: {path}: {e}")
         return None
 
-def _to_bgr(img: np.ndarray) -> np.ndarray:
-    """Convert any JXL-decoded ndarray to 3-channel BGR for OpenCV processing."""
-    if img.ndim == 2:                      # grayscale
-        return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+def _cvt_channels(img: np.ndarray, from3, from4, gray_code=None) -> np.ndarray:
+    """!
+    @brief Dispatch a JXL-decoded array to a target colour space by channel count.
+    @param from3 cv2 code for 3-channel (RGB) input.
+    @param from4 cv2 code for 4-channel (RGBA) input.
+    @param gray_code cv2 code to expand 1/2-channel gray to the target; None keeps it 2D.
+    """
+    if img.ndim == 2:
+        return img if gray_code is None else cv2.cvtColor(img, gray_code)
     c = img.shape[2]
-    if c == 1:                             # grayscale packed as (h,w,1)
-        return cv2.cvtColor(img[:,:,0], cv2.COLOR_GRAY2BGR)
-    if c == 2:                             # grayscale + alpha — drop alpha
-        return cv2.cvtColor(img[:,:,0], cv2.COLOR_GRAY2BGR)
+    if c == 1 or c == 2:                        # gray, or gray+alpha (drop alpha)
+        g = img[:, :, 0]
+        return g if gray_code is None else cv2.cvtColor(g, gray_code)
     if c == 3:
-        return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-    if c == 4:                             # RGBA
-        return cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
-    # >4 channels: take first 3 and treat as RGB
-    return cv2.cvtColor(img[:,:,:3], cv2.COLOR_RGB2BGR)
+        return cv2.cvtColor(img, from3)
+    if c == 4:
+        return cv2.cvtColor(img, from4)
+    return cv2.cvtColor(img[:, :, :3], from3)   # >4: first 3 as RGB
+
+def _to_bgr(img: np.ndarray) -> np.ndarray:
+    """! @brief Convert any JXL-decoded ndarray to 3-channel BGR for OpenCV."""
+    return _cvt_channels(img, cv2.COLOR_RGB2BGR, cv2.COLOR_RGBA2BGR, cv2.COLOR_GRAY2BGR)
 
 def _to_gray(img: np.ndarray) -> np.ndarray:
-    """Convert any JXL-decoded ndarray to single-channel grayscale."""
-    if img.ndim == 2:
-        return img
-    c = img.shape[2]
-    if c == 1:
-        return img[:,:,0]
-    if c == 2:                             # grayscale + alpha
-        return img[:,:,0]
-    if c == 3:
-        return cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    if c == 4:
-        return cv2.cvtColor(img, cv2.COLOR_RGBA2GRAY)
-    return cv2.cvtColor(img[:,:,:3], cv2.COLOR_RGB2GRAY)
+    """! @brief Convert any JXL-decoded ndarray to single-channel grayscale."""
+    return _cvt_channels(img, cv2.COLOR_RGB2GRAY, cv2.COLOR_RGBA2GRAY, None)
 
 # ── Hashing ────────────────────────────────────────────────────────────────────
 def _ahash_bytes(gray: np.ndarray, size: int) -> bytes:
-    """aHash → packed bytes (size²/8 bytes)."""
+    """! @brief aHash of a grayscale image, packed to size²/8 bytes."""
     small = cv2.resize(gray, (size, size), interpolation=cv2.INTER_AREA)
     bits  = (small >= small.mean()).flatten()
     pad   = (-len(bits)) % 8
@@ -1386,13 +1377,12 @@ def _ahash_bytes(gray: np.ndarray, size: int) -> bytes:
     return np.packbits(bits).tobytes()
 
 def _sha256(path: str) -> str:
+    """! @brief Streaming SHA-256 hex digest of a file."""
     with open(path, 'rb') as f:
         return hashlib.file_digest(f, 'sha256').hexdigest()
 
 def _set_media_kind(rel_path: str) -> None:
-    """Stamp media_kind ('image'/'video') and, for videos, duration onto the row.
-    Cheap and idempotent; called at the end of every _index_file so the UI knows
-    whether to render <img> or <video>."""
+    """! @brief Stamp media_kind ('image'/'video') and, for videos, duration onto the row."""
     try:
         kind = mt.kind(rel_path)
         dur = None
@@ -1655,12 +1645,23 @@ def load_config():
     # lazily on first score, so this does not slow down startup.
     if iqa is not None:
         state["iqa_model"] = iqa.set_model(state.get("iqa_model", "brisque"))
+    if seg_models is not None:
+        state["sam_model"] = seg_models.resolve_sam_id(
+            state.get("sam_model", seg_models.SAM_DEFAULT))
+        state["bg_seg_model"] = seg_models.resolve_yolo_seg_id(
+            state.get("bg_seg_model", seg_models.YOLO_SEG_DEFAULT))
+        try:
+            import sam_proposals as _sp
+            _sp.set_model(state["sam_model"])
+        except Exception:
+            pass
 
 def save_config():
     keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt",
             "oai_actions","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size",
             "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","our_model","face_cluster_eps",
             "body_enabled","body_cluster_eps","object_proposals",
+            "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
             "barcode_model","barcode_conf", "iqa_model","auth","gdl_sites","gdl_opts","gdl_auth"]
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys if k in state}, f, indent=2)
@@ -2148,6 +2149,8 @@ def _merge_region(keep: dict, incoming: dict) -> dict:
         keep["barcode_binary"] = True
     if not keep.get("region_type") and incoming.get("region_type"):
         keep["region_type"] = incoming["region_type"]
+    if not keep.get("mask_svg") and incoming.get("mask_svg"):
+        keep["mask_svg"] = incoming["mask_svg"]
     keep["confirmed"] = bool(keep.get("confirmed")) or bool(incoming.get("confirmed"))
     return keep
 
@@ -3036,6 +3039,39 @@ _face_dirty = {"v": False}
 _face_force = {"v": False}
 _face_wake = threading.Event()
 
+def _attach_masks(img, regions: list) -> None:
+    if seg_runtime is None or not regions:
+        return
+    try:
+        insts = seg_runtime.segment_boxes(img, regions,
+                                          model_id=state.get("sam_model"))
+    except Exception:
+        return
+    for inst in insts:
+        best, best_iou = None, 0.0
+        for r in regions:
+            iou = _iou_center(r, inst)
+            if iou > best_iou:
+                best, best_iou = r, iou
+        if best is not None and best_iou >= 0.5 and inst.get("mask_svg"):
+            best["mask_svg"] = inst["mask_svg"]
+
+
+def _iou_center(a, b) -> float:
+    """IoU of two normalised center-form boxes."""
+    ax1, ay1 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
+    ax2, ay2 = a["cx"] + a["w"] / 2, a["cy"] + a["h"] / 2
+    bx1, by1 = b["cx"] - b["w"] / 2, b["cy"] - b["h"] / 2
+    bx2, by2 = b["cx"] + b["w"] / 2, b["cy"] + b["h"] / 2
+    ix = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    iy = max(0.0, min(ay2, by2) - max(ay1, by1))
+    inter = ix * iy
+    if inter <= 0:
+        return 0.0
+    ua = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+    return inter / ua if ua > 0 else 0.0
+
+
 def _face_regions_for(img, rel: str) -> list:
     """!
     @brief Detect faces + people (+ optional custom model) in one image.
@@ -3046,10 +3082,49 @@ def _face_regions_for(img, rel: str) -> list:
         out.append({"class_name": "face", "region_name": "",
                     "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
                     "confirmed": False, "region_tags": [], "region_description": ""})
+    person_regions = []
     for b in _run_person(img):
-        out.append({"class_name": "person", "region_name": "",
+        person_regions.append({"class_name": "person", "region_name": "",
                     "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
                     "confirmed": False, "region_tags": [], "region_description": ""})
+
+    if state.get("bg_seg_enabled") and seg_runtime is not None and seg_models is not None:
+        try:
+            cids = seg_models.wanted_class_ids(
+                state.get("bg_seg_model"), state.get("bg_seg_classes") or [])
+            insts = seg_runtime.segment_background(
+                img, model_id=state.get("bg_seg_model"), class_ids=cids)
+        except Exception:
+            insts = []
+        for inst in insts:
+            if not inst.get("mask_svg"):
+                continue
+            if inst.get("class_name") == "person":
+                best, best_iou = None, 0.0
+                for r in person_regions:
+                    iou = _iou_center(r, inst)
+                    if iou > best_iou:
+                        best, best_iou = r, iou
+                if best is not None and best_iou >= 0.5:
+                    best["mask_svg"] = inst["mask_svg"]
+                else:
+                    person_regions.append({
+                        "class_name": "person", "region_name": "",
+                        "cx": inst["cx"], "cy": inst["cy"],
+                        "w": inst["w"], "h": inst["h"], "confirmed": False,
+                        "region_tags": [], "region_description": "",
+                        "mask_svg": inst["mask_svg"]})
+            else:
+                out.append({
+                    "class_name": inst.get("class_name", "object"),
+                    "region_name": "", "cx": inst["cx"], "cy": inst["cy"],
+                    "w": inst["w"], "h": inst["h"], "confirmed": False,
+                    "region_tags": [], "region_description": "",
+                    "mask_svg": inst["mask_svg"]})
+    else:
+        _attach_masks(img, person_regions)
+
+    out.extend(person_regions)
     if state.get("face_bg_custom"):
         models = (state.get("model_groups") or {}).get("trained") or []
         chosen = (state.get("our_model") or "").strip()
@@ -3861,6 +3936,56 @@ def _apply_llm_action(fp, action):
         write_metadata(fp, meta["tags"], meta["description"], meta["regions"],
                        flag={"delete": delete, "reason": reason})
         return True
+    if target == "segment":
+        if seg_runtime is None:
+            return True
+        query = (prompt or "").strip()
+        sam_id = state.get("sam_model")
+        insts = []
+        try:
+            mode = seg_runtime.sam_text_mode(sam_id)
+            if mode and query:
+                # SAM 3 or FastSAM: hand the text straight to the model.
+                insts = seg_runtime.segment_text(bgr, query, model_id=sam_id) or []
+            else:
+                # SAM 2.1 / MobileSAM: no text path. Use the LLM only as a rough
+                # locator — a loose box around the subject — then let SAM produce
+                # the actual mask; the mask's bounds, not the LLM box, are stored.
+                rough = _llm_call(
+                    (query or "the main subject") +
+                    "\n\nReturn a rough bounding box (normalised 0..1) around "
+                    "each instance. It only needs to loosely contain the "
+                    "subject; precision is not required.", bgr, "boxes") or []
+                seed = []
+                for b in rough:
+                    try:
+                        seed.append({"class_name": query or b.get("class_name", "object"),
+                                     "cx": float(b["cx"]), "cy": float(b["cy"]),
+                                     "w": float(b["w"]), "h": float(b["h"])})
+                    except Exception:
+                        pass
+                if seed:
+                    insts = seg_runtime.segment_boxes(
+                        bgr, seed, model_id=sam_id) or []
+        except Exception:
+            insts = []
+        new = []
+        for inst in insts:
+            if not inst.get("mask_svg"):
+                continue
+            new.append({"class_name": inst.get("class_name") or query or "object",
+                        "cx": inst["cx"], "cy": inst["cy"],
+                        "w": inst["w"], "h": inst["h"],
+                        "confirmed": False, "region_tags": [],
+                        "region_description": "", "mask_svg": inst["mask_svg"]})
+        if new:
+            for n in new:
+                if n["class_name"] not in state["classes"]:
+                    state["classes"].append(n["class_name"])
+            save_classes()
+            write_metadata(fp, meta["tags"], meta["description"],
+                           _merge_regions(meta["regions"], new))
+        return True
     if target == "regions":
         boxes = _llm_call(prompt + "\n\nReturn bounding boxes normalised 0..1.", bgr, "boxes") or []
         new = []
@@ -4635,6 +4760,7 @@ def api_state():
          "autotag_enabled","pipeline_tree","yolo_size","pose_kind","pose_size",
          "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","our_model",
          "face_cluster_eps","body_enabled","body_cluster_eps","object_proposals",
+         "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
          "barcode_model","barcode_conf",
          "model_groups","iqa_model")})
 
@@ -4658,8 +4784,22 @@ def update_settings():
     for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","pipeline_tree","yolo_size","pose_kind","pose_size",
               "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","our_model","face_cluster_eps",
               "body_enabled","body_cluster_eps","object_proposals","iqa_model",
+              "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
               "barcode_model","barcode_conf"):
         if k in d: state[k] = d[k]
+    if seg_models is not None:
+        if "sam_model" in d:
+            state["sam_model"] = seg_models.resolve_sam_id(state["sam_model"])
+            try:
+                import sam_proposals as _sp
+                _sp.set_model(state["sam_model"])
+            except Exception:
+                pass
+        if "bg_seg_model" in d:
+            state["bg_seg_model"] = seg_models.resolve_yolo_seg_id(
+                state["bg_seg_model"])
+            if seg_runtime is not None:
+                seg_runtime.clear_cache()
     # Switching the NR-IQA model only re-points the module; the new weights load
     # lazily on the next scan, so this stays a cheap settings save.
     if "iqa_model" in d and iqa is not None:
@@ -7453,6 +7593,16 @@ def _person_fn(bgr):
 def _panel_fn(bgr):
     return _run_panels(bgr)
 
+def _seg_fn(bgr, boxes):
+    """Pipeline seg hook: mask the given boxes with the selected SAM model.
+    Returns instance dicts (box + mask_svg). [] if the segmenter's unavailable."""
+    if seg_runtime is None or not boxes:
+        return []
+    try:
+        return seg_runtime.segment_boxes(bgr, boxes, model_id=state.get("sam_model"))
+    except Exception:
+        return []
+
 def _pipeline_endpoints():
     """Endpoint URLs for parallel pipeline runs. Reads state['oai_endpoints']
     (a list, or newline/comma-separated string). Falls back to the single
@@ -7517,6 +7667,8 @@ def _apply_pipeline_result(fp, analysis):
                    "confirmed": False}
             if s.get("needs_review"):
                 reg["needs_review"] = True
+            if s.get("mask_svg"):
+                reg["mask_svg"] = s["mask_svg"]   # fine SAM mask for this subject
             if s.get("pose"):
                 reg["pose"] = s["pose"]   # skeleton validated to THIS character
             regions.append(reg)
@@ -7571,7 +7723,7 @@ def run_pipeline_route():
 
     try:
         analysis = run_pipeline(tree, bgr, _llm_call, pose_fn=_pose_fn, ocr_fn=_ocr_fn,
-                                person_fn=_person_fn, panel_fn=_panel_fn,
+                                person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn,
                                 endpoints=_pipeline_endpoints(), progress=_progress,
                                 known=_known_context(fp))
     except Exception as e:
@@ -7603,7 +7755,7 @@ def bulk_pipeline():
             def _prog(msg, i=i): state["status_text"] = f"Smart Tag {i+1}/{total}: {msg}"
             analysis = run_pipeline(tree, _to_bgr(img), _llm_call,
                                     pose_fn=_pose_fn, ocr_fn=_ocr_fn,
-                                    person_fn=_person_fn, panel_fn=_panel_fn,
+                                    person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn,
                                     endpoints=_pipeline_endpoints(), progress=_prog,
                                     known=_known_context(fp))
             _apply_pipeline_result(fp, analysis)
@@ -7833,6 +7985,73 @@ def api_iqa_models():
                         "models": [], "active": None})
     return jsonify({"success": True, "models": iqa.list_models(),
                     "active": iqa.get_model()})
+
+
+@app.route("/api/seg_models")
+def api_seg_models():
+    """Segmentation-model registries for the settings dropdowns:
+      sam   — the AI-tools segmenter (SAM 3.1 / 2.1 sizes / MobileSAM / FastSAM),
+              plus anything discovered in models/seg/sam.
+      yolo  — the background (class-aware) segmenter (yolov26*-seg), plus
+              anything in models/seg/yolo.
+    Each entry carries a `speed` badge and an `available`/`reason` pair so the
+    UI can grey out options whose deps or checkpoints are missing — same shape
+    as /api/iqa_models.
+    """
+    if seg_models is None:
+        return jsonify({"success": False, "error": "seg_models unavailable",
+                        "sam": [], "yolo": [],
+                        "active_sam": None, "active_bg": None})
+    return jsonify({
+        "success": True,
+        "sam": seg_models.list_sam_models(),
+        "yolo": seg_models.list_yolo_seg_models(),
+        "active_sam": state.get("sam_model"),
+        "active_bg": state.get("bg_seg_model"),
+        "bg_enabled": bool(state.get("bg_seg_enabled")),
+        "bg_classes": state.get("bg_seg_classes") or [],
+    })
+
+
+@app.route("/api/seg_classes")
+def api_seg_classes():
+    """Trained-class catalog for a background-seg model, so the settings UI can
+    show 'what do you want segmented' checkboxes. Query: ?model=<id> (defaults
+    to the active bg model). Returns an ordered list of {id,name} and the user's
+    current selection. Loading the catalog reads the checkpoint's class names
+    (no inference); empty if ultralytics/weights are unavailable.
+    """
+    if seg_models is None:
+        return jsonify({"success": False, "error": "seg_models unavailable",
+                        "classes": [], "selected": [], "downloadable": False})
+    model_id = (request.args.get("model") or state.get("bg_seg_model")
+                or seg_models.YOLO_SEG_DEFAULT)
+    want_dl = request.args.get("download") in ("1", "true", "yes")
+    present = seg_models.weights_present(model_id)
+    if not present and not want_dl:
+        # Weights not cached and the user hasn't asked to fetch — offer the button.
+        return jsonify({
+            "success": True, "model": model_id, "classes": [],
+            "selected": state.get("bg_seg_classes") or [],
+            "downloadable": True, "downloading": False,
+            "note": "This segmentation model isn't downloaded yet. Download it "
+                    "to choose which classes to segment (or it'll fetch on first "
+                    "use).",
+        })
+    catalog = seg_models.class_catalog(model_id, download=want_dl)
+    classes = [{"id": cid, "name": name}
+               for cid, name in sorted(catalog.items())]
+    return jsonify({
+        "success": True,
+        "model": model_id,
+        "classes": classes,
+        "selected": state.get("bg_seg_classes") or [],
+        "downloadable": False,
+        "note": ("" if classes else
+                 ("Download failed or the model has no class list; it will still "
+                  "fetch on first use." if want_dl else
+                  "Class list needs ultralytics and the model weights.")),
+    })
 
 
 @app.route("/api/iqa_scan", methods=["POST"])
@@ -9031,7 +9250,7 @@ def comic_pipeline_route():
             def _prog(msg, i=i): state["status_text"] = f"Comic {i+1}/{total}: {msg}"
             analysis = run_pipeline(tree, _to_bgr(img), _llm_call,
                                     pose_fn=_pose_fn, ocr_fn=_ocr_fn,
-                                    person_fn=_person_fn, panel_fn=_panel_fn,
+                                    person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn,
                                     endpoints=_pipeline_endpoints(), progress=_prog,
                                     known=_known_context(fp))
             _apply_pipeline_result(fp, analysis)      # store per-page result too

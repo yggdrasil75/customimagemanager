@@ -48,6 +48,7 @@ import threading
 import numpy as np
 
 import object_grouping as og
+import mask_svg
 
 try:
     import cv2
@@ -80,6 +81,53 @@ SEED_DEDUP_IOU = 0.55
 
 _sam = {"checked": False, "generator": None, "err": ""}
 _lock = threading.Lock()
+
+# Active segmentation-model id chosen in settings (see seg_models.py). None ==
+# "use the env-configured classic checkpoint above" so this module still works
+# standalone without the registry. manager pushes the setting down via
+# set_model() on config load / settings save.
+_active_model_id = None
+
+
+def set_model(model_id):
+    """Point the *proposal* generator at a seg_models checkpoint. This module is
+    the tag-driven region *proposer* (find similar untagged regions), which is a
+    separate job from the AI-tools segmenter in seg_runtime.py. It happens to use
+    a SAM checkpoint for its automatic mask generator, so we let settings repoint
+    that checkpoint here and reset the cached generator.
+
+    The interactive/pipeline segmenter that actually produces reusable masks
+    lives in seg_runtime.py and loads the selected family's real runtime; this
+    only affects proposal boxes. Unknown ids / a missing registry leave the env
+    default in place. Cheap and never raises.
+    """
+    global _active_model_id, SAM_CHECKPOINT
+    _active_model_id = model_id
+    try:
+        import seg_models as _sm
+    except Exception:
+        return
+    info = _sm.sam_info(model_id)
+    wp = _sm.sam_weights_path(model_id)
+    if wp:
+        SAM_CHECKPOINT = wp
+    # invalidate the cached generator so new weights take effect
+    with _lock:
+        _sam["checked"] = False
+        _sam["generator"] = None
+        _sam["err"] = ""
+    # keep the real segmenter's cache in sync too
+    try:
+        import seg_runtime as _sr
+        _sr.clear_cache()
+    except Exception:
+        pass
+    return info.get("id") if info else None
+
+
+def active_model():
+    """The seg_models id currently selected, or None if using the env default."""
+    return _active_model_id
 
 
 def available():
@@ -176,8 +224,14 @@ def _seed_to_px(seed, W, H):
     return (x1, y1, x2, y2)
 
 
-def _box_dict(x1, y1, x2, y2, W, H, depth, cls=None):
-    """Build the propose_regions-shaped dict for a pixel box."""
+def _box_dict(x1, y1, x2, y2, W, H, depth, cls=None, segmentation=None):
+    """Build the propose_regions-shaped dict for a pixel box.
+
+    segmentation: optional full-image boolean SAM mask. When given, its outline
+    is converted to normalized SVG paths (all three scan methods) and attached
+    under 'mask_svg', ready to persist into mwg-rs:Extensions. Absent for
+    heuristic/seed boxes, which have no pixel mask.
+    """
     img_area = float(W * H)
     dmean = (float(depth[y1:y2, x1:x2].mean())
              if depth is not None and (y2 > y1 and x2 > x1) else 0.0)
@@ -189,6 +243,10 @@ def _box_dict(x1, y1, x2, y2, W, H, depth, cls=None):
         # Carried through for callers that want to know a seed's YOLO class; the
         # discovery pipeline ignores unknown keys, so this is harmless there.
         d["seed_class"] = cls
+    if segmentation is not None:
+        paths = mask_svg.mask_to_svg_paths(segmentation, method="all")
+        if any(paths.values()):
+            d["mask_svg"] = paths
     return d
 
 
@@ -263,7 +321,8 @@ def propose(img_bgr, depth=None, max_regions=40, seed_boxes=None):
         if any(_iou_px((x1, y1, x2, y2), spx) > SEED_DEDUP_IOU
                for spx, _ in seeds_px):
             continue
-        boxes.append(_box_dict(x1, y1, x2, y2, W, H, depth))
+        boxes.append(_box_dict(x1, y1, x2, y2, W, H, depth,
+                               segmentation=m.get("segmentation")))
 
     # biggest first, capped — identical policy to propose_regions
     boxes.sort(key=lambda b: b["area"], reverse=True)

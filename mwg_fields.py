@@ -183,7 +183,19 @@ _MWG_RS_FIELDS = [
      "RegionStruct.Description — holds our per-region tag/description JSON."),
     ("RegionExtensions", "string", True, None, None,
      "RegionStruct.Extensions (open struct). We store cim:Confirmed here — the "
-     "AI box confirmed/unconfirmed flag, moved off Type."),
+     "AI box confirmed/unconfirmed flag, moved off Type — plus the three SVG "
+     "mask-path leaves below."),
+    ("RegionExtMaskUnderscan", "string", True, None, None,
+     "Extensions/cim:MaskUnderscan — normalized SVG path (d=) for the SAM mask, "
+     "traced slightly INSIDE the pixel mask (smaller, drops edge pixels). "
+     "Coords normalized to the image; multiple subpaths (M..Z) carry holes."),
+    ("RegionExtMaskOverscan", "string", True, None, None,
+     "Extensions/cim:MaskOverscan — normalized SVG path for the SAM mask traced "
+     "slightly OUTSIDE (larger, keeps every edge pixel, may grab a sliver of "
+     "background)."),
+    ("RegionExtMaskCenterline", "string", True, None, None,
+     "Extensions/cim:MaskCenterline — normalized SVG path for the SAM mask "
+     "traced down the middle of the stairstep edges. The default mask store."),
     ("RegionFocusUsage", "string", True, None, _RS_FOCUSUSAGE,
      "RegionStruct.FocusUsage."),
     ("RegionName", "string", True, "regions", None,
@@ -309,6 +321,11 @@ def parse_region_list(xmp, desc_from_json):
         bc_val = xmp.get(f'{p}/mwg-rs:Extensions/cim:BarCodeValue', '') or ''
         bc_fmt = xmp.get(f'{p}/mwg-rs:Extensions/cim:BarCodeFormat', '') or ''
         bc_bin = xmp.get(f'{p}/mwg-rs:Extensions/cim:BarCodeBinary', '') or ''
+        # SAM mask outlines, normalized SVG paths, one per scan method. Absent
+        # on non-SAM regions; empty string when a method produced no path.
+        mask_under = xmp.get(f'{p}/mwg-rs:Extensions/cim:MaskUnderscan', '') or ''
+        mask_over = xmp.get(f'{p}/mwg-rs:Extensions/cim:MaskOverscan', '') or ''
+        mask_center = xmp.get(f'{p}/mwg-rs:Extensions/cim:MaskCenterline', '') or ''
         regions.append({
             "class_name": rclass or inst_name or 'object',
             "region_name": inst_name,
@@ -321,6 +338,11 @@ def parse_region_list(xmp, desc_from_json):
             "barcode_value": str(bc_val),
             "barcode_format": str(bc_fmt),
             "barcode_binary": str(bc_bin).strip().lower() in ('true', '1', 'yes'),
+            "mask_svg": {
+                "underscan": str(mask_under),
+                "overscan": str(mask_over),
+                "centerline": str(mask_center),
+            },
         })
     return regions
 
@@ -364,6 +386,15 @@ def build_region_list_xml(regions, esc, desc_to_json, see_also_link, new_uuid):
         bc_fmt = b.get("barcode_format")
         if bc_fmt:
             ext_parts.append(f'<cim:BarCodeFormat>{esc(str(bc_fmt))}</cim:BarCodeFormat>')
+        # SAM mask outlines: one normalized SVG path per scan method. Only
+        # non-empty paths are written, so ordinary (non-mask) regions add nothing.
+        mask_svg = b.get("mask_svg") or {}
+        for _meth, _tag in (("underscan", "MaskUnderscan"),
+                            ("overscan", "MaskOverscan"),
+                            ("centerline", "MaskCenterline")):
+            _d = mask_svg.get(_meth)
+            if _d:
+                ext_parts.append(f'<cim:{_tag}>{esc(str(_d))}</cim:{_tag}>')
         ext_el = ('<mwg-rs:Extensions rdf:parseType="Resource">'
                   + "".join(ext_parts) +
                   '</mwg-rs:Extensions>')

@@ -5,9 +5,9 @@ function renderAiActions(){
     const d=document.createElement('div');
     d.className='bg-gray-800 p-2 rounded border border-gray-700 relative group action-row';
     d.dataset.id=act.id||String(Date.now()+Math.random());
-    const opts=['description','tags','regions','flag'].map(v=>
+    const opts=['description','tags','regions','segment','flag'].map(v=>
       `<option value="${v}"${act.target===v?' selected':''}>${
-        v==='regions'?'→ Boxes':v==='tags'?'→ Tags':v==='flag'?'→ Flag':'→ Desc'}</option>`).join('');
+        v==='regions'?'→ Boxes':v==='segment'?'→ Segment':v==='tags'?'→ Tags':v==='flag'?'→ Flag':'→ Desc'}</option>`).join('');
     d.innerHTML=`<button onclick="this.parentElement.remove()"
       class="absolute top-1 right-1 text-red-500 hidden group-hover:block text-xs px-1 bg-gray-900 rounded">✕</button>
       <div class="flex gap-1 mb-1 pr-5">
@@ -87,6 +87,132 @@ document.addEventListener('change',e=>{
   if(e.target&&e.target.id==='cfg_iqa_model') renderIqaNote();
 });
 
+// ── segmentation models (SAM + background YOLO-seg) ──────────────────────────
+// Mirrors loadIqaModels: two registries from /api/seg_models, grouped by speed,
+// unavailable entries shown-but-disabled so the list documents what installing
+// the runtime/weights would unlock.
+const SEG_SPEED_LABEL={fast:'\u26a1 fast',balanced:'\u2696 balanced',accurate:'\ud83c\udfaf accurate'};
+let segSamCache=[], segYoloCache=[];
+
+function fillSegSelect(sel,models,selected){
+  if(!sel) return;
+  sel.innerHTML='';
+  ['fast','balanced','accurate'].forEach(sp=>{
+    const inGroup=models.filter(m=>m.speed===sp);
+    if(!inGroup.length) return;
+    const g=document.createElement('optgroup');
+    g.label=SEG_SPEED_LABEL[sp]||sp;
+    inGroup.forEach(m=>{
+      const o=document.createElement('option');
+      o.value=m.id;
+      o.text=m.label+(m.available?'':'  \u2014 needs deps');
+      o.disabled=!m.available;
+      g.appendChild(o);
+    });
+    sel.appendChild(g);
+  });
+  // custom (discovered) checkpoints, if the server tagged any
+  const customs=models.filter(m=>m.custom);
+  if(customs.length){
+    const g=document.createElement('optgroup'); g.label='\ud83d\udcc1 custom';
+    customs.forEach(m=>{ const o=document.createElement('option');
+      o.value=m.id; o.text=m.label+(m.available?'':'  \u2014 needs deps');
+      o.disabled=!m.available; g.appendChild(o); });
+    sel.appendChild(g);
+  }
+  if(selected) sel.value=selected;
+}
+
+function renderSegNote(sel,cache,noteEl){
+  if(!sel||!noteEl) return;
+  const m=cache.find(x=>x.id===sel.value);
+  noteEl.innerText=m?(m.note+(m.available?'':('  ('+(m.reason||'unavailable')+')'))):'';
+}
+
+async function loadSegModels(activeSam,activeBg,bgEnabled,bgClasses){
+  const samSel=document.getElementById('cfg_sam_model');
+  const bgSel=document.getElementById('cfg_bg_seg_model');
+  const bgChk=document.getElementById('cfg_bg_seg');
+  try{
+    const d=await fetch('/api/seg_models').then(r=>r.json());
+    if(!d.success) return;
+    segSamCache=d.sam||[]; segYoloCache=d.yolo||[];
+    fillSegSelect(samSel,segSamCache,activeSam||d.active_sam);
+    fillSegSelect(bgSel,segYoloCache,activeBg||d.active_bg);
+    if(bgChk) bgChk.checked=(bgEnabled!==undefined?bgEnabled:d.bg_enabled)||false;
+    renderSegNote(samSel,segSamCache,document.getElementById('cfg_sam_note'));
+    renderSegNote(bgSel,segYoloCache,document.getElementById('cfg_bg_seg_note'));
+    window._bgClassSel=new Set(bgClasses||d.bg_classes||[]);
+  }catch(e){}
+}
+
+// The class picker is loaded lazily (reading a checkpoint's class list needs
+// the weights). We do NOT pre-download seg models, so on first open the weights
+// may be absent — the API then reports downloadable:true and we show a button
+// rather than blocking or showing an empty list.
+async function loadSegClasses(forceDownload){
+  const box=document.getElementById('cfg_bg_classes');
+  const note=document.getElementById('cfg_bg_classes_note');
+  const model=document.getElementById('cfg_bg_seg_model')?.value;
+  if(!box) return;
+  box.innerHTML='<span class="text-[10px] text-gray-500">'+
+    (forceDownload?'downloading model…':'loading…')+'</span>';
+  try{
+    let url='/api/seg_classes?model='+encodeURIComponent(model||'');
+    if(forceDownload) url+='&download=1';
+    const d=await fetch(url).then(r=>r.json());
+    box.innerHTML='';
+    if(d.downloadable){
+      // weights not cached yet — offer an explicit fetch
+      note.innerText=d.note||'';
+      const btn=document.createElement('button');
+      btn.type='button';
+      btn.className='text-[11px] px-2 py-1 rounded bg-cyan-700 hover:bg-cyan-600 text-white';
+      btn.innerText='Download & load classes';
+      btn.onclick=()=>loadSegClasses(true);
+      box.appendChild(btn);
+      return;
+    }
+    if(!d.success||!d.classes.length){
+      note.innerText=d.note||'No class list available.'; return;
+    }
+    note.innerText='';
+    const sel=window._bgClassSel||new Set(d.selected||[]);
+    window._bgClassSel=sel;
+    d.classes.forEach(c=>{
+      const lbl=document.createElement('label');
+      lbl.className='flex items-center gap-1 text-[11px] text-gray-300';
+      lbl.innerHTML='<input type="checkbox" class="accent-cyan-500 bg-class-cb" '+
+        'data-name="'+c.name+'" '+(sel.has(c.name)?'checked':'')+'> '+c.name;
+      box.appendChild(lbl);
+    });
+  }catch(e){ box.innerHTML=''; note.innerText='Failed to load classes.'; }
+}
+
+document.addEventListener('change',e=>{
+  if(!e.target) return;
+  if(e.target.id==='cfg_sam_model')
+    renderSegNote(e.target,segSamCache,document.getElementById('cfg_sam_note'));
+  if(e.target.id==='cfg_bg_seg_model'){
+    renderSegNote(e.target,segYoloCache,document.getElementById('cfg_bg_seg_note'));
+    // model changed -> class list is stale; clear selection cache and reload if open
+    window._bgClassSel=new Set();
+    if(!document.getElementById('cfg_bg_classes').classList.contains('hidden')) loadSegClasses();
+  }
+  if(e.target.classList&&e.target.classList.contains('bg-class-cb')){
+    const s=window._bgClassSel||(window._bgClassSel=new Set());
+    if(e.target.checked) s.add(e.target.dataset.name); else s.delete(e.target.dataset.name);
+  }
+});
+document.addEventListener('click',e=>{
+  if(e.target&&e.target.id==='cfg_bg_classes_toggle'){
+    const box=document.getElementById('cfg_bg_classes');
+    const hidden=box.classList.toggle('hidden');
+    e.target.innerText=hidden?'show classes':'hide classes';
+    if(!hidden) loadSegClasses();
+  }
+});
+
 async function saveAiSettings(){
   oai_actions_cache=[...document.querySelectorAll('.action-row')].map(r=>({
     id:r.dataset.id, name:r.querySelector('.act-name').value.trim()||'Action',
@@ -105,6 +231,10 @@ async function saveAiSettings(){
       oai_embed_model:document.getElementById('cfg_embed_model')?.value||'',
       yolo_size:document.getElementById('cfg_yolo_size').value,
       iqa_model:document.getElementById('cfg_iqa_model')?.value||'brisque',
+      sam_model:document.getElementById('cfg_sam_model')?.value||'sam2.1_b',
+      bg_seg_enabled:!!document.getElementById('cfg_bg_seg')?.checked,
+      bg_seg_model:document.getElementById('cfg_bg_seg_model')?.value||'yolov26n-seg',
+      bg_seg_classes:[...(window._bgClassSel||[])],
       face_bg_enabled:!!document.getElementById('cfg_face_bg')?.checked,
       face_bg_custom:!!document.getElementById('cfg_face_custom')?.checked,
       face_model:document.getElementById('cfg_face_model')?.value||'',

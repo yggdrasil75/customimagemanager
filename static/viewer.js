@@ -1,20 +1,3 @@
-// viewer.js — the shared image/video viewer, as a prefix-parametrized factory.
-// ---------------------------------------------------------------------------
-// Both the main editor pane and the AI-review modal mount the SAME viewer
-// markup (templates/partials/_viewer_macro.html) and instantiate makeViewer()
-// with a different id prefix, so they share one draw / box-overlay / video-
-// scrub code path:
-//     mainViewer   = makeViewer('')     → ids: media_canvas, vt_bar, …
-//     reviewViewer = makeViewer('rv_')  → ids: rv_media_canvas, rv_vt_bar, …
-//
-// The main pane re-exports its instance's canvas/ctx/imgObj/mediaVideo/vtOverlay
-// and drawCanvas() as the original globals, so all existing call sites in the
-// other modules keep working unchanged.
-//
-// globals.js must load first (it owns currentFile, currentRegions, the region-
-// editing state, and helpers like _esc / renderRegionsList / setActiveRegion
-// that the MAIN viewer drives). The review viewer runs in a self-contained mode
-// (its own regions + decisions) and does not touch that shared editing state.
 function regionAtCanvas(px,py){
   for(let i=currentRegions.length-1;i>=0;i--){
     const b=currentRegions[i];

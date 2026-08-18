@@ -184,6 +184,23 @@ def _cond_ok(when, subj):
 
 
 # ── pose ↔ box validation ─────────────────────────────────────────────────────
+def _iou_boxes(a, b):
+    """IoU of two normalised center-form boxes ({cx,cy,w,h}). 0 on no overlap."""
+    try:
+        ax1, ay1 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
+        ax2, ay2 = a["cx"] + a["w"] / 2, a["cy"] + a["h"] / 2
+        bx1, by1 = b["cx"] - b["w"] / 2, b["cy"] - b["h"] / 2
+        bx2, by2 = b["cx"] + b["w"] / 2, b["cy"] + b["h"] / 2
+    except (KeyError, TypeError):
+        return 0.0
+    ix = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    iy = max(0.0, min(ay2, by2) - max(ay1, by1))
+    inter = ix * iy
+    if inter <= 0:
+        return 0.0
+    ua = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+    return inter / ua if ua > 0 else 0.0
+
 def _box_corners(b):
     """(x1,y1,x2,y2) for a normalised center-form box."""
     cx, cy = float(b["cx"]), float(b["cy"])
@@ -267,8 +284,8 @@ def match_pose_boxes(boxes, pose, unmatched_box="keep",
 # ── engine ────────────────────────────────────────────────────────────────────
 def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
                  max_boxes=12, max_steps=200, pose_fn=None, ocr_fn=None,
-                 person_fn=None, panel_fn=None, endpoints=None, max_workers=None,
-                 known=None):
+                 person_fn=None, panel_fn=None, seg_fn=None, endpoints=None,
+                 max_workers=None, known=None):
     """Execute `tree` against `image_bgr` using the `llm` callable.
 
     Injected detectors (all optional, called as fn(image_bgr)):
@@ -276,6 +293,9 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
       ocr_fn    -> {"text": str, "lines":[{text,cx,cy,w,h}...]}
       person_fn -> [{class_name,cx,cy,w,h}]  (YOLO/OBB character boxes, normalised)
       panel_fn  -> [{cx,cy,w,h}]             (comic panel boxes, normalised)
+      seg_fn    -> called as seg_fn(image_bgr, boxes) -> list of instance dicts
+                   {cx,cy,w,h,mask_svg,...}; used by the 'segment' node to attach
+                   fine SAM masks to the current subjects.
 
     Parallelism:
       endpoints   -> optional list of LLM endpoint URLs. When given, independent
@@ -529,6 +549,33 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
                 _report("pose: no pose_fn injected")
             cur = node.get("next")
 
+        elif ntype == "segment":
+            subs = ctx.get("subjects") or []
+            if seg_fn and subs:
+                boxes = [dict(s["box"], class_name=s.get("label", "subject"))
+                         for s in subs if s.get("box")]
+                try:
+                    insts = seg_fn(image_bgr, boxes) or []
+                except Exception as e:
+                    insts = []
+                    _report(f"segment failed: {e}")
+                for inst in insts:
+                    if not inst.get("mask_svg"):
+                        continue
+                    best, best_iou = None, 0.0
+                    for s in subs:
+                        b = s.get("box") or {}
+                        iou = _iou_boxes(b, inst)
+                        if iou > best_iou:
+                            best, best_iou = s, iou
+                    if best is not None and best_iou >= 0.5:
+                        best["mask_svg"] = inst["mask_svg"]
+                _report(f"segment: masked {sum(1 for s in subs if s.get('mask_svg'))}"
+                        f"/{len(subs)} subject(s)")
+            elif not seg_fn:
+                _report("segment: no seg_fn injected")
+            cur = node.get("next")
+
         elif ntype == "ocr":
             if ocr_fn:
                 try:
@@ -663,6 +710,10 @@ DEFAULT_PIPELINE = {
         },
         {
             "id": "ocr", "type": "ocr", "label": "Reading text",
+            "next": "segment"
+        },
+        {
+            "id": "segment", "type": "segment", "label": "Masking subjects",
             "next": "per_subject"
         },
         {

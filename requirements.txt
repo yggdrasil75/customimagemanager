@@ -25,3 +25,4 @@ python-docx
 striprtf
 waitress
 zxing-cpp
+vtracer

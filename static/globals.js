@@ -256,6 +256,7 @@ async function fetchState(){
       document.getElementById('cfg_embed_model').value=s.oai_embed_model||'';
       document.getElementById('cfg_yolo_size').value=s.yolo_size||'n';
       loadIqaModels(s.iqa_model||'brisque');
+      loadSegModels(s.sam_model,s.bg_seg_model,s.bg_seg_enabled,s.bg_seg_classes);
       // faces / people
       const _fb=document.getElementById('cfg_face_bg');
       if(_fb) _fb.checked=!!s.face_bg_enabled;

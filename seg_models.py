@@ -1,0 +1,431 @@
+"""
+seg_models.py
+=============
+
+Segmentation-model registry for the two distinct jobs the app does with masks:
+
+  SAM family   the "AI tools" segmenter — the interactive/pipeline mask engine
+               that turns a box or a point into a pixel mask (which mask_svg.py
+               then stores as normalized SVG paths). Used by the pipeline, the
+               manual "segment this region" tool, SAM region proposals, etc.
+               Options: SAM 3.1, SAM 2.1 (several sizes), MobileSAM, FastSAM.
+
+  YOLO-seg     the "background segmentation" detector — a class-aware instance
+               segmenter run in bulk to grab people / object bounds (person,
+               and the rest of the COCO-ish classes the weights were trained on)
+               without a prompt. Options: yolov26{n,s,m,l,x}-seg by default,
+               plus anything the user drops in models/seg/yolo.
+
+Both registries follow the same shape as iqa.MODELS so the settings UI treats
+them identically: a list of dicts with a stable `id`, a human `label`, a `speed`
+badge, a one-line `note`, and a runtime `available`/`reason` pair the UI uses to
+grey out entries whose weights or deps are missing.
+
+DISCOVERY
+---------
+Beyond the built-in entries, we scan:
+
+    models/seg/sam    -> extra SAM-compatible checkpoints (*.pt, *.pth)
+    models/seg/yolo   -> extra YOLO-seg weights (*.pt)
+
+Discovered files appear in the dropdown under a "custom" group, keyed by their
+filename, so a user can point at a checkpoint we don't ship a spec for.
+
+WHAT TO SEGMENT (class filter)
+------------------------------
+A YOLO-seg model reports every class it was trained on (person, car, ... and,
+for a domain model, things like "scalpel"). Most of those we don't want as
+regions. `class_catalog()` returns a model's trained class names so the settings
+UI can present checkboxes, and `wanted_class_ids()` maps the user's saved
+selection back to the integer ids the detector filters on. Empty selection =
+"keep everything the model knows", so the feature is opt-in and never silently
+drops classes a user didn't deselect.
+
+DEGRADES
+--------
+Nothing here loads a heavy model; it only inspects the environment. Every
+function is exception-safe and returns a sane empty/fallback value, so a missing
+torch / ultralytics / checkpoint greys out an option instead of crashing the
+settings page.
+"""
+
+import os
+import glob
+import threading
+
+# ── where models live ────────────────────────────────────────────────────────
+# Mirrors manager.MODELS_DIR ("models"); overridable for tests. The two subdirs
+# are created lazily on first discovery so a fresh checkout without them is fine.
+MODELS_DIR = os.environ.get("CIM_MODELS_DIR", "models")
+SEG_DIR = os.path.join(MODELS_DIR, "seg")
+SAM_DIR = os.path.join(SEG_DIR, "sam")
+YOLO_DIR = os.path.join(SEG_DIR, "yolo")
+
+# Checkpoint extensions we recognise per family.
+_SAM_EXTS = (".pt", ".pth")
+_YOLO_EXTS = (".pt",)
+
+
+# ── dependency probes (cheap, cached) ─────────────────────────────────────────
+def _have(mod):
+    try:
+        __import__(mod)
+        return True
+    except Exception:
+        return False
+
+
+_HAVE_TORCH = _have("torch")
+_HAVE_ULTRALYTICS = _have("ultralytics")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SAM family registry — the AI-tools segmenter
+# ════════════════════════════════════════════════════════════════════════════
+# Each entry:
+#   id        stable key persisted in settings
+#   label     dropdown text
+#   family    "sam3" | "sam2" | "mobile_sam" | "fastsam" — selects the loader
+#             (SAM vs FastSAM) and, for display, the variant
+#   size      variant tag within a family ("", "t","s","b","l") for the sizes
+#   speed     "fast" | "balanced" | "accurate"  badge (rough CPU-time class)
+#   weights   ultralytics model name (auto-downloaded on first use) OR a file
+#             the user drops in models/seg/sam
+#   note      one-liner under the dropdown
+#
+# All families run through ultralytics (`SAM` / `FastSAM`) — no separate SAM
+# package is needed, just the model weights, which ultralytics fetches by name.
+# SAM 2.1 ships in several sizes; we expose them so a big GPU can pick 'large'
+# while a laptop stays on 'tiny', mirroring the YOLO/pose size knobs.
+SAM_MODELS = [
+    {
+        "id": "sam3", "label": "SAM 3", "family": "sam3", "size": "",
+        "speed": "accurate", "weights": "sam3.pt",
+        "note": "Newest Segment Anything. Best-quality masks; wants a GPU. "
+                "Downloaded by ultralytics on first use.",
+    },
+    {
+        "id": "sam2.1_t", "label": "SAM 2.1 · tiny", "family": "sam2",
+        "size": "t", "speed": "fast", "weights": "sam2_t.pt",
+        "note": "SAM 2.1 tiny — fastest 2.1 variant, good for bulk/CPU use.",
+    },
+    {
+        "id": "sam2.1_s", "label": "SAM 2.1 · small", "family": "sam2",
+        "size": "s", "speed": "balanced", "weights": "sam2_s.pt",
+        "note": "SAM 2.1 small — a step up in quality over tiny.",
+    },
+    {
+        "id": "sam2.1_b", "label": "SAM 2.1 · base+", "family": "sam2",
+        "size": "b", "speed": "balanced", "weights": "sam2_b.pt",
+        "note": "SAM 2.1 base-plus — balanced default for a mid GPU.",
+    },
+    {
+        "id": "sam2.1_l", "label": "SAM 2.1 · large", "family": "sam2",
+        "size": "l", "speed": "accurate", "weights": "sam2_l.pt",
+        "note": "SAM 2.1 large — highest-quality 2.1 masks, GPU recommended.",
+    },
+    {
+        "id": "mobile_sam", "label": "MobileSAM", "family": "mobile_sam",
+        "size": "", "speed": "fast", "weights": "mobile_sam.pt",
+        "note": "Tiny distilled SAM. Runs on CPU in real time; lower fidelity "
+                "than full SAM but ideal for quick/interactive masking.",
+    },
+    {
+        "id": "fastsam_s", "label": "FastSAM-s", "family": "fastsam",
+        "size": "s", "speed": "fast", "weights": "FastSAM-s.pt",
+        "note": "YOLO-based 'segment anything'. Very fast on CPU/GPU; coarser "
+                "masks. Good throughput fallback when SAM is too slow.",
+    },
+    {
+        "id": "fastsam_x", "label": "FastSAM-x", "family": "fastsam",
+        "size": "x", "speed": "balanced", "weights": "FastSAM-x.pt",
+        "note": "Larger FastSAM — better masks than -s, still fast.",
+    },
+]
+
+SAM_DEFAULT = "sam2.1_b"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# YOLO-seg registry — the background (class-aware) segmenter
+# ════════════════════════════════════════════════════════════════════════════
+# Same shape, minus the SAM-only 'family'. `weights` is the ultralytics model
+# name (auto-downloaded on first use) or a filename under models/seg/yolo.
+YOLO_SEG_MODELS = [
+    {
+        "id": f"yolov26{s}-seg",
+        "label": f"YOLOv26{s}-seg",
+        "size": s,
+        "speed": {"n": "fast", "s": "fast", "m": "balanced",
+                  "l": "accurate", "x": "accurate"}[s],
+        "weights": f"yolov26{s}-seg.pt",
+        "note": f"YOLOv26 {('nano','small','medium','large','xlarge')[i]} "
+                f"instance segmentation. Class-aware; used to grab people and "
+                f"other trained-class bounds in bulk.",
+    }
+    for i, s in enumerate(("n", "s", "m", "l", "x"))
+]
+
+YOLO_SEG_DEFAULT = "yolov26n-seg"
+
+
+_SAM_BY_ID = {m["id"]: m for m in SAM_MODELS}
+_YOLO_BY_ID = {m["id"]: m for m in YOLO_SEG_MODELS}
+
+
+# ── discovery ─────────────────────────────────────────────────────────────────
+def _scan(dir_path, exts):
+    """Return sorted checkpoint paths under dir_path with a matching extension.
+    Never raises; returns [] if the dir is absent."""
+    out = []
+    try:
+        for ext in exts:
+            out.extend(glob.glob(os.path.join(dir_path, "**", "*" + ext),
+                                  recursive=True))
+    except Exception:
+        return []
+    return sorted(set(out))
+
+
+def _custom_entry(path, family=None):
+    """Build a registry-shaped dict for a discovered checkpoint file. All
+    families load through ultralytics, so a custom entry just carries its path."""
+    name = os.path.basename(path)
+    d = {
+        "id": f"custom:{name}", "label": f"{name} (custom)",
+        "size": "", "speed": "balanced", "weights": path,
+        "note": f"User checkpoint discovered in {os.path.dirname(path)}.",
+        "custom": True,
+    }
+    if family is not None:
+        d["family"] = family
+    return d
+
+
+def _sam_weight_path(entry):
+    """Path to a SAM entry's LOCAL checkpoint, or '' if there isn't one on disk.
+    Custom entries carry their full path in 'weights'; built-ins may have a
+    user-dropped copy under models/seg/sam, else '' (the caller then hands the
+    bare model name to ultralytics to download). '' is not an error."""
+    w = entry.get("weights", "")
+    if entry.get("custom"):
+        return w
+    local = os.path.join(SAM_DIR, w) if w else ""
+    return local if (local and os.path.exists(local)) else ""
+
+
+def _sam_available(entry):
+    """(available, reason) for a SAM entry. Every family runs through
+    ultralytics, which downloads built-in weights by name on first use, so the
+    only hard requirement is ultralytics itself. A custom checkpoint just needs
+    its file present."""
+    if not _HAVE_ULTRALYTICS:
+        return False, "pip install ultralytics"
+    if entry.get("custom"):
+        wp = _sam_weight_path(entry)
+        if wp and not os.path.exists(wp):
+            return False, f"checkpoint not found: {wp}"
+    return True, ""
+
+
+def _yolo_available(entry):
+    if not _HAVE_ULTRALYTICS:
+        return False, "pip install ultralytics"
+    return True, ""
+
+
+def list_sam_models():
+    """SAM-family registry (built-ins + discovered) for the settings dropdown.
+    Each entry: id,label,family,size,speed,note,available,reason,custom.
+    Never raises."""
+    out = []
+    for m in SAM_MODELS:
+        avail, why = _sam_available(m)
+        out.append({
+            "id": m["id"], "label": m["label"], "family": m["family"],
+            "size": m["size"], "speed": m["speed"], "note": m["note"],
+            "available": bool(avail), "reason": why, "custom": False,
+        })
+    for p in _scan(SAM_DIR, _SAM_EXTS):
+        # skip files that already back a built-in entry (same basename)
+        if any(os.path.basename(p) == os.path.basename(m.get("weights", ""))
+               for m in SAM_MODELS):
+            continue
+        e = _custom_entry(p, family="sam2")
+        avail, why = _sam_available(e)
+        e.update({"available": bool(avail), "reason": why})
+        out.append(e)
+    return out
+
+
+def list_yolo_seg_models():
+    """YOLO-seg registry (built-ins + discovered) for the background-seg
+    dropdown. Never raises."""
+    out = []
+    for m in YOLO_SEG_MODELS:
+        avail, why = _yolo_available(m)
+        out.append({
+            "id": m["id"], "label": m["label"], "size": m["size"],
+            "speed": m["speed"], "note": m["note"],
+            "available": bool(avail), "reason": why, "custom": False,
+        })
+    for p in _scan(YOLO_DIR, _YOLO_EXTS):
+        e = _custom_entry(p)
+        avail, why = _yolo_available(e)
+        e.update({"available": bool(avail), "reason": why})
+        out.append(e)
+    return out
+
+
+# ── active-selection helpers (state lives in manager; these just validate) ────
+def sam_info(model_id):
+    """Registry entry for a SAM id (built-in or discovered), or the default's
+    entry if the id is unknown. Discovered entries are resolved by re-scanning."""
+    if model_id in _SAM_BY_ID:
+        return _SAM_BY_ID[model_id]
+    for e in list_sam_models():
+        if e["id"] == model_id:
+            return e
+    return _SAM_BY_ID[SAM_DEFAULT]
+
+
+def yolo_seg_info(model_id):
+    if model_id in _YOLO_BY_ID:
+        return _YOLO_BY_ID[model_id]
+    for e in list_yolo_seg_models():
+        if e["id"] == model_id:
+            return e
+    return _YOLO_BY_ID[YOLO_SEG_DEFAULT]
+
+
+def resolve_sam_id(model_id):
+    """Coerce a persisted id to a valid one: keep it if known/discovered, else
+    fall back to the default. Returns the id to actually use."""
+    if model_id in _SAM_BY_ID:
+        return model_id
+    if any(e["id"] == model_id for e in list_sam_models()):
+        return model_id
+    return SAM_DEFAULT
+
+
+def resolve_yolo_seg_id(model_id):
+    if model_id in _YOLO_BY_ID:
+        return model_id
+    if any(e["id"] == model_id for e in list_yolo_seg_models()):
+        return model_id
+    return YOLO_SEG_DEFAULT
+
+
+def sam_weights_path(model_id):
+    """Filesystem path to the checkpoint for a SAM id (or '' if none/known-by-
+    download). Callers hand this to the SAM loader."""
+    return _sam_weight_path(sam_info(model_id))
+
+
+def yolo_weights_ref(model_id):
+    """The ultralytics weights reference for a YOLO-seg id: a discovered file's
+    full path, else the auto-download model name."""
+    e = yolo_seg_info(model_id)
+    w = e.get("weights", "")
+    if e.get("custom"):
+        return w
+    # built-in: prefer a local copy under models/seg/yolo if the user dropped
+    # one, else the bare name for ultralytics to fetch.
+    local = os.path.join(YOLO_DIR, w)
+    return local if os.path.exists(local) else w
+
+
+# ── "what to segment" class filter ────────────────────────────────────────────
+_catalog_cache = {}
+_catalog_lock = threading.Lock()
+
+
+def weights_present(model_id):
+    """True if the YOLO-seg weights for `model_id` are already on disk (a
+    discovered file, or a built-in copy under models/seg/yolo, or already in
+    ultralytics' download cache). Lets the UI distinguish 'ready' from 'needs a
+    download' without triggering the fetch. Never raises."""
+    try:
+        ref = yolo_weights_ref(model_id)
+        if os.path.exists(ref):
+            return True
+        # ultralytics stashes auto-downloaded weights in its settings 'weights_dir'
+        # (default ~/.config/Ultralytics or the cwd). Check the common spots for a
+        # bare model name so a prior download counts as present.
+        name = os.path.basename(ref)
+        for base in _ultralytics_weight_dirs():
+            if os.path.exists(os.path.join(base, name)):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _ultralytics_weight_dirs():
+    """Directories ultralytics may have cached downloaded weights in."""
+    dirs = [os.getcwd()]
+    try:
+        from ultralytics.utils import SETTINGS  # type: ignore
+        wd = SETTINGS.get("weights_dir")
+        if wd:
+            dirs.append(str(wd))
+    except Exception:
+        pass
+    dirs.append(os.path.expanduser("~/.config/Ultralytics"))
+    return dirs
+
+
+def class_catalog(model_id, download=False):
+    """Ordered {id: name} of the classes a YOLO-seg model was trained on, for
+    the 'what do you want segmented' checkboxes.
+
+    download=False (default): only read the catalog if the weights are ALREADY
+    present. If they're not, return {} without fetching — so a settings-page
+    request never blocks on a multi-MB download. Use weights_present() to tell
+    the two empty cases apart.
+
+    download=True: load the model, fetching the weights if ultralytics needs to.
+    This may block; call it from an explicit user action (the 'Download & load
+    classes' button), not from an idle render.
+
+    Cached once loaded. Returns {} if ultralytics/the weights are unavailable.
+    Never raises.
+    """
+    if not _HAVE_ULTRALYTICS:
+        return {}
+    ref = yolo_weights_ref(model_id)
+    with _catalog_lock:
+        if ref in _catalog_cache:
+            return _catalog_cache[ref]
+    if not download and not weights_present(model_id):
+        return {}                       # don't trigger a download on a passive read
+    names = {}
+    try:
+        from ultralytics import YOLO
+        model = YOLO(ref)
+        raw = getattr(model, "names", None) or {}
+        # ultralytics 'names' is {int: str}; normalise keys to int.
+        names = {int(k): str(v) for k, v in raw.items()}
+    except Exception:
+        names = {}
+    with _catalog_lock:
+        _catalog_cache[ref] = names
+    return names
+
+
+def wanted_class_ids(model_id, selected_names):
+    """Map a user's saved class-name selection to the integer class ids the
+    detector filters on (ultralytics `classes=` arg).
+
+    selected_names: list of class-name strings the user ticked. An empty list
+    means 'keep everything the model knows' -> returns None (no filter), so the
+    feature never silently drops classes the user didn't deselect. Unknown names
+    are ignored. Returns a sorted list of ints, or None for 'all'."""
+    if not selected_names:
+        return None
+    catalog = class_catalog(model_id)
+    if not catalog:
+        return None
+    want = {str(n).strip().lower() for n in selected_names if str(n).strip()}
+    ids = [cid for cid, name in catalog.items() if name.lower() in want]
+    return sorted(ids) if ids else None

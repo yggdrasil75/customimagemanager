@@ -81,6 +81,51 @@
           <code>onnxruntime</code>; OCR needs <code>rapidocr_onnxruntime</code> or <code>easyocr</code>. Weights
           download automatically on first use.</p>
       </div>
+      <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
+        <label class="text-xs text-cyan-300 font-bold block mb-2">Segmentation</label>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">SAM model
+              <span class="text-gray-600">(AI tools &amp; pipeline)</span></label>
+            <select id="cfg_sam_model"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+              <!-- populated from /api/seg_models (sam) -->
+            </select>
+            <p id="cfg_sam_note" class="text-[10px] text-gray-500 mt-1"></p>
+          </div>
+          <div>
+            <label class="flex items-center gap-2 text-sm text-gray-300 mb-1">
+              <input id="cfg_bg_seg" type="checkbox" class="accent-cyan-500">
+              Background segmentation
+              <span class="text-gray-600 text-[10px]">(class-aware, bulk)</span>
+            </label>
+            <select id="cfg_bg_seg_model"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+              <!-- populated from /api/seg_models (yolo) -->
+            </select>
+            <p id="cfg_bg_seg_note" class="text-[10px] text-gray-500 mt-1"></p>
+          </div>
+        </div>
+        <div class="mt-2">
+          <div class="flex items-center justify-between">
+            <span class="text-[10px] text-gray-500">What to segment
+              <span class="text-gray-600">(trained classes &mdash; none ticked = keep all)</span></span>
+            <button id="cfg_bg_classes_toggle" type="button"
+              class="text-[10px] text-cyan-400 hover:text-cyan-300">show classes</button>
+          </div>
+          <div id="cfg_bg_classes" class="hidden mt-1 max-h-32 overflow-y-auto grid grid-cols-3 gap-x-2 gap-y-0.5
+               bg-gray-900/50 rounded p-2 border border-gray-700">
+            <!-- populated from /api/seg_classes -->
+          </div>
+          <p id="cfg_bg_classes_note" class="text-[10px] text-gray-600 mt-1"></p>
+        </div>
+        <p class="text-[10px] text-gray-600 mt-1">
+          <b class="text-cyan-400">SAM</b> powers the interactive/pipeline masker (masks are stored as
+          compact SVG paths). <b class="text-cyan-400">Background segmentation</b> runs a YOLO-seg model to
+          grab people and other trained-class bounds without a prompt. SAM 2/3 need their runtime +
+          checkpoints in <code>models/seg/sam</code>; extra YOLO-seg weights go in <code>models/seg/yolo</code>.
+        </p>
+      </div>
       <div><label class="text-xs text-gray-400 block mb-1">System Prompt</label>
         <textarea id="cfg_system" rows="2"
           class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
