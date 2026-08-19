@@ -9,6 +9,35 @@
         class="text-xs bg-teal-700 hover:bg-teal-600 px-2 py-1 rounded font-bold">🌳 Pipeline…</button>
     </div>
     <div class="overflow-y-auto flex-1 grid grid-cols-2 gap-x-6 gap-y-3 pr-1 items-start">
+      <div id="branding_section" class="col-span-2 hidden border border-amber-700/50 rounded p-3 mb-1">
+        <label class="text-xs text-amber-300 font-bold block mb-2">Branding
+          <span class="text-gray-600 font-normal">(admin only)</span></label>
+        <div class="grid grid-cols-2 gap-3 items-start">
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">App name</label>
+            <input id="cfg_brand_name" type="text" placeholder="Media Library"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          </div>
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">Logo
+              <span class="text-gray-600">(png/svg/jpg/webp)</span></label>
+            <div class="flex items-center gap-2">
+              <img id="cfg_brand_logo_preview" src="" alt=""
+                class="h-8 w-8 object-contain rounded bg-gray-900 hidden">
+              <input id="cfg_brand_logo_file" type="file"
+                accept="image/png,image/jpeg,image/svg+xml,image/webp,image/gif"
+                class="text-xs text-gray-300">
+              <button type="button" onclick="clearBrandLogo()"
+                class="text-[10px] text-rose-400 hover:text-rose-300">clear</button>
+            </div>
+          </div>
+        </div>
+        <div class="flex justify-end mt-2">
+          <button type="button" onclick="saveBranding()"
+            class="bg-amber-600 hover:bg-amber-500 px-3 py-1 rounded text-xs font-bold">Save branding</button>
+        </div>
+        <p id="cfg_brand_status" class="text-[10px] text-gray-500 mt-1"></p>
+      </div>
       <div><label class="text-xs text-gray-400 block mb-1">Endpoint</label>
         <input id="cfg_endpoint" type="text"
           class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">

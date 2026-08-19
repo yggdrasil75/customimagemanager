@@ -54,7 +54,9 @@ FEATURE_SECTIONS = {
     },
     "settings": {
         "label": "Settings",
-        "features": [],
+        "features": [
+            ("branding", "Branding (name / logo)"),
+        ],
     },
     "gallery_tabs": {
         "label": "Gallery tabs",

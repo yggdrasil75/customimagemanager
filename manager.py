@@ -142,6 +142,8 @@ state = {
         "session_days": 14,
         "ldap": {},
     },
+    "brand_name": "Media Library",
+    "brand_logo": "",   # relative URL under /media, or "" for none
     "iqa_model": "brisque",
     "yolo_size": "n",
     "face_bg_enabled": False,
@@ -1649,7 +1651,7 @@ def save_config():
             "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","our_model","face_cluster_eps",
             "body_enabled","body_cluster_eps","object_proposals",
             "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
-            "barcode_model","barcode_conf", "iqa_model","auth","gdl_sites","gdl_opts","gdl_auth",
+            "barcode_model","barcode_conf", "iqa_model","brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
             "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads"]
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys if k in state}, f, indent=2)
@@ -4765,7 +4767,7 @@ def api_state():
          "face_cluster_eps","body_enabled","body_cluster_eps","object_proposals",
          "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
          "barcode_model","barcode_conf",
-         "model_groups","iqa_model")})
+         "model_groups","iqa_model","brand_name","brand_logo")})
 
 @app.route("/api/update_settings", methods=["POST"])
 @_auth.require_feature("settings", action='update_settings', fields=())
@@ -4809,6 +4811,56 @@ def update_settings():
     if "iqa_model" in d and iqa is not None:
         state["iqa_model"] = iqa.set_model(state["iqa_model"])
     save_config(); return jsonify({"success": True})
+
+@app.route("/api/branding", methods=["POST"])
+@_auth.require_feature("branding", action='update_branding', fields=())
+def update_branding():
+    # Locked to admins (or a custom role explicitly granted "branding").
+    # require_feature already lets admins through and denies anyone whose
+    # role sets branding=False; this extra check makes the default deny for
+    # non-admins whose role hasn't been granted it.
+    u = g.get("user") or {}
+    feats = u.get("features") or {}
+    if not u.get("is_admin") and feats.get("branding") is not True:
+        return jsonify({"error": "admin required"}), 403
+
+    name = (request.form.get("brand_name") or "").strip()
+    if name:
+        state["brand_name"] = name[:120]
+
+    if request.form.get("clear_logo") == "1":
+        state["brand_logo"] = ""
+
+    f = request.files.get("logo")
+    if f and f.filename:
+        ext = os.path.splitext(f.filename)[1].lower()
+        if ext not in (".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif"):
+            return jsonify({"error": "unsupported image type"}), 400
+        brand_dir = os.path.join(MEDIA_DIR, "branding")
+        os.makedirs(brand_dir, exist_ok=True)
+        dest = os.path.join(brand_dir, "logo" + ext)
+        # drop any previous logo of a different extension
+        for old in os.listdir(brand_dir):
+            if old.startswith("logo."):
+                try: os.remove(os.path.join(brand_dir, old))
+                except OSError: pass
+        f.save(dest)
+        # cache-bust so a replaced logo shows immediately
+        state["brand_logo"] = "/api/branding/logo?v=" + str(int(time.time()))
+
+    save_config()
+    return jsonify({"success": True,
+                    "brand_name": state["brand_name"],
+                    "brand_logo": state["brand_logo"]})
+
+@app.route("/api/branding/logo")
+def branding_logo():
+    brand_dir = os.path.join(MEDIA_DIR, "branding")
+    if os.path.isdir(brand_dir):
+        for name in os.listdir(brand_dir):
+            if name.startswith("logo."):
+                return send_file(os.path.join(brand_dir, name))
+    return ("", 404)
 
 @app.route("/api/folders")
 def api_folders():

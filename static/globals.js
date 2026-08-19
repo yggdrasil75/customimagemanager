@@ -243,6 +243,7 @@ async function fetchState(){
   try{
     const s=await fetch('/api/state').then(r=>r.json());
     document.getElementById('status_text').innerText=s.status_text;
+    applyBranding(s);
     const sel=document.getElementById('model_selector');
     const prev=sel.value;
     const models=s.available_models||[];
@@ -303,6 +304,12 @@ async function fetchState(){
       try{ document.getElementById('cfg_pipeline').value=JSON.stringify(s.pipeline_tree||{},null,2); }catch(_){}
       const at=document.getElementById('autotag_toggle');
       if(at) at.checked=!!s.autotag_enabled;
+      const bn=document.getElementById('cfg_brand_name');
+      if(bn) bn.value=s.brand_name||'';
+      const bp=document.getElementById('cfg_brand_logo_preview');
+      if(bp){ if(s.brand_logo){ bp.src=s.brand_logo; bp.classList.remove('hidden'); }
+              else bp.classList.add('hidden'); }
+      gateBrandingSection();
     }
   }catch(e){}
 }
