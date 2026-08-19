@@ -57,10 +57,7 @@
     b.id = 'cim-user-badge';
     b.style.cssText = 'position:fixed;top:6px;right:10px;z-index:9999;' +
       'font:12px system-ui;color:#cbd5e1;display:flex;gap:8px;align-items:center';
-    const admin = state.user.is_admin
-      ? '<button id="cim-admin-btn" style="background:#374151;color:#e5e7eb;' +
-        'border:0;border-radius:6px;padding:3px 8px;cursor:pointer">Users</button>'
-      : '';
+    const admin = '';
     b.innerHTML =
       '<span title="' + (state.user.source || '') + ' account">' +
       (state.user.display_name || state.user.username) +
@@ -69,18 +66,21 @@
       'border:0;border-radius:6px;padding:3px 8px;cursor:pointer">Logout</button>';
     document.body.appendChild(b);
     document.getElementById('cim-logout-btn').onclick = state.logout;
-    const ab = document.getElementById('cim-admin-btn');
-    if (ab) ab.onclick = openUserAdmin;
   }
 
   // --- admin user-management panel ----------------------------------------
   async function openUserAdmin() {
+    const mount = document.getElementById('settings_users_mount');
     let modal = document.getElementById('cim-user-modal');
     if (!modal) {
       modal = document.createElement('div');
       modal.id = 'cim-user-modal';
-      modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);' +
-        'z-index:10000;display:grid;place-items:center;font:13px system-ui';
+      if (!mount) {
+        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);' +
+          'z-index:10000;display:grid;place-items:center;font:13px system-ui';
+      } else {
+        modal.style.cssText = 'font:13px system-ui';
+      }
       modal.innerHTML =
         '<div style="background:#1f2937;color:#e5e7eb;border-radius:12px;' +
         'padding:20px;width:640px;max-width:92vw;max-height:86vh;overflow:auto">' +
@@ -113,7 +113,18 @@
         'padding:6px 12px;cursor:pointer">Add group</button></div>' +
         '<div id="cim-um-err" style="color:#f87171;min-height:16px;margin-top:8px"></div>' +
         '</div>';
-      document.body.appendChild(modal);
+      const inner = modal.firstElementChild;
+      if (mount) {
+        inner.style.width = 'auto';
+        inner.style.maxWidth = 'none';
+        inner.style.maxHeight = 'none';
+        inner.style.background = 'transparent';
+        inner.style.padding = '0';
+        modal.querySelector('#cim-um-close').style.display = 'none';
+        mount.appendChild(modal);
+      } else {
+        document.body.appendChild(modal);
+      }
       modal.querySelector('#cim-um-close').onclick = () => modal.remove();
       modal.querySelector('#cim-add').onclick = addUser;
       modal.querySelector('#cim-grp-add').onclick = addGroup;

@@ -1,14 +1,22 @@
-{# LLM / Vision settings. The Smart Tag pipeline editor lives in its own modal
-   now (partials/ai_pipeline_modal.html) so it can be worked on independently;
-   this modal keeps endpoint / model / prompt / actions only. #}
-<div id="ai_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
+{# Unified settings modal. Two tabs — "AI / Vision" (LLM, models, faces, actions)
+   and "Storage" (tiers + small-file packing). Tab bodies are the two former
+   modals verbatim, so all field IDs and their JS handlers are unchanged. #}
+<div id="settings_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
   <div class="bg-gray-800 p-6 rounded-lg border border-gray-600 w-[880px] max-w-[95vw] flex flex-col max-h-[90vh]">
-    <div class="flex justify-between items-center mb-4 flex-shrink-0">
-      <h2 class="font-bold text-purple-400">LLM / Vision Settings</h2>
+    <div class="flex justify-between items-center mb-3 flex-shrink-0">
+      <div class="flex gap-1">
+        <button data-settings-tab="ai" onclick="settingsTab('ai')"
+          class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">🧠 AI / Vision</button>
+        <button data-settings-tab="storage" onclick="settingsTab('storage')"
+          class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">🗄 Storage</button>
+        <button data-settings-tab="users" onclick="settingsTab('users')"
+          class="settings-tab hidden px-3 py-1.5 rounded-t text-sm font-bold" data-admin-only>👤 Users</button>
+      </div>
       <button onclick="openPipelineSettings()" title="Edit the Smart Tag decision tree"
-        class="text-xs bg-teal-700 hover:bg-teal-600 px-2 py-1 rounded font-bold">🌳 Pipeline…</button>
+        class="text-xs bg-teal-700 hover:bg-teal-600 px-2 py-1 rounded font-bold" data-settings-pane="ai">🌳 Pipeline…</button>
     </div>
-    <div class="overflow-y-auto flex-1 grid grid-cols-2 gap-x-6 gap-y-3 pr-1 items-start">
+
+    <div data-settings-pane="ai" class="overflow-y-auto flex-1 grid grid-cols-2 gap-x-6 gap-y-3 pr-1 items-start">
       <div id="branding_section" class="col-span-2 hidden border border-amber-700/50 rounded p-3 mb-1">
         <label class="text-xs text-amber-300 font-bold block mb-2">Branding
           <span class="text-gray-600 font-normal">(admin only)</span></label>
@@ -226,11 +234,92 @@
         <div id="actions_container" class="space-y-2"></div>
       </div>
     </div>
-    <div class="flex justify-end gap-2 pt-3 border-t border-gray-700 mt-3 flex-shrink-0">
-      <button onclick="document.getElementById('ai_modal').classList.add('hidden')"
-        class="bg-gray-600 px-4 py-1.5 rounded text-sm">Cancel</button>
-      <button onclick="saveAiSettings()"
-        class="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded text-sm font-bold">Save</button>
+
+    <div data-settings-pane="storage" class="hidden overflow-y-auto flex-1 pr-1">
+        <label class="flex items-center gap-2 text-sm text-gray-300 mb-3 cursor-pointer">
+          <input type="checkbox" id="tiers_enabled" class="accent-amber-500"> Enable automatic tiering
+        </label>
+        <div class="grid grid-cols-[1fr_2fr_70px_90px_28px] gap-2 text-[10px] text-gray-500 mb-1 px-1">
+          <span>Name</span><span>Path</span><span>Ratio %</span><span>Speed MB/s</span><span></span>
+        </div>
+        <div id="tiers_rows" class="space-y-1.5 mb-2"></div>
+        <button onclick="addTierRow()"
+          class="text-xs bg-indigo-600 hover:bg-indigo-500 px-2 py-1 rounded font-bold mb-3">+ Add tier</button>
+        <div class="grid grid-cols-3 gap-2 mb-3">
+          <div><label class="text-[10px] text-gray-500 block mb-0.5">Video headroom ×</label>
+            <input id="tiers_headroom" type="number" step="0.5" min="1"
+              class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          </div>
+          <div><label class="text-[10px] text-gray-500 block mb-0.5">Rebalance every (min)</label>
+            <input id="tiers_interval" type="number" min="1"
+              class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          </div>
+          <div><label class="text-[10px] text-gray-500 block mb-0.5">Copy throttle MB/s</label>
+            <input id="tiers_throttle" type="number" min="1"
+              class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          </div>
+        </div>
+        <div id="tiers_status" class="text-xs text-gray-300 space-y-1 border-t border-gray-700 pt-3"></div>
+
+        <div class="border-t border-gray-700 pt-3 mt-3">
+          <h3 class="font-bold text-sky-300 mb-1">📦 Small-file packing</h3>
+          <p class="text-[11px] text-gray-500 mb-2">Folds images and their sidecars (everything except video) into
+            large <code>.packs/</code> archives to cut inode count and open file descriptors. The packs are the
+            source of truth; the database is only a rebuildable cache. Videos and tiered (symlinked) files are left
+            alone.</p>
+          <label class="flex items-center gap-2 text-sm text-gray-300 mb-2 cursor-pointer">
+            <input type="checkbox" id="packs_enabled" class="accent-sky-500"> Enable packing
+          </label>
+          <label class="flex items-center gap-2 text-sm text-gray-300 mb-2 cursor-pointer">
+            <input type="checkbox" id="packs_auto" class="accent-sky-500"> Auto-migrate in the background when idle
+          </label>
+          <div class="grid grid-cols-3 gap-2 mb-2">
+            <div><label class="text-[10px] text-gray-500 block mb-0.5">Pack size (MB)</label>
+              <input id="packs_size_mb" type="number" min="16" step="16"
+                class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+            </div>
+            <div><label class="text-[10px] text-gray-500 block mb-0.5">Max open packs</label>
+              <input id="packs_max_open" type="number" min="1"
+                class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+            </div>
+            <div><label class="text-[10px] text-gray-500 block mb-0.5">Idle before migrate (s)</label>
+              <input id="packs_idle" type="number" min="0"
+                class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+            </div>
+          </div>
+          <p class="text-[10px] text-gray-600 mb-2">Pack size and max-open-packs apply the next time the app starts;
+            the auto-migrate and idle settings take effect immediately.</p>
+          <div class="flex gap-2 mb-2">
+            <button onclick="packsRun('all')"
+              class="text-xs bg-sky-700 hover:bg-sky-600 px-2 py-1 rounded font-bold">Convert now</button>
+            <button onclick="packsRun('compact')"
+              class="text-xs bg-sky-800 hover:bg-sky-700 px-2 py-1 rounded font-bold">Compact</button>
+            <button onclick="packsRun('unpack')"
+              class="text-xs bg-gray-600 hover:bg-gray-500 px-2 py-1 rounded font-bold">Unpack all</button>
+            <button onclick="packsCancel()"
+              class="text-xs bg-gray-600 hover:bg-gray-500 px-2 py-1 rounded">Cancel</button>
+          </div>
+          <div id="packs_status" class="text-xs text-gray-300 space-y-1"></div>
+        </div>
+    </div>
+
+    <div data-settings-pane="users" data-admin-only class="hidden overflow-y-auto flex-1 pr-1">
+      <div id="settings_users_mount"></div>
+    </div>
+
+    <div class="flex justify-between items-center pt-3 border-t border-gray-700 mt-3 flex-shrink-0">
+      <div class="flex gap-2" data-settings-pane="storage">
+        <button onclick="tiersRebalance()"
+          class="bg-amber-600 hover:bg-amber-500 px-3 py-1.5 rounded text-sm font-bold">Rebalance now</button>
+        <button onclick="tiersCancel()" class="bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded text-sm">Cancel run</button>
+      </div>
+      <div class="flex gap-2 ml-auto">
+        <button onclick="closeSettings()" class="bg-gray-600 px-4 py-1.5 rounded text-sm">Close</button>
+        <button data-settings-pane="ai" onclick="saveAiSettings()"
+          class="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded text-sm font-bold">Save AI</button>
+        <button data-settings-pane="storage" onclick="saveTiersConfig()"
+          class="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded text-sm font-bold">Save storage</button>
+      </div>
     </div>
   </div>
 </div>

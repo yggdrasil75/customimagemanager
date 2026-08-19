@@ -15,8 +15,35 @@ function addTierRow(t) {
   document.getElementById('tiers_rows').insertAdjacentHTML('beforeend', tierRowHtml(t));
 }
 
-async function openTiersModal() {
-  document.getElementById('tiers_modal').classList.remove('hidden');
+function settingsTab(name) {
+  document.querySelectorAll('[data-settings-pane]').forEach(el => {
+    el.classList.toggle('hidden', el.dataset.settingsPane !== name);
+  });
+  document.querySelectorAll('.settings-tab').forEach(b => {
+    b.classList.toggle('bg-gray-700', b.dataset.settingsTab === name);
+    b.classList.toggle('text-gray-500', b.dataset.settingsTab !== name);
+  });
+  if (name === 'storage') loadStorageTab();
+  else stopTiersPoll();
+  if (name === 'users') window.openUserAdmin && window.openUserAdmin();
+}
+
+function openSettings(tab = 'ai') {
+  const admin = !!(window.CIMAuth && window.CIMAuth.user && window.CIMAuth.user.is_admin);
+  document.querySelectorAll('#settings_modal [data-admin-only]').forEach(el => {
+    el.classList.toggle('hidden', !admin);
+  });
+  document.getElementById('settings_modal').classList.remove('hidden');
+  window.pipelineEditorRefresh && window.pipelineEditorRefresh();
+  settingsTab(tab);
+}
+
+function closeSettings() {
+  document.getElementById('settings_modal').classList.add('hidden');
+  stopTiersPoll();
+}
+
+async function loadStorageTab() {
   const r = await fetch('/api/tiers').then(r => r.json()).catch(() => null);
   const cfg = r?.config || {};
   document.getElementById('tiers_enabled').checked = !!cfg.enabled;
