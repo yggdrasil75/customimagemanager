@@ -45,6 +45,7 @@ doesn't reload.
 
 import os
 import threading
+from functools import lru_cache
 
 import numpy as np
 
@@ -59,6 +60,35 @@ try:
     import seg_models
 except Exception:  # pragma: no cover
     seg_models = None
+
+@lru_cache(maxsize=1)
+def _ul_sam():
+    """(SAM, FastSAM) classes, or (None, None) if ultralytics is missing."""
+    try:
+        from ultralytics import SAM, FastSAM
+        return SAM, FastSAM
+    except Exception:
+        return None, None
+
+
+@lru_cache(maxsize=1)
+def _ul_yolo():
+    """ultralytics YOLO class, or None."""
+    try:
+        from ultralytics import YOLO
+        return YOLO
+    except Exception:
+        return None
+
+
+@lru_cache(maxsize=1)
+def _ul_sam3_predictor():
+    """ultralytics SAM3SemanticPredictor class, or None if this build lacks it."""
+    try:
+        from ultralytics.models.sam import SAM3SemanticPredictor
+        return SAM3SemanticPredictor
+    except Exception:
+        return None
 
 
 # ── model cache ───────────────────────────────────────────────────────────────
@@ -128,11 +158,16 @@ def _box_px(box, W, H):
 # SAM-family loaders (the AI-tools segmenter)
 # ════════════════════════════════════════════════════════════════════════════
 def _get_sam(model_id):
-    """Resolve + load the selected SAM-family model, memoised. Every family runs
-    through ultralytics: FastSAM via `FastSAM`, everything else (SAM 3.1, SAM 2.1
-    sizes, MobileSAM) via `SAM`. `weights` is a discovered checkpoint path or a
-    bare model name ultralytics fetches on first use (sam2_b.pt, sam3.pt, ...).
-    Returns the loaded model or None. Never raises."""
+    """Resolve + load the selected SAM-family model, memoised.
+      fastsam                -> ultralytics FastSAM(weights)
+      sam2 / mobile_sam      -> ultralytics SAM(weights)  (auto-downloads)
+      sam3                   -> ultralytics SAM3SemanticPredictor with a LOCAL
+                                sam3.pt. ultralytics can't fetch it, so if the
+                                code is present but the weight is missing we
+                                fetch it from HuggingFace via seg_models first.
+    `weights` is a discovered checkpoint path or, for auto-downloadable families,
+    a models/seg/sam/<name> ref ultralytics fetches on first use.
+    Returns the loaded model/predictor or None. Never raises."""
     if seg_models is None:
         return None
     entry = seg_models.sam_info(model_id)
@@ -143,9 +178,28 @@ def _get_sam(model_id):
             return _cache[key]
     model = None
     try:
-        from ultralytics import SAM, FastSAM
-        weights = seg_models.sam_weights_ref(model_id)
-        model = (FastSAM if family == "fastsam" else SAM)(weights)
+        if family == "sam3":
+            SAM3SemanticPredictor = _ul_sam3_predictor()
+            weights = seg_models.sam_weights_path(model_id)
+            if SAM3SemanticPredictor and not (weights and os.path.exists(weights)):
+                try:
+                    seg_models.download_sam3()
+                except Exception:
+                    pass
+                weights = seg_models.sam_weights_path(model_id)
+            if SAM3SemanticPredictor and weights and os.path.exists(weights):
+                model = SAM3SemanticPredictor(overrides={
+                    "task": "segment", "mode": "predict",
+                    "model": weights, "conf": 0.25, "iou": 0.7,
+                    "save": False, "verbose": False,
+                })
+            else:
+                model = None
+        else:
+            SAM, FastSAM = _ul_sam()
+            weights = seg_models.sam_weights_ref(model_id)
+            loader = FastSAM if family == "fastsam" else SAM
+            model = loader(weights) if loader else None
     except Exception:
         model = None
     with _cache_lock:
@@ -170,16 +224,16 @@ def _instances_from_result(res, W, H, labels=None):
             m = cv2.resize(m.astype(np.float32), (W, H),
                            interpolation=cv2.INTER_NEAREST)
         if labels is not None:
-            cls = labels[i] if i < len(labels) else "object"
+            cls_name = labels[i] if i < len(labels) else "object"
         elif rboxes is not None and rboxes.cls is not None and i < len(rboxes.cls):
-            cls = names.get(int(rboxes.cls[i].item()), "object")
+            cls_name = names.get(int(rboxes.cls[i].item()), "object")
         else:
-            cls = "object"
+            cls_name = "object"
         score = None
         if rboxes is not None and getattr(rboxes, "conf", None) is not None \
                 and i < len(rboxes.conf):
             score = float(rboxes.conf[i].item())
-        inst = _mask_to_instance(m > 0.5, W, H, class_name=cls, score=score)
+        inst = _mask_to_instance(m > 0.5, W, H, class_name=cls_name, score=score)
         if inst:
             out.append(inst)
     return out
@@ -243,16 +297,17 @@ def segment_text(img_bgr, query, model_id=None):
         return []
     q = query.strip()
     try:
-        if mode == "fastsam":
-            # FastSAM grounds text via CLIP: run the segment-everything pass with
-            # the text prompt so ultralytics returns only the matching masks.
-            # (ultralytics FastSAM accepts texts= directly on the call.)
-            res = model(img, texts=[q], verbose=False)
+        if mode == "sam3":
+            concepts = [c.strip() for c in q.split(",") if c.strip()] or [q]
+            model.set_image(img)
+            res = model(text=concepts)
         else:
-            # SAM 3 native text head.
             res = model(img, texts=[q], verbose=False)
         insts = _instances_from_result(res, W, H, labels=None)
     except Exception:
+        import logging
+        logging.getLogger(__name__).exception(
+            "segment_text failed (mode=%s, model=%s)", mode, model_id)
         return []
     for inst in insts:
         inst["class_name"] = q          # the thing the user asked to segment
@@ -273,8 +328,8 @@ def _get_yolo_seg(model_id):
             return _cache[key]
     model = None
     try:
-        from ultralytics import YOLO
-        model = YOLO(ref)
+        YOLO = _ul_yolo()
+        model = YOLO(ref) if YOLO else None
     except Exception:
         model = None
     with _cache_lock:

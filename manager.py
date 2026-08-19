@@ -8144,6 +8144,14 @@ def api_seg_models():
         "active_bg": state.get("bg_seg_model"),
         "bg_enabled": bool(state.get("bg_seg_enabled")),
         "bg_classes": state.get("bg_seg_classes") or [],
+        # SAM3 needs a manual weight fetch; tell the UI whether it's present and
+        # whether this build even has the SAM3 code (so it can show a Download
+        # button vs. an 'unsupported build' note).
+        "sam3": {
+            "present": seg_models.sam3_present(),
+            "have_code": seg_models._have_sam3_code(),
+            "repo": seg_models.SAM3_HF_REPO,
+        },
     })
 
 
@@ -8186,6 +8194,38 @@ def api_seg_classes():
                   "fetch on first use." if want_dl else
                   "Class list needs ultralytics and the model weights.")),
     })
+
+
+@app.route("/api/download_sam3", methods=["POST"])
+def api_download_sam3():
+    """Fetch the SAM3 checkpoint from HuggingFace into models/seg/sam/sam3.pt.
+    SAM3's weight isn't auto-downloadable by ultralytics, so this backs the
+    'Download SAM3' button. Optional body: {repo, token} to override the source
+    repo or supply a token for a gated repo. Returns {success, message,
+    present}."""
+    if seg_models is None:
+        return jsonify({"success": False, "error": "seg_models unavailable"})
+    body = request.json or {}
+    repo = (body.get("repo") or "").strip() or None
+    token = (body.get("token") or "").strip() or None
+    if seg_models.sam3_present():
+        return jsonify({"success": True, "message": "SAM3 weight already present.",
+                        "present": True})
+    state["status_text"] = "Downloading SAM3…"
+    try:
+        ok, msg = seg_models.download_sam3(repo=repo, token=token)
+    except Exception as e:
+        state["status_text"] = "Ready."
+        return jsonify({"success": False, "error": str(e), "present": False})
+    state["status_text"] = "Ready."
+    # New weight changes availability; drop any cached (None) SAM3 loader.
+    if ok and seg_runtime is not None:
+        try:
+            seg_runtime.clear_cache()
+        except Exception:
+            pass
+    return jsonify({"success": bool(ok), "message": msg,
+                    "present": seg_models.sam3_present()})
 
 
 @app.route("/api/iqa_scan", methods=["POST"])

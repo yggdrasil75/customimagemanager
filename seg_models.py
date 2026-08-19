@@ -52,6 +52,7 @@ settings page.
 import os
 import glob
 import threading
+from functools import lru_cache
 
 # ── where models live ────────────────────────────────────────────────────────
 # Mirrors manager.MODELS_DIR ("models"); overridable for tests. The two subdirs
@@ -101,27 +102,30 @@ SAM_MODELS = [
     {
         "id": "sam3", "label": "SAM 3", "family": "sam3", "size": "",
         "speed": "accurate", "weights": "sam3.pt",
-        "note": "Newest Segment Anything. Best-quality masks; wants a GPU. "
-                "Downloaded by ultralytics on first use.",
+        "note": "Newest Segment Anything (native text prompts). Needs an "
+                "ultralytics build with SAM3SemanticPredictor. The weight isn't "
+                "auto-fetched by ultralytics, so it's pulled from HuggingFace "
+                "into models/seg/sam/ on first use (or pre-fetch it with "
+                "'Download SAM3').",
     },
     {
         "id": "sam2.1_t", "label": "SAM 2.1 · tiny", "family": "sam2",
-        "size": "t", "speed": "fast", "weights": "sam2_t.pt",
+        "size": "t", "speed": "fast", "weights": "sam2.1_t.pt",
         "note": "SAM 2.1 tiny — fastest 2.1 variant, good for bulk/CPU use.",
     },
     {
         "id": "sam2.1_s", "label": "SAM 2.1 · small", "family": "sam2",
-        "size": "s", "speed": "balanced", "weights": "sam2_s.pt",
+        "size": "s", "speed": "balanced", "weights": "sam2.1_s.pt",
         "note": "SAM 2.1 small — a step up in quality over tiny.",
     },
     {
         "id": "sam2.1_b", "label": "SAM 2.1 · base+", "family": "sam2",
-        "size": "b", "speed": "balanced", "weights": "sam2_b.pt",
+        "size": "b", "speed": "balanced", "weights": "sam2.1_b.pt",
         "note": "SAM 2.1 base-plus — balanced default for a mid GPU.",
     },
     {
         "id": "sam2.1_l", "label": "SAM 2.1 · large", "family": "sam2",
-        "size": "l", "speed": "accurate", "weights": "sam2_l.pt",
+        "size": "l", "speed": "accurate", "weights": "sam2.1_l.pt",
         "note": "SAM 2.1 large — highest-quality 2.1 masks, GPU recommended.",
     },
     {
@@ -153,13 +157,13 @@ SAM_DEFAULT = "sam2.1_b"
 # name (auto-downloaded on first use) or a filename under models/seg/yolo.
 YOLO_SEG_MODELS = [
     {
-        "id": f"yolov26{s}-seg",
-        "label": f"YOLOv26{s}-seg",
+        "id": f"yolo26{s}-seg",
+        "label": f"YOLOV26{s}-seg",
         "size": s,
         "speed": {"n": "fast", "s": "fast", "m": "balanced",
                   "l": "accurate", "x": "accurate"}[s],
-        "weights": f"yolov26{s}-seg.pt",
-        "note": f"YOLOv26 {('nano','small','medium','large','xlarge')[i]} "
+        "weights": f"yolo26{s}-seg.pt",
+        "note": f"YOLO26 {('nano','small','medium','large','xlarge')[i]} "
                 f"instance segmentation. Class-aware; used to grab people and "
                 f"other trained-class bounds in bulk.",
     }
@@ -214,17 +218,70 @@ def _sam_weight_path(entry):
     return local if (local and os.path.exists(local)) else ""
 
 
+@lru_cache(maxsize=1)
+def _github_assets():
+    """The set of weight filenames ultralytics can auto-download, resolved once.
+    Empty set (treated as 'unknown, be optimistic') if it can't be read."""
+    try:
+        from ultralytics.utils.downloads import GITHUB_ASSETS_NAMES
+        return set(GITHUB_ASSETS_NAMES)
+    except Exception:
+        return set()
+
+
+def _known_download_asset(name):
+    """True if `name` is a bare weight filename ultralytics can auto-download
+    from its GitHub assets. Used to tell 'will fetch on first use' apart from
+    'ultralytics has no such asset and it isn't on disk' (which would blow up as
+    a FileNotFoundError at load time). If the asset list can't be read we
+    optimistically return True (fall back to old behaviour)."""
+    assets = _github_assets()
+    if not assets:
+        return True
+    return os.path.basename(name) in assets
+
+
+@lru_cache(maxsize=1)
+def _have_sam3_code():
+    """True if this ultralytics ships the SAM3 predictor. SAM3 isn't loaded via
+    the generic SAM() wrapper or the GitHub-asset auto-download; it needs
+    SAM3SemanticPredictor and a manually-provided checkpoint. Probed once."""
+    try:
+        from ultralytics.models.sam import SAM3SemanticPredictor  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 def _sam_available(entry):
     """(available, reason) for a SAM entry. Every family runs through
-    ultralytics, which downloads built-in weights by name on first use, so the
-    only hard requirement is ultralytics itself. A custom checkpoint just needs
-    its file present."""
+    ultralytics, which downloads a built-in weight by name on first use — but
+    only if that name is actually one of ultralytics' assets. A name it doesn't
+    know (e.g. 'sam3.pt' on a build without SAM3) is NOT downloadable and, absent
+    a local copy, would fail at load; report it unavailable so the UI greys it
+    out instead of silently no-opping. A custom checkpoint just needs its file."""
     if not _HAVE_ULTRALYTICS:
         return False, "pip install ultralytics"
     if entry.get("custom"):
         wp = _sam_weight_path(entry)
         if wp and not os.path.exists(wp):
             return False, f"checkpoint not found: {wp}"
+        return True, ""
+    if entry.get("family") == "sam3":
+        if not _have_sam3_code():
+            return False, ("this ultralytics build has no SAM3 "
+                           "(needs SAM3SemanticPredictor)")
+        if not _sam_weight_path(entry):
+            return True, "will download sam3.pt from HuggingFace on first use"
+        return True, ""
+    # built-in: OK if the user dropped a local copy, else it must be a name
+    # ultralytics can fetch.
+    if _sam_weight_path(entry):
+        return True, ""
+    w = entry.get("weights", "")
+    if not _known_download_asset(w):
+        return False, (f"{w} isn't available in this ultralytics build "
+                       f"(drop it in {SAM_DIR} to use it)")
     return True, ""
 
 
@@ -337,6 +394,114 @@ def sam_weights_ref(model_id):
     except Exception:
         pass
     return os.path.join(SAM_DIR, w)
+
+
+# ── SAM3 weight fetch (HuggingFace; ultralytics can't auto-download it) ────────
+# SAM3's checkpoint isn't a GitHub asset, so we grab it from a HuggingFace repo
+# on explicit user action and drop it at models/seg/sam/sam3.pt — the path
+# _sam_available()/_get_sam() look for. Default repo is overridable via env.
+SAM3_HF_REPO = os.environ.get("CIM_SAM3_HF_REPO", "AEmotionStudio/sam3.1")
+_CKPT_EXTS = (".pt", ".pth", ".safetensors")
+
+
+def sam3_present():
+    """True if models/seg/sam/sam3.pt is already on disk."""
+    return os.path.exists(os.path.join(SAM_DIR, "sam3.pt"))
+
+
+def _hf_list_files(repo):
+    """Filenames in a HuggingFace model repo, via the public API. [] on failure
+    (offline, private, rate-limited). No token needed for a public repo."""
+    import json
+    import urllib.request
+    url = f"https://huggingface.co/api/models/{repo}"
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            data = json.load(r)
+        return [s.get("rfilename", "") for s in data.get("siblings", [])]
+    except Exception:
+        return []
+
+
+def _pick_sam3_checkpoint(files):
+    """Choose the checkpoint filename to pull from the repo listing: prefer a
+    name containing 'sam3', else the first checkpoint-extension file. '' if none.
+    Prefers .pt over .safetensors so ultralytics loads it directly."""
+    cks = [f for f in files if f.lower().endswith(_CKPT_EXTS)]
+    if not cks:
+        return ""
+    def rank(f):
+        low = f.lower()
+        return (0 if "sam3" in low else 1,
+                _CKPT_EXTS.index(next(e for e in _CKPT_EXTS if low.endswith(e))))
+    return sorted(cks, key=rank)[0]
+
+
+def download_sam3(repo=None, token=None, progress=None):
+    """Fetch the SAM3 checkpoint from HuggingFace into models/seg/sam/sam3.pt.
+
+    Returns (ok, message). Safe to call when it's already present (no-op ok).
+    Streams the file straight from the repo's resolve/main URL into our own
+    models dir — no huggingface_hub dependency and no hidden ~/.cache location;
+    the weight lands exactly where the loader looks. The default repo is public,
+    so `token` is normally unnecessary (only added as a header if given, for a
+    gated mirror). Never raises."""
+    # Fast path: already have the canonical sam3.pt.
+    if sam3_present():
+        return True, "SAM3 weight already present."
+    repo = repo or SAM3_HF_REPO
+    try:
+        os.makedirs(SAM_DIR, exist_ok=True)
+    except Exception as e:
+        return False, f"can't create {SAM_DIR}: {e}"
+
+    files = _hf_list_files(repo)
+    fname = _pick_sam3_checkpoint(files) if files else "sam3.pt"
+    if not fname:
+        return False, f"no checkpoint (*.pt/.pth/.safetensors) found in {repo}."
+
+    # The loader looks for models/seg/sam/sam3.pt. If the repo file is a .pt we
+    # save it there directly. If it's a .pth/.safetensors we keep its real
+    # extension (saving it as .pt would mislabel it and ultralytics could fail),
+    # and report the actual path so the user knows what landed.
+    if fname.lower().endswith(".pt"):
+        dest = os.path.join(SAM_DIR, "sam3.pt")
+    else:
+        dest = os.path.join(SAM_DIR, os.path.basename(fname))
+    if os.path.exists(dest):
+        return True, f"SAM3 weight already present ({os.path.basename(dest)})."
+
+    import urllib.request
+    url = f"https://huggingface.co/{repo}/resolve/main/{fname}"
+    req = urllib.request.Request(url)
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    tmp = dest + ".part"
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            total = int(r.headers.get("Content-Length", 0) or 0)
+            done = 0
+            with open(tmp, "wb") as f:
+                while True:
+                    chunk = r.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    if progress and total:
+                        try:
+                            progress(done, total)
+                        except Exception:
+                            pass
+        os.replace(tmp, dest)
+        return True, f"Downloaded {fname} from {repo}."
+    except Exception as e:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        return False, f"download failed from {url}: {e}"
 
 
 def yolo_weights_ref(model_id):
