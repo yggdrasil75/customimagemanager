@@ -13,6 +13,10 @@
 let currentPane = 'gallery';
 
 function setPane(pane) {
+  if (window.CIMFeatures && pane !== 'gallery' &&
+      !window.CIMFeatures.allowed('tab.' + pane)) {
+    pane = 'gallery';
+  }
   currentPane = pane;
 
   const isMusic = (pane === 'music');
@@ -45,12 +49,7 @@ function setPane(pane) {
   if (f) f.className = isFaces ? on : off;
   if (rv) rv.className = isReview ? on : off;
   if (bk) bk.className = isBooks ? on : off;
-  // Only (re)load a pane's list when it has actually been switched INTO, and
-  // only if it isn't already populated. setPane() gets called for plenty of
-  // reasons that aren't a tab change (badge refreshes, init, returning from a
-  // modal); reloading unconditionally rebuilt the list and threw the user's
-  // scroll position back to the top mid-edit. Use the pane's own Refresh
-  // button, or an explicit action, to force a rebuild.
+  if (window.CIMFeatures) window.CIMFeatures.apply(document);
   const _fresh = (pane !== window._lastPane);
   if (isFaces && typeof loadFaces === 'function') {
     const l = document.getElementById('faces_list');

@@ -68,12 +68,54 @@ from datetime import datetime
 from flask import request, jsonify, redirect, g, render_template
 from werkzeug.security import generate_password_hash, check_password_hash
 
+import features
+from cimlogger import audit
+
 log = logging.getLogger("auth")
 if not log.handlers:
     log.addHandler(logging.StreamHandler())
 log.setLevel(logging.INFO)
 
 COOKIE_NAME = "cim_session"
+
+# Sentinel so callers can distinguish "leave unchanged" from "set to NULL".
+_UNSET = object()
+
+
+def require_feature(feature_key, action=None, fields=()):
+    """Decorator: 403 unless g.user's effective features allow feature_key.
+
+    Fail-open for unknown keys (feats.get(key) is None -> allowed) so new
+    endpoints aren't accidentally locked out before the catalog knows them;
+    only an explicit False denies. Admin/anonymous users always pass.
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrap(*a, **k):
+            u = g.get("user")
+            if not u:
+                return jsonify({"error": "authentication required"}), 401
+            if not u.get("is_admin"):
+                feats = u.get("features") or {}
+                if feats.get(feature_key) is False:
+                    return jsonify({"error": "feature not permitted"}), 403
+            resp = fn(*a, **k)
+            if action:
+                try:
+                    body = request.get_json(silent=True) or {}
+                    parts = []
+                    for f in fields:
+                        if f in body:
+                            v = body[f]
+                            if isinstance(v, (list, dict)) and len(str(v)) > 300:
+                                v = str(v)[:300] + "…"
+                            parts.append(f"{f}={v!r}")
+                    audit(action, " ".join(parts))
+                except Exception:
+                    pass
+            return resp
+        return wrap
+    return deco
 
 # Paths that must remain reachable without a session, otherwise you could
 # never log in or load the login page's assets.
@@ -155,8 +197,18 @@ class Auth:
             email         TEXT,
             is_admin      INTEGER NOT NULL DEFAULT 0,
             disabled      INTEGER NOT NULL DEFAULT 0,
+            role          TEXT NOT NULL DEFAULT 'custom',   -- admin|uploader|viewer|custom
+            perms         TEXT,                             -- JSON overrides {feature:bool}
+            group_id      INTEGER,                          -- optional group membership
             created_at    TEXT,
             last_login    TEXT
+        );
+        CREATE TABLE IF NOT EXISTS auth_groups (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            name          TEXT UNIQUE NOT NULL COLLATE NOCASE,
+            role          TEXT NOT NULL DEFAULT 'custom',
+            perms         TEXT,                             -- JSON overrides {feature:bool}
+            created_at    TEXT
         );
         CREATE TABLE IF NOT EXISTS auth_sessions (
             token       TEXT PRIMARY KEY,
@@ -169,18 +221,80 @@ class Auth:
             FOREIGN KEY(user_id) REFERENCES auth_users(id) ON DELETE CASCADE
         );
         """)
+        # Migrate older auth_users tables that predate role/perms/group_id.
+        have = {row[1] for row in db.execute("PRAGMA table_info(auth_users)")}
+        for col, ddl in (("role", "TEXT NOT NULL DEFAULT 'custom'"),
+                         ("perms", "TEXT"),
+                         ("group_id", "INTEGER")):
+            if col not in have:
+                db.execute(f"ALTER TABLE auth_users ADD COLUMN {col} {ddl}")
         db.commit()
+
+    # -- permission helpers --------------------------------------------------
+    def _load_perms(self, raw):
+        if not raw:
+            return {}
+        try:
+            d = json.loads(raw)
+            return d if isinstance(d, dict) else {}
+        except Exception:
+            return {}
+
+    def get_group(self, group_id):
+        if not group_id:
+            return None
+        return self._db().execute(
+            "SELECT * FROM auth_groups WHERE id=?", (group_id,)).fetchone()
+
+    def list_groups(self):
+        rows = self._db().execute(
+            "SELECT * FROM auth_groups ORDER BY name").fetchall()
+        return [{"id": r["id"], "name": r["name"], "role": r["role"],
+                 "perms": self._load_perms(r["perms"])} for r in rows]
+
+    def effective_perms_for(self, user_row):
+        """Resolve the effective feature map for a DB user row.
+
+        Precedence: admin > user role/overrides layered over the user's
+        group (if any). A user in a group inherits the group's role and
+        overrides, then applies its own on top.
+        """
+        if user_row is None:
+            return features.effective_permissions("viewer", {})
+        if user_row["is_admin"]:
+            return features.effective_permissions("admin", {})
+
+        role = (user_row["role"] if "role" in user_row.keys()
+                else None) or "custom"
+        overrides = self._load_perms(
+            user_row["perms"] if "perms" in user_row.keys() else None)
+
+        gid = user_row["group_id"] if "group_id" in user_row.keys() else None
+        grp = self.get_group(gid)
+        if grp:
+            # Start from the group, then layer the user on top.
+            role = role if role and role != "custom" else grp["role"]
+            merged = dict(self._load_perms(grp["perms"]))
+            merged.update(overrides)
+            overrides = merged
+        return features.effective_permissions(role, overrides)
 
     # -- user CRUD -----------------------------------------------------------
     def _row_to_user(self, r):
         if r is None:
             return None
-        return {
+        keys = r.keys()
+        u = {
             "id": r["id"], "username": r["username"], "source": r["source"],
             "display_name": r["display_name"], "email": r["email"],
             "is_admin": bool(r["is_admin"]), "disabled": bool(r["disabled"]),
             "created_at": r["created_at"], "last_login": r["last_login"],
+            "role": (r["role"] if "role" in keys else "custom") or "custom",
+            "group_id": r["group_id"] if "group_id" in keys else None,
+            "perms": self._load_perms(r["perms"] if "perms" in keys else None),
         }
+        u["features"] = self.effective_perms_for(r)
+        return u
 
     def get_user(self, username):
         r = self._db().execute(
@@ -197,18 +311,23 @@ class Auth:
             "SELECT COUNT(*) c FROM auth_users").fetchone()["c"]
 
     def create_local_user(self, username, password, is_admin=False,
-                          display_name=None, email=None):
+                          display_name=None, email=None, role=None,
+                          group_id=None, perms=None):
         username = (username or "").strip()
         if not username:
             raise ValueError("username required")
         if not password:
             raise ValueError("password required")
+        if role is None:
+            role = "admin" if is_admin else "custom"
         db = self._db()
         db.execute(
             "INSERT INTO auth_users(username,source,password_hash,display_name,"
-            "email,is_admin,created_at) VALUES(?,?,?,?,?,?,?)",
+            "email,is_admin,role,perms,group_id,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
             (username, "local", generate_password_hash(password),
              display_name or username, email, 1 if is_admin else 0,
+             role, json.dumps(perms or {}), group_id,
              datetime.utcnow().isoformat()))
         db.commit()
         return self._row_to_user(self.get_user(username))
@@ -238,20 +357,63 @@ class Auth:
         self._db().commit()
 
     def update_user(self, user_id, is_admin=None, disabled=None,
-                    display_name=None, email=None):
+                    display_name=None, email=None, role=None, perms=None,
+                    group_id=_UNSET):
         sets, vals = [], []
         for col, val in (("is_admin", is_admin), ("disabled", disabled)):
             if val is not None:
                 sets.append(f"{col}=?"); vals.append(1 if val else 0)
-        for col, val in (("display_name", display_name), ("email", email)):
+        for col, val in (("display_name", display_name), ("email", email),
+                         ("role", role)):
             if val is not None:
                 sets.append(f"{col}=?"); vals.append(val)
+        if perms is not None:
+            sets.append("perms=?"); vals.append(json.dumps(perms))
+        if group_id is not _UNSET:            # allow clearing to NULL
+            sets.append("group_id=?"); vals.append(group_id)
         if not sets:
             return
         vals.append(user_id)
         self._db().execute(
             f"UPDATE auth_users SET {','.join(sets)} WHERE id=?", vals)
         self._db().commit()
+
+    # -- group CRUD ----------------------------------------------------------
+    def create_group(self, name, role="custom", perms=None):
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("group name required")
+        db = self._db()
+        db.execute(
+            "INSERT INTO auth_groups(name,role,perms,created_at) VALUES(?,?,?,?)",
+            (name, role or "custom", json.dumps(perms or {}),
+             datetime.utcnow().isoformat()))
+        db.commit()
+        r = db.execute("SELECT * FROM auth_groups WHERE name=?", (name,)).fetchone()
+        return {"id": r["id"], "name": r["name"], "role": r["role"],
+                "perms": self._load_perms(r["perms"])}
+
+    def update_group(self, group_id, name=None, role=None, perms=None):
+        sets, vals = [], []
+        if name is not None:
+            sets.append("name=?"); vals.append(name)
+        if role is not None:
+            sets.append("role=?"); vals.append(role)
+        if perms is not None:
+            sets.append("perms=?"); vals.append(json.dumps(perms))
+        if not sets:
+            return
+        vals.append(group_id)
+        self._db().execute(
+            f"UPDATE auth_groups SET {','.join(sets)} WHERE id=?", vals)
+        self._db().commit()
+
+    def delete_group(self, group_id):
+        db = self._db()
+        db.execute("UPDATE auth_users SET group_id=NULL WHERE group_id=?",
+                   (group_id,))
+        db.execute("DELETE FROM auth_groups WHERE id=?", (group_id,))
+        db.commit()
 
     def delete_user(self, user_id):
         db = self._db()
@@ -484,7 +646,9 @@ class Auth:
         """before_request hook: enforce login + CSRF on protected paths."""
         if not self.enabled():
             g.user = {"username": "anonymous", "is_admin": True,
-                      "id": 0, "source": "disabled"}
+                      "id": 0, "source": "disabled", "role": "admin",
+                      "group_id": None, "perms": {},
+                      "features": features.effective_permissions("admin", {})}
             return None
         self._load_current()
         if self._is_public(request.path):
@@ -600,6 +764,7 @@ class Auth:
         @require_admin
         def _list_users():
             return jsonify({"users": self.list_users(),
+                            "groups": self.list_groups(),
                             "mode": self.cfg().get("mode")})
 
         @app.route("/api/auth/users/create", methods=["POST"])
@@ -611,7 +776,10 @@ class Auth:
                     d.get("username"), d.get("password"),
                     is_admin=bool(d.get("is_admin")),
                     display_name=d.get("display_name"),
-                    email=d.get("email"))
+                    email=d.get("email"),
+                    role=d.get("role"),
+                    group_id=d.get("group_id"),
+                    perms=d.get("perms"))
             except Exception as e:
                 return jsonify({"error": str(e)}), 400
             return jsonify({"ok": True, "user": u})
@@ -630,11 +798,59 @@ class Auth:
                 if len(admins) <= 1 and admins and admins[0]["id"] == uid:
                     return jsonify({"error": "cannot demote/disable the last "
                                     "active admin"}), 400
-            self.update_user(
-                uid, is_admin=d.get("is_admin"), disabled=d.get("disabled"),
-                display_name=d.get("display_name"), email=d.get("email"))
+            kw = dict(is_admin=d.get("is_admin"), disabled=d.get("disabled"),
+                      display_name=d.get("display_name"), email=d.get("email"),
+                      role=d.get("role"), perms=d.get("perms"))
+            if "group_id" in d:                 # may be null to clear
+                kw["group_id"] = d.get("group_id")
+            self.update_user(uid, **kw)
             if d.get("disabled") is True:
                 self.revoke_user_sessions(uid)
+            return jsonify({"ok": True})
+
+        # ---- feature catalog + groups -------------------------------------
+        @app.route("/api/auth/features")
+        @require_admin
+        def _features():
+            return jsonify(features.catalog())
+
+        @app.route("/api/auth/groups")
+        @require_admin
+        def _list_groups():
+            return jsonify({"groups": self.list_groups(),
+                            "catalog": features.catalog()})
+
+        @app.route("/api/auth/groups/create", methods=["POST"])
+        @require_admin
+        def _create_group():
+            d = request.get_json(silent=True) or {}
+            try:
+                grp = self.create_group(
+                    d.get("name"), role=d.get("role") or "custom",
+                    perms=d.get("perms") or {})
+            except Exception as e:
+                return jsonify({"error": str(e)}), 400
+            return jsonify({"ok": True, "group": grp})
+
+        @app.route("/api/auth/groups/update", methods=["POST"])
+        @require_admin
+        def _update_group():
+            d = request.get_json(silent=True) or {}
+            gid = d.get("id")
+            if not gid:
+                return jsonify({"error": "id required"}), 400
+            self.update_group(gid, name=d.get("name"), role=d.get("role"),
+                              perms=d.get("perms"))
+            return jsonify({"ok": True})
+
+        @app.route("/api/auth/groups/delete", methods=["POST"])
+        @require_admin
+        def _delete_group():
+            d = request.get_json(silent=True) or {}
+            gid = d.get("id")
+            if not gid:
+                return jsonify({"error": "id required"}), 400
+            self.delete_group(gid)
             return jsonify({"ok": True})
 
         @app.route("/api/auth/users/set_password", methods=["POST"])

@@ -3,13 +3,13 @@
       <span class="text-purple-300 font-bold">📚 <span id="comic_title_h">Comic</span></span>
       <span id="comic_pageinfo" class="text-xs text-gray-400"></span>
       <div class="ml-auto flex gap-2 items-center">
-        <select id="comic_action_select" title="AI action to run on every page"
+        <select id="comic_action_select" title="AI action to run on every page" data-feature="ai.llm"
           class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-1 max-w-[130px]"></select>
-        <button onclick="comicRunAI()" class="text-xs bg-yellow-600 hover:bg-yellow-500 px-3 py-1 rounded font-bold">✨
+        <button onclick="comicRunAI()" data-feature="ai.llm" class="text-xs bg-yellow-600 hover:bg-yellow-500 px-3 py-1 rounded font-bold">✨
           Run AI</button>
-        <button onclick="comicPipeline()" class="text-xs bg-teal-600 hover:bg-teal-500 px-3 py-1 rounded font-bold">🌳
+        <button onclick="comicPipeline()" data-feature="ai.smarttag" class="text-xs bg-teal-600 hover:bg-teal-500 px-3 py-1 rounded font-bold">🌳
           Smart Tag</button>
-        <button onclick="comicBoxAll()" class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1 rounded font-bold">🤖 Box
+        <button onclick="comicBoxAll()" data-feature="ai.autotag" class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1 rounded font-bold">🤖 Box
           all pages</button>
         <button onclick="closeComic()" class="text-gray-400 hover:text-white text-lg leading-none">✕</button>
       </div>
@@ -27,13 +27,13 @@
         <input id="comic_tags" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
         <label class="text-[10px] uppercase text-gray-400 font-bold block">Characters (comma)</label>
         <input id="comic_chars" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-        <button onclick="saveComic()"
+        <button onclick="saveComic()" data-feature="comics.edit"
           class="w-full bg-green-600 hover:bg-green-500 py-1.5 rounded font-bold text-sm mt-1">Save comic info</button>
-        <button onclick="setComicCover()" class="w-full bg-gray-700 hover:bg-gray-600 py-1 rounded text-xs">Set current
+        <button onclick="setComicCover()" data-feature="comics.edit" class="w-full bg-gray-700 hover:bg-gray-600 py-1 rounded text-xs">Set current
           page as cover</button>
-        <button onclick="openComicPageInEditor()"
+        <button onclick="openComicPageInEditor()" data-feature="comics.edit"
           class="w-full bg-indigo-700 hover:bg-indigo-600 py-1 rounded text-xs">Edit current page metadata</button>
-        <button onclick="unpackageComic()"
+        <button onclick="unpackageComic()" data-feature="comics.delete"
           class="w-full bg-red-800 hover:bg-red-700 py-1 rounded text-xs text-red-200">Unpackage comic</button>
       </div>
       <div class="flex-1 flex flex-col overflow-hidden">

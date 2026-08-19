@@ -168,8 +168,11 @@ function makeViewer(prefix, opts) {
 
   // ── canvas box-editing events (MAIN pane only — review is read-only draw) ──
   if (isMain) {
+    const boxesEditable = () =>
+      !window.CIMFeatures || window.CIMFeatures.allowed('annot.boxes');
     canvas.addEventListener('mousedown', e => {
       if (!currentFile) return;
+      if (!boxesEditable()) return;   // read-only: no create/confirm/edit via canvas
       if (e.button === 0) { startX = e.offsetX; startY = e.offsetY; drawing = true; }
       else if (e.button === 1) {
         e.preventDefault();
@@ -216,6 +219,7 @@ function makeViewer(prefix, opts) {
     });
     canvas.addEventListener('contextmenu', e => {
       e.preventDefault(); if (!currentFile || !regionsVisible()) return;
+      if (!boxesEditable()) return;   // read-only: no delete-box via right-click
       for (let i = currentRegions.length - 1; i >= 0; i--) {
         const b = currentRegions[i];
         const px = (b.cx - b.w / 2) * canvas.width, py = (b.cy - b.h / 2) * canvas.height;
@@ -323,6 +327,7 @@ function makeViewer(prefix, opts) {
     if (isMain) {
       svg.addEventListener('mousedown', e => {
         if (e.button !== 0) return;
+        if (window.CIMFeatures && !window.CIMFeatures.allowed('annot.boxes')) return;
         const [x, y] = pointerNorm(e); drag = { x0: x, y0: y }; e.preventDefault();
       });
       window.addEventListener('mousemove', e => {

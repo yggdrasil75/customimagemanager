@@ -122,17 +122,10 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 shutil.rmtree(os.path.join(MEDIA_DIR, ".thumbs"), ignore_errors=True)  # retired loose cache
 os.makedirs("logs",     exist_ok=True)
 
-_log_fmt = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
-_eh = logging.FileHandler('logs/error.log'); _eh.setLevel(logging.ERROR); _eh.setFormatter(_log_fmt)
-
-training_logger = logging.getLogger('training')
-training_logger.setLevel(logging.INFO)
-_th = logging.FileHandler('logs/training.log'); _th.setFormatter(_log_fmt)
-training_logger.addHandler(_th); training_logger.addHandler(_eh)
-
-access_logger = logging.getLogger('access')
-access_logger.setLevel(logging.INFO)
-access_logger.addHandler(logging.StreamHandler())
+# All loggers and the audit helpers live in cimlogger so any module can import
+# them without reaching back into manager.py. See cimlogger.py.
+from cimlogger import (training_logger, access_logger, audit_logger,
+                       audit, audited)
 
 state = {
     "classes": ["object"], "available_models": [],
@@ -4285,6 +4278,7 @@ def api_exif_read():
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route("/api/exif/write", methods=["POST"])
+@_auth.require_feature("meta.exif.edit", action='exif_write', fields=('filename',))
 def api_exif_write():
     """Apply a {tag_name: value} patch to a media file's EXIF via
     exif_export.write_exif(). Read-only/unknown tags are skipped server-side."""
@@ -4592,6 +4586,7 @@ def api_body_name():
 
 
 @app.route("/api/faces/scan", methods=["POST"])
+@_auth.require_feature("tab.faces.edit")
 def api_face_scan():
     """Force a rescan (clears face_done) or just recluster what's cached.
 
@@ -4655,6 +4650,7 @@ def api_face_progress():
 
 
 @app.route("/api/faces/name", methods=["POST"])
+@_auth.require_feature("tab.faces.edit", action='face_name', fields=('cluster_id', 'name'))
 def api_face_name():
     """Bulk-name a cluster. Writes the name into every MWG region it covers —
     metadata is the source of truth, the DB is only the cache."""
@@ -4692,6 +4688,7 @@ def api_face_name():
 
 
 @app.route("/api/faces/split", methods=["POST"])
+@_auth.require_feature("tab.faces.edit", action='face_split', fields=('cluster_id',))
 def api_face_split():
     """Kick a wrong face out of its cluster (back to unclustered)."""
     d = request.json or {}
@@ -4771,6 +4768,7 @@ def api_state():
          "model_groups","iqa_model")})
 
 @app.route("/api/update_settings", methods=["POST"])
+@_auth.require_feature("settings", action='update_settings', fields=())
 def update_settings():
     d = request.json
     # A face_size change means the NEXT detect must load different weights. The
@@ -4915,6 +4913,7 @@ def api_albums():
 
 
 @app.route("/api/albums/create", methods=["POST"])
+@_auth.require_feature("tab.albums.edit", action='album_create', fields=('name',))
 def api_album_create():
     """Create an empty album (optionally seeded with files)."""
     d = request.json or {}
@@ -4933,6 +4932,7 @@ def api_album_create():
 
 
 @app.route("/api/albums/delete", methods=["POST"])
+@_auth.require_feature("tab.albums.edit", action='album_delete', fields=('name',))
 def api_album_delete():
     """Delete an album. Removes the collection from every member's XMP; the
     images themselves are never touched."""
@@ -4950,6 +4950,7 @@ def api_album_delete():
 
 
 @app.route("/api/albums/rename", methods=["POST"])
+@_auth.require_feature("tab.albums.edit", action='album_rename', fields=('old', 'new', 'old_name', 'new_name'))
 def api_album_rename():
     """Rename an album, rewriting the collection name in every member's XMP."""
     d = request.json or {}
@@ -4983,6 +4984,7 @@ def api_album_rename():
 
 
 @app.route("/api/albums/add", methods=["POST"])
+@_auth.require_feature("tab.albums.edit", action='album_add', fields=('name', 'filename', 'filenames'))
 def api_album_add():
     """Add one or more files to an album (creating it if new)."""
     d = request.json or {}
@@ -4994,6 +4996,7 @@ def api_album_add():
 
 
 @app.route("/api/albums/remove", methods=["POST"])
+@_auth.require_feature("tab.albums.edit", action='album_remove', fields=('name', 'filename', 'filenames'))
 def api_album_remove():
     """Remove one or more files from an album."""
     d = request.json or {}
@@ -5005,6 +5008,7 @@ def api_album_remove():
 
 
 @app.route("/api/albums/set_cover", methods=["POST"])
+@_auth.require_feature("tab.albums.edit")
 def api_album_set_cover():
     """Pin a specific member image as the album's cover tile."""
     d = request.json or {}
@@ -6076,6 +6080,10 @@ def api_gdl_config():
     if request.method == "GET":
         return jsonify({"success": True, "sites": state.get("gdl_sites", {}),
                         "opts": state.get("gdl_opts", {})})
+    # Writing site mappings is a fetch-config action; deny if not permitted.
+    _u = g.get("user") or {}
+    if not _u.get("is_admin") and (_u.get("features") or {}).get("fetch") is False:
+        return jsonify({"success": False, "error": "feature not permitted"}), 403
     d = request.json or {}
     site = (d.get("site") or "").strip()
     if not site:
@@ -6120,6 +6128,7 @@ def api_gdl_config():
     return jsonify({"success": True})
 
 @app.route("/api/gdl/fetch", methods=["POST"])
+@_auth.require_feature("fetch")
 def api_gdl_fetch():
     """Add a URL to the gallery-dl download queue and return immediately. A
     background worker downloads it and streams the files into the ingest queue;
@@ -6181,6 +6190,7 @@ def api_gdl_queue():
 
 
 @app.route("/api/gdl/queue/<int:qid>/cancel", methods=["POST"])
+@_auth.require_feature("fetch")
 def api_gdl_queue_cancel(qid):
     """Cancel a queued or in-progress download. Pending rows flip to canceled
     immediately; an in-flight one is flagged and stops between files."""
@@ -6209,6 +6219,7 @@ def api_gdl_queue_cancel(qid):
 
 
 @app.route("/api/gdl/queue/clear", methods=["POST"])
+@_auth.require_feature("fetch")
 def api_gdl_queue_clear():
     """Remove finished rows (done/error/canceled) from the queue view. Does not
     touch pending/downloading rows or anything already in the ingest queue."""
@@ -6226,6 +6237,8 @@ def api_gdl_queue_clear():
 
 
 @app.route("/api/move", methods=["POST"])
+@_auth.require_feature("data.move", action="move_file",
+                       fields=("filename", "filenames", "new_folder", "dest", "destination"))
 def api_move():
     filename   = request.json.get("filename","")
     new_folder = request.json.get("new_folder","").strip()
@@ -6783,7 +6796,22 @@ def api_metadata():
         meta["rating_user"] = user is not None
         return jsonify({"success":True,"metadata":meta})
     elif d.get("action")=="write":
-        ok = write_metadata(fp, d.get("tags",[]), d.get("description",""), d.get("regions",[]))
+        u = g.get("user") or {}
+        feats = {} if u.get("is_admin") else (u.get("features") or {})
+        def _denied(key):
+            return feats.get(key) is False
+        tags = d.get("tags", [])
+        desc = d.get("description", "")
+        regions = d.get("regions", [])
+        if _denied("annot.description") or _denied("annot.tags") or _denied("annot.boxes"):
+            cur = _fast_metadata(fn, fp) or {}
+            if _denied("annot.description"):
+                desc = cur.get("description", "")
+            if _denied("annot.tags"):
+                tags = cur.get("tags", [])
+            if _denied("annot.boxes"):
+                regions = cur.get("regions", [])
+        ok = write_metadata(fp, tags, desc, regions)
         _meta_cache_drop(fn)
         return jsonify({"success":ok})
 
@@ -6815,10 +6843,12 @@ def api_tiers_cancel():
     return jsonify({"success": True})
 
 @app.route("/api/delete", methods=["POST"])
+@_auth.require_feature("data.delete")
 def api_delete():
     fn = request.json.get("filename","")
     fp = get_safe_path(MEDIA_DIR, fn)
     if fp:
+        existed = os.path.exists(fp)
         base = os.path.splitext(fp)[0]
         for ext in mt.related_exts(fp):
             member = base + ext
@@ -6826,9 +6856,13 @@ def api_delete():
         _thumb_drop(fn)
         _purge_file_everywhere(fn)
         _dedup_remove_file(fn)
+        audit("delete_file", f"file={fn!r} existed={existed}")
+    else:
+        audit("delete_file_rejected", f"file={fn!r} (unsafe path)")
     return jsonify({"success":True})
 
 @app.route("/api/reconcile", methods=["POST"])
+@_auth.require_feature("ai.reconcile")
 def api_reconcile():
     """Purge DB rows for files deleted on disk. Externally-edited files are
     picked up by re-indexing (mtime change), so trigger both a reconcile and a
@@ -6839,6 +6873,7 @@ def api_reconcile():
     return jsonify({"success": True, "purged": removed})
 
 @app.route("/api/tag_review", methods=["POST"])
+@_auth.require_feature("tab.review")
 def api_tag_review():
     """Apply a per-tag review decision to one file in a single write.
 
@@ -6885,6 +6920,7 @@ def api_confirm_all_tags():
     return jsonify({"success": True, "tags": out, "confirmed": len(out)})
 
 @app.route("/api/bulk_tag", methods=["POST"])
+@_auth.require_feature("annot.tags")
 def bulk_tag():
     """Add tags to many files at once without touching regions or description."""
     filenames = request.json.get("filenames", [])
@@ -6921,6 +6957,7 @@ def bulk_tag():
     return jsonify({"success": True, "updated": updated, "errors": errors})
 
 @app.route("/api/bulk_delete", methods=["POST"])
+@_auth.require_feature("data.delete")
 def bulk_delete():
     filenames = request.json.get("filenames", [])
     deleted, errors = 0, []
@@ -6940,7 +6977,30 @@ def bulk_delete():
         except Exception as e:
             errors.append(fn)
             access_logger.error(f"bulk_delete {fn}: {e}")
+    # Record the full list so a mistaken bulk delete can be traced to the user
+    # and the exact files identified. Truncate the inline list if huge, but
+    # always log the count.
+    shown = filenames if len(filenames) <= 50 else filenames[:50] + ["...(+%d more)" % (len(filenames) - 50)]
+    audit("bulk_delete", f"deleted={deleted} errors={len(errors)} files={shown}")
     return jsonify({"success": True, "deleted": deleted, "errors": errors})
+
+@app.route("/api/audit_log")
+def api_audit_log():
+    """Admin-only: return the tail of the audit trail so a mistaken delete can
+    be traced to a user. Read-only; the file itself is the source of truth."""
+    u = g.get("user") or {}
+    if not u.get("is_admin"):
+        return jsonify({"error": "admin only"}), 403
+    try:
+        n = min(int(request.args.get("lines", 500)), 5000)
+    except Exception:
+        n = 500
+    path = "logs/audit.log"
+    if not os.path.exists(path):
+        return jsonify({"lines": [], "note": "no audit entries yet"})
+    with open(path, "r", errors="replace") as f:
+        tail = f.readlines()[-n:]
+    return jsonify({"lines": [l.rstrip("\n") for l in tail]})
 
 # ── Dedup ──────────────────────────────────────────────────────────────────────
 
@@ -6976,11 +7036,13 @@ def dedup_status():
                     "file_count": 0, "created": None, "group_count": 0})
 
 @app.route("/api/dedup_clear", methods=["POST"])
+@_auth.require_feature("dedup")
 def dedup_clear():
     _dedup_checkpoint_clear()
     return jsonify({"success": True})
 
 @app.route("/api/dedup_clear_group", methods=["POST"])
+@_auth.require_feature("dedup")
 def dedup_clear_group():
     db_id = request.json.get("db_id")
     if db_id:
@@ -6989,6 +7051,7 @@ def dedup_clear_group():
     return jsonify({"success": True})
 
 @app.route("/api/dedup_exclude", methods=["POST"])
+@_auth.require_feature("dedup")
 def dedup_exclude():
     """
     Remove a file from a stored group without deleting it, and record
@@ -7106,6 +7169,7 @@ def dedup_groups_page():
     return jsonify({"success": True})
 
 @app.route("/api/dedup", methods=["POST"])
+@_auth.require_feature("dedup")
 def dedup():
     force = request.json.get("force", False) if request.is_json else False
     try:
@@ -7287,6 +7351,7 @@ def dedup():
         state["status_text"] = "Ready."
 
 @app.route("/api/dedup_merge", methods=["POST"])
+@_auth.require_feature("dedup", action='dedup_merge', fields=('keep', 'remove'))
 def dedup_merge():
     data   = request.json
     target = data.get("target","")
@@ -7361,6 +7426,7 @@ def api_comic_get():
                     "pages": [folder + "/" + p for p in pages]})
 
 @app.route("/api/comic_create", methods=["POST"])
+@_auth.require_feature("comics.make", action='comic_create', fields=('folder', 'title'))
 def api_comic_create():
     d = request.json or {}
     folder = (d.get("folder", "") or "").strip().strip('/')
@@ -7384,6 +7450,7 @@ def api_comic_create():
     return jsonify({"success": True, "folder": folder})
 
 @app.route("/api/comic_update", methods=["POST"])
+@_auth.require_feature("comics.edit", action='comic_update', fields=('folder', 'title'))
 def api_comic_update():
     d = request.json or {}
     folder = (d.get("folder", "") or "").strip().strip('/')
@@ -7400,6 +7467,7 @@ def api_comic_update():
     return jsonify({"success": True})
 
 @app.route("/api/comic_delete", methods=["POST"])
+@_auth.require_feature("comics.delete", action='comic_delete', fields=('folder',))
 def api_comic_delete():
     """Unpackage a comic (keeps all images, just removes comic status)."""
     folder = (request.json.get("folder", "") or "").strip().strip('/')
@@ -7500,6 +7568,7 @@ def api_flag():
     return jsonify({"success": True})
 
 @app.route("/api/review_boxes", methods=["POST"])
+@_auth.require_feature("tab.review", action='review_boxes', fields=('filename',))
 def api_review_boxes():
     """Apply per-box review decisions to one file in a single write.
 
@@ -7566,6 +7635,7 @@ def api_confirm_all():
     return jsonify({"success": True, "confirmed": len(meta["regions"])})
 
 @app.route("/api/bulk_box", methods=["POST"])
+@_auth.require_feature("ai.autotag")
 def bulk_box():
     """Run box detection on many files. method 'yolo' uses the given model;
     method 'llm' uses the configured vision model. Boxes are added UNCONFIRMED."""
@@ -7630,6 +7700,7 @@ def bulk_box():
     return jsonify({"success": True, "done": done, "boxed": boxed, "errors": errors})
 
 @app.route("/api/bulk_segment", methods=["POST"])
+@_auth.require_feature("ai.segment")
 def bulk_segment():
     """Run the selected YOLO-seg (background) model over many files, writing
     masked regions (mask_svg in each region's Extensions) UNCONFIRMED. Mirrors
@@ -7688,6 +7759,7 @@ def bulk_segment():
 
 
 @app.route("/api/bulk_llm", methods=["POST"])
+@_auth.require_feature("ai.llm")
 def bulk_llm():
     """Run a configured AI action on many files, writing the result into each."""
     filenames = request.json.get("filenames", [])
@@ -7835,6 +7907,7 @@ def _apply_pipeline_result(fp, analysis):
     return tags, desc, regions
 
 @app.route("/api/run_pipeline", methods=["POST"])
+@_auth.require_feature("ai.smarttag")
 def run_pipeline_route():
     """Run the configurable AI decision tree against one image: classify, tag,
     describe, box subjects, and describe each subject crop. Writes the merged
@@ -7870,6 +7943,7 @@ def run_pipeline_route():
                     "tags": tags, "description": desc, "regions": regions})
 
 @app.route("/api/bulk_pipeline", methods=["POST"])
+@_auth.require_feature("ai.smarttag")
 def bulk_pipeline():
     """Run the Smart Tag pipeline across many files (mass processing)."""
     filenames = request.json.get("filenames", [])
@@ -8229,6 +8303,7 @@ def api_download_sam3():
 
 
 @app.route("/api/iqa_scan", methods=["POST"])
+@_auth.require_feature("ai.iqa")
 def iqa_scan():
     """Run NR-IQA (BRISQUE) and store a 0..5 star quality score on each file row
     so it can be shown in the list and the detail panel.
@@ -8322,6 +8397,7 @@ def iqa_scan():
 
 
 @app.route("/api/iqa_set", methods=["POST"])
+@_auth.require_feature("ai.iqa")
 def iqa_set():
     """Set (or clear) the user's 0..5 star rating for one file. This is the
     manual-rating entry point: it writes the unified `rating`/`rating_user`
@@ -9396,6 +9472,7 @@ def _merge_comic_analyses(folder, page_analyses, summarize=True):
     return data
 
 @app.route("/api/comic_pipeline", methods=["POST"])
+@_auth.require_feature("ai.smarttag")
 def comic_pipeline_route():
     """Run the pipeline across every page of a comic IN ORDER, store each page's
     result, then merge tags / characters / description up to the comic level.
@@ -9443,6 +9520,7 @@ def comic_pipeline_route():
                         "description": merged.get("description", "")}})
 
 @app.route("/api/pose", methods=["POST"])
+@_auth.require_feature("ai.pose")
 def api_pose():
     """Estimate a skeleton/pose for one image and store it in the sidecar."""
     fn = request.json.get("filename", "")
@@ -9463,6 +9541,7 @@ def api_pose():
     return jsonify({"success": True, "pose": pose_data})
 
 @app.route("/api/pose_remove", methods=["POST"])
+@_auth.require_feature("ai.pose_remove", action='pose_remove', fields=('filename',))
 def api_pose_remove():
     """Remove a bad skeleton/pose from an image.
 
@@ -9506,6 +9585,7 @@ def api_pose_remove():
                     "remaining_people": len(people)})
 
 @app.route("/api/ocr", methods=["POST"])
+@_auth.require_feature("ai.ocr")
 def api_ocr():
     """Run OCR on one image and return detected text lines (with boxes). The
     client decides whether to add them as regions / append to the description."""
@@ -9522,6 +9602,7 @@ def api_ocr():
     return jsonify({"success": True, **res})
 
 @app.route("/api/barcodes", methods=["POST"])
+@_auth.require_feature("ai.barcodes")
 def api_barcodes():
     fn = request.json.get("filename", "")
     fp = get_safe_path(MEDIA_DIR, fn)
@@ -9538,6 +9619,7 @@ def api_barcodes():
 
 
 @app.route("/api/segment", methods=["POST"])
+@_auth.require_feature("ai.segment")
 def api_segment():
     """Run the selected YOLO-seg (background) model on one image on demand and
     return masked regions, so the user can trigger class-aware segmentation
@@ -9593,6 +9675,7 @@ def api_segment():
 
 
 @app.route("/api/auto_tag", methods=["POST"])
+@_auth.require_feature("ai.autotag")
 def auto_tag():
     model_path = request.json.get("model")
     fn  = request.json.get("filename","")
@@ -9620,6 +9703,7 @@ def auto_tag():
         return jsonify({"success":False,"error":str(e)})
 
 @app.route("/api/run_llm", methods=["POST"])
+@_auth.require_feature("ai.llm")
 def run_llm():
     fn        = request.json.get("filename","")
     action_id = str(request.json.get("action_id",""))
@@ -9702,6 +9786,7 @@ def run_llm():
         return jsonify({"success":False,"error":str(e)})
 
 @app.route("/api/train", methods=["POST"])
+@_auth.require_feature("ai.quicktrain")
 def train():
     d          = request.json or {}
     remote_ip  = d.get("remote_ip","").strip()

@@ -3,11 +3,11 @@
       <div id="controls_tabs" class="flex flex-shrink-0 border-b border-gray-700 bg-gray-800 text-xs font-bold">
         <button data-tab="main" onclick="setControlsTab('main')"
           class="controls-tab px-3 py-2 text-white border-b-2 border-blue-500">Editor</button>
-        <button data-tab="exif" onclick="setControlsTab('exif')"
+        <button data-tab="exif" onclick="setControlsTab('exif')" data-feature="meta.exif"
           class="controls-tab px-3 py-2 text-gray-400 border-b-2 border-transparent hover:text-white">EXIF</button>
-        <button data-tab="iptc" onclick="setControlsTab('iptc')"
+        <button data-tab="iptc" onclick="setControlsTab('iptc')" data-feature="meta.iptc"
           class="controls-tab px-3 py-2 text-gray-400 border-b-2 border-transparent hover:text-white">IPTC</button>
-        <button data-tab="xmp" onclick="setControlsTab('xmp')"
+        <button data-tab="xmp" onclick="setControlsTab('xmp')" data-feature="meta.xmp"
           class="controls-tab px-3 py-2 text-gray-400 border-b-2 border-transparent hover:text-white">XMP</button>
 
         <button data-tab="book" onclick="setControlsTab('book')"
@@ -26,11 +26,11 @@
             <button onclick="findSimilarToCurrent()"
               title="Find visually similar images (needs embeddings — run pipeline step 2)"
               class="text-[10px] bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded text-white uppercase font-bold">Similar</button>
-            <button onclick="moveCurrentFile()"
+            <button onclick="moveCurrentFile()" data-feature="data.move"
               class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded uppercase font-bold">Move</button>
-            <button onclick="confirmAllRegions()" title="Confirm every unconfirmed box"
+            <button onclick="confirmAllRegions()" title="Confirm every unconfirmed box" data-annot-edit="annot.boxes"
               class="text-[10px] bg-amber-700 hover:bg-amber-600 px-2 py-1 rounded text-white">✓ Confirm all</button>
-            <button id="btn_delete" onclick="deleteCurrentFile()"
+            <button id="btn_delete" onclick="deleteCurrentFile()" data-feature="data.delete"
               class="hidden text-red-400 hover:text-red-300 text-xs px-1">Delete</button>
           </div>
         </div>
@@ -41,7 +41,7 @@
           <div class="flex items-center gap-2">
             <span class="text-[10px] text-gray-500 uppercase tracking-wider font-bold">Albums</span>
             <span id="album_chip_count" class="text-[10px] text-gray-600"></span>
-            <button id="btn_add_to_album" onclick="addCurrentToAlbum()" title="Add this image to an album"
+            <button id="btn_add_to_album" onclick="addCurrentToAlbum()" title="Add this image to an album" data-feature="tab.albums.edit"
               class="ml-auto text-[10px] bg-fuchsia-700 hover:bg-fuchsia-600 px-2 py-1 rounded text-white uppercase font-bold">+ Add to album</button>
           </div>
           <div id="album_chips" class="flex flex-wrap gap-1"></div>
@@ -81,7 +81,7 @@
             </div>
             <div id="region_tag_list"
               class="max-h-32 overflow-y-auto bg-gray-950 border border-gray-700 rounded p-1 flex flex-col gap-0.5"></div>
-            <div class="flex gap-1 mt-1">
+            <div class="flex gap-1 mt-1" data-annot-edit="annot.tags">
               <input id="region_tag_add_input" type="text"
                 placeholder="Add region tag(s), comma-separated"
                 class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600 text-xs text-white focus:border-blue-500"
@@ -94,7 +94,7 @@
             </div>
           </div>
 
-          <div class="flex gap-2">
+          <div class="flex gap-2" data-annot-edit="annot.boxes">
             <div class="flex-1">
               <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1"
                 title="The individual's name — mwg-rs:Name (e.g. 'jill'). The class ('girl') is the region label above.">Name</label>
@@ -122,12 +122,12 @@
           <div>
             <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Region Description</label>
             <textarea id="region_desc" rows="2"
-              oninput="onRegionDescInput()"
+              oninput="onRegionDescInput()" data-annot-edit="annot.description"
               class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
           </div>
         </div>
 
-        <div>
+        <div data-feature="ai.iqa">
           <div class="flex justify-between items-center mb-1">
             <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Quality</label>
             <span id="iqa_manual_badge" class="hidden text-[9px] text-amber-400 uppercase font-bold">manual</span>
@@ -148,7 +148,7 @@
           </div>
           <div id="tag_list"
             class="max-h-40 overflow-y-auto bg-gray-900 border border-gray-600 rounded p-1 flex flex-col gap-0.5"></div>
-          <div class="flex gap-1 mt-1">
+          <div class="flex gap-1 mt-1" data-annot-edit="annot.tags">
             <input id="tag_add_input" type="text" placeholder="Add tag(s), comma-separated, then Enter"
               class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600 text-xs text-white focus:border-blue-500"
               onkeydown="if(event.key==='Enter'){event.preventDefault();addTagsFromInput();}">
@@ -166,14 +166,14 @@
         <div>
           <div class="flex justify-between items-center mb-1">
             <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Description</label>
-            <div class="flex items-center gap-1">
+            <div class="flex items-center gap-1" data-feature="ai.llm">
               <select id="llm_action_select"
                 class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-0.5 max-w-[130px]"></select>
               <button onclick="runLLM()" id="btn_run_llm"
                 class="text-xs bg-yellow-600 hover:bg-yellow-500 px-2 py-0.5 rounded font-bold">✨ AI</button>
             </div>
           </div>
-          <textarea id="meta_desc" oninput="triggerAutosave()" rows="4"
+          <textarea id="meta_desc" oninput="triggerAutosave()" rows="4" data-annot-edit="annot.description"
             class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
         </div>
 
@@ -185,49 +185,49 @@
       </div>
 
       <!-- AI Tools -->
-      <div class="p-3 flex flex-col gap-2 border-t border-gray-700">
+      <div class="p-3 flex flex-col gap-2 border-t border-gray-700" data-feature="ai_tooling">
         <div class="flex justify-between items-center">
           <h3 class="font-bold text-purple-400 text-sm">AI Tooling</h3>
           <div class="flex gap-2">
-            <a href="/training_portal" target="_blank"
+            <a href="/training_portal" target="_blank" data-feature="ai.trainer"
               class="text-xs text-purple-300 bg-gray-700 px-2 py-1 rounded hover:bg-gray-600 border border-purple-800">Trainer
               ↗</a>
           </div>
         </div>
-        <div id="yolo_controls" class="opacity-50 pointer-events-none">
+        <div id="yolo_controls" class="opacity-50 pointer-events-none" data-feature="ai.autotag">
           <select id="model_selector"
             class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm mb-1"></select>
           <button onclick="runAutoTag()" id="btn_autotag"
             class="w-full bg-indigo-600 hover:bg-indigo-500 py-1.5 rounded font-bold text-sm">Auto-Tag Image</button>
         </div>
-        <button onclick="runPipeline()" id="btn_smarttag"
+        <button onclick="runPipeline()" id="btn_smarttag" data-feature="ai.smarttag"
           class="w-full bg-teal-600 hover:bg-teal-500 py-1.5 rounded font-bold text-sm">🌳 Smart Tag (AI
           pipeline)</button>
         <div class="grid grid-cols-2 gap-2">
-          <button onclick="runPose()" id="btn_pose"
+          <button onclick="runPose()" id="btn_pose" data-feature="ai.pose"
             class="bg-cyan-700 hover:bg-cyan-600 py-1.5 rounded font-bold text-sm">🦴 Pose</button>
-          <button onclick="runOCR()" id="btn_ocr"
+          <button onclick="runOCR()" id="btn_ocr" data-feature="ai.ocr"
             class="bg-sky-700 hover:bg-sky-600 py-1.5 rounded font-bold text-sm">🔤 OCR</button>
         </div>
-        <button onclick="runSegment()" id="btn_segment"
+        <button onclick="runSegment()" id="btn_segment" data-feature="ai.segment"
           title="Run the selected background segmentation (YOLO-seg) model on this image and add masked regions for the whitelisted classes (Settings ▸ Segmentation)."
           class="w-full bg-fuchsia-700 hover:bg-fuchsia-600 py-1.5 rounded font-bold text-sm">🎭 Segment (YOLO)</button>
-        <button onclick="runBarcodes()" id="btn_barcodes"
+        <button onclick="runBarcodes()" id="btn_barcodes" data-feature="ai.barcodes"
           title="Detect barcodes and QR codes with the configured YOLO model, then decode each one. Codes that are found but can't be read are still marked, so you keep a note of where they are."
           class="w-full bg-amber-700 hover:bg-amber-600 py-1.5 rounded font-bold text-sm">▥ Scan barcodes</button>
-        <button onclick="removePose()" id="btn_pose_remove" style="display:none"
+        <button onclick="removePose()" id="btn_pose_remove" style="display:none" data-feature="ai.pose_remove"
           title="Delete the current (bad) skeleton from this image"
           class="w-full bg-rose-800 hover:bg-rose-700 py-1.5 rounded font-bold text-sm">🗑 Remove skeleton</button>
-        <button onclick="quickTrain()"
+        <button onclick="quickTrain()" data-feature="ai.quicktrain"
           class="w-full bg-purple-600 hover:bg-purple-500 py-1.5 rounded font-bold text-sm">Quick Train</button>
-        <button onclick="openTiersModal()"
+        <button onclick="openTiersModal()" data-feature="ai.tiers"
           class="w-full bg-gray-700 hover:bg-gray-600 py-1.5 rounded font-bold text-sm border border-amber-700 text-amber-300">🗄
           Storage Tiers</button>
-        <label class="flex items-center justify-between text-xs text-gray-300 mt-1 cursor-pointer">
+        <label class="flex items-center justify-between text-xs text-gray-300 mt-1 cursor-pointer" data-feature="ai.bg_autotag">
           <span>Background auto-tag when idle</span>
           <input type="checkbox" id="autotag_toggle" onchange="toggleAutotag()" class="accent-purple-500">
         </label>
-        <button onclick="reconcileLibrary()" id="btn_reconcile"
+        <button onclick="reconcileLibrary()" id="btn_reconcile" data-feature="ai.reconcile"
           title="Purge DB entries for files deleted on disk and re-read externally edited files"
           class="w-full bg-gray-700 hover:bg-gray-600 py-1.5 rounded font-bold text-sm border border-teal-700 text-teal-300">🔄
           Sync with disk</button>

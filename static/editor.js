@@ -51,14 +51,15 @@ function renderRegionsList(){
       onclick="selectRegion(${i})">
       <span class="w-5 text-right text-gray-500 flex-shrink-0">${i+1}</span>
       <span class="inline-block w-2 h-2 rounded-full flex-shrink-0" style="background:${conf?'#3B82F6':'#F59E0B'}"></span>
-      <input class="flex-1 min-w-0 bg-transparent text-white border-b border-transparent focus:border-gray-500 focus:outline-none"
+      <input class="region-edit flex-1 min-w-0 bg-transparent text-white border-b border-transparent focus:border-gray-500 focus:outline-none"
         value="${_esc(b.class_name)}" onclick="event.stopPropagation()" onchange="renameRegion(${i}, this.value)">
       ${rtags?`<span class="text-[9px] text-gray-500 flex-shrink-0" title="${rtags} region tag(s)">${rtags}🏷</span>`:''}
       ${conf?'<span class="text-[9px] text-blue-400 flex-shrink-0">ok</span>'
-            :`<button class="text-amber-400 px-1 flex-shrink-0" title="Confirm" onclick="event.stopPropagation();confirmRegion(${i})">✓</button>`}
-      <button class="text-red-400 px-1 flex-shrink-0" title="Delete" onclick="event.stopPropagation();deleteRegion(${i})">✕</button>
+            :`<button class="region-confirm text-amber-400 px-1 flex-shrink-0" title="Confirm" onclick="event.stopPropagation();confirmRegion(${i})">✓</button>`}
+      <button class="region-del text-red-400 px-1 flex-shrink-0" title="Delete" onclick="event.stopPropagation();deleteRegion(${i})">✕</button>
     </div>`;
   }).join('');
+  if(window.CIMFeatures) window.CIMFeatures.apply(el);
 }
 function renameRegion(i,name){
   if(isVideoFile(currentFile)){ vtOverlay.rename(i,name); return; }
@@ -148,6 +149,7 @@ function renderRegionTags(){
   if(c) c.textContent = tags.length?`${tags.length} tag${tags.length>1?'s':''}${pend?` · ${pend} pending`:''}`:'';
   const btn=document.getElementById('btn_confirm_all_region_tags');
   if(btn) btn.style.display = pend?'inline-block':'none';
+  if(window.CIMFeatures) window.CIMFeatures.apply(box);
 }
 function _curRegion(){ return currentRegions[selectedRegionIdx]; }
 function onRegionDescInput(){

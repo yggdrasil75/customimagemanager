@@ -44,6 +44,9 @@ function renderImageAlbums() {
   }
 
   rows.forEach(a => box.appendChild(albumRow(a)));
+  // The list was just rebuilt; re-hide edit controls (rename/delete) for
+  // users without tab.albums.edit.
+  if (window.CIMFeatures) window.CIMFeatures.apply(box);
 }
 
 function albumRow(a) {
@@ -83,6 +86,7 @@ function albumRow(a) {
   // actions — stopPropagation so they don't also open the album
   const acts = document.createElement('div');
   acts.className = 'flex gap-1 opacity-0 group-hover:opacity-100 flex-shrink-0';
+  acts.setAttribute('data-feature', 'tab.albums.edit');
 
   const ren = document.createElement('button');
   ren.className = 'text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded';
@@ -258,16 +262,17 @@ function renderAlbumChips() {
   }
 
   currentFileAlbums.forEach(name => {
+    const canEdit = !window.CIMFeatures || window.CIMFeatures.allowed('tab.albums.edit');
     const chip = document.createElement('span');
     chip.className = 'inline-flex items-center gap-1 text-[10px] bg-fuchsia-900/60 border ' +
       'border-fuchsia-700 text-fuchsia-100 px-2 py-0.5 rounded-full';
     chip.innerHTML =
       `<span class="cursor-pointer hover:underline" title="Open this album">${escapeHtml(name)}</span>` +
-      `<span class="cursor-pointer text-fuchsia-300 hover:text-white font-bold" title="Remove from this album">✕</span>`;
+      (canEdit ? `<span class="cursor-pointer text-fuchsia-300 hover:text-white font-bold" title="Remove from this album">✕</span>` : '');
     // Clicking the name scopes the gallery grid to that album (openAlbumGallery
     // switches to the Gallery tab itself); the ✕ removes just this image.
     chip.children[0].onclick = () => openAlbumGallery(name);
-    chip.children[1].onclick = () => removeCurrentFromAlbum(name);
+    if (canEdit && chip.children[1]) chip.children[1].onclick = () => removeCurrentFromAlbum(name);
     box.appendChild(chip);
   });
 }

@@ -3,13 +3,13 @@
         <h1 class="text-xl font-bold text-blue-400">Media Library</h1>
       </div>
       <div class="flex gap-2 items-center flex-wrap">
-        <button id="btn_dedup" onclick="runDedup(false)"
+        <button id="btn_dedup" onclick="runDedup(false)" data-feature="dedup"
           class="text-xs bg-indigo-600 hover:bg-indigo-500 font-bold px-2 py-1.5 rounded">Dupes</button>
-        <span id="dedup_cache_badge" class="hidden text-[10px] text-gray-500 italic"></span>
-        <button id="btn_gdl" onclick="gdlOpen()"
+        <span id="dedup_cache_badge" class="hidden text-[10px] text-gray-500 italic" data-feature="dedup"></span>
+        <button id="btn_gdl" onclick="gdlOpen()" data-feature="fetch"
           title="Fetch media + metadata from a gallery-dl-supported site"
           class="text-xs bg-emerald-700 hover:bg-emerald-600 font-bold px-2 py-1.5 rounded">⬇ Fetch</button>
-        <button id="btn_settings"
+        <button id="btn_settings" data-feature="settings"
           onclick="document.getElementById('ai_modal').classList.remove('hidden');window.pipelineEditorRefresh&&window.pipelineEditorRefresh()"
           title="LLM / Vision settings"
           class="text-xs bg-gray-700 hover:bg-gray-600 font-bold px-2 py-1.5 rounded">⚙ Settings</button>

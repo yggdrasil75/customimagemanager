@@ -128,6 +128,7 @@ function renderTags(){
   const btn=document.getElementById('btn_confirm_all_tags');
   if(btn) btn.style.display=unconf?'inline-block':'none';
   syncTagMirror();
+  if(window.CIMFeatures) window.CIMFeatures.apply(box);
 }
 // Edit a tag's text in place, preserving its confirmed/unconfirmed state.
 function renameTag(i,name){

@@ -34,10 +34,20 @@
     if (ed && typeof ed.load === "function") {
       loaded[tab] = fn;
       try { ed.load(fn); } catch (e) { console.error(tab + " load failed", e); }
+      // Editors render asynchronously (load() fetches then builds the fields),
+      // so apply read-only enforcement on the next tick once the DOM exists.
+      if (window.CIMFeatures && window.CIMFeatures.enforceEditor) {
+        setTimeout(() => window.CIMFeatures.enforceEditor(tab), 0);
+      }
     }
   }
 
   function setControlsTab(tab) {
+    // Refuse to switch into a metadata tab the user isn't permitted to see.
+    if (window.CIMFeatures && (tab === 'exif' || tab === 'iptc' || tab === 'xmp') &&
+        !window.CIMFeatures.allowed('meta.' + tab)) {
+      tab = 'main';
+    }
     activeTab = tab;
     document.querySelectorAll(".controls-tab-pane").forEach((p) => p.classList.add("hidden"));
     const pane = document.getElementById("controls_pane_" + tab);
