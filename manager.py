@@ -43,7 +43,6 @@ import video_tracks as vt
 import tiering
 import music_index as mi
 
-
 # ── loose-disk file helpers (formerly routed through packio) ─────────────────
 # Everything lives as ordinary files on disk now; these keep the old call sites
 # terse and null-safe.
@@ -99,7 +98,6 @@ def quality_to_stars(q, blank=False):
     if iqa is None:
         return None
     return iqa.to_stars(q, blank=blank)
-
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 app       = Flask(__name__)
@@ -207,7 +205,6 @@ def _thumb_lru_put(rel_path: str, mtime: float, data: bytes) -> None:
             _k, (_m, d) = _thumb_lru.popitem(last=False)
             _thumb_lru_bytes -= len(d)
 
-
 def _thumb_lru_get(rel_path: str, mtime: float):
     with _thumb_lock:
         entry = _thumb_lru.get(rel_path)
@@ -215,7 +212,6 @@ def _thumb_lru_get(rel_path: str, mtime: float):
             _thumb_lru.move_to_end(rel_path)
             return entry[1]
     return None
-
 
 def _thumb_lru_drop(rel_path: str) -> None:
     global _thumb_lru_bytes
@@ -282,7 +278,6 @@ def _db() -> sqlite3.Connection:
             _all_conns[id(conn)] = conn
     return conn
 
-
 def _db_retry(fn, *args, attempts=6, **kwargs):
     """Run `fn` (a self-contained write transaction) retrying SQLITE_BUSY.
 
@@ -309,7 +304,6 @@ def _db_retry(fn, *args, attempts=6, **kwargs):
             # Exponential backoff, jittered so contending workers don't
             # resynchronise and collide again on the next attempt.
             time.sleep(min(2.0, 0.05 * (2 ** i)) * (1.0 + random.random() * 0.25))
-
 
 @app.teardown_request
 def _db_rollback_leaked(exc=None):
@@ -758,7 +752,6 @@ def _update_meta(rel_path, tags, description):
         (json.dumps(tags), description, rel_path))
     _db().commit()
 
-
 # ── File edit changelog (undo/redo + EXIF ImageHistory) ──────────────────────
 def _history_record(rel_path, field, old_value, new_value, commit=True):
     """Append one reversible change to a file's changelog. `field` is a logical
@@ -783,7 +776,6 @@ def _history_record(rel_path, field, old_value, new_value, commit=True):
     if commit:
         db.commit()
 
-
 def _history_entries(rel_path, include_undone=False):
     """Return a file's changelog as a list of dicts, oldest first."""
     q = ("SELECT seq, ts, field, old_value, new_value, undone "
@@ -800,7 +792,6 @@ def _history_entries(rel_path, include_undone=False):
             "undone": bool(r["undone"]),
         })
     return out
-
 
 def _history_undo(rel_path):
     """Return the most recent not-yet-undone change (so a caller can revert it),
@@ -819,7 +810,6 @@ def _history_undo(rel_path):
             "old": json.loads(r["old_value"]) if r["old_value"] is not None else None,
             "new": json.loads(r["new_value"]) if r["new_value"] is not None else None}
 
-
 def _history_redo(rel_path):
     """Return the oldest undone change (so a caller can re-apply new_value),
     marking it active again, or None if there's nothing to redo."""
@@ -836,7 +826,6 @@ def _history_redo(rel_path):
             "old": json.loads(r["old_value"]) if r["old_value"] is not None else None,
             "new": json.loads(r["new_value"]) if r["new_value"] is not None else None}
 
-
 def _history_as_imagehistory(rel_path, limit=64):
     """Render the active changelog as a compact string suitable for EXIF
     ImageHistory (0x9213): one line per change, most recent last. Trimmed to the
@@ -848,7 +837,6 @@ def _history_as_imagehistory(rel_path, limit=64):
         lines.append(f"{ts} {e['field']}: {e['old']!r} -> {e['new']!r}")
     return "\n".join(lines)
 
-
 # ── Hidden raw store (RawDataUniqueID <-> original camera raw) ────────────────
 # When keep_raws is enabled, an uploaded camera-raw source is copied into a
 # hidden directory under MEDIA_DIR and recorded in the `raws` table. The derived
@@ -856,18 +844,15 @@ def _history_as_imagehistory(rel_path, limit=64):
 # key, and OriginalRawFileName (0xc68b) records the raw's original name.
 _RAW_STORE_DIRNAME = ".raws"     # leading dot -> excluded from library walks
 
-
 def _raw_store_dir():
     d = os.path.join(MEDIA_DIR, _RAW_STORE_DIRNAME)
     os.makedirs(d, exist_ok=True)
     return d
 
-
 def _new_raw_uid():
     """A 16-byte unique ID as 32 hex chars, matching the EXIF RawDataUniqueID
     width (16 bytes)."""
     return uuid.uuid4().hex     # 32 hex chars == 16 bytes
-
 
 def _store_raw(raw_src_path, orig_name, derived_rel):
     """Copy a camera-raw file into the hidden store and record it. Returns the
@@ -889,14 +874,12 @@ def _store_raw(raw_src_path, orig_name, derived_rel):
         access_logger.warning(f"_store_raw {orig_name}: {e}")
         return None
 
-
 def _raw_by_uid(uid):
     """Look up a stored raw by its RawDataUniqueID. Returns the row dict or None."""
     if not uid:
         return None
     r = _db().execute("SELECT * FROM raws WHERE uid=?", (str(uid).strip(),)).fetchone()
     return dict(r) if r else None
-
 
 def _raw_uid_for_image(rel_path):
     """Return the RawDataUniqueID linked to a derived library image, preferring
@@ -917,7 +900,6 @@ def _raw_uid_for_image(rel_path):
     except Exception:
         pass
     return None
-
 
 def _link_raw_to_image(raw_src_path, orig_name, derived_rel, derived_abs):
     """After deriving a library image from a camera raw, set the raw-link EXIF on
@@ -1281,7 +1263,6 @@ def read_jxl(path: str) -> np.ndarray | None:
         access_logger.warning(f"read_jxl: file missing: {path}")
         return None
 
-
 def _decode_jxl_uncached(path: str) -> np.ndarray | None:
     """!
     @brief Decode and normalise a JXL from disk without the cache.
@@ -1384,7 +1365,6 @@ def _set_media_kind(rel_path: str) -> None:
         _db().commit()
     except Exception as e:
         access_logger.warning(f"_set_media_kind {rel_path}: {e}")
-
 
 def _index_file(rel_path: str, force: bool = False,
                 known_sha: str | None = None) -> bool:
@@ -1600,7 +1580,6 @@ def _enumerate_library():
                 seen.add(rel)
                 yield rel
 
-
 def _reconcile_deleted():
     """Walk the `files` table and purge every row whose backing file is gone
     from disk AND not present in a pack. Complements _build_index_background
@@ -1788,7 +1767,6 @@ _PRISM_NS = "http://prismstandard.org/namespaces/basic/3.0/"
 # Lightroom/digiKam/ExifTool can see our albums.
 _MWG_COLL_NS = "http://www.metadataworkinggroup.com/schemas/collections/"
 
-
 def _read_albums_from_xmp(filepath):
     """Return the album names for a file straight from its XMP, or [].
 
@@ -1803,7 +1781,6 @@ def _read_albums_from_xmp(filepath):
     except Exception as e:
         access_logger.warning(f"album read {filepath}: {e}")
         return []
-
 
 def _build_mwg_collections_xml(albums):
     """Serialise album names as an mwg-coll:Collections bag.
@@ -1995,7 +1972,6 @@ def _set_compressed_bpp(filepath: str, width: int | None = None,
     except Exception as e:
         access_logger.warning(f"_set_compressed_bpp {filepath}: {e}")
 
-
 def _exif_rating(filepath: str) -> int | None:
     """!
     @brief Map the file's EXIF Rating/RatingPercent to a 0-5 star rating.
@@ -2019,7 +1995,6 @@ def _exif_rating(filepath: str) -> int | None:
         access_logger.warning(f"EXIF rating read {filepath}: {e}")
     return None
 
-
 def _exif_description(filepath: str) -> str:
     """!
     @brief Read the file's EXIF ImageDescription as a stripped string.
@@ -2035,7 +2010,6 @@ def _exif_description(filepath: str) -> str:
     except Exception as e:
         access_logger.warning(f"EXIF ImageDescription read {filepath}: {e}")
     return ""
-
 
 def _read_xp_fields(filepath: str) -> dict:
     """!
@@ -2057,7 +2031,6 @@ def _read_xp_fields(filepath: str) -> dict:
     except Exception as e:
         access_logger.warning(f"XP fields read {filepath}: {e}")
     return out
-
 
 def _ingest_xp(filepath: str, tags: list, desc: str) -> tuple[list, str, dict | None]:
     """!
@@ -2088,7 +2061,6 @@ def _ingest_xp(filepath: str, tags: list, desc: str) -> tuple[list, str, dict | 
 
     return tags, desc, xp_prov
 
-
 def _regions_overlap(a: dict, b: dict, iou_thresh: float = 0.5,
                      center_thresh: float = 0.04) -> bool:
     """!
@@ -2114,7 +2086,6 @@ def _regions_overlap(a: dict, b: dict, iou_thresh: float = 0.5,
         return False
     union = a["w"] * a["h"] + b["w"] * b["h"] - inter
     return union > 0 and (inter / union) >= iou_thresh
-
 
 def _merge_region(keep: dict, incoming: dict) -> dict:
     """!
@@ -2144,7 +2115,6 @@ def _merge_region(keep: dict, incoming: dict) -> dict:
     keep["confirmed"] = bool(keep.get("confirmed")) or bool(incoming.get("confirmed"))
     return keep
 
-
 def _merge_regions(*sources: list) -> list:
     """!
     @brief Deduplicate region lists across metadata standards.
@@ -2161,7 +2131,6 @@ def _merge_regions(*sources: list) -> list:
             else:
                 merged.append(dict(r))
     return merged
-
 
 def read_metadata(filepath: str) -> dict:
     """!
@@ -2364,7 +2333,6 @@ def _sync_album_cache(rel_path: str, albums: list) -> None:
         db.execute("INSERT OR IGNORE INTO album_members(album, rel_path, added) "
                    "VALUES (?,?,?)", (n, rel_path, now))
 
-
 def _file_albums(rel_path: str) -> list:
     """!
     @brief Album names for one file, from the DB cache.
@@ -2378,7 +2346,6 @@ def _file_albums(rel_path: str) -> list:
         return json.loads(row["albums"] or "[]")
     except Exception:
         return []
-
 
 def _set_file_albums(rel_path: str, albums: list) -> bool:
     """!
@@ -2395,7 +2362,6 @@ def _set_file_albums(rel_path: str, albums: list) -> bool:
         flag=meta.get("flag"), pose=meta.get("pose"),
         page_count=meta.get("page_count"), albums=albums)
 
-
 def _album_apply(rel_paths: list, transform) -> int:
     """!
     @brief Apply a membership change to many files, writing only those that change.
@@ -2409,7 +2375,6 @@ def _album_apply(rel_paths: list, transform) -> int:
         if new != cur and _set_file_albums(rp, new):
             n += 1
     return n
-
 
 def _album_add(rel_paths: list, album: str) -> int:
     """!
@@ -2425,7 +2390,6 @@ def _album_add(rel_paths: list, album: str) -> int:
     _db().commit()
     return n
 
-
 def _album_remove(rel_paths: list, album: str) -> int:
     """!
     @brief Remove many files from one album.
@@ -2435,7 +2399,6 @@ def _album_remove(rel_paths: list, album: str) -> int:
     n = _album_apply(rel_paths, lambda cur: [a for a in cur if a != album])
     _db().commit()
     return n
-
 
 def _album_list() -> list:
     """!
@@ -2468,7 +2431,6 @@ def _album_list() -> list:
         out.append({"name": r["name"], "description": r["description"] or "",
                     "cover": cover, "count": r["n"], "created": r["created"]})
     return out
-
 
 def write_metadata(filepath: str, tags: list, description: str, regions: list,
                    analysis: dict | None = None, flag: dict | None = None,
@@ -2581,12 +2543,10 @@ def write_metadata(filepath: str, tags: list, description: str, regions: list,
         _record_metadata_failure(filepath, e)
         return False
 
-
 # ── metadata-write failure surface ────────────────────────────────────────────
 _metadata_failures = {}
 _metadata_failures_lock = threading.Lock()
 _METADATA_FAILURE_MAX = 500
-
 
 def _record_metadata_failure(filepath: str, exc: Exception) -> None:
     """!
@@ -2614,7 +2574,6 @@ def _record_metadata_failure(filepath: str, exc: Exception) -> None:
     except Exception:
         pass
 
-
 def _clear_metadata_failure(filepath: str, defer_commit: bool = False) -> None:
     """!
     @brief Clear a recorded metadata-write failure for a file.
@@ -2636,7 +2595,6 @@ def _clear_metadata_failure(filepath: str, defer_commit: bool = False) -> None:
                 _db().rollback()
             except Exception:
                 pass
-
 
 def metadata_failures() -> list:
     """!
@@ -2736,7 +2694,6 @@ def _thumb_from_array(img) -> bytes | None:
                            [cv2.IMWRITE_JPEG_PROGRESSIVE,1, cv2.IMWRITE_JPEG_QUALITY,80])
     return buf.tobytes() if ok else None
 
-
 def _make_thumb_bytes(abs_path: str) -> bytes | None:
     """! @brief Decode a file and encode its thumbnail JPEG bytes."""
     return _thumb_from_array(read_jxl(abs_path))
@@ -2820,7 +2777,6 @@ def _pixel_similarity_score(diff_mean: float, threshold: float = 15.0) -> float:
     if diff_mean >= threshold:
         return 0.0
     return 1.0 - math.log(1.0 + diff_mean) / math.log(1.0 + threshold)
-
 
 def yolo_train_worker(abs_folder: str, dataset_dir: str, yaml_path: str,
                       epochs: int, batch: int, imgsz: int, device, base_model: str) -> None:
@@ -2911,7 +2867,6 @@ def _run_pose(img_bgr):
     """! @brief Backward-compatible shim; delegates to pose.run_pose."""
     return pose.run_pose(img_bgr)
 
-
 # ── character / panel detectors (for the pipeline) ───────────────────────────--
 
 def _detect_obb_or_box(img_bgr, model_path: str, keep_classes: set | None = None,
@@ -2996,7 +2951,6 @@ def _run_panels(img_bgr) -> list:
         return []
     return _detect_obb_or_box(img_bgr, pm, as_obb=True)
 
-
 def _run_faces(img_bgr) -> list:
     """!
     @brief Detect faces via a configured (or size-resolved) YOLO face model.
@@ -3016,7 +2970,6 @@ def _run_faces(img_bgr) -> list:
         b["class_name"] = "face"
         out.append(b)
     return out
-
 
 # ── Background face / person boxing + clustering ───────────────────────────────
 # set whenever new embeddings land; the worker reclusters once the queue drains
@@ -3046,7 +2999,6 @@ def _attach_masks(img, regions: list) -> None:
         if best is not None and best_iou >= 0.5 and inst.get("mask_svg"):
             best["mask_svg"] = inst["mask_svg"]
 
-
 def _iou_center(a, b) -> float:
     """IoU of two normalised center-form boxes."""
     ax1, ay1 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
@@ -3060,7 +3012,6 @@ def _iou_center(a, b) -> float:
         return 0.0
     ua = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
     return inter / ua if ua > 0 else 0.0
-
 
 def _face_regions_for(img, rel: str) -> list:
     """!
@@ -3130,7 +3081,6 @@ def _face_regions_for(img, rel: str) -> list:
                             "region_description": ""})
     return out
 
-
 def _upsert_region_embeddings(table: str, rel: str, boxes: list, vecs: list,
                               mode: str, extra=None) -> None:
     """!
@@ -3164,7 +3114,6 @@ def _upsert_region_embeddings(table: str, rel: str, boxes: list, vecs: list,
                        (rel, cx, cy, *cols.values()))
     db.commit()
 
-
 def _cache_faces(rel: str, img, regions: list) -> None:
     """! @brief Embed and cache the face boxes for one image (confirmed names untouched)."""
     fboxes = [r for r in regions if r["class_name"] == "face"]
@@ -3172,7 +3121,6 @@ def _cache_faces(rel: str, img, regions: list) -> None:
         return
     vecs, mode = facelib.embed_faces(img, fboxes)
     _upsert_region_embeddings("face_regions", rel, fboxes, vecs, mode)
-
 
 def _cache_bodies(rel: str, img, regions: list) -> None:
     """! @brief Embed and cache person boxes, binding each to the face row it contains."""
@@ -3189,12 +3137,10 @@ def _cache_bodies(rel: str, img, regions: list) -> None:
     extra = [{"face_id": body_to_face.get(i)} for i in range(len(pboxes))]
     _upsert_region_embeddings("body_regions", rel, pboxes, vecs, mode, extra)
 
-
 def _mark_body_done(rel: str) -> None:
     """! @brief Mark a file's body-embedding pass complete."""
     _db().execute("UPDATE files SET body_done=1 WHERE rel_path=?", (rel,))
     _db().commit()
-
 
 def _background_face_worker() -> None:
     """!
@@ -3264,12 +3210,10 @@ def _background_face_worker() -> None:
             access_logger.error(f"face worker: {e}")
             time.sleep(30)
 
-
 def _mark_face_done(rel: str) -> None:
     """! @brief Mark a file's face-boxing pass complete."""
     _db().execute("UPDATE files SET face_done=1 WHERE rel_path=?", (rel,))
     _db().commit()
-
 
 def _recluster_table(table: str, default_mode: str, eps_for) -> int:
     """!
@@ -3304,7 +3248,6 @@ def _recluster_table(table: str, default_mode: str, eps_for) -> int:
         total += used
     return total
 
-
 def _recluster() -> int:
     """!
     @brief Recluster every cached face embedding; confirmed names seed cluster suggestions.
@@ -3318,7 +3261,6 @@ def _recluster() -> int:
     if state.get("body_enabled"):
         _recluster_bodies()
     return total
-
 
 def _propagate_cluster_names(db, table: str) -> set:
     """!
@@ -3336,7 +3278,6 @@ def _propagate_cluster_names(db, table: str) -> set:
                        "AND confirmed=0", (known[0], lab))
             named.add(lab)
     return named
-
 
 def _recluster_bodies() -> int:
     """!
@@ -3417,7 +3358,6 @@ def _run_ocr(img_bgr) -> dict:
     return {"engine": None, "text": "", "lines": [],
             "note": "No OCR engine installed (pip install rapidocr_onnxruntime, or easyocr)."}
 
-
 def _barcode_model_path() -> str:
     """!
     @brief Resolve the configured or auto-discovered barcode YOLO model path.
@@ -3435,7 +3375,6 @@ def _barcode_model_path() -> str:
         access_logger.warning(f"barcode model autodiscover: {e}")
     return ""
 
-
 def _barcode_detect():
     """!
     @brief Build a detector callback for barcodes.scan.
@@ -3448,7 +3387,6 @@ def _barcode_detect():
         return None
     conf = float(state.get("barcode_conf", 0.25) or 0.25)
     return lambda bgr: _detect_obb_or_box(bgr, mp, conf=conf)
-
 
 def _run_barcodes(img_bgr, deep: bool = True) -> dict:
     """!
@@ -3463,14 +3401,12 @@ def _run_barcodes(img_bgr, deep: bool = True) -> dict:
         return {"engine": None, "codes": [], "detected": 0, "decoded": 0,
                 "note": f"Barcode scan failed: {e}"}
 
-
 def _warm_models() -> None:
     """! @brief Pre-trigger pose/OCR model downloads in the background."""
     dummy = np.zeros((64, 64, 3), np.uint8)
     for fn in (lambda: _run_pose(dummy), lambda: _run_ocr(dummy)):
         try: fn()
         except Exception: pass
-
 
 def _clamp_box(b: dict) -> dict | None:
     """!
@@ -3624,7 +3560,6 @@ def _folder_scope_clause(column: str, folder: str) -> tuple[list, list]:
         return [f"({column} LIKE ? AND {column} NOT LIKE ?)"], [f + '/%', f + '/%/%']
     return [], []
 
-
 def _query_comics(text: str, folder: str) -> list:
     """!
     @brief Comic cover entries matching the folder scope and free-text search.
@@ -3699,7 +3634,6 @@ def _query_books(text: str, folder: str) -> list:
         })
     return out
 
-
 # ── LLM helpers (shared by actions + pipeline) ────────────────────────────────
 def _oai_v1_base(endpoint):
     """Reduce any OpenAI-compatible URL to its `.../v1` base (no trailing
@@ -3753,21 +3687,17 @@ def _embed_endpoint():
         return ""
     return base + ("/embeddings" if base.endswith("/v1") else "/v1/embeddings")
 
-
 def _oai_embed_enabled():
     """True when an OAI embedding model is configured (text search needs this)."""
     return bool((state.get("oai_embed_model") or "").strip()) and bool(_embed_endpoint())
 
-
 def _oai_embed_model():
     return (state.get("oai_embed_model") or "").strip()
-
 
 def _oai_embed_tag():
     """Model tag stored alongside each vector so mismatched spaces never mix.
     Prefixed 'oai:' to distinguish OAI vectors from local-CNN vectors."""
     return "oai:" + _oai_embed_model()
-
 
 def _oai_embed_request(inputs, timeout=120):
     """POST an OpenAI-style /v1/embeddings request. `inputs` is a list whose
@@ -3790,7 +3720,6 @@ def _oai_embed_request(inputs, timeout=120):
     data = sorted(data, key=lambda d: d.get("index", 0))
     return [np.asarray(d["embedding"], np.float32) for d in data]
 
-
 def _oai_embed_image(img_bgr, timeout=120):
     """Embed one image via the OAI endpoint. Sends a data-URL string, which the
     common multimodal servers (and OpenAI-compatible CLIP shims) accept in the
@@ -3812,7 +3741,6 @@ def _oai_embed_image(img_bgr, timeout=120):
         access_logger.exception("OAI image embed failed")
         return None
 
-
 def _oai_embed_text(text, timeout=60):
     """Embed a text query via the OAI endpoint for library text search. Returns
     an L2-normalised float32 vector, or None on failure."""
@@ -3829,7 +3757,6 @@ def _oai_embed_text(text, timeout=60):
     except Exception:
         access_logger.exception("OAI text embed failed")
         return None
-
 
 _BOX_TOOL = [{"type": "function", "function": {
     "name": "create_bounding_boxes",
@@ -3957,7 +3884,6 @@ def _segment_regions(bgr, query):
     if new:
         save_classes()
     return new
-
 
 def _apply_llm_action(fp, action):
     """Run one configured AI action against a file and merge the result into its
@@ -4259,7 +4185,6 @@ def api_metadata_failures():
     items = sorted(out.values(), key=lambda x: (x["when"] or 0), reverse=True)
     return jsonify({"success": True, "count": len(items), "failures": items})
 
-
 @app.route("/api/exif/schema")
 def api_exif_schema():
     """Return the full EXIF field schema (no file needed)."""
@@ -4485,7 +4410,6 @@ def api_raw_keep():
         save_config()
     return jsonify({"success": True, "enabled": bool(state.get("keep_raws"))})
 
-
 # ── Faces API ─────────────────────────────────────────────────────────────────
 def _cluster_summary(table, extra_cols, sample_cols, sample_key, row_to_sample,
                      extra_to_fields=None, sample_limit=30):
@@ -4522,7 +4446,6 @@ def _cluster_summary(table, extra_cols, sample_cols, sample_key, row_to_sample,
         f"SELECT COUNT(*) FROM {table} WHERE cluster_id<0").fetchone()[0]
     return clusters, singles
 
-
 @app.route("/api/faces/clusters")
 def api_face_clusters():
     """Clusters for the Faces tab, biggest first. Unnamed clusters lead."""
@@ -4533,7 +4456,6 @@ def api_face_clusters():
                    "w": r[4], "h": r[5]})
     return jsonify({"clusters": clusters, "unclustered": singles,
                     "identity": facelib.have_identity_embedder()})
-
 
 @app.route("/api/bodies/clusters")
 def api_body_clusters():
@@ -4550,7 +4472,6 @@ def api_body_clusters():
     return jsonify({"clusters": clusters, "unclustered": singles,
                     "enabled": bool(state.get("body_enabled")),
                     "identity": bodylib.have_body_embedder()})
-
 
 @app.route("/api/bodies/name", methods=["POST"])
 def api_body_name():
@@ -4585,7 +4506,6 @@ def api_body_name():
         (name, cid))
     _db().commit()
     return jsonify({"success": True, "named": touched})
-
 
 @app.route("/api/faces/scan", methods=["POST"])
 @_auth.require_feature("tab.faces.edit")
@@ -4624,7 +4544,6 @@ def api_face_scan():
     _face_dirty["v"] = False
     return jsonify({"success": True, "clusters": n})
 
-
 @app.route("/api/faces/progress")
 def api_face_progress():
     """Poll target for the Faces tab: how much of the library is still queued."""
@@ -4649,7 +4568,6 @@ def api_face_progress():
                     "model_error": facelib.face_model_error(),
                     "face_size": _face_size(),
                     "status": state.get("status_text", "")})
-
 
 @app.route("/api/faces/name", methods=["POST"])
 @_auth.require_feature("tab.faces.edit", action='face_name', fields=('cluster_id', 'name'))
@@ -4688,7 +4606,6 @@ def api_face_name():
     _db().commit()
     return jsonify({"success": True, "named": touched})
 
-
 @app.route("/api/faces/split", methods=["POST"])
 @_auth.require_feature("tab.faces.edit", action='face_split', fields=('cluster_id',))
 def api_face_split():
@@ -4722,7 +4639,6 @@ def api_face_split():
     db.commit()
     return jsonify({"success": True, "moved": len(ids)})
 
-
 @app.route("/api/bodies/split", methods=["POST"])
 def api_body_split():
     """Kick a wrong body out of its cluster (back to unclustered), or carve a
@@ -4752,7 +4668,6 @@ def api_body_split():
         f"UPDATE body_regions SET cluster_id=-1 WHERE id IN ({ph})", ids)
     db.commit()
     return jsonify({"success": True, "moved": len(ids)})
-
 
 @app.route("/api/state")
 def api_state():
@@ -4903,7 +4818,6 @@ def api_list():
     return jsonify({"success":True,"files":entries,"total":total,
                     "page":page,"page_size": state["page_size"]})
 
-
 def _semantic_list(query, offset, limit, folder='', album=''):
     """Rank the library by text→image embedding similarity for the gallery
     search. Returns (entries, total, error). `error` is a user-facing string when
@@ -4963,7 +4877,6 @@ def api_albums():
     """List every album with a member count and a cover thumbnail."""
     return jsonify({"success": True, "albums": _album_list()})
 
-
 @app.route("/api/albums/create", methods=["POST"])
 @_auth.require_feature("tab.albums.edit", action='album_create', fields=('name',))
 def api_album_create():
@@ -4982,7 +4895,6 @@ def api_album_create():
     added = _album_add(files, name) if files else 0
     return jsonify({"success": True, "name": name, "added": added})
 
-
 @app.route("/api/albums/delete", methods=["POST"])
 @_auth.require_feature("tab.albums.edit", action='album_delete', fields=('name',))
 def api_album_delete():
@@ -4999,7 +4911,6 @@ def api_album_delete():
     _db().execute("DELETE FROM albums WHERE name=?", (name,))
     _db().commit()
     return jsonify({"success": True, "removed": len(members)})
-
 
 @app.route("/api/albums/rename", methods=["POST"])
 @_auth.require_feature("tab.albums.edit", action='album_rename', fields=('old', 'new', 'old_name', 'new_name'))
@@ -5034,7 +4945,6 @@ def api_album_rename():
     _db().commit()
     return jsonify({"success": True, "changed": changed})
 
-
 @app.route("/api/albums/add", methods=["POST"])
 @_auth.require_feature("tab.albums.edit", action='album_add', fields=('name', 'filename', 'filenames'))
 def api_album_add():
@@ -5046,7 +4956,6 @@ def api_album_add():
         return jsonify({"success": False, "error": "Album and files are required."}), 400
     return jsonify({"success": True, "added": _album_add(files, name)})
 
-
 @app.route("/api/albums/remove", methods=["POST"])
 @_auth.require_feature("tab.albums.edit", action='album_remove', fields=('name', 'filename', 'filenames'))
 def api_album_remove():
@@ -5057,7 +4966,6 @@ def api_album_remove():
     if not name or not files:
         return jsonify({"success": False, "error": "Album and files are required."}), 400
     return jsonify({"success": True, "removed": _album_remove(files, name)})
-
 
 @app.route("/api/albums/set_cover", methods=["POST"])
 @_auth.require_feature("tab.albums.edit")
@@ -5071,7 +4979,6 @@ def api_album_set_cover():
     _db().execute("UPDATE albums SET cover=? WHERE name=?", (cover, name))
     _db().commit()
     return jsonify({"success": True})
-
 
 @app.route("/api/albums/of", methods=["POST"])
 def api_albums_of():
@@ -5165,7 +5072,6 @@ def api_upload():
     _upload_workers_wake()
     return jsonify({"success": True, "queued": True, "queue_id": qid,
                     "filename": pred}), 202
-
 
 def _run_upload():
     """The full convert+index pipeline for one upload. Reads the file and form
@@ -5479,7 +5385,6 @@ def _run_upload():
             return jsonify({"success": False, "error_code": "server_error",
                             "error": str(e)}), 500
 
-
 # ── Durable upload queue + worker pool ────────────────────────────────────────
 # The upload request spools raw bytes and enqueues; these workers drain the
 # queue and run the (slow) convert/index chain — cjxl parallelism lives here, not
@@ -5490,10 +5395,8 @@ _UPLOAD_STALE_SECS  = 300
 _upload_wake        = threading.Event()
 _upload_started     = threading.Event()   # guards one-time pool start
 
-
 def _upload_workers_wake():
     _upload_wake.set()
-
 
 def _claim_upload_job():
     """!
@@ -5529,7 +5432,6 @@ def _claim_upload_job():
         if got != "retry":
             return got
 
-
 # Error codes that are a genuine, handled verdict on the file itself — retrying
 # the identical bytes cannot change the result, so these are terminal.
 _TERMINAL_UPLOAD_CODES = frozenset({
@@ -5537,7 +5439,6 @@ _TERMINAL_UPLOAD_CODES = frozenset({
     "conversion_failed",                    # undecodable = corrupt / invalid format
     "no_file", "bad_folder",                # malformed request; identical retry is pointless
 })
-
 
 def _process_upload_job(job) -> tuple[str, str, str]:
     """!
@@ -5579,7 +5480,6 @@ def _process_upload_job(job) -> tuple[str, str, str]:
     # server_error / index_failed / unknown -> transient. Retry.
     return "retry", payload.get("error", ecode or "unknown") or "unknown", ""
 
-
 def _finish_upload_job(job_id, ok: bool, err: str, rel_path: str) -> None:
     """! @brief Write a terminal outcome (done|error) for a job."""
     def _fin():
@@ -5590,7 +5490,6 @@ def _finish_upload_job(job_id, ok: bool, err: str, rel_path: str) -> None:
             ("done" if ok else "error", err[:500], rel_path, time.time(), job_id))
         db.commit()
     _db_retry(_fin)
-
 
 def _upload_worker_loop():
     while True:
@@ -5629,9 +5528,7 @@ def _upload_worker_loop():
             try: os.remove(job["spool_path"])
             except OSError: pass
 
-
 _upload_threads = []   # live worker Thread objects, for liveness reporting
-
 
 # ── gallery-dl download queue ────────────────────────────────────────────────
 # A URL the user wants fetched becomes a row in gdl_queue. One background worker
@@ -5645,25 +5542,20 @@ _gdl_started   = threading.Event()
 _gdl_cancels   = set()               # ids the user asked to cancel mid-download
 _gdl_cancels_lk = threading.Lock()
 
-
 def _gdl_workers_wake():
     _gdl_wake.set()
-
 
 def _gdl_mark_cancel(qid):
     with _gdl_cancels_lk:
         _gdl_cancels.add(qid)
 
-
 def _gdl_is_canceled(qid):
     with _gdl_cancels_lk:
         return qid in _gdl_cancels
 
-
 def _gdl_clear_cancel(qid):
     with _gdl_cancels_lk:
         _gdl_cancels.discard(qid)
-
 
 def _claim_gdl_job():
     """Atomically take the oldest pending download. Returns a Row or None.
@@ -5691,7 +5583,6 @@ def _claim_gdl_job():
         if got != "retry":
             return got
 
-
 def _gdl_update(qid, **cols):
     """Patch a gdl_queue row (status/total/downloaded/error/site)."""
     if not cols:
@@ -5708,9 +5599,7 @@ def _gdl_update(qid, **cols):
     except Exception as e:
         access_logger.error(f"gdl_queue update {qid} failed: {e}")
 
-
 _GDL_COOKIE_DIR = os.path.join(os.path.dirname(DB_PATH), "gdl_cookies")
-
 
 def _gdl_compile_auth(site):
     """Turn a site's saved auth blob into gallery-dl opt strings.
@@ -5748,7 +5637,6 @@ def _gdl_compile_auth(site):
             opts.append(f"{ns}.cookies={json.dumps([br])}")
     return opts
 
-
 def _gdl_write_cookie_file(key, text):
     """Persist pasted cookies to a stable per-site file gallery-dl can read.
     Returns the path, or '' on failure. Overwritten each save so edits take."""
@@ -5767,7 +5655,6 @@ def _gdl_write_cookie_file(key, text):
     except Exception as e:
         access_logger.error(f"gdl cookie file write failed for {key}: {e}")
         return ""
-
 
 def _gdl_cookiestring_to_netscape(s):
     """Convert a browser 'Cookie:' header ("a=1; b=2") into a minimal Netscape
@@ -5788,7 +5675,6 @@ def _gdl_cookiestring_to_netscape(s):
         lines.append(f".\tTRUE\t/\tFALSE\t2147483647\t{name}\t{value}")
     return "\n".join(lines) + "\n"
 
-
 def _gdl_auth_public(site):
     """A site's saved auth with secrets redacted, safe to send to the browser.
     Reports the method, username, and browser, plus flags for whether a password
@@ -5801,7 +5687,6 @@ def _gdl_auth_public(site):
         "has_password": bool(a.get("password")),
         "has_cookies":  bool(a.get("cookies_text")),
     }
-
 
 def _gdl_resolve_opts(url):
     """Download-time gallery-dl opts for a URL: global ("") plus this site's,
@@ -5820,7 +5705,6 @@ def _gdl_resolve_opts(url):
         if cat:
             dl_opts += list(all_opts.get(cat, [])) + _gdl_compile_auth(cat)
     return dl_opts
-
 
 def _process_gdl_job(job):
     """Run gallery-dl for one queued URL, enqueuing each produced file into the
@@ -5893,7 +5777,6 @@ def _process_gdl_job(job):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-
 def _gdl_worker_loop():
     while True:
         job = None
@@ -5921,7 +5804,6 @@ def _gdl_worker_loop():
             continue
         _gdl_update(qid, status="done" if ok else "error", error=err[:500])
 
-
 def _start_gdl_workers():
     if _gdl_started.is_set():
         return
@@ -5944,7 +5826,6 @@ def _start_gdl_workers():
             access_logger.error(f"gdl worker died: {e}", exc_info=True)
     threading.Thread(target=_guarded, daemon=True, name="gdl-dl").start()
     _gdl_workers_wake()
-
 
 def _start_upload_workers():
     if _upload_started.is_set():
@@ -5980,7 +5861,173 @@ def _start_upload_workers():
         _upload_threads.append(t)
     _upload_workers_wake()
     access_logger.info(f"upload pool: {len(_upload_threads)} threads spawned")
+    _start_spool_janitor()
 
+# ── spool janitor ────────────────────────────────────────────────────────────
+# Periodic cleaner for the upload spool + ingest queue. Not a dumb rm — each pass
+# tries to *resolve* mess rather than just delete it:
+#   1. Errored jobs whose spooled bytes survive -> requeued (same convert/index
+#      chain the workers run). Jobs past _JANITOR_MAX_ATTEMPTS are left parked
+#      for a human to /api/upload/discard.
+#   2. Orphaned spool files with no queue row (crash-dropped originals) ->
+#      re-ingested via _run_upload, which decides new-vs-duplicate itself.
+#   3. Spools of already-'done' or duplicate originals -> deleted; the file is
+#      already in the library, so the leftover bytes are redundant.
+# Terminal-vs-transient uses the SAME _TERMINAL_UPLOAD_CODES the workers use, so
+# the janitor can never drop a good original a worker would have kept.
+_JANITOR_INTERVAL_SECS = 15 * 60
+_JANITOR_MAX_ATTEMPTS  = 5
+_JANITOR_ORPHAN_MIN_AGE = 120       # ignore spool files younger than this (in flight)
+_janitor_started = threading.Event()
+_janitor_wake    = threading.Event()
+
+def _janitor_requeue_errors(db):
+    """Errored jobs whose spool survives and are under the attempt budget go
+    back to 'pending'. Returns (requeued_ids, parked_ids)."""
+    rows = db.execute(
+        "SELECT id, spool_path, attempts FROM upload_queue "
+        "WHERE status='error'").fetchall()
+    requeued, parked = [], []
+    for r in rows:
+        sp = r["spool_path"]
+        if not (sp and os.path.exists(sp)):
+            continue                       # no bytes -> nothing to retry from
+        if r["attempts"] >= _JANITOR_MAX_ATTEMPTS:
+            parked.append(r["id"])         # keep bytes, stop auto-retrying
+            continue
+        def _rq(_id=r["id"]):
+            d = _db()
+            d.execute("UPDATE upload_queue SET status='pending', error='', "
+                      "updated=? WHERE id=? AND status='error'",
+                      (time.time(), _id))
+            d.commit()
+        try:
+            _db_retry(_rq); requeued.append(r["id"])
+        except Exception as e:
+            access_logger.error(f"janitor requeue {r['id']}: {e}")
+    return requeued, parked
+
+def _janitor_drop_done_spools(db):
+    """A 'done' job's original is already in the library; a crash between finish
+    and remove can leave its spool behind. Drop it. Returns count removed."""
+    rows = db.execute(
+        "SELECT id, spool_path FROM upload_queue "
+        "WHERE status='done' AND spool_path<>''").fetchall()
+    n = 0
+    for r in rows:
+        sp = r["spool_path"]
+        if sp and os.path.exists(sp):
+            try: os.remove(sp); n += 1
+            except OSError: continue
+        def _clr(_id=r["id"]):
+            d = _db()
+            d.execute("UPDATE upload_queue SET spool_path='' WHERE id=?", (_id,))
+            d.commit()
+        try: _db_retry(_clr)
+        except Exception: pass
+    return n
+
+def _janitor_reingest_one(data, name):
+    """Push raw bytes back through _run_upload (the call the workers make).
+    Returns 'done' | 'duplicate' | 'retry'."""
+    ctx = app.test_request_context(
+        "/api/upload", method="POST",
+        data={"file": (io.BytesIO(data), name), "folder": "", "metadata": "{}"},
+        content_type="multipart/form-data")
+    with ctx:
+        resp = _run_upload()
+        body, code = (resp if isinstance(resp, tuple) else (resp, 200))
+        payload = body.get_json(silent=True) or {}
+    if bool(payload.get("success")) and code < 400:
+        return "done"
+    ecode = payload.get("error_code") or ""
+    if ecode in ("exact_duplicate", "filename_exists"):
+        return "duplicate"
+    if ecode in _TERMINAL_UPLOAD_CODES:
+        return "duplicate"             # corrupt/undecodable: bytes worthless, drop
+    return "retry"
+
+def _janitor_reingest_orphans(db):
+    """Spool files on disk that no queue row references — crash-dropped between
+    spool and enqueue, or after a row was deleted. Re-run each through the normal
+    upload path. Returns (reingested, deleted, skipped)."""
+    if not os.path.isdir(_UPLOAD_SPOOL_DIR):
+        return 0, 0, 0
+    referenced = {
+        r["spool_path"] for r in
+        db.execute("SELECT spool_path FROM upload_queue "
+                   "WHERE spool_path<>''").fetchall()
+    }
+    reingested = deleted = skipped = 0
+    now = time.time()
+    for path in glob.glob(os.path.join(_UPLOAD_SPOOL_DIR, "up-*")):
+        if path in referenced:
+            continue
+        try: st = os.stat(path)
+        except OSError: continue
+        if now - st.st_mtime < _JANITOR_ORPHAN_MIN_AGE:
+            skipped += 1               # too fresh; a request may still own it
+            continue
+        if st.st_size == 0:
+            try: os.remove(path); deleted += 1     # empty = failed write, junk
+            except OSError: pass
+            continue
+        # Original filename is lost for a true orphan; the upload path dedups on
+        # content hash anyway, so a real duplicate collapses to a spool drop.
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+            outcome = _janitor_reingest_one(data, os.path.basename(path))
+        except Exception as e:
+            access_logger.error(f"janitor reingest {path}: {e}")
+            skipped += 1
+            continue
+        if outcome in ("done", "duplicate"):
+            try: os.remove(path); reingested += 1
+            except OSError: pass
+        else:
+            skipped += 1               # transient: leave it for the next sweep
+    return reingested, deleted, skipped
+
+def _janitor_sweep():
+    """Run all three cleaning actions once. Returns a summary dict."""
+    db = _db()
+    db.rollback()
+    requeued, parked = _janitor_requeue_errors(db)
+    dropped_done      = _janitor_drop_done_spools(db)
+    reingested, deleted, skipped = _janitor_reingest_orphans(db)
+    if requeued or reingested:
+        _upload_workers_wake()
+    summary = {
+        "requeued_errors": requeued, "parked_errors": parked,
+        "dropped_done_spools": dropped_done, "reingested_orphans": reingested,
+        "deleted_junk_orphans": deleted, "skipped_orphans": skipped,
+    }
+    access_logger.info(f"spool janitor sweep: {summary}")
+    return summary
+
+def _janitor_loop():
+    while True:
+        try:
+            _janitor_sweep()
+        except Exception as e:
+            access_logger.error(f"spool janitor sweep failed: {e}", exc_info=True)
+        _janitor_wake.wait(timeout=_JANITOR_INTERVAL_SECS)
+        _janitor_wake.clear()
+
+def _start_spool_janitor():
+    """Start the janitor thread. Idempotent; called from _start_upload_workers."""
+    if _janitor_started.is_set():
+        return
+    _janitor_started.set()
+    threading.Thread(target=_janitor_loop, daemon=True, name="spool-janitor").start()
+    access_logger.info("spool janitor started")
+
+@app.route("/api/upload/clean", methods=["POST"])
+def api_upload_clean():
+    """Run a cleaning pass now: requeue recoverable errors, re-ingest orphaned
+    spool files, drop spools of already-processed originals."""
+    return jsonify({"success": True, "result": _janitor_sweep()})
 
 @app.route("/api/upload/queue")
 def api_upload_queue_status():
@@ -6015,7 +6062,6 @@ def api_upload_queue_status():
                     "workers_started": _upload_started.is_set(),
                     "jobs": err_out})
 
-
 @app.route("/api/upload/retry", methods=["POST"])
 def api_upload_retry():
     """Requeue errored jobs whose spooled original still exists. Pass {"id": N}
@@ -6046,7 +6092,6 @@ def api_upload_retry():
         _upload_workers_wake()
     return jsonify({"success": True, "requeued": requeued,
                     "unrecoverable": unrecoverable})
-
 
 @app.route("/api/upload/discard", methods=["POST"])
 def api_upload_discard():
@@ -6218,7 +6263,6 @@ def api_gdl_fetch():
     _gdl_workers_wake()
     return jsonify({"success": True, "queued": len(ids), "ids": ids}), 202
 
-
 @app.route("/api/gdl/queue")
 def api_gdl_queue():
     """The download queue: recent rows plus a status tally. Drives the queue UI."""
@@ -6239,7 +6283,6 @@ def api_gdl_queue():
         "items": [dict(r) for r in rows],
         "counts": {r["status"]: r["c"] for r in tally},
     })
-
 
 @app.route("/api/gdl/queue/<int:qid>/cancel", methods=["POST"])
 @_auth.require_feature("fetch")
@@ -6269,7 +6312,6 @@ def api_gdl_queue_cancel(qid):
         _gdl_mark_cancel(qid)      # worker will stop between files
     return jsonify({"success": True, "status": "canceling" if res == "flag" else res})
 
-
 @app.route("/api/gdl/queue/clear", methods=["POST"])
 @_auth.require_feature("fetch")
 def api_gdl_queue_clear():
@@ -6286,7 +6328,6 @@ def api_gdl_queue_clear():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
     return jsonify({"success": True, "removed": n})
-
 
 @app.route("/api/move", methods=["POST"])
 @_auth.require_feature("data.move", action="move_file",
@@ -6818,7 +6859,6 @@ def _fast_metadata(fn, fp):
         "genre": "", "alt_of": "", "page_count": None, "albums": [],
     }
 
-
 @app.route("/api/metadata", methods=["POST"])
 def api_metadata():
     d  = request.json
@@ -7160,7 +7200,6 @@ def dedup_exclude():
         _db().commit()
         return jsonify({"success": True, "group_remains": False})
 
-
 @app.route("/api/dedup_groups")
 def dedup_groups_page():
     """
@@ -7215,7 +7254,6 @@ def dedup_groups_page():
 
     return jsonify({"success": True, "groups": groups,
                     "total": total, "page": page, "page_size": page_size})
-
 
     _dedup_checkpoint_clear()
     return jsonify({"success": True})
@@ -7672,7 +7710,6 @@ def api_review_boxes():
     return jsonify({"success": True, "accepted": accepted, "denied": denied,
                     "remaining_unconfirmed": remaining})
 
-
 @app.route("/api/confirm_all", methods=["POST"])
 def api_confirm_all():
     """Mark every region on a file as confirmed (accept all AI boxes)."""
@@ -7808,7 +7845,6 @@ def bulk_segment():
     state["status_text"] = "Ready."
     return jsonify({"success": True, "done": done, "segmented": segmented,
                     "errors": errors})
-
 
 @app.route("/api/bulk_llm", methods=["POST"])
 @_auth.require_feature("ai.llm")
@@ -8074,7 +8110,6 @@ def _objemb_save_nocommit(db, rel_path, mtime, sig, boxes, embs, tags):
          sqlite3.Binary(emb_blob), emb_dim,
          json.dumps(tags or []), time.time()))
 
-
 def _objemb_save(rel_path, mtime, sig, boxes, embs, tags):
     """Persist one image's embeddings and commit immediately. Convenience
     wrapper around _objemb_save_nocommit for callers outside the batched scan
@@ -8105,7 +8140,6 @@ def _objemb_count(sig, rel_paths):
                 if not dim:
                     dim = int(d)
     return total, dim
-
 
 def _objemb_stream(sig, rel_paths, dim, img_batch=1000):
     """Generator over the library's embeddings in a STABLE global order, pulling
@@ -8169,7 +8203,6 @@ def _objemb_stream(sig, rel_paths, dim, img_batch=1000):
             yield np.concatenate(vecs, axis=0), items
         # window drops out of scope here before the next pull
 
-
 @app.route("/api/quality_sweep", methods=["POST"])
 def quality_sweep():
     """Score image quality with NR-IQA (BRISQUE) and flag junk for review,
@@ -8230,7 +8263,6 @@ def quality_sweep():
                     "flagged": sorted(bad)[:500],
                     "wrote_flags": write_flags})
 
-
 @app.route("/api/iqa_models")
 def api_iqa_models():
     """NR-IQA model registry for the settings dropdown.
@@ -8245,7 +8277,6 @@ def api_iqa_models():
                         "models": [], "active": None})
     return jsonify({"success": True, "models": iqa.list_models(),
                     "active": iqa.get_model()})
-
 
 @app.route("/api/seg_models")
 def api_seg_models():
@@ -8279,7 +8310,6 @@ def api_seg_models():
             "repo": seg_models.SAM3_HF_REPO,
         },
     })
-
 
 @app.route("/api/seg_classes")
 def api_seg_classes():
@@ -8321,7 +8351,6 @@ def api_seg_classes():
                   "Class list needs ultralytics and the model weights.")),
     })
 
-
 @app.route("/api/download_sam3", methods=["POST"])
 def api_download_sam3():
     """Fetch the SAM3 checkpoint from HuggingFace into models/seg/sam/sam3.pt.
@@ -8352,7 +8381,6 @@ def api_download_sam3():
             pass
     return jsonify({"success": bool(ok), "message": msg,
                     "present": seg_models.sam3_present()})
-
 
 @app.route("/api/iqa_scan", methods=["POST"])
 @_auth.require_feature("ai.iqa")
@@ -8447,7 +8475,6 @@ def iqa_scan():
     state["status_text"] = f"IQA scan complete — scored {scored} image(s)."
     return jsonify({"success": True, "scored": scored, "total": total})
 
-
 @app.route("/api/iqa_set", methods=["POST"])
 @_auth.require_feature("ai.iqa")
 def iqa_set():
@@ -8477,7 +8504,6 @@ def iqa_set():
     _db().commit()
     return jsonify({"success": True, "stars": stars})
 
-
 # ════════════════════════════ IMAGE-LEVEL PIPELINE ═══════════════════════════
 # A lighter, image-level layer beneath object discovery. Five MANUAL steps, each
 # resumable and reading the previous step's persisted output:
@@ -8493,7 +8519,6 @@ def _eligible_files():
     return sorted(rp for (rp, w, h) in rows
                   if not (w and h) or min(w, h) >= og.MIN_IMAGE_PX)
 
-
 def _img_loader(fn):
     fp = get_safe_path(MEDIA_DIR, fn)
     if not fp or not os.path.exists(fp):
@@ -8503,14 +8528,12 @@ def _img_loader(fn):
         return None
     return og.downscale_to_cap(_to_bgr(img))
 
-
 def _img_mtime(fn):
     try:
         fp = get_safe_path(MEDIA_DIR, fn)
         return _getmtime_loose(fp) if fp and os.path.exists(fp) else None
     except Exception:
         return None
-
 
 def _img_tags(fn):
     try:
@@ -8520,15 +8543,12 @@ def _img_tags(fn):
     except Exception:
         return []
 
-
 def _img_prog(stage, done, total, phase=None):
     ph = f" {phase}" if phase else ""
     state["status_text"] = f"[{stage}{ph}] {done}/{total}"
 
-
 def _img_stop():
     return bool(state.get("discover_cancel"))
-
 
 @app.route("/api/img_depth", methods=["POST"])
 def img_depth():
@@ -8554,7 +8574,6 @@ def img_depth():
     return jsonify({"success": bool(ok), "run_sig": sig,
                     "depth": {"done": done, "total": total}})
 
-
 @app.route("/api/img_embed", methods=["POST"])
 def img_embed():
     """STEP 2 — one whole-image embedding per image, stored permanently in
@@ -8577,7 +8596,6 @@ def img_embed():
     total = ii.embedding_count(db)
     state["status_text"] = f"Image embeddings complete — {total} stored."
     return jsonify({"success": True, "embedded_now": n, "total_embeddings": total})
-
 
 @app.route("/api/library_embed", methods=["POST"])
 def library_embed():
@@ -8634,7 +8652,6 @@ def library_embed():
                     "scope": "selected" if sel else "library",
                     "text_search": text_search})
 
-
 @app.route("/api/embed_status")
 def embed_status():
     """Small status probe for the Review-tab button: whether OAI embeddings are
@@ -8648,7 +8665,6 @@ def embed_status():
         "stored_is_oai": bool(stored_tag and str(stored_tag).startswith("oai:")),
         "total": ii.embedding_count(db),
     })
-
 
 @app.route("/api/img_cluster", methods=["POST"])
 def img_cluster():
@@ -8672,7 +8688,6 @@ def img_cluster():
     return jsonify({"success": True, "clusters": n,
                     "embeddings": ii.embedding_count(db)})
 
-
 @app.route("/api/img_heuristics", methods=["POST"])
 def img_heuristics():
     """STEP 4 — build each cluster's concept map (centroid + tolerance + a
@@ -8693,7 +8708,6 @@ def img_heuristics():
     state["status_text"] = f"Cluster heuristics built — {len(summaries)} clusters."
     return jsonify({"success": True, "clusters": summaries[:300],
                     "n_clusters": len(summaries)})
-
 
 @app.route("/api/img_detect", methods=["POST"])
 def img_detect():
@@ -8771,7 +8785,6 @@ def img_detect():
                     "total_objects": total_objs,
                     "results": per_cluster})
 
-
 @app.route("/api/img_search", methods=["POST"])
 def img_search():
     """Search/browse the library via the persisted image embeddings. Returns
@@ -8825,7 +8838,6 @@ def img_search():
     return jsonify({"success": True, "mode": "similar", "query": qi,
                     "count": len(entries), "files": entries})
 
-
 @app.route("/api/img_status", methods=["GET"])
 def img_status():
     """Progress snapshot for the five image-pipeline steps, for the UI."""
@@ -8842,7 +8854,6 @@ def img_status():
                     "heuristics": db.execute(
                         "SELECT COUNT(*) FROM image_cluster_meta").fetchone()[0]
                         if _table_exists(db, "image_cluster_meta") else 0})
-
 
 def _entries_for_files(rel_paths):
     """Build gallery entries (same shape as /api/list) for an explicit, ordered
@@ -8876,12 +8887,10 @@ def _entries_for_files(rel_paths):
                     "width": r["width"] or 0, "height": r["height"] or 0})
     return out
 
-
 def _table_exists(db, name):
     return db.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
         (name,)).fetchone() is not None
-
 
 @app.route("/api/img_cancel", methods=["POST"])
 def img_cancel():
@@ -8891,7 +8900,6 @@ def img_cancel():
     state["discover_cancel"] = True
     state["status_text"] = "Cancel requested — stopping at next checkpoint…"
     return jsonify({"success": True})
-
 
 @app.route("/api/discover_objects_staged", methods=["POST"])
 def discover_objects_staged():
@@ -9042,7 +9050,6 @@ def discover_objects_staged():
                                   else "unavailable"),
                     "total_objects": total_objs,
                     "clusters": summary[:200] if summary else None})
-
 
 @app.route("/api/discover_objects", methods=["POST"])
 def discover_objects():
@@ -9332,7 +9339,6 @@ def bulk_tag_cluster():
             access_logger.error(f"bulk_tag_cluster {m['file']}: {e}")
     return jsonify({"success": True, "tagged": touched, "errors": errors})
 
-
 @app.route("/api/staged_clusters")
 def staged_clusters():
     """Persistent view of the 5-stage discovery results.
@@ -9414,7 +9420,6 @@ def staged_clusters():
     return jsonify({"success": True, "run_sig": sig, "clusters": clusters,
                     "n_clusters": len(clusters), "n_objects": n_objects})
 
-
 @app.route("/api/apply_staged_cluster", methods=["POST"])
 def apply_staged_cluster():
     """Apply a user-given name to confirmed member boxes of a staged cluster.
@@ -9469,7 +9474,6 @@ def apply_staged_cluster():
             access_logger.error(f"apply_staged_cluster {fn}: {e}")
     return jsonify({"success": True, "files": touched,
                     "boxes": boxes_written, "errors": errors})
-
 
 def _merge_comic_analyses(folder, page_analyses, summarize=True):
     """Aggregate per-page pipeline analyses into comic-level metadata.
@@ -9669,7 +9673,6 @@ def api_barcodes():
     return jsonify({"success": True, "regions": barcodes.to_regions(res),
                     "summary": barcodes.summary_text(res), **res})
 
-
 @app.route("/api/segment", methods=["POST"])
 @_auth.require_feature("ai.segment")
 def api_segment():
@@ -9724,7 +9727,6 @@ def api_segment():
                 else "Model not downloaded yet, or no objects found.")
     return jsonify({"success": True, "regions": regions, "model": model_id,
                     "count": len(regions), "note": note})
-
 
 @app.route("/api/auto_tag", methods=["POST"])
 @_auth.require_feature("ai.autotag")
@@ -9907,7 +9909,6 @@ def autotag_toggle():
     save_config()
     return jsonify({"success": True, "enabled": state["autotag_enabled"]})
 
-
 def _background_autotag_worker():
     """When the app is idle and a trained model exists, walk through files that
     have never been touched and add UNCONFIRMED boxes for the user to confirm."""
@@ -9982,7 +9983,6 @@ music_state = {"indexing": False, "indexed": 0, "total": 0,
                "embedding": False, "emb_done": 0, "emb_total": 0,
                "clustering": False, "status": "idle"}
 
-
 def _music_upsert(rel_path, abs_path, force=False):
     """Index one track if new or changed. Returns True if (re)indexed."""
     try:
@@ -10013,7 +10013,6 @@ def _music_upsert(rel_path, abs_path, force=False):
           m["year"], m["genre"], m["composer"], m["comment"], time.time()))
     _db().commit()
     return True
-
 
 def _music_index_background(force=False):
     """Walk MEDIA_DIR for audio; resumable (skips unchanged mtimes)."""
@@ -10049,7 +10048,6 @@ def _music_index_background(force=False):
     finally:
         music_state["indexing"] = False
 
-
 def _music_embed_background(force=False):
     """Compute embeddings for tracks missing one (or all if force). Resumable."""
     if music_state["embedding"]:
@@ -10080,7 +10078,6 @@ def _music_embed_background(force=False):
     finally:
         music_state["embedding"] = False
 
-
 def _music_load_embeddings():
     """Return (paths, np.array(embs)) for every track that has one."""
     rows = _db().execute("SELECT rel_path, emb FROM music WHERE emb IS NOT NULL").fetchall()
@@ -10090,7 +10087,6 @@ def _music_load_embeddings():
         if v is not None and v.size == mi.EMB_DIM:
             paths.append(r["rel_path"]); embs.append(v)
     return paths, embs
-
 
 # ── music routes ───────────────────────────────────────────────────────────────
 @app.route("/api/music/status")
@@ -10107,20 +10103,17 @@ def music_status():
                     "artists": counts["artists"] or 0, "albums": counts["albums"] or 0,
                     "clusters": nclust})
 
-
 @app.route("/api/music/reindex", methods=["POST"])
 def music_reindex():
     force = bool((request.json or {}).get("force"))
     threading.Thread(target=_music_index_background, args=(force,), daemon=True).start()
     return jsonify({"success": True})
 
-
 @app.route("/api/music/embed", methods=["POST"])
 def music_embed():
     force = bool((request.json or {}).get("force"))
     threading.Thread(target=_music_embed_background, args=(force,), daemon=True).start()
     return jsonify({"success": True})
-
 
 @app.route("/api/music/cluster", methods=["POST"])
 def music_cluster():
@@ -10152,13 +10145,11 @@ def music_cluster():
     finally:
         music_state["clustering"] = False
 
-
 @app.route("/api/music/clusterlist")
 def music_clusterlist():
     rows = _db().execute(
         "SELECT cluster, label, size FROM music_clusters ORDER BY size DESC").fetchall()
     return jsonify({"success": True, "clusters": [dict(r) for r in rows]})
-
 
 @app.route("/api/music/artists")
 def music_artists():
@@ -10168,7 +10159,6 @@ def music_artists():
         FROM music GROUP BY name ORDER BY name COLLATE NOCASE""").fetchall()
     return jsonify({"success": True,
                     "artists": [dict(r) for r in rows]})
-
 
 @app.route("/api/music/albums")
 def music_albums():
@@ -10185,7 +10175,6 @@ def music_albums():
         GROUP BY album, artist ORDER BY year, album COLLATE NOCASE""", params).fetchall()
     return jsonify({"success": True, "albums": [dict(r) for r in rows]})
 
-
 def _music_row_dict(r):
     return {"rel_path": r["rel_path"], "title": r["title"], "artist": r["artist"],
             "album": r["album"], "albumartist": r["albumartist"], "track": r["track"],
@@ -10195,7 +10184,6 @@ def _music_row_dict(r):
             "samplerate": r["samplerate"], "channels": r["channels"],
             "cluster": r["cluster"], "tags": json.loads(r["tags"] or "[]"),
             "has_emb": r["emb"] is not None}
-
 
 @app.route("/api/music/songs")
 def music_songs():
@@ -10228,7 +10216,6 @@ def music_songs():
     return jsonify({"success": True, "total": total, "page": page, "page_size": per,
                     "songs": [_music_row_dict(r) for r in rows]})
 
-
 @app.route("/api/music/meta", methods=["POST"])
 def music_meta():
     """Edit metadata for one track — writes to DB and back into the file."""
@@ -10252,7 +10239,6 @@ def music_meta():
         _db().commit()
     return jsonify({"success": True, "file_written": wrote})
 
-
 @app.route("/api/music/stream/<path:filename>")
 def music_stream(filename):
     """Serve the audio file for the in-browser player (supports range)."""
@@ -10260,7 +10246,6 @@ def music_stream(filename):
     if not fp or not os.path.exists(fp):
         return jsonify({"success": False, "error": "not found"}), 404
     return send_file(fp, conditional=True)
-
 
 @app.route("/api/music/shuffle", methods=["POST"])
 def music_shuffle():
@@ -10291,7 +10276,6 @@ def music_shuffle():
     playlist = [by_path[p] for p in order if p in by_path]
     return jsonify({"success": True, "playlist": playlist})
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # BOOKS & COMICS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -10320,10 +10304,8 @@ book_routes.register(app, {
     "current_user":  lambda: (getattr(g, "user", None) or {}).get("username", ""),
 })
 
-
 # ── HTML templates ────────────────────────────────────────────────────────--
 # UI templates live in templates.py (imported at top of file).
-
 
 if __name__=='__main__':
     from waitress import serve
