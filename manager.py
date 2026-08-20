@@ -163,6 +163,10 @@ state = {
     "pose_kind": "body",
     "pose_size": "n",
     "page_size": 200,
+    # Storage-tiering config, persisted here in app_config.json (migrated from the
+    # legacy standalone tiers_config.json on first run by tiering.load_cfg). The
+    # tiering module owns the schema; this is just the persisted blob.
+    "tiers": None,
     "search_quick_filters": [
         {"id": "1", "label": "Untagged",   "query": "is:untagged"},
         {"id": "2", "label": "This year",  "query": "date:2026"},
@@ -1782,7 +1786,7 @@ def save_config():
             "body_enabled","body_cluster_eps","object_proposals",
             "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
             "barcode_model","barcode_conf", "iqa_model","brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
-            "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters"]
+            "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers"]
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys if k in state}, f, indent=2)
 
@@ -7391,6 +7395,7 @@ def api_tiers_get():
     return jsonify({"success": True, "config": tiering.load_cfg()})
 
 @app.route("/api/tiers", methods=["POST"])
+@_auth.require_feature("settings", action='update_tiers', fields=())
 def api_tiers_set():
     try:
         cfg = tiering.save_cfg(request.json or {})
@@ -10791,7 +10796,15 @@ if __name__=='__main__':
     access_logger.info("Starting background auto-tagger…")
     threading.Thread(target=_background_autotag_worker, daemon=True).start()
     access_logger.info("Starting storage tiering worker…")
-    tiering.start(MEDIA_DIR, _db, lambda: _last_activity)
+    # Persist tier config inside the shared app_config.json (state["tiers"]) via
+    # save_config, same as every other setting — not a standalone tiers_config.json.
+    def _load_tiers_cfg():
+        return state.get("tiers") or None
+    def _store_tiers_cfg(cfg):
+        state["tiers"] = cfg
+        save_config()
+    tiering.start(MEDIA_DIR, _db, lambda: _last_activity,
+                  load_stored_cfg=_load_tiers_cfg, store_cfg=_store_tiers_cfg)
     access_logger.info("Starting background music indexer…")
     threading.Thread(target=_music_index_background, daemon=True).start()
     access_logger.info("Starting background book indexer…")

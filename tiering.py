@@ -79,6 +79,8 @@ _state = {
     "media_dir": None,
     "db_factory": None,             # returns a sqlite3 connection (thread-local)
     "get_last_activity": None,      # returns epoch seconds of last HTTP request
+    "load_stored_cfg": None,        # () -> dict|None : read persisted cfg from host
+    "store_cfg": None,              # (dict) -> None  : persist cfg via host
     "cfg": None,
     "lock": threading.Lock(),
     "run": {                        # progress of the current/last rebalance
@@ -88,17 +90,47 @@ _state = {
 }
 
 # ── config ────────────────────────────────────────────────────────────────────
-def load_cfg():
-    cfg = dict(DEFAULT_CFG)
+def _read_legacy_file():
+    """Read the old standalone tiers_config.json, if it still exists. Used only to
+    migrate a pre-existing config into the host app_config.json on first load."""
     try:
         with open(CFG_FILE) as f:
-            cfg.update(json.load(f))
+            return json.load(f)
     except Exception:
-        pass
+        return None
+
+def load_cfg():
+    """Load tier config. Prefers the host-persisted copy (app_config.json via the
+    injected load_stored_cfg callback); falls back to the legacy standalone file
+    and, when found there, migrates it into the host store immediately."""
+    cfg = dict(DEFAULT_CFG)
+    stored = None
+    loader = _state.get("load_stored_cfg")
+    if loader:
+        try:
+            stored = loader()
+        except Exception:
+            stored = None
+    migrated_from_legacy = False
+    if not stored:
+        legacy = _read_legacy_file()
+        if legacy:
+            stored = legacy
+            migrated_from_legacy = True
+    if stored:
+        cfg.update({k: stored[k] for k in stored if k in DEFAULT_CFG})
     _state["cfg"] = cfg
+    # Persist a freshly-migrated legacy config into the host store so subsequent
+    # loads come from app_config.json and the old file becomes irrelevant.
+    if migrated_from_legacy and _state.get("store_cfg"):
+        try:
+            _state["store_cfg"](cfg)
+        except Exception:
+            pass
     return cfg
 
-def save_cfg(cfg):
+def _sanitize_cfg(cfg):
+    """Coerce an incoming cfg dict to the known schema (same rules as before)."""
     clean = dict(DEFAULT_CFG)
     clean.update({k: cfg[k] for k in cfg if k in DEFAULT_CFG})
     tiers = []
@@ -113,9 +145,20 @@ def save_cfg(cfg):
         except Exception:
             continue
     clean["tiers"] = [t for t in tiers if t["path"]]
-    with open(CFG_FILE, "w") as f:
-        json.dump(clean, f, indent=2)
+    return clean
+
+def save_cfg(cfg):
+    """Validate and persist tier config through the host store (app_config.json).
+    Falls back to the legacy standalone file only if no host store is wired."""
+    clean = _sanitize_cfg(cfg)
     _state["cfg"] = clean
+    storer = _state.get("store_cfg")
+    if storer:
+        storer(clean)
+    else:
+        # No host wired (e.g. standalone/testing) — keep the old behavior.
+        with open(CFG_FILE, "w") as f:
+            json.dump(clean, f, indent=2)
     return clean
 
 # ── path helpers ──────────────────────────────────────────────────────────────
@@ -464,10 +507,13 @@ def _loop():
         if cfg["enabled"] and cfg["tiers"] and _idle():
             rebalance(block=True)
 
-def start(media_dir, db_factory, get_last_activity):
+def start(media_dir, db_factory, get_last_activity,
+          load_stored_cfg=None, store_cfg=None):
     _state["media_dir"] = os.path.abspath(media_dir)
     _state["db_factory"] = db_factory
     _state["get_last_activity"] = get_last_activity
+    _state["load_stored_cfg"] = load_stored_cfg
+    _state["store_cfg"] = store_cfg
     load_cfg()
     threading.Thread(target=_loop, daemon=True).start()
 

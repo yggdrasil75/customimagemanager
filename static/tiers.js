@@ -133,9 +133,15 @@ async function persistTiersConfig() {
   try {
     const r = await fetch('/api/tiers', { method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(collectTiersConfig()) }).then(r => r.json()).catch(() => null);
-    if (!r || !r.success) return { ok: false, error: 'Storage settings save failed' };
-  } catch (e) { return { ok: false, error: 'Storage settings save failed' }; }
+      body: JSON.stringify(collectTiersConfig()) });
+    let d = null;
+    try { d = await r.json(); } catch (_) { d = null; }
+    if (!r.ok || !d || !d.success) {
+      const msg = (d && d.error) ? ('Storage: ' + d.error)
+                : ('Storage settings save failed (' + r.status + ')');
+      return { ok: false, error: msg };
+    }
+  } catch (e) { return { ok: false, error: 'Storage settings save failed (network)' }; }
   refreshTiersStatus();
   return { ok: true };
 }
