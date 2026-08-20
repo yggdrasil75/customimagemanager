@@ -1,0 +1,9 @@
+services:
+  cim:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./media:/app/media
+      - ./data:/app/data
+    restart: unless-stopped
