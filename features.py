@@ -90,6 +90,7 @@ FEATURE_SECTIONS = {
             ("annot.boxes",       "Boxes / regions — allow editing"),
             ("data.delete",       "Delete files (single + bulk)"),
             ("data.move",         "Move / relocate files"),
+            ("data.upload",       "Upload / drag-drop files"),
         ],
     },
     "comics": {
@@ -131,6 +132,7 @@ BUILTIN_ROLES = {
     "admin":    _all_allowed(),
     # uploader: only the pieces an automated box/tag uploader needs.
     "uploader": {**_all_denied(),
+                 "data.upload": True,
                  "ai_tooling": True,
                  "ai.autotag": True,
                  "ai.segment": True},

@@ -1,5 +1,6 @@
 /* ── Storage tiers ─────────────────────────────────────────────────────── */
 let _tiersPoll = null;
+let _tiersLoaded = false;   // storage tab opened at least once this session?
 
 function tierRowHtml(t = {}) {
   return `<div class="grid grid-cols-[1fr_2fr_70px_90px_28px] gap-2 tier-row items-center">
@@ -25,14 +26,27 @@ function settingsTab(name) {
   });
   if (name === 'storage') loadStorageTab();
   else stopTiersPoll();
+  if (name === 'pipeline') window.pipelineEditorRefresh && window.pipelineEditorRefresh();
   if (name === 'users') window.openUserAdmin && window.openUserAdmin();
 }
 
-function openSettings(tab = 'general') {
+async function openSettings(tab = 'general') {
   const admin = !!(window.CIMAuth && window.CIMAuth.user && window.CIMAuth.user.is_admin);
   document.querySelectorAll('#settings_modal [data-admin-only]').forEach(el => {
     el.classList.toggle('hidden', !admin);
   });
+  // Fresh edit session: reset per-open flags so a Close→Open cycle starts from
+  // the saved server state, never from a half-finished previous edit.
+  _tiersLoaded = false;
+  _brandClearLogo = false;
+  // Take one fresh snapshot from the server, THEN freeze: while the modal is open
+  // the background poll won't touch the working copy, so nothing refreshes out
+  // from under the user — even if someone else saves settings meanwhile.
+  try {
+    const s = await fetch('/api/state').then(r => r.json());
+    quick_filters_cache = s.search_quick_filters || [];
+  } catch (e) { /* keep whatever cache we have */ }
+  window._settingsOpen = true;
   document.getElementById('settings_modal').classList.remove('hidden');
   window.pipelineEditorRefresh && window.pipelineEditorRefresh();
   if (typeof renderQuickFilterEditor === 'function') renderQuickFilterEditor();
@@ -42,11 +56,43 @@ function openSettings(tab = 'general') {
 function closeSettings() {
   document.getElementById('settings_modal').classList.add('hidden');
   stopTiersPoll();
+  _brandClearLogo = false;
+  window._settingsOpen = false;
+}
+
+// The single Save: persist every pane, then close. Any pane failing aborts the
+// close and surfaces the error, so nothing is silently lost. Panes that weren't
+// touched/loaded no-op inside their persist* helper.
+async function saveAllSettings() {
+  const btn = document.getElementById('settings_save_btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  const steps = [];
+  if (typeof persistAiSettings === 'function')    steps.push(persistAiSettings);
+  if (typeof persistBranding === 'function')      steps.push(persistBranding);
+  if (typeof persistTiersConfig === 'function')   steps.push(persistTiersConfig);
+  let failed = null;
+  for (const step of steps) {
+    let res;
+    try { res = await step(); } catch (e) { res = { ok: false, error: 'Save failed' }; }
+    if (res && res.ok === false) { failed = res.error || 'Save failed'; break; }
+  }
+  if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+  if (failed) {
+    if (window.showToast) showToast(failed);
+    return;   // leave the modal open (still frozen) so the user can fix it
+  }
+  // Success: unfreeze, refresh the chips from what we just saved, and close.
+  window._settingsOpen = false;
+  if (typeof renderQuickFilters === 'function') renderQuickFilters();
+  if (window.showToast) showToast('Settings saved.');
+  document.getElementById('settings_modal').classList.add('hidden');
+  stopTiersPoll();
 }
 
 async function loadStorageTab() {
   const r = await fetch('/api/tiers').then(r => r.json()).catch(() => null);
   const cfg = r?.config || {};
+  _tiersLoaded = true;
   document.getElementById('tiers_enabled').checked = !!cfg.enabled;
   document.getElementById('tiers_headroom').value = cfg.video_headroom ?? 4;
   document.getElementById('tiers_interval').value = Math.round((cfg.interval_sec ?? 3600) / 60);
@@ -79,13 +125,19 @@ function collectTiersConfig() {
   };
 }
 
-async function saveTiersConfig() {
-  const r = await fetch('/api/tiers', { method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(collectTiersConfig()) }).then(r => r.json()).catch(() => null);
-  document.getElementById('status_text').textContent =
-    r?.success ? 'Storage settings saved.' : 'Failed to save storage settings.';
+// Persist storage tiers. Returns {ok}/{ok:false,error}. No-ops (ok:true) if the
+// Storage tab was never opened this session, so the unified Save can't wipe the
+// saved tier config with an empty, never-populated form.
+async function persistTiersConfig() {
+  if (!_tiersLoaded) return { ok: true };
+  try {
+    const r = await fetch('/api/tiers', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(collectTiersConfig()) }).then(r => r.json()).catch(() => null);
+    if (!r || !r.success) return { ok: false, error: 'Storage settings save failed' };
+  } catch (e) { return { ok: false, error: 'Storage settings save failed' }; }
   refreshTiersStatus();
+  return { ok: true };
 }
 
 function fmtBytes(b) {

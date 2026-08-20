@@ -165,7 +165,7 @@ state = {
     "page_size": 200,
     "search_quick_filters": [
         {"id": "1", "label": "Untagged",   "query": "is:untagged"},
-        {"id": "2", "label": "This year",  "query": "date:2025"},
+        {"id": "2", "label": "This year",  "query": "date:2026"},
         {"id": "3", "label": "Needs review", "query": "is:unconfirmed"},
     ],
     "thumb_lru_bytes": 2 << 30,
@@ -5465,6 +5465,7 @@ def api_albums_of():
                     "all": [a["name"] for a in _album_list()]})
 
 @app.route("/api/upload", methods=["POST"])
+@_auth.require_feature("data.upload", action='upload', fields=('folder',))
 def api_upload():
     """Accept phase only: durably spool the raw bytes + enqueue, then return
     immediately. The heavy convert/index chain runs in the queue worker pool.
@@ -6500,6 +6501,7 @@ def _start_spool_janitor():
     access_logger.info("spool janitor started")
 
 @app.route("/api/upload/clean", methods=["POST"])
+@_auth.require_feature("data.upload", action='upload_clean')
 def api_upload_clean():
     """Run a cleaning pass now: requeue recoverable errors, re-ingest orphaned
     spool files, drop spools of already-processed originals."""

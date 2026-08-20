@@ -9,13 +9,13 @@
           class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">⚙ General</button>
         <button data-settings-tab="ai" onclick="settingsTab('ai')"
           class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">🧠 AI / Vision</button>
+        <button data-settings-tab="pipeline" onclick="settingsTab('pipeline')"
+          class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">🌳 Pipeline</button>
         <button data-settings-tab="storage" onclick="settingsTab('storage')"
           class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">🗄 Storage</button>
         <button data-settings-tab="users" onclick="settingsTab('users')"
           class="settings-tab hidden px-3 py-1.5 rounded-t text-sm font-bold" data-admin-only>👤 Users</button>
       </div>
-      <button onclick="openPipelineSettings()" title="Edit the Smart Tag decision tree"
-        class="text-xs bg-teal-700 hover:bg-teal-600 px-2 py-1 rounded font-bold" data-settings-pane="ai">🌳 Pipeline…</button>
     </div>
 
     <div data-settings-pane="general" class="overflow-y-auto flex-1 pr-1">
@@ -42,10 +42,6 @@
             </div>
           </div>
         </div>
-        <div class="flex justify-end mt-2">
-          <button type="button" onclick="saveBranding()"
-            class="bg-green-600 hover:bg-green-500 px-3 py-1 rounded text-xs font-bold">Save branding</button>
-        </div>
         <p id="cfg_brand_status" class="text-[10px] text-gray-500 mt-1"></p>
       </div>
       <div class="border-t border-gray-600 pt-3 col-span-2">
@@ -56,7 +52,7 @@
         </div>
         <p class="text-[10px] text-gray-500 mb-2">Chips shown when the search box is focused. Label is
           what you see; query is any search expression (e.g. <code>line:failure</code>,
-          <code>is:untagged</code>, <code>date:2025</code>).</p>
+          <code>is:untagged</code>, <code>date:2026</code>).</p>
         <div class="grid grid-cols-[1fr_2fr_28px] gap-2 text-[10px] text-gray-500 mb-1 px-1">
           <span>Label</span><span>Query</span><span></span>
         </div>
@@ -299,6 +295,24 @@
       </div>
     </div>
 
+    {# Pipeline pane: the Smart Tag decision tree. The #cfg_pipeline textarea now
+       lives here (moved out of the old standalone popup) so its value is read by
+       the single unified Save like every other pane. pipeline_editor.js mounts
+       its visual node editor beside this textarea. #}
+    <div data-settings-pane="pipeline" class="hidden overflow-y-auto flex-1 pr-1">
+      <div class="flex items-center justify-between mb-2">
+        <h2 class="font-bold text-teal-300 text-sm">🌳 Smart Tag pipeline</h2>
+        <span class="text-[10px] text-gray-500">decision tree run by 🌳 Smart Tag</span>
+      </div>
+      <div class="border border-gray-600 rounded p-3">
+        <label class="text-xs font-bold text-gray-400 block mb-1">Pipeline (advanced JSON)</label>
+        <p class="text-[10px] text-gray-500 mb-1">Edit visually below, or toggle to raw JSON. Edit carefully.</p>
+        <textarea id="cfg_pipeline" rows="10"
+          class="w-full p-2 bg-gray-900 rounded border border-gray-600 text-xs text-white font-mono resize-y"></textarea>
+        <p id="cfg_pipeline_err" class="text-[10px] text-red-400 mt-1 hidden"></p>
+      </div>
+    </div>
+
     <div data-settings-pane="storage" class="hidden overflow-y-auto flex-1 pr-1">
         <label class="flex items-center gap-2 text-sm text-gray-300 mb-3 cursor-pointer">
           <input type="checkbox" id="tiers_enabled" class="accent-amber-500"> Enable automatic tiering
@@ -342,13 +356,9 @@
         <button onclick="tiersCancel()" class="bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded text-sm">Cancel run</button>
       </div>
       <div class="flex gap-2 ml-auto">
-        <button onclick="closeSettings()" class="bg-gray-600 px-4 py-1.5 rounded text-sm">Close</button>
-        <button data-settings-pane="general" onclick="saveGeneralSettings()"
-          class="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded text-sm font-bold">Save general</button>
-        <button data-settings-pane="ai" onclick="saveAiSettings()"
-          class="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded text-sm font-bold">Save AI</button>
-        <button data-settings-pane="storage" onclick="saveTiersConfig()"
-          class="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded text-sm font-bold">Save storage</button>
+        <button onclick="closeSettings()" class="bg-gray-600 hover:bg-gray-500 px-4 py-1.5 rounded text-sm">Close</button>
+        <button id="settings_save_btn" onclick="saveAllSettings()"
+          class="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded text-sm font-bold">Save</button>
       </div>
     </div>
   </div>

@@ -168,29 +168,6 @@ function collectQuickFilters(){
   return _collectQuickFilterRows(true);
 }
 
-// Save the General tab. Currently just the search quick-filters, but this is the
-// hook to hang any future general-tab settings on. Persists via the same
-// /api/update_settings endpoint the other tabs use, then refreshes the chips.
-async function saveGeneralSettings(){
-  const filters=collectQuickFilters();
-  quick_filters_cache=filters;
-  try{
-    const r=await fetch('/api/update_settings',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({search_quick_filters:filters})});
-    if(!r.ok){
-      if(typeof showToast==='function') showToast('Save failed ('+r.status+').');
-      return;
-    }
-  }catch(e){
-    if(typeof showToast==='function') showToast('Save failed.');
-    return;
-  }
-  renderQuickFilterEditor();       // reflect the cleaned (empty-dropped) list
-  renderQuickFilters();            // refresh the chips under the search box
-  if(typeof showToast==='function') showToast('General settings saved.');
-}
-
 function toggleDatePicker(){
   document.getElementById('date_picker_pop').classList.toggle('hidden');
 }

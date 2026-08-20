@@ -244,11 +244,16 @@ async function fetchState(){
     const s=await fetch('/api/state').then(r=>r.json());
     document.getElementById('status_text').innerText=s.status_text;
     applyBranding(s);
-    const editing = document.activeElement &&
-                    document.activeElement.closest &&
-                    document.activeElement.closest('#quick_filters_rows');
-    if(!editing) quick_filters_cache = s.search_quick_filters || [];
-    if(typeof renderQuickFilters==='function') renderQuickFilters();
+    // While the settings modal is open we FREEZE its working copy: the 2.5s poll
+    // must not touch the quick-filter cache/editor or re-render anything the user
+    // is editing — not even if another user saves settings meanwhile. The modal
+    // took a fresh snapshot on open; it's released on save/close. The chips under
+    // the search box are only refreshed when settings are closed (they mirror the
+    // live cache, which is frozen while editing anyway).
+    if(!window._settingsOpen){
+      quick_filters_cache = s.search_quick_filters || [];
+      if(typeof renderQuickFilters==='function') renderQuickFilters();
+    }
     const sel=document.getElementById('model_selector');
     const prev=sel.value;
     const models=s.available_models||[];

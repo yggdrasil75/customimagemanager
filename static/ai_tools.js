@@ -213,56 +213,69 @@ document.addEventListener('click',e=>{
   }
 });
 
-async function saveAiSettings(){
+// Persist the AI/Vision pane. Returns {ok:true} or {ok:false, error}. Does NOT
+// close the modal — the unified Save orchestrates close after all panes persist.
+async function persistAiSettings(){
   oai_actions_cache=[...document.querySelectorAll('.action-row')].map(r=>({
     id:r.dataset.id, name:r.querySelector('.act-name').value.trim()||'Action',
     prompt:r.querySelector('.act-prompt').value.trim(), target:r.querySelector('.act-target').value}));
   // Validate the pipeline JSON before saving
   let tree=null;
-  const ptxt=document.getElementById('cfg_pipeline').value.trim();
+  const pipeEl=document.getElementById('cfg_pipeline');
   const errEl=document.getElementById('cfg_pipeline_err');
+  const ptxt=pipeEl ? pipeEl.value.trim() : '';
   if(ptxt){
-    try{ tree=JSON.parse(ptxt); errEl.classList.add('hidden'); }
-    catch(e){ errEl.innerText='Invalid pipeline JSON: '+e.message; errEl.classList.remove('hidden'); return; }
+    try{ tree=JSON.parse(ptxt); if(errEl) errEl.classList.add('hidden'); }
+    catch(e){ if(errEl){ errEl.innerText='Invalid pipeline JSON: '+e.message; errEl.classList.remove('hidden'); }
+      return {ok:false, error:'Invalid pipeline JSON'}; }
   }
-  const body={oai_endpoint:document.getElementById('cfg_endpoint').value,
-      oai_key:document.getElementById('cfg_apikey').value,
-      oai_model:document.getElementById('cfg_model').value,
-      oai_embed_model:document.getElementById('cfg_embed_model')?.value||'',
-      yolo_size:document.getElementById('cfg_yolo_size').value,
-      iqa_model:document.getElementById('cfg_iqa_model')?.value||'brisque',
-      sam_model:document.getElementById('cfg_sam_model')?.value||'sam2.1_b',
-      bg_seg_enabled:!!document.getElementById('cfg_bg_seg')?.checked,
-      bg_seg_model:document.getElementById('cfg_bg_seg_model')?.value||'yolov26n-seg',
+  // Safe field readers: a single missing element must never throw and abort the
+  // whole unified Save (that's the bug that made Save silently do nothing).
+  const _v=(id,d='')=>{ const e=document.getElementById(id); return e?e.value:d; };
+  const _c=(id)=>{ const e=document.getElementById(id); return !!(e&&e.checked); };
+  const body={oai_endpoint:_v('cfg_endpoint'),
+      oai_key:_v('cfg_apikey'),
+      oai_model:_v('cfg_model'),
+      oai_embed_model:_v('cfg_embed_model'),
+      yolo_size:_v('cfg_yolo_size'),
+      iqa_model:_v('cfg_iqa_model','brisque'),
+      sam_model:_v('cfg_sam_model','sam2.1_b'),
+      bg_seg_enabled:_c('cfg_bg_seg'),
+      bg_seg_model:_v('cfg_bg_seg_model','yolov26n-seg'),
       bg_seg_classes:[...(window._bgClassSel||[])],
-      face_bg_enabled:!!document.getElementById('cfg_face_bg')?.checked,
-      face_bg_custom:!!document.getElementById('cfg_face_custom')?.checked,
-      face_model:document.getElementById('cfg_face_model')?.value||'',
-      face_size:document.getElementById('cfg_face_size')?.value||'n',
-      person_model:document.getElementById('cfg_person_model')?.value||'',
-      our_model:document.getElementById('cfg_our_model')?.value||'',
-      barcode_model:document.getElementById('cfg_barcode_model')?.value||'',
-      pose_kind:document.getElementById('cfg_pose_kind').value,
-      pose_size:document.getElementById('cfg_pose_size').value,
-      oai_system_prompt:document.getElementById('cfg_system').value,
+      face_bg_enabled:_c('cfg_face_bg'),
+      face_bg_custom:_c('cfg_face_custom'),
+      face_model:_v('cfg_face_model'),
+      face_size:_v('cfg_face_size','n'),
+      person_model:_v('cfg_person_model'),
+      our_model:_v('cfg_our_model'),
+      barcode_model:_v('cfg_barcode_model'),
+      pose_kind:_v('cfg_pose_kind'),
+      pose_size:_v('cfg_pose_size'),
+      oai_system_prompt:_v('cfg_system'),
       llm_preprocess:{
         compress:{
-          enabled:!!document.getElementById('cfg_pp_compress').checked,
-          max_side:parseInt(document.getElementById('cfg_pp_maxside').value,10)||1024,
-          interp:document.getElementById('cfg_pp_interp').value},
+          enabled:_c('cfg_pp_compress'),
+          max_side:parseInt(_v('cfg_pp_maxside'),10)||1024,
+          interp:_v('cfg_pp_interp')},
         pad:{
-          enabled:!!document.getElementById('cfg_pp_pad').checked,
-          fill:document.getElementById('cfg_pp_fill').value,
+          enabled:_c('cfg_pp_pad'),
+          fill:_v('cfg_pp_fill'),
           ratios:[...document.querySelectorAll('#cfg_pp_ratios input:checked')].map(c=>c.value)}},
       oai_actions:oai_actions_cache};
   if(tree!==null) body.pipeline_tree=tree;
-  // NB: search quick-filters live on the General tab and are saved by
-  // saveGeneralSettings(); the AI save intentionally leaves them untouched so a
-  // partially-rendered editor can never overwrite the saved list.
-  await fetch('/api/update_settings',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(body)});
+  // Fold in the General pane's search quick-filters so the single settings POST
+  // carries them too (same /api/update_settings endpoint).
+  if(typeof collectQuickFilters==='function'){
+    body.search_quick_filters=collectQuickFilters();
+  }
+  try{
+    const r=await fetch('/api/update_settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)});
+    if(!r.ok) return {ok:false, error:'Settings save failed ('+r.status+')'};
+  }catch(e){ return {ok:false, error:'Settings save failed'}; }
   updateActionDropdown();
-  document.getElementById('ai_modal').classList.add('hidden');
+  return {ok:true};
 }
 async function runLLM(){
   if(!currentFile) return;

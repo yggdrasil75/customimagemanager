@@ -1,9 +1,4 @@
-{# Smart Tag pipeline settings — split out of the LLM settings modal so the
-   decision tree can be worked on on its own. pipeline_editor.js mounts its
-   visual node editor beside #cfg_pipeline (its parentElement), so keeping that
-   textarea here is all that's needed; openPipelineSettings() calls
-   window.pipelineEditorRefresh() after showing this modal. saveAiSettings()
-   still reads #cfg_pipeline, so Save/Cancel live here too. #}
+
 <div id="ai_pipeline_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
   <div class="bg-gray-800 p-5 rounded-lg border border-gray-600 w-[560px] flex flex-col max-h-[90vh]">
     <div class="flex justify-between items-center mb-3 flex-shrink-0">
@@ -22,7 +17,7 @@
     <div class="flex justify-end gap-2 pt-3 border-t border-gray-700 mt-3 flex-shrink-0">
       <button onclick="document.getElementById('ai_pipeline_modal').classList.add('hidden')"
         class="bg-gray-600 px-4 py-1.5 rounded text-sm">Close</button>
-      <button onclick="saveAiSettings()"
+      <button onclick="savePipelineModal()"
         class="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded text-sm font-bold">Save</button>
     </div>
   </div>

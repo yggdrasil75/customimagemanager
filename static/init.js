@@ -15,11 +15,6 @@ loadGallery();
 fetchDedupStatus();
 refreshReviewCount();
 
-function openPipelineSettings(){
-  document.getElementById('ai_pipeline_modal').classList.remove('hidden');
-  if(window.pipelineEditorRefresh) window.pipelineEditorRefresh();
-}
-
 // ── Branding ────────────────────────────────────────────────────────────────
 let _brandClearLogo=false;
 
@@ -58,10 +53,16 @@ function clearBrandLogo(){
   if(st) st.textContent='Logo will be removed on save.';
 }
 
-async function saveBranding(){
-  const st=document.getElementById('cfg_brand_status');
+// Persist branding (multipart: name + optional logo file). Returns {ok} /
+// {ok:false,error}. No-ops (ok:true) when the branding section isn't available
+// to this user, so the unified Save can call it unconditionally.
+async function persistBranding(){
+  const sec=document.getElementById('branding_section');
+  if(!sec || sec.classList.contains('hidden')) return {ok:true};
+  const nameEl=document.getElementById('cfg_brand_name');
+  if(!nameEl) return {ok:true};
   const fd=new FormData();
-  fd.append('brand_name', document.getElementById('cfg_brand_name').value||'');
+  fd.append('brand_name', nameEl.value||'');
   if(_brandClearLogo) fd.append('clear_logo','1');
   const fi=document.getElementById('cfg_brand_logo_file');
   if(fi&&fi.files&&fi.files[0]) fd.append('logo', fi.files[0]);
@@ -69,14 +70,15 @@ async function saveBranding(){
   if(window.CIMAuth&&window.CIMAuth.csrf) headers['X-CSRF-Token']=window.CIMAuth.csrf;
   try{
     const r=await fetch('/api/branding',{method:'POST',body:fd,headers});
-    const d=await r.json();
-    if(!r.ok){ if(st) st.textContent=d.error||'Save failed'; return; }
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok) return {ok:false, error:d.error||'Branding save failed'};
     _brandClearLogo=false;
-    if(st) st.textContent='Saved.';
+    const st=document.getElementById('cfg_brand_status');
+    if(st) st.textContent='';
     applyBranding(d);
     const bp=document.getElementById('cfg_brand_logo_preview');
     if(bp){ if(d.brand_logo){ bp.src=d.brand_logo; bp.classList.remove('hidden'); }
             else bp.classList.add('hidden'); }
-    if(window.showToast) showToast('Branding updated');
-  }catch(e){ if(st) st.textContent='Save failed'; }
+    return {ok:true};
+  }catch(e){ return {ok:false, error:'Branding save failed'}; }
 }
