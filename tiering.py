@@ -268,23 +268,57 @@ def plan(db=None):
                 continue
         moves.append({"rel": f["rel"], "from": cur, "to": tgt, "size": f["size"]})
 
-    stats = [{
-        "name": t["name"], "path": t["path"], "ratio": t["ratio"],
-        "speed_mbps": t["speed_mbps"],
-        "budget_bytes": int(budget[i]),
-        "planned_bytes": int(used[i]),
-        "actual_bytes": _tier_usage_bytes(i, cfg),
-    } for i, t in enumerate(tiers)]
+    stats = []
+    for i, t in enumerate(tiers):
+        files_n, actual = _walk_usage(_object_root(t["path"]))
+        stats.append({
+            "name": t["name"], "path": t["path"], "ratio": t["ratio"],
+            "speed_mbps": t["speed_mbps"],
+            "budget_bytes": int(budget[i]),
+            "planned_bytes": int(used[i]),
+            "actual_bytes": actual,
+            "actual_files": files_n,
+        })
     return moves, stats
 
 def _tier_usage_bytes(idx, cfg):
-    root = _object_root(cfg["tiers"][idx]["path"])
-    total = 0
+    return _walk_usage(_object_root(cfg["tiers"][idx]["path"]))[1]
+
+def _walk_usage(root):
+    """(file_count, total_bytes) under root; (0, 0) if it doesn't exist."""
+    count = total = 0
     for dirpath, _, names in os.walk(root):
         for n in names:
-            try: total += os.stat(os.path.join(dirpath, n)).st_size
-            except OSError: pass
-    return total
+            try:
+                total += os.stat(os.path.join(dirpath, n)).st_size
+                count += 1
+            except OSError:
+                pass
+    return count, total
+
+def _media_usage(cfg):
+    """Bytes/files living directly under media/, excluding any tier object
+    roots that happen to sit inside it (so tiers aren't double-counted)."""
+    media_dir = _state["media_dir"]
+    if not media_dir:
+        return 0, 0
+    tier_roots = {os.path.abspath(_object_root(t["path"])) for t in cfg["tiers"]}
+    count = total = 0
+    for dirpath, dirs, names in os.walk(media_dir):
+        if os.path.abspath(dirpath) in tier_roots:
+            dirs[:] = []
+            continue
+        for n in names:
+            p = os.path.join(dirpath, n)
+            try:
+                # symlinks into tiers cost ~nothing here; count real bytes only
+                st = os.lstat(p)
+                if not os.path.islink(p):
+                    total += st.st_size
+                    count += 1
+            except OSError:
+                pass
+    return count, total
 
 # ── executor ──────────────────────────────────────────────────────────────────
 def _dest_object_path(tier_path, rel):
@@ -444,4 +478,6 @@ def status():
     except Exception as e:
         stats = []
         log.error(f"status plan failed: {e}")
-    return {"config": cfg, "tiers": stats, "run": dict(_state["run"])}
+    m_files, m_bytes = _media_usage(cfg)
+    media = {"path": _state.get("media_dir"), "files": m_files, "bytes": m_bytes}
+    return {"config": cfg, "tiers": stats, "media": media, "run": dict(_state["run"])}

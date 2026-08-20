@@ -28,7 +28,7 @@ function settingsTab(name) {
   if (name === 'users') window.openUserAdmin && window.openUserAdmin();
 }
 
-function openSettings(tab = 'ai') {
+function openSettings(tab = 'general') {
   const admin = !!(window.CIMAuth && window.CIMAuth.user && window.CIMAuth.user.is_admin);
   document.querySelectorAll('#settings_modal [data-admin-only]').forEach(el => {
     el.classList.toggle('hidden', !admin);
@@ -56,35 +56,8 @@ async function loadStorageTab() {
     { name: 'nvme', ratio: 5,  speed_mbps: 3000 },
     { name: 'ssd',  ratio: 50, speed_mbps: 500 },
     { name: 'hdd',  ratio: 45, speed_mbps: 150 }]).forEach(addTierRow);
-  loadPacksSettings();
   refreshTiersStatus();
-  refreshPacksStatus();
-  _tiersPoll = setInterval(() => { refreshTiersStatus(); refreshPacksStatus(); }, 4000);
-}
-
-function loadPacksSettings() {
-  // Pack config lives in /api/state under "packs".
-  const apply = (p) => {
-    p = p || {};
-    const set = (id, v) => { const el = document.getElementById(id); if (el != null && v != null) el.value = v; };
-    const chk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
-    chk('packs_enabled', p.enabled);
-    chk('packs_auto', p.auto_migrate);
-    set('packs_size_mb', Math.round((p.pack_bytes ?? (1 << 30)) / (1024 * 1024)));
-    set('packs_max_open', p.max_open_packs ?? 16);
-    set('packs_idle', p.idle_sec ?? 60);
-  };
-  fetch('/api/state').then(r => r.json()).then(s => apply(s.packs)).catch(() => apply({}));
-}
-
-function collectPacksConfig() {
-  return {
-    enabled: document.getElementById('packs_enabled').checked,
-    auto_migrate: document.getElementById('packs_auto').checked,
-    pack_bytes: (parseInt(document.getElementById('packs_size_mb').value) || 1024) * 1024 * 1024,
-    max_open_packs: parseInt(document.getElementById('packs_max_open').value) || 16,
-    idle_sec: parseInt(document.getElementById('packs_idle').value) || 60,
-  };
+  _tiersPoll = setInterval(refreshTiersStatus, 4000);
 }
 
 function stopTiersPoll() { clearInterval(_tiersPoll); _tiersPoll = null; }
@@ -109,45 +82,9 @@ async function saveTiersConfig() {
   const r = await fetch('/api/tiers', { method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(collectTiersConfig()) }).then(r => r.json()).catch(() => null);
-  // Pack settings go through the general settings endpoint, under "packs".
-  const pr = await fetch('/api/update_settings', { method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ packs: collectPacksConfig() }) }).then(r => r.json()).catch(() => null);
   document.getElementById('status_text').textContent =
-    (r?.success && pr?.success) ? 'Storage settings saved.' : 'Failed to save some storage settings.';
+    r?.success ? 'Storage settings saved.' : 'Failed to save storage settings.';
   refreshTiersStatus();
-  refreshPacksStatus();
-}
-
-async function packsRun(job) {
-  const label = { all: 'Convert', compact: 'Compact', unpack: 'Unpack' }[job] || job;
-  if (job === 'unpack' && !confirm('Unpack every packed file back to loose files on disk? This can take a while.')) return;
-  const r = await fetch('/api/packs/run', { method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ job }) }).then(r => r.json()).catch(() => null);
-  document.getElementById('status_text').textContent =
-    r?.success ? `${label} started.` : `Could not start ${label.toLowerCase()} (packing disabled?).`;
-  refreshPacksStatus();
-}
-
-async function packsCancel() {
-  await fetch('/api/packs/cancel', { method: 'POST' }).catch(() => {});
-  refreshPacksStatus();
-}
-
-async function refreshPacksStatus() {
-  const el = document.getElementById('packs_status');
-  if (!el) return;
-  const r = await fetch('/api/packs/status').then(r => r.json()).catch(() => null);
-  if (!r) { el.textContent = 'Status unavailable.'; return; }
-  if (!r.enabled) { el.innerHTML = '<span class="text-gray-500">Packing disabled.</span>'; return; }
-  const run = r.run || {}, st = r.store || {};
-  let html = `<div class="text-gray-400">Worker: <span class="text-yellow-400">${run.phase || 'idle'}</span>` +
-    (run.active ? ` — ${run.packed || 0} packed, ${run.skipped || 0} skipped` : '') +
-    (run.errors ? `, <span class="text-red-400">${run.errors} errors</span>` : '') + `</div>`;
-  html += `<div class="text-gray-400">${st.blobs || 0} blobs in ${st.packs || 0} packs` +
-    ` (${fmtBytes(st.pack_bytes)}, ${st.garbage_pct != null ? st.garbage_pct : 0}% reclaimable)</div>`;
-  el.innerHTML = html;
 }
 
 function fmtBytes(b) {
@@ -157,20 +94,71 @@ function fmtBytes(b) {
   return b.toFixed(i ? 1 : 0) + ' ' + u[i];
 }
 
+function fmtGB(b) {
+  if (b == null) return '—';
+  return (b / 1e9).toFixed(b >= 1e10 ? 0 : 2) + ' GB';
+}
+
+function fmtCount(n) {
+  if (n == null) return '—';
+  return n.toLocaleString() + (n === 1 ? ' file' : ' files');
+}
+
+function _statusRow(label, sub, files, bytes, barPct, barColor) {
+  const bar = barPct == null ? '' :
+    `<div class="h-1.5 bg-gray-700 rounded mt-1">
+       <div class="h-1.5 ${barColor} rounded" style="width:${Math.min(100, barPct)}%"></div></div>`;
+  return `<div class="py-1.5 border-b border-gray-800 last:border-0">
+      <div class="flex justify-between items-baseline gap-3">
+        <div class="min-w-0">
+          <span class="text-gray-200 font-medium">${label}</span>
+          ${sub ? `<span class="text-[10px] text-gray-600 ml-1 truncate">${sub}</span>` : ''}
+        </div>
+        <div class="text-right whitespace-nowrap">
+          <span class="text-gray-200">${fmtGB(bytes)}</span>
+          <span class="text-[11px] text-gray-500 ml-2">${fmtCount(files)}</span>
+        </div>
+      </div>${bar}</div>`;
+}
+
 async function refreshTiersStatus() {
   const el = document.getElementById('tiers_status');
+  if (!el) return;
   const r = await fetch('/api/tiers/status').then(r => r.json()).catch(() => null);
   if (!r?.success) { el.textContent = 'Status unavailable.'; return; }
   const run = r.run || {};
-  let html = `<div class="text-gray-400">Worker: <span class="text-yellow-400">${run.phase || 'idle'}</span>` +
+  const worker = `<div class="text-[11px] text-gray-500 mb-2">Worker:
+      <span class="text-yellow-400">${run.phase || 'idle'}</span>` +
     (run.planned ? ` — ${run.done}/${run.planned} moves, ${fmtBytes(run.moved_bytes)} moved` : '') +
     (run.errors ? `, <span class="text-red-400">${run.errors} errors</span>` : '') + `</div>`;
-  for (const t of (r.tiers || [])) {
-    const pct = t.budget_bytes ? Math.min(100, 100 * t.actual_bytes / t.budget_bytes) : 0;
-    html += `<div><span class="text-gray-400">${t.name}</span> — ${fmtBytes(t.actual_bytes)} of ${fmtBytes(t.budget_bytes)} target
-      <div class="h-1.5 bg-gray-700 rounded mt-0.5"><div class="h-1.5 bg-amber-500 rounded" style="width:${pct}%"></div></div></div>`;
+
+  const tiers = r.tiers || [];
+  const media = r.media || null;
+  const grand = tiers.reduce((a, t) => a + (t.actual_bytes || 0), 0) + (media?.bytes || 0);
+  const gfiles = tiers.reduce((a, t) => a + (t.actual_files || 0), 0) + (media?.files || 0);
+
+  let rows = '';
+  if (media) {
+    rows += _statusRow('media/ <span class="text-[10px] text-gray-500 font-normal">(links · DB · thumbs)</span>',
+      media.path || '', media.files, media.bytes, null, null);
   }
-  el.innerHTML = html;
+  for (const t of tiers) {
+    const pct = t.budget_bytes ? 100 * t.actual_bytes / t.budget_bytes : null;
+    const over = pct != null && pct > 100;
+    const sub = `target ${fmtGB(t.budget_bytes)}`;
+    rows += _statusRow(t.name, sub, t.actual_files, t.actual_bytes,
+      pct, over ? 'bg-rose-500' : 'bg-amber-500');
+  }
+  if (!rows) rows = `<div class="text-gray-500 text-[11px] py-1">No tiers configured — all bytes live in media/.</div>`;
+
+  const total = `<div class="flex justify-between items-baseline pt-2 mt-1 border-t border-gray-700">
+      <span class="text-gray-400 font-medium">Total</span>
+      <div class="text-right whitespace-nowrap">
+        <span class="text-gray-200 font-medium">${fmtGB(grand)}</span>
+        <span class="text-[11px] text-gray-500 ml-2">${fmtCount(gfiles)}</span>
+      </div></div>`;
+
+  el.innerHTML = worker + rows + total;
 }
 
 async function tiersRebalance() {

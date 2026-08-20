@@ -244,6 +244,11 @@ async function fetchState(){
     const s=await fetch('/api/state').then(r=>r.json());
     document.getElementById('status_text').innerText=s.status_text;
     applyBranding(s);
+    // Search quick-filters (chips under the search box). Cached globally and
+    // (re)rendered every state load so a settings save reflects immediately.
+    quick_filters_cache = s.search_quick_filters || [];
+    if(typeof renderQuickFilters==='function') renderQuickFilters();
+    if(typeof renderQuickFilterEditor==='function') renderQuickFilterEditor();
     const sel=document.getElementById('model_selector');
     const prev=sel.value;
     const models=s.available_models||[];
@@ -308,7 +313,9 @@ async function fetchState(){
       {const rs=new Set(ppd.ratios||['square','16:9','9:16']);
        document.querySelectorAll('#cfg_pp_ratios input').forEach(c=>{c.checked=rs.has(c.value);});}
       oai_actions_cache=s.oai_actions||[];
-      renderAiActions(); updateActionDropdown(); hasSettings=true;
+      renderAiActions(); updateActionDropdown();
+      if(typeof renderQuickFilterEditor==='function') renderQuickFilterEditor();
+      hasSettings=true;
       try{ document.getElementById('cfg_pipeline').value=JSON.stringify(s.pipeline_tree||{},null,2); }catch(_){}
       const at=document.getElementById('autotag_toggle');
       if(at) at.checked=!!s.autotag_enabled;

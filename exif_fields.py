@@ -69,6 +69,15 @@ class EXIFField:
                                       # rather than reading from the camera;
                                       # implies writable
     note: str = ""                    # free-text hint shown in the editor
+    aliases: tuple = ()               # other tag names the same tag id is known
+                                      # by in different backends. The schema uses
+                                      # ExifTool names, but the pyexiv2/exiv2
+                                      # backend emits EXIF-standard names for some
+                                      # tags (e.g. exiftool 'CreateDate' vs exiv2
+                                      # 'DateTimeDigitized', 'ModifyDate' vs
+                                      # 'DateTime'). Listing the alias here lets
+                                      # the reader map the value onto this field
+                                      # instead of dropping it into 'unknown'.
 
     def __post_init__(self):
         # A generated field is one we produce, so it must be writable.
@@ -382,6 +391,7 @@ IMAGE_FIELDS = [
     EXIFField(0x0131, "Software", TYPE_STRING, writable=False,
               note="Creating software; not normally user-edited"),
     EXIFField(0x0132, "ModifyDate", TYPE_STRING, writable=False,
+              aliases=("DateTime",),
               note="Called DateTime by the EXIF spec; read-only"),
 
     # Artist: primary artist or a list of all artists. Becomes a list-type tag
@@ -1329,6 +1339,7 @@ PHOTO_FIELDS = [
     EXIFField(0x9003, "DateTimeOriginal", TYPE_STRING, writable=False,
               note="When the original image was taken; read-only here"),
     EXIFField(0x9004, "CreateDate", TYPE_STRING, writable=False,
+              aliases=("DateTimeDigitized",),
               note="DateTimeDigitized; read-only here"),
     EXIFField(0x9009, "GooglePlusUploadCode", TYPE_UNDEF, writable=False, note="read-only"),
     EXIFField(0x9010, "OffsetTime",           TYPE_STRING, writable=False,

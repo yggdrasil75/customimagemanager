@@ -78,6 +78,136 @@ document.getElementById('search_input').addEventListener('input',e=>{
 });
 
 
+// ── Quick-filter dropdown ────────────────────────────────────────────────────
+// Chips shown when the search box is focused. Their labels/queries come from the
+// configurable `search_quick_filters` setting, so home vs. work can surface
+// different filters. Clicking a chip drops its query into the search box.
+function renderQuickFilters(){
+  const list=document.getElementById('quick_filters_list');
+  if(!list) return;
+  const filters=(typeof quick_filters_cache!=='undefined' && quick_filters_cache) || [];
+  list.innerHTML='';
+  if(!filters.length){
+    list.innerHTML='<span class="text-xs text-gray-500 px-1 py-1">No quick filters set — add some in Settings.</span>';
+    return;
+  }
+  filters.forEach(f=>{
+    const b=document.createElement('button');
+    b.type='button';
+    b.className='text-xs bg-gray-700 hover:bg-blue-600 rounded px-2 py-1';
+    b.textContent=f.label;
+    b.title=f.query;
+    b.onclick=()=>applyQuickFilter(f.query);
+    list.appendChild(b);
+  });
+}
+
+function showQuickFilters(){
+  renderQuickFilters();
+  document.getElementById('quick_filters_pop').classList.remove('hidden');
+}
+
+function hideQuickFilters(){
+  const pop=document.getElementById('quick_filters_pop');
+  if(pop) pop.classList.add('hidden');
+  const dp=document.getElementById('date_picker_pop');
+  if(dp) dp.classList.add('hidden');
+}
+
+function applyQuickFilter(query){
+  const si=document.getElementById('search_input');
+  si.value=query;
+  hideQuickFilters();
+  si.dispatchEvent(new Event('input',{bubbles:true}));
+}
+
+// ── Quick-filter settings editor (in the Settings modal) ─────────────────────
+function renderQuickFilterEditor(){
+  const c=document.getElementById('quick_filters_rows');
+  if(!c) return;
+  const filters=(typeof quick_filters_cache!=='undefined' && quick_filters_cache) || [];
+  c.innerHTML='';
+  filters.forEach(f=>{
+    const row=document.createElement('div');
+    row.className='grid grid-cols-[1fr_2fr_28px] gap-2 items-center qf-row';
+    row.dataset.id=f.id||String(Date.now()+Math.random());
+    const label=document.createElement('input');
+    label.className='qf-label bg-gray-900 text-white text-xs p-1 rounded border border-gray-600';
+    label.value=f.label||''; label.placeholder='Label';
+    const query=document.createElement('input');
+    query.className='qf-query bg-gray-900 text-white text-xs p-1 rounded border border-gray-600';
+    query.value=f.query||''; query.placeholder='Query (e.g. line:failure)';
+    const del=document.createElement('button');
+    del.type='button'; del.textContent='✕';
+    del.className='text-red-500 hover:text-red-400 text-xs';
+    del.onclick=()=>row.remove();
+    row.append(label,query,del);
+    c.appendChild(row);
+  });
+}
+
+function addQuickFilter(){
+  if(typeof quick_filters_cache==='undefined' || !quick_filters_cache) quick_filters_cache=[];
+  quick_filters_cache=collectQuickFilters();   // keep any in-progress edits
+  quick_filters_cache.push({id:String(Date.now()),label:'',query:''});
+  renderQuickFilterEditor();
+}
+
+// Read the editor rows back into an array (used on save).
+function collectQuickFilters(){
+  return [...document.querySelectorAll('.qf-row')].map(r=>({
+    id:r.dataset.id,
+    label:(r.querySelector('.qf-label').value||'').trim(),
+    query:(r.querySelector('.qf-query').value||'').trim(),
+  })).filter(f=>f.label && f.query);
+}
+
+function toggleDatePicker(){
+  document.getElementById('date_picker_pop').classList.toggle('hidden');
+}
+
+// Strip any existing date-family token from the search box, returning the rest.
+function _stripDateTokens(value){
+  const keys=['date','datetime','dateoriginal','capture_date','capturedate','datedigitized','modified'];
+  return value.split(/\s+/).filter(t=>{
+    const k=t.split(':')[0].toLowerCase();
+    return t && !keys.includes(k);
+  });
+}
+
+function applyDateFilter(){
+  const field=document.getElementById('date_field').value;
+  const from=document.getElementById('date_from').value;
+  const to=document.getElementById('date_to').value;
+  const si=document.getElementById('search_input');
+  let terms=_stripDateTokens(si.value);
+  if(from && to){ terms.push(field+':'+from+'..'+to); }
+  else if(from){ terms.push(field+':'+from); }
+  else if(to){ terms.push(field+':<='+to); }
+  si.value=terms.join(' ').trim();
+  hideQuickFilters();
+  si.dispatchEvent(new Event('input',{bubbles:true}));
+}
+
+function clearDateFilter(){
+  const si=document.getElementById('search_input');
+  document.getElementById('date_from').value='';
+  document.getElementById('date_to').value='';
+  si.value=_stripDateTokens(si.value).join(' ').trim();
+  hideQuickFilters();
+  si.dispatchEvent(new Event('input',{bubbles:true}));
+}
+
+// Close the whole dropdown when clicking outside the search area.
+document.addEventListener('click',e=>{
+  const pop=document.getElementById('quick_filters_pop');
+  const si=document.getElementById('search_input');
+  if(pop && !pop.classList.contains('hidden') &&
+     !pop.contains(e.target) && e.target!==si){
+    hideQuickFilters();
+  }
+});
+
 function syncUrl(){
   const p=new URLSearchParams();
   if(currentPage) p.set('page',currentPage);

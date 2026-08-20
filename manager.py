@@ -163,6 +163,11 @@ state = {
     "pose_kind": "body",
     "pose_size": "n",
     "page_size": 200,
+    "search_quick_filters": [
+        {"id": "1", "label": "Untagged",   "query": "is:untagged"},
+        {"id": "2", "label": "This year",  "query": "date:2025"},
+        {"id": "3", "label": "Needs review", "query": "is:unconfirmed"},
+    ],
     "thumb_lru_bytes": 2 << 30,
     "meta_cache_max": 4096,
     "wsgi_threads": max(8, min(32, (os.cpu_count() or 8) // 2)),
@@ -680,11 +685,49 @@ def _init_db():
         "ALTER TABLE albums ADD COLUMN description TEXT DEFAULT ''",
         "ALTER TABLE albums ADD COLUMN cover TEXT DEFAULT ''",
         "ALTER TABLE albums ADD COLUMN created REAL",
+        # Semantic capture/creation dates, each normalized to 'YYYY-MM-DD' for
+        # the date search filters, with a matching *_epoch (unix seconds) for
+        # range math. Resolved at index time by _resolve_dates, which scans every
+        # date-bearing field across EXIF / IPTC / XMP (mapped AND unmapped) plus
+        # the file's own inode times, and sorts each into one of five buckets by
+        # the qualifier in the field name:
+        #   d_actual     — "date"/"datetime" with no more-specific qualifier
+        #                  (EXIF DateTime, xmp:CreateDate, IPTC DateCreated...)
+        #   d_original   — field name contains "original" (EXIF DateTimeOriginal)
+        #   d_capture    — field name contains "capture"
+        #   d_digitized  — field name contains "digitized" (EXIF DateTimeDigitized)
+        #                  OR the file/inode creation time (ctime/birthtime)
+        #   d_modified   — field name contains "modified" (EXIF ModifyDate)
+        #                  OR the file/inode modified time (mtime)
+        # Search tokens: date: = actual|original|digitized, datetime: = actual,
+        # dateoriginal: = original, capture_date: = capture,
+        # datedigitized: = digitized, modified: = modified. Matching is STRICT:
+        # a token only matches files whose corresponding bucket is populated.
+        # NULL = that bucket had no source on this file.
+        "ALTER TABLE files ADD COLUMN d_actual TEXT DEFAULT NULL",
+        "ALTER TABLE files ADD COLUMN d_actual_epoch REAL DEFAULT NULL",
+        "ALTER TABLE files ADD COLUMN d_original TEXT DEFAULT NULL",
+        "ALTER TABLE files ADD COLUMN d_original_epoch REAL DEFAULT NULL",
+        "ALTER TABLE files ADD COLUMN d_capture TEXT DEFAULT NULL",
+        "ALTER TABLE files ADD COLUMN d_capture_epoch REAL DEFAULT NULL",
+        "ALTER TABLE files ADD COLUMN d_digitized TEXT DEFAULT NULL",
+        "ALTER TABLE files ADD COLUMN d_digitized_epoch REAL DEFAULT NULL",
+        "ALTER TABLE files ADD COLUMN d_modified TEXT DEFAULT NULL",
+        "ALTER TABLE files ADD COLUMN d_modified_epoch REAL DEFAULT NULL",
+        # Which source field won each bucket, for explainability (e.g. a
+        # surprising d_actual). JSON: {"d_actual":"Exif.Photo.DateTime", ...}.
+        "ALTER TABLE files ADD COLUMN date_sources TEXT DEFAULT NULL",
     ]:
         try:
             db.execute(ddl); db.commit()
         except Exception:
             pass
+    try:
+        for c in ("d_actual", "d_original", "d_capture", "d_digitized", "d_modified"):
+            db.execute(f"CREATE INDEX IF NOT EXISTS idx_{c} ON files({c})")
+        db.commit()
+    except Exception:
+        pass
     # One-time consolidation: iqa_manual is retired in favor of rating_user.
     # Fold any pre-existing manual IQA ratings (iqa_manual=1) into the unified
     # rating columns so upgrading users don't lose their hand-set stars. Guarded
@@ -987,6 +1030,95 @@ def _get_file_row(rel_path):
 
 _FILTER_RE = re.compile(r'(width|height)\s*(<=|>=|<|>|=)\s*(\d+)$', re.I)
 
+# Date search tokens. Each maps to the set of bucket columns it queries; a match
+# is STRICT (the file must have at least one of those buckets populated). The
+# broad `date:` spans actual+original+digitized per the search grammar; the
+# narrow tokens hit one bucket each.
+_DATE_TOKEN_COLS = {
+    "date":         ("d_actual", "d_original", "d_digitized"),
+    "datetime":     ("d_actual",),
+    "dateoriginal": ("d_original",),
+    "capture_date": ("d_capture",),
+    "capturedate":  ("d_capture",),   # tolerate the un-underscored spelling
+    "datedigitized": ("d_digitized",),
+    "modified":     ("d_modified",),
+}
+# key:op?value  where value is a date or partial date (YYYY, YYYY-MM, YYYY-MM-DD)
+# or a range a..b. op is one of < <= > >= = (default: prefix/equality match).
+_DATE_RE = re.compile(
+    r'^(' + '|'.join(_DATE_TOKEN_COLS) + r'):'
+    r'(<=|>=|<|>|=)?'
+    r'([0-9]{4}(?:[-/][0-9]{1,2}){0,2}'
+    r'(?:\.\.[0-9]{4}(?:[-/][0-9]{1,2}){0,2})?)$', re.I)
+
+def _norm_date_literal(s: str, end: bool = False) -> str | None:
+    """Normalize a user date literal to 'YYYY-MM-DD'. Partial dates expand to the
+    first (or, with end=True, the last) day of the given period so range/compare
+    math is well defined. Returns None if unparseable."""
+    s = s.strip().replace('/', '-')
+    parts = s.split('-')
+    try:
+        if len(parts) == 1:            # YYYY
+            y = int(parts[0])
+            return f"{y:04d}-12-31" if end else f"{y:04d}-01-01"
+        if len(parts) == 2:            # YYYY-MM
+            y, mo = int(parts[0]), int(parts[1])
+            if not (1 <= mo <= 12):
+                return None
+            if end:
+                from calendar import monthrange
+                return f"{y:04d}-{mo:02d}-{monthrange(y, mo)[1]:02d}"
+            return f"{y:04d}-{mo:02d}-01"
+        if len(parts) == 3:            # YYYY-MM-DD
+            y, mo, d = int(parts[0]), int(parts[1]), int(parts[2])
+            datetime(y, mo, d)          # validate
+            return f"{y:04d}-{mo:02d}-{d:02d}"
+    except Exception:
+        return None
+    return None
+
+def _date_clause(cols: tuple, op: str | None, literal: str) -> tuple[str, list]:
+    """Build a SQL WHERE fragment + params matching any of `cols` against a date
+    literal/range. STRICT: NULL buckets never match (SQL comparisons on NULL are
+    already false, so no extra guard needed). Compares the stored 'YYYY-MM-DD'
+    text lexicographically, which is correct for zero-padded ISO dates."""
+    # Range form a..b (inclusive), ignores op.
+    if '..' in literal:
+        lo_raw, hi_raw = literal.split('..', 1)
+        lo = _norm_date_literal(lo_raw, end=False)
+        hi = _norm_date_literal(hi_raw, end=True)
+        if not lo or not hi:
+            return "", []
+        ors = " OR ".join(f"({c} IS NOT NULL AND {c} BETWEEN ? AND ?)" for c in cols)
+        params = []
+        for _ in cols:
+            params += [lo, hi]
+        return f"({ors})", params
+
+    if op in ("<", "<="):
+        bound = _norm_date_literal(literal, end=(op == "<="))
+        cmp = "<" if op == "<" else "<="
+    elif op in (">", ">="):
+        bound = _norm_date_literal(literal, end=(op == ">"))
+        cmp = ">" if op == ">" else ">="
+    else:
+        # Bare or '=': match the whole named period (prefix match), so
+        # `date:2021` matches all of 2021 and `date:2021-05` all of that month.
+        lo = _norm_date_literal(literal, end=False)
+        hi = _norm_date_literal(literal, end=True)
+        if not lo or not hi:
+            return "", []
+        ors = " OR ".join(f"({c} IS NOT NULL AND {c} BETWEEN ? AND ?)" for c in cols)
+        params = []
+        for _ in cols:
+            params += [lo, hi]
+        return f"({ors})", params
+
+    if not bound:
+        return "", []
+    ors = " OR ".join(f"({c} IS NOT NULL AND {c} {cmp} ?)" for c in cols)
+    return f"({ors})", [bound] * len(cols)
+
 def _parse_search(search: str) -> tuple[str, list, list]:
     """!
     @brief Pull structured filters (width:/height: comparisons, is: flags) out of free text.
@@ -999,6 +1131,14 @@ def _parse_search(search: str) -> tuple[str, list, list]:
             col, opx, val = m.group(1).lower(), m.group(2), int(m.group(3))
             where.append(f"{col} {opx} ?")
             params.append(val)
+            continue
+        dm = _DATE_RE.match(tok)
+        if dm:
+            cols = _DATE_TOKEN_COLS[dm.group(1).lower()]
+            clause, cp = _date_clause(cols, dm.group(2), dm.group(3))
+            if clause:
+                where.append(clause)
+                params += cp
             continue
         low = tok.lower()
         if low == 'is:untagged':
@@ -1393,6 +1533,10 @@ def _index_file(rel_path: str, force: bool = False,
         if img is None:
             # Undecodable — write stub so we don't retry every run
             _upsert_file(rel_path, mtime, 0, 0, sha, None, None, [], '')
+            try:
+                _store_dates(rel_path, _resolve_dates(abs_path, mtime))
+            except Exception as e:
+                access_logger.warning(f"date resolve (stub) {rel_path}: {e}")
             _set_media_kind(rel_path)
             return True
 
@@ -1420,6 +1564,11 @@ def _index_file(rel_path: str, force: bool = False,
         meta  = read_metadata(abs_path)
         _upsert_file(rel_path, mtime, w, h, sha, ph8, ph32,
                      meta['tags'], meta['description'])
+        # Resolve the five semantic date buckets from all metadata + inode times.
+        try:
+            _store_dates(rel_path, _resolve_dates(abs_path, mtime))
+        except Exception as e:
+            access_logger.warning(f"date resolve {rel_path}: {e}")
         # Rebuild the analysis + flag caches from the sidecar so moving files to
         # a new machine and reindexing restores AI analysis and deletion flags.
         _an = meta.get('analysis')
@@ -1633,7 +1782,7 @@ def save_config():
             "body_enabled","body_cluster_eps","object_proposals",
             "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
             "barcode_model","barcode_conf", "iqa_model","brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
-            "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads"]
+            "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters"]
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys if k in state}, f, indent=2)
 
@@ -1954,6 +2103,265 @@ def _build_mwg_regions_xml(regions: list) -> tuple[str, str]:
         regions, saxutils.escape,
         _region_desc_to_json, _region_filter_link,
         lambda: str(uuid.uuid4()))
+
+# ── Date resolution ───────────────────────────────────────────────────────────
+
+_MONTHS = {m.lower(): i for i, m in enumerate(
+    ["", "January", "February", "March", "April", "May", "June", "July",
+     "August", "September", "October", "November", "December"]) if m}
+_MONTHS.update({m.lower(): i for i, m in enumerate(
+    ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep",
+     "Oct", "Nov", "Dec"]) if m})
+
+def _parse_any_date(val) -> tuple[str, float] | None:
+    """!
+    @brief Parse a date/datetime value in almost any common layout.
+    @return (isodate 'YYYY-MM-DD', epoch_seconds) or None if nothing usable.
+    @note Time and timezone are used for the epoch when present but the stored
+          date string is the local calendar date. Two-digit years and impossible
+          dates are rejected; day/month order is disambiguated when a value >12
+          forces it, else assumed the dominant field order of the source.
+    """
+    if val is None:
+        return None
+    # exiv2/pyexiv2 sometimes returns lists (repeated tags) — take first usable.
+    if isinstance(val, (list, tuple)):
+        for v in val:
+            r = _parse_any_date(v)
+            if r:
+                return r
+        return None
+    s = str(val).strip()
+    if not s or s in ("0000:00:00 00:00:00", "0000-00-00", "0000:00:00"):
+        return None
+
+    # 1) ISO 8601 and the EXIF 'YYYY:MM:DD[ T]HH:MM:SS' family. Accept ':' or '-'
+    #    or '/' between date parts, optional time, optional fractional seconds,
+    #    optional 'Z'/±HH:MM offset. This is the overwhelmingly common case.
+    m = re.match(
+        r'^\s*(\d{4})[:/-](\d{1,2})[:/-](\d{1,2})'
+        r'(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?'
+        r'\s*(Z|[+-]\d{2}:?\d{2})?)?\s*$', s)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        hh = int(m.group(4) or 0); mm = int(m.group(5) or 0); ss = int(m.group(6) or 0)
+        return _mk_date(y, mo, d, hh, mm, ss, m.group(7))
+
+    # 2) Slash/dash/dot dates with the YEAR LAST: DD-MM-YYYY, MM/DD/YYYY,
+    #    DD.MM.YYYY, with optional trailing time. Order disambiguated below.
+    m = re.match(
+        r'^\s*(\d{1,2})[./-](\d{1,2})[./-](\d{4})'
+        r'(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?\s*$', s)
+    if m:
+        a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        hh = int(m.group(4) or 0); mm = int(m.group(5) or 0); ss = int(m.group(6) or 0)
+        # If one field is >12 it must be the day; otherwise assume DD/MM (the
+        # more common worldwide order for year-last strings). US MM/DD still
+        # resolves correctly whenever the day is >12, and same-value ambiguity
+        # (e.g. 03/04) can't be resolved without locale, so we pick one.
+        if a > 12 and b <= 12:
+            d, mo = a, b
+        elif b > 12 and a <= 12:
+            d, mo = b, a
+        else:
+            d, mo = a, b   # assume day-first
+        return _mk_date(y, mo, d, hh, mm, ss, None)
+
+    # 3) Textual month: '22 May 2021', 'May 22, 2021', 'May 2021'.
+    m = re.match(r'^\s*(\d{1,2})\s+([A-Za-z]{3,9})\.?\s+(\d{4})', s)
+    if m and m.group(2).lower() in _MONTHS:
+        return _mk_date(int(m.group(3)), _MONTHS[m.group(2).lower()], int(m.group(1)), 0, 0, 0, None)
+    m = re.match(r'^\s*([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})', s)
+    if m and m.group(1).lower() in _MONTHS:
+        return _mk_date(int(m.group(3)), _MONTHS[m.group(1).lower()], int(m.group(2)), 0, 0, 0, None)
+    m = re.match(r'^\s*([A-Za-z]{3,9})\.?\s+(\d{4})\s*$', s)
+    if m and m.group(1).lower() in _MONTHS:
+        return _mk_date(int(m.group(2)), _MONTHS[m.group(1).lower()], 1, 0, 0, 0, None)
+
+    # 4) Compact 'YYYYMMDD' (e.g. IPTC DateCreated raw) with optional 'HHMMSS'.
+    m = re.match(r'^\s*(\d{4})(\d{2})(\d{2})(?:(\d{2})(\d{2})(\d{2}))?\s*$', s)
+    if m:
+        g = [int(x) if x else 0 for x in m.groups()]
+        return _mk_date(g[0], g[1], g[2], g[3], g[4], g[5], None)
+
+    # 5) Bare year 'YYYY' — least precise, but better than nothing for search.
+    m = re.match(r'^\s*(\d{4})\s*$', s)
+    if m:
+        return _mk_date(int(m.group(1)), 1, 1, 0, 0, 0, None)
+
+    return None
+
+def _mk_date(y, mo, d, hh, mm, ss, tz) -> tuple[str, float] | None:
+    """Validate parts and return ('YYYY-MM-DD', epoch) or None if impossible."""
+    if not (1826 <= y <= 2100):   # first photograph ~1826; guard junk years
+        return None
+    if not (1 <= mo <= 12):
+        return None
+    if not (1 <= d <= 31):
+        return None
+    try:
+        from datetime import timezone, timedelta
+        # Clamp obviously-bad day-of-month rather than rejecting the whole date.
+        for dd in (d, 28):
+            try:
+                base = datetime(y, mo, dd, min(hh, 23), min(mm, 59), min(ss, 59))
+                d = dd
+                break
+            except ValueError:
+                continue
+        else:
+            return None
+        iso = f"{y:04d}-{mo:02d}-{d:02d}"
+        if tz and tz != 'Z':
+            sign = 1 if tz[0] == '+' else -1
+            tz = tz[1:].replace(':', '')
+            off = timedelta(hours=int(tz[:2]), minutes=int(tz[2:4]))
+            epoch = (base.replace(tzinfo=timezone.utc) - sign * off).timestamp()
+        elif tz == 'Z':
+            epoch = base.replace(tzinfo=timezone.utc).timestamp()
+        else:
+            epoch = base.replace(tzinfo=timezone.utc).timestamp()
+        return iso, epoch
+    except Exception:
+        return None
+
+# Bucket classification. Order matters: the more specific qualifiers are tested
+# before the generic "actual", because e.g. 'DateTimeOriginal' contains both
+# 'date' and 'original'.
+# A few tag names carry a semantic that their plain wording doesn't reveal.
+# EXIF 'CreateDate' (exiftool) IS DateTimeDigitized; EXIF 'ModifyDate' IS the
+# base DateTime ("actual"). Keyed by the trailing tag name, case-insensitive.
+_DATE_NAME_OVERRIDES = {
+    "createdate": "d_digitized",       # 0x9004 == DateTimeDigitized
+    "datetimedigitized": "d_digitized",
+    "modifydate": "d_actual",          # 0x0132 == DateTime (the "actual" date)
+    "datetime": "d_actual",
+    "datetimeoriginal": "d_original",
+}
+
+def _date_bucket(field_name: str) -> str | None:
+    """Which semantic bucket a date-bearing field name belongs to, or None."""
+    n = field_name.lower()
+    tail = n.rsplit(".", 1)[-1]
+    # 'createdate' means DateTimeDigitized in EXIF but "resource created"
+    # (actual) in XMP, so only apply the EXIF-specific overrides to EXIF fields.
+    if n.startswith("exif.") and tail in _DATE_NAME_OVERRIDES:
+        return _DATE_NAME_OVERRIDES[tail]
+    if tail in ("datetimeoriginal",):   # unambiguous across standards
+        return "d_original"
+    # Must look date/time-bearing at all. 'digitized'/'modified'/'created'/
+    # 'capture' imply a time even without the word 'date' in some schemas.
+    if not any(k in n for k in ("date", "time", "digitized", "modified",
+                                "created", "capture")):
+        return None
+    # Exclude non-temporal look-alikes (e.g. 'TimeZone'/'OffsetTime' carry no
+    # date; subsec fields hold fractions, not dates — their values won't parse).
+    if "zone" in n or "offsettime" in n or "subsectime" in n:
+        return None
+    if "original" in n:
+        return "d_original"
+    if "capture" in n:
+        return "d_capture"
+    if "digitized" in n or "digital" in n:
+        return "d_digitized"
+    if "modif" in n:
+        return "d_modified"
+    # Plain create/created/creation and bare date/datetime -> the "actual" date.
+    return "d_actual"
+
+def _iter_metadata_date_fields(filepath: str):
+    """Yield (fully_qualified_name, raw_value) for every date-ish field on the
+    file across EXIF, IPTC and XMP — both schema-mapped fields and unmapped
+    ('unknown') tags, so nothing like a SubIFD DateTimeDigitized is missed."""
+    readers = (
+        ("Exif", exif_import.read_exif, "groups"),
+        ("Iptc", iptc_import.read_iptc, "records"),
+        ("Xmp",  xmp_import.read_xmp,   "namespaces"),
+    )
+    for prefix, fn, coll_key in readers:
+        try:
+            data = fn(filepath)
+        except Exception as e:
+            access_logger.warning(f"date scan {prefix} {filepath}: {e}")
+            continue
+        for coll in data.get(coll_key, []):
+            grp = coll.get("name") or coll.get("ns") or ""
+            for f in coll.get("fields", []):
+                if f.get("present") and f.get("raw") not in (None, ""):
+                    yield f"{prefix}.{grp}.{f.get('name')}", f.get("raw")
+            for u in coll.get("unknown", []):
+                if u.get("raw") not in (None, ""):
+                    yield f"{prefix}.{grp}.{u.get('name')}", u.get("raw")
+
+def _resolve_dates(filepath: str, mtime: float | None = None) -> dict:
+    """!
+    @brief Resolve the five semantic date buckets for one file.
+    @return {"d_actual":iso|None, "d_actual_epoch":float|None, ... , "sources":{bucket:field}}
+    @note Metadata beats inode times. Within a bucket the EARLIEST valid date
+          wins for capture-like buckets (actual/original/capture/digitized) and
+          the LATEST wins for 'modified' — a file edited twice keeps the most
+          recent edit, while capture time is the earliest evidence of the shot.
+          Inode ctime feeds d_digitized (a proxy for "entered this system") and
+          inode mtime feeds d_modified, but only when no metadata filled them.
+    """
+    buckets = {b: None for b in ("d_actual", "d_original", "d_capture",
+                                 "d_digitized", "d_modified")}
+    sources = {}
+
+    def consider(bucket, iso, epoch, src, prefer_latest):
+        cur = buckets[bucket]
+        if cur is None:
+            buckets[bucket] = (iso, epoch); sources[bucket] = src
+            return
+        better = (epoch > cur[1]) if prefer_latest else (epoch < cur[1])
+        if better:
+            buckets[bucket] = (iso, epoch); sources[bucket] = src
+
+    for name, raw in _iter_metadata_date_fields(filepath):
+        bucket = _date_bucket(name)
+        if not bucket:
+            continue
+        parsed = _parse_any_date(raw)
+        if not parsed:
+            continue
+        iso, epoch = parsed
+        consider(bucket, iso, epoch, name, prefer_latest=(bucket == "d_modified"))
+
+    # Inode fallbacks — only where metadata left the bucket empty.
+    try:
+        st = os.stat(filepath)
+        # birthtime (creation) where the platform exposes it, else ctime.
+        ctime = getattr(st, "st_birthtime", None) or st.st_ctime
+        mt = mtime if mtime is not None else st.st_mtime
+        if buckets["d_digitized"] is None and ctime:
+            iso = datetime.utcfromtimestamp(ctime).strftime("%Y-%m-%d")
+            buckets["d_digitized"] = (iso, float(ctime)); sources["d_digitized"] = "inode.ctime"
+        if buckets["d_modified"] is None and mt:
+            iso = datetime.utcfromtimestamp(mt).strftime("%Y-%m-%d")
+            buckets["d_modified"] = (iso, float(mt)); sources["d_modified"] = "inode.mtime"
+    except Exception as e:
+        access_logger.warning(f"date inode fallback {filepath}: {e}")
+
+    out = {}
+    for b, v in buckets.items():
+        out[b] = v[0] if v else None
+        out[f"{b}_epoch"] = v[1] if v else None
+    out["sources"] = sources
+    return out
+
+def _store_dates(rel_path: str, dates: dict) -> None:
+    """Write resolved date buckets onto the files row (no commit; caller batches)."""
+    _db().execute(
+        "UPDATE files SET d_actual=?, d_actual_epoch=?, d_original=?, "
+        "d_original_epoch=?, d_capture=?, d_capture_epoch=?, d_digitized=?, "
+        "d_digitized_epoch=?, d_modified=?, d_modified_epoch=?, date_sources=? "
+        "WHERE rel_path=?",
+        (dates["d_actual"], dates["d_actual_epoch"],
+         dates["d_original"], dates["d_original_epoch"],
+         dates["d_capture"], dates["d_capture_epoch"],
+         dates["d_digitized"], dates["d_digitized_epoch"],
+         dates["d_modified"], dates["d_modified_epoch"],
+         json.dumps(dates.get("sources") or {}), rel_path))
 
 def _set_compressed_bpp(filepath: str, width: int | None = None,
                         height: int | None = None) -> None:
@@ -4697,7 +5105,7 @@ def api_state():
          "face_cluster_eps","body_enabled","body_cluster_eps","object_proposals",
          "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
          "barcode_model","barcode_conf",
-         "model_groups","iqa_model","brand_name","brand_logo")})
+         "model_groups","iqa_model","brand_name","brand_logo","search_quick_filters")})
 
 @app.route("/api/update_settings", methods=["POST"])
 @_auth.require_feature("settings", action='update_settings', fields=())
@@ -4723,6 +5131,20 @@ def update_settings():
               "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
               "barcode_model","barcode_conf"):
         if k in d: state[k] = d[k]
+    # Search quick-filters: validate shape so a malformed save can't break the
+    # search UI. Each entry must be {id,label,query}; drop anything else.
+    if "search_quick_filters" in d:
+        clean = []
+        for i, it in enumerate(d.get("search_quick_filters") or []):
+            if not isinstance(it, dict):
+                continue
+            label = str(it.get("label", "")).strip()[:40]
+            query = str(it.get("query", "")).strip()[:200]
+            if not label or not query:
+                continue
+            clean.append({"id": str(it.get("id") or (i + 1)),
+                          "label": label, "query": query})
+        state["search_quick_filters"] = clean
     if seg_models is not None:
         if "sam_model" in d:
             state["sam_model"] = seg_models.resolve_sam_id(state["sam_model"])
@@ -4832,6 +5254,44 @@ def api_list():
     entries, total = _query_files(search, page * state["page_size"], state["page_size"], folder, album)
     return jsonify({"success":True,"files":entries,"total":total,
                     "page":page,"page_size": state["page_size"]})
+
+@app.route("/api/dates/backfill", methods=["POST"])
+def api_dates_backfill():
+    """Populate the five date buckets for rows that don't have them yet, without a
+    full re-index (no re-hash / re-thumbnail). Idempotent and resumable: only
+    touches rows where all five buckets are NULL, so re-running continues where it
+    left off. Pass ?force=1 to recompute every row (e.g. after a parser change).
+    Bounded per call by ?limit (default 500) so it never blocks the worker for
+    long; the response reports remaining, and the client loops until done."""
+    force = request.args.get("force", "") in ("1", "true", "yes")
+    limit = max(1, min(5000, int(request.args.get("limit", 500))))
+    db = _db()
+    if force:
+        rows = db.execute("SELECT rel_path FROM files LIMIT ?", (limit,)).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT rel_path FROM files WHERE d_actual IS NULL AND d_original IS NULL "
+            "AND d_capture IS NULL AND d_digitized IS NULL AND d_modified IS NULL "
+            "LIMIT ?", (limit,)).fetchall()
+    done = 0
+    for (rel_path,) in rows:
+        abs_path = get_safe_path(MEDIA_DIR, rel_path)
+        if not abs_path or not os.path.exists(abs_path):
+            continue
+        try:
+            _store_dates(rel_path, _resolve_dates(abs_path))
+            done += 1
+        except Exception as e:
+            access_logger.warning(f"date backfill {rel_path}: {e}")
+    db.commit()
+    if force:
+        remaining = 0
+    else:
+        remaining = db.execute(
+            "SELECT COUNT(*) FROM files WHERE d_actual IS NULL AND d_original IS NULL "
+            "AND d_capture IS NULL AND d_digitized IS NULL AND d_modified IS NULL"
+        ).fetchone()[0]
+    return jsonify({"success": True, "processed": done, "remaining": remaining})
 
 def _semantic_list(query, offset, limit, folder='', album=''):
     """Rank the library by text→image embedding similarity for the gallery

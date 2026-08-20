@@ -108,6 +108,12 @@ def read_exif(filepath):
         for f in grp.fields:
             present = f.name in raw_for_grp
             rawval = raw_for_grp.pop(f.name, None)
+            if not present:
+                for alias in getattr(f, "aliases", ()) or ():
+                    if alias in raw_for_grp:
+                        present = True
+                        rawval = raw_for_grp.pop(alias)
+                        break
             d = f.to_dict()
             d["raw"] = rawval
             d["present"] = present
