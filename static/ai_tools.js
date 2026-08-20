@@ -256,15 +256,12 @@ async function saveAiSettings(){
           ratios:[...document.querySelectorAll('#cfg_pp_ratios input:checked')].map(c=>c.value)}},
       oai_actions:oai_actions_cache};
   if(tree!==null) body.pipeline_tree=tree;
-  // Search quick-filters, collected from their editor rows.
-  if(typeof collectQuickFilters==='function'){
-    quick_filters_cache=collectQuickFilters();
-    body.search_quick_filters=quick_filters_cache;
-  }
+  // NB: search quick-filters live on the General tab and are saved by
+  // saveGeneralSettings(); the AI save intentionally leaves them untouched so a
+  // partially-rendered editor can never overwrite the saved list.
   await fetch('/api/update_settings',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(body)});
   updateActionDropdown();
-  if(typeof renderQuickFilters==='function') renderQuickFilters();
   document.getElementById('ai_modal').classList.add('hidden');
 }
 async function runLLM(){

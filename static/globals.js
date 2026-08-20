@@ -244,11 +244,11 @@ async function fetchState(){
     const s=await fetch('/api/state').then(r=>r.json());
     document.getElementById('status_text').innerText=s.status_text;
     applyBranding(s);
-    // Search quick-filters (chips under the search box). Cached globally and
-    // (re)rendered every state load so a settings save reflects immediately.
-    quick_filters_cache = s.search_quick_filters || [];
+    const editing = document.activeElement &&
+                    document.activeElement.closest &&
+                    document.activeElement.closest('#quick_filters_rows');
+    if(!editing) quick_filters_cache = s.search_quick_filters || [];
     if(typeof renderQuickFilters==='function') renderQuickFilters();
-    if(typeof renderQuickFilterEditor==='function') renderQuickFilterEditor();
     const sel=document.getElementById('model_selector');
     const prev=sel.value;
     const models=s.available_models||[];

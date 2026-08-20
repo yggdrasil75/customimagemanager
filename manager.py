@@ -5256,6 +5256,7 @@ def api_list():
                     "page":page,"page_size": state["page_size"]})
 
 @app.route("/api/dates/backfill", methods=["POST"])
+@_auth.require_feature("settings", action='dates_backfill', fields=())
 def api_dates_backfill():
     """Populate the five date buckets for rows that don't have them yet, without a
     full re-index (no re-hash / re-thumbnail). Idempotent and resumable: only

@@ -343,6 +343,8 @@
       </div>
       <div class="flex gap-2 ml-auto">
         <button onclick="closeSettings()" class="bg-gray-600 px-4 py-1.5 rounded text-sm">Close</button>
+        <button data-settings-pane="general" onclick="saveGeneralSettings()"
+          class="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded text-sm font-bold">Save general</button>
         <button data-settings-pane="ai" onclick="saveAiSettings()"
           class="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded text-sm font-bold">Save AI</button>
         <button data-settings-pane="storage" onclick="saveTiersConfig()"

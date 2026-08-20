@@ -148,18 +148,47 @@ function renderQuickFilterEditor(){
 
 function addQuickFilter(){
   if(typeof quick_filters_cache==='undefined' || !quick_filters_cache) quick_filters_cache=[];
-  quick_filters_cache=collectQuickFilters();   // keep any in-progress edits
+
+  quick_filters_cache=_collectQuickFilterRows(false);
   quick_filters_cache.push({id:String(Date.now()),label:'',query:''});
   renderQuickFilterEditor();
 }
 
-// Read the editor rows back into an array (used on save).
-function collectQuickFilters(){
-  return [...document.querySelectorAll('.qf-row')].map(r=>({
+function _collectQuickFilterRows(dropEmpty){
+  const rows=[...document.querySelectorAll('.qf-row')].map(r=>({
     id:r.dataset.id,
     label:(r.querySelector('.qf-label').value||'').trim(),
     query:(r.querySelector('.qf-query').value||'').trim(),
-  })).filter(f=>f.label && f.query);
+  }));
+  return dropEmpty ? rows.filter(f=>f.label && f.query) : rows;
+}
+
+// Backwards-compatible name used by the save path: returns save-ready rows.
+function collectQuickFilters(){
+  return _collectQuickFilterRows(true);
+}
+
+// Save the General tab. Currently just the search quick-filters, but this is the
+// hook to hang any future general-tab settings on. Persists via the same
+// /api/update_settings endpoint the other tabs use, then refreshes the chips.
+async function saveGeneralSettings(){
+  const filters=collectQuickFilters();
+  quick_filters_cache=filters;
+  try{
+    const r=await fetch('/api/update_settings',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({search_quick_filters:filters})});
+    if(!r.ok){
+      if(typeof showToast==='function') showToast('Save failed ('+r.status+').');
+      return;
+    }
+  }catch(e){
+    if(typeof showToast==='function') showToast('Save failed.');
+    return;
+  }
+  renderQuickFilterEditor();       // reflect the cleaned (empty-dropped) list
+  renderQuickFilters();            // refresh the chips under the search box
+  if(typeof showToast==='function') showToast('General settings saved.');
 }
 
 function toggleDatePicker(){

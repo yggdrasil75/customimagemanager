@@ -35,6 +35,7 @@ function openSettings(tab = 'general') {
   });
   document.getElementById('settings_modal').classList.remove('hidden');
   window.pipelineEditorRefresh && window.pipelineEditorRefresh();
+  if (typeof renderQuickFilterEditor === 'function') renderQuickFilterEditor();
   settingsTab(tab);
 }
 
