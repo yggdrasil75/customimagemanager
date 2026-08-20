@@ -168,6 +168,51 @@
           class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
       </div>
       <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
+        <label class="text-xs text-teal-300 font-bold block mb-2">Image preprocessing
+          <span class="font-normal text-gray-500">(applied to every image sent to the vision model &mdash; helps smaller/older models)</span></label>
+        <div class="grid grid-cols-2 gap-4">
+          <div class="border border-gray-700 rounded p-3">
+            <label class="flex items-center gap-2 text-sm text-gray-300 mb-2 cursor-pointer">
+              <input id="cfg_pp_compress" type="checkbox" class="accent-teal-500"> Compress (downscale)</label>
+            <div class="grid grid-cols-2 gap-2">
+              <div><label class="text-[10px] text-gray-500 block mb-0.5">Max longest side (px)</label>
+                <input id="cfg_pp_maxside" type="number" min="64" step="64"
+                  class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white"></div>
+              <div><label class="text-[10px] text-gray-500 block mb-0.5">Interpolation</label>
+                <select id="cfg_pp_interp"
+                  class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+                  <option value="area">area (best downscale)</option>
+                  <option value="linear">linear</option>
+                  <option value="cubic">cubic</option>
+                  <option value="lanczos4">lanczos4</option>
+                  <option value="nearest">nearest</option>
+                </select></div>
+            </div>
+          </div>
+          <div class="border border-gray-700 rounded p-3">
+            <label class="flex items-center gap-2 text-sm text-gray-300 mb-2 cursor-pointer">
+              <input id="cfg_pp_pad" type="checkbox" class="accent-teal-500"> Pad to valid ratio</label>
+            <div class="mb-2"><label class="text-[10px] text-gray-500 block mb-0.5">Fill</label>
+              <select id="cfg_pp_fill"
+                class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+                <option value="black">black</option>
+                <option value="white">white</option>
+                <option value="noise">random noise</option>
+              </select></div>
+            <label class="text-[10px] text-gray-500 block mb-1">Allowed ratios (snaps to nearest)</label>
+            <div id="cfg_pp_ratios" class="flex flex-wrap gap-x-3 gap-y-1 text-xs text-gray-300">
+              <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="square" class="accent-teal-500"> square</label>
+              <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="16:9" class="accent-teal-500"> 16:9</label>
+              <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="9:16" class="accent-teal-500"> 9:16</label>
+              <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="4:3" class="accent-teal-500"> 4:3</label>
+              <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="3:4" class="accent-teal-500"> 3:4</label>
+              <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="3:2" class="accent-teal-500"> 3:2</label>
+              <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="2:3" class="accent-teal-500"> 2:3</label>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
         <label class="text-xs text-purple-300 font-bold block mb-2">Faces &amp; People</label>
         <div class="grid grid-cols-2 gap-3">
           <label class="flex items-center gap-2 text-sm text-gray-300">

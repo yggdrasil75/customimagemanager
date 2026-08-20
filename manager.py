@@ -84,6 +84,7 @@ try:
 except Exception:
     seg_runtime = None
 from pipeline import DEFAULT_PIPELINE, run_pipeline
+import llm_preprocess
 from templates import HTML, TRAINING_HTML
 
 import easyocr
@@ -170,6 +171,7 @@ state = {
     "gdl_opts": {}, 
     "gdl_auth": {},
     "oai_system_prompt": "You are an expert image analysis AI. Provide concise, highly detailed, and accurate responses.",
+    "llm_preprocess": llm_preprocess.DEFAULT,
     "oai_actions": [
         {"id":"1","name":"Describe Scene","prompt":"Describe the overall scene, lighting, and composition in a detailed paragraph.","target":"description"},
         {"id":"2","name":"Describe Clothes","prompt":"Focus entirely on the subject's clothing, style, and accessories.","target":"description"},
@@ -1626,7 +1628,7 @@ def load_config():
 
 def save_config():
     keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt",
-            "oai_actions","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size",
+            "oai_actions","llm_preprocess","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size",
             "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","our_model","face_cluster_eps",
             "body_enabled","body_cluster_eps","object_proposals",
             "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
@@ -3767,16 +3769,29 @@ _BOX_TOOL = [{"type": "function", "function": {
             "cy": {"type": "number"}, "w": {"type": "number"}, "h": {"type": "number"}},
         "required": ["class_name", "cx", "cy", "w", "h"]}}}, "required": ["boxes"]}}}]
 
+def _encode_for_llm(image_bgr, quality=85):
+    """Preprocess (compress/pad per state['llm_preprocess']) then JPEG-encode a
+    BGR image to a data-URL. Single chokepoint for every image sent to a vision
+    LLM — pipeline, SAM exemplar identification, and AI actions all pass through
+    here. Returns the data-URL string, or None if encoding fails."""
+    if image_bgr is None:
+        return None
+    image_bgr = llm_preprocess.preprocess(image_bgr, state.get("llm_preprocess"))
+    ok, buf = cv2.imencode('.jpg', image_bgr, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        return None
+    b64 = base64.b64encode(buf.tobytes()).decode()
+    return f"data:image/jpeg;base64,{b64}"
+
 def _llm_call(prompt, image_bgr, want="text", choices=None, endpoint=None):
     """Typed single-turn call used by the pipeline engine. `want` controls parsing.
     `endpoint` (optional) pins this call to a specific model instance."""
     content = [{"type": "text", "text": prompt}]
     if image_bgr is not None:
-        ok, buf = cv2.imencode('.jpg', image_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        if ok:
-            b64 = base64.b64encode(buf.tobytes()).decode()
+        url = _encode_for_llm(image_bgr)
+        if url:
             content.append({"type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+                            "image_url": {"url": url}})
     messages = [{"role": "system", "content": state.get("oai_system_prompt", "")},
                 {"role": "user", "content": content}]
 
@@ -4702,7 +4717,7 @@ def update_settings():
     # Same for the "our"/trained model: _detect_obb_or_box memoises by path.
     if "our_model" in d and d["our_model"] != state.get("our_model"):
         _load_yolo.cache_clear()
-    for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","pipeline_tree","yolo_size","pose_kind","pose_size",
+    for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","llm_preprocess","pipeline_tree","yolo_size","pose_kind","pose_size",
               "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","our_model","face_cluster_eps",
               "body_enabled","body_cluster_eps","object_proposals","iqa_model",
               "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
@@ -9789,8 +9804,7 @@ def run_llm():
                 write_metadata(fp, meta["tags"], meta["description"],
                                _merge_regions(meta["regions"], new))
             return jsonify({"success":True,"target":"regions","regions":new})
-        _,buf = cv2.imencode('.jpg',_to_bgr(img),[cv2.IMWRITE_JPEG_QUALITY,85])
-        b64 = base64.b64encode(buf.tobytes()).decode()
+        data_url = _encode_for_llm(_to_bgr(img))
         hdrs = {"Content-Type":"application/json"}
         if api_key: hdrs["Authorization"] = f"Bearer {api_key}"
         user_p = action["prompt"]
@@ -9800,7 +9814,7 @@ def run_llm():
                    "messages":[{"role":"system","content":sys_p},
                                 {"role":"user","content":[
                                     {"type":"text","text":user_p},
-                                    {"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}}]}]}
+                                    {"type":"image_url","image_url":{"url":data_url}}]}]}
         if action["target"]=="regions":
             payload["tools"]=[{"type":"function","function":{"name":"create_bounding_boxes",
                 "description":"Bounding boxes normalised 0..1",

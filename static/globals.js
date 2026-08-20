@@ -299,6 +299,14 @@ async function fetchState(){
       document.getElementById('cfg_pose_kind').value=s.pose_kind||'body';
       document.getElementById('cfg_pose_size').value=s.pose_size||'n';
       document.getElementById('cfg_system').value=s.oai_system_prompt||'';
+      const pp=s.llm_preprocess||{}, ppc=pp.compress||{}, ppd=pp.pad||{};
+      document.getElementById('cfg_pp_compress').checked=!!ppc.enabled;
+      document.getElementById('cfg_pp_maxside').value=ppc.max_side||1024;
+      document.getElementById('cfg_pp_interp').value=ppc.interp||'area';
+      document.getElementById('cfg_pp_pad').checked=!!ppd.enabled;
+      document.getElementById('cfg_pp_fill').value=ppd.fill||'black';
+      {const rs=new Set(ppd.ratios||['square','16:9','9:16']);
+       document.querySelectorAll('#cfg_pp_ratios input').forEach(c=>{c.checked=rs.has(c.value);});}
       oai_actions_cache=s.oai_actions||[];
       renderAiActions(); updateActionDropdown(); hasSettings=true;
       try{ document.getElementById('cfg_pipeline').value=JSON.stringify(s.pipeline_tree||{},null,2); }catch(_){}

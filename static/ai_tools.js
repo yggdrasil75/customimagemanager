@@ -245,6 +245,15 @@ async function saveAiSettings(){
       pose_kind:document.getElementById('cfg_pose_kind').value,
       pose_size:document.getElementById('cfg_pose_size').value,
       oai_system_prompt:document.getElementById('cfg_system').value,
+      llm_preprocess:{
+        compress:{
+          enabled:!!document.getElementById('cfg_pp_compress').checked,
+          max_side:parseInt(document.getElementById('cfg_pp_maxside').value,10)||1024,
+          interp:document.getElementById('cfg_pp_interp').value},
+        pad:{
+          enabled:!!document.getElementById('cfg_pp_pad').checked,
+          fill:document.getElementById('cfg_pp_fill').value,
+          ratios:[...document.querySelectorAll('#cfg_pp_ratios input:checked')].map(c=>c.value)}},
       oai_actions:oai_actions_cache};
   if(tree!==null) body.pipeline_tree=tree;
   await fetch('/api/update_settings',{method:'POST',headers:{'Content-Type':'application/json'},
