@@ -226,7 +226,13 @@ def _instances_from_result(res, W, H, labels=None):
         if labels is not None:
             cls_name = labels[i] if i < len(labels) else "object"
         elif rboxes is not None and rboxes.cls is not None and i < len(rboxes.cls):
-            cls_name = names.get(int(rboxes.cls[i].item()), "object")
+            cid = int(rboxes.cls[i].item())
+            if isinstance(names, dict):
+                cls_name = names.get(cid, "object")
+            elif isinstance(names, (list, tuple)):
+                cls_name = names[cid] if 0 <= cid < len(names) else "object"
+            else:
+                cls_name = "object"
         else:
             cls_name = "object"
         score = None
