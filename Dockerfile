@@ -27,6 +27,8 @@ RUN pip install --no-cache-dir opencv-python-headless \
 
 COPY . .
 
+RUN mkdir -p static && curl -fsSL https://cdn.tailwindcss.com -o static/tailwindcss.js
+
 EXPOSE 8000
 
 CMD ["python", "manager.py"]
