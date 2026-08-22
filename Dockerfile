@@ -1,7 +1,8 @@
 FROM python:3.12
 
 ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    YOLO_CONFIG_DIR=/app/data/Ultralytics
 
 # System deps: cjxl (libjxl-tools) + libs for opencv, pymupdf, rawpy, pyexiv2,
 # video, insightface + calibre (ebook-convert / calibredb CLI)
