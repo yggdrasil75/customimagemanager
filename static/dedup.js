@@ -34,8 +34,7 @@ async function fetchDedupStatus(){
   }catch(e){}
 }
 
-// Dedup pagination — only DEDUP_PAGE_SIZE group DOM nodes exist at any time
-let dedupTotalGroups=0, dedupPage=0;
+let dedupTotalGroups=0, dedupPage=0, dedupSort='resolution';
 const DEDUP_PAGE_SIZE=30;
 
 async function runDedup(force=false){
@@ -66,7 +65,7 @@ async function loadDedupPage(page){
   dedupPage=page;
   const c=document.getElementById('dedup_content');
   c.innerHTML='<p class="text-gray-400 text-sm animate-pulse p-4">Loading…</p>';
-  const d=await fetch(`/api/dedup_groups?page=${page}&page_size=${DEDUP_PAGE_SIZE}`).then(r=>r.json());
+  const d=await fetch(`/api/dedup_groups?page=${page}&page_size=${DEDUP_PAGE_SIZE}&sort=${dedupSort}`).then(r=>r.json());
   if(!d.success){ c.innerHTML='<p class="text-red-400 p-4">Failed.</p>'; return; }
   dedupTotalGroups=d.total;
   c.innerHTML='';
@@ -96,6 +95,16 @@ function updateDedupPager(page,total){
     <span>Page ${page+1}/${pages} · ${total} groups remaining</span>
     <button onclick="loadDedupPage(${page+1})" ${page>=pages-1?'disabled':''}
       class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded disabled:opacity-30">Next ▶</button>
+    <span class="flex items-center gap-2">
+      <label class="text-gray-500">Sort by</label>
+      <select id="dedup_sort" onchange="dedupSort=this.value;loadDedupPage(0)"
+        class="bg-gray-800 border border-gray-600 rounded px-2 py-0.5 text-white">
+        <option value="resolution" ${dedupSort==='resolution'?'selected':''}>Highest resolution</option>
+        <option value="path_short" ${dedupSort==='path_short'?'selected':''}>Shortest path</option>
+        <option value="path_long" ${dedupSort==='path_long'?'selected':''}>Longest path</option>
+        <option value="descriptive" ${dedupSort==='descriptive'?'selected':''}>Most descriptive</option>
+      </select>
+    </span>
     <span class="ml-auto flex items-center gap-2">
       <label class="text-gray-500">Auto-resolve ≥</label>
       <input id="autoresolve_threshold" type="number" min="0" max="100" value="100" step="5"
@@ -116,7 +125,12 @@ function renderDedupGroup(group){
   const badge=group.kind==='exact'
     ?'<span class="text-[9px] bg-red-900 text-red-300 px-1.5 py-0.5 rounded font-bold ml-2">EXACT</span>'
     :'<span class="text-[9px] bg-yellow-900 text-yellow-300 px-1.5 py-0.5 rounded font-bold ml-2">SIMILAR</span>';
-  let inner=`<p class="text-xs font-bold text-gray-400 mb-2">${group.items.length} files${badge}</p>
+  let inner=`<div class="flex items-center justify-between mb-2">
+      <p class="text-xs font-bold text-gray-400">${group.items.length} files${badge}</p>
+      <button onclick="highlightDiff(${group.db_id})"
+        class="bg-indigo-800 hover:bg-indigo-700 text-indigo-200 text-[10px] font-bold px-2 py-0.5 rounded">
+        ⇄ Highlight differences</button>
+    </div>
     <div class="flex gap-3 overflow-x-auto pb-1">`;
   group.items.forEach((item,idx)=>{
     const f=item.filename;
@@ -135,7 +149,9 @@ function renderDedupGroup(group){
     inner+=`<div class="flex-shrink-0 w-40 bg-gray-900 p-2 rounded border border-gray-700"
         data-file="${f.replace(/"/g,'&quot;')}" data-gid="${group.db_id}"
         data-score="${item.score ?? ''}">
-      <img loading="lazy" src="/api/thumb/${encodeURIComponent(f)}"
+      <label class="flex items-center gap-1 text-[10px] text-gray-400 mb-1 cursor-pointer">
+        <input type="checkbox" class="dg-pick" data-file="${f.replace(/"/g,'&quot;')}"> compare</label>
+      <img src="/api/thumb/${encodeURIComponent(f)}"
         class="w-full h-28 object-cover rounded mb-1 bg-black">
       <p class="text-[10px] truncate text-blue-300 font-mono mb-1" title="${f}">${f.split('/').pop()}</p>
       <p class="text-[10px] text-gray-400 mb-1">${item.resolution}
@@ -156,6 +172,19 @@ function renderDedupGroup(group){
   c.appendChild(div);
 }
 
+function disbandIfTooSmall(gid){
+  const groupDiv=document.getElementById(`dg_${gid}`);
+  if(groupDiv&&groupDiv.querySelectorAll('[data-file]').length<2){
+    groupDiv.remove();
+    fetch('/api/dedup_clear_group',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({db_id:gid})});
+  }
+}
+
+function reloadIfPageEmpty(){
+  if(!document.getElementById('dedup_content').children.length) loadDedupPage(dedupPage);
+}
+
 async function keepAndMerge(btn){
   const card=btn.closest('[data-file]');
   const target=card.dataset.file;
@@ -173,7 +202,7 @@ async function keepAndMerge(btn){
       document.getElementById('editor_panel').classList.add('opacity-50','pointer-events-none'); }
     else if(currentFile===target) selectFile(target);
     loadGallery();
-    if(!document.getElementById('dedup_content').children.length) loadDedupPage(dedupPage);
+    reloadIfPageEmpty();
   } else showToast('Merge error: '+d.error);
 }
 
@@ -186,78 +215,113 @@ async function deleteFromDedup(btn){
   card.remove();
   if(currentFile===fn){ currentFile=null;
     document.getElementById('editor_panel').classList.add('opacity-50','pointer-events-none'); }
-  const groupDiv=document.getElementById(`dg_${gid}`);
-  if(groupDiv&&groupDiv.querySelectorAll('[data-file]').length<2){
-    groupDiv.remove();
-    fetch('/api/dedup_clear_group',{method:'POST',
-      headers:{'Content-Type':'application/json'},body:JSON.stringify({db_id:gid})});
-  }
+  disbandIfTooSmall(gid);
   loadGallery();
-  if(!document.getElementById('dedup_content').children.length) loadDedupPage(dedupPage);
+  reloadIfPageEmpty();
 }
 
 async function removeFromGroup(btn){
-  const card   = btn.closest('[data-file]');
-  const file   = card.dataset.file;
-  const gid    = parseInt(card.dataset.gid);
-
-  const d = await fetch('/api/dedup_exclude', {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({file, db_id: gid})
-  }).then(r=>r.json());
-
-  if(d.success){
-    card.remove();
-    showToast(`"${file.split('/').pop()}" excluded from this group permanently.`);
-    if(!d.group_remains){
-      document.getElementById(`dg_${gid}`)?.remove();
-    } else {
-      // If only 1 card remains, also remove the group
-      const groupDiv = document.getElementById(`dg_${gid}`);
-      if(groupDiv && groupDiv.querySelectorAll('[data-file]').length < 2){
-        groupDiv.remove();
-        fetch('/api/dedup_clear_group',{method:'POST',
-          headers:{'Content-Type':'application/json'},body:JSON.stringify({db_id:gid})});
-      }
-    }
-    if(!document.getElementById('dedup_content').children.length) loadDedupPage(dedupPage);
-  } else {
-    showToast('Error: ' + d.error);
-  }
+  const card=btn.closest('[data-file]');
+  const file=card.dataset.file;
+  const gid=parseInt(card.dataset.gid);
+  const d=await fetch('/api/dedup_exclude',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({file,db_id:gid})}).then(r=>r.json());
+  if(!d.success){ showToast('Error: '+d.error); return; }
+  card.remove();
+  showToast(`"${file.split('/').pop()}" excluded from this group permanently.`);
+  if(!d.group_remains) document.getElementById(`dg_${gid}`)?.remove();
+  else disbandIfTooSmall(gid);
+  reloadIfPageEmpty();
 }
-async function bulkResolveAll() {
-  const thresholdPct = parseFloat(document.getElementById('autoresolve_threshold')?.value ?? 100);
-  const threshold    = thresholdPct / 100;   // convert to 0-1 to match stored scoresq
-  let resolved=0, skipped=0;
+let _diffImgA=null, _diffImgB=null;
 
+function _loadImage(src){
+  return new Promise((resolve,reject)=>{
+    const im=new Image();
+    im.onload=()=>resolve(im);
+    im.onerror=reject;
+    im.src=src;
+  });
+}
+
+async function highlightDiff(gid){
+  const picks=[...document.querySelectorAll(`#dg_${gid} .dg-pick:checked`)];
+  if(picks.length!==2){ showToast('Pick exactly 2 images to compare.'); return; }
+  const [fa,fb]=picks.map(p=>p.dataset.file);
+  document.getElementById('diff_label_a').innerText=fa.split('/').pop();
+  document.getElementById('diff_label_b').innerText=fb.split('/').pop();
+  document.getElementById('dedup_diff_modal').classList.remove('hidden');
+  try{
+    [_diffImgA,_diffImgB]=await Promise.all([
+      _loadImage(`/api/file/${encodeURIComponent(fa)}`),
+      _loadImage(`/api/file/${encodeURIComponent(fb)}`)]);
+  }catch(e){ showToast('Could not load full images.'); return; }
+  renderDiffOverlay();
+}
+
+function renderDiffOverlay(){
+  if(!_diffImgA||!_diffImgB) return;
+  const W=Math.min(_diffImgA.naturalWidth,_diffImgB.naturalWidth,512);
+  const H=Math.min(_diffImgA.naturalHeight,_diffImgB.naturalHeight,512);
+  const ca=document.getElementById('diff_canvas_a');
+  const cb=document.getElementById('diff_canvas_b');
+  const cd=document.getElementById('diff_canvas_d');
+  for(const c of [ca,cb,cd]){ c.width=W; c.height=H; }
+  const xa=ca.getContext('2d');
+  const xb=cb.getContext('2d');
+  const xd=cd.getContext('2d');
+  xa.drawImage(_diffImgA,0,0,W,H);
+  xb.drawImage(_diffImgB,0,0,W,H);
+  const a=xa.getImageData(0,0,W,H);
+  const b=xb.getImageData(0,0,W,H);
+  const diff=xd.createImageData(W,H);
+  const showHeat=document.getElementById('diff_overlay_toggle').checked;
+  for(let i=0;i<a.data.length;i+=4){
+    const dr=Math.abs(a.data[i]-b.data[i]);
+    const dg=Math.abs(a.data[i+1]-b.data[i+1]);
+    const db=Math.abs(a.data[i+2]-b.data[i+2]);
+    const mag=(dr+dg+db)/3;
+    if(showHeat){
+      const gray=(a.data[i]+a.data[i+1]+a.data[i+2])/3;
+      diff.data[i]=Math.min(255,gray+mag*2);
+      diff.data[i+1]=Math.max(0,gray-mag);
+      diff.data[i+2]=Math.max(0,gray-mag);
+    } else {
+      diff.data[i]=diff.data[i+1]=diff.data[i+2]=mag;
+    }
+    diff.data[i+3]=255;
+  }
+  xd.putImageData(diff,0,0);
+}
+
+async function bulkResolveAll() {
+  const thresholdPct=parseFloat(document.getElementById('autoresolve_threshold')?.value ?? 100);
+  const threshold=thresholdPct/100;
+  let resolved=0, skipped=0;
   while(true){
     const d=await fetch(`/api/dedup_groups?page=0&page_size=50`).then(r=>r.json());
     if(!d.groups.length) break;
     let anyMerged=false;
     for(const group of d.groups){
-      // Check every non-reference item meets the threshold
-      // score===null means exact duplicate (always resolve regardless of threshold)
-      const nonRef = group.items.slice(1);
-      const allQualify = nonRef.every(item =>
-        item.score === null || item.score === undefined || item.score >= threshold
-      );
+      const nonRef=group.items.slice(1);
+      const allQualify=nonRef.every(item=>
+        item.score===null||item.score===undefined||item.score>=threshold);
       if(!allQualify){ skipped++; continue; }
       const target=group.items[0].filename;
       const others=nonRef.map(x=>x.filename);
       if(others.length){
         await fetch('/api/dedup_merge',{method:'POST',
           headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({target,others,db_id:group.db_id})});
+          body:JSON.stringify({target,others,db_id:group.db_id,skip_retrain:true})});
         resolved++;
         anyMerged=true;
       }
     }
-    // If nothing was merged this pass (all remaining below threshold), stop
-    if(!anyMerged) break;
-    if(d.total===0) break;
+    if(!anyMerged||d.total===0) break;
   }
-
-  const msg = skipped > 0
+  if(resolved>0) await fetch('/api/dedup_retrain',{method:'POST'});
+  const msg=skipped>0
     ? `Resolved ${resolved} group(s). Skipped ${skipped} below ${thresholdPct}%.`
     : `Resolved ${resolved} group(s).`;
   showToast(msg);

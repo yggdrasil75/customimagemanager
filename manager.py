@@ -35,6 +35,7 @@ import faces as facelib
 import bodies as bodylib
 import imagecodecs
 from dup_heuristics import DuplicateClassifier, classify_pair, extract_features
+from dup_cnn import DupCNN, encode_pair
 import object_grouping as og
 import discover_stages as ds
 import image_index as ii
@@ -111,6 +112,8 @@ COMIC_SCHEMA = "mm.comic/1"
 
 DUP_MODEL_PATH = os.path.join(MEDIA_DIR, "dup_model.json")
 _dup_model     = DuplicateClassifier.load(DUP_MODEL_PATH)
+DUP_CNN_PATH   = os.path.join(MODELS_DIR, "dup_cnn.pt")
+_dup_cnn       = None   # loaded lazily after config so width_mult is known
 
 # Updated on every request; the background auto-tagger only runs when the
 # server has been idle for a while so it never competes with the user.
@@ -145,6 +148,7 @@ state = {
     "brand_logo": "",   # relative URL under /media, or "" for none
     "iqa_model": "brisque",
     "yolo_size": "n",
+    "dup_cnn_width": 1.0,   # Siamese dup-CNN channel multiplier (0.25..2.0)
     "face_bg_enabled": False,
     "face_bg_custom": False,
     "face_model": "",
@@ -520,7 +524,14 @@ def _init_db():
             created REAL NOT NULL
         );
 
-        -- Cached per-image object embeddings for the discovery/grouping scan.
+        -- Encoded image-pair tensors + labels for the Siamese dup-CNN.
+        -- Separate from dup_samples: the CNN needs pixels, not 9-float features.
+        CREATE TABLE IF NOT EXISTS dup_cnn_samples (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            blob    BLOB NOT NULL,
+            label   INTEGER NOT NULL,
+            created REAL NOT NULL
+        );
         -- Doubles as the scan checkpoint: a restart skips any rel_path already
         -- present whose mtime + params still match, so a 22k-image scan resumes
         -- instead of restarting. `boxes` and `embs` are JSON; `embs` is a list
@@ -1328,26 +1339,36 @@ def _load_exclusion_set() -> set[tuple[str, str]]:
 # ── Duplicate heuristic: learn from user feedback ─────────────────────────────
 def _record_dup_sample(img_a, img_b, label: int) -> None:
     """!
-    @brief Store a feature vector + label from a user merge/exclude decision.
+    @brief Store a feedback sample from a user merge/exclude decision.
     @param label 1 at merge time, 0 at exclude time.
-    @note Features are captured now because one file may be deleted moments later.
+
+    Writes both the 9-float feature vector (logistic model) and the encoded
+    image pair (CNN); features are captured now because one file may be deleted
+    moments later.
     """
     try:
         f = extract_features(img_a, img_b)
-        if f is None:
-            return
-        _db().execute(
-            "INSERT INTO dup_samples(feat,label,created) VALUES(?,?,?)",
-            (json.dumps([float(x) for x in f]), int(label), time.time()))
+        if f is not None:
+            _db().execute(
+                "INSERT INTO dup_samples(feat,label,created) VALUES(?,?,?)",
+                (json.dumps([float(x) for x in f]), int(label), time.time()))
+        blob = encode_pair(img_a, img_b)
+        if blob is not None:
+            _db().execute(
+                "INSERT INTO dup_cnn_samples(blob,label,created) VALUES(?,?,?)",
+                (blob, int(label), time.time()))
         _db().commit()
     except Exception as e:
         access_logger.warning(f"_record_dup_sample: {e}")
 
 def _retrain_dup_model(min_samples: int = 8) -> bool:
     """!
-    @brief Refit the duplicate classifier from accumulated feedback.
-    @return True if retrained and saved; False if too few samples or on error.
+    @brief Refit the logistic model, and the CNN when torch and samples allow.
+    @return True if the logistic model retrained and saved; False if too few
+            samples or on error. CNN training is best-effort and does not affect
+            this return value.
     """
+    _retrain_dup_cnn()
     try:
         rows = _db().execute("SELECT feat,label FROM dup_samples").fetchall()
         if len(rows) < min_samples:
@@ -1360,6 +1381,28 @@ def _retrain_dup_model(min_samples: int = 8) -> bool:
             return True
     except Exception as e:
         access_logger.error(f"_retrain_dup_model: {e}")
+    return False
+
+def _retrain_dup_cnn() -> bool:
+    """!
+    @brief Refit the Siamese CNN from stored image-pair samples, best-effort.
+    @return True if the CNN retrained and saved; False when torch is missing,
+            samples are too few, or on error.
+    """
+    global _dup_cnn
+    if _dup_cnn is None:
+        _dup_cnn = DupCNN(state.get("dup_cnn_width", 1.0))
+    if not _dup_cnn.available:
+        return False
+    try:
+        rows = _db().execute("SELECT blob,label FROM dup_cnn_samples").fetchall()
+        samples = [(r[0], r[1]) for r in rows]
+        if _dup_cnn.fit(samples):
+            _dup_cnn.save(DUP_CNN_PATH)
+            access_logger.info(f"Dup CNN retrained on {len(samples)} samples")
+            return True
+    except Exception as e:
+        access_logger.error(f"_retrain_dup_cnn: {e}")
     return False
 
 def _dedup_is_stale(disk_count: int) -> bool:
@@ -1779,6 +1822,8 @@ def load_config():
             _sp.set_model(state["sam_model"])
         except Exception:
             pass
+    global _dup_cnn
+    _dup_cnn = DupCNN.load(DUP_CNN_PATH, state.get("dup_cnn_width", 1.0))
 
 def save_config():
     keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt",
@@ -1787,7 +1832,7 @@ def save_config():
             "body_enabled","body_size","body_cluster_eps","object_proposals",
             "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
             "barcode_model","barcode_conf", "iqa_model","brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
-            "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers"]
+            "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers","dup_cnn_width"]
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys if k in state}, f, indent=2)
 
@@ -7629,6 +7674,12 @@ def dedup_status():
     return jsonify({"has_cache": False, "stage": None,
                     "file_count": 0, "created": None, "group_count": 0})
 
+@app.route("/api/dedup_retrain", methods=["POST"])
+@_auth.require_feature("dedup")
+def dedup_retrain():
+    """! @brief Refit the duplicate model once; called after a bulk auto-resolve."""
+    return jsonify({"success": _retrain_dup_model()})
+
 @app.route("/api/dedup_clear", methods=["POST"])
 @_auth.require_feature("dedup")
 def dedup_clear():
@@ -7702,6 +7753,20 @@ def dedup_exclude():
         _db().commit()
         return jsonify({"success": True, "group_remains": False})
 
+def _dedup_sort_key(sort: str):
+    """!
+    @brief Sort key for ordering items within a dedup group; item 0 is the merge target.
+    @param sort One of resolution, path_short, path_long, descriptive (default resolution).
+    @return A key function suitable for list.sort.
+    """
+    keys = {
+        "resolution": lambda x: -x["pixels"],
+        "path_short": lambda x: x["path_len"],
+        "path_long":  lambda x: -x["path_len"],
+        "descriptive": lambda x: -x["descriptiveness"],
+    }
+    return keys.get(sort, keys["resolution"])
+
 @app.route("/api/dedup_groups")
 def dedup_groups_page():
     """
@@ -7711,6 +7776,7 @@ def dedup_groups_page():
     """
     page      = max(0, int(request.args.get("page", 0)))
     page_size = max(1, min(200, int(request.args.get("page_size", 50))))
+    sort      = request.args.get("sort", "resolution")
     offset    = page * page_size
 
     rows = _db().execute(
@@ -7725,7 +7791,8 @@ def dedup_groups_page():
     if all_paths:
         placeholders = ",".join("?" * len(all_paths))
         file_rows = _db().execute(
-            f"SELECT rel_path, width, height FROM files WHERE rel_path IN ({placeholders})",
+            f"SELECT rel_path, width, height, tags, description "
+            f"FROM files WHERE rel_path IN ({placeholders})",
             all_paths
         ).fetchall()
         info = {r["rel_path"]: r for r in file_rows}
@@ -7744,14 +7811,17 @@ def dedup_groups_page():
         for path in live:
             r = info[path]
             w, h = r["width"] or 0, r["height"] or 0
+            desc = (r["description"] or "").strip()
+            tag_count = len([t for t in (r["tags"] or "").split(",") if t.strip()])
             detail.append({"filename": path, "format": "JXL",
                             "resolution": f"{w}x{h}" if w else "N/A",
                             "quality": "Lossless",
                             "score": score_map.get(path),
-                            "db_id": row["id"]})
-        detail.sort(key=lambda x: -(int(x["resolution"].split("x")[0]) *
-                                     int(x["resolution"].split("x")[1]))
-                                   if "x" in x["resolution"] else 0)
+                            "db_id": row["id"],
+                            "pixels": w * h,
+                            "path_len": len(path),
+                            "descriptiveness": len(desc) + tag_count})
+        detail.sort(key=_dedup_sort_key(sort))
         groups.append({"db_id": row["id"], "kind": row["kind"], "items": detail})
 
     return jsonify({"success": True, "groups": groups,
@@ -7906,9 +7976,13 @@ def dedup():
             for i in group_row_indices[1:]:
                 img = read_jxl(get_safe_path(MEDIA_DIR, rows[i]["rel_path"]))
                 if img is None: continue
-                # Heuristic classifier: True only for genuine duplicates,
-                # rejecting same-scene-different-subject pairs.
-                is_dup, prob, _ = classify_pair(_dup_model, ref_bgr, _to_bgr(img))
+                other_bgr = _to_bgr(img)
+                cnn_prob = _dup_cnn.predict(ref_bgr, other_bgr) if _dup_cnn else None
+                if cnn_prob is not None:
+                    prob = cnn_prob
+                    is_dup = prob >= 0.5
+                else:
+                    is_dup, prob, _ = classify_pair(_dup_model, ref_bgr, other_bgr)
                 if is_dup:
                     keep_idx.append(i)
                     keep_scores.append(prob)
@@ -7949,6 +8023,7 @@ def dedup_merge():
     target = data.get("target","")
     others = [f for f in data.get("others",[]) if f]
     db_id  = data.get("db_id")          # optional: remove group row when done
+    skip_retrain = bool(data.get("skip_retrain"))
     tp     = get_safe_path(MEDIA_DIR, target)
     if not tp or not os.path.exists(tp):
         return jsonify({"success":False,"error":"Target not found"})
@@ -7994,7 +8069,8 @@ def dedup_merge():
             if db_id:
                 _db().execute("DELETE FROM dedup_groups WHERE id=?", (db_id,))
                 _db().commit()
-            _retrain_dup_model()
+            if not skip_retrain:
+                _retrain_dup_model()
             return jsonify({"success":True})
         return jsonify({"success":False,"error":"Write failed"})
     except Exception as e:
