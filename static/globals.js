@@ -306,6 +306,10 @@ async function fetchState(){
         if(_fm) _fm.addEventListener('change', _syncFaceSize);
         _syncFaceSize();
       }
+      const _be=document.getElementById('cfg_body_enabled');
+      if(_be) _be.checked=!!s.body_enabled;
+      const _bs=document.getElementById('cfg_body_size');
+      if(_bs) _bs.value=s.body_size||'s';
       document.getElementById('cfg_pose_kind').value=s.pose_kind||'body';
       document.getElementById('cfg_pose_size').value=s.pose_size||'n';
       document.getElementById('cfg_system').value=s.oai_system_prompt||'';

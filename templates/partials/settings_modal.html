@@ -270,6 +270,26 @@
               <option value="">Latest trained (auto)</option>
             </select>
           </div>
+          <div class="col-span-3">
+            <label class="flex items-center gap-2 text-xs text-gray-300 cursor-pointer select-none">
+              <input type="checkbox" id="cfg_body_enabled" class="accent-purple-500">
+              Body re-id <span class="text-gray-600">(embed &amp; cluster person boxes, associate with faces)</span>
+            </label>
+            <p class="text-[10px] text-gray-600 mt-1">Bodies are only embedded on images
+              scanned while this is on. Enabling it needs a <b>Rescan all</b> from the
+              Faces pane to embed the existing library.</p>
+          </div>
+          <div>
+            <span class="text-[10px] text-gray-500 block mb-0.5">Body size
+              <span class="text-gray-600">(DINOv3)</span></span>
+            <select id="cfg_body_size"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+              <option value="s">s · small</option>
+              <option value="b">b · base</option>
+              <option value="l">l · large</option>
+              <option value="g">g · giant</option>
+            </select>
+          </div>
           <div>
             <span class="text-[10px] text-gray-500 block mb-0.5">Barcode model</span>
             <select id="cfg_barcode_model"

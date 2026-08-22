@@ -1,236 +1,205 @@
-"""
-bodies.py
-=========
-Body (person) re-identification embedding, and face<->body association.
+"""! @brief Body (person) identity embedding for album tagging, and face<->body association.
 
-DESIGN
-------
-Detection  : reuses the `person` boxes the face worker already produces
-             (COCO YOLO person / OBB person model). No new detector.
-Embedding  : torchreid (OSNet, an ArcFace-analogue for whole-body appearance)
-             when available. Falls back to object_grouping's cv2/CNN appearance
-             embedder, marked as a degraded mode so the UI can say so.
-Clustering : reuses faces.cluster (HNSW + exact-cosine union-find). No second
-             clustering implementation.
+Detection reuses the `person` boxes the face worker already produces; there is no
+new detector here. Embedding uses a DINOv2 vision backbone (outfit- and
+viewpoint-robust, the right axis for grouping the same person across outfits and
+angles in a photo album), falling back to object_grouping's appearance embedder
+when torch/transformers are unavailable. Clustering reuses faces.cluster. Every
+public call degrades to an empty result rather than raising.
 
-WHY A BODY EMBEDDER AT ALL
---------------------------
-Faces cluster identities beautifully when the face is visible and large enough
-(>=32px, frontal-ish). But a great many library images show a costume/body with
-the face turned, cropped, or too small for ArcFace. A body/appearance embedding
-lets those images still cluster by *who/what is wearing the outfit*, and — the
-point of this module — lets us ASSOCIATE a body cluster with a face cluster when
-the two boxes co-occur in the same image (a face inside a person box). That
-association is what "put the face and the body together properly" means.
-
-WHY torchreid AND NOT ARCFACE ON THE BODY
------------------------------------------
-ArcFace is a *face* recognition head; run on a torso crop it is meaningless.
-Person re-id (OSNet/torchreid) is trained exactly for "same appearance across
-images/cameras/poses" and is the correct tool for the body crop. It shares the
-same downstream contract as ArcFace here: an L2-normalised vector compared by
-cosine distance, so faces.cluster consumes it unchanged.
-
-DOMAIN NOTE
------------
-Re-id models are trained on photographs of clothed pedestrians. On stylised /
-anime art the embedding is weaker (out of distribution) but still better than
-raw appearance; on cosplay photographs it is in-distribution and strong. This is
-why body clusters and face clusters are kept as SEPARATE spaces and only bridged
-by in-image co-occurrence, never by comparing a body vector to a face vector.
-
-Nothing here raises: every public call degrades to an empty result.
+Faces remain the primary identity signal (face_regions cluster on ArcFace); the
+body vector only bridges a face cluster to images where the face is turned,
+cropped, or too small, via in-image co-occurrence -- a face box contained in a
+person box. Body and face vectors live in separate spaces and are never compared
+directly.
 """
 
 import os
 import threading
+from typing import Any, Optional
 
 import numpy as np
 
+import faces as facelib
 import object_grouping as og
-from torchreid.reid.utils import FeatureExtractor
 
 try:
     import cv2
-except Exception:  # pragma: no cover - cv2 is a hard dep elsewhere
+except Exception:
     cv2 = None
 
-# torchreid's OSNet embedding is 512-d and L2-normalisable, so it lands in the
-# same tight-identity regime as ArcFace. Appearance fallback needs a stricter
-# radius, exactly as in faces.py.
-BODY_EPS_REID       = 0.20   # cosine distance for OSNet re-id vectors
-BODY_EPS_APPEARANCE = 0.25   # appearance fallback needs a tighter radius
+try:
+    import torch
+    from transformers import AutoImageProcessor, AutoModel
+except Exception:
+    torch = None
+    AutoImageProcessor = None
+    AutoModel = None
 
-# Minimum person-box size worth embedding. A tiny far-background person carries
-# almost no re-id signal and mostly adds noise clusters.
+## Cosine distance for DINO identity vectors.
+BODY_EPS_REID = 0.20
+## Appearance fallback needs a tighter radius.
+BODY_EPS_APPEARANCE = 0.25
+## Minimum person-box side worth embedding; smaller carries almost no signal.
 MIN_BODY_PX = 64
-
-# How much of a face box must be swallowed by a person box for us to call them
-# the same instance. Faces are small relative to bodies, so we test how much of
-# the FACE lies inside the PERSON (containment), not symmetric IoU — a correct
-# face-in-body pair has IoU well below 0.35 but containment near 1.0.
+## Fraction of a face box that must lie inside a person box to bind them.
 FACE_IN_BODY_CONTAINMENT = 0.9
 
-_reid = {"checked": False, "extractor": None}
+## Body-size knob -> DINOv3 model id, mirroring the yolo n/s/m/l/x knob. The id
+## is stored per-row as embed_mode, so vectors from different sizes cluster in
+## separate spaces (a small-model vector is never compared to a large-model one)
+## and any one size can be regenerated without touching the others.
+## ponytail: these are the pretrain-lvd1689m repos; confirm the strings resolve
+## and aren't gated (v3 repos have required an HF token where v2 did not). If
+## gated, from_pretrained below takes token=..., wire it to a setting then.
+_BODY_MODELS = {
+    "s": "facebook/dinov3-vits16-pretrain-lvd1689m",
+    "b": "facebook/dinov3-vitb16-pretrain-lvd1689m",
+    "l": "facebook/dinov3-vitl16-pretrain-lvd1689m",
+    "g": "facebook/dinov3-vit7b16-pretrain-lvd1689m",
+}
+_BODY_DEFAULT = "s"
+
+## Weights land here (project models dir), not a hidden ~/.cache, matching the
+## house download convention.
+_HF_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "dino")
+
+_reid: dict[str, Any] = {"checked": False, "model": None, "proc": None, "id": None}
 _lock = threading.Lock()
 
 
-# ── identity (re-id) embedding ────────────────────────────────────────────────
-def _load_reid():
-    """Lazily bring up torchreid's OSNet extractor. Cheap no-op after first call.
+def _body_size() -> str:
+    """! @brief Resolve the configured body-embedder size, defaulting to 's'."""
+    import manager as m
+    s = (m.state.get("body_size") or _BODY_DEFAULT).lower()
+    return s if s in _BODY_MODELS else _BODY_DEFAULT
 
-    We use the packaged `osnet_x1_0` weights (ImageNet+MSMT-pretrained), which
-    torchreid downloads to its own cache on first use. If torchreid or its
-    weights are unavailable (offline, no torch, no GPU-and-slow-CPU-declined),
-    we return None and the caller degrades to appearance embeddings.
+
+def _load_reid() -> Optional[tuple]:
+    """! @brief Lazily bring up the DINOv3 backbone for the current body size.
+    @return (model, processor, model_id) tuple, or None if torch/transformers or
+            the weights are unavailable. Weights auto-download on first use into
+            the project models/dino dir.
     """
-    if _reid["checked"]:
-        return _reid["extractor"]
-    _reid["checked"] = True
-    try:
-        device = "cuda" if og.has_gpu() else "cpu"
-        # osnet_x1_0 is the standard strong-yet-small re-id backbone. model_path
-        # left empty -> torchreid pulls its own pretrained weights.
-        ext = FeatureExtractor(model_name="osnet_x1_0",
-                               model_path="",
-                               device=device)
-        _reid["extractor"] = ext
-    except Exception:
-        _reid["extractor"] = None
-    return _reid["extractor"]
+    model_id = _BODY_MODELS[_body_size()]
+    with _lock:
+        if _reid["checked"] and _reid["id"] == model_id:
+            if _reid["model"] is None:
+                return None
+            return (_reid["model"], _reid["proc"], model_id)
+        _reid["checked"] = True
+        _reid["id"] = model_id
+        if AutoModel is None:
+            _reid["model"] = None
+            return None
+        try:
+            device = "cuda" if og.has_gpu() else "cpu"
+            proc = AutoImageProcessor.from_pretrained(model_id, cache_dir=_HF_CACHE)
+            model = AutoModel.from_pretrained(model_id, cache_dir=_HF_CACHE).to(device).eval()
+            _reid["model"] = model
+            _reid["proc"] = proc
+            return (model, proc, model_id)
+        except Exception:
+            _reid["model"] = None
+            return None
 
 
-def have_body_embedder():
+def have_body_embedder() -> bool:
+    """! @brief Whether the DINO backbone is up (else callers degrade to appearance)."""
     return _load_reid() is not None
 
 
-def _as_bgr(img):
-    """Coerce any decoded array to 3-channel uint8 BGR, or None. (Same contract
-    as faces._as_bgr — kept local so bodies.py has no import cycle with manager.)"""
-    if img is None or getattr(img, "size", 0) == 0:
-        return None
-    if cv2 is None:
-        return None
-    if img.ndim == 2:
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-    elif img.ndim == 3 and img.shape[2] != 3:
-        c = img.shape[2]
-        if c in (1, 2):
-            img = cv2.cvtColor(img[:, :, 0], cv2.COLOR_GRAY2BGR)
-        elif c == 4:
-            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-        else:
-            img = img[:, :, :3]
-    if img.dtype != np.uint8:
-        img = np.clip(img, 0, 255).astype(np.uint8)
-    return img
-
-
-def _crop(img_bgr, box):
-    """Extract the pixel crop for a normalised center-form box. Returns None if
-    the crop is empty or below the minimum re-id size."""
+def _crop(img_bgr: np.ndarray, box: dict) -> Optional[np.ndarray]:
+    """! @brief Extract the pixel crop for a normalised center-form box.
+    @return The crop, or None if empty or below MIN_BODY_PX on a side.
+    """
     H, W = img_bgr.shape[:2]
-    x1 = int(round((box["cx"] - box["w"] / 2) * W))
-    y1 = int(round((box["cy"] - box["h"] / 2) * H))
-    x2 = int(round((box["cx"] + box["w"] / 2) * W))
-    y2 = int(round((box["cy"] + box["h"] / 2) * H))
-    x1, y1 = max(0, x1), max(0, y1)
-    x2, y2 = min(W, x2), min(H, y2)
+    x1 = max(0, int(round((box["cx"] - box["w"] / 2) * W)))
+    y1 = max(0, int(round((box["cy"] - box["h"] / 2) * H)))
+    x2 = min(W, int(round((box["cx"] + box["w"] / 2) * W)))
+    y2 = min(H, int(round((box["cy"] + box["h"] / 2) * H)))
     if x2 - x1 < MIN_BODY_PX or y2 - y1 < MIN_BODY_PX:
         return None
     crop = img_bgr[y1:y2, x1:x2]
     return crop if crop.size else None
 
 
-def embed_bodies(img_bgr, boxes):
-    """Embed each person crop. `boxes` are normalised center-form dicts.
+def _normalise(v: Any) -> Optional[np.ndarray]:
+    """! @brief L2-normalise a vector to unit length.
+    @return The unit vector, or None if the input is None or zero-norm.
+    """
+    if v is None:
+        return None
+    v = np.asarray(v, dtype=np.float32)
+    n = np.linalg.norm(v)
+    return (v / n) if n else None
 
-    Returns (vectors, mode) where mode is 'reid' or 'appearance', mirroring
-    faces.embed_faces so the same cluster/cache path consumes it. Vectors are
-    L2-normalised; a box too small (or a failed embed) yields None in that slot.
 
-    Unlike faces (where insightface re-detects on the full frame), re-id has no
-    detector — it embeds exactly the crop it is handed. So here we crop per box
-    and batch the crops through OSNet, which keeps the caller's box list
-    authoritative with no IoU re-matching needed.
+def embed_bodies(img_bgr: np.ndarray, boxes: list[dict]) -> tuple[list, str]:
+    """! @brief Embed each person crop, mirroring faces.embed_faces.
+    @return (vectors, mode) where mode is the DINOv3 model id for identity
+            vectors, 'appearance' for the fallback, or 'none'. Storing the model
+            id (not a generic 'reid') lets rows from different models cluster in
+            separate spaces and be regenerated per-model. Vectors are
+            L2-normalised; a box too small or a failed embed yields None in that
+            slot. Unlike faces (which re-detect on the full frame), DINO has no
+            detector and embeds exactly the crops it is handed, so the caller's
+            box list stays authoritative with no IoU re-matching.
     """
     if img_bgr is None or not boxes:
         return [], "none"
-    img_bgr = _as_bgr(img_bgr)
+    img_bgr = facelib._as_bgr(img_bgr)
     if img_bgr is None:
         return [], "none"
 
-    ext = _load_reid()
-
-    if ext is not None:
+    loaded = _load_reid()
+    if loaded is not None:
+        model, proc, model_id = loaded
         crops, slots = [], []
         for idx, b in enumerate(boxes):
             c = _crop(img_bgr, b)
             if c is not None:
-                # 2. FIXED COLOR SPACE: Torchreid expects RGB, but OpenCV provides BGR.
-                # ReID models depend intensely on clothing colors; feeding BGR confuses it.
-                c_rgb = cv2.cvtColor(c, cv2.COLOR_BGR2RGB)
-                crops.append(c_rgb)
+                crops.append(cv2.cvtColor(c, cv2.COLOR_BGR2RGB))
                 slots.append(idx)
-        vecs = [None] * len(boxes)
+        vecs: list = [None] * len(boxes)
         if crops:
             try:
-                # FeatureExtractor accepts a list of numpy BGR crops and returns
-                # a (N, 512) tensor. Normalise to unit length for cosine.
-                feats = ext(crops)
-                feats = feats.detach().cpu().numpy().astype(np.float32)
+                inputs = proc(images=crops, return_tensors="pt").to(model.device)
+                with torch.no_grad():
+                    out = model(**inputs)
+                feats = out.pooler_output.detach().cpu().numpy().astype(np.float32)
                 for slot, f in zip(slots, feats):
-                    n = np.linalg.norm(f)
-                    vecs[slot] = (f / n) if n else None
+                    vecs[slot] = _normalise(f)
             except Exception:
                 vecs = [None] * len(boxes)
         if any(v is not None for v in vecs):
-            return vecs, "reid"
+            return vecs, model_id
 
-    # Degraded: appearance-only. Same fallback as faces.py, same caveat: clusters
-    # will split the same person across pose/lighting.
     try:
-        vecs = og.embed_regions(img_bgr, boxes)
-        out = []
-        for v in vecs:
-            if v is None:
-                out.append(None); continue
-            v = np.asarray(v, dtype=np.float32)
-            n = np.linalg.norm(v)
-            out.append(v / n if n else None)
-        return out, "appearance"
+        return [_normalise(v) for v in og.embed_regions(img_bgr, boxes)], "appearance"
     except Exception:
         return [], "none"
 
 
-# ── face <-> body association ─────────────────────────────────────────────────
-def _containment_face_in_body(face, body):
-    """Fraction of the FACE box's area that lies inside the BODY box. Both are
-    normalised center-form dicts. ~1.0 means the face sits within the person."""
+def _containment_face_in_body(face: dict, body: dict) -> float:
+    """! @brief Fraction of the FACE box's area that lies inside the BODY box (~1.0 = contained)."""
     fx1, fy1 = face["cx"] - face["w"] / 2, face["cy"] - face["h"] / 2
     fx2, fy2 = face["cx"] + face["w"] / 2, face["cy"] + face["h"] / 2
     bx1, by1 = body["cx"] - body["w"] / 2, body["cy"] - body["h"] / 2
     bx2, by2 = body["cx"] + body["w"] / 2, body["cy"] + body["h"] / 2
     ix = max(0.0, min(fx2, bx2) - max(fx1, bx1))
     iy = max(0.0, min(fy2, by2) - max(fy1, by1))
-    inter = ix * iy
     face_area = max(1e-9, (fx2 - fx1) * (fy2 - fy1))
-    return inter / face_area
+    return (ix * iy) / face_area
 
 
-def associate_faces_bodies(faces, bodies):
-    """Given the face boxes and body boxes of ONE image, decide which face sits
-    in which body. Returns a list of (face_index, body_index) pairs.
-
-    Each face is bound to the body that most contains it, provided containment
-    clears FACE_IN_BODY_CONTAINMENT. A body may hold at most one face (the best
-    of any competing faces), so overlapping people don't both claim the same
-    face. Unmatched faces/bodies simply don't appear in the result.
+def associate_faces_bodies(faces: list[dict], bodies: list[dict]) -> list[tuple[int, int]]:
+    """! @brief Bind each face to the body that most contains it, within one image.
+    @return List of (face_index, body_index) pairs. Each face binds to at most one
+            body and each body holds at most one face; the strongest containments
+            win contested bodies (greedy, descending). Bindings below
+            FACE_IN_BODY_CONTAINMENT and unmatched boxes are omitted.
     """
-    pairs = []
-    used_bodies = set()
-    # Greedy by best containment first so the strongest bindings win contested
-    # bodies. Build all candidate (containment, fi, bi) then assign descending.
     cands = []
     for fi, f in enumerate(faces):
         for bi, b in enumerate(bodies):
@@ -238,7 +207,7 @@ def associate_faces_bodies(faces, bodies):
             if c >= FACE_IN_BODY_CONTAINMENT:
                 cands.append((c, fi, bi))
     cands.sort(reverse=True)
-    used_faces = set()
+    pairs, used_faces, used_bodies = [], set(), set()
     for c, fi, bi in cands:
         if fi in used_faces or bi in used_bodies:
             continue

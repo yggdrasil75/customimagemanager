@@ -14,7 +14,7 @@ onnxruntime
 pyiqa
 rawpy
 ldap3
-torchreid
+transformers
 numpy
 gdown
 segment-anything

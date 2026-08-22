@@ -247,6 +247,8 @@ async function persistAiSettings(){
       face_bg_custom:_c('cfg_face_custom'),
       face_model:_v('cfg_face_model'),
       face_size:_v('cfg_face_size','n'),
+      body_enabled:_c('cfg_body_enabled'),
+      body_size:_v('cfg_body_size','s'),
       person_model:_v('cfg_person_model'),
       our_model:_v('cfg_our_model'),
       barcode_model:_v('cfg_barcode_model'),

@@ -449,9 +449,6 @@ async function loadBodies() {
     return;
   }
 
-  // Keep the enable checkbox in sync with the server-side setting.
-  const cb = document.getElementById('body_enable_cb');
-  if (cb) cb.checked = !!d.enabled;
   const bwarn = document.getElementById('bodies_warn');
   if (bwarn) bwarn.classList.toggle('hidden', !d.enabled || !!d.identity);
 
@@ -569,27 +566,4 @@ async function splitSelectedBodies(cid) {
   document.getElementById('faces_status').textContent =
     d.success ? `Split ${d.moved} body(ies) into a new person.` : (d.error || 'Failed.');
   keepScroll('faces_list', loadFaces);
-}
-
-// Flip the server-side body_enabled setting from the pane. Enabling it means the
-// library must be re-scanned to embed bodies, so we offer a rescan right away.
-async function toggleBodyEnabled(on) {
-  document.getElementById('faces_status').textContent =
-    on ? 'Enabling body re-id…' : 'Disabling body re-id…';
-  try {
-    await fetch('/api/update_settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ body_enabled: !!on })
-    });
-  } catch (e) {
-    document.getElementById('faces_status').textContent = 'Setting failed.';
-    return;
-  }
-  if (on && confirm('Body re-id enabled. Rescan the library now to embed bodies?\n'
-      + '(Bodies are only embedded on images scanned while this is on.)')) {
-    rescanFaces();
-  } else {
-    keepScroll('faces_list', loadFaces);
-  }
 }

@@ -153,6 +153,7 @@ state = {
     "our_model": "",
     "face_cluster_eps": 0.0,
     "body_enabled": False,
+    "body_size": "s",
     "body_cluster_eps": 0.0,
     "object_proposals": "sam",
     "sam_model": "sam2.1_b",
@@ -1783,7 +1784,7 @@ def save_config():
     keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt",
             "oai_actions","llm_preprocess","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size",
             "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","our_model","face_cluster_eps",
-            "body_enabled","body_cluster_eps","object_proposals",
+            "body_enabled","body_size","body_cluster_eps","object_proposals",
             "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
             "barcode_model","barcode_conf", "iqa_model","brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
             "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers"]
@@ -3700,8 +3701,11 @@ def _recluster_bodies() -> int:
     """
     eps = state.get("body_cluster_eps") or None
     def eps_for(mode):
-        return eps if eps else (bodylib.BODY_EPS_REID if mode == "reid"
-                                else bodylib.BODY_EPS_APPEARANCE)
+        if eps:
+            return eps
+        # Any identity-model space (torchreid 'reid' or a dinov3 model id) uses
+        # the tight cosine radius; only appearance vectors need the wider one.
+        return bodylib.BODY_EPS_APPEARANCE if mode == "appearance" else bodylib.BODY_EPS_REID
     total = _recluster_table("body_regions", "reid", eps_for)
 
     db = _db()
@@ -5106,7 +5110,7 @@ def api_state():
          "oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions",
          "autotag_enabled","pipeline_tree","yolo_size","pose_kind","pose_size",
          "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","our_model",
-         "face_cluster_eps","body_enabled","body_cluster_eps","object_proposals",
+         "face_cluster_eps","body_enabled","body_size","body_cluster_eps","object_proposals",
          "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
          "barcode_model","barcode_conf",
          "model_groups","iqa_model","brand_name","brand_logo","search_quick_filters")})
@@ -5119,6 +5123,21 @@ def update_settings():
     # detector is memoised by path in _face_cache, and _run_faces resolves the
     # path from the setting, so the cache would keep serving the old model until
     # a restart. Drop it here.
+    # A body_size change points the embedder at a different DINOv3 model, whose
+    # vectors occupy a different space. Regenerate only the rows made by a
+    # different model (matching rows and confirmed rows are left intact), by
+    # dropping the stale unconfirmed ones and re-queuing just their files.
+    if "body_size" in d and d["body_size"] != state.get("body_size"):
+        new_id = bodylib._BODY_MODELS.get((d["body_size"] or "").lower())
+        if new_id:
+            db = _db()
+            db.execute("UPDATE files SET body_done=0 WHERE rel_path IN "
+                       "(SELECT rel_path FROM body_regions "
+                       " WHERE embed_mode<>? AND COALESCE(confirmed,0)=0)", (new_id,))
+            db.execute("DELETE FROM body_regions "
+                       "WHERE embed_mode<>? AND COALESCE(confirmed,0)=0", (new_id,))
+            db.commit()
+            _face_dirty["v"] = True
     if "face_size" in d and d["face_size"] != state.get("face_size"):
         _load_yolo.cache_clear()
     # Same reasoning for the barcode detector: _detect_obb_or_box memoises by
@@ -5131,7 +5150,7 @@ def update_settings():
         _load_yolo.cache_clear()
     for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","llm_preprocess","pipeline_tree","yolo_size","pose_kind","pose_size",
               "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","our_model","face_cluster_eps",
-              "body_enabled","body_cluster_eps","object_proposals","iqa_model",
+              "body_enabled","body_size","body_cluster_eps","object_proposals","iqa_model",
               "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
               "barcode_model","barcode_conf"):
         if k in d: state[k] = d[k]

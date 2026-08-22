@@ -3,10 +3,9 @@
 
    Two sub-sections stacked in one scroll area:
      * FACES  — ArcFace identity clusters (the original pane).
-     * BODIES — torchreid (OSNet) re-id clusters of the 'person' boxes, each
-                associated with a face cluster by in-image containment. Only
-                rendered when body re-id is enabled in Settings; the toggle here
-                flips that setting without leaving the pane. #}
+     * BODIES — DINOv3 re-id clusters of the 'person' boxes, each associated
+                with a face cluster by in-image containment. Only rendered when
+                Body re-id is enabled in Settings. #}
 <div id="faces_pane" class="hidden flex-1 flex flex-col overflow-hidden">
   <div class="flex items-center gap-2 p-2 bg-gray-800 border-b border-gray-700 flex-shrink-0" data-feature="tab.faces.edit">
     <button onclick="rescanFaces()"
@@ -17,13 +16,6 @@
       class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded font-bold">
       Recluster
     </button>
-    <label title="Also embed each person box with torchreid re-id and cluster
-bodies, associating them with faces. Re-detects the library when first enabled."
-      class="flex items-center gap-1 text-[11px] text-gray-300 ml-2 cursor-pointer select-none">
-      <input type="checkbox" id="body_enable_cb" onchange="toggleBodyEnabled(this.checked)"
-             class="accent-purple-500">
-      Body re-id
-    </label>
     <span id="faces_status" class="text-[11px] text-gray-500 ml-auto"></span>
   </div>
   <div id="faces_warn"
