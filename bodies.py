@@ -15,6 +15,7 @@ directly.
 """
 
 import os
+import functools
 import threading
 from typing import Any, Optional
 
@@ -35,6 +36,16 @@ except Exception:
     torch = None
     AutoImageProcessor = None
     AutoModel = None
+
+# SMPLest-X is a research repo, not a pip package, and needs the (license-gated)
+# SMPL body-model files alongside its own weights. Treat it exactly like the DINO
+# and insightface backends: optional, lazily loaded, degrades to None when the
+# import or its model files are absent. `smplestx_runner` is a thin adapter the
+# user drops next to this module exposing infer(img_bgr, box) -> (verts, faces).
+try:
+    import smplestx_runner as _smplx_mod
+except Exception:
+    _smplx_mod = None
 
 ## Cosine distance for DINO identity vectors.
 BODY_EPS_REID = 0.20
@@ -215,3 +226,103 @@ def associate_faces_bodies(faces: list[dict], bodies: list[dict]) -> list[tuple[
         used_faces.add(fi)
         used_bodies.add(bi)
     return pairs
+
+
+# ── SMPLest-X body mesh ───────────────────────────────────────────────────────
+@functools.lru_cache(maxsize=1)
+def _load_smplx() -> Optional[Any]:
+    """! @brief Lazily bring up the SMPLest-X runner; memoised after the first call.
+    @return The runner module (exposing infer), or None when the dependency or its
+            model files are unavailable so callers degrade instead of raising.
+    """
+    if _smplx_mod is not None and hasattr(_smplx_mod, "infer"):
+        return _smplx_mod
+    return None
+
+
+def have_mesh_estimator() -> bool:
+    """! @brief Whether SMPLest-X is up (else no mesh is produced)."""
+    return _load_smplx() is not None
+
+
+def estimate_params(img_bgr: np.ndarray, box: dict) -> Optional[dict]:
+    """! @brief Run SMPLest-X on one crop and return its SMPL parameters + mesh.
+    @param box Normalised center-form person box.
+    @return {betas, faces, vertices} where betas is the pose-independent shape
+            vector (identical in expectation across images of one person), faces
+            is the SMPL topology, and vertices is this crop's posed mesh; or None
+            when the estimator is absent or inference fails.
+    """
+    runner = _load_smplx()
+    if runner is None or img_bgr is None:
+        return None
+    img_bgr = facelib._as_bgr(img_bgr)
+    if img_bgr is None:
+        return None
+    try:
+        out = runner.infer(img_bgr, box)
+    except Exception:
+        return None
+    if not out or out.get("betas") is None:
+        return None
+    return {"betas": np.asarray(out["betas"], np.float32),
+            "faces": np.asarray(out["faces"], np.int32),
+            "vertices": np.asarray(out["vertices"], np.float32)}
+
+
+def _drop_beta_outliers(betas: np.ndarray, max_mad: float = 5.0) -> np.ndarray:
+    """! @brief Keep shape vectors within max_mad median-absolute-deviations of the median.
+    @return Boolean mask of inliers. MAD is used over std so one bad fit (occlusion,
+            truncation, a second person leaking into the crop) can't drag the gate.
+            The threshold is loose (a bad SMPL fit scores hundreds of MADs off, while
+            a tight-but-honest cluster can push a good view past 3), and when the
+            spread is negligible (all fits agree) every view is kept.
+    """
+    med = np.median(betas, axis=0)
+    dist = np.linalg.norm(betas - med, axis=1)
+    spread = np.abs(dist - np.median(dist))
+    mad = np.median(spread)
+    if mad < 1e-4:
+        return np.ones(len(betas), dtype=bool)
+    return (spread / mad) <= max_mad
+
+
+def estimate_shape(crops: list, min_views: int = 3) -> Optional[tuple]:
+    """! @brief Fuse many per-image SMPL fits into one canonical, outlier-robust body shape.
+    @param crops List of (img_bgr, box) for a person's reasonably-sized regions.
+    @param min_views Fewest successful fits required to trust an average.
+    @return (vertices, faces) for a NEUTRAL-POSE mesh rebuilt from the averaged
+            shape, or None when too few crops fit. Shape params (beta) are averaged
+            across images -- not vertices, which are pose-dependent and meaningless
+            to average -- then the runner reposes them to canonical.
+    """
+    runner = _load_smplx()
+    if runner is None:
+        return None
+    fits = [p for p in (estimate_params(img, box) for img, box in crops) if p is not None]
+    if len(fits) < min_views:
+        return None
+    betas = np.stack([f["betas"] for f in fits])
+    inliers = betas[_drop_beta_outliers(betas)]
+    if len(inliers) == 0:
+        inliers = betas
+    mean_beta = inliers.mean(axis=0)
+    faces = fits[0]["faces"]
+    try:
+        verts = runner.pose_neutral(mean_beta)   # SMPL forward pass, zero pose
+    except Exception:
+        return None
+    return (np.asarray(verts, np.float32), np.asarray(faces, np.int32))
+
+
+def mesh_to_obj(vertices: np.ndarray, faces: np.ndarray) -> bytes:
+    """! @brief Serialise a vertex/face mesh to Wavefront OBJ text.
+    @return UTF-8 OBJ bytes (v lines + 1-indexed f lines), ready to store as the
+            person container's mesh member. OBJ carries the shape and skeleton
+            we need with no binary chunking.
+    """
+    verts = np.asarray(vertices, np.float32)
+    faces = np.asarray(faces, np.int32) + 1   # OBJ face indices are 1-based
+    lines = [f"v {x:.6f} {y:.6f} {z:.6f}" for x, y, z in verts]
+    lines += [f"f {a} {b} {c}" for a, b, c in faces]
+    return ("\n".join(lines) + "\n").encode()

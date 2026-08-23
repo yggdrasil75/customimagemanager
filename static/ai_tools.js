@@ -5,9 +5,9 @@ function renderAiActions(){
     const d=document.createElement('div');
     d.className='bg-gray-800 p-2 rounded border border-gray-700 relative group action-row';
     d.dataset.id=act.id||String(Date.now()+Math.random());
-    const opts=['description','tags','regions','segment','flag'].map(v=>
+    const opts=['description','tags','regions','segment','flag','body'].map(v=>
       `<option value="${v}"${act.target===v?' selected':''}>${
-        v==='regions'?'→ Boxes':v==='segment'?'→ Segment':v==='tags'?'→ Tags':v==='flag'?'→ Flag':'→ Desc'}</option>`).join('');
+        v==='regions'?'→ Boxes':v==='segment'?'→ Segment':v==='tags'?'→ Tags':v==='flag'?'→ Flag':v==='body'?'→ Body':'→ Desc'}</option>`).join('');
     d.innerHTML=`<button onclick="this.parentElement.remove()"
       class="absolute top-1 right-1 text-red-500 hidden group-hover:block text-xs px-1 bg-gray-900 rounded">✕</button>
       <div class="flex gap-1 mb-1 pr-5">

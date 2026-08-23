@@ -14,6 +14,7 @@ stays in manager.py and is imported lazily inside the functions to avoid a
 circular import.
 """
 import numpy as np
+from typing import Optional
 
 try:
     from rtmlib import Wholebody
@@ -132,3 +133,67 @@ def run_pose(img_bgr) -> dict:
         if wb is not None:
             return wb
     return _run_pose_yolo(img_bgr)
+
+
+# ── T-pose estimation ─────────────────────────────────────────────────────────
+# COCO-17 landmark indices used to define the body-local frame; the same indices
+# lead the wholebody-133 table, so both topologies normalise identically.
+_L_SHOULDER, _R_SHOULDER, _L_HIP, _R_HIP = 5, 6, 11, 12
+
+
+def _normalise_skeleton(keypoints: list, vis_thresh: float = 0.2) -> Optional[np.ndarray]:
+    """! @brief Map one skeleton into a pelvis-origin, torso-scaled frame so poses compare across images.
+    @return (N,3) array of [x, y, v] with pelvis at origin and shoulder-hip span
+            scaled to 1, or None when the torso landmarks are too weak to anchor.
+            Low-visibility points keep their v so the aggregator can down-weight them.
+    """
+    pts = np.array([[p.get("x", 0.0), p.get("y", 0.0), p.get("v", 0.0)]
+                    for p in keypoints], dtype=np.float32)
+    if len(pts) <= max(_L_HIP, _R_HIP):
+        return None
+    for i in (_L_SHOULDER, _R_SHOULDER, _L_HIP, _R_HIP):
+        if pts[i, 2] < vis_thresh:
+            return None
+    pelvis = (pts[_L_HIP, :2] + pts[_R_HIP, :2]) / 2.0
+    neck = (pts[_L_SHOULDER, :2] + pts[_R_SHOULDER, :2]) / 2.0
+    torso = float(np.linalg.norm(neck - pelvis))
+    if torso < 1e-4:
+        return None
+    out = pts.copy()
+    out[:, :2] = (pts[:, :2] - pelvis) / torso
+    return out
+
+
+def aggregate_tpose(skeletons: list, names: list, edges: list,
+                    vis_thresh: float = 0.2, min_support: int = 2) -> Optional[dict]:
+    """! @brief Fuse a person's per-image skeletons into one canonical normalised pose.
+    @param skeletons Raw per-image keypoint lists (each a list of {x,y,v}).
+    @param min_support Fewest visible observations a keypoint needs to be kept.
+    @return {model, kind, names, edges, keypoints:[{x,y,v,n}], support} where each
+            keypoint is the confidence-weighted median across images in the
+            body-local frame (n = how many images saw it), or None when too few
+            skeletons anchor. This is a stable 2D canonical skeleton, not a 3D
+            lift; the SMPLest-X mesh supersedes it once available.
+    """
+    normed = [s for s in (_normalise_skeleton(k, vis_thresh) for k in skeletons)
+              if s is not None]
+    if len(normed) < min_support:
+        return None
+    n_kp = min(len(s) for s in normed)
+    stack = np.stack([s[:n_kp] for s in normed])   # (images, kp, 3)
+    keypoints = []
+    for ki in range(n_kp):
+        vis = stack[:, ki, 2] >= vis_thresh
+        support = int(vis.sum())
+        if support < min_support:
+            keypoints.append({"x": 0.0, "y": 0.0, "v": 0.0, "n": support})
+            continue
+        seen = stack[vis, ki]
+        x = float(np.median(seen[:, 0]))
+        y = float(np.median(seen[:, 1]))
+        v = float(np.mean(seen[:, 2]))
+        keypoints.append({"x": round(x, 4), "y": round(y, 4),
+                          "v": round(v, 3), "n": support})
+    return {"model": "tpose-aggregate", "kind": "tpose",
+            "names": list(names[:n_kp]), "edges": edges,
+            "keypoints": keypoints, "support": len(normed)}

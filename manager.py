@@ -26,6 +26,7 @@ import hashlib, sqlite3, uuid, math, mimetypes, functools
 import urllib.request, urllib.parse
 import atexit
 from datetime import datetime
+from typing import Optional
 from collections import OrderedDict, Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from werkzeug.utils import secure_filename
@@ -33,6 +34,7 @@ from flask import Flask, render_template, render_template_string, request, jsoni
 from ultralytics import YOLO
 import faces as facelib
 import bodies as bodylib
+import persons as personlib
 import imagecodecs
 from dup_heuristics import DuplicateClassifier, classify_pair, extract_features
 from dup_cnn import DupCNN, encode_pair
@@ -84,7 +86,7 @@ try:
     import seg_runtime
 except Exception:
     seg_runtime = None
-from pipeline import DEFAULT_PIPELINE, run_pipeline
+from pipeline import DEFAULT_PIPELINE, run_pipeline, _kpts_in_box
 import llm_preprocess
 from templates import HTML, TRAINING_HTML
 
@@ -448,6 +450,15 @@ def _init_db():
         CREATE INDEX IF NOT EXISTS idx_body_cluster ON body_regions(cluster_id);
         CREATE INDEX IF NOT EXISTS idx_body_rel     ON body_regions(rel_path);
         CREATE INDEX IF NOT EXISTS idx_body_face    ON body_regions(face_id);
+
+        -- Disposable cache mapping a face cluster_id to the stable uuid of a
+        -- person record. The record itself lives in <media>/.persons/<uuid>.person
+        -- (source of truth: descriptor, t-pose, mesh, off-image bio). This table
+        -- is rebuilt by scanning that dir, so dropping it costs only recompute.
+        CREATE TABLE IF NOT EXISTS persons (
+            cluster_id  INTEGER PRIMARY KEY,
+            uuid        TEXT NOT NULL
+        );
 
         CREATE TABLE IF NOT EXISTS dedup_groups (
             id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3771,6 +3782,162 @@ def _recluster_bodies() -> int:
     db.commit()
     return total
 
+# ── Unified person model ────────────────────────────────────────────────────--
+def _cluster_centroid(table: str, cluster_id: int) -> Optional[list]:
+    """! @brief Mean L2-normalised embedding of a cluster, for the identity signal.
+    @return A float list, or None when the cluster has no cached embeddings.
+    """
+    rows = _db().execute(
+        f"SELECT embedding FROM {table} WHERE cluster_id=? AND embedding IS NOT NULL",
+        (cluster_id,)).fetchall()
+    if not rows:
+        return None
+    vecs = [np.frombuffer(r[0], np.float32) for r in rows]
+    c = np.mean(vecs, axis=0)
+    n = np.linalg.norm(c)
+    return (c / n).tolist() if n else c.tolist()
+
+def person_for_cluster(cluster_id: int, create: bool = True) -> Optional[str]:
+    """! @brief Resolve a face cluster to its person uuid, creating the record on first use.
+    @return The person uuid, or None when absent and create is False. The DB row is
+            only a cache; the record file under .persons is the source of truth.
+    """
+    db = _db()
+    row = db.execute("SELECT uuid FROM persons WHERE cluster_id=?",
+                     (cluster_id,)).fetchone()
+    if row and personlib.read(MEDIA_DIR, row[0]) is not None:
+        return row[0]
+    if not create:
+        return None
+    name = db.execute(
+        "SELECT name FROM face_regions WHERE cluster_id=? AND name<>'' LIMIT 1",
+        (cluster_id,)).fetchone()
+    desc = personlib.create(MEDIA_DIR, name[0] if name else "")
+    desc["clusters"]["face"] = [cluster_id]
+    desc["centroids"]["arcface"] = _cluster_centroid("face_regions", cluster_id)
+    body = db.execute(
+        "SELECT DISTINCT b.cluster_id FROM body_regions b "
+        "JOIN face_regions f ON f.id=b.face_id "
+        "WHERE f.cluster_id=? AND b.cluster_id>=0", (cluster_id,)).fetchall()
+    if body:
+        desc["clusters"]["body"] = [b[0] for b in body]
+        desc["centroids"]["dino"] = _cluster_centroid("body_regions", body[0][0])
+    personlib.write(MEDIA_DIR, desc)
+    db.execute("INSERT OR REPLACE INTO persons(cluster_id, uuid) VALUES (?,?)",
+               (cluster_id, desc["uuid"]))
+    db.commit()
+    return desc["uuid"]
+
+def store_person_field(cluster_id: int, section: str, key: str, value) -> bool:
+    """! @brief Shared per-field write used by BOTH the pipeline and LLM actions.
+    @param section 'body' (hair/skin/physique...), 'bio' (birthday/relationships), or 'root'.
+    @return True on success. This is the unification point: an action no longer
+            collapses into a description blob, it fills the same slot the pipeline does.
+    """
+    person_uuid = person_for_cluster(cluster_id, create=True)
+    if not person_uuid:
+        return False
+    return personlib.set_field(MEDIA_DIR, person_uuid, section, key, value)
+
+def rebuild_persons_cache() -> int:
+    """! @brief Rebuild the persons DB cache from the .persons source-of-truth files.
+    @return Number of cluster->uuid mappings restored.
+    """
+    db = _db()
+    db.execute("DELETE FROM persons")
+    n = 0
+    for desc in personlib.list_all(MEDIA_DIR):
+        for cid in desc.get("clusters", {}).get("face", []):
+            db.execute("INSERT OR REPLACE INTO persons(cluster_id, uuid) VALUES (?,?)",
+                       (cid, desc["uuid"]))
+            n += 1
+    db.commit()
+    return n
+
+def _person_cluster_skeletons(cluster_id: int) -> list:
+    """! @brief Per-image skeletons for one face cluster, matched to that person's body box.
+    @return List of keypoint lists (each a list of {x,y,v}); an image contributes
+            only the skeleton whose visible keypoints best fall inside the body box.
+    """
+    rows = _db().execute(
+        "SELECT b.rel_path, b.cx, b.cy, b.w, b.h FROM body_regions b "
+        "JOIN face_regions f ON f.id=b.face_id WHERE f.cluster_id=?",
+        (cluster_id,)).fetchall()
+    out = []
+    for rel, cx, cy, w, h in rows:
+        xmp = get_safe_path(MEDIA_DIR, os.path.splitext(rel)[0] + ".xmp")
+        pose_data = _read_pose_from_xmp(xmp)
+        people = (pose_data or {}).get("people", []) or []
+        if not people:
+            continue
+        box = {"cx": cx, "cy": cy, "w": w, "h": h}
+        best = max(people, key=lambda p: _kpts_in_box(p, box))
+        if _kpts_in_box(best, box) > 0:
+            out.append(best.get("keypoints", []))
+    return out
+
+def estimate_person_tpose(cluster_id: int) -> bool:
+    """! @brief Aggregate a person's cluster skeletons into a canonical T-pose in their record.
+    @return True when a T-pose was estimated and written to the person container;
+            False if the person is unresolved or too few skeletons anchor it.
+    """
+    person_uuid = person_for_cluster(cluster_id, create=True)
+    if not person_uuid:
+        return False
+    skeletons = _person_cluster_skeletons(cluster_id)
+    tpose = pose.aggregate_tpose(skeletons, pose.COCO_KP_NAMES, pose.COCO_SKELETON)
+    if tpose is None:
+        return False
+    personlib.put_member(MEDIA_DIR, person_uuid, personlib.TPOSE,
+                         json.dumps(tpose).encode())
+    return True
+
+def _person_body_crops(cluster_id: int, min_frac: float = 0.15, cap: int = 40):
+    """! @brief Load all reasonably-sized body crops for a person's cluster.
+    @param min_frac Skip boxes whose smaller side is under this fraction of the image;
+           a truncated or tiny crop yields a bad SMPL fit and would only add noise.
+    @param cap Most crops to load, largest first, so a huge cluster stays bounded.
+    @return List of (bgr_image, box); empty when the cluster has none on disk.
+    """
+    rows = _db().execute(
+        "SELECT b.rel_path, b.cx, b.cy, b.w, b.h FROM body_regions b "
+        "JOIN face_regions f ON f.id=b.face_id WHERE f.cluster_id=? "
+        "ORDER BY b.w*b.h DESC LIMIT ?", (cluster_id, cap)).fetchall()
+    out = []
+    for rel, cx, cy, w, h in rows:
+        if min(w, h) < min_frac:
+            continue
+        fp = get_safe_path(MEDIA_DIR, rel)
+        if not fp:
+            continue
+        img = read_jxl(fp)
+        if img is None:
+            continue
+        out.append((_to_bgr(img), {"cx": cx, "cy": cy, "w": w, "h": h}))
+    return out
+
+def estimate_person_mesh(cluster_id: int) -> bool:
+    """! @brief Estimate a canonical SMPLest-X body mesh for a person and store it as mesh.obj.
+    @return True when a mesh was produced and written to the person container;
+            False if SMPLest-X is unavailable, the person is unresolved, or too few
+            usable crops exist. The shape is averaged over every reasonably-sized
+            crop with outliers dropped, not taken from a single view.
+    """
+    if not bodylib.have_mesh_estimator():
+        return False
+    person_uuid = person_for_cluster(cluster_id, create=True)
+    if not person_uuid:
+        return False
+    crops = _person_body_crops(cluster_id)
+    if not crops:
+        return False
+    mesh = bodylib.estimate_shape(crops)
+    if mesh is None:
+        return False
+    obj = bodylib.mesh_to_obj(*mesh)
+    personlib.put_member(MEDIA_DIR, person_uuid, personlib.MESH, obj)
+    return True
+
 # ── OCR ─────────────────────────────────────────────────────────────────────--
 @functools.lru_cache(maxsize=1)
 def _load_rapidocr():
@@ -4361,6 +4528,29 @@ def _segment_regions(bgr, query):
         save_classes()
     return new
 
+def _apply_body_action(rel, bgr, action):
+    """! @brief Fill the fixed body-description slots for each identified person in an image.
+    @return True once run. For every face cluster present in the image, one LLM
+            call returns the BODY_FIELDS as JSON and each is written through the
+            shared store, so the person record gains structured, reusable fields.
+    """
+    clusters = [r[0] for r in _db().execute(
+        "SELECT DISTINCT cluster_id FROM face_regions WHERE rel_path=? AND cluster_id>=0",
+        (rel,)).fetchall()]
+    if not clusters:
+        return True
+    fields = ", ".join(personlib.BODY_FIELDS)
+    prompt = (action.get("prompt", "") +
+              f"\n\nDescribe the person. Respond ONLY as JSON with these keys: {fields}. "
+              "Use a short phrase per key, empty string if unknown.")
+    res = _llm_call(prompt, bgr, "json") or {}
+    for cid in clusters:
+        for key in personlib.BODY_FIELDS:
+            val = str(res.get(key, "")).strip()
+            if val:
+                store_person_field(cid, "body", key, val)
+    return True
+
 def _apply_llm_action(fp, action):
     """Run one configured AI action against a file and merge the result into its
     metadata (tags appended/deduped, description appended, boxes added as
@@ -4380,6 +4570,8 @@ def _apply_llm_action(fp, action):
         write_metadata(fp, meta["tags"], meta["description"], meta["regions"],
                        flag={"delete": delete, "reason": reason})
         return True
+    if target == "body":
+        return _apply_body_action(_rel(fp), bgr, action)
     if target == "segment":
         if seg_runtime is None:
             return True
@@ -4982,6 +5174,39 @@ def api_body_name():
         (name, cid))
     _db().commit()
     return jsonify({"success": True, "named": touched})
+
+@app.route("/api/persons/<int:cluster_id>")
+def api_person_get(cluster_id):
+    """The unified person record for a face cluster (created on first view).
+    Reports whether a T-pose and mesh have been estimated so the UI can show it."""
+    person_uuid = person_for_cluster(cluster_id, create=True)
+    if not person_uuid:
+        return jsonify({"success": False, "error": "no such cluster"})
+    desc = personlib.read(MEDIA_DIR, person_uuid)
+    return jsonify({"success": True, "person": desc,
+                    "body_fields": list(personlib.BODY_FIELDS),
+                    "bio_fields": list(personlib.BIO_FIELDS),
+                    "has_tpose": personlib.read_member(MEDIA_DIR, person_uuid, personlib.TPOSE) is not None,
+                    "has_mesh": personlib.read_member(MEDIA_DIR, person_uuid, personlib.MESH) is not None,
+                    "mesh_estimator": bodylib.have_mesh_estimator()})
+
+@app.route("/api/persons/<int:cluster_id>/field", methods=["POST"])
+def api_person_field(cluster_id):
+    """Set one body/bio field, through the same store the pipeline uses."""
+    d = request.json or {}
+    ok = store_person_field(cluster_id, d.get("section", ""),
+                            d.get("key", ""), d.get("value", ""))
+    return jsonify({"success": ok})
+
+@app.route("/api/persons/<int:cluster_id>/tpose", methods=["POST"])
+def api_person_tpose(cluster_id):
+    """Estimate and store the canonical T-pose from this person's images."""
+    return jsonify({"success": estimate_person_tpose(cluster_id)})
+
+@app.route("/api/persons/<int:cluster_id>/mesh", methods=["POST"])
+def api_person_mesh(cluster_id):
+    """Estimate and store the SMPLest-X body mesh (no-op if the estimator is absent)."""
+    return jsonify({"success": estimate_person_mesh(cluster_id)})
 
 @app.route("/api/faces/scan", methods=["POST"])
 @_auth.require_feature("tab.faces.edit")
