@@ -454,9 +454,6 @@ async function loadBodies() {
     return;
   }
 
-  const bwarn = document.getElementById('bodies_warn');
-  if (bwarn) bwarn.classList.toggle('hidden', !d.enabled || !!d.identity);
-
   if (!d.enabled) { block.innerHTML = ''; return; }
 
   _bodyClusters = d.clusters || [];

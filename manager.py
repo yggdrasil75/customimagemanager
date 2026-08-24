@@ -3766,8 +3766,6 @@ def _recluster_bodies() -> int:
     def eps_for(mode):
         if eps:
             return eps
-        # Any identity-model space (torchreid 'reid' or a dinov3 model id) uses
-        # the tight cosine radius; only appearance vectors need the wider one.
         return bodylib.BODY_EPS_APPEARANCE if mode == "appearance" else bodylib.BODY_EPS_REID
     total = _recluster_table("body_regions", "reid", eps_for)
 
