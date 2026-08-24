@@ -35,6 +35,7 @@ from ultralytics import YOLO
 import faces as facelib
 import bodies as bodylib
 import persons as personlib
+import appearances
 import imagecodecs
 from dup_heuristics import DuplicateClassifier, classify_pair, extract_features
 from dup_cnn import DupCNN, encode_pair
@@ -169,6 +170,12 @@ state = {
     "model_groups": {},
     "pose_kind": "body",
     "pose_size": "n",
+    # Appearance clustering: cosine-distance threshold below which two of a
+    # person's faces belong to the same era. Higher = fewer, broader eras.
+    "appearance_eps": 0.35,
+    # Body-shape and pose backends (swappable behind the runner adapter).
+    "shape_estimator": "smplest_x",
+    "pose_estimator": "yolo",
     "page_size": 200,
     # Storage-tiering config, persisted here in app_config.json (migrated from the
     # legacy standalone tiers_config.json on first run by tiering.load_cfg). The
@@ -3783,19 +3790,36 @@ def _recluster_bodies() -> int:
     return total
 
 # ── Unified person model ────────────────────────────────────────────────────--
-def _cluster_centroid(table: str, cluster_id: int) -> Optional[list]:
-    """! @brief Mean L2-normalised embedding of a cluster, for the identity signal.
-    @return A float list, or None when the cluster has no cached embeddings.
+def _build_appearances(cluster_id: int) -> list:
+    """! @brief Split a face cluster into time-scoped appearances by embedding drift.
+    @return List of appearance dicts, each with its own era-scoped centroids, image
+            membership and date span. Dates are validated against the era, not used
+            to form it, so a wrong scan-date can't misplace a photo.
     """
     rows = _db().execute(
-        f"SELECT embedding FROM {table} WHERE cluster_id=? AND embedding IS NOT NULL",
-        (cluster_id,)).fetchall()
+        "SELECT fr.id, fr.rel_path, fr.embedding, f.d_original_epoch, f.d_capture_epoch "
+        "FROM face_regions fr JOIN files f ON f.rel_path=fr.rel_path "
+        "WHERE fr.cluster_id=? AND fr.embedding IS NOT NULL", (cluster_id,)).fetchall()
     if not rows:
-        return None
-    vecs = [np.frombuffer(r[0], np.float32) for r in rows]
-    c = np.mean(vecs, axis=0)
-    n = np.linalg.norm(c)
-    return (c / n).tolist() if n else c.tolist()
+        return []
+    embs = np.stack([np.frombuffer(r[2], np.float32) for r in rows])
+    epochs = [(r[3] if r[3] is not None else r[4]) for r in rows]
+    labels = appearances.cluster_eras(embs, eps=float(state.get("appearance_eps", 0.35)))
+    rank = appearances.order_eras_by_time(labels, epochs)
+    out = []
+    for lbl in sorted(set(labels.tolist()), key=lambda l: rank[l]):
+        idxs = [i for i in range(len(rows)) if labels[i] == lbl]
+        app = personlib.blank_appearance(f"era{rank[lbl]}")
+        app["label"] = f"era {rank[lbl]}"
+        app["rel_paths"] = sorted({rows[i][1] for i in idxs})
+        centroid = np.mean([embs[i] for i in idxs], axis=0)
+        norm = np.linalg.norm(centroid)
+        app["centroids"]["arcface"] = (centroid / norm).tolist() if norm else centroid.tolist()
+        dated = [epochs[i] for i in idxs if epochs[i] is not None]
+        if dated:
+            app["date_span"] = {"min": min(dated), "max": max(dated)}
+        out.append(app)
+    return out
 
 def person_for_cluster(cluster_id: int, create: bool = True) -> Optional[str]:
     """! @brief Resolve a face cluster to its person uuid, creating the record on first use.
@@ -3814,30 +3838,40 @@ def person_for_cluster(cluster_id: int, create: bool = True) -> Optional[str]:
         (cluster_id,)).fetchone()
     desc = personlib.create(MEDIA_DIR, name[0] if name else "")
     desc["clusters"]["face"] = [cluster_id]
-    desc["centroids"]["arcface"] = _cluster_centroid("face_regions", cluster_id)
+    desc["appearances"] = _build_appearances(cluster_id)
     body = db.execute(
         "SELECT DISTINCT b.cluster_id FROM body_regions b "
         "JOIN face_regions f ON f.id=b.face_id "
         "WHERE f.cluster_id=? AND b.cluster_id>=0", (cluster_id,)).fetchall()
     if body:
         desc["clusters"]["body"] = [b[0] for b in body]
-        desc["centroids"]["dino"] = _cluster_centroid("body_regions", body[0][0])
     personlib.write(MEDIA_DIR, desc)
     db.execute("INSERT OR REPLACE INTO persons(cluster_id, uuid) VALUES (?,?)",
                (cluster_id, desc["uuid"]))
     db.commit()
     return desc["uuid"]
 
-def store_person_field(cluster_id: int, section: str, key: str, value) -> bool:
+def _default_appearance_id(person_uuid: str) -> Optional[str]:
+    """! @brief The most-populated appearance's id, used when a caller names none."""
+    desc = personlib.read(MEDIA_DIR, person_uuid)
+    if not desc or not desc["appearances"]:
+        return None
+    return max(desc["appearances"], key=lambda a: len(a["rel_paths"]))["id"]
+
+def store_person_field(cluster_id: int, section: str, key: str, value,
+                       appearance_id: Optional[str] = None) -> bool:
     """! @brief Shared per-field write used by BOTH the pipeline and LLM actions.
-    @param section 'body' (hair/skin/physique...), 'bio' (birthday/relationships), or 'root'.
+    @param section 'bio' (person-level) or 'body' (era-level).
+    @param appearance_id Era to write body fields into; defaults to the largest era.
     @return True on success. This is the unification point: an action no longer
             collapses into a description blob, it fills the same slot the pipeline does.
     """
     person_uuid = person_for_cluster(cluster_id, create=True)
     if not person_uuid:
         return False
-    return personlib.set_field(MEDIA_DIR, person_uuid, section, key, value)
+    if section == "body" and appearance_id is None:
+        appearance_id = _default_appearance_id(person_uuid)
+    return personlib.set_field(MEDIA_DIR, person_uuid, section, key, value, appearance_id)
 
 def rebuild_persons_cache() -> int:
     """! @brief Rebuild the persons DB cache from the .persons source-of-truth files.
@@ -3854,8 +3888,9 @@ def rebuild_persons_cache() -> int:
     db.commit()
     return n
 
-def _person_cluster_skeletons(cluster_id: int) -> list:
-    """! @brief Per-image skeletons for one face cluster, matched to that person's body box.
+def _person_cluster_skeletons(cluster_id: int, rel_set: set) -> list:
+    """! @brief Per-image skeletons for one appearance, matched to that person's body box.
+    @param rel_set Only images in this era contribute, so poses never mix across eras.
     @return List of keypoint lists (each a list of {x,y,v}); an image contributes
             only the skeleton whose visible keypoints best fall inside the body box.
     """
@@ -3865,6 +3900,8 @@ def _person_cluster_skeletons(cluster_id: int) -> list:
         (cluster_id,)).fetchall()
     out = []
     for rel, cx, cy, w, h in rows:
+        if rel not in rel_set:
+            continue
         xmp = get_safe_path(MEDIA_DIR, os.path.splitext(rel)[0] + ".xmp")
         pose_data = _read_pose_from_xmp(xmp)
         people = (pose_data or {}).get("people", []) or []
@@ -3876,36 +3913,53 @@ def _person_cluster_skeletons(cluster_id: int) -> list:
             out.append(best.get("keypoints", []))
     return out
 
-def estimate_person_tpose(cluster_id: int) -> bool:
-    """! @brief Aggregate a person's cluster skeletons into a canonical T-pose in their record.
-    @return True when a T-pose was estimated and written to the person container;
-            False if the person is unresolved or too few skeletons anchor it.
+def _resolve_appearance(cluster_id: int, appearance_id: Optional[str]):
+    """! @brief Resolve (person_uuid, appearance dict) for a cluster + optional era id.
+    @return (uuid, appearance) or (None, None); defaults to the largest era.
     """
     person_uuid = person_for_cluster(cluster_id, create=True)
     if not person_uuid:
+        return None, None
+    if appearance_id is None:
+        appearance_id = _default_appearance_id(person_uuid)
+    desc = personlib.read(MEDIA_DIR, person_uuid)
+    app = personlib.get_appearance(desc, appearance_id or "") if desc else None
+    return person_uuid, app
+
+def estimate_person_tpose(cluster_id: int, appearance_id: Optional[str] = None) -> bool:
+    """! @brief Aggregate one appearance's skeletons into a canonical T-pose in the record.
+    @return True when a T-pose was estimated and written for that era; False if the
+            person/era is unresolved or too few skeletons anchor it.
+    """
+    person_uuid, app = _resolve_appearance(cluster_id, appearance_id)
+    if app is None:
         return False
-    skeletons = _person_cluster_skeletons(cluster_id)
+    skeletons = _person_cluster_skeletons(cluster_id, set(app["rel_paths"]))
     tpose = pose.aggregate_tpose(skeletons, pose.COCO_KP_NAMES, pose.COCO_SKELETON)
     if tpose is None:
         return False
-    personlib.put_member(MEDIA_DIR, person_uuid, personlib.TPOSE,
-                         json.dumps(tpose).encode())
+    personlib.put_member(MEDIA_DIR, person_uuid,
+                         personlib.tpose_member(app["id"]), json.dumps(tpose).encode())
+    app["has_tpose"] = True
+    personlib.upsert_appearance(MEDIA_DIR, person_uuid, app)
     return True
 
-def _person_body_crops(cluster_id: int, min_frac: float = 0.15, cap: int = 40):
-    """! @brief Load all reasonably-sized body crops for a person's cluster.
+def _person_body_crops(cluster_id: int, rel_set: set, min_frac: float = 0.15,
+                       cap: int = 400):
+    """! @brief Load all reasonably-sized body crops for one appearance's images.
+    @param rel_set Only images in this era are loaded, so shapes never mix across eras.
     @param min_frac Skip boxes whose smaller side is under this fraction of the image;
            a truncated or tiny crop yields a bad SMPL fit and would only add noise.
-    @param cap Most crops to load, largest first, so a huge cluster stays bounded.
-    @return List of (bgr_image, box); empty when the cluster has none on disk.
+    @param cap Most crops to load, largest first, so a huge era stays bounded.
+    @return List of (bgr_image, box); empty when the era has none on disk.
     """
     rows = _db().execute(
         "SELECT b.rel_path, b.cx, b.cy, b.w, b.h FROM body_regions b "
         "JOIN face_regions f ON f.id=b.face_id WHERE f.cluster_id=? "
-        "ORDER BY b.w*b.h DESC LIMIT ?", (cluster_id, cap)).fetchall()
+        "ORDER BY b.w*b.h DESC LIMIT ?", (cluster_id, cap * 4)).fetchall()
     out = []
     for rel, cx, cy, w, h in rows:
-        if min(w, h) < min_frac:
+        if rel not in rel_set or min(w, h) < min_frac:
             continue
         fp = get_safe_path(MEDIA_DIR, rel)
         if not fp:
@@ -3914,28 +3968,32 @@ def _person_body_crops(cluster_id: int, min_frac: float = 0.15, cap: int = 40):
         if img is None:
             continue
         out.append((_to_bgr(img), {"cx": cx, "cy": cy, "w": w, "h": h}))
+        if len(out) >= cap:
+            break
     return out
 
-def estimate_person_mesh(cluster_id: int) -> bool:
-    """! @brief Estimate a canonical SMPLest-X body mesh for a person and store it as mesh.obj.
-    @return True when a mesh was produced and written to the person container;
-            False if SMPLest-X is unavailable, the person is unresolved, or too few
-            usable crops exist. The shape is averaged over every reasonably-sized
-            crop with outliers dropped, not taken from a single view.
+def estimate_person_mesh(cluster_id: int, appearance_id: Optional[str] = None) -> bool:
+    """! @brief Estimate a canonical body mesh for one appearance and store it as its mesh.obj.
+    @return True when a mesh was produced and written for that era; False if the
+            estimator is absent, the person/era is unresolved, or too few usable
+            crops exist. Shape is averaged across the era's crops with outliers
+            dropped — never mixed across eras, never a single view.
     """
     if not bodylib.have_mesh_estimator():
         return False
-    person_uuid = person_for_cluster(cluster_id, create=True)
-    if not person_uuid:
+    person_uuid, app = _resolve_appearance(cluster_id, appearance_id)
+    if app is None:
         return False
-    crops = _person_body_crops(cluster_id)
+    crops = _person_body_crops(cluster_id, set(app["rel_paths"]))
     if not crops:
         return False
     mesh = bodylib.estimate_shape(crops)
     if mesh is None:
         return False
     obj = bodylib.mesh_to_obj(*mesh)
-    personlib.put_member(MEDIA_DIR, person_uuid, personlib.MESH, obj)
+    personlib.put_member(MEDIA_DIR, person_uuid, personlib.mesh_member(app["id"]), obj)
+    app["has_mesh"] = True
+    personlib.upsert_appearance(MEDIA_DIR, person_uuid, app)
     return True
 
 # ── OCR ─────────────────────────────────────────────────────────────────────--
@@ -5175,38 +5233,66 @@ def api_body_name():
     _db().commit()
     return jsonify({"success": True, "named": touched})
 
+def _person_date_flags(cluster_id: int) -> list:
+    """! @brief Faces whose stored date disagrees with their embedding era.
+    @return One entry per suspect face with the era's median date as a PROPOSED
+            correction; advisory only, the caller never overwrites a stored date.
+    """
+    rows = _db().execute(
+        "SELECT fr.rel_path, fr.embedding, f.d_original_epoch, f.d_capture_epoch "
+        "FROM face_regions fr JOIN files f ON f.rel_path=fr.rel_path "
+        "WHERE fr.cluster_id=? AND fr.embedding IS NOT NULL", (cluster_id,)).fetchall()
+    if not rows:
+        return []
+    embs = np.stack([np.frombuffer(r[1], np.float32) for r in rows])
+    epochs = [(r[2] if r[2] is not None else r[3]) for r in rows]
+    labels = appearances.cluster_eras(embs, eps=float(state.get("appearance_eps", 0.35)))
+    flags = appearances.flag_date_disagreements(labels, epochs)
+    for fl in flags:
+        fl["rel_path"] = rows[fl["index"]][0]
+        fl["has_stored_date"] = rows[fl["index"]][2] is not None
+    return flags
+
 @app.route("/api/persons/<int:cluster_id>")
 def api_person_get(cluster_id):
     """The unified person record for a face cluster (created on first view).
-    Reports whether a T-pose and mesh have been estimated so the UI can show it."""
+    Each appearance reports whether its T-pose and mesh exist, plus any faces whose
+    stored date disagrees with their embedding era (advisory, never auto-applied)."""
     person_uuid = person_for_cluster(cluster_id, create=True)
     if not person_uuid:
         return jsonify({"success": False, "error": "no such cluster"})
     desc = personlib.read(MEDIA_DIR, person_uuid)
+    for app in desc["appearances"]:
+        app["has_tpose"] = personlib.read_member(
+            MEDIA_DIR, person_uuid, personlib.tpose_member(app["id"])) is not None
+        app["has_mesh"] = personlib.read_member(
+            MEDIA_DIR, person_uuid, personlib.mesh_member(app["id"])) is not None
     return jsonify({"success": True, "person": desc,
                     "body_fields": list(personlib.BODY_FIELDS),
                     "bio_fields": list(personlib.BIO_FIELDS),
-                    "has_tpose": personlib.read_member(MEDIA_DIR, person_uuid, personlib.TPOSE) is not None,
-                    "has_mesh": personlib.read_member(MEDIA_DIR, person_uuid, personlib.MESH) is not None,
+                    "date_flags": _person_date_flags(cluster_id),
                     "mesh_estimator": bodylib.have_mesh_estimator()})
 
 @app.route("/api/persons/<int:cluster_id>/field", methods=["POST"])
 def api_person_field(cluster_id):
-    """Set one body/bio field, through the same store the pipeline uses."""
+    """Set one body/bio field, through the same store the pipeline uses.
+    Body fields target an appearance (defaults to the largest era)."""
     d = request.json or {}
-    ok = store_person_field(cluster_id, d.get("section", ""),
-                            d.get("key", ""), d.get("value", ""))
+    ok = store_person_field(cluster_id, d.get("section", ""), d.get("key", ""),
+                            d.get("value", ""), d.get("appearance_id"))
     return jsonify({"success": ok})
 
 @app.route("/api/persons/<int:cluster_id>/tpose", methods=["POST"])
 def api_person_tpose(cluster_id):
-    """Estimate and store the canonical T-pose from this person's images."""
-    return jsonify({"success": estimate_person_tpose(cluster_id)})
+    """Estimate and store the canonical T-pose for one appearance."""
+    d = request.json or {}
+    return jsonify({"success": estimate_person_tpose(cluster_id, d.get("appearance_id"))})
 
 @app.route("/api/persons/<int:cluster_id>/mesh", methods=["POST"])
 def api_person_mesh(cluster_id):
-    """Estimate and store the SMPLest-X body mesh (no-op if the estimator is absent)."""
-    return jsonify({"success": estimate_person_mesh(cluster_id)})
+    """Estimate and store the body mesh for one appearance (no-op if estimator absent)."""
+    d = request.json or {}
+    return jsonify({"success": estimate_person_mesh(cluster_id, d.get("appearance_id"))})
 
 @app.route("/api/faces/scan", methods=["POST"])
 @_auth.require_feature("tab.faces.edit")
@@ -5379,6 +5465,7 @@ def api_state():
         ("classes","available_models","status_text","remote_ip",
          "oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions",
          "autotag_enabled","pipeline_tree","yolo_size","pose_kind","pose_size",
+         "appearance_eps","shape_estimator","pose_estimator",
          "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","our_model",
          "face_cluster_eps","body_enabled","body_size","body_cluster_eps","object_proposals",
          "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
@@ -5419,6 +5506,7 @@ def update_settings():
     if "our_model" in d and d["our_model"] != state.get("our_model"):
         _load_yolo.cache_clear()
     for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","llm_preprocess","pipeline_tree","yolo_size","pose_kind","pose_size",
+              "appearance_eps","shape_estimator","pose_estimator",
               "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","our_model","face_cluster_eps",
               "body_enabled","body_size","body_cluster_eps","object_proposals","iqa_model",
               "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",

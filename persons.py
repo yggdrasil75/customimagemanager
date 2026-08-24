@@ -1,23 +1,32 @@
 """! @file persons.py
-@brief Unified, reusable person model that outlives the source images.
+@brief Unified, reusable person model, time-scoped, that outlives the source images.
 
 A person record is a source-of-truth file under `<media>/.persons/<uuid>.person`,
-a zip container holding three members:
+a zip container. Its structure has two tiers because one person is not one body:
+an 18-year-old and the same person at 60 are genuinely different shapes, and
+averaging across them would blend two real bodies into one that matches neither.
 
-  descriptor.json : uuid, name, static body-description fields (hair/skin/
-                    physique...), plus off-image facts (birthday, relationships)
-                    and the identity centroids (arcface/dino) so the person is
-                    still identifiable after every source photo is gone.
-  tpose.json      : estimated canonical T-pose keypoints (optional).
-  mesh.obj        : SMPLest-X body mesh (optional; added when that lands).
+  descriptor.json : the person (stable for life) — uuid, name, off-image bio
+                    (birthday, relationships), and a list of APPEARANCES.
+                    Each appearance is one stable era of the person's look:
+                    its own body-description fields (hair greys, physique
+                    changes), its own identity centroids (arcface/dino) computed
+                    only from that era's photos, its image membership and a
+                    descriptive date span.
+  tpose_<id>.json : one appearance's canonical T-pose keypoints (optional).
+  mesh_<id>.obj   : one appearance's canonical body mesh (optional).
+
+Appearances are formed from face-embedding drift (a physical, monotonic process),
+NOT from capture dates — scanned family photos routinely carry the scan date, not
+the shot date, so a date is only ever validated against the embedding era and
+flagged when it disagrees; it never moves a photo between eras.
 
 The DB `persons` table is a disposable cache mapping cluster_id -> uuid; it is
 rebuilt by scanning `.persons/`, so a lost DB costs only recompute, never the
 descriptor/mesh/relationships that live nowhere else.
 
-The static body-description fields are the fixed slots a secondary pipeline (or
-an LLM action) fills. They live here so the pipeline and the actions write the
-SAME structure through the SAME store — that is the unification.
+Body fields are filled by a secondary pipeline or an LLM action through the SAME
+per-field store, into the SAME appearance the pipeline uses — that is the unification.
 """
 
 import io
@@ -28,12 +37,22 @@ import zipfile
 from typing import Any, Optional
 
 DESCRIPTOR = "descriptor.json"
-TPOSE = "tpose.json"
-MESH = "mesh.obj"
+
+
+def tpose_member(appearance_id: str) -> str:
+    """! @brief Container member name for one appearance's canonical T-pose."""
+    return f"tpose_{appearance_id}.json"
+
+
+def mesh_member(appearance_id: str) -> str:
+    """! @brief Container member name for one appearance's canonical body mesh."""
+    return f"mesh_{appearance_id}.obj"
 
 ## Fixed body-description slots a secondary pipeline / LLM action fills per
 ## person. Kept as a tuple so callers can offer them as form fields and the
-## store can reject typo keys instead of silently growing the schema.
+## Fixed body-description slots a secondary pipeline / LLM action fills. These are
+## era-specific (hair greys, physique changes), so they live on an APPEARANCE, not
+## the person: one person can have several appearances across their life.
 BODY_FIELDS: tuple[str, ...] = (
     "hair_color", "hair_style", "hair_length",
     "skin_tone", "physique", "height", "eye_color",
@@ -55,14 +74,32 @@ def _path(media_dir: str, person_uuid: str) -> str:
     return os.path.join(persons_dir(media_dir), f"{person_uuid}.person")
 
 
+def blank_appearance(appearance_id: str) -> dict[str, Any]:
+    """! @brief An empty time-scoped appearance (one stable era of a person's look).
+    @return A record holding this era's own body fields, identity centroids, image
+            membership and date span, so nothing is ever averaged across eras. The
+            date span is descriptive only — appearances are formed from embedding
+            drift, not dates, so a wrong scan-date can't move a photo between eras.
+    """
+    return {
+        "id": appearance_id,
+        "label": "",
+        "body": {k: "" for k in BODY_FIELDS},
+        "rel_paths": [],
+        "centroids": {"arcface": None, "dino": None},
+        "date_span": {"min": None, "max": None},
+        "has_tpose": False,
+        "has_mesh": False,
+    }
+
+
 def _blank(person_uuid: str) -> dict[str, Any]:
     return {
         "uuid": person_uuid,
         "name": "",
-        "body": {k: "" for k in BODY_FIELDS},
         "bio": {k: "" for k in BIO_FIELDS},
         "clusters": {"face": [], "body": []},
-        "centroids": {"arcface": None, "dino": None},
+        "appearances": [],
     }
 
 
@@ -132,7 +169,7 @@ def write(media_dir: str, descriptor: dict[str, Any]) -> str:
 
 
 def put_member(media_dir: str, person_uuid: str, member: str, data: bytes) -> None:
-    """! @brief Attach/replace a binary member (tpose.json, mesh.obj) in the container."""
+    """! @brief Attach/replace a binary member (an appearance's tpose/mesh) in the container."""
     members = _members(media_dir, person_uuid)
     members[member] = data
     _rewrite(media_dir, person_uuid, members)
@@ -148,22 +185,48 @@ def create(media_dir: str, name: str = "") -> dict[str, Any]:
     return desc
 
 
-def set_field(media_dir: str, person_uuid: str, section: str, key: str,
-              value: Any) -> bool:
-    """! @brief Set one field in the shared per-field store used by pipeline and actions.
-    @param section 'body', 'bio', or 'root' (name/uuid live at root).
-    @return True if written; False if the record is missing or the key is not a
-            defined slot (typo keys are rejected so the schema can't drift).
+def get_appearance(desc: dict[str, Any], appearance_id: str) -> Optional[dict[str, Any]]:
+    """! @brief Find an appearance by id within a loaded descriptor."""
+    for a in desc["appearances"]:
+        if a["id"] == appearance_id:
+            return a
+    return None
+
+
+def upsert_appearance(media_dir: str, person_uuid: str,
+                      appearance: dict[str, Any]) -> bool:
+    """! @brief Insert or replace one appearance (matched by id) and persist.
+    @return True on success, False when the person record is missing.
     """
     desc = read(media_dir, person_uuid)
     if desc is None:
         return False
-    if section == "root" and key in ("name",):
-        desc[key] = value
-    elif section == "body" and key in BODY_FIELDS:
-        desc["body"][key] = value
+    desc["appearances"] = [a for a in desc["appearances"] if a["id"] != appearance["id"]]
+    desc["appearances"].append(appearance)
+    write(media_dir, desc)
+    return True
+
+
+def set_field(media_dir: str, person_uuid: str, section: str, key: str,
+              value: Any, appearance_id: Optional[str] = None) -> bool:
+    """! @brief Set one field in the shared per-field store used by pipeline and actions.
+    @param section 'bio' (person-level) or 'body' (era-level, needs appearance_id).
+    @param appearance_id Required for body fields; selects which era to write.
+    @return True if written; False if the record/appearance is missing or the key is
+            not a defined slot (typo keys are rejected so the schema can't drift).
+    """
+    desc = read(media_dir, person_uuid)
+    if desc is None:
+        return False
+    if section == "root" and key == "name":
+        desc["name"] = value
     elif section == "bio" and key in BIO_FIELDS:
         desc["bio"][key] = value
+    elif section == "body" and key in BODY_FIELDS:
+        app = get_appearance(desc, appearance_id or "")
+        if app is None:
+            return False
+        app["body"][key] = value
     else:
         return False
     write(media_dir, desc)

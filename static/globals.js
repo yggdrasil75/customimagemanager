@@ -311,6 +311,9 @@ async function fetchState(){
       const _bs=document.getElementById('cfg_body_size');
       if(_bs) _bs.value=s.body_size||'s';
       document.getElementById('cfg_pose_kind').value=s.pose_kind||'body';
+      document.getElementById('cfg_pose_estimator').value=s.pose_estimator||'yolo';
+      document.getElementById('cfg_shape_estimator').value=s.shape_estimator||'smplest_x';
+      document.getElementById('cfg_appearance_eps').value=(s.appearance_eps??0.35);
       document.getElementById('cfg_pose_size').value=s.pose_size||'n';
       document.getElementById('cfg_system').value=s.oai_system_prompt||'';
       const pp=s.llm_preprocess||{}, ppc=pp.compress||{}, ppd=pp.pad||{};

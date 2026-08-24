@@ -582,42 +582,73 @@ async function openPerson(cid) {
   const d = await (await fetch('/api/persons/' + cid)).json();
   if (!d.success) { el.innerHTML = '<div class="text-xs text-red-400">' + (d.error || 'Failed.') + '</div>'; return; }
   const p = d.person;
-  const field = (section, key, val) =>
+  const esc = v => (v || '').replace(/"/g, '&quot;');
+
+  // Person-level bio (stable for life).
+  const bioRows = d.bio_fields.map(k =>
     `<label class="flex flex-col gap-0.5">
-       <span class="text-[10px] text-gray-400">${key.replace(/_/g, ' ')}</span>
-       <input value="${(val || '').replace(/"/g, '&quot;')}"
-              onchange="savePersonField(${cid},'${section}','${key}',this.value)"
+       <span class="text-[10px] text-gray-400">${k.replace(/_/g, ' ')}</span>
+       <input value="${esc(p.bio[k])}"
+              onchange="savePersonField(${cid},'bio','${k}',this.value,null)"
               class="p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white">
-     </label>`;
-  const bodyRows = d.body_fields.map(k => field('body', k, p.body[k])).join('');
-  const bioRows = d.bio_fields.map(k => field('bio', k, p.bio[k])).join('');
+     </label>`).join('');
+
+  // Date disagreements: advisory, never auto-applied.
+  const flagBanner = (d.date_flags && d.date_flags.length)
+    ? `<div class="mt-2 p-1.5 bg-amber-900/40 border border-amber-700 rounded text-[10px] text-amber-200">
+         ⚠ ${d.date_flags.length} photo(s) have a date that disagrees with their look —
+         likely a scan date. Review before trusting; nothing was changed automatically.
+       </div>` : '';
+
+  // Per-appearance (era) sections: body fields + T-pose/mesh, scoped to that era.
+  const eras = (p.appearances || []).map(a => {
+    const bodyRows = d.body_fields.map(k =>
+      `<label class="flex flex-col gap-0.5">
+         <span class="text-[10px] text-gray-400">${k.replace(/_/g, ' ')}</span>
+         <input value="${esc(a.body[k])}"
+                onchange="savePersonField(${cid},'body','${k}','${a.id}')"
+                data-val class="p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white">
+       </label>`).join('');
+    return `<div class="mt-2 pt-2 border-t border-gray-700">
+        <div class="text-[11px] text-blue-300 font-bold mb-1">${a.label || a.id}
+          <span class="text-gray-500 font-normal">· ${a.rel_paths.length} photo(s)</span></div>
+        <div class="grid grid-cols-2 gap-1.5">${bodyRows}</div>
+        <div class="flex items-center gap-2 mt-2">
+          <button onclick="estimatePose(${cid},'${a.id}')"
+            class="text-xs bg-teal-700 hover:bg-teal-600 px-2 py-1 rounded font-bold">
+            ${a.has_tpose ? 'Re-estimate T-pose' : 'Estimate T-pose'}</button>
+          <button onclick="estimateMesh(${cid},'${a.id}')" ${d.mesh_estimator ? '' : 'disabled'}
+            class="text-xs bg-teal-700 hover:bg-teal-600 disabled:opacity-40 px-2 py-1 rounded font-bold"
+            title="${d.mesh_estimator ? '' : 'shape estimator not installed'}">
+            ${a.has_mesh ? 'Re-estimate mesh' : 'Estimate mesh'}</button>
+          <span id="person_status_${cid}_${a.id}" class="text-[10px] text-gray-400"></span>
+        </div>
+      </div>`;
+  }).join('');
+
   el.innerHTML = `
-    <div class="grid grid-cols-2 gap-1.5">${bodyRows}</div>
-    <div class="grid grid-cols-1 gap-1.5 mt-2">${bioRows}</div>
-    <div class="flex items-center gap-2 mt-2">
-      <button onclick="estimatePose(${cid})"
-        class="text-xs bg-teal-700 hover:bg-teal-600 px-2 py-1 rounded font-bold">
-        ${d.has_tpose ? 'Re-estimate T-pose' : 'Estimate T-pose'}</button>
-      <button onclick="estimateMesh(${cid})" ${d.mesh_estimator ? '' : 'disabled'}
-        class="text-xs bg-teal-700 hover:bg-teal-600 disabled:opacity-40 px-2 py-1 rounded font-bold"
-        title="${d.mesh_estimator ? '' : 'SMPLest-X not installed'}">
-        ${d.has_mesh ? 'Re-estimate mesh' : 'Estimate mesh'}</button>
-      <span id="person_status_${cid}" class="text-[10px] text-gray-400"></span>
-    </div>`;
+    <div class="grid grid-cols-1 gap-1.5">${bioRows}</div>
+    ${flagBanner}
+    ${eras || '<div class="text-[10px] text-gray-500 mt-2">No appearances yet.</div>'}`;
 }
 
-async function savePersonField(cid, section, key, value) {
+async function savePersonField(cid, section, key, value, appearance_id) {
+  // For body fields the 4th arg is the appearance id and the value is read live.
+  if (section === 'body') { appearance_id = value; value = event.target.value; }
   await fetch('/api/persons/' + cid + '/field', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ section, key, value })
+    body: JSON.stringify({ section, key, value, appearance_id })
   });
 }
 
-async function _personTask(cid, path, label) {
-  const s = document.getElementById('person_status_' + cid);
+async function _personTask(cid, appearanceId, path, label) {
+  const s = document.getElementById('person_status_' + cid + '_' + appearanceId);
   if (s) s.textContent = label + '…';
-  const d = await (await fetch('/api/persons/' + cid + path, { method: 'POST' })).json();
+  const d = await (await fetch('/api/persons/' + cid + path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ appearance_id: appearanceId })
+  })).json();
   if (s) s.textContent = d.success ? label + ' done.' : label + ' unavailable.';
 }
-const estimatePose = cid => _personTask(cid, '/tpose', 'T-pose');
-const estimateMesh = cid => _personTask(cid, '/mesh', 'Mesh');
+const estimatePose = (cid, aid) => _personTask(cid, aid, '/tpose', 'T-pose');
+const estimateMesh = (cid, aid) => _personTask(cid, aid, '/mesh', 'Mesh');

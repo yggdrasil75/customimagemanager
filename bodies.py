@@ -246,12 +246,15 @@ def have_mesh_estimator() -> bool:
 
 
 def estimate_params(img_bgr: np.ndarray, box: dict) -> Optional[dict]:
-    """! @brief Run SMPLest-X on one crop and return its SMPL parameters + mesh.
+    """! @brief Run the shape estimator on one crop and return its SMPL parameters + mesh.
     @param box Normalised center-form person box.
-    @return {betas, faces, vertices} where betas is the pose-independent shape
-            vector (identical in expectation across images of one person), faces
-            is the SMPL topology, and vertices is this crop's posed mesh; or None
-            when the estimator is absent or inference fails.
+    @return {betas, faces, vertices, confidence} where betas is the pose-independent
+            shape vector (identical in expectation across images of one person),
+            faces is the SMPL topology, vertices is this crop's posed mesh, and
+            confidence is the runner's fit quality in [0,1] (low for baggy clothing,
+            occlusion or truncation, which inflate reprojection error); or None when
+            the estimator is absent or inference fails. Confidence defaults to 1.0
+            for runners that don't report it, so behaviour is unchanged without it.
     """
     runner = _load_smplx()
     if runner is None or img_bgr is None:
@@ -267,7 +270,8 @@ def estimate_params(img_bgr: np.ndarray, box: dict) -> Optional[dict]:
         return None
     return {"betas": np.asarray(out["betas"], np.float32),
             "faces": np.asarray(out["faces"], np.int32),
-            "vertices": np.asarray(out["vertices"], np.float32)}
+            "vertices": np.asarray(out["vertices"], np.float32),
+            "confidence": float(out.get("confidence", 1.0))}
 
 
 def _drop_beta_outliers(betas: np.ndarray, max_mad: float = 5.0) -> np.ndarray:
@@ -287,26 +291,34 @@ def _drop_beta_outliers(betas: np.ndarray, max_mad: float = 5.0) -> np.ndarray:
     return (spread / mad) <= max_mad
 
 
-def estimate_shape(crops: list, min_views: int = 3) -> Optional[tuple]:
+def estimate_shape(crops: list, min_views: int = 3,
+                   min_confidence: float = 0.3) -> Optional[tuple]:
     """! @brief Fuse many per-image SMPL fits into one canonical, outlier-robust body shape.
     @param crops List of (img_bgr, box) for a person's reasonably-sized regions.
-    @param min_views Fewest successful fits required to trust an average.
+    @param min_views Fewest surviving fits required to trust an average.
+    @param min_confidence Drop fits below this quality before averaging — this is the
+           clothing/occlusion filter: a baggy or occluded crop scores low because it
+           inflates the reprojection error the runner reports. Skipped when the runner
+           reports no confidence (all default to 1.0).
     @return (vertices, faces) for a NEUTRAL-POSE mesh rebuilt from the averaged
-            shape, or None when too few crops fit. Shape params (beta) are averaged
-            across images -- not vertices, which are pose-dependent and meaningless
-            to average -- then the runner reposes them to canonical.
+            shape, or None when too few crops survive. Shape params (beta) are a
+            CONFIDENCE-WEIGHTED mean -- not vertices, which are pose-dependent and
+            meaningless to average -- then the runner reposes them to canonical.
     """
     runner = _load_smplx()
     if runner is None:
         return None
     fits = [p for p in (estimate_params(img, box) for img, box in crops) if p is not None]
+    fits = [f for f in fits if f["confidence"] >= min_confidence]
     if len(fits) < min_views:
         return None
     betas = np.stack([f["betas"] for f in fits])
-    inliers = betas[_drop_beta_outliers(betas)]
-    if len(inliers) == 0:
-        inliers = betas
-    mean_beta = inliers.mean(axis=0)
+    conf = np.array([f["confidence"] for f in fits], np.float32)
+    keep = _drop_beta_outliers(betas)
+    betas, conf = betas[keep], conf[keep]
+    if conf.sum() == 0:
+        conf = np.ones_like(conf)
+    mean_beta = np.average(betas, axis=0, weights=conf)
     faces = fits[0]["faces"]
     try:
         verts = runner.pose_neutral(mean_beta)   # SMPL forward pass, zero pose

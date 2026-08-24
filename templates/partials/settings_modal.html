@@ -128,7 +128,31 @@
               <option value="x">x · xlarge</option>
             </select>
           </div>
+          <div>
+            <span class="text-[10px] text-gray-500 block mb-0.5">Pose estimator</span>
+            <select id="cfg_pose_estimator"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+              <option value="yolo">YOLO pose</option>
+              <option value="wholebody">RTMPose whole-body</option>
+            </select>
+          </div>
+          <div>
+            <span class="text-[10px] text-gray-500 block mb-0.5">Shape estimator</span>
+            <select id="cfg_shape_estimator"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+              <option value="smplest_x">SMPLest-X</option>
+              <option value="shapy">SHAPY</option>
+            </select>
+          </div>
+          <div>
+            <span class="text-[10px] text-gray-500 block mb-0.5">Appearance split (eps)</span>
+            <input id="cfg_appearance_eps" type="number" step="0.01" min="0" max="1"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          </div>
         </div>
+        <p class="text-[10px] text-gray-600 mt-1">Appearance split groups a person's photos
+          into life-eras by face-embedding drift; lower eps = more, tighter eras. Shape/pose
+          estimators are optional body-mesh backends.</p>
         <p class="text-[10px] text-gray-600 mt-1">Whole-body pose needs <code>rtmlib</code> +
           <code>onnxruntime</code>; OCR needs <code>rapidocr_onnxruntime</code> or <code>easyocr</code>. Weights
           download automatically on first use.</p>

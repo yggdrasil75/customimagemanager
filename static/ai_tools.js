@@ -254,6 +254,9 @@ async function persistAiSettings(){
       barcode_model:_v('cfg_barcode_model'),
       pose_kind:_v('cfg_pose_kind'),
       pose_size:_v('cfg_pose_size'),
+      pose_estimator:_v('cfg_pose_estimator'),
+      shape_estimator:_v('cfg_shape_estimator'),
+      appearance_eps:parseFloat(_v('cfg_appearance_eps'))||0.35,
       oai_system_prompt:_v('cfg_system'),
       llm_preprocess:{
         compress:{
