@@ -173,9 +173,8 @@ state = {
     # Appearance clustering: cosine-distance threshold below which two of a
     # person's faces belong to the same era. Higher = fewer, broader eras.
     "appearance_eps": 0.35,
-    # Body-shape and pose backends (swappable behind the runner adapter).
-    "shape_estimator": "smplest_x",
-    "pose_estimator": "yolo",
+    "shape_estimator": "anny_fit",
+    "pose_estimator": "atlas",
     "page_size": 200,
     # Storage-tiering config, persisted here in app_config.json (migrated from the
     # legacy standalone tiers_config.json on first run by tiering.load_cfg). The
@@ -1175,7 +1174,11 @@ def _parse_search(search: str) -> tuple[str, list, list]:
                 params += cp
             continue
         low = tok.lower()
-        if low == 'is:untagged':
+        if low.startswith('person:') and low[7:].lstrip('-').isdigit():
+            where.append(
+                "rel_path IN (SELECT rel_path FROM face_regions WHERE cluster_id=?)")
+            params.append(int(low[7:]))
+        elif low == 'is:untagged':
             where.append("(tags IS NULL OR tags='' OR tags='[]')")
         elif low == 'is:tagged':
             where.append("(tags IS NOT NULL AND tags!='' AND tags!='[]')")
@@ -3871,6 +3874,33 @@ def store_person_field(cluster_id: int, section: str, key: str, value,
         appearance_id = _default_appearance_id(person_uuid)
     return personlib.set_field(MEDIA_DIR, person_uuid, section, key, value, appearance_id)
 
+def _write_reciprocal_edges(person_uuid: str, line: str, edges: list) -> None:
+    """! @brief Write the back-edge on each linked person so both records hold the link.
+    @param edges The edges just written on person_uuid; external edges (no uuid) are
+           skipped since they have no record to write to. Parent lines map to the
+           child's 'children' line and vice-versa; spouse/siblings are symmetric.
+    """
+    this = personlib.read(MEDIA_DIR, person_uuid)
+    this_name = this["name"] if this else ""
+    for e in edges:
+        other = e.get("uuid")
+        if not other:
+            continue
+        other_desc = personlib.read(MEDIA_DIR, other)
+        if other_desc is None:
+            continue
+        if line in ("mother", "father"):
+            back = "children"
+        elif line == "children":
+            gender = (this["bio"].get("gender") or "").lower() if this else ""
+            back = "mother" if gender.startswith("f") else "father"
+        else:
+            back = line
+        existing = other_desc["relationships"][back]
+        if not any(x.get("uuid") == person_uuid for x in existing):
+            existing.append(personlib._edge(person_uuid, this_name))
+            personlib.set_relationship(MEDIA_DIR, other, back, existing)
+
 def rebuild_persons_cache() -> int:
     """! @brief Rebuild the persons DB cache from the .persons source-of-truth files.
     @return Number of cluster->uuid mappings restored.
@@ -5268,17 +5298,51 @@ def api_person_get(cluster_id):
     return jsonify({"success": True, "person": desc,
                     "body_fields": list(personlib.BODY_FIELDS),
                     "bio_fields": list(personlib.BIO_FIELDS),
+                    "list_fields": list(personlib.LIST_FIELDS),
+                    "relation_lines": list(personlib.RELATION_LINES),
                     "date_flags": _person_date_flags(cluster_id),
                     "mesh_estimator": bodylib.have_mesh_estimator()})
 
 @app.route("/api/persons/<int:cluster_id>/field", methods=["POST"])
 def api_person_field(cluster_id):
-    """Set one body/bio field, through the same store the pipeline uses.
+    """Set one body/bio/list field, through the same store the pipeline uses.
     Body fields target an appearance (defaults to the largest era)."""
     d = request.json or {}
     ok = store_person_field(cluster_id, d.get("section", ""), d.get("key", ""),
                             d.get("value", ""), d.get("appearance_id"))
     return jsonify({"success": ok})
+
+@app.route("/api/persons/<int:cluster_id>/relationship", methods=["POST"])
+def api_person_relationship(cluster_id):
+    """Replace one relationship line and write the reciprocal edge on each linked
+    person, so both records hold the link. External edges (name only) write one side."""
+    d = request.json or {}
+    line = d.get("line", "")
+    edges = d.get("edges", []) or []
+    person_uuid = person_for_cluster(cluster_id, create=True)
+    if not person_uuid or line not in personlib.RELATION_LINES:
+        return jsonify({"success": False})
+    ok = personlib.set_relationship(MEDIA_DIR, person_uuid, line, edges)
+    if ok:
+        _write_reciprocal_edges(person_uuid, line, edges)
+    return jsonify({"success": ok})
+
+@app.route("/api/persons/directory")
+def api_persons_directory():
+    """Typeahead source: every known person as {uuid, name, cluster_id} for linking."""
+    db = _db()
+    out = []
+    for desc in personlib.list_all(MEDIA_DIR):
+        row = db.execute("SELECT cluster_id FROM persons WHERE uuid=? LIMIT 1",
+                         (desc["uuid"],)).fetchone()
+        out.append({"uuid": desc["uuid"], "name": desc["name"] or "(unnamed)",
+                    "cluster_id": row[0] if row else None})
+    return jsonify({"success": True, "people": sorted(out, key=lambda p: p["name"].lower())})
+
+@app.route("/api/persons/review")
+def api_persons_review():
+    """One-sided relationship edges for the review tab (never auto-repaired)."""
+    return jsonify({"success": True, "problems": personlib.check_reciprocity(MEDIA_DIR)})
 
 @app.route("/api/persons/<int:cluster_id>/tpose", methods=["POST"])
 def api_person_tpose(cluster_id):

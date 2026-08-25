@@ -132,6 +132,7 @@
             <span class="text-[10px] text-gray-500 block mb-0.5">Pose estimator</span>
             <select id="cfg_pose_estimator"
               class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+              <option value="atlas">ATLAS</option>
               <option value="yolo">YOLO pose</option>
               <option value="wholebody">RTMPose whole-body</option>
             </select>
@@ -140,8 +141,10 @@
             <span class="text-[10px] text-gray-500 block mb-0.5">Shape estimator</span>
             <select id="cfg_shape_estimator"
               class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="smplest_x">SMPLest-X</option>
-              <option value="shapy">SHAPY</option>
+              <option value="anny_fit">ANNY-Fit (any age)</option>
+              <option value="anny">ANNY</option>
+              <option value="smplest_x">SMPLest-X (adult-anchored)</option>
+              <option value="shapy">SHAPY (adult-anchored)</option>
             </select>
           </div>
           <div>

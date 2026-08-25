@@ -121,8 +121,9 @@ function _renderFaceCluster(c) {
         <div class="flex gap-1.5 flex-wrap">
           ${c.faces.map(f => faceChip(f)).join('')}
           ${c.count > c.faces.length
-            ? `<div class="w-14 h-14 flex items-center justify-center text-[10px]
-                          text-gray-500 bg-gray-900 rounded">
+            ? `<div onclick="filterGalleryByPerson(${c.id})" title="Show all photos of this person"
+                    class="w-14 h-14 flex items-center justify-center text-[10px] cursor-pointer
+                           text-gray-400 bg-gray-900 hover:bg-gray-700 rounded">
                  +${c.count - c.faces.length}</div>` : ''}
         </div>
         ${(() => {
@@ -139,6 +140,16 @@ function _renderFaceCluster(c) {
             </div>` : '';
         })()}
       </div>`;
+}
+
+// Clicking a cluster's "+n" filters the gallery to that person's photos.
+function filterGalleryByPerson(clusterId) {
+  const si = document.getElementById('search_input');
+  if (si) {
+    si.value = 'person:' + clusterId;
+    si.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  if (typeof setPane === 'function') setPane('gallery');
 }
 
 async function loadFaces() {
@@ -210,9 +221,6 @@ async function loadFaces() {
   } catch (e) {
     el.innerHTML = '<div class="text-xs text-red-400 p-2">Failed to load faces.</div>';
   }
-  // Body (re-id) clusters render into their own block appended after the faces.
-  // Kept in a separate loader so a body-side failure never blanks the faces.
-  loadBodies();
 }
 
 async function nameCluster(cid) {
@@ -373,239 +381,74 @@ async function rescanFaces() {
   _facePoll = setInterval(pollFaceProgress, 2000);
   pollFaceProgress();
 }
-// ─────────────────────────────────────────────────────────────────────────────
-// Body (re-id) clusters
-// ─────────────────────────────────────────────────────────────────────────────
-// torchreid/OSNet clusters the 'person' boxes the face worker already produces.
-// Each body row may link to a face_regions row that sits inside it (same image),
-// which is how a body cluster inherits/associates a face identity. The UI mirrors
-// the faces section: bulk-name a whole cluster, deny a stray body, split a
-// selection into a new cluster.
-
-let _bodyClusters = [];
-let _bodySel = new Set();
-
-function toggleBodySel(id) {
-  if (_bodySel.has(id)) _bodySel.delete(id); else _bodySel.add(id);
-  keepScroll('faces_list', loadBodies);
-}
-function clearBodySel() { _bodySel.clear(); keepScroll('faces_list', loadBodies); }
-
-// A body chip crops the person box out of the shared thumbnail. Person boxes are
-// tall (roughly 1:2..1:3), so unlike faceChip we render a portrait chip and use
-// the same background-size/position math, which is aspect-agnostic. A small ring
-// on the chip signals "this body is associated with a face" (face_id set).
-function bodyChip(b, w = 40, h = 72, pad = 1.15) {
-  const bw = Math.max(b.w, 0.01) * pad;
-  const bh = Math.max(b.h, 0.01) * pad;
-  const zx = 100 / bw;
-  const zy = 100 / bh;
-  const px = bw >= 1 ? 50 : clamp01((b.cx - bw / 2) / (1 - bw)) * 100;
-  const py = bh >= 1 ? 50 : clamp01((b.cy - bh / 2) / (1 - bh)) * 100;
-  const url = '/api/thumb/' + encodeURI(b.rel);
-  const relAttr = (b.rel || '').replace(/"/g, '&quot;');
-  const sel = _bodySel.has(b.id);
-  const linked = b.face_id != null;
-  const linkRing = linked ? 'ring-1 ring-emerald-500/70' : '';
-  return `<div class="relative flex-shrink-0 group" style="width:${w}px;height:${h}px">
-      <div class="w-full h-full rounded bg-gray-900 bg-no-repeat cursor-zoom-in
-                  ${sel ? 'ring-2 ring-purple-400' : linkRing}"
-           title="${relAttr}${linked ? '\nlinked to a face' : '\nno face linked'}\nclick to open in the viewer"
-           onclick="viewFaceImage('${relAttr}')"
-           style="background-image:url('${url}');
-                  background-size:${zx}% ${zy}%;
-                  background-position:${px}% ${py}%"></div>
-      ${linked ? `<span title="Associated with a face"
-              class="absolute -top-1 -left-1 w-3 h-3 rounded-full bg-emerald-600
-                     border border-gray-900"></span>` : ''}
-      <button title="Not this person — remove from cluster"
-              onclick="event.stopPropagation();denyBody(${b.id})"
-              class="absolute -top-1 -right-1 w-4 h-4 leading-none rounded-full
-                     bg-red-700 hover:bg-red-600 text-white text-[10px] font-bold
-                     opacity-0 group-hover:opacity-100 transition">×</button>
-      <input type="checkbox" ${sel ? 'checked' : ''}
-             title="Select — split these off as a separate person"
-             onclick="event.stopPropagation();toggleBodySel(${b.id})"
-             class="absolute -bottom-1 -left-1 w-3.5 h-3.5 accent-purple-500
-                    opacity-0 group-hover:opacity-100
-                    ${sel ? '!opacity-100' : ''}">
-    </div>`;
-}
-
-async function loadBodies() {
-  // Anchor: everything body-related lives in a single block appended to the end
-  // of #faces_list, so re-rendering faces (which rebuilds that container) drops
-  // the old body block and we rebuild it here.
-  const list = document.getElementById('faces_list');
-  if (!list) return;
-  let block = document.getElementById('bodies_block');
-  if (!block) {
-    block = document.createElement('div');
-    block.id = 'bodies_block';
-    block.className = 'space-y-2';
-    list.appendChild(block);
-  }
-
-  let d;
-  try {
-    d = await (await fetch('/api/bodies/clusters')).json();
-  } catch (e) {
-    block.innerHTML = '';
-    return;
-  }
-
-  if (!d.enabled) { block.innerHTML = ''; return; }
-
-  _bodyClusters = d.clusters || [];
-
-  const header = `<div class="flex items-center gap-2 pt-3 mt-1 border-t border-gray-700">
-      <span class="text-xs font-bold text-gray-300">Bodies (re-id)</span>
-      <span class="text-[10px] text-gray-500">${_bodyClusters.length} cluster(s)
-        · ${d.unclustered} unclustered${d.identity ? '' : ' · appearance-only'}</span>
-    </div>`;
-
-  if (!_bodyClusters.length) {
-    block.innerHTML = header + `<div class="text-xs text-gray-500 p-2">
-      No body clusters yet. Bodies are embedded during the face scan when
-      <b>Body re-id</b> is on — hit <b>Rescan all</b>, then <b>Recluster</b>.</div>`;
-    return;
-  }
-
-  block.innerHTML = header + _bodyClusters.map(c => `
-    <div id="bcluster_${c.id}" class="bg-gray-800 rounded border ${c.confirmed
-        ? 'border-green-700' : 'border-gray-700'} p-2">
-      <div class="flex items-center gap-2 mb-2">
-        <input value="${(c.name || '').replace(/"/g, '&quot;')}"
-               placeholder="Whose body/outfit is this?" id="bname_${c.id}"
-               onkeydown="if(event.key==='Enter')nameBodyCluster(${c.id})"
-               class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600
-                      text-sm text-white">
-        <span title="${c.linked_faces} of these are associated with a face"
-              class="text-[10px] ${c.linked_faces ? 'text-emerald-400' : 'text-gray-500'}">
-          ${c.linked_faces ? '⛓ ' + c.linked_faces + '/' : ''}${c.count}</span>
-        <button onclick="nameBodyCluster(${c.id})"
-          class="text-xs bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded font-bold">
-          Name all
-        </button>
-      </div>
-      <div class="flex gap-1.5 flex-wrap">
-        ${c.bodies.map(b => bodyChip(b)).join('')}
-        ${c.count > c.bodies.length
-          ? `<div class="w-10 h-[72px] flex items-center justify-center text-[10px]
-                        text-gray-500 bg-gray-900 rounded">
-               +${c.count - c.bodies.length}</div>` : ''}
-      </div>
-      ${(() => {
-        const n = c.bodies.filter(b => _bodySel.has(b.id)).length;
-        return n ? `<div class="flex items-center gap-2 mt-2 pt-2
-                            border-t border-gray-700">
-            <span class="text-[10px] text-purple-300">${n} selected</span>
-            <button onclick="splitSelectedBodies(${c.id})"
-              class="text-xs bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded font-bold">
-              Split into new person
-            </button>
-            <button onclick="clearBodySel()"
-              class="text-xs text-gray-400 hover:text-gray-200 px-1">clear</button>
-          </div>` : '';
-      })()}
-    </div>`).join('');
-}
-
-async function nameBodyCluster(cid) {
-  const input = document.getElementById('bname_' + cid);
-  const name = (input?.value || '').trim();
-  if (!name) return;
-  document.getElementById('faces_status').textContent = 'Writing body names…';
-  const r = await fetch('/api/bodies/name', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cluster_id: cid, name })
-  });
-  const d = await r.json();
-  document.getElementById('faces_status').textContent =
-    d.success ? `Named ${d.named} image(s).` : (d.error || 'Failed.');
-  const c = _bodyClusters.find(x => x.id === cid);
-  const el = document.getElementById('bcluster_' + cid);
-  if (d.success && c && el) { c.name = name; c.confirmed = true; }
-  keepScroll('faces_list', loadBodies);
-}
-
-// Deny/split reuse the same /api/bodies/split contract as faces (id / ids+mode).
-async function denyBody(id) {
-  document.getElementById('faces_status').textContent = 'Removing body…';
-  try {
-    await fetch('/api/bodies/split', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id })
-    });
-  } catch (e) {
-    document.getElementById('faces_status').textContent = 'Remove failed.';
-    return;
-  }
-  _bodySel.delete(id);
-  keepScroll('faces_list', loadBodies);
-}
-
-async function splitSelectedBodies(cid) {
-  const cluster = _bodyClusters.find(c => c.id === cid);
-  const ids = (cluster ? cluster.bodies : [])
-    .map(b => b.id).filter(id => _bodySel.has(id));
-  if (!ids.length) return;
-  document.getElementById('faces_status').textContent = 'Splitting…';
-  let d;
-  try {
-    d = await (await fetch('/api/bodies/split', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids, mode: 'new' })
-    })).json();
-  } catch (e) {
-    document.getElementById('faces_status').textContent = 'Split failed.';
-    return;
-  }
-  ids.forEach(id => _bodySel.delete(id));
-  document.getElementById('faces_status').textContent =
-    d.success ? `Split ${d.moved} body(ies) into a new person.` : (d.error || 'Failed.');
-  keepScroll('faces_list', loadFaces);
-}
 // ── Person editor: unified body/bio fields + T-pose/mesh estimation ──────────
+// Bio fields that render as a specific input type; everything else is short text.
+const _DATE_FIELDS = ['birthday', 'death_date'];
+const _MULTILINE_FIELDS = ['notes'];
+let _peopleDirectory = [];   // {uuid,name,cluster_id}, loaded once for typeahead
+
+async function _loadDirectory() {
+  if (_peopleDirectory.length) return _peopleDirectory;
+  const d = await (await fetch('/api/persons/directory')).json();
+  _peopleDirectory = d.people || [];
+  return _peopleDirectory;
+}
+
 async function openPerson(cid) {
   const el = document.getElementById('person_' + cid);
   if (!el) return;
   if (!el.classList.contains('hidden')) { el.classList.add('hidden'); return; }
   el.classList.remove('hidden');
   el.innerHTML = '<div class="text-xs text-gray-500">Loading…</div>';
-  const d = await (await fetch('/api/persons/' + cid)).json();
+  const [d] = await Promise.all([
+    (await fetch('/api/persons/' + cid)).json(), _loadDirectory()]);
   if (!d.success) { el.innerHTML = '<div class="text-xs text-red-400">' + (d.error || 'Failed.') + '</div>'; return; }
   const p = d.person;
   const esc = v => (v || '').replace(/"/g, '&quot;');
 
-  // Person-level bio (stable for life).
-  const bioRows = d.bio_fields.map(k =>
-    `<label class="flex flex-col gap-0.5">
-       <span class="text-[10px] text-gray-400">${k.replace(/_/g, ' ')}</span>
-       <input value="${esc(p.bio[k])}"
-              onchange="savePersonField(${cid},'bio','${k}',this.value,null)"
-              class="p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white">
-     </label>`).join('');
+  // Typed person-level bio field.
+  const bioField = k => {
+    const label = `<span class="text-[10px] text-gray-400">${k.replace(/_/g, ' ')}</span>`;
+    if (_DATE_FIELDS.includes(k))
+      return `<label class="flex flex-col gap-0.5">${label}
+        <input type="date" value="${esc(p.bio[k])}"
+               onchange="savePersonField(${cid},'bio','${k}',this.value,null)"
+               class="p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white"></label>`;
+    if (_MULTILINE_FIELDS.includes(k))
+      return `<label class="flex flex-col gap-0.5 col-span-2">${label}
+        <textarea rows="3" onchange="savePersonField(${cid},'bio','${k}',this.value,null)"
+               class="p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white">${esc(p.bio[k])}</textarea></label>`;
+    return `<label class="flex flex-col gap-0.5">${label}
+      <input value="${esc(p.bio[k])}"
+             onchange="savePersonField(${cid},'bio','${k}',this.value,null)"
+             class="p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white"></label>`;
+  };
+  const bioRows = d.bio_fields.map(bioField).join('');
 
-  // Date disagreements: advisory, never auto-applied.
+  // List fields (aliases, tags) as comma-separated for a lazy-but-clear editor.
+  const listRows = (d.list_fields || []).map(k =>
+    `<label class="flex flex-col gap-0.5">
+       <span class="text-[10px] text-gray-400">${k} (comma-separated)</span>
+       <input value="${esc((p.lists[k] || []).join(', '))}"
+              onchange="saveListField(${cid},'${k}',this.value)"
+              class="p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white"></label>`).join('');
+
+  const relTree = (d.relation_lines || []).map(line =>
+    _renderRelationLine(cid, line, p.relationships[line] || [])).join('');
+
   const flagBanner = (d.date_flags && d.date_flags.length)
     ? `<div class="mt-2 p-1.5 bg-amber-900/40 border border-amber-700 rounded text-[10px] text-amber-200">
          ⚠ ${d.date_flags.length} photo(s) have a date that disagrees with their look —
          likely a scan date. Review before trusting; nothing was changed automatically.
        </div>` : '';
 
-  // Per-appearance (era) sections: body fields + T-pose/mesh, scoped to that era.
   const eras = (p.appearances || []).map(a => {
     const bodyRows = d.body_fields.map(k =>
       `<label class="flex flex-col gap-0.5">
          <span class="text-[10px] text-gray-400">${k.replace(/_/g, ' ')}</span>
          <input value="${esc(a.body[k])}"
                 onchange="savePersonField(${cid},'body','${k}','${a.id}')"
-                data-val class="p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white">
-       </label>`).join('');
+                class="p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white"></label>`).join('');
     return `<div class="mt-2 pt-2 border-t border-gray-700">
         <div class="text-[11px] text-blue-300 font-bold mb-1">${a.label || a.id}
           <span class="text-gray-500 font-normal">· ${a.rel_paths.length} photo(s)</span></div>
@@ -624,13 +467,86 @@ async function openPerson(cid) {
   }).join('');
 
   el.innerHTML = `
-    <div class="grid grid-cols-1 gap-1.5">${bioRows}</div>
+    <div class="grid grid-cols-2 gap-1.5">${bioRows}${listRows}</div>
+    <div class="mt-2 pt-2 border-t border-gray-700">
+      <div class="text-[11px] text-blue-300 font-bold mb-1">Relationships</div>
+      <datalist id="peopledir_${cid}">
+        ${_peopleDirectory.map(pp => `<option value="${esc(pp.name)}">`).join('')}
+      </datalist>
+      ${relTree}
+    </div>
     ${flagBanner}
     ${eras || '<div class="text-[10px] text-gray-500 mt-2">No appearances yet.</div>'}`;
 }
 
+// One relationship line: existing edges as removable chips + a typeahead adder.
+function _renderRelationLine(cid, line, edges) {
+  const chips = edges.map((e, i) =>
+    `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 bg-gray-700 rounded text-[10px]">
+       ${e.uuid ? '' : '<span class="text-gray-500" title="external, no photos">◇</span>'}
+       ${(e.name || '?').replace(/</g, '&lt;')}
+       <button onclick="removeRelation(${cid},'${line}',${i})"
+               class="text-gray-500 hover:text-red-400">×</button>
+     </span>`).join('');
+  return `<div class="mb-1.5" data-line="${line}">
+      <div class="flex items-center gap-1 flex-wrap">
+        <span class="text-[10px] text-gray-400 w-16">${line}</span>
+        ${chips}
+        <input list="peopledir_${cid}" placeholder="+ add"
+               onkeydown="if(event.key==='Enter'){addRelation(${cid},'${line}',this.value);this.value='';}"
+               class="px-1 py-0.5 bg-gray-800 rounded border border-gray-600 text-[10px] text-white w-24">
+      </div>
+    </div>`;
+}
+
+// Add an edge: match the typed name to a known person, else store as external.
+async function addRelation(cid, line, name) {
+  name = (name || '').trim();
+  if (!name) return;
+  const match = _peopleDirectory.find(p => p.name.toLowerCase() === name.toLowerCase());
+  const edges = _currentEdges(cid, line);
+  edges.push({ uuid: match ? match.uuid : null, name: match ? match.name : name });
+  await _saveRelation(cid, line, edges);
+}
+
+async function removeRelation(cid, line, idx) {
+  const edges = _currentEdges(cid, line);
+  edges.splice(idx, 1);
+  await _saveRelation(cid, line, edges);
+}
+
+// Read the current edges for a line straight off the rendered chips so we don't
+// hold editor state: each chip's text is the name, the ◇ marker means external.
+function _currentEdges(cid, line) {
+  const row = document.querySelector('#person_' + cid + ' [data-line="' + line + '"]');
+  if (!row) return [];
+  return [...row.querySelectorAll('span.inline-flex')].map(chip => {
+    const external = !!chip.querySelector('[title="external, no photos"]');
+    const name = chip.childNodes[chip.childNodes.length - 2].textContent.trim();
+    const match = _peopleDirectory.find(p => p.name === name);
+    return { uuid: external ? null : (match ? match.uuid : null), name };
+  });
+}
+
+async function _saveRelation(cid, line, edges) {
+  await fetch('/api/persons/' + cid + '/relationship', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ line, edges })
+  });
+  // Reopen to repaint chips and reflect any reciprocal edges written server-side.
+  const el = document.getElementById('person_' + cid);
+  if (el) { el.classList.add('hidden'); openPerson(cid); }
+}
+
+async function saveListField(cid, key, raw) {
+  const value = raw.split(',').map(s => s.trim()).filter(Boolean);
+  await fetch('/api/persons/' + cid + '/field', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ section: 'list', key, value })
+  });
+}
+
 async function savePersonField(cid, section, key, value, appearance_id) {
-  // For body fields the 4th arg is the appearance id and the value is read live.
   if (section === 'body') { appearance_id = value; value = event.target.value; }
   await fetch('/api/persons/' + cid + '/field', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },

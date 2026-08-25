@@ -48,8 +48,6 @@ def mesh_member(appearance_id: str) -> str:
     """! @brief Container member name for one appearance's canonical body mesh."""
     return f"mesh_{appearance_id}.obj"
 
-## Fixed body-description slots a secondary pipeline / LLM action fills per
-## person. Kept as a tuple so callers can offer them as form fields and the
 ## Fixed body-description slots a secondary pipeline / LLM action fills. These are
 ## era-specific (hair greys, physique changes), so they live on an APPEARANCE, not
 ## the person: one person can have several appearances across their life.
@@ -59,8 +57,19 @@ BODY_FIELDS: tuple[str, ...] = (
     "facial_hair", "distinguishing_marks",
 )
 
-## Off-image biographical slots. Free-form; never inferable from one photo.
-BIO_FIELDS: tuple[str, ...] = ("birthday", "relationships", "notes")
+## Person-level biographical slots, stable across life. birthday/death_date are
+## ISO dates (date pickers), aliases/tags are lists, notes is multiline; the rest
+## are short free text. relationships is structured separately (see RELATION_LINES).
+BIO_FIELDS: tuple[str, ...] = (
+    "birthday", "death_date", "gender", "occupation",
+    "birthplace", "location", "notes",
+)
+LIST_FIELDS: tuple[str, ...] = ("aliases", "tags")
+
+## The four relationship lines a person can have. mother/father/spouse are the
+## parent+partner lines; siblings/children are multi. Each edge is either a link
+## to a known person (uuid) or an external name string with no record.
+RELATION_LINES: tuple[str, ...] = ("mother", "father", "spouse", "siblings", "children")
 
 
 def persons_dir(media_dir: str) -> str:
@@ -98,9 +107,39 @@ def _blank(person_uuid: str) -> dict[str, Any]:
         "uuid": person_uuid,
         "name": "",
         "bio": {k: "" for k in BIO_FIELDS},
+        "lists": {k: [] for k in LIST_FIELDS},
+        "relationships": {k: [] for k in RELATION_LINES},
         "clusters": {"face": [], "body": []},
         "appearances": [],
     }
+
+
+def _edge(uuid_or_none: Optional[str], name: str) -> dict[str, Any]:
+    """! @brief One relationship endpoint: a link to a known person, or an external name.
+    @param uuid_or_none The linked person's uuid, or None for an external person who
+           has no record (too few photos in the library).
+    @return {uuid, name}; uuid is None for externals so reads can tell them apart.
+    """
+    return {"uuid": uuid_or_none, "name": name}
+
+
+def _migrate(desc: dict[str, Any]) -> dict[str, Any]:
+    """! @brief Bring an older record up to the current schema without losing data.
+    @return The descriptor with any missing bio/list/relationship keys filled in,
+            so records written before these fields existed still load cleanly.
+    """
+    desc.setdefault("bio", {})
+    for k in BIO_FIELDS:
+        desc["bio"].setdefault(k, "")
+    desc.setdefault("lists", {k: [] for k in LIST_FIELDS})
+    for k in LIST_FIELDS:
+        desc["lists"].setdefault(k, [])
+    desc.setdefault("relationships", {k: [] for k in RELATION_LINES})
+    for k in RELATION_LINES:
+        desc["relationships"].setdefault(k, [])
+    desc.setdefault("clusters", {"face": [], "body": []})
+    desc.setdefault("appearances", [])
+    return desc
 
 
 def new_uuid() -> str:
@@ -117,7 +156,7 @@ def read(media_dir: str, person_uuid: str) -> Optional[dict[str, Any]]:
         return None
     try:
         with zipfile.ZipFile(path) as z:
-            return json.loads(z.read(DESCRIPTOR))
+            return _migrate(json.loads(z.read(DESCRIPTOR)))
     except Exception:
         return None
 
@@ -227,10 +266,72 @@ def set_field(media_dir: str, person_uuid: str, section: str, key: str,
         if app is None:
             return False
         app["body"][key] = value
+    elif section == "list" and key in LIST_FIELDS:
+        desc["lists"][key] = value if isinstance(value, list) else [value]
     else:
         return False
     write(media_dir, desc)
     return True
+
+
+def set_relationship(media_dir: str, person_uuid: str, line: str,
+                     edges: list) -> bool:
+    """! @brief Replace one relationship line (mother/father/spouse/siblings/children).
+    @param edges List of {uuid, name}; uuid None marks an external person. The caller
+           is responsible for also writing the reciprocal edge on the other person so
+           both records hold the link and one corrupt file can't erase the other side.
+    @return True on success, False when the record is missing or the line is unknown.
+    """
+    if line not in RELATION_LINES:
+        return False
+    desc = read(media_dir, person_uuid)
+    if desc is None:
+        return False
+    desc["relationships"][line] = edges
+    write(media_dir, desc)
+    return True
+
+
+## Which line becomes which on the other person when an edge is written. Symmetric
+## lines map to themselves; parent<->child is the one asymmetric pair. Used to write
+## the reciprocal edge so relationships are stored on BOTH people.
+_RECIPROCAL = {"spouse": "spouse", "siblings": "siblings",
+               "mother": "children", "father": "children"}
+
+
+def reciprocal_line(line: str, target_is_female: Optional[bool]) -> Optional[str]:
+    """! @brief The line an edge should be written under on the OTHER person.
+    @param target_is_female Used only for children->parent: picks mother vs father;
+           None leaves it to the caller (write as 'mother' by convention if unknown).
+    @return The reciprocal line name, or None when it can't be inferred here (the
+            child->parent direction, which the caller resolves from the edge's role).
+    """
+    if line in _RECIPROCAL:
+        return _RECIPROCAL[line]
+    if line == "children":
+        return "mother" if target_is_female else "father"
+    return None
+
+
+def check_reciprocity(media_dir: str) -> list[dict[str, Any]]:
+    """! @brief Find relationship edges present on one person but missing on the other.
+    @return One entry per one-sided edge: {person, line, other, other_name}. Reads
+            never auto-repair — mismatches surface in the review tab so a corrupt or
+            half-written edge is shown, not silently reconciled by overwriting.
+    """
+    people = {d["uuid"]: d for d in list_all(media_dir)}
+    problems = []
+    for uid, desc in people.items():
+        for line, edges in desc["relationships"].items():
+            for e in edges:
+                other = e.get("uuid")
+                if not other or other not in people:
+                    continue
+                back = people[other]["relationships"]
+                if not any(be.get("uuid") == uid for line2 in back.values() for be in line2):
+                    problems.append({"person": uid, "line": line,
+                                     "other": other, "other_name": e.get("name", "")})
+    return problems
 
 
 def list_all(media_dir: str) -> list[dict[str, Any]]:

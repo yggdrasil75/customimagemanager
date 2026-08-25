@@ -18,14 +18,18 @@ async function clearCurrentFlag(){
 async function refreshReviewCount(){
   try{
     const d=await fetch('/api/review_list?offset=0&limit=1').then(r=>r.json());
+    let rel=0;
+    try{ const r=await fetch('/api/persons/review').then(r=>r.json());
+         if(r.success) rel=(r.problems||[]).length; }catch(e){}
+    const grand=(d.total||0)+rel;
     const b=document.getElementById('review_badge');
     if(b){
-      if(d.total>0){ b.innerText=_fmtCount(d.total); b.title=d.total+' pending'; b.classList.remove('hidden'); }
+      if(grand>0){ b.innerText=_fmtCount(grand); b.title=grand+' pending'; b.classList.remove('hidden'); }
       else b.classList.add('hidden');
     }
     // The Review TAB badge mirrors the header button's badge.
     const tb=document.getElementById('review_tab_badge');
-    if(tb) tb.innerText = d.total>0 ? _fmtCount(d.total) : '';
+    if(tb) tb.innerText = grand>0 ? _fmtCount(grand) : '';
   }catch(e){}
 }
 
@@ -88,7 +92,7 @@ async function loadReviewPane(){
   list.innerHTML='<div class="text-xs text-gray-500 p-2">Loading…</div>';
   _reviewStatus('');
   refreshEmbedStatus();
-  let counts={delete:0,box:0,tag:0}, total=0;
+  let counts={delete:0,box:0,tag:0}, total=0, rel=[];
   try{
     const head=await fetch('/api/review_list?offset=0&limit=1').then(r=>r.json());
     counts=head.counts||counts; total=head.total||0;
@@ -96,20 +100,37 @@ async function loadReviewPane(){
     list.innerHTML='<div class="text-xs text-red-400 p-2">Failed to load review queue.</div>';
     return;
   }
+  try{
+    const r=await fetch('/api/persons/review').then(r=>r.json());
+    if(r.success) rel=r.problems||[];
+  }catch(e){}
   refreshReviewCount();
-  if(!total){
-    list.innerHTML='<div class="text-xs text-gray-500 p-3">Nothing to review — no delete flags, unconfirmed boxes, or unconfirmed tags.</div>';
+  if(!total && !rel.length){
+    list.innerHTML='<div class="text-xs text-gray-500 p-3">Nothing to review — no delete flags, unconfirmed boxes, unconfirmed tags, or relationship mismatches.</div>';
     _reviewStatus('0 pending');
     return;
   }
-  _reviewStatus(`${total} item(s) pending`);
+  _reviewStatus(`${total+rel.length} item(s) pending`);
   // Fetch each non-empty group's first page in parallel.
   const wanted=REVIEW_GROUPS.filter(g=>(counts[g.key]||0)>0);
   const pages=await Promise.all(wanted.map(g=>
     fetch(`/api/review_list?queue=${g.key}&offset=0&limit=${REVIEW_PANE_PER_GROUP}`)
       .then(r=>r.json()).catch(()=>({items:[],total:0}))));
-  list.innerHTML=wanted.map((g,i)=>
-    _renderReviewGroup(g, pages[i].items||[], counts[g.key]||0)).join('') || '';
+  list.innerHTML=_renderRelationshipReview(rel) + (wanted.map((g,i)=>
+    _renderReviewGroup(g, pages[i].items||[], counts[g.key]||0)).join('') || '');
+}
+
+// One-sided relationship edges (A links B, B has no back-link). Surfaced for the
+// user to reconcile; never auto-repaired, since a corrupt half is ambiguous.
+function _renderRelationshipReview(problems){
+  if(!problems.length) return '';
+  const rows=problems.map(pr=>
+    `<div class="text-[11px] text-amber-200 py-0.5">
+       <b>${(pr.other_name||pr.other).replace(/</g,'&lt;')}</b> —
+       one-sided <b>${pr.line}</b> link (open the person in People to fix)</div>`).join('');
+  return `<div class="mb-3 p-2 bg-amber-900/30 border border-amber-700 rounded">
+      <div class="text-xs text-amber-300 font-bold mb-1">
+        Relationships linked on only one side · ${problems.length}</div>${rows}</div>`;
 }
 
 function _reviewThumb(it, queue){
