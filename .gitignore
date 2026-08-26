@@ -2,6 +2,7 @@
 /media
 /__pycache__
 /static/tailwindcss.js
+/static/vendor/
 *.pt
 /logs
 app_config.json

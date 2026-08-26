@@ -4740,8 +4740,10 @@ def static_asset(filename):
     """Serve editor assets from the static/ directory (css/js only), guarded
     against path traversal — mirrors web_asset."""
     static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-    if ("/" in filename or "\\" in filename or ".." in filename
-            or not filename.endswith((".css", ".js"))):
+    if ("\\" in filename or ".." in filename
+            or not filename.endswith((".css", ".js"))
+            or (filename.count("/") > 1)
+            or ("/" in filename and not filename.startswith("vendor/"))):
         return "", 404
     fp = os.path.join(static_dir, filename)
     if not os.path.isfile(fp):
@@ -5356,6 +5358,34 @@ def api_person_mesh(cluster_id):
     """Estimate and store the body mesh for one appearance (no-op if estimator absent)."""
     d = request.json or {}
     return jsonify({"success": estimate_person_mesh(cluster_id, d.get("appearance_id"))})
+
+@app.route("/api/persons/<int:cluster_id>/mesh_data/<appearance_id>")
+def api_person_mesh_data(cluster_id, appearance_id):
+    """Serve one appearance's canonical body mesh as a raw .obj, for the 3D viewer.
+
+    Returns 404 when the person, appearance, or mesh member is absent so the
+    front-end can fall back to a placeholder rather than erroring."""
+    person_uuid = person_for_cluster(cluster_id, create=False)
+    if not person_uuid:
+        return "", 404
+    data = personlib.read_member(
+        MEDIA_DIR, person_uuid, personlib.mesh_member(appearance_id))
+    if data is None:
+        return "", 404
+    return data, 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+@app.route("/api/persons/<int:cluster_id>/tpose_data/<appearance_id>")
+def api_person_tpose_data(cluster_id, appearance_id):
+    """Serve one appearance's canonical T-pose keypoints as JSON, for the 3D
+    viewer's skeleton fallback when no mesh has been estimated yet."""
+    person_uuid = person_for_cluster(cluster_id, create=False)
+    if not person_uuid:
+        return "", 404
+    data = personlib.read_member(
+        MEDIA_DIR, person_uuid, personlib.tpose_member(appearance_id))
+    if data is None:
+        return "", 404
+    return data, 200, {"Content-Type": "application/json"}
 
 @app.route("/api/faces/scan", methods=["POST"])
 @_auth.require_feature("tab.faces.edit")

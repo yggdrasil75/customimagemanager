@@ -8,6 +8,10 @@ apt install build-essential libjxl-dev
 git clone https://github.com/yggdrasil75/customimagemanager
 cd customimagemanager
 wget https://cdn.tailwindcss.com/3.4.17 -O static/tailwindcss.js
+mkdir -p static/vendor
+wget https://unpkg.com/three@0.137.5/build/three.min.js -O static/vendor/three.min.js
+wget https://unpkg.com/three@0.137.5/examples/js/loaders/OBJLoader.js -O static/vendor/OBJLoader.js
+wget https://unpkg.com/three@0.137.5/examples/js/controls/OrbitControls.js -O static/vendor/OrbitControls.js
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt

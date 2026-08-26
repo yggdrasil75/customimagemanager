@@ -12,6 +12,9 @@
 
         <button data-tab="book" onclick="setControlsTab('book')"
           class="controls-tab hidden px-3 py-2 text-white border-b-2 border-blue-500">Book</button>
+
+        <button data-tab="person" onclick="setControlsTab('person')"
+          class="controls-tab hidden px-3 py-2 text-white border-b-2 border-blue-500">Person</button>
       </div>
 
       <!-- Tab panes -->
@@ -250,6 +253,14 @@
 
       <!-- Tab 5: Book (book mode only) -->
       {% include 'partials/book_controls.html' %}
+
+      <!-- Tab 6: Person (person mode only) — the person editor, moved here from
+           the faces-tab inline drawer so a person takes over the right pane. -->
+      <div id="controls_pane_person" class="controls-tab-pane hidden h-full overflow-y-auto p-3">
+        <div id="person_editor_body" class="text-xs text-gray-500">
+          Select a person in the Faces tab to edit here.
+        </div>
+      </div>
 
       </div><!-- /#controls_tab_bodies -->
     </div>

@@ -57,26 +57,31 @@ function setMediaMode(mode) {
   if (mode === mediaMode) return;
   mediaMode = mode;
   const isBook = (mode === 'book');
+  const isPerson = (mode === 'person');
+  const isImage = (mode === 'image');
 
-  // Centre pane: image viewer ↔ reader.
-  _bq('image_pane')?.classList.toggle('hidden', isBook);
+  // Centre pane: image viewer ↔ reader ↔ person mesh. Exactly one is visible.
+  _bq('image_pane')?.classList.toggle('hidden', !isImage);
   _bq('book_reader')?.classList.toggle('hidden', !isBook);
+  _bq('person_pane')?.classList.toggle('hidden', !isPerson);
 
   // Controls pane: swap the body and prune impossible tabs.
   document.querySelectorAll('.controls-tab').forEach(btn => {
     const t = btn.dataset.tab;
-    if (IMAGE_ONLY_TABS.includes(t)) btn.classList.toggle('hidden', isBook);
-    if (t === 'main') btn.classList.toggle('hidden', isBook);
+    if (IMAGE_ONLY_TABS.includes(t)) btn.classList.toggle('hidden', !isImage);
+    if (t === 'main') btn.classList.toggle('hidden', !isImage);
     if (t === 'book') btn.classList.toggle('hidden', !isBook);
+    if (t === 'person') btn.classList.toggle('hidden', !isPerson);
   });
 
   // Anything explicitly marked image-only inside the shared chrome.
   document.querySelectorAll('[data-media="image"]').forEach(el =>
-    el.classList.toggle('hidden', isBook));
+    el.classList.toggle('hidden', !isImage));
   document.querySelectorAll('[data-media="book"]').forEach(el =>
     el.classList.toggle('hidden', !isBook));
 
-  if (typeof setControlsTab === 'function') setControlsTab(isBook ? 'book' : 'main');
+  if (typeof setControlsTab === 'function')
+    setControlsTab(isBook ? 'book' : isPerson ? 'person' : 'main');
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

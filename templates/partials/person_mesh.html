@@ -1,0 +1,48 @@
+<!-- Person mesh viewer — the centre-pane swap for a person.
+
+     #editor_region normally holds the image viewer (#image_pane). Opening a
+     person (faces tab ▸ "Person") hides #image_pane and shows this instead,
+     exactly like the book reader swap, while the controls pane switches to its
+     own "Person" tab. Same geometry, different centre.
+
+     The viewport renders the selected appearance's canonical body mesh (or its
+     T-pose skeleton when no mesh exists yet) in a Three.js scene. A scrub bar
+     underneath steps through the person's appearances in time order, so you can
+     drag across a life — 18-year-old body → 60-year-old body — and watch the
+     shape change. -->
+<div id="person_pane" class="hidden flex-1 flex flex-col bg-gray-900 min-w-0">
+
+  <!-- header -->
+  <div class="px-3 py-2 bg-gray-800 border-b border-gray-700 flex items-center gap-2 flex-shrink-0">
+    <span class="text-xs font-bold text-blue-400 truncate flex-1"
+          id="person_pane_name">Person</span>
+    <span id="person_pane_era" class="text-[11px] text-gray-400 truncate"></span>
+    <button onclick="closePersonView()" title="Back to images"
+      class="text-[11px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-gray-300">✕ Close</button>
+  </div>
+
+  <!-- 3D viewport -->
+  <div id="person_mesh_container" class="flex-1 bg-black overflow-hidden relative" style="min-height:120px">
+    <div id="person_mesh_empty"
+      class="absolute inset-0 flex items-center justify-center text-gray-600 text-sm pointer-events-none">
+      No mesh or T-pose for this appearance yet — estimate one in the Person tab.
+    </div>
+  </div>
+
+  <!-- Appearance scrub bar: drag across the person's eras over time -->
+  <div class="px-3 py-2 bg-gray-800 border-t border-gray-700 flex flex-col gap-1 flex-shrink-0">
+    <div class="flex items-center gap-2">
+      <span class="text-[10px] text-gray-500 uppercase tracking-wider font-bold w-16 flex-shrink-0">Appearance</span>
+      <!-- Track + ticks share ONE column so they line up. The ticks are absolutely
+           positioned by their fractional value (left:N%), matching where the range
+           thumb sits, instead of a flex justify-between that drifts out of step. -->
+      <div class="flex-1 flex flex-col gap-1 min-w-0">
+        <input id="person_scrub" type="range" min="0" max="0" value="0" step="1"
+          oninput="onPersonScrub(this.value)"
+          class="w-full h-1 accent-blue-500 cursor-pointer">
+        <div id="person_scrub_ticks" class="relative h-5 text-[9px] text-gray-500"></div>
+      </div>
+      <span id="person_scrub_label" class="text-[10px] text-gray-400 tabular-nums w-32 flex-shrink-0 text-right"></span>
+    </div>
+  </div>
+</div>

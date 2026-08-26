@@ -117,7 +117,6 @@ function _renderFaceCluster(c) {
             Person
           </button>
         </div>
-        <div id="person_${c.id}" class="hidden mt-2 pt-2 border-t border-gray-700"></div>
         <div class="flex gap-1.5 flex-wrap">
           ${c.faces.map(f => faceChip(f)).join('')}
           ${c.count > c.faces.length
@@ -394,15 +393,38 @@ async function _loadDirectory() {
   return _peopleDirectory;
 }
 
+// Which cluster's editor is currently shown in the right-pane Person tab.
+let _openPersonCid = null;
+
+// Open a person: take over the centre pane with their body mesh (+ appearance
+// scrub bar) and fill the right-pane "Person" tab with the editor. Clicking the
+// same person again while it's open closes back to the image view.
 async function openPerson(cid) {
-  const el = document.getElementById('person_' + cid);
-  if (!el) return;
-  if (!el.classList.contains('hidden')) { el.classList.add('hidden'); return; }
-  el.classList.remove('hidden');
-  el.innerHTML = '<div class="text-xs text-gray-500">Loading…</div>';
+  if (_openPersonCid === cid && typeof mediaMode !== 'undefined' && mediaMode === 'person') {
+    if (typeof setMediaMode === 'function') setMediaMode('image');
+    _openPersonCid = null;
+    return;
+  }
+  const body = document.getElementById('person_editor_body');
+  if (body) body.innerHTML = '<div class="text-xs text-gray-500">Loading…</div>';
   const [d] = await Promise.all([
     (await fetch('/api/persons/' + cid)).json(), _loadDirectory()]);
-  if (!d.success) { el.innerHTML = '<div class="text-xs text-red-400">' + (d.error || 'Failed.') + '</div>'; return; }
+  if (!d.success) {
+    if (body) body.innerHTML = '<div class="text-xs text-red-400">' + (d.error || 'Failed.') + '</div>';
+    return;
+  }
+  _openPersonCid = cid;
+  // Centre pane: 3D mesh + scrub bar. This also switches the right pane to the
+  // Person tab via setMediaMode('person').
+  if (window.personView) window.personView.open(cid, d.person);
+  // Right pane: the editor.
+  _renderPersonEditor(cid, d);
+}
+
+// Build the person editor markup into the right-pane Person tab body.
+function _renderPersonEditor(cid, d) {
+  const el = document.getElementById('person_editor_body');
+  if (!el) return;
   const p = d.person;
   const esc = v => (v || '').replace(/"/g, '&quot;');
 
@@ -536,9 +558,10 @@ async function _saveRelation(cid, line, edges) {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ line, edges })
   });
-  // Reopen to repaint chips and reflect any reciprocal edges written server-side.
-  const el = document.getElementById('person_' + cid);
-  if (el) { el.classList.add('hidden'); openPerson(cid); }
+  // Repaint chips and reflect any reciprocal edges written server-side by
+  // reloading the record into the right-pane editor (no centre-pane reset).
+  const dd = await (await fetch('/api/persons/' + cid)).json();
+  if (dd.success) _renderPersonEditor(cid, dd);
 }
 
 async function saveListField(cid, key, raw) {
@@ -565,6 +588,14 @@ async function _personTask(cid, appearanceId, path, label) {
     body: JSON.stringify({ appearance_id: appearanceId })
   })).json();
   if (s) s.textContent = d.success ? label + ' done.' : label + ' unavailable.';
+  // Re-pull the record so the mesh viewer + editor reflect the new tpose/mesh.
+  if (d.success) {
+    const dd = await (await fetch('/api/persons/' + cid)).json();
+    if (dd.success) {
+      if (window.personView) window.personView.open(cid, dd.person);
+      _renderPersonEditor(cid, dd);
+    }
+  }
 }
 const estimatePose = (cid, aid) => _personTask(cid, aid, '/tpose', 'T-pose');
 const estimateMesh = (cid, aid) => _personTask(cid, aid, '/mesh', 'Mesh');
