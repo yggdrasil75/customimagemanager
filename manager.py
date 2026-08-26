@@ -3877,11 +3877,11 @@ def store_person_field(cluster_id: int, section: str, key: str, value,
 def _write_reciprocal_edges(person_uuid: str, line: str, edges: list) -> None:
     """! @brief Write the back-edge on each linked person so both records hold the link.
     @param edges The edges just written on person_uuid; external edges (no uuid) are
-           skipped since they have no record to write to. Parent lines map to the
-           child's 'children' line and vice-versa; spouse/siblings are symmetric.
+           skipped since they have no record to write to. 
     """
     this = personlib.read(MEDIA_DIR, person_uuid)
     this_name = this["name"] if this else ""
+    is_female = (this["bio"].get("gender") or "").lower().startswith("f") if this else None
     for e in edges:
         other = e.get("uuid")
         if not other:
@@ -3889,16 +3889,16 @@ def _write_reciprocal_edges(person_uuid: str, line: str, edges: list) -> None:
         other_desc = personlib.read(MEDIA_DIR, other)
         if other_desc is None:
             continue
-        if line in ("mother", "father"):
-            back = "children"
-        elif line == "children":
-            gender = (this["bio"].get("gender") or "").lower() if this else ""
-            back = "mother" if gender.startswith("f") else "father"
-        else:
-            back = line
+        back = personlib.reciprocal_line(line, is_female)
+        if back is None:
+            continue
+        edge = personlib._edge(person_uuid, this_name)
+        if back in personlib.SINGLE_RELATIONS:
+            personlib.set_relationship(MEDIA_DIR, other, back, [edge])
+            continue
         existing = other_desc["relationships"][back]
         if not any(x.get("uuid") == person_uuid for x in existing):
-            existing.append(personlib._edge(person_uuid, this_name))
+            existing.append(edge)
             personlib.set_relationship(MEDIA_DIR, other, back, existing)
 
 def rebuild_persons_cache() -> int:
@@ -5300,6 +5300,7 @@ def api_person_get(cluster_id):
                     "bio_fields": list(personlib.BIO_FIELDS),
                     "list_fields": list(personlib.LIST_FIELDS),
                     "relation_lines": list(personlib.RELATION_LINES),
+                    "single_relations": list(personlib.SINGLE_RELATIONS),
                     "date_flags": _person_date_flags(cluster_id),
                     "mesh_estimator": bodylib.have_mesh_estimator()})
 

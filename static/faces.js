@@ -433,8 +433,12 @@ async function openPerson(cid) {
               onchange="saveListField(${cid},'${k}',this.value)"
               class="p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white"></label>`).join('');
 
+  // Hold this person's relationships in memory so add/remove mutate state
+  // directly instead of scraping it back off the DOM.
+  _relState[cid] = p.relationships || {};
+  const singles = new Set(d.single_relations || []);
   const relTree = (d.relation_lines || []).map(line =>
-    _renderRelationLine(cid, line, p.relationships[line] || [])).join('');
+    _renderRelationLine(cid, line, _relState[cid][line] || [], singles.has(line))).join('');
 
   const flagBanner = (d.date_flags && d.date_flags.length)
     ? `<div class="mt-2 p-1.5 bg-amber-900/40 border border-amber-700 rounded text-[10px] text-amber-200">
@@ -479,22 +483,32 @@ async function openPerson(cid) {
     ${eras || '<div class="text-[10px] text-gray-500 mt-2">No appearances yet.</div>'}`;
 }
 
-// One relationship line: existing edges as removable chips + a typeahead adder.
-function _renderRelationLine(cid, line, edges) {
-  const chips = edges.map((e, i) =>
+// In-memory relationships per open person, so add/remove mutate state directly.
+let _relState = {};
+
+// One relationship line. Single lines (mother/father/spouse) show a single slot:
+// a filled chip that can only be cleared, or one adder. Multi lines (siblings,
+// children, ex-spouses, step-family) show all chips plus an always-present adder.
+function _renderRelationLine(cid, line, edges, single) {
+  const label = line.replace(/_/g, ' ');
+  const chip = (e, i) =>
     `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 bg-gray-700 rounded text-[10px]">
        ${e.uuid ? '' : '<span class="text-gray-500" title="external, no photos">◇</span>'}
        ${(e.name || '?').replace(/</g, '&lt;')}
        <button onclick="removeRelation(${cid},'${line}',${i})"
                class="text-gray-500 hover:text-red-400">×</button>
-     </span>`).join('');
-  return `<div class="mb-1.5" data-line="${line}">
+     </span>`;
+  const adder =
+    `<input list="peopledir_${cid}" placeholder="+ add"
+            onkeydown="if(event.key==='Enter'){addRelation(${cid},'${line}',this.value);this.value='';}"
+            class="px-1 py-0.5 bg-gray-800 rounded border border-gray-600 text-[10px] text-white w-24">`;
+  // A single line shows its one chip OR the adder; multi shows all chips AND the adder.
+  const body = single
+    ? (edges.length ? chip(edges[0], 0) : adder)
+    : edges.map(chip).join('') + adder;
+  return `<div class="mb-1.5">
       <div class="flex items-center gap-1 flex-wrap">
-        <span class="text-[10px] text-gray-400 w-16">${line}</span>
-        ${chips}
-        <input list="peopledir_${cid}" placeholder="+ add"
-               onkeydown="if(event.key==='Enter'){addRelation(${cid},'${line}',this.value);this.value='';}"
-               class="px-1 py-0.5 bg-gray-800 rounded border border-gray-600 text-[10px] text-white w-24">
+        <span class="text-[10px] text-gray-400 w-20">${label}</span>${body}
       </div>
     </div>`;
 }
@@ -504,31 +518,20 @@ async function addRelation(cid, line, name) {
   name = (name || '').trim();
   if (!name) return;
   const match = _peopleDirectory.find(p => p.name.toLowerCase() === name.toLowerCase());
-  const edges = _currentEdges(cid, line);
-  edges.push({ uuid: match ? match.uuid : null, name: match ? match.name : name });
+  const edge = { uuid: match ? match.uuid : null, name: match ? match.name : name };
+  const edges = (_relState[cid][line] || []).slice();
+  if (!edges.some(e => e.name.toLowerCase() === edge.name.toLowerCase())) edges.push(edge);
   await _saveRelation(cid, line, edges);
 }
 
 async function removeRelation(cid, line, idx) {
-  const edges = _currentEdges(cid, line);
+  const edges = (_relState[cid][line] || []).slice();
   edges.splice(idx, 1);
   await _saveRelation(cid, line, edges);
 }
 
-// Read the current edges for a line straight off the rendered chips so we don't
-// hold editor state: each chip's text is the name, the ◇ marker means external.
-function _currentEdges(cid, line) {
-  const row = document.querySelector('#person_' + cid + ' [data-line="' + line + '"]');
-  if (!row) return [];
-  return [...row.querySelectorAll('span.inline-flex')].map(chip => {
-    const external = !!chip.querySelector('[title="external, no photos"]');
-    const name = chip.childNodes[chip.childNodes.length - 2].textContent.trim();
-    const match = _peopleDirectory.find(p => p.name === name);
-    return { uuid: external ? null : (match ? match.uuid : null), name };
-  });
-}
-
 async function _saveRelation(cid, line, edges) {
+  _relState[cid][line] = edges;
   await fetch('/api/persons/' + cid + '/relationship', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ line, edges })

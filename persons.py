@@ -66,10 +66,16 @@ BIO_FIELDS: tuple[str, ...] = (
 )
 LIST_FIELDS: tuple[str, ...] = ("aliases", "tags")
 
-## The four relationship lines a person can have. mother/father/spouse are the
-## parent+partner lines; siblings/children are multi. Each edge is either a link
-## to a known person (uuid) or an external name string with no record.
-RELATION_LINES: tuple[str, ...] = ("mother", "father", "spouse", "siblings", "children")
+## Relationship lines split into single-entry and multi-entry. mother/father/spouse
+## hold at most one person (a person has one of each at a time — an ex goes under
+## ex_spouses). The rest are lists. Each edge links a known person (uuid) or names
+## an external person (uuid None) with no record.
+SINGLE_RELATIONS: tuple[str, ...] = ("mother", "father", "spouse")
+MULTI_RELATIONS: tuple[str, ...] = (
+    "siblings", "children", "ex_spouses",
+    "step_parents", "step_siblings", "step_children",
+)
+RELATION_LINES: tuple[str, ...] = SINGLE_RELATIONS + MULTI_RELATIONS
 
 
 def persons_dir(media_dir: str) -> str:
@@ -287,29 +293,35 @@ def set_relationship(media_dir: str, person_uuid: str, line: str,
     desc = read(media_dir, person_uuid)
     if desc is None:
         return False
-    desc["relationships"][line] = edges
+    # Single-entry lines hold at most one person; keep only the last set.
+    desc["relationships"][line] = edges[-1:] if line in SINGLE_RELATIONS else edges
     write(media_dir, desc)
     return True
 
 
 ## Which line becomes which on the other person when an edge is written. Symmetric
-## lines map to themselves; parent<->child is the one asymmetric pair. Used to write
-## the reciprocal edge so relationships are stored on BOTH people.
-_RECIPROCAL = {"spouse": "spouse", "siblings": "siblings",
-               "mother": "children", "father": "children"}
+## lines map to themselves; parent<->child is asymmetric (resolved by gender below).
+## Used to write the reciprocal edge so relationships are stored on BOTH people.
+_RECIPROCAL = {
+    "spouse": "spouse", "ex_spouses": "ex_spouses",
+    "siblings": "siblings", "step_siblings": "step_siblings",
+    "mother": "children", "father": "children",
+    "step_parents": "step_children",
+}
 
 
 def reciprocal_line(line: str, target_is_female: Optional[bool]) -> Optional[str]:
     """! @brief The line an edge should be written under on the OTHER person.
-    @param target_is_female Used only for children->parent: picks mother vs father;
-           None leaves it to the caller (write as 'mother' by convention if unknown).
-    @return The reciprocal line name, or None when it can't be inferred here (the
-            child->parent direction, which the caller resolves from the edge's role).
+    @param target_is_female Picks mother/father (for children) or the step equivalent
+           (for step_children); None falls back to the father-side line by convention.
+    @return The reciprocal line name, or None when it can't be inferred here.
     """
     if line in _RECIPROCAL:
         return _RECIPROCAL[line]
     if line == "children":
         return "mother" if target_is_female else "father"
+    if line == "step_children":
+        return "step_parents"
     return None
 
 
