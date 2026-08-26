@@ -26,12 +26,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir opencv-python-headless \
     && pip install --no-cache-dir -r requirements.txt
 
-ARG SMPLESTX_REF=main
-RUN pip install --no-cache-dir "git+https://github.com/SMPLCap/SMPLest-X.git@${SMPLESTX_REF}" || \
-    echo "SMPLest-X install skipped (unavailable) — mesh estimator will be disabled"
 RUN mkdir -p /app/models/smplx && \
     curl -fSL -o /app/models/smplx/smplest_x_h.pth.tar \
-        "https://github.com/SMPLCap/SMPLest-X/releases/download/v1.0/smplest_x_h.pth.tar" || \
+        "https://huggingface.co/waanqii/SMPLest-X/resolve/main/smplest_x_h.pth.tar" || \
     echo "SMPLest-X checkpoint download skipped — mesh estimator will be disabled"
 
 COPY . .

@@ -61,27 +61,34 @@
     </div>
 
     <div data-settings-pane="ai" class="hidden overflow-y-auto flex-1 grid grid-cols-2 gap-x-6 gap-y-3 pr-1 items-start">
-      <div><label class="text-xs text-gray-400 block mb-1">Endpoint</label>
-        <input id="cfg_endpoint" type="text"
-          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+      <div class="col-span-2">
+        <label class="text-xs text-indigo-300 font-bold block mb-2">LLM connection
+          <span class="font-normal text-gray-500">(vision model for Smart Tag &amp; AI actions)</span></label>
+        <div class="grid grid-cols-2 gap-x-6 gap-y-3">
+          <div><label class="text-xs text-gray-400 block mb-1">Endpoint</label>
+            <input id="cfg_endpoint" type="text"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          </div>
+          <div><label class="text-xs text-gray-400 block mb-1">API Key</label>
+            <input id="cfg_apikey" type="password"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          </div>
+          <div><label class="text-xs text-gray-400 block mb-1">Model</label>
+            <input id="cfg_model" type="text"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          </div>
+          <div><label class="text-xs text-gray-400 block mb-1">Embedding model
+              <span class="text-gray-600">(blank = local CNN, no text search)</span></label>
+            <input id="cfg_embed_model" type="text" placeholder="e.g. clip-ViT-B-32"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          </div>
+        </div>
       </div>
-      <div><label class="text-xs text-gray-400 block mb-1">API Key</label>
-        <input id="cfg_apikey" type="password"
-          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-      </div>
-      <div><label class="text-xs text-gray-400 block mb-1">Model</label>
-        <input id="cfg_model" type="text"
-          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-      </div>
-      <div><label class="text-xs text-gray-400 block mb-1">Embedding model
-          <span class="text-gray-600">(blank = local CNN, no text search)</span></label>
-        <input id="cfg_embed_model" type="text" placeholder="e.g. clip-ViT-B-32"
-          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-      </div>
-      <div><label class="text-xs text-gray-400 block mb-1">AI rating model <span
-            class="text-gray-600">(NR-IQA &mdash; no-reference)</span></label>
+      <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
+        <label class="text-xs text-emerald-300 font-bold block mb-2">AI rating model
+          <span class="font-normal text-gray-500">(NR-IQA &mdash; no-reference quality score)</span></label>
         <select id="cfg_iqa_model"
-          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white max-w-md">
           <!-- populated from /api/iqa_models; grouped by speed class -->
         </select>
         <p id="cfg_iqa_note" class="text-[10px] text-gray-500 mt-1"></p>
@@ -95,9 +102,10 @@
           scan re-scores them.
         </p>
       </div>
-      <div><label class="text-xs text-gray-400 block mb-1">Pose &amp; detection models <span
-            class="text-gray-600">(auto-downloaded)</span></label>
-        <div class="grid grid-cols-3 gap-2">
+      <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
+        <label class="text-xs text-sky-300 font-bold block mb-2">Pose &amp; detection models
+          <span class="font-normal text-gray-500">(auto-downloaded on first use)</span></label>
+        <div class="grid grid-cols-3 gap-x-4 gap-y-2">
           <div>
             <span class="text-[10px] text-gray-500 block mb-0.5">YOLO size</span>
             <select id="cfg_yolo_size"
@@ -148,12 +156,19 @@
             </select>
           </div>
           <div>
+            <span class="text-[10px] text-gray-500 block mb-0.5">Barcode model</span>
+            <select id="cfg_barcode_model"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+              <option value="">Auto (built-in detector)</option>
+            </select>
+          </div>
+          <div>
             <span class="text-[10px] text-gray-500 block mb-0.5">Appearance split (eps)</span>
             <input id="cfg_appearance_eps" type="number" step="0.01" min="0" max="1"
               class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
           </div>
         </div>
-        <p class="text-[10px] text-gray-600 mt-1">Appearance split groups a person's photos
+        <p class="text-[10px] text-gray-600 mt-1.5">Appearance split groups a person's photos
           into life-eras by face-embedding drift; lower eps = more, tighter eras. Shape/pose
           estimators are optional body-mesh backends.</p>
         <p class="text-[10px] text-gray-600 mt-1">Whole-body pose needs <code>rtmlib</code> +
@@ -205,7 +220,9 @@
           checkpoints in <code>models/seg/sam</code>; extra YOLO-seg weights go in <code>models/seg/yolo</code>.
         </p>
       </div>
-      <div><label class="text-xs text-gray-400 block mb-1">System Prompt</label>
+      <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
+        <label class="text-xs text-indigo-300 font-bold block mb-2">System prompt
+          <span class="font-normal text-gray-500">(prepended to every vision-model call)</span></label>
         <textarea id="cfg_system" rows="2"
           class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
       </div>
@@ -255,90 +272,97 @@
         </div>
       </div>
       <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
-        <label class="text-xs text-purple-300 font-bold block mb-2">Faces &amp; People</label>
-        <div class="grid grid-cols-2 gap-3">
-          <label class="flex items-center gap-2 text-sm text-gray-300">
-            <input id="cfg_face_bg" type="checkbox" class="accent-purple-500">
-            Background face/person boxing
-          </label>
-          <label class="flex items-center gap-2 text-sm text-gray-300">
-            <input id="cfg_face_custom" type="checkbox" class="accent-purple-500">
-            Also run our trained model
-          </label>
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Face model</span>
-            <select id="cfg_face_model"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="">Auto (download community weights)</option>
-            </select>
+        <label class="text-xs text-purple-300 font-bold block mb-2">Faces &amp; People
+          <span class="font-normal text-gray-500">(detect, embed, and cluster who&rsquo;s in each image)</span></label>
+        <label class="flex items-center gap-2 text-sm text-gray-300 mb-3 cursor-pointer">
+          <input id="cfg_face_bg" type="checkbox" class="accent-purple-500">
+          Detect faces &amp; people on every scan
+          <span class="text-gray-600 text-[10px]">(background boxing)</span>
+        </label>
+        <div class="grid grid-cols-2 gap-4">
+          <div class="border border-gray-700 rounded p-3">
+            <div class="text-[11px] font-bold text-purple-200/80 mb-2">Faces</div>
+            <div class="space-y-2">
+              <div>
+                <span class="text-[10px] text-gray-500 block mb-0.5">Face model</span>
+                <select id="cfg_face_model"
+                  class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+                  <option value="">Auto (download community weights)</option>
+                </select>
+              </div>
+              <div>
+                <span class="text-[10px] text-gray-500 block mb-0.5">Face size
+                  <span class="text-gray-600">(auto only)</span></span>
+                <select id="cfg_face_size"
+                  class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+                  <option value="n">n · nano</option>
+                  <option value="s">s · small</option>
+                  <option value="m">m · medium</option>
+                  <option value="l">l · large</option>
+                </select>
+              </div>
+            </div>
+            <p class="text-[10px] text-gray-600 mt-2">Larger models catch small and profile
+              faces <code>n</code> misses &mdash; those extra detections are what let a cluster
+              hold together. Ignored when a model is chosen explicitly; changing the size
+              needs a <b>Rescan all</b>. (yolov11-face ships n/s/m/l; there is no x.)</p>
           </div>
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Face size
-              <span class="text-gray-600">(auto only)</span></span>
-            <select id="cfg_face_size"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="n">n · nano</option>
-              <option value="s">s · small</option>
-              <option value="m">m · medium</option>
-              <option value="l">l · large</option>
-            </select>
-          </div>
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Person model</span>
-            <select id="cfg_person_model"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="">Common (COCO · person)</option>
-            </select>
-          </div>
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Our model</span>
-            <select id="cfg_our_model"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="">Latest trained (auto)</option>
-            </select>
-          </div>
-          <div class="col-span-3">
-            <label class="flex items-center gap-2 text-xs text-gray-300 cursor-pointer select-none">
-              <input type="checkbox" id="cfg_body_enabled" class="accent-purple-500">
-              Body re-id <span class="text-gray-600">(embed &amp; cluster person boxes, associate with faces)</span>
-            </label>
-            <p class="text-[10px] text-gray-600 mt-1">Bodies are only embedded on images
-              scanned while this is on. Enabling it needs a <b>Rescan all</b> from the
-              Faces pane to embed the existing library.</p>
-          </div>
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Body size
-              <span class="text-gray-600">(DINOv3)</span></span>
-            <select id="cfg_body_size"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="s">s · small</option>
-              <option value="b">b · base</option>
-              <option value="l">l · large</option>
-              <option value="g">g · giant</option>
-            </select>
-          </div>
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Barcode model</span>
-            <select id="cfg_barcode_model"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="">Auto (built-in detector)</option>
-            </select>
+          <div class="border border-gray-700 rounded p-3">
+            <div class="text-[11px] font-bold text-purple-200/80 mb-2">People &amp; bodies</div>
+            <div class="space-y-2">
+              <div>
+                <span class="text-[10px] text-gray-500 block mb-0.5">Person model</span>
+                <select id="cfg_person_model"
+                  class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+                  <option value="">Common (COCO · person)</option>
+                </select>
+              </div>
+              <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer select-none pt-0.5">
+                <input type="checkbox" id="cfg_body_enabled" class="accent-purple-500">
+                Body re-id
+                <span class="text-gray-600 text-[10px]">(cluster bodies, link to faces)</span>
+              </label>
+              <div>
+                <span class="text-[10px] text-gray-500 block mb-0.5">Body size
+                  <span class="text-gray-600">(DINOv3)</span></span>
+                <select id="cfg_body_size"
+                  class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+                  <option value="s">s · small</option>
+                  <option value="b">b · base</option>
+                  <option value="l">l · large</option>
+                  <option value="g">g · giant</option>
+                </select>
+              </div>
+            </div>
+            <p class="text-[10px] text-gray-600 mt-2">Bodies are only embedded on images scanned
+              while re-id is on. Enabling it needs a <b>Rescan all</b> from the Faces pane to
+              embed the existing library.</p>
           </div>
         </div>
-        <p class="text-[10px] text-gray-600 mt-1">Larger face models catch small and
-          profile faces that <code>n</code> misses &mdash; those extra detections are
-          what let a cluster hold together. Changing the size needs a
-          <b>Rescan all</b> to pick them up. Ignored when a Face model is chosen
-          explicitly. (yolov11-face ships n/s/m/l; there is no x.)</p>
+        <label class="flex items-center gap-2 text-sm text-gray-300 mt-3 cursor-pointer">
+          <input id="cfg_face_custom" type="checkbox" class="accent-purple-500">
+          Also run our trained model
+          <span class="text-gray-600 text-[10px]">(alongside the community weights above)</span>
+        </label>
+        <div class="mt-2 max-w-sm">
+          <span class="text-[10px] text-gray-500 block mb-0.5">Our model</span>
+          <select id="cfg_our_model"
+            class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+            <option value="">Latest trained (auto)</option>
+          </select>
+        </div>
         <p id="cfg_face_mode" class="text-[10px] text-gray-500 mt-2"></p>
       </div>
-      <div class="border-t border-gray-600 pt-3">
+      <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
         <div class="flex justify-between items-center mb-2">
-          <label class="text-xs font-bold text-gray-400">Actions</label>
+          <label class="text-xs text-rose-300 font-bold">AI actions
+            <span class="font-normal text-gray-500">(named prompts you can run on an image)</span></label>
           <button onclick="addAiAction()"
             class="text-xs bg-indigo-600 hover:bg-indigo-500 px-2 py-0.5 rounded font-bold">+ Add</button>
         </div>
-        <div id="actions_container" class="space-y-2"></div>
+        <div id="actions_container" class="grid grid-cols-2 gap-3"></div>
+        <p id="actions_empty" class="hidden text-[11px] text-gray-500 border border-dashed border-gray-700 rounded p-4 text-center">
+          No actions yet. Add one to run a custom prompt on any image.</p>
       </div>
     </div>
 

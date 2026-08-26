@@ -261,12 +261,18 @@ async function fetchState(){
     models.forEach(m=>{const o=document.createElement('option');o.value=m;
       const pts=m.split(/[\/\\]/);o.text=pts.slice(-3).join('/');sel.appendChild(o);});
     if(prev) sel.value=prev;
-    if(!hasSettings){
-      document.getElementById('cfg_endpoint').value=s.oai_endpoint;
-      document.getElementById('cfg_apikey').value=s.oai_key;
-      document.getElementById('cfg_model').value=s.oai_model;
-      document.getElementById('cfg_embed_model').value=s.oai_embed_model||'';
-      document.getElementById('cfg_yolo_size').value=s.yolo_size||'n';
+    if(!hasSettings){ populateSettingsForm(s); hasSettings=true; }
+  }catch(e){}
+}
+
+function populateSettingsForm(s){
+  try{
+      const _set=(id,v)=>{const e=document.getElementById(id); if(e) e.value=v;};
+      _set('cfg_endpoint', s.oai_endpoint||'');
+      _set('cfg_apikey', s.oai_key||'');
+      _set('cfg_model', s.oai_model||'');
+      _set('cfg_embed_model', s.oai_embed_model||'');
+      _set('cfg_yolo_size', s.yolo_size||'n');
       loadIqaModels(s.iqa_model||'brisque');
       loadSegModels(s.sam_model,s.bg_seg_model,s.bg_seg_enabled,s.bg_seg_classes);
       // faces / people
@@ -310,25 +316,25 @@ async function fetchState(){
       if(_be) _be.checked=!!s.body_enabled;
       const _bs=document.getElementById('cfg_body_size');
       if(_bs) _bs.value=s.body_size||'s';
-      document.getElementById('cfg_pose_kind').value=s.pose_kind||'body';
-      document.getElementById('cfg_pose_estimator').value=s.pose_estimator||'atlas';
-      document.getElementById('cfg_shape_estimator').value=s.shape_estimator||'anny_fit';
-      document.getElementById('cfg_appearance_eps').value=(s.appearance_eps??0.35);
-      document.getElementById('cfg_pose_size').value=s.pose_size||'n';
-      document.getElementById('cfg_system').value=s.oai_system_prompt||'';
+      _set('cfg_pose_kind', s.pose_kind||'body');
+      _set('cfg_pose_estimator', s.pose_estimator||'atlas');
+      _set('cfg_shape_estimator', s.shape_estimator||'anny_fit');
+      _set('cfg_appearance_eps', (s.appearance_eps??0.35));
+      _set('cfg_pose_size', s.pose_size||'n');
+      _set('cfg_system', s.oai_system_prompt||'');
+      const _chk=(id,v)=>{const e=document.getElementById(id); if(e) e.checked=!!v;};
       const pp=s.llm_preprocess||{}, ppc=pp.compress||{}, ppd=pp.pad||{};
-      document.getElementById('cfg_pp_compress').checked=!!ppc.enabled;
-      document.getElementById('cfg_pp_maxside').value=ppc.max_side||1024;
-      document.getElementById('cfg_pp_interp').value=ppc.interp||'area';
-      document.getElementById('cfg_pp_pad').checked=!!ppd.enabled;
-      document.getElementById('cfg_pp_fill').value=ppd.fill||'black';
+      _chk('cfg_pp_compress', ppc.enabled);
+      _set('cfg_pp_maxside', ppc.max_side||1024);
+      _set('cfg_pp_interp', ppc.interp||'area');
+      _chk('cfg_pp_pad', ppd.enabled);
+      _set('cfg_pp_fill', ppd.fill||'black');
       {const rs=new Set(ppd.ratios||['square','16:9','9:16']);
        document.querySelectorAll('#cfg_pp_ratios input').forEach(c=>{c.checked=rs.has(c.value);});}
       oai_actions_cache=s.oai_actions||[];
       renderAiActions(); updateActionDropdown();
       if(typeof renderQuickFilterEditor==='function') renderQuickFilterEditor();
-      hasSettings=true;
-      try{ document.getElementById('cfg_pipeline').value=JSON.stringify(s.pipeline_tree||{},null,2); }catch(_){}
+      _set('cfg_pipeline', JSON.stringify(s.pipeline_tree||{},null,2));
       const at=document.getElementById('autotag_toggle');
       if(at) at.checked=!!s.autotag_enabled;
       const bn=document.getElementById('cfg_brand_name');
@@ -337,7 +343,6 @@ async function fetchState(){
       if(bp){ if(s.brand_logo){ bp.src=s.brand_logo; bp.classList.remove('hidden'); }
               else bp.classList.add('hidden'); }
       gateBrandingSection();
-    }
   }catch(e){}
 }
 setInterval(fetchState,2500); fetchState();

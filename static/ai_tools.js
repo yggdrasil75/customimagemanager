@@ -1,22 +1,26 @@
 // ── AI actions ─────────────────────────────────────────────────────────────
 function renderAiActions(){
-  const c=document.getElementById('actions_container'); c.innerHTML='';
+  const c=document.getElementById('actions_container'); if(!c) return;
+  c.innerHTML='';
+  const empty=document.getElementById('actions_empty');
+  if(empty) empty.classList.toggle('hidden', oai_actions_cache.length>0);
+  const TARGETS=[['description','→ Desc'],['tags','→ Tags'],['regions','→ Boxes'],
+                 ['segment','→ Segment'],['flag','→ Flag'],['body','→ Body']];
   oai_actions_cache.forEach(act=>{
     const d=document.createElement('div');
-    d.className='bg-gray-800 p-2 rounded border border-gray-700 relative group action-row';
+    d.className='bg-gray-800 p-2.5 rounded border border-gray-700 relative group action-row';
     d.dataset.id=act.id||String(Date.now()+Math.random());
-    const opts=['description','tags','regions','segment','flag','body'].map(v=>
-      `<option value="${v}"${act.target===v?' selected':''}>${
-        v==='regions'?'→ Boxes':v==='segment'?'→ Segment':v==='tags'?'→ Tags':v==='flag'?'→ Flag':v==='body'?'→ Body':'→ Desc'}</option>`).join('');
-    d.innerHTML=`<button onclick="this.parentElement.remove()"
-      class="absolute top-1 right-1 text-red-500 hidden group-hover:block text-xs px-1 bg-gray-900 rounded">✕</button>
-      <div class="flex gap-1 mb-1 pr-5">
-        <input class="act-name flex-1 bg-gray-900 text-white text-xs p-1 rounded border border-gray-600"
-          value="${act.name.replace(/"/g,'&quot;')}" placeholder="Name">
-        <select class="act-target bg-gray-900 text-white text-xs p-1 rounded border border-gray-600 w-20">${opts}</select>
+    const opts=TARGETS.map(([v,label])=>
+      `<option value="${v}"${act.target===v?' selected':''}>${label}</option>`).join('');
+    d.innerHTML=`<button onclick="this.parentElement.remove()" title="Remove action"
+      class="absolute top-1.5 right-1.5 text-red-500 opacity-0 group-hover:opacity-100 transition-opacity text-xs px-1 bg-gray-900 rounded">✕</button>
+      <div class="flex gap-1.5 mb-1.5 pr-6">
+        <input class="act-name flex-1 min-w-0 bg-gray-900 text-white text-xs p-1.5 rounded border border-gray-600"
+          value="${(act.name||'').replace(/"/g,'&quot;')}" placeholder="Name">
+        <select class="act-target shrink-0 bg-gray-900 text-white text-xs p-1.5 rounded border border-gray-600 w-24">${opts}</select>
       </div>
-      <textarea class="act-prompt w-full bg-gray-900 text-white text-xs p-1 rounded border border-gray-600 h-9 resize-y"
-        placeholder="Prompt…">${act.prompt}</textarea>`;
+      <textarea class="act-prompt w-full bg-gray-900 text-white text-xs p-1.5 rounded border border-gray-600 h-14 resize-y"
+        placeholder="Prompt…">${act.prompt||''}</textarea>`;
     c.appendChild(d);
   });
 }
