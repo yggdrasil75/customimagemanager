@@ -40,6 +40,7 @@ import imagecodecs
 from dup_heuristics import DuplicateClassifier, classify_pair, extract_features
 from dup_cnn import DupCNN, encode_pair
 import object_grouping as og
+import model_registry
 import discover_stages as ds
 import image_index as ii
 import media_types as mt
@@ -3319,15 +3320,44 @@ def remote_yolo_train_worker(abs_folder: str, dataset_dir: str, config: dict,
 # ── Pose / skeleton: extracted to pose.py ─────────────────────────────────────
 import pose
 
-@functools.lru_cache(maxsize=4)
-def _load_yolo(model_path):
-    """! 
-    @brief Memoised YOLO loader; maxsize>1 so alternating detectors don't thrash.
-    @note Invalidate with _load_yolo.cache_clear() when a setting repoints a model path.
-    """
+_yolo_registered = set()
+
+
+def _build_yolo(model_path):
     if not os.path.dirname(model_path):
         model_path = os.path.join(MODELS_DIR, model_path)
     return YOLO(model_path)
+
+
+def _load_yolo(model_path):
+    """!
+    @brief Load-on-demand YOLO loader backed by the central model registry, so
+           the several detectors we alternate between (person / face / barcode /
+           trained) share one global memory budget and the least-recently-used
+           one is evicted instead of all of them staying resident.
+    @note Invalidate with _load_yolo.cache_clear() when a setting repoints a
+          model path (kept for source compatibility with existing call sites).
+    """
+    key = f"manager:yolo:{model_path}"
+    if key not in _yolo_registered:
+        model_registry.register(
+            key, (lambda p=model_path: _build_yolo(p)),
+            cost_mb=250, gpu=og.has_gpu())
+        _yolo_registered.add(key)
+    return model_registry.acquire(key)
+
+
+def _load_yolo_cache_clear():
+    """Drop every YOLO the manager has loaded (mirrors the old lru_cache API)."""
+    for k in list(_yolo_registered):
+        try:
+            model_registry.unload(k)
+        except Exception:
+            pass
+
+
+# Preserve the `.cache_clear()` call sites without changing them.
+_load_yolo.cache_clear = _load_yolo_cache_clear
 
 _SIZES = ("n", "s", "m", "l", "x")
 def _pose_size():

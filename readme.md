@@ -1,8 +1,5 @@
 install:
 
-clone this repo
-
-save this file to static as tailwindcss.js: https://cdn.tailwindcss.com/3.4.17
 ```
 apt install build-essential libjxl-dev
 git clone https://github.com/yggdrasil75/customimagemanager
@@ -16,6 +13,18 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 python manager.py
+```
+
+alternatively:
+
+```
+docker compose up --build
+```
+
+with future runs just needing (outside of major updates):
+
+```
+docker compose up
 ```
 
 what it is:

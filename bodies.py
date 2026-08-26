@@ -23,6 +23,7 @@ import numpy as np
 
 import faces as facelib
 import object_grouping as og
+import model_registry
 
 try:
     import cv2
@@ -75,7 +76,6 @@ _BODY_DEFAULT = "s"
 ## house download convention.
 _HF_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "dino")
 
-_reid: dict[str, Any] = {"checked": False, "model": None, "proc": None, "id": None}
 _lock = threading.Lock()
 
 
@@ -86,33 +86,44 @@ def _body_size() -> str:
     return s if s in _BODY_MODELS else _BODY_DEFAULT
 
 
+def _build_reid(model_id: str):
+    """! @brief Construct (model, processor) for a DINO backbone id, or None."""
+    if AutoModel is None:
+        return None
+    try:
+        device = "cuda" if og.has_gpu() else "cpu"
+        proc = AutoImageProcessor.from_pretrained(model_id, cache_dir=_HF_CACHE)
+        model = AutoModel.from_pretrained(model_id, cache_dir=_HF_CACHE).to(device).eval()
+        return (model, proc)
+    except Exception:
+        return None
+
+
+# One registry entry per body size (the size knob repoints which id we load).
+# DINOv3 backbones run ~1-2GB on GPU depending on size; register lazily so we
+# only ever register the ids we actually touch.
+_reid_registered: set = set()
+
+
 def _load_reid() -> Optional[tuple]:
-    """! @brief Lazily bring up the DINOv3 backbone for the current body size.
-    @return (model, processor, model_id) tuple, or None if torch/transformers or
-            the weights are unavailable. Weights auto-download on first use into
-            the project models/dino dir.
+    """! @brief Lazily bring up the DINOv3 backbone for the current body size,
+    via the central load-on-demand registry so it's evicted under memory
+    pressure instead of held for the process lifetime.
+    @return (model, processor, model_id) tuple, or None if unavailable.
     """
     model_id = _BODY_MODELS[_body_size()]
+    key = f"bodies:reid:{model_id}"
     with _lock:
-        if _reid["checked"] and _reid["id"] == model_id:
-            if _reid["model"] is None:
-                return None
-            return (_reid["model"], _reid["proc"], model_id)
-        _reid["checked"] = True
-        _reid["id"] = model_id
-        if AutoModel is None:
-            _reid["model"] = None
-            return None
-        try:
-            device = "cuda" if og.has_gpu() else "cpu"
-            proc = AutoImageProcessor.from_pretrained(model_id, cache_dir=_HF_CACHE)
-            model = AutoModel.from_pretrained(model_id, cache_dir=_HF_CACHE).to(device).eval()
-            _reid["model"] = model
-            _reid["proc"] = proc
-            return (model, proc, model_id)
-        except Exception:
-            _reid["model"] = None
-            return None
+        if key not in _reid_registered:
+            model_registry.register(
+                key, (lambda mid=model_id: _build_reid(mid)),
+                cost_mb=1600, gpu=og.has_gpu())
+            _reid_registered.add(key)
+    got = model_registry.acquire(key)
+    if not got:
+        return None
+    model, proc = got
+    return (model, proc, model_id)
 
 
 def have_body_embedder() -> bool:

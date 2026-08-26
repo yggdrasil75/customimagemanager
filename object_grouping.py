@@ -45,6 +45,7 @@ import queue
 import threading
 import functools
 import numpy as np
+import model_registry
 from concurrent.futures import ThreadPoolExecutor
 
 try:
@@ -120,18 +121,10 @@ def _box_ok(x1, y1, x2, y2):
 
 
 # ── depth ─────────────────────────────────────────────────────────────────────
-def _load_depth(model_path=None):
-    """Lazy-load Depth-Anything v2 via transformers. Returns True on success.
-    `model_path` may be a HF id or a local dir; defaults to the small v2 model.
-    Re-attempts if a *different* model is requested than the last try."""
-    mid = model_path or "depth-anything/Depth-Anything-V2-Small-hf"
-    if _DEPTH["loaded"] and _DEPTH.get("req") == mid:
-        return _DEPTH["model"] is not None
-    _DEPTH["loaded"] = True
-    _DEPTH["req"] = mid
+def _build_depth(mid):
+    """Construct (model, proc) for a Depth-Anything id, or None."""
     if not _have_torch():
-        _DEPTH["model"] = None
-        return False
+        return None
     try:
         torch = _get_torch()
         from transformers import AutoImageProcessor, AutoModelForDepthEstimation
@@ -140,11 +133,26 @@ def _load_depth(model_path=None):
         model.eval()
         if torch.cuda.is_available():
             model = model.to("cuda")
-        _DEPTH.update(model=model, proc=proc, path=mid)
-        return True
+        return (model, proc)
     except Exception:
-        _DEPTH.update(model=None, proc=None)
+        return None
+
+
+_depth_registered = set()  # retained for back-compat; registration is idempotent
+
+
+def _load_depth(model_path=None):
+    mid = model_path or "depth-anything/Depth-Anything-V2-Small-hf"
+    key = f"og:depth:{mid}"
+    model_registry.register(key, (lambda m=mid: _build_depth(m)),
+                            cost_mb=400, gpu=has_gpu())
+    got = model_registry.acquire(key)
+    if not got:
+        _DEPTH.update(loaded=True, req=mid, model=None, proc=None)
         return False
+    model, proc = got
+    _DEPTH.update(loaded=True, req=mid, model=model, proc=proc, path=mid)
+    return True
 
 
 def _pseudo_depth(gray):
@@ -386,18 +394,10 @@ def _propose_regions_heuristic(img_bgr, depth=None, max_regions=40,
 
 
 # ── CNN backbone (optional) ───────────────────────────────────────────────────
-def _load_cnn(model_path=None):
-    """Lazy-load a timm CNN backbone for embeddings. Returns True on success.
-    `model_path` selects the timm architecture (default: efficientnet_b0).
-    Re-attempts if a *different* arch is requested than the last try."""
-    arch = model_path or "efficientnet_b0"
-    if _CNN["loaded"] and _CNN.get("req") == arch:
-        return _CNN["model"] is not None
-    _CNN["loaded"] = True
-    _CNN["req"] = arch
+def _build_cnn(arch):
+    """Construct (model, dim) for a timm arch, or None."""
     if not _have_torch():
-        _CNN["model"] = None
-        return False
+        return None
     try:
         torch = _get_torch()
         import timm
@@ -405,11 +405,26 @@ def _load_cnn(model_path=None):
         model.eval()
         if torch.cuda.is_available():
             model = model.to("cuda")
-        _CNN.update(model=model, path=arch, dim=model.num_features)
-        return True
+        return (model, model.num_features)
     except Exception:
-        _CNN.update(model=None)
+        return None
+
+
+_cnn_registered = set()  # retained for back-compat; registration is idempotent
+
+
+def _load_cnn(model_path=None):
+    arch = model_path or "efficientnet_b0"
+    key = f"og:cnn:{arch}"
+    model_registry.register(key, (lambda a=arch: _build_cnn(a)),
+                            cost_mb=300, gpu=has_gpu())
+    got = model_registry.acquire(key)
+    if not got:
+        _CNN.update(loaded=True, req=arch, model=None)
         return False
+    model, dim = got
+    _CNN.update(loaded=True, req=arch, model=model, path=arch, dim=dim)
+    return True
 
 
 def _cnn_embed(crops_bgr):

@@ -48,6 +48,7 @@ import threading
 import numpy as np
 
 import object_grouping as og
+import model_registry
 import mask_svg
 
 try:
@@ -116,6 +117,10 @@ def set_model(model_id):
         _sam["checked"] = False
         _sam["generator"] = None
         _sam["err"] = ""
+    try:
+        model_registry.unload("sam:proposals")
+    except Exception:
+        pass
     # keep the real segmenter's cache in sync too
     try:
         import seg_runtime as _sr
@@ -146,52 +151,64 @@ def status():
     return _sam["err"]
 
 
+def _build_generator():
+    """Build the SamAutomaticMaskGenerator, recording any failure reason in
+    _sam['err'] for the UI. Returns the generator or None. Called by the central
+    registry, which owns the instance's lifetime (so it's evicted under memory
+    pressure rather than pinned for the process lifetime)."""
+    try:
+        import torch  # noqa: F401 — presence check; used indirectly by SAM
+    except Exception as e:
+        _sam["err"] = f"torch unavailable ({e})"
+        return None
+    if not os.path.exists(SAM_CHECKPOINT):
+        _sam["err"] = (f"checkpoint not found: {SAM_CHECKPOINT} "
+                       f"(download the {SAM_MODEL_TYPE} SAM checkpoint into "
+                       f"./models)")
+        return None
+    try:
+        from segment_anything import (sam_model_registry,
+                                      SamAutomaticMaskGenerator)
+    except Exception as e:
+        _sam["err"] = (f"segment-anything not installed ({e}); "
+                       f"pip install segment-anything")
+        return None
+    try:
+        device = "cuda" if og.has_gpu() else "cpu"
+        sam = sam_model_registry[SAM_MODEL_TYPE](checkpoint=SAM_CHECKPOINT)
+        sam.to(device=device)
+        gen = SamAutomaticMaskGenerator(
+            model=sam,
+            points_per_side=SAM_POINTS_PER_SIDE,
+            pred_iou_thresh=SAM_PRED_IOU_THRESH,
+            stability_score_thresh=SAM_STABILITY_THRESH,
+            # Drop the very smallest masks up front; MIN_BOX_PX drops the rest
+            # after we convert to boxes at the working resolution.
+            min_mask_region_area=64,
+        )
+        _sam["err"] = ""
+        return gen
+    except Exception as e:
+        _sam["err"] = f"SAM init failed ({e})"
+        return None
+
+
+# ViT-H SAM is ~2.5GB on GPU; the biggest single model here.
+model_registry.register("sam:proposals", _build_generator,
+                           cost_mb=2600, gpu=og.has_gpu())
+
+
 def _load_generator():
-    """Lazily build the SamAutomaticMaskGenerator. Returns it, or None if SAM /
-    its checkpoint / torch are unavailable. The reason is recorded in _sam['err']
-    for the UI. Cheap no-op after the first call."""
-    if _sam["checked"]:
-        return _sam["generator"]
-    with _lock:
-        if _sam["checked"]:
-            return _sam["generator"]
-        _sam["checked"] = True
-        try:
-            import torch  # noqa: F401 — presence check; used indirectly by SAM
-        except Exception as e:
-            _sam["err"] = f"torch unavailable ({e})"
-            return None
-        if not os.path.exists(SAM_CHECKPOINT):
-            _sam["err"] = (f"checkpoint not found: {SAM_CHECKPOINT} "
-                           f"(download the {SAM_MODEL_TYPE} SAM checkpoint into "
-                           f"./models)")
-            return None
-        try:
-            from segment_anything import (sam_model_registry,
-                                          SamAutomaticMaskGenerator)
-        except Exception as e:
-            _sam["err"] = (f"segment-anything not installed ({e}); "
-                           f"pip install segment-anything")
-            return None
-        try:
-            device = "cuda" if og.has_gpu() else "cpu"
-            sam = sam_model_registry[SAM_MODEL_TYPE](checkpoint=SAM_CHECKPOINT)
-            sam.to(device=device)
-            gen = SamAutomaticMaskGenerator(
-                model=sam,
-                points_per_side=SAM_POINTS_PER_SIDE,
-                pred_iou_thresh=SAM_PRED_IOU_THRESH,
-                stability_score_thresh=SAM_STABILITY_THRESH,
-                # Drop the very smallest masks up front; MIN_BOX_PX drops the rest
-                # after we convert to boxes at the working resolution.
-                min_mask_region_area=64,
-            )
-            _sam["generator"] = gen
-            _sam["err"] = ""
-        except Exception as e:
-            _sam["err"] = f"SAM init failed ({e})"
-            _sam["generator"] = None
-        return _sam["generator"]
+    """Lazily build the SamAutomaticMaskGenerator via the central registry.
+    Returns it, or None if SAM / its checkpoint / torch are unavailable (reason
+    in _sam['err']). Cheap after the first call while the model stays resident;
+    transparently rebuilt if it was evicted."""
+    gen = model_registry.acquire("sam:proposals")
+    # Keep the legacy `checked` flag truthy so callers that read it still see a
+    # completed probe; `err` is set by the builder above.
+    _sam["checked"] = True
+    _sam["generator"] = gen
+    return gen
 
 
 def _iou_px(a, b):

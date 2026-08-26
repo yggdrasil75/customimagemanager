@@ -30,6 +30,7 @@ import threading
 import numpy as np
 
 import object_grouping as og
+import model_registry
 import urllib.request
 import cv2
 
@@ -57,7 +58,6 @@ DEFAULT_EPS = 0.60        # cosine distance; ArcFace identities are tight
 FALLBACK_EPS = 0.25       # appearance embeddings need a stricter radius
 MATCH_IOU    = 0.35       # min overlap to bind an insightface det to a YOLO box
 
-_insight = {"checked": False, "app": None}
 _lock = threading.Lock()
 
 # Last face-model download failure, surfaced to the UI. Previously a dead URL was
@@ -152,21 +152,29 @@ def ensure_face_model(size="n"):
 
 
 # ── identity embedding ────────────────────────────────────────────────────────
-def _load_insight():
-    """Lazily bring up insightface. Cheap no-op after the first call."""
-    if _insight["checked"]:
-        return _insight["app"]
-    _insight["checked"] = True
+def _build_insight():
+    """Construct insightface's FaceAnalysis app, or None on any failure."""
     try:
         from insightface.app import FaceAnalysis
         app = FaceAnalysis(name="buffalo_l",
+                           root=os.path.join(MODELS_DIR, "insightface"),
                            providers=["CUDAExecutionProvider",
                                       "CPUExecutionProvider"])
         app.prepare(ctx_id=0 if og.has_gpu() else -1, det_size=(640, 640))
-        _insight["app"] = app
+        return app
     except Exception:
-        _insight["app"] = None
-    return _insight["app"]
+        return None
+
+
+# buffalo_l det+recog is ~1GB of ONNX weights on GPU.
+model_registry.register("faces:insight", _build_insight,
+                           cost_mb=1100, gpu=og.has_gpu())
+
+
+def _load_insight():
+    """Lazily bring up insightface via the central registry (load-on-demand, so
+    it's evicted when other models need the memory). Cheap after first call."""
+    return model_registry.acquire("faces:insight")
 
 
 def have_identity_embedder():

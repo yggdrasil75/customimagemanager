@@ -63,6 +63,8 @@ import threading
 import numpy as np
 import urllib.request
 import torch
+import object_grouping as og
+import model_registry
 
 try:
     import cv2
@@ -225,7 +227,6 @@ _active = os.environ.get("IQA_MODEL", DEFAULT_MODEL)
 if _active not in _BY_ID:
     _active = DEFAULT_MODEL
 
-_scorers: dict = {}       # id -> callable(img_bgr) -> float|None, or None if dead
 _lock = threading.RLock()
 
 
@@ -317,27 +318,42 @@ def _build_pyiqa(spec):
     return score
 
 
-def _get_scorer(model_id=None):
-    """Lazily build (and cache) the scorer for `model_id`. Thread-safe; a model
-    that fails to load is cached as None so we retry at most once.
+def _build_scorer(mid):
+    """Build the scorer callable for `mid`, with BRISQUE fallback. Returns a
+    callable, or None only when even the default couldn't be built."""
+    spec = _BY_ID.get(mid, _BY_ID[DEFAULT_MODEL])
+    fn = (_build_opencv_brisque() if spec["backend"] == "opencv"
+          else _build_pyiqa(spec))
+    if fn is None and mid != DEFAULT_MODEL:
+        # Graceful degradation: serve BRISQUE instead of this dead model.
+        fn = _get_scorer(DEFAULT_MODEL)
+    return fn
 
-    If the requested model can't be built we transparently fall back to legacy
-    BRISQUE, so a missing pyiqa/torch never breaks scanning."""
+
+_registered_scorers: set = set()
+
+
+def _get_scorer(model_id=None):
+    """Lazily build the scorer for `model_id` via the central load-on-demand
+    registry, so pyiqa/torch scorers are evicted under memory pressure rather
+    than accumulating in a permanent per-id cache. A model that fails to load is
+    remembered as None (retried at most once). Missing pyiqa/torch transparently
+    falls back to legacy BRISQUE, so scanning never breaks.
+
+    opencv BRISQUE is tiny and CPU-only; pyiqa metrics carry a torch model, so
+    only those are marked gpu-costly for the registry's VRAM budget."""
     mid = model_id or _active
+    spec = _BY_ID.get(mid, _BY_ID[DEFAULT_MODEL])
+    is_torch = spec["backend"] != "opencv"
+    key = f"iqa:{mid}"
     with _lock:
-        if mid in _scorers:
-            return _scorers[mid]
-        spec = _BY_ID.get(mid, _BY_ID[DEFAULT_MODEL])
-        fn = (_build_opencv_brisque() if spec["backend"] == "opencv"
-              else _build_pyiqa(spec))
-        if fn is None and mid != DEFAULT_MODEL:
-            # Graceful degradation: this model couldn't be built (no pyiqa/torch,
-            # weights download failed, ...) so serve BRISQUE instead. We cache the
-            # FALLBACK under `mid` — caching None here would make the next lookup
-            # short-circuit on the fast path above and never reach this branch.
-            fn = _get_scorer(DEFAULT_MODEL)
-        _scorers[mid] = fn
-        return fn
+        if key not in _registered_scorers:
+            model_registry.register(
+                key, (lambda m=mid: _build_scorer(m)),
+                cost_mb=(700 if is_torch else 0),
+                gpu=(is_torch and bool(torch.cuda.is_available())))
+            _registered_scorers.add(key)
+    return model_registry.acquire(key)
 
 
 def _effective_id(model_id=None):
@@ -350,14 +366,12 @@ def _effective_id(model_id=None):
     every rating, turning the worst images into five stars.
     """
     mid = model_id or _active
-    if _get_scorer(mid) is None:
+    fn = _get_scorer(mid)
+    if fn is None:
         return mid
-    with _lock:
-        # A fallback is in play iff this id's cached scorer IS the default's.
-        if (mid != DEFAULT_MODEL
-                and _scorers.get(mid) is not None
-                and _scorers.get(mid) is _scorers.get(DEFAULT_MODEL)):
-            return DEFAULT_MODEL
+    # A fallback is in play iff this id's scorer IS the default's instance.
+    if mid != DEFAULT_MODEL and fn is _get_scorer(DEFAULT_MODEL):
+        return DEFAULT_MODEL
     return mid
 
 

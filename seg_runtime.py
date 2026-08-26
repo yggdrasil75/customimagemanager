@@ -55,6 +55,8 @@ except Exception:  # pragma: no cover
     cv2 = None
 
 import mask_svg
+import object_grouping as og
+import model_registry
 
 try:
     import seg_models
@@ -92,15 +94,20 @@ def _ul_sam3_predictor():
 
 
 # ── model cache ───────────────────────────────────────────────────────────────
-_cache = {}            # resolved-key -> loaded predictor/model (or None if dead)
+_registered = set()    # registry keys we've declared, so we register once
 _cache_lock = threading.Lock()
 
 
 def clear_cache():
-    """Drop all loaded models. Call when a setting repoints weights (mirrors
-    manager's _load_yolo.cache_clear())."""
+    """Drop all loaded seg models. Call when a setting repoints weights (mirrors
+    manager's _load_yolo.cache_clear()). Frees them from the central registry."""
     with _cache_lock:
-        _cache.clear()
+        keys = list(_registered)
+    for k in keys:
+        try:
+            model_registry.unload(k)
+        except Exception:
+            pass
 
 
 def _to_bgr_u8(img):
@@ -171,11 +178,20 @@ def _get_sam(model_id):
     if seg_models is None:
         return None
     entry = seg_models.sam_info(model_id)
-    family = entry.get("family", "")
-    key = ("sam", entry.get("id"))
+    key = f"seg:sam:{entry.get('id')}"
     with _cache_lock:
-        if key in _cache:
-            return _cache[key]
+        if key not in _registered:
+            model_registry.register(
+                key, (lambda mid=model_id: _build_sam(mid)),
+                cost_mb=2600, gpu=og.has_gpu())
+            _registered.add(key)
+    return model_registry.acquire(key)
+
+
+def _build_sam(model_id):
+    """Construct the selected SAM-family predictor. Returns model or None."""
+    entry = seg_models.sam_info(model_id)
+    family = entry.get("family", "")
     model = None
     try:
         if family == "sam3":
@@ -202,8 +218,6 @@ def _get_sam(model_id):
             model = loader(weights) if loader else None
     except Exception:
         model = None
-    with _cache_lock:
-        _cache[key] = model
     return model
 
 
@@ -323,24 +337,30 @@ def segment_text(img_bgr, query, model_id=None):
 # ════════════════════════════════════════════════════════════════════════════
 # YOLO-seg loader (the background, class-aware segmenter)
 # ════════════════════════════════════════════════════════════════════════════
+def _build_yolo_seg(ref):
+    """Construct a YOLO-seg model from a weights ref, or None."""
+    try:
+        YOLO = _ul_yolo()
+        return YOLO(ref) if YOLO else None
+    except Exception:
+        return None
+
+
 def _get_yolo_seg(model_id):
-    """Load the selected YOLO-seg model, memoised. Returns the model or None."""
+    """Load the selected YOLO-seg model via the central load-on-demand registry
+    so alternating seg models don't accumulate resident forever. Returns the
+    model or None."""
     if seg_models is None:
         return None
     ref = seg_models.yolo_weights_ref(model_id)
-    key = ("yolo", ref)
+    key = f"seg:yolo:{ref}"
     with _cache_lock:
-        if key in _cache:
-            return _cache[key]
-    model = None
-    try:
-        YOLO = _ul_yolo()
-        model = YOLO(ref) if YOLO else None
-    except Exception:
-        model = None
-    with _cache_lock:
-        _cache[key] = model
-    return model
+        if key not in _registered:
+            model_registry.register(
+                key, (lambda r=ref: _build_yolo_seg(r)),
+                cost_mb=300, gpu=og.has_gpu())
+            _registered.add(key)
+    return model_registry.acquire(key)
 
 
 def segment_background(img_bgr, model_id=None, class_ids=None, conf=0.25):

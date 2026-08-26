@@ -29,6 +29,7 @@ if app is None:
     # reproduce the failure WITHOUT the try/except that hides it
     print("  reproducing without the swallow:")
     a = FaceAnalysis(name="buffalo_l",
+                     root=os.path.join(facelib.MODELS_DIR, "insightface"),
                      providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
     a.prepare(ctx_id=-1, det_size=(640, 640))
     print("  ...prepared fine standalone?! then ctx_id=0 / GPU is the problem")

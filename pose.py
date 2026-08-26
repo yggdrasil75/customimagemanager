@@ -15,6 +15,9 @@ circular import.
 """
 import numpy as np
 from typing import Optional
+import os
+
+import model_registry  # pins TORCH_HOME (rtmlib weights -> models/) before rtmlib loads
 
 try:
     from rtmlib import Wholebody
