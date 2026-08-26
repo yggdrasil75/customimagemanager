@@ -66,6 +66,10 @@ BIO_FIELDS: tuple[str, ...] = (
 )
 LIST_FIELDS: tuple[str, ...] = ("aliases", "tags")
 
+## Bio fields whose value is a closed set. Anything outside the set (or its empty
+## "unset" value) is rejected so gender can't drift into free text server-side.
+BIO_CHOICES: dict[str, tuple[str, ...]] = {"gender": ("", "male", "female")}
+
 ## Relationship lines split into single-entry and multi-entry. mother/father/spouse
 ## hold at most one person (a person has one of each at a time — an ex goes under
 ## ex_spouses). The rest are lists. Each edge links a known person (uuid) or names
@@ -266,6 +270,8 @@ def set_field(media_dir: str, person_uuid: str, section: str, key: str,
     if section == "root" and key == "name":
         desc["name"] = value
     elif section == "bio" and key in BIO_FIELDS:
+        if key in BIO_CHOICES and value not in BIO_CHOICES[key]:
+            return False
         desc["bio"][key] = value
     elif section == "body" and key in BODY_FIELDS:
         app = get_appearance(desc, appearance_id or "")

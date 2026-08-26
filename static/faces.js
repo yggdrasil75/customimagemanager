@@ -384,6 +384,7 @@ async function rescanFaces() {
 // Bio fields that render as a specific input type; everything else is short text.
 const _DATE_FIELDS = ['birthday', 'death_date'];
 const _MULTILINE_FIELDS = ['notes'];
+const _CHOICE_FIELDS = { gender: ['', 'male', 'female'] };
 let _peopleDirectory = [];   // {uuid,name,cluster_id}, loaded once for typeahead
 
 async function _loadDirectory() {
@@ -440,6 +441,14 @@ function _renderPersonEditor(cid, d) {
       return `<label class="flex flex-col gap-0.5 col-span-2">${label}
         <textarea rows="3" onchange="savePersonField(${cid},'bio','${k}',this.value,null)"
                class="p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white">${esc(p.bio[k])}</textarea></label>`;
+    if (_CHOICE_FIELDS[k]) {
+      const cur = p.bio[k] || '';
+      const opts = _CHOICE_FIELDS[k].map(o =>
+        `<option value="${o}"${o === cur ? ' selected' : ''}>${o || '—'}</option>`).join('');
+      return `<label class="flex flex-col gap-0.5">${label}
+        <select onchange="savePersonField(${cid},'bio','${k}',this.value,null)"
+                class="p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white">${opts}</select></label>`;
+    }
     return `<label class="flex flex-col gap-0.5">${label}
       <input value="${esc(p.bio[k])}"
              onchange="savePersonField(${cid},'bio','${k}',this.value,null)"

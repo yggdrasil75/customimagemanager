@@ -5332,14 +5332,38 @@ def api_person_relationship(cluster_id):
 
 @app.route("/api/persons/directory")
 def api_persons_directory():
-    """Typeahead source: every known person as {uuid, name, cluster_id} for linking."""
+    """Typeahead source: every KNOWN (named) person as {uuid, name, cluster_id}.
+
+    A person is anyone with a name — either a written .person record or a named
+    face cluster that has no record yet. Unnamed records are excluded: you can't
+    link a relationship to a person you can't identify. Named clusters without a
+    record are included so typeahead finds every named person in the library, not
+    just the few whose editor happens to have been opened (which is what wrote the
+    record). uuid is null for those; addRelation stores them as external names.
+    """
     db = _db()
-    out = []
+    by_uuid = {}          # uuid -> {uuid, name, cluster_id}, named records only
     for desc in personlib.list_all(MEDIA_DIR):
+        name = (desc.get("name") or "").strip()
+        if not name:
+            continue      # can't identify — never offered as a relationship target
         row = db.execute("SELECT cluster_id FROM persons WHERE uuid=? LIMIT 1",
                          (desc["uuid"],)).fetchone()
-        out.append({"uuid": desc["uuid"], "name": desc["name"] or "(unnamed)",
-                    "cluster_id": row[0] if row else None})
+        by_uuid[desc["uuid"]] = {"uuid": desc["uuid"], "name": name,
+                                 "cluster_id": row[0] if row else None}
+    linked_clusters = {p["cluster_id"] for p in by_uuid.values()
+                       if p["cluster_id"] is not None}
+    seen_names = {p["name"].lower() for p in by_uuid.values()}
+    out = list(by_uuid.values())
+    # Named face clusters with no .person record yet: still real, named people.
+    for cid, name in db.execute(
+            "SELECT cluster_id, name FROM face_regions "
+            "WHERE cluster_id>=0 AND name<>'' GROUP BY cluster_id"):
+        name = (name or "").strip()
+        if not name or cid in linked_clusters or name.lower() in seen_names:
+            continue
+        seen_names.add(name.lower())
+        out.append({"uuid": None, "name": name, "cluster_id": cid})
     return jsonify({"success": True, "people": sorted(out, key=lambda p: p["name"].lower())})
 
 @app.route("/api/persons/review")
