@@ -6,4 +6,6 @@ services:
     volumes:
       - ./media:/app/media
       - ./data:/app/data
+      - ./logs:/app/logs
+      - ./models:/app/models
     restart: unless-stopped

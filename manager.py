@@ -28,7 +28,8 @@ import atexit
 from datetime import datetime
 from typing import Optional
 from collections import OrderedDict, Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
+import thread_manager
 from werkzeug.utils import secure_filename
 from flask import Flask, render_template, render_template_string, request, jsonify, send_file, Response, g
 from ultralytics import YOLO
@@ -1734,13 +1735,7 @@ def _build_index_background():
     state["status_text"] = "Indexing library…"
     count = 0
     batch = []
-    # One pool for the entire walk. Creating a pool per 64-file batch spawned a
-    # fresh set of 8 threads each time; every one opened its own thread-local
-    # SQLite connection that was never closed. At 500k files that was ~62k
-    # orphaned connections (x3 fds each under WAL) -> "too many open files".
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        # _enumerate_library yields both loose and packed files, so packed
-        # files keep getting re-checked instead of silently dropping out.
+    with thread_manager.pool(want=8, name="libwalk") as ex:
         for rel in _enumerate_library():
             batch.append(rel)
             if len(batch) >= 64:
@@ -3091,7 +3086,12 @@ def _sync_yolo(filepath: str, regions: list) -> None:
     """!
     @brief Write a file's confirmed regions out as a YOLO label .txt (or remove it).
     """
-    confirmed = [r for r in regions if r.get('confirmed', True)]
+    def _usable(r):
+        name = r.get('class_name')
+        return (isinstance(name, str) and name != "" and
+                all(k in r for k in ('cx', 'cy', 'w', 'h')))
+    confirmed = [r for r in regions
+                 if r.get('confirmed', True) and _usable(r)]
     for r in confirmed:
         if r['class_name'] not in state["classes"]:
             state["classes"].append(r['class_name'])
@@ -3103,7 +3103,11 @@ def _sync_yolo(filepath: str, regions: list) -> None:
     with open(txt,'w') as f:
         for r in confirmed:
             cid = state["classes"].index(r['class_name'])
-            f.write(f"{cid} {r['cx']:.6f} {r['cy']:.6f} {r['w']:.6f} {r['h']:.6f}\n")
+            try:
+                f.write(f"{cid} {float(r['cx']):.6f} {float(r['cy']):.6f} "
+                        f"{float(r['w']):.6f} {float(r['h']):.6f}\n")
+            except (TypeError, ValueError):
+                continue
 
 # ── Thumbnails ─────────────────────────────────────────────────────────────────
 _thumbdb_local = threading.local()
@@ -3658,7 +3662,7 @@ def _background_face_worker() -> None:
     @brief Idle-gated worker: box faces/people, cache embeddings, cluster when the queue drains.
     @note Forced mode (user "Rescan all") ignores the idle gate; opportunistic mode only runs while idle.
     """
-    IDLE_SECS, BATCH = 60, 6
+    BATCH = 6
     while True:
         _face_wake.wait(timeout=15)          # interruptible: a manual rescan wakes us immediately
         _face_wake.clear()
@@ -3666,7 +3670,7 @@ def _background_face_worker() -> None:
             forced = _face_force["v"]
             if not forced and not state.get("face_bg_enabled"):
                 continue
-            if not forced and time.time() - _last_activity < IDLE_SECS:
+            if not forced and not thread_manager.is_idle():
                 continue
 
             rows = _db().execute(
@@ -3693,7 +3697,7 @@ def _background_face_worker() -> None:
                 f"Face scan: {left} image(s) left…" if forced
                 else f"Face scan (idle): {left} image(s) left…")
             for (rel,) in rows:
-                if not _face_force["v"] and time.time() - _last_activity < IDLE_SECS:
+                if not _face_force["v"] and not thread_manager.is_idle():
                     break                      # user is back — yield (opportunistic only)
                 abs_p = get_safe_path(MEDIA_DIR, rel)
                 if not abs_p or not os.path.exists(abs_p):
@@ -4735,7 +4739,7 @@ def _apply_llm_action(fp, action):
 # activity: the idle workers only run after IDLE_SECS of quiet, so a tab polling
 # every 2s would keep _last_activity permanently fresh and starve them forever.
 # (This is why an open Faces tab could sit at "queued" and never advance.)
-_POLL_PATHS = {"/api/state", "/api/faces/progress"}
+_POLL_PATHS = {"/api/state", "/api/faces/progress", "/api/workers"}
 
 @app.before_request
 def _touch_activity():
@@ -5619,6 +5623,10 @@ def api_state():
          "barcode_model","barcode_conf",
          "model_groups","iqa_model","brand_name","brand_logo","search_quick_filters")})
 
+@app.route("/api/workers")
+def api_workers():
+    return jsonify(thread_manager.status())
+
 @app.route("/api/update_settings", methods=["POST"])
 @_auth.require_feature("settings", action='update_settings', fields=())
 def update_settings():
@@ -6333,10 +6341,31 @@ def _run_upload():
             if is_raw_src:
                 _link_raw_to_image(orig, fname, rel_path, store_path)
 
-            meta = json.loads(request.form.get("metadata", "{}") or "{}")
-            write_metadata(store_path, meta.get("tags", []),
-                           meta.get("description", ""), meta.get("regions", []),
-                           anim_delays=anim_delays)
+            try:
+                meta = json.loads(request.form.get("metadata", "{}") or "{}")
+                if not isinstance(meta, dict):
+                    raise ValueError(f"metadata is {type(meta).__name__}, not an object")
+            except (ValueError, TypeError) as e:
+                access_logger.warning(
+                    f"upload: bad metadata for {rel_path}: {e}; ingesting file "
+                    f"without sidecar metadata")
+                meta = {}
+            try:
+                write_metadata(store_path, meta.get("tags", []),
+                               meta.get("description", ""), meta.get("regions", []),
+                               anim_delays=anim_delays)
+            except Exception as e:
+                # A single malformed region shouldn't sink the whole file. Log it,
+                # write the image with no sidecar metadata, and let ingest proceed.
+                access_logger.warning(
+                    f"upload: metadata write failed for {rel_path}: {e}; "
+                    f"ingesting file without sidecar metadata")
+                try:
+                    write_metadata(store_path, [], "", [], anim_delays=anim_delays)
+                except Exception as e2:
+                    access_logger.error(
+                        f"upload: metadata write failed even when empty for "
+                        f"{rel_path}: {e2}")
             exif_patch = meta.get("exif")
             if exif_patch:
                 try:
@@ -6395,34 +6424,34 @@ def _run_upload():
 # queue and run the (slow) convert/index chain — cjxl parallelism lives here, not
 # on the request threads. Sized so parallel encoders stay near the core count.
 _UPLOAD_SPOOL_DIR   = os.path.join(os.path.dirname(DB_PATH), "upload_spool")
-_UPLOAD_WORKERS     = max(1, min(state["wsgi_threads"], os.cpu_count() or 8))
 _UPLOAD_STALE_SECS  = 300
 _upload_wake        = threading.Event()
 _upload_started     = threading.Event()   # guards one-time pool start
 
 def _upload_workers_wake():
     _upload_wake.set()
+    thread_manager.wake()
 
 def _claim_upload_job():
-    """!
-    @brief Atomically claim the oldest pending job whose destination is free.
-    @return A queue Row, or None if nothing is claimable.
-    @note Two rows for the same (orig_name, folder) never run at once: a pending
-          row is skipped while another row for the same destination is
-          'processing', which is what prevented the two-workers-same-file race.
-    """
     def _claim():
         db = _db()
         db.rollback()
         rows = db.execute(
-            "SELECT id FROM upload_queue q WHERE status='pending' "
+            "SELECT id, spool_path, orig_name FROM upload_queue q WHERE status='pending' "
             "AND NOT EXISTS ("
             "  SELECT 1 FROM upload_queue p WHERE p.status='processing' "
             "  AND p.orig_name=q.orig_name AND IFNULL(p.folder,'')=IFNULL(q.folder,'')) "
-            "ORDER BY attempts ASC, id ASC LIMIT ?", (_UPLOAD_WORKERS,)).fetchall()
+            "ORDER BY attempts ASC, id ASC LIMIT 8").fetchall()
         if not rows:
             return None
-        target = rows[random.randrange(len(rows))]["id"]
+        costed = [(r, _spool_cost_mb(r["spool_path"], r["orig_name"])) for r in rows]
+        target, cost = None, 0.0
+        for r, c in costed:
+            if thread_manager.can_afford(c * 3):
+                target, cost = r["id"], c * 3
+                break
+        if target is None:
+            return None
         n = db.execute(
             "UPDATE upload_queue SET status='processing', attempts=attempts+1, "
             "updated=? WHERE id=? AND status='pending'",
@@ -6430,8 +6459,12 @@ def _claim_upload_job():
         db.commit()
         if not n:
             return "retry"        # lost the race; caller loops again
-        return db.execute("SELECT * FROM upload_queue WHERE id=?",
+        row = db.execute("SELECT * FROM upload_queue WHERE id=?",
                           (target,)).fetchone()
+        if row is not None:
+            row = dict(row)
+            row["_cost_mb"] = cost
+        return row
     while True:
         got = _db_retry(_claim)
         if got != "retry":
@@ -6462,12 +6495,10 @@ def _process_upload_job(job) -> tuple[str, str, str]:
         # Spool genuinely gone -> nothing to retry from. Terminal.
         return "failed", f"spool missing: {e}", ""
 
-    ctx = app.test_request_context(
-        "/api/upload", method="POST",
-        data={"file": (io.BytesIO(data), job["orig_name"]),
-              "folder": job["folder"] or "",
-              "metadata": job["metadata"] or "{}"},
-        content_type="multipart/form-data")
+    ctx = app.test_request_context("/api/upload", method="POST",
+            data={"file": (io.BytesIO(data), job["orig_name"]),
+            "folder": job["folder"] or "", "metadata": job["metadata"] or "{}"},
+            content_type="multipart/form-data")
     with ctx:
         resp = _run_upload()
         body, code = (resp if isinstance(resp, tuple) else (resp, 200))
@@ -6496,52 +6527,70 @@ def _finish_upload_job(job_id, ok: bool, err: str, rel_path: str) -> None:
         db.commit()
     _db_retry(_fin)
 
-def _upload_worker_loop():
-    while True:
-        job = None
-        try:
-            job = _claim_upload_job()
-        except Exception as e:
-            access_logger.error(f"upload queue claim failed: {e}")
-        if job is None:
-            _upload_wake.wait(timeout=5.0)
-            _upload_wake.clear()
-            continue
-        try:
-            outcome, detail, rel = _process_upload_job(job)
-        except Exception as e:
-            # An unhandled crash is transient by definition — retry, never park.
-            outcome, detail, rel = "retry", str(e), ""
-            access_logger.error(f"upload job {job['id']} crashed: {e}",
-                                exc_info=True)
+def _handle_upload_job(job):
+    """Run one claimed upload job to a terminal state. Same retry/backoff/finish
+    logic the old loop body had — but this is a single task submitted to the
+    thread manager's pool, not a parked worker thread. Backoff on 'retry' happens
+    inline before the row goes back to pending so a hot-looping bad job can't
+    starve the pool."""
+    try:
+        outcome, detail, rel = _process_upload_job(job)
+    except Exception as e:
+        # An unhandled crash is transient by definition — retry, never park.
+        outcome, detail, rel = "retry", str(e), ""
+        access_logger.error(f"upload job {job['id']} crashed: {e}",
+                            exc_info=True)
 
-        if outcome == "retry":
-            def _requeue():
-                db = _db()
-                db.execute("UPDATE upload_queue SET status='pending', error=?, "
-                           "updated=? WHERE id=?",
-                           (detail[:500], time.time(), job["id"]))
-                db.commit()
-            try: _db_retry(_requeue)
-            except Exception: pass
-            time.sleep(min(30.0, 0.5 * max(1, job["attempts"])))   # capped backoff
-            continue
+    if outcome == "retry":
+        def _requeue():
+            db = _db()
+            db.execute("UPDATE upload_queue SET status='pending', error=?, "
+                       "updated=? WHERE id=?",
+                       (detail[:500], time.time(), job["id"]))
+            db.commit()
+        try: _db_retry(_requeue)
+        except Exception: pass
+        time.sleep(min(30.0, 0.5 * max(1, job["attempts"])))   # capped backoff
+        return
 
-        # Terminal: 'done' or 'failed' (known-bad file).
-        _finish_upload_job(job["id"], outcome == "done", detail, rel)
-        if outcome == "done":
-            try: os.remove(job["spool_path"])
-            except OSError: pass
+    # Terminal: 'done' or 'failed' (known-bad file).
+    _finish_upload_job(job["id"], outcome == "done", detail, rel)
+    if outcome == "done":
+        try: os.remove(job["spool_path"])
+        except OSError: pass
+
+def _spool_cost_mb(spool_path, orig_name):
+    try:
+        size_mb = os.path.getsize(spool_path) / (1024 * 1024)
+    except Exception:
+        size_mb = 0.0
+    try:
+        if mt.is_raw(orig_name):
+            try:
+                import rawpy
+                with rawpy.imread(spool_path) as raw:
+                    s = raw.sizes
+                    px = float(s.raw_width) * float(s.raw_height)
+            except Exception:
+                # Header unreadable — approximate from compressed size. Raw files
+                # are lightly compressed, so decoded is several times larger.
+                return max(256.0, size_mb * 6.0)
+            out_mb = px * 6 / (1024 * 1024)          # 16-bit RGB output buffer
+            return max(256.0, out_mb * 2.2)          # + libraw demosaic scratch
+    except Exception:
+        pass
+    # Non-raw: decoded pixels are unknown without a header read we don't do here;
+    # a small multiple of the file size is a safe over-estimate for JPEG/PNG/etc.
+    return max(32.0, size_mb * 3.0)
+
+def _register_upload_source():
+    thread_manager.register_source(
+        "upload", _claim_upload_job, _handle_upload_job,
+        cost_of=lambda job: job.get("_cost_mb", 0.0))
 
 _upload_threads = []   # live worker Thread objects, for liveness reporting
 
 # ── gallery-dl download queue ────────────────────────────────────────────────
-# A URL the user wants fetched becomes a row in gdl_queue. One background worker
-# claims pending rows one at a time (downloads are network- and disk-heavy;
-# running many in parallel mostly just trips site rate limits), runs gallery-dl,
-# streams each produced file into the upload_queue for the normal ingest, and
-# records progress. Mirrors the upload-worker pattern: atomic claim, wake event,
-# boot-time requeue of anything left mid-flight.
 _gdl_wake      = threading.Event()
 _gdl_started   = threading.Event()
 _gdl_cancels   = set()               # ids the user asked to cancel mid-download
@@ -6549,6 +6598,7 @@ _gdl_cancels_lk = threading.Lock()
 
 def _gdl_workers_wake():
     _gdl_wake.set()
+    thread_manager.wake()
 
 def _gdl_mark_cancel(qid):
     with _gdl_cancels_lk:
@@ -6562,31 +6612,53 @@ def _gdl_clear_cancel(qid):
     with _gdl_cancels_lk:
         _gdl_cancels.discard(qid)
 
-def _claim_gdl_job():
-    """Atomically take the oldest pending download. Returns a Row or None.
-    Single worker, but the guarded UPDATE keeps it correct even if that ever
-    changes."""
-    def _claim():
+def _claim_gdl_job_for_free_site(inflight_cap=None):
+    if inflight_cap is not None and len(thread_manager.held_keys()) >= max(1, inflight_cap):
+        return None
+
+    def _peek():
         db = _db()
         db.rollback()
-        row = db.execute(
-            "SELECT id FROM gdl_queue WHERE status='pending' "
-            "ORDER BY id ASC LIMIT 1").fetchone()
-        if not row:
+        return db.execute(
+            "SELECT id, url FROM gdl_queue WHERE status='pending' "
+            "ORDER BY id ASC LIMIT 32").fetchall()
+    try:
+        candidates = _db_retry(_peek) or []
+    except Exception as e:
+        access_logger.error(f"gdl queue peek failed: {e}")
+        return None
+
+    for row in candidates:
+        try:
+            site = gdl.site_of(row["url"])
+        except Exception:
+            site = ""
+        key = f"gdl:{site}"
+        if not thread_manager.try_acquire_key(key):
+            continue          # this site is already downloading — skip it
+        def _take(qid=row["id"]):
+            db = _db()
+            db.rollback()
+            n = db.execute(
+                "UPDATE gdl_queue SET status='downloading', attempts=attempts+1, "
+                "updated=? WHERE id=? AND status='pending'",
+                (time.time(), qid)).rowcount
+            db.commit()
+            if not n:
+                return None
+            return db.execute("SELECT * FROM gdl_queue WHERE id=?",
+                              (qid,)).fetchone()
+        try:
+            claimed = _db_retry(_take)
+        except Exception as e:
+            thread_manager.release_key(key)
+            access_logger.error(f"gdl claim failed: {e}")
             return None
-        qid = row["id"]
-        n = db.execute(
-            "UPDATE gdl_queue SET status='downloading', attempts=attempts+1, "
-            "updated=? WHERE id=? AND status='pending'",
-            (time.time(), qid)).rowcount
-        db.commit()
-        if not n:
-            return "retry"
-        return db.execute("SELECT * FROM gdl_queue WHERE id=?", (qid,)).fetchone()
-    while True:
-        got = _db_retry(_claim)
-        if got != "retry":
-            return got
+        if claimed is None:
+            thread_manager.release_key(key)   # lost the race; try next candidate
+            continue
+        return claimed, site
+    return None
 
 def _gdl_update(qid, **cols):
     """Patch a gdl_queue row (status/total/downloaded/error/site)."""
@@ -6782,32 +6854,35 @@ def _process_gdl_job(job):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-def _gdl_worker_loop():
-    while True:
-        job = None
-        try:
-            job = _claim_gdl_job()
-        except Exception as e:
-            access_logger.error(f"gdl queue claim failed: {e}")
-        if job is None:
-            _gdl_wake.wait(timeout=5.0)
-            _gdl_wake.clear()
-            continue
-        qid = job["id"]
-        if _gdl_is_canceled(qid):
-            _gdl_update(qid, status="canceled")
-            _gdl_clear_cancel(qid)
-            continue
-        ok, err = _process_gdl_job(job)
-        if err == "canceled" or _gdl_is_canceled(qid):
-            _gdl_update(qid, status="canceled", error="")
-            _gdl_clear_cancel(qid)
-            continue
-        if not ok and job["attempts"] < 3:
-            _gdl_update(qid, status="pending", error=err[:500])
-            time.sleep(min(10.0, 1.0 * job["attempts"]))
-            continue
-        _gdl_update(qid, status="done" if ok else "error", error=err[:500])
+def _handle_gdl_job(job, site):
+    qid = job["id"]
+    if _gdl_is_canceled(qid):
+        _gdl_update(qid, status="canceled")
+        _gdl_clear_cancel(qid)
+        return
+    ok, err = _process_gdl_job(job)
+    if err == "canceled" or _gdl_is_canceled(qid):
+        _gdl_update(qid, status="canceled", error="")
+        _gdl_clear_cancel(qid)
+        return
+    if not ok and job["attempts"] < 3:
+        _gdl_update(qid, status="pending", error=err[:500])
+        time.sleep(min(10.0, 1.0 * job["attempts"]))
+        return
+    _gdl_update(qid, status="done" if ok else "error", error=err[:500])
+
+def _register_gdl_source():
+    def _claim():
+        got = _claim_gdl_job_for_free_site(inflight_cap=thread_manager.spare())
+        if got is None:
+            return None
+        row, site = got
+        return {"row": row, "site": site}
+    def _handle(job):
+        _handle_gdl_job(job["row"], job["site"])
+    def _key(job):
+        return f"gdl:{job['site']}"
+    thread_manager.register_source("gdl", _claim, _handle, key_of=_key)
 
 def _start_gdl_workers():
     if _gdl_started.is_set():
@@ -6823,13 +6898,7 @@ def _start_gdl_workers():
         _db_retry(_requeue_stale)
     except Exception as e:
         access_logger.error(f"gdl queue boot requeue failed: {e}")
-    def _guarded():
-        access_logger.info("gdl download worker started")
-        try:
-            _gdl_worker_loop()
-        except Exception as e:
-            access_logger.error(f"gdl worker died: {e}", exc_info=True)
-    threading.Thread(target=_guarded, daemon=True, name="gdl-dl").start()
+    _register_gdl_source()
     _gdl_workers_wake()
 
 def _start_upload_workers():
@@ -6851,21 +6920,10 @@ def _start_upload_workers():
         _db_retry(_requeue_stale)
     except Exception as e:
         access_logger.error(f"upload queue boot requeue failed: {e}")
-    # Spawn the pool. Wrap each thread body so a crash on the very first
-    # iteration is loud, not silent — a dead worker that logged nothing is
-    # exactly what "151 pending, 0 processing, 0 errors" looks like.
-    for i in range(_UPLOAD_WORKERS):
-        def _guarded(n=i):
-            access_logger.info(f"upload worker {n} started")
-            try:
-                _upload_worker_loop()
-            except Exception as e:
-                access_logger.error(f"upload worker {n} died: {e}", exc_info=True)
-        t = threading.Thread(target=_guarded, daemon=True, name=f"upload-w{i}")
-        t.start()
-        _upload_threads.append(t)
+    # Hand ingest to the manager's background processor — it fills every free
+    # thread across all sources. No dispatcher thread or executor of our own.
+    _register_upload_source()
     _upload_workers_wake()
-    access_logger.info(f"upload pool: {len(_upload_threads)} threads spawned")
     _start_spool_janitor()
 
 # ── spool janitor ────────────────────────────────────────────────────────────
@@ -7063,7 +7121,7 @@ def api_upload_queue_status():
                     "error": counts.get("error", 0),
                     "done": counts.get("done", 0),
                     "lost": lost,   # errored jobs whose original bytes are gone
-                    "workers": _UPLOAD_WORKERS,
+                    "workers": thread_manager.slots_for(),
                     "workers_alive": sum(1 for t in _upload_threads if t.is_alive()),
                     "workers_started": _upload_started.is_set(),
                     "jobs": err_out})
@@ -8328,9 +8386,9 @@ def dedup():
                     pass
         if stale:
             state["status_text"] = f"Dedup 1/4: Indexing {len(stale)} new/changed files…"
-            with ThreadPoolExecutor(max_workers=8) as ex:
+            with thread_manager.pool(want=8, name="dedup-index") as ex:
                 list(ex.map(_index_file, stale))
-                _db_release_pool(ex, 8)
+                _db_release_pool(ex, ex._max_workers)
 
         hashed_count = _db().execute(
             "SELECT COUNT(*) FROM files WHERE phash8 IS NOT NULL").fetchone()[0]
@@ -8450,7 +8508,7 @@ def dedup():
 
         verified_members = []
         verified_scores  = []
-        with ThreadPoolExecutor(max_workers=4) as ex:
+        with thread_manager.pool(want=4, name="dedup-verify") as ex:
             for result in ex.map(verify, sim_groups_raw):
                 if result:
                     idxs, scores = result
@@ -10124,7 +10182,7 @@ def discover_objects():
     skipped, errors = [], []
     total = len(filenames)
     gpu_batch = int(body.get("gpu_batch", state.get("discover_batch", 8)))
-    workers = int(body.get("decode_workers", state.get("discover_workers", 4)))
+    workers = int(body.get("decode_workers", state.get("discover_workers") or thread_manager.slots_for(4)))
 
     # ── checkpoint / cache ──────────────────────────────────────────────────--
     sig = _discover_sig(depth_model, cnn_model, max_regions)
@@ -10949,13 +11007,13 @@ def autotag_toggle():
 def _background_autotag_worker():
     """When the app is idle and a trained model exists, walk through files that
     have never been touched and add UNCONFIRMED boxes for the user to confirm."""
-    IDLE_SECS, BATCH = 60, 8
+    BATCH = 8
     while True:
         time.sleep(15)
         try:
             if not state.get("autotag_enabled"):
                 continue
-            if time.time() - _last_activity < IDLE_SECS:
+            if not thread_manager.is_idle():
                 continue
             models = state.get("available_models") or []
             if not models:
@@ -10973,7 +11031,7 @@ def _background_autotag_worker():
 
             state["status_text"] = f"Background auto-tag: {len(rows)} image(s)…"
             for (rel,) in rows:
-                if time.time() - _last_activity < IDLE_SECS:
+                if not thread_manager.is_idle():
                     break   # user is back — yield immediately
                 abs_p = get_safe_path(MEDIA_DIR, rel)
                 if not abs_p or not os.path.exists(abs_p):
@@ -11360,18 +11418,17 @@ if __name__=='__main__':
         save_config()
     tiering.start(MEDIA_DIR, _db, lambda: _last_activity,
                   load_stored_cfg=_load_tiers_cfg, store_cfg=_store_tiers_cfg)
+    thread_manager.set_activity_source(lambda: _last_activity)
     access_logger.info("Starting background music indexer…")
     threading.Thread(target=_music_index_background, daemon=True).start()
     access_logger.info("Starting background book indexer…")
     book_routes.start_background()
     access_logger.info("Starting background face worker…")
     threading.Thread(target=_background_face_worker, daemon=True).start()
-    access_logger.info(f"Starting upload queue ({_UPLOAD_WORKERS} workers)…")
     _start_upload_workers()
-    access_logger.info("Starting gallery-dl download queue…")
     _start_gdl_workers()
     access_logger.info("Warming pose/OCR models (auto-download)…")
-    threading.Thread(target=_warm_models, daemon=True).start()
+    # threading.Thread(target=_warm_models, daemon=True).start()
     access_logger.info("Serving on :8000")
     serve(app, host='0.0.0.0', port=8000, threads=state["wsgi_threads"], connection_limit=1000,
     channel_timeout=300, channel_request_lookahead=1)

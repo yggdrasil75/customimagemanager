@@ -87,8 +87,6 @@ class ModelRegistry:
             return key
 
     def acquire(self, key):
-        """Return the model for key, loading on first use. Touches LRU and runs
-        eviction. None if unregistered or the loader failed."""
         with self._lock:
             e = self._entries.get(key)
             if e is None:
@@ -96,14 +94,27 @@ class ModelRegistry:
             self._pinned.add(key)
         try:
             with self._lock:
-                if not e["loaded"]:
-                    try:
-                        e["model"] = e["loader"]()
-                        e["err"] = ""
-                    except Exception as ex:
-                        e["model"] = None
-                        e["err"] = repr(ex)
-                    e["loaded"] = True
+                need_load = not e["loaded"]
+            if need_load:
+                hook = getattr(self, "_mem_hook", None)
+                res = hook(e["cost_mb"], e["gpu"]) if hook else None
+                if res is not None:
+                    res.__enter__()
+                try:
+                    with self._lock:
+                        if not e["loaded"]:      # re-check under lock
+                            try:
+                                e["model"] = e["loader"]()
+                                e["err"] = ""
+                            except Exception as ex:
+                                e["model"] = None
+                                e["err"] = repr(ex)
+                            e["loaded"] = True
+                finally:
+                    if res is not None:
+                        res.settle()
+                        e["mem_res"] = res
+            with self._lock:
                 self._seq += 1
                 e["seq"] = self._seq
                 model = e["model"]
@@ -133,6 +144,16 @@ class ModelRegistry:
                       if prefix is None or str(k).startswith(prefix)]:
                 self._unload_locked(k)
 
+    def set_memory_hook(self, hook):
+        """Install a callable hook(cost_mb, gpu) -> reservation context manager,
+        used to reserve a model's memory through the thread manager on load. The
+        reservation must support __enter__/__exit__ and a settle() method (RAM
+        reservations settle after load; VRAM reservations are held until the
+        model is unloaded). None disables reservation. Kept optional so the
+        registry has no hard dependency on the thread manager."""
+        with self._lock:
+            self._mem_hook = hook
+
     def status(self):
         """Snapshot: list of (key, loaded, cost_mb, gpu)."""
         with self._lock:
@@ -146,6 +167,12 @@ class ModelRegistry:
         model = e["model"]
         e["model"] = None
         e["loaded"] = False
+        res = e.pop("mem_res", None)
+        if res is not None:
+            try:
+                res.__exit__(None, None, None)   # frees any held VRAM reservation
+            except Exception:
+                pass
         if model is None:
             return
         try:
@@ -195,3 +222,4 @@ touch = REGISTRY.touch
 unload = REGISTRY.unload
 clear = REGISTRY.clear
 status = REGISTRY.status
+set_memory_hook = REGISTRY.set_memory_hook
