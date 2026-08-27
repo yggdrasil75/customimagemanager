@@ -34,7 +34,6 @@ error_handler = logging.FileHandler('logs/error.log')
 error_handler.setLevel(logging.ERROR)
 error_handler.setFormatter(_FMT)
 
-
 def _make(name, filename, *, level=logging.INFO, backups=5,
           fmt=_FMT, console=True, share_errors=True):
     lg = logging.getLogger(name)
@@ -50,7 +49,6 @@ def _make(name, filename, *, level=logging.INFO, backups=5,
         if console:
             lg.addHandler(logging.StreamHandler())
     return lg
-
 
 # training keeps a plain FileHandler (no rotation) to match prior behaviour.
 training_logger = logging.getLogger('training')
@@ -70,7 +68,6 @@ audit_logger = _make('audit', 'logs/audit.log', backups=20,
                      fmt=logging.Formatter('%(asctime)s %(message)s'),
                      share_errors=False)
 
-
 def _current_actor():
     """Return (username, source, ip) for the acting user, or a 'system'
     fallback outside a request context. Never raises."""
@@ -89,7 +86,6 @@ def _current_actor():
     except Exception:
         return "system", "", ""
 
-
 def audit(action, detail=""):
     """Write one audit line tagged with the current user. Never raises."""
     try:
@@ -101,7 +97,6 @@ def audit(action, detail=""):
             access_logger.warning(f"audit() failed for {action}: {e}")
         except Exception:
             pass
-
 
 def audited(action, *fields):
     """Decorator: audit an endpoint AFTER it runs, pulling `fields` from the

@@ -72,7 +72,6 @@ def _ul_sam():
     except Exception:
         return None, None
 
-
 @lru_cache(maxsize=1)
 def _ul_yolo():
     """ultralytics YOLO class, or None."""
@@ -81,7 +80,6 @@ def _ul_yolo():
         return YOLO
     except Exception:
         return None
-
 
 @lru_cache(maxsize=1)
 def _ul_sam3_predictor():
@@ -92,11 +90,9 @@ def _ul_sam3_predictor():
     except Exception:
         return None
 
-
 # ── model cache ───────────────────────────────────────────────────────────────
 _registered = set()    # registry keys we've declared, so we register once
 _cache_lock = threading.Lock()
-
 
 def clear_cache():
     """Drop all loaded seg models. Call when a setting repoints weights (mirrors
@@ -108,7 +104,6 @@ def clear_cache():
             model_registry.unload(k)
         except Exception:
             pass
-
 
 def _to_bgr_u8(img):
     """Coerce to 3-channel uint8 BGR, matching manager._detect_obb_or_box."""
@@ -125,7 +120,6 @@ def _to_bgr_u8(img):
     if img.dtype != np.uint8:
         img = np.clip(img, 0, 255).astype(np.uint8)
     return img
-
 
 def _mask_to_instance(mask, W, H, class_name="object", score=None,
                       make_svg=True):
@@ -149,7 +143,6 @@ def _mask_to_instance(mask, W, H, class_name="object", score=None,
             d["mask_svg"] = paths
     return d
 
-
 def _box_px(box, W, H):
     """Normalised center-form box -> pixel xyxy, clamped to the image."""
     x1 = int(round((box["cx"] - box["w"] / 2) * W))
@@ -159,7 +152,6 @@ def _box_px(box, W, H):
     x1, y1 = max(0, x1), max(0, y1)
     x2, y2 = min(W - 1, x2), min(H - 1, y2)
     return x1, y1, x2, y2
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # SAM-family loaders (the AI-tools segmenter)
@@ -186,7 +178,6 @@ def _get_sam(model_id):
                 cost_mb=2600, gpu=og.has_gpu())
             _registered.add(key)
     return model_registry.acquire(key)
-
 
 def _build_sam(model_id):
     """Construct the selected SAM-family predictor. Returns model or None."""
@@ -219,7 +210,6 @@ def _build_sam(model_id):
     except Exception:
         model = None
     return model
-
 
 def _instances_from_result(res, W, H, labels=None):
     """Turn an ultralytics result into instance dicts (box + mask_svg). `labels`,
@@ -258,7 +248,6 @@ def _instances_from_result(res, W, H, labels=None):
             out.append(inst)
     return out
 
-
 def segment_boxes(img_bgr, boxes, model_id=None):
     """AI-tools segmenter, box-prompted: a fine mask per input box using the
     selected SAM model. `boxes` are normalised center-form dicts. Returns
@@ -280,7 +269,6 @@ def segment_boxes(img_bgr, boxes, model_id=None):
     except Exception:
         return []
 
-
 def sam_text_mode(model_id=None):
     """How the selected model accepts a text/concept query, or '' if it can't.
       'sam3'    -> native text head (ultralytics SAM with texts=[...]).
@@ -296,7 +284,6 @@ def sam_text_mode(model_id=None):
     if fam == "fastsam":
         return "fastsam"
     return ""
-
 
 def segment_text(img_bgr, query, model_id=None):
     """AI-tools segmenter, TEXT-prompted, for models with a text path (SAM 3
@@ -333,7 +320,6 @@ def segment_text(img_bgr, query, model_id=None):
         inst["class_name"] = q          # the thing the user asked to segment
     return insts
 
-
 # ════════════════════════════════════════════════════════════════════════════
 # YOLO-seg loader (the background, class-aware segmenter)
 # ════════════════════════════════════════════════════════════════════════════
@@ -344,7 +330,6 @@ def _build_yolo_seg(ref):
         return YOLO(ref) if YOLO else None
     except Exception:
         return None
-
 
 def _get_yolo_seg(model_id):
     """Load the selected YOLO-seg model via the central load-on-demand registry
@@ -361,7 +346,6 @@ def _get_yolo_seg(model_id):
                 cost_mb=300, gpu=og.has_gpu())
             _registered.add(key)
     return model_registry.acquire(key)
-
 
 def segment_background(img_bgr, model_id=None, class_ids=None, conf=0.25):
     """Class-aware background segmenter: run YOLO-seg over the whole image and

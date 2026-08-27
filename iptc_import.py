@@ -39,7 +39,6 @@ EXIV2_RECORD_ALIASES = {
     "Application2": "Application",
 }
 
-
 def _candidate_paths(filepath):
     """Yield the paths worth trying for IPTC data, most-specific first.
     A sidecar with the same stem takes priority for formats pyexiv2 chokes on."""
@@ -49,7 +48,6 @@ def _candidate_paths(filepath):
         if p not in seen and os.path.exists(p):
             seen.append(p)
             yield p
-
 
 def _read_raw_iptc(filepath):
     """Return the raw {tag_string: value} IPTC dict from the first readable
@@ -68,7 +66,6 @@ def _read_raw_iptc(filepath):
             log.warning(f"pyexiv2 read_iptc failed on {p}: {e}")
     return {}, None
 
-
 def _split_tag(tag_string):
     """'Iptc.NewsPhoto.ColorRepresentation' -> ('NewsPhoto','ColorRepresentation').
     Applies exiv2->schema record aliases (e.g. Application2 -> Application).
@@ -78,7 +75,6 @@ def _split_tag(tag_string):
         rec = EXIV2_RECORD_ALIASES.get(parts[1], parts[1])
         return rec, ".".join(parts[2:])
     return None, None
-
 
 def read_iptc(filepath):
     """Read IPTC and return a structure organized by record:
@@ -158,7 +154,6 @@ def read_iptc(filepath):
         })
 
     return {"source": source, "records": records_out}
-
 
 def summarize(filepath):
     """Compact counts for logging / list views: how many known fields carry a

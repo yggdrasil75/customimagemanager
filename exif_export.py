@@ -34,7 +34,6 @@ import exif_fields as efields
 
 log = logging.getLogger("exif_export")
 
-
 _JXL_REPACKAGE_EXTS = {".jxl"}
 # Substring that identifies the specific Exiv2 error worth repackaging for.
 _BMFF_WRITE_ERR = "BMFF"
@@ -50,7 +49,6 @@ _EMPTY_XMP = (
     '</x:xmpmeta>\n'
     '<?xpacket end="w"?>\n'
 )
-
 
 def _writable_target(filepath):
     """Pick the path we should write EXIF to. For formats pyexiv2 can open in
@@ -84,7 +82,6 @@ def _writable_target(filepath):
         if os.path.exists(p):
             return p
     return filepath
-
 
 def _coerce(field, value):
     """Coerce an incoming JSON value to the field's declared type.
@@ -123,7 +120,6 @@ def _coerce(field, value):
         return None, f"{field.name} exceeds max length {field.length}"
     return sv, None
 
-
 def _to_int(value):
     try:
         if isinstance(value, str):
@@ -135,7 +131,6 @@ def _to_int(value):
     except (ValueError, TypeError):
         return None
 
-
 def _enum_int_keys(field):
     keys = set()
     for k in field.values.keys():
@@ -144,7 +139,6 @@ def _enum_int_keys(field):
         except (ValueError, TypeError):
             pass
     return keys
-
 
 # ── db_transform converters ──────────────────────────────────────────────────
 # Map a coerced EXIF value to the value stored in its db_field column. Each
@@ -161,7 +155,6 @@ def _rating_halfstar(v):
         return round(iv / 2)
     return None            # out-of-range 'likes' rating: don't touch stars
 
-
 def _rating_percent(v):
     """RatingPercent (0x4749): 0-100 -> 0-5 stars (round(percent / 20)),
     clamped to the 0-5 range."""
@@ -171,12 +164,10 @@ def _rating_percent(v):
         return None
     return max(0, min(5, round(iv / 20)))
 
-
 _DB_TRANSFORMS = {
     "rating_halfstar": _rating_halfstar,
     "rating_percent":  _rating_percent,
 }
-
 
 def _apply_db_transform(field, coerced):
     """Return the value to store in field.db_field for a coerced EXIF value.
@@ -194,7 +185,6 @@ def _apply_db_transform(field, coerced):
     if out is None:
         return None, True                  # doesn't map -> leave column alone
     return out, False
-
 
 def write_exif(filepath, patch, allow_repackage=False):
     """Apply a {tag_name: value} patch to the file's EXIF.
@@ -296,7 +286,6 @@ def write_exif(filepath, patch, allow_repackage=False):
         result["error"] = str(e)
 
     return result
-
 
 def _repackage_jxl_bare(path):
     """Rewrite a container (ISOBMFF) JXL in place as a bare codestream so Exiv2

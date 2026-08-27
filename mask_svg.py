@@ -112,7 +112,6 @@ VTRACER_PATH_PRECISION = 2
 VTRACER_LENGTH_THRESHOLD = 8.0
 VTRACER_MODE = "spline"
 
-
 def _as_uint8_mask(mask):
     """Coerce whatever SAM/caller handed us into a single-channel uint8 {0,255}
     mask, or None if it can't be interpreted."""
@@ -129,7 +128,6 @@ def _as_uint8_mask(mask):
         m = (m > 0).astype(np.uint8) * 255
     return m
 
-
 def _prep(mask_u8, method):
     """Apply the scan-method morphology. underscan erodes (outline inside),
     overscan dilates (outline outside), centerline is untouched."""
@@ -142,7 +140,6 @@ def _prep(mask_u8, method):
     if method == "overscan":
         return cv2.dilate(mask_u8, k, iterations=1)
     return mask_u8
-
 
 def _vtracer_to_d(mask_u8):
     """Trace mask_u8 with vtracer, returning a normalized SVG `d` string with
@@ -173,7 +170,6 @@ def _vtracer_to_d(mask_u8):
         return ""
     return _normalize_vtracer_svg(svg, W, H)
 
-
 def _normalize_vtracer_svg(svg, W, H):
     """Extract path `d` strings from a vtracer SVG document and renormalize
     their pixel coordinates to [0,1] against (W,H), preserving M/L/C/Z commands.
@@ -195,12 +191,10 @@ def _normalize_vtracer_svg(svg, W, H):
         out.append(_renorm_d(dm.group(1), W, H, tx, ty))
     return " ".join(p for p in out if p)
 
-
 # Path commands whose operands are coordinate pairs (absolute uppercase, which
 # is all vtracer emits). We transform every operand pairwise as (x,y) — correct
 # for M/L/C/S/Q/T. H/V/A never appear in vtracer output.
 _PAIR_CMDS = set("MLCSQT")
-
 
 def _renorm_d(d, W, H, tx=0.0, ty=0.0):
     """Renormalize one object-local pixel-space `d` string to [0,1] against
@@ -235,7 +229,6 @@ def _renorm_d(d, W, H, tx=0.0, ty=0.0):
     s = " ".join(out)
     s = re.sub(r'([MLCSQTZ]) ', r'\1', s)  # no space after command letter
     return s
-
 
 def _contours_to_d(mask_u8, simplify):
     """Trace mask_u8 into a normalized SVG `d` string (outer contours + holes as
@@ -279,12 +272,10 @@ def _contours_to_d(mask_u8, simplify):
         return ""
     return _pts_to_d(subpaths)
 
-
 def _fmt(v):
     """Compact fixed-point coordinate: 4 decimals, no trailing zeros/point."""
     s = f"{v:.4f}".rstrip("0").rstrip(".")
     return s if s else "0"
-
 
 def _pts_to_d(subpaths):
     """Build an SVG `d` from normalized point loops. Each loop -> M x y L ... Z.
@@ -301,7 +292,6 @@ def _pts_to_d(subpaths):
         seg.append("Z")
         parts.append("".join(seg))
     return " ".join(parts)
-
 
 def mask_to_svg_paths(mask, method="all", simplify=DEFAULT_SIMPLIFY,
                       backend="auto"):
@@ -336,7 +326,6 @@ def mask_to_svg_paths(mask, method="all", simplify=DEFAULT_SIMPLIFY,
             out[meth] = ""
     return out
 
-
 def _cubic(p0, p1, p2, p3, steps=12):
     """Flatten one cubic Bézier into `steps` line points (excluding p0, which
     the caller already has). Enough segments that fill/rasterize is smooth."""
@@ -349,7 +338,6 @@ def _cubic(p0, p1, p2, p3, steps=12):
             + 3 * mt * (t**2) * p2 + (t**3) * p3
         out.append((pt[0], pt[1]))
     return out
-
 
 def svg_d_to_points(d):
     """Parse one of our own `d` strings back into a list of normalized point
@@ -392,7 +380,6 @@ def svg_d_to_points(d):
     if cur:
         loops.append(np.asarray(cur, dtype=np.float64))
     return loops
-
 
 def rasterize(d, width, height):
     """Render a stored `d` string back to a boolean pixel mask of the given

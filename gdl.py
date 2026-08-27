@@ -58,16 +58,13 @@ _MEDIA_EXTS = {
 # for a config-context-per-thread only if this ever becomes a throughput wall.
 _lock = threading.RLock()
 
-
 class GdlError(RuntimeError):
     pass
-
 
 def available():
     """True if the gallery-dl library is importable (it is, if this module
     imported at all — kept as a function so callers/UI have a clean check)."""
     return True
-
 
 def _opts_to_kvlist(opts):
     """Turn ["extractor.danbooru.username=me", ...] into the (path, key, value)
@@ -89,13 +86,11 @@ def _opts_to_kvlist(opts):
         kvlist.append((path, key, value))
     return kvlist
 
-
 def _fresh_config(opts):
     """Clear any loaded user config and return the scoped-options context
     manager to apply `opts` for the call. Caller uses it as a `with` block."""
     _gconfig.clear()
     return _gconfig.apply(_DEFAULT_INCLUDES + _opts_to_kvlist(opts))
-
 
 # Ask extractors that gate extra metadata behind an "includes" list to hand it
 # over — most importantly `notes` (translation/annotation boxes on e621,
@@ -107,7 +102,6 @@ def _fresh_config(opts):
 _DEFAULT_INCLUDES = [
     (("extractor",), "metadata", "notes,pools,tags"),
 ]
-
 
 def _flatten(obj, prefix=""):
     """Flatten nested dicts into dotted keys, so a booru's
@@ -121,7 +115,6 @@ def _flatten(obj, prefix=""):
         else:
             out[key] = v
     return out
-
 
 def discover_fields(url, opts=None, resolve=2):
     """Return the metadata fields available for `url` as
@@ -152,13 +145,11 @@ def discover_fields(url, opts=None, resolve=2):
         raise GdlError(msg)
     return {"site": site, "fields": sorted(fields)}
 
-
 def site_of(url, opts=None):
     """The extractor category for a URL (e.g. 'danbooru'), from the extractor
     class itself — no network needed."""
     extr = _find_extractor(url)
     return getattr(extr, "category", "") if extr else ""
-
 
 def download(url, dest, opts=None, on_file=None):
     os.makedirs(dest, exist_ok=True)
@@ -219,7 +210,6 @@ def download(url, dest, opts=None, on_file=None):
     if not seen:
         raise GdlError(str(err) if err else "gallery-dl downloaded nothing.")
 
-
 def _ready_files(dest, seen, final=False):
     """Yield (media_path, metadata) for media files in `dest` not yet in `seen`.
     Normally a file is 'ready' only once its .json sidecar exists (so we don't
@@ -233,7 +223,6 @@ def _ready_files(dest, seen, final=False):
             seen.add(mpath)
             yield mpath, _read_sidecar(mpath)
 
-
 def _pair_media(root):
     """All downloaded media files under root (recursive), excluding sidecars."""
     found = []
@@ -244,7 +233,6 @@ def _pair_media(root):
                 found.append(os.path.join(dirpath, n))
     return sorted(found)
 
-
 def _read_sidecar(media_path):
     """gallery-dl writes `<media>.json` next to each file. Return it flattened,
     or {} if absent/unreadable — a missing sidecar shouldn't drop the image."""
@@ -254,7 +242,6 @@ def _read_sidecar(media_path):
             return _flatten(json.load(f))
     except (OSError, json.JSONDecodeError):
         return {}
-
 
 def apply_mapping(meta, mapping):
     """Turn a gallery-dl metadata dict into the library's ingest packet using a
@@ -347,13 +334,11 @@ def apply_mapping(meta, mapping):
         out.pop("xmp")
     return out
 
-
 def _as_tags(val):
     """A source value → list of tag strings."""
     if isinstance(val, list):
         return [str(t).strip() for t in val if str(t).strip()]
     return [t for t in str(val).replace(",", " ").split() if t]
-
 
 def _notes_to_regions(notes, meta):
     """Convert a list of booru note/translation dicts into region boxes.
@@ -391,13 +376,11 @@ def _notes_to_regions(notes, meta):
         })
     return regions
 
-
 def _num(v):
     try:
         return float(v)
     except (TypeError, ValueError):
         return None
-
 
 def _first_num(meta, keys):
     for k in keys:
@@ -406,7 +389,6 @@ def _first_num(meta, keys):
             if n:
                 return n
     return None
-
 
 if __name__ == "__main__":
     # Self-check: pure-logic parts run offline (no network, no live extractor).

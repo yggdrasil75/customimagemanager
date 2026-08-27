@@ -39,7 +39,6 @@ from typing import Optional
 import iptc_fields
 import mwg_fields
 
-
 # ── Data / value types ──────────────────────────────────────────────────────
 # Short strings so the frontend can choose an input widget per type. XMP adds a
 # few structural types beyond the IPTC scalar set: lang-alt (a language-keyed
@@ -53,7 +52,6 @@ TYPE_TIME     = "time"        # ACDSee stores ReleaseTime as a plain string
 TYPE_LANGALT  = "lang-alt"    # rdf:Alt of language-tagged strings
 TYPE_BAG      = "bag"         # rdf:Bag — unordered list (e.g. Keywords)
 TYPE_SEQ      = "seq"         # rdf:Seq — ordered list
-
 
 @dataclass
 class XMPField:
@@ -96,7 +94,6 @@ class XMPField:
             d["values"] = {str(k): v for k, v in self.values.items()}
         return d
 
-
 def _try_int(v):
     try:
         if isinstance(v, str) and v.lower().startswith("0x"):
@@ -104,7 +101,6 @@ def _try_int(v):
         return int(v)
     except (TypeError, ValueError):
         return v
-
 
 # ── acdsee namespace ────────────────────────────────────────────────────────
 # ACD Systems' catalog metadata (ACDSee / ACDSee Pro). Retrieval-only here.
@@ -144,7 +140,6 @@ ACDSEE_FIELDS = [
     XMPField("Tagged",              TYPE_BOOL),
 ]
 
-
 # ── Namespace registry ──────────────────────────────────────────────────────
 # Each namespace: pyexiv2 ns token (Xmp.<ns>.<prop>), display title, ordered
 # field list, description, and a mapped flag so the UI can show "not yet
@@ -157,7 +152,6 @@ class XMPNamespace:
     uri: str = ""              # RDF namespace URI, for reference
     fields: list = field(default_factory=list)
     mapped: bool = True        # False => known ns we haven't detailed yet
-
 
 # ── acdsee-rs namespace (region / face-box metadata) ────────────────────────
 # ACDSee stores face/object regions in Xmp.acdsee-rs.Regions as a nested struct:
@@ -189,7 +183,6 @@ ACDSEE_RS_FIELDS = [
     XMPField("ALGArea",                 TYPE_STRING, is_list=True,
              note="Detector-guessed area struct. Fallback when no DLYArea."),
 ]
-
 
 # ── aux namespace (Adobe camera-raw auxiliary capture / lens metadata) ──────
 # Camera, lens, firmware and raw-enhancement provenance written by Adobe Camera
@@ -247,7 +240,6 @@ AUX_FIELDS = [
     XMPField("VignetteCorrectionAlreadyApplied",               TYPE_BOOL),
 ]
 
-
 # ── cc namespace (Creative Commons licensing) ───────────────────────────────
 # Creative Commons license metadata. There's no formal CC spec for XMP, so
 # ExifTool (and thus these definitions) make assumptions about property shape;
@@ -294,7 +286,6 @@ CC_FIELDS = [
     }),
     XMPField("useGuidelines",    TYPE_STRING),
 ]
-
 
 # ── crd namespace (Adobe Camera Raw Defaults) ───────────────────────────────
 # Adobe Camera Raw "defaults" — the raw-processing settings ACR/Lightroom apply.
@@ -671,7 +662,6 @@ CRD_FIELDS = [
     XMPField("Whites2012",    TYPE_INTEGER),
 ]
 
-
 # ── dc namespace (Dublin Core) ──────────────────────────────────────────────
 # The standard descriptive namespace and the one that actually matters for a
 # catalog. Several fields fold into what we maintain:
@@ -708,7 +698,6 @@ DC_FIELDS = [
     XMPField("type",        TYPE_STRING, is_list=True),
 ]
 
-
 # ── dex namespace (Description Explorer) ─────────────────────────────────────
 # Uncommon. Its Rating is an OPTIONAL extra source for our rating (lowest
 # precedence — EXIF and acdsee win first). LicenseType is an enum. Source/Rating
@@ -731,7 +720,6 @@ DEX_FIELDS = [
     XMPField("Source",      TYPE_STRING),
 ]
 
-
 # ── DICOM namespace (medical imaging) ───────────────────────────────────────
 # Lets DICOM medical-imaging fields ride along in non-DICOM files. Not useful for
 # this catalog's purposes (a cosplay/model catalog has no need of patient/study
@@ -753,7 +741,6 @@ DICOM_FIELDS = [
     XMPField("StudyPhysician",   TYPE_STRING),
 ]
 
-
 # ── digiKam namespace ───────────────────────────────────────────────────────
 # digiKam photo-manager metadata. TagsList is the one that matters: it's the
 # hierarchical keyword tree digiKam maintains, and it feeds our booru-style tags
@@ -774,7 +761,6 @@ DIGIKAM_FIELDS = [
     XMPField("TagsList",               TYPE_BAG, is_list=True, feeds="tags",
              note="Hierarchical A/B/C paths; leaf folded into our booru tags."),
 ]
-
 
 # ── exif namespace (EXIF-in-XMP) ────────────────────────────────────────────
 # XMP copies of standard EXIF capture tags. This is retrieval-only and, for this
@@ -921,7 +907,6 @@ EXIF_FIELDS = [
     XMPField("WhiteBalance",     TYPE_INTEGER, values={0: "Auto", 1: "Manual"}),
 ]
 
-
 # ── exifEX namespace (EXIF 2.32-for-XMP additions) ──────────────────────────
 # Newer EXIF capture tags. Retrieval-only. Several DUPLICATE the aux namespace —
 # SerialNumber (body serial), OwnerName, LensModel, LensSerialNumber, LensInfo
@@ -980,7 +965,6 @@ EXIFEX_FIELDS = [
     XMPField("WaterDepth",         TYPE_REAL, note="rational"),
 ]
 
-
 # ── expressionmedia namespace (Microsoft Expression Media) ──────────────────
 # A read source for several catalog concepts we store ourselves:
 #   * Event       -> our `event` column (new; editable in-app)
@@ -1004,7 +988,6 @@ EXPRESSIONMEDIA_FIELDS = [
              note="Contents unknown; surfaced read-only."),
 ]
 
-
 # ── extensis namespace (Extensis Portfolio) ─────────────────────────────────
 # Workflow/approval metadata from Extensis Portfolio. Not useful for this
 # catalog; surfaced read-only, wired to nothing.
@@ -1018,7 +1001,6 @@ EXTENSIS_FIELDS = [
     XMPField("RoutingNotes", TYPE_STRING),
     XMPField("WorkToDo",     TYPE_STRING),
 ]
-
 
 # ── getty namespace (Getty Images GIFT) ─────────────────────────────────────
 # Getty Images delivery metadata. NOTE: the on-disk prefix is "GettyImagesGIFT"
@@ -1048,7 +1030,6 @@ GETTY_FIELDS = [
     XMPField("TimeShot",           TYPE_STRING),
 ]
 
-
 # ── hdr namespace (ACR 15.1 HDR metadata) ───────────────────────────────────
 # HDR metadata written by Adobe Camera Raw 15.1. On-disk prefix is
 # "hdr_metadata" (keyed here); ExifTool shortens to "hdr". Property names on disk
@@ -1064,13 +1045,11 @@ HDR_FIELDS = [
     XMPField("scene_referred",         TYPE_BOOL, note="ExifTool: SceneReferred"),
 ]
 
-
 # ── HDRGainMap namespace (Apple HDR GainMap) ────────────────────────────────
 # Apple HDR GainMap images. Prefix matches ExifTool's here. Retrieval-only.
 HDRGAINMAP_FIELDS = [
     XMPField("HDRGainMapVersion", TYPE_STRING),
 ]
-
 
 # ── prism namespace (PRISM 3.0 publishing metadata) ─────────────────────────
 # Publishing Requirements for Industry Standard Metadata. A large namespace,
@@ -1222,7 +1201,6 @@ PRISM_FIELDS = [
     XMPField("WordCount",            TYPE_INTEGER),
 ]
 
-
 # ── iptcCore namespace (IPTC Core) ──────────────────────────────────────────
 # Defined in iptc_fields.py (with the rest of the IPTC schema) and built here
 # via its factory, passing in our XMPField class and the TYPE_* map it needs.
@@ -1244,7 +1222,6 @@ IPTCEXT_FIELDS = iptc_fields.build_iptc_ext_fields(XMPField, _IPTC_TYPE_MAP)
 MWG_RS_FIELDS   = mwg_fields.build_mwg_rs_fields(XMPField, _IPTC_TYPE_MAP)
 MWG_COLL_FIELDS = mwg_fields.build_mwg_coll_fields(XMPField, _IPTC_TYPE_MAP)
 MWG_KW_FIELDS   = mwg_fields.build_mwg_kw_fields(XMPField, _IPTC_TYPE_MAP)
-
 
 XMP_NAMESPACES = [
     XMPNamespace(
@@ -1421,7 +1398,6 @@ XMP_NAMESPACES = [
 # Fast lookups.
 NS_BY_TOKEN = {n.ns: n for n in XMP_NAMESPACES}
 
-
 def field_lookup(ns_token, prop_name):
     """Return the XMPField for a given (namespace, property) or None."""
     ns = NS_BY_TOKEN.get(ns_token)
@@ -1432,7 +1408,6 @@ def field_lookup(ns_token, prop_name):
             return f
     return None
 
-
 def feed_map():
     """Return {(ns_token, prop): 'description'|'tags'|'rating'} for every field
     that folds into a field we already maintain. Used by the ingest path."""
@@ -1442,7 +1417,6 @@ def feed_map():
             if f.feeds:
                 out[(ns.ns, f.name)] = f.feeds
     return out
-
 
 def schema_dict():
     """Full schema as a JSON-serializable dict, for the editor frontend."""

@@ -65,12 +65,10 @@ _lock = threading.Lock()
 # reported "all caught up" over an empty table.
 _face_model_error = {"v": ""}
 
-
 # ── model discovery ───────────────────────────────────────────────────────────
 def ensure_models_dir():
     os.makedirs(MODELS_DIR, exist_ok=True)
     return MODELS_DIR
-
 
 def list_models():
     """Every selectable detector, grouped by origin.
@@ -88,7 +86,6 @@ def list_models():
         out[key].append(p)
     return out
 
-
 def face_model_name(size="n"):
     """Resolve a requested size to a yolov11 face weight file that EXISTS.
 
@@ -103,11 +100,9 @@ def face_model_name(size="n"):
         size = cand[-1] if cand else FACE_SIZES[0]
     return f"yolov11{size}-face.pt"
 
-
 def face_model_error():
     """Last download failure, for the UI to surface. '' when healthy."""
     return _face_model_error["v"]
-
 
 def ensure_face_model(size="n"):
     """Return a path to the face detector for `size`, downloading it on first
@@ -150,7 +145,6 @@ def ensure_face_model(size="n"):
             pass
         return ""
 
-
 # ── identity embedding ────────────────────────────────────────────────────────
 def _build_insight():
     """Construct insightface's FaceAnalysis app, or None on any failure."""
@@ -165,21 +159,17 @@ def _build_insight():
     except Exception:
         return None
 
-
 # buffalo_l det+recog is ~1GB of ONNX weights on GPU.
 model_registry.register("faces:insight", _build_insight,
                            cost_mb=1100, gpu=og.has_gpu())
-
 
 def _load_insight():
     """Lazily bring up insightface via the central registry (load-on-demand, so
     it's evicted when other models need the memory). Cheap after first call."""
     return model_registry.acquire("faces:insight")
 
-
 def have_identity_embedder():
     return _load_insight() is not None
-
 
 def _as_bgr(img):
     """Coerce any decoded array to 3-channel uint8 BGR, or None."""
@@ -199,7 +189,6 @@ def _as_bgr(img):
         img = np.clip(img, 0, 255).astype(np.uint8)
     return img
 
-
 def _iou(a, b):
     """IoU between two normalised center-form boxes."""
     ax1, ay1 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
@@ -211,7 +200,6 @@ def _iou(a, b):
     inter = ix * iy
     union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
     return inter / union if union > 0 else 0.0
-
 
 def embed_faces(img_bgr, boxes):
     """Embed each face crop. `boxes` are normalised center-form dicts.
@@ -281,7 +269,6 @@ def embed_faces(img_bgr, boxes):
         return out, "appearance"
     except Exception:
         return [], "none"
-
 
 # ── clustering ────────────────────────────────────────────────────────────────
 def cluster(vectors, mode="arcface", min_cluster=2, eps=None):

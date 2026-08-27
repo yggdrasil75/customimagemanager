@@ -48,7 +48,6 @@ _ROTATE_ANGLES = (22.5, 45.0, 67.5)
 # module (bar/cell) size below which they will not lock on at all.
 _TARGET_SHORT_SIDE = 320
 
-
 def normalize_format(raw) -> str:
     """Map an engine's symbology spelling onto one canonical name.
 
@@ -64,19 +63,15 @@ def normalize_format(raw) -> str:
     key = "".join(ch for ch in s.lower() if ch.isalnum())
     return _FORMAT_ALIASES.get(key, s or "Unknown")
 
-
 def is_matrix(fmt: str) -> bool:
     return normalize_format(fmt) in _MATRIX_FORMATS
-
 
 def is_product_code(fmt: str) -> bool:
     return normalize_format(fmt) in _PRODUCT_FORMATS
 
-
 def looks_like_barcode_class(name: str) -> bool:
     n = str(name or "").strip().lower()
     return any(h in n for h in _CLASS_HINTS)
-
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -91,7 +86,6 @@ def _as_bgr(img: np.ndarray) -> np.ndarray:
         img = np.clip(img, 0, 255).astype(np.uint8)
     return np.ascontiguousarray(img)
 
-
 def _payload(data) -> tuple[str, bool]:
     """(value, is_binary). A QR code can carry arbitrary bytes; those become
     base64 rather than being mangled by a replace-errors UTF-8 decode."""
@@ -101,7 +95,6 @@ def _payload(data) -> tuple[str, bool]:
         except UnicodeDecodeError:
             return base64.b64encode(bytes(data)).decode("ascii"), True
     return str(data or ""), False
-
 
 def _crop(bgr: np.ndarray, box: dict, pad: float = 0.12):
     """Pixel crop around a normalised box, padded. Returns (crop, x1, y1).
@@ -122,14 +115,12 @@ def _crop(bgr: np.ndarray, box: dict, pad: float = 0.12):
         return None, 0, 0
     return bgr[y1:y2, x1:x2], x1, y1
 
-
 def _upscale(crop: np.ndarray) -> np.ndarray:
     short = min(crop.shape[:2])
     if short >= _TARGET_SHORT_SIDE:
         return crop
     f = min(6.0, _TARGET_SHORT_SIDE / max(1, short))
     return cv2.resize(crop, None, fx=f, fy=f, interpolation=cv2.INTER_CUBIC)
-
 
 def _enhance(crop: np.ndarray) -> np.ndarray:
     """Local contrast + sharpen. CLAHE rather than a global stretch, because
@@ -141,7 +132,6 @@ def _enhance(crop: np.ndarray) -> np.ndarray:
     gray = cv2.addWeighted(gray, 1.6, blur, -0.6, 0)
     return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
-
 def _rotate(img: np.ndarray, deg: float) -> np.ndarray:
     h, w = img.shape[:2]
     m = cv2.getRotationMatrix2D((w / 2, h / 2), deg, 1.0)
@@ -151,7 +141,6 @@ def _rotate(img: np.ndarray, deg: float) -> np.ndarray:
     m[1, 2] += nh / 2 - h / 2
     return cv2.warpAffine(img, m, (nw, nh), flags=cv2.INTER_CUBIC,
                           borderValue=(255, 255, 255))
-
 
 # ── decoders ────────────────────────────────────────────────────────────────
 # Each returns [{value, format, binary}] for the image it was handed. Geometry
@@ -185,7 +174,6 @@ def _framed_for_linear(img: np.ndarray) -> np.ndarray:
     return cv2.copyMakeBorder(img, int(h * pad), int(h * pad),
                               int(w * pad), int(w * pad),
                               cv2.BORDER_CONSTANT, value=(255, 255, 255))
-
 
 def _decode_opencv(img: np.ndarray) -> list[dict]:
     out = []
@@ -225,7 +213,6 @@ def _decode_opencv(img: np.ndarray) -> list[dict]:
             log.debug("opencv linear failed: %s", e)
     return out
 
-
 def _decode_zxing(img: np.ndarray) -> list[dict] | None:
     """None when zxing-cpp isn't installed, so callers can tell "absent" from
     "found nothing"."""
@@ -263,10 +250,8 @@ def _decode_zxing(img: np.ndarray) -> list[dict] | None:
                     "binary": binary, "quad": quad})
     return out
 
-
 def has_zxing() -> bool:
     return _decode_zxing(np.zeros((32, 32, 3), np.uint8)) is not None
-
 
 def _decode_once(img: np.ndarray) -> list[dict]:
     """zxing when present (wider symbology coverage), else OpenCV."""
@@ -274,7 +259,6 @@ def _decode_once(img: np.ndarray) -> list[dict]:
     if hits:
         return hits
     return _decode_opencv(img)
-
 
 def decode_crop(crop: np.ndarray, *, deep: bool = True) -> dict | None:
     """Read a code out of a single crop, escalating through cheap variants.
@@ -300,7 +284,6 @@ def decode_crop(crop: np.ndarray, *, deep: bool = True) -> dict | None:
         for hit in _decode_once(img):
             return {**hit, "via": via}
     return None
-
 
 # ── scan ────────────────────────────────────────────────────────────────────
 
@@ -333,7 +316,6 @@ def _grad_boxes(gray: np.ndarray, mode: str) -> list[tuple]:
                             cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)))
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return [cv2.boundingRect(c) for c in cnts]
-
 
 def detect_cv(bgr: np.ndarray) -> list[dict]:
     """Locate probable barcodes with no model. Returns detector-shaped boxes.
@@ -387,7 +369,6 @@ def detect_cv(bgr: np.ndarray) -> list[dict]:
         if not any(_iou(c, m) > 0.5 for m in merged):
             merged.append(c)
     return merged
-
 
 def _iou(a: dict, b: dict) -> float:
     ax1, ay1 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
@@ -489,7 +470,6 @@ def scan(bgr: np.ndarray, detect_fn=None, *, deep: bool = True,
             "detected": len(codes),
             "decoded": sum(1 for c in codes if c["decoded"]), "note": note}
 
-
 def _box_from_quad(quad, W: int, H: int) -> dict | None:
     """Normalised centre-form box from a decoder's 4-point corner quad."""
     if not quad or len(quad) < 3:
@@ -507,7 +487,6 @@ def _box_from_quad(quad, W: int, H: int) -> dict | None:
             "cy": clamp(((y1 + y2) / 2) / max(1, H)),
             "w": clamp((x2 - x1) / max(1, W)),
             "h": clamp((y2 - y1) / max(1, H))}
-
 
 def _make_code(box: dict | None, hit: dict | None) -> dict:
     """One result row. Geometry comes from the detector box when there is one;
@@ -530,7 +509,6 @@ def _make_code(box: dict | None, hit: dict | None) -> dict:
         "det_conf": round(det_conf, 3) if det_conf is not None else None,
         "det_class": (box or {}).get("class_name"),
     }
-
 
 # ── marking ─────────────────────────────────────────────────────────────────
 # A code becomes an MWG region with Type="BarCode" — one of the four region
@@ -557,7 +535,6 @@ def code_label(code: dict, max_len: int = 64) -> str:
     v = " ".join(v.split())
     return v if len(v) <= max_len else v[:max_len - 1] + "…"
 
-
 def code_tags(code: dict) -> list[str]:
     """Coarse on purpose: 'barcode' groups every code in the library, the
     symbology narrows it, and the rest are what people actually filter on."""
@@ -575,7 +552,6 @@ def code_tags(code: dict) -> list[str]:
             and val[:8].lower().startswith(("http://", "https:")):
         tags.append("url")
     return list(dict.fromkeys(tags))
-
 
 def to_regions(result: dict, *, confirmed: bool = False) -> list[dict]:
     """Turn a scan() result into app region dicts ready for write_metadata.
@@ -610,7 +586,6 @@ def to_regions(result: dict, *, confirmed: bool = False) -> list[dict]:
                             for t in code_tags(c)],
         })
     return regions
-
 
 def summary_text(result: dict) -> str:
     """One line per decoded code, for appending to an image description.

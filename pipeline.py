@@ -58,7 +58,6 @@ import cv2
 
 SCHEMA = "mm.analysis/1"
 
-
 # ── geometry ──────────────────────────────────────────────────────────────────
 def _crop_rect(h, w, box, pad=0.04):
     """Pixel rect (x1,y1,x2,y2) of a padded normalised box, clamped to the image."""
@@ -69,7 +68,6 @@ def _crop_rect(h, w, box, pad=0.04):
     x2, y2 = min(w, x2), min(h, y2)
     return x1, y1, x2, y2
 
-
 def crop_box(image_bgr, box, pad=0.04):
     """Return the sub-image for a normalised box, with a little padding."""
     h, w = image_bgr.shape[:2]
@@ -78,7 +76,6 @@ def crop_box(image_bgr, box, pad=0.04):
         return image_bgr
     return image_bgr[y1:y2, x1:x2]
 
-
 def _region_to_page(b, ox, oy, ow, oh):
     """Remap a box normalised within a panel/region (origin ox,oy and size ow,oh
     in PAGE-normalised units) back to full-page normalised coords."""
@@ -86,11 +83,9 @@ def _region_to_page(b, ox, oy, ow, oh):
             "cx": ox + b["cx"] * ow, "cy": oy + b["cy"] * oh,
             "w": b["w"] * ow, "h": b["h"] * oh}
 
-
 def _strip_name(b):
     """Drop class_name, keep only the four geometry keys (subject['box'] shape)."""
     return {k: b[k] for k in ("cx", "cy", "w", "h")}
-
 
 def _map_box_to_full(b, x1, y1, x2, y2, W, H):
     """Map a crop-local normalised box back to full-image normalised coords."""
@@ -109,14 +104,12 @@ def _map_box_to_full(b, x1, y1, x2, y2, W, H):
         fb["class_name"] = (b.get("class_name") or "part").strip() or "part"
     return fb
 
-
 def _valid_box(b):
     try:
         cx, cy, w, h = float(b["cx"]), float(b["cy"]), float(b["w"]), float(b["h"])
     except (KeyError, TypeError, ValueError):
         return False
     return 0 <= cx <= 1 and 0 <= cy <= 1 and 0 < w <= 1 and 0 < h <= 1
-
 
 def _clamp(b):
     """Clamp a normalised center-form box to the image; new dict or None."""
@@ -130,7 +123,6 @@ def _clamp(b):
         return None
     return {"cx": (x1 + x2) / 2, "cy": (y1 + y2) / 2, "w": x2 - x1, "h": y2 - y1}
 
-
 def _fmt(s, ctx, subj=None):
     s = s.replace("{image_type}", str(ctx.get("image_type") or "image"))
     # {known} expands to the caller-supplied context about this file (existing
@@ -141,7 +133,6 @@ def _fmt(s, ctx, subj=None):
     if subj is not None:
         s = s.replace("{label}", str(subj.get("label", "subject")))
     return s
-
 
 def _known_text(known):
     """Render the caller-supplied `known` dict into a compact prompt block.
@@ -164,14 +155,12 @@ def _known_text(known):
         parts.append("Folder: " + str(known["folder"]))
     return "\n".join(parts)
 
-
 def _dedup(seq):
     out, seen = [], set()
     for x in seq:
         if x and x.lower() not in seen:
             out.append(x); seen.add(x.lower())
     return out
-
 
 def _cond_ok(when, subj):
     """Evaluate a step guard against the subject's accumulated fields."""
@@ -181,7 +170,6 @@ def _cond_ok(when, subj):
     if field is None:
         return True
     return subj.get(field) == when.get("equals")
-
 
 # ── pose ↔ box validation ─────────────────────────────────────────────────────
 def _iou_boxes(a, b):
@@ -207,7 +195,6 @@ def _box_corners(b):
     w, h = float(b["w"]), float(b["h"])
     return cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2
 
-
 def _kpts_in_box(person, box, vis_thresh=0.2):
     """Fraction of a skeleton's *visible* keypoints that fall inside `box`."""
     pts = [p for p in person.get("keypoints", []) if p.get("v", 0) >= vis_thresh]
@@ -216,7 +203,6 @@ def _kpts_in_box(person, box, vis_thresh=0.2):
     x1, y1, x2, y2 = _box_corners(box)
     inside = sum(1 for p in pts if x1 <= p["x"] <= x2 and y1 <= p["y"] <= y2)
     return inside / len(pts)
-
 
 def _box_from_kpts(person, vis_thresh=0.2, pad=0.03):
     """Synthesise a normalised box from a skeleton's visible-keypoint extent."""
@@ -229,7 +215,6 @@ def _box_from_kpts(person, vis_thresh=0.2, pad=0.03):
     if x2 - x1 < 1e-3 or y2 - y1 < 1e-3:
         return None
     return {"cx": (x1 + x2) / 2, "cy": (y1 + y2) / 2, "w": x2 - x1, "h": y2 - y1}
-
 
 def match_pose_boxes(boxes, pose, unmatched_box="keep",
                      contain_thresh=0.4, vis_thresh=0.2):
@@ -279,7 +264,6 @@ def match_pose_boxes(boxes, pose, unmatched_box="keep",
                              "class_name": "person", "needs_review": False,
                              "from_pose": True})
     return subjects
-
 
 # ── engine ────────────────────────────────────────────────────────────────────
 def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
@@ -681,7 +665,6 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
         "pose": ctx.get("pose"),
         "ocr": ctx.get("ocr"),
     }
-
 
 # ── default decision tree ─────────────────────────────────────────────────────
 # Flow:

@@ -27,7 +27,6 @@ except Exception:
 
 import functools
 
-
 # ── Keypoint topology ─────────────────────────────────────────────────────────
 COCO_KP_NAMES = ["nose", "left_eye", "right_eye", "left_ear", "right_ear",
                  "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
@@ -36,13 +35,11 @@ COCO_KP_NAMES = ["nose", "left_eye", "right_eye", "left_ear", "right_ear",
 COCO_SKELETON = [[5, 7], [7, 9], [6, 8], [8, 10], [5, 6], [5, 11], [6, 12], [11, 12],
                  [11, 13], [13, 15], [12, 14], [14, 16], [0, 1], [0, 2], [1, 3], [2, 4], [0, 5], [0, 6]]
 
-
 def _hand_edges(base: int) -> list:
     """! @brief Finger-chain edges for a 21-point hand rooted at index `base`."""
     chains = [[0, 1, 2, 3, 4], [0, 5, 6, 7, 8], [0, 9, 10, 11, 12],
               [0, 13, 14, 15, 16], [0, 17, 18, 19, 20]]
     return [[base + a, base + b] for ch in chains for a, b in zip(ch, ch[1:])]
-
 
 # COCO-WholeBody-133: 0-16 body, 17-22 feet, 23-90 face, 91-111 L-hand, 112-132 R-hand
 WHOLEBODY_EDGES = (COCO_SKELETON
@@ -50,7 +47,6 @@ WHOLEBODY_EDGES = (COCO_SKELETON
                    + [[9, 91], [10, 112]]                                           # wrist → hand root
                    + _hand_edges(91) + _hand_edges(112))                            # finger chains
 WHOLEBODY_NAMES = COCO_KP_NAMES + [f"kp{i}" for i in range(17, 133)]
-
 
 _WB_REGISTERED = set()
 
@@ -63,7 +59,6 @@ def _load_wholebody(mode: str):
             cost_mb=1000, gpu=(dev == "cuda"))
         _WB_REGISTERED.add(key)
     return model_registry.acquire(key)
-
 
 def _run_pose_yolo(img_bgr) -> dict:
     """!
@@ -99,7 +94,6 @@ def _run_pose_yolo(img_bgr) -> dict:
         m.access_logger.error(f"pose(yolo): {e}")
         return base
 
-
 def _run_pose_wholebody(img_bgr) -> dict | None:
     """!
     @brief Whole-body pose (133 keypoints incl. hands + face) via RTMPose / rtmlib.
@@ -131,7 +125,6 @@ def _run_pose_wholebody(img_bgr) -> dict | None:
         m.access_logger.error(f"pose(wholebody): {e}")
         return None
 
-
 def run_pose(img_bgr) -> dict:
     """!
     @brief Estimate a skeleton using the configured backend; never raises.
@@ -144,12 +137,10 @@ def run_pose(img_bgr) -> dict:
             return wb
     return _run_pose_yolo(img_bgr)
 
-
 # ── T-pose estimation ─────────────────────────────────────────────────────────
 # COCO-17 landmark indices used to define the body-local frame; the same indices
 # lead the wholebody-133 table, so both topologies normalise identically.
 _L_SHOULDER, _R_SHOULDER, _L_HIP, _R_HIP = 5, 6, 11, 12
-
 
 def _normalise_skeleton(keypoints: list, vis_thresh: float = 0.2) -> Optional[np.ndarray]:
     """! @brief Map one skeleton into a pelvis-origin, torso-scaled frame so poses compare across images.
@@ -172,7 +163,6 @@ def _normalise_skeleton(keypoints: list, vis_thresh: float = 0.2) -> Optional[np
     out = pts.copy()
     out[:, :2] = (pts[:, :2] - pelvis) / torso
     return out
-
 
 def aggregate_tpose(skeletons: list, names: list, edges: list,
                     vis_thresh: float = 0.2, min_support: int = 2) -> Optional[dict]:

@@ -84,7 +84,6 @@ from html.parser import HTMLParser
 
 import numpy as np
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. EXTENSIONS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -161,15 +160,12 @@ EMB_SIG_PREFIX = "bookchunk-v1"
 
 _lock = threading.Lock()
 
-
 def _ext(path: str) -> str:
     return os.path.splitext(path)[1].lower()
-
 
 def ext_candidate(path: str) -> bool:
     """Layer 1: is this extension even in the running for being a book?"""
     return _ext(path) in BOOK_EXTS
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 2. CONTENT SNIFFING
@@ -186,7 +182,6 @@ _PALM_BOOK_TYPES = {
     b'zTXTGPlm': 'ztxt',      # Weasel zTXT
 }
 
-
 def _read_head(path: str, n: int = 4096) -> bytes:
     try:
         with open(path, 'rb') as f:
@@ -194,14 +189,12 @@ def _read_head(path: str, n: int = 4096) -> bytes:
     except Exception:
         return b''
 
-
 def _zip_names(path: str, limit: int = 400) -> list[str]:
     try:
         with zipfile.ZipFile(path) as z:
             return z.namelist()[:limit]
     except Exception:
         return []
-
 
 def sniff(path: str) -> str | None:
     """Layer 2: what format do the BYTES say this is?
@@ -299,7 +292,6 @@ def sniff(path: str) -> str | None:
         return 'text'
     return None
 
-
 def _looks_like_text(buf: bytes) -> bool:
     if not buf:
         return False
@@ -312,7 +304,6 @@ def _looks_like_text(buf: bytes) -> bool:
         pass
     printable = sum(1 for b in buf if 9 <= b <= 13 or 32 <= b < 127 or b >= 160)
     return printable / len(buf) > 0.90
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 3. CONTEXTUAL CLASSIFICATION
@@ -344,7 +335,6 @@ class Verdict:
         return {'status': self.status, 'fmt': self.fmt, 'kind': self.kind,
                 'reason': self.reason, 'confidence': self.confidence}
 
-
 def _dir_context(abs_path: str) -> dict:
     """Everything classify() needs to know about the file's neighbourhood.
 
@@ -362,7 +352,6 @@ def _dir_context(abs_path: str) -> dict:
         (dirs if os.path.isdir(os.path.join(d, e)) else files).add(e)
     return _context_from_listing(files, dirs)
 
-
 def _context_from_listing(files: set, dirs: set) -> dict:
     lower_files = {f.lower() for f in files}
     return {
@@ -376,7 +365,6 @@ def _context_from_listing(files: set, dirs: set) -> dict:
         'unpacked_marker': bool(lower_files & _UNPACKED_BOOK_MARKERS),
         'page_images': sum(1 for f in files if _ext(f) in _PAGE_IMAGE_EXTS),
     }
-
 
 def classify(abs_path: str, ctx: dict | None = None) -> Verdict:
     """Layer 3. The single entry point the indexer calls per candidate file."""
@@ -478,7 +466,6 @@ def classify(abs_path: str, ctx: dict | None = None) -> Verdict:
 
     return Verdict('triage', fmt, 'book', 'unclassified')
 
-
 def _classify_txt(abs_path: str, stem: str, ctx: dict) -> Verdict:
     """.txt is the nastiest case: this app writes tag sidecars as .txt.
 
@@ -528,7 +515,6 @@ def _classify_txt(abs_path: str, stem: str, ctx: dict) -> Verdict:
         return Verdict('triage', 'text', 'book', 'too few words to be sure')
     return Verdict('book', 'text', 'book', f'{size} B of prose')
 
-
 def _classify_html(abs_path: str, stem: str, ctx: dict, fmt: str | None) -> Verdict:
     """.htm(l): standalone story (very common for ao3/ffn downloads), a saved
     webpage, or a chapter inside an unpacked epub."""
@@ -568,7 +554,6 @@ def _classify_html(abs_path: str, stem: str, ctx: dict, fmt: str | None) -> Verd
     return Verdict('triage', 'html', 'book',
                    f'{text_len} chars of text, {link_count} links — ambiguous')
 
-
 def _ole2_has_word_stream(path: str) -> bool:
     """Cheap check for a WordDocument stream in an OLE2 compound file.
 
@@ -578,7 +563,6 @@ def _ole2_has_word_stream(path: str) -> bool:
     """
     head = _read_head(path, 65536)
     return b'W\x00o\x00r\x00d\x00D\x00o\x00c\x00u\x00m\x00e\x00n\x00t\x00' in head
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 4. SCHEMA
@@ -728,7 +712,6 @@ def ensure_tables(db):
     """)
     db.commit()
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # 5. WALKING
 # ══════════════════════════════════════════════════════════════════════════════
@@ -759,7 +742,6 @@ def walk_candidates(media_dir: str):
                 v = Verdict('triage', None, 'book', f'classify error: {e}')
             yield rp, ap, v
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # 6. METADATA EXTRACTION
 # ══════════════════════════════════════════════════════════════════════════════
@@ -770,7 +752,6 @@ _EMPTY_META = {
     'identifiers': {}, 'description': '', 'subjects': [],
     'page_count': None, 'cover_bytes': None, 'source': '',
 }
-
 
 def read_metadata(abs_path: str, fmt: str) -> dict:
     """Normalise metadata from any format into one flat dict. Never raises."""
@@ -810,7 +791,6 @@ def read_metadata(abs_path: str, fmt: str) -> dict:
         meta['source'] = _guess_source(abs_path, meta)
     return meta
 
-
 def _title_from_filename(path: str) -> str:
     stem = os.path.splitext(os.path.basename(path))[0]
     # "Author - Title (Series 03)" and "Title - Author" are both everywhere.
@@ -823,7 +803,6 @@ def _title_from_filename(path: str) -> str:
             return right.strip()
     return stem.replace('_', ' ').strip()
 
-
 def _author_from_filename(path: str) -> str:
     stem = os.path.splitext(os.path.basename(path))[0]
     if ' - ' in stem:
@@ -831,7 +810,6 @@ def _author_from_filename(path: str) -> str:
         if ',' in left and len(left.split()) <= 4:
             return left.strip()
     return ''
-
 
 def _guess_source(path: str, meta: dict) -> str:
     p = path.lower()
@@ -848,11 +826,9 @@ def _guess_source(path: str, meta: dict) -> str:
         return 'ffn'
     return ''
 
-
 # ── epub ──────────────────────────────────────────────────────────────────────
 _DC = '{http://purl.org/dc/elements/1.1/}'
 _OPF = '{http://www.idpf.org/2007/opf}'
-
 
 def _meta_epub(path: str, meta: dict):
     with zipfile.ZipFile(path) as z:
@@ -868,7 +844,6 @@ def _meta_epub(path: str, meta: dict):
             except Exception:
                 pass
 
-
 def _epub_opf_name(z: zipfile.ZipFile) -> str | None:
     try:
         container = ET.fromstring(z.read('META-INF/container.xml'))
@@ -881,7 +856,6 @@ def _epub_opf_name(z: zipfile.ZipFile) -> str | None:
         if n.lower().endswith('.opf'):
             return n
     return None
-
 
 def _parse_opf(root: ET.Element, meta: dict):
     for el in root.iter():
@@ -931,7 +905,6 @@ def _parse_opf(root: ET.Element, meta: dict):
             out.append(a)
     meta['authors'] = out
 
-
 def _epub_cover_name(z, opf_root, opf_name) -> str | None:
     base = os.path.dirname(opf_name)
     cover_id = None
@@ -956,7 +929,6 @@ def _epub_cover_name(z, opf_root, opf_name) -> str | None:
             return _zip_join(base, href, z)
     return None
 
-
 def _zip_join(base, href, z) -> str | None:
     if not href:
         return None
@@ -967,7 +939,6 @@ def _zip_join(base, href, z) -> str | None:
     if href in names:
         return href
     return None
-
 
 def _meta_opf_folder(opf_path: str, meta: dict):
     try:
@@ -985,7 +956,6 @@ def _meta_opf_folder(opf_path: str, meta: dict):
             except Exception:
                 pass
             break
-
 
 # ── pdf ───────────────────────────────────────────────────────────────────────
 def _meta_pdf(path: str, meta: dict):
@@ -1016,7 +986,6 @@ def _meta_pdf(path: str, meta: dict):
         except Exception:
             pass
 
-
 def _open_pdf(path):
     try:
         import fitz            # PyMuPDF
@@ -1026,7 +995,6 @@ def _open_pdf(path):
         return fitz.open(path)
     except Exception:
         return None
-
 
 # ── comic archives ────────────────────────────────────────────────────────────
 def comic_page_names(abs_path: str, fmt: str) -> list[str]:
@@ -1056,11 +1024,9 @@ def comic_page_names(abs_path: str, fmt: str) -> list[str]:
              if _ext(n) in _PAGE_IMAGE_EXTS and not os.path.basename(n).startswith('.')]
     return sorted(names, key=_natural_key)
 
-
 def _natural_key(s: str):
     return [int(t) if t.isdigit() else t.lower()
             for t in re.split(r'(\d+)', s)]
-
 
 def comic_page_bytes(abs_path: str, fmt: str, name: str) -> bytes | None:
     try:
@@ -1085,7 +1051,6 @@ def comic_page_bytes(abs_path: str, fmt: str, name: str) -> bytes | None:
         return None
     return None
 
-
 def _meta_comic(path: str, fmt: str, meta: dict):
     pages = comic_page_names(path, fmt)
     meta['page_count'] = len(pages)
@@ -1101,7 +1066,6 @@ def _meta_comic(path: str, fmt: str, meta: dict):
                         break
         except Exception:
             pass
-
 
 def _parse_comicinfo(data: bytes, meta: dict):
     try:
@@ -1136,7 +1100,6 @@ def _parse_comicinfo(data: bytes, meta: dict):
         meta['subjects'] = [g.strip() for g in t('Genre').split(',') if g.strip()]
     if t('LanguageISO'):
         meta['language'] = t('LanguageISO')
-
 
 # ── fb2 ───────────────────────────────────────────────────────────────────────
 def _meta_fb2(path: str, meta: dict):
@@ -1178,7 +1141,6 @@ def _meta_fb2(path: str, meta: dict):
             except Exception:
                 pass
             break
-
 
 # ── mobi / azw ────────────────────────────────────────────────────────────────
 def _meta_mobi(path: str, meta: dict):
@@ -1244,7 +1206,6 @@ def _meta_mobi(path: str, meta: dict):
     except Exception:
         pass
 
-
 # ── docx / html / text ────────────────────────────────────────────────────────
 def _meta_docx(path: str, meta: dict):
     try:
@@ -1270,7 +1231,6 @@ def _meta_docx(path: str, meta: dict):
         elif el.tag == CP + 'keywords':
             meta['subjects'] = [k.strip() for k in re.split(r'[,;]', txt) if k.strip()]
 
-
 def _meta_html(path: str, meta: dict):
     head = _read_head(path, 65536).decode('utf-8', 'replace')
     m = re.search(r'<title[^>]*>(.*?)</title>', head, re.I | re.S)
@@ -1289,7 +1249,6 @@ def _meta_html(path: str, meta: dict):
         m = re.search(r'archiveofourown\.org/works/(\d+)', head)
         if m:
             meta['identifiers']['ao3'] = m.group(1)
-
 
 def _meta_text(path: str, meta: dict):
     head = _read_head(path, 8192).decode('utf-8', 'replace')
@@ -1310,7 +1269,6 @@ def _meta_text(path: str, meta: dict):
         if len(first) < 120:
             meta['title'] = first
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # 7. TEXT EXTRACTION → SECTIONS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1323,7 +1281,6 @@ class ExtractResult:
         self.sections = sections or []    # [{'title':…, 'html':…}]
         self.error = error
         self.word_count = word_count
-
 
 def extract_sections(abs_path: str, fmt: str) -> ExtractResult:
     """Extract a flow book into sanitized HTML sections.
@@ -1355,14 +1312,12 @@ def extract_sections(abs_path: str, fmt: str) -> ExtractResult:
     # Long tail: mobi, azw3, kfx, lit, chm, ceb, lrf, doc, palmdoc…
     return _extract_via_calibre(abs_path, fmt)
 
-
 def _finish(sections) -> ExtractResult:
     sections = [s for s in sections if s.get('html', '').strip()]
     words = sum(len(re.findall(r"\w+", _strip_tags(s['html']))) for s in sections)
     if not sections:
         return ExtractResult('failed', error='no readable text found')
     return ExtractResult('ok', sections, word_count=words)
-
 
 def _extract_epub(path: str) -> ExtractResult:
     with zipfile.ZipFile(path) as z:
@@ -1400,7 +1355,6 @@ def _extract_epub(path: str) -> ExtractResult:
                              'html': sanitize_html(body)})
     return _finish(sections)
 
-
 def _extract_opf_folder(opf_path: str) -> ExtractResult:
     d = os.path.dirname(opf_path)
     files = []
@@ -1430,7 +1384,6 @@ def _extract_opf_folder(opf_path: str) -> ExtractResult:
                          'html': sanitize_html(body)})
     return _finish(sections)
 
-
 # Chapter headings in plain-text books. Deliberately conservative: a false split
 # just makes an extra section, but a false *merge* on a 900-page book is painful.
 _CHAPTER_RE = re.compile(
@@ -1440,7 +1393,6 @@ _CHAPTER_RE = re.compile(
     r'|prologue|epilogue|afterword|foreword|introduction'
     r'|\d{1,3}\.'
     r')\b.{0,80}$', re.I)
-
 
 def _extract_text(path: str) -> ExtractResult:
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
@@ -1459,7 +1411,6 @@ def _extract_text(path: str) -> ExtractResult:
     sections.append({'title': cur_title or 'Text', 'html': _paras_to_html(cur)})
     return _finish(sections)
 
-
 def _strip_gutenberg_boilerplate(text: str) -> str:
     start = re.search(r'\*\*\*\s*START OF (?:THE|THIS) PROJECT GUTENBERG.*?\*\*\*',
                       text, re.I)
@@ -1475,7 +1426,6 @@ def _strip_gutenberg_boilerplate(text: str) -> str:
             text = text[:e2.start()]
     return text
 
-
 def _paras_to_html(lines: list[str]) -> str:
     out, buf = [], []
     for line in lines:
@@ -1487,7 +1437,6 @@ def _paras_to_html(lines: list[str]) -> str:
     if buf:
         out.append('<p>' + _html.escape(' '.join(buf)) + '</p>')
     return '\n'.join(out)
-
 
 def _extract_html(path: str) -> ExtractResult:
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
@@ -1505,7 +1454,6 @@ def _extract_html(path: str) -> ExtractResult:
     if not sections:
         sections = [{'title': '', 'html': clean}]
     return _finish(sections)
-
 
 def _extract_fb2(path: str) -> ExtractResult:
     try:
@@ -1526,7 +1474,6 @@ def _extract_fb2(path: str) -> ExtractResult:
                     paras.append('<p>' + _html.escape(t) + '</p>')
             sections.append({'title': title.strip(), 'html': '\n'.join(paras)})
     return _finish(sections)
-
 
 def _extract_docx(path: str) -> ExtractResult:
     try:
@@ -1558,7 +1505,6 @@ def _extract_docx(path: str) -> ExtractResult:
     sections.append({'title': cur_title, 'html': '\n'.join(cur)})
     return _finish(sections)
 
-
 def _extract_docx_raw(path: str) -> ExtractResult:
     """python-docx-free fallback: pull <w:t> runs straight out of the XML."""
     try:
@@ -1575,7 +1521,6 @@ def _extract_docx_raw(path: str) -> ExtractResult:
             paras.append('<p>' + _html.escape(text) + '</p>')
     return _finish([{'title': '', 'html': '\n'.join(paras)}])
 
-
 def _extract_rtf(path: str) -> ExtractResult:
     try:
         from striprtf.striprtf import rtf_to_text
@@ -1586,16 +1531,13 @@ def _extract_rtf(path: str) -> ExtractResult:
         text = rtf_to_text(f.read(), errors='ignore')
     return _finish([{'title': '', 'html': _paras_to_html(text.splitlines())}])
 
-
 # ── Calibre fallback ──────────────────────────────────────────────────────────
 _CALIBRE_FORMATS = {'mobi', 'azw3', 'kfx', 'lit', 'chm', 'ceb', 'lrf',
                     'doc', 'palmdoc', 'ereader', 'plucker', 'ztxt', 'opf'}
 
-
 def have_calibre() -> bool:
     import shutil as _sh
     return _sh.which('ebook-convert') is not None
-
 
 def _extract_via_calibre(abs_path: str, fmt: str) -> ExtractResult:
     """Universal fallback. `ebook-convert IN OUT.epub` then read the epub.
@@ -1622,7 +1564,6 @@ def _extract_via_calibre(abs_path: str, fmt: str) -> ExtractResult:
             return ExtractResult('failed', error=f'ebook-convert failed: {tail}')
         return _extract_epub(out)
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # 8. HTML SANITIZER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1643,7 +1584,6 @@ _ALLOWED_ATTRS = {
     '*': {'id', 'class', 'lang', 'dir'},
 }
 _VOID = {'br', 'hr', 'img'}
-
 
 class _Sanitizer(HTMLParser):
     def __init__(self):
@@ -1685,7 +1625,6 @@ class _Sanitizer(HTMLParser):
         if not self.skip_depth:
             self.out.append(_html.escape(data))
 
-
 def sanitize_html(fragment: str) -> str:
     s = _Sanitizer()
     try:
@@ -1694,7 +1633,6 @@ def sanitize_html(fragment: str) -> str:
     except Exception:
         return _html.escape(_strip_tags(fragment))
     return ''.join(s.out)
-
 
 class _Stripper(HTMLParser):
     def __init__(self):
@@ -1714,7 +1652,6 @@ class _Stripper(HTMLParser):
         if not self.skip:
             self.parts.append(d)
 
-
 def _strip_tags(s: str) -> str:
     p = _Stripper()
     try:
@@ -1724,16 +1661,13 @@ def _strip_tags(s: str) -> str:
         return re.sub(r'<[^>]+>', ' ', s or '')
     return re.sub(r'\s+', ' ', ''.join(p.parts)).strip()
 
-
 def _body_of(raw: str) -> str:
     m = re.search(r'<body[^>]*>(.*)</body>', raw, re.I | re.S)
     return m.group(1) if m else raw
 
-
 def _first_heading(fragment: str) -> str:
     m = re.search(r'<h[1-6][^>]*>(.*?)</h[1-6]>', fragment or '', re.I | re.S)
     return _strip_tags(m.group(1))[:120] if m else ''
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 9. CHUNKING + EMBEDDINGS
@@ -1769,11 +1703,9 @@ def chunk_sections(sections: list[dict]) -> list[dict]:
             pos = max(pos + 1, end - CHUNK_OVERLAP)
     return chunks
 
-
 def pack_emb(vec: np.ndarray) -> bytes:
     v = np.asarray(vec, dtype=np.float32).ravel()
     return struct.pack("<I", v.size) + v.tobytes()
-
 
 def unpack_emb(blob) -> np.ndarray | None:
     if not blob:
@@ -1784,10 +1716,8 @@ def unpack_emb(blob) -> np.ndarray | None:
     except Exception:
         return None
 
-
 def emb_sig(model_tag: str) -> str:
     return f"{EMB_SIG_PREFIX}:{model_tag}"
-
 
 def rank_by_vector(qv: np.ndarray, rows) -> list[tuple]:
     """Score (rel_path, idx, section, offset, text, emb) rows against a query
@@ -1807,14 +1737,12 @@ def rank_by_vector(qv: np.ndarray, rows) -> list[tuple]:
     out.sort(key=lambda t: -t[0])
     return out
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # 10. MISC
 # ══════════════════════════════════════════════════════════════════════════════
 
 def reader_for(fmt: str) -> str:
     return 'paged' if fmt in PAGED_FORMATS else 'flow'
-
 
 def sort_title(title: str) -> str:
     """'The Hobbit' → 'hobbit, the' so browsing by title isn't 4000 T's."""
@@ -1824,11 +1752,9 @@ def sort_title(title: str) -> str:
         return f"{m.group(2)}, {m.group(1)}".lower()
     return t.lower()
 
-
 def cover_cache_name(rel_path: str) -> str:
     h = hashlib.sha1(rel_path.encode('utf-8')).hexdigest()
     return f"{h}.jpg"
-
 
 def make_cover_jpeg(data: bytes, max_edge: int = 640) -> bytes | None:
     """Normalise any cover image to a bounded JPEG. cv2 is already a hard dep."""
@@ -1850,7 +1776,6 @@ def make_cover_jpeg(data: bytes, max_edge: int = 640) -> bytes | None:
     except Exception:
         return None
 
-
 def render_pdf_page(abs_path: str, page: int, dpi: int = 150) -> bytes | None:
     doc = _open_pdf(abs_path)
     if doc is None:
@@ -1868,7 +1793,6 @@ def render_pdf_page(abs_path: str, page: int, dpi: int = 150) -> bytes | None:
         except Exception:
             pass
 
-
 def page_count_for(abs_path: str, fmt: str) -> int | None:
     if fmt == 'pdf':
         doc = _open_pdf(abs_path)
@@ -1884,7 +1808,6 @@ def page_count_for(abs_path: str, fmt: str) -> int | None:
     if fmt in COMIC_ARCHIVE_EXTS or fmt in ('cbz', 'cbr', 'cb7', 'cbt', 'cba'):
         return len(comic_page_names(abs_path, fmt))
     return None
-
 
 def pdf_is_probably_comic(abs_path: str) -> bool:
     """A PDF whose first pages carry almost no extractable text is a scan — i.e.

@@ -77,7 +77,6 @@ try:
 except Exception:
     _HAVE_IQA = False
 
-
 # ── model registry ────────────────────────────────────────────────────────────
 # NR-IQA ONLY. Each entry:
 #   id        stable key persisted in settings / DB
@@ -172,7 +171,6 @@ _FULL_REFERENCE = {
     "srsim", "vifp", "ckdn", "deepdc", "msswd",
 }
 
-
 def _assert_nr():
     """Guard: fail loudly at import time if a full-reference metric ever sneaks
     into MODELS. Cheap insurance against a copy-paste mistake."""
@@ -183,9 +181,7 @@ def _assert_nr():
                 f"iqa.MODELS contains full-reference metric {name!r} "
                 f"(id={m['id']!r}); only no-reference models are valid here.")
 
-
 _assert_nr()
-
 
 def list_models():
     """Registry entries for the settings dropdown, each with an `available` flag
@@ -209,7 +205,6 @@ def list_models():
         })
     return out
 
-
 # ── active model selection ────────────────────────────────────────────────────
 MODEL_DIR = os.environ.get("IQA_MODEL_DIR", "models")
 _MODEL_FILE = os.path.join(MODEL_DIR, "brisque_model_live.yml")
@@ -229,7 +224,6 @@ if _active not in _BY_ID:
 
 _lock = threading.RLock()
 
-
 def set_model(model_id):
     """Select the active NR-IQA model. Unknown ids fall back to the default.
     Returns the id actually in effect. Loading is lazy — this is cheap."""
@@ -238,16 +232,13 @@ def set_model(model_id):
         _active = model_id if model_id in _BY_ID else DEFAULT_MODEL
         return _active
 
-
 def get_model():
     """Id of the currently active model."""
     return _active
 
-
 def model_info(model_id=None):
     """Registry entry for a model (default: the active one)."""
     return _BY_ID.get(model_id or _active, _BY_ID[DEFAULT_MODEL])
-
 
 # ── backends ──────────────────────────────────────────────────────────────────
 
@@ -264,7 +255,6 @@ def _ensure_brisque_files():
         return os.path.exists(_MODEL_FILE) and os.path.exists(_RANGE_FILE)
     except Exception:
         return False
-
 
 def _build_opencv_brisque():
     """cv2 BRISQUE -> callable(img_bgr) -> float|None. None if unusable."""
@@ -285,7 +275,6 @@ def _build_opencv_brisque():
             return None
 
     return score
-
 
 def _build_pyiqa(spec):
     """pyiqa metric -> callable(img_bgr) -> float|None. None if unusable.
@@ -317,7 +306,6 @@ def _build_pyiqa(spec):
 
     return score
 
-
 def _build_scorer(mid):
     """Build the scorer callable for `mid`, with BRISQUE fallback. Returns a
     callable, or None only when even the default couldn't be built."""
@@ -329,9 +317,7 @@ def _build_scorer(mid):
         fn = _get_scorer(DEFAULT_MODEL)
     return fn
 
-
 _registered_scorers: set = set()
-
 
 def _get_scorer(model_id=None):
     """Lazily build the scorer for `model_id` via the central load-on-demand
@@ -355,7 +341,6 @@ def _get_scorer(model_id=None):
             _registered_scorers.add(key)
     return model_registry.acquire(key)
 
-
 def _effective_id(model_id=None):
     """Which model will ACTUALLY run for `model_id`, accounting for fallback.
 
@@ -374,13 +359,11 @@ def _effective_id(model_id=None):
         return DEFAULT_MODEL
     return mid
 
-
 def available(model_id=None):
     """True if the given (default: active) NR-IQA model is usable right now.
     Note this is True when a fallback is serving the request — use
     `_effective_id()` to find out what is really running."""
     return _get_scorer(model_id) is not None
-
 
 # ── scoring ───────────────────────────────────────────────────────────────────
 
@@ -396,7 +379,6 @@ def _normalize(raw, spec):
     x = max(0.0, min(1.0, x))                # clamp: models can overshoot
     return (1.0 - x) if spec["lower_better"] else x
 
-
 def score(img_bgr, model_id=None):
     """Native score from the active (or given) model. Higher may mean better or
     worse depending on the model — use `quality()` unless you need the raw
@@ -406,7 +388,6 @@ def score(img_bgr, model_id=None):
         return None
     return fn(img_bgr)
 
-
 def quality(img_bgr, model_id=None):
     """Normalized quality in 0..1, ALWAYS higher = better. None if unavailable.
 
@@ -415,12 +396,10 @@ def quality(img_bgr, model_id=None):
     eff = _effective_id(model_id)
     return _normalize(score(img_bgr, model_id), model_info(eff))
 
-
 def brisque(img_bgr):
     """DEPRECATED back-compat shim: raw score from the *active* model, which is
     no longer necessarily BRISQUE. Prefer `score()` / `quality()`."""
     return score(img_bgr)
-
 
 def _structure(img_bgr):
     """Cheap structural stats to catch blank/featureless junk that distortion
@@ -432,7 +411,6 @@ def _structure(img_bgr):
     except Exception:
         return 999.0, 1.0   # on error, assume "fine" so we don't false-flag
 
-
 # ── thresholds (tunable) ──────────────────────────────────────────────────────
 # Expressed on the NORMALIZED 0..1 scale so they hold across every model. 0.35
 # is roughly where BRISQUE 65 (the old BRISQUE_BAD) lands.
@@ -442,7 +420,6 @@ LOW_EDGE_DENSITY = 0.004 # edge-pixel fraction below this => near-featureless
 
 # Legacy alias: old callers passed BRISQUE-native thresholds (higher = worse).
 BRISQUE_BAD = 65.0
-
 
 def assess(img_bgr, quality_bad=None, blank_std=None, low_edge_density=None,
            model_id=None, brisque_bad=None):
@@ -503,7 +480,6 @@ def assess(img_bgr, quality_bad=None, blank_std=None, low_edge_density=None,
             "sharpness": lum_std, "edges": edge_density, "blank": is_blank,
             "bad": bool(reasons), "reason": "; ".join(reasons)}
 
-
 def assess_batch(imgs_bgr, **kw):
     """Assess a list of images. We loop rather than batch: pyiqa models like
     MUSIQ take native-resolution input, so images in a chunk rarely share a
@@ -511,7 +487,6 @@ def assess_batch(imgs_bgr, **kw):
     change the score). The staged runner already chunks, so this is fine.
     Returns a list of assess() dicts aligned with the input."""
     return [assess(im, **kw) for im in imgs_bgr]
-
 
 def to_stars(q, blank=False):
     """Map a NORMALIZED quality (0..1, higher = better) to 0..5 stars.

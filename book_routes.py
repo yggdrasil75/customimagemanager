@@ -48,7 +48,6 @@ from flask import request, jsonify, send_file, Response
 
 import book_index as bi
 
-
 # Filled in by register().
 CTX: dict = {}
 
@@ -65,28 +64,22 @@ book_state = {
 # OCR is a long job, and starting one you can't stop is a trap.
 _comic_cancel = threading.Event()
 
-
 def _db():
     return CTX["db"]()
-
 
 def _media():
     return CTX["media_dir"]
 
-
 def _abs(rel):
     return CTX["safe_path"](_media(), rel)
 
-
 def _log():
     return CTX["logger"]
-
 
 def _cache_dir():
     d = os.path.join(_media(), ".bookcache")
     os.makedirs(d, exist_ok=True)
     return d
-
 
 def _user():
     """Current username, or '' when auth is off. Progress is per-user so a
@@ -96,7 +89,6 @@ def _user():
         return (fn() if callable(fn) else "") or ""
     except Exception:
         return ""
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Indexing
@@ -188,7 +180,6 @@ def _upsert_book(rel_path, abs_path, verdict, force=False) -> bool:
     db.commit()
     return True
 
-
 def _record_triage(rel_path, abs_path, verdict):
     """Park an undecidable file in the triage queue with enough context for a
     human to answer in one glance."""
@@ -216,7 +207,6 @@ def _record_triage(rel_path, abs_path, verdict):
     """, (rel_path, os.path.splitext(rel_path)[1].lower(), verdict.fmt or "",
           verdict.reason, size, preview, time.time()))
     db.commit()
-
 
 def _index_background(force=False):
     if book_state["indexing"]:
@@ -278,7 +268,6 @@ def _index_background(force=False):
     finally:
         book_state["indexing"] = False
 
-
 def reconcile():
     """Drop book rows whose file has vanished, then run an incremental scan.
 
@@ -298,7 +287,6 @@ def reconcile():
         _log().info(f"book reconcile purged {len(gone)} deleted books")
     _index_background(force=False)
     return len(gone)
-
 
 def index_one(rel_path: str) -> dict:
     """Index exactly ONE book. Called by manager.api_upload.
@@ -329,7 +317,6 @@ def index_one(rel_path: str) -> dict:
     elif v.status == "triage":
         _record_triage(rel_path, ap, v)
     return v.as_dict()
-
 
 def rename_book(old_rel: str, new_rel: str) -> bool:
     """Repoint every book table from old_rel to new_rel. Called by api_move.
@@ -370,7 +357,6 @@ def rename_book(old_rel: str, new_rel: str) -> bool:
     db.commit()
     return True
 
-
 def sha_exists(sha: str) -> str | None:
     """rel_path of a book whose content hash matches, or None.
 
@@ -403,7 +389,6 @@ def sha_exists(sha: str) -> str | None:
     db.commit()
     return None
 
-
 def _sha256_file(path: str) -> str:
     import hashlib
     h = hashlib.sha256()
@@ -411,7 +396,6 @@ def _sha256_file(path: str) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
-
 
 def delete_book(rel_path: str, remove_file: bool = True) -> bool:
     """Delete a book: its rows, its cover cache, and optionally the file."""
@@ -425,7 +409,6 @@ def delete_book(rel_path: str, remove_file: bool = True) -> bool:
             return False
     return True
 
-
 def _purge_book(rel_path):
     db = _db()
     row = db.execute("SELECT cover FROM books WHERE rel_path=?", (rel_path,)).fetchone()
@@ -438,7 +421,6 @@ def _purge_book(rel_path):
               "book_progress", "book_bookmarks"):
         db.execute(f"DELETE FROM {t} WHERE rel_path=?", (rel_path,))
     db.commit()
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Text extraction
@@ -477,7 +459,6 @@ def _extract_one(rel_path) -> str:
     db.commit()
     return res.status
 
-
 def _extract_background(force=False):
     if book_state["extracting"]:
         return
@@ -503,7 +484,6 @@ def _extract_background(force=False):
     finally:
         book_state["extracting"] = False
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # Comic pages — panel detection + OCR
 # ══════════════════════════════════════════════════════════════════════════════
@@ -511,7 +491,6 @@ def _extract_background(force=False):
 def _page_row(rel_path, n):
     return _db().execute("SELECT * FROM book_pages WHERE rel_path=? AND page=?",
                          (rel_path, n)).fetchone()
-
 
 def _save_page(rel_path, n, res):
     _db().execute("""
@@ -528,7 +507,6 @@ def _save_page(rel_path, n, res):
           res.get("text", ""), res.get("panel_src", ""), res.get("engine", ""),
           1 if res.get("rtl") else 0, time.time()))
     _db().commit()
-
 
 def _comic_background(rel_path, do_panels, do_ocr, force, rtl, per_panel):
     """Analyse every page of one comic.
@@ -626,7 +604,6 @@ def _comic_background(rel_path, do_panels, do_ocr, force, rtl, per_panel):
         book_state.update(comic=False, comic_book="", comic_stage="")
         CTX.get("db_close", lambda: None)()
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # Embeddings
 # ══════════════════════════════════════════════════════════════════════════════
@@ -662,7 +639,6 @@ def _embed_background(force=False):
     finally:
         book_state["embedding"] = False
 
-
 def _embed_one(rel_path, sig):
     db = _db()
     secs = db.execute(
@@ -681,7 +657,6 @@ def _embed_one(rel_path, sig):
                     bi.pack_emb(vec) if vec is not None else None, sig))
     db.execute("UPDATE books SET emb_status='ok' WHERE rel_path=?", (rel_path,))
     db.commit()
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Row shaping
@@ -705,7 +680,6 @@ def _row_dict(r):
         "text_status": r["text_status"], "text_error": r["text_error"],
         "source": r["source"],
     }
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # register()
@@ -1329,7 +1303,6 @@ def register(app, ctx: dict):
         return jsonify({"success": True, "count": len(rows)})
 
     return app
-
 
 def start_background(force=False):
     """Called from manager.py's __main__ block, mirroring the music indexer."""

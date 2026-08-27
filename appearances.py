@@ -14,11 +14,9 @@ move a photo between eras) when it disagrees.
 import numpy as np
 from typing import Any, Optional
 
-
 def _normalise(vecs: np.ndarray) -> np.ndarray:
     n = np.linalg.norm(vecs, axis=1, keepdims=True)
     return vecs / np.where(n == 0, 1.0, n)
-
 
 def cluster_eras(embeddings: np.ndarray, eps: float = 0.35,
                  min_size: int = 3) -> np.ndarray:
@@ -52,7 +50,6 @@ def cluster_eras(embeddings: np.ndarray, eps: float = 0.35,
         current += 1
     return labels
 
-
 def order_eras_by_time(labels: np.ndarray, epochs: list) -> dict[int, int]:
     """! @brief Order raw era labels chronologically using each era's median date.
     @param epochs Per-face capture epoch (float) or None; undated faces are ignored
@@ -67,7 +64,6 @@ def order_eras_by_time(labels: np.ndarray, epochs: list) -> dict[int, int]:
         med[lbl] = float(np.median(vals)) if vals else float("inf")
     ordered = sorted(med, key=lambda l: (med[l], l))
     return {lbl: rank for rank, lbl in enumerate(ordered)}
-
 
 def flag_date_disagreements(labels: np.ndarray, epochs: list,
                             max_mad: float = 4.0,

@@ -38,7 +38,6 @@ import iptc_fields as ifields
 
 log = logging.getLogger("xmp_import")
 
-
 def _candidate_paths(filepath):
     """Yield the paths worth trying for XMP data, most-specific first.
 
@@ -63,14 +62,12 @@ def _candidate_paths(filepath):
             seen.append(p)
             yield p
 
-
 def _read_raw_xmp(filepath):
     """Return the raw {tag_string: value} XMP dict from the first readable
     candidate path, or ({}, None) if none. tag_string looks like
     'Xmp.acdsee.Caption'."""
     raw, source, _ = resolve_xmp(filepath)
     return raw, source
-
 
 def resolve_xmp(filepath):
     """Resolve XMP for a file from the best available source and return
@@ -112,7 +109,6 @@ def resolve_xmp(filepath):
             log.warning(f"pyexiv2 read_xmp failed on {p}: {e}")
     return {}, None, ""
 
-
 def _split_tag(tag_string):
     """'Xmp.acdsee.Caption' -> ('acdsee', 'Caption').
     Returns (None, None) for anything that doesn't fit the pattern."""
@@ -122,7 +118,6 @@ def _split_tag(tag_string):
         # remainder joined so 'Xmp.acdsee.Categories' style structs survive.
         return parts[1], ".".join(parts[2:])
     return None, None
-
 
 def read_xmp(filepath):
     """Read XMP and return a structure organized by namespace:
@@ -204,13 +199,11 @@ def read_xmp(filepath):
 
     return {"source": source, "namespaces": namespaces_out}
 
-
 # ── Ingest folding ──────────────────────────────────────────────────────────
 def _as_list(v):
     if v is None:
         return []
     return list(v) if isinstance(v, (list, tuple)) else [v]
-
 
 def _langalt_text(value):
     """Extract plain text from an XMP value that may be a lang-alt block.
@@ -231,7 +224,6 @@ def _langalt_text(value):
         return str(next(iter(value.values())))
     lst = _as_list(value)
     return str(lst[0]) if lst else ""
-
 
 def folded_values(filepath):
     """Extract only the acdsee (and any other feeds='...') values that fold into
@@ -259,7 +251,6 @@ def _flatten_hierarchical_tag(path):
         s = s.replace(sep, "/")
     parts = [p.strip() for p in s.split("/") if p.strip()]
     return parts[-1] if parts else s
-
 
 def folded_values(filepath):
     """Extract the XMP values that fold into fields we already maintain, so the
@@ -332,7 +323,6 @@ def folded_values(filepath):
     return {"description": description, "tags": tags, "rating": rating,
             "event": event, "catalog_sets": catalog_sets}
 
-
 def dc_extras(filepath):
     """Extract Dublin Core fields that are meaningful but have no column in the
     current `files` schema yet: creator (artist), date (initial creation date),
@@ -348,7 +338,6 @@ def dc_extras(filepath):
     dates = [str(x) for x in _as_list(raw.get("Xmp.dc.date")) if str(x).strip()]
     date = min(dates) if dates else None   # ISO 8601 sorts chronologically
     return {"creator": creator, "date": date, "language": language}
-
 
 # ── IPTC Extension (iptcExt) folds ──────────────────────────────────────────
 # Three things the ingest path pulls out of the IPTC Extension schema:
@@ -391,7 +380,6 @@ def iptcext_creators(filepath):
             seen.add(n); out.append(n)
     return out
 
-
 def iptcext_model_age(filepath):
     """Return the model age from IPTC Extension ModelAge, or None.
 
@@ -414,7 +402,6 @@ def iptcext_model_age(filepath):
                 except (TypeError, ValueError):
                     continue
     return min(ages) if ages else None
-
 
 def iptcext_persons(filepath):
     """Return the names of people shown, from IPTC Extension PersonInImage and
@@ -451,7 +438,6 @@ def iptcext_persons(filepath):
             seen.add(n); out.append(n)
     return out
 
-
 def prism_extras(filepath):
     """Extract the PRISM fields that map to our columns:
       * genre      — prism:Genre (image genre) -> our genre column
@@ -487,7 +473,6 @@ def prism_extras(filepath):
             page_count = None
     return {"genre": genre, "alt_of": alt_of, "page_count": page_count}
 
-
 def is_ai_generated(filepath):
     """True if the file's IPTC Extension metadata marks it as AI-generated.
 
@@ -521,7 +506,6 @@ def is_ai_generated(filepath):
                 return True
     return False
 
-
 # ── DataOnScreen (iptcExt TextRegion) -> MWG-RS ─────────────────────────────
 # IPTC Extension DataOnScreen is a repeating TextRegion struct: each has a
 # RegionText plus a Region (Area struct). Unlike acdsee-rs (center-based), the
@@ -531,7 +515,6 @@ def is_ai_generated(filepath):
 # region label so on-screen text is searchable alongside other regions. These
 # import unconfirmed (they're extracted metadata, not user-placed boxes).
 _DOS_BASE = "Xmp.iptcExt.DataOnScreen"
-
 
 def _parse_dataonscreen_regions(xmp):
     """Read Xmp.iptcExt.DataOnScreen text regions and return them in the MWG
@@ -581,7 +564,6 @@ def _parse_dataonscreen_regions(xmp):
         })
     return regions
 
-
 def read_dataonscreen_regions(filepath):
     """Convenience wrapper: read the file's XMP and return converted DataOnScreen
     text regions (MWG dict shape). [] when there are none / pyexiv2 unavailable.
@@ -594,7 +576,6 @@ def read_dataonscreen_regions(filepath):
     except Exception as e:
         log.warning(f"DataOnScreen region parse failed on {filepath}: {e}")
         return []
-
 
 # ── ACDSee regions (acdsee-rs) -> MWG-RS ────────────────────────────────────
 # ACDSee stores face/object regions in the Xmp.acdsee-rs.Regions struct. Its
@@ -609,7 +590,6 @@ def read_dataonscreen_regions(filepath):
 # (write-back, DB sync, YOLO export) treats them identically.
 _ACD_RS_BASE = "Xmp.acdsee-rs.Regions"
 _ACD_RS_LIST = _ACD_RS_BASE + "/acdsee-rs:RegionList"
-
 
 def _acd_area(xmp, region_path, which):
     """Return (cx, cy, w, h) for the given area struct ('DLYArea'|'ALGArea')
@@ -626,7 +606,6 @@ def _acd_area(xmp, region_path, which):
     if not (w > 0 and h > 0):
         return None
     return cx, cy, w, h
-
 
 def _parse_acdsee_regions(xmp):
     """Read regions from Xmp.acdsee-rs.Regions and return them in the same MWG
@@ -667,7 +646,6 @@ def _parse_acdsee_regions(xmp):
         })
     return regions
 
-
 def read_acdsee_regions(filepath):
     """Convenience wrapper: read the file's XMP and return converted ACDSee
     regions (MWG dict shape). [] when there are none or pyexiv2 is unavailable.
@@ -681,7 +659,6 @@ def read_acdsee_regions(filepath):
     except Exception as e:
         log.warning(f"acdsee region parse failed on {filepath}: {e}")
         return []
-
 
 # ── Crop geometry (crd) for duplicate / crop detection ──────────────────────
 # Adobe Camera Raw's crd:Crop{Top,Left,Bottom,Right} are the normalized (0..1)
@@ -720,7 +697,6 @@ def crop_box(filepath):
     angle = _f("CropAngle") or 0.0
     return {"x": left, "y": top, "w": w, "h": h, "angle": angle}
 
-
 def is_cropped(filepath, epsilon=1e-3):
     """True if the file has a crd crop box that keeps less than the full frame.
     Cheap gate for the dedup path: only images that were actually cropped are
@@ -729,7 +705,6 @@ def is_cropped(filepath, epsilon=1e-3):
     if box is None:
         return False
     return box["w"] < 1.0 - epsilon or box["h"] < 1.0 - epsilon
-
 
 def summarize(filepath):
     """Compact counts for logging / list views: how many known fields carry a

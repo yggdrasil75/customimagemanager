@@ -58,7 +58,6 @@ import numpy as np
 import object_grouping as og
 from collections import Counter
 
-
 # ── schema ────────────────────────────────────────────────────────────────────
 def ensure_tables(db):
     db.execute("""CREATE TABLE IF NOT EXISTS image_embeddings(
@@ -84,20 +83,16 @@ def ensure_tables(db):
         updated   REAL)""")
     db.commit()
 
-
 # ── blob helpers ──────────────────────────────────────────────────────────────
 def _pack(vec: np.ndarray) -> bytes:
     return np.ascontiguousarray(vec, np.float32).tobytes()
 
-
 def _unpack(blob: bytes, dim: int) -> np.ndarray:
     return np.frombuffer(blob, np.float32, count=dim).copy()
-
 
 def _normalise(v: np.ndarray) -> np.ndarray:
     n = np.linalg.norm(v)
     return v / n if n else v
-
 
 # ── STAGE: image embeddings ───────────────────────────────────────────────────
 def embed_image(img_bgr, cnn_model=None) -> np.ndarray | None:
@@ -118,7 +113,6 @@ def embed_image(img_bgr, cnn_model=None) -> np.ndarray | None:
     except Exception:
         return None
 
-
 def _have_embedding(db, rel_path, model, mtime):
     row = db.execute(
         "SELECT mtime, model FROM image_embeddings WHERE rel_path=?",
@@ -128,7 +122,6 @@ def _have_embedding(db, rel_path, model, mtime):
     same_model = (row["model"] or "") == (model or "")
     same_mtime = (mtime is None) or (row["mtime"] == mtime)
     return same_model and same_mtime
-
 
 def stage_embeddings(db, file_list, loader, cnn_model=None, mtime_of=None,
                      force=False, progress=None, should_stop=None):
@@ -166,7 +159,6 @@ def stage_embeddings(db, file_list, loader, cnn_model=None, mtime_of=None,
     if pending:
         _flush_embeddings(db, pending)
     return embedded
-
 
 def stage_embeddings_with(db, file_list, loader, embed_fn, model_tag,
                           mtime_of=None, force=False, progress=None,
@@ -208,7 +200,6 @@ def stage_embeddings_with(db, file_list, loader, embed_fn, model_tag,
         _flush_embeddings(db, pending)
     return embedded
 
-
 def embedding_model_tag(db):
     """The model tag currently stored (or None if the table is empty). Lets the
     UI tell whether stored vectors are OAI (text-searchable) or local-CNN."""
@@ -217,18 +208,15 @@ def embedding_model_tag(db):
     ).fetchone()
     return row["model"] if row else None
 
-
 def _flush_embeddings(db, rows):
     db.executemany(
         "INSERT OR REPLACE INTO image_embeddings"
         "(rel_path,dim,vec,model,mtime,updated) VALUES (?,?,?,?,?,?)", rows)
     db.commit()
 
-
 def embedding_count(db) -> int:
     ensure_tables(db)
     return db.execute("SELECT COUNT(*) FROM image_embeddings").fetchone()[0]
-
 
 # ── STAGE: cluster images ─────────────────────────────────────────────────────
 def _iter_embeddings_ordered(db, dim, batch=4096):
@@ -245,7 +233,6 @@ def _iter_embeddings_ordered(db, dim, batch=4096):
         mat = np.stack([_unpack(r["vec"], dim) for r in rows])
         yield names, mat
         offset += len(rows)
-
 
 def _bruteforce_cluster(db, dim, total, eps, min_cluster, prog=None):
     """numpy-only fallback clusterer (no hnswlib). Loads all image vectors into
@@ -287,7 +274,6 @@ def _bruteforce_cluster(db, dim, total, eps, min_cluster, prog=None):
     keep = {root: idx for idx, (root, c) in enumerate(
         sorted(counts.items(), key=lambda kv: -kv[1])) if c >= min_cluster}
     return np.array([keep.get(int(r), -1) for r in roots], dtype=int)
-
 
 def stage_cluster_images(db, eps=0.16, min_cluster=2, progress=None):
     """Cluster the stored image embeddings with the SAME memory-flat streaming
@@ -345,13 +331,11 @@ def stage_cluster_images(db, eps=0.16, min_cluster=2, progress=None):
             break
     return len({int(x) for x in labels if x >= 0})
 
-
 def cluster_count(db) -> int:
     ensure_tables(db)
     row = db.execute(
         "SELECT COUNT(DISTINCT label) FROM image_clusters WHERE label>=0").fetchone()
     return row[0] if row else 0
-
 
 # ── STAGE: build cluster heuristics (the "concept map") ───────────────────────
 def stage_build_heuristics(db, tag_of=None, margin=2.0, progress=None):
@@ -421,7 +405,6 @@ def stage_build_heuristics(db, tag_of=None, margin=2.0, progress=None):
     summaries.sort(key=lambda r: -r["size"])
     return summaries
 
-
 # ── using the concept map ─────────────────────────────────────────────────────
 def load_heuristics(db):
     """Load all cluster concept maps into a compact in-RAM structure for scoring.
@@ -443,7 +426,6 @@ def load_heuristics(db):
     return {"labels": labels, "centroids": cents, "radii": radii,
             "spreads": spreads, "meta": meta, "dim": dim}
 
-
 def classify_vector(heur, vec, margin=2.0):
     """Assign a single (image or region) embedding to the nearest cluster concept
     and report whether it BELONGS or is an OUTLIER.
@@ -459,7 +441,6 @@ def classify_vector(heur, vec, margin=2.0):
     r = float(heur["radii"][j]); s = float(heur["spreads"][j])
     return {"label": int(heur["labels"][j]), "dist": d,
             "residual": d - r, "belongs": bool(d <= r + margin * s)}
-
 
 # ── image search via the persisted embeddings ─────────────────────────────────
 def search_by_vector(db, query_vec, top_k=60):
@@ -482,7 +463,6 @@ def search_by_vector(db, query_vec, top_k=60):
         return []
     order = np.argsort(-best_scores)[:top_k]
     return [(best_names[i], float(best_scores[i])) for i in order]
-
 
 def search_by_image(db, img_bgr, cnn_model=None, top_k=60):
     """Embed a query image and search. Returns [(rel_path, score)]."""

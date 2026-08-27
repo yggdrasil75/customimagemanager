@@ -36,7 +36,6 @@ try:                       # cv2 is already a hard dep of the app
 except Exception:          # pragma: no cover - defensive
     cv2 = None
 
-
 # ── extension sets ────────────────────────────────────────────────────────────
 # Still-image inputs that cjxl transcodes to a single-frame .jxl on upload.
 STILL_INPUT_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp'}
@@ -57,10 +56,8 @@ RAW_INPUT_EXTS = {
     '.fff', '.mef', '.mos', '.mrw', '.x3f', '.erf', '.kdc', '.dcr',
 }
 
-
 def is_raw(path: str) -> bool:
     return _ext(path) in RAW_INPUT_EXTS
-
 
 # Videos are stored with their ORIGINAL extension (no transcode possible).
 VIDEO_EXTS = {'.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v', '.mpg',
@@ -106,7 +103,6 @@ except Exception:                          # book support optional at import tim
         '.pdf', '.txt', '.htm', '.html', '.doc', '.pdb', '.pkg', '.opf',
     }
 
-
 def is_book_candidate(path: str) -> bool:
     """True if the extension puts this file in the running for being a book.
 
@@ -115,13 +111,11 @@ def is_book_candidate(path: str) -> bool:
     """
     return _ext(path) in BOOK_EXTS
 
-
 def is_book(path: str) -> bool:
     """True for extensions that are unambiguously a book/comic. Safe to use for
     routing decisions (which viewer, which mime); the ambiguous half of
     BOOK_EXTS deliberately returns False here."""
     return _ext(path) in UNAMBIGUOUS_BOOK_EXTS
-
 
 def is_uploadable_book(path: str) -> bool:
     """True for any book extension accepted on upload — the unambiguous books
@@ -129,7 +123,6 @@ def is_uploadable_book(path: str) -> bool:
     Use this (not is_book) in the upload pipeline to route a file to the
     store-original-bytes path instead of the image transcoder."""
     return _ext(path) in UPLOADABLE_BOOK_EXTS
-
 
 # Extensions accepted from an uploader / bulk-upload walk. Raws are accepted so
 # the upload handler can stash them (when keep_raws is on) and derive an image;
@@ -156,33 +149,26 @@ _VIDEO_MIME = {
     '.ogv': 'video/ogg',
 }
 
-
 # ── tiny predicates ───────────────────────────────────────────────────────────
 def _ext(path: str) -> str:
     return os.path.splitext(path)[1].lower()
 
-
 def is_video(path: str) -> bool:
     return _ext(path) in VIDEO_EXTS
-
 
 def is_audio(path: str) -> bool:
     return _ext(path) in AUDIO_EXTS
 
-
 def is_jxl(path: str) -> bool:
     return _ext(path) == '.jxl'
-
 
 def is_library_file(path: str) -> bool:
     """True for a stored asset (a .jxl or a native video). Replaces the old
     scattered `f.endswith('.jxl')` checks in library walks."""
     return _ext(path) in LIBRARY_EXTS
 
-
 def is_animated_input(path: str) -> bool:
     return _ext(path) in ANIMATED_INPUT_EXTS
-
 
 # ── animated-JXL detection ─────────────────────────────────────────────────────
 # The viewer needs to know whether a stored .jxl actually animates so it can
@@ -199,7 +185,6 @@ _anim_cache_lock = threading.Lock()
 # Duration (seconds) above which an animated JXL is handled like a video rather
 # than a boxable frame-strip. Kept here so backend and any caller agree.
 JXL_VIDEO_CUTOFF_S = 30.0
-
 
 def jxl_anim_info(path: str) -> dict:
     """Animation info for a stored JXL: {'animated','duration','n_frames'}.
@@ -250,7 +235,6 @@ def jxl_anim_info(path: str) -> dict:
         _anim_cache[key] = dict(result)
     return dict(result)
 
-
 def jxl_keyframe_indices(n_frames: int) -> list[int]:
     """Frame indices to expose as boxable keyframes for an animated JXL.
 
@@ -289,7 +273,6 @@ def jxl_keyframe_indices(n_frames: int) -> list[int]:
                 have.add(cand)
         idxs = sorted(idxs)
     return idxs
-
 
 def jxl_decode_frames(path: str, indices=None):
     """Decode selected frames of an animated JXL as a list of RGB uint8 arrays.
@@ -335,12 +318,10 @@ def jxl_decode_frames(path: str, indices=None):
             out.append(arr[i])
     return out
 
-
 def is_animated_jxl(path: str) -> bool:
     """True if `path` is a JXL with more than one frame. Backward-compatible
     thin wrapper over jxl_anim_info()."""
     return bool(jxl_anim_info(path).get('animated'))
-
 
 def kind(path: str) -> str:
     """'video' | 'audio' | 'book' | 'image' — the media_kind stored per row and
@@ -359,7 +340,6 @@ def kind(path: str) -> str:
         return 'book'
     return 'image'
 
-
 def mime_for(path: str) -> str | None:
     e = _ext(path)
     if e == '.jxl':
@@ -368,7 +348,6 @@ def mime_for(path: str) -> str | None:
     if v:
         return v
     return _BOOK_MIME.get(e) if e in BOOK_EXTS else None
-
 
 def stored_name(input_filename: str) -> str:
     """The on-disk name an uploaded file will take. Images/gifs become <base>.jxl;
@@ -388,7 +367,6 @@ def stored_name(input_filename: str) -> str:
     base, ext = os.path.splitext(input_filename)
     keep = VIDEO_EXTS | AUDIO_EXTS | UPLOADABLE_BOOK_EXTS
     return input_filename if ext.lower() in keep else base + '.jxl'
-
 
 # Mime types for serving a book straight to the browser (Download button, or an
 # external/OPDS reader). The in-app reader never uses these -- it gets rendered
@@ -421,7 +399,6 @@ _BOOK_MIME = {
     '.htm': 'text/html; charset=utf-8',
     '.html': 'text/html; charset=utf-8',
 }
-
 
 # ── content sniffing (for misnamed / extension-less uploads) ──────────────────
 # Maps a real, supported extension onto a file whose name lies about its type.
@@ -463,7 +440,6 @@ def sniff_ext(path: str) -> str | None:
     if head[:5] == b'%PDF-':                             return '.pdf'
     return None
 
-
 # Extensions that are interchangeable enough that a "mismatch" between the
 # filename and the sniffed content is not worth correcting. Sniffing can only
 # see a container's magic, not which codec is inside it, so these must not be
@@ -477,7 +453,6 @@ _EXT_ALIASES = [
     {'.png', '.apng'},                 # APNG is a PNG with extra chunks
 ]
 
-
 def ext_matches(declared: str, sniffed: str) -> bool:
     """True if a declared extension and a sniffed one describe the same thing.
     Treats known container/codec aliases (.jpg/.jpeg, .mkv/.webm, ...) as equal
@@ -486,7 +461,6 @@ def ext_matches(declared: str, sniffed: str) -> bool:
     if d == s:
         return True
     return any(d in grp and s in grp for grp in _EXT_ALIASES)
-
 
 def reconcile_ext(path: str, filename: str):
     """Reconcile a filename's extension against the file's actual CONTENT.
@@ -514,7 +488,6 @@ def reconcile_ext(path: str, filename: str):
     base = os.path.splitext(filename)[0] if declared else filename
     return (base or 'upload') + sniffed, sniffed, 'corrected'
 
-
 def related_exts(primary_path: str) -> list[str]:
     """Every extension that should move/delete together with an asset: its own
     primary extension plus the sidecars. Using this instead of a hard-coded
@@ -522,11 +495,9 @@ def related_exts(primary_path: str) -> list[str]:
     exts = {_ext(primary_path)} | set(SIDECAR_EXTS) | {'.jxl'}
     return [e for e in exts if e]
 
-
 # ── ffmpeg / ffprobe helpers ──────────────────────────────────────────────────
 def _have(tool: str) -> bool:
     return shutil.which(tool) is not None
-
 
 def video_poster_frame(path: str, seek: float = 1.0) -> np.ndarray | None:
     """Pull ONE representative frame from a video as an RGB uint8 ndarray, matching
@@ -562,7 +533,6 @@ def video_poster_frame(path: str, seek: float = 1.0) -> np.ndarray | None:
         frame = _grab(0.0)
     return frame
 
-
 def develop_raw(raw_path: str, out_png_path: str) -> bool:
     """Develop a camera RAW into a 16-bit RGB PNG at out_png_path.
 
@@ -593,7 +563,6 @@ def develop_raw(raw_path: str, out_png_path: str) -> bool:
     except Exception:
         return False
 
-
 def video_duration(path: str) -> float | None:
     """Duration in seconds via ffprobe, or None if unavailable."""
     if not _have('ffprobe'):
@@ -607,14 +576,12 @@ def video_duration(path: str) -> float | None:
     except Exception:
         return None
 
-
 # Animations longer than this (seconds) are transcoded to a real video at upload
 # rather than stored as an animated JXL — JXL is a poor video container, and a
 # real video flows through the native <video> + time-indexed-box pipeline.
 ANIM_VIDEO_CUTOFF_S = 30.0
 # Target container/codec for those transcodes.
 ANIM_VIDEO_EXT = '.mkv'
-
 
 def transcode_animation_to_video(src_path: str, out_path: str,
                                  delays_ms=None, jxl_frames=None) -> bool:

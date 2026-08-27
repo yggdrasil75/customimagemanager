@@ -37,7 +37,6 @@ except Exception:                        # pragma: no cover - env without pyexiv
 # {"Xmp.dc.creator": ("seq", True), "Xmp.dc.rights": ("lang-alt", False), ...}
 _SCHEMA = None
 
-
 def _schema():
     global _SCHEMA
     if _SCHEMA is None:
@@ -48,11 +47,9 @@ def _schema():
                 _SCHEMA[token] = (f.get("dtype"), bool(f.get("is_list")))
     return _SCHEMA
 
-
 def known_tokens():
     """All XMP tokens the schema defines (for the UI's target picker)."""
     return sorted(_schema().keys())
-
 
 def _normalize_token(tok):
     """Accept 'Xmp.dc.creator', 'dc.creator', or 'dc:creator' → the pyexiv2
@@ -63,7 +60,6 @@ def _normalize_token(tok):
     if not t.startswith("Xmp."):
         t = "Xmp." + t
     return t if t in _schema() else None
-
 
 def _coerce(value, dtype, is_list):
     """Shape a raw value for pyexiv2's modify_xmp.
@@ -85,7 +81,6 @@ def _coerce(value, dtype, is_list):
     if isinstance(value, (list, tuple)):
         return " ".join(str(v) for v in value)
     return str(value)
-
 
 def write_xmp(filepath, patch):
     """Apply a {token: value} XMP patch to `filepath`, writing to its .xmp
@@ -130,7 +125,6 @@ def write_xmp(filepath, patch):
     except Exception as e:
         result["skipped"].append({"token": "*", "reason": str(e)})
     return result
-
 
 if __name__ == "__main__":
     # Offline self-check: token normalization + coercion (no file writes).

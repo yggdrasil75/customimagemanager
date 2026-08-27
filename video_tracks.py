@@ -37,11 +37,9 @@ import uuid
 
 BOX_KEYS = ("cx", "cy", "w", "h")
 
-
 def sidecar_path(video_path: str) -> str:
     """`/media/clip.mp4` → `/media/clip.tracks.json`."""
     return os.path.splitext(video_path)[0] + ".tracks.json"
-
 
 # ── load / save ───────────────────────────────────────────────────────────────
 def load(video_path: str) -> dict:
@@ -62,7 +60,6 @@ def load(video_path: str) -> dict:
     except Exception:
         return {"version": 1, "tracks": []}
 
-
 def save(video_path: str, doc: dict) -> dict:
     """Validate and write the document. Empty tracks are dropped; if nothing is
     left the sidecar is deleted so we don't litter empty files. Returns the
@@ -82,7 +79,6 @@ def save(video_path: str, doc: dict) -> dict:
         json.dump(out, fh, ensure_ascii=False, indent=1)
     os.replace(tmp, p)
     return out
-
 
 def _clean_track(t: dict) -> dict:
     kfs = []
@@ -107,11 +103,9 @@ def _clean_track(t: dict) -> dict:
         "keyframes": kfs,
     }
 
-
 def _clamp(v) -> float:
     v = float(v)
     return 0.0 if v < 0 else 1.0 if v > 1 else v
-
 
 # ── interpolation ─────────────────────────────────────────────────────────────
 def box_at(track: dict, t: float) -> dict | None:
@@ -142,7 +136,6 @@ def box_at(track: dict, t: float) -> dict | None:
     f = 0.0 if span <= 0 else (t - prev["t"]) / span
     return {k: prev[k] + (nxt[k] - prev[k]) * f for k in BOX_KEYS}
 
-
 def boxes_at(doc: dict, t: float) -> list[dict]:
     """Every visible box at time ``t`` across all tracks, each annotated with its
     track id / label / class — ready to hand to an overlay renderer."""
@@ -154,7 +147,6 @@ def boxes_at(doc: dict, t: float) -> list[dict]:
                         "class_name": tr.get("class_name", "object"),
                         "confirmed": tr.get("confirmed", True), **b})
     return out
-
 
 def labels(doc: dict) -> list[str]:
     """Distinct non-empty person labels in the document (for tagging / search)."""

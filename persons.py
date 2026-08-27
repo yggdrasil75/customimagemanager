@@ -38,11 +38,9 @@ from typing import Any, Optional
 
 DESCRIPTOR = "descriptor.json"
 
-
 def tpose_member(appearance_id: str) -> str:
     """! @brief Container member name for one appearance's canonical T-pose."""
     return f"tpose_{appearance_id}.json"
-
 
 def mesh_member(appearance_id: str) -> str:
     """! @brief Container member name for one appearance's canonical body mesh."""
@@ -81,17 +79,14 @@ MULTI_RELATIONS: tuple[str, ...] = (
 )
 RELATION_LINES: tuple[str, ...] = SINGLE_RELATIONS + MULTI_RELATIONS
 
-
 def persons_dir(media_dir: str) -> str:
     """! @brief Absolute path to the media root's `.persons` store, created on demand."""
     d = os.path.join(media_dir, ".persons")
     os.makedirs(d, exist_ok=True)
     return d
 
-
 def _path(media_dir: str, person_uuid: str) -> str:
     return os.path.join(persons_dir(media_dir), f"{person_uuid}.person")
-
 
 def blank_appearance(appearance_id: str) -> dict[str, Any]:
     """! @brief An empty time-scoped appearance (one stable era of a person's look).
@@ -111,7 +106,6 @@ def blank_appearance(appearance_id: str) -> dict[str, Any]:
         "has_mesh": False,
     }
 
-
 def _blank(person_uuid: str) -> dict[str, Any]:
     return {
         "uuid": person_uuid,
@@ -123,7 +117,6 @@ def _blank(person_uuid: str) -> dict[str, Any]:
         "appearances": [],
     }
 
-
 def _edge(uuid_or_none: Optional[str], name: str) -> dict[str, Any]:
     """! @brief One relationship endpoint: a link to a known person, or an external name.
     @param uuid_or_none The linked person's uuid, or None for an external person who
@@ -131,7 +124,6 @@ def _edge(uuid_or_none: Optional[str], name: str) -> dict[str, Any]:
     @return {uuid, name}; uuid is None for externals so reads can tell them apart.
     """
     return {"uuid": uuid_or_none, "name": name}
-
 
 def _migrate(desc: dict[str, Any]) -> dict[str, Any]:
     """! @brief Bring an older record up to the current schema without losing data.
@@ -151,11 +143,9 @@ def _migrate(desc: dict[str, Any]) -> dict[str, Any]:
     desc.setdefault("appearances", [])
     return desc
 
-
 def new_uuid() -> str:
     """! @brief Fresh stable id a person record owns for life (survives reclustering)."""
     return uuid.uuid4().hex
-
 
 def read(media_dir: str, person_uuid: str) -> Optional[dict[str, Any]]:
     """! @brief Load a person's descriptor.
@@ -170,7 +160,6 @@ def read(media_dir: str, person_uuid: str) -> Optional[dict[str, Any]]:
     except Exception:
         return None
 
-
 def read_member(media_dir: str, person_uuid: str, member: str) -> Optional[bytes]:
     """! @brief Read one raw member (e.g. mesh.obj) from a person container.
     @return The bytes, or None when the record or member is absent.
@@ -184,7 +173,6 @@ def read_member(media_dir: str, person_uuid: str, member: str) -> Optional[bytes
     except (KeyError, Exception):
         return None
 
-
 def _rewrite(media_dir: str, person_uuid: str, members: dict[str, bytes]) -> None:
     """! @brief Atomically write a person container from a full member map."""
     path = _path(media_dir, person_uuid)
@@ -197,14 +185,12 @@ def _rewrite(media_dir: str, person_uuid: str, members: dict[str, bytes]) -> Non
         f.write(buf.getvalue())
     os.replace(tmp, path)
 
-
 def _members(media_dir: str, person_uuid: str) -> dict[str, bytes]:
     path = _path(media_dir, person_uuid)
     if not os.path.exists(path):
         return {}
     with zipfile.ZipFile(path) as z:
         return {n: z.read(n) for n in z.namelist()}
-
 
 def write(media_dir: str, descriptor: dict[str, Any]) -> str:
     """! @brief Persist a descriptor, preserving any existing tpose/mesh members.
@@ -216,13 +202,11 @@ def write(media_dir: str, descriptor: dict[str, Any]) -> str:
     _rewrite(media_dir, person_uuid, members)
     return person_uuid
 
-
 def put_member(media_dir: str, person_uuid: str, member: str, data: bytes) -> None:
     """! @brief Attach/replace a binary member (an appearance's tpose/mesh) in the container."""
     members = _members(media_dir, person_uuid)
     members[member] = data
     _rewrite(media_dir, person_uuid, members)
-
 
 def create(media_dir: str, name: str = "") -> dict[str, Any]:
     """! @brief Create and persist a blank person record.
@@ -233,14 +217,12 @@ def create(media_dir: str, name: str = "") -> dict[str, Any]:
     write(media_dir, desc)
     return desc
 
-
 def get_appearance(desc: dict[str, Any], appearance_id: str) -> Optional[dict[str, Any]]:
     """! @brief Find an appearance by id within a loaded descriptor."""
     for a in desc["appearances"]:
         if a["id"] == appearance_id:
             return a
     return None
-
 
 def upsert_appearance(media_dir: str, person_uuid: str,
                       appearance: dict[str, Any]) -> bool:
@@ -254,7 +236,6 @@ def upsert_appearance(media_dir: str, person_uuid: str,
     desc["appearances"].append(appearance)
     write(media_dir, desc)
     return True
-
 
 def set_field(media_dir: str, person_uuid: str, section: str, key: str,
               value: Any, appearance_id: Optional[str] = None) -> bool:
@@ -285,7 +266,6 @@ def set_field(media_dir: str, person_uuid: str, section: str, key: str,
     write(media_dir, desc)
     return True
 
-
 def set_relationship(media_dir: str, person_uuid: str, line: str,
                      edges: list) -> bool:
     """! @brief Replace one relationship line (mother/father/spouse/siblings/children).
@@ -304,7 +284,6 @@ def set_relationship(media_dir: str, person_uuid: str, line: str,
     write(media_dir, desc)
     return True
 
-
 ## Which line becomes which on the other person when an edge is written. Symmetric
 ## lines map to themselves; parent<->child is asymmetric (resolved by gender below).
 ## Used to write the reciprocal edge so relationships are stored on BOTH people.
@@ -314,7 +293,6 @@ _RECIPROCAL = {
     "mother": "children", "father": "children",
     "step_parents": "step_children",
 }
-
 
 def reciprocal_line(line: str, target_is_female: Optional[bool]) -> Optional[str]:
     """! @brief The line an edge should be written under on the OTHER person.
@@ -329,7 +307,6 @@ def reciprocal_line(line: str, target_is_female: Optional[bool]) -> Optional[str
     if line == "step_children":
         return "step_parents"
     return None
-
 
 def check_reciprocity(media_dir: str) -> list[dict[str, Any]]:
     """! @brief Find relationship edges present on one person but missing on the other.
@@ -350,7 +327,6 @@ def check_reciprocity(media_dir: str) -> list[dict[str, Any]]:
                     problems.append({"person": uid, "line": line,
                                      "other": other, "other_name": e.get("name", "")})
     return problems
-
 
 def list_all(media_dir: str) -> list[dict[str, Any]]:
     """! @brief Every valid person descriptor on disk (the source of truth)."""

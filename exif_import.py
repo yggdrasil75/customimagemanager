@@ -25,7 +25,6 @@ import exif_fields as efields
 
 log = logging.getLogger("exif_import")
 
-
 def _candidate_paths(filepath):
     """Yield the paths worth trying for EXIF data, most-specific first.
     A sidecar with the same stem takes priority for formats pyexiv2 chokes on."""
@@ -35,7 +34,6 @@ def _candidate_paths(filepath):
         if p not in seen and os.path.exists(p):
             seen.append(p)
             yield p
-
 
 def _read_raw_exif(filepath):
     """Return the raw {tag_string: value} EXIF dict from the first readable
@@ -54,7 +52,6 @@ def _read_raw_exif(filepath):
             log.warning(f"pyexiv2 read_exif failed on {p}: {e}")
     return {}, None
 
-
 def _split_tag(tag_string):
     """'Exif.Image.ImageWidth' -> ('Image','ImageWidth').
     Applies exiv2->schema group aliases. Returns (None, None) for anything that
@@ -64,7 +61,6 @@ def _split_tag(tag_string):
         grp = efields.EXIV2_GROUP_ALIASES.get(parts[1], parts[1])
         return grp, ".".join(parts[2:])
     return None, None
-
 
 def read_exif(filepath):
     """Read EXIF and return a structure organized by group:
@@ -149,7 +145,6 @@ def read_exif(filepath):
         })
 
     return {"source": source, "groups": groups_out}
-
 
 def summarize(filepath):
     """Compact counts for logging / list views: how many known fields carry a

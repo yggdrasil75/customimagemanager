@@ -30,7 +30,6 @@ pyexiv2 exposes IIM tags as 'Iptc.<RecordName>.<TagName>', e.g.
 from dataclasses import dataclass, field
 from typing import Optional
 
-
 # ── Data types ──────────────────────────────────────────────────────────────
 # Kept as short strings so the frontend can pick an input widget per type.
 TYPE_INT8   = "int8u"
@@ -40,7 +39,6 @@ TYPE_STRING = "string"
 TYPE_DATE   = "date"
 TYPE_TIME   = "time"
 TYPE_BINARY = "binary"     # not directly editable (ICC profile, palette, etc.)
-
 
 @dataclass
 class IPTCField:
@@ -82,7 +80,6 @@ class IPTCField:
             d["values"] = {str(k): v for k, v in self.values.items()}
         return d
 
-
 def _try_int(v):
     try:
         if isinstance(v, str) and v.lower().startswith("0x"):
@@ -90,7 +87,6 @@ def _try_int(v):
         return int(v)
     except (TypeError, ValueError):
         return v
-
 
 # ── NewsPhoto record (record 3) ─────────────────────────────────────────────
 # "Where we start getting info that is actually usable" — technical description
@@ -187,7 +183,6 @@ NEWSPHOTO_FIELDS = [
     IPTCField(145, "GammaCompensatedValue", TYPE_INT16),
 ]
 
-
 # ── Record registry ─────────────────────────────────────────────────────────
 # Each record: display name, pyexiv2 record name, ordered field list, and a
 # short description. EnvelopeRecord/ApplicationRecord are declared as
@@ -201,7 +196,6 @@ class IPTCRecord:
     description: str
     fields: list = field(default_factory=list)
     mapped: bool = True       # False => known record we haven't detailed yet
-
 
 IPTC_RECORDS = [
     IPTCRecord(
@@ -228,7 +222,6 @@ IPTC_RECORDS = [
 RECORD_BY_NAME = {r.name: r for r in IPTC_RECORDS}
 RECORD_BY_NUMBER = {r.number: r for r in IPTC_RECORDS}
 
-
 def field_lookup(record_name, tag_name):
     """Return the IPTCField for a given (record, tag) or None."""
     rec = RECORD_BY_NAME.get(record_name)
@@ -238,7 +231,6 @@ def field_lookup(record_name, tag_name):
         if f.name == tag_name:
             return f
     return None
-
 
 def schema_dict():
     """Full schema as JSON-serializable dict, for the editor frontend."""
@@ -310,7 +302,6 @@ _IPTCCORE_FIELDS = [
 # near the end of this module (along with every other IPTC XMP struct), and
 # CONTACTINFO_STRUCT_FIELDS is derived from it there.
 
-
 def build_iptc_core_fields(XMPField, type_map):
     """Build the IPTC Core XMP field list.
 
@@ -327,7 +318,6 @@ def build_iptc_core_fields(XMPField, type_map):
             writable=False, is_list=is_list, note=note,
         ))
     return out
-
 
 # ── iptcExt namespace (IPTC Extension) ──────────────────────────────────────
 # IPTC Extension schema (Iptc4xmpExt; ExifTool shortens to 'XMP-iptcExt'). This
@@ -818,7 +808,6 @@ AI_DIGITAL_SOURCE_MARKERS = (
     "algorithmicmedia",            # pure algorithmic generation
 )
 
-
 def build_iptc_ext_fields(XMPField, type_map):
     """Build the IPTC Extension XMP field list. See build_iptc_core_fields for
     why the XMPField class + type map are passed in.
@@ -833,7 +822,6 @@ def build_iptc_ext_fields(XMPField, type_map):
             writable=False, is_list=is_list, feeds=feeds, note=note,
         ))
     return out
-
 
 # ── IPTC XMP struct definitions (reference) ─────────────────────────────────
 # pyexiv2 flattens XMP structs into leaf properties, so the fields the editor
@@ -1037,7 +1025,6 @@ IPTC_STRUCTS = {
 # Back-compat alias: the flat ContactInfo member-name list some code may still
 # reference. Derived from the registry so the two never drift.
 CONTACTINFO_STRUCT_FIELDS = [m[0] for m in IPTC_STRUCTS["ContactInfo"]]
-
 
 def struct_fields(struct_name):
     """Return the member (name, kind, is_list, note) tuples for a named IPTC

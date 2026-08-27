@@ -3330,12 +3330,10 @@ import pose
 
 _yolo_registered = set()
 
-
 def _build_yolo(model_path):
     if not os.path.dirname(model_path):
         model_path = os.path.join(MODELS_DIR, model_path)
     return YOLO(model_path)
-
 
 def _load_yolo(model_path):
     """!
@@ -3354,7 +3352,6 @@ def _load_yolo(model_path):
         _yolo_registered.add(key)
     return model_registry.acquire(key)
 
-
 def _load_yolo_cache_clear():
     """Drop every YOLO the manager has loaded (mirrors the old lru_cache API)."""
     for k in list(_yolo_registered):
@@ -3362,7 +3359,6 @@ def _load_yolo_cache_clear():
             model_registry.unload(k)
         except Exception:
             pass
-
 
 # Preserve the `.cache_clear()` call sites without changing them.
 _load_yolo.cache_clear = _load_yolo_cache_clear

@@ -65,7 +65,6 @@ DEFAULT = {
     "pad":      {"enabled": False, "fill": "black", "ratios": ["square", "16:9", "9:16"]},
 }
 
-
 def _compress(bgr, cfg):
     max_side = int(cfg.get("max_side", 1024))
     if max_side <= 0:
@@ -80,14 +79,12 @@ def _compress(bgr, cfg):
     interp = INTERP_METHODS.get(cfg.get("interp", "area"), cv2.INTER_AREA)
     return cv2.resize(bgr, (new_w, new_h), interpolation=interp)
 
-
 def _fill_canvas(h, w, channels, fill):
     if fill == "white":
         return np.full((h, w, channels), 255, np.uint8)
     if fill == "noise":
         return np.random.randint(0, 256, (h, w, channels), np.uint8)
     return np.zeros((h, w, channels), np.uint8)  # black / default
-
 
 def _pad(bgr, cfg):
     allowed = [VALID_RATIOS[r] for r in cfg.get("ratios", []) if r in VALID_RATIOS]
@@ -114,7 +111,6 @@ def _pad(bgr, cfg):
     x0 = (new_w - w) // 2
     canvas[y0:y0 + h, x0:x0 + w] = bgr
     return canvas
-
 
 def preprocess(bgr, config=None):
     """Apply compression then padding to a BGR ndarray per `config`.

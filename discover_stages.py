@@ -91,7 +91,6 @@ KEEP_DERIVATIVES = True
 DEPTH_DIR = DERIV_DIR
 DEPTH_EVICT_AFTER_USE = not KEEP_DERIVATIVES
 
-
 # ───────────────────────── checkpoint store ──────────────────────────────────
 
 def _ensure_tables(db):
@@ -131,7 +130,6 @@ def _ensure_tables(db):
         PRIMARY KEY (run_sig, obj_index))""")
     db.commit()
 
-
 def run_sig(file_list):
     """Stable signature of the ordered file set. Changing the set (add/remove)
     changes the sig; reordering does too, so chunk indices stay meaningful."""
@@ -142,13 +140,11 @@ def run_sig(file_list):
         h.update(b"\0")
     return h.hexdigest()[:16]
 
-
 def _done_chunks(db, sig, stage):
     rows = db.execute(
         "SELECT chunk_lo FROM stage_progress WHERE run_sig=? AND stage=? "
         "AND status='done'", (sig, stage)).fetchall()
     return {int(r[0]) for r in rows}
-
 
 def _mark_chunk(db, sig, stage, chunk_lo, status="done"):
     db.execute(
@@ -156,13 +152,11 @@ def _mark_chunk(db, sig, stage, chunk_lo, status="done"):
         "VALUES (?,?,?,?,?)", (sig, stage, chunk_lo, status, time.time()))
     db.commit()
 
-
 def stage_status(db, sig, stage, total_files):
     """How many chunks of this stage are finished, for progress reporting."""
     total_chunks = (total_files + CHUNK - 1) // CHUNK
     done = len(_done_chunks(db, sig, stage))
     return done, total_chunks
-
 
 def _trim_allocator():
     """Release cached memory back to the OS. PyTorch's CPU caching allocator and
@@ -179,11 +173,9 @@ def _trim_allocator():
     except Exception:
         pass
 
-
 def _chunks(file_list):
     for lo in range(0, len(file_list), CHUNK):
         yield lo, file_list[lo:lo + CHUNK]
-
 
 # ─────────────────────── derivative store (variant + depth) ───────────────────
 # Keyed by the ORIGINAL image path (not the run sig), so derivatives are shared
@@ -193,21 +185,17 @@ def _chunks(file_list):
 def _deriv_key(rel_path, work_px):
     return hashlib.sha1(f"{rel_path}:{work_px}".encode()).hexdigest()
 
-
 def _variant_path(rel_path, work_px):
     k = _deriv_key(rel_path, work_px)
     return os.path.join(DERIV_DIR, k[:2], k + ".jpg")
-
 
 def _depth_path_for(rel_path, work_px):
     k = _deriv_key(rel_path, work_px)
     return os.path.join(DERIV_DIR, k[:2], k + ".npz")
 
-
 # back-compat name used elsewhere in this module
 def _depth_path(sig, rel_path, work_px=None):
     return _depth_path_for(rel_path, work_px if work_px is not None else og._WORK)
-
 
 def _save_variant(rel_path, work_px, img_bgr):
     """Persist the downscaled working image so later stages never re-decode the
@@ -220,7 +208,6 @@ def _save_variant(rel_path, work_px, img_bgr):
     except Exception:
         pass
 
-
 def _load_variant(rel_path, work_px):
     p = _variant_path(rel_path, work_px)
     if not os.path.exists(p):
@@ -230,13 +217,11 @@ def _load_variant(rel_path, work_px):
     except Exception:
         return None
 
-
 def _save_depth(sig, rel_path, depth, work_px=None):
     p = _depth_path_for(rel_path, work_px if work_px is not None else og._WORK)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     # fp16 halves disk vs fp32; depth precision well within fp16 range (0..1).
     np.savez_compressed(p, d=depth.astype(np.float16))
-
 
 def _load_depth_cached(sig, rel_path, work_px=None):
     p = _depth_path_for(rel_path, work_px if work_px is not None else og._WORK)
@@ -248,7 +233,6 @@ def _load_depth_cached(sig, rel_path, work_px=None):
     except Exception:
         return None
 
-
 def _evict_depth(sig, rel_path, work_px=None):
     try:
         os.remove(_depth_path_for(rel_path,
@@ -256,13 +240,11 @@ def _evict_depth(sig, rel_path, work_px=None):
     except Exception:
         pass
 
-
 def _evict_variant(rel_path, work_px):
     try:
         os.remove(_variant_path(rel_path, work_px))
     except Exception:
         pass
-
 
 def clear_derivatives():
     """Delete the entire derivative cache (variants + depth). Use to reclaim
@@ -271,7 +253,6 @@ def clear_derivatives():
         shutil.rmtree(DERIV_DIR)
     except Exception:
         pass
-
 
 # ──────────────────────────── STAGE 0: quality ───────────────────────────────
 
@@ -359,13 +340,11 @@ def stage_quality(db, sig, file_list, loader, work_px=og._WORK,
 
     return _collect_bad(db, sig) if skip_bad_downstream else set()
 
-
 def _collect_bad(db, sig):
     rows = db.execute(
         "SELECT rel_path FROM stage_quality WHERE run_sig=? AND bad=1",
         (sig,)).fetchall()
     return {r[0] for r in rows}
-
 
 def quality_summary(db, sig):
     """Counts for reporting: total scored, how many flagged bad, and the reason
@@ -377,7 +356,6 @@ def quality_summary(db, sig):
         (sig,)).fetchone()[0]
     return {"scored": int(total), "bad": int(bad),
             "kept": int(total) - int(bad)}
-
 
 # ───────────────────────────── STAGE 1: depth ────────────────────────────────
 
@@ -438,7 +416,6 @@ def stage_depth(db, sig, file_list, loader, depth_model=None,
         if progress:
             progress("depth", min(lo + len(names), total), total)
     return True
-
 
 # ──────────────────────── STAGE 2: boxes + embeddings ─────────────────────────
 
@@ -544,7 +521,6 @@ def stage_boxes(db, sig, file_list, loader, tag_fn=None, cnn_model=None,
             progress("boxes", min(lo + len(names), total), total)
     return True
 
-
 # ──────────────────────── stage-2 output streaming ───────────────────────────
 
 def count_objects(db, sig):
@@ -555,7 +531,6 @@ def count_objects(db, sig):
             total += int(nb or 0)
             dim = dim or int(d)
     return total, dim
-
 
 def iter_object_chunks(db, sig, dim, img_batch=CHUNK):
     """Yield (embeddings_ndarray, items_list) per image-chunk in stable order.
@@ -592,7 +567,6 @@ def iter_object_chunks(db, sig, dim, img_batch=CHUNK):
                               "box": boxes[bi] if bi < len(boxes) else {}})
         if vecs:
             yield np.concatenate(vecs, 0), items
-
 
 # ───────────────────────────── STAGE 3: cluster ──────────────────────────────
 
@@ -648,7 +622,6 @@ def stage_cluster(db, sig, eps=0.18, min_cluster=2, progress=None):
     n_clusters = len({int(x) for x in labels if x >= 0})
     return n_clusters
 
-
 # ───────────────────────────── STAGE 4: assign ───────────────────────────────
 
 def stage_assign(db, sig, progress=None):
@@ -687,7 +660,6 @@ def stage_assign(db, sig, progress=None):
     if progress:
         progress("assign", len(out), len(out), "done")
     return out
-
 
 # ─────────────────────────────── orchestrator ────────────────────────────────
 

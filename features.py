@@ -109,14 +109,11 @@ ALL_FEATURES = [k for s in FEATURE_SECTIONS.values() for k, _ in s["features"]]
 ALL_SECTION_KEYS = list(FEATURE_SECTIONS.keys())
 ALL_KEYS = ALL_SECTION_KEYS + ALL_FEATURES
 
-
 def _all_allowed():
     return {k: True for k in ALL_KEYS}
 
-
 def _all_denied():
     return {k: False for k in ALL_KEYS}
-
 
 # ── built-in role bundles ────────────────────────────────────────────────────
 # Each role is a permission map {feature_key: bool}. Missing keys inherit the
@@ -166,7 +163,6 @@ BUILTIN_ROLES = {
     "custom":   _all_allowed(),
 }
 
-
 def effective_permissions(role, overrides):
     """Resolve the final {feature_key: bool} for a user.
 
@@ -188,7 +184,6 @@ def effective_permissions(role, overrides):
         if k in out:
             out[k] = bool(v)
     return out
-
 
 def catalog():
     """JSON-serializable description of the feature tree for the admin UI."""

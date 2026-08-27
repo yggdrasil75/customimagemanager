@@ -78,13 +78,11 @@ _HF_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "
 
 _lock = threading.Lock()
 
-
 def _body_size() -> str:
     """! @brief Resolve the configured body-embedder size, defaulting to 's'."""
     import manager as m
     s = (m.state.get("body_size") or _BODY_DEFAULT).lower()
     return s if s in _BODY_MODELS else _BODY_DEFAULT
-
 
 def _build_reid(model_id: str):
     """! @brief Construct (model, processor) for a DINO backbone id, or None."""
@@ -98,12 +96,10 @@ def _build_reid(model_id: str):
     except Exception:
         return None
 
-
 # One registry entry per body size (the size knob repoints which id we load).
 # DINOv3 backbones run ~1-2GB on GPU depending on size; register lazily so we
 # only ever register the ids we actually touch.
 _reid_registered: set = set()
-
 
 def _load_reid() -> Optional[tuple]:
     """! @brief Lazily bring up the DINOv3 backbone for the current body size,
@@ -125,11 +121,9 @@ def _load_reid() -> Optional[tuple]:
     model, proc = got
     return (model, proc, model_id)
 
-
 def have_body_embedder() -> bool:
     """! @brief Whether the DINO backbone is up (else callers degrade to appearance)."""
     return _load_reid() is not None
-
 
 def _crop(img_bgr: np.ndarray, box: dict) -> Optional[np.ndarray]:
     """! @brief Extract the pixel crop for a normalised center-form box.
@@ -145,7 +139,6 @@ def _crop(img_bgr: np.ndarray, box: dict) -> Optional[np.ndarray]:
     crop = img_bgr[y1:y2, x1:x2]
     return crop if crop.size else None
 
-
 def _normalise(v: Any) -> Optional[np.ndarray]:
     """! @brief L2-normalise a vector to unit length.
     @return The unit vector, or None if the input is None or zero-norm.
@@ -155,7 +148,6 @@ def _normalise(v: Any) -> Optional[np.ndarray]:
     v = np.asarray(v, dtype=np.float32)
     n = np.linalg.norm(v)
     return (v / n) if n else None
-
 
 def embed_bodies(img_bgr: np.ndarray, boxes: list[dict]) -> tuple[list, str]:
     """! @brief Embed each person crop, mirroring faces.embed_faces.
@@ -202,7 +194,6 @@ def embed_bodies(img_bgr: np.ndarray, boxes: list[dict]) -> tuple[list, str]:
     except Exception:
         return [], "none"
 
-
 def _containment_face_in_body(face: dict, body: dict) -> float:
     """! @brief Fraction of the FACE box's area that lies inside the BODY box (~1.0 = contained)."""
     fx1, fy1 = face["cx"] - face["w"] / 2, face["cy"] - face["h"] / 2
@@ -213,7 +204,6 @@ def _containment_face_in_body(face: dict, body: dict) -> float:
     iy = max(0.0, min(fy2, by2) - max(fy1, by1))
     face_area = max(1e-9, (fx2 - fx1) * (fy2 - fy1))
     return (ix * iy) / face_area
-
 
 def associate_faces_bodies(faces: list[dict], bodies: list[dict]) -> list[tuple[int, int]]:
     """! @brief Bind each face to the body that most contains it, within one image.
@@ -238,7 +228,6 @@ def associate_faces_bodies(faces: list[dict], bodies: list[dict]) -> list[tuple[
         used_bodies.add(bi)
     return pairs
 
-
 # ── SMPLest-X body mesh ───────────────────────────────────────────────────────
 @functools.lru_cache(maxsize=1)
 def _load_smplx() -> Optional[Any]:
@@ -250,11 +239,9 @@ def _load_smplx() -> Optional[Any]:
         return _smplx_mod
     return None
 
-
 def have_mesh_estimator() -> bool:
     """! @brief Whether SMPLest-X is up (else no mesh is produced)."""
     return _load_smplx() is not None
-
 
 def estimate_params(img_bgr: np.ndarray, box: dict) -> Optional[dict]:
     """! @brief Run the shape estimator on one crop and return its SMPL parameters + mesh.
@@ -284,7 +271,6 @@ def estimate_params(img_bgr: np.ndarray, box: dict) -> Optional[dict]:
             "vertices": np.asarray(out["vertices"], np.float32),
             "confidence": float(out.get("confidence", 1.0))}
 
-
 def _drop_beta_outliers(betas: np.ndarray, max_mad: float = 5.0) -> np.ndarray:
     """! @brief Keep shape vectors within max_mad median-absolute-deviations of the median.
     @return Boolean mask of inliers. MAD is used over std so one bad fit (occlusion,
@@ -300,7 +286,6 @@ def _drop_beta_outliers(betas: np.ndarray, max_mad: float = 5.0) -> np.ndarray:
     if mad < 1e-4:
         return np.ones(len(betas), dtype=bool)
     return (spread / mad) <= max_mad
-
 
 def estimate_shape(crops: list, min_views: int = 3,
                    min_confidence: float = 0.3) -> Optional[tuple]:
@@ -336,7 +321,6 @@ def estimate_shape(crops: list, min_views: int = 3,
     except Exception:
         return None
     return (np.asarray(verts, np.float32), np.asarray(faces, np.int32))
-
 
 def mesh_to_obj(vertices: np.ndarray, faces: np.ndarray) -> bytes:
     """! @brief Serialise a vertex/face mesh to Wavefront OBJ text.

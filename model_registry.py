@@ -9,7 +9,6 @@ except Exception:
 
 VRAM_BUDGET_FRAC = 0.85
 
-
 def _detected_vram_mb():
     if torch is None:
         return 0.0
@@ -20,11 +19,9 @@ def _detected_vram_mb():
     except Exception:
         return 0.0
 
-
 def _vram_budget_mb():
     v = _detected_vram_mb()
     return int(v * VRAM_BUDGET_FRAC) if v > 0 else 0
-
 
 def _max_resident_for_vram():
     v = _detected_vram_mb()
@@ -38,7 +35,6 @@ except Exception:
     psutil = None
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
-
 
 def _model_device(model):
     if model is None:
@@ -62,7 +58,6 @@ def _model_device(model):
     return None
 
 
-
 def pin_cache_dir():
     """Point TORCH_HOME at MODELS_DIR/torch if the user hasn't set their own, so
     torch.hub/rtmlib/pyiqa downloads land under models/ and survive rebuilds.
@@ -76,9 +71,7 @@ def pin_cache_dir():
             pass
     return os.environ.get("TORCH_HOME")
 
-
 pin_cache_dir()
-
 
 def _detect_device():
     if torch is not None:
@@ -88,7 +81,6 @@ def _detect_device():
         except Exception:
             pass
     return "cpu"
-
 
 _DEVICE = None
 
@@ -105,7 +97,6 @@ def on_gpu():
     """True when the chosen device is CUDA. Convenience for loaders."""
     return device() == "cuda"
 
-
 def _rss_mb():
     if psutil is not None:
         try:
@@ -119,7 +110,6 @@ def _rss_mb():
     except Exception:
         return 0.0
 
-
 def _vram_mb():
     if torch is None:
         return 0.0
@@ -128,11 +118,9 @@ def _vram_mb():
     except Exception:
         return 0.0
 
-
 def _mem_snapshot():
     """(rss_mb, vram_mb) before a load, for measuring what it actually cost."""
     return (_rss_mb(), _vram_mb())
-
 
 def _measure_cost(before, dev):
     """Actual MB a load consumed, measured as the delta from `before`. Uses the
@@ -152,7 +140,6 @@ def _measure_cost(before, dev):
     d = _rss_mb() - rss0
     return d if d > 1.0 else 0.0
 
-
 def _file_cost_mb(model_path):
     if not model_path:
         return 0.0
@@ -166,7 +153,6 @@ def _file_cost_mb(model_path):
         except Exception:
             continue
     return 0.0
-
 
 class ModelRegistry:
     """Thread-safe LRU cache of heavy models. A failed load is cached as None
@@ -340,7 +326,6 @@ class ModelRegistry:
                 if victim is None:
                     return
                 self._unload_locked(victim)
-
 
 REGISTRY = ModelRegistry()
 

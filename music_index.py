@@ -40,7 +40,6 @@ EMB_SIG = "librosa-v1"  # bump to invalidate every cached embedding
 
 _lock = threading.Lock()
 
-
 # ── schema ────────────────────────────────────────────────────────────────────
 def ensure_tables(db):
     db.executescript("""
@@ -84,7 +83,6 @@ def ensure_tables(db):
     """)
     db.commit()
 
-
 # ── metadata (mutagen) ─────────────────────────────────────────────────────────
 def _first(d, *keys):
     for k in keys:
@@ -95,7 +93,6 @@ def _first(d, *keys):
             return str(v)
     return ""
 
-
 def _split_num(s):
     """'3/12' -> 3 ; '7' -> 7 ; '' -> None"""
     if s is None:
@@ -105,7 +102,6 @@ def _split_num(s):
         return int(s)
     except (ValueError, TypeError):
         return None
-
 
 def read_audio_metadata(abs_path: str) -> dict:
     """Normalise tags from any container into one flat dict. Never raises."""
@@ -143,14 +139,12 @@ def read_audio_metadata(abs_path: str) -> dict:
     out["disc"]        = _split_num(_first(t, "discnumber", "disc"))
     return out
 
-
 # mapping from our flat keys to EasyID3/easy-mp4/vorbis key names mutagen accepts
 _EASY_KEYS = {
     "title": "title", "artist": "artist", "album": "album",
     "albumartist": "albumartist", "genre": "genre",
     "composer": "composer", "year": "date",
 }
-
 
 def write_audio_metadata(abs_path: str, meta: dict) -> bool:
     """Write editable fields back into the file. Returns True on success."""
@@ -183,12 +177,10 @@ def write_audio_metadata(abs_path: str, meta: dict) -> bool:
     except Exception:
         return False
 
-
 # ── embedding ──────────────────────────────────────────────────────────────────
 def _pack_emb(vec: np.ndarray) -> bytes:
     v = np.asarray(vec, dtype=np.float32).ravel()
     return struct.pack("<I", v.size) + v.tobytes()
-
 
 def unpack_emb(blob) -> np.ndarray | None:
     if not blob:
@@ -198,7 +190,6 @@ def unpack_emb(blob) -> np.ndarray | None:
         return np.frombuffer(blob[4:4 + n * 4], dtype=np.float32).copy()
     except Exception:
         return None
-
 
 def compute_embedding(abs_path: str, max_seconds: float = 90.0) -> np.ndarray | None:
     """Deterministic offline audio fingerprint suitable for similarity/clustering.
@@ -238,7 +229,6 @@ def compute_embedding(abs_path: str, max_seconds: float = 90.0) -> np.ndarray | 
     except Exception:
         return None
 
-
 def normalize_matrix(M: np.ndarray) -> np.ndarray:
     """Z-score per column then L2-normalise rows -> cosine == dot product."""
     M = np.asarray(M, dtype=np.float32)
@@ -247,7 +237,6 @@ def normalize_matrix(M: np.ndarray) -> np.ndarray:
     Z = (M - mu) / sd
     n = np.linalg.norm(Z, axis=1, keepdims=True) + 1e-9
     return Z / n
-
 
 # ── clustering ──────────────────────────────────────────────────────────────────
 def cluster_embeddings(paths, embs, k=None):
@@ -260,7 +249,6 @@ def cluster_embeddings(paths, embs, k=None):
     k = min(k, n)
     km = KMeans(n_clusters=k, n_init=4, random_state=0).fit(X)
     return {p: int(c) for p, c in zip(paths, km.labels_)}, k
-
 
 # ── similarity / shuffle ────────────────────────────────────────────────────────
 def shuffle_by(seed_vecs, all_paths, all_embs, temperature=0.25, limit=500):

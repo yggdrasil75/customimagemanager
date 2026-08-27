@@ -70,7 +70,6 @@ MWG_KW_DESCRIPTION = (
     "surfaced read-only."
 )
 
-
 # ════════════════════════════════════════════════════════════════════════════
 # Composite reconciliation reference (MWG 2.0 Composite tags)
 # ════════════════════════════════════════════════════════════════════════════
@@ -140,7 +139,6 @@ MWG_COMPOSITE = {
         "XMP-iptcExt:LocationShownProvinceState",
         "CurrentIPTCDigest", "IPTCDigest"], "note": ""},
 }
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # Field tables (flattened leaves) — built via xmp_fields' XMPField + type map
@@ -246,7 +244,6 @@ for _d in range(6, 0, -1):
          f"Depth-{_d} keyword text. Leaf keywords fold into our booru tags."))
 del _d
 
-
 def _build(fields, XMPField, type_map, force_writable=None):
     out = []
     for name, kind, is_list, feeds, values, note in fields:
@@ -255,22 +252,18 @@ def _build(fields, XMPField, type_map, force_writable=None):
                             is_list=is_list, values=values, feeds=feeds, note=note))
     return out
 
-
 def build_mwg_rs_fields(XMPField, type_map):
     """MWG Regions fields. Writable — mwg-rs is our region store, the one MWG
     namespace we write back (via build_region_list_xml)."""
     return _build(_MWG_RS_FIELDS, XMPField, type_map, force_writable=True)
 
-
 def build_mwg_coll_fields(XMPField, type_map):
     """MWG Collections fields — read-only (folded into catalog_sets on ingest)."""
     return _build(_MWG_COLL_FIELDS, XMPField, type_map, force_writable=False)
 
-
 def build_mwg_kw_fields(XMPField, type_map):
     """MWG hierarchical Keywords fields — read-only (leaves fold into tags)."""
     return _build(_MWG_KW_FIELDS, XMPField, type_map, force_writable=False)
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # mwg-rs Regions — pure XML shape (moved out of manager.py)
@@ -281,7 +274,6 @@ def build_mwg_kw_fields(XMPField, type_map):
 # is (de)serialized, and how the SeeAlso filter link is built — are injected as
 # callbacks so this module needs nothing from manager.py.
 import re as _re
-
 
 def parse_region_list(xmp, desc_from_json):
     """Read Xmp.mwg-rs.Regions into a list of app region dicts. `desc_from_json`
@@ -345,7 +337,6 @@ def parse_region_list(xmp, desc_from_json):
             },
         })
     return regions
-
 
 def build_region_list_xml(regions, esc, desc_to_json, see_also_link, new_uuid):
     """Emit the <mwg-rs:Regions> block + namespace attrs, or ('', '') if empty.
@@ -421,7 +412,6 @@ def build_region_list_xml(regions, esc, desc_to_json, see_also_link, new_uuid):
           f' xmlns:cim="{CIM_EXT_URI}"')
     return block, ns
 
-
 # ── mwg-coll / mwg-kw readers (fold sources) ────────────────────────────────
 def parse_collections(xmp):
     """Return the CollectionName strings from Xmp.mwg-coll.Collections. Folds
@@ -435,7 +425,6 @@ def parse_collections(xmp):
             if s and s not in seen:
                 seen.add(s); out.append(s)
     return out
-
 
 def parse_keyword_leaves(xmp):
     """Return the leaf keyword strings from the Xmp.mwg-kw hierarchy. ExifTool

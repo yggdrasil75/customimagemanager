@@ -73,7 +73,6 @@ MIN_BOX_PX = 32             # drop proposal boxes below this on either side
 _WORK = 384                 # working resolution for depth / proposals
 _EMB_FALLBACK_DIM = 64      # cv2-feature embedding length
 
-
 def downscale_to_cap(img, max_px=MAX_IMAGE_PX):
     """Downscale so the LONGEST side is <= max_px, preserving aspect ratio.
     Returns the image unchanged if already within the cap. This is the single
@@ -96,10 +95,8 @@ def downscale_to_cap(img, max_px=MAX_IMAGE_PX):
 
 
 
-
 def has_gpu():
     return model_registry.on_gpu()
-
 
 # ── image gating ──────────────────────────────────────────────────────────────
 def image_too_small(img):
@@ -109,10 +106,8 @@ def image_too_small(img):
     h, w = img.shape[:2]
     return min(h, w) < MIN_IMAGE_PX
 
-
 def _box_ok(x1, y1, x2, y2):
     return (x2 - x1) >= MIN_BOX_PX and (y2 - y1) >= MIN_BOX_PX
-
 
 # ── depth ─────────────────────────────────────────────────────────────────────
 def _build_depth(mid):
@@ -131,9 +126,7 @@ def _build_depth(mid):
     except Exception:
         return None
 
-
 _depth_registered = set()  # retained for back-compat; registration is idempotent
-
 
 def _load_depth(model_path=None):
     mid = model_path or "depth-anything/Depth-Anything-V2-Small-hf"
@@ -148,7 +141,6 @@ def _load_depth(model_path=None):
     _DEPTH.update(loaded=True, req=mid, model=model, proc=proc, path=mid)
     return True
 
-
 def _pseudo_depth(gray):
     """cv2-only depth proxy when no model is available. Not metric — just a
     monotonic-ish cue: near objects tend to be sharper / higher-contrast, so we
@@ -160,7 +152,6 @@ def _pseudo_depth(gray):
     e = energy - energy.min()
     rng = float(e.max()) or 1.0
     return (e / rng).astype(np.float32)
-
 
 def depth_map(img_bgr, model_path=None):
     """Return a float32 depth map (HxW, ~0..1, larger = nearer) for an image.
@@ -194,7 +185,6 @@ def depth_map(img_bgr, model_path=None):
             return _pseudo_depth(gray)
         except Exception:
             return None
-
 
 # ── region proposals (no trained detector) ────────────────────────────────────
 def depth_map_batch(imgs_bgr, model_path=None):
@@ -242,14 +232,12 @@ def depth_map_batch(imgs_bgr, model_path=None):
         # fall back per-image
         return [depth_map(im, model_path) for im in imgs_bgr]
 
-
 # Proposal source: "heuristic" (saliency+contours, the original) or "sam"
 # (Segment Anything, sharper boundaries). Set once by the discovery entrypoints
 # from the `object_proposals` setting; propose_regions dispatches on it so no
 # call site in discover_stages has to change. Kept module-level (not a param)
 # precisely so the many existing propose_regions() callers keep working.
 _PROPOSAL_SOURCE = "sam"
-
 
 def set_proposal_source(source):
     """Select the region-proposal backend for subsequent propose_regions calls.
@@ -259,10 +247,8 @@ def set_proposal_source(source):
     _PROPOSAL_SOURCE = "sam" if (source or "").lower() == "sam" else "heuristic"
     return _PROPOSAL_SOURCE
 
-
 def proposal_source():
     return _PROPOSAL_SOURCE
-
 
 def propose_regions(img_bgr, depth=None, max_regions=40, seed_boxes=None):
     """Find candidate object boxes without a trained detector.
@@ -287,7 +273,6 @@ def propose_regions(img_bgr, depth=None, max_regions=40, seed_boxes=None):
     return _propose_regions_heuristic(img_bgr, depth=depth,
                                       max_regions=max_regions,
                                       seed_boxes=seed_boxes)
-
 
 def _propose_regions_heuristic(img_bgr, depth=None, max_regions=40,
                                seed_boxes=None):
@@ -386,7 +371,6 @@ def _propose_regions_heuristic(img_bgr, depth=None, max_regions=40,
     except Exception:
         return []
 
-
 # ── CNN backbone (optional) ───────────────────────────────────────────────────
 def _build_cnn(arch):
     """Construct (model, dim) for a timm arch, or None."""
@@ -403,9 +387,7 @@ def _build_cnn(arch):
     except Exception:
         return None
 
-
 _cnn_registered = set()  # retained for back-compat; registration is idempotent
-
 
 def _load_cnn(model_path=None):
     arch = model_path or "efficientnet_b0"
@@ -419,7 +401,6 @@ def _load_cnn(model_path=None):
     model, dim = got
     _CNN.update(loaded=True, req=arch, model=model, path=arch, dim=dim)
     return True
-
 
 def _cnn_embed(crops_bgr):
     """Embed a list of BGR crops with the CNN backbone -> (N, dim) float32.
@@ -442,7 +423,6 @@ def _cnn_embed(crops_bgr):
         feat = _CNN["model"](t)
         feat = F.normalize(feat, dim=1)
     return feat.detach().cpu().numpy().astype(np.float32)
-
 
 # ── cv2 fallback embedding (depth + color + shape) ────────────────────────────
 def _cv2_embed_one(crop_bgr, depth_crop=None):
@@ -476,7 +456,6 @@ def _cv2_embed_one(crop_bgr, depth_crop=None):
     n = np.linalg.norm(vec) or 1.0
     return (vec / n).astype(np.float32)
 
-
 def embed_regions(img_bgr, boxes, depth=None, cnn_model=None):
     """Embed each proposed box. Uses the CNN backbone when available (depth is
     concatenated as extra channels of stats), else the cv2 descriptor. Returns
@@ -501,7 +480,6 @@ def embed_regions(img_bgr, boxes, depth=None, cnn_model=None):
     except Exception:
         pass
     return np.stack([_cv2_embed_one(c, dc) for c, dc in zip(crops, dcrops)])
-
 
 # ── grouping ──────────────────────────────────────────────────────────────────
 def group_embeddings(embeddings, min_cluster=2, eps=0.18):
@@ -551,7 +529,6 @@ def group_embeddings(embeddings, min_cluster=2, eps=0.18):
     except Exception:
         return np.full(n, -1, dtype=int)
 
-
 def _finalise_labels(roots, min_cluster, n):
     """Union-find roots -> contiguous cluster ids, dropping sub-min_cluster
     groups to noise (-1)."""
@@ -566,7 +543,6 @@ def _finalise_labels(roots, min_cluster, n):
             remap[r] = nxt; nxt += 1
         out[i] = remap[r]
     return out
-
 
 def group_embeddings_streaming(batch_iter, total, dim, eps=0.18, min_cluster=2,
                                ef=100, M=16, k=24, normalise=True,
@@ -690,7 +666,6 @@ def group_embeddings_streaming(batch_iter, total, dim, eps=0.18, min_cluster=2,
         except Exception:
             pass
 
-
 def _hnsw_group(X, eps, min_cluster, ef=100, M=16, k=24):
     """Cluster unit vectors with an HNSW index + union-find. `eps` is cosine
     distance; hnswlib's 'cosine' space returns distance = 1 - cos directly, so we
@@ -739,7 +714,6 @@ def _hnsw_group(X, eps, min_cluster, ef=100, M=16, k=24):
         index = None
         gc.collect()
 
-
 def _greedy_group(X, eps, min_cluster):
     """KD-tree greedy union-find fallback (X already L2-normalised). Used only if
     hnswlib is unavailable. A KD-tree is useless above ~20 dims, so reduce with
@@ -778,14 +752,12 @@ def _greedy_group(X, eps, min_cluster):
     roots = np.fromiter((find(i) for i in range(len(Xr))), dtype=int, count=len(Xr))
     return _finalise_labels(roots, min_cluster, len(Xr))
 
-
 def _tag_overlap(tags_a, tags_b):
     sa = {t.lower().strip() for t in (tags_a or [])}
     sb = {t.lower().strip() for t in (tags_b or [])}
     if not sa or not sb:
         return 0.0
     return len(sa & sb) / len(sa | sb)
-
 
 def suggest_cluster_labels(items, labels):
     """Given per-item tags, propose a label for each cluster by majority vote of
@@ -805,7 +777,6 @@ def suggest_cluster_labels(items, labels):
             out[lab] = cnt.most_common(1)[0][0]
     return out
 
-
 # ── one-call convenience ──────────────────────────────────────────────────────
 def analyse_image(img_bgr, depth_model=None, cnn_model=None, max_regions=40):
     """Full per-image pass: gate size -> depth -> propose -> embed. Returns
@@ -821,7 +792,6 @@ def analyse_image(img_bgr, depth_model=None, cnn_model=None, max_regions=40):
                 "depth": depth}
     emb = embed_regions(img_bgr, boxes, depth=depth, cnn_model=cnn_model)
     return {"boxes": boxes, "embeddings": emb, "depth": depth}
-
 
 # ── batched cross-image scan (overlap CPU decode with GPU inference) ───────────
 def scan_images(loader, names, depth_model=None, cnn_model=None, max_regions=40,
@@ -939,7 +909,6 @@ def scan_images(loader, names, depth_model=None, cnn_model=None, max_regions=40,
         done[0] += 1
         if progress: progress(done[0], total)
         yield r
-
 
 def _embed_crops(crops_bgr, dcrops, cnn_model=None):
     """Embed a flat list of crops (already cut out) in one pass. Mirrors

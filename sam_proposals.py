@@ -86,7 +86,6 @@ _lock = threading.Lock()
 # set_model() on config load / settings save.
 _active_model_id = None
 
-
 def set_model(model_id):
     """Point the *proposal* generator at a seg_models checkpoint. This module is
     the tag-driven region *proposer* (find similar untagged regions), which is a
@@ -126,11 +125,9 @@ def set_model(model_id):
         pass
     return info.get("id") if info else None
 
-
 def active_model():
     """The seg_models id currently selected, or None if using the env default."""
     return _active_model_id
-
 
 def available():
     """True if SAM is importable AND a checkpoint is present. Cheap after the
@@ -140,13 +137,11 @@ def available():
         return _sam["err"] == "" and _load_generator() is not None
     return _load_generator() is not None
 
-
 def status():
     """Human-readable state for the UI: '' when healthy, else the reason SAM is
     unavailable (so the pane can say 'falling back to heuristic proposals')."""
     _load_generator()
     return _sam["err"]
-
 
 def _build_generator():
     """Build the SamAutomaticMaskGenerator, recording any failure reason in
@@ -189,11 +184,9 @@ def _build_generator():
         _sam["err"] = f"SAM init failed ({e})"
         return None
 
-
 # ViT-H SAM is ~2.5GB on GPU; the biggest single model here.
 model_registry.register("sam:proposals", _build_generator,
                            cost_mb=2600, gpu=og.has_gpu())
-
 
 def _load_generator():
     """Lazily build the SamAutomaticMaskGenerator via the central registry.
@@ -207,7 +200,6 @@ def _load_generator():
     _sam["generator"] = gen
     return gen
 
-
 def _iou_px(a, b):
     """IoU between two pixel boxes (x1,y1,x2,y2)."""
     ax1, ay1, ax2, ay2 = a
@@ -219,7 +211,6 @@ def _iou_px(a, b):
         return 0.0
     ua = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
     return inter / ua if ua > 0 else 0.0
-
 
 def _seed_to_px(seed, W, H):
     """Convert a normalised seed box dict to a pixel box, or None if degenerate.
@@ -236,7 +227,6 @@ def _seed_to_px(seed, W, H):
     if not og._box_ok(x1, y1, x2, y2):
         return None
     return (x1, y1, x2, y2)
-
 
 def _box_dict(x1, y1, x2, y2, W, H, depth, cls=None, segmentation=None):
     """Build the propose_regions-shaped dict for a pixel box.
@@ -262,7 +252,6 @@ def _box_dict(x1, y1, x2, y2, W, H, depth, cls=None, segmentation=None):
         if any(paths.values()):
             d["mask_svg"] = paths
     return d
-
 
 def propose(img_bgr, depth=None, max_regions=40, seed_boxes=None):
     """SAM region proposals, shape-compatible with og.propose_regions.

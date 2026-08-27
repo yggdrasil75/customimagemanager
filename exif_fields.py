@@ -26,7 +26,6 @@ schema by (group_name, tag_name) so lookups from a read are direct.
 from dataclasses import dataclass, field
 from typing import Optional
 
-
 # ── Data types ──────────────────────────────────────────────────────────────
 # Kept as short strings so the frontend can pick an input widget per type.
 # Mirrors iptc_fields TYPE_* plus a couple of EXIF-specific numeric types.
@@ -40,10 +39,8 @@ TYPE_DATE   = "date"
 TYPE_TIME   = "time"
 TYPE_BINARY = "binary"         # not directly editable (thumbnails, etc.)
 
-
 # The subset of types that render as plain <number> inputs on the frontend.
 NUMERIC_TYPES = {TYPE_INT8, TYPE_INT16, TYPE_INT32}
-
 
 @dataclass
 class EXIFField:
@@ -118,7 +115,6 @@ class EXIFField:
             d["values"] = {str(k): v for k, v in self.values.items()}
         return d
 
-
 def _try_int(v):
     try:
         if isinstance(v, str) and v.lower().startswith("0x"):
@@ -126,7 +122,6 @@ def _try_int(v):
         return int(v)
     except (TypeError, ValueError):
         return v
-
 
 # ── Interoperability IFD (Exif.Iop) ─────────────────────────────────────────
 # Small IFD describing DCF interoperability. InteropIndex is a short enumerated
@@ -147,7 +142,6 @@ INTEROP_FIELDS = [
               note="Height of a related image (RelatedImageLength per DCF); "
                    "read-only"),
 ]
-
 
 # ── IFD0 image-structure tags (Exif.Image) ──────────────────────────────────
 # "These are all mostly about the image and should match the image's own
@@ -1283,7 +1277,6 @@ IMAGE_FIELDS = [
     EXIFField(0xcea1, "SEAL", TYPE_STRING, writable=False, note="SEAL signature block; read-only"),
 ]
 
-
 # ── Exif SubIFD (Exif.Photo) ─────────────────────────────────────────────────
 # The main EXIF sub-IFD: exposure, camera settings, timestamps. Most of these
 # are written by the camera at capture and are surfaced read-only (there's no
@@ -1716,7 +1709,6 @@ PHOTO_FIELDS = [
     EXIFField(0xfe58, "PSMoireFilter",  TYPE_STRING, writable=False, note="Photoshop CameraRaw; read-only"),
 ]
 
-
 # ── Group registry ──────────────────────────────────────────────────────────
 # Each group: pyexiv2 group name, human display title, ordered field list, short
 # description, and a `mapped` flag. Groups declared as placeholders (mapped=
@@ -1730,7 +1722,6 @@ class EXIFGroup:
     ifd: str                  # ExifTool IFD label (IFD0, InteropIFD, ...)
     fields: list = field(default_factory=list)
     mapped: bool = True       # False => known group we haven't detailed yet
-
 
 EXIF_GROUPS = [
     EXIFGroup(
@@ -1763,7 +1754,6 @@ EXIF_GROUPS = [
 # Fast lookups.
 GROUP_BY_NAME = {g.name: g for g in EXIF_GROUPS}
 
-
 # exiv2/pyexiv2 sometimes reports IFD0 tags under 'Image' but a few tools use
 # alternate group spellings; map them onto our schema group names so a read
 # resolves. Extend as needed when new importers surface other spellings.
@@ -1775,7 +1765,6 @@ EXIV2_GROUP_ALIASES = {
     "GPSInfo":       "GPSInfo",
 }
 
-
 def field_lookup(group_name, tag_name):
     """Return the EXIFField for a given (group, tag) or None."""
     grp = GROUP_BY_NAME.get(group_name)
@@ -1785,7 +1774,6 @@ def field_lookup(group_name, tag_name):
         if f.name == tag_name:
             return f
     return None
-
 
 def field_by_tagname(tag_name):
     """Find a field by bare tag name across all groups.
@@ -1807,7 +1795,6 @@ def field_by_tagname(tag_name):
                 if first is None:
                     first = (g.name, f)
     return first if first is not None else (None, None)
-
 
 def schema_dict():
     """Full schema as JSON-serializable dict, for the editor frontend."""

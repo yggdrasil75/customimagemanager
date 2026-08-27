@@ -22,7 +22,6 @@ WORK: int = 128
 WIDTH_MIN: float = 0.25
 WIDTH_MAX: float = 2.0
 
-
 def _to_work_bgr(img: "np.ndarray | None") -> "np.ndarray | None":
     """!
     @brief Resize any BGR/gray array to a WORKxWORKx3 float32 tensor in 0..1.
@@ -40,7 +39,6 @@ def _to_work_bgr(img: "np.ndarray | None") -> "np.ndarray | None":
     except Exception:
         return None
 
-
 def encode_pair(img_a: "np.ndarray", img_b: "np.ndarray") -> "bytes | None":
     """!
     @brief Serialize an image pair to the stored training sample (two CHW tensors).
@@ -54,11 +52,9 @@ def encode_pair(img_a: "np.ndarray", img_b: "np.ndarray") -> "bytes | None":
     np.savez_compressed(buf, a=a, b=b)
     return buf.getvalue()
 
-
 def _channels(width_mult: float) -> "list[int]":
     base = [16, 32, 64, 128]
     return [max(4, int(round(c * width_mult))) for c in base]
-
 
 if _HAVE_TORCH:
     class _Encoder(nn.Module):
@@ -92,7 +88,6 @@ if _HAVE_TORCH:
             ea, eb = self.enc(a), self.enc(b)
             pair = torch.cat([(ea - eb).abs(), ea * eb], dim=1)
             return self.head(pair).squeeze(1)
-
 
 class DupCNN:
     """!

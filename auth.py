@@ -81,7 +81,6 @@ COOKIE_NAME = "cim_session"
 # Sentinel so callers can distinguish "leave unchanged" from "set to NULL".
 _UNSET = object()
 
-
 def require_feature(feature_key, action=None, fields=()):
     """Decorator: 403 unless g.user's effective features allow feature_key.
 
@@ -127,7 +126,6 @@ _PUBLIC_PATHS = {
 }
 _PUBLIC_PREFIXES = ("/static/",)
 
-
 # ── configuration ───────────────────────────────────────────────────────────
 _DEFAULT_LDAP = {
     "server": "",
@@ -151,7 +149,6 @@ _DEFAULT_CFG = {
     "session_days": 14,
     "ldap": dict(_DEFAULT_LDAP),
 }
-
 
 class Auth:
     """Wires authentication into an existing Flask app.

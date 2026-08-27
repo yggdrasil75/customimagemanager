@@ -66,7 +66,6 @@ YOLO_DIR = os.path.join(SEG_DIR, "yolo")
 _SAM_EXTS = (".pt", ".pth")
 _YOLO_EXTS = (".pt",)
 
-
 # ── dependency probes (cheap, cached) ─────────────────────────────────────────
 def _have(mod):
     try:
@@ -75,10 +74,8 @@ def _have(mod):
     except Exception:
         return False
 
-
 _HAVE_TORCH = _have("torch")
 _HAVE_ULTRALYTICS = _have("ultralytics")
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # SAM family registry — the AI-tools segmenter
@@ -149,7 +146,6 @@ SAM_MODELS = [
 
 SAM_DEFAULT = "sam2.1_b"
 
-
 # ════════════════════════════════════════════════════════════════════════════
 # YOLO-seg registry — the background (class-aware) segmenter
 # ════════════════════════════════════════════════════════════════════════════
@@ -172,10 +168,8 @@ YOLO_SEG_MODELS = [
 
 YOLO_SEG_DEFAULT = "yolov26n-seg"
 
-
 _SAM_BY_ID = {m["id"]: m for m in SAM_MODELS}
 _YOLO_BY_ID = {m["id"]: m for m in YOLO_SEG_MODELS}
-
 
 # ── discovery ─────────────────────────────────────────────────────────────────
 def _scan(dir_path, exts):
@@ -189,7 +183,6 @@ def _scan(dir_path, exts):
     except Exception:
         return []
     return sorted(set(out))
-
 
 def _custom_entry(path, family=None):
     """Build a registry-shaped dict for a discovered checkpoint file. All
@@ -205,7 +198,6 @@ def _custom_entry(path, family=None):
         d["family"] = family
     return d
 
-
 def _sam_weight_path(entry):
     """Path to a SAM entry's LOCAL checkpoint, or '' if there isn't one on disk.
     Custom entries carry their full path in 'weights'; built-ins may have a
@@ -217,7 +209,6 @@ def _sam_weight_path(entry):
     local = os.path.join(SAM_DIR, w) if w else ""
     return local if (local and os.path.exists(local)) else ""
 
-
 @lru_cache(maxsize=1)
 def _github_assets():
     """The set of weight filenames ultralytics can auto-download, resolved once.
@@ -227,7 +218,6 @@ def _github_assets():
         return set(GITHUB_ASSETS_NAMES)
     except Exception:
         return set()
-
 
 def _known_download_asset(name):
     """True if `name` is a bare weight filename ultralytics can auto-download
@@ -240,7 +230,6 @@ def _known_download_asset(name):
         return True
     return os.path.basename(name) in assets
 
-
 @lru_cache(maxsize=1)
 def _have_sam3_code():
     """True if this ultralytics ships the SAM3 predictor. SAM3 isn't loaded via
@@ -251,7 +240,6 @@ def _have_sam3_code():
         return True
     except Exception:
         return False
-
 
 def _sam_available(entry):
     """(available, reason) for a SAM entry. Every family runs through
@@ -284,12 +272,10 @@ def _sam_available(entry):
                        f"(drop it in {SAM_DIR} to use it)")
     return True, ""
 
-
 def _yolo_available(entry):
     if not _HAVE_ULTRALYTICS:
         return False, "pip install ultralytics"
     return True, ""
-
 
 def list_sam_models():
     """SAM-family registry (built-ins + discovered) for the settings dropdown.
@@ -314,7 +300,6 @@ def list_sam_models():
         out.append(e)
     return out
 
-
 def list_yolo_seg_models():
     """YOLO-seg registry (built-ins + discovered) for the background-seg
     dropdown. Never raises."""
@@ -333,7 +318,6 @@ def list_yolo_seg_models():
         out.append(e)
     return out
 
-
 # ── active-selection helpers (state lives in manager; these just validate) ────
 def sam_info(model_id):
     """Registry entry for a SAM id (built-in or discovered), or the default's
@@ -345,7 +329,6 @@ def sam_info(model_id):
             return e
     return _SAM_BY_ID[SAM_DEFAULT]
 
-
 def yolo_seg_info(model_id):
     if model_id in _YOLO_BY_ID:
         return _YOLO_BY_ID[model_id]
@@ -353,7 +336,6 @@ def yolo_seg_info(model_id):
         if e["id"] == model_id:
             return e
     return _YOLO_BY_ID[YOLO_SEG_DEFAULT]
-
 
 def resolve_sam_id(model_id):
     """Coerce a persisted id to a valid one: keep it if known/discovered, else
@@ -364,7 +346,6 @@ def resolve_sam_id(model_id):
         return model_id
     return SAM_DEFAULT
 
-
 def resolve_yolo_seg_id(model_id):
     if model_id in _YOLO_BY_ID:
         return model_id
@@ -372,12 +353,10 @@ def resolve_yolo_seg_id(model_id):
         return model_id
     return YOLO_SEG_DEFAULT
 
-
 def sam_weights_path(model_id):
     """Filesystem path to the checkpoint for a SAM id (or '' if none/known-by-
     download). Callers hand this to the SAM loader."""
     return _sam_weight_path(sam_info(model_id))
-
 
 def sam_weights_ref(model_id):
     """The path to hand ultralytics for a SAM id. Built-ins point at
@@ -395,7 +374,6 @@ def sam_weights_ref(model_id):
         pass
     return os.path.join(SAM_DIR, w)
 
-
 # ── SAM3 weight fetch (HuggingFace; ultralytics can't auto-download it) ────────
 # SAM3's checkpoint isn't a GitHub asset, so we grab it from a HuggingFace repo
 # on explicit user action and drop it at models/seg/sam/sam3.pt — the path
@@ -403,11 +381,9 @@ def sam_weights_ref(model_id):
 SAM3_HF_REPO = os.environ.get("CIM_SAM3_HF_REPO", "AEmotionStudio/sam3.1")
 _CKPT_EXTS = (".pt", ".pth", ".safetensors")
 
-
 def sam3_present():
     """True if models/seg/sam/sam3.pt is already on disk."""
     return os.path.exists(os.path.join(SAM_DIR, "sam3.pt"))
-
 
 def _hf_list_files(repo):
     """Filenames in a HuggingFace model repo, via the public API. [] on failure
@@ -422,7 +398,6 @@ def _hf_list_files(repo):
     except Exception:
         return []
 
-
 def _pick_sam3_checkpoint(files):
     """Choose the checkpoint filename to pull from the repo listing: prefer a
     name containing 'sam3', else the first checkpoint-extension file. '' if none.
@@ -435,7 +410,6 @@ def _pick_sam3_checkpoint(files):
         return (0 if "sam3" in low else 1,
                 _CKPT_EXTS.index(next(e for e in _CKPT_EXTS if low.endswith(e))))
     return sorted(cks, key=rank)[0]
-
 
 def download_sam3(repo=None, token=None, progress=None):
     """Fetch the SAM3 checkpoint from HuggingFace into models/seg/sam/sam3.pt.
@@ -503,7 +477,6 @@ def download_sam3(repo=None, token=None, progress=None):
             pass
         return False, f"download failed from {url}: {e}"
 
-
 def yolo_weights_ref(model_id):
     """The ultralytics weights reference for a YOLO-seg id: a discovered file's
     full path, else the auto-download model name."""
@@ -517,11 +490,9 @@ def yolo_weights_ref(model_id):
         pass
     return os.path.join(YOLO_DIR, w)
 
-
 # ── "what to segment" class filter ────────────────────────────────────────────
 _catalog_cache = {}
 _catalog_lock = threading.Lock()
-
 
 def weights_present(model_id):
     """True if the YOLO-seg weights for `model_id` are already on disk (a
@@ -533,7 +504,6 @@ def weights_present(model_id):
         return bool(ref) and os.path.exists(ref)
     except Exception:
         return False
-
 
 def class_catalog(model_id, download=False):
     """Ordered {id: name} of the classes a YOLO-seg model was trained on, for
@@ -571,7 +541,6 @@ def class_catalog(model_id, download=False):
     with _catalog_lock:
         _catalog_cache[ref] = names
     return names
-
 
 def wanted_class_ids(model_id, selected_names):
     """Map a user's saved class-name selection to the integer class ids the

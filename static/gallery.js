@@ -77,7 +77,6 @@ document.getElementById('search_input').addEventListener('input',e=>{
   },300);
 });
 
-
 // ── Quick-filter dropdown ────────────────────────────────────────────────────
 // Chips shown when the search box is focused. Their labels/queries come from the
 // configurable `search_quick_filters` setting, so home vs. work can surface

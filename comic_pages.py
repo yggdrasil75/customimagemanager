@@ -58,7 +58,6 @@ try:
 except Exception:                                    # pragma: no cover
     cv2 = None
 
-
 # ── tunables ─────────────────────────────────────────────────────────────────
 # Fractions of the page unless noted. These are deliberately loose: a missed
 # panel is worse than a slightly baggy one, because a missed panel silently
@@ -74,7 +73,6 @@ GUTTER_PCT = 0.985    # a row/col is gutter if this fraction of it is background
 GUTTER_MIN = 0.012    # a gutter run must be this wide to count as a cut
 LINE_PCT   = 0.90     # a row/col is a border if this fraction of it is one line
 XY_DEPTH   = 5        # recursion limit for xycut
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Page decoding
@@ -113,10 +111,8 @@ def decode_bytes(data: bytes) -> np.ndarray | None:
         pass
     return None
 
-
 def _rgb_to_bgr(a: np.ndarray) -> np.ndarray:
     return a[:, :, ::-1].copy() if a.ndim == 3 and a.shape[2] >= 3 else a
-
 
 def _norm_array(a: np.ndarray) -> np.ndarray | None:
     """Whatever imagecodecs handed back -> 3-channel uint8 BGR."""
@@ -138,7 +134,6 @@ def _norm_array(a: np.ndarray) -> np.ndarray | None:
         return _rgb_to_bgr(a[:, :, :3])
     return None
 
-
 def page_bgr(abs_path: str, fmt: str, n: int, dpi: int = 150,
              page_names: list[str] | None = None) -> np.ndarray | None:
     """Decode page `n` of a comic container. `page_names` is the cached result
@@ -154,7 +149,6 @@ def page_bgr(abs_path: str, fmt: str, n: int, dpi: int = 150,
         return None
     return decode_bytes(bi.comic_page_bytes(abs_path, fmt, names[n]))
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # Geometry helpers
 # ══════════════════════════════════════════════════════════════════════════════
@@ -166,14 +160,12 @@ def _norm_box(x, y, w, h, W, H) -> dict:
     return {"cx": round((x + w / 2) / W, 5), "cy": round((y + h / 2) / H, 5),
             "w":  round(w / W, 5),           "h":  round(h / H, 5)}
 
-
 def _px(box: dict, W: int, H: int) -> tuple[int, int, int, int]:
     """Normalised box -> (x0, y0, x1, y1) in pixels."""
     w = box["w"] * W; h = box["h"] * H
     x0 = box["cx"] * W - w / 2; y0 = box["cy"] * H - h / 2
     return (int(round(x0)), int(round(y0)),
             int(round(x0 + w)), int(round(y0 + h)))
-
 
 def _iou(a: dict, b: dict) -> float:
     ax0, ay0 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
@@ -186,7 +178,6 @@ def _iou(a: dict, b: dict) -> float:
     union = a["w"] * a["h"] + b["w"] * b["h"] - inter
     return inter / union if union > 0 else 0.0
 
-
 def _contains(outer: dict, inner: dict, slack: float = 0.02) -> bool:
     ox0, oy0 = outer["cx"] - outer["w"] / 2, outer["cy"] - outer["h"] / 2
     ox1, oy1 = ox0 + outer["w"], oy0 + outer["h"]
@@ -194,7 +185,6 @@ def _contains(outer: dict, inner: dict, slack: float = 0.02) -> bool:
     ix1, iy1 = ix0 + inner["w"], iy0 + inner["h"]
     return (ix0 >= ox0 - slack and iy0 >= oy0 - slack
             and ix1 <= ox1 + slack and iy1 <= oy1 + slack)
-
 
 def _dedupe(boxes: list[dict], iou_thresh: float = 0.55) -> list[dict]:
     """Drop near-duplicates and fully-contained boxes, keeping the larger.
@@ -208,7 +198,6 @@ def _dedupe(boxes: list[dict], iou_thresh: float = 0.55) -> list[dict]:
             continue
         out.append(b)
     return out
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Background / gutter analysis
@@ -242,7 +231,6 @@ def _gutter_mask(gray: np.ndarray) -> tuple[np.ndarray, str]:
     cut = min(90.0, max(12.0, med + 12)) if margin else 14.0
     return gray <= cut, "dark"
 
-
 def _prep(bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
     """Downscale, grayscale, gutter mask, ink mask.
 
@@ -261,7 +249,6 @@ def _prep(bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
     gutter, kind = _gutter_mask(gray)
     ink = (gray <= 100) if kind == "light" else (gray >= 160)
     return gray, gutter, ink, kind
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Detector 1 — contours
@@ -294,7 +281,6 @@ def _content_mask(gutter: np.ndarray, erode_px: int = 0) -> np.ndarray:
                             cv2.getStructuringElement(cv2.MORPH_RECT, (e, e)))
     return content
 
-
 def _boxes_from_mask(mask: np.ndarray, W: int, H: int,
                      ox: int = 0, oy: int = 0, grow: int = 0) -> list[dict]:
     """External contours of `mask` -> normalised boxes, filtered to panel shapes.
@@ -321,11 +307,9 @@ def _boxes_from_mask(mask: np.ndarray, W: int, H: int,
         out.append(_norm_box(x, y, bw, bh, W, H))
     return out
 
-
 def _detect_contours(gutter: np.ndarray) -> list[dict]:
     h, w = gutter.shape
     return _boxes_from_mask(_content_mask(gutter), w, h)
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Detector 2 — recursive projection cut
@@ -348,7 +332,6 @@ def _runs(ok: np.ndarray, span: int, min_run: int) -> list[tuple[int, int]]:
     return [(a, b) for a, b in out
             if b - a >= min_run and a > 0 and b < span]
 
-
 def _cut_runs(gut_prof: np.ndarray, line_prof: np.ndarray | None,
               span: int, min_wide: int) -> list[tuple[int, int]]:
     """Candidate cut positions, from two different kinds of separator.
@@ -364,7 +347,6 @@ def _cut_runs(gut_prof: np.ndarray, line_prof: np.ndarray | None,
         runs = runs + _runs(line_prof >= LINE_PCT, span, 2)
     return runs
 
-
 def _trim(gutter: np.ndarray, x0: int, y0: int, x1: int, y1: int):
     """Shrink a region to hug its content, so panel boxes don't carry margin."""
     sub = ~gutter[y0:y1, x0:x1]
@@ -374,7 +356,6 @@ def _trim(gutter: np.ndarray, x0: int, y0: int, x1: int, y1: int):
     cols = np.where(sub.any(axis=0))[0]
     return (x0 + int(cols[0]), y0 + int(rows[0]),
             x0 + int(cols[-1]) + 1, y0 + int(rows[-1]) + 1)
-
 
 def _line_masks(ink_sub: np.ndarray, frac: float = 0.6):
     """Long straight horizontal / vertical ink runs — i.e. panel borders.
@@ -408,7 +389,6 @@ def _line_masks(ink_sub: np.ndarray, frac: float = 0.6):
                               cv2.getStructuringElement(cv2.MORPH_RECT, (1, vlen)))
         vline = cv2.dilate(vl, np.ones((1, 3), np.uint8)) > 0
     return hline, vline
-
 
 def _xycut(gutter: np.ndarray, region, depth: int, out: list,
            ink: np.ndarray | None = None):
@@ -462,7 +442,6 @@ def _xycut(gutter: np.ndarray, region, depth: int, out: list,
 
     out.append((x0, y0, x1, y1))
 
-
 def _detect_xycut(gutter: np.ndarray, ink: np.ndarray | None = None,
                   region=None) -> list[dict]:
     H, W = gutter.shape
@@ -472,7 +451,6 @@ def _detect_xycut(gutter: np.ndarray, ink: np.ndarray | None = None,
     return [_norm_box(x0, y0, x1 - x0, y1 - y0, W, H)
             for x0, y0, x1, y1 in leaves
             if (x1 - x0) * (y1 - y0) >= MIN_AREA * page_area]
-
 
 def _refine(gutter: np.ndarray, ink: np.ndarray, box: dict) -> list[dict]:
     """Try to break one oversized blob into real panels.
@@ -500,7 +478,6 @@ def _refine(gutter: np.ndarray, ink: np.ndarray, box: dict) -> list[dict]:
         return kids
     return [box]
 
-
 def _drop_empty(panels: list[dict], gutter: np.ndarray,
                 min_content: float = 0.06) -> list[dict]:
     """Reject boxes that are almost entirely background.
@@ -527,7 +504,6 @@ def _drop_empty(panels: list[dict], gutter: np.ndarray,
         return []
     floor = max(min_content, 0.35 * float(np.median(fracs)))
     return [p for p, f in zip(panels, fracs) if f >= floor]
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Reading order
@@ -567,7 +543,6 @@ def order_panels(panels: list[dict], rtl: bool = False) -> list[dict]:
     for i, p in enumerate(ordered):
         p["order"] = i
     return ordered
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Panel detection — the entry point
@@ -641,14 +616,12 @@ def detect_panels(bgr: np.ndarray, panel_fn=None, rtl: bool = False) -> dict:
 
     return {"panels": order_panels(panels, rtl), "source": source}
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # OCR
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _line_centre(ln: dict) -> tuple[float, float]:
     return float(ln.get("cx", 0.5)), float(ln.get("cy", 0.5))
-
 
 def _assign_panel(ln: dict, panels: list[dict]) -> int:
     """Index of the panel holding this line's centre, else the best overlap,
@@ -664,7 +637,6 @@ def _assign_panel(ln: dict, panels: list[dict]) -> int:
         if ov > best_ov:
             best, best_ov = i, ov
     return best if best_ov > 0.05 else -1
-
 
 def _group_blocks(lines: list[dict], rtl: bool) -> list[list[dict]]:
     """Cluster OCR lines into balloons/captions.
@@ -701,7 +673,6 @@ def _group_blocks(lines: list[dict], rtl: bool) -> list[list[dict]]:
                                -min(l["cx"] for l in b) if rtl
                                else min(l["cx"] for l in b)))
     return blocks
-
 
 def ocr_page(bgr: np.ndarray, panels: list[dict], ocr_fn,
              rtl: bool = False, per_panel: bool = False) -> dict:
@@ -756,7 +727,6 @@ def ocr_page(bgr: np.ndarray, panels: list[dict], ocr_fn,
     text = build_text(panels, lines, rtl)
     return {"engine": engine, "lines": lines, "text": text}
 
-
 def build_text(panels: list[dict], lines: list[dict], rtl: bool = False) -> str:
     """Flatten lines into a reading-order transcript, one block per line of
     output and a blank line between panels. Unplaced lines go last under their
@@ -785,7 +755,6 @@ def build_text(panels: list[dict], lines: list[dict], rtl: bool = False) -> str:
         if body.strip():
             chunks.append(f"[unplaced]\n{body}")
     return "\n\n".join(chunks)
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # One page, both passes

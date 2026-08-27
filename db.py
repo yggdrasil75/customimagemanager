@@ -52,7 +52,6 @@ _all_conns_lock = threading.Lock()
 ## @brief Optional logger, set by init(); used only for the leaked-transaction warning.
 _logger: Any = None
 
-
 def init(media_dir: str = "media", logger: Any = None) -> None:
     """@brief Set DB paths, create the schema, and record an optional logger.
     @param media_dir directory holding library.db and thumbs.db.
@@ -62,7 +61,6 @@ def init(media_dir: str = "media", logger: Any = None) -> None:
     THUMB_DB = os.path.join(media_dir, "thumbs.db")
     _logger = logger
     init_schema()
-
 
 def _configure(conn: sqlite3.Connection) -> None:
     """@brief Apply the shared pragmas to a fresh connection.
@@ -74,7 +72,6 @@ def _configure(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA cache_size=-32000")   # 32 MB page cache
-
 
 def conn() -> sqlite3.Connection:
     """@brief This thread's connection to the main library DB, opened on first use."""
@@ -88,7 +85,6 @@ def conn() -> sqlite3.Connection:
         with _all_conns_lock:
             _all_conns[id(c)] = c
     return c
-
 
 def thumb_conn() -> sqlite3.Connection:
     """@brief This thread's connection to the disposable thumbnail BLOB cache."""
@@ -104,7 +100,6 @@ def thumb_conn() -> sqlite3.Connection:
         with _all_conns_lock:
             _all_conns[id(c)] = c
     return c
-
 
 def retry(fn: Callable, *args, attempts: int = 6, **kwargs):
     """@brief Run a self-contained write transaction, retrying on SQLITE_BUSY.
@@ -135,7 +130,6 @@ def retry(fn: Callable, *args, attempts: int = 6, **kwargs):
             # resynchronise and collide again on the next attempt.
             time.sleep(min(2.0, 0.05 * (2 ** i)) * (1.0 + random.random() * 0.25))
 
-
 def rollback_if_open() -> None:
     """@brief Roll back this thread's connection if it left a transaction open.
 
@@ -154,7 +148,6 @@ def rollback_if_open() -> None:
                 _logger.warning("rolled back an uncommitted transaction")
         except Exception:
             pass
-
 
 def close() -> None:
     """@brief Release this thread's main-DB connection.
@@ -180,7 +173,6 @@ def close() -> None:
     except Exception:
         pass
 
-
 def release_pool(ex, n_workers: int) -> None:
     """@brief Close the DB connection held by each worker thread in an executor.
     @param ex a ThreadPoolExecutor whose worker threads may have called conn().
@@ -195,7 +187,6 @@ def release_pool(ex, n_workers: int) -> None:
     except Exception:
         pass
 
-
 @atexit.register
 def close_all() -> None:
     """@brief Close every connection still open at process exit."""
@@ -208,13 +199,11 @@ def close_all() -> None:
         except Exception:
             pass
 
-
 def table_exists(db: sqlite3.Connection, name: str) -> bool:
     """@brief True if a table of this name exists in the given connection."""
     return db.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
         (name,)).fetchone() is not None
-
 
 # ── Schema ───────────────────────────────────────────────────────────────────
 _SCHEMA = """
@@ -496,7 +485,6 @@ _MIGRATIONS = [
 # Semantic-date buckets that each get their own index for the date filters.
 _DATE_COLS = ("d_actual", "d_original", "d_capture", "d_digitized", "d_modified")
 
-
 def init_schema() -> None:
     """@brief Create tables, apply pending migrations, and consolidate legacy ratings.
 
@@ -520,7 +508,6 @@ def init_schema() -> None:
         pass
     _consolidate_iqa_manual(db)
 
-
 def _consolidate_iqa_manual(db: sqlite3.Connection) -> None:
     """@brief Fold retired iqa_manual stars into the unified rating columns.
 
@@ -541,7 +528,6 @@ def _consolidate_iqa_manual(db: sqlite3.Connection) -> None:
     except Exception:
         pass
 
-
 # ── Core file row CRUD ───────────────────────────────────────────────────────
 def upsert_file(rel_path: str, mtime: float, width: int, height: int,
                 sha256: str, phash8: bytes, phash32: bytes,
@@ -558,7 +544,6 @@ def upsert_file(rel_path: str, mtime: float, width: int, height: int,
     """, (rel_path, mtime, width, height, sha256, phash8, phash32,
           json.dumps(tags), description))
     db.commit()
-
 
 # ── File edit changelog (undo/redo + EXIF ImageHistory) ──────────────────────
 def history_record(rel_path: str, field: str, old_value: Any, new_value: Any,
@@ -586,7 +571,6 @@ def history_record(rel_path: str, field: str, old_value: Any, new_value: Any,
     if commit:
         db.commit()
 
-
 def _history_row_to_change(r: sqlite3.Row) -> dict:
     """@brief Decode a file_history row's JSON old/new values into a change dict."""
     return {
@@ -594,7 +578,6 @@ def _history_row_to_change(r: sqlite3.Row) -> dict:
         "old": json.loads(r["old_value"]) if r["old_value"] is not None else None,
         "new": json.loads(r["new_value"]) if r["new_value"] is not None else None,
     }
-
 
 def history_entries(rel_path: str, include_undone: bool = False) -> list:
     """@brief Return a file's changelog as a list of change dicts, oldest first.
@@ -613,7 +596,6 @@ def history_entries(rel_path: str, include_undone: bool = False) -> list:
         out.append(e)
     return out
 
-
 def history_undo(rel_path: str) -> Optional[dict]:
     """@brief Mark the most recent active change undone and return it.
     @return {seq, field, old, new}, or None if there's nothing to undo.
@@ -631,7 +613,6 @@ def history_undo(rel_path: str) -> Optional[dict]:
     db.commit()
     return _history_row_to_change(r)
 
-
 def history_redo(rel_path: str) -> Optional[dict]:
     """@brief Mark the oldest undone change active again and return it.
     @return {seq, field, old, new}, or None if there's nothing to redo.
@@ -646,7 +627,6 @@ def history_redo(rel_path: str) -> Optional[dict]:
     db.execute("UPDATE file_history SET undone=0 WHERE id=?", (r["id"],))
     db.commit()
     return _history_row_to_change(r)
-
 
 def history_as_imagehistory(rel_path: str, limit: int = 64) -> str:
     """@brief Render the active changelog as a string for EXIF ImageHistory (0x9213).

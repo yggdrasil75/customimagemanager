@@ -37,10 +37,8 @@ except Exception:                              # pragma: no cover
     MultipartEncoder = None                    # type: ignore
     _HAVE_TOOLBELT = False
 
-
 class AuthError(Exception):
     """Raised when the uploader cannot obtain or refresh a server session."""
-
 
 class Session:
     """Holds the uploader's authenticated connection to the server.
@@ -184,10 +182,8 @@ class Session:
         except requests.exceptions.RequestException:
             pass
 
-
 def log_error(msg: str) -> None:
     print(f"  [!] {msg}", file=sys.stderr)
-
 
 class _StreamingMultipart:
     """Minimal streaming multipart/form-data body (fallback for when
@@ -230,7 +226,6 @@ class _StreamingMultipart:
                 yield chunk
         yield self._epilogue
 
-
 def _post_streaming(session, endpoint, filepath, fname, form_data, timeout):
     """POST a file as a streamed multipart body without loading it into memory.
 
@@ -255,7 +250,6 @@ def _post_streaming(session, endpoint, filepath, fname, form_data, timeout):
                "Content-Length": str(body.len)}
     headers.update(session.headers())
     return http.post(endpoint, data=body, headers=headers, timeout=timeout)
-
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -324,7 +318,6 @@ TEMPORARY_ERROR_CODES = {
 AUTH_STATUS_CODES = {401, 403}
 # Any HTTP 5xx or network error is also treated as temporary.
 
-
 # ── Result types ──────────────────────────────────────────────────────────────
 
 class Outcome(Enum):
@@ -332,7 +325,6 @@ class Outcome(Enum):
     DUPLICATE = "duplicate"    # exact_duplicate or filename_exists
     SKIPPED   = "skipped"      # other permanent rejection
     FAILED    = "failed"       # gave up after retries
-
 
 @dataclass
 class UploadResult:
@@ -343,7 +335,6 @@ class UploadResult:
     existing_file: Optional[str] = None
     attempts:      int = 1
 
-
 # ── Sidecar parsing ───────────────────────────────────────────────────────────
 
 def load_classes(source_dir: str) -> list[str]:
@@ -352,7 +343,6 @@ def load_classes(source_dir: str) -> list[str]:
         with open(p, encoding='utf-8') as f:
             return [l.strip() for l in f if l.strip()]
     return []
-
 
 def parse_sidecar(filepath: str, classes_map: list[str]) -> tuple:
     """
@@ -420,7 +410,6 @@ def parse_sidecar(filepath: str, classes_map: list[str]) -> tuple:
 
     # Format 3: description fallback
     return [], content, []
-
 
 # ── Upload logic ──────────────────────────────────────────────────────────────
 
@@ -567,7 +556,6 @@ def upload_file(
         attempts=max_attempts,
     )
 
-
 # ── Summary printing ──────────────────────────────────────────────────────────
 
 def print_summary(results: list[UploadResult], verbose_duplicates: bool) -> None:
@@ -608,7 +596,6 @@ def print_summary(results: list[UploadResult], verbose_duplicates: bool) -> None
         for r in by_outcome[Outcome.FAILED]:
             print(f"  {os.path.basename(r.filepath)}: {r.message}")
 
-
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def _should_upload(fname: str, aggressive: bool) -> bool:
@@ -621,7 +608,6 @@ def _should_upload(fname: str, aggressive: bool) -> bool:
             return False
         return ext not in NON_MEDIA_EXTENSIONS
     return ext in MEDIA_EXTENSIONS
-
 
 def bulk_upload(
     source_dir:      str,
@@ -732,7 +718,6 @@ def bulk_upload(
         return 1
     return 0
 
-
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Bulk-upload images to the AI Media & Asset Manager.",
@@ -817,7 +802,6 @@ def main() -> None:
         verify_tls      = not args.no_verify_tls,
         dest            = args.dest,
     ))
-
 
 if __name__ == "__main__":
     main()

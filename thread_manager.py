@@ -15,14 +15,12 @@ try:
 except Exception:
     torch = None
 
-
 RESERVED_SLOTS = 1
 IDLE_SECONDS = 60
 MEM_BUDGET_FRAC = 0.8
 VRAM_BUDGET_FRAC = 0.85
 MODEL_OVERHEAD = 1.05
 MODEL_SETTLE_SECONDS = 8.0
-
 
 def _gpu_kind():
     if torch is None:
@@ -52,7 +50,6 @@ def _gpu_kind():
         return "dedicated"
     except Exception:
         return "none"
-
 
 def _detect_mem_limit_mb():
     """The memory limit this process actually runs under, in MB, or 0 if none.
@@ -88,11 +85,9 @@ def _detect_mem_limit_mb():
         return total / (1024 * 1024)
     return 0.0
 
-
 def _default_max():
     n = os.cpu_count() or 8
     return max(2, n)
-
 
 class ThreadManager:
     """Global slot allocator. Thread-safe. Not a fixed executor: it tracks how
@@ -486,7 +481,6 @@ class ThreadManager:
             "held_keys": sorted(self.held_keys()),
         }
 
-
 class _ModelReservation:
     """Reserve a model's memory against the right pool for the duration of a
     `with` block.
@@ -586,7 +580,6 @@ class _ModelReservation:
             self._active = False
         return False
 
-
 class _ManagedPool:
     """Context manager returned by ThreadManager.pool(). Counts the task as
     active for its lifetime and builds a right-sized ThreadPoolExecutor."""
@@ -613,7 +606,6 @@ class _ManagedPool:
         finally:
             self._tm._leave()
         return False
-
 
 # Process-wide singleton + module-level shortcuts (mirrors model_registry).
 MANAGER = ThreadManager()

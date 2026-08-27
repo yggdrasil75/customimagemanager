@@ -87,7 +87,6 @@ _WORK = 256          # images are compared at WORK x WORK
 _BLOCK = 16          # 16x16 grid of (WORK/16)=16px blocks  -> 256 blocks
 _EPS = 1e-6
 
-
 # ── Low-level helpers ─────────────────────────────────────────────────────────
 def _resize_work(arr):
     if _HAVE_CV2:
@@ -95,7 +94,6 @@ def _resize_work(arr):
     ys = (np.linspace(0, arr.shape[0] - 1, _WORK)).astype(int)
     xs = (np.linspace(0, arr.shape[1] - 1, _WORK)).astype(int)
     return arr[ys][:, xs]
-
 
 def _to_work(img):
     """
@@ -118,12 +116,10 @@ def _to_work(img):
     col = _resize_work(bgr).astype(np.float32)
     return g, col
 
-
 def _to_gray_work(img):
     """Back-compat single-output helper used by the fallback path."""
     g, _ = _to_work(img)
     return g
-
 
 def _global_ssim(a, b):
     """Cheap single-window SSIM on two equal-size float32 arrays (0..255)."""
@@ -137,7 +133,6 @@ def _global_ssim(a, b):
             ((mu_a ** 2 + mu_b ** 2 + c1) * (va + vb + c2) + _EPS))
     return float(max(-1.0, min(1.0, ssim)))
 
-
 def _edge_map(g):
     if _HAVE_CV2:
         gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
@@ -149,7 +144,6 @@ def _edge_map(g):
         m = np.hypot(gx, gy)
     mx = m.max()
     return (m / mx * 255.0) if mx > 0 else m
-
 
 # ── Feature extraction ────────────────────────────────────────────────────────
 def extract_features(img_a, img_b):
@@ -194,7 +188,6 @@ def extract_features(img_a, img_b):
     return np.array([mean_diff, block_max, block_p95, block_std, frac_high,
                      spread, inv_ssim, edge_diff, center_excess],
                     dtype=np.float64)
-
 
 # ── The model ─────────────────────────────────────────────────────────────────
 class DuplicateClassifier:
@@ -295,7 +288,6 @@ def _crop_subregion(img, box):
     except Exception:
         return img
 
-
 def classify_crop_pair(model, img_a, img_b, box_a=None, box_b=None, threshold=0.5):
     try:
         a, b = img_a, img_b
@@ -315,7 +307,6 @@ def classify_crop_pair(model, img_a, img_b, box_a=None, box_b=None, threshold=0.
         is_dup, prob, feats = classify_pair(model, img_a, img_b,
                                             threshold=threshold)
         return is_dup, prob, feats, False
-
 
 # ── Convenience one-shot API for the app ──────────────────────────────────────
 def classify_pair(model, img_a, img_b, threshold=0.5):
