@@ -65,8 +65,7 @@ def order_eras_by_time(labels: np.ndarray, epochs: list) -> dict[int, int]:
     ordered = sorted(med, key=lambda l: (med[l], l))
     return {lbl: rank for rank, lbl in enumerate(ordered)}
 
-def flag_date_disagreements(labels: np.ndarray, epochs: list,
-                            max_mad: float = 4.0,
+def flag_date_disagreements(labels: np.ndarray, epochs: list, max_mad: float = 4.0,
                             floor_seconds: float = 730 * 86400) -> list[dict[str, Any]]:
     """! @brief Flag faces whose date is an outlier within their own embedding era.
     @param max_mad Median-absolute-deviations from the era's median date beyond which

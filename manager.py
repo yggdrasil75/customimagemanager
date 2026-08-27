@@ -1596,6 +1596,14 @@ def _index_file(rel_path: str, force: bool = False,
     abs_path = get_safe_path(MEDIA_DIR, rel_path)
     if not abs_path or not os.path.exists(abs_path):
         return False
+    _ext = os.path.splitext(abs_path)[1].lower()
+    _is_music = _ext in mi.MUSIC_EXTS
+    if _is_music and not mt.is_library_file(abs_path):
+        try:
+            _music_upsert(rel_path, abs_path, force=force)
+        except Exception as e:
+            access_logger.error(f"music index {rel_path}: {e}")
+        return True
     try:
         mtime = _getmtime_loose(abs_path)
         row   = _get_file_row(rel_path)
@@ -1793,7 +1801,10 @@ def _enumerate_library():
     for root, dirs, filenames in os.walk(MEDIA_DIR):
         dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'runs']
         for f in filenames:
-            if f.startswith('.') or not mt.is_library_file(f):
+            if f.startswith('.'):
+                continue
+            if not (mt.is_library_file(f) or os.path.splitext(f)[1].lower() in mi.MUSIC_EXTS):
+                continue
                 continue
             rel = _rel(os.path.join(root, f))
             if rel not in seen:
@@ -3657,73 +3668,60 @@ def _mark_body_done(rel: str) -> None:
     _db().execute("UPDATE files SET body_done=1 WHERE rel_path=?", (rel,))
     _db().commit()
 
-def _background_face_worker() -> None:
-    """!
-    @brief Idle-gated worker: box faces/people, cache embeddings, cluster when the queue drains.
-    @note Forced mode (user "Rescan all") ignores the idle gate; opportunistic mode only runs while idle.
+def _face_process_one(rel: str) -> None:
+    """! @brief Box faces/people for one file, cache embeddings, mark done."""
+    abs_p = get_safe_path(MEDIA_DIR, rel)
+    if not abs_p or not os.path.exists(abs_p):
+        _mark_face_done(rel); return
+    img = read_jxl(abs_p)
+    if img is None:
+        _mark_face_done(rel); return
+    bgr = _to_bgr(img)                 # read_jxl may return gray/RGBA; YOLO needs 3-channel BGR
+    found = _face_regions_for(bgr, rel)
+    if found:
+        meta = read_metadata(abs_p)
+        merged = _merge_regions(meta["regions"], found)
+        write_metadata(abs_p, meta["tags"], meta["description"], merged)
+        _cache_faces(rel, bgr, found)
+        if state.get("body_enabled"):
+            _cache_bodies(rel, bgr, found)   # same decoded image, gated on body_enabled
+        _face_dirty["v"] = True
+    _mark_face_done(rel)
+    if state.get("body_enabled"):
+        _mark_body_done(rel)
+
+def _claim_face_job():
+    """! @brief One face-scan unit for the shared background processor, or None.
     """
-    BATCH = 6
-    while True:
-        _face_wake.wait(timeout=15)          # interruptible: a manual rescan wakes us immediately
-        _face_wake.clear()
-        try:
-            forced = _face_force["v"]
-            if not forced and not state.get("face_bg_enabled"):
-                continue
-            if not forced and not thread_manager.is_idle():
-                continue
+    forced = _face_force["v"]
+    if not forced and not state.get("face_bg_enabled"):
+        return None
+    if not forced and not thread_manager.is_idle():
+        return None
+    row = _db().execute(
+        "SELECT rel_path FROM files WHERE COALESCE(face_done,0)=0 LIMIT 1").fetchone()
+    if row is None:
+        # queue drained: trailing cluster pass, then settle status
+        if _face_dirty["v"]:
+            state["status_text"] = "Face scan: clustering…"
+            n = _recluster()
+            _face_dirty["v"] = False
+            state["status_text"] = f"Face scan: done ({n} cluster(s))."
+        elif forced:
+            state["status_text"] = "Face scan: complete."
+        else:
+            state["status_text"] = "Face scan: all caught up."
+        _face_force["v"] = False
+        return None
+    left = _db().execute(
+        "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
+    state["status_text"] = (
+        f"Face scan: {left} image(s) left…" if forced
+        else f"Face scan (idle): {left} image(s) left…")
+    return row[0]
 
-            rows = _db().execute(
-                "SELECT rel_path FROM files WHERE COALESCE(face_done,0)=0 LIMIT ?",
-                (BATCH,)).fetchall()
-            if not rows:
-                if _face_dirty["v"]:
-                    state["status_text"] = "Face scan: clustering…"
-                    n = _recluster()
-                    _face_dirty["v"] = False
-                    state["status_text"] = f"Face scan: done ({n} cluster(s))."
-                elif forced:
-                    state["status_text"] = "Face scan: complete."
-                else:
-                    state["status_text"] = "Face scan: all caught up."
-                _face_force["v"] = False
-                if not forced:
-                    time.sleep(45)
-                continue
-
-            left = _db().execute(
-                "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
-            state["status_text"] = (
-                f"Face scan: {left} image(s) left…" if forced
-                else f"Face scan (idle): {left} image(s) left…")
-            for (rel,) in rows:
-                if not _face_force["v"] and not thread_manager.is_idle():
-                    break                      # user is back — yield (opportunistic only)
-                abs_p = get_safe_path(MEDIA_DIR, rel)
-                if not abs_p or not os.path.exists(abs_p):
-                    _mark_face_done(rel); continue
-                img = read_jxl(abs_p)
-                if img is None:
-                    _mark_face_done(rel); continue
-                bgr = _to_bgr(img)             # read_jxl may return gray/RGBA; YOLO needs 3-channel BGR
-
-                found = _face_regions_for(bgr, rel)
-                if found:
-                    meta = read_metadata(abs_p)
-                    merged = _merge_regions(meta["regions"], found)
-                    write_metadata(abs_p, meta["tags"], meta["description"], merged)
-                    _cache_faces(rel, bgr, found)
-                    if state.get("body_enabled"):
-                        _cache_bodies(rel, bgr, found)   # same decoded image, gated on body_enabled
-                    _face_dirty["v"] = True
-                _mark_face_done(rel)
-                if state.get("body_enabled"):
-                    _mark_body_done(rel)
-            if _face_force["v"]:
-                _face_wake.set()      # keep the forced run going without a pause
-        except Exception as e:
-            access_logger.error(f"face worker: {e}")
-            time.sleep(30)
+def _register_face_source():
+    thread_manager.register_source("face", _claim_face_job, _face_process_one)
 
 def _mark_face_done(rel: str) -> None:
     """! @brief Mark a file's face-boxing pass complete."""
@@ -5459,13 +5457,9 @@ def api_face_scan():
         db.execute("DELETE FROM body_regions WHERE COALESCE(confirmed,0)=0")
         db.commit()
         _face_dirty["v"] = True
-        # Clicking the button is an explicit instruction: run NOW, at full speed,
-        # regardless of the idle gate or the face_bg_enabled setting (which only
-        # governs *opportunistic* background scanning). Previously this just
-        # queued work behind a 60s-idle gate the user could never satisfy while
-        # they were sitting there watching the pane.
         _face_force["v"] = True
         _face_wake.set()
+        thread_manager.wake()
         pending = db.execute(
             "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
         state["status_text"] = f"Face scan: starting ({pending} image(s))…"
@@ -6416,7 +6410,7 @@ def _run_upload():
 # The upload request spools raw bytes and enqueues; these workers drain the
 # queue and run the (slow) convert/index chain — cjxl parallelism lives here, not
 # on the request threads. Sized so parallel encoders stay near the core count.
-_UPLOAD_SPOOL_DIR   = os.path.join(os.path.dirname(DB_PATH), "upload_spool")
+_UPLOAD_SPOOL_DIR   = os.path.join(os.path.dirname(DB_PATH), ".upload_spool")
 _UPLOAD_STALE_SECS  = 300
 _upload_wake        = threading.Event()
 _upload_started     = threading.Event()   # guards one-time pool start
@@ -11013,63 +11007,60 @@ def autotag_toggle():
     save_config()
     return jsonify({"success": True, "enabled": state["autotag_enabled"]})
 
-def _background_autotag_worker():
-    """When the app is idle and a trained model exists, walk through files that
-    have never been touched and add UNCONFIRMED boxes for the user to confirm."""
-    BATCH = 8
-    while True:
-        time.sleep(15)
-        try:
-            if not state.get("autotag_enabled"):
-                continue
-            if not thread_manager.is_idle():
-                continue
-            models = state.get("available_models") or []
-            if not models:
-                continue
-            model_path = models[-1]   # newest by mtime
-            mdl = _load_yolo(model_path)
+def _autotag_process_one(rel: str) -> None:
+    """! @brief Add UNCONFIRMED boxes for one file using the newest trained model."""
+    models = state.get("available_models") or []
+    if not models:
+        return
+    mdl = _load_yolo(models[-1])       # newest by mtime
+    abs_p = get_safe_path(MEDIA_DIR, rel)
+    if not abs_p or not os.path.exists(abs_p):
+        _db().execute("UPDATE files SET autotag_done=1 WHERE rel_path=?", (rel,))
+        _db().commit(); return
+    meta = read_metadata(abs_p)
+    if any(r.get("confirmed", True) for r in meta["regions"]):
+        _db().execute("UPDATE files SET autotag_done=1 WHERE rel_path=?", (rel,))
+        _db().commit(); return
+    img = read_jxl(abs_p)
+    if img is None:
+        _db().execute("UPDATE files SET autotag_done=1 WHERE rel_path=?", (rel,))
+        _db().commit(); return
+    res = mdl(img, verbose=False, conf=0.25)
+    new_regions = list(meta["regions"])   # keep any existing unconfirmed
+    if res and res[0].boxes:
+        for box in res[0].boxes:
+            cid = int(box.cls[0].item()); name = res[0].names[cid]
+            cx,cy,w,h = box.xywhn[0].tolist()
+            new_regions.append({"class_name":name,"cx":cx,"cy":cy,
+                                "w":w,"h":h,"confirmed":False})
+            if name not in state["classes"]: state["classes"].append(name)
+    save_classes()
+    # write_metadata sets autotag_done=1 for us
+    write_metadata(abs_p, meta["tags"], meta["description"], new_regions)
 
-            rows = _db().execute(
-                "SELECT rel_path FROM files WHERE COALESCE(autotag_done,0)=0 LIMIT ?",
-                (BATCH,)).fetchall()
-            if not rows:
-                state["status_text"] = "Background auto-tag: all caught up."
-                time.sleep(45)
-                continue
+def _claim_autotag_job():
+    """! @brief One auto-tag unit for the shared background processor, or None.
 
-            state["status_text"] = f"Background auto-tag: {len(rows)} image(s)…"
-            for (rel,) in rows:
-                if not thread_manager.is_idle():
-                    break   # user is back — yield immediately
-                abs_p = get_safe_path(MEDIA_DIR, rel)
-                if not abs_p or not os.path.exists(abs_p):
-                    _db().execute("UPDATE files SET autotag_done=1 WHERE rel_path=?", (rel,))
-                    _db().commit(); continue
-                meta = read_metadata(abs_p)
-                if any(r.get("confirmed", True) for r in meta["regions"]):
-                    _db().execute("UPDATE files SET autotag_done=1 WHERE rel_path=?", (rel,))
-                    _db().commit(); continue
-                img = read_jxl(abs_p)
-                if img is None:
-                    _db().execute("UPDATE files SET autotag_done=1 WHERE rel_path=?", (rel,))
-                    _db().commit(); continue
-                res = mdl(img, verbose=False, conf=0.25)
-                new_regions = list(meta["regions"])   # keep any existing unconfirmed
-                if res and res[0].boxes:
-                    for box in res[0].boxes:
-                        cid = int(box.cls[0].item()); name = res[0].names[cid]
-                        cx,cy,w,h = box.xywhn[0].tolist()
-                        new_regions.append({"class_name":name,"cx":cx,"cy":cy,
-                                            "w":w,"h":h,"confirmed":False})
-                        if name not in state["classes"]: state["classes"].append(name)
-                save_classes()
-                # write_metadata sets autotag_done=1 for us
-                write_metadata(abs_p, meta["tags"], meta["description"], new_regions)
-            state["status_text"] = "Ready."
-        except Exception as e:
-            access_logger.error(f"autotag worker: {e}")
-            time.sleep(30)
+    Idle-gated: only claims when auto-tag is enabled, a trained model exists,
+    and the app is idle. Returns None when there's nothing to do, letting the
+    processor round-robin to other sources instead of owning a thread.
+    """
+    if not state.get("autotag_enabled"):
+        return None
+    if not thread_manager.is_idle():
+        return None
+    if not (state.get("available_models") or []):
+        return None
+    row = _db().execute(
+        "SELECT rel_path FROM files WHERE COALESCE(autotag_done,0)=0 LIMIT 1").fetchone()
+    if row is None:
+        state["status_text"] = "Background auto-tag: all caught up."
+        return None
+    state["status_text"] = "Background auto-tag: working…"
+    return row[0]
+
+def _register_autotag_source():
+    thread_manager.register_source("autotag", _claim_autotag_job, _autotag_process_one)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MUSIC  —  artists / albums / songs, embeddings, clustering, shuffle-by-X
@@ -11152,6 +11143,28 @@ def _music_index_background(force=False):
     finally:
         music_state["indexing"] = False
 
+_music_scan_pending = threading.Event()   # set on boot and on manual reindex
+
+def _claim_music_job():
+    """! @brief Claim the resumable music scan when one is pending, else None.
+
+    The scan is a single whole-library walk (resumable, skips unchanged mtimes),
+    so it's one unit of work rather than a per-file queue: claim it once, run it
+    to completion in the handler, then go quiet until something re-arms the flag.
+    """
+    if music_state["indexing"]:
+        return None
+    if not _music_scan_pending.is_set():
+        return None
+    _music_scan_pending.clear()
+    return {"force": False}
+
+def _handle_music_job(job):
+    _music_index_background(force=bool(job.get("force")))
+
+def _register_music_source():
+    thread_manager.register_source("music", _claim_music_job, _handle_music_job)
+
 def _music_embed_background(force=False):
     """Compute embeddings for tracks missing one (or all if force). Resumable."""
     if music_state["embedding"]:
@@ -11210,7 +11223,13 @@ def music_status():
 @app.route("/api/music/reindex", methods=["POST"])
 def music_reindex():
     force = bool((request.json or {}).get("force"))
-    threading.Thread(target=_music_index_background, args=(force,), daemon=True).start()
+    if force:
+        # Forced full rescan runs directly (bypasses the mtime-skip); the source
+        # covers the ordinary resumable pass.
+        threading.Thread(target=_music_index_background, args=(True,), daemon=True).start()
+    else:
+        _music_scan_pending.set()
+        thread_manager.wake()
     return jsonify({"success": True})
 
 @app.route("/api/music/embed", methods=["POST"])
@@ -11413,10 +11432,18 @@ book_routes.register(app, {
 
 if __name__=='__main__':
     from waitress import serve
+    thread_manager.set_activity_source(lambda: _last_activity)
+    model_registry.set_memory_hook(lambda cost_mb, gpu: thread_manager.reserve_model(cost_mb, gpu))
+
     access_logger.info("Starting background indexer…")
     threading.Thread(target=_build_index_background, daemon=True).start()
-    access_logger.info("Starting background auto-tagger…")
-    threading.Thread(target=_background_autotag_worker, daemon=True).start()
+    access_logger.info("Registering background sources (autotag, face, music, upload, gdl)…")
+    _register_autotag_source()
+    _register_face_source()
+    _register_music_source()
+    _music_scan_pending.set()
+    _start_upload_workers()
+    _start_gdl_workers()
     access_logger.info("Starting storage tiering worker…")
     # Persist tier config inside the shared app_config.json (state["tiers"]) via
     # save_config, same as every other setting — not a standalone tiers_config.json.
@@ -11427,16 +11454,9 @@ if __name__=='__main__':
         save_config()
     tiering.start(MEDIA_DIR, _db, lambda: _last_activity,
                   load_stored_cfg=_load_tiers_cfg, store_cfg=_store_tiers_cfg)
-    thread_manager.set_activity_source(lambda: _last_activity)
-    model_registry.set_memory_hook(lambda cost_mb, gpu: thread_manager.reserve_model(cost_mb, gpu))
-    access_logger.info("Starting background music indexer…")
-    threading.Thread(target=_music_index_background, daemon=True).start()
     access_logger.info("Starting background book indexer…")
     book_routes.start_background()
-    access_logger.info("Starting background face worker…")
-    threading.Thread(target=_background_face_worker, daemon=True).start()
-    _start_upload_workers()
-    _start_gdl_workers()
+    thread_manager.wake()
     access_logger.info("Warming pose/OCR models (auto-download)…")
     access_logger.info("Serving on :8000")
     serve(app, host='0.0.0.0', port=8000, threads=state["wsgi_threads"], connection_limit=1000,

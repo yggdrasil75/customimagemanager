@@ -84,16 +84,8 @@ from html.parser import HTMLParser
 
 import numpy as np
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 1. EXTENSIONS
-# ══════════════════════════════════════════════════════════════════════════════
-
-# Comic archives. Container-per-extension; the real container is sniffed because
-# .cbz-that-is-actually-a-rar is extremely common in scene releases.
 COMIC_ARCHIVE_EXTS = {'.cbz', '.cbr', '.cb7', '.cbt', '.cba'}
 
-# Formats whose extension is unambiguous enough to accept on sight (still
-# sniffed, but a sniff failure doesn't disqualify them).
 UNAMBIGUOUS_BOOK_EXTS = {
     '.epub', '.mobi', '.azw', '.azw3', '.kf8', '.kfx', '.lit', '.fb2',
     '.lrf', '.lrx', '.chm', '.ceb', '.docx', '.rtf',
