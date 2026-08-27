@@ -98,13 +98,7 @@ def downscale_to_cap(img, max_px=MAX_IMAGE_PX):
 
 
 def has_gpu():
-    """True if a CUDA device is usable. Cheap and cached by torch internally."""
-    if torch is None:
-        return False
-    try:
-        return bool(torch.cuda.is_available())
-    except Exception:
-        return False
+    return model_registry.on_gpu()
 
 
 # ── image gating ──────────────────────────────────────────────────────────────
@@ -131,7 +125,7 @@ def _build_depth(mid):
         proc = AutoImageProcessor.from_pretrained(mid)
         model = AutoModelForDepthEstimation.from_pretrained(mid)
         model.eval()
-        if torch.cuda.is_available():
+        if has_gpu():
             model = model.to("cuda")
         return (model, proc)
     except Exception:
@@ -182,7 +176,7 @@ def depth_map(img_bgr, model_path=None):
             rgb = cv2.cvtColor(img_bgr[:, :, :3], cv2.COLOR_BGR2RGB)
             pil = Image.fromarray(rgb)
             inp = _DEPTH["proc"](images=pil, return_tensors="pt")
-            if torch.cuda.is_available():
+            if has_gpu():
                 inp = {k: v.to("cuda") for k, v in inp.items()}
             with torch.no_grad():
                 pred = _DEPTH["model"](**inp).predicted_depth
@@ -223,7 +217,7 @@ def depth_map_batch(imgs_bgr, model_path=None):
         pil = [Image.fromarray(cv2.cvtColor(im[:, :, :3], cv2.COLOR_BGR2RGB))
                for im in imgs_bgr]
         inp = _DEPTH["proc"](images=pil, return_tensors="pt")
-        if torch.cuda.is_available():
+        if has_gpu():
             inp = {k: v.to("cuda") for k, v in inp.items()}
         with torch.no_grad():
             pred = _DEPTH["model"](**inp).predicted_depth   # (N, h, w)
@@ -403,7 +397,7 @@ def _build_cnn(arch):
         import timm
         model = timm.create_model(arch, pretrained=True, num_classes=0)
         model.eval()
-        if torch.cuda.is_available():
+        if has_gpu():
             model = model.to("cuda")
         return (model, model.num_features)
     except Exception:
@@ -442,7 +436,7 @@ def _cnn_embed(crops_bgr):
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
     t = (t - mean) / std
-    if torch.cuda.is_available():
+    if has_gpu():
         t = t.to("cuda")
     with torch.no_grad():
         feat = _CNN["model"](t)

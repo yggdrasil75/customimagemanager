@@ -52,10 +52,17 @@ WHOLEBODY_EDGES = (COCO_SKELETON
 WHOLEBODY_NAMES = COCO_KP_NAMES + [f"kp{i}" for i in range(17, 133)]
 
 
-@functools.lru_cache(maxsize=2)
+_WB_REGISTERED = set()
+
 def _load_wholebody(mode: str):
-    """! @brief Memoised RTMPose Wholebody estimator for a given quality mode."""
-    return Wholebody(mode=mode, backend="onnxruntime", device="cpu")
+    dev = model_registry.device()
+    key = f"pose:wholebody:{mode}:{dev}"
+    if key not in _WB_REGISTERED:
+        model_registry.register(
+            key, (lambda m=mode, d=dev: Wholebody(mode=m, backend="onnxruntime", device=d)),
+            cost_mb=1000, gpu=(dev == "cuda"))
+        _WB_REGISTERED.add(key)
+    return model_registry.acquire(key)
 
 
 def _run_pose_yolo(img_bgr) -> dict:

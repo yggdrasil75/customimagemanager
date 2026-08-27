@@ -89,6 +89,10 @@ try:
     import seg_runtime
 except Exception:
     seg_runtime = None
+try:
+    import rawpy
+except Exception:
+    rawpy = None
 from pipeline import DEFAULT_PIPELINE, run_pipeline, _kpts_in_box
 import llm_preprocess
 from templates import HTML, TRAINING_HTML
@@ -3346,7 +3350,7 @@ def _load_yolo(model_path):
     if key not in _yolo_registered:
         model_registry.register(
             key, (lambda p=model_path: _build_yolo(p)),
-            cost_mb=250, gpu=og.has_gpu())
+            cost_mb=250, gpu=og.has_gpu(), model_path=model_path)
         _yolo_registered.add(key)
     return model_registry.acquire(key)
 
@@ -4150,13 +4154,6 @@ def _run_barcodes(img_bgr, deep: bool = True) -> dict:
         access_logger.error(f"barcode scan: {e}")
         return {"engine": None, "codes": [], "detected": 0, "decoded": 0,
                 "note": f"Barcode scan failed: {e}"}
-
-def _warm_models() -> None:
-    """! @brief Pre-trigger pose/OCR model downloads in the background."""
-    dummy = np.zeros((64, 64, 3), np.uint8)
-    for fn in (lambda: _run_pose(dummy), lambda: _run_ocr(dummy)):
-        try: fn()
-        except Exception: pass
 
 def _clamp_box(b: dict) -> dict | None:
     """!
@@ -6447,8 +6444,8 @@ def _claim_upload_job():
         costed = [(r, _spool_cost_mb(r["spool_path"], r["orig_name"])) for r in rows]
         target, cost = None, 0.0
         for r, c in costed:
-            if thread_manager.can_afford(c * 3):
-                target, cost = r["id"], c * 3
+            if thread_manager.can_afford(c):
+                target, cost = r["id"], c
                 break
         if target is None:
             return None
@@ -6564,29 +6561,45 @@ def _spool_cost_mb(spool_path, orig_name):
         size_mb = os.path.getsize(spool_path) / (1024 * 1024)
     except Exception:
         size_mb = 0.0
+
+    is_raw = False
     try:
-        if mt.is_raw(orig_name):
-            try:
-                import rawpy
-                with rawpy.imread(spool_path) as raw:
-                    s = raw.sizes
-                    px = float(s.raw_width) * float(s.raw_height)
-            except Exception:
-                # Header unreadable — approximate from compressed size. Raw files
-                # are lightly compressed, so decoded is several times larger.
-                return max(256.0, size_mb * 6.0)
-            out_mb = px * 6 / (1024 * 1024)          # 16-bit RGB output buffer
-            return max(256.0, out_mb * 2.2)          # + libraw demosaic scratch
+        is_raw = bool(mt.is_raw(orig_name))
     except Exception:
-        pass
-    # Non-raw: decoded pixels are unknown without a header read we don't do here;
-    # a small multiple of the file size is a safe over-estimate for JPEG/PNG/etc.
-    return max(32.0, size_mb * 3.0)
+        is_raw = False
+
+    if is_raw:
+        px = 0.0
+        try:
+            with rawpy.imread(spool_path) as raw:
+                s = raw.sizes
+                px = float(s.raw_width) * float(s.raw_height)
+        except Exception:
+            px = 0.0
+        if px <= 0:
+            return max(384.0, size_mb * 8.0)
+        buf_mb = px * 6 / (1024 * 1024)
+        return max(384.0, buf_mb * 4.0)
+
+    return max(48.0, size_mb * 5.0)
+
+def _upload_job_cost_mb(job):
+    """Memory cost for an upload job. Prefer the estimate the claim already
+    computed; if it's missing (a requeued row re-fetched without it, a dict that
+    lost the key), recompute from the spool file rather than reserving 0 — a
+    silent 0 here defeats the whole admission guard for that job."""
+    c = job.get("_cost_mb") if hasattr(job, "get") else None
+    if c and c > 0:
+        return c
+    try:
+        return _spool_cost_mb(job["spool_path"], job["orig_name"])
+    except Exception:
+        return 384.0
 
 def _register_upload_source():
     thread_manager.register_source(
         "upload", _claim_upload_job, _handle_upload_job,
-        cost_of=lambda job: job.get("_cost_mb", 0.0))
+        cost_of=_upload_job_cost_mb)
 
 _upload_threads = []   # live worker Thread objects, for liveness reporting
 
@@ -11419,6 +11432,7 @@ if __name__=='__main__':
     tiering.start(MEDIA_DIR, _db, lambda: _last_activity,
                   load_stored_cfg=_load_tiers_cfg, store_cfg=_store_tiers_cfg)
     thread_manager.set_activity_source(lambda: _last_activity)
+    model_registry.set_memory_hook(lambda cost_mb, gpu: thread_manager.reserve_model(cost_mb, gpu))
     access_logger.info("Starting background music indexer…")
     threading.Thread(target=_music_index_background, daemon=True).start()
     access_logger.info("Starting background book indexer…")
@@ -11428,7 +11442,6 @@ if __name__=='__main__':
     _start_upload_workers()
     _start_gdl_workers()
     access_logger.info("Warming pose/OCR models (auto-download)…")
-    # threading.Thread(target=_warm_models, daemon=True).start()
     access_logger.info("Serving on :8000")
     serve(app, host='0.0.0.0', port=8000, threads=state["wsgi_threads"], connection_limit=1000,
     channel_timeout=300, channel_request_lookahead=1)

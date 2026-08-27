@@ -62,17 +62,14 @@ except Exception:  # pragma: no cover
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
 # Which SAM variant + checkpoint filename to look for in ./models. The registry
-# key must match the checkpoint (sam_vit_b -> sam_vit_b_01ec64.pth). Overridable
-# via env so a machine with a big GPU can opt into vit_h without a code change.
-SAM_MODEL_TYPE = os.environ.get("CIM_SAM_MODEL_TYPE", "vit_b")
-SAM_CHECKPOINT = os.environ.get(
-    "CIM_SAM_CHECKPOINT",
-    os.path.join(MODELS_DIR, "sam_vit_b_01ec64.pth"))
+# key must match the checkpoint (sam_vit_b -> sam_vit_b_01ec64.pth).
+SAM_MODEL_TYPE = "vit_b"
+SAM_CHECKPOINT = os.path.join(MODELS_DIR, "sam_vit_b_01ec64.pth")
 
 # Automatic mask generator knobs. Fewer points-per-side than the SAM default
 # (32) keeps proposal counts and runtime sane for a discovery scan; masks below
 # a minimum area are dropped as noise (same spirit as MIN_BOX_PX).
-SAM_POINTS_PER_SIDE = int(os.environ.get("CIM_SAM_POINTS", "16"))
+SAM_POINTS_PER_SIDE = 32
 SAM_PRED_IOU_THRESH = 0.86
 SAM_STABILITY_THRESH = 0.90
 

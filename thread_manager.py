@@ -10,11 +10,22 @@ except Exception:
     psutil = None
     _PROC = None
 
+try:
+    import torch
+except Exception:
+    torch = None
+
+
+RESERVED_SLOTS = 1
+IDLE_SECONDS = 60
+MEM_BUDGET_FRAC = 0.8
+VRAM_BUDGET_FRAC = 0.85
+MODEL_OVERHEAD = 1.05
+MODEL_SETTLE_SECONDS = 8.0
+
 
 def _gpu_kind():
-    try:
-        import torch
-    except Exception:
+    if torch is None:
         return "none"
     try:
         if not torch.cuda.is_available():
@@ -41,20 +52,6 @@ def _gpu_kind():
         return "dedicated"
     except Exception:
         return "none"
-
-
-def _env_int(name, default):
-    try:
-        return int(os.environ.get(name, "") or default)
-    except Exception:
-        return default
-
-
-def _env_float(name, default):
-    try:
-        return float(os.environ.get(name, "") or default)
-    except Exception:
-        return default
 
 
 def _detect_mem_limit_mb():
@@ -109,15 +106,13 @@ class ThreadManager:
 
     # ── sizing ────────────────────────────────────────────────────────────
     def max_slots(self):
-        """Total worker slots in the global pool."""
-        override = _env_int("CIM_MAX_THREADS", 0)
-        return max(2, override) if override > 0 else _default_max()
+        """Total worker slots in the global pool: the CPU count (min 2)."""
+        return _default_max()
 
     def reserved(self):
         """Slots kept free for responsiveness; clamped so at least 1 spare
         remains."""
-        r = _env_int("CIM_RESERVED_THREADS", 1)
-        return max(0, min(r, self.max_slots() - 1))
+        return max(0, min(RESERVED_SLOTS, self.max_slots() - 1))
 
     def spare(self):
         """Slots available to hand out to background/feature tasks."""
@@ -297,19 +292,12 @@ class ThreadManager:
           3. Total system RAM times the same fraction, if psutil is present.
           4. 0 (disabled) when nothing is detectable.
         Cached briefly since cgroup reads hit the filesystem."""
-        env = os.environ.get("CIM_MEM_BUDGET_MB", "")
-        if env.strip():
-            try:
-                return max(0, int(env))
-            except Exception:
-                pass
         now = time.time()
         cached = getattr(self, "_budget_cache", None)
         if cached and now - cached[1] < 10:
             return cached[0]
-        frac = _env_float("CIM_MEM_BUDGET_FRAC", 0.8)
         limit = _detect_mem_limit_mb()
-        budget = int(limit * frac) if limit else 0
+        budget = int(limit * MEM_BUDGET_FRAC) if limit else 0
         self._budget_cache = (budget, now)
         return budget
 
@@ -360,16 +348,11 @@ class ThreadManager:
         (their memory is RAM and is governed by the RAM budget instead)."""
         if self.gpu_kind() != "dedicated":
             return 0
-        env = os.environ.get("CIM_VRAM_BUDGET_MB", "")
-        if env.strip():
-            try:
-                return max(0, int(env))
-            except Exception:
-                pass
+        if torch is None:
+            return 0
         try:
-            import torch
             total = torch.cuda.get_device_properties(0).total_memory / (1024 * 1024)
-            return int(total * _env_float("CIM_VRAM_BUDGET_FRAC", 0.85))
+            return int(total * VRAM_BUDGET_FRAC)
         except Exception:
             return 0
 
@@ -394,7 +377,7 @@ class ThreadManager:
         return "ram"
 
     def model_overhead_factor(self):
-        return max(1.0, _env_float("CIM_MODEL_OVERHEAD", 1.05))
+        return MODEL_OVERHEAD
 
     def can_load_model(self, cost_mb, gpu=False, device=None):
         if cost_mb is None or cost_mb <= 0:
@@ -412,13 +395,9 @@ class ThreadManager:
         return self.can_afford(cost_mb)
 
     def reserve_model(self, cost_mb, gpu=False, device=None):
-        """Context manager reserving a model's memory for as long as it's held,
-        against the correct pool (dedicated VRAM vs RAM). Background model work
-        wraps its acquire+use in this so the upload queue sees the reduced RAM
-        headroom (for shared/CPU models) and won't start a raw that no longer
-        fits. On dedicated GPUs the reservation hits the VRAM axis and leaves RAM
-        untouched. No-op accounting when the relevant budget is disabled."""
-        return _ModelReservation(self, float(cost_mb or 0.0), bool(gpu))
+        padded = float(cost_mb or 0.0) * self.model_overhead_factor()
+        target = self.model_cost_target(bool(gpu), device)
+        return _ModelReservation(self, padded, target)
 
     def _commit_vram(self, cost_mb):
         with self._lock:
@@ -436,7 +415,7 @@ class ThreadManager:
         self._get_last_activity = get_last_activity
 
     def idle_secs(self):
-        return _env_int("CIM_IDLE_SECS", 60)
+        return IDLE_SECONDS
 
     def seconds_since_activity(self):
         if self._get_last_activity is None:
@@ -529,10 +508,41 @@ class _ModelReservation:
 
     Either budget being disabled makes the accounting a no-op."""
 
-    def __init__(self, tm, cost_mb, gpu):
+    def resize(self, new_cost_mb):
+        """Adjust a live reservation to the measured cost (the declared estimate
+        was only a guess). Applies the overhead pad and commits/releases the
+        delta against the current target pool."""
+        new_cost = max(0.0, float(new_cost_mb or 0.0)) * self._tm.model_overhead_factor()
+        if not self._active:
+            self._cost = new_cost
+            return
+        delta = new_cost - self._cost
+        if abs(delta) < 0.5:
+            return
+        if self._target == "vram":
+            self._tm._commit_vram(delta) if delta > 0 else self._tm._uncommit_vram(-delta)
+        else:
+            self._tm._commit_mem(delta) if delta > 0 else self._tm._uncommit_mem(-delta)
+        self._cost = new_cost
+
+    def retarget(self, device):
+        new_target = self._tm.model_cost_target(device=device)
+        if new_target == self._target:
+            return
+        if self._active and self._cost > 0:
+            # Move the live commitment across pools.
+            if self._target == "vram":
+                self._tm._uncommit_vram(self._cost)
+                self._tm._commit_mem(self._cost)
+            else:
+                self._tm._uncommit_mem(self._cost)
+                self._tm._commit_vram(self._cost)
+        self._target = new_target
+
+    def __init__(self, tm, cost_mb, target):
         self._tm = tm
         self._cost = max(0.0, cost_mb)
-        self._target = tm.model_cost_target(gpu)
+        self._target = target
         self._active = False
 
     def __enter__(self):
@@ -556,7 +566,7 @@ class _ModelReservation:
         RSS. No-op for VRAM (never in RSS; held until unload)."""
         if not (self._active and self._target == "ram"):
             return
-        delay = _env_float("CIM_MODEL_SETTLE_SECS", 8.0)
+        delay = MODEL_SETTLE_SECONDS
         if delay <= 0:
             self._tm._uncommit_mem(self._cost); self._active = False
             return

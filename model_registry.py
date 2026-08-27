@@ -1,22 +1,3 @@
-"""
-model_registry.py
-=================
-Process-wide load-on-demand cache for heavy models.
-
-Every subsystem (faces, bodies, iqa, sam, seg, yolo, depth, cnn) loads its model
-lazily and, without this, holds it for the process lifetime. A full scan touches
-most of them, so resident memory becomes the sum of every model ever used. This
-registry keeps loads lazy but makes them evictable: each model is registered once
-with a loader/unloader and a rough cost; callers acquire it by key (loading on
-first use), and after each load the least-recently-used entries are evicted until
-back under budget.
-
-Budgets are read from env at eviction time:
-    CIM_MODEL_MAX_RESIDENT   max number of models kept live   (default 3)
-    CIM_MODEL_VRAM_BUDGET_MB soft cap on summed GPU cost (MB)  (default 6000)
-A budget of 0 disables that axis; both 0 means never evict.
-"""
-
 import os
 import gc
 import threading
@@ -26,7 +7,60 @@ try:
 except Exception:
     torch = None
 
+VRAM_BUDGET_FRAC = 0.85
+
+
+def _detected_vram_mb():
+    if torch is None:
+        return 0.0
+    try:
+        if not torch.cuda.is_available():
+            return 0.0
+        return torch.cuda.get_device_properties(0).total_memory / (1024 * 1024)
+    except Exception:
+        return 0.0
+
+
+def _vram_budget_mb():
+    v = _detected_vram_mb()
+    return int(v * VRAM_BUDGET_FRAC) if v > 0 else 0
+
+
+def _max_resident_for_vram():
+    v = _detected_vram_mb()
+    if v <= 0:
+        return 3
+    return max(2, min(8, int(v / 2560)))
+
+try:
+    import psutil
+except Exception:
+    psutil = None
+
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+
+
+def _model_device(model):
+    if model is None:
+        return None
+    try:
+        d = getattr(model, "device", None)
+        if d is not None:
+            return str(d)
+    except Exception:
+        pass
+    for obj in (model, getattr(model, "model", None)):
+        if obj is None:
+            continue
+        try:
+            params = obj.parameters()
+            first = next(params, None)
+            if first is not None:
+                return str(first.device)
+        except Exception:
+            continue
+    return None
+
 
 
 def pin_cache_dir():
@@ -46,11 +80,92 @@ def pin_cache_dir():
 pin_cache_dir()
 
 
-def _env_int(name, default):
+def _detect_device():
+    if torch is not None:
+        try:
+            if torch.cuda.is_available():
+                return "cuda"
+        except Exception:
+            pass
+    return "cpu"
+
+
+_DEVICE = None
+
+def device():
+    """The process-wide compute device string ('cpu' or 'cuda'), decided once by
+    the registry. Loaders call this instead of probing torch themselves, so the
+    choice is made in exactly one place."""
+    global _DEVICE
+    if _DEVICE is None:
+        _DEVICE = _detect_device()
+    return _DEVICE
+
+def on_gpu():
+    """True when the chosen device is CUDA. Convenience for loaders."""
+    return device() == "cuda"
+
+
+def _rss_mb():
+    if psutil is not None:
+        try:
+            return psutil.Process().memory_info().rss / (1024 * 1024)
+        except Exception:
+            pass
     try:
-        return int(os.environ.get(name, "") or default)
+        with open(f"/proc/{os.getpid()}/statm") as f:
+            pages = int(f.read().split()[1])
+        return pages * (os.sysconf("SC_PAGE_SIZE") / (1024 * 1024))
     except Exception:
-        return default
+        return 0.0
+
+
+def _vram_mb():
+    if torch is None:
+        return 0.0
+    try:
+        return torch.cuda.memory_allocated() / (1024 * 1024)
+    except Exception:
+        return 0.0
+
+
+def _mem_snapshot():
+    """(rss_mb, vram_mb) before a load, for measuring what it actually cost."""
+    return (_rss_mb(), _vram_mb())
+
+
+def _measure_cost(before, dev):
+    """Actual MB a load consumed, measured as the delta from `before`. Uses the
+    VRAM delta when the model landed on CUDA (dedicated card), else the RSS delta.
+    This is what makes cost_mb self-calibrating: the declared value is only a
+    pre-load estimate; once loaded we know the truth and store it. Returns 0 when
+    the delta is non-positive (measurement noise / shared pages) so the caller
+    keeps the declared estimate."""
+    rss0, vram0 = before
+    on_cuda = dev is not None and str(dev).lower().startswith(("cuda", "gpu"))
+    if on_cuda:
+        d = _vram_mb() - vram0
+        if d > 1.0:
+            return d
+        # VRAM delta unreliable (allocator caching / non-torch backend) — fall
+        # back to RSS delta, which still moves for host-side buffers.
+    d = _rss_mb() - rss0
+    return d if d > 1.0 else 0.0
+
+
+def _file_cost_mb(model_path):
+    if not model_path:
+        return 0.0
+    p = model_path
+    if not os.path.isabs(p) and not os.path.dirname(p):
+        p = os.path.join(MODELS_DIR, p)
+    for cand in (model_path, p, os.path.join(MODELS_DIR, os.path.basename(model_path))):
+        try:
+            if os.path.isfile(cand):
+                return os.path.getsize(cand) / (1024 * 1024)
+        except Exception:
+            continue
+    return 0.0
 
 
 class ModelRegistry:
@@ -65,25 +180,27 @@ class ModelRegistry:
         self._pinned = set()
 
     def _max_resident(self):
-        return _env_int("CIM_MODEL_MAX_RESIDENT", 3)
+        return _max_resident_for_vram()
 
     def _vram_budget_mb(self):
-        return _env_int("CIM_MODEL_VRAM_BUDGET_MB", 6000)
+        return _vram_budget_mb()
 
-    def register(self, key, loader, unloader=None, cost_mb=0, gpu=False):
-        """Declare a model. Idempotent: re-registering keeps any live instance
-        but refreshes loader/unloader/cost. loader() returns the model or None;
-        unloader(model) frees it (default drops the ref and empties CUDA cache)."""
+    def register(self, key, loader, unloader=None, cost_mb=0, gpu=False,
+                 model_path=None):
+        est = _file_cost_mb(model_path) if model_path else 0.0
+        if est <= 0:
+            est = cost_mb
         with self._lock:
             e = self._entries.get(key)
             if e is None:
                 self._entries[key] = {
                     "model": None, "loaded": False, "loader": loader,
-                    "unloader": unloader, "cost_mb": cost_mb, "gpu": gpu,
+                    "unloader": unloader, "cost_mb": est, "gpu": gpu,
                     "seq": 0, "err": ""}
             else:
+                new_cost = e["cost_mb"] if e.get("measured") else est
                 e.update(loader=loader, unloader=unloader,
-                         cost_mb=cost_mb, gpu=gpu)
+                         cost_mb=new_cost, gpu=gpu)
             return key
 
     def acquire(self, key):
@@ -100,6 +217,7 @@ class ModelRegistry:
                 res = hook(e["cost_mb"], e["gpu"]) if hook else None
                 if res is not None:
                     res.__enter__()
+                before = _mem_snapshot()
                 try:
                     with self._lock:
                         if not e["loaded"]:      # re-check under lock
@@ -110,6 +228,16 @@ class ModelRegistry:
                                 e["model"] = None
                                 e["err"] = repr(ex)
                             e["loaded"] = True
+                    dev = _model_device(e["model"])
+                    if res is not None and dev is not None and hasattr(res, "retarget"):
+                        res.retarget(dev)
+                    measured = _measure_cost(before, dev)
+                    if measured and measured > 0:
+                        with self._lock:
+                            e["cost_mb"] = measured
+                            e["measured"] = True
+                        if res is not None and hasattr(res, "resize"):
+                            res.resize(measured)
                 finally:
                     if res is not None:
                         res.settle()
