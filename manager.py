@@ -1057,6 +1057,7 @@ def _purge_file_everywhere(rel_path):
         "DELETE FROM book_chunks       WHERE rel_path=?",
         "DELETE FROM book_progress     WHERE rel_path=?",
         "DELETE FROM book_bookmarks    WHERE rel_path=?",
+        "DELETE FROM music             WHERE rel_path=?",
     ):
         try:
             db.execute(sql, (rel_path,))
@@ -1737,6 +1738,11 @@ def _index_file(rel_path: str, force: bool = False,
                           (int(_pc), rel_path))
         _db().commit()
         _set_media_kind(rel_path)
+        if _is_music:
+            try:
+                _music_upsert(rel_path, abs_path, force=force)
+            except Exception as e:
+                access_logger.error(f"music index {rel_path}: {e}")
         return True
     except Exception as e:
         access_logger.error(f"_index_file {rel_path}: {e}")
@@ -1804,7 +1810,6 @@ def _enumerate_library():
             if f.startswith('.'):
                 continue
             if not (mt.is_library_file(f) or os.path.splitext(f)[1].lower() in mi.MUSIC_EXTS):
-                continue
                 continue
             rel = _rel(os.path.join(root, f))
             if rel not in seen:
@@ -11110,7 +11115,6 @@ def _music_upsert(rel_path, abs_path, force=False):
     return True
 
 def _music_index_background(force=False):
-    """Walk MEDIA_DIR for audio; resumable (skips unchanged mtimes)."""
     if music_state["indexing"]:
         return
     music_state["indexing"] = True
@@ -11123,16 +11127,9 @@ def _music_index_background(force=False):
             for f in files:
                 if os.path.splitext(f)[1].lower() in mi.MUSIC_EXTS:
                     ap = os.path.join(root, f)
-                    rp = _rel(ap)
-                    paths.append((rp, ap))
+                    paths.append((_rel(ap), ap))
         music_state["total"] = len(paths)
         music_state["indexed"] = 0
-        # prune rows whose file vanished
-        have = {rp for rp, _ in paths}
-        for (rp,) in _db().execute("SELECT rel_path FROM music").fetchall():
-            if rp not in have:
-                _db().execute("DELETE FROM music WHERE rel_path=?", (rp,))
-        _db().commit()
         for rp, ap in paths:
             try:
                 _music_upsert(rp, ap, force=force)
@@ -11142,28 +11139,6 @@ def _music_index_background(force=False):
         music_state["status"] = "idle"
     finally:
         music_state["indexing"] = False
-
-_music_scan_pending = threading.Event()   # set on boot and on manual reindex
-
-def _claim_music_job():
-    """! @brief Claim the resumable music scan when one is pending, else None.
-
-    The scan is a single whole-library walk (resumable, skips unchanged mtimes),
-    so it's one unit of work rather than a per-file queue: claim it once, run it
-    to completion in the handler, then go quiet until something re-arms the flag.
-    """
-    if music_state["indexing"]:
-        return None
-    if not _music_scan_pending.is_set():
-        return None
-    _music_scan_pending.clear()
-    return {"force": False}
-
-def _handle_music_job(job):
-    _music_index_background(force=bool(job.get("force")))
-
-def _register_music_source():
-    thread_manager.register_source("music", _claim_music_job, _handle_music_job)
 
 def _music_embed_background(force=False):
     """Compute embeddings for tracks missing one (or all if force). Resumable."""
@@ -11224,12 +11199,9 @@ def music_status():
 def music_reindex():
     force = bool((request.json or {}).get("force"))
     if force:
-        # Forced full rescan runs directly (bypasses the mtime-skip); the source
-        # covers the ordinary resumable pass.
         threading.Thread(target=_music_index_background, args=(True,), daemon=True).start()
     else:
-        _music_scan_pending.set()
-        thread_manager.wake()
+        threading.Thread(target=_build_index_background, daemon=True).start()
     return jsonify({"success": True})
 
 @app.route("/api/music/embed", methods=["POST"])
@@ -11437,11 +11409,10 @@ if __name__=='__main__':
 
     access_logger.info("Starting background indexer…")
     threading.Thread(target=_build_index_background, daemon=True).start()
-    access_logger.info("Registering background sources (autotag, face, music, upload, gdl)…")
+
+    access_logger.info("Registering background sources (autotag, face, upload, gdl)…")
     _register_autotag_source()
     _register_face_source()
-    _register_music_source()
-    _music_scan_pending.set()
     _start_upload_workers()
     _start_gdl_workers()
     access_logger.info("Starting storage tiering worker…")
