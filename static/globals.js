@@ -7,6 +7,8 @@ let activeRegionIdx=-1, _suppressPaste=false, currentFlag=null, currentPose=null
 // selectedRegionIdx is the PINNED region whose tags/description are being edited
 // in the per-region editor (distinct from activeRegionIdx, which is hover-only).
 let selectedRegionIdx=-1;
+let highlightRegionBox=null;
+let highlightRegionFile=null;
 let currentPage=0, totalFiles=0, currentSearch='', currentFolder='', allFolders=[];
 let imageFilter=null;  // active pipeline result set shown in the grid, or null
 let currentTags=[], currentIqa=null, currentIqaManual=false;
@@ -290,28 +292,17 @@ function populateSettingsForm(s){
           if(p===cur) o.selected=true; el.appendChild(o);
         });
       };
-      _fill('cfg_face_model', s.face_model, (_g.face||[]).concat(_g.custom||[]));
       _fill('cfg_person_model', s.person_model,
             (_g.trained||[]).concat(_g.custom||[]));
       _fill('cfg_our_model', s.our_model,
             (_g.trained||[]).concat(_g.custom||[]));
       _fill('cfg_barcode_model', s.barcode_model,
             (_g.trained||[]).concat(_g.custom||[]));
-      const _fs=document.getElementById('cfg_face_size');
-      if(_fs){
-        _fs.value=s.face_size||'n';
-        // face_size only drives the AUTO download path; an explicitly chosen face
-        // model already pins its own size, so disable the knob rather than let it
-        // sit there implying it does something.
-        const _fm=document.getElementById('cfg_face_model');
-        const _syncFaceSize=()=>{
-          const auto=!(_fm && _fm.value);
-          _fs.disabled=!auto;
-          _fs.classList.toggle('opacity-40', !auto);
-        };
-        if(_fm) _fm.addEventListener('change', _syncFaceSize);
-        _syncFaceSize();
-      }
+      loadFaceModels(s.face_detector, s.face_recognition);
+      const _rd=document.getElementById('cfg_face_reject_drawn');
+      if(_rd) _rd.checked=s.face_reject_drawn!==false;
+      const _dt=document.getElementById('cfg_face_drawn_thresh');
+      if(_dt) _dt.value=(s.face_drawn_thresh!=null?s.face_drawn_thresh:0.55);
       const _be=document.getElementById('cfg_body_enabled');
       if(_be) _be.checked=!!s.body_enabled;
       const _bs=document.getElementById('cfg_body_size');

@@ -8,4 +8,5 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./models:/app/models
+      - ./app_config.json:/app/app_config.json
     restart: unless-stopped

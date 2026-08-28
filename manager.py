@@ -36,6 +36,8 @@ from ultralytics import YOLO
 import faces as facelib
 import bodies as bodylib
 import persons as personlib
+import face_mesh as facemeshlib
+import face_models as facemodels
 import appearances
 import imagecodecs
 from dup_heuristics import DuplicateClassifier, classify_pair, extract_features
@@ -160,11 +162,15 @@ state = {
     "dup_cnn_width": 1.0,   # Siamese dup-CNN channel multiplier (0.25..2.0)
     "face_bg_enabled": False,
     "face_bg_custom": False,
+    "face_detector": "yolov11n-face",
+    "face_recognition": "buffalo_l",
     "face_model": "",
     "face_size": "n",
     "person_model": "",
     "our_model": "",
     "face_cluster_eps": 0.0,
+    "face_reject_drawn": True,
+    "face_drawn_thresh": 0.55,
     "body_enabled": False,
     "body_size": "s",
     "body_cluster_eps": 0.0,
@@ -653,6 +659,8 @@ def _init_db():
         # completion so enabling body clustering later re-scans only what needs
         # a body embedding, without re-running (already-done) face detection.
         "ALTER TABLE files ADD COLUMN body_done INTEGER DEFAULT 0",
+        "ALTER TABLE face_regions ADD COLUMN unknown INTEGER DEFAULT 0",
+        "ALTER TABLE face_regions ADD COLUMN not_face INTEGER DEFAULT 0",
         "ALTER TABLE files ADD COLUMN analysis TEXT DEFAULT ''",
         "ALTER TABLE files ADD COLUMN comic_folder TEXT DEFAULT ''",
         "ALTER TABLE files ADD COLUMN flagged_delete INTEGER DEFAULT 0",
@@ -1865,7 +1873,8 @@ def load_config():
 def save_config():
     keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt",
             "oai_actions","llm_preprocess","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size",
-            "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","our_model","face_cluster_eps",
+            "face_bg_enabled","face_bg_custom","face_detector","face_recognition","face_model","face_size","person_model","our_model","face_cluster_eps",
+            "face_reject_drawn","face_drawn_thresh",
             "body_enabled","body_size","body_cluster_eps","object_proposals",
             "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
             "barcode_model","barcode_conf", "iqa_model","brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
@@ -1896,7 +1905,25 @@ def populate_model_selector():
     state["model_groups"] = groups
     state["available_models"] = trained + groups["face"] + groups["custom"]
 
-load_config(); load_classes(); populate_model_selector()
+def _migrate_face_settings():
+    """Map an old config's (face_model + face_size) onto the new face_detector, and
+    push the persisted recognition pack into faces.py. Runs once at startup so an
+    upgrade keeps the user's prior detector size instead of silently resetting."""
+    # Only migrate when the new key is still at its default and a legacy value exists.
+    if state.get("face_detector") in (None, "", "yolov11n-face"):
+        legacy_model = (state.get("face_model") or "").strip()
+        legacy_size = (state.get("face_size") or "").strip().lower()
+        if legacy_model:
+            base = os.path.basename(legacy_model)
+            state["face_detector"] = os.path.splitext(base)[0] or "yolov11n-face"
+        elif legacy_size in ("n", "s", "m", "l"):
+            state["face_detector"] = f"yolov11{legacy_size}-face"
+        elif legacy_size == "x":            # 'x' was never published; clamp to l
+            state["face_detector"] = "yolov11l-face"
+    state["face_detector"] = facemodels.resolve_detector_id(state.get("face_detector"))
+    facelib.set_recognition_model(state.get("face_recognition") or facemodels.INSIGHT_DEFAULT)
+
+load_config(); load_classes(); populate_model_selector(); _migrate_face_settings()
 
 # ── authentication / user management ──────────────────────────────────────────
 # Installed here (after _db and config are ready) so its before_request gate is
@@ -3349,7 +3376,12 @@ _yolo_registered = set()
 def _build_yolo(model_path):
     if not os.path.dirname(model_path):
         model_path = os.path.join(MODELS_DIR, model_path)
-    return YOLO(model_path)
+    m = YOLO(model_path)
+    try:
+        m.fuse()
+    except Exception:
+        pass
+    return m
 
 def _load_yolo(model_path):
     """!
@@ -3386,13 +3418,8 @@ def _pose_size():
 def _yolo_size():
     s = (state.get("yolo_size") or "n").lower()
     return s if s in _SIZES else "n"
-def _face_size():
-    # Faces get their own size knob: the object detector and the face detector
-    # have different cost/recall tradeoffs, and 'n' misses small/profile faces --
-    # exactly the ones cluster density depends on. faces.py clamps 'x' (which the
-    # face release does not publish) down to 'l'.
-    s = (state.get("face_size") or "n").lower()
-    return s if s in _SIZES else "n"
+def _face_detector_id():
+    return facemodels.resolve_detector_id(state.get("face_detector"))
 
 def _run_pose(img_bgr):
     """! @brief Backward-compatible shim; delegates to pose.run_pose."""
@@ -3427,7 +3454,20 @@ def _detect_obb_or_box(img_bgr, model_path: str, keep_classes: set | None = None
                 img_bgr = img_bgr[:, :, :3]
         if img_bgr.dtype != np.uint8:
             img_bgr = np.clip(img_bgr, 0, 255).astype(np.uint8)
-        res = _load_yolo(model_path)(img_bgr, verbose=False, conf=conf)
+        try:
+            res = _load_yolo(model_path)(img_bgr, verbose=False, conf=conf)
+        except Exception as ex:
+            if "bn" in str(ex) or "fuse" in str(ex).lower():
+                key = f"manager:yolo:{model_path}"
+                if not os.path.dirname(model_path):
+                    key = f"manager:yolo:{os.path.join(MODELS_DIR, model_path)}"
+                try:
+                    model_registry.unload(key)
+                except Exception:
+                    pass
+                res = _load_yolo(model_path)(img_bgr, verbose=False, conf=conf)
+            else:
+                raise
         if not res:
             return []
         r = res[0]; H, W = img_bgr.shape[:2]
@@ -3487,16 +3527,21 @@ def _run_faces(img_bgr) -> list:
     @brief Detect faces via a configured (or size-resolved) YOLO face model.
     @return Boxes [{class_name:'face',cx,cy,w,h}] with sub-32px faces dropped; [] if none.
     """
-    fm = (state.get("face_model") or "").strip()
-    if not fm:
-        fm = facelib.ensure_face_model(_face_size())   # -> ./models
+    fm = facelib.ensure_face_detector(_face_detector_id())
     if not fm:
         return []
     boxes = _detect_obb_or_box(img_bgr, fm)
     H, W = img_bgr.shape[:2]
+    reject_drawn = bool(state.get("face_reject_drawn"))
+    thresh = float(state.get("face_drawn_thresh") or facelib.DRAWN_THRESH)
     out = []
     for b in boxes:
         if b["w"] * W < 32 or b["h"] * H < 32:
+            continue
+        # Keep illustrated/cartoon faces out of the people pipeline: they detect as
+        # faces but the same character is drawn many ways, so they never cluster to
+        # a stable identity and only pollute real-person groups.
+        if reject_drawn and facelib.is_drawn(img_bgr, b, thresh):
             continue
         b["class_name"] = "face"
         out.append(b)
@@ -3650,6 +3695,21 @@ def _cache_faces(rel: str, img, regions: list) -> None:
     fboxes = [r for r in regions if r["class_name"] == "face"]
     if not fboxes:
         return
+    # Honour not_face tombstones: if the user already said a box here isn't a face,
+    # a re-detection of (approximately) the same box must not resurrect it.
+    tomb = _db().execute(
+        "SELECT cx,cy,w,h FROM face_regions WHERE rel_path=? AND COALESCE(not_face,0)=1",
+        (rel,)).fetchall()
+    if tomb:
+        def _is_tomb(b):
+            for cx, cy, w, h in tomb:
+                if (abs(b["cx"] - cx) < 1e-2 and abs(b["cy"] - cy) < 1e-2
+                        and abs(b["w"] - w) < 2e-2 and abs(b["h"] - h) < 2e-2):
+                    return True
+            return False
+        fboxes = [b for b in fboxes if not _is_tomb(b)]
+        if not fboxes:
+            return
     vecs, mode = facelib.embed_faces(img, fboxes)
     _upsert_region_embeddings("face_regions", rel, fboxes, vecs, mode)
 
@@ -3673,8 +3733,40 @@ def _mark_body_done(rel: str) -> None:
     _db().execute("UPDATE files SET body_done=1 WHERE rel_path=?", (rel,))
     _db().commit()
 
+def _face_scan_lease_keys():
+    """Registry keys the face-scan pass touches per image, so we can lease them
+    resident for the whole pass. On a small resident-model budget, acquiring
+    insightface (or the body backbone) after the YOLO detector would otherwise
+    evict the detector, forcing a reload+refuse on the very next image — the thrash
+    that both wastes time and trips ultralytics' double-fuse ('Conv has no bn')."""
+    keys = []
+    det = facelib.ensure_face_detector(_face_detector_id())
+    if det:
+        # Mirror _load_yolo's key derivation so the lease names the same entry.
+        p = det if os.path.dirname(det) else os.path.join(MODELS_DIR, det)
+        keys.append(f"manager:yolo:{p}")
+    keys.append(facelib.insight_registry_key())
+    if state.get("body_enabled"):
+        try:
+            keys.append(bodylib.reid_registry_key())
+        except Exception:
+            pass
+    return keys
+
 def _face_process_one(rel: str) -> None:
-    """! @brief Box faces/people for one file, cache embeddings, mark done."""
+    """! @brief Box faces/people for one file, cache embeddings, mark done.
+
+    The whole per-image pass runs under a model lease so the detector, recognition
+    app and body backbone stay resident together — otherwise, on a small
+    resident-model budget, acquiring insightface would evict the YOLO detector we
+    just used, and the next image would reload+refuse it (the 'Conv has no bn'
+    fuse crash). The lease releases at the end of the image, so when the scan
+    finishes and other work needs the memory, normal LRU eviction resumes.
+    """
+    with model_registry.lease(*_face_scan_lease_keys()):
+        _face_process_one_inner(rel)
+
+def _face_process_one_inner(rel: str) -> None:
     abs_p = get_safe_path(MEDIA_DIR, rel)
     if not abs_p or not os.path.exists(abs_p):
         _mark_face_done(rel); return
@@ -3742,9 +3834,12 @@ def _recluster_table(table: str, default_mode: str, eps_for) -> int:
     @note Modes are clustered separately (identity and appearance vectors occupy
           different spaces); cluster ids are base-offset so they stay unique across modes.
     """
+    extra_where = ""
+    if table == "face_regions":
+        extra_where = " AND COALESCE(unknown,0)=0 AND COALESCE(not_face,0)=0"
     rows = _db().execute(
         f"SELECT id,embedding,embed_mode,name,confirmed FROM {table} "
-        "WHERE embedding IS NOT NULL").fetchall()
+        f"WHERE embedding IS NOT NULL{extra_where}").fetchall()
     if not rows:
         return 0
     by_mode = {}
@@ -3752,12 +3847,14 @@ def _recluster_table(table: str, default_mode: str, eps_for) -> int:
         by_mode.setdefault(m or default_mode, []).append(
             (rid, np.frombuffer(blob, dtype=np.float32)))
 
+    name_by_id = {rid: (nm or "") for rid, _b, _m, nm, cf in rows if cf}
     db = _db()
     total, base = 0, 0
     for mode, items in by_mode.items():
         ids  = [i for i, _ in items]
         vecs = [v for _, v in items]
         labels = facelib.cluster(vecs, mode=mode, eps=eps_for(mode))
+        labels = _enforce_confirmed_names(ids, labels, name_by_id)
         db.executemany(f"UPDATE {table} SET cluster_id=? WHERE id=?",
                        [(int(lab) + base if int(lab) >= 0 else -1, i)
                         for i, lab in zip(ids, labels)])
@@ -3765,6 +3862,51 @@ def _recluster_table(table: str, default_mode: str, eps_for) -> int:
         base += used
         total += used
     return total
+
+def _enforce_confirmed_names(ids, labels, name_by_id):
+    """Never let one cluster hold two different confirmed names.
+
+    Post-process the clusterer's labels: for every proposed cluster, look at the
+    confirmed names inside it. If it carries more than one, split it by name —
+    each confirmed name keeps its own sub-cluster, and unconfirmed members follow
+    the confirmed name they sit closest to *by majority* (we have no vectors here,
+    so unnamed rows go to the largest confirmed group in that cluster, which is the
+    safe default; a wrongly-attached face is one deny click away, a wrong MERGE of
+    two named people is not). Clusters with 0 or 1 confirmed name are untouched.
+    """
+    if not name_by_id:
+        return labels
+    # Group row-indices by proposed label.
+    members = {}
+    for pos, (rid, lab) in enumerate(zip(ids, labels)):
+        if lab >= 0:
+            members.setdefault(lab, []).append(pos)
+    out = list(labels)
+    next_lab = (max([l for l in labels if l >= 0], default=-1)) + 1
+    for lab, poss in members.items():
+        names = {name_by_id[ids[p]] for p in poss
+                 if ids[p] in name_by_id and name_by_id[ids[p]]}
+        if len(names) <= 1:
+            continue
+        # More than one confirmed name in this cluster: carve one sub-cluster per
+        # name. The largest confirmed name keeps the original label; the rest get
+        # fresh labels. Unconfirmed rows attach to the majority confirmed name.
+        by_name = {}
+        for p in poss:
+            nm = name_by_id.get(ids[p], "")
+            by_name.setdefault(nm, []).append(p)
+        # Order named groups by size, largest first; "" (unconfirmed) handled after.
+        named = sorted(((nm, ps) for nm, ps in by_name.items() if nm),
+                       key=lambda kv: -len(kv[1]))
+        majority_name = named[0][0]
+        label_for_name = {majority_name: lab}
+        for nm, _ps in named[1:]:
+            label_for_name[nm] = next_lab
+            next_lab += 1
+        for p in poss:
+            nm = name_by_id.get(ids[p], "")
+            out[p] = label_for_name[nm] if nm else label_for_name[majority_name]
+    return out
 
 def _recluster() -> int:
     """!
@@ -4058,6 +4200,65 @@ def estimate_person_mesh(cluster_id: int, appearance_id: Optional[str] = None) -
     obj = bodylib.mesh_to_obj(*mesh)
     personlib.put_member(MEDIA_DIR, person_uuid, personlib.mesh_member(app["id"]), obj)
     app["has_mesh"] = True
+    personlib.upsert_appearance(MEDIA_DIR, person_uuid, app)
+    return True
+
+def _person_face_crops(cluster_id: int, rel_set: set,
+                       min_frac: float = facemeshlib.MIN_FACE_FRAC,
+                       cap: int = 300):
+    """! @brief Load face crops for one appearance's images, for 3D face fitting.
+    @param rel_set Only images in this era contribute, so a face mesh never mixes
+           an 18- and a 60-year-old face — same era-isolation as the body path.
+    @param min_frac Skip face boxes whose smaller side is under this fraction of the
+           image; a tiny or truncated face gives a garbage 3DMM fit.
+    @return List of (bgr_image, box), largest first and capped; empty when none.
+    @note Reads face_regions (not body_regions): the face box is what the 3DMM /
+          deep3d fit is anchored on. Confirmed, unknown-excluded rows only.
+    """
+    rows = _db().execute(
+        "SELECT rel_path, cx, cy, w, h FROM face_regions "
+        "WHERE cluster_id=? AND COALESCE(unknown,0)=0 AND COALESCE(not_face,0)=0 "
+        "ORDER BY w*h DESC LIMIT ?", (cluster_id, cap * 4)).fetchall()
+    out = []
+    for rel, cx, cy, w, h in rows:
+        if rel not in rel_set or min(w, h) < min_frac:
+            continue
+        fp = get_safe_path(MEDIA_DIR, rel)
+        if not fp:
+            continue
+        img = read_jxl(fp)
+        if img is None:
+            continue
+        out.append((_to_bgr(img), {"cx": cx, "cy": cy, "w": w, "h": h}))
+        if len(out) >= cap:
+            break
+    return out
+
+def estimate_person_face_mesh(cluster_id: int,
+                              appearance_id: Optional[str] = None) -> bool:
+    """! @brief Estimate a canonical 3D FACE mesh for one appearance and store it.
+    @return True when a face mesh was produced and written for that era; False if no
+            face estimator is installed, the person/era is unresolved, or too few
+            usable crops exist. Identity shape is averaged across the era's face
+            crops (expression/pose dropped), never mixed across eras.
+    @note Stored as the appearance's face_mesh member, distinct from the body mesh,
+          so the viewer's Face/Body toggle picks which to load.
+    """
+    if not facemeshlib.have_face_estimator():
+        return False
+    person_uuid, app = _resolve_appearance(cluster_id, appearance_id)
+    if app is None:
+        return False
+    crops = _person_face_crops(cluster_id, set(app["rel_paths"]))
+    if not crops:
+        return False
+    mesh = facemeshlib.estimate_shape(crops)
+    if mesh is None:
+        return False
+    obj = facemeshlib.mesh_to_obj(*mesh)
+    personlib.put_member(MEDIA_DIR, person_uuid,
+                         personlib.face_mesh_member(app["id"]), obj)
+    app["has_face_mesh"] = True
     personlib.upsert_appearance(MEDIA_DIR, person_uuid, app)
     return True
 
@@ -5198,16 +5399,20 @@ def api_raw_keep():
 
 # ── Faces API ─────────────────────────────────────────────────────────────────
 def _cluster_summary(table, extra_cols, sample_cols, sample_key, row_to_sample,
-                     extra_to_fields=None, sample_limit=30):
+                     extra_to_fields=None, sample_limit=30, flag_filter=""):
     """Shared face/body cluster listing. One aggregate query for counts/names and
     one windowed query for up-to-N samples per cluster, instead of a per-cluster
-    sample SELECT (N+1 -> 2 queries total)."""
+    sample SELECT (N+1 -> 2 queries total).
+
+    `flag_filter` is an extra SQL predicate (e.g. exclude unknown/not_face rows for
+    the face table) applied to every row the listing considers."""
     db = _db()
     agg_extra = (", " + extra_cols) if extra_cols else ""
+    ff = (" AND " + flag_filter) if flag_filter else ""
     rows = db.execute(
         f"SELECT cluster_id, COUNT(*), COALESCE(MAX(name),''), "
         f"       MAX(confirmed), MAX(embed_mode){agg_extra} "
-        f"FROM {table} WHERE cluster_id>=0 "
+        f"FROM {table} WHERE cluster_id>=0{ff} "
         "GROUP BY cluster_id ORDER BY COUNT(*) DESC").fetchall()
     # Pull all samples in one pass, ranked within each cluster.
     samples = {}
@@ -5215,7 +5420,7 @@ def _cluster_summary(table, extra_cols, sample_cols, sample_key, row_to_sample,
             f"SELECT {sample_cols} FROM ("
             f"  SELECT {sample_cols}, ROW_NUMBER() OVER "
             "        (PARTITION BY cluster_id ORDER BY id) rn "
-            f"  FROM {table} WHERE cluster_id>=0) "
+            f"  FROM {table} WHERE cluster_id>=0{ff}) "
             f"WHERE rn<=?", (sample_limit,)).fetchall():
         samples.setdefault(r[-1], []).append(r)
     clusters = []
@@ -5232,15 +5437,83 @@ def _cluster_summary(table, extra_cols, sample_cols, sample_key, row_to_sample,
         f"SELECT COUNT(*) FROM {table} WHERE cluster_id<0").fetchone()[0]
     return clusters, singles
 
+def _cluster_outlier_dists(cluster_ids):
+    """For each given face cluster, cosine distance of every member from the
+    cluster centroid, keyed by face-region id.
+
+    This is what powers "show the least-certain faces last": a face far from its
+    cluster's centroid is the one most likely to have been swept in by mistake, so
+    the UI floats those to the bottom of the group where they're easy to deny.
+    Unknown / not_face rows are excluded (they aren't part of the identity).
+    Returns {face_id: distance in 0..2}; empty when embeddings are missing.
+    """
+    if not cluster_ids:
+        return {}
+    db = _db()
+    ph = ",".join("?" * len(cluster_ids))
+    rows = db.execute(
+        f"SELECT id,cluster_id,embedding FROM face_regions "
+        f"WHERE cluster_id IN ({ph}) AND embedding IS NOT NULL "
+        "AND COALESCE(unknown,0)=0 AND COALESCE(not_face,0)=0",
+        [int(c) for c in cluster_ids]).fetchall()
+    by_c = {}
+    for fid, cid, blob in rows:
+        by_c.setdefault(cid, []).append((fid, np.frombuffer(blob, np.float32)))
+    dists = {}
+    for cid, items in by_c.items():
+        vs = [v for _, v in items if v is not None and v.size]
+        if len(vs) < 2:
+            continue
+        # Guard against mixed embedding widths (arcface vs appearance) in one row set.
+        w = {}
+        for v in vs:
+            w[v.size] = w.get(v.size, 0) + 1
+        dom = max(w, key=w.get)
+        M = np.stack([v for v in vs if v.size == dom]).astype(np.float32)
+        n = np.linalg.norm(M, axis=1, keepdims=True); n[n == 0] = 1.0
+        M = M / n
+        centroid = M.mean(axis=0)
+        cn = np.linalg.norm(centroid) or 1.0
+        centroid = centroid / cn
+        for fid, v in items:
+            if v is None or v.size != dom:
+                continue
+            vv = v.astype(np.float32)
+            vn = np.linalg.norm(vv) or 1.0
+            dists[fid] = float(1.0 - float(np.dot(vv / vn, centroid)))
+    return dists
+
 @app.route("/api/faces/clusters")
 def api_face_clusters():
-    """Clusters for the Faces tab, biggest first. Unnamed clusters lead."""
+    """Clusters for the Faces tab, biggest first. Unnamed clusters lead.
+
+    Unknown and not_face rows are excluded from the listing. Each face sample
+    carries `dist` (cosine distance from its cluster centroid) so the UI can sort
+    the least-certain / most-distinct faces to the bottom of each group, making the
+    one or two wrongly-merged faces easy to spot and deny."""
     clusters, singles = _cluster_summary(
         "face_regions", "",
         "id,rel_path,cx,cy,w,h,cluster_id", "faces",
         lambda r: {"id": r[0], "rel": r[1], "cx": r[2], "cy": r[3],
-                   "w": r[4], "h": r[5]})
+                   "w": r[4], "h": r[5]},
+        flag_filter="COALESCE(unknown,0)=0 AND COALESCE(not_face,0)=0",
+        sample_limit=60)
+    dists = _cluster_outlier_dists([c["id"] for c in clusters])
+    if dists:
+        for c in clusters:
+            for f in c["faces"]:
+                if f["id"] in dists:
+                    f["dist"] = round(dists[f["id"]], 4)
+            # Sort each cluster's shown faces by ascending certainty distance so
+            # the most-distinct (likely-wrong) faces land last.
+            c["faces"].sort(key=lambda f: f.get("dist", 0.0))
+            c["max_dist"] = round(max((f.get("dist", 0.0) for f in c["faces"]),
+                                      default=0.0), 4)
+    # How many faces are parked as "unknown", for the tab to show a count.
+    unknown_n = _db().execute(
+        "SELECT COUNT(*) FROM face_regions WHERE COALESCE(unknown,0)=1").fetchone()[0]
     return jsonify({"clusters": clusters, "unclustered": singles,
+                    "unknown": unknown_n,
                     "identity": facelib.have_identity_embedder()})
 
 @app.route("/api/bodies/clusters")
@@ -5327,6 +5600,8 @@ def api_person_get(cluster_id):
             MEDIA_DIR, person_uuid, personlib.tpose_member(app["id"])) is not None
         app["has_mesh"] = personlib.read_member(
             MEDIA_DIR, person_uuid, personlib.mesh_member(app["id"])) is not None
+        app["has_face_mesh"] = personlib.read_member(
+            MEDIA_DIR, person_uuid, personlib.face_mesh_member(app["id"])) is not None
     return jsonify({"success": True, "person": desc,
                     "body_fields": list(personlib.BODY_FIELDS),
                     "bio_fields": list(personlib.BIO_FIELDS),
@@ -5334,7 +5609,9 @@ def api_person_get(cluster_id):
                     "relation_lines": list(personlib.RELATION_LINES),
                     "single_relations": list(personlib.SINGLE_RELATIONS),
                     "date_flags": _person_date_flags(cluster_id),
-                    "mesh_estimator": bodylib.have_mesh_estimator()})
+                    "mesh_estimator": bodylib.have_mesh_estimator(),
+                    "face_estimator": facemeshlib.have_face_estimator(),
+                    "face_estimator_name": facemeshlib.face_estimator_name()})
 
 @app.route("/api/persons/<int:cluster_id>/field", methods=["POST"])
 def api_person_field(cluster_id):
@@ -5413,6 +5690,27 @@ def api_person_mesh(cluster_id):
     d = request.json or {}
     return jsonify({"success": estimate_person_mesh(cluster_id, d.get("appearance_id"))})
 
+@app.route("/api/persons/<int:cluster_id>/face_mesh", methods=["POST"])
+def api_person_face_mesh(cluster_id):
+    """Estimate and store the 3D FACE mesh for one appearance (no-op if no face
+    estimator is installed)."""
+    d = request.json or {}
+    return jsonify({"success": estimate_person_face_mesh(cluster_id, d.get("appearance_id"))})
+
+@app.route("/api/persons/<int:cluster_id>/face_mesh_data/<appearance_id>")
+def api_person_face_mesh_data(cluster_id, appearance_id):
+    """Serve one appearance's canonical FACE mesh as a raw .obj, for the 3D viewer's
+    Face mode. 404 when the person, appearance, or face-mesh member is absent so the
+    front-end falls back to the placeholder."""
+    person_uuid = person_for_cluster(cluster_id, create=False)
+    if not person_uuid:
+        return "", 404
+    data = personlib.read_member(
+        MEDIA_DIR, person_uuid, personlib.face_mesh_member(appearance_id))
+    if data is None:
+        return "", 404
+    return data, 200, {"Content-Type": "text/plain; charset=utf-8"}
+
 @app.route("/api/persons/<int:cluster_id>/mesh_data/<appearance_id>")
 def api_person_mesh_data(cluster_id, appearance_id):
     """Serve one appearance's canonical body mesh as a raw .obj, for the 3D viewer.
@@ -5456,9 +5754,8 @@ def api_face_scan():
     if d.get("rescan"):
         db = _db()
         db.execute("UPDATE files SET face_done=0, body_done=0")
-        # Keep confirmed faces (they carry user-entered names, and MWG has them
-        # anyway); drop the rest so re-detection starts from a clean slate.
-        db.execute("DELETE FROM face_regions WHERE COALESCE(confirmed,0)=0")
+        db.execute("DELETE FROM face_regions WHERE COALESCE(confirmed,0)=0 "
+                   "AND COALESCE(not_face,0)=0 AND COALESCE(unknown,0)=0")
         db.execute("DELETE FROM body_regions WHERE COALESCE(confirmed,0)=0")
         db.commit()
         _face_dirty["v"] = True
@@ -5496,7 +5793,8 @@ def api_face_progress():
                     # so every image will scan clean with zero faces -- the pane
                     # must say so rather than report a cheerful "all caught up".
                     "model_error": facelib.face_model_error(),
-                    "face_size": _face_size(),
+                    "face_detector": _face_detector_id(),
+                    "face_recognition": facelib.recognition_model(),
                     "status": state.get("status_text", "")})
 
 @app.route("/api/faces/name", methods=["POST"])
@@ -5569,6 +5867,142 @@ def api_face_split():
     db.commit()
     return jsonify({"success": True, "moved": len(ids)})
 
+def _face_rows_by_ids(ids):
+    ph = ",".join("?" * len(ids))
+    return _db().execute(
+        f"SELECT id,rel_path,cx,cy,w,h,name FROM face_regions WHERE id IN ({ph})",
+        [int(i) for i in ids]).fetchall()
+
+def _strip_mwg_region(rel, cx, cy):
+    """Remove the matching MWG face region from an image's metadata (source of
+    truth), used when a detection is declared 'not a face'."""
+    abs_p = get_safe_path(MEDIA_DIR, rel)
+    if not abs_p or not os.path.exists(abs_p):
+        return
+    meta = read_metadata(abs_p)
+    kept = [r for r in meta["regions"]
+            if not (r.get("class_name") == "face"
+                    and abs(r["cx"] - cx) < 1e-3 and abs(r["cy"] - cy) < 1e-3)]
+    if len(kept) != len(meta["regions"]):
+        write_metadata(abs_p, meta["tags"], meta["description"], kept)
+
+@app.route("/api/faces/not_face", methods=["POST"])
+@_auth.require_feature("tab.faces.edit", action='face_not_face', fields=('ids',))
+def api_face_not_face():
+    """Declare one or more detections to be NOT a face.
+
+    Tombstones the row (not_face=1, cluster_id=-1) so it leaves every cluster, is
+    excluded from reclustering, and — because a rescan re-detecting the same box
+    checks these tombstones — stays dropped instead of reappearing each scan. Also
+    removes the matching MWG face region from the image so the box vanishes from the
+    editor too. Undo with /api/faces/unmark."""
+    d = request.json or {}
+    ids = d.get("ids")
+    if ids is None:
+        one = int(d.get("id", -1)); ids = [one] if one >= 0 else []
+    ids = [int(i) for i in ids if int(i) >= 0]
+    if not ids:
+        return jsonify({"success": False, "error": "no face id(s) given"})
+    rows = _face_rows_by_ids(ids)
+    for _id, rel, cx, cy, _w, _h, _n in rows:
+        _strip_mwg_region(rel, cx, cy)
+    db = _db()
+    ph = ",".join("?" * len(ids))
+    db.execute(
+        f"UPDATE face_regions SET not_face=1, unknown=0, cluster_id=-1, "
+        f"name='', confirmed=0 WHERE id IN ({ph})", [int(i) for i in ids])
+    db.commit()
+    return jsonify({"success": True, "marked": len(ids)})
+
+@app.route("/api/faces/unknown", methods=["POST"])
+@_auth.require_feature("tab.faces.edit", action='face_unknown', fields=('ids',))
+def api_face_unknown():
+    """Mark faces as 'unknown': a real face that is deliberately NOT a person you
+    want to identify (a photobomber, a stranger in the background).
+
+    The face stays valid (it's still a face, unlike not_face) but is pulled out of
+    its cluster and excluded from clustering and the unnamed queue, so it never gets
+    merged into a named person and never nags for a name. Undo with
+    /api/faces/unmark."""
+    d = request.json or {}
+    ids = d.get("ids")
+    if ids is None:
+        one = int(d.get("id", -1)); ids = [one] if one >= 0 else []
+    ids = [int(i) for i in ids if int(i) >= 0]
+    if not ids:
+        return jsonify({"success": False, "error": "no face id(s) given"})
+    db = _db()
+    ph = ",".join("?" * len(ids))
+    db.execute(
+        f"UPDATE face_regions SET unknown=1, not_face=0, cluster_id=-1, "
+        f"name='', confirmed=0 WHERE id IN ({ph})", [int(i) for i in ids])
+    db.commit()
+    return jsonify({"success": True, "marked": len(ids)})
+
+@app.route("/api/faces/unmark", methods=["POST"])
+@_auth.require_feature("tab.faces.edit", action='face_unmark', fields=('ids',))
+def api_face_unmark():
+    """Clear an unknown / not_face flag, returning the face to the unclustered pool.
+    A recluster then folds it back into a group."""
+    d = request.json or {}
+    ids = d.get("ids")
+    if ids is None:
+        one = int(d.get("id", -1)); ids = [one] if one >= 0 else []
+    ids = [int(i) for i in ids if int(i) >= 0]
+    if not ids:
+        return jsonify({"success": False, "error": "no face id(s) given"})
+    db = _db()
+    ph = ",".join("?" * len(ids))
+    db.execute(
+        f"UPDATE face_regions SET unknown=0, not_face=0 WHERE id IN ({ph})",
+        [int(i) for i in ids])
+    db.commit()
+    return jsonify({"success": True, "unmarked": len(ids)})
+
+@app.route("/api/faces/merge", methods=["POST"])
+@_auth.require_feature("tab.faces.edit", action='face_merge',
+                       fields=('src', 'dst'))
+def api_face_merge():
+    """Merge face cluster `src` into `dst` (both become one).
+
+    Deliberately a distinct, explicit action — the UI must confirm it before
+    calling, because merging two ids is easy to do by accident and (with confirmed
+    names on both sides) exactly the mistake that fuses two real people. The
+    endpoint itself requires `confirm: true` as a server-side backstop so a stray
+    call can't merge silently.
+
+    The destination's name wins if it has one; otherwise the source's name carries
+    over. Everything in `src` is repointed to `dst`."""
+    d = request.json or {}
+    if not d.get("confirm"):
+        return jsonify({"success": False, "error": "merge not confirmed"})
+    try:
+        src = int(d.get("src", -1)); dst = int(d.get("dst", -1))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "src and dst required"})
+    if src < 0 or dst < 0 or src == dst:
+        return jsonify({"success": False, "error": "need two distinct clusters"})
+    db = _db()
+    dname = db.execute(
+        "SELECT name FROM face_regions WHERE cluster_id=? AND name<>'' LIMIT 1",
+        (dst,)).fetchone()
+    sname = db.execute(
+        "SELECT name FROM face_regions WHERE cluster_id=? AND name<>'' LIMIT 1",
+        (src,)).fetchone()
+    keep_name = (dname[0] if dname else (sname[0] if sname else ""))
+    moved = db.execute("SELECT COUNT(*) FROM face_regions WHERE cluster_id=?",
+                       (src,)).fetchone()[0]
+    db.execute("UPDATE face_regions SET cluster_id=? WHERE cluster_id=?",
+               (dst, src))
+    if keep_name:
+        # Propagate the surviving name across the merged cluster as a suggestion;
+        # confirmed rows keep their own name (already equal to keep_name).
+        db.execute("UPDATE face_regions SET name=? WHERE cluster_id=? "
+                   "AND confirmed=0", (keep_name, dst))
+    db.commit()
+    return jsonify({"success": True, "cluster_id": dst, "moved": moved,
+                    "name": keep_name})
+
 @app.route("/api/bodies/split", methods=["POST"])
 def api_body_split():
     """Kick a wrong body out of its cluster (back to unclustered), or carve a
@@ -5609,8 +6043,8 @@ def api_state():
          "oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions",
          "autotag_enabled","pipeline_tree","yolo_size","pose_kind","pose_size",
          "appearance_eps","shape_estimator","pose_estimator",
-         "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","our_model",
-         "face_cluster_eps","body_enabled","body_size","body_cluster_eps","object_proposals",
+         "face_bg_enabled","face_bg_custom","face_detector","face_recognition","person_model","our_model",
+         "face_cluster_eps","face_reject_drawn","face_drawn_thresh","body_enabled","body_size","body_cluster_eps","object_proposals",
          "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
          "barcode_model","barcode_conf",
          "model_groups","iqa_model","brand_name","brand_logo","search_quick_filters")})
@@ -5642,8 +6076,23 @@ def update_settings():
                        "WHERE embed_mode<>? AND COALESCE(confirmed,0)=0", (new_id,))
             db.commit()
             _face_dirty["v"] = True
-    if "face_size" in d and d["face_size"] != state.get("face_size"):
+    if "face_detector" in d and d["face_detector"] != state.get("face_detector"):
+        # A detector change points _run_faces at different weights; _load_yolo
+        # memoises by path, so drop the cache to pick them up on the next detect.
         _load_yolo.cache_clear()
+    if "face_recognition" in d and d["face_recognition"] != state.get("face_recognition"):
+        # A recognition-pack change moves embeddings to a different space; the old
+        # cached vectors are no longer comparable. Point the embedder at the new
+        # pack and clear unconfirmed face embeddings so a rescan rebuilds them.
+        facelib.set_recognition_model(d["face_recognition"])
+        db = _db()
+        db.execute("UPDATE files SET face_done=0 WHERE rel_path IN "
+                   "(SELECT rel_path FROM face_regions WHERE COALESCE(confirmed,0)=0)")
+        db.execute("DELETE FROM face_regions "
+                   "WHERE COALESCE(confirmed,0)=0 AND COALESCE(not_face,0)=0 "
+                   "AND COALESCE(unknown,0)=0")
+        db.commit()
+        _face_dirty["v"] = True
     # Same reasoning for the barcode detector: _detect_obb_or_box memoises by
     # path, so pointing the setting at a different model has no effect until
     # the cache is dropped.
@@ -5654,7 +6103,8 @@ def update_settings():
         _load_yolo.cache_clear()
     for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","llm_preprocess","pipeline_tree","yolo_size","pose_kind","pose_size",
               "appearance_eps","shape_estimator","pose_estimator",
-              "face_bg_enabled","face_bg_custom","face_model","face_size","person_model","our_model","face_cluster_eps",
+              "face_bg_enabled","face_bg_custom","face_detector","face_recognition","person_model","our_model","face_cluster_eps",
+            "face_reject_drawn","face_drawn_thresh",
               "body_enabled","body_size","body_cluster_eps","object_proposals","iqa_model",
               "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
               "barcode_model","barcode_conf"):
@@ -9413,6 +9863,23 @@ def api_seg_models():
             "have_code": seg_models._have_sam3_code(),
             "repo": seg_models.SAM3_HF_REPO,
         },
+    })
+
+@app.route("/api/face_models")
+def api_face_models():
+    """Face-model registries for the settings dropdowns:
+      detectors   — YOLO-face box detectors (yolov11 n/s/m/l), plus anything the
+                    user dropped in models/face/yolo.
+      recognition — insightface identity packs (buffalo l/m/s/sc, antelopev2).
+    Each entry carries a `speed` badge and an `available`/`reason` pair, same shape
+    as /api/seg_models, so the UI can grey out options whose deps are missing."""
+    return jsonify({
+        "success": True,
+        "detectors": facemodels.list_detectors(),
+        "recognition": facemodels.list_recognition(),
+        "active_detector": _face_detector_id(),
+        "active_recognition": facelib.recognition_model(),
+        "model_error": facelib.face_model_error(),
     })
 
 @app.route("/api/seg_classes")

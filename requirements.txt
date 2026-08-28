@@ -29,3 +29,4 @@ vtracer
 gallery-dl
 git+https://github.com/ultralytics/CLIP/
 smplx
+trimesh

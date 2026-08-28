@@ -17,6 +17,12 @@
     <span class="text-xs font-bold text-blue-400 truncate flex-1"
           id="person_pane_name">Person</span>
     <span id="person_pane_era" class="text-[11px] text-gray-400 truncate"></span>
+    <div id="person_view_toggle" class="hidden flex items-center rounded overflow-hidden border border-gray-600 flex-shrink-0">
+      <button id="person_view_face" onclick="personSetView('face')"
+        class="text-[11px] px-2 py-0.5 bg-gray-700 text-gray-300">Face</button>
+      <button id="person_view_body" onclick="personSetView('body')"
+        class="text-[11px] px-2 py-0.5 bg-blue-600 text-white">Body</button>
+    </div>
     <button onclick="closePersonView()" title="Back to images"
       class="text-[11px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-gray-300">✕ Close</button>
   </div>

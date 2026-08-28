@@ -31,25 +31,16 @@ import numpy as np
 
 import object_grouping as og
 import model_registry
+import face_models as facemodels
 import urllib.request
 import cv2
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
-# Community YOLO face weights. Ultralytics' zoo has no official face model, so we
-# pull from a GitHub release (allowlisted) rather than the Ultralytics CDN.
-#
-# The tag is 1.0.0. It was previously v0.0.0, which does not exist -- every fetch
-# 404'd, ensure_face_model() swallowed it and returned '', _run_faces() read that
-# as "no model configured", and every image was marked face_done with zero
-# detections. The face table stayed empty and clustering had nothing to cluster.
-FACE_MODEL_REPO = "https://github.com/akanametov/yolo-face/releases/download/1.0.0"
-
-# yolov11 face weights ship n/s/m/l -- there is NO 'x' variant, even though the
-# shared size selector offers one. Asking for a file that isn't published 404s,
-# so resolve through face_model_name() rather than formatting a name blindly.
-FACE_SIZES = ("n", "s", "m", "l")
-_SIZE_ORDER = ("n", "s", "m", "l", "x")
+FACE_DIR = os.path.join(MODELS_DIR, "face")
+YOLO_FACE_DIR = os.path.join(FACE_DIR, "yolo")
+INSIGHT_DIR = os.path.join(FACE_DIR, "insightface")
+FACE_MODEL_REPO = facemodels.FACE_MODEL_REPO
 
 MIN_MODEL_BYTES = 1_000_000   # a real .pt is megabytes; smaller == error page
 
@@ -84,43 +75,39 @@ def list_models():
         base = os.path.basename(p).lower()
         key = "face" if "face" in base else "custom"
         out[key].append(p)
+    for p in sorted(glob.glob(os.path.join(YOLO_FACE_DIR, "*.pt"))):
+        if p not in out["face"]:
+            out["face"].append(p)
     return out
-
-def face_model_name(size="n"):
-    """Resolve a requested size to a yolov11 face weight file that EXISTS.
-
-    The size selector offers n/s/m/l/x for parity with the detection models, but
-    the face release publishes no 'x'. Clamp down to the largest published size
-    instead of formatting a name that 404s.
-    """
-    size = (size or "n").lower()
-    if size not in FACE_SIZES:
-        want = _SIZE_ORDER.index(size) if size in _SIZE_ORDER else 0
-        cand = [s for s in FACE_SIZES if _SIZE_ORDER.index(s) <= want]
-        size = cand[-1] if cand else FACE_SIZES[0]
-    return f"yolov11{size}-face.pt"
 
 def face_model_error():
     """Last download failure, for the UI to surface. '' when healthy."""
     return _face_model_error["v"]
 
-def ensure_face_model(size="n"):
-    """Return a path to the face detector for `size`, downloading it on first
-    use. Returns '' when unavailable (offline / bad URL) — caller falls back.
+def ensure_face_detector(detector_id=None):
+    """Return a path to the selected face DETECTOR, downloading a built-in on first
+    use. Returns '' when unavailable (offline / bad id) — caller falls back.
 
-    Each size caches under its own filename, so switching the setting fetches the
-    new weights once and keeps the old ones for a switch back. We no longer just
-    grab list_models()['face'][0]: that returned whatever happened to be in
-    ./models first, so changing the size setting silently kept using the old
-    weights.
+    Resolution goes through face_models: a custom/discovered file is used from disk;
+    a built-in is fetched by its bare name from the akanametov release into
+    models/face/yolo and cached there. Replaces the old (auto + size) pair with a
+    single explicit detector selection.
     """
     ensure_models_dir()
-    name = face_model_name(size)
-    dest = os.path.join(MODELS_DIR, name)
+    os.makedirs(YOLO_FACE_DIR, exist_ok=True)
+    detector_id = facemodels.resolve_detector_id(detector_id or facemodels.YOLO_FACE_DEFAULT)
+    local, download_name = facemodels.detector_weight_ref(detector_id)
+    if local and os.path.exists(local):
+        _face_model_error["v"] = ""
+        return local
+    if not download_name:
+        _face_model_error["v"] = f"{detector_id}: no weights on disk and none to fetch"
+        return ""
+    dest = os.path.join(YOLO_FACE_DIR, download_name)
     if os.path.exists(dest):
         _face_model_error["v"] = ""
         return dest
-    url = f"{FACE_MODEL_REPO}/{name}"
+    url = f"{FACE_MODEL_REPO}/{download_name}"
     try:
         with _lock:
             if os.path.exists(dest):
@@ -137,7 +124,7 @@ def ensure_face_model(size="n"):
         _face_model_error["v"] = ""
         return dest
     except Exception as e:
-        _face_model_error["v"] = f"{name}: {e}"
+        _face_model_error["v"] = f"{download_name}: {e}"
         try:
             if os.path.exists(dest + ".part"):
                 os.remove(dest + ".part")
@@ -145,13 +132,111 @@ def ensure_face_model(size="n"):
             pass
         return ""
 
+DRAWN_THRESH = 0.55
+
+def _crop_box(img_bgr, b):
+    """Pixel crop for a normalised center-form box, clamped to the frame."""
+    H, W = img_bgr.shape[:2]
+    x1 = int(max(0, (b["cx"] - b["w"] / 2) * W))
+    y1 = int(max(0, (b["cy"] - b["h"] / 2) * H))
+    x2 = int(min(W, (b["cx"] + b["w"] / 2) * W))
+    y2 = int(min(H, (b["cy"] + b["h"] / 2) * H))
+    if x2 - x1 < 4 or y2 - y1 < 4:
+        return None
+    return img_bgr[y1:y2, x1:x2]
+
+def drawn_score(img_bgr, box):
+    """Estimate how illustration-like one face crop is, in 0..1 (higher = drawn).
+
+    Blends three cheap, medium-revealing statistics of the crop:
+      palette    : fraction of the 4-bit-per-channel color cube actually used.
+                   Photos spread across hundreds of bins; flat cartoon shading uses
+                   a handful.  (low usage -> drawn)
+      flatness   : share of pixels sitting in near-uniform local neighbourhoods
+                   (tiny Laplacian).  Big flat fills are the signature of cel
+                   shading; skin under real light is never that flat. (high -> drawn)
+      hf_energy  : high-frequency energy (grain/pores/texture) normalised by
+                   contrast.  Photos carry sensor noise and micro-texture even in
+                   smooth areas; vector art is clean between its hard edges.
+                   (low -> drawn)
+    Any failure returns 0.0 (treat as photo) so a bad crop never wrongly rejects.
+    """
+    crop = _crop_box(img_bgr, box)
+    if crop is None:
+        return 0.0
+    try:
+        c = _as_bgr(crop)
+        if c is None:
+            return 0.0
+        # Downscale so the stats are resolution-independent and cheap.
+        h, w = c.shape[:2]
+        scale = 128.0 / max(h, w)
+        if scale < 1.0:
+            c = cv2.resize(c, (max(1, int(w * scale)), max(1, int(h * scale))),
+                           interpolation=cv2.INTER_AREA)
+        gray = cv2.cvtColor(c, cv2.COLOR_BGR2GRAY)
+
+        # palette: distinct colours at 4 bits/channel, over the crop's pixel count.
+        q = (c.astype(np.int32) >> 4)                 # 16 levels per channel
+        codes = (q[..., 0] << 8) | (q[..., 1] << 4) | q[..., 2]
+        used = np.unique(codes).size
+        npix = codes.size
+        palette_drawn = 1.0 - min(1.0, used / max(1.0, npix * 0.5))
+
+        # flatness: fraction of near-zero-Laplacian pixels (flat fills).
+        lap = cv2.Laplacian(gray, cv2.CV_32F, ksize=3)
+        flat = float(np.mean(np.abs(lap) < 4.0))
+
+        # hf_energy: std of high-pass, normalised by overall contrast; invert so
+        # "clean" (low texture) reads as drawn.
+        blur = cv2.GaussianBlur(gray, (0, 0), 1.2)
+        hf = gray.astype(np.float32) - blur.astype(np.float32)
+        contrast = float(np.std(gray)) + 1e-3
+        hf_norm = min(1.0, float(np.std(hf)) / contrast / 0.35)
+        hf_drawn = 1.0 - hf_norm
+
+        # Weighted blend. Flatness is the strongest single cue, palette next.
+        score = 0.4 * flat + 0.35 * palette_drawn + 0.25 * hf_drawn
+        return float(max(0.0, min(1.0, score)))
+    except Exception:
+        return 0.0
+
+def is_drawn(img_bgr, box, thresh=None):
+    """True when a face crop is illustration-like enough to keep out of the people
+    pipeline. `thresh` overrides DRAWN_THRESH (caller passes the setting)."""
+    t = DRAWN_THRESH if thresh is None else float(thresh)
+    if t >= 1.0:
+        return False          # rejection disabled
+    return drawn_score(img_bgr, box) >= t
+
 # ── identity embedding ────────────────────────────────────────────────────────
+# Which insightface pack the recognition head uses. buffalo_l is the default and
+# what every existing embedding was built with; manager sets this from the
+# face_recognition setting. Changing it invalidates cached embeddings (different
+# training), so the caller triggers a rescan — we just build whatever is set.
+_recog_model = {"v": facemodels.INSIGHT_DEFAULT}
+
+def set_recognition_model(model_id):
+    """Set the insightface pack name and drop any loaded app so the next embed call
+    rebuilds with the new pack. No-op if unchanged."""
+    new = facemodels.resolve_recognition_id(model_id)
+    if new == _recog_model["v"]:
+        return
+    _recog_model["v"] = new
+    try:
+        model_registry.unload("faces:insight")
+    except Exception:
+        pass
+
+def recognition_model():
+    return _recog_model["v"]
+
 def _build_insight():
     """Construct insightface's FaceAnalysis app, or None on any failure."""
     try:
         from insightface.app import FaceAnalysis
-        app = FaceAnalysis(name="buffalo_l",
-                           root=os.path.join(MODELS_DIR, "insightface"),
+        app = FaceAnalysis(name=_recog_model["v"],
+                           root=INSIGHT_DIR,
                            providers=["CUDAExecutionProvider",
                                       "CPUExecutionProvider"])
         app.prepare(ctx_id=0 if og.has_gpu() else -1, det_size=(640, 640))
@@ -167,6 +252,13 @@ def _load_insight():
     """Lazily bring up insightface via the central registry (load-on-demand, so
     it's evicted when other models need the memory). Cheap after first call."""
     return model_registry.acquire("faces:insight")
+
+INSIGHT_KEY = "faces:insight"
+
+def insight_registry_key():
+    """! @brief Registry key for the recognition app, so a batched task can lease it
+    resident across many embeds instead of reloading it per image."""
+    return INSIGHT_KEY
 
 def have_identity_embedder():
     return _load_insight() is not None

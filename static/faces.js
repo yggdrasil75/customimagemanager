@@ -35,14 +35,17 @@ function faceChip(f, size = 56, pad = 1.6) {
   const url = '/api/thumb/' + encodeURI(f.rel);
   const relAttr = (f.rel || '').replace(/"/g, '&quot;');
   const sel = _faceSel.has(f.id);
-  // The chip is a positioned wrapper so the ✕ (deny) and the selection ring can
-  // overlay the crop. Click the crop → open the full image; the ✕ denies just
-  // this face; the checkbox marks it for "split off as new person".
+  // An outlier (far from the cluster centroid) is the one most likely swept in by
+  // mistake; ring it amber so the eye goes straight to it.
+  const outlier = f._outlier ? 'ring-2 ring-amber-400' : '';
+  // The chip is a positioned wrapper so the action buttons and the selection ring
+  // can overlay the crop. Click the crop → open the full image. Buttons, top to
+  // bottom-right: ✕ deny (remove from cluster), ⦸ not-a-face, ? unknown/photobomber.
   return `<div class="relative flex-shrink-0 group" style="width:${size}px;height:${size}px">
       <div class="w-full h-full rounded bg-gray-900 bg-no-repeat cursor-zoom-in
-                  ${sel ? 'ring-2 ring-purple-400' : ''}"
-           title="${relAttr}\nclick to open in the viewer"
-           onclick="viewFaceImage('${relAttr}')"
+                  ${sel ? 'ring-2 ring-purple-400' : outlier}"
+           title="${relAttr}\nclick to find this exact face in the image${f.dist != null ? '\ndistance from centroid: ' + f.dist : ''}"
+           onclick="viewFaceImage('${relAttr}', ${f.cx}, ${f.cy}, ${f.w}, ${f.h})"
            style="background-image:url('${url}');
                   background-size:${zx}% ${zy}%;
                   background-position:${px}% ${py}%"></div>
@@ -51,6 +54,16 @@ function faceChip(f, size = 56, pad = 1.6) {
               class="absolute -top-1 -right-1 w-4 h-4 leading-none rounded-full
                      bg-red-700 hover:bg-red-600 text-white text-[10px] font-bold
                      opacity-0 group-hover:opacity-100 transition">×</button>
+      <button title="Not a face — drop this detection"
+              onclick="event.stopPropagation();notAFace(${f.id})"
+              class="absolute top-3 -right-1 w-4 h-4 leading-none rounded-full
+                     bg-gray-600 hover:bg-gray-500 text-white text-[10px] font-bold
+                     opacity-0 group-hover:opacity-100 transition">⦸</button>
+      <button title="Unknown person — keep as a face but don't identify (photobomber)"
+              onclick="event.stopPropagation();markUnknown(${f.id})"
+              class="absolute top-7 -right-1 w-4 h-4 leading-none rounded-full
+                     bg-amber-700 hover:bg-amber-600 text-white text-[10px] font-bold
+                     opacity-0 group-hover:opacity-100 transition">?</button>
       <input type="checkbox" ${sel ? 'checked' : ''}
              title="Select — split these off as a separate person"
              onclick="event.stopPropagation();toggleFaceSel(${f.id})"
@@ -97,10 +110,40 @@ function toggleFaceSel(id) {
 
 function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 
+// Faces whose centroid distance is at least this fraction of the cluster's worst,
+// AND above a floor, are treated as "least certain" and shown in a separate row at
+// the bottom so a wrong one or two are easy to pick out and deny.
+const _OUTLIER_FRAC = 0.6;
+const _OUTLIER_FLOOR = 0.25;
+
+function _splitConfidentOutliers(c) {
+  const faces = c.faces || [];
+  const haveDist = faces.some(f => f.dist != null);
+  if (!haveDist || faces.length < 4) return { main: faces, tail: [] };
+  const worst = c.max_dist || Math.max(...faces.map(f => f.dist || 0));
+  if (worst < _OUTLIER_FLOOR) return { main: faces, tail: [] };
+  const cut = Math.max(_OUTLIER_FLOOR, worst * _OUTLIER_FRAC);
+  const main = [], tail = [];
+  for (const f of faces) {
+    if ((f.dist || 0) >= cut) { f._outlier = true; tail.push(f); }
+    else { f._outlier = false; main.push(f); }
+  }
+  // Never send the whole cluster to the tail; if everything is "far", keep the
+  // closest half up top so there's a reference to compare against.
+  if (!main.length && tail.length) {
+    tail.sort((a, b) => (a.dist || 0) - (b.dist || 0));
+    const half = Math.ceil(tail.length / 2);
+    for (let i = 0; i < half; i++) tail[i]._outlier = false;
+    return { main: tail.slice(0, half), tail: tail.slice(half) };
+  }
+  return { main, tail };
+}
+
 function _renderFaceCluster(c) {
+  const { main, tail } = _splitConfidentOutliers(c);
   return `
       <div id="fcluster_${c.id}" class="bg-gray-800 rounded border ${c.confirmed
-          ? 'border-green-700' : 'border-gray-700'} p-2">
+          ? 'border-green-700' : 'border-gray-700'} p-2" data-name="${(c.name||'').replace(/"/g,'&quot;')}">
         <div class="flex items-center gap-2 mb-2">
           <input value="${(c.name || '').replace(/"/g, '&quot;')}"
                  placeholder="Who is this?" id="fname_${c.id}"
@@ -112,19 +155,32 @@ function _renderFaceCluster(c) {
             class="text-xs bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded font-bold">
             Name all
           </button>
+          <button onclick="mergeInto(${c.id})" title="Merge another person into this one"
+            class="text-xs bg-teal-700 hover:bg-teal-600 px-2 py-1 rounded font-bold">
+            Merge…
+          </button>
           <button onclick="openPerson(${c.id})"
             class="text-xs bg-blue-700 hover:bg-blue-600 px-2 py-1 rounded font-bold">
             Person
           </button>
         </div>
         <div class="flex gap-1.5 flex-wrap">
-          ${c.faces.map(f => faceChip(f)).join('')}
+          ${main.map(f => faceChip(f)).join('')}
           ${c.count > c.faces.length
             ? `<div onclick="filterGalleryByPerson(${c.id})" title="Show all photos of this person"
                     class="w-14 h-14 flex items-center justify-center text-[10px] cursor-pointer
                            text-gray-400 bg-gray-900 hover:bg-gray-700 rounded">
                  +${c.count - c.faces.length}</div>` : ''}
         </div>
+        ${tail.length ? `
+        <div class="mt-2 pt-2 border-t border-amber-800/60">
+          <div class="text-[10px] text-amber-300 mb-1">
+            least certain — check these aren't someone else (deny ✕ any that don't belong)
+          </div>
+          <div class="flex gap-1.5 flex-wrap">
+            ${tail.map(f => faceChip(f)).join('')}
+          </div>
+        </div>` : ''}
         ${(() => {
           const n = c.faces.filter(f => _faceSel.has(f.id)).length;
           return n ? `<div class="flex items-center gap-2 mt-2 pt-2
@@ -271,6 +327,93 @@ async function denyFace(id) {
   }
 }
 
+function _dropFaceLocal(id, statusMsg) {
+  // Shared local update for deny/not-a-face/unknown: remove the chip without a
+  // full reload so scroll position holds.
+  _faceSel.delete(id);
+  const cid = _faceClusterOf(id);
+  const c = cid != null ? _faceClusters.find(x => x.id === cid) : null;
+  if (c) {
+    c.faces = c.faces.filter(f => f.id !== id);
+    c.count = Math.max(0, (c.count || 1) - 1);
+    document.getElementById('faces_status').textContent = statusMsg;
+    if (c.faces.length) _repaintFaceCluster(cid);
+    else keepScroll('faces_list', loadFaces);
+  } else {
+    keepScroll('faces_list', loadFaces);
+  }
+}
+
+async function notAFace(id) {
+  // Declare a detection to be not a face at all: drops it, tombstones it so a
+  // rescan won't bring it back, and removes the box from the image metadata.
+  document.getElementById('faces_status').textContent = 'Dropping detection…';
+  try {
+    await fetch('/api/faces/not_face', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+  } catch (e) {
+    document.getElementById('faces_status').textContent = 'Failed.'; return;
+  }
+  _dropFaceLocal(id, 'Marked as not a face.');
+}
+
+async function markUnknown(id) {
+  // A real face, but a person you don't want to identify (photobomber). Kept as a
+  // valid face, pulled out of clustering so it can't merge into a named person.
+  document.getElementById('faces_status').textContent = 'Marking unknown…';
+  try {
+    await fetch('/api/faces/unknown', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+  } catch (e) {
+    document.getElementById('faces_status').textContent = 'Failed.'; return;
+  }
+  _dropFaceLocal(id, 'Marked as unknown.');
+}
+
+async function mergeInto(dst) {
+  // Merge another cluster into `dst`. Two-step confirmation: pick the source, then
+  // an explicit confirm — merging two ids (especially two NAMED people) is exactly
+  // the mistake that fuses distinct people, so it should never happen on one click.
+  const dstC = _faceClusters.find(c => c.id === dst);
+  const others = _faceClusters.filter(c => c.id !== dst);
+  if (!others.length) { alert('No other clusters to merge.'); return; }
+  const lines = others.map(c =>
+    `  ${c.id}: ${c.name || '(unnamed)'} — ${c.count} face(s)`).join('\n');
+  const raw = prompt(
+    `Merge which cluster INTO "${dstC?.name || dst}" (id ${dst})?\n` +
+    `Enter the id of the person to merge in:\n\n${lines}`);
+  if (raw == null) return;
+  const src = parseInt(raw.trim(), 10);
+  const srcC = _faceClusters.find(c => c.id === src);
+  if (!srcC || src === dst) { alert('Not a valid source cluster.'); return; }
+
+  let warn = `Merge "${srcC.name || '(unnamed)'}" (id ${src}, ${srcC.count} face(s))\n` +
+             `into "${dstC?.name || '(unnamed)'}" (id ${dst})?`;
+  if (srcC.name && dstC?.name && srcC.name !== dstC.name) {
+    warn += `\n\n⚠ These have DIFFERENT names ("${srcC.name}" vs "${dstC.name}").` +
+            `\nMerging says they are the SAME person. Are you sure?`;
+  }
+  if (!confirm(warn)) return;
+
+  document.getElementById('faces_status').textContent = 'Merging…';
+  let d;
+  try {
+    d = await (await fetch('/api/faces/merge', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ src, dst, confirm: true })
+    })).json();
+  } catch (e) {
+    document.getElementById('faces_status').textContent = 'Merge failed.'; return;
+  }
+  document.getElementById('faces_status').textContent =
+    d.success ? `Merged ${d.moved} face(s).` : (d.error || 'Failed.');
+  keepScroll('faces_list', loadFaces);
+}
+
 function clearFaceSel() {
   const touched = _faceClusters
     .filter(c => (c.faces || []).some(f => _faceSel.has(f.id)))
@@ -308,7 +451,14 @@ async function splitSelected(cid) {
 // A face crop rarely gives you enough to name someone confidently, so clicking
 // a chip loads the whole image into the same viewer the gallery uses — with its
 // region boxes, editor panel, etc. No separate lightbox.
-function viewFaceImage(rel) {
+function viewFaceImage(rel, cx, cy, w, h) {
+  if (cx != null) {
+    highlightRegionBox = { cx: +cx, cy: +cy, w: +w, h: +h };
+    highlightRegionFile = rel;
+  } else {
+    highlightRegionBox = null;
+    highlightRegionFile = null;
+  }
   if (typeof selectFile === 'function') {
     selectFile(rel);
   } else {
@@ -496,6 +646,10 @@ function _renderPersonEditor(cid, d) {
             class="text-xs bg-teal-700 hover:bg-teal-600 disabled:opacity-40 px-2 py-1 rounded font-bold"
             title="${d.mesh_estimator ? '' : 'shape estimator not installed'}">
             ${a.has_mesh ? 'Re-estimate mesh' : 'Estimate mesh'}</button>
+          <button onclick="estimateFaceMesh(${cid},'${a.id}')" ${d.face_estimator ? '' : 'disabled'}
+            class="text-xs bg-indigo-700 hover:bg-indigo-600 disabled:opacity-40 px-2 py-1 rounded font-bold"
+            title="${d.face_estimator ? ('3D face via ' + (d.face_estimator_name || 'estimator')) : 'no face-mesh estimator installed'}">
+            ${a.has_face_mesh ? 'Re-estimate face' : 'Estimate face'}</button>
           <span id="person_status_${cid}_${a.id}" class="text-[10px] text-gray-400"></span>
         </div>
       </div>`;
@@ -608,3 +762,9 @@ async function _personTask(cid, appearanceId, path, label) {
 }
 const estimatePose = (cid, aid) => _personTask(cid, aid, '/tpose', 'T-pose');
 const estimateMesh = (cid, aid) => _personTask(cid, aid, '/mesh', 'Mesh');
+// After estimating a face mesh, flip the viewer to Face mode so the result shows
+// without the user having to hit the toggle.
+async function estimateFaceMesh(cid, aid) {
+  await _personTask(cid, aid, '/face_mesh', 'Face mesh');
+  if (window.personView && window.personView.setView) window.personView.setView('face');
+}

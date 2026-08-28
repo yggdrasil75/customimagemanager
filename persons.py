@@ -46,6 +46,13 @@ def mesh_member(appearance_id: str) -> str:
     """! @brief Container member name for one appearance's canonical body mesh."""
     return f"mesh_{appearance_id}.obj"
 
+def face_mesh_member(appearance_id: str) -> str:
+    """! @brief Container member name for one appearance's canonical FACE mesh.
+    Stored alongside the body mesh so the 3D viewer's Face/Body toggle reads one or
+    the other member with the same OBJ loader.
+    """
+    return f"facemesh_{appearance_id}.obj"
+
 ## Fixed body-description slots a secondary pipeline / LLM action fills. These are
 ## era-specific (hair greys, physique changes), so they live on an APPEARANCE, not
 ## the person: one person can have several appearances across their life.
@@ -104,6 +111,7 @@ def blank_appearance(appearance_id: str) -> dict[str, Any]:
         "date_span": {"min": None, "max": None},
         "has_tpose": False,
         "has_mesh": False,
+        "has_face_mesh": False,
     }
 
 def _blank(person_uuid: str) -> dict[str, Any]:
@@ -141,6 +149,12 @@ def _migrate(desc: dict[str, Any]) -> dict[str, Any]:
         desc["relationships"].setdefault(k, [])
     desc.setdefault("clusters", {"face": [], "body": []})
     desc.setdefault("appearances", [])
+    # Backfill flags added after some records were written, so an appearance saved
+    # before face-mesh support still loads with the key present (default False).
+    for a in desc["appearances"]:
+        a.setdefault("has_tpose", False)
+        a.setdefault("has_mesh", False)
+        a.setdefault("has_face_mesh", False)
     return desc
 
 def new_uuid() -> str:

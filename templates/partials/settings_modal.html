@@ -284,28 +284,43 @@
             <div class="text-[11px] font-bold text-purple-200/80 mb-2">Faces</div>
             <div class="space-y-2">
               <div>
-                <span class="text-[10px] text-gray-500 block mb-0.5">Face model</span>
-                <select id="cfg_face_model"
+                <span class="text-[10px] text-gray-500 block mb-0.5">Face detector
+                  <span class="text-gray-600">(boxes faces)</span></span>
+                <select id="cfg_face_detector"
                   class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-                  <option value="">Auto (download community weights)</option>
                 </select>
+                <p id="cfg_face_detector_note" class="text-[10px] text-gray-600 mt-1"></p>
               </div>
               <div>
-                <span class="text-[10px] text-gray-500 block mb-0.5">Face size
-                  <span class="text-gray-600">(auto only)</span></span>
-                <select id="cfg_face_size"
+                <span class="text-[10px] text-gray-500 block mb-0.5">Recognition model
+                  <span class="text-gray-600">(identity embedding)</span></span>
+                <select id="cfg_face_recognition"
                   class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-                  <option value="n">n · nano</option>
-                  <option value="s">s · small</option>
-                  <option value="m">m · medium</option>
-                  <option value="l">l · large</option>
                 </select>
+                <p id="cfg_face_recognition_note" class="text-[10px] text-gray-600 mt-1"></p>
+              </div>
+              <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer select-none pt-0.5">
+                <input type="checkbox" id="cfg_face_reject_drawn" class="accent-purple-500">
+                Skip drawn faces
+                <span class="text-gray-600 text-[10px]">(cartoon / anime / illustration)</span>
+              </label>
+              <div>
+                <span class="text-[10px] text-gray-500 block mb-0.5">Drawn cutoff
+                  <span class="text-gray-600">(0&ndash;1, higher = stricter)</span></span>
+                <input type="number" id="cfg_face_drawn_thresh" min="0" max="1" step="0.05"
+                  class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
               </div>
             </div>
-            <p class="text-[10px] text-gray-600 mt-2">Larger models catch small and profile
-              faces <code>n</code> misses &mdash; those extra detections are what let a cluster
-              hold together. Ignored when a model is chosen explicitly; changing the size
-              needs a <b>Rescan all</b>. (yolov11-face ships n/s/m/l; there is no x.)</p>
+            <p class="text-[10px] text-gray-600 mt-2">The <b>detector</b> is a YOLO model with a
+              &ldquo;face&rdquo; class — a bigger size catches small / profile faces (the ones cluster
+              density needs) at more cost. The <b>recognition</b> pack turns each face into an
+              identity vector; changing it rebuilds embeddings (a rescan is queued automatically).
+              Drop extra face detectors in <code>models/face/yolo</code>; insightface packs live in
+              <code>models/face/insightface</code>.</p>
+            <p class="text-[10px] text-gray-600 mt-2">Illustrated faces detect as faces but the
+              same character is drawn many ways, so they never cluster to a real identity. When on,
+              crops scoring at/above the cutoff are kept out of the People tab. Set the cutoff to
+              <code>1</code> to disable; changing this needs a <b>Rescan all</b>.</p>
           </div>
           <div class="border border-gray-700 rounded p-3">
             <div class="text-[11px] font-bold text-purple-200/80 mb-2">People &amp; bodies</div>

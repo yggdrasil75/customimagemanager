@@ -34,6 +34,12 @@ function maskD(b) {
   if (!m) return '';
   return m.centerline || m.overscan || m.underscan || '';
 }
+function _isHighlightBox(b){
+  const h = (typeof highlightRegionBox!=='undefined') ? highlightRegionBox : null;
+  if(!h) return false;
+  return Math.abs(b.cx-h.cx)<0.01 && Math.abs(b.cy-h.cy)<0.01
+      && Math.abs(b.w -h.w )<0.02 && Math.abs(b.h -h.h )<0.02;
+}
 
 function regionAtCanvas(px,py){
   for(let i=currentRegions.length-1;i>=0;i--){
@@ -94,15 +100,16 @@ function makeViewer(prefix, opts) {
       regionsFor().forEach((b, idx) => {
         const x = (b.cx - b.w / 2) * dw, y = (b.cy - b.h / 2) * dh, w = b.w * dw, h = b.h * dh;
         let col, conf = (b.confirmed !== false), active = (idx === activeIdx());
+        const pinned = isMain && _isHighlightBox(b);
         if (isMain) {
-          col = conf ? '#3B82F6' : '#F59E0B';
+          col = pinned ? '#10B981' : (conf ? '#3B82F6' : '#F59E0B');
         } else {
           // review: colour by decision
           const dec = self.decisions[idx];
           col = dec === 'deny' ? '#ef4444' : dec === 'accept' ? '#22c55e'
               : dec === 'keep' ? '#3b82f6' : '#f59e0b';
         }
-        ctx.strokeStyle = col; ctx.lineWidth = active ? 3 : 1.5;
+        ctx.strokeStyle = col; ctx.lineWidth = pinned ? 4 : (active ? 3 : 1.5);
         // Fine segmentation mask (if present and Masks toggle is on): translucent
         // fill + solid outline in the region colour, under the box/label.
         const masksOn = (function(){ const t = P('toggle_masks'); return !t || t.checked; })();
@@ -134,6 +141,13 @@ function makeViewer(prefix, opts) {
           const lw = ctx.measureText(label).width + 8;
           ctx.fillStyle = col; ctx.fillRect(x, y - 18, lw, 18);
           ctx.fillStyle = '#fff'; ctx.fillText(label, x + 4, y - 5);
+        } else if (pinned) {
+          // Persistent marker so the pinned face is findable without hovering —
+          // in a crowd of blurry boxes this is the one you clicked from People.
+          const label = '\u25B6 this one';
+          const lw = ctx.measureText(label).width + 8;
+          ctx.fillStyle = col; ctx.fillRect(x, Math.max(0, y - 18), lw, 18);
+          ctx.fillStyle = '#fff'; ctx.fillText(label, x + 4, Math.max(13, y - 5));
         }
       });
     }

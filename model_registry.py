@@ -1,6 +1,7 @@
 import os
 import gc
 import threading
+import contextlib
 
 try:
     import torch
@@ -164,6 +165,7 @@ class ModelRegistry:
         self._entries = {}
         self._seq = 0
         self._pinned = set()
+        self._leased = {}
 
     def _max_resident(self):
         return _max_resident_for_vram()
@@ -246,6 +248,33 @@ class ModelRegistry:
                 self._seq += 1
                 e["seq"] = self._seq
 
+    def hold(self, *keys):
+        """Pin one or more keys resident until release(). Refcounted, so paired
+        hold/release nest safely. Prefer the lease() context manager below."""
+        with self._lock:
+            for k in keys:
+                self._leased[k] = self._leased.get(k, 0) + 1
+
+    def release(self, *keys):
+        """Undo one hold() for each key; the key becomes evictable again once its
+        refcount hits zero. After release, trim anything now over budget."""
+        with self._lock:
+            for k in keys:
+                n = self._leased.get(k, 0) - 1
+                if n <= 0:
+                    self._leased.pop(k, None)
+                else:
+                    self._leased[k] = n
+        self._evict_over_budget()
+
+    @contextlib.contextmanager
+    def lease(self, *keys):
+        self.hold(*keys)
+        try:
+            yield
+        finally:
+            self.release(*keys)
+
     def unload(self, key):
         """Free one model now. Safe if never loaded."""
         with self._lock:
@@ -322,7 +351,8 @@ class ModelRegistry:
                     return
                 live.sort(key=lambda t: t[0])
                 victim = next((k for _, k, _e in live
-                               if k != protect and k not in self._pinned), None)
+                               if k != protect and k not in self._pinned
+                               and k not in self._leased), None)
                 if victim is None:
                     return
                 self._unload_locked(victim)
@@ -333,6 +363,9 @@ register = REGISTRY.register
 acquire = REGISTRY.acquire
 touch = REGISTRY.touch
 unload = REGISTRY.unload
+lease = REGISTRY.lease
+hold = REGISTRY.hold
+release = REGISTRY.release
 clear = REGISTRY.clear
 status = REGISTRY.status
 set_memory_hook = REGISTRY.set_memory_hook

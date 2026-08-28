@@ -149,6 +149,49 @@ async function loadSegModels(activeSam,activeBg,bgEnabled,bgClasses){
     window._bgClassSel=new Set(bgClasses||d.bg_classes||[]);
   }catch(e){}
 }
+let faceDetCache=[], faceRecCache=[];
+
+function fillFaceSelect(sel,models,selected){
+  if(!sel) return;
+  sel.innerHTML='';
+  ['fast','balanced','accurate'].forEach(sp=>{
+    const inGroup=models.filter(m=>m.speed===sp && !m.custom);
+    if(!inGroup.length) return;
+    const g=document.createElement('optgroup');
+    g.label=SEG_SPEED_LABEL[sp]||sp;
+    inGroup.forEach(m=>{
+      const o=document.createElement('option');
+      o.value=m.id;
+      o.text=m.label+(m.available?'':'  \u2014 needs deps');
+      o.disabled=!m.available;
+      g.appendChild(o);
+    });
+    sel.appendChild(g);
+  });
+  const customs=models.filter(m=>m.custom);
+  if(customs.length){
+    const g=document.createElement('optgroup'); g.label='\ud83d\udcc1 custom';
+    customs.forEach(m=>{ const o=document.createElement('option');
+      o.value=m.id; o.text=m.label+(m.available?'':'  \u2014 needs deps');
+      o.disabled=!m.available; g.appendChild(o); });
+    sel.appendChild(g);
+  }
+  if(selected) sel.value=selected;
+}
+
+async function loadFaceModels(activeDetector,activeRecognition){
+  const detSel=document.getElementById('cfg_face_detector');
+  const recSel=document.getElementById('cfg_face_recognition');
+  try{
+    const d=await fetch('/api/face_models').then(r=>r.json());
+    if(!d.success) return;
+    faceDetCache=d.detectors||[]; faceRecCache=d.recognition||[];
+    fillFaceSelect(detSel,faceDetCache,activeDetector||d.active_detector);
+    fillFaceSelect(recSel,faceRecCache,activeRecognition||d.active_recognition);
+    renderSegNote(detSel,faceDetCache,document.getElementById('cfg_face_detector_note'));
+    renderSegNote(recSel,faceRecCache,document.getElementById('cfg_face_recognition_note'));
+  }catch(e){}
+}
 
 // The class picker is loaded lazily (reading a checkpoint's class list needs
 // the weights). We do NOT pre-download seg models, so on first open the weights
@@ -203,6 +246,10 @@ document.addEventListener('change',e=>{
     window._bgClassSel=new Set();
     if(!document.getElementById('cfg_bg_classes').classList.contains('hidden')) loadSegClasses();
   }
+  if(e.target.id==='cfg_face_detector')
+    renderSegNote(e.target,faceDetCache,document.getElementById('cfg_face_detector_note'));
+  if(e.target.id==='cfg_face_recognition')
+    renderSegNote(e.target,faceRecCache,document.getElementById('cfg_face_recognition_note'));
   if(e.target.classList&&e.target.classList.contains('bg-class-cb')){
     const s=window._bgClassSel||(window._bgClassSel=new Set());
     if(e.target.checked) s.add(e.target.dataset.name); else s.delete(e.target.dataset.name);
@@ -249,8 +296,10 @@ async function persistAiSettings(){
       bg_seg_classes:[...(window._bgClassSel||[])],
       face_bg_enabled:_c('cfg_face_bg'),
       face_bg_custom:_c('cfg_face_custom'),
-      face_model:_v('cfg_face_model'),
-      face_size:_v('cfg_face_size','n'),
+      face_detector:_v('cfg_face_detector','yolov11n-face'),
+      face_recognition:_v('cfg_face_recognition','buffalo_l'),
+      face_reject_drawn:_c('cfg_face_reject_drawn'),
+      face_drawn_thresh:parseFloat(_v('cfg_face_drawn_thresh','0.55'))||0.55,
       body_enabled:_c('cfg_body_enabled'),
       body_size:_v('cfg_body_size','s'),
       person_model:_v('cfg_person_model'),

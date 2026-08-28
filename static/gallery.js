@@ -441,6 +441,9 @@ async function selectFile(fn){
   }
   const _mySeq=++_selectSeq;
   currentFile=fn;
+  if(typeof highlightRegionFile!=='undefined' && highlightRegionFile!==fn){
+    highlightRegionBox=null; highlightRegionFile=null;
+  }
   // Clear multi-selection visual when opening single file
   document.querySelectorAll('.gallery-item').forEach(e=>{
     e.classList.remove('selected-item','multi-selected');

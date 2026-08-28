@@ -121,6 +121,11 @@ def _load_reid() -> Optional[tuple]:
     model, proc = got
     return (model, proc, model_id)
 
+def reid_registry_key():
+    """! @brief Registry key for the current body-reid backbone, so a batched task
+    can lease it resident across many embeds instead of reloading it per image."""
+    return f"bodies:reid:{_BODY_MODELS[_body_size()]}"
+
 def have_body_embedder() -> bool:
     """! @brief Whether the DINO backbone is up (else callers degrade to appearance)."""
     return _load_reid() is not None

@@ -15,7 +15,7 @@
 
   let scene, camera, renderer, controls, current; // current mesh/skeleton group
   let raf = null;
-  let state = { cid: null, eras: [], idx: 0 };
+  let state = { cid: null, eras: [], idx: 0, view: "body" };
 
   function container() { return document.getElementById("person_mesh_container"); }
 
@@ -145,8 +145,6 @@
     return g;
   }
 
-  // Load and render the appearance at index i. Tries the mesh first, then the
-  // T-pose skeleton, then shows the placeholder.
   async function render(i) {
     const era = state.eras[i];
     if (!era) return;
@@ -157,7 +155,26 @@
     setEmpty(false);
 
     const base = "/api/persons/" + state.cid;
-    // Mesh first.
+
+    if (state.view === "face") {
+      if (era.has_face_mesh && THREE.OBJLoader) {
+        try {
+          const txt = await (await fetch(base + "/face_mesh_data/" + encodeURIComponent(era.id))).text();
+          const obj = new THREE.OBJLoader().parse(txt);
+          obj.traverse(c => {
+            if (c.isMesh) c.material = new THREE.MeshStandardMaterial(
+              { color: 0xd8c2a8, roughness: 0.7, metalness: 0.0, flatShading: false });
+          });
+          clearCurrent();
+          current = obj; scene.add(obj); frame(obj);
+          return;
+        } catch (e) { /* fall through to placeholder */ }
+      }
+      setEmpty(true);
+      return;
+    }
+
+    // Body view. Mesh first.
     if (era.has_mesh && THREE.OBJLoader) {
       try {
         const txt = await (await fetch(base + "/mesh_data/" + encodeURIComponent(era.id))).text();
@@ -180,6 +197,29 @@
       } catch (e) { /* fall through */ }
     }
     setEmpty(true);
+  }
+
+  // Reflect the active view in the toggle buttons and the empty-state hint.
+  function syncToggle() {
+    const wrap = document.getElementById("person_view_toggle");
+    if (wrap) wrap.classList.remove("hidden");
+    const f = document.getElementById("person_view_face");
+    const b = document.getElementById("person_view_body");
+    const on = "bg-blue-600 text-white", off = "bg-gray-700 text-gray-300";
+    if (f) f.className = "text-[11px] px-2 py-0.5 " + (state.view === "face" ? on : off);
+    if (b) b.className = "text-[11px] px-2 py-0.5 " + (state.view === "body" ? on : off);
+    const e = document.getElementById("person_mesh_empty");
+    if (e) e.textContent = state.view === "face"
+      ? "No face mesh for this appearance yet — estimate one in the Person tab."
+      : "No mesh or T-pose for this appearance yet — estimate one in the Person tab.";
+  }
+
+  function setView(v) {
+    v = (v === "face") ? "face" : "body";
+    if (v === state.view) return;
+    state.view = v;
+    syncToggle();
+    render(state.idx);
   }
 
   function eraLabel(era) {
@@ -242,7 +282,9 @@
       return (typeof dm === "number") ? dm : Number.MAX_SAFE_INTEGER;
     };
     const eras = (person.appearances || []).slice().sort((a, b) => rank(a) - rank(b));
-    state = { cid, eras, idx: 0 };
+    const prevView = (state && state.view) || "body";
+    state = { cid, eras, idx: 0, view: prevView };
+    syncToggle();
 
     const nameEl = document.getElementById("person_pane_name");
     if (nameEl) nameEl.textContent = person.name || ("Person #" + cid);
@@ -269,10 +311,13 @@
   }
 
   function close() {
+    const wrap = document.getElementById("person_view_toggle");
+    if (wrap) wrap.classList.add("hidden");
     setMediaMode("image");
   }
 
-  window.personView = { open, close };
+  window.personView = { open, close, setView };
   window.onPersonScrub = scrubTo;
   window.closePersonView = close;
+  window.personSetView = setView;
 })();
