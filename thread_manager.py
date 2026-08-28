@@ -98,6 +98,7 @@ class ThreadManager:
         self._lock = threading.RLock()
         self._active = 0          # number of live logical tasks sharing spares
         self._get_last_activity = None   # set via set_activity_source()
+        self._foreground = None
 
     # ── sizing ────────────────────────────────────────────────────────────
     def max_slots(self):
@@ -188,6 +189,23 @@ class ThreadManager:
         if ev is not None:
             ev.set()
 
+    def set_foreground(self, name):
+        with self._lock:
+            self._foreground = name
+        self.wake()
+
+    def clear_foreground(self, name=None):
+        """Drop foreground promotion. If name is given, only clears when it
+        matches (so a stale clear can't cancel a newer foreground)."""
+        with self._lock:
+            if name is None or self._foreground == name:
+                self._foreground = None
+        self.wake()
+
+    def foreground(self):
+        with self._lock:
+            return self._foreground
+
     def _ensure_processor(self):
         # Called under _lock. Starts the single processor thread once.
         if getattr(self, "_proc_started", False):
@@ -232,36 +250,84 @@ class ThreadManager:
                     self.release_key(k)
                 self.wake()
         with self._lock:
-            self._inflight.add(self._ex.submit(_run))
+            fut = self._ex.submit(_run)
+            fut._src_name = src_name          # so _foreground_idle can tell whose
+            self._inflight.add(fut)           # jobs are still running
         return True
 
     def _process_loop(self):
         POLL = 1.0
         while True:
-            free, _ = self._free_slots()
-            if free <= 0:
-                self._wake.wait(timeout=POLL); self._wake.clear(); continue
-            with self._lock:
-                sources = list(getattr(self, "_sources", {}).items())
-            if not sources:
-                self._wake.wait(timeout=POLL); self._wake.clear(); continue
-            # Round-robin: one pass tries each source in turn, filling free
-            # threads. Keep passing while jobs are still being started and slots
-            # remain; stop when a full pass starts nothing (everything idle/busy).
-            started_any = False
+            try:
+                self._process_once(POLL)
+            except Exception:
+                # A bug in one source's claim/dispatch must never kill the only
+                # background thread — that would silently stop ALL cycling. Log
+                # via stderr and keep going after a short breather.
+                import traceback, sys
+                traceback.print_exc(file=sys.stderr)
+                time.sleep(POLL)
+
+    def _process_once(self, POLL):
+        free, _ = self._free_slots()
+        if free <= 0:
+            self._wake.wait(timeout=POLL); self._wake.clear(); return
+        with self._lock:
+            all_sources = dict(getattr(self, "_sources", {}))
+            fg = self._foreground
+        if not all_sources:
+            self._wake.wait(timeout=POLL); self._wake.clear(); return
+
+        # Foreground preemption: while a source is promoted, service ONLY it,
+        # so a manual action gets the whole pool. When it produces no job on a
+        # pass that had free slots AND its own in-flight work is done, it's
+        # drained -> auto-clear and fall back to round-robin next iteration.
+        if fg is not None:
+            src = all_sources.get(fg)
+            if src is None:                       # promoted source vanished
+                self.clear_foreground(fg); return
+            started = 0
             while free > 0:
-                progressed = False
-                for name, src in sources:
-                    if free <= 0:
-                        break
-                    if self._dispatch(name, src):
-                        free -= 1
-                        progressed = True
-                        started_any = True
-                if not progressed:
+                if self._dispatch(fg, src):
+                    free -= 1; started += 1
+                else:
                     break
-            if not started_any:
-                self._wake.wait(timeout=POLL); self._wake.clear()
+            if started == 0:
+                if self._foreground_idle(fg):
+                    self.clear_foreground(fg)
+                else:
+                    self._wake.wait(timeout=POLL); self._wake.clear()
+            return
+
+        # Normal round-robin: one pass tries each source in turn, filling free
+        # threads. Keep passing while jobs start and slots remain.
+        sources = list(all_sources.items())
+        started_any = False
+        while free > 0:
+            progressed = False
+            for name, src in sources:
+                if free <= 0:
+                    break
+                with self._lock:                  # honor a mid-pass promotion
+                    if self._foreground is not None:
+                        progressed = False; break
+                if self._dispatch(name, src):
+                    free -= 1
+                    progressed = True
+                    started_any = True
+            if not progressed:
+                break
+        if not started_any:
+            self._wake.wait(timeout=POLL); self._wake.clear()
+
+    def _foreground_idle(self, name):
+        """True when the foreground source has no in-flight jobs left. We tag each
+        dispatched future with its source name so we can tell whose work is still
+        running."""
+        with self._lock:
+            self._inflight = {f for f in self._inflight if not f.done()}
+            return not any(getattr(f, "_src_name", None) == name
+                           for f in self._inflight)
 
     # ── memory manager ────────────────────────────────────────────────────
     def rss_mb(self):
@@ -424,8 +490,6 @@ class ThreadManager:
         """True when the app has been quiet long enough for background work.
         Also refuses to report idle while under memory pressure, so heavy
         background jobs don't kick off when there's no headroom."""
-        if self.under_memory_pressure():
-            return False
         return self.seconds_since_activity() >= self.idle_secs()
 
     # ── per-key serialization gate ────────────────────────────────────────
@@ -617,6 +681,9 @@ pool = MANAGER.pool
 run = MANAGER.run
 register_source = MANAGER.register_source
 wake = MANAGER.wake
+set_foreground = MANAGER.set_foreground
+clear_foreground = MANAGER.clear_foreground
+foreground = MANAGER.foreground
 rss_mb = MANAGER.rss_mb
 mem_budget_mb = MANAGER.mem_budget_mb
 mem_headroom_mb = MANAGER.mem_headroom_mb

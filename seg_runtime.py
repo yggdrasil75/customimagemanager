@@ -326,6 +326,13 @@ def segment_text(img_bgr, query, model_id=None):
 def _build_yolo_seg(ref):
     """Construct a YOLO-seg model from a weights ref, or None."""
     try:
+        import traceback, logging
+        logging.getLogger("access").warning(
+            "BUILD_YOLO_SEG %s\n%s", ref,
+            "".join(traceback.format_stack(limit=8)[:-1]))
+    except Exception:
+        pass
+    try:
         YOLO = _ul_yolo()
         return YOLO(ref) if YOLO else None
     except Exception:

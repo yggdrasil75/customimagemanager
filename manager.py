@@ -3373,10 +3373,27 @@ import pose
 
 _yolo_registered = set()
 
+def _canonical_yolo_path(model_path):
+    p = model_path
+    if not os.path.dirname(p):
+        p = os.path.join(MODELS_DIR, p)
+    try:
+        return os.path.realpath(p)
+    except Exception:
+        return os.path.abspath(p)
+
+def _yolo_key(model_path):
+    return f"manager:yolo:{_canonical_yolo_path(model_path)}"
+
 def _build_yolo(model_path):
-    if not os.path.dirname(model_path):
-        model_path = os.path.join(MODELS_DIR, model_path)
-    m = YOLO(model_path)
+    canon = _canonical_yolo_path(model_path)
+    try:
+        import traceback
+        stack = "".join(traceback.format_stack(limit=8)[:-1])
+        access_logger.warning("BUILD_YOLO %s\n%s", canon, stack)
+    except Exception:
+        pass
+    m = YOLO(canon)
     try:
         m.fuse()
     except Exception:
@@ -3392,11 +3409,11 @@ def _load_yolo(model_path):
     @note Invalidate with _load_yolo.cache_clear() when a setting repoints a
           model path (kept for source compatibility with existing call sites).
     """
-    key = f"manager:yolo:{model_path}"
+    key = _yolo_key(model_path)
     if key not in _yolo_registered:
         model_registry.register(
             key, (lambda p=model_path: _build_yolo(p)),
-            cost_mb=250, gpu=og.has_gpu(), model_path=model_path)
+            cost_mb=250, gpu=og.has_gpu(), model_path=_canonical_yolo_path(model_path))
         _yolo_registered.add(key)
     return model_registry.acquire(key)
 
@@ -3458,11 +3475,8 @@ def _detect_obb_or_box(img_bgr, model_path: str, keep_classes: set | None = None
             res = _load_yolo(model_path)(img_bgr, verbose=False, conf=conf)
         except Exception as ex:
             if "bn" in str(ex) or "fuse" in str(ex).lower():
-                key = f"manager:yolo:{model_path}"
-                if not os.path.dirname(model_path):
-                    key = f"manager:yolo:{os.path.join(MODELS_DIR, model_path)}"
                 try:
-                    model_registry.unload(key)
+                    model_registry.unload(_yolo_key(model_path))
                 except Exception:
                     pass
                 res = _load_yolo(model_path)(img_bgr, verbose=False, conf=conf)
@@ -3742,29 +3756,36 @@ def _face_scan_lease_keys():
     keys = []
     det = facelib.ensure_face_detector(_face_detector_id())
     if det:
-        # Mirror _load_yolo's key derivation so the lease names the same entry.
-        p = det if os.path.dirname(det) else os.path.join(MODELS_DIR, det)
-        keys.append(f"manager:yolo:{p}")
+        keys.append(_yolo_key(det))
     keys.append(facelib.insight_registry_key())
     if state.get("body_enabled"):
         try:
             keys.append(bodylib.reid_registry_key())
         except Exception:
             pass
-    return keys
+    try:
+        obb = ((state.get("person_model") or "")
+               or (state.get("person_obb_model") or "")).strip()
+        keys.append(_yolo_key(obb) if obb else _yolo_key(f"yolo11{_yolo_size()}.pt"))
+    except Exception:
+        pass
+    if state.get("face_bg_custom"):
+        try:
+            models = (state.get("model_groups") or {}).get("trained") or []
+            chosen = (state.get("our_model") or "").strip()
+            mp = chosen if (chosen and chosen in models) else (models[-1] if models else None)
+            if mp:
+                keys.append(_yolo_key(mp))
+        except Exception:
+            pass
+    # De-dup while preserving order (person may equal face in odd configs).
+    seen = set()
+    return [k for k in keys if not (k in seen or seen.add(k))]
 
 def _face_process_one(rel: str) -> None:
     """! @brief Box faces/people for one file, cache embeddings, mark done.
-
-    The whole per-image pass runs under a model lease so the detector, recognition
-    app and body backbone stay resident together — otherwise, on a small
-    resident-model budget, acquiring insightface would evict the YOLO detector we
-    just used, and the next image would reload+refuse it (the 'Conv has no bn'
-    fuse crash). The lease releases at the end of the image, so when the scan
-    finishes and other work needs the memory, normal LRU eviction resumes.
     """
-    with model_registry.lease(*_face_scan_lease_keys()):
-        _face_process_one_inner(rel)
+    _face_process_one_inner(rel)
 
 def _face_process_one_inner(rel: str) -> None:
     abs_p = get_safe_path(MEDIA_DIR, rel)
@@ -5761,6 +5782,7 @@ def api_face_scan():
         _face_dirty["v"] = True
         _face_force["v"] = True
         _face_wake.set()
+        thread_manager.set_foreground("face")
         thread_manager.wake()
         pending = db.execute(
             "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
@@ -11895,7 +11917,6 @@ if __name__=='__main__':
     access_logger.info("Starting background book indexer…")
     book_routes.start_background()
     thread_manager.wake()
-    access_logger.info("Warming pose/OCR models (auto-download)…")
     access_logger.info("Serving on :8000")
     serve(app, host='0.0.0.0', port=8000, threads=state["wsgi_threads"], connection_limit=1000,
     channel_timeout=300, channel_request_lookahead=1)

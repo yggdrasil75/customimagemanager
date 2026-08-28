@@ -2,7 +2,7 @@ FROM python:3.12
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    YOLO_CONFIG_DIR=/app/data/Ultralytics
+    YOLO_CONFIG_DIR=/app/data
 
 # System deps: cjxl (libjxl-tools) + libs for opencv, pymupdf, rawpy, pyexiv2,
 # video, insightface + calibre (ebook-convert / calibredb CLI)
@@ -23,8 +23,8 @@ WORKDIR /app
 
 COPY requirements.txt .
 # opencv-python-headless: cv2 is imported by manager.py but missing from requirements.txt
-RUN pip install --no-cache-dir opencv-python-headless \
-    && pip install --no-cache-dir -r requirements.txt
+RUN pip install opencv-python-headless \
+    && pip install -r requirements.txt
 
 # RUN mkdir -p /app/models/smplx && \
 #     curl -fSL -o /app/models/smplx/smplest_x_h.pth.tar \

@@ -27,8 +27,20 @@ def _vram_budget_mb():
 def _max_resident_for_vram():
     v = _detected_vram_mb()
     if v <= 0:
-        return 3
+        return 0
     return max(2, min(8, int(v / 2560)))
+
+def _system_ram_mb():
+    if psutil is not None:
+        try:
+            return psutil.virtual_memory().total / (1024 * 1024)
+        except Exception:
+            pass
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        return pages * (os.sysconf("SC_PAGE_SIZE") / (1024 * 1024))
+    except Exception:
+        return 0.0
 
 try:
     import psutil
@@ -166,6 +178,13 @@ class ModelRegistry:
         self._seq = 0
         self._pinned = set()
         self._leased = {}
+        self._load_locks = {}
+    def _load_lock_for(self, key):
+        with self._lock:
+            lk = self._load_locks.get(key)
+            if lk is None:
+                lk = self._load_locks[key] = threading.Lock()
+            return lk
 
     def _max_resident(self):
         return _max_resident_for_vram()
@@ -197,39 +216,45 @@ class ModelRegistry:
             if e is None:
                 return None
             self._pinned.add(key)
+            already = e["loaded"]
+            model = e["model"]
         try:
-            with self._lock:
-                need_load = not e["loaded"]
-            if need_load:
-                hook = getattr(self, "_mem_hook", None)
-                res = hook(e["cost_mb"], e["gpu"]) if hook else None
-                if res is not None:
-                    res.__enter__()
-                before = _mem_snapshot()
-                try:
+            if not already:
+                lk = self._load_lock_for(key)
+                with lk:
                     with self._lock:
-                        if not e["loaded"]:      # re-check under lock
-                            try:
-                                e["model"] = e["loader"]()
-                                e["err"] = ""
-                            except Exception as ex:
-                                e["model"] = None
-                                e["err"] = repr(ex)
-                            e["loaded"] = True
-                    dev = _model_device(e["model"])
-                    if res is not None and dev is not None and hasattr(res, "retarget"):
-                        res.retarget(dev)
-                    measured = _measure_cost(before, dev)
-                    if measured and measured > 0:
+                        loaded = e["loaded"]
+                        model = e["model"]
+                    if not loaded:
+                        hook = getattr(self, "_mem_hook", None)
+                        res = hook(e["cost_mb"], e["gpu"]) if hook else None
+                        if res is not None:
+                            res.__enter__()
+                        before = _mem_snapshot()
+                        built = None
+                        err = ""
+                        try:
+                            built = e["loader"]()
+                        except Exception as ex:
+                            err = repr(ex)
+                        dev = _model_device(built)
+                        if res is not None and dev is not None and hasattr(res, "retarget"):
+                            res.retarget(dev)
+                        measured = _measure_cost(before, dev)
                         with self._lock:
-                            e["cost_mb"] = measured
-                            e["measured"] = True
-                        if res is not None and hasattr(res, "resize"):
-                            res.resize(measured)
-                finally:
-                    if res is not None:
-                        res.settle()
-                        e["mem_res"] = res
+                            e["model"] = built
+                            e["err"] = err
+                            e["loaded"] = True
+                            if measured and measured > 0:
+                                e["cost_mb"] = measured
+                                e["measured"] = True
+                            if res is not None:
+                                e["mem_res"] = res
+                        if res is not None:
+                            if measured and measured > 0 and hasattr(res, "resize"):
+                                res.resize(measured)
+                            res.settle()
+                        model = built
             with self._lock:
                 self._seq += 1
                 e["seq"] = self._seq
@@ -334,19 +359,19 @@ class ModelRegistry:
                     pass
 
     def _evict_over_budget(self, protect=None):
-        max_n = self._max_resident()
         vram = self._vram_budget_mb()
-        if max_n <= 0 and vram <= 0:
+        max_n = self._max_resident()
+        if vram <= 0:
             return
         while True:
             with self._lock:
                 live = [(e["seq"], k, e) for k, e in self._entries.items()
-                        if e["loaded"] and e["model"] is not None]
+                        if e["loaded"] and e["model"] is not None and e["gpu"]]
                 if not live:
                     return
                 over_count = max_n > 0 and len(live) > max_n
-                gpu_mb = sum(e["cost_mb"] for _, _, e in live if e["gpu"])
-                over_vram = vram > 0 and gpu_mb > vram
+                gpu_mb = sum(e["cost_mb"] for _, _, e in live)
+                over_vram = gpu_mb > vram
                 if not over_count and not over_vram:
                     return
                 live.sort(key=lambda t: t[0])
