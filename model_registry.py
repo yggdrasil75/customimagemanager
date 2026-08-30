@@ -87,29 +87,87 @@ def pin_cache_dir():
 
 pin_cache_dir()
 
-def _detect_device():
+def _torch_hip_version():
+    if torch is None:
+        return None
+    try:
+        return getattr(getattr(torch, "version", None), "hip", None)
+    except Exception:
+        return None
+
+
+def _detect_backend():
+    override = (os.environ.get("CIM_DEVICE") or "").strip().lower()
+    if override in ("cpu",):
+        return "cpu"
     if torch is not None:
         try:
             if torch.cuda.is_available():
+                if _torch_hip_version():
+                    return "rocm"
                 return "cuda"
         except Exception:
             pass
     return "cpu"
 
+
+_BACKEND = None
 _DEVICE = None
 
+def backend():
+    """The detected accelerator vendor: 'cuda' (NVIDIA), 'rocm' (AMD), or 'cpu'.
+    Decided once, process-wide. Use this when the vendor matters (ONNX providers,
+    logging). For the torch device string, use device()."""
+    global _BACKEND
+    if _BACKEND is None:
+        _BACKEND = _detect_backend()
+    return _BACKEND
+
 def device():
-    """The process-wide compute device string ('cpu' or 'cuda'), decided once by
-    the registry. Loaders call this instead of probing torch themselves, so the
-    choice is made in exactly one place."""
     global _DEVICE
     if _DEVICE is None:
-        _DEVICE = _detect_device()
+        _DEVICE = "cuda" if backend() in ("cuda", "rocm") else "cpu"
     return _DEVICE
 
 def on_gpu():
-    """True when the chosen device is CUDA. Convenience for loaders."""
+    """True when a GPU accelerator (CUDA or ROCm) was chosen. Convenience for
+    loaders that only care 'GPU vs CPU', not the vendor."""
     return device() == "cuda"
+
+def onnx_providers():
+    """The ONNX Runtime execution-provider preference list for the detected
+    backend, most-preferred first, always ending in CPUExecutionProvider so a
+    session still builds if the GPU provider isn't in the installed onnxruntime
+    wheel. Any library that constructs an onnxruntime InferenceSession (insight-
+    face, rtmlib, rapidocr, ...) should pass this instead of hardcoding CUDA.
+
+    Filtered against onnxruntime.get_available_providers() when that import is
+    cheap, so we never hand ORT a provider it doesn't have and trigger its noisy
+    fallback warning; if onnxruntime isn't importable we return the unfiltered
+    preference and let the caller deal with it."""
+    b = backend()
+    if b == "rocm":
+        pref = ["ROCMExecutionProvider", "MIGraphXExecutionProvider",
+                "CPUExecutionProvider"]
+    elif b == "cuda":
+        pref = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    else:
+        return ["CPUExecutionProvider"]
+    try:
+        import onnxruntime as ort
+        avail = set(ort.get_available_providers())
+        filtered = [p for p in pref if p in avail]
+        # Guarantee CPU is always present as the final fallback.
+        if "CPUExecutionProvider" not in filtered:
+            filtered.append("CPUExecutionProvider")
+        return filtered
+    except Exception:
+        return pref
+
+def onnx_device_id():
+    """ctx/device id for ONNX-style APIs that take an int (insightface's ctx_id,
+    rtmlib device string suffix, ...): 0 on a GPU backend, -1 on CPU."""
+    return 0 if on_gpu() else -1
 
 def _rss_mb():
     if psutil is not None:

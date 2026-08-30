@@ -51,12 +51,12 @@ WHOLEBODY_NAMES = COCO_KP_NAMES + [f"kp{i}" for i in range(17, 133)]
 _WB_REGISTERED = set()
 
 def _load_wholebody(mode: str):
-    dev = model_registry.device()
+    dev = model_registry.backend()
     key = f"pose:wholebody:{mode}:{dev}"
     if key not in _WB_REGISTERED:
         model_registry.register(
             key, (lambda m=mode, d=dev: Wholebody(mode=m, backend="onnxruntime", device=d)),
-            cost_mb=1000, gpu=(dev == "cuda"))
+            cost_mb=1000, gpu=(dev != "cpu"))
         _WB_REGISTERED.add(key)
     return model_registry.acquire(key)
 

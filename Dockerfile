@@ -1,4 +1,5 @@
 FROM python:3.12
+ARG GPU_BACKEND=cpu
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -21,15 +22,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY requirements.txt requirements-cpu.txt requirements-cuda.txt requirements-rocm.txt ./
 # opencv-python-headless: cv2 is imported by manager.py but missing from requirements.txt
 RUN pip install opencv-python-headless \
-    && pip install -r requirements.txt
-
-# RUN mkdir -p /app/models/smplx && \
-#     curl -fSL -o /app/models/smplx/smplest_x_h.pth.tar \
-#         "https://huggingface.co/waanqii/SMPLest-X/resolve/main/smplest_x_h.pth.tar" || \
-#     echo "SMPLest-X checkpoint download skipped — mesh estimator will be disabled"
+    && pip install -r requirements.txt \
+    && echo "Installing GPU backend: ${GPU_BACKEND}" \
+    && pip install -r "requirements-${GPU_BACKEND}.txt"
 
 COPY . .
 

@@ -237,9 +237,8 @@ def _build_insight():
         from insightface.app import FaceAnalysis
         app = FaceAnalysis(name=_recog_model["v"],
                            root=INSIGHT_DIR,
-                           providers=["CUDAExecutionProvider",
-                                      "CPUExecutionProvider"])
-        app.prepare(ctx_id=0 if og.has_gpu() else -1, det_size=(640, 640))
+                           providers=model_registry.onnx_providers())
+        app.prepare(ctx_id=model_registry.onnx_device_id(), det_size=(640, 640))
         return app
     except Exception:
         return None

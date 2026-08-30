@@ -10,12 +10,10 @@ easyocr
 mutagen
 hnswlib
 insightface
-onnxruntime
 pyiqa
 rawpy
 ldap3
 transformers
-numpy
 gdown
 segment-anything
 pymupdf
@@ -30,3 +28,4 @@ gallery-dl
 git+https://github.com/ultralytics/CLIP/
 smplx
 trimesh
+psutil

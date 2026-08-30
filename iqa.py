@@ -284,7 +284,7 @@ def _build_pyiqa(spec):
     if not _HAVE_IQA: return None
 
     try:
-        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        dev = model_registry.device()
         metric = pyiqa.create_metric(spec["pyiqa"], device=dev)
         metric.eval()
     except Exception:
@@ -337,7 +337,7 @@ def _get_scorer(model_id=None):
             model_registry.register(
                 key, (lambda m=mid: _build_scorer(m)),
                 cost_mb=(700 if is_torch else 0),
-                gpu=(is_torch and bool(torch.cuda.is_available())))
+                gpu=(is_torch and model_registry.on_gpu()))
             _registered_scorers.add(key)
     return model_registry.acquire(key)
 
