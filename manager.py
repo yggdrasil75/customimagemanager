@@ -4012,28 +4012,29 @@ def _claim_face_job():
         rows = _db().execute(
             "SELECT rel_path FROM files WHERE COALESCE(face_done,0)=0 LIMIT ?",
             (batch,)).fetchall()
+        if not rows:
+            # queue drained: trailing cluster pass, then settle status
+            if _face_dirty["v"]:
+                state["status_text"] = "Face scan: clustering…"
+                n = _recluster()
+                _face_dirty["v"] = False
+                state["status_text"] = f"Face scan: done ({n} cluster(s))."
+            elif forced:
+                state["status_text"] = "Face scan: complete."
+            else:
+                state["status_text"] = "Face scan: all caught up."
+            _face_force["v"] = False
+            thread_manager.release_key("face-scan")   # nothing to run
+            return None
+        left = _db().execute(
+            "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
+        state["status_text"] = (
+            f"Face scan: {left} image(s) left…" if forced
+            else f"Face scan (idle): {left} image(s) left…")
+        return [r[0] for r in rows]
     except Exception:
-        thread_manager.release_key("face-scan")
+        thread_manager.release_key("face-scan")       # never leak the gate
         raise
-    if not rows:
-        if _face_dirty["v"]:
-            state["status_text"] = "Face scan: clustering…"
-            n = _recluster()
-            _face_dirty["v"] = False
-            state["status_text"] = f"Face scan: done ({n} cluster(s))."
-        elif forced:
-            state["status_text"] = "Face scan: complete."
-        else:
-            state["status_text"] = "Face scan: all caught up."
-        _face_force["v"] = False
-        thread_manager.release_key("face-scan")   # nothing to run: don't leak the gate
-        return None
-    left = _db().execute(
-        "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
-    state["status_text"] = (
-        f"Face scan: {left} image(s) left…" if forced
-        else f"Face scan (idle): {left} image(s) left…")
-    return [r[0] for r in rows]
 
 def _register_face_source():
     thread_manager.register_source(

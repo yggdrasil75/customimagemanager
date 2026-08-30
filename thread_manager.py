@@ -381,9 +381,6 @@ class ThreadManager:
             return not any(getattr(f, "_src_name", None) == name
                            for f in self._inflight)
 
-    def source_idle(self, name):
-        return self._source_idle(name)
-
     def _foreground_idle(self, name):
         """True when the foreground source has no in-flight jobs left. We tag each
         dispatched future with its source name so we can tell whose work is still
@@ -782,6 +779,5 @@ is_idle = MANAGER.is_idle
 try_acquire_key = MANAGER.try_acquire_key
 release_key = MANAGER.release_key
 held_keys = MANAGER.held_keys
-source_idle = MANAGER.source_idle
 seconds_since_activity = MANAGER.seconds_since_activity
 status = MANAGER.status
