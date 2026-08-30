@@ -375,6 +375,24 @@ class ThreadManager:
         poll this to shrink batches or pause enqueuing."""
         return self.memory_pressure() >= threshold
 
+    def ingest_pressure(self):
+        """! @brief Snapshot of how loaded the background pool is right now.
+        @return dict with: busy (running bg jobs), spare (total handoutable
+                slots), free (spare - busy), mem (memory_pressure ratio),
+                saturated (bool: no free slot OR near the memory budget).
+        Used by the upload endpoint to decide, per request, whether it can
+        afford to run the convert/index chain inline (and give the client a
+        true receipt) or must spool and defer. Cheap: no work, just accounting.
+        """
+        with self._lock:
+            inflight = getattr(self, "_inflight", None)
+            busy = len({f for f in inflight if not f.done()}) if inflight else 0
+        spare = self.spare()
+        free  = spare - busy
+        mem   = self.memory_pressure()
+        return {"busy": busy, "spare": spare, "free": free, "mem": mem,
+                "saturated": free <= 0 or mem >= 0.9}
+
     def mem_headroom_mb(self):
         """MB of soft budget still free right now (budget - current RSS -
         committed cost of in-flight jobs). inf when no budget is set."""

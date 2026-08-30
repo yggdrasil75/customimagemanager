@@ -24,7 +24,7 @@ import tempfile, io, time, random, json, threading, logging
 import requests, base64, re, pyexiv2, xml.sax.saxutils as saxutils
 import hashlib, sqlite3, uuid, math, mimetypes, functools
 import urllib.request, urllib.parse
-import atexit
+import atexit, contextlib
 from datetime import datetime
 from typing import Optional
 from collections import OrderedDict, Counter
@@ -3387,12 +3387,14 @@ def _yolo_key(model_path):
 
 def _build_yolo(model_path):
     canon = _canonical_yolo_path(model_path)
-    try:
-        import traceback
-        stack = "".join(traceback.format_stack(limit=8)[:-1])
-        access_logger.warning("BUILD_YOLO %s\n%s", canon, stack)
-    except Exception:
-        pass
+    access_logger.info("Loading YOLO model %s", canon)
+    if access_logger.isEnabledFor(logging.DEBUG):
+        try:
+            import traceback
+            stack = "".join(traceback.format_stack(limit=8)[:-1])
+            access_logger.debug("BUILD_YOLO %s\n%s", canon, stack)
+        except Exception:
+            pass
     m = YOLO(canon)
     try:
         m.fuse()
@@ -3782,10 +3784,29 @@ def _face_scan_lease_keys():
     seen = set()
     return [k for k in keys if not (k in seen or seen.add(k))]
 
-def _face_process_one(rel: str) -> None:
-    """! @brief Box faces/people for one file, cache embeddings, mark done.
-    """
-    _face_process_one_inner(rel)
+FACE_BATCH = 16
+def _face_process_one(job) -> None:
+    rels = job if isinstance(job, (list, tuple)) else [job]
+    lease_keys = []
+    try:
+        lease_keys = _face_scan_lease_keys()
+    except Exception:
+        lease_keys = []
+    ctx = model_registry.lease(*lease_keys) if lease_keys else contextlib.nullcontext()
+    with ctx:
+        for rel in rels:
+            try:
+                _face_process_one_inner(rel)
+            except Exception:
+                # One bad image must not abort the rest of the batch; mark it done
+                # so the queue drains instead of re-serving the same failing file.
+                access_logger.exception("face scan failed for %s", rel)
+                try:
+                    _mark_face_done(rel)
+                    if state.get("body_enabled"):
+                        _mark_body_done(rel)
+                except Exception:
+                    pass
 
 def _face_process_one_inner(rel: str) -> None:
     abs_p = get_safe_path(MEDIA_DIR, rel)
@@ -3816,30 +3837,40 @@ def _claim_face_job():
         return None
     if not forced and not thread_manager.is_idle():
         return None
-    row = _db().execute(
-        "SELECT rel_path FROM files WHERE COALESCE(face_done,0)=0 LIMIT 1").fetchone()
-    if row is None:
-        # queue drained: trailing cluster pass, then settle status
-        if _face_dirty["v"]:
-            state["status_text"] = "Face scan: clustering…"
-            n = _recluster()
-            _face_dirty["v"] = False
-            state["status_text"] = f"Face scan: done ({n} cluster(s))."
-        elif forced:
-            state["status_text"] = "Face scan: complete."
-        else:
-            state["status_text"] = "Face scan: all caught up."
-        _face_force["v"] = False
+    if not thread_manager.try_acquire_key("face-scan"):
         return None
-    left = _db().execute(
-        "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
-    state["status_text"] = (
-        f"Face scan: {left} image(s) left…" if forced
-        else f"Face scan (idle): {left} image(s) left…")
-    return row[0]
+    try:
+        rows = _db().execute(
+            "SELECT rel_path FROM files WHERE COALESCE(face_done,0)=0 LIMIT ?",
+            (FACE_BATCH,)).fetchall()
+        if not rows:
+            # queue drained: trailing cluster pass, then settle status
+            if _face_dirty["v"]:
+                state["status_text"] = "Face scan: clustering…"
+                n = _recluster()
+                _face_dirty["v"] = False
+                state["status_text"] = f"Face scan: done ({n} cluster(s))."
+            elif forced:
+                state["status_text"] = "Face scan: complete."
+            else:
+                state["status_text"] = "Face scan: all caught up."
+            _face_force["v"] = False
+            thread_manager.release_key("face-scan")   # nothing to run
+            return None
+        left = _db().execute(
+            "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
+        state["status_text"] = (
+            f"Face scan: {left} image(s) left…" if forced
+            else f"Face scan (idle): {left} image(s) left…")
+        return [r[0] for r in rows]
+    except Exception:
+        thread_manager.release_key("face-scan")       # never leak the gate
+        raise
 
 def _register_face_source():
-    thread_manager.register_source("face", _claim_face_job, _face_process_one)
+    thread_manager.register_source(
+        "face", _claim_face_job, _face_process_one,
+        key_of=lambda job: "face-scan")
 
 def _mark_face_done(rel: str) -> None:
     """! @brief Mark a file's face-boxing pass complete."""
@@ -6464,55 +6495,33 @@ def api_albums_of():
     return jsonify({"success": True, "albums": _file_albums(fn),
                     "all": [a["name"] for a in _album_list()]})
 
-@app.route("/api/upload", methods=["POST"])
-@_auth.require_feature("data.upload", action='upload', fields=('folder',))
-def api_upload():
-    """Accept phase only: durably spool the raw bytes + enqueue, then return
-    immediately. The heavy convert/index chain runs in the queue worker pool.
-    This keeps each Pi's request short (bounded by disk write, not by cjxl), so
-    many devices can ingest concurrently without saturating the WSGI threads.
+def _predicted_rel(tdir, orig_name):
+    """Best-guess stored rel_path for an upload, for duplicate short-circuits and
+    for the `filename` field returned on the spool path (where the true stored
+    name isn't known until a worker converts it)."""
+    try:
+        return os.path.relpath(os.path.join(tdir, mt.stored_name(orig_name)),
+                               MEDIA_DIR).replace('\\', '/')
+    except Exception:
+        return orig_name
 
-    The response keeps the old success shape plus queued=True, and `filename` is
-    the *predicted* stored rel_path so existing clients that read it still work.
-    """
-    if 'file' not in request.files:
-        return jsonify({"success": False, "error_code": "no_file",
-                        "error": "No file part in request."}), 400
-    file   = request.files['file']
-    folder = request.form.get("folder", "").strip()
-    tdir   = get_safe_path(MEDIA_DIR, folder) if folder else MEDIA_DIR
-    if not tdir:
-        return jsonify({"success": False, "error_code": "bad_folder",
-                        "error": "Folder path is outside media directory."}), 400
-
-    orig_name = secure_filename(file.filename) or "upload.bin"
-    # Spool the raw upload to a durable dir (survives restart). Stream straight
-    # to disk — no decode, no cjxl — so the request cost is just the write.
+def _spool_upload_to_disk(file, orig_name):
+    """Stream the raw upload to the durable spool dir and return its path. No
+    decode, no cjxl — just the write. Shared by the spool path and by the inline
+    path (which spools first so an inline attempt is still crash-durable and can
+    fall back to the queue on a transient failure)."""
     os.makedirs(_UPLOAD_SPOOL_DIR, exist_ok=True)
     fd, spool_path = tempfile.mkstemp(dir=_UPLOAD_SPOOL_DIR, prefix="up-",
                                       suffix="-" + orig_name)
     os.close(fd)
     file.save(spool_path)
+    return spool_path
 
-    metadata = request.form.get("metadata", "{}") or "{}"
+def _enqueue_spooled_upload(spool_path, orig_name, folder, metadata, pred):
+    """Insert (or collapse into) an upload_queue row for an already-spooled file
+    and return the JSON response tuple. Collapsing a duplicate re-POST drops the
+    redundant spool. On enqueue failure the spool is removed and a 500 returned."""
     now = time.time()
-
-    # Predict where this will land, so we can short-circuit obvious duplicates
-    # before spending a worker + cjxl on something that only fails filename_exists.
-    try:
-        pred = os.path.relpath(os.path.join(tdir, mt.stored_name(orig_name)),
-                               MEDIA_DIR).replace('\\', '/')
-    except Exception:
-        pred = orig_name
-
-    # Already in the library on disk? Nothing to do — report it like the pipeline
-    # would, without queuing a doomed job. (Content-level dupes under a different
-    # name are still caught by the sha check inside the conversion pipeline.)
-    pred_abs = os.path.join(MEDIA_DIR, pred)
-    if os.path.exists(pred_abs):
-        return jsonify({"success": True, "queued": False, "duplicate": True,
-                        "filename": pred, "existing_file": pred}), 200
-
     def _enqueue():
         db = _db()
         # Same name already waiting/processing? Collapse the duplicate re-POST
@@ -6549,6 +6558,163 @@ def api_upload():
     _upload_workers_wake()
     return jsonify({"success": True, "queued": True, "queue_id": qid,
                     "filename": pred}), 202
+
+def _process_spooled_inline(spool_path, orig_name, folder, metadata):
+    """Run the full convert/index chain for a just-spooled upload *inline*, in
+    the request thread, reusing the exact queue-worker code path so the verdict
+    is identical whether a file goes inline or through the pool. Returns
+    (outcome, payload, http_code):
+      - outcome 'done'   -> payload is the real pipeline JSON (true filename,
+                            corrected_extension, duplicate, etc.); spool removed.
+      - outcome 'failed' -> terminal, known-bad file (corrupt/dup/etc.); the
+                            real error payload is returned; spool removed.
+      - outcome 'retry'  -> transient server-side failure; spool is LEFT on disk
+                            for the caller to enqueue so the file is never lost.
+    """
+    try:
+        with open(spool_path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        # Spool vanished before we could read it — nothing to run inline. Let the
+        # caller treat this as transient (it will try to enqueue, which will also
+        # notice the missing spool and fail cleanly).
+        return "retry", {"error": f"spool missing: {e}"}, 503
+
+    # Run the exact same pipeline the queue worker runs, but keep its FULL JSON
+    # body so the client gets the true receipt (real filename, duplicate flag,
+    # corrected_extension) rather than the flattened queue outcome.
+    ctx = app.test_request_context("/api/upload", method="POST",
+            data={"file": (io.BytesIO(data), orig_name),
+                  "folder": folder or "", "metadata": metadata or "{}"},
+            content_type="multipart/form-data")
+    with ctx:
+        resp = _run_upload()
+        body, code = (resp if isinstance(resp, tuple) else (resp, 200))
+        payload = body.get_json(silent=True) or {}
+
+    if bool(payload.get("success")) and code < 400:
+        try: os.remove(spool_path)
+        except OSError: pass
+        payload.setdefault("queued", False)
+        return "done", payload, code
+
+    ecode = payload.get("error_code") or ""
+    if ecode in ("exact_duplicate", "filename_exists"):
+        # Already in the library — a true, terminal duplicate verdict.
+        try: os.remove(spool_path)
+        except OSError: pass
+        existing = payload.get("existing_file") or payload.get("filename")
+        return "done", {"success": True, "queued": False, "duplicate": True,
+                        "filename": existing, "existing_file": existing,
+                        "error_code": ecode}, 200
+    if ecode in _TERMINAL_UPLOAD_CODES:
+        # Known-bad file (corrupt / unconvertible / malformed request). Terminal:
+        # return the real error so the client can skip it, and drop the spool.
+        try: os.remove(spool_path)
+        except OSError: pass
+        return "failed", payload, (code if code >= 400 else 422)
+
+    # server_error / index_failed / unknown -> transient. Leave the spool on disk
+    # for the caller to enqueue so a good file is never lost to a hiccup.
+    return "retry", payload, (code if code >= 400 else 503)
+
+@app.route("/api/upload", methods=["POST"])
+@_auth.require_feature("data.upload", action='upload', fields=('folder',))
+def api_upload():
+    """Adaptive ingest. Two ways a file can be taken:
+
+      * INLINE (synchronous) — the raw bytes are spooled, then the full
+        convert/index chain runs in the request thread and the response carries
+        the *true* receipt: the real stored filename, real SHA duplicate
+        detection, real conversion/corruption verdict, and any extension
+        correction. This is the old upload.py behaviour, and it's what a
+        near-sequential uploader (the home photo album) wants: immediate,
+        trustworthy confirmation and a clean retry if the stored result is bad.
+
+      * SPOOL (deferred) — the raw bytes are spooled to a durable dir, a queue
+        row is enqueued, and the request returns 202 immediately with a
+        *predicted* filename. The heavy chain drains in the worker pool later.
+        This is what a burst uploader (the factory quality lines) wants: each
+        request costs only a disk write, so many devices ingest concurrently
+        during the day and the queue lets out during breaks / after close.
+
+    Mode selection, in priority order:
+      1. explicit `mode` form field — 'sync' forces inline, 'spool' forces
+         deferred, 'auto' (default) lets the server decide;
+      2. in 'auto', run inline when the background pool can currently afford it
+         (a free slot and not under memory pressure), and spool when it can't —
+         i.e. only fall back to the queue when the box can't keep up.
+
+    Safety net: an inline attempt that hits a *transient* server-side failure is
+    not lost — its already-written spool is enqueued and the client is told it
+    was queued, exactly as if it had taken the spool path to begin with. A file
+    can therefore never be dropped by choosing inline.
+    """
+    if 'file' not in request.files:
+        return jsonify({"success": False, "error_code": "no_file",
+                        "error": "No file part in request."}), 400
+    file   = request.files['file']
+    folder = request.form.get("folder", "").strip()
+    tdir   = get_safe_path(MEDIA_DIR, folder) if folder else MEDIA_DIR
+    if not tdir:
+        return jsonify({"success": False, "error_code": "bad_folder",
+                        "error": "Folder path is outside media directory."}), 400
+
+    orig_name = secure_filename(file.filename) or "upload.bin"
+    metadata  = request.form.get("metadata", "{}") or "{}"
+    pred      = _predicted_rel(tdir, orig_name)
+
+    # Already in the library on disk? Report it like the pipeline would, without
+    # spending anything. (Content-level dupes under a different name are still
+    # caught by the SHA check inside the conversion pipeline.)
+    if os.path.exists(os.path.join(MEDIA_DIR, pred)):
+        return jsonify({"success": True, "queued": False, "duplicate": True,
+                        "filename": pred, "existing_file": pred}), 200
+
+    # ── choose a mode ────────────────────────────────────────────────────────
+    mode = (request.form.get("mode", "auto") or "auto").strip().lower()
+    if mode not in ("auto", "sync", "spool"):
+        mode = "auto"
+    if mode == "auto":
+        # Inline while the box keeps up; spool once the pool is saturated.
+        try:
+            inline = not thread_manager.ingest_pressure()["saturated"]
+        except Exception:
+            inline = True
+    else:
+        inline = (mode == "sync")
+
+    # Bytes hit the durable spool dir first either way — an inline run stays
+    # crash-safe and can fall back to the queue without a re-upload.
+    try:
+        spool_path = _spool_upload_to_disk(file, orig_name)
+    except Exception as e:
+        access_logger.error(f"upload spool write failed for {orig_name}: {e}")
+        return jsonify({"success": False, "error_code": "server_error",
+                        "error": "Could not stage upload."}), 500
+
+    if not inline:
+        return _enqueue_spooled_upload(spool_path, orig_name, folder,
+                                       metadata, pred)
+
+    # ── inline: run the real pipeline and return the true receipt ────────────
+    try:
+        outcome, payload, code = _process_spooled_inline(
+            spool_path, orig_name, folder, metadata)
+    except Exception as e:
+        # An unexpected crash inline is transient by definition — fall through
+        # to the queue rather than dropping the file.
+        access_logger.error(f"inline upload crashed for {orig_name}: {e}",
+                            exc_info=True)
+        outcome = "retry"
+
+    if outcome != "retry":
+        return jsonify(payload), code
+
+    # Transient failure inline: enqueue the spool we already wrote so the file
+    # is retried by the pool, and answer as the deferred path would.
+    return _enqueue_spooled_upload(spool_path, orig_name, folder,
+                                   metadata, pred)
 
 def _run_upload():
     """The full convert+index pipeline for one upload. Reads the file and form

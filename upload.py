@@ -322,6 +322,7 @@ AUTH_STATUS_CODES = {401, 403}
 
 class Outcome(Enum):
     SUCCESS   = "success"
+    QUEUED    = "queued"       # server spooled it; no final verdict yet
     DUPLICATE = "duplicate"    # exact_duplicate or filename_exists
     SKIPPED   = "skipped"      # other permanent rejection
     FAILED    = "failed"       # gave up after retries
@@ -422,6 +423,7 @@ def upload_file(
     initial_backoff: float,
     session:         "Session",
     dest:            str = "",
+    mode:            str = "auto",
 ) -> UploadResult:
     rel_dir = os.path.relpath(os.path.dirname(filepath), source_dir)
     parts   = [p for p in (dest, rel_dir if rel_dir != "." else "") if p]
@@ -439,7 +441,7 @@ def upload_file(
 
     for attempt in range(1, max_attempts + 1):
         try:
-            form_data = {'folder': folder}
+            form_data = {'folder': folder, 'mode': mode}
             if metadata:
                 form_data['metadata'] = json.dumps(metadata)
             # Stream the file off disk instead of buffering it — a 13GB video
@@ -458,6 +460,17 @@ def upload_file(
                 body = {}
 
             if resp.status_code == 200 and body.get('success'):
+                # A body that came back as a duplicate on a 200 is a duplicate,
+                # not a fresh store — the server reports pre-existing files this
+                # way. Surface it as such so the summary counts are honest.
+                if body.get('duplicate'):
+                    existing = body.get('existing_file') or body.get('filename')
+                    return UploadResult(
+                        filepath=filepath, outcome=Outcome.DUPLICATE,
+                        message=f"duplicate of {existing}" if existing
+                                else "duplicate",
+                        error_code=body.get('error_code'),
+                        existing_file=existing, attempts=attempt)
                 # The server may have corrected a mislabeled extension; surface
                 # that rather than silently reporting a plain success.
                 corrected = body.get('corrected_extension') or {}
@@ -469,6 +482,21 @@ def upload_file(
                     filepath=filepath,
                     outcome=Outcome.SUCCESS,
                     message=f"→ {body.get('filename', fname)}{note}",
+                    attempts=attempt,
+                )
+
+            if resp.status_code == 202 and body.get('success'):
+                if mode == 'sync' and attempt < max_attempts:
+                    last_error = "server queued instead of confirming inline"
+                    last_code  = "unexpected_queue"
+                    backoff = initial_backoff * (2 ** (attempt - 1))
+                    time.sleep(backoff)
+                    continue
+                return UploadResult(
+                    filepath=filepath,
+                    outcome=Outcome.QUEUED,
+                    message=f"queued → {body.get('filename', fname)} "
+                            f"(queue_id {body.get('queue_id','?')})",
                     attempts=attempt,
                 )
 
@@ -565,6 +593,7 @@ def print_summary(results: list[UploadResult], verbose_duplicates: bool) -> None
 
     total     = len(results)
     succeeded = len(by_outcome[Outcome.SUCCESS])
+    queued    = len(by_outcome[Outcome.QUEUED])
     dupes     = len(by_outcome[Outcome.DUPLICATE])
     skipped   = len(by_outcome[Outcome.SKIPPED])
     failed    = len(by_outcome[Outcome.FAILED])
@@ -572,6 +601,8 @@ def print_summary(results: list[UploadResult], verbose_duplicates: bool) -> None
     print("\n" + "─" * 60)
     print(f"  Total:      {total}")
     print(f"  Uploaded:   {succeeded}")
+    if queued:
+        print(f"  Queued:     {queued}  (spooled on server; converts later)")
     print(f"  Duplicates: {dupes}  (skipped — already on server)")
     print(f"  Skipped:    {skipped}  (permanent rejection)")
     print(f"  Failed:     {failed}  (gave up after retries)")
@@ -621,6 +652,7 @@ def bulk_upload(
     password:        str = "",
     verify_tls:      bool = True,
     dest:            str = "",
+    mode:            str = "auto",
 ) -> int:
     source_dir = os.path.abspath(source_dir)
     if not os.path.isdir(source_dir):
@@ -678,6 +710,10 @@ def bulk_upload(
     endpoint = f"{server_url.rstrip('/')}/api/upload"
     total    = len(files)
     print(f"[*] Found {total} file(s).  Server: {endpoint}")
+    _mode_desc = {"sync":  "sync (inline convert; true receipt per file)",
+                  "spool": "spool (server queues; converts later)",
+                  "auto":  "auto (inline while the server keeps up, else spool)"}
+    print(f"[*] Ingest mode: {_mode_desc.get(mode, mode)}")
     if max_attempts > 1:
         print(f"[*] Retries: up to {max_attempts} attempts, "
               f"{initial_backoff}s initial backoff (exponential).\n")
@@ -691,7 +727,7 @@ def bulk_upload(
         futures = {
             ex.submit(
                 upload_file, fp, source_dir, classes_map,
-                endpoint, max_attempts, initial_backoff, session, dest
+                endpoint, max_attempts, initial_backoff, session, dest, mode
             ): fp
             for fp in files
         }
@@ -701,7 +737,7 @@ def bulk_upload(
             results.append(r)
 
             # Per-file status line
-            icon = {"success":"✓","duplicate":"=","skipped":"!","failed":"✗"}[r.outcome.value]
+            icon = {"success":"✓","queued":"⋯","duplicate":"=","skipped":"!","failed":"✗"}[r.outcome.value]
             fname = os.path.basename(r.filepath)
             atts  = f" (attempt {r.attempts})" if r.attempts > 1 else ""
             print(f"  [{completed:>{len(str(total))}}/{total}] {icon} {fname}{atts}  {r.message}")
@@ -737,6 +773,9 @@ def main() -> None:
         help="Max attempts per file for transient errors (1 = no retry).")
     parser.add_argument("--backoff", type=float, default=2.0,
         help="Initial retry backoff in seconds (doubles each attempt).")
+    parser.add_argument("--mode", choices=("auto", "sync", "spool"),
+        default="auto",
+        help="Ingest mode.")
     parser.add_argument("--verbose-duplicates", action="store_true",
         help="List every duplicate with its existing server path in the summary.")
     parser.add_argument("--aggressive", action="store_true",
@@ -801,6 +840,7 @@ def main() -> None:
         password        = password,
         verify_tls      = not args.no_verify_tls,
         dest            = args.dest,
+        mode            = args.mode,
     ))
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ import os
 import gc
 import threading
 import contextlib
+import sys
 
 try:
     import torch
@@ -226,6 +227,7 @@ class ModelRegistry:
                         loaded = e["loaded"]
                         model = e["model"]
                     if not loaded:
+                        print(f"REGBUILD key={key} entry_id={id(e)} entries_id={id(self._entries.get(key))} loaded={e['loaded']} nkeys={len(self._entries)}", file=sys.stderr, flush=True)
                         hook = getattr(self, "_mem_hook", None)
                         res = hook(e["cost_mb"], e["gpu"]) if hook else None
                         if res is not None:
@@ -245,6 +247,7 @@ class ModelRegistry:
                             e["model"] = built
                             e["err"] = err
                             e["loaded"] = True
+                            print(f"REGSTORE key={key} entry_id={id(e)} built_is_none={built is None} err={err[:60]}", file=__import__('sys').stderr, flush=True)
                             if measured and measured > 0:
                                 e["cost_mb"] = measured
                                 e["measured"] = True
