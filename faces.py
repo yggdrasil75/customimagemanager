@@ -26,6 +26,7 @@ import os
 import glob
 import json
 import threading
+import concurrent.futures as _futures
 
 import numpy as np
 
@@ -41,6 +42,14 @@ MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 FACE_DIR = os.path.join(MODELS_DIR, "face")
 YOLO_FACE_DIR = os.path.join(FACE_DIR, "yolo")
 INSIGHT_DIR = os.path.join(FACE_DIR, "insightface")
+_INSIGHT_INFER_POOL = _futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="insight-infer")
+try:
+    INSIGHT_INFER_TIMEOUT_S = float(os.environ.get("CIM_INSIGHT_TIMEOUT", "120"))
+except (TypeError, ValueError):
+    INSIGHT_INFER_TIMEOUT_S = 120.0
+_INSIGHT_INFER_POOL = _futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="insight-infer")
 FACE_MODEL_REPO = facemodels.FACE_MODEL_REPO
 
 MIN_MODEL_BYTES = 1_000_000   # a real .pt is megabytes; smaller == error page
@@ -232,13 +241,21 @@ def set_recognition_model(model_id):
 def recognition_model():
     return _recog_model["v"]
 
+def _insight_providers():
+    """ONNX providers for insightface specifically.
+    """
+    base = model_registry.onnx_providers()
+    if os.environ.get("CIM_INSIGHT_ALLOW_MIGRAPHX") in ("1", "true", "yes"):
+        return base
+    return [p for p in base if p != "MIGraphXExecutionProvider"] or ["CPUExecutionProvider"]
+
 def _build_insight():
     """Construct insightface's FaceAnalysis app, or None on any failure."""
     try:
         from insightface.app import FaceAnalysis
         app = FaceAnalysis(name=_recog_model["v"],
                            root=INSIGHT_DIR,
-                           providers=model_registry.onnx_providers())
+                           providers=_insight_providers())
         app.prepare(ctx_id=model_registry.onnx_device_id(), det_size=(640, 640))
         return app
     except Exception:
@@ -323,7 +340,14 @@ def embed_faces(img_bgr, boxes):
 
     if app is not None:
         try:
-            found = app.get(img_bgr)          # full-image detect + align + embed
+            fut = _INSIGHT_INFER_POOL.submit(app.get, img_bgr)
+            found = fut.result(timeout=INSIGHT_INFER_TIMEOUT_S)   # full-image detect + align + embed
+        except _futures.TimeoutError:
+            import sys as _sys
+            print("INSIGHT_INFER_TIMEOUT: app.get exceeded "
+                  f"{INSIGHT_INFER_TIMEOUT_S:.0f}s; degrading to appearance",
+                  file=_sys.stderr, flush=True)
+            found = []
         except Exception:
             found = []
         if found:
