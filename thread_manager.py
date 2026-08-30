@@ -114,6 +114,30 @@ class ThreadManager:
         """Slots available to hand out to background/feature tasks."""
         return max(1, self.max_slots() - self.reserved())
 
+    def face_batch_size(self):
+        kind = self.gpu_kind()
+        if kind == "dedicated":
+            # Total card VRAM, not the resident-model budget fraction: batch
+            # activations are transient, not a persistent reservation, so sizing
+            # them off the budget would needlessly starve big cards. ~8GB→16,
+            # ~16GB→32, ~32GB→64 (R9700).
+            vram_gb = 0.0
+            try:
+                if torch is not None and torch.cuda.is_available():
+                    vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            except Exception:
+                vram_gb = 0.0
+            n = int(vram_gb * 2)            # ~2 imgs per GB of VRAM
+            # round down to a power of two for predictable batches, clamp 4..64
+            b = 1
+            while b * 2 <= n:
+                b *= 2
+            return max(4, min(64, b))
+        if kind == "shared":
+            return 4
+        # CPU-only: one image per core, floor 1 (a Pi lands at 1).
+        return max(1, min(8, (os.cpu_count() or 1)))
+
     def slots_for(self, want=None):
         """Fair share of the spare pool for one task, given how many tasks are
         currently active. Always >= 1; never more than `want` if given."""
