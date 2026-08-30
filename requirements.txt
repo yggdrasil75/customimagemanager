@@ -29,3 +29,4 @@ git+https://github.com/ultralytics/CLIP/
 smplx
 trimesh
 psutil
+opencv-python-headless

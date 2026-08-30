@@ -23,11 +23,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt requirements-cpu.txt requirements-cuda.txt requirements-rocm.txt ./
-# opencv-python-headless: cv2 is imported by manager.py but missing from requirements.txt
-RUN pip install opencv-python-headless \
-    && echo "Installing GPU backend: ${GPU_BACKEND}" \
-    && pip install -r "requirements-${GPU_BACKEND}.txt"
-    && pip install -r requirements.txt \
+RUN echo "Installing GPU backend: ${GPU_BACKEND}" \
+    && pip install -r "requirements-${GPU_BACKEND}.txt" \
+    && pip install -r requirements.txt
 
 COPY . .
 
