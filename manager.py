@@ -4024,9 +4024,7 @@ def _recluster_bodies() -> int:
 # ── Unified person model ────────────────────────────────────────────────────--
 def _build_appearances(cluster_id: int) -> list:
     """! @brief Split a face cluster into time-scoped appearances by embedding drift.
-    @return List of appearance dicts, each with its own era-scoped centroids, image
-            membership and date span. Dates are validated against the era, not used
-            to form it, so a wrong scan-date can't misplace a photo.
+    @return List of appearance dicts, each with era-scoped centroids, membership and date span.
     """
     rows = _db().execute(
         "SELECT fr.id, fr.rel_path, fr.embedding, f.d_original_epoch, f.d_capture_epoch "
@@ -5620,8 +5618,7 @@ def api_body_name():
 
 def _person_date_flags(cluster_id: int) -> list:
     """! @brief Faces whose stored date disagrees with their embedding era.
-    @return One entry per suspect face with the era's median date as a PROPOSED
-            correction; advisory only, the caller never overwrites a stored date.
+    @return One entry per suspect face, with the era's median date as an advisory proposed correction.
     """
     rows = _db().execute(
         "SELECT fr.rel_path, fr.embedding, f.d_original_epoch, f.d_capture_epoch "
