@@ -299,26 +299,63 @@ class ThreadManager:
                     self._wake.wait(timeout=POLL); self._wake.clear()
             return
 
-        # Normal round-robin: one pass tries each source in turn, filling free
-        # threads. Keep passing while jobs start and slots remain.
-        sources = list(all_sources.items())
+        ordered = self._rr_order(all_sources)
         started_any = False
-        while free > 0:
-            progressed = False
-            for name, src in sources:
-                if free <= 0:
-                    break
-                with self._lock:                  # honor a mid-pass promotion
-                    if self._foreground is not None:
-                        progressed = False; break
-                if self._dispatch(name, src):
-                    free -= 1
-                    progressed = True
-                    started_any = True
-            if not progressed:
+        for i, (name, src) in enumerate(ordered):
+            if free <= 0:
                 break
+            with self._lock:                      # honor a mid-run promotion
+                if self._foreground is not None:
+                    return
+            started = 0
+            while free > 0:
+                if self._dispatch(name, src):
+                    free -= 1; started += 1; started_any = True
+                else:
+                    break
+            if started and i == 0 and self._source_idle(name):
+                # The lead produced work and is now fully drained (nothing pending
+                # or running): hand the lead to the next source next tick.
+                self._advance_rr(name)
+            # Whether it drained, stayed busy, or had nothing, fall through to the
+            # next source so any remaining free slots get used.
+
         if not started_any:
             self._wake.wait(timeout=POLL); self._wake.clear()
+
+    def _rr_order(self, all_sources):
+        """Sources in service order for this tick, rotated so the cursor source is
+        tried first. Keeps a stable order otherwise, so drain-one-at-a-time is
+        deterministic and every source eventually leads."""
+        items = list(all_sources.items())
+        cur = getattr(self, "_rr_cursor", None)
+        if cur is not None:
+            idx = next((i for i, (n, _) in enumerate(items) if n == cur), 0)
+            items = items[idx:] + items[:idx]
+        return items
+
+    def _advance_rr(self, drained_name):
+        """Move the round-robin cursor past the source that just drained, so the
+        next source leads next tick (prevents one busy source from always going
+        first and starving the rest)."""
+        with self._lock:
+            names = list(getattr(self, "_sources", {}).keys())
+        if not names:
+            return
+        try:
+            i = names.index(drained_name)
+        except ValueError:
+            return
+        self._rr_cursor = names[(i + 1) % len(names)]
+
+    def _source_idle(self, name):
+        """True when `name` has no jobs in flight. Mirrors _foreground_idle but for
+        any source, so drain-one-at-a-time can tell 'claim dried up but a batch is
+        still running' (wait) from 'truly nothing left' (advance)."""
+        with self._lock:
+            self._inflight = {f for f in self._inflight if not f.done()}
+            return not any(getattr(f, "_src_name", None) == name
+                           for f in self._inflight)
 
     def _foreground_idle(self, name):
         """True when the foreground source has no in-flight jobs left. We tag each
