@@ -25,9 +25,9 @@ WORKDIR /app
 COPY requirements.txt requirements-cpu.txt requirements-cuda.txt requirements-rocm.txt ./
 # opencv-python-headless: cv2 is imported by manager.py but missing from requirements.txt
 RUN pip install opencv-python-headless \
-    && pip install -r requirements.txt \
     && echo "Installing GPU backend: ${GPU_BACKEND}" \
     && pip install -r "requirements-${GPU_BACKEND}.txt"
+    && pip install -r requirements.txt \
 
 COPY . .
 
