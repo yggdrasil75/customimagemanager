@@ -1,63 +1,11 @@
 """
-User management, authentication and authorization.
-========================================================================
-Two authentication backends, selectable per-deployment via app_config.json:
+Authentication: local (SQLite + werkzeug pbkdf2) and/or LDAP/AD backends,
+server-side cookie sessions, CSRF, and per-feature permission gates.
 
-  * "local" - users stored in SQLite, passwords hashed with werkzeug
-              (pbkdf2). Good for personal / test use. Ships with a
-              first-run bootstrap that creates an admin account.
-
-  * "ldap"  - bind against a corporate LDAP / Active Directory server.
-              No passwords are ever stored locally. Group membership can
-              be mapped to the local "admin" role. Good for company AD.
-
-Both backends can be enabled at once ("mode": "both"): a login attempt
-tries LDAP first, then falls back to a local account of the same name.
-This lets you keep a break-glass local admin even on an AD deployment.
-
-Design goals
-------------
-* Zero changes to the rest of the app's data model. Auth lives in its own
-  tables (auth_users, auth_sessions) created lazily.
-* Server-side sessions keyed by an opaque cookie token, so logout and
-  admin-forced revocation actually work (unlike stateless JWTs).
-* A single `require_login` gate installed as a Flask before_request hook,
-  plus a `require_admin` decorator for the user-management endpoints.
-* CSRF: because the app is same-origin and uses a cookie, every state-
-  changing (non-GET) request must echo the session's CSRF token in the
-  `X-CSRF-Token` header. GET requests are read-only and exempt.
-
-Configuration (app_config.json -> "auth" object)
--------------------------------------------------
-{
-  "auth": {
-    "enabled": true,
-    "mode": "local",                # "local" | "ldap" | "both"
-    "session_days": 14,
-    "ldap": {
-      "server": "ldap://dc01.corp.example.com",
-      "use_ssl": false,             # true -> ldaps:// on 636
-      "start_tls": true,            # STARTTLS on the plain port
-      "base_dn": "DC=corp,DC=example,DC=com",
-      "user_dn_template": "",       # e.g. "{username}@corp.example.com" for AD UPN bind
-      "bind_dn": "",                # service account for search-then-bind (optional)
-      "bind_password": "",
-      "user_search_filter": "(&(objectClass=user)(sAMAccountName={username}))",
-      "attr_username": "sAMAccountName",
-      "attr_email": "mail",
-      "attr_display_name": "displayName",
-      "admin_group_dn": "CN=ImageAdmins,OU=Groups,DC=corp,DC=example,DC=com",
-      "member_attr": "memberOf"
-    }
-  }
-}
-
-For quick AD integration you usually only need: server, base_dn, and
-either user_dn_template (UPN bind, simplest) OR a bind service account
-plus user_search_filter (needed if you also want group->admin mapping).
+Configuration lives in app_config.json under "auth": enabled, mode
+("local"|"ldap"|"both"), session_days, and an ldap sub-object.
 """
 
-import os
 import json
 import time
 import secrets
@@ -77,16 +25,12 @@ if not log.handlers:
 log.setLevel(logging.INFO)
 
 COOKIE_NAME = "cim_session"
-
-# Sentinel so callers can distinguish "leave unchanged" from "set to NULL".
 _UNSET = object()
 
 def require_feature(feature_key, action=None, fields=()):
-    """Decorator: 403 unless g.user's effective features allow feature_key.
+    """@brief Decorator: 403 unless g.user's features explicitly deny feature_key.
 
-    Fail-open for unknown keys (feats.get(key) is None -> allowed) so new
-    endpoints aren't accidentally locked out before the catalog knows them;
-    only an explicit False denies. Admin/anonymous users always pass.
+    @param action optional audit action name; fields are request-body keys to log.
     """
     def deco(fn):
         @functools.wraps(fn)
@@ -116,8 +60,6 @@ def require_feature(feature_key, action=None, fields=()):
         return wrap
     return deco
 
-# Paths that must remain reachable without a session, otherwise you could
-# never log in or load the login page's assets.
 _PUBLIC_PATHS = {
     "/api/auth/login",
     "/api/auth/config",   # exposes only which modes are enabled (no secrets)
@@ -126,7 +68,6 @@ _PUBLIC_PATHS = {
 }
 _PUBLIC_PREFIXES = ("/static/",)
 
-# ── configuration ───────────────────────────────────────────────────────────
 _DEFAULT_LDAP = {
     "server": "",
     "use_ssl": False,
@@ -151,24 +92,15 @@ _DEFAULT_CFG = {
 }
 
 class Auth:
-    """Wires authentication into an existing Flask app.
-
-    Usage from manager.py:
-
-        import auth
-        _authmgr = auth.Auth(app, _db, get_cfg=lambda: state.get("auth"),
-                             save_cfg=save_config)
-        _authmgr.install()
-    """
+    """@brief Wires authentication into an existing Flask app."""
 
     def __init__(self, app, db_factory, get_cfg, save_cfg=None):
         self.app = app
-        self._db = db_factory              # callable -> sqlite3.Connection
-        self._get_cfg = get_cfg            # callable -> dict|None (raw config)
-        self._save_cfg = save_cfg          # callable to persist config (optional)
+        self._db = db_factory
+        self._get_cfg = get_cfg
+        self._save_cfg = save_cfg
         self._init_db()
 
-    # -- config helpers ------------------------------------------------------
     def cfg(self):
         raw = self._get_cfg() or {}
         merged = dict(_DEFAULT_CFG)
@@ -181,7 +113,6 @@ class Auth:
     def enabled(self):
         return bool(self.cfg().get("enabled", True))
 
-    # -- schema --------------------------------------------------------------
     def _init_db(self):
         db = self._db()
         db.executescript("""
@@ -218,7 +149,6 @@ class Auth:
             FOREIGN KEY(user_id) REFERENCES auth_users(id) ON DELETE CASCADE
         );
         """)
-        # Migrate older auth_users tables that predate role/perms/group_id.
         have = {row[1] for row in db.execute("PRAGMA table_info(auth_users)")}
         for col, ddl in (("role", "TEXT NOT NULL DEFAULT 'custom'"),
                          ("perms", "TEXT"),
@@ -227,7 +157,6 @@ class Auth:
                 db.execute(f"ALTER TABLE auth_users ADD COLUMN {col} {ddl}")
         db.commit()
 
-    # -- permission helpers --------------------------------------------------
     def _load_perms(self, raw):
         if not raw:
             return {}
@@ -250,12 +179,7 @@ class Auth:
                  "perms": self._load_perms(r["perms"])} for r in rows]
 
     def effective_perms_for(self, user_row):
-        """Resolve the effective feature map for a DB user row.
-
-        Precedence: admin > user role/overrides layered over the user's
-        group (if any). A user in a group inherits the group's role and
-        overrides, then applies its own on top.
-        """
+        """@brief Resolve effective feature map: group role/perms, then user's own on top."""
         if user_row is None:
             return features.effective_permissions("viewer", {})
         if user_row["is_admin"]:
@@ -276,7 +200,6 @@ class Auth:
             overrides = merged
         return features.effective_permissions(role, overrides)
 
-    # -- user CRUD -----------------------------------------------------------
     def _row_to_user(self, r):
         if r is None:
             return None
@@ -418,9 +341,8 @@ class Auth:
         db.execute("DELETE FROM auth_users WHERE id=?", (user_id,))
         db.commit()
 
-    # -- authentication ------------------------------------------------------
     def authenticate(self, username, password):
-        """Return a user Row on success, else None. Honors the configured mode."""
+        """@brief Return a user Row on success, else None. Honors the configured mode."""
         mode = self.cfg().get("mode", "local")
         username = (username or "").strip()
         if not username or password is None:
@@ -468,7 +390,6 @@ class Auth:
         email = None
         member_of = []
 
-        # Strategy A: direct bind with a DN/UPN template (simplest for AD).
         if c.get("user_dn_template"):
             bind_id = c["user_dn_template"].format(username=username)
             try:
@@ -478,7 +399,6 @@ class Auth:
             except Exception as e:
                 log.info("ldap direct bind failed for %s: %s", username, e)
                 return None
-            # Optionally read attributes / group membership after binding.
             info = self._ldap_lookup(conn, c, username)
             if info:
                 display_name = info.get("display_name") or display_name
@@ -486,7 +406,6 @@ class Auth:
                 member_of = info.get("member_of", [])
             conn.unbind()
         else:
-            # Strategy B: search-then-bind using a service account.
             if not c.get("bind_dn"):
                 log.error("ldap: need either user_dn_template or a bind_dn "
                           "service account")
@@ -514,7 +433,6 @@ class Auth:
             email = self._attr(entry, c.get("attr_email"))
             member_of = self._attr_list(entry, c.get("member_attr"))
             svc.unbind()
-            # Now bind AS the user to verify the password.
             try:
                 uc = ldap3.Connection(server, user=user_dn, password=password,
                                       auto_bind=self._autobind(c))
@@ -581,7 +499,6 @@ class Auth:
         except Exception:
             return []
 
-    # -- sessions ------------------------------------------------------------
     def _new_session(self, user_id):
         token = secrets.token_urlsafe(32)
         csrf = secrets.token_urlsafe(24)
@@ -617,9 +534,8 @@ class Auth:
         self._db().execute("DELETE FROM auth_sessions WHERE user_id=?", (user_id,))
         self._db().commit()
 
-    # -- request gate --------------------------------------------------------
     def _load_current(self):
-        """Populate flask.g.user / g.session from the request cookie."""
+        """@brief Populate g.user / g.session from the request cookie."""
         g.user = None
         g.session = None
         tok = request.cookies.get(COOKIE_NAME)
@@ -640,7 +556,7 @@ class Auth:
         return any(path.startswith(p) for p in _PUBLIC_PREFIXES)
 
     def _gate(self):
-        """before_request hook: enforce login + CSRF on protected paths."""
+        """@brief before_request hook: enforce login + CSRF on protected paths."""
         if not self.enabled():
             g.user = {"username": "anonymous", "is_admin": True,
                       "id": 0, "source": "disabled", "role": "admin",
@@ -651,22 +567,17 @@ class Auth:
         if self._is_public(request.path):
             return None
         if g.user is None:
-            # HTML navigation -> redirect to login; API -> 401 JSON.
             if request.path.startswith("/api/"):
                 return jsonify({"error": "authentication required"}), 401
             return redirect("/login")
-        # CSRF for state-changing verbs.
         if request.method not in ("GET", "HEAD", "OPTIONS"):
             sent = request.headers.get("X-CSRF-Token", "")
             if not g.session or sent != g.session["csrf"]:
                 return jsonify({"error": "bad or missing CSRF token"}), 403
         return None
 
-    # -- route registration --------------------------------------------------
     def install(self):
         app = self.app
-
-        # Gate runs first, before any other before_request handlers.
         app.before_request(self._gate)
 
         @app.route("/login")
@@ -688,8 +599,6 @@ class Auth:
             username = data.get("username", "")
             password = data.get("password", "")
 
-            # First-run bootstrap: no users exist yet -> first login creates
-            # a local admin (only when local auth is available).
             if (self.enabled() and self.user_count() == 0
                     and self.cfg().get("mode") in ("local", "both")):
                 try:
@@ -748,7 +657,6 @@ class Auth:
             self.set_password(g.user["id"], new)
             return jsonify({"ok": True})
 
-        # ---- admin-only user management -----------------------------------
         def require_admin(fn):
             @functools.wraps(fn)
             def wrap(*a, **k):
@@ -788,7 +696,6 @@ class Auth:
             uid = d.get("id")
             if not uid:
                 return jsonify({"error": "id required"}), 400
-            # Guard against removing the last admin.
             if d.get("is_admin") is False or d.get("disabled") is True:
                 admins = [u for u in self.list_users()
                           if u["is_admin"] and not u["disabled"]]
@@ -798,14 +705,13 @@ class Auth:
             kw = dict(is_admin=d.get("is_admin"), disabled=d.get("disabled"),
                       display_name=d.get("display_name"), email=d.get("email"),
                       role=d.get("role"), perms=d.get("perms"))
-            if "group_id" in d:                 # may be null to clear
+            if "group_id" in d:
                 kw["group_id"] = d.get("group_id")
             self.update_user(uid, **kw)
             if d.get("disabled") is True:
                 self.revoke_user_sessions(uid)
             return jsonify({"ok": True})
 
-        # ---- feature catalog + groups -------------------------------------
         @app.route("/api/auth/features")
         @require_admin
         def _features():
