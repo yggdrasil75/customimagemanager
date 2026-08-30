@@ -264,8 +264,8 @@ class ThreadManager:
                 # A bug in one source's claim/dispatch must never kill the only
                 # background thread — that would silently stop ALL cycling. Log
                 # via stderr and keep going after a short breather.
-                import traceback, sys
-                traceback.print_exc(file=sys.stderr)
+                # import traceback, sys
+                # traceback.print_exc(file=sys.stderr)
                 time.sleep(POLL)
 
     def _process_once(self, POLL):

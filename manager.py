@@ -3388,13 +3388,13 @@ def _yolo_key(model_path):
 def _build_yolo(model_path):
     canon = _canonical_yolo_path(model_path)
     access_logger.info("Loading YOLO model %s", canon)
-    if access_logger.isEnabledFor(logging.DEBUG):
-        try:
-            import traceback
-            stack = "".join(traceback.format_stack(limit=8)[:-1])
-            access_logger.debug("BUILD_YOLO %s\n%s", canon, stack)
-        except Exception:
-            pass
+    # if access_logger.isEnabledFor(logging.DEBUG):
+    #     try:
+    #         import traceback
+    #         stack = "".join(traceback.format_stack(limit=8)[:-1])
+    #         access_logger.debug("BUILD_YOLO %s\n%s", canon, stack)
+    #     except Exception:
+    #         pass
     m = YOLO(canon)
     try:
         m.fuse()

@@ -104,10 +104,10 @@ model.train(data=yaml_path, epochs=epochs, batch=batch, imgsz=imgsz, device=devi
             
     except Exception as e:
         jobs[job_id]["status"] = "failed"
-        error_details = traceback.format_exc()
-        with open(log_file, "a", encoding="utf-8") as lf:
-            lf.write(f"\n[ERROR] Thread failed: {str(e)}\n")
-            lf.write(f"Traceback:\n{error_details}\n")
+        # error_details = traceback.format_exc()
+        # with open(log_file, "a", encoding="utf-8") as lf:
+        #     lf.write(f"\n[ERROR] Thread failed: {str(e)}\n")
+        #     lf.write(f"Traceback:\n{error_details}\n")
 
 @app.route('/api/start_train', methods=['POST'])
 def start_train():
