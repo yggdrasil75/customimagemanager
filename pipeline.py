@@ -54,7 +54,8 @@ substituted before the call.
 """
 
 import numpy as np
-import cv2
+from optional_deps import optional_import
+cv2, _HAVE_CV2 = optional_import("cv2")
 
 SCHEMA = "mm.analysis/1"
 

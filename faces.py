@@ -33,7 +33,8 @@ import object_grouping as og
 import model_registry
 import face_models as facemodels
 import urllib.request
-import cv2
+from optional_deps import optional_import
+cv2, _HAVE_CV2 = optional_import("cv2")
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 

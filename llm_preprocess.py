@@ -36,17 +36,20 @@ Config shape (a plain dict, e.g. from app state under 'llm_preprocess'):
   }
 """
 
-import cv2
 import numpy as np
+from optional_deps import optional_import
+cv2, _HAVE_CV2 = optional_import("cv2")
 
 # --- selectable OpenCV interpolation methods for the compress step ----------
-INTERP_METHODS = {
+INTERP_METHODS = ({
     "nearest":  cv2.INTER_NEAREST,
     "linear":   cv2.INTER_LINEAR,
     "cubic":    cv2.INTER_CUBIC,
     "area":     cv2.INTER_AREA,     # best for downscaling
     "lanczos4": cv2.INTER_LANCZOS4,
-}
+} if _HAVE_CV2 else {
+    "nearest": None, "linear": None, "cubic": None, "area": None, "lanczos4": None,
+})
 
 # --- the ratios a model is allowed to be padded to (w/h) --------------------
 # Extreme inputs get snapped to the nearest of whichever of these are enabled.

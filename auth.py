@@ -17,6 +17,7 @@ from flask import request, jsonify, redirect, g, render_template
 from werkzeug.security import generate_password_hash, check_password_hash
 
 import features
+import capabilities
 from cimlogger import audit
 
 log = logging.getLogger("auth")
@@ -38,6 +39,10 @@ def require_feature(feature_key, action=None, fields=()):
             u = g.get("user")
             if not u:
                 return jsonify({"error": "authentication required"}), 401
+            # Capability denials bind even admins: if the box can't run it
+            # (missing dep), the route 503s rather than crashing mid-request.
+            if capabilities.capability_denials().get(feature_key) is False:
+                return jsonify({"error": "feature unavailable on this server"}), 503
             if not u.get("is_admin"):
                 feats = u.get("features") or {}
                 if feats.get(feature_key) is False:
@@ -180,6 +185,10 @@ class Auth:
 
     def effective_perms_for(self, user_row):
         """@brief Resolve effective feature map: group role/perms, then user's own on top."""
+        perms = self._resolve_perms(user_row)
+        return capabilities.apply_machine_limits(perms)
+
+    def _resolve_perms(self, user_row):
         if user_row is None:
             return features.effective_permissions("viewer", {})
         if user_row["is_admin"]:

@@ -19,9 +19,12 @@ Key architectural decisions vs the naive version:
 - Background workers use daemon threads; startup is non-blocking.
 """
 
-import os, glob, cv2, yaml, subprocess, shutil, sys, numpy as np
+import os, glob, yaml, subprocess, shutil, sys, numpy as np
 import tempfile, io, time, random, json, threading, logging
-import requests, base64, re, pyexiv2, xml.sax.saxutils as saxutils
+import requests, base64, re, xml.sax.saxutils as saxutils
+from optional_deps import optional_import
+cv2, _HAVE_CV2 = optional_import("cv2")
+pyexiv2, _HAVE_PYEXIV2 = optional_import("pyexiv2")
 import hashlib, sqlite3, uuid, math, mimetypes, functools
 import urllib.request, urllib.parse
 import atexit, contextlib
@@ -32,14 +35,14 @@ from concurrent.futures import ThreadPoolExecutor
 import thread_manager
 from werkzeug.utils import secure_filename
 from flask import Flask, render_template, render_template_string, request, jsonify, send_file, Response, g
-from ultralytics import YOLO
+YOLO, _HAVE_YOLO = optional_import("ultralytics", attr="YOLO")
 import faces as facelib
 import bodies as bodylib
 import persons as personlib
 import face_mesh as facemeshlib
 import face_models as facemodels
 import appearances
-import imagecodecs
+imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
 from dup_heuristics import DuplicateClassifier, classify_pair, extract_features
 from dup_cnn import DupCNN, encode_pair
 import object_grouping as og
@@ -99,7 +102,7 @@ from pipeline import DEFAULT_PIPELINE, run_pipeline, _kpts_in_box
 import llm_preprocess
 from templates import HTML, TRAINING_HTML
 
-import easyocr
+easyocr, _HAVE_EASYOCR = optional_import("easyocr")
 
 # ── NR-IQA star mapping ───────────────────────────────────────────────────────
 # iqa.assess() now returns a NORMALIZED quality in 0..1 (higher = better) no
@@ -3386,6 +3389,9 @@ def _yolo_key(model_path):
     return f"manager:yolo:{_canonical_yolo_path(model_path)}"
 
 def _build_yolo(model_path):
+    if not _HAVE_YOLO:
+        raise RuntimeError("ultralytics is not installed on this server; "
+                           "YOLO detection/segmentation is unavailable")
     canon = _canonical_yolo_path(model_path)
     access_logger.info("Loading YOLO model %s", canon)
     # if access_logger.isEnabledFor(logging.DEBUG):

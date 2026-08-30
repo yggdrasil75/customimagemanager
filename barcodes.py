@@ -1,12 +1,12 @@
-
 from __future__ import annotations
 
 import base64
 import logging
 import math
 
-import cv2
 import numpy as np
+from optional_deps import optional_import
+cv2, _HAVE_CV2 = optional_import("cv2")
 
 log = logging.getLogger(__name__)
 

@@ -38,10 +38,15 @@ import shutil
 import tempfile
 import threading
 
-import gallery_dl.config as _gconfig
-from gallery_dl import exception as _gexc
-from gallery_dl.extractor import find as _find_extractor
-from gallery_dl.job import DataJob, DownloadJob
+from optional_deps import optional_import
+# gallery-dl is optional; without it the Fetch feature is hidden (capabilities.py)
+# and these stay None. Every entry point below guards on _HAVE_GDL.
+_gconfig, _HAVE_GDL = optional_import("gallery_dl.config")
+_gexc, _ = optional_import("gallery_dl.exception")
+_find_extractor, _ = optional_import("gallery_dl.extractor", attr="find")
+_gjob, _ = optional_import("gallery_dl.job")
+DataJob = getattr(_gjob, "DataJob", None) if _gjob else None
+DownloadJob = getattr(_gjob, "DownloadJob", None) if _gjob else None
 
 _log = logging.getLogger("gdl")
 
@@ -62,9 +67,10 @@ class GdlError(RuntimeError):
     pass
 
 def available():
-    """True if the gallery-dl library is importable (it is, if this module
-    imported at all — kept as a function so callers/UI have a clean check)."""
-    return True
+    """True if the gallery-dl library is importable. This module now imports
+    cleanly even when gallery-dl is absent (optional dep), so callers/UI must
+    check this rather than assume presence."""
+    return _HAVE_GDL
 
 def _opts_to_kvlist(opts):
     """Turn ["extractor.danbooru.username=me", ...] into the (path, key, value)
@@ -124,6 +130,8 @@ def discover_fields(url, opts=None, resolve=2):
     descends into actual per-post metadata instead of stopping at the parent —
     the fields returned are the real ones a download would expose. `opts` passes
     site credentials explicitly (see module docstring)."""
+    if not _HAVE_GDL:
+        raise GdlError("gallery-dl is not installed on this server")
     if not _find_extractor(url):
         raise GdlError(f"No gallery-dl extractor matches that URL: {url}")
     with _lock, _fresh_config(opts):
@@ -152,6 +160,8 @@ def site_of(url, opts=None):
     return getattr(extr, "category", "") if extr else ""
 
 def download(url, dest, opts=None, on_file=None):
+    if not _HAVE_GDL:
+        raise GdlError("gallery-dl is not installed on this server")
     os.makedirs(dest, exist_ok=True)
     if not _find_extractor(url):
         raise GdlError(f"No gallery-dl extractor matches that URL: {url}")

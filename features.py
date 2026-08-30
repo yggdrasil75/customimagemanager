@@ -93,6 +93,12 @@ FEATURE_SECTIONS = {
             ("data.upload",       "Upload / drag-drop files"),
         ],
     },
+    "viewers": {
+        "label": "Viewers",
+        "features": [
+            ("view.3d", "3D viewer (mesh / body)"),
+        ],
+    },
     "comics": {
         "label": "Comics",
         "features": [
