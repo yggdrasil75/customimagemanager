@@ -4005,12 +4005,16 @@ def _claim_face_job():
         return None
     if not forced and not thread_manager.is_idle():
         return None
-    if not thread_manager.source_idle("face"):
+    if not thread_manager.try_acquire_key("face-scan"):
         return None
-    batch = thread_manager.face_batch_size()
-    rows = _db().execute(
-        "SELECT rel_path FROM files WHERE COALESCE(face_done,0)=0 LIMIT ?",
-        (batch,)).fetchall()
+    try:
+        batch = thread_manager.face_batch_size()
+        rows = _db().execute(
+            "SELECT rel_path FROM files WHERE COALESCE(face_done,0)=0 LIMIT ?",
+            (batch,)).fetchall()
+    except Exception:
+        thread_manager.release_key("face-scan")
+        raise
     if not rows:
         if _face_dirty["v"]:
             state["status_text"] = "Face scan: clustering…"
@@ -4022,6 +4026,7 @@ def _claim_face_job():
         else:
             state["status_text"] = "Face scan: all caught up."
         _face_force["v"] = False
+        thread_manager.release_key("face-scan")   # nothing to run: don't leak the gate
         return None
     left = _db().execute(
         "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
@@ -4032,7 +4037,8 @@ def _claim_face_job():
 
 def _register_face_source():
     thread_manager.register_source(
-        "face", _claim_face_job, _face_process_one)
+        "face", _claim_face_job, _face_process_one,
+        key_of=lambda job: "face-scan")
 
 def _mark_face_done(rel: str) -> None:
     """! @brief Mark a file's face-boxing pass complete."""
