@@ -67,9 +67,6 @@ services:
     devices:
       - /dev/kfd
       - /dev/dri
-    group_add:
-      - "${RENDER_GID:-render}"
-      - "${VIDEO_GID:-video}"
     security_opt:
       - seccomp:unconfined
     ipc: host
