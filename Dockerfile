@@ -24,8 +24,7 @@ WORKDIR /app
 
 COPY requirements.txt requirements-cpu.txt requirements-cuda.txt requirements-rocm.txt ./
 RUN echo "Installing GPU backend: ${GPU_BACKEND}" \
-    && pip install -r "requirements-${GPU_BACKEND}.txt" \
-    && pip install -r requirements.txt
+    && pip install -r "requirements-${GPU_BACKEND}.txt" -r requirements.txt
 
 COPY . .
 
