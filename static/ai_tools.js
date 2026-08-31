@@ -309,6 +309,7 @@ async function persistAiSettings(){
       pose_size:_v('cfg_pose_size'),
       pose_estimator:_v('cfg_pose_estimator'),
       shape_estimator:_v('cfg_shape_estimator'),
+      face_estimator:_v('cfg_face_estimator'),
       appearance_eps:parseFloat(_v('cfg_appearance_eps'))||0.35,
       oai_system_prompt:_v('cfg_system'),
       llm_preprocess:{

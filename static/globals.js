@@ -310,6 +310,7 @@ function populateSettingsForm(s){
       _set('cfg_pose_kind', s.pose_kind||'body');
       _set('cfg_pose_estimator', s.pose_estimator||'atlas');
       _set('cfg_shape_estimator', s.shape_estimator||'anny_fit');
+      _set('cfg_face_estimator', s.face_estimator||'auto');
       _set('cfg_appearance_eps', (s.appearance_eps??0.35));
       _set('cfg_pose_size', s.pose_size||'n');
       _set('cfg_system', s.oai_system_prompt||'');

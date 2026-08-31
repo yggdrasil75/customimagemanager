@@ -156,6 +156,16 @@
             </select>
           </div>
           <div>
+            <span class="text-[10px] text-gray-500 block mb-0.5">Face estimator</span>
+            <select id="cfg_face_estimator"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+              <option value="auto">Auto (best available)</option>
+              <option value="landmarks3d">Landmarks-3D · no download</option>
+              <option value="insight3d">InsightFace 3DMM · needs BFM basis</option>
+              <option value="deep3d">Deep3D · needs deep3d_runner</option>
+            </select>
+          </div>
+          <div>
             <span class="text-[10px] text-gray-500 block mb-0.5">Barcode model</span>
             <select id="cfg_barcode_model"
               class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
@@ -170,7 +180,9 @@
         </div>
         <p class="text-[10px] text-gray-600 mt-1.5">Appearance split groups a person's photos
           into life-eras by face-embedding drift; lower eps = more, tighter eras. Shape/pose
-          estimators are optional body-mesh backends.</p>
+          estimators are optional body-mesh backends. Face estimator picks the 3D
+          face backend: Landmarks-3D works with no extra download; InsightFace 3DMM
+          needs a BFM basis; Deep3D needs the optional runner.</p>
         <p class="text-[10px] text-gray-600 mt-1">Whole-body pose needs <code>rtmlib</code> +
           <code>onnxruntime</code>; OCR needs <code>rapidocr_onnxruntime</code> or <code>easyocr</code>. Weights
           download automatically on first use.</p>
