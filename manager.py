@@ -7971,10 +7971,14 @@ def api_gdl_fields():
     url = (request.json or {}).get("url", "").strip()
     if not url:
         return jsonify({"success": False, "error": "url required"}), 400
-    # We don't know the site until discovery runs, so we apply the global ("")
-    # opts and compiled global auth here; site-specific auth can be added and
-    # re-checked once the category is known.
+    pre_site = ""
+    try:
+        pre_site = gdl.site_of(url) or ""
+    except Exception:
+        pre_site = ""
     opts = list(state.get("gdl_opts", {}).get("", [])) + _gdl_compile_auth("")
+    if pre_site:
+        opts += list(state.get("gdl_opts", {}).get(pre_site, [])) + _gdl_compile_auth(pre_site)
     try:
         info = gdl.discover_fields(url, opts=opts)
     except gdl.GdlError as e:

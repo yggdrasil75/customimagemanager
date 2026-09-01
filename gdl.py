@@ -136,8 +136,11 @@ def discover_fields(url, opts=None, resolve=2):
         raise GdlError(f"No gallery-dl extractor matches that URL: {url}")
     with _lock, _fresh_config(opts):
         job = DataJob(url, file=None, resolve=resolve)
-        job.run()
+        status = job.run()
         meta_dicts = list(job.data_meta)
+        err = getattr(job, "exception", None)
+        if not err and status:
+            err = GdlError(f"gallery-dl exited with status {status}")
 
     fields, site = set(), ""
     for kw in meta_dicts:
@@ -150,7 +153,7 @@ def discover_fields(url, opts=None, resolve=2):
     if not fields:
         # data_meta empty usually means the extractor errored before yielding.
         msg = str(err) if err else "gallery-dl found no metadata for that URL."
-        raise GdlError(msg)
+        raise GdlError(msg) from (err if isinstance(err, BaseException) else None)
     return {"site": site, "fields": sorted(fields)}
 
 def site_of(url, opts=None):
