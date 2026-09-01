@@ -88,7 +88,7 @@ async function _gdlRenderRows(saved) {
     const row = document.createElement('div');
     row.className = 'flex items-center gap-2 py-0.5';
     row.innerHTML =
-      `<code class="flex-1 text-xs text-gray-300 truncate" title="${field}">${field}</code>` +
+      `<code class="flex-1 text-xs text-gray-300 truncate" title="${_esc(field)}">${_esc(field)}</code>` +
       `<select data-field="${field}"
          class="gdl-map-sel w-52 p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white">
          ${optsHTML}</select>` +

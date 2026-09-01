@@ -142,19 +142,31 @@ def discover_fields(url, opts=None, resolve=2):
         if not err and status:
             err = GdlError(f"gallery-dl exited with status {status}")
 
+    if err:
+        raise GdlError(str(err)) from (err if isinstance(err, BaseException) else None)
+
+    expected = site_of(url) or ""
     fields, site = set(), ""
     for kw in meta_dicts:
         if not isinstance(kw, dict):
             continue
+        cat = kw.get("category") or kw.get("subcategory") or ""
+        # A dict whose category doesn't match the URL's extractor didn't come
+        # from real post metadata — it's a login/interstitial page bleeding in.
+        # Skip it rather than flatten its CSS/markup into the field list.
+        if expected and cat and cat != expected:
+            continue
         flat = _flatten(kw)
         fields.update(flat.keys())
-        site = site or flat.get("category") or flat.get("subcategory") or ""
+        site = site or cat
 
     if not fields:
-        # data_meta empty usually means the extractor errored before yielding.
-        msg = str(err) if err else "gallery-dl found no metadata for that URL."
-        raise GdlError(msg) from (err if isinstance(err, BaseException) else None)
-    return {"site": site, "fields": sorted(fields)}
+        # No usable metadata. For a login-gated site with no creds this is the
+        # common path, so point the user at the likely cause.
+        hint = " (this site may require login — set an auth method and retry)"
+        raise GdlError(
+            f"gallery-dl found no metadata for that URL.{hint if expected else ''}")
+    return {"site": site or expected, "fields": sorted(fields)}
 
 def site_of(url, opts=None):
     """The extractor category for a URL (e.g. 'danbooru'), from the extractor
