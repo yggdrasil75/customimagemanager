@@ -46,8 +46,11 @@ CAPABILITY_PROBES = {
     "torch":        lambda: _installed("torch"),
     "onnxruntime":  lambda: _installed("onnxruntime")
                             or _installed("onnxruntime_gpu"),
-    "ultralytics":  lambda: _installed("ultralytics"),      # YOLO autotag/segment
-    "mediapipe":    lambda: _installed("mediapipe"),        # pose / face mesh
+    "ultralytics":  lambda: _installed("ultralytics"),      # YOLO autotag/segment/pose
+    "rtmlib":       lambda: _installed("rtmlib")            # optional whole-body pose
+                            and (_installed("onnxruntime")
+                                 or _installed("onnxruntime_gpu")),
+    "mediapipe":    lambda: _installed("mediapipe"),        # (legacy; not used by pose)
     # 3D viewer / mesh fitting
     "trimesh":      lambda: _installed("trimesh"),
     # OCR
@@ -67,9 +70,8 @@ CAPABILITY_PROBES = {
 CAPABILITY_FEATURES = {
     "insightface": ["tab.faces", "tab.faces.edit"],
     "trimesh":     ["view.3d"],          # new leaf; see features.py patch
-    "ultralytics": ["ai.autotag", "ai.segment"],
+    "ultralytics": ["ai.autotag", "ai.segment", "ai.pose", "ai.pose_remove"],
     "torch":       ["ai.smarttag", "ai.iqa", "dedup"],
-    "mediapipe":   ["ai.pose", "ai.pose_remove"],
     "ocr":         ["ai.ocr"],
     "barcodes":    ["ai.barcodes"],
     "gallery_dl":  ["fetch"],

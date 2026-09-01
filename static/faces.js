@@ -640,15 +640,16 @@ function _renderPersonEditor(cid, d) {
         <div class="grid grid-cols-2 gap-1.5">${bodyRows}</div>
         <div class="flex items-center gap-2 mt-2">
           <button onclick="estimatePose(${cid},'${a.id}')"
-            class="text-xs bg-teal-700 hover:bg-teal-600 px-2 py-1 rounded font-bold">
+            class="text-xs bg-teal-700 hover:bg-teal-600 px-2 py-1 rounded font-bold"
+            title="Fuses this appearance's pose skeletons into one canonical T-pose. Needs the pose stage to have run and at least 2 full-torso views (both shoulders + hips visible).">
             ${a.has_tpose ? 'Re-estimate T-pose' : 'Estimate T-pose'}</button>
           <button onclick="estimateMesh(${cid},'${a.id}')" ${d.mesh_estimator ? '' : 'disabled'}
             class="text-xs bg-teal-700 hover:bg-teal-600 disabled:opacity-40 px-2 py-1 rounded font-bold"
             title="${d.mesh_estimator ? '' : 'shape estimator not installed'}">
             ${a.has_mesh ? 'Re-estimate mesh' : 'Estimate mesh'}</button>
-          <button onclick="estimateFaceMesh(${cid},'${a.id}')" ${d.face_estimator ? '' : 'disabled'}
-            class="text-xs bg-indigo-700 hover:bg-indigo-600 disabled:opacity-40 px-2 py-1 rounded font-bold"
-            title="${d.face_estimator ? ('3D face via ' + (d.face_estimator_name || 'estimator')) : 'no face-mesh estimator installed'}">
+          <button onclick="estimateFaceMesh(${cid},'${a.id}')"
+            class="text-xs bg-indigo-700 hover:bg-indigo-600 px-2 py-1 rounded font-bold"
+            title="${d.face_estimator ? ('3D face via ' + (d.face_estimator_name || 'estimator')) : 'Fits a sparse 3D face from this appearance photos using landmarks already produced by the face model. No extra download.'}">
             ${a.has_face_mesh ? 'Re-estimate face' : 'Estimate face'}</button>
           <span id="person_status_${cid}_${a.id}" class="text-[10px] text-gray-400"></span>
         </div>
@@ -750,7 +751,18 @@ async function _personTask(cid, appearanceId, path, label) {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ appearance_id: appearanceId })
   })).json();
-  if (s) s.textContent = d.success ? label + ' done.' : label + ' unavailable.';
+  if (s) {
+    if (d.success) {
+      s.textContent = label + ' done.';
+      s.className = 'text-[10px] text-green-400';
+      s.title = '';
+    } else {
+      const why = d.reason || (label + ' unavailable.');
+      s.textContent = why;
+      s.className = 'text-[10px] text-amber-400';
+      s.title = why;
+    }
+  }
   // Re-pull the record so the mesh viewer + editor reflect the new tpose/mesh.
   if (d.success) {
     const dd = await (await fetch('/api/persons/' + cid)).json();
@@ -765,6 +777,8 @@ const estimateMesh = (cid, aid) => _personTask(cid, aid, '/mesh', 'Mesh');
 // After estimating a face mesh, flip the viewer to Face mode so the result shows
 // without the user having to hit the toggle.
 async function estimateFaceMesh(cid, aid) {
+  const s = document.getElementById('person_status_' + cid + '_' + aid);
+  if (s) { s.className = 'text-[10px] text-gray-400'; s.textContent = 'Face mesh…'; }
   await _personTask(cid, aid, '/face_mesh', 'Face mesh');
   if (window.personView && window.personView.setView) window.personView.setView('face');
 }

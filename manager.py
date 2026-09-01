@@ -186,15 +186,11 @@ state = {
     "model_groups": {},
     "pose_kind": "body",
     "pose_size": "n",
-    # Appearance clustering: cosine-distance threshold below which two of a
-    # person's faces belong to the same era. Higher = fewer, broader eras.
     "appearance_eps": 0.35,
     "shape_estimator": "anny_fit",
     "pose_estimator": "atlas",
+    "face_estimator": "auto",
     "page_size": 200,
-    # Storage-tiering config, persisted here in app_config.json (migrated from the
-    # legacy standalone tiers_config.json on first run by tiering.load_cfg). The
-    # tiering module owns the schema; this is just the persisted blob.
     "tiers": None,
     "search_quick_filters": [
         {"id": "1", "label": "Untagged",   "query": "is:untagged"},
@@ -4195,23 +4191,30 @@ def _resolve_appearance(cluster_id: int, appearance_id: Optional[str]):
     app = personlib.get_appearance(desc, appearance_id or "") if desc else None
     return person_uuid, app
 
-def estimate_person_tpose(cluster_id: int, appearance_id: Optional[str] = None) -> bool:
+def estimate_person_tpose(cluster_id: int, appearance_id: Optional[str] = None):
     """! @brief Aggregate one appearance's skeletons into a canonical T-pose in the record.
-    @return True when a T-pose was estimated and written for that era; False if the
-            person/era is unresolved or too few skeletons anchor it.
+    @return (True, "") when a T-pose was estimated and written for that era; otherwise
+            (False, reason) with a user-facing explanation of what is missing.
     """
     person_uuid, app = _resolve_appearance(cluster_id, appearance_id)
     if app is None:
-        return False
+        return False, "No person/appearance is linked to this cluster yet."
     skeletons = _person_cluster_skeletons(cluster_id, set(app["rel_paths"]))
+    if not skeletons:
+        return False, ("No pose skeletons found for this appearance. Run the pose "
+                       "stage on these images first (Pipeline \u2192 Pose), or check "
+                       "that .xmp sidecars with keypoints exist next to the images.")
     tpose = pose.aggregate_tpose(skeletons, pose.COCO_KP_NAMES, pose.COCO_SKELETON)
     if tpose is None:
-        return False
+        return False, (f"Found {len(skeletons)} skeleton(s), but too few have both "
+                       "shoulders and hips visible to anchor a T-pose (need at least "
+                       "2 full-torso views). Add clearer full-body images of this "
+                       "appearance.")
     personlib.put_member(MEDIA_DIR, person_uuid,
                          personlib.tpose_member(app["id"]), json.dumps(tpose).encode())
     app["has_tpose"] = True
     personlib.upsert_appearance(MEDIA_DIR, person_uuid, app)
-    return True
+    return True, ""
 
 def _person_body_crops(cluster_id: int, rel_set: set, min_frac: float = 0.15,
                        cap: int = 400):
@@ -4249,21 +4252,24 @@ def estimate_person_mesh(cluster_id: int, appearance_id: Optional[str] = None) -
             dropped — never mixed across eras, never a single view.
     """
     if not bodylib.have_mesh_estimator():
-        return False
+        return False, ("No body-mesh estimator is installed. Install the optional "
+                       "SMPL body estimator and its weights to enable this.")
     person_uuid, app = _resolve_appearance(cluster_id, appearance_id)
     if app is None:
-        return False
+        return False, "No person/appearance is linked to this cluster yet."
     crops = _person_body_crops(cluster_id, set(app["rel_paths"]))
     if not crops:
-        return False
+        return False, ("No usable body crops for this appearance (need body regions "
+                       "at least 15% of the image). Add clearer full-body images.")
     mesh = bodylib.estimate_shape(crops)
     if mesh is None:
-        return False
+        return False, (f"Loaded {len(crops)} body crop(s) but the estimator could "
+                       "not fit a stable shape across them.")
     obj = bodylib.mesh_to_obj(*mesh)
     personlib.put_member(MEDIA_DIR, person_uuid, personlib.mesh_member(app["id"]), obj)
     app["has_mesh"] = True
     personlib.upsert_appearance(MEDIA_DIR, person_uuid, app)
-    return True
+    return True, ""
 
 def _person_face_crops(cluster_id: int, rel_set: set,
                        min_frac: float = facemeshlib.MIN_FACE_FRAC,
@@ -4307,22 +4313,27 @@ def estimate_person_face_mesh(cluster_id: int,
           so the viewer's Face/Body toggle picks which to load.
     """
     if not facemeshlib.have_face_estimator():
-        return False
+        return False, ("No face estimator available: the buffalo_l face model isn't "
+                       "loadable. Ensure insightface and its models are installed — "
+                       "the default landmark-based face mesh needs no extra download.")
     person_uuid, app = _resolve_appearance(cluster_id, appearance_id)
     if app is None:
-        return False
+        return False, "No person/appearance is linked to this cluster yet."
     crops = _person_face_crops(cluster_id, set(app["rel_paths"]))
     if not crops:
-        return False
-    mesh = facemeshlib.estimate_shape(crops)
+        return False, ("No usable face crops for this appearance (need face regions "
+                       f"at least {int(facemeshlib.MIN_FACE_FRAC*100)}% of the image, "
+                       "confirmed and not marked unknown). Add clearer face images.")
+    mesh = facemeshlib.estimate_shape(crops, prefer=(state.get("face_estimator") or "auto"))
     if mesh is None:
-        return False
+        return False, (f"Loaded {len(crops)} face crop(s) but the estimator could "
+                       "not fit a stable identity shape across them.")
     obj = facemeshlib.mesh_to_obj(*mesh)
     personlib.put_member(MEDIA_DIR, person_uuid,
                          personlib.face_mesh_member(app["id"]), obj)
     app["has_face_mesh"] = True
     personlib.upsert_appearance(MEDIA_DIR, person_uuid, app)
-    return True
+    return True, ""
 
 # ── OCR ─────────────────────────────────────────────────────────────────────--
 @functools.lru_cache(maxsize=1)
@@ -5739,24 +5750,36 @@ def api_persons_review():
     """One-sided relationship edges for the review tab (never auto-repaired)."""
     return jsonify({"success": True, "problems": personlib.check_reciprocity(MEDIA_DIR)})
 
+def _run_estimator(fn, cluster_id, appearance_id):
+    """Run an estimator and turn any unexpected error into a clean (False, reason)
+    JSON response. Normal 'can't do it' cases already return (False, reason); this
+    only catches genuine faults (e.g. a corrupt insightface install raising on the
+    canonical mean shape) so the UI shows why instead of an opaque 500."""
+    try:
+        ok, reason = fn(cluster_id, appearance_id)
+    except Exception as e:
+        access_logger.error(f"{fn.__name__}: {e}")
+        ok, reason = False, f"{type(e).__name__}: {e}"
+    return jsonify({"success": ok, "reason": reason})
+
 @app.route("/api/persons/<int:cluster_id>/tpose", methods=["POST"])
 def api_person_tpose(cluster_id):
     """Estimate and store the canonical T-pose for one appearance."""
     d = request.json or {}
-    return jsonify({"success": estimate_person_tpose(cluster_id, d.get("appearance_id"))})
+    return _run_estimator(estimate_person_tpose, cluster_id, d.get("appearance_id"))
 
 @app.route("/api/persons/<int:cluster_id>/mesh", methods=["POST"])
 def api_person_mesh(cluster_id):
     """Estimate and store the body mesh for one appearance (no-op if estimator absent)."""
     d = request.json or {}
-    return jsonify({"success": estimate_person_mesh(cluster_id, d.get("appearance_id"))})
+    return _run_estimator(estimate_person_mesh, cluster_id, d.get("appearance_id"))
 
 @app.route("/api/persons/<int:cluster_id>/face_mesh", methods=["POST"])
 def api_person_face_mesh(cluster_id):
     """Estimate and store the 3D FACE mesh for one appearance (no-op if no face
     estimator is installed)."""
     d = request.json or {}
-    return jsonify({"success": estimate_person_face_mesh(cluster_id, d.get("appearance_id"))})
+    return _run_estimator(estimate_person_face_mesh, cluster_id, d.get("appearance_id"))
 
 @app.route("/api/persons/<int:cluster_id>/face_mesh_data/<appearance_id>")
 def api_person_face_mesh_data(cluster_id, appearance_id):
@@ -6104,7 +6127,7 @@ def api_state():
         ("classes","available_models","status_text","remote_ip",
          "oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions",
          "autotag_enabled","pipeline_tree","yolo_size","pose_kind","pose_size",
-         "appearance_eps","shape_estimator","pose_estimator",
+         "appearance_eps","shape_estimator","pose_estimator","face_estimator",
          "face_bg_enabled","face_bg_custom","face_detector","face_recognition","person_model","our_model",
          "face_cluster_eps","face_reject_drawn","face_drawn_thresh","body_enabled","body_size","body_cluster_eps","object_proposals",
          "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
@@ -6164,7 +6187,7 @@ def update_settings():
     if "our_model" in d and d["our_model"] != state.get("our_model"):
         _load_yolo.cache_clear()
     for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","llm_preprocess","pipeline_tree","yolo_size","pose_kind","pose_size",
-              "appearance_eps","shape_estimator","pose_estimator",
+              "appearance_eps","shape_estimator","pose_estimator","face_estimator",
               "face_bg_enabled","face_bg_custom","face_detector","face_recognition","person_model","our_model","face_cluster_eps",
             "face_reject_drawn","face_drawn_thresh",
               "body_enabled","body_size","body_cluster_eps","object_proposals","iqa_model",
@@ -11363,6 +11386,39 @@ def api_pose():
         return jsonify({"success": True, "pose": pose_data,
                         "note": "No people detected (or pose model unavailable)."})
     return jsonify({"success": True, "pose": pose_data})
+
+@app.route("/api/bulk_pose", methods=["POST"])
+@_auth.require_feature("ai.pose")
+def bulk_pose():
+    """Estimate a skeleton/pose for many files and store each in its sidecar.
+    Mirrors /api/pose over a selection. Body: {filenames}. This is what feeds
+    the per-appearance T-pose aggregation, so running it over a person's images
+    is the prerequisite for 'Estimate T-pose'."""
+    filenames = request.json.get("filenames", [])
+    done, posed, errors = 0, 0, []
+    total = len(filenames)
+    for fn in filenames:
+        fp = get_safe_path(MEDIA_DIR, fn)
+        if not fp or not os.path.exists(fp):
+            errors.append(fn); continue
+        try:
+            img = read_jxl(fp)
+            if img is None:
+                errors.append(fn); continue
+            pose_data = _run_pose(_to_bgr(img))
+            meta = read_metadata(fp)
+            write_metadata(fp, meta["tags"], meta["description"],
+                           meta["regions"], pose=pose_data)
+            if (pose_data or {}).get("people"):
+                posed += 1
+            done += 1
+            state["status_text"] = f"Pose: {done}/{total} ({posed} with people)..."
+        except Exception as e:
+            errors.append(fn)
+            access_logger.error(f"bulk_pose {fn}: {e}")
+    state["status_text"] = "Ready."
+    return jsonify({"success": True, "done": done, "posed": posed,
+                    "errors": errors})
 
 @app.route("/api/pose_remove", methods=["POST"])
 @_auth.require_feature("ai.pose_remove", action='pose_remove', fields=('filename',))

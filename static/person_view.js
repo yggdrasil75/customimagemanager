@@ -35,7 +35,14 @@
     camera = new THREE.PerspectiveCamera(45, w / h, 0.01, 100);
     camera.position.set(0, 1.1, 3.2);
 
-    renderer = new THREE.WebGLRenderer({ antialias: true });
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+    } catch (e) {
+      console.warn("person_view: WebGL unavailable, showing placeholder", e);
+      renderer = null;
+      scene = camera = null;
+      return false;
+    }
     renderer.setPixelRatio(window.devicePixelRatio || 1);
     renderer.setSize(w, h);
     el.appendChild(renderer.domElement);
@@ -163,7 +170,7 @@
           const obj = new THREE.OBJLoader().parse(txt);
           obj.traverse(c => {
             if (c.isMesh) c.material = new THREE.MeshStandardMaterial(
-              { color: 0xd8c2a8, roughness: 0.7, metalness: 0.0, flatShading: false });
+              { color: 0xd8c2a8, roughness: 0.7, metalness: 0.0, flatShading: false, side: THREE.DoubleSide });
           });
           clearCurrent();
           current = obj; scene.add(obj); frame(obj);
@@ -181,7 +188,7 @@
         const obj = new THREE.OBJLoader().parse(txt);
         obj.traverse(c => {
           if (c.isMesh) c.material = new THREE.MeshStandardMaterial(
-            { color: 0xb0b4bb, roughness: 0.8, metalness: 0.0, flatShading: false });
+            { color: 0xb0b4bb, roughness: 0.8, metalness: 0.0, flatShading: false, side: THREE.DoubleSide });
         });
         clearCurrent();
         current = obj; scene.add(obj); frame(obj);
