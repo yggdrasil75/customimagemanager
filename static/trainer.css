@@ -1,0 +1,18 @@
+/* Trainer tab styles. Loaded by app.html alongside app.css. Kept here rather
+   than inline in the partial so the markup stays clean and the rules live with
+   the other stylesheets. */
+
+.trlbl { display:block; font-size:.65rem; color:#9ca3af; margin-bottom:.1rem; }
+.trinp { width:100%; padding:.3rem; background:#374151; border:1px solid #4b5563;
+         border-radius:.25rem; color:#fff; font-size:.75rem; }
+.trck  { display:flex; align-items:center; gap:.3rem; font-size:.7rem; color:#d1d5db; }
+
+#tr_grid .gallery-item.has-boxes  { border-color:#22c55e; }
+#tr_grid .gallery-item.tr-current { outline:3px solid #60a5fa; outline-offset:-3px; }
+
+.tr-vrow { display:flex; align-items:center; gap:.5rem; padding:.25rem .4rem;
+           border-radius:.25rem; cursor:pointer; background:#111827; }
+.tr-vrow:hover      { background:#1f2937; }
+.tr-vrow.tr-current { outline:2px solid #60a5fa; }
+.tr-vthumb { width:44px; height:44px; object-fit:cover; border-radius:.2rem; flex-shrink:0; }
+.tr-chip   { font-size:.6rem; padding:0 .3rem; border-radius:.6rem; }

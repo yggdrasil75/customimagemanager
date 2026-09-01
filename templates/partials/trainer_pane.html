@@ -78,6 +78,15 @@
       <button onclick="trToggleAdvanced()" id="tr_adv_toggle"
         class="text-xs text-purple-300 hover:text-purple-200">Advanced ▾</button>
     </div>
+    <!-- Box classes to train on. Leaving all unchecked = train on every class in
+         the set. Checking specific ones trains ONLY those; unrelated boxes on the
+         same images are ignored and never modified. -->
+    <div>
+      <label class="trlbl">Box classes <span class="text-gray-500">(none checked = all)</span></label>
+      <div id="tr_classes" class="max-h-24 overflow-y-auto bg-gray-900 border border-gray-700 rounded p-1 space-y-0.5">
+        <span class="text-xs text-gray-600">No labels yet.</span>
+      </div>
+    </div>
     <div class="grid grid-cols-2 gap-2">
       <div><label class="trlbl">Base</label>
         <select id="tr_base_model" class="trinp">
@@ -176,16 +185,3 @@
     </details>
   </div>
 </div>
-
-<style>
-  .trlbl{display:block;font-size:.65rem;color:#9ca3af;margin-bottom:.1rem}
-  .trinp{width:100%;padding:.3rem;background:#374151;border:1px solid #4b5563;border-radius:.25rem;color:#fff;font-size:.75rem}
-  .trck{display:flex;align-items:center;gap:.3rem;font-size:.7rem;color:#d1d5db}
-  #tr_grid .gallery-item.has-boxes{border-color:#22c55e}
-  #tr_grid .gallery-item.tr-current{outline:3px solid #60a5fa;outline-offset:-3px}
-  .tr-vrow{display:flex;align-items:center;gap:.5rem;padding:.25rem .4rem;border-radius:.25rem;cursor:pointer;background:#111827}
-  .tr-vrow:hover{background:#1f2937}
-  .tr-vrow.tr-current{outline:2px solid #60a5fa}
-  .tr-vthumb{width:44px;height:44px;object-fit:cover;border-radius:.2rem;flex-shrink:0}
-  .tr-chip{font-size:.6rem;padding:0 .3rem;border-radius:.6rem}
-</style>

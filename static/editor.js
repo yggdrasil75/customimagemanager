@@ -1,3 +1,20 @@
+// Populate the region-name datalist (#vt_labels) with existing box labels so
+// the still-image region modal offers a searchable dropdown. Also merges any
+// labels already on the current image. Cached per session; call is cheap.
+let _boxLabelsLoaded=false;
+function fillBoxLabels(){
+  const dl=document.getElementById('vt_labels');
+  if(!dl) return;
+  const put=(labels)=>{
+    const have=new Set([...dl.options].map(o=>o.value));
+    (labels||[]).forEach(l=>{ if(l && !have.has(l)){ const o=document.createElement('option'); o.value=l; dl.appendChild(o); have.add(l); }});
+  };
+  // labels already on this image (immediate), then the library-wide set (async).
+  put((typeof currentRegions!=='undefined'?currentRegions:[]).map(r=>r.class_name).filter(Boolean));
+  if(_boxLabelsLoaded) return;
+  fetch('/api/box_labels').then(r=>r.json()).then(d=>{ if(d.success){ put(d.labels); _boxLabelsLoaded=true; }}).catch(()=>{});
+}
+
 function saveRegion(){
   if(vtTagging){ vtOverlay.commitTag(document.getElementById('modal_region_name').value);
     document.getElementById('region_modal').classList.add('hidden'); return; }
@@ -17,6 +34,9 @@ function saveRegion(){
     }
     currentRegions.push(pendingBox);openIdx=currentRegions.length-1;pendingBox=null;}
   document.getElementById('region_modal').classList.add('hidden');
+  // Make a freshly-typed label immediately searchable next time.
+  if(name){ const dl=document.getElementById('vt_labels');
+    if(dl && ![...dl.options].some(o=>o.value===name)){ const o=document.createElement('option'); o.value=name; dl.appendChild(o); } }
   drawCanvas(); if(popoutOpen) drawPopout(); triggerAutosave();
   if(openIdx>=0) selectRegion(openIdx);   // jump straight into region tag/desc editing
 }

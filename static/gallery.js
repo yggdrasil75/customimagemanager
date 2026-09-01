@@ -458,6 +458,9 @@ async function selectFile(fn){
   // Repopulate the editor pane's album chips for this file (fire-and-forget:
   // it must not block the image/metadata load below).
   if(typeof refreshCurrentFileAlbums==='function') refreshCurrentFileAlbums();
+  // Fill the region-name datalist (vt_labels) with existing box labels so the
+  // still-image box editor has a searchable dropdown, like the video path does.
+  if(typeof fillBoxLabels==='function') fillBoxLabels();
   if(isVideoFile(fn)){
     // Native video: use the <video> element, hide the image canvas. Image
     // region boxes stay hidden; time-indexed video boxes render via vtOverlay.

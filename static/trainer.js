@@ -152,7 +152,7 @@
     jpost('/api/trainer/boxes', { action: 'read', filename: fn }).then(d => {
       const has = d.success && (d.regions || []).some(r => (r.class_name || '').trim());
       it.has_label = has;
-      renderCounts(); renderGrid();
+      renderCounts(); renderGrid(); loadClasses();
     }).catch(() => {});
   }
 
@@ -191,10 +191,34 @@
     const labelled = items.filter(i => i.has_label).length;
     if (!labelled) { alert('No images in this set have boxes yet. Click a tile and draw boxes in the editor.'); return; }
     if (!confirm(`Train on ${labelled} labelled image(s) from "${currentSet}"?`)) return;
-    const d = await jpost('/api/train', { set: currentSet, base_model: $('tr_base_model').value, cfg: collectCfg() });
+    const classes = selectedClasses();
+    const d = await jpost('/api/train', {
+      set: currentSet, base_model: $('tr_base_model').value, cfg: collectCfg(),
+      classes,
+    });
     if (!d.success) { trStatus('Train failed: ' + (d.error || '?')); return; }
     trStatus(`Training started (${d.train} train / ${d.val} val)`);
     startLogPoll();
+  }
+
+  // ── box-class filter ───────────────────────────────────────────────────────
+  // Checked classes scope training/validation to ONLY those box types; none
+  // checked = all classes. This never edits stored regions — it just filters
+  // what the generated dataset/diff includes.
+  async function loadClasses() {
+    const box = $('tr_classes');
+    if (!box) return;
+    let labels = [];
+    try { const d = await jget('/api/box_labels'); if (d.success) labels = d.labels || []; }
+    catch (e) { /* leave empty */ }
+    if (!labels.length) { box.innerHTML = '<span class="text-xs text-gray-600">No labels yet.</span>'; return; }
+    const prev = new Set(selectedClasses());
+    box.innerHTML = labels.map(l =>
+      `<label class="trck"><input type="checkbox" class="tr-cls accent-purple-500" value="${l.replace(/"/g, '&quot;')}"
+        ${prev.has(l) ? 'checked' : ''}> ${l}</label>`).join('');
+  }
+  function selectedClasses() {
+    return [...document.querySelectorAll('#tr_classes .tr-cls:checked')].map(c => c.value);
   }
 
   function trStatus(t) { const el = $('tr_status'); if (el) el.innerText = t; }
@@ -225,6 +249,7 @@
       add_new: num('tr_val_addnew'),
       iou_ok: num('tr_val_iouok'),
       conf: num('tr_val_conf'),
+      classes: selectedClasses(),
     };
     $('tr_val_summary').innerHTML = '<span class="text-gray-400">Running the model over the set…</span>';
     $('tr_val_list').innerHTML = '';
@@ -296,7 +321,8 @@
       if (b.pred) regions.push({ ...b.pred, confirmed: true });
       else if (b.verdict === 'dropped' && b.gt) regions.push({ ...b.gt, confirmed: true });
     });
-    const d = await jpost('/api/trainer/apply_prediction', { filename: rel, regions });
+    const d = await jpost('/api/trainer/apply_prediction',
+      { filename: rel, regions, classes: selectedClasses() });
     if (!d.success) { alert('Accept failed: ' + (d.error || '?')); return; }
     const it = items.find(x => x.rel_path === rel);
     if (it) it.has_label = regions.some(r => (r.class_name || '').trim());
@@ -310,7 +336,8 @@
   let _inited = false;
   function trInit() {
     _inited = true;
-    loadSets();   // always refresh on open (sets/boxes may have changed elsewhere)
+    loadSets();      // always refresh on open (sets/boxes may have changed elsewhere)
+    loadClasses();   // refresh the box-class filter list
   }
 
   document.addEventListener('keydown', trKeyNav);
