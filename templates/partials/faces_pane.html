@@ -10,8 +10,13 @@
   <div class="flex items-center gap-2 p-2 bg-gray-800 border-b border-gray-700 flex-shrink-0" data-feature="tab.faces.edit">
     <button onclick="rescanFaces()"
       class="text-xs bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded font-bold">
-      Rescan all
+      Force Scan
     </button>
+    <label class="flex items-center gap-1 text-xs text-gray-300 select-none cursor-pointer"
+      title="Reset: clear results and re-detect at live priority. Unchecked: run the existing scan as the current task, no reset.">
+      <input type="checkbox" id="faces_reset" class="accent-purple-600">
+      reset
+    </label>
     <button onclick="reclusterFaces()"
       class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded font-bold">
       Recluster

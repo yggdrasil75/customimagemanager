@@ -587,6 +587,14 @@ class ThreadManager:
             held.add(key)
             return True
 
+    def key_free(self, key):
+        """True if `key` is not currently held. Non-mutating peek, for sources
+        that let the dispatcher (key_of) own acquisition/release and only want to
+        avoid claiming work while a batch under the same key is still in flight."""
+        with self._lock:
+            held = getattr(self, "_keys", None)
+            return not (held and key in held)
+
     def release_key(self, key):
         """Release a key claimed via try_acquire_key. Safe if not held."""
         with self._lock:
@@ -777,6 +785,7 @@ under_memory_pressure = MANAGER.under_memory_pressure
 set_activity_source = MANAGER.set_activity_source
 is_idle = MANAGER.is_idle
 try_acquire_key = MANAGER.try_acquire_key
+key_free = MANAGER.key_free
 release_key = MANAGER.release_key
 held_keys = MANAGER.held_keys
 seconds_since_activity = MANAGER.seconds_since_activity

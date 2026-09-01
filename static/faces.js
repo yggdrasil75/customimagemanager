@@ -511,18 +511,24 @@ async function pollFaceProgress() {
 }
 
 async function rescanFaces() {
-  if (!confirm('Re-detect faces across the whole library? Runs in the background when idle.')) return;
+  const reset = !!(document.getElementById('faces_reset') || {}).checked;
+  const msg = reset
+    ? 'Reset and re-detect faces across the whole library? Clears cached results and runs at live priority.'
+    : 'Run the face scan now as the current task (no reset)?';
+  if (!confirm(msg)) return;
   const st = document.getElementById('faces_status');
-  st.textContent = 'Queueing rescan…';
+  st.textContent = 'Queueing scan…';
   let d;
   try {
     d = await (await fetch('/api/faces/scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rescan: true })
+      // reset -> the old behaviour (clear + live priority); without reset ->
+      // just force the existing queue to run as the current foreground task.
+      body: JSON.stringify({ reset: reset })
     })).json();
   } catch (e) {
-    st.textContent = 'Rescan failed to start.';
+    st.textContent = 'Scan failed to start.';
     return;
   }
   st.textContent = `Scanning ${d.pending || 0} image(s)…`;

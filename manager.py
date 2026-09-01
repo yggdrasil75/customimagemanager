@@ -3638,6 +3638,7 @@ _face_dirty = {"v": False}
 # the loop's 15s sleep.
 _face_force = {"v": False}
 _face_wake = threading.Event()
+_face_setup_backoff = {"until": 0.0}
 
 def _attach_masks(img, regions: list) -> None:
     if seg_runtime is None or not regions:
@@ -3857,8 +3858,20 @@ def _face_process_one(job) -> None:
         lease_keys = _face_scan_lease_keys()
     except Exception:
         lease_keys = []
-    ctx = model_registry.lease(*lease_keys) if lease_keys else contextlib.nullcontext()
-    with ctx:
+    try:
+        ctx = model_registry.lease(*lease_keys) if lease_keys else contextlib.nullcontext()
+        ctx.__enter__()
+    except Exception:
+        # A persistent failure (e.g. a detector that just won't load) would other-
+        # wise re-enter setup every poll. Back off so we retry ~once a minute and
+        # keep the queue intact; the source self-heals the moment the model loads.
+        _face_setup_backoff["until"] = time.time() + 60
+        access_logger.exception("face scan: batch setup failed; backing off 60s")
+        err = facelib.face_model_error() or "model/detector unavailable"
+        state["status_text"] = f"Face scan: stalled ({err}) — retrying, check Settings."
+        return
+    _face_setup_backoff["until"] = 0.0   # setup worked → clear any prior backoff
+    try:
         for rel in rels:
             try:
                 _face_process_one_inner(rel)
@@ -3872,6 +3885,11 @@ def _face_process_one(job) -> None:
                         _mark_body_done(rel)
                 except Exception:
                     pass
+    finally:
+        try:
+            ctx.__exit__(None, None, None)
+        except Exception:
+            pass
 
 def _face_process_one_inner(rel: str) -> None:
     abs_p = get_safe_path(MEDIA_DIR, rel)
@@ -3902,35 +3920,32 @@ def _claim_face_job():
         return None
     if not forced and not thread_manager.is_idle():
         return None
-    if not thread_manager.try_acquire_key("face-scan"):
+    if not forced and time.time() < _face_setup_backoff["until"]:
         return None
-    try:
-        rows = _db().execute(
-            "SELECT rel_path FROM files WHERE COALESCE(face_done,0)=0 LIMIT ?",
-            (FACE_BATCH,)).fetchall()
-        if not rows:
-            # queue drained: trailing cluster pass, then settle status
-            if _face_dirty["v"]:
-                state["status_text"] = "Face scan: clustering…"
-                n = _recluster()
-                _face_dirty["v"] = False
-                state["status_text"] = f"Face scan: done ({n} cluster(s))."
-            elif forced:
-                state["status_text"] = "Face scan: complete."
-            else:
-                state["status_text"] = "Face scan: all caught up."
-            _face_force["v"] = False
-            thread_manager.release_key("face-scan")   # nothing to run
-            return None
-        left = _db().execute(
-            "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
-        state["status_text"] = (
-            f"Face scan: {left} image(s) left…" if forced
-            else f"Face scan (idle): {left} image(s) left…")
-        return [r[0] for r in rows]
-    except Exception:
-        thread_manager.release_key("face-scan")       # never leak the gate
-        raise
+    if not thread_manager.key_free("face-scan"):
+        return None
+    rows = _db().execute(
+        "SELECT rel_path FROM files WHERE COALESCE(face_done,0)=0 LIMIT ?",
+        (FACE_BATCH,)).fetchall()
+    if not rows:
+        # queue drained: trailing cluster pass, then settle status
+        if _face_dirty["v"]:
+            state["status_text"] = "Face scan: clustering…"
+            n = _recluster()
+            _face_dirty["v"] = False
+            state["status_text"] = f"Face scan: done ({n} cluster(s))."
+        elif forced:
+            state["status_text"] = "Face scan: complete."
+        else:
+            state["status_text"] = "Face scan: all caught up."
+        _face_force["v"] = False
+        return None
+    left = _db().execute(
+        "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
+    state["status_text"] = (
+        f"Face scan: {left} image(s) left…" if forced
+        else f"Face scan (idle): {left} image(s) left…")
+    return [r[0] for r in rows]
 
 def _register_face_source():
     thread_manager.register_source(
@@ -5889,13 +5904,15 @@ def api_face_scan():
     cached rows so a rescan genuinely re-derives them.
     """
     d = request.json or {}
-    if d.get("rescan"):
+    reset = bool(d.get("reset") or d.get("rescan"))
+    if reset or "reset" in d or "rescan" in d:
         db = _db()
-        db.execute("UPDATE files SET face_done=0, body_done=0")
-        db.execute("DELETE FROM face_regions WHERE COALESCE(confirmed,0)=0 "
-                   "AND COALESCE(not_face,0)=0 AND COALESCE(unknown,0)=0")
-        db.execute("DELETE FROM body_regions WHERE COALESCE(confirmed,0)=0")
-        db.commit()
+        if reset:
+            db.execute("UPDATE files SET face_done=0, body_done=0")
+            db.execute("DELETE FROM face_regions WHERE COALESCE(confirmed,0)=0 "
+                       "AND COALESCE(not_face,0)=0 AND COALESCE(unknown,0)=0")
+            db.execute("DELETE FROM body_regions WHERE COALESCE(confirmed,0)=0")
+            db.commit()
         _face_dirty["v"] = True
         _face_force["v"] = True
         _face_wake.set()
@@ -5903,9 +5920,10 @@ def api_face_scan():
         thread_manager.wake()
         pending = db.execute(
             "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
-        state["status_text"] = f"Face scan: starting ({pending} image(s))…"
+        verb = "starting" if reset else "resuming"
+        state["status_text"] = f"Face scan: {verb} ({pending} image(s))…"
         return jsonify({"success": True, "status": "rescanning", "pending": pending,
-                        "forced": True})
+                        "reset": reset, "forced": True})
     n = _recluster()
     _face_dirty["v"] = False
     return jsonify({"success": True, "clusters": n})
