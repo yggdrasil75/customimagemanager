@@ -546,6 +546,7 @@ async function saveMetadata(){
     ind.innerText='✓ Saved';
     setTimeout(()=>{ if(ind.innerText==='✓ Saved'){ ind.classList.remove('text-green-400');
       ind.classList.add('text-gray-500'); } },2000);
+    if(typeof window.onBoxesSaved==='function') window.onBoxesSaved(currentFile);
   }
 }
 

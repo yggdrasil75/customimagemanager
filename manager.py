@@ -50,6 +50,7 @@ import model_registry
 import discover_stages as ds
 import image_index as ii
 import training_select as ts
+import training_validate as tv
 import media_types as mt
 import video_tracks as vt
 import tiering
@@ -101,7 +102,7 @@ except Exception:
     rawpy = None
 from pipeline import DEFAULT_PIPELINE, run_pipeline, _kpts_in_box
 import llm_preprocess
-from templates import HTML, TRAINING_HTML
+from templates import HTML
 
 easyocr, _HAVE_EASYOCR = optional_import("easyocr")
 
@@ -3339,6 +3340,62 @@ def yolo_train_worker(abs_folder: str, dataset_dir: str, yaml_path: str,
         state["status_text"] = f"Training error: {e}"
         training_logger.error(e)
 
+def yolo_train_worker_cfg(dataset_dir: str, yaml_path: str, base_model: str,
+                          cfg: dict) -> None:
+    """! @brief Local YOLO training with an arbitrary Ultralytics hyperparameter
+    dict. Only a vetted allow-list of keys is forwarded, so a bad field in the
+    request can't inject arbitrary kwargs. Runs in a subprocess and refreshes the
+    model list on completion."""
+    # Ultralytics train() kwargs we expose. Values are coerced client- and
+    # server-side; anything not here is dropped.
+    ALLOWED = {
+        "epochs", "batch", "imgsz", "device", "patience", "optimizer", "lr0",
+        "lrf", "momentum", "weight_decay", "warmup_epochs", "cos_lr", "dropout",
+        "freeze", "seed", "workers", "rect", "single_cls", "val", "fraction",
+        "close_mosaic", "label_smoothing",
+        # augmentation
+        "hsv_h", "hsv_s", "hsv_v", "degrees", "translate", "scale", "shear",
+        "perspective", "flipud", "fliplr", "mosaic", "mixup", "copy_paste",
+    }
+    clean = {}
+    for k, v in (cfg or {}).items():
+        if k in ALLOWED and v is not None and v != "":
+            clean[k] = v
+    # Device: '-1' (CPU) / '0' (GPU idx) / 'cpu' / 'mps' etc.
+    dv = clean.get("device", -1)
+    if isinstance(dv, str):
+        clean["device"] = -1 if dv == "-1" else (int(dv) if dv.isdigit() else dv)
+    # Pin the run's output location so validation knows exactly where best.pt is.
+    # project/name/exist_ok are Ultralytics-native; we set them here rather than
+    # exposing them as tunable cfg (they're plumbing, not hyperparameters).
+    run_name = str(clean.pop("_run_name", "train"))
+    clean.setdefault("exist_ok", True)
+    try:
+        training_logger.info("Starting LOCAL YOLO Training (cfg)")
+        script = (
+            "import sys, json\n"
+            "from ultralytics import YOLO\n"
+            "yp, bm, cfg = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])\n"
+            "YOLO(bm).train(data=yp, **cfg)\n"
+        )
+        run_dir = os.path.abspath(MODELS_DIR)
+        clean.setdefault("project", os.path.join(run_dir, "runs", "detect"))
+        clean.setdefault("name", run_name)
+        cmd = [sys.executable, "-c", script, yaml_path, base_model, json.dumps(clean)]
+        os.makedirs(run_dir, exist_ok=True)
+        best = os.path.join(clean["project"], clean["name"], "weights", "best.pt")
+        state["trainer_last_weights"] = best
+        with open("logs/training.log", "w", encoding="utf-8", errors="replace") as lf:
+            lf.write(f"[{datetime.now()}] YOLO Training Started\n")
+            lf.write(f"base={base_model}  cfg={json.dumps(clean)}\n")
+            lf.flush()
+            subprocess.run(cmd, check=True, cwd=run_dir, stdout=lf, stderr=subprocess.STDOUT)
+        populate_model_selector()
+        state["status_text"] = "Training Complete!"
+    except Exception as e:
+        state["status_text"] = f"Training error: {e}"
+        training_logger.error(e)
+
 def remote_yolo_train_worker(abs_folder: str, dataset_dir: str, config: dict,
                              remote_ip: str) -> None:
     """! @brief Zip the dataset, run YOLO training on a remote host, and fetch the weights back."""
@@ -5020,9 +5077,6 @@ def _touch_activity():
 
 @app.route("/")
 def index(): return render_template("app.html")
-
-@app.route("/training_portal")
-def training_portal(): return render_template_string(TRAINING_HTML)
 
 @app.route("/web/<path:filename>")
 def web_asset(filename):
@@ -11695,7 +11749,9 @@ def trainer_sets():
 @app.route("/api/trainer/set", methods=["GET"])
 @_auth.require_feature("ai.trainer")
 def trainer_set_members():
-    name = request.args.get("set", "default").strip() or "default"
+    name = (request.args.get("set", "") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "set name required"}), 400
     paths = ts.members(_db(), name)
     return jsonify({"success": True, "name": name, "count": len(paths),
                     "files": _sel_paths_to_entries(paths)})
@@ -11713,10 +11769,11 @@ def trainer_set_delete():
 
 @app.route("/api/trainer/select", methods=["POST"])
 @_auth.require_feature("ai.trainer.select", action="trainer_select",
-                       fields=("strategy", "n", "set"))
+                       fields=("strategy", "n"))
 def trainer_select():
-    """Pick N images by strategy. Does NOT modify the persistent set — it just
-    proposes a selection the user can then Keep or discard."""
+    """Pick N images by strategy and store them into a brand-new numbered set
+    ("Set 1", "Set 2", …) in one shot. Returns the new set name and its members
+    so the portal can jump straight into manual validation."""
     d = request.json or {}
     strategy = d.get("strategy", "random")
     if strategy not in ts.STRATEGIES:
@@ -11725,23 +11782,28 @@ def trainer_select():
         n = max(0, int(d.get("n", 0)))
     except (TypeError, ValueError):
         return jsonify({"success": False, "error": "n must be an integer"}), 400
-    set_name = (d.get("set") or "default").strip() or "default"
-    keep_existing = bool(d.get("keep_existing", True))
+    exclude_all_sets = bool(d.get("exclude_all_sets", True))
+    # media filter: 'image' (default) or 'image_video'. Audio is never trainable.
+    media = (d.get("media") or "image")
+    kinds = {"image"} if media == "image" else {"image", "video"}
     try:
-        paths = ts.select(_db(), strategy, n, keep_existing=keep_existing, set_name=set_name)
+        name, paths = ts.create_run(_db(), strategy, n,
+                                     exclude_all_sets=exclude_all_sets, kinds=kinds)
     except Exception as e:
         training_logger.error(f"select failed: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
-    return jsonify({"success": True, "strategy": strategy, "count": len(paths),
-                    "files": _sel_paths_to_entries(paths)})
+    return jsonify({"success": True, "set": name, "strategy": strategy,
+                    "count": len(paths), "files": _sel_paths_to_entries(paths)})
 
 
 @app.route("/api/trainer/keep", methods=["POST"])
 @_auth.require_feature("ai.trainer.keep", action="trainer_keep", fields=("set",))
 def trainer_keep():
-    """Add rel_paths to the persistent set (the actual 'selection')."""
+    """Add rel_paths to an existing set (used when editing a set during review)."""
     d = request.json or {}
-    set_name = (d.get("set") or "default").strip() or "default"
+    set_name = (d.get("set") or "").strip()
+    if not set_name:
+        return jsonify({"success": False, "error": "set name required"}), 400
     paths = [p for p in (d.get("paths") or []) if isinstance(p, str)]
     total = ts.keep(_db(), set_name, paths)
     return jsonify({"success": True, "added": len(paths), "count": total})
@@ -11750,9 +11812,11 @@ def trainer_keep():
 @app.route("/api/trainer/clear", methods=["POST"])
 @_auth.require_feature("ai.trainer.keep", action="trainer_clear", fields=("set",))
 def trainer_clear():
-    """Empty the SELECTION (persistent set). Never touches the gallery/library."""
+    """Empty a set. Never touches the gallery/library."""
     d = request.json or {}
-    set_name = (d.get("set") or "default").strip() or "default"
+    set_name = (d.get("set") or "").strip()
+    if not set_name:
+        return jsonify({"success": False, "error": "set name required"}), 400
     ts.clear(_db(), set_name)
     return jsonify({"success": True})
 
@@ -11760,45 +11824,210 @@ def trainer_clear():
 @app.route("/api/trainer/remove", methods=["POST"])
 @_auth.require_feature("ai.trainer.keep", action="trainer_remove", fields=("set",))
 def trainer_remove():
-    """Drop specific rel_paths from the persistent set (does not touch gallery)."""
+    """Drop specific rel_paths from a set (does not touch gallery)."""
     d = request.json or {}
-    set_name = (d.get("set") or "default").strip() or "default"
+    set_name = (d.get("set") or "").strip()
+    if not set_name:
+        return jsonify({"success": False, "error": "set name required"}), 400
     paths = [p for p in (d.get("paths") or []) if isinstance(p, str)]
     ts.remove(_db(), set_name, paths)
     return jsonify({"success": True, "removed": len(paths)})
+
+
+@app.route("/api/trainer/labels")
+@_auth.require_feature("ai.trainer")
+def trainer_labels():
+    """Existing box class labels, for the reviewer's searchable dropdown. Union
+    of the YOLO class list and any class_names already on images in the set."""
+    labels = set(state.get("classes") or [])
+    set_name = (request.args.get("set") or "").strip()
+    if set_name:
+        for rp in ts.members(_db(), set_name):
+            fp = get_safe_path(MEDIA_DIR, rp)
+            if not fp or not os.path.exists(fp):
+                continue
+            try:
+                for r in (read_metadata(fp).get("regions") or []):
+                    nm = (r.get("class_name") or "").strip()
+                    if nm:
+                        labels.add(nm)
+            except Exception:
+                pass
+    return jsonify({"success": True, "labels": sorted(labels)})
+
+
+@app.route("/api/trainer/boxes", methods=["POST"])
+@_auth.require_feature("ai.trainer.keep", action="trainer_boxes", fields=("filename",))
+def trainer_boxes():
+    """Read or write the boxes for ONE image in a set. This is the decluttered
+    box editor's save path — it only touches regions, leaving tags/description
+    untouched. Body: {action:'read'|'write', filename, regions?}."""
+    d  = request.json or {}
+    fn = (d.get("filename") or "").strip()
+    fp = get_safe_path(MEDIA_DIR, fn)
+    if not fp or not os.path.exists(fp):
+        return jsonify({"success": False, "error": "not found"}), 404
+    if d.get("action") == "write":
+        # keep the image's existing tags/description; only replace regions
+        cur = read_metadata(fp) or {}
+        regions = d.get("regions") or []
+        ok = write_metadata(fp, cur.get("tags", []) or [],
+                            cur.get("description", "") or "", regions)
+        _meta_cache_drop(fn)
+        return jsonify({"success": bool(ok), "count": len(regions)})
+    # read
+    regions = (read_metadata(fp) or {}).get("regions", []) or []
+    return jsonify({"success": True, "regions": regions})
+
+
+@app.route("/api/trainer/validate", methods=["POST"])
+@_auth.require_feature("ai.trainer.run", action="trainer_validate", fields=("set",))
+def trainer_validate():
+    """Run the set's trained model over images and diff predictions against the
+    ground-truth boxes, so you can see where the model tightens, loosens, adds or
+    drops boxes — and get an accuracy number.
+
+    Body:
+      set          required
+      iou_ok       IoU at/above which a match counts as 'correct'   (default .7)
+      iou_min      IoU below which a match doesn't count at all      (default .3)
+      conf         model confidence threshold                        (default .25)
+      source       'self' (the set's own images, default) or 'new'
+      add_new      when source=='new', how many fresh images to pull in and add
+                   to the set so you can confirm/deny on unseen data (default 20)
+    """
+    d = request.json or {}
+    set_name = (d.get("set") or "").strip()
+    if not set_name:
+        return jsonify({"success": False, "error": "set name required"}), 400
+    meta = ts.get_meta(_db(), set_name)
+    weights = meta.get("weights")
+    if not weights or not os.path.exists(weights):
+        return jsonify({"success": False,
+                        "error": "No trained model for this set yet. Train it first."}), 400
+    try:
+        iou_ok = float(d.get("iou_ok", 0.7)); iou_min = float(d.get("iou_min", 0.3))
+        conf = float(d.get("conf", 0.25))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "bad numeric parameter"}), 400
+
+    # Optionally pull fresh, never-seen images into the set for this validation.
+    added_new = []
+    if d.get("source") == "new":
+        try:
+            k = max(0, int(d.get("add_new", 20)))
+        except (TypeError, ValueError):
+            k = 20
+        if k:
+            added_new = ts.select(_db(), d.get("strategy", "random"), k,
+                                   exclude_all_sets=True, kinds={"image"})
+            if added_new:
+                ts.keep(_db(), set_name, added_new)
+
+    per_image = []
+    results = []
+    new_set = set(added_new)
+    for rp in ts.members(_db(), set_name):
+        fp = get_safe_path(MEDIA_DIR, rp)
+        if not fp or not os.path.exists(fp):
+            continue
+        base = os.path.splitext(fp)[0]
+        if not os.path.exists(base + ".jxl"):     # stills only; skip video members
+            continue
+        img = read_jxl(fp)
+        if img is None:
+            continue
+        bgr = img[:, :, ::-1] if (img.ndim == 3 and img.shape[2] >= 3) else img
+        pred = _detect_obb_or_box(bgr, weights, conf=conf)
+        gt = (read_metadata(fp) or {}).get("regions", []) or []
+        diff = tv.diff_image(gt, pred, iou_ok=iou_ok, iou_min=iou_min)
+        per_image.append(diff)
+        results.append({
+            "rel_path": rp, "thumb": f"/api/thumb/{rp}",
+            "is_new": rp in new_set,
+            "mean_iou": diff["mean_iou"], "counts": diff["counts"],
+            "boxes": diff["boxes"],
+        })
+
+    summary = tv.aggregate(per_image, iou_ok=iou_ok)
+    ts.set_meta(_db(), set_name, accuracy=summary.get("f1"))
+    # Worst images first: most dropped/added, then lowest IoU — that's where the
+    # user's confirm/deny attention is best spent.
+    results.sort(key=lambda r: (-(r["counts"]["dropped"] + r["counts"]["added"]),
+                                r["mean_iou"]))
+    return jsonify({"success": True, "set": set_name, "summary": summary,
+                    "added_new": added_new, "images": results})
+
+
+@app.route("/api/trainer/apply_prediction", methods=["POST"])
+@_auth.require_feature("ai.trainer.keep", action="trainer_apply_pred", fields=("filename",))
+def trainer_apply_prediction():
+    """Confirm a validation result by writing the given boxes as the image's new
+    ground truth (its regions + YOLO .txt). Used by the confirm/deny loop: accept
+    the model's prediction, or a hand-corrected mix, as the new label. Denying is
+    a no-op on the server — the existing GT simply stays."""
+    d = request.json or {}
+    fn = (d.get("filename") or "").strip()
+    fp = get_safe_path(MEDIA_DIR, fn)
+    if not fp or not os.path.exists(fp):
+        return jsonify({"success": False, "error": "not found"}), 404
+    regions = d.get("regions") or []
+    cur = read_metadata(fp) or {}
+    ok = write_metadata(fp, cur.get("tags", []) or [],
+                        cur.get("description", "") or "", regions)
+    _meta_cache_drop(fn)
+    return jsonify({"success": bool(ok), "count": len(regions)})
 
 
 @app.route("/api/train", methods=["POST"])
 @_auth.require_feature("ai.trainer.run", action="trainer_train", fields=("set",))
 def train():
     d          = request.json or {}
-    set_name   = (d.get("set") or "default").strip() or "default"
+    set_name   = (d.get("set") or "").strip()
+    if not set_name:
+        return jsonify({"success": False, "error": "set name required"}), 400
+    cfg        = dict(d.get("cfg") or {})
+    base_model = (d.get("base_model") or f"yolo11{_yolo_size()}.pt")
+    try:
+        val_frac = float(cfg.pop("val_split", d.get("val_split", 0.05)))
+    except (TypeError, ValueError):
+        val_frac = 0.05
+    val_frac = min(max(val_frac, 0.0), 0.9)
+
     abs_folder = os.path.abspath(MEDIA_DIR)
-    dset_dir   = os.path.join(abs_folder, "yolo_dataset")
+    # Each set gets its own reusable dataset subfolder, so a subset's YOLO data
+    # persists and doesn't clobber another set's. e.g. media/yolo_datasets/Set_1/
+    safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in set_name).strip("_") or "set"
+    dset_dir   = os.path.join(abs_folder, "yolo_datasets", safe)
     shutil.rmtree(dset_dir, ignore_errors=True)
     for sub in ("images/train", "images/val", "labels/train", "labels/val"):
         os.makedirs(os.path.join(dset_dir, sub), exist_ok=True)
     state["status_text"] = "Preparing dataset…"
 
-    # Only labelled images from the selection set contribute.
+    # Only labelled STILL images contribute — YOLO here trains on .jxl frames,
+    # so video members of the set are skipped (boxing video is a separate flow).
     bases = []
+    skipped_video = 0
     for rp in ts.members(_db(), set_name):
         abs_path = get_safe_path(MEDIA_DIR, rp)
         if not abs_path:
             continue
         base = os.path.splitext(abs_path)[0]
-        if os.path.exists(base + ".txt") and os.path.getsize(base + ".txt") > 0 \
-                and os.path.exists(base + ".jxl"):
+        if not os.path.exists(base + ".jxl"):
+            skipped_video += 1
+            continue
+        if os.path.exists(base + ".txt") and os.path.getsize(base + ".txt") > 0:
             bases.append(base)
 
     if not bases:
         state["status_text"] = "No labelled images in this set!"
         return jsonify({"success": False,
-                        "error": "No labelled images in this set. Draw boxes first."}), 400
+                        "error": "No labelled still images in this set. Draw boxes first."}), 400
 
     pairs = bases
     random.shuffle(pairs)
-    val_n = max(1, int(len(pairs) * .05)) if len(pairs) > 1 else 0
+    val_n = min(len(pairs) - 1, int(round(len(pairs) * val_frac))) if len(pairs) > 1 else 0
+    val_n = max(val_n, 1 if (val_frac > 0 and len(pairs) > 1) else 0)
     val_b, tr_b = pairs[:val_n], pairs[val_n:]
     for b in tr_b:
         bn = os.path.basename(b)
@@ -11814,19 +12043,32 @@ def train():
     with open(yaml_p, 'w') as f:
         yaml.dump({"path": dset_dir, "train": "images/train", "val": "images/val",
                    "nc": len(state["classes"]), "names": state["classes"]}, f)
+    # If there's no val split, tell Ultralytics not to validate.
+    if not val_b:
+        cfg["val"] = False
+    cfg["_run_name"] = "set_" + safe
     state["status_text"] = f"Training… ({len(tr_b)} train | {len(val_b)} val)"
-    threading.Thread(target=yolo_train_worker, daemon=True,
-                     args=(abs_folder, dset_dir, yaml_p,
-                           d.get("epochs", 100), d.get("batch", 4),
-                           d.get("imgsz", 640), d.get("device", "-1"),
-                           d.get("base_model") or f"yolo11{_yolo_size()}.pt")).start()
-    return jsonify({"success": True, "train": len(tr_b), "val": len(val_b)})
+    # Where best.pt will land (mirrors what the worker pins).
+    weights = os.path.join(os.path.abspath(MODELS_DIR), "runs", "detect",
+                           "set_" + safe, "weights", "best.pt")
+    ts.set_meta(_db(), set_name, weights=weights)
+    threading.Thread(target=yolo_train_worker_cfg, daemon=True,
+                     args=(dset_dir, yaml_p, base_model, cfg)).start()
+    return jsonify({"success": True, "set": set_name, "weights": weights,
+                    "train": len(tr_b), "val": len(val_b)})
 
 @app.route("/api/training_log")
 def get_training_log():
     if not os.path.exists('logs/training.log'):
         return jsonify({"log":"Awaiting start…"})
-    return jsonify({"log":"".join(open('logs/training.log').readlines()[-200:])})
+    # Ultralytics writes UTF-8 (progress bars, box-drawing glyphs); read with an
+    # explicit encoding and tolerate stray bytes so a Windows cp1252 default
+    # locale can't 500 the poller.
+    try:
+        with open('logs/training.log', encoding='utf-8', errors='replace') as f:
+            return jsonify({"log": "".join(f.readlines()[-200:])})
+    except OSError as e:
+        return jsonify({"log": f"(log unavailable: {e})"})
 
 @app.route("/tailwind")
 def get_tailwind():

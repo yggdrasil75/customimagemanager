@@ -1,11 +1,14 @@
+{% from 'partials/_viewer_macro.html' import media_viewer %}
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><title>Trainer</title>
 <script src="/tailwind"></script>
+<link rel="stylesheet" href="/static/app.css">
 <script src="/static/auth.js"></script>
-<script src="/static/features.js"></script></head>
-<body class="bg-gray-900 text-white h-screen flex flex-col">
-<div class="p-4 bg-gray-800 border-b border-gray-700 flex justify-between items-center flex-shrink-0">
-  <h1 class="text-xl font-bold text-purple-400">Trainer — Box Model</h1>
+<script src="/static/features.js"></script>
+</head>
+<body class="bg-gray-900 text-white h-screen flex flex-col overflow-hidden">
+<div class="p-3 bg-gray-800 border-b border-gray-700 flex justify-between items-center flex-shrink-0">
+  <h1 class="text-lg font-bold text-purple-400">Trainer — Box Model</h1>
   <div class="flex items-center gap-3">
     <span id="app_status" class="text-xs text-gray-400"></span>
     <a href="/" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm">← Back</a>
@@ -13,28 +16,28 @@
 </div>
 
 <div class="flex flex-1 overflow-hidden">
-  <!-- LEFT: selection controls -->
+  <!-- LEFT: controls -->
   <div class="w-80 p-4 bg-gray-800 border-r border-gray-700 overflow-y-auto flex-shrink-0 space-y-4">
 
-    <!-- Set picker (persistent) -->
+    <!-- Sets -->
     <div class="bg-gray-900 p-3 rounded border border-gray-700" data-feature="ai.trainer">
-      <label class="text-xs font-bold text-purple-300 block mb-1">Dataset (persistent)</label>
-      <div class="flex gap-1">
-        <select id="set_select" onchange="onSetChange()"
-          class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white"></select>
-        <button onclick="newSet()" title="New set"
-          class="px-2 bg-gray-700 hover:bg-gray-600 rounded border border-gray-600 text-sm">+</button>
+      <label class="text-xs font-bold text-purple-300 block mb-1">Dataset</label>
+      <select id="set_select" onchange="onSetChange()"
+        class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white"></select>
+      <div class="flex justify-between items-center mt-1">
+        <span class="text-xs text-gray-500"><span id="set_count" class="text-purple-300">0</span> images · saved</span>
+        <button onclick="deleteSet()" data-feature="ai.trainer.keep"
+          class="text-xs text-red-400 hover:text-red-300">Delete set</button>
       </div>
-      <p class="text-xs text-gray-500 mt-1">Sets survive restarts. <span id="set_count" class="text-purple-300">0</span> kept.</p>
     </div>
 
-    <!-- Selection -->
+    <!-- Build a new set -->
     <div class="space-y-2" data-feature="ai.trainer.select">
-      <label class="text-xs font-bold text-gray-300 block">Select</label>
+      <label class="text-xs font-bold text-gray-300 block">Build a new set</label>
       <div class="flex items-center gap-2">
-        <span class="text-xs text-gray-400">Count (n)</span>
+        <span class="text-xs text-gray-400 w-16">Count (n)</span>
         <input id="sel_n" type="number" value="20" min="1"
-          class="w-24 p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm">
+          class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm">
       </div>
       <div>
         <label class="text-xs text-gray-400 block mb-1">Priority</label>
@@ -46,69 +49,164 @@
         </select>
       </div>
       <label class="flex items-center gap-2 text-xs text-gray-300">
-        <input id="sel_exclude_kept" type="checkbox" checked class="accent-purple-500">
-        Exclude images already kept
+        <input id="sel_exclude_sets" type="checkbox" checked class="accent-purple-500">
+        Exclude images already in a set
       </label>
-      <button onclick="doSelect()"
-        class="w-full bg-indigo-600 hover:bg-indigo-500 py-2 rounded font-bold text-sm">Select n</button>
+      <div>
+        <label class="text-xs text-gray-400 block mb-1">Media types (YOLO can't use audio)</label>
+        <select id="sel_media"
+          class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm">
+          <option value="image">Images only</option>
+          <option value="image_video">Images + video</option>
+        </select>
+      </div>
+      <button onclick="buildSet()"
+        class="w-full bg-indigo-600 hover:bg-indigo-500 py-2 rounded font-bold text-sm">Create set of n</button>
+      <p class="text-xs text-gray-500">Creates the next numbered set and fills it. Your gallery is never changed.</p>
     </div>
 
-    <!-- Keep / clear -->
+    <!-- Set actions -->
     <div class="space-y-2 pt-2 border-t border-gray-700" data-feature="ai.trainer.keep">
-      <label class="text-xs font-bold text-gray-300 block">Selection actions</label>
-      <button onclick="keepSelection()"
-        class="w-full bg-green-700 hover:bg-green-600 py-1.5 rounded font-bold text-sm">Keep proposed → set</button>
       <button onclick="clearSet()"
-        class="w-full bg-red-800 hover:bg-red-700 py-1.5 rounded text-sm">Clear selection (keeps gallery)</button>
-      <p class="text-xs text-gray-500">Clear only empties this set. Your images stay in the gallery.</p>
+        class="w-full bg-red-800 hover:bg-red-700 py-1.5 rounded text-sm">Empty this set (keeps gallery)</button>
     </div>
 
     <!-- Train -->
     <div class="space-y-2 pt-2 border-t border-gray-700" data-feature="ai.trainer.run">
-      <label class="text-xs font-bold text-purple-300 block">Train box model (YOLO11)</label>
-      <div class="grid grid-cols-2 gap-2">
-        <div><label class="text-xs text-gray-400 block mb-1">Base</label>
-          <select id="base_model" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-            <option value="yolo11n.pt">nano</option><option value="yolo11s.pt">small</option>
-          </select></div>
-        <div><label class="text-xs text-gray-400 block mb-1">Device</label>
-          <select id="device" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-            <option value="-1">CPU</option><option value="0">GPU 0</option>
-          </select></div>
-        <div><label class="text-xs text-gray-400 block mb-1">Epochs</label>
-          <input id="epochs" type="number" value="100" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm"></div>
-        <div><label class="text-xs text-gray-400 block mb-1">Batch</label>
-          <input id="batch" type="number" value="4" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm"></div>
-        <div class="col-span-2"><label class="text-xs text-gray-400 block mb-1">Image size</label>
-          <input id="imgsz" type="number" value="640" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm"></div>
+      <div class="flex justify-between items-center">
+        <label class="text-xs font-bold text-purple-300">Training settings</label>
+        <button onclick="toggleAdvanced()" id="adv_toggle"
+          class="text-xs text-purple-300 hover:text-purple-200">Show advanced ▾</button>
       </div>
-      <p class="text-xs text-yellow-500">Only kept images that already have boxes are used.</p>
+
+      <div class="grid grid-cols-2 gap-2">
+        <div><label class="lbl">Base model</label>
+          <select id="base_model" class="inp">
+            <option value="yolo11n.pt">YOLO11 nano</option>
+            <option value="yolo11s.pt">YOLO11 small</option>
+            <option value="yolo11m.pt">YOLO11 medium</option>
+            <option value="yolo11l.pt">YOLO11 large</option>
+            <option value="yolo11x.pt">YOLO11 xlarge</option>
+          </select></div>
+        <div><label class="lbl">Device</label>
+          <select id="device" class="inp">
+            <option value="-1">CPU</option><option value="0">GPU 0</option>
+            <option value="1">GPU 1</option>
+          </select></div>
+        <div><label class="lbl">Epochs</label><input id="epochs" type="number" value="100" class="inp"></div>
+        <div><label class="lbl">Batch</label><input id="batch" type="number" value="4" class="inp"></div>
+        <div><label class="lbl">Image size</label><input id="imgsz" type="number" value="640" step="32" class="inp"></div>
+        <div><label class="lbl">Val split</label><input id="val_split" type="number" value="0.05" step="0.05" min="0" max="0.9" class="inp"></div>
+      </div>
+
+      <div id="advanced" class="hidden space-y-2">
+        <div class="grid grid-cols-2 gap-2">
+          <div><label class="lbl">Patience</label><input id="patience" type="number" value="100" class="inp"></div>
+          <div><label class="lbl">Optimizer</label>
+            <select id="optimizer" class="inp">
+              <option value="auto">auto</option><option value="SGD">SGD</option>
+              <option value="Adam">Adam</option><option value="AdamW">AdamW</option>
+              <option value="RMSProp">RMSProp</option>
+            </select></div>
+          <div><label class="lbl">lr0</label><input id="lr0" type="number" value="0.01" step="0.001" class="inp"></div>
+          <div><label class="lbl">lrf</label><input id="lrf" type="number" value="0.01" step="0.001" class="inp"></div>
+          <div><label class="lbl">Momentum</label><input id="momentum" type="number" value="0.937" step="0.001" class="inp"></div>
+          <div><label class="lbl">Weight decay</label><input id="weight_decay" type="number" value="0.0005" step="0.0001" class="inp"></div>
+          <div><label class="lbl">Warmup epochs</label><input id="warmup_epochs" type="number" value="3" step="0.5" class="inp"></div>
+          <div><label class="lbl">Freeze layers</label><input id="freeze" type="number" value="0" class="inp"></div>
+          <div><label class="lbl">Dropout</label><input id="dropout" type="number" value="0" step="0.05" class="inp"></div>
+          <div><label class="lbl">Seed</label><input id="seed" type="number" value="0" class="inp"></div>
+          <div><label class="lbl">Workers</label><input id="workers" type="number" value="8" class="inp"></div>
+          <div><label class="lbl">Close mosaic</label><input id="close_mosaic" type="number" value="10" class="inp"></div>
+        </div>
+        <div class="grid grid-cols-2 gap-x-3 gap-y-1 pt-1">
+          <label class="ck"><input type="checkbox" id="cos_lr" class="accent-purple-500"> Cosine LR</label>
+          <label class="ck"><input type="checkbox" id="rect" class="accent-purple-500"> Rect batches</label>
+          <label class="ck"><input type="checkbox" id="single_cls" class="accent-purple-500"> Single class</label>
+        </div>
+        <label class="lbl pt-1">Augmentation</label>
+        <div class="grid grid-cols-2 gap-2">
+          <div><label class="lbl">hsv_h</label><input id="hsv_h" type="number" value="0.015" step="0.005" class="inp"></div>
+          <div><label class="lbl">hsv_s</label><input id="hsv_s" type="number" value="0.7" step="0.05" class="inp"></div>
+          <div><label class="lbl">hsv_v</label><input id="hsv_v" type="number" value="0.4" step="0.05" class="inp"></div>
+          <div><label class="lbl">degrees</label><input id="degrees" type="number" value="0" step="1" class="inp"></div>
+          <div><label class="lbl">translate</label><input id="translate" type="number" value="0.1" step="0.05" class="inp"></div>
+          <div><label class="lbl">scale</label><input id="scale" type="number" value="0.5" step="0.05" class="inp"></div>
+          <div><label class="lbl">shear</label><input id="shear" type="number" value="0" step="1" class="inp"></div>
+          <div><label class="lbl">perspective</label><input id="perspective" type="number" value="0" step="0.0001" class="inp"></div>
+          <div><label class="lbl">flipud</label><input id="flipud" type="number" value="0" step="0.1" class="inp"></div>
+          <div><label class="lbl">fliplr</label><input id="fliplr" type="number" value="0.5" step="0.1" class="inp"></div>
+          <div><label class="lbl">mosaic</label><input id="mosaic" type="number" value="1.0" step="0.1" class="inp"></div>
+          <div><label class="lbl">mixup</label><input id="mixup" type="number" value="0" step="0.1" class="inp"></div>
+          <div><label class="lbl">copy_paste</label><input id="copy_paste" type="number" value="0" step="0.1" class="inp"></div>
+        </div>
+      </div>
+
+      <p class="text-xs text-yellow-500">Only images in this set that already have boxes are used.</p>
       <button onclick="startTraining()"
         class="w-full bg-purple-600 hover:bg-purple-700 py-2 rounded font-bold">Start training</button>
     </div>
   </div>
 
-  <!-- MIDDLE: proposed / kept grid -->
+  <!-- MIDDLE: grid -->
   <div class="flex-1 flex flex-col min-w-0">
     <div class="flex items-center justify-between px-4 py-2 border-b border-gray-700 bg-gray-800/50">
-      <div class="flex gap-2 text-sm">
-        <button id="tab_proposed" onclick="showTab('proposed')"
-          class="px-3 py-1 rounded bg-indigo-700">Proposed (<span id="n_proposed">0</span>)</button>
-        <button id="tab_kept" onclick="showTab('kept')"
-          class="px-3 py-1 rounded bg-gray-700">Kept (<span id="n_kept">0</span>)</button>
-      </div>
-      <span class="text-xs text-gray-500">green ring = has boxes</span>
+      <span id="grid_title" class="text-sm font-bold text-gray-200">No set selected</span>
+      <span class="text-xs text-gray-500"><span class="text-green-400">green</span> = has boxes · click to review</span>
     </div>
-    <div id="grid" class="flex-1 overflow-y-auto p-3 grid gap-2"
-      style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr));align-content:start"></div>
+    <div class="flex-1 overflow-y-auto px-4 py-3" id="grid_scroll">
+      <div id="grid" class="masonry"></div>
+    </div>
   </div>
 
   <!-- RIGHT: log -->
-  <div class="w-80 flex flex-col p-3 border-l border-gray-700 min-w-0 flex-shrink-0" data-feature="ai.trainer.run">
+  <div class="w-72 flex flex-col p-3 border-l border-gray-700 min-w-0 flex-shrink-0" data-feature="ai.trainer.run">
     <p class="text-xs text-gray-500 uppercase mb-2">Live log</p>
     <pre id="log_output"
       class="flex-1 bg-gray-950 border border-gray-700 rounded p-2 text-green-400 font-mono text-xs overflow-y-auto whitespace-pre-wrap"></pre>
   </div>
 </div>
+
+<div id="reviewer" class="hidden fixed inset-0 bg-black/90 z-50 flex flex-col">
+  <div class="flex items-center justify-between p-3 bg-gray-900/80 flex-shrink-0">
+    <span id="rev_info" class="text-sm text-gray-200"></span>
+    <div class="flex items-center gap-2">
+      <button onclick="revRemove()" data-feature="ai.trainer.keep"
+        class="bg-red-700 hover:bg-red-600 px-3 py-1.5 rounded text-sm">Remove from set</button>
+      <button onclick="closeReviewer()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm">Close (Esc)</button>
+    </div>
+  </div>
+  <div class="flex flex-1 min-h-0">
+    <!-- left: image + boxes -->
+    <div class="flex-1 flex items-center justify-between px-2 min-h-0 relative">
+      <button onclick="revStep(-1)" class="absolute left-2 top-1/2 -translate-y-1/2 z-40 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl">‹</button>
+      {{ media_viewer(p='rv_', chrome=False, pane_class='w-full h-full flex flex-col', pane_id='reviewer_viewer') }}
+      <button onclick="revStep(1)" class="absolute right-2 top-1/2 -translate-y-1/2 z-40 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl">›</button>
+    </div>
+    <!-- right: minimal box editor — boxes + names only -->
+    <div class="w-72 bg-gray-850 border-l border-gray-700 p-3 flex flex-col gap-2 flex-shrink-0" data-feature="ai.trainer.keep">
+      <div class="flex items-center justify-between">
+        <span class="text-sm font-bold text-amber-300">Boxes</span>
+        <span id="rev_dirty" class="text-xs text-yellow-500"></span>
+      </div>
+      <p class="text-[11px] text-gray-500">Drag on the image to add a box. Right-click a box to delete.</p>
+      <div id="rev_boxlist" class="flex-1 overflow-y-auto space-y-1"></div>
+      <button onclick="revSaveBoxes()" id="rev_save"
+        class="w-full bg-emerald-700 hover:bg-emerald-600 py-1.5 rounded font-bold text-sm">Save boxes</button>
+    </div>
+  </div>
+  <div class="p-2 text-center text-xs text-gray-500 flex-shrink-0">← / → navigate · drag = add box · right-click box = delete · Del = remove image from set · Esc = close</div>
+  <!-- shared datalist of existing labels for the searchable name inputs -->
+  <datalist id="rev_labels"></datalist>
+</div>
+
+<style>
+  .lbl{display:block;font-size:.7rem;color:#9ca3af;margin-bottom:.15rem}
+  .inp{width:100%;padding:.35rem;background:#374151;border:1px solid #4b5563;border-radius:.25rem;color:#fff;font-size:.8rem}
+  .ck{display:flex;align-items:center;gap:.35rem;font-size:.75rem;color:#d1d5db}
+  /* has-boxes marker on a set tile */
+  .gallery-item.has-boxes{border-color:#22c55e}
+</style>
+<script src="/static/viewer.js"></script>
 <script src="/static/training.js"></script>
 </body></html>

@@ -10,8 +10,11 @@ Selection strategies (pick N images from the library, minus what's already kept)
   - diverse  : greedy farthest-point over whole-image embeddings, so the picked
                set spreads across embedding space (most distinct look/content)
 
-"keep" adds the current picks to the persistent set. "clear" empties the
-*selection* (the persistent set), never the gallery/library itself.
+Running a selection creates a fresh numbered set ("Set 1", "Set 2", …) and
+stores the picks into it immediately — there is no separate "keep" step. You
+can optionally exclude images that already live in any other set so the same
+image isn't pulled into two sets. "clear" empties a set; "delete" removes it.
+Neither ever touches the gallery/library.
 """
 
 import time
@@ -73,6 +76,32 @@ def member_set(db, name):
     return set(members(db, name))
 
 
+def all_member_set(db):
+    """Union of rel_paths across every set — for 'exclude images already in a
+    set' so the same image isn't pulled into two different sets."""
+    ensure_tables(db)
+    rows = db.execute("SELECT DISTINCT rel_path FROM training_set_members").fetchall()
+    return {r["rel_path"] for r in rows}
+
+
+def next_set_name(db):
+    """Next free numbered name: 'Set 1', 'Set 2', … Reuses the lowest gap so
+    deleting Set 2 then creating again gives 'Set 2' back."""
+    ensure_tables(db)
+    used = set()
+    for r in db.execute("SELECT name FROM training_sets").fetchall():
+        nm = r["name"]
+        if nm.startswith("Set "):
+            try:
+                used.add(int(nm[4:]))
+            except ValueError:
+                pass
+    i = 1
+    while i in used:
+        i += 1
+    return f"Set {i}"
+
+
 def keep(db, name, rel_paths):
     """Add rel_paths to the persistent set. Returns new member count."""
     ensure_tables(db)
@@ -105,30 +134,41 @@ def remove(db, name, rel_paths):
 
 
 # ── selection strategies ──────────────────────────────────────────────────────
-def _all_paths(db, exclude):
-    rows = db.execute("SELECT rel_path FROM files").fetchall()
+# `kinds` is a set of allowed media_kind values ('image', 'video'). None => all.
+# YOLO can't train on audio, so callers pass {'image'} or {'image','video'}.
+def _kind_clause(kinds):
+    if not kinds:
+        return "", []
+    marks = ",".join("?" for _ in kinds)
+    return f" WHERE COALESCE(media_kind,'image') IN ({marks})", list(kinds)
+
+
+def _all_paths(db, exclude, kinds=None):
+    where, params = _kind_clause(kinds)
+    rows = db.execute("SELECT rel_path FROM files" + where, params).fetchall()
     return [r["rel_path"] for r in rows if r["rel_path"] not in exclude]
 
 
-def select_recent(db, n, exclude):
+def select_recent(db, n, exclude, kinds=None):
     """Semi-random over the most recent n*2 files by mtime."""
     pool_size = max(n * 2, n)
+    where, params = _kind_clause(kinds)
     rows = db.execute(
-        "SELECT rel_path FROM files ORDER BY mtime DESC LIMIT ?",
-        (pool_size + len(exclude),)).fetchall()
+        "SELECT rel_path FROM files" + where + " ORDER BY mtime DESC LIMIT ?",
+        params + [pool_size + len(exclude)]).fetchall()
     pool = [r["rel_path"] for r in rows if r["rel_path"] not in exclude][:pool_size]
     random.shuffle(pool)
     return pool[:n]
 
 
-def select_random(db, n, exclude):
-    pool = _all_paths(db, exclude)
+def select_random(db, n, exclude, kinds=None):
+    pool = _all_paths(db, exclude, kinds)
     if len(pool) <= n:
         return pool
     return random.sample(pool, n)
 
 
-def select_diverse(db, n, exclude):
+def select_diverse(db, n, exclude, kinds=None):
     """Greedy farthest-point sampling over whole-image embeddings.
 
     Picks a random seed, then repeatedly adds the image whose nearest already-
@@ -139,18 +179,25 @@ def select_diverse(db, n, exclude):
     dim_row = db.execute("SELECT dim FROM image_embeddings LIMIT 1").fetchone()
     if not dim_row:
         # no embeddings computed — nothing to be diverse over
-        return select_random(db, n, exclude)
+        return select_random(db, n, exclude, kinds)
     dim = dim_row["dim"]
+    allowed = None
+    if kinds:
+        where, params = _kind_clause(kinds)
+        allowed = {r["rel_path"] for r in
+                   db.execute("SELECT rel_path FROM files" + where, params).fetchall()}
 
     names, mats = [], []
     for nm, mat in ii._iter_embeddings_ordered(db, dim):
         for i, rp in enumerate(nm):
             if rp in exclude:
                 continue
+            if allowed is not None and rp not in allowed:
+                continue
             names.append(rp)
             mats.append(mat[i])
     if not names:
-        return select_random(db, n, exclude)
+        return select_random(db, n, exclude, kinds)
     if len(names) <= n:
         return names
 
@@ -172,11 +219,39 @@ def select_diverse(db, n, exclude):
 STRATEGIES = {"recent": select_recent, "random": select_random, "diverse": select_diverse}
 
 
-def select(db, strategy, n, keep_existing=True, set_name="default"):
-    """Return a list of rel_paths. When keep_existing, the current persistent
-    set is excluded from candidates (so you top up rather than re-pick)."""
+def select(db, strategy, n, exclude_all_sets=True, set_name=None, extra_exclude=None,
+           kinds=None):
+    """Return a list of rel_paths chosen by strategy.
+
+    exclude_all_sets -- when True, skip any image that already lives in ANY set,
+                        so a new set doesn't re-pick images you've already
+                        pulled into another set.
+    set_name         -- when given (and not excluding all sets), only that set's
+                        own members are excluded (used for topping up one set).
+    kinds            -- allowed media_kind values ({'image'} or {'image','video'});
+                        None means no filter. Audio is never trainable by YOLO.
+    """
     ensure_tables(db)
     n = max(0, int(n))
-    exclude = member_set(db, set_name) if keep_existing else set()
+    if exclude_all_sets:
+        exclude = all_member_set(db)
+    elif set_name:
+        exclude = member_set(db, set_name)
+    else:
+        exclude = set()
+    if extra_exclude:
+        exclude |= set(extra_exclude)
     fn = STRATEGIES.get(strategy, select_random)
-    return fn(db, n, exclude)
+    return fn(db, n, exclude, kinds)
+
+
+def create_run(db, strategy, n, exclude_all_sets=True, kinds=None):
+    """Select N images and store them into a brand-new numbered set in one shot.
+    Returns (set_name, rel_paths). This is the whole 'select' user action —
+    there is no separate keep step."""
+    ensure_tables(db)
+    name = next_set_name(db)
+    paths = select(db, strategy, n, exclude_all_sets=exclude_all_sets, kinds=kinds)
+    create_set(db, name)
+    keep(db, name, paths)
+    return name, paths

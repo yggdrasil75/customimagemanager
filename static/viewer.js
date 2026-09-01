@@ -73,7 +73,7 @@ function makeViewer(prefix, opts) {
     decisions: {},
     onRegionsChanged: null,   // review supplies this to keep its panel in sync
   };
-  self.ctx = self.canvas.getContext('2d');
+  self.ctx = self.canvas ? self.canvas.getContext('2d') : null;
   const canvas = self.canvas, mediaVideo = self.mediaVideo, imgObj = self.imgObj, ctx = self.ctx;
   const mediaAnim = self.mediaAnim;
 
@@ -181,7 +181,7 @@ function makeViewer(prefix, opts) {
   imgObj.onload = () => { applyEditorLayout(); };
 
   // ── canvas box-editing events (MAIN pane only — review is read-only draw) ──
-  if (isMain) {
+  if (isMain && canvas) {
     const boxesEditable = () =>
       !window.CIMFeatures || window.CIMFeatures.allowed('annot.boxes');
     canvas.addEventListener('mousedown', e => {
@@ -252,6 +252,15 @@ function makeViewer(prefix, opts) {
           dlist = document.getElementById('vt_labels'), cont = P('canvas_container');
     let file = null, doc = { tracks: [] }, W = 1, H = 1, saveTimer = null,
         drag = null, pending = null, selId = null;
+
+    // On pages that don't mount this viewer's markup (e.g. a standalone page
+    // that only uses the rv_ instance), the video-overlay nodes are absent.
+    // Return a no-op stub so construction can't null-deref mediaVideo/cont.
+    if (!svg || !mediaVideo || !cont) {
+      return { enable() {}, disable() {}, commitTag() {}, cancelTag() {},
+        renderList() {}, rename() {}, confirm() {}, remove() {}, setActive() {},
+        toggleKey() {}, _draw() {} };
+    }
 
     const colorOf = id => PALETTE[Math.max(0, doc.tracks.findIndex(t => t.id === id)) % PALETTE.length];
     const onKey = (tr, t) => tr.keyframes.some(k => Math.abs(k.t - t) < EPS);
@@ -598,12 +607,15 @@ function makeViewer(prefix, opts) {
   self.strip = strip;
 
   // Layout observers (main pane only — review sizes to its flex container).
-  if (isMain) {
-    new ResizeObserver(() => { if (currentFile && imgObj.width) requestAnimationFrame(drawCanvas); })
-      .observe(P('canvas_container'));
-  } else {
-    new ResizeObserver(() => { if (imgObj.width && !mediaVideo.classList.contains('hidden') === false) drawCanvas(); })
-      .observe(P('canvas_container'));
+  const _cc = P('canvas_container');
+  if (_cc) {
+    if (isMain) {
+      new ResizeObserver(() => { if (currentFile && imgObj.width) requestAnimationFrame(drawCanvas); })
+        .observe(_cc);
+    } else {
+      new ResizeObserver(() => { if (imgObj.width && !mediaVideo.classList.contains('hidden') === false) drawCanvas(); })
+        .observe(_cc);
+    }
   }
 
   // ── high-level show helpers ──

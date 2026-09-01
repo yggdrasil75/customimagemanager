@@ -25,6 +25,7 @@ function setPane(pane) {
   const isGallery = (pane === 'gallery');
   const isFaces = (pane === 'faces');
   const isReview = (pane === 'review');
+  const isTrainer = (pane === 'trainer');
 
   // Panes
   document.getElementById('gallery_pane')?.classList.toggle('hidden', !isGallery);
@@ -33,6 +34,7 @@ function setPane(pane) {
   document.getElementById('faces_pane')?.classList.toggle('hidden', !isFaces);
   document.getElementById('review_pane')?.classList.toggle('hidden', !isReview);
   document.getElementById('books_pane')?.classList.toggle('hidden', !isBooks);
+  document.getElementById('trainer_pane')?.classList.toggle('hidden', !isTrainer);
 
   // Tab chrome
   const on = 'flex-1 px-4 py-2 border-b-2 border-blue-500 text-blue-400 bg-gray-750';
@@ -43,12 +45,14 @@ function setPane(pane) {
   const f = document.getElementById('tab_faces');
   const rv = document.getElementById('tab_review');
   const bk = document.getElementById('tab_books');
+  const tr = document.getElementById('tab_trainer');
   if (g) g.className = isGallery ? on : off;
   if (a) a.className = isAlbums ? on : off;
   if (m) m.className = isMusic ? on : off;
   if (f) f.className = isFaces ? on : off;
   if (rv) rv.className = isReview ? on : off;
   if (bk) bk.className = isBooks ? on : off;
+  if (tr) tr.className = isTrainer ? on : off;
   if (window.CIMFeatures) window.CIMFeatures.apply(document);
   const _fresh = (pane !== window._lastPane);
   if (isFaces && typeof loadFaces === 'function') {
@@ -58,6 +62,10 @@ function setPane(pane) {
   if (isReview && typeof loadReviewPane === 'function') {
     const l = document.getElementById('review_pane_list');
     if (_fresh && (!l || !l.children.length)) loadReviewPane();
+  }
+  if (isTrainer) {
+    if (typeof trInit === 'function') trInit();
+    else setTimeout(() => { if (typeof trInit === 'function') trInit(); }, 100);
   }
   window._lastPane = pane;
 

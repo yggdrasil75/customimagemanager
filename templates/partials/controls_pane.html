@@ -192,9 +192,8 @@
         <div class="flex justify-between items-center">
           <h3 class="font-bold text-purple-400 text-sm">AI Tooling</h3>
           <div class="flex gap-2">
-            <a href="/training_portal" target="_blank" data-feature="ai.trainer"
-              class="text-xs text-purple-300 bg-gray-700 px-2 py-1 rounded hover:bg-gray-600 border border-purple-800">Trainer
-              ↗</a>
+            <button type="button" onclick="setPane('trainer')" data-feature="tab.trainer"
+              class="text-xs text-purple-300 bg-gray-700 px-2 py-1 rounded hover:bg-gray-600 border border-purple-800">Trainer</button>
           </div>
         </div>
         <div id="yolo_controls" class="opacity-50 pointer-events-none" data-feature="ai.autotag">

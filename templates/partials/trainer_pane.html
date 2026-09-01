@@ -1,0 +1,191 @@
+<!-- Tab: Trainer. Builds workable, persistent numbered subsets ("Set 1", …) so
+     you can curate a few hundred images instead of ten thousand, review each in
+     the SAME editor pane the gallery uses (click a tile → selectFile → real
+     canvas box drawing, region_modal, autosave — no duplicate box UI here), and
+     train a YOLO box model on just that subset. This pane only owns what's new:
+     set building, the media filter, and the train controls. -->
+<div id="trainer_pane" class="hidden flex-1 flex flex-col overflow-hidden">
+
+  <div class="p-3 border-b border-gray-700 bg-gray-800 flex-shrink-0 space-y-2">
+    <!-- Set picker -->
+    <div data-feature="ai.trainer">
+      <div class="flex gap-2 items-center">
+        <select id="tr_set_select" onchange="trOnSetChange()"
+          class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white"></select>
+        <button onclick="trDeleteSet()" data-feature="ai.trainer.keep"
+          class="text-xs text-red-400 hover:text-red-300 whitespace-nowrap">Delete</button>
+      </div>
+      <p class="text-xs text-gray-500 mt-1">
+        <span id="tr_set_count" class="text-purple-300">0</span> images ·
+        <span id="tr_labelled" class="text-green-400">0</span> with boxes<span id="tr_acc"></span></p>
+    </div>
+
+    <!-- Build a new set — collapses to a one-line summary once a set is active so
+         a short monitor isn't stuck showing a single grid row. Reopens on click. -->
+    <details id="tr_build" class="border-t border-gray-700 pt-2" data-feature="ai.trainer.select">
+      <summary class="text-xs font-bold text-gray-300 cursor-pointer select-none">Build a new set</summary>
+      <div class="space-y-2 mt-2">
+        <div class="flex items-center gap-2">
+          <span class="text-xs text-gray-400 w-14">Count</span>
+          <input id="tr_n" type="number" value="50" min="1"
+            class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm">
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">Priority</label>
+            <select id="tr_strategy" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm">
+              <option value="recent">Recent</option>
+              <option value="random">Random</option>
+              <option value="diverse">Diverse</option>
+            </select>
+          </div>
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">Media</label>
+            <select id="tr_media" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm">
+              <option value="image">Images</option>
+              <option value="image_video">Images + video</option>
+            </select>
+          </div>
+        </div>
+        <label class="flex items-center gap-2 text-xs text-gray-300">
+          <input id="tr_exclude_sets" type="checkbox" checked class="accent-purple-500">
+          Exclude images already in a set
+        </label>
+        <button onclick="trBuildSet()"
+          class="w-full bg-indigo-600 hover:bg-indigo-500 py-2 rounded font-bold text-sm">Create set</button>
+        <p class="text-xs text-gray-500">Recent = semi-random over the latest n×2; diverse = most distinct
+          embeddings. YOLO can't use audio. Your gallery is never changed.</p>
+      </div>
+    </details>
+    <button onclick="trClearSet()" data-feature="ai.trainer.keep"
+      class="w-full bg-red-800 hover:bg-red-700 py-1 rounded text-xs">Empty this set (keeps gallery)</button>
+  </div>
+
+  <!-- Set grid: same masonry/.gallery-item as the gallery. Click a tile to open
+       it in the editor pane and draw/name boxes there. -->
+  <div class="px-3 py-2 text-xs text-gray-500 flex items-center justify-between flex-shrink-0">
+    <span id="tr_grid_title">No set selected</span>
+    <span><span class="text-green-400">green</span> = has boxes · click to edit</span>
+  </div>
+  <div class="flex-1 overflow-y-auto px-3 pb-2" id="tr_grid_scroll">
+    <div id="tr_grid" class="masonry"></div>
+  </div>
+
+  <!-- Train controls -->
+  <div class="p-3 border-t border-gray-700 bg-gray-800 flex-shrink-0 space-y-2" data-feature="ai.trainer.run">
+    <div class="flex justify-between items-center">
+      <label class="text-xs font-bold text-purple-300">Train box model</label>
+      <button onclick="trToggleAdvanced()" id="tr_adv_toggle"
+        class="text-xs text-purple-300 hover:text-purple-200">Advanced ▾</button>
+    </div>
+    <div class="grid grid-cols-2 gap-2">
+      <div><label class="trlbl">Base</label>
+        <select id="tr_base_model" class="trinp">
+          <option value="yolo11n.pt">YOLO11 n</option><option value="yolo11s.pt">YOLO11 s</option>
+          <option value="yolo11m.pt">YOLO11 m</option><option value="yolo11l.pt">YOLO11 l</option>
+          <option value="yolo11x.pt">YOLO11 x</option>
+        </select></div>
+      <div><label class="trlbl">Device</label>
+        <select id="tr_device" class="trinp">
+          <option value="-1">CPU</option><option value="0">GPU 0</option>
+          <option value="1">GPU 1</option><option value="mps">MPS</option>
+        </select></div>
+      <div><label class="trlbl">Epochs</label><input id="tr_epochs" type="number" value="100" class="trinp"></div>
+      <div><label class="trlbl">Batch</label><input id="tr_batch" type="number" value="4" class="trinp"></div>
+      <div><label class="trlbl">Image size</label><input id="tr_imgsz" type="number" value="640" step="32" class="trinp"></div>
+      <div><label class="trlbl">Val split</label><input id="tr_val_split" type="number" value="0.05" step="0.05" min="0" max="0.9" class="trinp"></div>
+    </div>
+    <div id="tr_advanced" class="hidden space-y-2">
+      <div class="grid grid-cols-2 gap-2">
+        <div><label class="trlbl">Patience</label><input id="tr_patience" type="number" value="100" class="trinp"></div>
+        <div><label class="trlbl">Optimizer</label>
+          <select id="tr_optimizer" class="trinp">
+            <option value="auto">auto</option><option value="SGD">SGD</option>
+            <option value="Adam">Adam</option><option value="AdamW">AdamW</option><option value="RMSProp">RMSProp</option>
+          </select></div>
+        <div><label class="trlbl">lr0</label><input id="tr_lr0" type="number" value="0.01" step="0.001" class="trinp"></div>
+        <div><label class="trlbl">lrf</label><input id="tr_lrf" type="number" value="0.01" step="0.001" class="trinp"></div>
+        <div><label class="trlbl">Momentum</label><input id="tr_momentum" type="number" value="0.937" step="0.001" class="trinp"></div>
+        <div><label class="trlbl">Weight decay</label><input id="tr_weight_decay" type="number" value="0.0005" step="0.0001" class="trinp"></div>
+        <div><label class="trlbl">Warmup ep</label><input id="tr_warmup_epochs" type="number" value="3" step="0.5" class="trinp"></div>
+        <div><label class="trlbl">Freeze</label><input id="tr_freeze" type="number" value="0" class="trinp"></div>
+        <div><label class="trlbl">Dropout</label><input id="tr_dropout" type="number" value="0" step="0.05" class="trinp"></div>
+        <div><label class="trlbl">Seed</label><input id="tr_seed" type="number" value="0" class="trinp"></div>
+        <div><label class="trlbl">Workers</label><input id="tr_workers" type="number" value="8" class="trinp"></div>
+        <div><label class="trlbl">Close mosaic</label><input id="tr_close_mosaic" type="number" value="10" class="trinp"></div>
+      </div>
+      <div class="grid grid-cols-3 gap-x-2 gap-y-1">
+        <label class="trck"><input type="checkbox" id="tr_cos_lr" class="accent-purple-500"> Cosine</label>
+        <label class="trck"><input type="checkbox" id="tr_rect" class="accent-purple-500"> Rect</label>
+        <label class="trck"><input type="checkbox" id="tr_single_cls" class="accent-purple-500"> 1-class</label>
+      </div>
+      <label class="trlbl pt-1">Augmentation</label>
+      <div class="grid grid-cols-3 gap-2">
+        <div><label class="trlbl">hsv_h</label><input id="tr_hsv_h" type="number" value="0.015" step="0.005" class="trinp"></div>
+        <div><label class="trlbl">hsv_s</label><input id="tr_hsv_s" type="number" value="0.7" step="0.05" class="trinp"></div>
+        <div><label class="trlbl">hsv_v</label><input id="tr_hsv_v" type="number" value="0.4" step="0.05" class="trinp"></div>
+        <div><label class="trlbl">degrees</label><input id="tr_degrees" type="number" value="0" step="1" class="trinp"></div>
+        <div><label class="trlbl">translate</label><input id="tr_translate" type="number" value="0.1" step="0.05" class="trinp"></div>
+        <div><label class="trlbl">scale</label><input id="tr_scale" type="number" value="0.5" step="0.05" class="trinp"></div>
+        <div><label class="trlbl">shear</label><input id="tr_shear" type="number" value="0" step="1" class="trinp"></div>
+        <div><label class="trlbl">persp</label><input id="tr_perspective" type="number" value="0" step="0.0001" class="trinp"></div>
+        <div><label class="trlbl">flipud</label><input id="tr_flipud" type="number" value="0" step="0.1" class="trinp"></div>
+        <div><label class="trlbl">fliplr</label><input id="tr_fliplr" type="number" value="0.5" step="0.1" class="trinp"></div>
+        <div><label class="trlbl">mosaic</label><input id="tr_mosaic" type="number" value="1.0" step="0.1" class="trinp"></div>
+        <div><label class="trlbl">mixup</label><input id="tr_mixup" type="number" value="0" step="0.1" class="trinp"></div>
+        <div><label class="trlbl">copy_paste</label><input id="tr_copy_paste" type="number" value="0" step="0.1" class="trinp"></div>
+      </div>
+    </div>
+    <button onclick="trStartTraining()"
+      class="w-full bg-purple-600 hover:bg-purple-700 py-2 rounded font-bold text-sm">Start training</button>
+    <p id="tr_status" class="text-xs text-gray-400"></p>
+    <details class="text-xs">
+      <summary class="text-gray-400 cursor-pointer">Live log</summary>
+      <pre id="tr_log" class="mt-1 bg-gray-950 border border-gray-700 rounded p-2 text-green-400 font-mono text-[10px] max-h-40 overflow-y-auto whitespace-pre-wrap"></pre>
+    </details>
+
+    <!-- Validation: run the trained model back over the images and see where it
+         tightens / loosens / adds / drops boxes, with an accuracy score. -->
+    <details id="tr_val_section" class="border-t border-gray-700 pt-2">
+      <summary class="text-xs font-bold text-amber-300 cursor-pointer select-none">Validate</summary>
+      <div class="space-y-2 mt-2">
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="trlbl">Source</label>
+            <select id="tr_val_source" class="trinp">
+              <option value="self">This set's images</option>
+              <option value="new">Pull in new images</option>
+            </select>
+          </div>
+          <div>
+            <label class="trlbl">New images (if new)</label>
+            <input id="tr_val_addnew" type="number" value="20" min="1" class="trinp">
+          </div>
+          <div><label class="trlbl">IoU ok ≥</label><input id="tr_val_iouok" type="number" value="0.7" step="0.05" min="0" max="1" class="trinp"></div>
+          <div><label class="trlbl">Conf ≥</label><input id="tr_val_conf" type="number" value="0.25" step="0.05" min="0" max="1" class="trinp"></div>
+          <div><label class="trlbl">Accept below F1</label><input id="tr_val_bound" type="number" value="0.8" step="0.05" min="0" max="1" class="trinp"></div>
+        </div>
+        <button onclick="trValidate()"
+          class="w-full bg-amber-700 hover:bg-amber-600 py-2 rounded font-bold text-sm">Run validation</button>
+        <div id="tr_val_summary" class="text-xs text-gray-300"></div>
+        <div id="tr_val_list" class="space-y-1 max-h-60 overflow-y-auto"></div>
+        <button id="tr_val_retrain" onclick="trStartTraining()" data-feature="ai.trainer.run"
+          class="hidden w-full bg-purple-700 hover:bg-purple-600 py-2 rounded font-bold text-sm">
+          Retrain on corrected labels</button>
+      </div>
+    </details>
+  </div>
+</div>
+
+<style>
+  .trlbl{display:block;font-size:.65rem;color:#9ca3af;margin-bottom:.1rem}
+  .trinp{width:100%;padding:.3rem;background:#374151;border:1px solid #4b5563;border-radius:.25rem;color:#fff;font-size:.75rem}
+  .trck{display:flex;align-items:center;gap:.3rem;font-size:.7rem;color:#d1d5db}
+  #tr_grid .gallery-item.has-boxes{border-color:#22c55e}
+  #tr_grid .gallery-item.tr-current{outline:3px solid #60a5fa;outline-offset:-3px}
+  .tr-vrow{display:flex;align-items:center;gap:.5rem;padding:.25rem .4rem;border-radius:.25rem;cursor:pointer;background:#111827}
+  .tr-vrow:hover{background:#1f2937}
+  .tr-vrow.tr-current{outline:2px solid #60a5fa}
+  .tr-vthumb{width:44px;height:44px;object-fit:cover;border-radius:.2rem;flex-shrink:0}
+  .tr-chip{font-size:.6rem;padding:0 .3rem;border-radius:.6rem}
+</style>
