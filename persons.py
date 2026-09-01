@@ -246,8 +246,13 @@ def upsert_appearance(media_dir: str, person_uuid: str,
     desc = read(media_dir, person_uuid)
     if desc is None:
         return False
-    desc["appearances"] = [a for a in desc["appearances"] if a["id"] != appearance["id"]]
-    desc["appearances"].append(appearance)
+    apps = desc["appearances"]
+    for i, a in enumerate(apps):
+        if a["id"] == appearance["id"]:
+            apps[i] = appearance          # replace in place, keep position
+            break
+    else:
+        apps.append(appearance)           # genuinely new era
     write(media_dir, desc)
     return True
 

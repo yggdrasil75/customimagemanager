@@ -333,8 +333,9 @@ def mesh_to_obj(vertices: np.ndarray, faces: np.ndarray) -> bytes:
             person container's mesh member. OBJ carries the shape and skeleton
             we need with no binary chunking.
     """
-    verts = np.asarray(vertices, np.float32)
-    faces = np.asarray(faces, np.int32) + 1   # OBJ face indices are 1-based
+    verts = np.asarray(vertices, np.float32).copy()
+    verts[:, 0] *= -1.0                        # flip X: estimator frame -> viewer frame
+    faces = np.asarray(faces, np.int32)[:, ::-1] + 1  # reverse winding, then OBJ 1-based
     lines = [f"v {x:.6f} {y:.6f} {z:.6f}" for x, y, z in verts]
     lines += [f"f {a} {b} {c}" for a, b, c in faces]
     return ("\n".join(lines) + "\n").encode()
