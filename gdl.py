@@ -160,11 +160,12 @@ def discover_fields(url, opts=None, resolve=2):
     captured = _ErrorCapture()
     with _lock, _fresh_config(opts):
         job = DataJob(url, file=None, resolve=resolve)
-        job.extractor.log.addHandler(captured)
+        _log_obj = getattr(job.extractor.log, "logger", job.extractor.log)
+        _log_obj.addHandler(captured)
         try:
             status = job.run()
         finally:
-            job.extractor.log.removeHandler(captured)
+            _log_obj.removeHandler(captured)
         meta_dicts = list(job.data_meta)
 
     expected = site_of(url) or ""
@@ -184,9 +185,6 @@ def discover_fields(url, opts=None, resolve=2):
         if not isinstance(kw, dict):
             continue
         cat = kw.get("category") or kw.get("subcategory") or ""
-        # A dict whose category doesn't match the URL's extractor didn't come
-        # from real post metadata — it's a login/interstitial page bleeding in.
-        # Skip it rather than flatten its CSS/markup into the field list.
         if expected and cat and cat != expected:
             continue
         flat = _flatten(kw)
