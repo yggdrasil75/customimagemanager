@@ -7933,6 +7933,27 @@ def api_gdl_available():
     to `pip install gallery-dl` instead of failing on first use."""
     return jsonify({"success": True, "available": gdl.available()})
 
+@app.route("/api/gdl/site", methods=["POST"])
+def api_gdl_site():
+    """Resolve a URL's extractor category WITHOUT any network call, plus its
+    saved mapping/opts/auth. This lets the UI offer login setup *before* the
+    first field check — needed for API/login-only sites (e.g. reddit) where
+    discovery can't succeed until credentials exist."""
+    url = (request.json or {}).get("url", "").strip()
+    if not url:
+        return jsonify({"success": False, "error": "url required"}), 400
+    try:
+        site = gdl.site_of(url) or ""
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    if not site:
+        return jsonify({"success": False,
+                        "error": "No gallery-dl extractor matches that URL."}), 400
+    return jsonify({"success": True, "site": site,
+                    "mapping": state.get("gdl_sites", {}).get(site, {}),
+                    "opts": state.get("gdl_opts", {}).get(site, []),
+                    "auth": _gdl_auth_public(site)})
+
 @app.route("/api/gdl/targets")
 def api_gdl_targets():
     """The set of destinations a gallery-dl field can map to. Beyond the three
@@ -8003,9 +8024,10 @@ def api_gdl_config():
     site = (d.get("site") or "").strip()
     if not site:
         return jsonify({"success": False, "error": "site required"}), 400
-    sites = dict(state.get("gdl_sites", {}))
-    sites[site] = d.get("mapping", {}) or {}
-    state["gdl_sites"] = sites
+    if "mapping" in d:
+        sites = dict(state.get("gdl_sites", {}))
+        sites[site] = d.get("mapping", {}) or {}
+        state["gdl_sites"] = sites
     if "opts" in d:
         opts = dict(state.get("gdl_opts", {}))
         # Accept either a list or a newline/comma string of KEY=VALUE lines.

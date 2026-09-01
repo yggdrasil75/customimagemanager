@@ -109,6 +109,29 @@ _DEFAULT_INCLUDES = [
     (("extractor",), "metadata", "notes,pools,tags"),
 ]
 
+class _ErrorCapture(logging.Handler):
+    """Grabs the first ERROR-level record an extractor logs. gallery-dl swallows
+    extractor exceptions and only logs them, so this is how we recover a real
+    message (e.g. reddit's authorization failure) to show the user."""
+    def __init__(self):
+        super().__init__(level=logging.ERROR)
+        self.message = ""
+    def emit(self, record):
+        if not self.message:
+            self.message = record.getMessage()
+
+# gallery-dl exit codes are a bitmask; 16 is the "authorization/login required"
+# bit. We also sniff the message text because not every auth failure sets it.
+_AUTH_BIT = 16
+_AUTH_HINTS = ("login", "log in", "auth", "unauthorized", "authorization",
+               "credential", "cookie", "403", "forbidden", "account required")
+
+def _looks_like_auth(x):
+    if isinstance(x, int):
+        return bool(x & _AUTH_BIT)
+    s = str(x).lower()
+    return any(h in s for h in _AUTH_HINTS)
+
 def _flatten(obj, prefix=""):
     """Flatten nested dicts into dotted keys, so a booru's
     `{"tags": [...], "user": {"name": ...}}` surfaces both `tags` and
@@ -134,18 +157,28 @@ def discover_fields(url, opts=None, resolve=2):
         raise GdlError("gallery-dl is not installed on this server")
     if not _find_extractor(url):
         raise GdlError(f"No gallery-dl extractor matches that URL: {url}")
+    captured = _ErrorCapture()
     with _lock, _fresh_config(opts):
         job = DataJob(url, file=None, resolve=resolve)
-        status = job.run()
+        job.extractor.log.addHandler(captured)
+        try:
+            status = job.run()
+        finally:
+            job.extractor.log.removeHandler(captured)
         meta_dicts = list(job.data_meta)
-        err = getattr(job, "exception", None)
-        if not err and status:
-            err = GdlError(f"gallery-dl exited with status {status}")
-
-    if err:
-        raise GdlError(str(err)) from (err if isinstance(err, BaseException) else None)
 
     expected = site_of(url) or ""
+
+    # A nonzero status means the extractor failed — treat any dicts it produced
+    # as untrustworthy (they're the interstitial page) and surface the real
+    # error instead of the CSS blob.
+    if status:
+        msg = captured.message or f"gallery-dl could not read that URL (status {status})."
+        if _looks_like_auth(msg) or _looks_like_auth(status):
+            msg = (msg + "  This site requires login — set an auth method below "
+                   "and press Check fields again.").strip()
+        raise GdlError(msg)
+
     fields, site = set(), ""
     for kw in meta_dicts:
         if not isinstance(kw, dict):
@@ -161,11 +194,9 @@ def discover_fields(url, opts=None, resolve=2):
         site = site or cat
 
     if not fields:
-        # No usable metadata. For a login-gated site with no creds this is the
-        # common path, so point the user at the likely cause.
-        hint = " (this site may require login — set an auth method and retry)"
-        raise GdlError(
-            f"gallery-dl found no metadata for that URL.{hint if expected else ''}")
+        hint = ("  This site may require login — set an auth method below and "
+                "retry.") if expected else ""
+        raise GdlError(f"gallery-dl found no metadata for that URL.{hint}")
     return {"site": site or expected, "fields": sorted(fields)}
 
 def site_of(url, opts=None):

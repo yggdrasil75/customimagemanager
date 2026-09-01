@@ -179,8 +179,56 @@ async function gdlPasteCookies() {
   }
 }
 
+// Resolve the URL's site without a network fetch/discovery, so login can be
+// saved before the first field check (required for login-only sites). Caches
+// onto _gdlSite and pre-loads any saved auth for that site.
+// Called on URL blur: resolve the site (no network) and prefill any saved
+// login for it, so a login-only site shows its auth before Check fields.
+async function gdlUrlChanged() {
+  _gdlSite = '';                                   // force re-resolve for new URL
+  const url = document.getElementById('gdl_url').value.trim();
+  if (!url) return;
+  const r = await fetch('/api/gdl/site', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }) }).then(r => r.json()).catch(() => null);
+  if (r && r.success) {
+    _gdlSite = r.site;
+    const siteEl = document.getElementById('gdl_site');
+    if (siteEl) siteEl.textContent = r.site || '(unknown)';
+    const authSiteEl = document.getElementById('gdl_auth_site');
+    if (authSiteEl) authSiteEl.textContent = r.site ? '— ' + r.site : '';
+    _gdlLoadAuth(r.auth || { method: 'none' });
+    const optsEl = document.getElementById('gdl_opts');
+    if (optsEl && (r.opts || []).length) optsEl.value = (r.opts || []).join('\n');
+  }
+}
+
+async function _gdlResolveSite() {
+  if (_gdlSite) return _gdlSite;
+  const url = document.getElementById('gdl_url').value.trim();
+  if (!url) return '';
+  const r = await fetch('/api/gdl/site', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }) }).then(r => r.json()).catch(() => null);
+  if (r && r.success) {
+    _gdlSite = r.site;
+    const siteEl = document.getElementById('gdl_site');
+    if (siteEl) siteEl.textContent = r.site || '(unknown)';
+    return r.site;
+  }
+  return '';
+}
+
 async function gdlSaveAuth() {
-  if (!_gdlSite) { _gdlStatus('Check fields first.', 'err'); return; }
+  if (!_gdlSite) {
+    // No successful check yet — resolve the site straight from the URL so an
+    // API/login-only site can have credentials saved first, then checked.
+    await _gdlResolveSite();
+  }
+  if (!_gdlSite) {
+    _gdlStatus('Enter a valid URL first so I know which site to save login for.', 'err');
+    return;
+  }
   const m = document.getElementById('gdl_auth_method').value;
   const auth = { method: m };
   if (m === 'userpass') {
@@ -192,11 +240,16 @@ async function gdlSaveAuth() {
   } else if (m === 'cookies_browser') {
     auth.browser = document.getElementById('gdl_auth_browser_sel').value;
   }
+  const payload = { site: _gdlSite, auth };
+  // Only send a mapping if rows are actually on screen; otherwise the server
+  // keeps whatever mapping is already saved for this site.
+  if (document.querySelector('.gdl-map-sel')) payload.mapping = _gdlCurrentMapping();
   const r = await fetch('/api/gdl/config', { method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ site: _gdlSite, mapping: _gdlCurrentMapping(), auth }) })
+    body: JSON.stringify(payload) })
     .then(r => r.json()).catch(() => null);
-  _gdlStatus(r?.success ? 'Login saved.' : 'Save failed.', r?.success ? 'ok' : 'err');
+  _gdlStatus(r?.success ? 'Login saved. Now press Check fields.' : 'Save failed.',
+             r?.success ? 'ok' : 'err');
 }
 
 function _gdlCurrentMapping() {
