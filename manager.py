@@ -49,6 +49,7 @@ import object_grouping as og
 import model_registry
 import discover_stages as ds
 import image_index as ii
+import training_select as ts
 import media_types as mt
 import video_tracks as vt
 import tiering
@@ -800,6 +801,11 @@ def _init_db():
     # permanent image-level pipeline tables (embeddings/clusters/heuristics)
     try:
         ii.ensure_tables(db)
+    except Exception:
+        pass
+    # persistent training-selection sets
+    try:
+        ts.ensure_tables(db)
     except Exception:
         pass
 
@@ -11600,57 +11606,165 @@ def run_llm():
     except Exception as e:
         return jsonify({"success":False,"error":str(e)})
 
+# ── training-selection: persistent image sets ────────────────────────────────
+# A "set" is a named, persistent bag of rel_paths curated for a training run. It
+# survives restarts, so a 5000-image pick is still there next week. See
+# training_select.py for the selection strategies and storage.
+
+def _sel_paths_to_entries(rel_paths):
+    """Turn rel_paths into gallery-style entries (thumb url + existence flags)
+    the portal can render, in the given order."""
+    db = _db()
+    out = []
+    for rp in rel_paths:
+        row = db.execute("SELECT rel_path FROM files WHERE rel_path=?", (rp,)).fetchone()
+        if not row:
+            continue
+        abs_path = get_safe_path(MEDIA_DIR, rp)
+        base = os.path.splitext(abs_path)[0] if abs_path else ""
+        has_label = bool(base) and os.path.exists(base + ".txt") \
+            and os.path.getsize(base + ".txt") > 0
+        out.append({"rel_path": rp,
+                    "thumb": f"/api/thumb/{rp}",
+                    "has_label": has_label})
+    return out
+
+
+@app.route("/api/trainer/sets")
+@_auth.require_feature("ai.trainer")
+def trainer_sets():
+    return jsonify({"success": True, "sets": ts.list_sets(_db())})
+
+
+@app.route("/api/trainer/set", methods=["GET"])
+@_auth.require_feature("ai.trainer")
+def trainer_set_members():
+    name = request.args.get("set", "default").strip() or "default"
+    paths = ts.members(_db(), name)
+    return jsonify({"success": True, "name": name, "count": len(paths),
+                    "files": _sel_paths_to_entries(paths)})
+
+
+@app.route("/api/trainer/set", methods=["DELETE"])
+@_auth.require_feature("ai.trainer.keep", action="trainer_set_delete", fields=("set",))
+def trainer_set_delete():
+    name = (request.args.get("set", "") or (request.json or {}).get("set", "")).strip()
+    if not name:
+        return jsonify({"success": False, "error": "set name required"}), 400
+    ts.delete_set(_db(), name)
+    return jsonify({"success": True})
+
+
+@app.route("/api/trainer/select", methods=["POST"])
+@_auth.require_feature("ai.trainer.select", action="trainer_select",
+                       fields=("strategy", "n", "set"))
+def trainer_select():
+    """Pick N images by strategy. Does NOT modify the persistent set — it just
+    proposes a selection the user can then Keep or discard."""
+    d = request.json or {}
+    strategy = d.get("strategy", "random")
+    if strategy not in ts.STRATEGIES:
+        return jsonify({"success": False, "error": f"unknown strategy {strategy!r}"}), 400
+    try:
+        n = max(0, int(d.get("n", 0)))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "n must be an integer"}), 400
+    set_name = (d.get("set") or "default").strip() or "default"
+    keep_existing = bool(d.get("keep_existing", True))
+    try:
+        paths = ts.select(_db(), strategy, n, keep_existing=keep_existing, set_name=set_name)
+    except Exception as e:
+        training_logger.error(f"select failed: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+    return jsonify({"success": True, "strategy": strategy, "count": len(paths),
+                    "files": _sel_paths_to_entries(paths)})
+
+
+@app.route("/api/trainer/keep", methods=["POST"])
+@_auth.require_feature("ai.trainer.keep", action="trainer_keep", fields=("set",))
+def trainer_keep():
+    """Add rel_paths to the persistent set (the actual 'selection')."""
+    d = request.json or {}
+    set_name = (d.get("set") or "default").strip() or "default"
+    paths = [p for p in (d.get("paths") or []) if isinstance(p, str)]
+    total = ts.keep(_db(), set_name, paths)
+    return jsonify({"success": True, "added": len(paths), "count": total})
+
+
+@app.route("/api/trainer/clear", methods=["POST"])
+@_auth.require_feature("ai.trainer.keep", action="trainer_clear", fields=("set",))
+def trainer_clear():
+    """Empty the SELECTION (persistent set). Never touches the gallery/library."""
+    d = request.json or {}
+    set_name = (d.get("set") or "default").strip() or "default"
+    ts.clear(_db(), set_name)
+    return jsonify({"success": True})
+
+
+@app.route("/api/trainer/remove", methods=["POST"])
+@_auth.require_feature("ai.trainer.keep", action="trainer_remove", fields=("set",))
+def trainer_remove():
+    """Drop specific rel_paths from the persistent set (does not touch gallery)."""
+    d = request.json or {}
+    set_name = (d.get("set") or "default").strip() or "default"
+    paths = [p for p in (d.get("paths") or []) if isinstance(p, str)]
+    ts.remove(_db(), set_name, paths)
+    return jsonify({"success": True, "removed": len(paths)})
+
+
 @app.route("/api/train", methods=["POST"])
-@_auth.require_feature("ai.quicktrain")
+@_auth.require_feature("ai.trainer.run", action="trainer_train", fields=("set",))
 def train():
     d          = request.json or {}
-    remote_ip  = d.get("remote_ip","").strip()
+    set_name   = (d.get("set") or "default").strip() or "default"
     abs_folder = os.path.abspath(MEDIA_DIR)
-    dset_dir   = os.path.join(abs_folder,"yolo_dataset")
-    shutil.rmtree(dset_dir,ignore_errors=True)
-    for sub in ("images/train","images/val","labels/train","labels/val"):
-        os.makedirs(os.path.join(dset_dir,sub),exist_ok=True)
-    state["status_text"]="Preparing dataset…"
+    dset_dir   = os.path.join(abs_folder, "yolo_dataset")
+    shutil.rmtree(dset_dir, ignore_errors=True)
+    for sub in ("images/train", "images/val", "labels/train", "labels/val"):
+        os.makedirs(os.path.join(dset_dir, sub), exist_ok=True)
+    state["status_text"] = "Preparing dataset…"
+
+    # Only labelled images from the selection set contribute.
     bases = []
-    for root,dirs,files in os.walk(MEDIA_DIR):
-        dirs[:] = [x for x in dirs if not x.startswith('.') and x!='runs']
-        for f in files:
-            if f.endswith('.txt') and f!='classes.txt':
-                tp=os.path.join(root,f)
-                if os.path.getsize(tp)>0:
-                    bases.append(os.path.splitext(tp)[0])
-    pairs = [b for b in bases if os.path.exists(b+".jxl")]
-    if not pairs:
-        state["status_text"]="No labels found!"; return jsonify({"success":False})
+    for rp in ts.members(_db(), set_name):
+        abs_path = get_safe_path(MEDIA_DIR, rp)
+        if not abs_path:
+            continue
+        base = os.path.splitext(abs_path)[0]
+        if os.path.exists(base + ".txt") and os.path.getsize(base + ".txt") > 0 \
+                and os.path.exists(base + ".jxl"):
+            bases.append(base)
+
+    if not bases:
+        state["status_text"] = "No labelled images in this set!"
+        return jsonify({"success": False,
+                        "error": "No labelled images in this set. Draw boxes first."}), 400
+
+    pairs = bases
     random.shuffle(pairs)
-    val_n = max(1,int(len(pairs)*.05)) if len(pairs)>1 else 0
-    val_b,tr_b = pairs[:val_n],pairs[val_n:]
+    val_n = max(1, int(len(pairs) * .05)) if len(pairs) > 1 else 0
+    val_b, tr_b = pairs[:val_n], pairs[val_n:]
     for b in tr_b:
-        bn=os.path.basename(b)
-        subprocess.run(['djxl',b+".jxl",os.path.join(dset_dir,"images/train",bn+".jpg")],
-                       stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-        shutil.copy(b+".txt",os.path.join(dset_dir,"labels/train",bn+".txt"))
+        bn = os.path.basename(b)
+        subprocess.run(['djxl', b + ".jxl", os.path.join(dset_dir, "images/train", bn + ".jpg")],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        shutil.copy(b + ".txt", os.path.join(dset_dir, "labels/train", bn + ".txt"))
     for b in val_b:
-        bn=os.path.basename(b)
-        subprocess.run(['djxl',b+".jxl",os.path.join(dset_dir,"images/val",bn+".jpg")],
-                       stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-        shutil.copy(b+".txt",os.path.join(dset_dir,"labels/val",bn+".txt"))
-    yaml_p=os.path.join(dset_dir,"dataset.yaml")
-    with open(yaml_p,'w') as f:
-        yaml.dump({"path":dset_dir,"train":"images/train","val":"images/val",
-                   "nc":len(state["classes"]),"names":state["classes"]},f)
-    if remote_ip:
-        state["remote_ip"]=remote_ip; save_config()
-        threading.Thread(target=remote_yolo_train_worker,
-                         args=(abs_folder,dset_dir,d,remote_ip),daemon=True).start()
-    else:
-        state["status_text"]=f"Training… ({len(tr_b)} train | {len(val_b)} val)"
-        threading.Thread(target=yolo_train_worker,daemon=True,
-                         args=(abs_folder,dset_dir,yaml_p,
-                               d.get("epochs",100),d.get("batch",4),
-                               d.get("imgsz",640),d.get("device","-1"),
-                               d.get("base_model") or f"yolo11{_yolo_size()}.pt")).start()
-    return jsonify({"success":True})
+        bn = os.path.basename(b)
+        subprocess.run(['djxl', b + ".jxl", os.path.join(dset_dir, "images/val", bn + ".jpg")],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        shutil.copy(b + ".txt", os.path.join(dset_dir, "labels/val", bn + ".txt"))
+    yaml_p = os.path.join(dset_dir, "dataset.yaml")
+    with open(yaml_p, 'w') as f:
+        yaml.dump({"path": dset_dir, "train": "images/train", "val": "images/val",
+                   "nc": len(state["classes"]), "names": state["classes"]}, f)
+    state["status_text"] = f"Training… ({len(tr_b)} train | {len(val_b)} val)"
+    threading.Thread(target=yolo_train_worker, daemon=True,
+                     args=(abs_folder, dset_dir, yaml_p,
+                           d.get("epochs", 100), d.get("batch", 4),
+                           d.get("imgsz", 640), d.get("device", "-1"),
+                           d.get("base_model") or f"yolo11{_yolo_size()}.pt")).start()
+    return jsonify({"success": True, "train": len(tr_b), "val": len(val_b)})
 
 @app.route("/api/training_log")
 def get_training_log():

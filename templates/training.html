@@ -1,49 +1,114 @@
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"><title>Training</title>
-<script src="/tailwind"></script></head>
+<html lang="en"><head><meta charset="UTF-8"><title>Trainer</title>
+<script src="/tailwind"></script>
+<script src="/static/auth.js"></script>
+<script src="/static/features.js"></script></head>
 <body class="bg-gray-900 text-white h-screen flex flex-col">
-<div class="p-5 bg-gray-800 border-b border-gray-700 flex justify-between flex-shrink-0">
-  <h1 class="text-2xl font-bold text-purple-400">YOLO11 Training</h1>
-  <a href="/" class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded text-sm">← Back</a>
+<div class="p-4 bg-gray-800 border-b border-gray-700 flex justify-between items-center flex-shrink-0">
+  <h1 class="text-xl font-bold text-purple-400">Trainer — Box Model</h1>
+  <div class="flex items-center gap-3">
+    <span id="app_status" class="text-xs text-gray-400"></span>
+    <a href="/" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm">← Back</a>
+  </div>
 </div>
+
 <div class="flex flex-1 overflow-hidden">
-  <div class="w-72 p-5 bg-gray-800 border-r border-gray-700 overflow-y-auto flex-shrink-0 space-y-3">
-    <div class="bg-indigo-900 p-3 rounded border border-indigo-700">
-      <label class="text-xs font-bold text-indigo-300 block mb-1">Remote Worker IP:Port</label>
-      <input id="remote_ip" type="text" placeholder="192.168.1.50:5000"
-        class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm">
-      <p class="text-xs text-indigo-200 mt-1">Blank = local.</p>
+  <!-- LEFT: selection controls -->
+  <div class="w-80 p-4 bg-gray-800 border-r border-gray-700 overflow-y-auto flex-shrink-0 space-y-4">
+
+    <!-- Set picker (persistent) -->
+    <div class="bg-gray-900 p-3 rounded border border-gray-700" data-feature="ai.trainer">
+      <label class="text-xs font-bold text-purple-300 block mb-1">Dataset (persistent)</label>
+      <div class="flex gap-1">
+        <select id="set_select" onchange="onSetChange()"
+          class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white"></select>
+        <button onclick="newSet()" title="New set"
+          class="px-2 bg-gray-700 hover:bg-gray-600 rounded border border-gray-600 text-sm">+</button>
+      </div>
+      <p class="text-xs text-gray-500 mt-1">Sets survive restarts. <span id="set_count" class="text-purple-300">0</span> kept.</p>
     </div>
-    <div><label class="text-xs text-gray-400 block mb-1">Base Model</label>
-      <select id="base_model" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-        <option value="yolo11n.pt">yolo11n (Nano)</option>
-        <option value="yolo11s.pt">yolo11s (Small)</option>
-      </select></div>
-    <div><label class="text-xs text-gray-400 block mb-1">Epochs</label>
-      <input id="epochs" type="number" value="100"
-        class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-white text-sm"></div>
-    <div><label class="text-xs text-gray-400 block mb-1">Batch</label>
-      <input id="batch" type="number" value="4"
-        class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-white text-sm"></div>
-    <div><label class="text-xs text-gray-400 block mb-1">Image Size</label>
-      <input id="imgsz" type="number" value="640"
-        class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-white text-sm"></div>
-    <div><label class="text-xs text-gray-400 block mb-1">Device</label>
-      <select id="device" class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-white text-sm">
-        <option value="-1">CPU</option><option value="0">GPU 0</option>
-      </select></div>
-    <button onclick="startTraining()"
-      class="w-full bg-purple-600 hover:bg-purple-700 py-2 rounded font-bold">Start</button>
-    <div class="pt-3 border-t border-gray-700">
-      <p class="text-xs text-yellow-400 font-bold">Status:</p>
-      <p id="app_status" class="text-xs text-gray-300 mt-1">Ready.</p>
+
+    <!-- Selection -->
+    <div class="space-y-2" data-feature="ai.trainer.select">
+      <label class="text-xs font-bold text-gray-300 block">Select</label>
+      <div class="flex items-center gap-2">
+        <span class="text-xs text-gray-400">Count (n)</span>
+        <input id="sel_n" type="number" value="20" min="1"
+          class="w-24 p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm">
+      </div>
+      <div>
+        <label class="text-xs text-gray-400 block mb-1">Priority</label>
+        <select id="sel_strategy"
+          class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm">
+          <option value="recent">Recent (semi-random over last n×2)</option>
+          <option value="random">Fully random</option>
+          <option value="diverse">Most diverse (distinct embeddings)</option>
+        </select>
+      </div>
+      <label class="flex items-center gap-2 text-xs text-gray-300">
+        <input id="sel_exclude_kept" type="checkbox" checked class="accent-purple-500">
+        Exclude images already kept
+      </label>
+      <button onclick="doSelect()"
+        class="w-full bg-indigo-600 hover:bg-indigo-500 py-2 rounded font-bold text-sm">Select n</button>
+    </div>
+
+    <!-- Keep / clear -->
+    <div class="space-y-2 pt-2 border-t border-gray-700" data-feature="ai.trainer.keep">
+      <label class="text-xs font-bold text-gray-300 block">Selection actions</label>
+      <button onclick="keepSelection()"
+        class="w-full bg-green-700 hover:bg-green-600 py-1.5 rounded font-bold text-sm">Keep proposed → set</button>
+      <button onclick="clearSet()"
+        class="w-full bg-red-800 hover:bg-red-700 py-1.5 rounded text-sm">Clear selection (keeps gallery)</button>
+      <p class="text-xs text-gray-500">Clear only empties this set. Your images stay in the gallery.</p>
+    </div>
+
+    <!-- Train -->
+    <div class="space-y-2 pt-2 border-t border-gray-700" data-feature="ai.trainer.run">
+      <label class="text-xs font-bold text-purple-300 block">Train box model (YOLO11)</label>
+      <div class="grid grid-cols-2 gap-2">
+        <div><label class="text-xs text-gray-400 block mb-1">Base</label>
+          <select id="base_model" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+            <option value="yolo11n.pt">nano</option><option value="yolo11s.pt">small</option>
+          </select></div>
+        <div><label class="text-xs text-gray-400 block mb-1">Device</label>
+          <select id="device" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+            <option value="-1">CPU</option><option value="0">GPU 0</option>
+          </select></div>
+        <div><label class="text-xs text-gray-400 block mb-1">Epochs</label>
+          <input id="epochs" type="number" value="100" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm"></div>
+        <div><label class="text-xs text-gray-400 block mb-1">Batch</label>
+          <input id="batch" type="number" value="4" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm"></div>
+        <div class="col-span-2"><label class="text-xs text-gray-400 block mb-1">Image size</label>
+          <input id="imgsz" type="number" value="640" class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm"></div>
+      </div>
+      <p class="text-xs text-yellow-500">Only kept images that already have boxes are used.</p>
+      <button onclick="startTraining()"
+        class="w-full bg-purple-600 hover:bg-purple-700 py-2 rounded font-bold">Start training</button>
     </div>
   </div>
-  <div class="flex-1 flex flex-col p-4 min-w-0">
-    <p class="text-xs text-gray-500 uppercase mb-2">Live Log</p>
+
+  <!-- MIDDLE: proposed / kept grid -->
+  <div class="flex-1 flex flex-col min-w-0">
+    <div class="flex items-center justify-between px-4 py-2 border-b border-gray-700 bg-gray-800/50">
+      <div class="flex gap-2 text-sm">
+        <button id="tab_proposed" onclick="showTab('proposed')"
+          class="px-3 py-1 rounded bg-indigo-700">Proposed (<span id="n_proposed">0</span>)</button>
+        <button id="tab_kept" onclick="showTab('kept')"
+          class="px-3 py-1 rounded bg-gray-700">Kept (<span id="n_kept">0</span>)</button>
+      </div>
+      <span class="text-xs text-gray-500">green ring = has boxes</span>
+    </div>
+    <div id="grid" class="flex-1 overflow-y-auto p-3 grid gap-2"
+      style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr));align-content:start"></div>
+  </div>
+
+  <!-- RIGHT: log -->
+  <div class="w-80 flex flex-col p-3 border-l border-gray-700 min-w-0 flex-shrink-0" data-feature="ai.trainer.run">
+    <p class="text-xs text-gray-500 uppercase mb-2">Live log</p>
     <pre id="log_output"
-      class="flex-1 bg-gray-950 border border-gray-700 rounded p-3 text-green-400 font-mono text-xs overflow-y-auto whitespace-pre-wrap"></pre>
+      class="flex-1 bg-gray-950 border border-gray-700 rounded p-2 text-green-400 font-mono text-xs overflow-y-auto whitespace-pre-wrap"></pre>
   </div>
 </div>
-<script src="/web/training.js"></script>
+<script src="/static/training.js"></script>
 </body></html>
