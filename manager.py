@@ -11381,6 +11381,39 @@ def api_pose():
                         "note": "No people detected (or pose model unavailable)."})
     return jsonify({"success": True, "pose": pose_data})
 
+@app.route("/api/bulk_pose", methods=["POST"])
+@_auth.require_feature("ai.pose")
+def bulk_pose():
+    """Estimate a skeleton/pose for many files and store each in its sidecar.
+    Mirrors /api/pose over a selection. Body: {filenames}. This is what feeds
+    the per-appearance T-pose aggregation, so running it over a person's images
+    is the prerequisite for 'Estimate T-pose'."""
+    filenames = request.json.get("filenames", [])
+    done, posed, errors = 0, 0, []
+    total = len(filenames)
+    for fn in filenames:
+        fp = get_safe_path(MEDIA_DIR, fn)
+        if not fp or not os.path.exists(fp):
+            errors.append(fn); continue
+        try:
+            img = read_jxl(fp)
+            if img is None:
+                errors.append(fn); continue
+            pose_data = _run_pose(_to_bgr(img))
+            meta = read_metadata(fp)
+            write_metadata(fp, meta["tags"], meta["description"],
+                           meta["regions"], pose=pose_data)
+            if (pose_data or {}).get("people"):
+                posed += 1
+            done += 1
+            state["status_text"] = f"Pose: {done}/{total} ({posed} with people)..."
+        except Exception as e:
+            errors.append(fn)
+            access_logger.error(f"bulk_pose {fn}: {e}")
+    state["status_text"] = "Ready."
+    return jsonify({"success": True, "done": done, "posed": posed,
+                    "errors": errors})
+
 @app.route("/api/pose_remove", methods=["POST"])
 @_auth.require_feature("ai.pose_remove", action='pose_remove', fields=('filename',))
 def api_pose_remove():
