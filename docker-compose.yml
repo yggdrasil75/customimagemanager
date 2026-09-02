@@ -61,9 +61,9 @@ services:
       context: .
       args:
         GPU_BACKEND: rocm
-    environment:
+    # environment:
       # - CIM_DEVICE=rocm   # uncomment to force ROCm regardless of detection
-      - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-}
+      # - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-}
     devices:
       - /dev/kfd
       - /dev/dri
