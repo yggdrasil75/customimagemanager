@@ -111,6 +111,105 @@ def _detect_backend():
     return "cpu"
 
 
+def backend_reason():
+    """One-line explanation of why backend() decided what it did, for logs and
+    the UI. Every CPU fallback in _detect_backend is silent and they look
+    identical from outside, so name the branch that actually fired."""
+    override = (os.environ.get("CIM_DEVICE") or "").strip().lower()
+    if override in ("cpu",):
+        return "CPU: forced by CIM_DEVICE=cpu"
+    if torch is None:
+        return f"CPU: torch did not import ({_TORCH_IMPORT_ERROR or 'unknown'})"
+    try:
+        if not torch.cuda.is_available():
+            hip = _torch_hip_version()
+            return ("CPU: torch.cuda.is_available()=False, "
+                    + (f"torch is a ROCm build (HIP {hip}) so the runtime isn't "
+                       "seeing the GPU" if hip else
+                       "torch is NOT a ROCm build (no HIP) — wrong wheel for this image"))
+    except Exception as e:
+        return f"CPU: probing torch.cuda failed ({type(e).__name__}: {e})"
+    hip = _torch_hip_version()
+    try:
+        name = torch.cuda.get_device_name(0)
+    except Exception:
+        name = "?"
+    return f"{'ROCm' if hip else 'CUDA'}: {name}"
+
+
+def log_backend(log):
+    """Dump everything that decides GPU-vs-CPU, once, at startup.
+
+    This runs in-process so it reflects what the app actually sees — the same
+    interpreter, env and device nodes the scan will use. Hand-running a probe in
+    a shell inside the container can disagree with the real process, which is
+    exactly when you'd be chasing the wrong thing.
+    """
+    # A silent CPU fallback isn't a status note — for this workload it's ~100x
+    # slower and it's the thing you'll be hunting. Emit the WHOLE dump at ERROR so
+    # it lands in error.log as one readable block; a healthy GPU is just INFO.
+    cpu = backend() == "cpu"
+    emit = log.error if cpu else log.info
+    emit("gpu: %s (%s)", "running on CPU" if cpu else f"backend={backend()}",
+         backend_reason())
+    for k in ("CIM_DEVICE", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
+              "HSA_OVERRIDE_GFX_VERSION", "CUDA_VISIBLE_DEVICES"):
+        v = os.environ.get(k)
+        if v:
+            emit("gpu: env %s=%s", k, v)
+    # ROCm needs both device nodes passed into the container AND the process must
+    # be able to OPEN them. os.path.exists() is not enough: the classic failure is
+    # a node that is present but unreadable because the container user isn't in
+    # the video/render groups. That enumerates as device_count=0 — identical
+    # symptom to having no GPU at all, which is why existence alone misleads.
+    try:
+        import glob as _g
+        def _acc(p):
+            return "ok" if os.access(p, os.R_OK | os.W_OK) else "PERMISSION DENIED"
+        kfd = "/dev/kfd"
+        emit("gpu: %s exists=%s access=%s", kfd, os.path.exists(kfd),
+             _acc(kfd) if os.path.exists(kfd) else "n/a")
+        for p in sorted(_g.glob("/dev/dri/renderD*")):
+            emit("gpu: %s access=%s", p, _acc(p))
+        try:
+            st = os.stat(kfd)
+            emit("gpu: %s owner uid=%s gid=%s mode=%o",
+                 kfd, st.st_uid, st.st_gid, st.st_mode & 0o777)
+        except Exception:
+            pass
+        emit("gpu: process uid=%s gid=%s groups=%s",
+             os.getuid(), os.getgid(), sorted(os.getgroups()))
+        # What the amdgpu/kfd KERNEL driver enumerates, independent of torch. If
+        # agents show up here but torch still reports 0 devices, the kernel is
+        # fine and ROCm userspace is rejecting the card — usually an unsupported
+        # gfx target, which HSA_OVERRIDE_GFX_VERSION exists to work around.
+        for nd in sorted(_g.glob("/sys/class/kfd/kfd/topology/nodes/*/properties")):
+            try:
+                props = dict(
+                    ln.split(None, 1) for ln in open(nd).read().splitlines()
+                    if len(ln.split(None, 1)) == 2)
+                gfx = props.get("gfx_target_version", "0").strip()
+                simd = props.get("simd_count", "0").strip()
+                if gfx != "0" and simd != "0":     # 0/0 == the CPU node, skip
+                    g = int(gfx)
+                    maj, mnr, stp = g // 10000, (g // 100) % 100, g % 100
+                    emit("gpu: kfd agent %s = gfx%d%x%x (HSA_OVERRIDE_GFX_VERSION=%d.%d.%d) simd_count=%s",
+                         nd.split("/")[-2], maj, mnr, stp, maj, mnr, stp, simd)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    if torch is None:
+        emit("gpu: torch not importable (%s)", _TORCH_IMPORT_ERROR or "unknown")
+        return
+    try:
+        emit("gpu: torch=%s hip=%s cuda.is_available=%s device_count=%s",
+                 torch.__version__, getattr(torch.version, "hip", None),
+                 torch.cuda.is_available(), torch.cuda.device_count())
+    except Exception as e:
+        emit("gpu: torch probe failed (%s: %s)", type(e).__name__, e)
+
+
 _BACKEND = None
 _DEVICE = None
 

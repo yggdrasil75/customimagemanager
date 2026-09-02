@@ -3640,6 +3640,23 @@ _face_force = {"v": False}
 _face_wake = threading.Event()
 _face_setup_backoff = {"until": 0.0}
 
+_face_log_last = {"skip": ""}
+_face_t = {"decode": 0.0, "detect": 0.0, "meta": 0.0, "embed": 0.0}
+def _face_skip(msg):
+    if msg == _face_log_last["skip"]:
+        return
+    _face_log_last["skip"] = msg
+    access_logger.info("face: %s", msg)
+
+def _face_log(msg, *args):
+    access_logger.info("face: " + (msg % args if args else msg))
+
+def _face_err(msg, *args):
+    """Problems, not progress. access_logger carries the shared ERROR handler, so
+    anything logged here also lands in logs/error.log — which is where you look
+    when the scan misbehaves, instead of grepping it out of access.log."""
+    access_logger.error("face: " + (msg % args if args else msg))
+
 def _attach_masks(img, regions: list) -> None:
     if seg_runtime is None or not regions:
         return
@@ -3853,60 +3870,97 @@ def _face_scan_lease_keys():
 FACE_BATCH = 16
 def _face_process_one(job) -> None:
     rels = job if isinstance(job, (list, tuple)) else [job]
+    t0 = time.time()
+    for _k in _face_t: _face_t[_k] = 0.0
+    if not _face_log_last.get("dev"):
+        _face_log_last["dev"] = True
+        _face_log("device: %s", facelib.device_desc())
+    _face_log("batch start: %d image(s)", len(rels))
     lease_keys = []
     try:
         lease_keys = _face_scan_lease_keys()
-    except Exception:
+    except Exception as e:
+        _face_err("lease-key build failed: %s", e)
         lease_keys = []
     try:
         ctx = model_registry.lease(*lease_keys) if lease_keys else contextlib.nullcontext()
         ctx.__enter__()
-    except Exception:
+    except Exception as e:
         # A persistent failure (e.g. a detector that just won't load) would other-
         # wise re-enter setup every poll. Back off so we retry ~once a minute and
         # keep the queue intact; the source self-heals the moment the model loads.
         _face_setup_backoff["until"] = time.time() + 60
-        access_logger.exception("face scan: batch setup failed; backing off 60s")
+        _face_err("SETUP FAILED (%s) — backing off 60s", e)
         err = facelib.face_model_error() or "model/detector unavailable"
         state["status_text"] = f"Face scan: stalled ({err}) — retrying, check Settings."
         return
     _face_setup_backoff["until"] = 0.0   # setup worked → clear any prior backoff
+    failed = 0
     try:
         for rel in rels:
             try:
                 _face_process_one_inner(rel)
-            except Exception:
+            except Exception as e:
                 # One bad image must not abort the rest of the batch; mark it done
                 # so the queue drains instead of re-serving the same failing file.
-                access_logger.exception("face scan failed for %s", rel)
+                failed += 1
+                _face_err("image failed (%s): %s", rel, e)
                 try:
                     _mark_face_done(rel)
                     if state.get("body_enabled"):
                         _mark_body_done(rel)
-                except Exception:
-                    pass
+                except Exception as e2:
+                    _face_err("mark-done FAILED for %s: %s", rel, e2)
     finally:
         try:
             ctx.__exit__(None, None, None)
         except Exception:
             pass
+        # Did the batch actually advance the queue? If these rows are still
+        # face_done=0 the scan will re-serve them forever and the count will sit
+        # still — this line is the one that proves it either way.
+        try:
+            qs = ",".join("?" * len(rels))
+            still = _db().execute(
+                f"SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0 "
+                f"AND rel_path IN ({qs})", tuple(rels)).fetchone()[0]
+            dt = time.time() - t0
+            # A batch that leaves rows unmarked is the freeze: those same rows get
+            # re-served forever and the count never moves. That's an error, not a
+            # progress note, so it belongs in error.log.
+            emit = _face_err if (still or failed) else _face_log
+            emit("batch end: %d img in %.1fs (%.1fs/img), %d failed, %d STILL not done",
+                 len(rels), dt, dt / max(1, len(rels)), failed, still)
+            _face_log("  phases: decode %.1fs | detect %.1fs | meta %.1fs | embed %.1fs",
+                      _face_t["decode"], _face_t["detect"],
+                      _face_t["meta"], _face_t["embed"])
+        except Exception as e:
+            _face_err("batch end check failed: %s", e)
 
 def _face_process_one_inner(rel: str) -> None:
     abs_p = get_safe_path(MEDIA_DIR, rel)
     if not abs_p or not os.path.exists(abs_p):
         _mark_face_done(rel); return
+    _t = time.time()
     img = read_jxl(abs_p)
+    _face_t["decode"] += time.time() - _t
     if img is None:
         _mark_face_done(rel); return
     bgr = _to_bgr(img)                 # read_jxl may return gray/RGBA; YOLO needs 3-channel BGR
+    _t = time.time()
     found = _face_regions_for(bgr, rel)
+    _face_t["detect"] += time.time() - _t
     if found:
+        _t = time.time()
         meta = read_metadata(abs_p)
         merged = _merge_regions(meta["regions"], found)
         write_metadata(abs_p, meta["tags"], meta["description"], merged)
+        _face_t["meta"] += time.time() - _t
+        _t = time.time()
         _cache_faces(rel, bgr, found)
         if state.get("body_enabled"):
             _cache_bodies(rel, bgr, found)   # same decoded image, gated on body_enabled
+        _face_t["embed"] += time.time() - _t
         _face_dirty["v"] = True
     _mark_face_done(rel)
     if state.get("body_enabled"):
@@ -3917,18 +3971,23 @@ def _claim_face_job():
     """
     forced = _face_force["v"]
     if not forced and not state.get("face_bg_enabled"):
+        _face_skip("skip: bg scan disabled and not forced")
         return None
     if not forced and not thread_manager.is_idle():
+        _face_skip("skip: waiting for idle")
         return None
     if not forced and time.time() < _face_setup_backoff["until"]:
+        _face_skip("skip: in setup backoff")
         return None
     if not thread_manager.try_acquire_key("face-scan"):
+        _face_skip("skip: batch already in flight (key held)")
         return None
     rows = _db().execute(
         "SELECT rel_path FROM files WHERE COALESCE(face_done,0)=0 LIMIT ?",
         (FACE_BATCH,)).fetchall()
     if not rows:
         thread_manager.release_key("face-scan")
+        _face_skip("queue empty (nothing with face_done=0)")
         # queue drained: trailing cluster pass, then settle status
         if _face_dirty["v"]:
             state["status_text"] = "Face scan: clustering…"
@@ -3943,6 +4002,8 @@ def _claim_face_job():
         return None
     left = _db().execute(
         "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
+    _face_log("claimed %d (%s), %d left", len(rows),
+              "forced" if forced else "idle", left)
     state["status_text"] = (
         f"Face scan: {left} image(s) left…" if forced
         else f"Face scan (idle): {left} image(s) left…")
@@ -12521,6 +12582,7 @@ if __name__=='__main__':
     from waitress import serve
     thread_manager.set_activity_source(lambda: _last_activity)
     model_registry.set_memory_hook(lambda cost_mb, gpu: thread_manager.reserve_model(cost_mb, gpu))
+    model_registry.log_backend(access_logger)
 
     access_logger.info("Starting background indexer…")
     threading.Thread(target=_build_index_background, daemon=True).start()

@@ -94,6 +94,15 @@ def face_model_error():
     """Last download failure, for the UI to surface. '' when healthy."""
     return _face_model_error["v"]
 
+def device_desc():
+    """Short description of the inference device, for logs. Uses the registry's
+    existing GPU state rather than importing torch — a CPU fallback is the usual
+    reason a scan crawls, so it's worth stating plainly."""
+    try:
+        return model_registry.backend_reason()
+    except Exception as e:
+        return f"unknown ({e})"
+
 def ensure_face_detector(detector_id=None):
     """Return a path to the selected face DETECTOR, downloading a built-in on first
     use. Returns '' when unavailable (offline / bad id) — caller falls back.
