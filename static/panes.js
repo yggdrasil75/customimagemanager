@@ -67,6 +67,7 @@ function setPane(pane) {
     if (typeof trInit === 'function') trInit();
     else setTimeout(() => { if (typeof trInit === 'function') trInit(); }, 100);
   }
+  applyTrainerControlsMode(isTrainer);
   window._lastPane = pane;
 
   // The album badge lives inside the Albums tab, so restore it after the
@@ -104,10 +105,42 @@ function setPane(pane) {
   }
 }
 
-// Reset the gallery multi-selection defensively. clearSelection() lives in
-// gallery.js and touches the selectedFiles Set from globals.js; if either is
-// unavailable we must NOT let that abort the caller, since the important work
-// (actually loading the album) comes after.
+// Trainer mode reshapes the controls pane: it reveals the Trainer controls tab,
+// hides the metadata tabs (EXIF/IPTC/XMP) that don't apply to training, and
+// switches to the Trainer tab — which, because description/tags/quality/AI
+// tooling all live inside the Editor (main) pane, hides that clutter simply by
+// not being the visible pane. Leaving trainer restores the normal tab set.
+let _trainerControlsPrev = null;
+function applyTrainerControlsMode(on) {
+  const trBtn = document.querySelector('.controls-tab[data-tab="trainer"]');
+  if (!trBtn) return;
+  const metaTabs = ['exif', 'iptc', 'xmp'].map(
+    t => document.querySelector(`.controls-tab[data-tab="${t}"]`));
+  if (on) {
+    if (_trainerControlsPrev == null && typeof activeControlsTab === 'function')
+      _trainerControlsPrev = activeControlsTab();
+    trBtn.classList.remove('hidden');
+    metaTabs.forEach(b => b && b.classList.add('hidden'));
+    if (typeof setControlsTab === 'function') setControlsTab('trainer');
+  } else {
+    trBtn.classList.add('hidden');
+    metaTabs.forEach(b => {
+      if (!b) return;
+      // Respect feature gating: only unhide a metadata tab the user may see.
+      const key = b.getAttribute('data-feature');
+      const allowed = !window.CIMFeatures || !key || window.CIMFeatures.allowed(key);
+      b.classList.toggle('hidden', !allowed);
+    });
+    // If we were on the trainer controls tab, go back to the editor.
+    if (typeof activeControlsTab === 'function' && activeControlsTab() === 'trainer'
+        && typeof setControlsTab === 'function') {
+      setControlsTab(_trainerControlsPrev || 'main');
+    }
+    _trainerControlsPrev = null;
+  }
+}
+
+
 function safeClearSelection() {
   try { if (typeof clearSelection === 'function') clearSelection(); }
   catch (e) { /* non-fatal */ }

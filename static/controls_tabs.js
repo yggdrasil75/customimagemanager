@@ -87,6 +87,7 @@
   }
 
   window.setControlsTab = setControlsTab;
+  window.activeControlsTab = function () { return activeTab; };
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", hookSelectFile);

@@ -9,7 +9,7 @@
  */
 (function () {
   let currentSet = null;
-  let items = [];        // [{rel_path, thumb, has_label}]
+  let items = [];        // [{rel_path(work copy), src_path, thumb, checked, with_data, color}]
   let logTimer = null;
 
   const $ = id => document.getElementById(id);
@@ -41,11 +41,31 @@
     await loadMembers();
   }
 
+  let gallerySafe = false;
+
   async function loadMembers() {
     if (!currentSet) { items = []; renderCounts(); renderGrid(); return; }
-    const d = await jget('/api/trainer/set?set=' + enc(currentSet));
+    // Scope colours to the classes the user has checked (empty = all).
+    const cls = selectedClasses();
+    const qs = '/api/trainer/set?set=' + enc(currentSet) +
+      cls.map(c => '&class=' + enc(c)).join('');
+    const d = await jget(qs);
     items = d.files || [];
+    gallerySafe = !!d.gallery_safe;
+    if (trPage >= trPageCount()) trPage = 0;
+    const gs = $('tr_gallery_safe'); if (gs) gs.checked = gallerySafe;
+    const lbl = $('tr_gsafe_label');
+    if (lbl) lbl.innerText = gallerySafe ? 'Gallery-safe (adds boxes only)' : 'Gallery-unsafe (isolated copy)';
     renderCounts(); renderGrid();
+  }
+
+  async function trSetGallerySafe() {
+    if (!currentSet) return;
+    const on = $('tr_gallery_safe').checked;
+    await jpost('/api/trainer/gallery_safe', { set: currentSet, gallery_safe: on });
+    gallerySafe = on;
+    const lbl = $('tr_gsafe_label');
+    if (lbl) lbl.innerText = on ? 'Gallery-safe (adds boxes only)' : 'Gallery-unsafe (isolated copy)';
   }
 
   async function trDeleteSet() {
@@ -64,6 +84,7 @@
       strategy: $('tr_strategy').value, n,
       exclude_all_sets: $('tr_exclude_sets').checked,
       media: $('tr_media').value,
+      gallery_safe: $('tr_build_gsafe') ? $('tr_build_gsafe').checked : false,
     });
     if (!d.success) { trStatus('Error: ' + (d.error || '?')); return; }
     trStatus(`${d.set}: ${d.count} images (${d.strategy})`);
@@ -77,11 +98,12 @@
     await loadSets(currentSet);
   }
 
-  function trOnSetChange() { currentSet = $('tr_set_select').value || null; loadMembers(); }
+  function trOnSetChange() { currentSet = $('tr_set_select').value || null; trPage = 0; curIdx = -1; loadMembers(); }
 
   function renderCounts() {
     $('tr_set_count').innerText = items.length;
-    $('tr_labelled').innerText = items.filter(i => i.has_label).length;
+    const wd = $('tr_withdata'); if (wd) wd.innerText = items.filter(i => i.with_data).length;
+    const ck = $('tr_checked'); if (ck) ck.innerText = items.filter(i => i.checked).length;
     // Collapse "Build a new set" once a set is active so a short screen isn't
     // stuck showing one grid row; keep it open when there's nothing selected.
     const build = $('tr_build');
@@ -90,6 +112,11 @@
 
   // ── grid (same masonry/.gallery-item as the gallery; click → real editor) ──
   let curIdx = -1;
+  let trPage = 0;
+  // Follow the gallery's page size so both tabs paginate consistently.
+  const trPageSize = () => (typeof PAGE !== 'undefined' && PAGE > 0) ? PAGE : 200;
+
+  function trPageCount() { return Math.max(1, Math.ceil(items.length / trPageSize())); }
 
   function renderGrid() {
     const grid = $('tr_grid');
@@ -98,14 +125,47 @@
     if (!items.length) {
       grid.innerHTML = `<p class="text-gray-600 text-sm p-3">`
         + (currentSet ? 'This set is empty.' : 'Build a set to get started.') + `</p>`;
-      curIdx = -1;
+      curIdx = -1; updatePager();
       return;
     }
-    grid.innerHTML = items.map((it, i) =>
-      `<div class="gallery-item${it.has_label ? ' has-boxes' : ''}${i === curIdx ? ' tr-current' : ''}"
-         id="tr_tile_${i}" title="${it.rel_path}" onclick="trPick(${i})">
+    const sz = trPageSize();
+    if (trPage >= trPageCount()) trPage = trPageCount() - 1;
+    const start = trPage * sz, end = Math.min(start + sz, items.length);
+    // Tile ids/onclick use the GLOBAL index i, so trPick / arrow-nav / curIdx all
+    // keep working across pages; we just render the current slice.
+    let html = '';
+    for (let i = start; i < end; i++) {
+      const it = items[i];
+      html += `<div class="gallery-item st-${it.color || 'none'}${i === curIdx ? ' tr-current' : ''}"
+         id="tr_tile_${i}" title="${it.src_path || it.rel_path}" onclick="trPick(${i})">
          <img loading="lazy" src="${it.thumb}" onload="this.classList.add('loaded')" onerror="this.style.opacity=.2">
-       </div>`).join('');
+       </div>`;
+    }
+    grid.innerHTML = html;
+    updatePager();
+  }
+
+  function updatePager() {
+    const pager = $('tr_pager');
+    const pages = trPageCount();
+    if (pager) pager.classList.toggle('hidden', items.length <= trPageSize());
+    const info = $('tr_page_info');
+    if (info) info.innerText = items.length ? `Page ${trPage + 1} / ${pages}` : '';
+    const showing = $('tr_showing');
+    if (showing && items.length) {
+      const start = trPage * trPageSize() + 1, end = Math.min((trPage + 1) * trPageSize(), items.length);
+      showing.innerText = `Showing ${start}–${end} of ${items.length}`;
+    }
+    const prev = $('tr_prev'), next = $('tr_next');
+    if (prev) prev.disabled = trPage === 0;
+    if (next) next.disabled = (trPage + 1) >= pages;
+  }
+
+  function trChangePage(dir) {
+    const pages = trPageCount();
+    trPage = Math.max(0, Math.min(pages - 1, trPage + dir));
+    const sc = $('tr_grid_scroll'); if (sc) sc.scrollTop = 0;
+    renderGrid();
   }
 
   // Select tile i: mark it current, scroll it into view, and open it in the
@@ -113,11 +173,22 @@
   // all happen there, not here).
   function trPick(i) {
     if (i < 0 || i >= items.length) return;
-    const prev = $('tr_tile_' + curIdx); if (prev) prev.classList.remove('tr-current');
+    // If the target tile is on another page, flip to it first so the tile exists.
+    const wantPage = Math.floor(i / trPageSize());
+    if (wantPage !== trPage) { trPage = wantPage; curIdx = i; renderGrid(); }
+    const prev = document.querySelector('#tr_grid .tr-current'); if (prev) prev.classList.remove('tr-current');
     curIdx = i;
+    const it = items[i];
     const el = $('tr_tile_' + i);
     if (el) { el.classList.add('tr-current'); el.scrollIntoView({ block: 'nearest' }); }
-    if (typeof selectFile === 'function') selectFile(items[i].rel_path);
+    if (typeof selectFile === 'function') selectFile(it.rel_path);   // rel_path = work copy
+    // Mark checked (green) the first time it's opened.
+    if (!it.checked) {
+      it.checked = true;
+      if (el) { el.classList.remove('st-none', 'st-yellow', 'st-blue'); el.classList.add('st-green'); }
+      renderCounts();
+      jpost('/api/trainer/checked', { set: currentSet, rel_path: it.rel_path, checked: true }).catch(() => {});
+    }
   }
 
   function trOpen(rel) {  // kept for any external callers
@@ -143,32 +214,23 @@
     trPick(ni);
   }
 
-  // After the editor autosaves boxes on an image, refresh the has-boxes marker
-  // and the labelled count. gallery.saveMetadata calls window.onBoxesSaved if
-  // present, so we hook it (see gallery.js change).
+  // After the editor autosaves boxes on a set image (the work copy), reload the
+  // set so the per-image colour (blue/yellow) and "with data" count refresh.
   function onBoxesSaved(fn) {
-    const it = items.find(i => i.rel_path === fn);
-    if (!it) return;
-    jpost('/api/trainer/boxes', { action: 'read', filename: fn }).then(d => {
-      const has = d.success && (d.regions || []).some(r => (r.class_name || '').trim());
-      it.has_label = has;
-      renderCounts(); renderGrid(); loadClasses();
-    }).catch(() => {});
+    if (!currentSet) return;
+    if (!items.some(i => i.rel_path === fn)) return;   // not one of ours
+    loadMembers();
+    loadClasses();
   }
 
   // ── training ────────────────────────────────────────────────────────────────
-  function trToggleAdvanced() {
-    const a = $('tr_advanced'), t = $('tr_adv_toggle');
-    const open = a.classList.toggle('hidden') === false;
-    t.innerText = open ? 'Advanced ▴' : 'Advanced ▾';
-  }
-
   const num = id => { const el = $(id); if (!el) return null; const v = el.value; return v === '' ? null : Number(v); };
 
   function collectCfg() {
     const cfg = { epochs: num('tr_epochs'), batch: num('tr_batch'), imgsz: num('tr_imgsz'),
       device: $('tr_device').value, val_split: num('tr_val_split') };
-    if (!$('tr_advanced').classList.contains('hidden')) {
+    const adv = $('tr_advanced_wrap');
+    if (adv && adv.open) {
       Object.assign(cfg, {
         patience: num('tr_patience'), optimizer: $('tr_optimizer').value,
         lr0: num('tr_lr0'), lrf: num('tr_lrf'), momentum: num('tr_momentum'),
@@ -188,8 +250,8 @@
 
   async function trStartTraining() {
     if (!currentSet) { alert('Select a set first.'); return; }
-    const labelled = items.filter(i => i.has_label).length;
-    if (!labelled) { alert('No images in this set have boxes yet. Click a tile and draw boxes in the editor.'); return; }
+    const labelled = items.filter(i => i.with_data).length;
+    if (!labelled) { alert('No images in this set have boxes in the selected class(es) yet. Click a tile and draw boxes in the editor.'); return; }
     if (!confirm(`Train on ${labelled} labelled image(s) from "${currentSet}"?`)) return;
     const classes = selectedClasses();
     const d = await jpost('/api/train', {
@@ -215,11 +277,13 @@
     const prev = new Set(selectedClasses());
     box.innerHTML = labels.map(l =>
       `<label class="trck"><input type="checkbox" class="tr-cls accent-purple-500" value="${l.replace(/"/g, '&quot;')}"
-        ${prev.has(l) ? 'checked' : ''}> ${l}</label>`).join('');
+        ${prev.has(l) ? 'checked' : ''} onchange="trClassChanged()"> ${l}</label>`).join('');
   }
   function selectedClasses() {
     return [...document.querySelectorAll('#tr_classes .tr-cls:checked')].map(c => c.value);
   }
+  // Re-scope the grid colours (yellow/blue depend on which classes are checked).
+  function trClassChanged() { if (currentSet) loadMembers(); }
 
   function trStatus(t) { const el = $('tr_status'); if (el) el.innerText = t; }
 
@@ -325,8 +389,9 @@
       { filename: rel, regions, classes: selectedClasses() });
     if (!d.success) { alert('Accept failed: ' + (d.error || '?')); return; }
     const it = items.find(x => x.rel_path === rel);
-    if (it) it.has_label = regions.some(r => (r.class_name || '').trim());
-    renderCounts(); renderGrid();
+    if (it) it.with_data = regions.some(r => (r.class_name || '').trim());
+    // Reload so the tile colour (blue/yellow) reflects the written boxes.
+    loadMembers();
     // mark the row done
     const row = [...document.querySelectorAll('.tr-vrow')].find(r => r.getAttribute('onclick')?.includes(rel));
     if (row) { row.style.opacity = .5; const btn = row.querySelector('button'); if (btn) { btn.textContent = 'Accepted'; btn.disabled = true; } }
@@ -345,7 +410,8 @@
   // expose the handlers the pane markup calls
   Object.assign(window, {
     trInit, trOnSetChange, trBuildSet, trClearSet, trDeleteSet,
-    trOpen, trPick, trPickByPath, trToggleAdvanced, trStartTraining,
+    trOpen, trPick, trPickByPath, trStartTraining,
     trValidate, trAccept, onBoxesSaved,
+    trSetGallerySafe, trClassChanged,
   });
 })();

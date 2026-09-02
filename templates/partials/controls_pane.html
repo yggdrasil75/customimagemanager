@@ -15,6 +15,9 @@
 
         <button data-tab="person" onclick="setControlsTab('person')"
           class="controls-tab hidden px-3 py-2 text-white border-b-2 border-blue-500">Person</button>
+
+        <button data-tab="trainer" onclick="setControlsTab('trainer')"
+          class="controls-tab hidden px-3 py-2 text-white border-b-2 border-blue-500">Trainer</button>
       </div>
 
       <!-- Tab panes -->
@@ -260,6 +263,10 @@
           Select a person in the Faces tab to edit here.
         </div>
       </div>
+
+      <!-- Tab 7: Trainer (trainer tab only) — training settings + validation,
+           moved out of the left pane to declutter it. -->
+      {% include 'partials/controls_pane_trainer.html' %}
 
       </div><!-- /#controls_tab_bodies -->
     </div>

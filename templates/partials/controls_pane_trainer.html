@@ -1,0 +1,119 @@
+<!-- Controls-pane tab: Trainer. Holds the training settings + validation that
+     used to crowd the left pane. Fields use flex-wrap flow (see .tr-flow in
+     trainer.css) with min/max widths, so when the controls pane is docked at the
+     BOTTOM (wide) they reflow into many columns, and when docked at the RIGHT
+     (narrow) they collapse to one or two. -->
+<div id="controls_pane_trainer" class="controls-tab-pane hidden h-full overflow-y-auto p-3 space-y-3"
+     data-feature="ai.trainer.run">
+
+  <div class="flex justify-between items-center">
+    <span class="text-sm font-bold text-purple-300">Train box model</span>
+    <span id="tr_status" class="text-xs text-gray-400"></span>
+  </div>
+
+  <!-- Box classes to train on. None checked = every class in the set; checking
+       specific ones trains ONLY those and never touches unrelated boxes. -->
+  <div>
+    <label class="trlbl">Box classes <span class="text-gray-500">(none checked = all)</span></label>
+    <div id="tr_classes" class="tr-flow bg-gray-900 border border-gray-700 rounded p-1 max-h-28 overflow-y-auto">
+      <span class="text-xs text-gray-600">No labels yet.</span>
+    </div>
+  </div>
+
+  <div class="tr-flow">
+    <div class="tr-field"><label class="trlbl">Base</label>
+      <select id="tr_base_model" class="trinp">
+        <option value="yolo11n.pt">YOLO11 n</option><option value="yolo11s.pt">YOLO11 s</option>
+        <option value="yolo11m.pt">YOLO11 m</option><option value="yolo11l.pt">YOLO11 l</option>
+        <option value="yolo11x.pt">YOLO11 x</option>
+      </select></div>
+    <div class="tr-field"><label class="trlbl">Device</label>
+      <select id="tr_device" class="trinp">
+        <option value="-1">CPU</option><option value="0">GPU 0</option>
+        <option value="1">GPU 1</option><option value="mps">MPS</option>
+      </select></div>
+    <div class="tr-field"><label class="trlbl">Epochs</label><input id="tr_epochs" type="number" value="100" class="trinp"></div>
+    <div class="tr-field"><label class="trlbl">Batch</label><input id="tr_batch" type="number" value="4" class="trinp"></div>
+    <div class="tr-field"><label class="trlbl">Image size</label><input id="tr_imgsz" type="number" value="640" step="32" class="trinp"></div>
+    <div class="tr-field"><label class="trlbl">Val split</label><input id="tr_val_split" type="number" value="0.05" step="0.05" min="0" max="0.9" class="trinp"></div>
+  </div>
+
+  <details id="tr_advanced_wrap">
+    <summary class="trlbl cursor-pointer select-none text-purple-300">Advanced</summary>
+    <div id="tr_advanced" class="space-y-2 mt-2">
+      <div class="tr-flow">
+        <div class="tr-field"><label class="trlbl">Patience</label><input id="tr_patience" type="number" value="100" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">Optimizer</label>
+          <select id="tr_optimizer" class="trinp">
+            <option value="auto">auto</option><option value="SGD">SGD</option>
+            <option value="Adam">Adam</option><option value="AdamW">AdamW</option><option value="RMSProp">RMSProp</option>
+          </select></div>
+        <div class="tr-field"><label class="trlbl">lr0</label><input id="tr_lr0" type="number" value="0.01" step="0.001" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">lrf</label><input id="tr_lrf" type="number" value="0.01" step="0.001" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">Momentum</label><input id="tr_momentum" type="number" value="0.937" step="0.001" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">Weight decay</label><input id="tr_weight_decay" type="number" value="0.0005" step="0.0001" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">Warmup ep</label><input id="tr_warmup_epochs" type="number" value="3" step="0.5" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">Freeze</label><input id="tr_freeze" type="number" value="0" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">Dropout</label><input id="tr_dropout" type="number" value="0" step="0.05" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">Seed</label><input id="tr_seed" type="number" value="0" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">Workers</label><input id="tr_workers" type="number" value="8" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">Close mosaic</label><input id="tr_close_mosaic" type="number" value="10" class="trinp"></div>
+      </div>
+      <div class="tr-flow">
+        <label class="trck"><input type="checkbox" id="tr_cos_lr" class="accent-purple-500"> Cosine</label>
+        <label class="trck"><input type="checkbox" id="tr_rect" class="accent-purple-500"> Rect</label>
+        <label class="trck"><input type="checkbox" id="tr_single_cls" class="accent-purple-500"> 1-class</label>
+      </div>
+      <label class="trlbl pt-1">Augmentation</label>
+      <div class="tr-flow">
+        <div class="tr-field"><label class="trlbl">hsv_h</label><input id="tr_hsv_h" type="number" value="0.015" step="0.005" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">hsv_s</label><input id="tr_hsv_s" type="number" value="0.7" step="0.05" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">hsv_v</label><input id="tr_hsv_v" type="number" value="0.4" step="0.05" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">degrees</label><input id="tr_degrees" type="number" value="0" step="1" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">translate</label><input id="tr_translate" type="number" value="0.1" step="0.05" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">scale</label><input id="tr_scale" type="number" value="0.5" step="0.05" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">shear</label><input id="tr_shear" type="number" value="0" step="1" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">persp</label><input id="tr_perspective" type="number" value="0" step="0.0001" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">flipud</label><input id="tr_flipud" type="number" value="0" step="0.1" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">fliplr</label><input id="tr_fliplr" type="number" value="0.5" step="0.1" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">mosaic</label><input id="tr_mosaic" type="number" value="1.0" step="0.1" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">mixup</label><input id="tr_mixup" type="number" value="0" step="0.1" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">copy_paste</label><input id="tr_copy_paste" type="number" value="0" step="0.1" class="trinp"></div>
+      </div>
+    </div>
+  </details>
+
+  <button onclick="trStartTraining()"
+    class="w-full bg-purple-600 hover:bg-purple-700 py-2 rounded font-bold text-sm">Start training</button>
+
+  <details class="text-xs">
+    <summary class="text-gray-400 cursor-pointer">Live log</summary>
+    <pre id="tr_log" class="mt-1 bg-gray-950 border border-gray-700 rounded p-2 text-green-400 font-mono text-[10px] max-h-40 overflow-y-auto whitespace-pre-wrap"></pre>
+  </details>
+
+  <!-- Validation -->
+  <details id="tr_val_section" class="border-t border-gray-700 pt-2">
+    <summary class="text-xs font-bold text-amber-300 cursor-pointer select-none">Validate</summary>
+    <div class="space-y-2 mt-2">
+      <div class="tr-flow">
+        <div class="tr-field"><label class="trlbl">Source</label>
+          <select id="tr_val_source" class="trinp">
+            <option value="self">This set's images</option>
+            <option value="new">Pull in new images</option>
+          </select></div>
+        <div class="tr-field"><label class="trlbl">New images (if new)</label>
+          <input id="tr_val_addnew" type="number" value="20" min="1" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">IoU ok ≥</label><input id="tr_val_iouok" type="number" value="0.7" step="0.05" min="0" max="1" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">Conf ≥</label><input id="tr_val_conf" type="number" value="0.25" step="0.05" min="0" max="1" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">Accept below F1</label><input id="tr_val_bound" type="number" value="0.8" step="0.05" min="0" max="1" class="trinp"></div>
+      </div>
+      <button onclick="trValidate()"
+        class="w-full bg-amber-700 hover:bg-amber-600 py-2 rounded font-bold text-sm">Run validation</button>
+      <div id="tr_val_summary" class="text-xs text-gray-300"></div>
+      <div id="tr_val_list" class="space-y-1 max-h-60 overflow-y-auto"></div>
+      <button id="tr_val_retrain" onclick="trStartTraining()"
+        class="hidden w-full bg-purple-700 hover:bg-purple-600 py-2 rounded font-bold text-sm">
+        Retrain on corrected labels</button>
+    </div>
+  </details>
+</div>

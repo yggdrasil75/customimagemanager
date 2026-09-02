@@ -36,7 +36,58 @@ def ensure_tables(db):
         added    REAL,
         PRIMARY KEY(set_name, rel_path))""")
     db.execute("CREATE INDEX IF NOT EXISTS idx_tsm_set ON training_set_members(set_name)")
+    db.execute("""CREATE TABLE IF NOT EXISTS training_set_meta(
+        set_name TEXT PRIMARY KEY,
+        weights  TEXT,
+        accuracy REAL,
+        updated  REAL)""")
+    # ── migrations ──────────────────────────────────────────────────────────
+    # A set now keeps an isolated WORKING COPY of each image under
+    # media/.training_sets/<set>/input/, so editing/adding/removing boxes for
+    # training never touches the gallery original. Members therefore carry:
+    #   rel_path  -- the gallery source (kept for provenance / re-copy)
+    #   work_path -- the editable copy the trainer/editor actually operates on
+    #   checked   -- whether the user has opened/reviewed this image yet
+    mcols = {r[1] for r in db.execute("PRAGMA table_info(training_set_members)")}
+    if "work_path" not in mcols:
+        db.execute("ALTER TABLE training_set_members ADD COLUMN work_path TEXT")
+    if "checked" not in mcols:
+        db.execute("ALTER TABLE training_set_members ADD COLUMN checked INTEGER DEFAULT 0")
+    # gallery_safe: when 1, the set only ADDS boxes (nothing the gallery would
+    # miss); when 0, the workflow may remove/replace boxes, so edits are kept in
+    # the isolated copy and never mirrored back. Purely advisory + gates mirror.
+    scols = {r[1] for r in db.execute("PRAGMA table_info(training_set_meta)")}
+    if "gallery_safe" not in scols:
+        db.execute("ALTER TABLE training_set_meta ADD COLUMN gallery_safe INTEGER DEFAULT 0")
     db.commit()
+
+
+def set_meta(db, name, **fields):
+    """Upsert per-set metadata (weights path, last accuracy, gallery_safe). Only
+    provided fields are changed."""
+    ensure_tables(db)
+    row = db.execute("SELECT weights, accuracy, gallery_safe FROM training_set_meta "
+                     "WHERE set_name=?", (name,)).fetchone()
+    weights = fields.get("weights", row["weights"] if row else None)
+    accuracy = fields.get("accuracy", row["accuracy"] if row else None)
+    gsafe = fields.get("gallery_safe", (row["gallery_safe"] if row else 0))
+    gsafe = 1 if gsafe else 0
+    db.execute("INSERT INTO training_set_meta(set_name, weights, accuracy, gallery_safe, updated) "
+               "VALUES(?,?,?,?,?) ON CONFLICT(set_name) DO UPDATE SET "
+               "weights=excluded.weights, accuracy=excluded.accuracy, "
+               "gallery_safe=excluded.gallery_safe, updated=excluded.updated",
+               (name, weights, accuracy, gsafe, time.time()))
+    db.commit()
+
+
+def get_meta(db, name):
+    ensure_tables(db)
+    row = db.execute("SELECT weights, accuracy, gallery_safe, updated FROM training_set_meta "
+                     "WHERE set_name=?", (name,)).fetchone()
+    if not row:
+        return {"weights": None, "accuracy": None, "gallery_safe": False, "updated": None}
+    return {"weights": row["weights"], "accuracy": row["accuracy"],
+            "gallery_safe": bool(row["gallery_safe"]), "updated": row["updated"]}
 
 
 # ── set management ────────────────────────────────────────────────────────────
@@ -72,6 +123,29 @@ def members(db, name):
     return [r["rel_path"] for r in rows]
 
 
+def member_records(db, name):
+    """Full per-member rows: source rel_path, editable work_path, checked flag."""
+    ensure_tables(db)
+    rows = db.execute(
+        "SELECT rel_path, work_path, COALESCE(checked,0) AS checked "
+        "FROM training_set_members WHERE set_name=? ORDER BY added", (name,)).fetchall()
+    return [{"rel_path": r["rel_path"], "work_path": r["work_path"],
+             "checked": bool(r["checked"])} for r in rows]
+
+
+def work_paths(db, name):
+    """The editable copies for this set (falling back to source if a copy is
+    somehow missing), for training/validation to operate on."""
+    return [(r["work_path"] or r["rel_path"]) for r in member_records(db, name)]
+
+
+def set_checked(db, name, rel_path, checked=True):
+    ensure_tables(db)
+    db.execute("UPDATE training_set_members SET checked=? WHERE set_name=? AND rel_path=?",
+               (1 if checked else 0, name, rel_path))
+    db.commit()
+
+
 def member_set(db, name):
     return set(members(db, name))
 
@@ -102,14 +176,23 @@ def next_set_name(db):
     return f"Set {i}"
 
 
-def keep(db, name, rel_paths):
-    """Add rel_paths to the persistent set. Returns new member count."""
+def keep(db, name, rel_paths, work_paths_map=None):
+    """Add rel_paths to the persistent set. When work_paths_map is given
+    (rel_path -> work_path), store the editable-copy path alongside each source.
+    Returns new member count."""
     ensure_tables(db)
     create_set(db, name)
     now = time.time()
+    wm = work_paths_map or {}
     db.executemany(
-        "INSERT OR IGNORE INTO training_set_members(set_name, rel_path, added) VALUES(?,?,?)",
-        [(name, rp, now) for rp in rel_paths])
+        "INSERT OR IGNORE INTO training_set_members(set_name, rel_path, added, work_path) "
+        "VALUES(?,?,?,?)",
+        [(name, rp, now, wm.get(rp)) for rp in rel_paths])
+    # Backfill work_path for rows added before a copy existed.
+    for rp, wp in wm.items():
+        db.execute("UPDATE training_set_members SET work_path=? "
+                   "WHERE set_name=? AND rel_path=? AND (work_path IS NULL OR work_path='')",
+                   (wp, name, rp))
     db.execute("UPDATE training_sets SET updated=? WHERE name=?", (now, name))
     db.commit()
     return db.execute("SELECT COUNT(*) FROM training_set_members WHERE set_name=?",
@@ -246,9 +329,13 @@ def select(db, strategy, n, exclude_all_sets=True, set_name=None, extra_exclude=
 
 
 def create_run(db, strategy, n, exclude_all_sets=True, kinds=None):
-    """Select N images and store them into a brand-new numbered set in one shot.
-    Returns (set_name, rel_paths). This is the whole 'select' user action —
-    there is no separate keep step."""
+    """DEPRECATED — do not use for the trainer flow.
+
+    This selects + stores members but does NOT copy the images into the set's
+    isolated working folder, so edits would fall through to the gallery original.
+    The /api/trainer/select route now owns set creation precisely because the
+    copy step needs filesystem access (MEDIA_DIR, .jxl + sidecars). Kept only so
+    any external caller still resolves; new code should not call it."""
     ensure_tables(db)
     name = next_set_name(db)
     paths = select(db, strategy, n, exclude_all_sets=exclude_all_sets, kinds=kinds)
