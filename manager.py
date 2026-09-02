@@ -3922,12 +3922,13 @@ def _claim_face_job():
         return None
     if not forced and time.time() < _face_setup_backoff["until"]:
         return None
-    if not thread_manager.key_free("face-scan"):
+    if not thread_manager.try_acquire_key("face-scan"):
         return None
     rows = _db().execute(
         "SELECT rel_path FROM files WHERE COALESCE(face_done,0)=0 LIMIT ?",
         (FACE_BATCH,)).fetchall()
     if not rows:
+        thread_manager.release_key("face-scan")
         # queue drained: trailing cluster pass, then settle status
         if _face_dirty["v"]:
             state["status_text"] = "Face scan: clustering…"
