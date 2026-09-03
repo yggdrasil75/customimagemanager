@@ -208,6 +208,17 @@ def log_backend(log):
                  torch.cuda.is_available(), torch.cuda.device_count())
     except Exception as e:
         emit("gpu: torch probe failed (%s: %s)", type(e).__name__, e)
+    try:
+        import onnxruntime as _ort
+        provs = _ort.get_available_providers()
+        want = {"cuda": "CUDAExecutionProvider", "rocm": "ROCMExecutionProvider"}.get(backend())
+        emit("gpu: onnxruntime=%s providers=%s", _ort.__version__, provs)
+        if want and want not in provs:
+            log.error("gpu: onnxruntime is missing %s on a %s backend — face "
+                      "detection will run on CPU (~100x slower). Install the GPU "
+                      "onnxruntime build for this backend.", want, backend())
+    except Exception as e:
+        emit("gpu: onnxruntime probe failed (%s: %s)", type(e).__name__, e)
 
 
 _BACKEND = None
