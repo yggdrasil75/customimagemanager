@@ -29,11 +29,27 @@
   </div>
 
   <div class="tr-flow">
+    <div class="tr-field"><label class="trlbl">Backend</label>
+      <select id="tr_backend" class="trinp" onchange="trBackendChange()"
+        title="YOLO (Ultralytics) or Mayaku (COCO-format, ConvNeXt/UniQuery). Mayaku is bonus support; YOLO is the default.">
+        <option value="yolo">YOLO (Ultralytics)</option>
+        <option value="mayaku">Mayaku</option>
+      </select></div>
     <div class="tr-field"><label class="trlbl">Base</label>
       <select id="tr_base_model" class="trinp">
-        <option value="yolo11n.pt">YOLO11 n</option><option value="yolo11s.pt">YOLO11 s</option>
-        <option value="yolo11m.pt">YOLO11 m</option><option value="yolo11l.pt">YOLO11 l</option>
-        <option value="yolo11x.pt">YOLO11 x</option>
+        <optgroup id="tr_base_yolo" label="YOLO">
+          <option value="yolo11n.pt">YOLO11 n</option><option value="yolo11s.pt">YOLO11 s</option>
+          <option value="yolo11m.pt">YOLO11 m</option><option value="yolo11l.pt">YOLO11 l</option>
+          <option value="yolo11x.pt">YOLO11 x</option>
+        </optgroup>
+        <optgroup id="tr_base_mayaku" label="Mayaku" hidden>
+          <option value="mayaku-n-det">Mayaku n (det)</option>
+          <option value="mayaku-s-det">Mayaku s (det)</option>
+          <option value="mayaku-m-det">Mayaku m (det)</option>
+          <option value="mayaku-l-det">Mayaku l (det)</option>
+          <option value="mayaku-xl-det">Mayaku xl (det)</option>
+          <option value="mayaku-xxl-det">Mayaku xxl (det)</option>
+        </optgroup>
       </select></div>
     <div class="tr-field"><label class="trlbl">Device</label>
       <select id="tr_device" class="trinp">

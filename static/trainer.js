@@ -243,6 +243,24 @@
   // ── training ────────────────────────────────────────────────────────────────
   const num = id => { const el = $(id); if (!el) return null; const v = el.value; return v === '' ? null : Number(v); };
 
+  function trBackend() { const el = $('tr_backend'); return el ? el.value : 'yolo'; }
+
+  // Swap the Base-model option group to match the selected backend, and pick a
+  // sensible default model so the two never mismatch (e.g. a YOLO .pt name left
+  // selected while Mayaku is chosen).
+  function trBackendChange() {
+    const backend = trBackend();
+    const yg = $('tr_base_yolo'), mg = $('tr_base_mayaku'), sel = $('tr_base_model');
+    if (!yg || !mg || !sel) return;
+    const mayaku = backend === 'mayaku';
+    yg.hidden = mayaku; mg.hidden = !mayaku;
+    // If the current selection belongs to the hidden group, jump to the first
+    // option of the visible one.
+    const inMayaku = sel.value.startsWith('mayaku-');
+    if (mayaku && !inMayaku) sel.value = 'mayaku-n-det';
+    if (!mayaku && inMayaku) sel.value = 'yolo11n.pt';
+  }
+
   function collectCfg() {
     const cropEl = $('tr_crop_to_boxes');
     const cfg = { epochs: num('tr_epochs'), batch: num('tr_batch'), imgsz: num('tr_imgsz'),
@@ -274,7 +292,8 @@
     if (!confirm(`Train on ${labelled} labelled image(s) from "${currentSet}"?`)) return;
     const classes = selectedClasses();
     const d = await jpost('/api/train', {
-      set: currentSet, base_model: $('tr_base_model').value, cfg: collectCfg(),
+      set: currentSet, backend: trBackend(),
+      base_model: $('tr_base_model').value, cfg: collectCfg(),
       classes,
     });
     if (!d.success) { trStatus('Train failed: ' + (d.error || '?')); return; }
@@ -448,6 +467,7 @@
 
   // Every field a preset captures. Checkboxes and selects included.
   const PRESET_FIELDS = [
+    'tr_backend',
     'tr_base_model', 'tr_epochs', 'tr_batch', 'tr_imgsz', 'tr_val_split', 'tr_crop_to_boxes',
     'tr_patience', 'tr_optimizer', 'tr_lr0', 'tr_lrf', 'tr_momentum', 'tr_weight_decay',
     'tr_warmup_epochs', 'tr_freeze', 'tr_dropout', 'tr_seed', 'tr_workers', 'tr_close_mosaic',
@@ -478,9 +498,15 @@
     const base = defaultFieldValues();
     const merged = Object.assign({}, base, preset || {});
     PRESET_FIELDS.forEach(id => { if (id in merged) writeField(id, merged[id]); });
+    // Backend drives which base-model optgroup is visible; re-sync after writing
+    // fields so a restored Mayaku preset shows Mayaku models (and keeps the
+    // stored base_model if it belongs to that backend).
+    const wantBase = merged['tr_base_model'];
+    trBackendChange();
+    if (wantBase != null) writeField('tr_base_model', wantBase);
     // Reveal Advanced if the preset touches anything in it, so edits are visible.
     const adv = $('tr_advanced_wrap');
-    const basicIds = ['tr_base_model', 'tr_epochs', 'tr_batch', 'tr_imgsz', 'tr_val_split', 'tr_crop_to_boxes'];
+    const basicIds = ['tr_backend', 'tr_base_model', 'tr_epochs', 'tr_batch', 'tr_imgsz', 'tr_val_split', 'tr_crop_to_boxes'];
     if (adv && preset && Object.keys(preset).some(k => !basicIds.includes(k))) {
       adv.open = true;
     }
@@ -598,6 +624,7 @@
   function trInit() {
     if (!_inited) initPresets();   // seed defaults + apply last-selected, once
     _inited = true;
+    trBackendChange();             // ensure Base options match the chosen backend
     loadSets();      // always refresh on open (sets/boxes may have changed elsewhere)
     loadClasses();   // refresh the box-class filter list
     loadDevices();   // query torch for real devices, replacing the CPU placeholder
@@ -612,5 +639,6 @@
     trValidate, trAccept, onBoxesSaved,
     trSetGallerySafe, trClassChanged,
     trPresetSelect, trPresetReload, trPresetOverwrite, trPresetNew, trPresetDelete,
+    trBackendChange,
   });
 })();

@@ -3448,6 +3448,9 @@ def remote_yolo_train_worker(abs_folder: str, dataset_dir: str, config: dict,
 # ── Pose / skeleton: extracted to pose.py ─────────────────────────────────────
 import pose
 
+# ── Mayaku (COCO-format) training support — parallel backend to YOLO ──────────
+import mayaku_support
+
 _yolo_registered = set()
 
 def _canonical_yolo_path(model_path):
@@ -12283,7 +12286,15 @@ def train():
     if not set_name:
         return jsonify({"success": False, "error": "set name required"}), 400
     cfg        = dict(d.get("cfg") or {})
-    base_model = (d.get("base_model") or f"yolo11{_yolo_size()}.pt")
+    # Training backend: "yolo" (default, unchanged) or "mayaku" (COCO-format).
+    # Adds bonus Mayaku support without touching the YOLO path.
+    backend    = (d.get("backend") or cfg.pop("backend", "yolo") or "yolo").strip().lower()
+    if backend not in ("yolo", "mayaku"):
+        backend = "yolo"
+    if backend == "mayaku":
+        base_model = (d.get("base_model") or "mayaku-n-det")
+    else:
+        base_model = (d.get("base_model") or f"yolo11{_yolo_size()}.pt")
     try:
         val_frac = float(cfg.pop("val_split", d.get("val_split", 0.05)))
     except (TypeError, ValueError):
@@ -12409,6 +12420,50 @@ def train():
     val_n = min(len(labelled) - 1, int(round(len(labelled) * val_frac))) if len(labelled) > 1 else 0
     val_n = max(val_n, 1 if (val_frac > 0 and len(labelled) > 1) else 0)
     val_set, tr_set = labelled[:val_n], labelled[val_n:]
+
+    # ── Mayaku backend: COCO-format dataset + Mayaku training worker ──────────
+    # Mayaku expects each split's images and its _annotations.coco.json in the
+    # SAME directory (Roboflow layout), so we decode jpgs into {train,val}/ and
+    # write the COCO json alongside. Region gathering, class indexing (`cls_id`)
+    # and crop-to-boxes above are shared with YOLO and untouched.
+    if backend == "mayaku":
+        def _decode_coco_split(pairs, split):
+            img_dst = os.path.join(dset_dir, split)
+            os.makedirs(img_dst, exist_ok=True)
+            out = []
+            for base, bn, regions in pairs:
+                jpg = os.path.join(img_dst, bn + ".jpg")
+                subprocess.run(['djxl', base + ".jxl", jpg],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if crop_to_boxes:
+                    regions = _crop_jpg_to_boxes(jpg, regions)
+                out.append((bn, regions))
+            return img_dst, out
+
+        tr_dir, tr_pairs = _decode_coco_split(tr_set, "train")
+        va_dir, va_pairs = _decode_coco_split(val_set, "val") if val_set else (None, [])
+        mayaku_support.write_coco_split(
+            tr_dir, os.path.join(tr_dir, "_annotations.coco.json"), tr_pairs, cls_id)
+        if va_pairs:
+            mayaku_support.write_coco_split(
+                va_dir, os.path.join(va_dir, "_annotations.coco.json"), va_pairs, cls_id)
+
+        run_name = "set_" + safe
+        # Mayaku hyperparameter keys differ from Ultralytics; forward only the
+        # ones the worker understands. The rest of cfg is ignored for Mayaku.
+        weights = os.path.join(os.path.abspath(MODELS_DIR), "runs", "mayaku",
+                               run_name, "best.pt")
+        ts.set_meta(_db(), set_name, weights=weights)
+        state["status_text"] = f"Training (Mayaku)… ({len(tr_pairs)} train | {len(va_pairs)} val)"
+        threading.Thread(
+            target=mayaku_support.mayaku_train_worker, daemon=True,
+            args=(dset_dir, base_model, cfg, run_name, MODELS_DIR,
+                  state, training_logger, populate_model_selector)).start()
+        return jsonify({"success": True, "set": set_name, "backend": "mayaku",
+                        "weights": weights,
+                        "train": len(tr_pairs), "val": len(va_pairs)})
+
+    # ── YOLO backend (default, unchanged) ─────────────────────────────────────
     for base, bn, regions in tr_set:
         jpg = os.path.join(dset_dir, "images/train", bn + ".jpg")
         subprocess.run(['djxl', base + ".jxl", jpg],
@@ -12439,7 +12494,8 @@ def train():
     ts.set_meta(_db(), set_name, weights=weights)
     threading.Thread(target=yolo_train_worker_cfg, daemon=True,
                      args=(dset_dir, yaml_p, base_model, cfg)).start()
-    return jsonify({"success": True, "set": set_name, "weights": weights,
+    return jsonify({"success": True, "set": set_name, "backend": "yolo",
+                    "weights": weights,
                     "train": len(tr_b), "val": len(val_b)})
 
 @app.route("/api/training_log")
