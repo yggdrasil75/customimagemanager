@@ -1,7 +1,6 @@
 --extra-index-url https://download.pytorch.org/whl/rocm7.2
---extra-index-url https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
+--find-links https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/
 torch==2.14.0+rocm7.2
 torchvision==0.29.0+rocm7.2
-onnxruntime-rocm
-onnxruntime-migraphx==1.23.2
+onnxruntime-migraphx
 pytorch-triton-rocm

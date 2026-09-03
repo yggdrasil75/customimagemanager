@@ -5,7 +5,7 @@ numpy
 pyexiv2
 imagecodecs
 rtmlib
-rapidocr_onnxruntime
+#rapidocr_onnxruntime
 easyocr
 mutagen
 hnswlib

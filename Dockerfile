@@ -26,6 +26,12 @@ COPY requirements.txt requirements-cpu.txt requirements-cuda.txt requirements-ro
 RUN echo "Installing GPU backend: ${GPU_BACKEND}" \
     && pip install -r "requirements-${GPU_BACKEND}.txt" -r requirements.txt
 
+RUN if [ "${GPU_BACKEND}" = "rocm" ]; then \
+        pip uninstall -y onnxruntime onnxruntime-gpu onnxruntime-rocm onnxruntime-migraphx || true \
+        && pip install onnxruntime-migraphx \
+            -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/ ; \
+    fi
+
 COPY . .
 
 RUN mkdir -p static && curl -fsSL https://cdn.tailwindcss.com/3.4.17 -o static/tailwindcss.js

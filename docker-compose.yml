@@ -61,7 +61,8 @@ services:
       context: .
       args:
         GPU_BACKEND: rocm
-    # environment:
+    environment:
+      - CIM_INSIGHT_ALLOW_MIGRAPHX=1
       # - CIM_DEVICE=rocm   # uncomment to force ROCm regardless of detection
       # - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-}
     devices:
