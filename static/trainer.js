@@ -214,13 +214,40 @@
     trPick(ni);
   }
 
-  // After the editor autosaves boxes on a set image (the work copy), reload the
-  // set so the per-image colour (blue/yellow) and "with data" count refresh.
-  function onBoxesSaved(fn) {
+  // After the editor autosaves boxes on a set image (the work copy), refresh the
+  // per-image colour (blue/yellow) and "with data" count. Autosave fires on every
+  // edit (every ~900ms while drawing), so we must NOT rebuild the grid here:
+  // renderGrid() recreates every <img>, forcing all thumbnails on the page to
+  // reload repeatedly. Instead we refetch the set data and patch ONLY the saved
+  // tile's colour class and the counts in place — no <img> is touched.
+  async function onBoxesSaved(fn) {
     if (!currentSet) return;
     if (!items.some(i => i.rel_path === fn)) return;   // not one of ours
-    loadMembers();
-    loadClasses();
+    const cls = selectedClasses();
+    const qs = '/api/trainer/set?set=' + enc(currentSet) +
+      cls.map(c => '&class=' + enc(c)).join('');
+    let d;
+    try { d = await jget(qs); } catch { return; }
+    const fresh = (d && d.files) || [];
+    const byPath = new Map(fresh.map(f => [f.rel_path, f]));
+    // Patch in-memory items with the fresh status, tracking which tiles changed.
+    const changed = [];
+    for (let i = 0; i < items.length; i++) {
+      const nf = byPath.get(items[i].rel_path);
+      if (!nf) continue;
+      if (items[i].color !== nf.color) changed.push(i);
+      items[i].checked = nf.checked;
+      items[i].with_data = nf.with_data;
+      items[i].color = nf.color;
+    }
+    // Update only the affected tiles' colour class — leave their <img> alone.
+    for (const i of changed) {
+      const el = $('tr_tile_' + i);
+      if (!el) continue;   // off the current page; will paint correctly when rendered
+      el.classList.remove('st-none', 'st-yellow', 'st-blue', 'st-green');
+      el.classList.add('st-' + (items[i].color || 'none'));
+    }
+    renderCounts();
   }
 
   // ── training ────────────────────────────────────────────────────────────────

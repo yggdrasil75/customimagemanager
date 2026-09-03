@@ -2653,8 +2653,9 @@ def _merge_regions(*sources: list) -> list:
     """
     merged = []
     for src in sources:
+        prior = list(merged)  # snapshot: only fold against EARLIER sources
         for r in src or []:
-            for existing in merged:
+            for existing in prior:
                 if _regions_overlap(existing, r):
                     _merge_region(existing, r)
                     break
@@ -8693,52 +8694,38 @@ def _fast_metadata(fn, fp):
 
     tags = _loads(row["tags"], [])
 
-    # Regions from the face/body cache (this is what the editor draws). Names and
-    # confirmations here mirror the MWG regions written into the image, so this
-    # is authoritative for the boxes the UI needs.
+    _side_xmp = os.path.splitext(fp)[0] + '.xmp'
     regions = []
-    for tbl in ("face_regions", "body_regions"):
+    if os.path.exists(_side_xmp):
         try:
-            for rr in db.execute(
-                    f"SELECT cx, cy, w, h, name, confirmed FROM {tbl} "
-                    "WHERE rel_path=?", (fn,)).fetchall():
-                regions.append({
-                    "cx": rr["cx"], "cy": rr["cy"], "w": rr["w"], "h": rr["h"],
-                    "class_name": rr["name"] or ("face" if tbl == "face_regions"
-                                                 else "person"),
-                    "name": rr["name"] or "",
-                    "confirmed": bool(rr["confirmed"]),
-                })
+            regions = read_metadata(fp).get("regions", []) or []
         except Exception:
-            pass  # table may not exist in older DBs
+            regions = []
 
-    # Face/body tables only hold detector output. Manually drawn / object boxes
-    # are written to the XMP sidecar but never inserted into those tables, so the
-    # fast path above returns nothing for them. When the DB has no region rows,
-    # fall back to the sidecar (the authoritative store for all region types).
-    if not regions and os.path.exists(fp):
+    if not regions and not os.path.exists(_side_xmp):
+        for tbl in ("face_regions", "body_regions"):
+            try:
+                for rr in db.execute(
+                        f"SELECT cx, cy, w, h, name, confirmed FROM {tbl} "
+                        "WHERE rel_path=?", (fn,)).fetchall():
+                    regions.append({
+                        "cx": rr["cx"], "cy": rr["cy"], "w": rr["w"], "h": rr["h"],
+                        "class_name": rr["name"] or ("face" if tbl == "face_regions"
+                                                     else "person"),
+                        "name": rr["name"] or "",
+                        "confirmed": bool(rr["confirmed"]),
+                    })
+            except Exception:
+                pass  # table may not exist in older DBs
+
+    # No sidecar and no cached rows: last-resort full read (also covers a file
+    # whose only regions live in embedded XMP for non-JXL formats).
+    if not regions and not os.path.exists(_side_xmp) and os.path.exists(fp):
         try:
             regions = read_metadata(fp).get("regions", []) or []
         except Exception:
             pass
 
-    _side_xmp = os.path.splitext(fp)[0] + '.xmp'
-    if regions and os.path.exists(_side_xmp):
-        try:
-            side = read_metadata(fp).get("regions", []) or []
-            masked = [s for s in side if s.get("mask_svg")]
-            for s in masked:
-                best, best_iou = None, 0.0
-                for r in regions:
-                    if r.get("mask_svg"):
-                        continue
-                    iou = _iou_center(r, s)
-                    if iou > best_iou:
-                        best, best_iou = r, iou
-                if best is not None and best_iou >= 0.5:
-                    best["mask_svg"] = s["mask_svg"]
-        except Exception:
-            pass
 
     pose = None
     try:
@@ -12071,6 +12058,81 @@ def trainer_remove():
     paths = [p for p in (d.get("paths") or []) if isinstance(p, str)]
     ts.remove(_db(), set_name, paths)
     return jsonify({"success": True, "removed": len(paths)})
+
+
+@app.route("/api/trainer/labels")
+@_auth.require_feature("ai.trainer")
+def trainer_labels():
+    """Label suggestions for the trainer box editor: the global box-label pool
+    plus any class names already used on the given set's members."""
+    labels = set(l for l in (state.get("classes") or []) if l and l != "object")
+    try:
+        for r in _db().execute(
+                "SELECT DISTINCT class_name FROM body_regions "
+                "WHERE class_name IS NOT NULL AND class_name<>''").fetchall():
+            labels.add(r["class_name"])
+    except Exception:
+        pass
+    name = (request.args.get("set", "") or "").strip()
+    if name:
+        try:
+            for rec in ts.member_records(_db(), name):
+                wp = rec["work_path"] or rec["rel_path"]
+                wabs = get_safe_path(MEDIA_DIR, wp)
+                if wabs and os.path.exists(wabs):
+                    for r in (read_metadata(wabs) or {}).get("regions", []) or []:
+                        nm = (r.get("class_name") or "").strip()
+                        if nm:
+                            labels.add(nm)
+        except Exception:
+            pass
+    return jsonify({"success": True, "labels": sorted(labels)})
+
+
+@app.route("/api/trainer/boxes", methods=["POST"])
+@_auth.require_feature("ai.trainer", action="trainer_boxes", fields=("filename",))
+def trainer_boxes():
+    """Read or write boxes for one trainer-set member.
+
+    Body: {action:'read'|'write', filename, regions?}
+      - filename is the member's WORK copy rel_path (under
+        media/.training_sets/<set>/input/), as returned by /api/trainer/set.
+      - 'read'  -> {success, regions:[{cx,cy,w,h,class_name,confirmed}, ...]}
+      - 'write' -> replaces the region list on the work copy only, then
+                   {success, count}.
+    Because this only ever touches the isolated copy, boxes persist in the
+    training set without mutating (or deleting clutter from) the gallery.
+    """
+    d = request.json or {}
+    action = (d.get("action") or "read").lower()
+    fn = (d.get("filename") or "").strip()
+    fp = get_safe_path(MEDIA_DIR, fn)
+    if not fp or not os.path.exists(fp):
+        return jsonify({"success": False, "error": "File not found."}), 404
+
+    if action == "read":
+        regions = (read_metadata(fp) or {}).get("regions", []) or []
+        return jsonify({"success": True, "regions": regions})
+
+    if action == "write":
+        meta = read_metadata(fp) or {}
+        clean = []
+        for r in (d.get("regions") or []):
+            cb = _clamp_box(r)
+            if not cb:
+                continue
+            clean.append({
+                "class_name": (r.get("class_name") or "").strip(),
+                "cx": cb["cx"], "cy": cb["cy"], "w": cb["w"], "h": cb["h"],
+                # boxes drawn/edited in the trainer are user-authored -> confirmed
+                "confirmed": r.get("confirmed", True) is not False,
+            })
+        ok = write_metadata(fp, meta.get("tags", []), meta.get("description", ""), clean)
+        if not ok:
+            return jsonify({"success": False, "error": "write failed"}), 500
+        return jsonify({"success": True, "count": len(clean)})
+
+    return jsonify({"success": False, "error": f"unknown action {action!r}"}), 400
 
 
 @app.route("/api/box_labels")
