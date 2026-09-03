@@ -3479,6 +3479,15 @@ def _build_yolo(model_path):
     #     except Exception:
     #         pass
     m = YOLO(canon)
+    # Pin to the accelerator explicitly (ROCm presents as 'cuda'). Ultralytics'
+    # auto-device is unreliable on ROCm/migraphx and otherwise leaves these .pt
+    # detectors on CPU — the migraphx path only accelerates the ONNX recognition
+    # models, not these torch YOLO weights.
+    try:
+        if model_registry.on_gpu():
+            m.to(model_registry.device())
+    except Exception:
+        pass
     try:
         m.fuse()
     except Exception:
@@ -3596,6 +3605,100 @@ def _detect_obb_or_box(img_bgr, model_path: str, keep_classes: set | None = None
     except Exception as e:
         access_logger.error(f"detect({model_path}): {e}")
         return []
+
+def _coerce_bgr3(img_bgr):
+    """Coerce to 3-channel uint8 BGR, or None if unusable. YOLO's first conv
+    needs exactly 3 channels; shared by the single and batched detect paths."""
+    if img_bgr is None or getattr(img_bgr, "size", 0) == 0:
+        return None
+    if img_bgr.ndim == 2:
+        img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_GRAY2BGR)
+    elif img_bgr.ndim == 3 and img_bgr.shape[2] != 3:
+        c = img_bgr.shape[2]
+        if c in (1, 2):
+            img_bgr = cv2.cvtColor(img_bgr[:, :, 0], cv2.COLOR_GRAY2BGR)
+        elif c == 4:
+            img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_BGRA2BGR)
+        else:
+            img_bgr = img_bgr[:, :, :3]
+    if img_bgr.dtype != np.uint8:
+        img_bgr = np.clip(img_bgr, 0, 255).astype(np.uint8)
+    return img_bgr
+
+def _parse_yolo_result(r, H, W, keep_classes, as_obb):
+    """Turn one ultralytics Result into normalised center-form boxes. Same logic
+    the single-image path uses; factored out so batched detect reuses it."""
+    out = []
+    obb = getattr(r, "obb", None)
+    if as_obb and obb is not None and len(obb) > 0:
+        names = r.names
+        for i in range(len(obb)):
+            cid = int(obb.cls[i].item()); name = names.get(cid, str(cid))
+            if keep_classes and name not in keep_classes:
+                continue
+            pts = obb.xyxyxyxy[i].cpu().numpy().reshape(-1, 2)
+            x1, y1 = pts[:, 0].min() / W, pts[:, 1].min() / H
+            x2, y2 = pts[:, 0].max() / W, pts[:, 1].max() / H
+            out.append({"class_name": name, "cx": (x1 + x2) / 2,
+                        "cy": (y1 + y2) / 2, "w": x2 - x1, "h": y2 - y1})
+        return out
+    if r.boxes is not None:
+        names = r.names
+        for b in r.boxes:
+            cid = int(b.cls[0].item()); name = names.get(cid, str(cid))
+            if keep_classes and name not in keep_classes:
+                continue
+            cx, cy, w, h = b.xywhn[0].tolist()
+            out.append({"class_name": name, "cx": cx, "cy": cy, "w": w, "h": h})
+    return out
+
+def _detect_obb_or_box_batch(imgs, model_path: str, keep_classes: set | None = None,
+                             conf: float = 0.25, as_obb: bool = False) -> list:
+    """!
+    @brief Batched form of _detect_obb_or_box: run ONE YOLO forward pass over a
+           list of images instead of N sequential single-image calls.
+    @param imgs List of BGR images (may contain None; those yield []).
+    @return List (len == len(imgs)) of per-image box lists, order preserved.
+    @note ultralytics accepts a list and batches it on-GPU; this is where the
+          real batch speedup lives. Result i maps to input i; images that fail
+          coercion are passed as a 1x1 black frame so the result list stays
+          index-aligned, and their output is forced to [].
+    """
+    n = len(imgs)
+    if n == 0:
+        return []
+    coerced, valid = [], []
+    for im in imgs:
+        c = _coerce_bgr3(im)
+        valid.append(c is not None)
+        coerced.append(c if c is not None else np.zeros((1, 1, 3), np.uint8))
+    try:
+        try:
+            res = _load_yolo(model_path)(coerced, verbose=False, conf=conf)
+        except Exception as ex:
+            if "bn" in str(ex) or "fuse" in str(ex).lower():
+                try:
+                    model_registry.unload(_yolo_key(model_path))
+                except Exception:
+                    pass
+                res = _load_yolo(model_path)(coerced, verbose=False, conf=conf)
+            else:
+                raise
+    except Exception as e:
+        access_logger.error(f"detect_batch({model_path}): {e}")
+        return [[] for _ in range(n)]
+    out = []
+    for i in range(n):
+        if not valid[i] or res is None or i >= len(res):
+            out.append([])
+            continue
+        H, W = coerced[i].shape[:2]
+        try:
+            out.append(_parse_yolo_result(res[i], H, W, keep_classes, as_obb))
+        except Exception as e:
+            access_logger.error(f"detect_batch parse[{i}]({model_path}): {e}")
+            out.append([])
+    return out
 
 def _run_person(img_bgr) -> list:
     """!
@@ -3772,6 +3875,134 @@ def _face_regions_for(img, rel: str) -> list:
                             "region_description": ""})
     return out
 
+def _filter_face_boxes(img_bgr, boxes) -> list:
+    """Shared face-box post-filter: drop sub-32px and (optionally) drawn faces.
+    Same rules as the single-image _run_faces, split out so the batched path can
+    reuse them per image."""
+    H, W = img_bgr.shape[:2]
+    reject_drawn = bool(state.get("face_reject_drawn"))
+    thresh = float(state.get("face_drawn_thresh") or facelib.DRAWN_THRESH)
+    out = []
+    for b in boxes:
+        if b["w"] * W < 32 or b["h"] * H < 32:
+            continue
+        if reject_drawn and facelib.is_drawn(img_bgr, b, thresh):
+            continue
+        b["class_name"] = "face"
+        out.append(b)
+    return out
+
+def _person_model_paths():
+    """(primary_model_path, as_obb, keep_classes) for the person detector, matching
+    _run_person's selection logic. Returned so the batched path can pick one model
+    for the whole batch. The OBB-then-fallback retry _run_person does per image is
+    not reproduced per element; batched scan uses the COCO person model when no OBB
+    model is configured, and the OBB model when one is."""
+    obb = ((state.get("person_model") or "")
+           or (state.get("person_obb_model") or "")).strip()
+    if obb:
+        return obb, True, None
+    return f"yolo11{_yolo_size()}.pt", False, {"person"}
+
+def _face_regions_for_batch(imgs, rels) -> list:
+    """!
+    @brief Batched equivalent of _face_regions_for for a list of images.
+    @return List (len == len(imgs)) of MWG-shaped region-dict lists.
+    @note Runs each detector ONCE over the whole batch (face, person, optional
+          custom) — the real YOLO batching. Per-image background segmentation is
+          still done per image (seg_runtime is not batch-aware); it is skipped in
+          the batched path only when bg_seg is disabled, which is the default.
+    """
+    n = len(imgs)
+    results = [[] for _ in range(n)]
+
+    # Faces — one forward pass over the batch.
+    fm = facelib.ensure_face_detector(_face_detector_id())
+    if fm:
+        face_batches = _detect_obb_or_box_batch(imgs, fm)
+        for i, boxes in enumerate(face_batches):
+            if imgs[i] is None:
+                continue
+            for b in _filter_face_boxes(imgs[i], boxes):
+                results[i].append({"class_name": "face", "region_name": "",
+                                   "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
+                                   "confirmed": False, "region_tags": [],
+                                   "region_description": ""})
+
+    # People — one forward pass over the batch.
+    pmodel, pobb, pkeep = _person_model_paths()
+    person_batches = _detect_obb_or_box_batch(imgs, pmodel, keep_classes=pkeep,
+                                              as_obb=pobb)
+    person_regions_per = [[] for _ in range(n)]
+    for i, boxes in enumerate(person_batches):
+        for b in boxes:
+            person_regions_per[i].append({"class_name": "person", "region_name": "",
+                                          "cx": b["cx"], "cy": b["cy"],
+                                          "w": b["w"], "h": b["h"], "confirmed": False,
+                                          "region_tags": [], "region_description": ""})
+
+    # Optional per-image background segmentation (only when enabled — off by default).
+    bg_on = (state.get("bg_seg_enabled") and seg_runtime is not None
+             and seg_models is not None)
+    if bg_on:
+        try:
+            cids = seg_models.wanted_class_ids(
+                state.get("bg_seg_model"), state.get("bg_seg_classes") or [])
+        except Exception:
+            cids = None
+        try:
+            seg_batches = seg_runtime.segment_background_batch(
+                imgs, model_id=state.get("bg_seg_model"), class_ids=cids)
+        except Exception:
+            seg_batches = [[] for _ in range(n)]
+        for i in range(n):
+            if imgs[i] is None:
+                continue
+            insts = seg_batches[i] if i < len(seg_batches) else []
+            for inst in insts:
+                if not inst.get("mask_svg"):
+                    continue
+                if inst.get("class_name") == "person":
+                    best, best_iou = None, 0.0
+                    for r in person_regions_per[i]:
+                        iou = _iou_center(r, inst)
+                        if iou > best_iou:
+                            best, best_iou = r, iou
+                    if best is not None and best_iou >= 0.5:
+                        best["mask_svg"] = inst["mask_svg"]
+                    else:
+                        person_regions_per[i].append({
+                            "class_name": "person", "region_name": "",
+                            "cx": inst["cx"], "cy": inst["cy"],
+                            "w": inst["w"], "h": inst["h"], "confirmed": False,
+                            "region_tags": [], "region_description": "",
+                            "mask_svg": inst["mask_svg"]})
+                else:
+                    results[i].append({
+                        "class_name": inst.get("class_name", "object"),
+                        "region_name": "", "cx": inst["cx"], "cy": inst["cy"],
+                        "w": inst["w"], "h": inst["h"], "confirmed": False,
+                        "region_tags": [], "region_description": "",
+                        "mask_svg": inst["mask_svg"]})
+
+    for i in range(n):
+        results[i].extend(person_regions_per[i])
+
+    # Optional custom trained model — one forward pass over the batch.
+    if state.get("face_bg_custom"):
+        models = (state.get("model_groups") or {}).get("trained") or []
+        chosen = (state.get("our_model") or "").strip()
+        model_path = chosen if (chosen and chosen in models) else (models[-1] if models else None)
+        if model_path:
+            custom_batches = _detect_obb_or_box_batch(imgs, model_path)
+            for i, boxes in enumerate(custom_batches):
+                for b in boxes:
+                    results[i].append({"class_name": b["class_name"], "region_name": "",
+                                       "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
+                                       "confirmed": False, "region_tags": [],
+                                       "region_description": ""})
+    return results
+
 def _upsert_region_embeddings(table: str, rel: str, boxes: list, vecs: list,
                               mode: str, extra=None) -> None:
     """!
@@ -3913,20 +4144,7 @@ def _face_process_one(job) -> None:
     _face_setup_backoff["until"] = 0.0   # setup worked → clear any prior backoff
     failed = 0
     try:
-        for rel in rels:
-            try:
-                _face_process_one_inner(rel)
-            except Exception as e:
-                # One bad image must not abort the rest of the batch; mark it done
-                # so the queue drains instead of re-serving the same failing file.
-                failed += 1
-                _face_err("image failed (%s): %s", rel, e)
-                try:
-                    _mark_face_done(rel)
-                    if state.get("body_enabled"):
-                        _mark_body_done(rel)
-                except Exception as e2:
-                    _face_err("mark-done FAILED for %s: %s", rel, e2)
+        failed = _face_detect_batch(rels)
     finally:
         try:
             ctx.__exit__(None, None, None)
@@ -3953,34 +4171,94 @@ def _face_process_one(job) -> None:
         except Exception as e:
             _face_err("batch end check failed: %s", e)
 
-def _face_process_one_inner(rel: str) -> None:
-    abs_p = get_safe_path(MEDIA_DIR, rel)
-    if not abs_p or not os.path.exists(abs_p):
-        _mark_face_done(rel); return
+def _face_detect_batch(rels: list) -> int:
+    """!
+    @brief Detect faces/people for a whole batch with ONE YOLO forward pass per
+           detector, then finish (metadata + embed) per image.
+    @return Count of images that failed and were marked done to keep the queue moving.
+    @note This is the real batching. Detection — the slow, GPU-bound part even
+          under migraphx — was previously N sequential single-image calls; now the
+          batch's decoded images are handed to YOLO as one list. Decode, metadata
+          write and embedding stay per image (they are not GPU-batchable here).
+    """
+    failed = 0
+    # ── decode phase: load every image up front so detection sees a full batch ──
+    abs_paths, imgs, decoded_rels = [], [], []
+    for rel in rels:
+        abs_p = get_safe_path(MEDIA_DIR, rel)
+        if not abs_p or not os.path.exists(abs_p):
+            _mark_face_done(rel)
+            if state.get("body_enabled"):
+                _mark_body_done(rel)
+            continue
+        _t = time.time()
+        try:
+            img = read_jxl(abs_p)
+        except Exception as e:
+            _face_err("decode failed (%s): %s", rel, e); img = None
+        _face_t["decode"] += time.time() - _t
+        if img is None:
+            _mark_face_done(rel)
+            if state.get("body_enabled"):
+                _mark_body_done(rel)
+            continue
+        try:
+            bgr = _to_bgr(img)             # read_jxl may return gray/RGBA; YOLO needs 3-ch BGR
+        except Exception as e:
+            _face_err("to_bgr failed (%s): %s", rel, e)
+            _mark_face_done(rel)
+            if state.get("body_enabled"):
+                _mark_body_done(rel)
+            continue
+        abs_paths.append(abs_p); imgs.append(bgr); decoded_rels.append(rel)
+
+    if not decoded_rels:
+        return failed
+
+    # ── detect phase: single batched forward pass per detector ──
     _t = time.time()
-    img = read_jxl(abs_p)
-    _face_t["decode"] += time.time() - _t
-    if img is None:
-        _mark_face_done(rel); return
-    bgr = _to_bgr(img)                 # read_jxl may return gray/RGBA; YOLO needs 3-channel BGR
-    _t = time.time()
-    found = _face_regions_for(bgr, rel)
+    try:
+        regions_per = _face_regions_for_batch(imgs, decoded_rels)
+    except Exception as e:
+        # Detection blew up for the whole batch — fall back so the queue still drains.
+        _face_err("batch detect failed, marking %d done: %s", len(decoded_rels), e)
+        for rel in decoded_rels:
+            failed += 1
+            _mark_face_done(rel)
+            if state.get("body_enabled"):
+                _mark_body_done(rel)
+        _face_t["detect"] += time.time() - _t
+        return failed
     _face_t["detect"] += time.time() - _t
-    if found:
-        _t = time.time()
-        meta = read_metadata(abs_p)
-        merged = _merge_regions(meta["regions"], found)
-        write_metadata(abs_p, meta["tags"], meta["description"], merged)
-        _face_t["meta"] += time.time() - _t
-        _t = time.time()
-        _cache_faces(rel, bgr, found)
-        if state.get("body_enabled"):
-            _cache_bodies(rel, bgr, found)   # same decoded image, gated on body_enabled
-        _face_t["embed"] += time.time() - _t
-        _face_dirty["v"] = True
-    _mark_face_done(rel)
-    if state.get("body_enabled"):
-        _mark_body_done(rel)
+
+    # ── finish phase: metadata + embeds, per image (one bad image can't sink the rest) ──
+    for rel, abs_p, bgr, found in zip(decoded_rels, abs_paths, imgs, regions_per):
+        try:
+            if found:
+                _t = time.time()
+                meta = read_metadata(abs_p)
+                merged = _merge_regions(meta["regions"], found)
+                write_metadata(abs_p, meta["tags"], meta["description"], merged)
+                _face_t["meta"] += time.time() - _t
+                _t = time.time()
+                _cache_faces(rel, bgr, found)
+                if state.get("body_enabled"):
+                    _cache_bodies(rel, bgr, found)   # same decoded image, gated on body_enabled
+                _face_t["embed"] += time.time() - _t
+                _face_dirty["v"] = True
+            _mark_face_done(rel)
+            if state.get("body_enabled"):
+                _mark_body_done(rel)
+        except Exception as e:
+            failed += 1
+            _face_err("image failed (%s): %s", rel, e)
+            try:
+                _mark_face_done(rel)
+                if state.get("body_enabled"):
+                    _mark_body_done(rel)
+            except Exception as e2:
+                _face_err("mark-done FAILED for %s: %s", rel, e2)
+    return failed
 
 def _claim_face_job():
     """! @brief One face-scan unit for the shared background processor, or None.

@@ -324,17 +324,17 @@ def segment_text(img_bgr, query, model_id=None):
 # YOLO-seg loader (the background, class-aware segmenter)
 # ════════════════════════════════════════════════════════════════════════════
 def _build_yolo_seg(ref):
-    """Construct a YOLO-seg model from a weights ref, or None."""
-    # try:
-    #     import traceback, logging
-    #     logging.getLogger("access").warning(
-    #         "BUILD_YOLO_SEG %s\n%s", ref,
-    #         "".join(traceback.format_stack(limit=8)[:-1]))
-    # except Exception:
-    #     pass
     try:
         YOLO = _ul_yolo()
-        return YOLO(ref) if YOLO else None
+        if not YOLO:
+            return None
+        m = YOLO(ref)
+        try:
+            if model_registry.on_gpu():
+                m.to(model_registry.device())   # 'cuda' for both CUDA and ROCm
+        except Exception:
+            pass
+        return m
     except Exception:
         return None
 
@@ -368,34 +368,82 @@ def segment_background(img_bgr, model_id=None, class_ids=None, conf=0.25):
         return []
     img = _to_bgr_u8(img_bgr)
     H, W = img.shape[:2]
-    out = []
     try:
         kwargs = {"verbose": False, "conf": conf}
         if class_ids:
             kwargs["classes"] = list(class_ids)
+        try:
+            if model_registry.on_gpu():
+                kwargs["device"] = model_registry.device()
+        except Exception:
+            pass
         res = model(img, **kwargs)
         if not res:
             return []
-        r = res[0]
-        masks = getattr(r, "masks", None)
-        boxes = getattr(r, "boxes", None)
-        if masks is None or boxes is None:
-            return []
-        names = getattr(r, "names", {}) or {}
-        data = masks.data.cpu().numpy()             # (N, mh, mw)
-        for i in range(len(data)):
-            m = data[i]
-            # ultralytics mask may be at a different resolution than the image;
-            # resize to full frame before tracing so coords normalise correctly.
-            if m.shape[:2] != (H, W):
-                m = cv2.resize(m.astype(np.float32), (W, H),
-                               interpolation=cv2.INTER_NEAREST)
-            cid = int(boxes.cls[i].item()) if boxes.cls is not None else -1
-            name = names.get(cid, str(cid))
-            score = float(boxes.conf[i].item()) if boxes.conf is not None else None
-            inst = _mask_to_instance(m > 0.5, W, H, class_name=name, score=score)
-            if inst:
-                out.append(inst)
+        return _seg_result_to_instances(res[0], W, H)
     except Exception:
+        return []
+
+def _seg_result_to_instances(r, W, H):
+    """One ultralytics YOLO-seg Result -> list of instance dicts. Shared by the
+    single-image and batched seg paths."""
+    out = []
+    masks = getattr(r, "masks", None)
+    boxes = getattr(r, "boxes", None)
+    if masks is None or boxes is None:
         return out
+    names = getattr(r, "names", {}) or {}
+    data = masks.data.cpu().numpy()             # (N, mh, mw)
+    for i in range(len(data)):
+        m = data[i]
+        # ultralytics mask may be at a different resolution than the image;
+        # resize to full frame before tracing so coords normalise correctly.
+        if m.shape[:2] != (H, W):
+            m = cv2.resize(m.astype(np.float32), (W, H),
+                           interpolation=cv2.INTER_NEAREST)
+        cid = int(boxes.cls[i].item()) if boxes.cls is not None else -1
+        name = names.get(cid, str(cid))
+        score = float(boxes.conf[i].item()) if boxes.conf is not None else None
+        inst = _mask_to_instance(m > 0.5, W, H, class_name=name, score=score)
+        if inst:
+            out.append(inst)
+    return out
+
+def segment_background_batch(imgs_bgr, model_id=None, class_ids=None, conf=0.25):
+    """Batched form of segment_background: run YOLO-seg over a LIST of images in
+    one forward pass. Returns a list (len == len(imgs_bgr)) of per-image instance
+    lists, order preserved. None / unusable entries yield []. Never raises."""
+    n = len(imgs_bgr)
+    if n == 0 or cv2 is None:
+        return [[] for _ in range(n)]
+    model = _get_yolo_seg(model_id)
+    if model is None:
+        return [[] for _ in range(n)]
+    coerced, valid = [], []
+    for im in imgs_bgr:
+        c = _to_bgr_u8(im) if im is not None else None
+        valid.append(c is not None)
+        coerced.append(c if c is not None else np.zeros((1, 1, 3), np.uint8))
+    kwargs = {"verbose": False, "conf": conf}
+    if class_ids:
+        kwargs["classes"] = list(class_ids)
+    try:
+        if model_registry.on_gpu():
+            kwargs["device"] = model_registry.device()
+    except Exception:
+        pass
+    try:
+        res = model(coerced, **kwargs)
+    except Exception:
+        return [[] for _ in range(n)]
+    out = []
+    for i in range(n):
+        if not valid[i] or res is None or i >= len(res):
+            out.append([])
+            continue
+        H, W = coerced[i].shape[:2]
+        try:
+            out.append(_seg_result_to_instances(res[i], W, H))
+        except Exception:
+            out.append([])
     return out
