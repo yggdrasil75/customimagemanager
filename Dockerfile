@@ -27,9 +27,12 @@ RUN echo "Installing GPU backend: ${GPU_BACKEND}" \
     && pip install -r "requirements-${GPU_BACKEND}.txt" -r requirements.txt
 
 RUN if [ "${GPU_BACKEND}" = "rocm" ]; then \
-        pip uninstall -y onnxruntime onnxruntime-gpu onnxruntime-rocm onnxruntime-migraphx || true \
+        apt install migraphx half \
+        && pip uninstall -y onnxruntime onnxruntime-gpu onnxruntime-rocm onnxruntime-migraphx || true \
         && pip install onnxruntime-migraphx \
-            -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/ ; \
+            -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.0/ \
+        && pip install onnxruntime-rocm \
+            -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.0/ ; \
     fi
 
 COPY . .
