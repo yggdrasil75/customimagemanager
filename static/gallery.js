@@ -448,6 +448,10 @@ async function selectFile(fn){
     clearTimeout(autosaveTO); autosaveTO=null;
     try{ await saveMetadata(); }catch(e){ /* keep navigating even if save failed */ }
   }
+  // Coming from book/person mode, the centre pane is showing the reader or the
+  // 3d mesh; switch it back to the image viewer or the load below lands in a
+  // hidden #image_pane and nothing appears to change.
+  if(typeof setMediaMode==='function') setMediaMode('image');
   const _mySeq=++_selectSeq;
   currentFile=fn;
   if(typeof highlightRegionFile!=='undefined' && highlightRegionFile!==fn){

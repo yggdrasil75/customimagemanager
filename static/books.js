@@ -363,6 +363,30 @@ function closeBook() {
   setMediaMode('image');
 }
 
+/* Delete the open book (the Delete key in book mode routes here). Removes the
+ * file by default — same as deleting an image — so confirm first, then close
+ * the reader and refresh the shelf so the gone book drops out of the list. */
+async function deleteCurrentBook() {
+  if (!currentBook) return;
+  // UX guard only — the server enforces tab.books.delete regardless. This just
+  // avoids firing a request that would 403 and gives a clear reason instead.
+  if (window.CIMFeatures && !window.CIMFeatures.allowed('tab.books.delete')) {
+    if (typeof showToast === 'function') showToast("You don't have permission to delete books.");
+    return;
+  }
+  const title = currentBook.title || currentBook.rel_path || 'this book';
+  if (!confirm(`Delete "${title}"? This removes the file from disk.`)) return;
+  const rp = currentBook.rel_path;
+  const d = await fetch('/api/books/delete', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rel_path: rp })
+  }).then(r => r.json()).catch(() => ({ success: false }));
+  if (!d.success) { alert('Could not delete that book.'); return; }
+  if (typeof showToast === 'function') showToast(`Deleted "${title}".`);
+  closeBook();
+  if (typeof booksReload === 'function') booksReload();
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
  * METADATA EDITOR (controls pane, book mode)
  * ══════════════════════════════════════════════════════════════════════════ */

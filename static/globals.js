@@ -371,15 +371,23 @@ document.addEventListener('keydown', async e=>{
     return;
   }
 
+  const mode = (typeof mediaMode==='undefined') ? 'image' : mediaMode;
+
+  if(e.key==='Delete' && !inInput && mode==='book'){
+    e.preventDefault();
+    if(typeof deleteCurrentBook==='function') deleteCurrentBook();
+    return;
+  }
+
   // Delete key with selection (and no input focused)
-  if(e.key==='Delete' && !inInput && selectedFiles.size>0){
+  if(e.key==='Delete' && !inInput && mode==='image' && selectedFiles.size>0){
     e.preventDefault();
     bulkDelete();
     return;
   }
 
   // Delete key for single current file
-  if(e.key==='Delete' && !inInput && currentFile && selectedFiles.size===0){
+  if(e.key==='Delete' && !inInput && mode==='image' && currentFile && selectedFiles.size===0){
     e.preventDefault();
     deleteCurrentFile();
     return;

@@ -46,6 +46,8 @@ import threading
 
 from flask import request, jsonify, send_file, Response
 
+import auth
+
 import book_index as bi
 
 # Filled in by register().
@@ -1182,6 +1184,7 @@ def register(app, ctx: dict):
         return jsonify({"success": True, "results": out})
 
     @app.route("/api/books/delete", methods=["POST"])
+    @auth.require_feature("tab.books.delete", action="book_delete", fields=("rel_path", "keep_file"))
     def books_delete():
         """Delete a book. `keep_file` removes it from the library but leaves the
         bytes on disk — useful when the shelf is wrong but the file isn't."""

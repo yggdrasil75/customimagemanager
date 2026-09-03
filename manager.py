@@ -1173,43 +1173,51 @@ def _date_clause(cols: tuple, op: str | None, literal: str) -> tuple[str, list]:
     ors = " OR ".join(f"({c} IS NOT NULL AND {c} {cmp} ?)" for c in cols)
     return f"({ors})", [bound] * len(cols)
 
-def _parse_search(search: str) -> tuple[str, list, list]:
+def _parse_search(search: str) -> tuple[str, list, list, list]:
     """!
     @brief Pull structured filters (width:/height: comparisons, is: flags) out of free text.
     @return (free_text, [sql_clause...], [param...]).
     """
-    text, where, params = [], [], []
+    text, where, params, structured = [], [], [], []
     for tok in search.split():
         m = _FILTER_RE.match(tok)
         if m:
             col, opx, val = m.group(1).lower(), m.group(2), int(m.group(3))
             where.append(f"{col} {opx} ?")
             params.append(val)
+            structured.append(("dim", col, opx, val))   # images-only
             continue
         dm = _DATE_RE.match(tok)
         if dm:
-            cols = _DATE_TOKEN_COLS[dm.group(1).lower()]
+            token = dm.group(1).lower()
+            cols = _DATE_TOKEN_COLS[token]
             clause, cp = _date_clause(cols, dm.group(2), dm.group(3))
             if clause:
                 where.append(clause)
                 params += cp
+                structured.append(("date", token, dm.group(2), dm.group(3)))
             continue
         low = tok.lower()
         if low.startswith('person:') and low[7:].lstrip('-').isdigit():
             where.append(
                 "rel_path IN (SELECT rel_path FROM face_regions WHERE cluster_id=?)")
             params.append(int(low[7:]))
+            structured.append(("person", int(low[7:])))   # images-only
         elif low == 'is:untagged':
             where.append("(tags IS NULL OR tags='' OR tags='[]')")
+            structured.append(("is", "untagged"))
         elif low == 'is:tagged':
             where.append("(tags IS NOT NULL AND tags!='' AND tags!='[]')")
+            structured.append(("is", "tagged"))
         elif low == 'is:unconfirmed':
             where.append("COALESCE(unconfirmed_count,0) > 0")
+            structured.append(("is", "unconfirmed"))
         elif low == 'is:tagunconfirmed':
             where.append("tags LIKE '%\"?%'")     # unconfirmed tags are JSON strings starting with '?'
+            structured.append(("is", "tagunconfirmed"))
         else:
             text.append(tok)
-    return ' '.join(text).strip(), where, params
+    return ' '.join(text).strip(), where, params, structured
 
 def _query_files(search: str, offset: int, limit: int,
                  folder: str = '', album: str = '') -> tuple[list, int]:
@@ -1218,12 +1226,12 @@ def _query_files(search: str, offset: int, limit: int,
     @param album If given, restrict to that album's members and suppress comics/books.
     @return (entries, total) where entries are typed dicts (kind='comic'|'book'|'image').
     """
-    text, where, params = _parse_search(search)
+    text, where, params, structured = _parse_search(search)
 
     # comics + books (few; fetched whole, shown first). Skipped for an album:
     # an album is a flat image set, and books/comics aren't album members.
-    comic_entries = [] if album else _query_comics(text, folder)
-    book_entries = [] if album else _query_books(text, folder)
+    comic_entries = [] if album else _query_comics(text, folder, structured)
+    book_entries = [] if album else _query_books(text, folder, structured)
     comic_entries = comic_entries + book_entries
     nc = len(comic_entries)
 
@@ -5008,11 +5016,76 @@ def _folder_scope_clause(column: str, folder: str) -> tuple[list, list]:
         return [f"({column} LIKE ? AND {column} NOT LIKE ?)"], [f + '/%', f + '/%/%']
     return [], []
 
-def _query_comics(text: str, folder: str) -> list:
+def _structured_book_date(structured: list | None):
+    """Translate structured search tokens for the books/comics tables.
+
+    Returns (clause, params):
+      ("", [])          no structured tokens, or none that apply — no filter.
+      (sql, params)     a `published`-column date filter to AND in.
+      (None, [])        an image-only token is present (person:/width:/is:…);
+                        the caller should exclude books/comics entirely.
+
+    date:/datetime:/dateoriginal:/… all collapse to the single `published`
+    column here (books have no separate actual/original/digitized buckets), so
+    any date token narrows by publication date. Multiple date tokens AND together.
+    """
+    if not structured:
+        return "", []
+    ors, params = [], []
+    for tok in structured:
+        kind = tok[0]
+        if kind == "date":
+            _, _token, op, literal = tok
+            clause, cp = _published_clause(op, literal)
+            if clause:
+                ors.append(clause)
+                params += cp
+            else:
+                # An unparseable date literal shouldn't silently pass every book.
+                return None, []
+        else:
+            # dim/person/is — nothing a book row can satisfy.
+            return None, []
+    if not ors:
+        return "", []
+    return "(" + " AND ".join(ors) + ")", params
+
+def _published_clause(op: str | None, literal: str):
+    """A WHERE fragment matching the books.published text column against a date
+    literal/range, reusing the image date normaliser. STRICT: empty/NULL
+    published never matches. Mirrors _date_clause but for one text column."""
+    col = "published"
+    guard = f"{col} IS NOT NULL AND {col}!=''"
+    if '..' in literal:
+        lo_raw, hi_raw = literal.split('..', 1)
+        lo = _norm_date_literal(lo_raw, end=False)
+        hi = _norm_date_literal(hi_raw, end=True)
+        if not lo or not hi:
+            return "", []
+        return f"({guard} AND substr({col},1,10) BETWEEN ? AND ?)", [lo, hi]
+    if op in ("<", "<="):
+        bound = _norm_date_literal(literal, end=(op == "<="))
+        cmp = "<" if op == "<" else "<="
+    elif op in (">", ">="):
+        bound = _norm_date_literal(literal, end=(op == ">"))
+        cmp = ">" if op == ">" else ">="
+    else:
+        lo = _norm_date_literal(literal, end=False)
+        hi = _norm_date_literal(literal, end=True)
+        if not lo or not hi:
+            return "", []
+        return f"({guard} AND substr({col},1,10) BETWEEN ? AND ?)", [lo, hi]
+    if not bound:
+        return "", []
+    return f"({guard} AND substr({col},1,10) {cmp} ?)", [bound]
+
+def _query_comics(text: str, folder: str, structured: list | None = None) -> list:
     """!
     @brief Comic cover entries matching the folder scope and free-text search.
     @return List of comic dicts (kind='comic') with cover dimensions resolved.
     """
+    if structured:
+        return []
     clauses, p = _folder_scope_clause("folder", folder)
     if text:
         like = f"%{text}%"
@@ -5043,7 +5116,7 @@ def _query_comics(text: str, folder: str) -> list:
         })
     return out
 
-def _query_books(text: str, folder: str) -> list:
+def _query_books(text: str, folder: str, structured: list | None = None) -> list:
     """!
     @brief Book entries matching the folder scope and free-text search.
     @return List of book dicts (kind='book'); [] if the books table is absent.
@@ -5052,7 +5125,16 @@ def _query_books(text: str, folder: str) -> list:
     """
     if not _table_exists(_db(), "books"):
         return []
+    # A structured token that books can't evaluate means the user is filtering on
+    # an image-only property; a book cannot match it, so drop books entirely
+    # rather than leave them all on screen (the original bug).
+    dclause, dparams = _structured_book_date(structured)
+    if dclause is None:
+        return []
     clauses, p = _folder_scope_clause("rel_path", folder)
+    if dclause:
+        clauses.append(dclause)
+        p += dparams
     if text:
         like = f"%{text}%"
         clauses.append("(title LIKE ? OR authors LIKE ? OR series LIKE ? "
