@@ -55,7 +55,7 @@ FACE_MODEL_REPO = facemodels.FACE_MODEL_REPO
 MIN_MODEL_BYTES = 1_000_000   # a real .pt is megabytes; smaller == error page
 
 MIN_FACE_PX = 32          # below this a face carries too little identity signal
-DEFAULT_EPS = 0.60        # cosine distance; ArcFace identities are tight
+DEFAULT_EPS = 0.4        # cosine distance; ArcFace identities are tight
 FALLBACK_EPS = 0.25       # appearance embeddings need a stricter radius
 MATCH_IOU    = 0.35       # min overlap to bind an insightface det to a YOLO box
 
@@ -456,13 +456,35 @@ def _cosine_union_find(X, eps, min_cluster):
 
     thresh = 1.0 - eps
     CH = 512
+    CORE_K = max(min_cluster, 3)
+    neigh_counts = np.zeros(n, dtype=np.int32)
+    rows = []                              # cache within-eps neighbours per row
     for s in range(0, n, CH):
-        sims = X[s:s + CH] @ X.T          # (chunk, n) — bounded
+        sims = X[s:s + CH] @ X.T
         for r in range(sims.shape[0]):
             i = s + r
-            for j in np.nonzero(sims[r] >= thresh)[0]:
-                if int(j) != i:
-                    union(i, int(j))
+            js = np.nonzero(sims[r] >= thresh)[0]
+            js = js[js != i]
+            neigh_counts[i] = len(js)
+            rows.append((i, js))
+    is_core = neigh_counts >= CORE_K
+    for i, js in rows:
+        if not is_core[i]:
+            continue
+        for j in js:
+            j = int(j)
+            if is_core[j]:                 # core–core edge: safe to merge
+                union(i, j)
+    # Attach non-core faces to a neighbouring core (border points) so tight
+    # clusters keep their edge members without ever bridging two cores.
+    for i, js in rows:
+        if is_core[i]:
+            continue
+        for j in js:
+            j = int(j)
+            if is_core[j]:
+                union(i, j)
+                break
 
     groups = {}
     for i in range(n):
