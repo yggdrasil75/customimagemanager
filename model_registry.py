@@ -244,6 +244,36 @@ def on_gpu():
     loaders that only care 'GPU vs CPU', not the vendor."""
     return device() == "cuda"
 
+_DEVICES = None
+
+def available_devices():
+    """The compute devices torch can see, as [{'value','label'}], for the UI's
+    device picker. Uses the module-level torch (no per-call import) and is
+    computed once and cached process-wide — device topology doesn't change while
+    we run, and probing torch on every request is what caused the bloat/ulimit/
+    slowdown. CPU is always first; CUDA/ROCm GPUs are enumerated by index with
+    their names; MPS is listed only when torch reports it built and available."""
+    global _DEVICES
+    if _DEVICES is not None:
+        return _DEVICES
+    devs = [{"value": "-1", "label": "CPU"}]
+    if torch is not None:
+        try:
+            if torch.cuda.is_available():
+                for i in range(torch.cuda.device_count()):
+                    try:
+                        nm = torch.cuda.get_device_name(i)
+                    except Exception:
+                        nm = f"GPU {i}"
+                    devs.append({"value": str(i), "label": f"GPU {i} — {nm}"})
+            mps = getattr(torch.backends, "mps", None)
+            if mps is not None and mps.is_available() and mps.is_built():
+                devs.append({"value": "mps", "label": "MPS (Apple)"})
+        except Exception:
+            pass
+    _DEVICES = devs
+    return _DEVICES
+
 def onnx_providers():
     """The ONNX Runtime execution-provider preference list for the detected
     backend, most-preferred first, always ending in CPUExecutionProvider so a

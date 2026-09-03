@@ -11924,6 +11924,16 @@ def _sel_paths_to_entries(rel_paths):
     return out
 
 
+@app.route("/api/trainer/devices")
+@_auth.require_feature("ai.trainer")
+def trainer_devices():
+    """Report the compute devices torch can see, so the UI never offers a GPU
+    index or an MPS option that doesn't exist on this machine. Backed by the
+    model registry, which imports torch once at module load and caches the
+    device list, so this route never re-imports torch per request."""
+    return jsonify({"success": True, "devices": model_registry.available_devices()})
+
+
 @app.route("/api/trainer/sets")
 @_auth.require_feature("ai.trainer")
 def trainer_sets():
@@ -12242,6 +12252,11 @@ def train():
     except (TypeError, ValueError):
         val_frac = 0.05
     val_frac = min(max(val_frac, 0.0), 0.9)
+    # Crop-to-boxes: before YOLO downscales each image to imgsz, crop tightly
+    # around the boxes we're training on (plus a margin) so the objects survive
+    # the resize at higher effective resolution. Coords are recomputed relative
+    # to the crop; the stored image/regions are never touched.
+    crop_to_boxes = bool(cfg.pop("crop_to_boxes", d.get("crop_to_boxes", False)))
 
     abs_folder = os.path.abspath(MEDIA_DIR)
     # Each set gets its own reusable dataset subfolder, so a subset's YOLO data
@@ -12313,17 +12328,63 @@ def train():
                 except (TypeError, ValueError):
                     continue
 
+    def _crop_jpg_to_boxes(jpg_path, regions, margin=0.10):
+        """Crop the decoded jpg in place to the union of `regions` (normalised
+        cx,cy,w,h) expanded by `margin` of the union size, and return regions
+        re-normalised to the crop. On any failure, leave the file and return the
+        original regions unchanged."""
+        try:
+            img = cv2.imread(jpg_path)
+            if img is None:
+                return regions
+            H, W = img.shape[:2]
+            xs0, ys0, xs1, ys1 = [], [], [], []
+            for r in regions:
+                cx, cy, w, h = float(r["cx"]), float(r["cy"]), float(r["w"]), float(r["h"])
+                xs0.append(cx - w / 2); xs1.append(cx + w / 2)
+                ys0.append(cy - h / 2); ys1.append(cy + h / 2)
+            ux0, uy0, ux1, uy1 = min(xs0), min(ys0), max(xs1), max(ys1)
+            mx, my = (ux1 - ux0) * margin, (uy1 - uy0) * margin
+            ux0 = max(0.0, ux0 - mx); uy0 = max(0.0, uy0 - my)
+            ux1 = min(1.0, ux1 + mx); uy1 = min(1.0, uy1 + my)
+            px0, py0 = int(ux0 * W), int(uy0 * H)
+            px1, py1 = int(round(ux1 * W)), int(round(uy1 * H))
+            if px1 - px0 < 2 or py1 - py0 < 2:
+                return regions
+            crop = img[py0:py1, px0:px1]
+            ch, cw = crop.shape[:2]
+            if not cv2.imwrite(jpg_path, crop):
+                return regions
+            out = []
+            for r in regions:
+                nr = dict(r)
+                nr["cx"] = (float(r["cx"]) * W - px0) / cw
+                nr["cy"] = (float(r["cy"]) * H - py0) / ch
+                nr["w"] = float(r["w"]) * W / cw
+                nr["h"] = float(r["h"]) * H / ch
+                out.append(nr)
+            return out
+        except Exception as e:
+            access_logger.warning(f"crop_to_boxes {jpg_path}: {e}")
+            return regions
+
     random.shuffle(labelled)
     val_n = min(len(labelled) - 1, int(round(len(labelled) * val_frac))) if len(labelled) > 1 else 0
     val_n = max(val_n, 1 if (val_frac > 0 and len(labelled) > 1) else 0)
     val_set, tr_set = labelled[:val_n], labelled[val_n:]
     for base, bn, regions in tr_set:
-        subprocess.run(['djxl', base + ".jxl", os.path.join(dset_dir, "images/train", bn + ".jpg")],
+        jpg = os.path.join(dset_dir, "images/train", bn + ".jpg")
+        subprocess.run(['djxl', base + ".jxl", jpg],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if crop_to_boxes:
+            regions = _crop_jpg_to_boxes(jpg, regions)
         _write_label(os.path.join(dset_dir, "labels/train"), bn, regions)
     for base, bn, regions in val_set:
-        subprocess.run(['djxl', base + ".jxl", os.path.join(dset_dir, "images/val", bn + ".jpg")],
+        jpg = os.path.join(dset_dir, "images/val", bn + ".jpg")
+        subprocess.run(['djxl', base + ".jxl", jpg],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if crop_to_boxes:
+            regions = _crop_jpg_to_boxes(jpg, regions)
         _write_label(os.path.join(dset_dir, "labels/val"), bn, regions)
     tr_b, val_b = tr_set, val_set   # keep the names the rest of the route uses
     yaml_p = os.path.join(dset_dir, "dataset.yaml")

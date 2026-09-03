@@ -29,56 +29,58 @@
       </select></div>
     <div class="tr-field"><label class="trlbl">Device</label>
       <select id="tr_device" class="trinp">
-        <option value="-1">CPU</option><option value="0">GPU 0</option>
-        <option value="1">GPU 1</option><option value="mps">MPS</option>
+        <option value="-1">CPU</option>
       </select></div>
-    <div class="tr-field"><label class="trlbl">Epochs</label><input id="tr_epochs" type="number" value="100" class="trinp"></div>
-    <div class="tr-field"><label class="trlbl">Batch</label><input id="tr_batch" type="number" value="4" class="trinp"></div>
-    <div class="tr-field"><label class="trlbl">Image size</label><input id="tr_imgsz" type="number" value="640" step="32" class="trinp"></div>
-    <div class="tr-field"><label class="trlbl">Val split</label><input id="tr_val_split" type="number" value="0.05" step="0.05" min="0" max="0.9" class="trinp"></div>
+    <div class="tr-field"><label class="trlbl">Epochs</label><input id="tr_epochs" type="number" value="100" min="1" max="10000" step="1" class="trinp" title="How many full passes over the training images to run."></div>
+    <div class="tr-field"><label class="trlbl">Batch</label><input id="tr_batch" type="number" value="4" min="1" max="1024" step="1" class="trinp" title="How many images are processed together per step; higher uses more memory."></div>
+    <div class="tr-field"><label class="trlbl">Image size</label><input id="tr_imgsz" type="number" value="640" step="32" min="32" max="4096" class="trinp" title="Images are resized to this many pixels on the long side before training."></div>
+    <div class="tr-field"><label class="trlbl">Val split</label><input id="tr_val_split" type="number" value="0.05" step="0.05" min="0" max="0.9" class="trinp" title="Fraction of images held out to measure accuracy instead of training on."></div>
   </div>
+
+  <label class="trck" title="Crop each image tightly around its boxes (plus a margin) before resizing, so the objects keep more detail.">
+    <input type="checkbox" id="tr_crop_to_boxes" class="accent-purple-500"> Crop to boxes (higher-quality input)</label>
 
   <details id="tr_advanced_wrap">
     <summary class="trlbl cursor-pointer select-none text-purple-300">Advanced</summary>
     <div id="tr_advanced" class="space-y-2 mt-2">
       <div class="tr-flow">
-        <div class="tr-field"><label class="trlbl">Patience</label><input id="tr_patience" type="number" value="100" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">Patience</label><input id="tr_patience" type="number" value="100" min="0" max="10000" step="1" class="trinp" title="Stop early if accuracy hasn't improved for this many epochs (0 disables early stopping)."></div>
         <div class="tr-field"><label class="trlbl">Optimizer</label>
-          <select id="tr_optimizer" class="trinp">
+          <select id="tr_optimizer" class="trinp" title="The algorithm that updates the model's weights; 'auto' lets Ultralytics choose.">
             <option value="auto">auto</option><option value="SGD">SGD</option>
             <option value="Adam">Adam</option><option value="AdamW">AdamW</option><option value="RMSProp">RMSProp</option>
           </select></div>
-        <div class="tr-field"><label class="trlbl">lr0</label><input id="tr_lr0" type="number" value="0.01" step="0.001" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">lrf</label><input id="tr_lrf" type="number" value="0.01" step="0.001" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">Momentum</label><input id="tr_momentum" type="number" value="0.937" step="0.001" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">Weight decay</label><input id="tr_weight_decay" type="number" value="0.0005" step="0.0001" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">Warmup ep</label><input id="tr_warmup_epochs" type="number" value="3" step="0.5" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">Freeze</label><input id="tr_freeze" type="number" value="0" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">Dropout</label><input id="tr_dropout" type="number" value="0" step="0.05" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">Seed</label><input id="tr_seed" type="number" value="0" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">Workers</label><input id="tr_workers" type="number" value="8" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">Close mosaic</label><input id="tr_close_mosaic" type="number" value="10" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">lr0</label><input id="tr_lr0" type="number" value="0.01" step="0.001" min="0" max="1" class="trinp" title="Initial learning rate — how big each weight update is at the start."></div>
+        <div class="tr-field"><label class="trlbl">lrf</label><input id="tr_lrf" type="number" value="0.01" step="0.001" min="0" max="1" class="trinp" title="Final learning rate as a fraction of lr0, decayed to over training."></div>
+        <div class="tr-field"><label class="trlbl">Momentum</label><input id="tr_momentum" type="number" value="0.937" step="0.001" min="0" max="1" class="trinp" title="How much the previous update carries into the next, smoothing learning."></div>
+        <div class="tr-field"><label class="trlbl">Weight decay</label><input id="tr_weight_decay" type="number" value="0.0005" step="0.0001" min="0" max="1" class="trinp" title="Penalty on large weights that curbs overfitting."></div>
+        <div class="tr-field"><label class="trlbl">Warmup ep</label><input id="tr_warmup_epochs" type="number" value="3" step="0.5" min="0" max="100" class="trinp" title="Epochs spent ramping the learning rate up from near zero at the start."></div>
+        <div class="tr-field"><label class="trlbl">Freeze</label><input id="tr_freeze" type="number" value="0" min="0" max="24" step="1" class="trinp" title="Number of early layers to keep fixed so only later layers train."></div>
+        <div class="tr-field"><label class="trlbl">Dropout</label><input id="tr_dropout" type="number" value="0" step="0.05" min="0" max="1" class="trinp" title="Fraction of neurons randomly disabled during training to reduce overfitting."></div>
+        <div class="tr-field"><label class="trlbl">Seed</label><input id="tr_seed" type="number" value="0" min="0" max="4294967295" step="1" class="trinp" title="Random seed; fixing it makes a training run reproducible."></div>
+        <div class="tr-field"><label class="trlbl">Workers</label><input id="tr_workers" type="number" value="8" min="0" max="64" step="1" class="trinp" title="Parallel CPU threads used to load and prepare images."></div>
+        <div class="tr-field"><label class="trlbl">Close mosaic</label><input id="tr_close_mosaic" type="number" value="10" min="0" max="10000" step="1" class="trinp" title="Turn off mosaic augmentation for the final N epochs to fine-tune on real images."></div>
       </div>
       <div class="tr-flow">
-        <label class="trck"><input type="checkbox" id="tr_cos_lr" class="accent-purple-500"> Cosine</label>
-        <label class="trck"><input type="checkbox" id="tr_rect" class="accent-purple-500"> Rect</label>
-        <label class="trck"><input type="checkbox" id="tr_single_cls" class="accent-purple-500"> 1-class</label>
+        <label class="trck" title="Decay the learning rate along a smooth cosine curve instead of linearly."><input type="checkbox" id="tr_cos_lr" class="accent-purple-500"> Cosine</label>
+        <label class="trck" title="Pad images to rectangles per batch instead of squares, saving compute."><input type="checkbox" id="tr_rect" class="accent-purple-500"> Rect</label>
+        <label class="trck" title="Treat every box as one merged class, ignoring class labels."><input type="checkbox" id="tr_single_cls" class="accent-purple-500"> 1-class</label>
       </div>
       <label class="trlbl pt-1">Augmentation</label>
       <div class="tr-flow">
-        <div class="tr-field"><label class="trlbl">hsv_h</label><input id="tr_hsv_h" type="number" value="0.015" step="0.005" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">hsv_s</label><input id="tr_hsv_s" type="number" value="0.7" step="0.05" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">hsv_v</label><input id="tr_hsv_v" type="number" value="0.4" step="0.05" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">degrees</label><input id="tr_degrees" type="number" value="0" step="1" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">translate</label><input id="tr_translate" type="number" value="0.1" step="0.05" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">scale</label><input id="tr_scale" type="number" value="0.5" step="0.05" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">shear</label><input id="tr_shear" type="number" value="0" step="1" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">persp</label><input id="tr_perspective" type="number" value="0" step="0.0001" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">flipud</label><input id="tr_flipud" type="number" value="0" step="0.1" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">fliplr</label><input id="tr_fliplr" type="number" value="0.5" step="0.1" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">mosaic</label><input id="tr_mosaic" type="number" value="1.0" step="0.1" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">mixup</label><input id="tr_mixup" type="number" value="0" step="0.1" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">copy_paste</label><input id="tr_copy_paste" type="number" value="0" step="0.1" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">hsv_h</label><input id="tr_hsv_h" type="number" value="0.015" step="0.005" min="0" max="1" class="trinp" title="Randomly shift image hue by up to this fraction to vary colour."></div>
+        <div class="tr-field"><label class="trlbl">hsv_s</label><input id="tr_hsv_s" type="number" value="0.7" step="0.05" min="0" max="1" class="trinp" title="Randomly shift colour saturation by up to this fraction."></div>
+        <div class="tr-field"><label class="trlbl">hsv_v</label><input id="tr_hsv_v" type="number" value="0.4" step="0.05" min="0" max="1" class="trinp" title="Randomly shift brightness by up to this fraction."></div>
+        <div class="tr-field"><label class="trlbl">degrees</label><input id="tr_degrees" type="number" value="0" step="1" min="0" max="360" class="trinp" title="Randomly rotate images by up to this many degrees."></div>
+        <div class="tr-field"><label class="trlbl">translate</label><input id="tr_translate" type="number" value="0.1" step="0.05" min="0" max="1" class="trinp" title="Randomly shift images by up to this fraction of their size."></div>
+        <div class="tr-field"><label class="trlbl">scale</label><input id="tr_scale" type="number" value="0.5" step="0.05" min="0" max="1" class="trinp" title="Randomly zoom images in or out by up to this fraction."></div>
+        <div class="tr-field"><label class="trlbl">shear</label><input id="tr_shear" type="number" value="0" step="1" min="0" max="180" class="trinp" title="Randomly slant images by up to this many degrees."></div>
+        <div class="tr-field"><label class="trlbl">persp</label><input id="tr_perspective" type="number" value="0" step="0.0001" min="0" max="0.001" class="trinp" title="Randomly apply a perspective warp, as if viewed from an angle."></div>
+        <div class="tr-field"><label class="trlbl">flipud</label><input id="tr_flipud" type="number" value="0" step="0.1" min="0" max="1" class="trinp" title="Probability of flipping an image upside down."></div>
+        <div class="tr-field"><label class="trlbl">fliplr</label><input id="tr_fliplr" type="number" value="0.5" step="0.1" min="0" max="1" class="trinp" title="Probability of flipping an image left-to-right."></div>
+        <div class="tr-field"><label class="trlbl">mosaic</label><input id="tr_mosaic" type="number" value="1.0" step="0.1" min="0" max="1" class="trinp" title="Probability of stitching four images into one training tile."></div>
+        <div class="tr-field"><label class="trlbl">mixup</label><input id="tr_mixup" type="number" value="0" step="0.1" min="0" max="1" class="trinp" title="Probability of blending two images and their boxes together."></div>
+        <div class="tr-field"><label class="trlbl">copy_paste</label><input id="tr_copy_paste" type="number" value="0" step="0.1" min="0" max="1" class="trinp" title="Probability of copying objects from one image onto another."></div>
       </div>
     </div>
   </details>

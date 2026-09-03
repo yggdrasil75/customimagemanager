@@ -254,8 +254,10 @@
   const num = id => { const el = $(id); if (!el) return null; const v = el.value; return v === '' ? null : Number(v); };
 
   function collectCfg() {
+    const cropEl = $('tr_crop_to_boxes');
     const cfg = { epochs: num('tr_epochs'), batch: num('tr_batch'), imgsz: num('tr_imgsz'),
-      device: $('tr_device').value, val_split: num('tr_val_split') };
+      device: $('tr_device').value, val_split: num('tr_val_split'),
+      crop_to_boxes: !!(cropEl && cropEl.checked) };
     const adv = $('tr_advanced_wrap');
     if (adv && adv.open) {
       Object.assign(cfg, {
@@ -424,12 +426,28 @@
     if (row) { row.style.opacity = .5; const btn = row.querySelector('button'); if (btn) { btn.textContent = 'Accepted'; btn.disabled = true; } }
   }
 
+  // Populate the Device dropdown from the devices torch actually reports, so we
+  // never offer a GPU index or MPS that doesn't exist on this machine.
+  async function loadDevices() {
+    const sel = $('tr_device');
+    if (!sel) return;
+    let devs = [{ value: '-1', label: 'CPU' }];
+    try {
+      const d = await jget('/api/trainer/devices');
+      if (d && d.success && Array.isArray(d.devices) && d.devices.length) devs = d.devices;
+    } catch (e) { /* fall back to CPU-only */ }
+    const prev = sel.value;
+    sel.innerHTML = devs.map(x => `<option value="${x.value}">${x.label}</option>`).join('');
+    if (devs.some(x => x.value === prev)) sel.value = prev;
+  }
+
   // ── init (called by setPane whenever the pane opens) ────────────────────────
   let _inited = false;
   function trInit() {
     _inited = true;
     loadSets();      // always refresh on open (sets/boxes may have changed elsewhere)
     loadClasses();   // refresh the box-class filter list
+    loadDevices();   // query torch for real devices, replacing the CPU placeholder
   }
 
   document.addEventListener('keydown', trKeyNav);
