@@ -11979,6 +11979,39 @@ def trainer_gallery_safe():
     return jsonify({"success": True, "gallery_safe": bool(d.get("gallery_safe"))})
 
 
+@app.route("/api/trainer/presets", methods=["GET"])
+@_auth.require_feature("ai.trainer")
+def trainer_presets_list():
+    return jsonify({"success": True, "presets": ts.list_presets(_db())})
+
+
+@app.route("/api/trainer/presets", methods=["POST"])
+@_auth.require_feature("ai.trainer", action="trainer_preset_save", fields=("name",))
+def trainer_preset_save():
+    d = request.json or {}
+    name = (d.get("name") or "").strip()
+    settings = d.get("settings")
+    if not name:
+        return jsonify({"success": False, "error": "preset name required"}), 400
+    if not isinstance(settings, dict):
+        return jsonify({"success": False, "error": "settings must be an object"}), 400
+    try:
+        ts.save_preset(_db(), name, settings)
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    return jsonify({"success": True, "name": name})
+
+
+@app.route("/api/trainer/presets", methods=["DELETE"])
+@_auth.require_feature("ai.trainer", action="trainer_preset_delete", fields=("name",))
+def trainer_preset_delete():
+    name = (request.args.get("name", "") or (request.json or {}).get("name", "")).strip()
+    if not name:
+        return jsonify({"success": False, "error": "preset name required"}), 400
+    ts.delete_preset(_db(), name)
+    return jsonify({"success": True})
+
+
 @app.route("/api/trainer/checked", methods=["POST"])
 @_auth.require_feature("ai.trainer", action="trainer_checked", fields=("set",))
 def trainer_checked():

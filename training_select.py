@@ -18,6 +18,7 @@ Neither ever touches the gallery/library.
 """
 
 import time
+import json
 import random
 import numpy as np
 
@@ -59,6 +60,13 @@ def ensure_tables(db):
     scols = {r[1] for r in db.execute("PRAGMA table_info(training_set_meta)")}
     if "gallery_safe" not in scols:
         db.execute("ALTER TABLE training_set_meta ADD COLUMN gallery_safe INTEGER DEFAULT 0")
+    # Training-config PRESETS: named snapshots of the trainer's settings fields,
+    # global (not tied to a set). `settings` is a JSON blob of field->value.
+    db.execute("""CREATE TABLE IF NOT EXISTS training_presets(
+        name     TEXT PRIMARY KEY,
+        settings TEXT NOT NULL,
+        created  REAL,
+        updated  REAL)""")
     db.commit()
 
 
@@ -88,6 +96,78 @@ def get_meta(db, name):
         return {"weights": None, "accuracy": None, "gallery_safe": False, "updated": None}
     return {"weights": row["weights"], "accuracy": row["accuracy"],
             "gallery_safe": bool(row["gallery_safe"]), "updated": row["updated"]}
+
+
+# ── training-config presets ───────────────────────────────────────────────────
+# A preset is a named snapshot of the trainer's settings fields. `settings` is a
+# dict of field-id -> value; a partial preset lists only what differs from the
+# UI defaults (the client fills the rest in). Presets are global, not per-set.
+DEFAULT_PRESETS = {
+    "Default": {},
+    "Fast (quick test)": {
+        "tr_base_model": "yolo11n.pt", "tr_epochs": 30, "tr_batch": 8,
+        "tr_imgsz": 512, "tr_patience": 20, "tr_close_mosaic": 5,
+    },
+    "Quality (slow)": {
+        "tr_base_model": "yolo11m.pt", "tr_epochs": 300, "tr_batch": 4,
+        "tr_imgsz": 640, "tr_patience": 100, "tr_optimizer": "AdamW", "tr_lr0": 0.001,
+    },
+    "Heavy augmentation": {
+        "tr_epochs": 200, "tr_degrees": 10, "tr_translate": 0.2, "tr_scale": 0.7,
+        "tr_fliplr": 0.5, "tr_flipud": 0.1, "tr_mosaic": 1.0, "tr_mixup": 0.15,
+        "tr_copy_paste": 0.1, "tr_hsv_h": 0.02, "tr_hsv_s": 0.8, "tr_hsv_v": 0.5,
+    },
+}
+
+
+def _seed_default_presets(db):
+    """Insert the shipped default presets once, if the table is empty."""
+    n = db.execute("SELECT COUNT(*) AS c FROM training_presets").fetchone()["c"]
+    if n:
+        return
+    now = time.time()
+    for name, settings in DEFAULT_PRESETS.items():
+        db.execute("INSERT OR IGNORE INTO training_presets(name, settings, created, updated) "
+                   "VALUES(?,?,?,?)", (name, json.dumps(settings), now, now))
+    db.commit()
+
+
+def list_presets(db):
+    """All presets, oldest-created first so the defaults stay in a stable order."""
+    ensure_tables(db)
+    _seed_default_presets(db)
+    rows = db.execute("SELECT name, settings, updated FROM training_presets "
+                      "ORDER BY created ASC, name ASC").fetchall()
+    out = []
+    for r in rows:
+        try:
+            settings = json.loads(r["settings"])
+        except Exception:
+            settings = {}
+        out.append({"name": r["name"], "settings": settings, "updated": r["updated"]})
+    return out
+
+
+def save_preset(db, name, settings):
+    """Create or overwrite a preset. `settings` must be a dict."""
+    ensure_tables(db)
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("preset name required")
+    if not isinstance(settings, dict):
+        raise ValueError("settings must be an object")
+    now = time.time()
+    db.execute("INSERT INTO training_presets(name, settings, created, updated) "
+               "VALUES(?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
+               "settings=excluded.settings, updated=excluded.updated",
+               (name, json.dumps(settings), now, now))
+    db.commit()
+
+
+def delete_preset(db, name):
+    ensure_tables(db)
+    db.execute("DELETE FROM training_presets WHERE name=?", ((name or "").strip(),))
+    db.commit()
 
 
 # ── set management ────────────────────────────────────────────────────────────

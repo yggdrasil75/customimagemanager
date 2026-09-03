@@ -431,9 +431,172 @@
     if (devs.some(x => x.value === prev)) sel.value = prev;
   }
 
+  // ── presets ───────────────────────────────────────────────────────────────
+  // A preset is a named snapshot of the training-settings fields below. It maps
+  // field id -> value. Presets are stored SERVER-SIDE (library.db) via
+  // /api/trainer/presets, so they survive restarts and are shared across
+  // browsers. Selecting one applies its values; editing fields never mutates the
+  // stored preset — the user must Overwrite to save or Reload to discard edits.
+  // Only the last-selected preset NAME is cached in localStorage as a UI
+  // convenience (not data we care about losing).
+  const PRESET_SEL_KEY = 'trainer_preset_selected_v1';
+
+  // In-memory cache of the server's presets: { name: settingsObj }. Populated by
+  // refreshPresets() on init and after each mutation.
+  let _presets = {};
+  let _presetOrder = [];
+
+  // Every field a preset captures. Checkboxes and selects included.
+  const PRESET_FIELDS = [
+    'tr_base_model', 'tr_epochs', 'tr_batch', 'tr_imgsz', 'tr_val_split', 'tr_crop_to_boxes',
+    'tr_patience', 'tr_optimizer', 'tr_lr0', 'tr_lrf', 'tr_momentum', 'tr_weight_decay',
+    'tr_warmup_epochs', 'tr_freeze', 'tr_dropout', 'tr_seed', 'tr_workers', 'tr_close_mosaic',
+    'tr_cos_lr', 'tr_rect', 'tr_single_cls',
+    'tr_hsv_h', 'tr_hsv_s', 'tr_hsv_v', 'tr_degrees', 'tr_translate', 'tr_scale',
+    'tr_shear', 'tr_perspective', 'tr_flipud', 'tr_fliplr', 'tr_mosaic', 'tr_mixup', 'tr_copy_paste',
+  ];
+
+  // Read the current value of a settings field (checkbox → bool, else string).
+  function readField(id) {
+    const el = $(id); if (!el) return null;
+    return el.type === 'checkbox' ? !!el.checked : el.value;
+  }
+  function writeField(id, v) {
+    const el = $(id); if (el == null || v == null) return;
+    if (el.type === 'checkbox') el.checked = !!v; else el.value = v;
+  }
+
+  // The current on-screen settings, as a preset object.
+  function snapshotSettings() {
+    const o = {};
+    PRESET_FIELDS.forEach(id => { const v = readField(id); if (v !== null) o[id] = v; });
+    return o;
+  }
+  // Apply a preset: start from the markup defaults (so a partial preset is
+  // complete) then overlay the preset's stored values.
+  function applyPreset(preset) {
+    const base = defaultFieldValues();
+    const merged = Object.assign({}, base, preset || {});
+    PRESET_FIELDS.forEach(id => { if (id in merged) writeField(id, merged[id]); });
+    // Reveal Advanced if the preset touches anything in it, so edits are visible.
+    const adv = $('tr_advanced_wrap');
+    const basicIds = ['tr_base_model', 'tr_epochs', 'tr_batch', 'tr_imgsz', 'tr_val_split', 'tr_crop_to_boxes'];
+    if (adv && preset && Object.keys(preset).some(k => !basicIds.includes(k))) {
+      adv.open = true;
+    }
+  }
+
+  // The HTML-shipped default for each field, captured once from the markup.
+  let _fieldDefaults = null;
+  function defaultFieldValues() {
+    if (_fieldDefaults) return _fieldDefaults;
+    _fieldDefaults = {};
+    PRESET_FIELDS.forEach(id => {
+      const el = $(id); if (!el) return;
+      _fieldDefaults[id] = el.type === 'checkbox' ? el.defaultChecked : (el.defaultValue !== undefined ? el.defaultValue : el.value);
+    });
+    return _fieldDefaults;
+  }
+
+  function currentPresetName() {
+    const sel = $('tr_preset_select');
+    return sel ? sel.value : null;
+  }
+
+  function renderPresetSelect(selectName) {
+    const sel = $('tr_preset_select');
+    if (!sel) return;
+    const names = _presetOrder;
+    sel.innerHTML = names.map(n => `<option value="${n.replace(/"/g, '&quot;')}">${n}</option>`).join('');
+    let want = selectName;
+    if (!want || !names.includes(want)) {
+      try { want = localStorage.getItem(PRESET_SEL_KEY); } catch (e) { want = null; }
+    }
+    if (!want || !names.includes(want)) want = names[0];
+    if (want != null) sel.value = want;
+    return want;
+  }
+
+  // Fetch presets from the server into the local cache.
+  async function refreshPresets() {
+    let d;
+    try { d = await jget('/api/trainer/presets'); }
+    catch (e) { trStatus('Could not load presets: ' + e); return false; }
+    if (!d || !d.success) { trStatus('Could not load presets' + (d && d.error ? ': ' + d.error : '')); return false; }
+    _presets = {};
+    _presetOrder = [];
+    (d.presets || []).forEach(p => { _presets[p.name] = p.settings || {}; _presetOrder.push(p.name); });
+    return true;
+  }
+
+  // Called once on init: load defaults, fetch presets, apply last-selected.
+  async function initPresets() {
+    defaultFieldValues();               // capture markup defaults first
+    const ok = await refreshPresets();
+    if (!ok) return;
+    const name = renderPresetSelect();
+    if (name && _presets[name]) applyPreset(_presets[name]);
+  }
+
+  function trPresetSelect() {
+    const name = currentPresetName();
+    if (!name || !(name in _presets)) return;
+    applyPreset(_presets[name]);
+    try { localStorage.setItem(PRESET_SEL_KEY, name); } catch (e) { /* ignore */ }
+    trStatus(`Loaded preset "${name}".`);
+  }
+
+  // Reload = re-apply the selected preset, discarding any unsaved field edits.
+  function trPresetReload() {
+    const name = currentPresetName();
+    if (!name || !(name in _presets)) return;
+    applyPreset(_presets[name]);
+    trStatus(`Reloaded preset "${name}".`);
+  }
+
+  // Overwrite = save the current field values back into the selected preset.
+  async function trPresetOverwrite() {
+    const name = currentPresetName();
+    if (!name) return;
+    if (!confirm(`Overwrite preset "${name}" with the current settings?`)) return;
+    const settings = snapshotSettings();
+    const d = await jpost('/api/trainer/presets', { name, settings });
+    if (!d || !d.success) { trStatus('Save failed: ' + ((d && d.error) || '?')); return; }
+    _presets[name] = settings;
+    trStatus(`Saved current settings into "${name}".`);
+  }
+
+  // New = capture current settings under a new name.
+  async function trPresetNew() {
+    const name = (prompt('Name for the new preset:') || '').trim();
+    if (!name) return;
+    if ((name in _presets) && !confirm(`"${name}" already exists. Replace it?`)) return;
+    const settings = snapshotSettings();
+    const d = await jpost('/api/trainer/presets', { name, settings });
+    if (!d || !d.success) { trStatus('Save failed: ' + ((d && d.error) || '?')); return; }
+    await refreshPresets();
+    renderPresetSelect(name);
+    try { localStorage.setItem(PRESET_SEL_KEY, name); } catch (e) { /* ignore */ }
+    trStatus(`Created preset "${name}".`);
+  }
+
+  async function trPresetDelete() {
+    const name = currentPresetName();
+    if (!name) return;
+    if (_presetOrder.length <= 1) { alert('Keep at least one preset.'); return; }
+    if (!confirm(`Delete preset "${name}"?`)) return;
+    const d = await fetch('/api/trainer/presets?name=' + enc(name), { method: 'DELETE' }).then(r => r.json());
+    if (!d || !d.success) { trStatus('Delete failed: ' + ((d && d.error) || '?')); return; }
+    await refreshPresets();
+    const next = renderPresetSelect();
+    if (next && _presets[next]) applyPreset(_presets[next]);
+    trStatus(`Deleted preset "${name}".`);
+  }
+
   // ── init (called by setPane whenever the pane opens) ────────────────────────
   let _inited = false;
   function trInit() {
+    if (!_inited) initPresets();   // seed defaults + apply last-selected, once
     _inited = true;
     loadSets();      // always refresh on open (sets/boxes may have changed elsewhere)
     loadClasses();   // refresh the box-class filter list
@@ -448,5 +611,6 @@
     trOpen, trPick, trPickByPath, trStartTraining,
     trValidate, trAccept, onBoxesSaved,
     trSetGallerySafe, trClassChanged,
+    trPresetSelect, trPresetReload, trPresetOverwrite, trPresetNew, trPresetDelete,
   });
 })();

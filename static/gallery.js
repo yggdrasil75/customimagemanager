@@ -218,8 +218,13 @@ function syncUrl(){
   if(currentPage) p.set('page',currentPage);
   if(currentSearch) p.set('q',currentSearch);
   if(currentFolder) p.set('folder',currentFolder);
+  // Preserve ?tab= — this rebuild used to drop it, so a refresh always came
+  // back to Gallery no matter which tab set it (panes.js:_syncPaneUrl).
+  if(typeof currentPane!=='undefined' && currentPane && currentPane!=='gallery'){
+    p.set('tab',currentPane);
+  }
   const qs=p.toString();
-  history.replaceState(null,'',qs?('?'+qs):location.pathname);
+  history.replaceState(history.state||null,'',qs?('?'+qs):location.pathname);
 }
 
 async function loadGallery(){

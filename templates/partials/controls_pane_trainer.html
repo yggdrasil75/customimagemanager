@@ -10,6 +10,14 @@
     <span class="text-sm font-bold text-purple-300">Train box model</span>
     <span id="tr_status" class="text-xs text-gray-400"></span>
   </div>
+  <div class="tr-flow items-end">
+    <div class="tr-field flex-1"><label class="trlbl">Preset</label>
+      <select id="tr_preset_select" class="trinp" onchange="trPresetSelect()"></select></div>
+    <button onclick="trPresetReload()" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-xs" title="Discard edits and restore the selected preset's settings.">Reload</button>
+    <button onclick="trPresetOverwrite()" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-xs" title="Save the current settings back into the selected preset.">Overwrite</button>
+    <button onclick="trPresetNew()" class="bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded text-xs" title="Save the current settings as a new named preset.">New…</button>
+    <button onclick="trPresetDelete()" class="bg-red-800 hover:bg-red-700 px-2 py-1 rounded text-xs" title="Delete the selected preset.">Delete</button>
+  </div>
 
   <!-- Box classes to train on. None checked = every class in the set; checking
        specific ones trains ONLY those and never touches unrelated boxes. -->
