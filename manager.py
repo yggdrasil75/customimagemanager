@@ -3246,23 +3246,37 @@ def serve_thumb(rel_path: str, abs_path: str, mtime: float | None = None):
     if mtime is None:
         mtime = _getmtime_loose(abs_path)
 
+    def _finish(data: bytes, mimetype: str):
+        etag = hashlib.md5(f"{rel_path}:{mtime}:{len(data)}".encode()).hexdigest()
+        # 304 fast-path: if the browser already has this exact version, don't resend.
+        inm = request.headers.get("If-None-Match")
+        if inm and etag in [t.strip().strip('"') for t in inm.split(",")]:
+            resp = app.response_class(status=304)
+        else:
+            resp = send_file(io.BytesIO(data), mimetype=mimetype)
+        resp.headers["Cache-Control"] = "private, max-age=31536000"
+        resp.headers["ETag"] = f'"{etag}"'
+        if mtime:
+            resp.last_modified = mtime
+        return resp
+
     data = _thumb_lru_get(rel_path, mtime)          # 1. in-process LRU
     if data is not None:
-        return send_file(io.BytesIO(data), mimetype='image/jpeg')
+        return _finish(data, 'image/jpeg')
 
     data = _thumb_get(rel_path, mtime)              # 2. BLOB cache
     if data:
         _thumb_lru_put(rel_path, mtime, data)
-        return send_file(io.BytesIO(data), mimetype='image/jpeg')
+        return _finish(data, 'image/jpeg')
 
     data = _make_thumb_bytes(abs_path)              # 3. generate
     if data is None:
         raw = _read_bytes_loose(abs_path)
         if raw is None: return "", 404
-        return send_file(io.BytesIO(raw), mimetype='image/jxl')
+        return _finish(raw, 'image/jxl')
     _thumb_put(rel_path, data, mtime)
     _thumb_lru_put(rel_path, mtime, data)
-    return send_file(io.BytesIO(data), mimetype='image/jpeg')
+    return _finish(data, 'image/jpeg')
 
 # ── Dedup - numpy matrix hamming ───────────────────────────────────────────────
 def _find_similar_pairs(blobs: list[bytes], threshold: int) -> list[tuple[int,int]]:
@@ -11863,52 +11877,42 @@ def _remove_set_workdir(set_name):
         shutil.rmtree(d, ignore_errors=True)
 
 
-def _member_entries(set_name, want_classes=None):
-    """Rich per-member status for the trainer grid, computed on the WORK copy.
+def _member_entry_for_record(rec, want=None):
+    """Status entry for ONE member record. `want` is a set of in-scope class
+    names (or None = all). Reads metadata for this one file only."""
+    rp = rec["rel_path"]
+    wp = rec["work_path"] or rp
+    wabs = get_safe_path(MEDIA_DIR, wp)
+    regions = []
+    if wabs and os.path.exists(wabs):
+        regions = (read_metadata(wabs) or {}).get("regions", []) or []
+    scoped = [r for r in regions
+              if want is None or (r.get("class_name") or "").strip() in want]
+    has_conf = any(r.get("confirmed", True) for r in scoped)
+    has_unconf = any(not r.get("confirmed", True) for r in scoped)
+    with_data = len(scoped) > 0
+    if rec["checked"]:
+        color = "green"
+    elif has_conf:
+        color = "blue"
+    elif has_unconf:
+        color = "yellow"
+    else:
+        color = "none"
+    return {
+        "rel_path": wp,          # the editable copy — clicking edits THIS
+        "src_path": rp,          # gallery source (provenance)
+        "thumb": f"/api/thumb/{wp}",
+        "checked": rec["checked"],
+        "with_data": with_data,
+        "color": color,
+    }
 
-    want_classes -- the box classes currently in scope (checked in the UI). The
-                    per-image colour is decided against these:
-                      green  = the user has opened/checked this image
-                      blue   = has confirmed boxes in the checked classes
-                      yellow = has only unconfirmed boxes in the checked classes
-                    Status flags returned per image:
-                      keep      -- always true (it's in the set)
-                      with_data -- has any box at all (in scope when scoped)
-                      checked   -- user has opened it
-    """
+
+def _member_entries(set_name, want_classes=None):
     db = _db()
     want = set(want_classes) if want_classes else None
-    out = []
-    for rec in ts.member_records(db, set_name):
-        rp = rec["rel_path"]
-        wp = rec["work_path"] or rp
-        wabs = get_safe_path(MEDIA_DIR, wp)
-        regions = []
-        if wabs and os.path.exists(wabs):
-            regions = (read_metadata(wabs) or {}).get("regions", []) or []
-        # scope to checked classes when provided
-        scoped = [r for r in regions
-                  if want is None or (r.get("class_name") or "").strip() in want]
-        has_conf = any(r.get("confirmed", True) for r in scoped)
-        has_unconf = any(not r.get("confirmed", True) for r in scoped)
-        with_data = len(scoped) > 0
-        if rec["checked"]:
-            color = "green"
-        elif has_conf:
-            color = "blue"
-        elif has_unconf:
-            color = "yellow"
-        else:
-            color = "none"
-        out.append({
-            "rel_path": wp,          # the editable copy — clicking edits THIS
-            "src_path": rp,          # gallery source (provenance)
-            "thumb": f"/api/thumb/{wp}",
-            "checked": rec["checked"],
-            "with_data": with_data,
-            "color": color,
-        })
-    return out
+    return [_member_entry_for_record(rec, want) for rec in ts.member_records(db, set_name)]
 
 
 def _sel_paths_to_entries(rel_paths):

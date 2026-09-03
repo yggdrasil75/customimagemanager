@@ -12,12 +12,36 @@
 
 let currentPane = 'gallery';
 
+// Keep the URL's ?tab= param in sync with the active pane so a refresh (or a
+// bookmarked/shared link) lands back on the same tab instead of resetting to
+// Gallery. Gallery is the default, so we drop the param entirely in that case
+// to keep plain "/" URLs clean. pushState (not replaceState) so the browser's
+// back/forward buttons move between tabs too; history.state carries the pane
+// so popstate can restore it without re-deriving anything from the DOM.
+function _syncPaneUrl(pane) {
+  if (typeof history === 'undefined' || !history.pushState) return;
+  const url = new URL(location.href);
+  if (pane === 'gallery') url.searchParams.delete('tab');
+  else url.searchParams.set('tab', pane);
+  if (url.href === location.href) return;
+  const state = Object.assign({}, history.state, { pane });
+  history.pushState(state, '', url);
+}
+
+window.addEventListener('popstate', (e) => {
+  const pane = (e.state && e.state.pane)
+    || new URLSearchParams(location.search).get('tab')
+    || 'gallery';
+  if (pane !== currentPane) setPane(pane);
+});
+
 function setPane(pane) {
   if (window.CIMFeatures && pane !== 'gallery' &&
       !window.CIMFeatures.allowed('tab.' + pane)) {
     pane = 'gallery';
   }
   currentPane = pane;
+  _syncPaneUrl(pane);
 
   const isMusic = (pane === 'music');
   const isBooks = (pane === 'books');

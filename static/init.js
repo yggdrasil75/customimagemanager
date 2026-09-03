@@ -1,3 +1,6 @@
+const VALID_PANES=['gallery','albums','music','faces','review','books','trainer'];
+let _initialPane='gallery';
+
 (function(){
   const p=new URLSearchParams(location.search);
   const pg=parseInt(p.get('page'),10);
@@ -6,11 +9,13 @@
   if(p.has('folder')) currentFolder=p.get('folder');
   const si=document.getElementById('search_input');
   if(si&&currentSearch) si.value=currentSearch;
+  const tab=p.get('tab');
+  if(tab&&VALID_PANES.includes(tab)) _initialPane=tab;
 })();
 
 loadFolders();
 loadImageAlbums();
-setPane('gallery');
+setPane(_initialPane);
 loadGallery();
 fetchDedupStatus();
 refreshReviewCount();
