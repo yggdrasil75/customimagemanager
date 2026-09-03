@@ -3737,8 +3737,6 @@ def _face_regions_for(img, rel: str) -> list:
                     "w": inst["w"], "h": inst["h"], "confirmed": False,
                     "region_tags": [], "region_description": "",
                     "mask_svg": inst["mask_svg"]})
-    else:
-        _attach_masks(img, person_regions)
 
     out.extend(person_regions)
     if state.get("face_bg_custom"):
@@ -11826,23 +11824,116 @@ def run_llm():
 # A "set" is a named, persistent bag of rel_paths curated for a training run. It
 # survives restarts, so a 5000-image pick is still there next week. See
 # training_select.py for the selection strategies and storage.
+#
+# ISOLATION: each set keeps an editable COPY of every image under
+# media/.training_sets/<set>/input/. The gallery scan skips dot-dirs, so these
+# copies are invisible to the gallery yet fully addressable by the normal editor
+# (get_safe_path/thumb/file/metadata all resolve any rel_path under MEDIA_DIR).
+# Editing, adding, or removing boxes on a set image therefore only ever mutates
+# the copy — the gallery original is never touched.
+
+TRAIN_SETS_DIR = ".training_sets"   # under MEDIA_DIR
+
+
+def _set_safe(set_name):
+    return "".join(c if (c.isalnum() or c in "-_") else "_" for c in set_name).strip("_") or "set"
+
+
+def _set_work_reldir(set_name):
+    return f"{TRAIN_SETS_DIR}/{_set_safe(set_name)}/input"
+
+
+def _copy_into_set(set_name, src_rel):
+    """Copy a gallery image (its .jxl + sidecar .txt/.xmp if present) into the
+    set's isolated input folder. Returns the work rel_path (under MEDIA_DIR), or
+    None if the source can't be resolved. Idempotent: re-copying overwrites."""
+    src_abs = get_safe_path(MEDIA_DIR, src_rel)
+    if not src_abs or not os.path.exists(src_abs):
+        return None
+    work_reldir = _set_work_reldir(set_name)
+    work_absdir = get_safe_path(MEDIA_DIR, work_reldir)
+    os.makedirs(work_absdir, exist_ok=True)
+    bn = os.path.basename(src_rel)
+    work_rel = f"{work_reldir}/{bn}"
+    work_abs = get_safe_path(MEDIA_DIR, work_rel)
+    try:
+        shutil.copy2(src_abs, work_abs)
+        # bring along sibling label/sidecar so existing boxes come with the copy
+        sbase = os.path.splitext(src_abs)[0]
+        wbase = os.path.splitext(work_abs)[0]
+        for ext in (".txt", ".xmp"):
+            if os.path.exists(sbase + ext):
+                shutil.copy2(sbase + ext, wbase + ext)
+    except OSError as e:
+        training_logger.error(f"copy_into_set failed for {src_rel}: {e}")
+        return None
+    return work_rel
+
+
+def _remove_set_workdir(set_name):
+    d = get_safe_path(MEDIA_DIR, f"{TRAIN_SETS_DIR}/{_set_safe(set_name)}")
+    if d:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _member_entries(set_name, want_classes=None):
+    """Rich per-member status for the trainer grid, computed on the WORK copy.
+
+    want_classes -- the box classes currently in scope (checked in the UI). The
+                    per-image colour is decided against these:
+                      green  = the user has opened/checked this image
+                      blue   = has confirmed boxes in the checked classes
+                      yellow = has only unconfirmed boxes in the checked classes
+                    Status flags returned per image:
+                      keep      -- always true (it's in the set)
+                      with_data -- has any box at all (in scope when scoped)
+                      checked   -- user has opened it
+    """
+    db = _db()
+    want = set(want_classes) if want_classes else None
+    out = []
+    for rec in ts.member_records(db, set_name):
+        rp = rec["rel_path"]
+        wp = rec["work_path"] or rp
+        wabs = get_safe_path(MEDIA_DIR, wp)
+        regions = []
+        if wabs and os.path.exists(wabs):
+            regions = (read_metadata(wabs) or {}).get("regions", []) or []
+        # scope to checked classes when provided
+        scoped = [r for r in regions
+                  if want is None or (r.get("class_name") or "").strip() in want]
+        has_conf = any(r.get("confirmed", True) for r in scoped)
+        has_unconf = any(not r.get("confirmed", True) for r in scoped)
+        with_data = len(scoped) > 0
+        if rec["checked"]:
+            color = "green"
+        elif has_conf:
+            color = "blue"
+        elif has_unconf:
+            color = "yellow"
+        else:
+            color = "none"
+        out.append({
+            "rel_path": wp,          # the editable copy — clicking edits THIS
+            "src_path": rp,          # gallery source (provenance)
+            "thumb": f"/api/thumb/{wp}",
+            "checked": rec["checked"],
+            "with_data": with_data,
+            "color": color,
+        })
+    return out
+
 
 def _sel_paths_to_entries(rel_paths):
-    """Turn rel_paths into gallery-style entries (thumb url + existence flags)
-    the portal can render, in the given order."""
+    """Legacy simple entries (thumb + has_label) for ad-hoc lists."""
     db = _db()
     out = []
     for rp in rel_paths:
-        row = db.execute("SELECT rel_path FROM files WHERE rel_path=?", (rp,)).fetchone()
-        if not row:
-            continue
         abs_path = get_safe_path(MEDIA_DIR, rp)
         base = os.path.splitext(abs_path)[0] if abs_path else ""
         has_label = bool(base) and os.path.exists(base + ".txt") \
             and os.path.getsize(base + ".txt") > 0
-        out.append({"rel_path": rp,
-                    "thumb": f"/api/thumb/{rp}",
-                    "has_label": has_label})
+        out.append({"rel_path": rp, "thumb": f"/api/thumb/{rp}", "has_label": has_label})
     return out
 
 
@@ -11858,9 +11949,11 @@ def trainer_set_members():
     name = (request.args.get("set", "") or "").strip()
     if not name:
         return jsonify({"success": False, "error": "set name required"}), 400
-    paths = ts.members(_db(), name)
-    return jsonify({"success": True, "name": name, "count": len(paths),
-                    "files": _sel_paths_to_entries(paths)})
+    classes = request.args.getlist("class") or None
+    meta = ts.get_meta(_db(), name)
+    files = _member_entries(name, want_classes=classes)
+    return jsonify({"success": True, "name": name, "count": len(files),
+                    "gallery_safe": meta.get("gallery_safe", False), "files": files})
 
 
 @app.route("/api/trainer/set", methods=["DELETE"])
@@ -11870,6 +11963,36 @@ def trainer_set_delete():
     if not name:
         return jsonify({"success": False, "error": "set name required"}), 400
     ts.delete_set(_db(), name)
+    _remove_set_workdir(name)      # drop the isolated copies too
+    return jsonify({"success": True})
+
+
+@app.route("/api/trainer/gallery_safe", methods=["POST"])
+@_auth.require_feature("ai.trainer.keep", action="trainer_gallery_safe", fields=("set",))
+def trainer_gallery_safe():
+    d = request.json or {}
+    name = (d.get("set") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "set name required"}), 400
+    ts.set_meta(_db(), name, gallery_safe=bool(d.get("gallery_safe")))
+    return jsonify({"success": True, "gallery_safe": bool(d.get("gallery_safe"))})
+
+
+@app.route("/api/trainer/checked", methods=["POST"])
+@_auth.require_feature("ai.trainer", action="trainer_checked", fields=("set",))
+def trainer_checked():
+    d = request.json or {}
+    name = (d.get("set") or "").strip()
+    src = (d.get("rel_path") or "").strip()   # may be work_path or src; match either
+    if not name or not src:
+        return jsonify({"success": False, "error": "set + rel_path required"}), 400
+    # rel_path from the grid is the work copy; map it back to the member's source
+    matched = None
+    for rec in ts.member_records(_db(), name):
+        if rec["work_path"] == src or rec["rel_path"] == src:
+            matched = rec["rel_path"]; break
+    if matched:
+        ts.set_checked(_db(), name, matched, bool(d.get("checked", True)))
     return jsonify({"success": True})
 
 
@@ -11877,9 +12000,9 @@ def trainer_set_delete():
 @_auth.require_feature("ai.trainer.select", action="trainer_select",
                        fields=("strategy", "n"))
 def trainer_select():
-    """Pick N images by strategy and store them into a brand-new numbered set
-    ("Set 1", "Set 2", …) in one shot. Returns the new set name and its members
-    so the portal can jump straight into manual validation."""
+    """Pick N images by strategy, COPY each into the set's isolated input folder
+    (media/.training_sets/<set>/input/), and store both source and work paths.
+    Editing the set never touches the gallery original."""
     d = request.json or {}
     strategy = d.get("strategy", "random")
     if strategy not in ts.STRATEGIES:
@@ -11889,17 +12012,27 @@ def trainer_select():
     except (TypeError, ValueError):
         return jsonify({"success": False, "error": "n must be an integer"}), 400
     exclude_all_sets = bool(d.get("exclude_all_sets", True))
-    # media filter: 'image' (default) or 'image_video'. Audio is never trainable.
     media = (d.get("media") or "image")
     kinds = {"image"} if media == "image" else {"image", "video"}
+    gallery_safe = bool(d.get("gallery_safe", False))
     try:
-        name, paths = ts.create_run(_db(), strategy, n,
-                                     exclude_all_sets=exclude_all_sets, kinds=kinds)
+        name = ts.next_set_name(_db())
+        picks = ts.select(_db(), strategy, n, exclude_all_sets=exclude_all_sets, kinds=kinds)
+        ts.create_set(_db(), name)
+        ts.set_meta(_db(), name, gallery_safe=gallery_safe)
+        # Copy each pick into the isolated folder; store rel->work mapping.
+        work_map = {}
+        for rp in picks:
+            wp = _copy_into_set(name, rp)
+            if wp:
+                work_map[rp] = wp
+        ts.keep(_db(), name, picks, work_paths_map=work_map)
     except Exception as e:
         training_logger.error(f"select failed: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
     return jsonify({"success": True, "set": name, "strategy": strategy,
-                    "count": len(paths), "files": _sel_paths_to_entries(paths)})
+                    "gallery_safe": gallery_safe,
+                    "count": len(picks), "files": _member_entries(name)})
 
 
 @app.route("/api/trainer/keep", methods=["POST"])
@@ -11940,82 +12073,19 @@ def trainer_remove():
     return jsonify({"success": True, "removed": len(paths)})
 
 
-@app.route("/api/trainer/labels")
-@_auth.require_feature("ai.trainer")
-def trainer_labels():
-    """Existing box class labels, for the reviewer's searchable dropdown. Union
-    of the YOLO class list and any class_names already on images in the set."""
-    labels = set(state.get("classes") or [])
-    set_name = (request.args.get("set") or "").strip()
-    if set_name:
-        for rp in ts.members(_db(), set_name):
-            fp = get_safe_path(MEDIA_DIR, rp)
-            if not fp or not os.path.exists(fp):
-                continue
-            try:
-                for r in (read_metadata(fp).get("regions") or []):
-                    nm = (r.get("class_name") or "").strip()
-                    if nm:
-                        labels.add(nm)
-            except Exception:
-                pass
+@app.route("/api/box_labels")
+def api_box_labels():
+    labels = set(l for l in (state.get("classes") or []) if l and l != "object")
+    try:
+        for r in _db().execute(
+                "SELECT DISTINCT class_name FROM body_regions "
+                "WHERE class_name IS NOT NULL AND class_name<>''").fetchall():
+            labels.add(r["class_name"])
+    except Exception:
+        pass
     return jsonify({"success": True, "labels": sorted(labels)})
 
 
-@app.route("/api/trainer/boxes", methods=["POST"])
-@_auth.require_feature("ai.trainer.keep", action="trainer_boxes", fields=("filename",))
-def trainer_boxes():
-    """Read or write the boxes for ONE image in a set. This is the decluttered
-    box editor's save path — it only touches regions, leaving tags/description
-    untouched. Body: {action:'read'|'write', filename, regions?}."""
-    d  = request.json or {}
-    fn = (d.get("filename") or "").strip()
-    fp = get_safe_path(MEDIA_DIR, fn)
-    if not fp or not os.path.exists(fp):
-        return jsonify({"success": False, "error": "not found"}), 404
-    if d.get("action") == "write":
-        # keep the image's existing tags/description; only replace regions
-        cur = read_metadata(fp) or {}
-        regions = d.get("regions") or []
-        ok = write_metadata(fp, cur.get("tags", []) or [],
-                            cur.get("description", "") or "", regions)
-        _meta_cache_drop(fn)
-        return jsonify({"success": bool(ok), "count": len(regions)})
-    # read
-    regions = (read_metadata(fp) or {}).get("regions", []) or []
-    return jsonify({"success": True, "regions": regions})
-
-
-@app.route("/api/trainer/validate", methods=["POST"])
-@_auth.require_feature("ai.trainer.run", action="trainer_validate", fields=("set",))
-def trainer_validate():
-    """Run the set's trained model over images and diff predictions against the
-    ground-truth boxes, so you can see where the model tightens, loosens, adds or
-    drops boxes — and get an accuracy number.
-
-    Body:
-      set          required
-      iou_ok       IoU at/above which a match counts as 'correct'   (default .7)
-      iou_min      IoU below which a match doesn't count at all      (default .3)
-      conf         model confidence threshold                        (default .25)
-      source       'self' (the set's own images, default) or 'new'
-      add_new      when source=='new', how many fresh images to pull in and add
-                   to the set so you can confirm/deny on unseen data (default 20)
-    """
-    d = request.json or {}
-    set_name = (d.get("set") or "").strip()
-    if not set_name:
-        return jsonify({"success": False, "error": "set name required"}), 400
-    meta = ts.get_meta(_db(), set_name)
-    weights = meta.get("weights")
-    if not weights or not os.path.exists(weights):
-        return jsonify({"success": False,
-                        "error": "No trained model for this set yet. Train it first."}), 400
-    try:
-        iou_ok = float(d.get("iou_ok", 0.7)); iou_min = float(d.get("iou_min", 0.3))
-        conf = float(d.get("conf", 0.25))
-    except (TypeError, ValueError):
-        return jsonify({"success": False, "error": "bad numeric parameter"}), 400
 
     # Optionally pull fresh, never-seen images into the set for this validation.
     added_new = []
@@ -12044,8 +12114,11 @@ def trainer_validate():
         if img is None:
             continue
         bgr = img[:, :, ::-1] if (img.ndim == 3 and img.shape[2] >= 3) else img
-        pred = _detect_obb_or_box(bgr, weights, conf=conf)
+        keep_classes = want_set if want_set else None
+        pred = _detect_obb_or_box(bgr, weights, conf=conf, keep_classes=keep_classes)
         gt = (read_metadata(fp) or {}).get("regions", []) or []
+        if want_set:
+            gt = [r for r in gt if (r.get("class_name") or "").strip() in want_set]
         diff = tv.diff_image(gt, pred, iou_ok=iou_ok, iou_min=iou_min)
         per_image.append(diff)
         results.append({
@@ -12068,21 +12141,29 @@ def trainer_validate():
 @app.route("/api/trainer/apply_prediction", methods=["POST"])
 @_auth.require_feature("ai.trainer.keep", action="trainer_apply_pred", fields=("filename",))
 def trainer_apply_prediction():
-    """Confirm a validation result by writing the given boxes as the image's new
-    ground truth (its regions + YOLO .txt). Used by the confirm/deny loop: accept
-    the model's prediction, or a hand-corrected mix, as the new label. Denying is
-    a no-op on the server — the existing GT simply stays."""
     d = request.json or {}
     fn = (d.get("filename") or "").strip()
     fp = get_safe_path(MEDIA_DIR, fn)
     if not fp or not os.path.exists(fp):
         return jsonify({"success": False, "error": "not found"}), 404
-    regions = d.get("regions") or []
+    accepted = d.get("regions") or []
+    scope = d.get("classes")
+    if isinstance(scope, list) and scope:
+        scope_set = {c for c in scope if isinstance(c, str) and c.strip()}
+    else:
+        scope_set = {(r.get("class_name") or "").strip() for r in accepted if r.get("class_name")}
+
     cur = read_metadata(fp) or {}
+    existing = cur.get("regions", []) or []
+    # Keep every box whose class is NOT in scope; replace the in-scope ones.
+    preserved = [r for r in existing
+                 if (r.get("class_name") or "").strip() not in scope_set]
+    merged = preserved + accepted
     ok = write_metadata(fp, cur.get("tags", []) or [],
-                        cur.get("description", "") or "", regions)
+                        cur.get("description", "") or "", merged)
     _meta_cache_drop(fn)
-    return jsonify({"success": bool(ok), "count": len(regions)})
+    return jsonify({"success": bool(ok), "count": len(merged),
+                    "preserved": len(preserved), "replaced_scope": sorted(scope_set)})
 
 
 @app.route("/api/train", methods=["POST"])
@@ -12110,11 +12191,21 @@ def train():
         os.makedirs(os.path.join(dset_dir, sub), exist_ok=True)
     state["status_text"] = "Preparing dataset…"
 
-    # Only labelled STILL images contribute — YOLO here trains on .jxl frames,
-    # so video members of the set are skipped (boxing video is a separate flow).
-    bases = []
+    # Which box classes to train on. When the caller passes a non-empty list, we
+    # train on ONLY those classes and every other box on the image is ignored —
+    # crucially WITHOUT editing the image's stored regions or the sidecar .txt.
+    # We build fresh, locally-indexed labels straight from metadata, so unrelated
+    # boxes you don't want to train on are never disturbed. Empty/omitted => all
+    # classes found across the set.
+    want = d.get("classes")
+    want = [c for c in want if isinstance(c, str) and c.strip()] if isinstance(want, list) else None
+    want_set = set(want) if want else None
+
+    # Gather, per still image, only the regions whose class we're training on.
+    labelled = []            # (base, jpg_name, [regions])
     skipped_video = 0
-    for rp in ts.members(_db(), set_name):
+    present_classes = set()
+    for rp in ts.work_paths(_db(), set_name):
         abs_path = get_safe_path(MEDIA_DIR, rp)
         if not abs_path:
             continue
@@ -12122,33 +12213,61 @@ def train():
         if not os.path.exists(base + ".jxl"):
             skipped_video += 1
             continue
-        if os.path.exists(base + ".txt") and os.path.getsize(base + ".txt") > 0:
-            bases.append(base)
+        regions = (read_metadata(abs_path) or {}).get("regions", []) or []
+        keep = []
+        for r in regions:
+            nm = (r.get("class_name") or "").strip()
+            if not nm or not r.get("confirmed", True):
+                continue
+            if not all(k in r for k in ("cx", "cy", "w", "h")):
+                continue
+            if want_set is not None and nm not in want_set:
+                continue          # a box we're deliberately NOT training on
+            keep.append(r)
+            present_classes.add(nm)
+        if keep:
+            labelled.append((base, os.path.basename(base), keep))
 
-    if not bases:
-        state["status_text"] = "No labelled images in this set!"
-        return jsonify({"success": False,
-                        "error": "No labelled still images in this set. Draw boxes first."}), 400
+    if not labelled:
+        state["status_text"] = "No matching labelled images in this set!"
+        msg = ("No boxes of the selected class(es) in this set."
+               if want_set else "No labelled still images in this set. Draw boxes first.")
+        return jsonify({"success": False, "error": msg}), 400
 
-    pairs = bases
-    random.shuffle(pairs)
-    val_n = min(len(pairs) - 1, int(round(len(pairs) * val_frac))) if len(pairs) > 1 else 0
-    val_n = max(val_n, 1 if (val_frac > 0 and len(pairs) > 1) else 0)
-    val_b, tr_b = pairs[:val_n], pairs[val_n:]
-    for b in tr_b:
-        bn = os.path.basename(b)
-        subprocess.run(['djxl', b + ".jxl", os.path.join(dset_dir, "images/train", bn + ".jpg")],
+    # Local, contiguous class indexing for THIS dataset only — independent of the
+    # app-wide state["classes"], so training a subset can't renumber anything.
+    names = sorted(want_set) if want_set else sorted(present_classes)
+    cls_id = {n: i for i, n in enumerate(names)}
+
+    def _write_label(dst_dir, bn, regions):
+        with open(os.path.join(dst_dir, bn + ".txt"), "w") as f:
+            for r in regions:
+                nm = (r.get("class_name") or "").strip()
+                if nm not in cls_id:
+                    continue
+                try:
+                    f.write(f"{cls_id[nm]} {float(r['cx']):.6f} {float(r['cy']):.6f} "
+                            f"{float(r['w']):.6f} {float(r['h']):.6f}\n")
+                except (TypeError, ValueError):
+                    continue
+
+    random.shuffle(labelled)
+    val_n = min(len(labelled) - 1, int(round(len(labelled) * val_frac))) if len(labelled) > 1 else 0
+    val_n = max(val_n, 1 if (val_frac > 0 and len(labelled) > 1) else 0)
+    val_set, tr_set = labelled[:val_n], labelled[val_n:]
+    for base, bn, regions in tr_set:
+        subprocess.run(['djxl', base + ".jxl", os.path.join(dset_dir, "images/train", bn + ".jpg")],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        shutil.copy(b + ".txt", os.path.join(dset_dir, "labels/train", bn + ".txt"))
-    for b in val_b:
-        bn = os.path.basename(b)
-        subprocess.run(['djxl', b + ".jxl", os.path.join(dset_dir, "images/val", bn + ".jpg")],
+        _write_label(os.path.join(dset_dir, "labels/train"), bn, regions)
+    for base, bn, regions in val_set:
+        subprocess.run(['djxl', base + ".jxl", os.path.join(dset_dir, "images/val", bn + ".jpg")],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        shutil.copy(b + ".txt", os.path.join(dset_dir, "labels/val", bn + ".txt"))
+        _write_label(os.path.join(dset_dir, "labels/val"), bn, regions)
+    tr_b, val_b = tr_set, val_set   # keep the names the rest of the route uses
     yaml_p = os.path.join(dset_dir, "dataset.yaml")
     with open(yaml_p, 'w') as f:
         yaml.dump({"path": dset_dir, "train": "images/train", "val": "images/val",
-                   "nc": len(state["classes"]), "names": state["classes"]}, f)
+                   "nc": len(names), "names": names}, f)
     # If there's no val split, tell Ultralytics not to validate.
     if not val_b:
         cfg["val"] = False

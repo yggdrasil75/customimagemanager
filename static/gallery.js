@@ -439,6 +439,10 @@ async function selectFile(fn){
     if(typeof openBook==='function') openBook(fn);
     return;
   }
+  if(typeof autosaveTO!=='undefined' && autosaveTO && currentFile && currentFile!==fn){
+    clearTimeout(autosaveTO); autosaveTO=null;
+    try{ await saveMetadata(); }catch(e){ /* keep navigating even if save failed */ }
+  }
   const _mySeq=++_selectSeq;
   currentFile=fn;
   if(typeof highlightRegionFile!=='undefined' && highlightRegionFile!==fn){
