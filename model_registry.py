@@ -211,7 +211,7 @@ def log_backend(log):
     try:
         import onnxruntime as _ort
         provs = _ort.get_available_providers()
-        want = {"cuda": "CUDAExecutionProvider", "rocm": "ROCMExecutionProvider"}.get(backend())
+        want = {"cuda": "CUDAExecutionProvider", "rocm": "MIGraphXExecutionProvider"}.get(backend())
         emit("gpu: onnxruntime=%s providers=%s", _ort.__version__, provs)
         if want and want not in provs:
             log.error("gpu: onnxruntime is missing %s on a %s backend — face "
