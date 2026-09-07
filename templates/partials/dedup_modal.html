@@ -29,6 +29,15 @@
             class="bg-gray-700 hover:bg-gray-600 px-4 py-1.5 rounded font-bold text-sm">Close</button>
         </div>
       </div>
+      <div id="diff_video_bar" class="hidden px-4 pt-3 flex-shrink-0">
+        <p id="diff_video_verdict" class="text-sm font-bold text-amber-300"></p>
+        <p id="diff_video_meta" class="text-[11px] font-mono text-gray-400 mt-1 whitespace-pre-wrap"></p>
+        <div class="flex items-center gap-2 mt-2">
+          <span class="text-[10px] text-gray-400">frame</span>
+          <input id="diff_video_scrub" type="range" min="0" max="0" value="0" class="flex-1" oninput="renderVideoDiffFrame(parseInt(this.value))">
+          <span id="diff_video_ts" class="text-[10px] font-mono text-gray-400 w-16 text-right"></span>
+        </div>
+      </div>
       <div class="flex-1 overflow-auto p-4 grid grid-cols-3 gap-4">
         <div class="flex flex-col items-center gap-1">
           <p id="diff_label_a" class="text-[10px] font-mono text-blue-300 truncate w-full text-center"></p>

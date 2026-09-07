@@ -39,6 +39,7 @@ const DEDUP_PAGE_SIZE=30;
 
 async function runDedup(force=false){
   const btn=document.getElementById('btn_dedup');
+  const label=btn.innerHTML;  // preserve the button's original wording
   btn.innerHTML='⏳ Scanning…'; btn.disabled=true;
   try{
     const d=await fetch('/api/dedup',{method:'POST',
@@ -58,7 +59,7 @@ async function runDedup(force=false){
       fetchDedupStatus();
     } else alert('Error: '+(d.error||'unknown'));
   }catch(e){ alert('Network error during dedup.'); }
-  btn.innerHTML='🔍 Duplicates'; btn.disabled=false;
+  btn.innerHTML=label; btn.disabled=false;
 }
 
 async function loadDedupPage(page){
@@ -277,9 +278,12 @@ async function highlightDiff(gid){
     // compare — no need to make the user tick both boxes.
     const all=[...document.querySelectorAll(`#dg_${gid} .dg-pick`)];
     if(all.length===2) picks=all;
-    else{ showToast('Pick exactly 2 images to compare.'); return; }
+    else{ showToast('Pick exactly 2 items to compare.'); return; }
   }
   const [fa,fb]=picks.map(p=>p.dataset.file);
+  const VIDEO_RE=/\.(mp4|m4v|mkv|webm|mov|avi|wmv|flv|mpg|mpeg|ts|m2ts|ogv|3gp)$/i;
+  if(VIDEO_RE.test(fa)||VIDEO_RE.test(fb)){ return highlightDiffVideo(gid,fa,fb); }
+  document.getElementById('diff_video_bar').classList.add('hidden'); _vdiff=null;
   document.getElementById('diff_label_a').innerText=fa.split('/').pop();
   document.getElementById('diff_label_b').innerText=fb.split('/').pop();
   document.getElementById('dedup_diff_modal').classList.remove('hidden');
@@ -335,6 +339,63 @@ function renderDiffOverlay(){
     diff.data[i+3]=255;
   }
   xd.putImageData(diff,0,0);
+}
+
+let _vdiff=null;  // {profile, frames_a, frames_b} for the current video comparison
+
+async function highlightDiffVideo(gid,fa,fb){
+  document.getElementById('diff_label_a').innerText=fa.split('/').pop();
+  document.getElementById('diff_label_b').innerText=fb.split('/').pop();
+  const bar=document.getElementById('diff_video_bar');
+  bar.classList.remove('hidden');
+  document.getElementById('diff_video_verdict').innerText='Comparing videos…';
+  document.getElementById('diff_video_meta').innerText='';
+  document.getElementById('dedup_diff_modal').classList.remove('hidden');
+  let d;
+  try{
+    d=await fetch('/api/dedup_compare_video',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({a:fa,b:fb})}).then(r=>r.json());
+  }catch(e){
+    logClientError('dedup_compare_video network error','dedup');
+    document.getElementById('diff_video_verdict').innerText='Network error comparing videos.'; return;
+  }
+  if(!d||!d.success){
+    // Server already logged the reason to error.log.
+    document.getElementById('diff_video_verdict').innerText='Could not compare: '+((d&&d.error)||'unknown error'); return;
+  }
+  _vdiff=d;
+  const ma=d.meta.a, mb=d.meta.b;
+  const fmt=m=>`${m.width||'?'}×${m.height||'?'}  ${m.duration!=null?m.duration.toFixed(1)+'s':'?'}  ${m.fps!=null?m.fps.toFixed(2)+'fps':'?'}  ${m.codec||'?'}${m.nb_frames!=null?'  '+m.nb_frames+'f':''}`;
+  document.getElementById('diff_video_verdict').innerText=
+    `${d.verdict}   ·   mean diff ${d.mean_diff}, peak ${d.max_diff} (sampled ${d.sampled_span.toFixed(1)}s)`;
+  document.getElementById('diff_video_meta').innerText=`A  ${fmt(ma)}\nB  ${fmt(mb)}`;
+  const scrub=document.getElementById('diff_video_scrub');
+  scrub.max=Math.max(0,d.profile.length-1); scrub.value=0;
+  // Open on the most-different frame so an edit is visible immediately.
+  let worst=0, worstv=-1;
+  d.profile.forEach((p,i)=>{ if((p.diff||0)>worstv){ worstv=p.diff||0; worst=i; } });
+  scrub.value=worst;
+  renderVideoDiffFrame(worst);
+}
+
+function _imgFromB64(b64){
+  return new Promise((resolve,reject)=>{
+    if(!b64){ resolve(null); return; }
+    const im=new Image();
+    im.onload=()=>resolve(im);
+    im.onerror=()=>resolve(null);
+    im.src='data:image/png;base64,'+b64;
+  });
+}
+
+async function renderVideoDiffFrame(i){
+  if(!_vdiff) return;
+  const p=_vdiff.profile[i]||{};
+  document.getElementById('diff_video_ts').innerText=
+    (p.t!=null?p.t.toFixed(2)+'s':'—')+(p.diff!=null?'  Δ'+p.diff:'');
+  const [ia,ib]=await Promise.all([_imgFromB64(_vdiff.frames_a[i]),_imgFromB64(_vdiff.frames_b[i])]);
+  if(ia&&ib){ _diffImgA=ia; _diffImgB=ib; renderDiffOverlay(); }
 }
 
 async function bulkResolveAll() {

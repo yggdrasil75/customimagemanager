@@ -43,10 +43,18 @@ from optional_deps import optional_import
 # and these stay None. Every entry point below guards on _HAVE_GDL.
 _gconfig, _HAVE_GDL = optional_import("gallery_dl.config")
 _gexc, _ = optional_import("gallery_dl.exception")
-_find_extractor, _ = optional_import("gallery_dl.extractor", attr="find")
+_gfind, _ = optional_import("gallery_dl.extractor", attr="find")
 _gjob, _ = optional_import("gallery_dl.job")
 DataJob = getattr(_gjob, "DataJob", None) if _gjob else None
 DownloadJob = getattr(_gjob, "DownloadJob", None) if _gjob else None
+
+_find_lock = threading.Lock()
+
+def _find_extractor(url):
+    if _gfind is None:
+        return None
+    with _find_lock:
+        return _gfind(url)
 
 _log = logging.getLogger("gdl")
 
@@ -57,11 +65,22 @@ _MEDIA_EXTS = {
     ".jxl", ".bmp", ".tiff", ".tif", ".mov", ".m4v", ".apng", ".svg",
 }
 
-# gallery-dl config is global module state; serialise access so concurrent
-# requests don't stomp each other's per-call options.
-# ponytail: one global lock. Fine — gdl calls are network-bound and rare; swap
-# for a config-context-per-thread only if this ever becomes a throughput wall.
-_lock = threading.RLock()
+_config_lock = threading.RLock()
+_site_locks = {}
+_site_locks_guard = threading.Lock()
+
+def _lock_for_site(site):
+    """Return the (shared) lock for a site, creating it on first use."""
+    key = site or ""
+    with _site_locks_guard:
+        lk = _site_locks.get(key)
+        if lk is None:
+            lk = _site_locks[key] = threading.RLock()
+        return lk
+
+# Kept for the discovery path (see discover_fields), which still needs config
+# mutated and read within one short critical section.
+_lock = _config_lock
 
 class GdlError(RuntimeError):
     pass
@@ -212,10 +231,12 @@ def download(url, dest, opts=None, on_file=None):
 
     # Force our output dir, a flat layout (no per-site subfolders), and a
     # full-metadata JSON sidecar per file.
+    cat = site_of(url)
+    scope = ("extractor", cat) if cat else ("extractor",)
     pin = [
-        (("extractor",), "base-directory", dest),
-        (("extractor",), "directory", []),
-        (("extractor",), "postprocessors",
+        (scope, "base-directory", dest),
+        (scope, "directory", []),
+        (scope, "postprocessors",
          [{"name": "metadata", "mode": "json"}]),
     ]
 
@@ -233,32 +254,41 @@ def download(url, dest, opts=None, on_file=None):
         except Exception as e:                        # surfaced after join
             err_box["err"] = e
 
-    with _lock:
-        _gconfig.clear()
-        with _gconfig.apply(_DEFAULT_INCLUDES + pin + _opts_to_kvlist(opts)):
-            worker = threading.Thread(target=_run_job, name="gdl-job", daemon=True)
-            worker.start()
+    site = site_of(url) or url
+    def _scoped(kv):
+        for path, key, value in kv:
+            if cat and path == ("extractor",):
+                path = ("extractor", cat)
+            yield (path, key, value)
+    kvlist = _DEFAULT_INCLUDES + pin + list(_scoped(_opts_to_kvlist(opts)))
+    with _lock_for_site(site):
+        with _config_lock:
+            for path, key, value in kvlist:
+                _gconfig.set(path, key, value)
 
-            seen = set()
-            # Poll while the job runs, yielding each file once its sidecar lands.
-            while worker.is_alive():
-                for mpath, meta in _ready_files(dest, seen):
-                    if on_file:
-                        try:
-                            on_file(mpath, meta)
-                        except Exception as e:
-                            _log.warning("gdl on_file failed for %s: %s", mpath, e)
-                    yield mpath, meta
-                worker.join(timeout=0.5)
-            # Final sweep: catch the last file(s) finished between polls, and any
-            # media whose sidecar never appeared (fall back to the file itself).
-            for mpath, meta in _ready_files(dest, seen, final=True):
+        worker = threading.Thread(target=_run_job, name="gdl-job", daemon=True)
+        worker.start()
+
+        seen = set()
+        # Poll while the job runs, yielding each file once its sidecar lands.
+        while worker.is_alive():
+            for mpath, meta in _ready_files(dest, seen):
                 if on_file:
                     try:
                         on_file(mpath, meta)
                     except Exception as e:
                         _log.warning("gdl on_file failed for %s: %s", mpath, e)
                 yield mpath, meta
+            worker.join(timeout=0.5)
+        # Final sweep: catch the last file(s) finished between polls, and any
+        # media whose sidecar never appeared (fall back to the file itself).
+        for mpath, meta in _ready_files(dest, seen, final=True):
+            if on_file:
+                try:
+                    on_file(mpath, meta)
+                except Exception as e:
+                    _log.warning("gdl on_file failed for %s: %s", mpath, e)
+            yield mpath, meta
 
     err = err_box.get("err")
     if not seen:

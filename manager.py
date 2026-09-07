@@ -45,6 +45,8 @@ import appearances
 imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
 from dup_heuristics import DuplicateClassifier, classify_pair, extract_features
 from dup_cnn import DupCNN, encode_pair
+from dup_cnn_video import DupVideoCNN, encode_pair as encode_clip_pair, clip_to_volume
+import dup_cnn_video
 import object_grouping as og
 import model_registry
 import discover_stages as ds
@@ -130,6 +132,8 @@ DUP_MODEL_PATH = os.path.join(MODELS_DIR, "dup_model.json")
 _dup_model     = DuplicateClassifier.load(DUP_MODEL_PATH)
 DUP_CNN_PATH   = os.path.join(MODELS_DIR, "dup_cnn.pt")
 _dup_cnn       = None   # loaded lazily after config so width_mult is known
+DUP_CNN_VIDEO_PATH = os.path.join(MODELS_DIR, "dup_cnn_video.pt")
+_dup_cnn_video = None   # loaded lazily after config, mirrors _dup_cnn
 
 # Updated on every request; the background auto-tagger only runs when the
 # server has been idle for a while so it never competes with the user.
@@ -557,6 +561,15 @@ def _init_db():
         -- Encoded image-pair tensors + labels for the Siamese dup-CNN.
         -- Separate from dup_samples: the CNN needs pixels, not 9-float features.
         CREATE TABLE IF NOT EXISTS dup_cnn_samples (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            blob    BLOB NOT NULL,
+            label   INTEGER NOT NULL,
+            created REAL NOT NULL
+        );
+
+        -- Encoded video clip-pair volumes + labels for the 3D Siamese dup-CNN.
+        -- Separate again: these blobs are [C,T,H,W] clip tensors, not frame pairs.
+        CREATE TABLE IF NOT EXISTS dup_cnn_video_samples (
             id      INTEGER PRIMARY KEY AUTOINCREMENT,
             blob    BLOB NOT NULL,
             label   INTEGER NOT NULL,
@@ -1411,6 +1424,33 @@ def _record_dup_sample(img_a, img_b, label: int) -> None:
     except Exception as e:
         access_logger.warning(f"_record_dup_sample: {e}")
 
+def _record_dup_video_sample(rel_a: str, rel_b: str, label: int) -> None:
+    """!
+    @brief Store a feedback sample for the video 3D-CNN from a merge/exclude.
+    @param label 1 at merge time, 0 at exclude time.
+
+    Only fires when BOTH paths are videos. Samples frames now and stores the
+    encoded clip-pair volume, because a file may be deleted moments after a merge.
+    Best-effort: any failure is logged and swallowed so dedup never breaks.
+    """
+    try:
+        pa = get_safe_path(MEDIA_DIR, rel_a)
+        pb = get_safe_path(MEDIA_DIR, rel_b)
+        if not pa or not pb or not mt.is_video(pa) or not mt.is_video(pb):
+            return
+        fa = mt.video_sample_frames(pa, n=dup_cnn_video.CLIP_T)
+        fb = mt.video_sample_frames(pb, n=dup_cnn_video.CLIP_T)
+        if not fa or not fb:
+            return
+        blob = encode_clip_pair(fa, fb)
+        if blob is not None:
+            _db().execute(
+                "INSERT INTO dup_cnn_video_samples(blob,label,created) VALUES(?,?,?)",
+                (blob, int(label), time.time()))
+            _db().commit()
+    except Exception as e:
+        access_logger.warning(f"_record_dup_video_sample: {e}")
+
 def _retrain_dup_model(min_samples: int = 8) -> bool:
     """!
     @brief Refit the logistic model, and the CNN when torch and samples allow.
@@ -1419,6 +1459,7 @@ def _retrain_dup_model(min_samples: int = 8) -> bool:
             this return value.
     """
     _retrain_dup_cnn()
+    _retrain_dup_cnn_video()
     try:
         rows = _db().execute("SELECT feat,label FROM dup_samples").fetchall()
         if len(rows) < min_samples:
@@ -1453,6 +1494,28 @@ def _retrain_dup_cnn() -> bool:
             return True
     except Exception as e:
         access_logger.error(f"_retrain_dup_cnn: {e}")
+    return False
+
+def _retrain_dup_cnn_video() -> bool:
+    """!
+    @brief Refit the 3D Siamese video CNN from stored clip-pair samples, best-effort.
+    @return True if it retrained and saved; False when torch is missing, samples
+            are too few, or on error.
+    """
+    global _dup_cnn_video
+    if _dup_cnn_video is None:
+        _dup_cnn_video = DupVideoCNN(state.get("dup_cnn_width", 1.0))
+    if not _dup_cnn_video.available:
+        return False
+    try:
+        rows = _db().execute("SELECT blob,label FROM dup_cnn_video_samples").fetchall()
+        samples = [(r[0], r[1]) for r in rows]
+        if _dup_cnn_video.fit(samples):
+            _dup_cnn_video.save(DUP_CNN_VIDEO_PATH)
+            access_logger.info(f"Dup video CNN retrained on {len(samples)} samples")
+            return True
+    except Exception as e:
+        access_logger.error(f"_retrain_dup_cnn_video: {e}")
     return False
 
 def _dedup_is_stale(disk_count: int) -> bool:
@@ -1883,6 +1946,8 @@ def load_config():
             pass
     global _dup_cnn
     _dup_cnn = DupCNN.load(DUP_CNN_PATH, state.get("dup_cnn_width", 1.0))
+    global _dup_cnn_video
+    _dup_cnn_video = DupVideoCNN.load(DUP_CNN_VIDEO_PATH, state.get("dup_cnn_width", 1.0))
 
 def save_config():
     keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt",
@@ -8732,6 +8797,19 @@ def api_file(filename):
     access_logger.error("api_file: not found on disk %r", filename)
     return "",404
 
+@app.route("/api/client_log", methods=["POST"])
+def api_client_log():
+    """Sink for client-side errors so they land in logs/error.log instead of
+    dying in the browser. The frontend posts {msg, context?} when it shows an
+    error the user can't otherwise trace."""
+    body = request.get_json(silent=True) or {}
+    msg = str(body.get("msg", "")).strip()[:1000]
+    if not msg:
+        return jsonify({"success": False}), 400
+    ctx = str(body.get("context", "")).strip()[:200]
+    access_logger.error("client: %s%s", msg, f" [{ctx}]" if ctx else "")
+    return jsonify({"success": True})
+
 @app.route("/api/thumb/<path:filename>")
 def api_thumb(filename):
     fp = get_safe_path(MEDIA_DIR, filename)
@@ -9476,6 +9554,9 @@ def dedup_exclude():
                 ob = read_jxl(get_safe_path(MEDIA_DIR, o))
                 if ob is not None:
                     _record_dup_sample(fa, ob, 0)
+        # Video clip-pair negative sample (fires only for video/video pairs).
+        for o in others:
+            _record_dup_video_sample(file, o, 0)
         _retrain_dup_model()
     except Exception as e:
         access_logger.warning(f"dedup_exclude sample: {e}")
@@ -9498,6 +9579,105 @@ def dedup_exclude():
         _db().execute("DELETE FROM dedup_groups WHERE id=?", (db_id,))
         _db().commit()
         return jsonify({"success": True, "group_remains": False})
+
+@app.route("/api/dedup_compare_video", methods=["POST"])
+@_auth.require_feature("dedup")
+def dedup_compare_video():
+    """Compare two videos frame-by-frame at matched timestamps.
+
+    Images can be diffed in the browser with a <canvas>, but videos can't be
+    loaded into an <img>, which is why "highlight differences" failed on them.
+    Here the server samples frames from both clips at the same timestamps,
+    measures how much each pair differs, and returns:
+      - a per-sample diff profile (so a localized edit shows up as a spike at a
+        particular time, while uniform compression noise stays low and flat),
+      - the two clips' metadata side by side,
+      - base64 PNGs of the sampled frames so the client can show the overlay.
+    """
+    import base64, io as _io
+    fa = (request.json or {}).get("a", "")
+    fb = (request.json or {}).get("b", "")
+    samples = int((request.json or {}).get("samples", 12))
+    samples = max(3, min(samples, 30))
+
+    pa = get_safe_path(MEDIA_DIR, fa)
+    pb = get_safe_path(MEDIA_DIR, fb)
+    if not pa or not pb:
+        access_logger.error("dedup_compare_video: rejected path %r / %r", fa, fb)
+        return jsonify({"success": False, "error": "rejected path"}), 400
+    for p, name in ((pa, fa), (pb, fb)):
+        if not os.path.exists(p):
+            access_logger.error("dedup_compare_video: not found %r", name)
+            return jsonify({"success": False, "error": f"not found: {name}"}), 404
+
+    ma = mt.video_probe(pa)
+    mb = mt.video_probe(pb)
+    if ma is None or mb is None:
+        access_logger.error("dedup_compare_video: ffprobe failed %r / %r", fa, fb)
+        return jsonify({"success": False,
+                        "error": "could not probe one or both videos (ffprobe missing or unreadable file)"}), 500
+
+    # Sample across the SHORTER duration so both clips have a real frame at every
+    # timestamp; if one is longer, that trailing part is reported as an edit below.
+    dur_a = ma.get("duration") or 0
+    dur_b = mb.get("duration") or 0
+    span = min(dur_a, dur_b)
+    if span <= 0:
+        return jsonify({"success": False, "error": "one or both videos have no readable duration"}), 500
+
+    def _encode(rgb):
+        import cv2
+        ok, buf = cv2.imencode('.png', cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+        return base64.b64encode(buf.tobytes()).decode('ascii') if ok else None
+
+    profile = []
+    frames_a, frames_b = [], []
+    for k in range(samples):
+        # Spread samples evenly, biased just inside the ends to skip black lead-in.
+        ts = span * (k + 0.5) / samples
+        ra = mt.video_frame_at(pa, ts)
+        rb = mt.video_frame_at(pb, ts)
+        if ra is None or rb is None:
+            profile.append({"t": round(ts, 3), "diff": None})
+            frames_a.append(None); frames_b.append(None)
+            continue
+        # Match sizes before diffing.
+        h = min(ra.shape[0], rb.shape[0]); w = min(ra.shape[1], rb.shape[1])
+        import cv2
+        ra2 = cv2.resize(ra, (w, h)); rb2 = cv2.resize(rb, (w, h))
+        mad = float(np.abs(ra2.astype(np.int16) - rb2.astype(np.int16)).mean())
+        profile.append({"t": round(ts, 3), "diff": round(mad, 3)})
+        frames_a.append(_encode(ra2)); frames_b.append(_encode(rb2))
+
+    diffs = [p["diff"] for p in profile if p["diff"] is not None]
+    mean_diff = round(sum(diffs) / len(diffs), 3) if diffs else None
+    max_diff = round(max(diffs), 3) if diffs else None
+    # Heuristic verdict: low-and-flat → recompression; a spike or long-tail → edit.
+    verdict = "inconclusive"
+    if mean_diff is not None:
+        dur_gap = abs(dur_a - dur_b)
+        if dur_gap > 0.5:
+            verdict = "likely edited (durations differ by "\
+                      f"{dur_gap:.1f}s)"
+        elif max_diff is not None and mean_diff < 6 and max_diff < 12:
+            verdict = "likely the same video (differences look like compression noise)"
+        elif max_diff is not None and max_diff > mean_diff * 3 and max_diff > 15:
+            worst = max(profile, key=lambda p: (p["diff"] or 0))
+            verdict = f"likely edited (differences spike around {worst['t']:.1f}s)"
+        elif mean_diff >= 6:
+            verdict = "differs throughout (re-encode at different quality, or a different video)"
+
+    return jsonify({
+        "success": True,
+        "meta": {"a": {**ma, "name": fa}, "b": {**mb, "name": fb}},
+        "sampled_span": round(span, 3),
+        "mean_diff": mean_diff,
+        "max_diff": max_diff,
+        "verdict": verdict,
+        "profile": profile,
+        "frames_a": frames_a,
+        "frames_b": frames_b,
+    })
 
 def _dedup_sort_key(sort: str):
     """!
@@ -9714,21 +9894,56 @@ def dedup():
         def verify(group_row_indices):
             group_row_indices.sort(
                 key=lambda i: -(rows[i]["width"] or 0) * (rows[i]["height"] or 0))
-            ref_img = read_jxl(get_safe_path(MEDIA_DIR, rows[group_row_indices[0]]["rel_path"]))
-            if ref_img is None: return None
-            ref_bgr = _to_bgr(ref_img)
+            ref_rel = rows[group_row_indices[0]]["rel_path"]
+            ref_path = get_safe_path(MEDIA_DIR, ref_rel)
+            ref_is_video = ref_path is not None and mt.is_video(ref_path)
+
+            # Stills decode once up front; videos decode lazily to frame lists.
+            ref_bgr = None
+            ref_frames = None
+            if ref_is_video:
+                ref_frames = mt.video_sample_frames(ref_path, n=dup_cnn_video.CLIP_T)
+                if not ref_frames: return None
+            else:
+                ref_img = read_jxl(ref_path)
+                if ref_img is None: return None
+                ref_bgr = _to_bgr(ref_img)
+
             keep_idx    = [group_row_indices[0]]
-            keep_scores = [1.0]   # reference image is 100% similar to itself
+            keep_scores = [1.0]   # reference is 100% similar to itself
             for i in group_row_indices[1:]:
-                img = read_jxl(get_safe_path(MEDIA_DIR, rows[i]["rel_path"]))
-                if img is None: continue
-                other_bgr = _to_bgr(img)
-                cnn_prob = _dup_cnn.predict(ref_bgr, other_bgr) if _dup_cnn else None
-                if cnn_prob is not None:
-                    prob = cnn_prob
-                    is_dup = prob >= 0.5
+                other_path = get_safe_path(MEDIA_DIR, rows[i]["rel_path"])
+                other_is_video = other_path is not None and mt.is_video(other_path)
+
+                if ref_is_video or other_is_video:
+                    # Only video-vs-video is a meaningful duplicate check here; a
+                    # video and a still are never the same asset, so skip mixed
+                    # pairs rather than guessing.
+                    if not (ref_is_video and other_is_video):
+                        continue
+                    other_frames = mt.video_sample_frames(other_path, n=dup_cnn_video.CLIP_T)
+                    if not other_frames: continue
+                    # Real temporal model: ingests both clips as spatiotemporal
+                    # volumes and compares whole videos, not stills.
+                    prob = (_dup_cnn_video.predict(ref_frames, other_frames)
+                            if (_dup_cnn_video and _dup_cnn_video.available
+                                and _dup_cnn_video.trained) else None)
+                    if prob is None:
+                        rf, of = ref_frames[len(ref_frames)//2], other_frames[len(other_frames)//2]
+                        is_dup, prob, _ = classify_pair(_dup_model, _to_bgr(rf), _to_bgr(of))
+                    else:
+                        is_dup = prob >= 0.5
                 else:
-                    is_dup, prob, _ = classify_pair(_dup_model, ref_bgr, other_bgr)
+                    img = read_jxl(other_path)
+                    if img is None: continue
+                    other_bgr = _to_bgr(img)
+                    cnn_prob = _dup_cnn.predict(ref_bgr, other_bgr) if _dup_cnn else None
+                    if cnn_prob is not None:
+                        prob = cnn_prob
+                        is_dup = prob >= 0.5
+                    else:
+                        is_dup, prob, _ = classify_pair(_dup_model, ref_bgr, other_bgr)
+
                 if is_dup:
                     keep_idx.append(i)
                     keep_scores.append(prob)
@@ -9785,6 +10000,8 @@ def dedup_merge():
                     oi = read_jxl(op)
                     if oi is not None:
                         _record_dup_sample(_target_img, oi, 1)
+                # Video clip-pair positive sample (fires only for video/video).
+                _record_dup_video_sample(target, other, 1)
             except Exception:
                 pass
             om = read_metadata(op)

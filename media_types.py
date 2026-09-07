@@ -533,6 +533,84 @@ def video_poster_frame(path: str, seek: float = 1.0) -> np.ndarray | None:
         frame = _grab(0.0)
     return frame
 
+def video_frame_at(path: str, ts: float, max_dim: int = 512) -> np.ndarray | None:
+    """Grab one RGB uint8 frame at timestamp `ts` seconds, downscaled so the long
+    edge is <= max_dim (keeps comparison cheap and frame-size-independent). Returns
+    None (never raises) on any failure."""
+    if cv2 is None or not _have('ffmpeg'):
+        return None
+    cmd = ['ffmpeg', '-loglevel', 'error']
+    if ts > 0:
+        cmd += ['-ss', f'{ts:.3f}']
+    cmd += ['-i', path, '-frames:v', '1',
+            '-vf', f'scale=w={max_dim}:h={max_dim}:force_original_aspect_ratio=decrease',
+            '-f', 'image2pipe', '-vcodec', 'png', '-']
+    try:
+        out = subprocess.run(cmd, capture_output=True, timeout=60).stdout
+    except Exception:
+        return None
+    if not out:
+        return None
+    bgr = cv2.imdecode(np.frombuffer(out, np.uint8), cv2.IMREAD_COLOR)
+    if bgr is None:
+        return None
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+def video_probe(path: str) -> dict | None:
+    """Return {duration, width, height, fps, nb_frames, codec} via ffprobe, or
+    None (never raises) if ffprobe is missing or the file can't be read. nb_frames
+    may be None when the container doesn't store an exact count."""
+    if not _have('ffprobe'):
+        return None
+    cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+           '-show_entries',
+           'stream=width,height,avg_frame_rate,nb_frames,codec_name:format=duration',
+           '-of', 'json', path]
+    try:
+        out = subprocess.run(cmd, capture_output=True, timeout=30, text=True).stdout
+        import json as _json
+        j = _json.loads(out or '{}')
+    except Exception:
+        return None
+    st = (j.get('streams') or [{}])[0]
+    fmt = j.get('format') or {}
+    def _num(v):
+        try: return float(v)
+        except Exception: return None
+    fps = None
+    afr = st.get('avg_frame_rate') or '0/0'
+    try:
+        n, d = afr.split('/')
+        fps = (float(n) / float(d)) if float(d) else None
+    except Exception:
+        fps = None
+    return {
+        'duration': _num(fmt.get('duration')),
+        'width': st.get('width'),
+        'height': st.get('height'),
+        'fps': fps,
+        'nb_frames': int(st['nb_frames']) if str(st.get('nb_frames','')).isdigit() else None,
+        'codec': st.get('codec_name'),
+    }
+
+def video_sample_frames(path: str, n: int = 8, max_dim: int = 256) -> "list[np.ndarray]":
+    """Extract up to n evenly-spaced RGB frames across a clip's duration, for the
+    temporal duplicate check. Skips a hair inside each end to avoid black lead-in/
+    out. Returns [] (never raises) if the video can't be probed or decoded."""
+    n = max(2, min(int(n), 32))
+    meta = video_probe(path)
+    dur = (meta or {}).get('duration') or 0
+    frames = []
+    if dur <= 0:
+        f = video_poster_frame(path)
+        return [f] if f is not None else []
+    for k in range(n):
+        ts = dur * (k + 0.5) / n
+        f = video_frame_at(path, ts, max_dim=max_dim)
+        if f is not None:
+            frames.append(f)
+    return frames
+
 def develop_raw(raw_path: str, out_png_path: str) -> bool:
     """Develop a camera RAW into a 16-bit RGB PNG at out_png_path.
 
