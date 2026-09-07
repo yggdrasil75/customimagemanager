@@ -62,6 +62,13 @@ async function runDedup(force=false){
   btn.innerHTML=label; btn.disabled=false;
 }
 
+async function closeDedup(){
+  document.getElementById('dedup_modal').classList.add('hidden');
+  // Flush any pending merge/exclude feedback into the model now that the user
+  // is done. Fire-and-forget; retrain runs server-side without blocking the UI.
+  fetch('/api/dedup_retrain',{method:'POST'}).catch(()=>{});
+}
+
 async function loadDedupPage(page){
   dedupPage=page;
   const c=document.getElementById('dedup_content');
@@ -196,7 +203,7 @@ async function keepAndMerge(btn){
   if(!others.length){ showToast('Nothing to merge.'); return; }
   const d=await fetch('/api/dedup_merge',{method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({target,others,db_id:gid})}).then(r=>r.json());
+    body:JSON.stringify({target,others,db_id:gid,skip_retrain:true})}).then(r=>r.json());
   if(d.success){
     groupDiv.remove();
     if(others.includes(currentFile)){ currentFile=null;

@@ -1451,6 +1451,25 @@ def _record_dup_video_sample(rel_a: str, rel_b: str, label: int) -> None:
     except Exception as e:
         access_logger.warning(f"_record_dup_video_sample: {e}")
 
+# Set when a merge/exclude records new feedback samples. The actual (expensive,
+# torch-based) retrain is deferred to dedup modal close or a rescan so it can't
+# run concurrently with more user feedback — concurrent fits corrupt autograd
+# state (in-place op version mismatch on a shared parameter tensor).
+_dup_feedback_dirty = False
+
+def _mark_dup_feedback_dirty() -> None:
+    global _dup_feedback_dirty
+    _dup_feedback_dirty = True
+
+def _retrain_dup_model_if_dirty(min_samples: int = 8) -> bool:
+    """! @brief Retrain only when feedback was recorded since the last retrain.
+    Clears the dirty flag. Called on dedup modal close and at rescan start."""
+    global _dup_feedback_dirty
+    if not _dup_feedback_dirty:
+        return False
+    _dup_feedback_dirty = False
+    return _retrain_dup_model(min_samples)
+
 def _retrain_dup_model(min_samples: int = 8) -> bool:
     """!
     @brief Refit the logistic model, and the CNN when torch and samples allow.
@@ -9568,8 +9587,11 @@ def dedup_status():
 @app.route("/api/dedup_retrain", methods=["POST"])
 @_auth.require_feature("dedup")
 def dedup_retrain():
-    """! @brief Refit the duplicate model once; called after a bulk auto-resolve."""
-    return jsonify({"success": _retrain_dup_model()})
+    """! @brief Refit the duplicate model once; called on dedup modal close and
+    after a bulk auto-resolve. Always marks feedback dirty first so an explicit
+    call retrains even if the flag wasn't set, then retrains once."""
+    _mark_dup_feedback_dirty()
+    return jsonify({"success": _retrain_dup_model_if_dirty()})
 
 @app.route("/api/dedup_clear", methods=["POST"])
 @_auth.require_feature("dedup")
@@ -9624,7 +9646,8 @@ def dedup_exclude():
         # Video clip-pair negative sample (fires only for video/video pairs).
         for o in others:
             _record_dup_video_sample(file, o, 0)
-        _retrain_dup_model()
+        # Defer retrain to modal close / rescan to avoid concurrent fits.
+        _mark_dup_feedback_dirty()
     except Exception as e:
         access_logger.warning(f"dedup_exclude sample: {e}")
 
@@ -9828,6 +9851,10 @@ def dedup_groups_page():
 def dedup():
     force = request.json.get("force", False) if request.is_json else False
     try:
+        # Flush any pending merge/exclude feedback into the model before scanning.
+        # Deferred here (and on modal close) so it never runs concurrently with
+        # live user feedback, which corrupts autograd state.
+        _retrain_dup_model_if_dirty()
         # ── 0. Count files on disk ────────────────────────────────────────
         state["status_text"] = "Dedup: Counting files…"
         # Union of loose + packed, so packed files are deduped too rather than
@@ -10099,8 +10126,9 @@ def dedup_merge():
             if db_id:
                 _db().execute("DELETE FROM dedup_groups WHERE id=?", (db_id,))
                 _db().commit()
+            # Defer retrain to modal close / rescan to avoid concurrent fits.
             if not skip_retrain:
-                _retrain_dup_model()
+                _mark_dup_feedback_dirty()
             return jsonify({"success":True})
         return jsonify({"success":False,"error":"Write failed"})
     except Exception as e:
