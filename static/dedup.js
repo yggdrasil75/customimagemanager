@@ -243,7 +243,7 @@ async function _loadImage(src){
   try{
     resp=await fetch(src);
   }catch(e){
-    throw new Error('network error while fetching the file');
+    const err=new Error('network error while fetching the file'); err.clientOnly=true; throw err;
   }
   if(!resp.ok){
     let why;
@@ -261,7 +261,7 @@ async function _loadImage(src){
     return await new Promise((resolve,reject)=>{
       const im=new Image();
       im.onload=()=>resolve(im);
-      im.onerror=()=>reject(new Error('the file exists but could not be decoded as an image'));
+      im.onerror=()=>{ const e=new Error('the file exists but could not be decoded as an image'); e.clientOnly=true; reject(e); };
       im.src=url;
     });
   }finally{
@@ -286,14 +286,16 @@ async function highlightDiff(gid){
   const results=await Promise.allSettled([
     _loadImage(`/api/file/${encodeURIComponent(fa)}`),
     _loadImage(`/api/file/${encodeURIComponent(fb)}`)]);
-  const failures=[];
+  const failures=[]; const clientOnly=[];
   [fa,fb].forEach((f,i)=>{
     if(results[i].status==='fulfilled'){
       if(i===0) _diffImgA=results[i].value; else _diffImgB=results[i].value;
     }else{
       _diffImgA=i===0?null:_diffImgA; _diffImgB=i===1?null:_diffImgB;
-      const reason=results[i].reason?.message||'unknown error';
+      const err=results[i].reason;
+      const reason=err?.message||'unknown error';
       failures.push(`"${f.split('/').pop()}": ${reason}`);
+      if(err?.clientOnly) clientOnly.push(`"${f.split('/').pop()}": ${reason}`);
     }
   });
   if(failures.length){ showToast('Could not load '+failures.join('; ')); return; }
