@@ -163,6 +163,11 @@ function _renderFaceCluster(c) {
             class="text-xs bg-blue-700 hover:bg-blue-600 px-2 py-1 rounded font-bold">
             Person
           </button>
+          <button onclick="markClusterUnknown(${c.id})"
+            title="Mark this whole person as unknown (a stranger / photobomber)"
+            class="text-xs bg-amber-700 hover:bg-amber-600 px-2 py-1 rounded font-bold">
+            Mark unknown
+          </button>
         </div>
         <div class="flex gap-1.5 flex-wrap">
           ${main.map(f => faceChip(f)).join('')}
@@ -372,6 +377,32 @@ async function markUnknown(id) {
     document.getElementById('faces_status').textContent = 'Failed.'; return;
   }
   _dropFaceLocal(id, 'Marked as unknown.');
+}
+
+async function markClusterUnknown(cid) {
+  // Mark an entire person (cluster) as unknown in one shot — for the 30+ shots of
+  // one stranger a convention dump leaves you with.
+  const c = _faceClusters.find(x => x.id === cid);
+  const label = c && c.name ? `"${c.name}"` : `this person (${c ? c.count : '?'} photo(s))`;
+  if (!confirm(`Mark ${label} as unknown? Every face in this cluster becomes an ` +
+               `unknown stranger and leaves clustering.`)) return;
+  document.getElementById('faces_status').textContent = 'Marking person unknown…';
+  let d;
+  try {
+    d = await (await fetch('/api/faces/unknown_cluster', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cluster_id: cid })
+    })).json();
+  } catch (e) {
+    document.getElementById('faces_status').textContent = 'Failed.'; return;
+  }
+  if (!d || !d.success) {
+    document.getElementById('faces_status').textContent =
+      'Failed: ' + ((d && d.error) || 'unknown error'); return;
+  }
+  document.getElementById('faces_status').textContent =
+    `Marked ${d.marked} face(s) unknown.`;
+  keepScroll('faces_list', loadFaces);   // cluster is gone; full reload
 }
 
 async function mergeInto(dst) {

@@ -6534,6 +6534,31 @@ def api_face_unknown():
     db.commit()
     return jsonify({"success": True, "marked": len(ids)})
 
+@app.route("/api/faces/unknown_cluster", methods=["POST"])
+@_auth.require_feature("tab.faces.edit", action='face_unknown_cluster',
+                       fields=('cluster_id',))
+def api_face_unknown_cluster():
+    """Mark an ENTIRE person (face cluster) as 'unknown' in one shot.
+
+    Same semantics as /api/faces/unknown, applied to every face in the cluster:
+    a convention dump can leave you with 30+ shots of one stranger, and marking the
+    whole person is saner than clicking each face. All faces stay valid but are
+    pulled out of the cluster, excluded from clustering and the unnamed queue, and
+    the name/confirmed flags are cleared. Undo per-face with /api/faces/unmark."""
+    d = request.json or {}
+    try:
+        cluster_id = int(d.get("cluster_id", -1))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "cluster_id required"})
+    if cluster_id < 0:
+        return jsonify({"success": False, "error": "cluster_id required"})
+    db = _db()
+    cur = db.execute(
+        "UPDATE face_regions SET unknown=1, not_face=0, cluster_id=-1, "
+        "name='', confirmed=0 WHERE cluster_id=?", (cluster_id,))
+    db.commit()
+    return jsonify({"success": True, "marked": cur.rowcount})
+
 @app.route("/api/faces/unmark", methods=["POST"])
 @_auth.require_feature("tab.faces.edit", action='face_unmark', fields=('ids',))
 def api_face_unmark():
@@ -8685,7 +8710,8 @@ def _client_supports_jxl() -> bool:
 def api_file(filename):
     fp = get_safe_path(MEDIA_DIR, filename)
     if not fp:
-        return "",404
+        access_logger.error("api_file: rejected path %r", filename)
+        return "rejected path", 400
     if os.path.exists(fp):
         if (mt.is_jxl(fp) and not mt.is_video(fp)
                 and not _client_supports_jxl()
@@ -8699,9 +8725,11 @@ def api_file(filename):
             if data is not None:
                 return send_file(io.BytesIO(data), mimetype='image/jpeg')
             # decode failed → fall through to serving the raw file
+            access_logger.error("api_file: JXL decode failed, serving raw %r", filename)
         # conditional=True enables HTTP Range requests so <video> can seek/stream
         # instead of downloading the whole clip up front.
         return send_file(fp, mimetype=mt.mime_for(filename), conditional=True)
+    access_logger.error("api_file: not found on disk %r", filename)
     return "",404
 
 @app.route("/api/thumb/<path:filename>")

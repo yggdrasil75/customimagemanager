@@ -236,27 +236,67 @@ async function removeFromGroup(btn){
 }
 let _diffImgA=null, _diffImgB=null;
 
-function _loadImage(src){
-  return new Promise((resolve,reject)=>{
-    const im=new Image();
-    im.onload=()=>resolve(im);
-    im.onerror=reject;
-    im.src=src;
-  });
+async function _loadImage(src){
+  // Fetch first so we can surface the real reason (missing file, permission,
+  // path rejected, undecodable bytes) instead of the opaque <img> onerror event.
+  let resp;
+  try{
+    resp=await fetch(src);
+  }catch(e){
+    throw new Error('network error while fetching the file');
+  }
+  if(!resp.ok){
+    let why;
+    switch(resp.status){
+      case 404: why='file not found on disk (it may have been deleted or moved)'; break;
+      case 403: why='permission denied reading the file'; break;
+      case 400: why='rejected path'; break;
+      default:  why=`server returned HTTP ${resp.status}`;
+    }
+    throw new Error(why);
+  }
+  const blob=await resp.blob();
+  const url=URL.createObjectURL(blob);
+  try{
+    return await new Promise((resolve,reject)=>{
+      const im=new Image();
+      im.onload=()=>resolve(im);
+      im.onerror=()=>reject(new Error('the file exists but could not be decoded as an image'));
+      im.src=url;
+    });
+  }finally{
+    // Image keeps its own copy once decoded; safe to revoke.
+    URL.revokeObjectURL(url);
+  }
 }
 
 async function highlightDiff(gid){
-  const picks=[...document.querySelectorAll(`#dg_${gid} .dg-pick:checked`)];
-  if(picks.length!==2){ showToast('Pick exactly 2 images to compare.'); return; }
+  let picks=[...document.querySelectorAll(`#dg_${gid} .dg-pick:checked`)];
+  if(picks.length!==2){
+    // If the group only holds two images, they're unambiguously the pair to
+    // compare — no need to make the user tick both boxes.
+    const all=[...document.querySelectorAll(`#dg_${gid} .dg-pick`)];
+    if(all.length===2) picks=all;
+    else{ showToast('Pick exactly 2 images to compare.'); return; }
+  }
   const [fa,fb]=picks.map(p=>p.dataset.file);
   document.getElementById('diff_label_a').innerText=fa.split('/').pop();
   document.getElementById('diff_label_b').innerText=fb.split('/').pop();
   document.getElementById('dedup_diff_modal').classList.remove('hidden');
-  try{
-    [_diffImgA,_diffImgB]=await Promise.all([
-      _loadImage(`/api/file/${encodeURIComponent(fa)}`),
-      _loadImage(`/api/file/${encodeURIComponent(fb)}`)]);
-  }catch(e){ showToast('Could not load full images.'); return; }
+  const results=await Promise.allSettled([
+    _loadImage(`/api/file/${encodeURIComponent(fa)}`),
+    _loadImage(`/api/file/${encodeURIComponent(fb)}`)]);
+  const failures=[];
+  [fa,fb].forEach((f,i)=>{
+    if(results[i].status==='fulfilled'){
+      if(i===0) _diffImgA=results[i].value; else _diffImgB=results[i].value;
+    }else{
+      _diffImgA=i===0?null:_diffImgA; _diffImgB=i===1?null:_diffImgB;
+      const reason=results[i].reason?.message||'unknown error';
+      failures.push(`"${f.split('/').pop()}": ${reason}`);
+    }
+  });
+  if(failures.length){ showToast('Could not load '+failures.join('; ')); return; }
   renderDiffOverlay();
 }
 
