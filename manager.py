@@ -210,6 +210,7 @@ state = {
     # it from current_state() at import time would freeze a pre-discovery
     # snapshot and wrongly disable freshly added plugins.
     "modules": {},
+    "model_selection": {},
     "search_quick_filters": [
         {"id": "1", "label": "Untagged",   "query": "is:untagged"},
         {"id": "2", "label": "This year",  "query": "date:2026"},
@@ -1974,7 +1975,7 @@ def save_config():
             "body_enabled","body_size","body_cluster_eps","object_proposals",
             "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
             "barcode_model","barcode_conf", "iqa_model","brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
-            "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers","dup_cnn_width","modules"]
+            "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers","dup_cnn_width","modules","model_selection"]
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys if k in state}, f, indent=2)
 
@@ -6857,6 +6858,32 @@ def api_modules_toggle():
     state["modules"] = module_registry.current_state()
     save_config()
     return jsonify({"success": True, "modules": module_registry.status()})
+
+@app.route("/api/models")
+def api_models():
+    """Model capabilities, their providers, and the current selection.
+
+    Feeds a model-picker UI: for each capability the user sees the available
+    providers (YOLO now, others later) and which one is selected.
+    """
+    return jsonify({"capabilities": modules.broker.status()})
+
+@app.route("/api/models/select", methods=["POST"])
+@_auth.require_feature("settings", action='select_model', fields=())
+def api_models_select():
+    """Choose which provider serves a capability. Admin-gated.
+
+    Body: {"capability": "<cap_id>", "provider": "<provider_id>"}. Selecting
+    an unavailable provider is allowed (weights may appear later); the choice
+    persists to app_config.json.
+    """
+    d = request.json or {}
+    ok, err = modules.broker.select(d.get("capability"), d.get("provider"))
+    if not ok:
+        return jsonify({"error": err or "selection failed"}), 400
+    state["model_selection"] = modules.broker.current_selection()
+    save_config()
+    return jsonify({"success": True, "capabilities": modules.broker.status()})
 
 @app.route("/api/update_settings", methods=["POST"])
 @_auth.require_feature("settings", action='update_settings', fields=())
@@ -13655,6 +13682,7 @@ module_host = modules.host.Host(
     media_dir=MEDIA_DIR,
     safe_path=get_safe_path,
     save_config=save_config,
+    broker=modules.broker,
 )
 
 # Serve each module's static/ assets at /modules/<id>/static/<file>.
@@ -13674,6 +13702,12 @@ def module_static(module_id, filename):
 
 # Call register(host) on every enabled plugin, in dependency order.
 module_registry.register_all(module_host)
+
+# Providers are now registered; seed the user's per-capability model selection
+# from persisted config. Kept after register_all so unknown/removed providers
+# are dropped rather than dangling. Written back so save_config persists a clean
+# map.
+state["model_selection"] = modules.broker.init_selection(state.get("model_selection"))
 
 
 @app.route("/api/module_assets")

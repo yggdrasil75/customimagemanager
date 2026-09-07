@@ -102,6 +102,55 @@ apply" hint. (Hot reload is not in v1.)
 
 Core modules can't be disabled; their toggle is locked.
 
+## Providing a model for a capability
+
+The app has a **model capability broker**. A *capability* is a named job with a
+fixed I/O contract — `box.faces`, `box.objects`, `segment`, `pose` (declared by
+the core). Several modules can each provide a model for the same capability, and
+the user picks which one is used. Consumers ask the broker for a capability and
+get back the selected provider — they never name a model.
+
+Register your model as a provider in `register(host)`:
+
+```python
+def register(host):
+    host.provide_model(
+        "box.faces", "my-detector",
+        label="My face detector",
+        loader=lambda: load_my_model(),          # -> a callable model
+        transform=lambda raw, *a, **k: to_boxes(raw),   # -> canonical shape
+        available=lambda: have_weights(),
+        cost_mb=250, gpu=True)
+```
+
+The **transform** is the important part: your model's native output (YOLO
+`.txt`-style boxes, COCO polygons, whatever) must be converted to the
+capability's canonical shape so every consumer gets the same thing regardless of
+which provider ran. The canonical shapes are in
+[`model_contracts.py`](model_contracts.py) — e.g. `box.faces` returns
+`[{cx, cy, w, h, conf}]` with coords normalized 0..1 center-form.
+
+Consumers request a capability and handle the typed error when nothing satisfies
+it:
+
+```python
+from modules.model_broker import NoProviderError
+try:
+    detect = host.request_model("box.faces")   # selected provider, ready to call
+    boxes = detect(image_bgr)                   # canonical output, always
+except NoProviderError as e:
+    ...  # e.reason in {unknown_capability, no_providers, selected_unavailable, none_available}
+```
+
+To add a **new** capability the core doesn't have, call
+`host.declare_capability(id, summary=…, input=…, output=…)` — the first module
+to declare an id owns its contract.
+
+Back your `loader` with the runtime `model_registry` (import it directly) so
+repeat loads are cheap and models share one memory/VRAM budget with LRU
+eviction. See [`yolo/module.py`](yolo/module.py) for a complete example that
+provides all four core capabilities.
+
 ## What's not in v1
 
 - No sandboxing — a module runs with the app's full privileges. Only install

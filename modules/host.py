@@ -50,7 +50,7 @@ class Host:
     """
 
     def __init__(self, *, app, db, config, logger, thread_manager,
-                 media_dir, safe_path, save_config):
+                 media_dir, safe_path, save_config, broker=None):
         # ── raw handles ──────────────────────────────────────────────────
         self.app = app
         self.db = db
@@ -60,6 +60,9 @@ class Host:
         self.media_dir = media_dir
         self.safe_path = safe_path
         self.save_config = save_config
+        # Model capability broker. Modules provide/request models through the
+        # helpers below rather than importing it, so the seam stays one object.
+        self.broker = broker
 
         # ── recorded contributions (read back by manager.py after load) ──
         # asset  = {"module_id","filename","kind"}  kind in {"js","css"}
@@ -129,6 +132,44 @@ class Host:
         """
         self.thread_manager.register_source(
             name, claim, handle, key_of=key_of, cost_of=cost_of)
+
+    # ── model capabilities ───────────────────────────────────────────────
+    def declare_capability(self, cap_id, *, summary, input, output):
+        """Declare a NEW model capability contract (first declarer owns it).
+
+        The core already declares box.faces / box.objects / segment / pose.
+        Use this only to add a capability the core doesn't have. Attributed to
+        the calling module.
+        """
+        return self.broker.declare(cap_id, summary=summary, input=input,
+                                   output=output, owner=self._current_module)
+
+    def provide_model(self, cap_id, provider_id, *, label, loader,
+                      transform=None, available=None, reason="",
+                      cost_mb=0, gpu=False):
+        """Register this module's model as a provider for a capability.
+
+        loader()   -> a callable model handle (back it with the runtime
+                      model_registry so repeat loads are cheap / LRU-evicted).
+        transform(raw_output, *call_args) -> the capability's canonical shape;
+                      this is where a provider reconciles its native format
+                      (e.g. YOLO boxes) with the contract so consumers get one
+                      shape regardless of which model ran.
+        available()-> bool; when False the provider is shown greyed-out and
+                      request() raises rather than returning it.
+        """
+        return self.broker.provide(
+            cap_id, provider_id, label=label, loader=loader, transform=transform,
+            available=available, reason=reason, cost_mb=cost_mb, gpu=gpu)
+
+    def request_model(self, cap_id):
+        """Get a ready handle for the user-selected provider of a capability.
+
+        Raises broker.NoProviderError (typed) when nothing satisfies it — the
+        consumer is expected to catch and degrade. The handle returns the
+        capability's canonical output shape.
+        """
+        return self.broker.request(cap_id)
 
     # ── startup hooks ────────────────────────────────────────────────────
     def on_startup(self, fn):
