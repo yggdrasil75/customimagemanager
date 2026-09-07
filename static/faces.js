@@ -643,13 +643,27 @@ function _renderPersonEditor(cid, d) {
   };
   const bioRows = d.bio_fields.map(bioField).join('');
 
-  // List fields (aliases, tags) as comma-separated for a lazy-but-clear editor.
-  const listRows = (d.list_fields || []).map(k =>
-    `<label class="flex flex-col gap-0.5">
-       <span class="text-[10px] text-gray-400">${k} (comma-separated)</span>
-       <input value="${esc((p.lists[k] || []).join(', '))}"
-              onchange="saveListField(${cid},'${k}',this.value)"
-              class="p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white"></label>`).join('');
+  // Hold each list (aliases, tags) in memory so chip add/remove mutate state
+  // directly, then persist the whole list — the same pattern relationships use.
+  _personLists[cid] = {};
+  (d.list_fields || []).forEach(k => { _personLists[cid][k] = (p.lists[k] || []).slice(); });
+
+  // List fields (aliases, tags) as chip editors that match the gallery Tags box:
+  // one chip per entry with an inline-editable name and an × to remove, plus an
+  // adder that splits on comma/Enter. tags additionally gets a suggestions panel.
+  const listRows = (d.list_fields || []).map(k => {
+    const suggest = (k === 'tags')
+      ? `<div id="person_tagsuggest_${cid}" class="mt-1"></div>` : '';
+    return `<div class="col-span-2">
+        <span class="text-[10px] text-gray-400">${k}</span>
+        <div id="person_list_${cid}_${k}" class="mt-0.5"></div>
+        <input placeholder="+ add ${k} (comma to add several)"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();addPersonListItems(${cid},'${k}',this.value);this.value='';}"
+               onblur="if(this.value.trim()){addPersonListItems(${cid},'${k}',this.value);this.value='';}"
+               class="mt-0.5 w-full p-1 bg-gray-800 rounded border border-gray-600 text-xs text-white">
+        ${suggest}
+      </div>`;
+  }).join('');
 
   // Hold this person's relationships in memory so add/remove mutate state
   // directly instead of scraping it back off the DOM.
@@ -704,6 +718,180 @@ function _renderPersonEditor(cid, d) {
     </div>
     ${flagBanner}
     ${eras || '<div class="text-[10px] text-gray-500 mt-2">No appearances yet.</div>'}`;
+
+  // Paint the chip lists now the containers exist, then load tag suggestions.
+  (d.list_fields || []).forEach(k => _renderPersonList(cid, k));
+  _loadTagSuggestions(cid);
+}
+
+// In-memory list fields (aliases, tags) per open person.
+let _personLists = {};
+// Chosen threshold per person for the tag-suggestions panel; persisted only in
+// memory for the session. {mode:'count'|'frac', value:number}.
+let _tagSuggestState = {};
+
+// Render one list field as gallery-style tag chips (blue dot, inline-edit, ×).
+function _renderPersonList(cid, key) {
+  const box = document.getElementById('person_list_' + cid + '_' + key);
+  if (!box) return;
+  const items = (_personLists[cid] && _personLists[cid][key]) || [];
+  const esc = v => (v || '').replace(/"/g, '&quot;');
+  if (!items.length) {
+    box.innerHTML = `<div class="text-[11px] text-gray-600 italic px-1 py-0.5">No ${key}</div>`;
+    return;
+  }
+  box.innerHTML = items.map((t, i) =>
+    `<div class="rrow tag-row flex items-center gap-1">
+       <span class="inline-block w-2 h-2 rounded-full flex-shrink-0" style="background:#3B82F6"></span>
+       <input class="tag-edit flex-1 min-w-0 bg-transparent border-b border-transparent focus:border-gray-500 focus:outline-none"
+              value="${esc(t)}" onchange="renamePersonListItem(${cid},'${key}',${i},this.value)">
+       <span class="tag-x flex-shrink-0" onclick="removePersonListItem(${cid},'${key}',${i})" title="Remove">✕</span>
+     </div>`).join('');
+}
+
+async function _savePersonList(cid, key) {
+  const value = (_personLists[cid][key] || []).slice();
+  await fetch('/api/persons/' + cid + '/field', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ section: 'list', key, value })
+  });
+  _renderPersonList(cid, key);
+  if (key === 'tags') _paintTagSuggestions(cid);   // grey out newly-added ones
+}
+
+// Add one or more items (split on comma), case-insensitive dedupe, then persist.
+function addPersonListItems(cid, key, raw) {
+  const cur = _personLists[cid][key] || (_personLists[cid][key] = []);
+  const have = new Set(cur.map(t => t.toLowerCase()));
+  let changed = false;
+  (raw || '').split(',').map(s => s.trim()).filter(Boolean).forEach(name => {
+    if (!have.has(name.toLowerCase())) { cur.push(name); have.add(name.toLowerCase()); changed = true; }
+  });
+  if (changed) _savePersonList(cid, key);
+}
+
+function renamePersonListItem(cid, key, i, name) {
+  const cur = _personLists[cid][key] || [];
+  name = (name || '').trim();
+  if (i < 0 || i >= cur.length) return;
+  if (!name) { cur.splice(i, 1); _savePersonList(cid, key); return; }
+  // Merge on collision with a different entry.
+  const other = cur.findIndex((t, j) => j !== i && t.toLowerCase() === name.toLowerCase());
+  if (other >= 0) cur.splice(i, 1);
+  else cur[i] = name;
+  _savePersonList(cid, key);
+}
+
+function removePersonListItem(cid, key, i) {
+  const cur = _personLists[cid][key] || [];
+  cur.splice(i, 1);
+  _savePersonList(cid, key);
+}
+
+// ── Tag suggestions ─────────────────────────────────────────────────────────
+// Suggestions come from the tags on every image this person appears in. The
+// server returns each tag with its occurrence count and total tagged images;
+// the threshold (an absolute count, or a fraction of those images) is applied
+// here so moving the slider is instant and needs no round-trip.
+async function _loadTagSuggestions(cid) {
+  const wrap = document.getElementById('person_tagsuggest_' + cid);
+  if (!wrap) return;
+  wrap.innerHTML = '<div class="text-[10px] text-gray-500">Loading tag suggestions…</div>';
+  let d;
+  try { d = await (await fetch('/api/persons/' + cid + '/tag_suggestions')).json(); }
+  catch (e) { wrap.innerHTML = ''; return; }
+  if (!d.success) { wrap.innerHTML = ''; return; }
+  _tagSuggestData = _tagSuggestData || {};
+  _tagSuggestData[cid] = d;
+  if (!_tagSuggestState[cid]) _tagSuggestState[cid] = { mode: 'count', value: 2 };
+  _paintTagSuggestions(cid);
+}
+let _tagSuggestData = {};
+
+function _suggestPasses(s, st, imageTotal) {
+  if (st.mode === 'frac') return imageTotal > 0 && (s.count / imageTotal) >= st.value;
+  return s.count >= st.value;
+}
+
+function _paintTagSuggestions(cid) {
+  const wrap = document.getElementById('person_tagsuggest_' + cid);
+  const d = _tagSuggestData[cid];
+  if (!wrap || !d) return;
+  const st = _tagSuggestState[cid];
+  const all = d.suggestions || [];
+  const imgTotal = d.image_total || 0;
+  // Recompute "present" live against in-memory tags so chips grey out on add.
+  const have = new Set((_personLists[cid] && _personLists[cid].tags || []).map(t => t.toLowerCase()));
+  const maxCount = all.reduce((m, s) => Math.max(m, s.count), 0);
+
+  if (!all.length) {
+    wrap.innerHTML = `<div class="text-[10px] text-gray-600 italic">No tags on this person's images yet.</div>`;
+    return;
+  }
+
+  const passing = all.filter(s => _suggestPasses(s, st, imgTotal));
+  const addable = passing.filter(s => !have.has(s.tag.toLowerCase()));
+
+  const esc = v => (v || '').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+  const chip = s => {
+    const present = have.has(s.tag.toLowerCase());
+    return `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] ${present ? 'bg-gray-800 text-gray-500' : 'bg-gray-700 text-gray-200 cursor-pointer hover:bg-blue-700'}"
+        ${present ? 'title="already added"' : `onclick="addPersonListItems(${cid},'tags','${esc(s.tag)}')" title="click to add"`}>
+        ${present ? '' : '<span class="text-blue-300">+</span>'}${esc(s.tag)}
+        <span class="text-gray-500">${s.count}</span></span>`;
+  };
+
+  // Slider: count mode steps 1..max; fraction mode 0..1. A toggle switches which.
+  const sliderMax = st.mode === 'frac' ? 100 : Math.max(1, maxCount);
+  const sliderVal = st.mode === 'frac' ? Math.round(st.value * 100) : st.value;
+  const thLabel = st.mode === 'frac'
+    ? `in ≥ ${Math.round(st.value * 100)}% of images`
+    : `in ≥ ${st.value} image(s)`;
+
+  wrap.innerHTML = `
+    <div class="mt-1 pt-1 border-t border-gray-700">
+      <div class="flex items-center justify-between mb-1">
+        <span class="text-[10px] text-gray-400">Suggested from ${imgTotal} tagged image(s)</span>
+        <button onclick="toggleTagSuggestMode(${cid})"
+          class="text-[9px] px-1 py-0.5 bg-gray-700 hover:bg-gray-600 rounded">
+          ${st.mode === 'frac' ? '% mode' : 'count mode'}</button>
+      </div>
+      <div class="flex items-center gap-2 mb-1">
+        <input type="range" min="${st.mode === 'frac' ? 1 : 1}" max="${sliderMax}" value="${sliderVal}"
+          oninput="setTagSuggestThreshold(${cid}, this.value)"
+          class="flex-1 accent-blue-500">
+        <span class="text-[10px] text-gray-400 w-28 text-right">${thLabel}</span>
+      </div>
+      <div class="flex flex-wrap gap-1">${passing.map(chip).join('') || '<span class="text-[10px] text-gray-600 italic">none above threshold</span>'}</div>
+      ${addable.length ? `<button onclick="addAllSuggestedTags(${cid})"
+          class="mt-1 text-[10px] px-2 py-0.5 bg-teal-700 hover:bg-teal-600 rounded font-bold">
+          + Add all ${addable.length} above threshold</button>` : ''}
+    </div>`;
+}
+
+function setTagSuggestThreshold(cid, v) {
+  const st = _tagSuggestState[cid];
+  v = parseInt(v, 10) || 0;
+  st.value = st.mode === 'frac' ? (v / 100) : v;
+  _paintTagSuggestions(cid);
+}
+
+function toggleTagSuggestMode(cid) {
+  const st = _tagSuggestState[cid];
+  st.mode = st.mode === 'frac' ? 'count' : 'frac';
+  st.value = st.mode === 'frac' ? 0.5 : 2;   // sensible default per mode
+  _paintTagSuggestions(cid);
+}
+
+function addAllSuggestedTags(cid) {
+  const d = _tagSuggestData[cid], st = _tagSuggestState[cid];
+  if (!d) return;
+  const have = new Set((_personLists[cid].tags || []).map(t => t.toLowerCase()));
+  const toAdd = (d.suggestions || [])
+    .filter(s => _suggestPasses(s, st, d.image_total || 0))
+    .filter(s => !have.has(s.tag.toLowerCase()))
+    .map(s => s.tag);
+  if (toAdd.length) addPersonListItems(cid, 'tags', toAdd.join(','));
 }
 
 // In-memory relationships per open person, so add/remove mutate state directly.

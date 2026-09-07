@@ -6230,6 +6230,73 @@ def _person_date_flags(cluster_id: int) -> list:
         fl["has_stored_date"] = rows[fl["index"]][2] is not None
     return flags
 
+def _person_rel_paths(cluster_id: int) -> list:
+    """! @brief Every image rel_path that contains this person's face cluster."""
+    rows = _db().execute(
+        "SELECT DISTINCT rel_path FROM face_regions WHERE cluster_id=?",
+        (cluster_id,)).fetchall()
+    return [r[0] for r in rows]
+
+def _person_tag_frequency(cluster_id: int) -> tuple:
+    """! @brief Count image tags across every photo this person appears in.
+    @return (counts, image_total) where counts is a list of {tag, count} sorted by
+            count desc then name, and image_total is how many of the person's images
+            carried any tags. The '?' unconfirmed-suggestion prefix is stripped so a
+            confirmed and a suggested copy of the same tag count as one.
+    """
+    rels = _person_rel_paths(cluster_id)
+    if not rels:
+        return [], 0
+    db = _db()
+    counts: dict = {}
+    image_total = 0
+    for rel in rels:
+        row = db.execute("SELECT tags FROM files WHERE rel_path=?", (rel,)).fetchone()
+        raw = row[0] if row else None
+        try:
+            tags = json.loads(raw) if raw else []
+        except Exception:
+            tags = []
+        # Fall back to on-disk metadata for images not yet in the files cache.
+        if not tags:
+            tags = _img_tags(rel)
+        seen = set()
+        for t in tags:
+            name = str(t).lstrip("?").strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue          # count a tag once per image
+            seen.add(key)
+            counts.setdefault(name, {"tag": name, "count": 0})["count"] += 1
+        if seen:
+            image_total += 1
+    ordered = sorted(counts.values(),
+                     key=lambda c: (-c["count"], c["tag"].lower()))
+    return ordered, image_total
+
+@app.route("/api/persons/<int:cluster_id>/tag_suggestions")
+def api_person_tag_suggestions(cluster_id):
+    """! @brief Suggested person tags derived from the tags on this person's images.
+    Returns every tag with its occurrence count so the client can apply a threshold
+    (absolute count or fraction of the person's tagged images) locally without a
+    round-trip per slider move. Already-set person tags/aliases are marked so the UI
+    can grey them out."""
+    person_uuid = person_for_cluster(cluster_id, create=True)
+    if not person_uuid:
+        return jsonify({"success": False, "error": "no such cluster"})
+    desc = personlib.read(MEDIA_DIR, person_uuid) or {}
+    have = set()
+    for k in personlib.LIST_FIELDS:
+        for v in desc.get("lists", {}).get(k, []):
+            have.add(str(v).lstrip("?").strip().lower())
+    counts, image_total = _person_tag_frequency(cluster_id)
+    for c in counts:
+        c["present"] = c["tag"].lower() in have
+    return jsonify({"success": True, "suggestions": counts,
+                    "image_total": image_total})
+
 @app.route("/api/persons/<int:cluster_id>")
 def api_person_get(cluster_id):
     """The unified person record for a face cluster (created on first view).
