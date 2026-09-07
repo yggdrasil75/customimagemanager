@@ -420,69 +420,6 @@ function renderAnalysis(){
   body.innerHTML=html;
 }
 
-// ── Pose / skeleton overlay ─────────────────────────────────────────────────
-function drawSkeleton(c,dw,dh,scale){
-  const t=document.getElementById('toggle_skeleton');
-  if(!t||!t.checked||!currentPose||!currentPose.people) return;
-  const edges=currentPose.edges||[];
-  c.save();
-  c.lineWidth=2/(scale||1);
-  currentPose.people.forEach(p=>{
-    const kp=p.keypoints||[];
-    c.strokeStyle='#22d3ee';
-    edges.forEach(e=>{
-      const ka=kp[e[0]], kb=kp[e[1]];
-      if(!ka||!kb) return;
-      if((ka.v||0)<0.2||(kb.v||0)<0.2) return;
-      c.beginPath(); c.moveTo(ka.x*dw,ka.y*dh); c.lineTo(kb.x*dw,kb.y*dh); c.stroke();
-    });
-    c.fillStyle='#f0abfc';
-    kp.forEach(k=>{ if((k.v||0)<0.2) return;
-      c.beginPath(); c.arc(k.x*dw,k.y*dh,3/(scale||1),0,7); c.fill(); });
-  });
-  c.restore();
-}
-async function runPose(){
-  if(!currentFile){ alert('Select an image first.'); return; }
-  const btn=document.getElementById('btn_pose'); const og=btn.innerText;
-  btn.innerText='🦴 …'; btn.disabled=true;
-  try{
-    const d=await fetch('/api/pose',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filename:currentFile})}).then(r=>r.json());
-    if(d.success){
-      currentPose=d.pose||null;
-      const t=document.getElementById('toggle_skeleton'); if(t) t.checked=true;
-      syncPoseButtons();
-      drawCanvas(); if(typeof popoutOpen!=='undefined'&&popoutOpen) drawPopout();
-      const n=(d.pose&&d.pose.people)?d.pose.people.length:0;
-      showToast(n?`Pose: ${n} person(s) detected.`:(d.note||'No people detected.'));
-    } else alert('Pose failed: '+(d.error||''));
-  }catch(e){ alert('Network error during pose.'); }
-  btn.innerText=og; btn.disabled=false;
-}
-// Show the "Remove skeleton" button only when a pose is currently stored.
-function syncPoseButtons(){
-  const rm=document.getElementById('btn_pose_remove');
-  if(rm) rm.style.display=(currentPose&&currentPose.people&&currentPose.people.length)?'block':'none';
-}
-async function removePose(){
-  if(!currentFile){ alert('Select an image first.'); return; }
-  if(!confirm('Delete the stored skeleton for this image? This cannot be undone.')) return;
-  const btn=document.getElementById('btn_pose_remove'); const og=btn.innerText;
-  btn.innerText='🗑 …'; btn.disabled=true;
-  try{
-    const d=await fetch('/api/pose_remove',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filename:currentFile})}).then(r=>r.json());
-    if(d.success){
-      currentPose=null;
-      const t=document.getElementById('toggle_skeleton'); if(t) t.checked=false;
-      syncPoseButtons();
-      drawCanvas(); if(typeof popoutOpen!=='undefined'&&popoutOpen) drawPopout();
-      showToast('Skeleton removed.');
-    } else alert('Remove failed: '+(d.error||''));
-  }catch(e){ alert('Network error removing skeleton.'); }
-  btn.innerText=og; btn.disabled=false;
-}
 async function runOCR(){
   if(!currentFile){ alert('Select an image first.'); return; }
   const btn=document.getElementById('btn_ocr'); const og=btn.innerText;

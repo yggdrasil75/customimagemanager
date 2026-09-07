@@ -71,6 +71,10 @@ class Host:
         self.settings_tabs = []
         # startup hook = zero-arg callable, run inside __main__ after serve setup
         self.startup_hooks = []
+        # pipeline stages a module contributes: name -> {"fn", "label",
+        # "editor"}. manager spreads the fns into run_pipeline and exposes the
+        # list so the pipeline editor only offers stages whose module is on.
+        self.pipeline_stages = {}
         # which module is currently being registered (set by the loader) so
         # helpers can attribute contributions without the author passing an id
         self._current_module = None
@@ -170,6 +174,26 @@ class Host:
         capability's canonical output shape.
         """
         return self.broker.request(cap_id)
+
+    # ── pipeline stages ──────────────────────────────────────────────────
+    def register_pipeline_stage(self, name, fn, *, label=None, editor=None):
+        """Contribute a stage the AI pipeline can run.
+
+        name   -- the node type used in the pipeline tree (e.g. "pose").
+        fn     -- fn(image_bgr) -> the stage's result dict, matching what
+                  run_pipeline expects for that stage (pose_fn/ocr_fn/etc.).
+        label  -- human label for the pipeline editor's node menu.
+        editor -- optional dict of editor hints (has_prompt, has_store, …) so
+                  the front end can render the node's controls; defaults to a
+                  plain no-LLM stage.
+        manager spreads the registered fns into run_pipeline as "<name>_fn",
+        so when this module is disabled the fn is simply absent and the
+        pipeline treats that node as an inert no-op.
+        """
+        self.pipeline_stages[name] = {
+            "fn": fn, "label": label or name,
+            "editor": editor or {}, "module_id": self._current_module}
+        return name
 
     # ── startup hooks ────────────────────────────────────────────────────
     def on_startup(self, fn):

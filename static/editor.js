@@ -312,7 +312,7 @@ function drawPopout(){
       }
     });
   }
-  drawSkeleton(pctx,iw,ih,pZoom);
+  runCanvasOverlays(pctx,iw,ih,pZoom);
   if(pDrawing){
     pctx.strokeStyle='#FCD34D'; pctx.lineWidth=1.5/pZoom;
     pctx.strokeRect(pSX,pSY,pCX-pSX,pCY-pSY);

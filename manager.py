@@ -3623,10 +3623,6 @@ def _yolo_size():
 def _face_detector_id():
     return facemodels.resolve_detector_id(state.get("face_detector"))
 
-def _run_pose(img_bgr):
-    """! @brief Backward-compatible shim; delegates to pose.run_pose."""
-    return pose.run_pose(img_bgr)
-
 # ── character / panel detectors (for the pipeline) ───────────────────────────--
 
 def _detect_obb_or_box(img_bgr, model_path: str, keep_classes: set | None = None,
@@ -6835,8 +6831,14 @@ def api_modules():
     # owning module is still enabled.
     tabs = [t for t in getattr(module_host, "settings_tabs", [])
             if module_registry.is_enabled(t["module_id"])]
+    # Pipeline stages contributed by enabled modules, so the pipeline editor
+    # only offers a node type when its module is on.
+    stages = [{"name": name, "label": s["label"], "editor": s["editor"]}
+              for name, s in getattr(module_host, "pipeline_stages", {}).items()
+              if module_registry.is_enabled(s["module_id"])]
     return jsonify({"modules": module_registry.status(),
                     "settings_tabs": tabs,
+                    "pipeline_stages": stages,
                     "missing_pip": module_registry.missing_pip()})
 
 @app.route("/api/modules/toggle", methods=["POST"])
@@ -10563,8 +10565,16 @@ def bulk_llm():
     return jsonify({"success": True, "done": done, "applied": applied,
                     "errors": errors, "target": action.get("target")})
 
-def _pose_fn(bgr):
-    return _run_pose(bgr)
+def _pose_stage_fn():
+    """Pose pipeline stage, or None when the pose module is disabled/absent.
+
+    The pose feature now lives in modules/pose; it registers a "pose" pipeline
+    stage via the host. Pulling the fn from the registry (instead of a hard
+    _pose_fn) means the pipeline's pose node becomes an inert no-op when the
+    module is off, with no core code path to maintain.
+    """
+    stage = module_host.pipeline_stages.get("pose") if 'module_host' in globals() else None
+    return stage["fn"] if stage else None
 
 def _ocr_fn(bgr):
     return _run_ocr(bgr)
@@ -10705,7 +10715,7 @@ def run_pipeline_route():
         state["status_text"] = f"Smart Tag: {msg}"
 
     try:
-        analysis = run_pipeline(tree, bgr, _llm_call, pose_fn=_pose_fn, ocr_fn=_ocr_fn,
+        analysis = run_pipeline(tree, bgr, _llm_call, pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn,
                                 person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn,
                                 endpoints=_pipeline_endpoints(), progress=_progress,
                                 known=_known_context(fp))
@@ -10738,7 +10748,7 @@ def bulk_pipeline():
                 errors.append(fn); continue
             def _prog(msg, i=i): state["status_text"] = f"Smart Tag {i+1}/{total}: {msg}"
             analysis = run_pipeline(tree, _to_bgr(img), _llm_call,
-                                    pose_fn=_pose_fn, ocr_fn=_ocr_fn,
+                                    pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn,
                                     person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn,
                                     endpoints=_pipeline_endpoints(), progress=_prog,
                                     known=_known_context(fp))
@@ -12261,7 +12271,7 @@ def comic_pipeline_route():
                 errors.append(page); continue
             def _prog(msg, i=i): state["status_text"] = f"Comic {i+1}/{total}: {msg}"
             analysis = run_pipeline(tree, _to_bgr(img), _llm_call,
-                                    pose_fn=_pose_fn, ocr_fn=_ocr_fn,
+                                    pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn,
                                     person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn,
                                     endpoints=_pipeline_endpoints(), progress=_prog,
                                     known=_known_context(fp))
@@ -12279,104 +12289,6 @@ def comic_pipeline_route():
                         "tags": merged.get("tags", []),
                         "characters": merged.get("characters", []),
                         "description": merged.get("description", "")}})
-
-@app.route("/api/pose", methods=["POST"])
-@_auth.require_feature("ai.pose")
-def api_pose():
-    """Estimate a skeleton/pose for one image and store it in the sidecar."""
-    fn = request.json.get("filename", "")
-    fp = get_safe_path(MEDIA_DIR, fn)
-    if not fp or not os.path.exists(fp):
-        return jsonify({"success": False, "error": "File not found."})
-    img = read_jxl(fp)
-    if img is None:
-        return jsonify({"success": False, "error": "Decode failed."})
-    state["status_text"] = "Estimating pose…"
-    pose_data = _run_pose(_to_bgr(img))
-    meta = read_metadata(fp)
-    write_metadata(fp, meta["tags"], meta["description"], meta["regions"], pose=pose_data)
-    state["status_text"] = "Ready."
-    if not pose_data.get("people"):
-        return jsonify({"success": True, "pose": pose_data,
-                        "note": "No people detected (or pose model unavailable)."})
-    return jsonify({"success": True, "pose": pose_data})
-
-@app.route("/api/bulk_pose", methods=["POST"])
-@_auth.require_feature("ai.pose")
-def bulk_pose():
-    """Estimate a skeleton/pose for many files and store each in its sidecar.
-    Mirrors /api/pose over a selection. Body: {filenames}. This is what feeds
-    the per-appearance T-pose aggregation, so running it over a person's images
-    is the prerequisite for 'Estimate T-pose'."""
-    filenames = request.json.get("filenames", [])
-    done, posed, errors = 0, 0, []
-    total = len(filenames)
-    for fn in filenames:
-        fp = get_safe_path(MEDIA_DIR, fn)
-        if not fp or not os.path.exists(fp):
-            errors.append(fn); continue
-        try:
-            img = read_jxl(fp)
-            if img is None:
-                errors.append(fn); continue
-            pose_data = _run_pose(_to_bgr(img))
-            meta = read_metadata(fp)
-            write_metadata(fp, meta["tags"], meta["description"],
-                           meta["regions"], pose=pose_data)
-            if (pose_data or {}).get("people"):
-                posed += 1
-            done += 1
-            state["status_text"] = f"Pose: {done}/{total} ({posed} with people)..."
-        except Exception as e:
-            errors.append(fn)
-            access_logger.error(f"bulk_pose {fn}: {e}")
-    state["status_text"] = "Ready."
-    return jsonify({"success": True, "done": done, "posed": posed,
-                    "errors": errors})
-
-@app.route("/api/pose_remove", methods=["POST"])
-@_auth.require_feature("ai.pose_remove", action='pose_remove', fields=('filename',))
-def api_pose_remove():
-    """Remove a bad skeleton/pose from an image.
-
-    Body: { filename, region_index? }
-      - no region_index  -> clear the image-level skeleton entirely.
-      - region_index (int) -> drop the pose attached to that one subject region,
-        leaving the image-level pose and other regions untouched.
-    """
-    d = request.json or {}
-    fn = d.get("filename", "")
-    fp = get_safe_path(MEDIA_DIR, fn)
-    if not fp or not os.path.exists(fp):
-        return jsonify({"success": False, "error": "File not found."})
-    meta = read_metadata(fp)
-    ri = d.get("region_index", None)
-    if ri is None:
-        # Clear the whole-image skeleton. Also strip per-region poses so a bad
-        # skeleton doesn't linger on individual subjects.
-        regions = []
-        for r in meta["regions"]:
-            r = dict(r); r.pop("pose", None); regions.append(r)
-        write_metadata(fp, meta["tags"], meta["description"], regions,
-                       analysis=meta.get("analysis"), pose={"clear": True})
-        return jsonify({"success": True, "cleared": "image"})
-    # Remove the pose from a single subject region.
-    try:
-        ri = int(ri)
-    except Exception:
-        return jsonify({"success": False, "error": "Bad region_index."})
-    regions = [dict(r) for r in meta["regions"]]
-    if ri < 0 or ri >= len(regions):
-        return jsonify({"success": False, "error": "region_index out of range."})
-    regions[ri].pop("pose", None)
-    # Rebuild the image-level pose from the surviving per-subject skeletons so the
-    # stored whole-image pose stays consistent with what's left.
-    people = [r["pose"] for r in regions if r.get("pose")]
-    new_pose = {"kind": "body", "people": people} if people else {"clear": True}
-    write_metadata(fp, meta["tags"], meta["description"], regions,
-                   analysis=meta.get("analysis"), pose=new_pose)
-    return jsonify({"success": True, "cleared": ri,
-                    "remaining_people": len(people)})
 
 @app.route("/api/ocr", methods=["POST"])
 @_auth.require_feature("ai.ocr")

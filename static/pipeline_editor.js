@@ -14,10 +14,15 @@
     'use strict';
 
     // ── vocabulary pulled straight from pipeline.py ───────────────────────────
-    const NODE_TYPES = [
-        'classify', 'llm', 'boxes', 'pose', 'ocr',
+    // Built-in node types. Module-contributed stages (e.g. "pose" from the pose
+    // module) are merged in at load from /api/modules, so a stage only appears
+    // when its module is enabled. Kept as `let` so the merge can extend it.
+    let NODE_TYPES = [
+        'classify', 'llm', 'boxes', 'ocr',
         'detect_persons', 'panels', 'for_each',
     ];
+    // Labels for module stages, filled by the merge below.
+    const MODULE_STAGE_LABELS = {};
     const WANTS = ['text', 'bool', 'tags', 'choice', 'boxes', 'json', 'name'];
     // Which node types actually issue an LLM call (so we show prompt/want).
     const HAS_PROMPT = new Set(['classify', 'llm', 'boxes', 'panels', 'detect_persons']);
@@ -415,9 +420,28 @@
         }, 300);
     });
 
+    // Merge module-contributed pipeline stages into the node-type list. Runs
+    // once; safe to call repeatedly. A stage only comes back from /api/modules
+    // when its owning module is enabled, so disabling pose drops its node type.
+    let _stagesMerged = false;
+    async function mergeModuleStages() {
+        if (_stagesMerged) return;
+        _stagesMerged = true;
+        try {
+            const data = await fetch('/api/modules').then(r => r.json());
+            for (const s of (data.pipeline_stages || [])) {
+                if (!NODE_TYPES.includes(s.name)) NODE_TYPES.push(s.name);
+                MODULE_STAGE_LABELS[s.name] = s.label || s.name;
+            }
+            if (mounted) render();
+        } catch (e) { _stagesMerged = false; /* allow retry */ }
+    }
+    mergeModuleStages();
+
     // expose a refresh hook so the app can re-sync after loading settings
     window.pipelineEditorRefresh = function () {
         if (!mounted) mount();
+        mergeModuleStages();
         const editor = document.getElementById('pl_editor');
         if (editor && !editor.classList.contains('hidden')) { loadFromTextarea(); render(); }
     };

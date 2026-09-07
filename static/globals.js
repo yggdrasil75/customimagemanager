@@ -13,6 +13,62 @@ let currentPage=0, totalFiles=0, currentSearch='', currentFolder='', allFolders=
 let imageFilter=null;  // active pipeline result set shown in the grid, or null
 let currentTags=[], currentIqa=null, currentIqaManual=false;
 let PAGE=200
+
+// ── Canvas overlay hooks ─────────────────────────────────────────────────────
+// Modules register a draw function here to paint on top of the image canvas
+// (e.g. the pose module's skeleton). The core render loop (viewer.js, editor.js
+// popout) calls runCanvasOverlays after drawing regions. When a module is
+// disabled its draw fn is simply never registered, so the overlay vanishes with
+// no core edit. Each fn is called as fn(ctx, drawW, drawH, scale).
+window.canvasOverlays = window.canvasOverlays || [];
+function registerCanvasOverlay(fn){
+  if(typeof fn==='function' && !window.canvasOverlays.includes(fn))
+    window.canvasOverlays.push(fn);
+}
+function runCanvasOverlays(ctx,dw,dh,scale){
+  for(const fn of window.canvasOverlays){
+    try{ fn(ctx,dw,dh,scale); }catch(e){ /* one bad overlay must not break render */ }
+  }
+}
+
+// ── Control-button extension areas ───────────────────────────────────────────
+// Named regions in the UI that modules can append buttons to, instead of the
+// core template reserving a slot per feature. An area is any element carrying
+// data-ext-area="<name>" (there can be several with the same name, e.g. the
+// gallery bulk bar exists in both the pane and the modal). A module calls
+//   registerControlButton('ai_tools', '<button ...>…</button>')
+// and the HTML is appended to every current AND future element of that area.
+// Registrations are remembered so areas rendered later (or re-rendered) still
+// receive them; data-feature on the injected markup is honoured.
+window._extButtons = window._extButtons || {};   // area -> [html, …]
+function _applyExtButtonsTo(el){
+  const area = el.getAttribute('data-ext-area');
+  const htmls = window._extButtons[area] || [];
+  for(const html of htmls){
+    // Skip if this exact button was already appended to this element.
+    if(el.querySelector(`[data-ext-key="${_extKey(html)}"]`)) continue;
+    const tmp=document.createElement('template'); tmp.innerHTML=html.trim();
+    const node=tmp.content.firstElementChild;
+    if(!node) continue;
+    node.setAttribute('data-ext-key', _extKey(html));
+    el.appendChild(node);
+  }
+  if(window.applyFeatureVisibility) applyFeatureVisibility(el);
+}
+function _extKey(html){
+  // cheap stable-ish key so the same registration isn't duplicated on re-scan
+  let h=0; for(let i=0;i<html.length;i++){ h=(h*31+html.charCodeAt(i))|0; }
+  return 'e'+(h>>>0);
+}
+function registerControlButton(area, html){
+  (window._extButtons[area] = window._extButtons[area] || []).push(html);
+  document.querySelectorAll(`[data-ext-area="${area}"]`).forEach(_applyExtButtonsTo);
+}
+// Re-apply all registrations to every area now in the DOM. Call after markup
+// that contains extension areas is (re)rendered — e.g. opening the gallery modal.
+function refreshControlButtons(){
+  document.querySelectorAll('[data-ext-area]').forEach(_applyExtButtonsTo);
+}
 // ── NR-IQA stars ─────────────────────────────────────────────────────────────
 // Compact star badge shown on a gallery tile. score is 0..5 (halves) or null.
 function starBadge(score){

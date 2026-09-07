@@ -152,7 +152,7 @@ function makeViewer(prefix, opts) {
       });
     }
     if (isMain) {
-      drawSkeleton(ctx, dw, dh, 1);
+      runCanvasOverlays(ctx, dw, dh, 1);
       if (drawing) { ctx.strokeStyle = '#FCD34D'; ctx.lineWidth = 1.5;
         ctx.strokeRect(startX, startY, curX - startX, curY - startY); }
     }

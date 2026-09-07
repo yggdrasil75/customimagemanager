@@ -208,21 +208,17 @@
         <button onclick="runPipeline()" id="btn_smarttag" data-feature="ai.smarttag"
           class="w-full bg-teal-600 hover:bg-teal-500 py-1.5 rounded font-bold text-sm">🌳 Smart Tag (AI
           pipeline)</button>
-        <div class="grid grid-cols-2 gap-2">
-          <button onclick="runPose()" id="btn_pose" data-feature="ai.pose"
-            class="bg-cyan-700 hover:bg-cyan-600 py-1.5 rounded font-bold text-sm">🦴 Pose</button>
-          <button onclick="runOCR()" id="btn_ocr" data-feature="ai.ocr"
-            class="bg-sky-700 hover:bg-sky-600 py-1.5 rounded font-bold text-sm">🔤 OCR</button>
-        </div>
+        <button onclick="runOCR()" id="btn_ocr" data-feature="ai.ocr"
+          class="w-full bg-sky-700 hover:bg-sky-600 py-1.5 rounded font-bold text-sm">🔤 OCR</button>
         <button onclick="runSegment()" id="btn_segment" data-feature="ai.segment"
           title="Run the selected background segmentation (YOLO-seg) model on this image and add masked regions for the whitelisted classes (Settings ▸ Segmentation)."
           class="w-full bg-fuchsia-700 hover:bg-fuchsia-600 py-1.5 rounded font-bold text-sm">🎭 Segment (YOLO)</button>
         <button onclick="runBarcodes()" id="btn_barcodes" data-feature="ai.barcodes"
           title="Detect barcodes and QR codes with the configured YOLO model, then decode each one. Codes that are found but can't be read are still marked, so you keep a note of where they are."
           class="w-full bg-amber-700 hover:bg-amber-600 py-1.5 rounded font-bold text-sm">▥ Scan barcodes</button>
-        <button onclick="removePose()" id="btn_pose_remove" style="display:none" data-feature="ai.pose_remove"
-          title="Delete the current (bad) skeleton from this image"
-          class="w-full bg-rose-800 hover:bg-rose-700 py-1.5 rounded font-bold text-sm">🗑 Remove skeleton</button>
+        <!-- Extension region: modules append control buttons here via
+             registerControlButton('ai_tools', html). Not pose-specific. -->
+        <div id="ext_ai_tools" data-ext-area="ai_tools" class="flex flex-col gap-2"></div>
         <button onclick="quickTrain()" data-feature="ai.quicktrain"
           class="w-full bg-purple-600 hover:bg-purple-500 py-1.5 rounded font-bold text-sm">Quick Train</button>
 

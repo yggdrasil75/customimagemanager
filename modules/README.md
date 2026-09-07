@@ -77,7 +77,24 @@ are later locked down):
 | `host.add_asset(filename, kind=None)` | inject a JS/CSS file from your `static/` |
 | `host.add_settings_tab(id, label, icon, admin_only)` | add a Settings modal tab |
 | `host.add_worker_source(name, claim, handle, …)` | register a background worker source |
+| `host.register_pipeline_stage(name, fn, label=…)` | contribute an AI-pipeline node type |
 | `host.on_startup(fn)` | run `fn()` once after the server is up |
+
+### Contributing a pipeline stage
+
+The Smart-Tag AI pipeline runs a tree of nodes (classify, llm, boxes, ocr, …). A
+module can add its own node type:
+
+```python
+def register(host):
+    host.register_pipeline_stage("pose", lambda img_bgr: estimate(img_bgr),
+                                 label="Pose (skeleton)")
+```
+
+`fn(image_bgr)` returns that stage's result dict. The core spreads registered
+stages into the pipeline as `"<name>_fn"`, and the pipeline editor only offers a
+node type while its module is enabled — disable the module and the node becomes
+an inert no-op and disappears from the editor. See `modules/pose/module.py`.
 
 ### Front-end
 

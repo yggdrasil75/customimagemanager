@@ -130,6 +130,10 @@
     ready.then(() => apply(document)).catch(() => apply(document));
   }
 
+  // Let dynamically-injected markup (e.g. module buttons that carry
+  // data-feature) re-run the visibility pass after insertion.
+  window.applyFeatureVisibility = function(root){ apply(root || document); };
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', run);
   } else {
