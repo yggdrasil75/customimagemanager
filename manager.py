@@ -126,7 +126,7 @@ THUMB_DB  = os.path.join(MEDIA_DIR, "thumbs.db")   # disposable BLOB cache
 CFG_FILE  = "app_config.json"
 COMIC_SCHEMA = "mm.comic/1"
 
-DUP_MODEL_PATH = os.path.join(MEDIA_DIR, "dup_model.json")
+DUP_MODEL_PATH = os.path.join(MODELS_DIR, "dup_model.json")
 _dup_model     = DuplicateClassifier.load(DUP_MODEL_PATH)
 DUP_CNN_PATH   = os.path.join(MODELS_DIR, "dup_cnn.pt")
 _dup_cnn       = None   # loaded lazily after config so width_mult is known
