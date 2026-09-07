@@ -15,6 +15,10 @@
           class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">🗄 Storage</button>
         <button data-settings-tab="users" onclick="settingsTab('users')"
           class="settings-tab hidden px-3 py-1.5 rounded-t text-sm font-bold" data-admin-only>👤 Users</button>
+        <button data-settings-tab="modules" onclick="settingsTab('modules')"
+          class="settings-tab hidden px-3 py-1.5 rounded-t text-sm font-bold" data-admin-only>🧩 Modules</button>
+        <!-- Pluggable modules inject their own tab buttons here (static/modules.js). -->
+        <span id="module_settings_tabs" class="contents"></span>
       </div>
     </div>
 
@@ -446,6 +450,18 @@
     <div data-settings-pane="users" data-admin-only class="hidden overflow-y-auto flex-1 pr-1">
       <div id="settings_users_mount"></div>
     </div>
+
+    <div data-settings-pane="modules" data-admin-only class="hidden overflow-y-auto flex-1 pr-1">
+      <p class="text-[11px] text-gray-500 mb-3">Turn optional modules on or off for this install.
+        <span class="text-amber-300">Core modules</span> back the whole runtime and can't be disabled.
+        Changes take effect immediately and persist across restarts.</p>
+      <div id="modules_rows" class="space-y-2">
+        <p class="text-xs text-gray-500">Loading…</p>
+      </div>
+    </div>
+
+    <!-- Pluggable modules inject their own settings panes here (static/modules.js). -->
+    <div id="module_settings_panes" class="contents"></div>
 
     <div class="flex justify-between items-center pt-3 border-t border-gray-700 mt-3 flex-shrink-0">
       <div class="flex gap-2" data-settings-pane="storage">

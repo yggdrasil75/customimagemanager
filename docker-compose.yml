@@ -1,9 +1,14 @@
 # Three service variants share the same image build, differing only in how the
 # GPU is exposed to the container. Pick one:
 #
+#   Ultra-light (viewer):    docker compose --profile ultralight up cim-ultralight
 #   CPU (default, no GPU):   docker compose up cim
 #   NVIDIA CUDA:             docker compose --profile cuda up cim-cuda
 #   AMD ROCm:                docker compose --profile rocm up cim-rocm
+#
+# The ultra-light service builds a tiny image with none of the ML/CV stack —
+# just enough to browse a library and read/write metadata. Optional features
+# hide themselves at runtime (see optional_deps.py + capabilities.py).
 #
 # The GPU services build the image with the matching accelerator wheels
 # (GPU_BACKEND build arg) AND grant the container access to the device. Both are
@@ -22,6 +27,18 @@ x-common: &common
   restart: unless-stopped
 
 services:
+  # ── Ultra-light (image viewer only) ────────────────────────────────────────
+  # Bare minimum: gallery, UI, viewer, and the core modules (auth,
+  # capabilities, cimlogger, metadata, threading). No torch / no ML / no CV.
+  # Smallest image and fastest build. Everything heavy hides itself at runtime.
+  cim-ultralight:
+    <<: *common
+    profiles: ["ultralight"]
+    build:
+      context: .
+      args:
+        GPU_BACKEND: ultralight
+
   # ── CPU (default) ──────────────────────────────────────────────────────────
   cim:
     <<: *common

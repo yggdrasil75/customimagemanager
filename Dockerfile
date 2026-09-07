@@ -5,26 +5,44 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     YOLO_CONFIG_DIR=/app/data
 
-# System deps: cjxl (libjxl-tools) + libs for opencv, pymupdf, rawpy, pyexiv2,
-# video, insightface + calibre (ebook-convert / calibredb CLI)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libjxl-tools \
-        ffmpeg \
-        libgl1 \
-        libglib2.0-0 \
-        libexiv2-dev \
-        libboost-python-dev \
-        libgomp1 \
-        unrar-free \
-        p7zip-full \
-        calibre \
+# System deps. The ultralight profile is an image VIEWER only, so it skips the
+# heavy CLIs/libs (ffmpeg, calibre, opengl, boost) and keeps just what the core
+# metadata module and JXL thumbnails need: libjxl-tools + libexiv2.
+# Every other backend (cpu/cuda/rocm) gets the full set for the ML stack.
+RUN apt-get update \
+    && if [ "${GPU_BACKEND}" = "ultralight" ]; then \
+        apt-get install -y --no-install-recommends \
+            libjxl-tools \
+            libexiv2-dev \
+            libboost-python-dev \
+            libgomp1 ; \
+    else \
+        apt-get install -y --no-install-recommends \
+            libjxl-tools \
+            ffmpeg \
+            libgl1 \
+            libglib2.0-0 \
+            libexiv2-dev \
+            libboost-python-dev \
+            libgomp1 \
+            unrar-free \
+            p7zip-full \
+            calibre ; \
+    fi \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY requirements.txt requirements-cpu.txt requirements-cuda.txt requirements-rocm.txt ./
-RUN echo "Installing GPU backend: ${GPU_BACKEND}" \
-    && pip install -r "requirements-${GPU_BACKEND}.txt" -r requirements.txt
+COPY requirements.txt requirements-cpu.txt requirements-cuda.txt requirements-rocm.txt requirements-ultralight.txt ./
+# ultralight installs ONLY its minimal pin set (no requirements.txt heavy ML
+# stack). All other backends layer the accelerator wheels on top of the full
+# requirements.txt as before.
+RUN echo "Installing backend: ${GPU_BACKEND}" \
+    && if [ "${GPU_BACKEND}" = "ultralight" ]; then \
+        pip install -r requirements-ultralight.txt ; \
+    else \
+        pip install -r "requirements-${GPU_BACKEND}.txt" -r requirements.txt ; \
+    fi
 
 RUN if [ "${GPU_BACKEND}" = "rocm" ]; then \
         apt install migraphx half \

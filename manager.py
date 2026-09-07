@@ -23,6 +23,13 @@ import os, glob, yaml, subprocess, shutil, sys, numpy as np
 import tempfile, io, time, random, json, threading, logging
 import requests, base64, re, xml.sax.saxutils as saxutils
 from optional_deps import optional_import
+# Install the modules package FIRST: importing it registers the core modules
+# (auth, capabilities, metadata, threading) under both their new dotted paths
+# and their legacy flat names, so every `import auth` / `import thread_manager`
+# / `import exif_import` below (and inside sibling files) keeps resolving after
+# the move into modules/ subfolders. See modules/__init__.py.
+import modules
+from modules import registry as module_registry
 cv2, _HAVE_CV2 = optional_import("cv2")
 pyexiv2, _HAVE_PYEXIV2 = optional_import("pyexiv2")
 import hashlib, sqlite3, uuid, math, mimetypes, functools
@@ -197,6 +204,12 @@ state = {
     "face_estimator": "auto",
     "page_size": 200,
     "tiers": None,
+    # Per-install module on/off map, {module_id: bool}. Left empty here on
+    # purpose: load_config() calls registry.init_state() which fills it in from
+    # the persisted file (or plugin defaults when a plugin is unlisted). Seeding
+    # it from current_state() at import time would freeze a pre-discovery
+    # snapshot and wrongly disable freshly added plugins.
+    "modules": {},
     "search_quick_filters": [
         {"id": "1", "label": "Untagged",   "query": "is:untagged"},
         {"id": "2", "label": "This year",  "query": "date:2026"},
@@ -1451,25 +1464,6 @@ def _record_dup_video_sample(rel_a: str, rel_b: str, label: int) -> None:
     except Exception as e:
         access_logger.warning(f"_record_dup_video_sample: {e}")
 
-# Set when a merge/exclude records new feedback samples. The actual (expensive,
-# torch-based) retrain is deferred to dedup modal close or a rescan so it can't
-# run concurrently with more user feedback — concurrent fits corrupt autograd
-# state (in-place op version mismatch on a shared parameter tensor).
-_dup_feedback_dirty = False
-
-def _mark_dup_feedback_dirty() -> None:
-    global _dup_feedback_dirty
-    _dup_feedback_dirty = True
-
-def _retrain_dup_model_if_dirty(min_samples: int = 8) -> bool:
-    """! @brief Retrain only when feedback was recorded since the last retrain.
-    Clears the dirty flag. Called on dedup modal close and at rescan start."""
-    global _dup_feedback_dirty
-    if not _dup_feedback_dirty:
-        return False
-    _dup_feedback_dirty = False
-    return _retrain_dup_model(min_samples)
-
 def _retrain_dup_model(min_samples: int = 8) -> bool:
     """!
     @brief Refit the logistic model, and the CNN when torch and samples allow.
@@ -1949,6 +1943,10 @@ def load_config():
                     if k in state: state[k] = v
         except Exception as e:
             access_logger.error(f"load_config: {e}")
+    # Normalize the module on/off map: force core modules True, drop unknown
+    # ids, and write the cleaned map back into state so save_config persists a
+    # canonical version. Hand-disabling a core module in the file is ignored.
+    state["modules"] = module_registry.init_state(state.get("modules"))
     # Point the iqa module at the persisted model choice. Weights (if any) load
     # lazily on first score, so this does not slow down startup.
     if iqa is not None:
@@ -1976,7 +1974,7 @@ def save_config():
             "body_enabled","body_size","body_cluster_eps","object_proposals",
             "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
             "barcode_model","barcode_conf", "iqa_model","brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
-            "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers","dup_cnn_width"]
+            "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers","dup_cnn_width","modules"]
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys if k in state}, f, indent=2)
 
@@ -6824,6 +6822,42 @@ def api_state():
 def api_workers():
     return jsonify(thread_manager.status())
 
+@app.route("/api/modules")
+def api_modules():
+    """Descriptor + on/off state for every declared module.
+
+    Feeds the Modules tab in settings. Read-only and unauthenticated-safe
+    (it leaks no secrets — just which building blocks exist and whether
+    they're on), mirroring /api/state.
+    """
+    # settings_tabs is populated during register_all(); only include tabs whose
+    # owning module is still enabled.
+    tabs = [t for t in getattr(module_host, "settings_tabs", [])
+            if module_registry.is_enabled(t["module_id"])]
+    return jsonify({"modules": module_registry.status(),
+                    "settings_tabs": tabs,
+                    "missing_pip": module_registry.missing_pip()})
+
+@app.route("/api/modules/toggle", methods=["POST"])
+@_auth.require_feature("settings", action='toggle_module', fields=())
+def api_modules_toggle():
+    """Enable/disable a non-core module. Admin-gated via the settings feature.
+
+    Body: {"id": "<module_id>", "enabled": true|false}. Core modules reject
+    a disable with 400; the UI renders their toggle locked so this is a
+    belt-and-suspenders guard. On success the new map is persisted to
+    app_config.json so the choice survives a restart.
+    """
+    d = request.json or {}
+    mid = d.get("id")
+    val = bool(d.get("enabled"))
+    ok, err = module_registry.set_enabled(mid, val)
+    if not ok:
+        return jsonify({"error": err or "toggle failed"}), 400
+    state["modules"] = module_registry.current_state()
+    save_config()
+    return jsonify({"success": True, "modules": module_registry.status()})
+
 @app.route("/api/update_settings", methods=["POST"])
 @_auth.require_feature("settings", action='update_settings', fields=())
 def update_settings():
@@ -9587,11 +9621,8 @@ def dedup_status():
 @app.route("/api/dedup_retrain", methods=["POST"])
 @_auth.require_feature("dedup")
 def dedup_retrain():
-    """! @brief Refit the duplicate model once; called on dedup modal close and
-    after a bulk auto-resolve. Always marks feedback dirty first so an explicit
-    call retrains even if the flag wasn't set, then retrains once."""
-    _mark_dup_feedback_dirty()
-    return jsonify({"success": _retrain_dup_model_if_dirty()})
+    """! @brief Refit the duplicate model once; called after a bulk auto-resolve."""
+    return jsonify({"success": _retrain_dup_model()})
 
 @app.route("/api/dedup_clear", methods=["POST"])
 @_auth.require_feature("dedup")
@@ -9646,8 +9677,7 @@ def dedup_exclude():
         # Video clip-pair negative sample (fires only for video/video pairs).
         for o in others:
             _record_dup_video_sample(file, o, 0)
-        # Defer retrain to modal close / rescan to avoid concurrent fits.
-        _mark_dup_feedback_dirty()
+        _retrain_dup_model()
     except Exception as e:
         access_logger.warning(f"dedup_exclude sample: {e}")
 
@@ -9851,10 +9881,6 @@ def dedup_groups_page():
 def dedup():
     force = request.json.get("force", False) if request.is_json else False
     try:
-        # Flush any pending merge/exclude feedback into the model before scanning.
-        # Deferred here (and on modal close) so it never runs concurrently with
-        # live user feedback, which corrupts autograd state.
-        _retrain_dup_model_if_dirty()
         # ── 0. Count files on disk ────────────────────────────────────────
         state["status_text"] = "Dedup: Counting files…"
         # Union of loose + packed, so packed files are deduped too rather than
@@ -10126,9 +10152,8 @@ def dedup_merge():
             if db_id:
                 _db().execute("DELETE FROM dedup_groups WHERE id=?", (db_id,))
                 _db().commit()
-            # Defer retrain to modal close / rescan to avoid concurrent fits.
             if not skip_retrain:
-                _mark_dup_feedback_dirty()
+                _retrain_dup_model()
             return jsonify({"success":True})
         return jsonify({"success":False,"error":"Write failed"})
     except Exception as e:
@@ -13610,6 +13635,66 @@ book_routes.register(app, {
     "current_user":  lambda: (getattr(g, "user", None) or {}).get("username", ""),
 })
 
+# ── Pluggable module system ───────────────────────────────────────────────--
+# Everything above this line is the application core. Below, third-party
+# modules discovered in modules/ get their register(host) called so they can
+# extend the app through the Host surface (routes, settings tabs, assets,
+# worker sources, startup hooks). See modules/host.py + modules/loader.py.
+#
+# The Host hands modules the SAME real objects the core uses (permissive v1):
+# the Flask app, the per-request DB accessor, the live config dict, the logger,
+# and the thread manager. book_routes above is effectively a hand-wired module;
+# this generalizes that pattern so strangers can do the same without editing
+# manager.py.
+module_host = modules.host.Host(
+    app=app,
+    db=_db,
+    config=state,
+    logger=access_logger,
+    thread_manager=thread_manager,
+    media_dir=MEDIA_DIR,
+    safe_path=get_safe_path,
+    save_config=save_config,
+)
+
+# Serve each module's static/ assets at /modules/<id>/static/<file>.
+@app.route("/modules/<module_id>/static/<path:filename>")
+def module_static(module_id, filename):
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "modules", module_id, "static")
+    fp = get_safe_path(base, filename)
+    if not fp or not os.path.isfile(fp):
+        return ("not found", 404)
+    # Only ship front-end asset types; never let this become a file-read hole.
+    if not filename.lower().endswith((".js", ".css", ".map", ".svg", ".png",
+                                      ".woff", ".woff2")):
+        return ("forbidden", 403)
+    from flask import send_file as _send_file
+    return _send_file(fp)
+
+# Call register(host) on every enabled plugin, in dependency order.
+module_registry.register_all(module_host)
+
+
+@app.route("/api/module_assets")
+def api_module_assets():
+    """Front-end asset list for enabled modules, injected by app.html on load.
+
+    Returns [{"url","kind","module_id"}, …]. Kept separate from /api/modules
+    (which is the admin descriptor list) so the boot path is a single small
+    fetch that any logged-in user can make.
+    """
+    out = []
+    for a in module_host.assets:
+        if not module_registry.is_enabled(a["module_id"]):
+            continue
+        out.append({
+            "url": f"/modules/{a['module_id']}/static/{a['filename']}",
+            "kind": a["kind"],
+            "module_id": a["module_id"],
+        })
+    return jsonify({"assets": out})
+
 # ── HTML templates ────────────────────────────────────────────────────────--
 # UI templates live in templates.py (imported at top of file).
 
@@ -13639,6 +13724,9 @@ if __name__=='__main__':
                   load_stored_cfg=_load_tiers_cfg, store_cfg=_store_tiers_cfg)
     access_logger.info("Starting background book indexer…")
     book_routes.start_background()
+    # Fire module startup hooks now that the server and thread manager are up.
+    access_logger.info("Running module startup hooks…")
+    module_host.run_startup_hooks()
     thread_manager.wake()
     access_logger.info("Serving on :8000")
     serve(app, host='0.0.0.0', port=8000, threads=state["wsgi_threads"], connection_limit=1000,

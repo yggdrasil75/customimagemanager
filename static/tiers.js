@@ -28,6 +28,85 @@ function settingsTab(name) {
   else stopTiersPoll();
   if (name === 'pipeline') window.pipelineEditorRefresh && window.pipelineEditorRefresh();
   if (name === 'users') window.openUserAdmin && window.openUserAdmin();
+  if (name === 'modules') loadModulesTab();
+}
+
+/* ── Modules tab ───────────────────────────────────────────────────────────
+   Lists every declared module from /api/modules and renders an on/off toggle.
+   Core modules render locked (disabled checkbox + a "core" badge) because the
+   server refuses to disable them anyway. Toggling posts to /api/modules/toggle
+   and re-renders from the authoritative response. */
+async function loadModulesTab() {
+  const mount = document.getElementById('modules_rows');
+  if (!mount) return;
+  try {
+    const { modules } = await fetch('/api/modules').then(r => r.json());
+    renderModules(modules || []);
+  } catch (e) {
+    mount.innerHTML = '<p class="text-xs text-rose-400">Failed to load modules.</p>';
+  }
+}
+
+function renderModules(modules) {
+  const mount = document.getElementById('modules_rows');
+  if (!mount) return;
+  mount.innerHTML = modules.map(m => {
+    const locked = m.core;
+    const coreBadge = locked
+      ? '<span class="text-[10px] uppercase tracking-wide bg-amber-900/60 text-amber-300 px-1.5 py-0.5 rounded ml-2">core</span>'
+      : '';
+    const ver = (m.version && m.version !== 'builtin')
+      ? `<span class="text-[10px] text-gray-500 ml-2">v${escapeHtml(m.version)}</span>` : '';
+    const checked = m.enabled ? 'checked' : '';
+    const disabled = locked ? 'disabled' : '';
+    const cursor = locked ? 'cursor-not-allowed opacity-70' : 'cursor-pointer';
+    const req = (m.requires && m.requires.length)
+      ? `<p class="text-[10px] text-gray-600 mt-1">requires: ${m.requires.map(escapeHtml).join(', ')}</p>` : '';
+    const err = m.error
+      ? `<p class="text-[10px] text-rose-400 mt-1 font-mono whitespace-pre-wrap">${escapeHtml(m.error)}</p>` : '';
+    // A plugin whose enabled flag and registered flag disagree needs a restart.
+    const needsRestart = (!m.core && m.enabled && !m.registered && !m.error)
+      || (!m.core && !m.enabled && m.registered);
+    const restart = needsRestart
+      ? '<span class="text-[10px] text-amber-300 ml-2">restart to apply</span>' : '';
+    return `<div class="flex items-start gap-3 bg-gray-900/40 border border-gray-700 rounded p-3">
+      <label class="flex items-center ${cursor} pt-0.5">
+        <input type="checkbox" class="accent-indigo-500" ${checked} ${disabled}
+          onchange="toggleModule('${m.id}', this.checked, this)">
+      </label>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center flex-wrap">
+          <span class="text-sm font-bold text-gray-200">${escapeHtml(m.name)}</span>${coreBadge}${ver}${restart}
+        </div>
+        <p class="text-[11px] text-gray-500 mt-0.5">${escapeHtml(m.description || '')}</p>
+        ${req}${err}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function toggleModule(id, enabled, el) {
+  if (el) el.disabled = true;
+  try {
+    const res = await fetch('/api/modules/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, enabled }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'toggle failed');
+    renderModules(data.modules || []);
+  } catch (e) {
+    // Revert the checkbox and re-enable on failure.
+    if (el) { el.checked = !enabled; el.disabled = false; }
+    loadModulesTab();
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
 }
 
 async function openSettings(tab = 'general') {
