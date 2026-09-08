@@ -12862,6 +12862,35 @@ def api_box_labels():
     return jsonify({"success": True, "labels": sorted(labels)})
 
 
+@app.route("/api/trainer/validate", methods=["POST"])
+@_auth.require_feature("ai.trainer.run", action="trainer_validate", fields=("set",))
+def trainer_validate():
+    """Run the set's trained model over its members, diff predictions against the
+    stored ground-truth boxes, and report per-image and aggregate accuracy."""
+    d = request.json or {}
+    set_name = (d.get("set") or "").strip()
+    if not set_name:
+        return jsonify({"success": False, "error": "set name required"}), 400
+
+    weights = ts.get_meta(_db(), set_name).get("weights") \
+        or state.get("trainer_last_weights")
+    if not weights or not os.path.exists(weights):
+        return jsonify({"success": False,
+                        "error": "No trained model for this set yet — train first."}), 400
+
+    try:
+        conf = float(d.get("conf", 0.25))
+    except (TypeError, ValueError):
+        conf = 0.25
+    try:
+        iou_ok = float(d.get("iou_ok", 0.7))
+    except (TypeError, ValueError):
+        iou_ok = 0.7
+    iou_min = 0.3
+
+    want = d.get("classes")
+    want = [c for c in want if isinstance(c, str) and c.strip()] if isinstance(want, list) else None
+    want_set = set(want) if want else None
 
     # Optionally pull fresh, never-seen images into the set for this validation.
     added_new = []
