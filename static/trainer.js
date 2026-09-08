@@ -635,7 +635,7 @@
   // expose the handlers the pane markup calls
   Object.assign(window, {
     trInit, trOnSetChange, trBuildSet, trClearSet, trDeleteSet,
-    trOpen, trPick, trPickByPath, trStartTraining,
+    trOpen, trPick, trPickByPath, trStartTraining, trChangePage,
     trValidate, trAccept, onBoxesSaved,
     trSetGallerySafe, trClassChanged,
     trPresetSelect, trPresetReload, trPresetOverwrite, trPresetNew, trPresetDelete,
