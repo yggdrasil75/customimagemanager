@@ -3463,6 +3463,7 @@ def yolo_train_worker_cfg(dataset_dir: str, yaml_path: str, base_model: str,
         "hsv_h", "hsv_s", "hsv_v", "degrees", "translate", "scale", "shear",
         "perspective", "flipud", "fliplr", "mosaic", "mixup", "copy_paste",
     }
+    run_name = str((cfg or {}).get("_run_name", "train"))
     clean = {}
     for k, v in (cfg or {}).items():
         if k in ALLOWED and v is not None and v != "":
@@ -3474,7 +3475,6 @@ def yolo_train_worker_cfg(dataset_dir: str, yaml_path: str, base_model: str,
     # Pin the run's output location so validation knows exactly where best.pt is.
     # project/name/exist_ok are Ultralytics-native; we set them here rather than
     # exposing them as tunable cfg (they're plumbing, not hyperparameters).
-    run_name = str(clean.pop("_run_name", "train"))
     clean.setdefault("exist_ok", True)
     try:
         training_logger.info("Starting LOCAL YOLO Training (cfg)")
