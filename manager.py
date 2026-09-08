@@ -12921,24 +12921,42 @@ def trainer_validate():
         bgr = img[:, :, ::-1] if (img.ndim == 3 and img.shape[2] >= 3) else img
         keep_classes = want_set if want_set else None
         pred = _detect_obb_or_box(bgr, weights, conf=conf, keep_classes=keep_classes)
-        gt = (read_metadata(fp) or {}).get("regions", []) or []
-        if want_set:
-            gt = [r for r in gt if (r.get("class_name") or "").strip() in want_set]
-        diff = tv.diff_image(gt, pred, iou_ok=iou_ok, iou_min=iou_min)
-        per_image.append(diff)
+        is_new = rp in new_set
+        if is_new:
+            # New image: no ground truth to compare against. Run the model and
+            # store its predictions for human review — do NOT score it (an
+            # empty-GT diff would read as all-false-positives and drag F1 to 0).
+            diff = tv.propose_image(pred)
+        else:
+            gt = (read_metadata(fp) or {}).get("regions", []) or []
+            if want_set:
+                gt = [r for r in gt if (r.get("class_name") or "").strip() in want_set]
+            diff = tv.diff_image(gt, pred, iou_ok=iou_ok, iou_min=iou_min)
+            per_image.append(diff)
         results.append({
             "rel_path": rp, "thumb": f"/api/thumb/{rp}",
-            "is_new": rp in new_set,
+            "is_new": is_new,
             "mean_iou": diff["mean_iou"], "counts": diff["counts"],
             "boxes": diff["boxes"],
         })
 
-    summary = tv.aggregate(per_image, iou_ok=iou_ok)
-    ts.set_meta(_db(), set_name, accuracy=summary.get("f1"))
+    if per_image:
+        summary = tv.aggregate(per_image, iou_ok=iou_ok)
+        ts.set_meta(_db(), set_name, accuracy=summary.get("f1"))
+    else:
+        # New-only run: nothing to score. Report the proposal counts so the
+        # UI has something to show, but leave f1/precision/recall null and
+        # DON'T overwrite the set's stored accuracy from a real validation.
+        summary = tv.aggregate([], iou_ok=iou_ok)
+        summary["f1"] = summary["precision"] = summary["recall"] = None
+        summary["mean_iou"] = None
+        summary["scored"] = False
+    summary.setdefault("scored", bool(per_image))
     # Worst images first: most dropped/added, then lowest IoU — that's where the
-    # user's confirm/deny attention is best spent.
+    # user's confirm/deny attention is best spent. New rows have mean_iou None
+    # (unscored); sort them after scored rows by treating None as worst.
     results.sort(key=lambda r: (-(r["counts"]["dropped"] + r["counts"]["added"]),
-                                r["mean_iou"]))
+                                r["mean_iou"] if r["mean_iou"] is not None else -1.0))
     return jsonify({"success": True, "set": set_name, "summary": summary,
                     "added_new": added_new, "images": results})
 

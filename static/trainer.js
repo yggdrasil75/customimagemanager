@@ -361,13 +361,21 @@
 
     const s = d.summary, c = s.counts;
     const bound = num('tr_val_bound');
-    const below = (s.f1 != null && bound != null && s.f1 < bound);
+    const scored = s.scored !== false && s.f1 != null;
+    const below = (scored && bound != null && s.f1 < bound);
+    if (!scored) {
+      // New-only run: predictions were stored for review, nothing was scored.
+      $('tr_val_summary').innerHTML =
+        `<div class="text-gray-300">Proposed boxes on ${(d.added_new || []).length} new image(s) — review and Accept below.</div>` +
+        `<div class="text-gray-400 mt-0.5">` + chip('added', c.added) + `</div>`;
+    } else {
     $('tr_val_summary').innerHTML =
       `<div>Accuracy: <b class="${below ? 'text-red-400' : 'text-green-400'}">F1 ${fmt(s.f1)}</b>` +
       ` · mean IoU ${fmt(s.mean_iou)} · P ${fmt(s.precision)} / R ${fmt(s.recall)}</div>` +
       `<div class="text-gray-400 mt-0.5">` +
       chip('correct', c.correct) + chip('tightened', c.tightened) + chip('loosened', c.loosened) +
       chip('shifted', c.shifted) + chip('dropped', c.dropped) + chip('added', c.added) + `</div>`;
+    }
 
     vres = {};
     $('tr_val_list').innerHTML = (d.images || []).map((im, i) => {
@@ -390,10 +398,14 @@
     const rt = $('tr_val_retrain');
     if (rt) rt.classList.toggle('hidden', !below);
     const accEl = $('tr_acc');
-    if (accEl) accEl.innerHTML = ` · <span class="${below ? 'text-red-400' : 'text-green-400'}">F1 ${fmt(s.f1)}</span>`;
-    trStatus(below
-      ? `F1 ${fmt(s.f1)} is below your bound ${fmt(bound)} — review, accept fixes, then retrain.`
-      : `F1 ${fmt(s.f1)} meets your bound ${fmt(bound)}.`);
+    if (accEl && scored) accEl.innerHTML = ` · <span class="${below ? 'text-red-400' : 'text-green-400'}">F1 ${fmt(s.f1)}</span>`;
+    if (!scored) {
+      trStatus(`Stored proposals for ${(d.added_new || []).length} new image(s) — review and Accept, then they become labelled training data.`);
+    } else {
+      trStatus(below
+        ? `F1 ${fmt(s.f1)} is below your bound ${fmt(bound)} — review, accept fixes, then retrain.`
+        : `F1 ${fmt(s.f1)} meets your bound ${fmt(bound)}.`);
+    }
   }
 
   function chip(kind, n) {
