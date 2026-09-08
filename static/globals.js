@@ -69,55 +69,6 @@ function registerControlButton(area, html){
 function refreshControlButtons(){
   document.querySelectorAll('[data-ext-area]').forEach(_applyExtButtonsTo);
 }
-// ── NR-IQA stars ─────────────────────────────────────────────────────────────
-// Compact star badge shown on a gallery tile. score is 0..5 (halves) or null.
-function starBadge(score){
-  if(score===null||score===undefined) return '';
-  const full=Math.floor(score), half=(score-full)>=0.5;
-  let s='★'.repeat(full)+(half?'½':'');
-  if(!s) s='·';
-  return `<span class="iqa-stars" title="Quality: ${score}/5">${s}</span>`;
-}
-
-// Interactive 0..5 star control in the detail panel.
-function renderStars(){
-  const el=document.getElementById('meta_stars'); if(!el) return;
-  const score=currentIqa;
-  let html='';
-  for(let i=1;i<=5;i++){
-    const on=(score!==null&&score!==undefined&&score>=i-0.001);
-    const halfOn=(score!==null&&score!==undefined&&!on&&score>=i-0.5);
-    html+=`<span class="star ${on?'on':''}" data-v="${i}"
-              onclick="setStars(${i})" title="${i} star${i>1?'s':''}">${on?'★':(halfOn?'⯨':'☆')}</span>`;
-  }
-  el.innerHTML=html;
-  document.getElementById('iqa_manual_badge').classList.toggle('hidden',!currentIqaManual);
-  const hint=document.getElementById('iqa_brisque_hint');
-  if(hint) hint.textContent=(score===null||score===undefined)?'unscored':`${score}/5`;
-}
-async function setStars(v){
-  if(!currentFile) return;
-  currentIqa=v; currentIqaManual=true; renderStars();
-  await fetch('/api/iqa_set',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename:currentFile,stars:v})}).then(r=>r.json()).catch(()=>{});
-  updateTileStar(currentFile,v);
-}
-async function clearStars(){
-  if(!currentFile) return;
-  currentIqa=null; currentIqaManual=false; renderStars();
-  await fetch('/api/iqa_set',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename:currentFile,stars:null})}).then(r=>r.json()).catch(()=>{});
-  updateTileStar(currentFile,null);
-}
-function updateTileStar(fn,score){
-  const tile=document.getElementById('t_'+fn.replace(/[^a-zA-Z0-9]/g,'_'));
-  if(!tile) return;
-  tile.querySelector('.iqa-stars')?.remove();
-  if(score!==null&&score!==undefined){
-    const tmp=document.createElement('div'); tmp.innerHTML=starBadge(score);
-    const node=tmp.firstElementChild; if(node) tile.appendChild(node);
-  }
-}
 
 // ── Tags list box ────────────────────────────────────────────────────────────
 function syncTagMirror(){
@@ -331,7 +282,6 @@ function populateSettingsForm(s){
       _set('cfg_model', s.oai_model||'');
       _set('cfg_embed_model', s.oai_embed_model||'');
       _set('cfg_yolo_size', s.yolo_size||'n');
-      loadIqaModels(s.iqa_model||'brisque');
       loadSegModels(s.sam_model,s.bg_seg_model,s.bg_seg_enabled,s.bg_seg_classes);
       // faces / people
       const _fb=document.getElementById('cfg_face_bg');

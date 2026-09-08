@@ -36,6 +36,71 @@
   }
 
   // ── 2. render module settings tabs ────────────────────────────────────────
+  // Render module-contributed settings fields into their target pane. For now
+  // pane="general" is supported (the default pane); a field's value is saved
+  // through the same /api/update_settings path core settings use.
+  function buildSettingsFields(fields) {
+    const byPane = {};
+    for (const f of fields) (byPane[f.pane || "general"] ||= []).push(f);
+    for (const pane in byPane) {
+      const mount = document.getElementById("module_settings_fields_" + pane);
+      if (!mount) continue;
+      mount.innerHTML = "";
+      for (const f of byPane[pane]) mount.appendChild(fieldEl(f));
+    }
+    if (window.applyFeatureVisibility) applyFeatureVisibility();
+  }
+
+  function fieldEl(f) {
+    const wrap = document.createElement("label");
+    wrap.className = "block text-xs text-gray-300";
+    if (f.admin_only) wrap.setAttribute("data-admin-only", "");
+    const title = document.createElement("div");
+    title.className = "font-bold mb-1";
+    title.textContent = f.label;
+    wrap.appendChild(title);
+    let input;
+    if (f.kind === "select") {
+      input = document.createElement("select");
+      input.className = "w-full bg-gray-900 border border-gray-700 rounded px-2 py-1";
+      for (const o of f.options || []) {
+        const opt = document.createElement("option");
+        opt.value = o.value; opt.textContent = o.label;
+        if (o.value === f.value) opt.selected = true;
+        input.appendChild(opt);
+      }
+    } else if (f.kind === "toggle") {
+      input = document.createElement("input");
+      input.type = "checkbox"; input.checked = !!f.value;
+    } else {
+      input = document.createElement("input");
+      input.type = f.kind === "number" ? "number" : "text";
+      input.className = "w-full bg-gray-900 border border-gray-700 rounded px-2 py-1";
+      input.value = f.value == null ? "" : f.value;
+    }
+    input.addEventListener("change", () => {
+      const v = f.kind === "toggle" ? input.checked
+        : f.kind === "number" ? parseFloat(input.value) : input.value;
+      saveSetting(f.key, v);
+    });
+    wrap.appendChild(input);
+    if (f.help) {
+      const h = document.createElement("div");
+      h.className = "text-[10px] text-gray-500 mt-1"; h.textContent = f.help;
+      wrap.appendChild(h);
+    }
+    return wrap;
+  }
+
+  async function saveSetting(key, value) {
+    try {
+      await fetch("/api/update_settings", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [key]: value }),
+      });
+    } catch (e) { /* non-fatal */ }
+  }
+
   async function buildSettingsTabs() {
     const tabBar = document.getElementById("module_settings_tabs");
     const paneWrap = document.getElementById("module_settings_panes");
@@ -44,6 +109,7 @@
     try {
       const data = await fetch("/api/modules").then((r) => r.json());
       tabs = (data && data.settings_tabs) || [];
+      buildSettingsFields((data && data.settings_fields) || []);
     } catch (e) {
       return;
     }

@@ -270,7 +270,7 @@ def match_pose_boxes(boxes, pose, unmatched_box="keep",
 def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
                  max_boxes=12, max_steps=200, pose_fn=None, ocr_fn=None,
                  person_fn=None, panel_fn=None, seg_fn=None, endpoints=None,
-                 max_workers=None, known=None):
+                 max_workers=None, known=None, stage_fns=None):
     """Execute `tree` against `image_bgr` using the `llm` callable.
 
     Injected detectors (all optional, called as fn(image_bgr)):
@@ -309,6 +309,9 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
     # so a `name` step can label a person box before the crop is described.
     ctx["known"] = known or {}
     ctx["known_text"] = _known_text(known)
+    # rel_path lets side-effecting stages (e.g. rating's 'rate') write results
+    # keyed by file; taken from the caller's `known` facts when present.
+    ctx["rel_path"] = (known or {}).get("filename") or (known or {}).get("rel_path")
 
     endpoints = list(endpoints or [])
     parallel = len(endpoints) > 1
@@ -646,6 +649,22 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
                     if pool is not None:
                         pool.shutdown(wait=True)
                 ctx["subjects"] = all_subjects
+            cur = node.get("next")
+
+        elif stage_fns and ntype in stage_fns:
+            # Module-contributed stage (e.g. rating's 'rate'). Called with the
+            # image and the current rel_path (if known); its result is stored in
+            # ctx under the node type so later nodes/branches can read it. A
+            # stage that raises degrades to no result rather than aborting.
+            try:
+                fn = stage_fns[ntype]
+                out = fn(image_bgr, rel_path=ctx.get("rel_path"))
+                ctx[ntype] = out
+                if node.get("store") and isinstance(out, dict):
+                    store_global(node.get("store"), "json", out)
+                _report(f"{ntype}: ok")
+            except Exception as e:
+                _report(f"{ntype} failed: {e}")
             cur = node.get("next")
 
         else:

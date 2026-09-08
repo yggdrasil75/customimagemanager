@@ -39,6 +39,12 @@ CORE_CAPABILITIES = {
         "output": "list of {keypoints, conf} where keypoints is a list of "
                   "{x, y, v} with x,y normalized 0..1 and v visibility 0..1",
     },
+    "iqa": {
+        "summary": "No-reference image quality assessment: a normalized score.",
+        "input": "image as HxWx3 uint8 BGR ndarray",
+        "output": "dict {raw, quality} where quality is normalized 0..1 "
+                  "(higher = better) and raw is the model's native score",
+    },
 }
 
 

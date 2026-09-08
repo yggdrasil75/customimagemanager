@@ -50,7 +50,8 @@ class Host:
     """
 
     def __init__(self, *, app, db, config, logger, thread_manager,
-                 media_dir, safe_path, save_config, broker=None):
+                 media_dir, safe_path, save_config, broker=None,
+                 config_registry=None):
         # ── raw handles ──────────────────────────────────────────────────
         self.app = app
         self.db = db
@@ -63,6 +64,9 @@ class Host:
         # Model capability broker. Modules provide/request models through the
         # helpers below rather than importing it, so the seam stays one object.
         self.broker = broker
+        # Config registry: declared settings (defaults, validation, change
+        # handlers, persistence). Modules own their settings through it.
+        self.config_registry = config_registry
 
         # ── recorded contributions (read back by manager.py after load) ──
         # asset  = {"module_id","filename","kind"}  kind in {"js","css"}
@@ -75,6 +79,19 @@ class Host:
         # "editor"}. manager spreads the fns into run_pipeline and exposes the
         # list so the pipeline editor only offers stages whose module is on.
         self.pipeline_stages = {}
+        # DB tables a module owns: list of {"ddl", "check", "module_id"}.
+        # manager creates them after register_all and runs each check() once at
+        # startup for read-cache consistency. This is how a module adds a new
+        # searchable feature backed by its own table.
+        self.db_tables = []
+        # File-row enrichers a module contributes: fn(db, rel_paths) -> {rel_path:
+        # {field: value}}. Core folds these into gallery/list rows, so a module
+        # can attach its own per-file data (e.g. rating) without a core column.
+        self.file_enrichers = []
+        # Settings UI fields a module contributes into a pane (its own or a core
+        # default pane): list of field descriptors read by /api/modules and
+        # rendered by the settings modal.
+        self.settings_fields = []
         # which module is currently being registered (set by the loader) so
         # helpers can attribute contributions without the author passing an id
         self._current_module = None
@@ -126,6 +143,49 @@ class Host:
             "admin_only": bool(admin_only),
             "module_id": self._current_module,
         })
+
+    # ── settings ─────────────────────────────────────────────────────────
+    def add_config_key(self, key, *, default=None, save=True,
+                       validate=None, on_change=None):
+        """Declare a config setting this module owns.
+
+        The registry seeds its default into state, includes it in the save
+        allowlist (unless save=False), validates incoming values, and runs
+        on_change(new, old) when update_settings changes it. This is how a
+        module stops needing core to know its setting exists.
+        """
+        self.config_registry.declare(
+            key, default=default, save=save, validate=validate,
+            on_change=on_change, owner=self._current_module)
+
+    def on_setting_change(self, key, fn):
+        """Attach a change handler to an already-declared setting.
+
+        Convenience for the common case of adding a side effect to a key
+        (core or otherwise) without redeclaring its default.
+        """
+        d = self.config_registry._settings.get(key)
+        if d is not None:
+            d["on_change"] = fn
+
+    def add_settings_field(self, *, key, label, kind="text", pane="general",
+                           tab=None, options=None, help=None, admin_only=False):
+        """Contribute one settings-UI field bound to a config key.
+
+        kind    -- "text" | "number" | "toggle" | "select".
+        pane    -- pane id to place it in; "general" is the shared default pane.
+        tab     -- settings tab id; defaults to the module's own tab if it has
+                   one, else the General tab.
+        options -- for "select": list of {value,label} or a callable returning
+                   that (evaluated server-side at render, so a module can list
+                   e.g. its model providers).
+        The field renders in the settings modal and reads/writes its config key
+        through the normal settings save path.
+        """
+        self.settings_fields.append({
+            "key": key, "label": label, "kind": kind, "pane": pane,
+            "tab": tab, "options": options, "help": help,
+            "admin_only": bool(admin_only), "module_id": self._current_module})
 
     # ── background workers ───────────────────────────────────────────────
     def add_worker_source(self, name, claim, handle, key_of=None, cost_of=None):
@@ -195,6 +255,58 @@ class Host:
             "editor": editor or {}, "module_id": self._current_module}
         return name
 
+    # ── database tables ──────────────────────────────────────────────────
+    def add_table(self, ddl, *, check=None):
+        """Declare a DB table this module owns.
+
+        ddl   -- a CREATE TABLE IF NOT EXISTS statement (or executescript-able
+                 string of several statements) run once after modules load.
+        check -- optional callable check(db) run once at startup for read-cache
+                 consistency: a module whose table caches a slower source of
+                 truth (e.g. ratings living in file XMP) uses this to detect and
+                 repair drift. Receives a live DB connection.
+        Recorded now; manager creates the table and runs the check after
+        register_all (the DB exists well before then). Modules that are
+        disabled never get here, so their table simply isn't created.
+        """
+        self.db_tables.append({"ddl": ddl, "check": check,
+                               "module_id": self._current_module})
+
+    def register_file_enricher(self, fn):
+        """Contribute per-file fields to core gallery/list rows.
+
+        fn(db, rel_paths) -> {rel_path: {field: value, …}}. Core calls every
+        enabled module's enricher with the batch of paths it's rendering and
+        merges the returned fields into each row dict. Lets a module surface its
+        own data (rating, dimensions, …) in listings without a core column.
+        Enrichers must be cheap and batch-oriented; one query per call, not per
+        row.
+        """
+        self.file_enrichers.append({"fn": fn, "module_id": self._current_module})
+
+    def enrich_file_rows(self, db, rows, path_key="filename"):
+        """Apply all enabled enrichers to a list of row dicts in place.
+
+        rows      -- list of dicts already built from a files query.
+        path_key  -- which key holds the rel_path (gallery uses "filename").
+        Returns rows. Missing/failed enrichers are skipped, never fatal.
+        """
+        if not rows or not self.file_enrichers:
+            return rows
+        paths = [r.get(path_key) for r in rows if r.get(path_key)]
+        for e in self.file_enrichers:
+            try:
+                extra = e["fn"](db, paths) or {}
+            except Exception as ex:
+                self.logger.error(
+                    f"module '{e['module_id']}' file enricher failed: {ex}")
+                continue
+            for r in rows:
+                add = extra.get(r.get(path_key))
+                if add:
+                    r.update(add)
+        return rows
+
     # ── startup hooks ────────────────────────────────────────────────────
     def on_startup(self, fn):
         """Queue fn() to run once, after the server is set up (in __main__).
@@ -212,3 +324,26 @@ class Host:
                 fn()
             except Exception as e:
                 self.logger.error(f"module startup hook failed: {e}")
+
+    def apply_db_tables(self, db):
+        """Create module-owned tables and run their consistency checks once.
+
+        Called by manager after register_all, with a live DB connection. Each
+        table's DDL runs first (idempotent CREATE IF NOT EXISTS), then its
+        check() if given. Failures are logged, never raised, so one module's
+        bad DDL can't stop the app.
+        """
+        for t in self.db_tables:
+            try:
+                db.executescript(t["ddl"])
+                db.commit()
+            except Exception as e:
+                self.logger.error(
+                    f"module '{t['module_id']}' add_table failed: {e}")
+                continue
+            if t["check"]:
+                try:
+                    t["check"](db)
+                except Exception as e:
+                    self.logger.error(
+                        f"module '{t['module_id']}' table check failed: {e}")

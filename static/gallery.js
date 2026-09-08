@@ -1,28 +1,3 @@
-// ── NR-IQA scan (folder / library) ───────────────────────────────────────────
-async function iqaScan(scope){
-  // Only whole-library rating remains (the per-folder scan was removed along
-  // with its header button); any caller scope is treated as 'library'.
-  const tgt=document.getElementById('btn_scan_lib');
-  const btns=[tgt];
-  const body={};
-  btns.forEach(b=>{if(b){b.disabled=true;}});
-  const orig=tgt?tgt.innerHTML:''; if(tgt) tgt.innerHTML='Rating…';
-  try{
-    const d=await fetch('/api/iqa_scan',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(body)}).then(r=>r.json());
-    if(!d.success){ alert('IQA scan failed: '+(d.error||'')); }
-    else{
-      const note=d.note?(' '+d.note):'';
-      document.getElementById('status_text').innerText=
-        `IQA: scored ${d.scored} of ${d.total}.${note}`;
-      loadGallery();   // refresh tiles to show new stars
-    }
-  }catch(e){ alert('Network error during IQA scan.'); }
-  finally{
-    btns.forEach(b=>{if(b){b.disabled=false;}});
-    if(tgt) tgt.innerHTML=orig;
-  }
-}
 
 async function loadFolders(){
   try{
@@ -342,7 +317,7 @@ function renderGallery(files){
       <img alt="">
       ${isVideoFile(f)?'<span class="absolute inset-0 flex items-center justify-center text-4xl text-white/80 pointer-events-none drop-shadow-lg">▶</span>':''}
       ${item.tags.length?`<span class="tag-badge">${item.tags.length}</span>`:''}
-      ${starBadge(item.iqa_score)}
+      ${typeof starBadge==='function'?starBadge(item.iqa_score):''}
       <span class="label">${f.split('/').pop()}</span>
       <span class="sel-check hidden absolute top-1 left-1 w-4 h-4 rounded-full bg-blue-500 border-2 border-white flex items-center justify-center text-[8px] font-bold text-white">✓</span>`;
     grid.appendChild(div);
@@ -522,7 +497,7 @@ async function selectFile(fn){
     document.getElementById('meta_desc').value=d.metadata.description;
     currentIqa=(d.metadata.iqa_score===undefined?null:d.metadata.iqa_score);
     currentIqaManual=!!d.metadata.iqa_manual;
-    renderStars();
+    if(typeof renderStars==='function') renderStars();
     const ti=document.getElementById('tag_add_input'); if(ti) ti.value='';
     currentRegions=d.metadata.regions||[];
     currentAnalysis=d.metadata.analysis||null;
@@ -631,53 +606,6 @@ async function bulkDelete(){
   } else {
     alert('Bulk delete error.');
   }
-}
-
-// Rate just the selected images. Reuses /api/iqa_scan, which accepts an explicit
-// `filenames` list (overriding folder scope). This is the per-selection cousin
-// of the Review tab's "Rate library" button.
-async function bulkRate(){
-  const files=[...selectedFiles];
-  if(!files.length) return;
-  const btn=document.querySelector('#bulk_bar button[onclick="bulkRate()"]');
-  const orig=btn?btn.innerHTML:''; if(btn){ btn.disabled=true; btn.innerHTML='Rating…'; }
-  try{
-    const d=await fetch('/api/iqa_scan',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filenames:files})}).then(r=>r.json());
-    if(!d.success){ alert('Rate selected failed: '+(d.error||'')); }
-    else{
-      const note=d.note?(' '+d.note):'';
-      document.getElementById('status_text').innerText=
-        `IQA: scored ${d.scored} of ${d.total}.${note}`;
-      // Refresh tiles so the new stars show; keep the current selection intact.
-      loadGallery();
-      if(currentFile && files.includes(currentFile)) selectFile(currentFile);
-    }
-  }catch(e){ alert('Network error during rating.'); }
-  finally{ if(btn){ btn.disabled=false; btn.innerHTML=orig; } }
-}
-
-// Embed just the selected images. Reuses /api/library_embed, which accepts an
-// explicit `files` list and always re-embeds (force). Per-selection cousin of
-// the Review tab's "Generate embeddings" button; prefers the OAI endpoint.
-async function bulkEmbed(){
-  const files=[...selectedFiles];
-  if(!files.length) return;
-  const btn=document.querySelector('#bulk_bar button[onclick="bulkEmbed()"]');
-  const orig=btn?btn.innerHTML:''; if(btn){ btn.disabled=true; btn.innerHTML='Embedding…'; }
-  try{
-    const d=await fetch('/api/library_embed',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({files, force:true})}).then(r=>r.json());
-    if(!d.success){ alert('Embed selected failed: '+(d.error||'')); }
-    else{
-      document.getElementById('status_text').innerText=
-        `Embeddings (${d.backend}): ${d.embedded_now}/${files.length} selected.`;
-      showToast(`Re-embedded ${d.embedded_now}/${files.length} selected (${d.backend}).`);
-    }
-  }catch(e){ alert('Network error during embedding.'); }
-  finally{ if(btn){ btn.disabled=false; btn.innerHTML=orig; } }
 }
 
 

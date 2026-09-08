@@ -44,10 +44,6 @@ from collections import Counter
 
 import object_grouping as og
 try:
-    import iqa
-except Exception:
-    iqa = None
-try:
     import torch
 except Exception:
     torch = None
@@ -258,6 +254,7 @@ def clear_derivatives():
 
 def stage_quality(db, sig, file_list, loader, work_px=og._WORK,
                   brisque_bad=None, quality_bad=None, iqa_model=None,
+                  score_fn=None, assess_fn=None,
                   write_flags=True, skip_bad_downstream=True,
                   progress=None, should_stop=None):
     """Score every image with NR-IQA (BRISQUE + structural guard) and record a
@@ -273,8 +270,8 @@ def stage_quality(db, sig, file_list, loader, work_px=og._WORK,
     exclude from downstream stages).
     """
     _ensure_tables(db)
-    if iqa is None:
-        # IQA module unavailable — nothing to do, treat all as fine.
+    if score_fn is None:
+        # No IQA provider injected — nothing to score, treat all as fine.
         return set()
 
     done = _done_chunks(db, sig, "quality")
@@ -299,10 +296,19 @@ def stage_quality(db, sig, file_list, loader, work_px=og._WORK,
             if img is None:
                 rows.append((fn, None, None, None, 0.0, 0.0, 0, "unreadable"))
                 continue
-            # quality_bad is on the normalized 0..1 scale and works for any model;
-            # brisque_bad is the legacy BRISQUE-native threshold, still honoured.
-            r = iqa.assess(img, quality_bad=quality_bad,
-                           brisque_bad=brisque_bad, model_id=iqa_model)
+            # Scoring comes from the injected score_fn (the broker-selected IQA
+            # provider); the blank/edge verdict from assess_fn (quality_heuristic).
+            # quality_bad is on the normalized 0..1 scale; brisque_bad is the
+            # legacy BRISQUE-native threshold, still honoured.
+            sc = score_fn(img) if score_fn else {"raw": None, "quality": None}
+            if assess_fn:
+                r = assess_fn(img, sc.get("quality"), raw=sc.get("raw"),
+                              model=(iqa_model or ""),
+                              quality_bad=quality_bad, brisque_bad=brisque_bad)
+            else:
+                r = {"raw": sc.get("raw"), "quality": sc.get("quality"),
+                     "model": iqa_model or "", "sharpness": 0.0, "edges": 0.0,
+                     "bad": False, "reason": ""}
             rows.append((fn, r["raw"], r["quality"], r["model"],
                          r["sharpness"], r["edges"],
                          1 if r["bad"] else 0, r["reason"]))
@@ -666,6 +672,7 @@ def stage_assign(db, sig, progress=None):
 def run_all(db, file_list, loader, tag_fn=None, depth_model=None,
             cnn_model=None, max_regions=15, eps=0.18, min_cluster=2,
             brisque_bad=None, quality_bad=None, iqa_model=None, write_flags=True,
+            score_fn=None, assess_fn=None,
             progress=None, should_stop=None, seed_fn=None,
             stages=("quality", "depth", "boxes", "cluster", "assign")):
     """Run the requested stages in order. Each is independently resumable, so
@@ -682,6 +689,7 @@ def run_all(db, file_list, loader, tag_fn=None, depth_model=None,
     if "quality" in stages:
         skip = stage_quality(db, sig, file_list, loader, brisque_bad=brisque_bad,
                              quality_bad=quality_bad, iqa_model=iqa_model,
+                             score_fn=score_fn, assess_fn=assess_fn,
                              write_flags=write_flags, progress=progress,
                              should_stop=should_stop)
 

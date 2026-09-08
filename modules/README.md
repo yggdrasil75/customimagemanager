@@ -78,7 +78,36 @@ are later locked down):
 | `host.add_settings_tab(id, label, icon, admin_only)` | add a Settings modal tab |
 | `host.add_worker_source(name, claim, handle, …)` | register a background worker source |
 | `host.register_pipeline_stage(name, fn, label=…)` | contribute an AI-pipeline node type |
+| `host.add_table(ddl, check=…)` | own a DB table (created at load; check runs once at startup) |
+| `host.register_file_enricher(fn)` | attach per-file fields to gallery/list/detail rows |
 | `host.on_startup(fn)` | run `fn()` once after the server is up |
+
+### Adding a searchable feature backed by your own table
+
+A module can own a DB table and surface its data in listings without any core
+column — this is how you add a new searchable/annotatable property (rating,
+dimensions, dominant colour, …):
+
+```python
+def register(host):
+    host.add_table(
+        "CREATE TABLE IF NOT EXISTS my_feature (rel_path TEXT PRIMARY KEY, val REAL)",
+        check=lambda db: prune_missing(db))          # startup consistency check
+
+    def enrich(db, rel_paths):                       # batch, not per-row
+        q = "SELECT rel_path, val FROM my_feature WHERE rel_path IN (%s)" \
+            % ",".join("?" * len(rel_paths))
+        return {r["rel_path"]: {"my_val": r["val"]}
+                for r in db.execute(q, rel_paths).fetchall()}
+    host.register_file_enricher(enrich)              # adds "my_val" to each row
+```
+
+The table is created after all modules load; the `check(db)` runs once at
+startup so a read-cache can reconcile against its source of truth. The enricher
+is called with each batch of paths core renders and merges its fields into the
+row dicts. Keep the source of truth in the file (XMP/EXIF via the metadata
+layer) where it should travel with the image; treat the table as a rebuildable
+cache. See `modules/rating/module.py` for a worked example.
 
 ### Contributing a pipeline stage
 

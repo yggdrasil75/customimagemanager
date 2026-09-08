@@ -18,11 +18,8 @@
       class="text-xs bg-red-800 hover:bg-red-700 px-2 py-1 rounded font-bold text-red-200">
       Delete all flagged…
     </button>
-    <button id="btn_scan_lib" onclick="iqaScan('library')"
-      title="Score image quality (NR-IQA) for the whole library — model is set in Settings"
-      class="text-xs bg-emerald-800 hover:bg-emerald-700 px-2 py-1 rounded font-bold">
-      Rate library
-    </button>
+    <!-- Rating module injects its 'Rate library' button here. -->
+    <span data-ext-area="review_actions" class="contents"></span>
     <button id="btn_embed_lib" onclick="embedLibrary(false)"
       title="Generate embeddings for the whole library (OAI endpoint if configured, else local). Powers similarity + text search."
       class="text-xs bg-purple-800 hover:bg-purple-700 px-2 py-1 rounded font-bold">

@@ -34,6 +34,7 @@ import importlib
 from .loader import registry  # noqa: F401  the ModuleRegistry singleton
 from . import host  # noqa: F401  Host class, for manager.py to construct
 from .model_broker import broker  # noqa: F401  the ModelBroker singleton
+from .config_registry import config  # noqa: F401  the ConfigRegistry singleton
 from .model_contracts import declare_core_capabilities
 
 # The core owns the initial capability contracts (box.faces, box.objects,

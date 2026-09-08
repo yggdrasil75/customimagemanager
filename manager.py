@@ -93,10 +93,7 @@ import iptc_import, iptc_fields
 import mwg_fields
 import barcodes
 import gdl
-try:
-    import iqa
-except Exception:
-    iqa = None
+import quality_heuristic
 try:
     import seg_models
 except Exception:
@@ -116,15 +113,23 @@ from templates import HTML
 easyocr, _HAVE_EASYOCR = optional_import("easyocr")
 
 # ── NR-IQA star mapping ───────────────────────────────────────────────────────
-# iqa.assess() now returns a NORMALIZED quality in 0..1 (higher = better) no
-# matter which model is selected, so the star mapping no longer needs to know
-# about BRISQUE's inverted 0..100 range. Blank/featureless images are capped at
-# 1 star by iqa.to_stars() so junk can't masquerade as five.
+# Quality scoring now comes from the broker-selected IQA provider (brisque /
+# pyiqa modules), which returns a NORMALIZED quality in 0..1 (higher = better).
+# The star mapping + junk gate live in quality_heuristic (core, model-agnostic).
 def quality_to_stars(q, blank=False):
     """Map normalized quality (0..1, higher=better) to 0..5 stars."""
-    if iqa is None:
+    return quality_heuristic.to_stars(q, blank=blank)
+
+def _iqa_score_fn():
+    """Broker-selected IQA scorer as fn(img_bgr)->{raw,quality}, or None.
+
+    None when no IQA provider is available (no brisque/pyiqa module, or deps
+    missing), so callers treat quality as unknown and skip the gate."""
+    try:
+        return modules.broker.request("iqa")
+    except Exception:
         return None
-    return iqa.to_stars(q, blank=blank)
+
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 app       = Flask(__name__)
@@ -173,7 +178,6 @@ state = {
     },
     "brand_name": "Media Library",
     "brand_logo": "",   # relative URL under /media, or "" for none
-    "iqa_model": "brisque",
     "yolo_size": "n",
     "dup_cnn_width": 1.0,   # Siamese dup-CNN channel multiplier (0.25..2.0)
     "face_bg_enabled": False,
@@ -1287,21 +1291,19 @@ def _query_files(search: str, offset: int, limit: int,
     if need > 0:
         file_offset = max(0, offset - nc)
         rows = _db().execute(
-            f"SELECT rel_path, tags, description, width, height, iqa_score, "
-            f"rating, rating_user FROM files{where_sql} "
+            f"SELECT rel_path, tags, description, width, height "
+            f"FROM files{where_sql} "
             f"ORDER BY rel_path LIMIT ? OFFSET ?", (*p, need, file_offset)).fetchall()
+        batch = []
         for r in rows:
-            # A genuine user rating (in-app or EXIF) overrides the BRISQUE estimate.
-            user_rating = r["rating"] if r["rating_user"] else None
-            eff_rating = user_rating if user_rating is not None else r["iqa_score"]
-            entries.append({"kind": "image", "filename": r["rel_path"],
-                            "tags": json.loads(r["tags"] or "[]"),
-                            "description": r["description"] or "",
-                            "iqa_score": r["iqa_score"],
-                            "rating": r["rating"],
-                            "rating_user": bool(r["rating_user"]),
-                            "effective_rating": eff_rating,
-                            "width": r["width"] or 0, "height": r["height"] or 0})
+            batch.append({"kind": "image", "filename": r["rel_path"],
+                          "tags": json.loads(r["tags"] or "[]"),
+                          "description": r["description"] or "",
+                          "width": r["width"] or 0, "height": r["height"] or 0})
+        # Rating fields (rating / iqa_score / effective_rating) are attached by
+        # the rating module's enricher when it's enabled; absent otherwise.
+        module_host.enrich_file_rows(_db(), batch)
+        entries.extend(batch)
     return entries, total
 
 # ── Dedup checkpoint helpers ──────────────────────────────────────────────────
@@ -1950,8 +1952,9 @@ def load_config():
     state["modules"] = module_registry.init_state(state.get("modules"))
     # Point the iqa module at the persisted model choice. Weights (if any) load
     # lazily on first score, so this does not slow down startup.
-    if iqa is not None:
-        state["iqa_model"] = iqa.set_model(state.get("iqa_model", "brisque"))
+    # (IQA model selection is now the broker's job — see model_selection /
+    # broker.init_selection after register_all; the legacy iqa_model setting is
+    # migrated into it there.)
     if seg_models is not None:
         state["sam_model"] = seg_models.resolve_sam_id(
             state.get("sam_model", seg_models.SAM_DEFAULT))
@@ -1974,8 +1977,14 @@ def save_config():
             "face_reject_drawn","face_drawn_thresh",
             "body_enabled","body_size","body_cluster_eps","object_proposals",
             "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
-            "barcode_model","barcode_conf", "iqa_model","brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
+            "barcode_model","barcode_conf", "brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
             "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers","dup_cnn_width","modules","model_selection"]
+    # Add any keys modules declared through the config registry, so a module's
+    # settings persist without being hand-added to this list.
+    try:
+        keys = list(dict.fromkeys(keys + modules.config.save_keys()))
+    except Exception:
+        pass
     with open(CFG_FILE, 'w') as f:
         json.dump({k: state[k] for k in keys if k in state}, f, indent=2)
 
@@ -6836,9 +6845,26 @@ def api_modules():
     stages = [{"name": name, "label": s["label"], "editor": s["editor"]}
               for name, s in getattr(module_host, "pipeline_stages", {}).items()
               if module_registry.is_enabled(s["module_id"])]
+    # Module-contributed settings fields; resolve callable option-lists now so
+    # the front end gets concrete choices (e.g. current iqa providers).
+    fields = []
+    for f in getattr(module_host, "settings_fields", []):
+        if not module_registry.is_enabled(f["module_id"]):
+            continue
+        opts = f.get("options")
+        if callable(opts):
+            try:
+                opts = opts()
+            except Exception:
+                opts = []
+        fields.append({"key": f["key"], "label": f["label"], "kind": f["kind"],
+                       "pane": f["pane"], "tab": f["tab"], "options": opts,
+                       "help": f["help"], "admin_only": f["admin_only"],
+                       "value": state.get(f["key"])})
     return jsonify({"modules": module_registry.status(),
                     "settings_tabs": tabs,
                     "pipeline_stages": stages,
+                    "settings_fields": fields,
                     "missing_pip": module_registry.missing_pip()})
 
 @app.route("/api/modules/toggle", methods=["POST"])
@@ -6891,6 +6917,16 @@ def api_models_select():
 @_auth.require_feature("settings", action='update_settings', fields=())
 def update_settings():
     d = request.json
+    # Registry-owned settings (core or module-declared) are validated, stored,
+    # and their change handlers fired here — no per-key branch needed below. A
+    # key not declared in the registry falls through to the legacy handling that
+    # follows. This is what lets a module own a setting (e.g. rating owns
+    # iqa_model) without manager knowing it exists.
+    _reg_errors = {}
+    for _k in list(d.keys()):
+        handled, err = modules.config.apply(_k, d[_k], state)
+        if handled and err:
+            _reg_errors[_k] = err
     # A face_size change means the NEXT detect must load different weights. The
     # detector is memoised by path in _face_cache, and _run_faces resolves the
     # path from the setting, so the cache would keep serving the old model until
@@ -6939,7 +6975,7 @@ def update_settings():
               "appearance_eps","shape_estimator","pose_estimator","face_estimator",
               "face_bg_enabled","face_bg_custom","face_detector","face_recognition","person_model","our_model","face_cluster_eps",
             "face_reject_drawn","face_drawn_thresh",
-              "body_enabled","body_size","body_cluster_eps","object_proposals","iqa_model",
+              "body_enabled","body_size","body_cluster_eps","object_proposals",
               "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
               "barcode_model","barcode_conf"):
         if k in d: state[k] = d[k]
@@ -6970,10 +7006,6 @@ def update_settings():
                 state["bg_seg_model"])
             if seg_runtime is not None:
                 seg_runtime.clear_cache()
-    # Switching the NR-IQA model only re-points the module; the new weights load
-    # lazily on the next scan, so this stays a cheap settings save.
-    if "iqa_model" in d and iqa is not None:
-        state["iqa_model"] = iqa.set_model(state["iqa_model"])
     save_config(); return jsonify({"success": True})
 
 @app.route("/api/branding", methods=["POST"])
@@ -9392,19 +9424,18 @@ def api_metadata():
             _meta_cache_put(fn, mt_, meta)
         meta = dict(meta)   # per-request copy: the rating fields below are
                             # request-specific and must not mutate the cached dict
-        row = _db().execute(
-            "SELECT iqa_score, rating, rating_user FROM files WHERE rel_path=?",
-            (fn,)).fetchone()
-        brisque = row["iqa_score"] if row else None
-        user = (row["rating"] if (row and row["rating_user"]) else None)
-        # Effective rating: a user rating (in-app or from image EXIF) overrides
-        # the preliminary BRISQUE estimate. iqa_score/iqa_manual are retained in
-        # the response for the existing UI, derived from the unified columns.
-        meta["iqa_score"]   = user if user is not None else brisque
-        meta["iqa_manual"]  = user is not None
+        # Rating fields come from the rating module's enricher (its own table),
+        # not a core column. When the module is disabled they're simply absent.
+        _rr = [{"filename": fn}]
+        module_host.enrich_file_rows(_db(), _rr)
+        _r = _rr[0]
+        brisque = _r.get("iqa_score")
+        user = _r.get("rating") if _r.get("rating_user") else None
+        meta["iqa_score"]   = _r.get("effective_rating")
+        meta["iqa_manual"]  = bool(_r.get("rating_user"))
         meta["brisque"]     = brisque
         meta["rating"]      = user
-        meta["rating_user"] = user is not None
+        meta["rating_user"] = bool(_r.get("rating_user"))
         return jsonify({"success":True,"metadata":meta})
     elif d.get("action")=="write":
         u = g.get("user") or {}
@@ -10576,6 +10607,21 @@ def _pose_stage_fn():
     stage = module_host.pipeline_stages.get("pose") if 'module_host' in globals() else None
     return stage["fn"] if stage else None
 
+def _module_stage_fns():
+    """Registered module pipeline stages as {node_type: fn}, minus the ones the
+    pipeline already takes as dedicated kwargs (pose). Passed to run_pipeline's
+    generic stage_fns so any module node type (e.g. rating's 'rate') dispatches
+    without a per-type kwarg."""
+    if 'module_host' not in globals():
+        return {}
+    out = {}
+    for name, s in module_host.pipeline_stages.items():
+        if name == "pose":
+            continue   # handled via the dedicated pose_fn kwarg
+        if module_registry.is_enabled(s["module_id"]):
+            out[name] = s["fn"]
+    return out
+
 def _ocr_fn(bgr):
     return _run_ocr(bgr)
 
@@ -10715,7 +10761,7 @@ def run_pipeline_route():
         state["status_text"] = f"Smart Tag: {msg}"
 
     try:
-        analysis = run_pipeline(tree, bgr, _llm_call, pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn,
+        analysis = run_pipeline(tree, bgr, _llm_call, pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn, stage_fns=_module_stage_fns(),
                                 person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn,
                                 endpoints=_pipeline_endpoints(), progress=_progress,
                                 known=_known_context(fp))
@@ -10748,7 +10794,7 @@ def bulk_pipeline():
                 errors.append(fn); continue
             def _prog(msg, i=i): state["status_text"] = f"Smart Tag {i+1}/{total}: {msg}"
             analysis = run_pipeline(tree, _to_bgr(img), _llm_call,
-                                    pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn,
+                                    pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn, stage_fns=_module_stage_fns(),
                                     person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn,
                                     endpoints=_pipeline_endpoints(), progress=_prog,
                                     known=_known_context(fp))
@@ -10913,10 +10959,11 @@ def quality_sweep():
       flag_junk     write flags to files table (default True)
       dry_run       if True, score but don't write flags (default False)
     """
-    if iqa is None or not iqa.available():
+    _score = _iqa_score_fn()
+    if _score is None:
         return jsonify({"success": False,
-                        "error": "IQA model unavailable (BRISQUE files missing "
-                                 "and could not be downloaded)."})
+                        "error": "No IQA model available (enable the brisque or "
+                                 "pyiqa module and pick a model in settings)."})
     body = request.json or {}
     filenames = body.get("filenames") or []
     if not filenames:
@@ -10949,6 +10996,7 @@ def quality_sweep():
     try:
         bad = ds.stage_quality(db, sig, filenames, _loader,
                                brisque_bad=brisque_bad, write_flags=write_flags,
+                               score_fn=_score, assess_fn=quality_heuristic.assess,
                                progress=_prog,
                                should_stop=lambda: bool(state.get("discover_cancel")))
     except Exception as e:
@@ -10960,21 +11008,6 @@ def quality_sweep():
     return jsonify({"success": True, "run_sig": sig, "quality": summary,
                     "flagged": sorted(bad)[:500],
                     "wrote_flags": write_flags})
-
-@app.route("/api/iqa_models")
-def api_iqa_models():
-    """NR-IQA model registry for the settings dropdown.
-
-    Every entry is a NO-REFERENCE model (full-reference metrics like SSIM/LPIPS
-    need a pristine original to compare against, which we don't have). Each
-    carries a `speed` class — fast / balanced / accurate — and an `available`
-    flag so the UI can grey out models whose deps aren't installed.
-    """
-    if iqa is None:
-        return jsonify({"success": False, "error": "iqa module unavailable",
-                        "models": [], "active": None})
-    return jsonify({"success": True, "models": iqa.list_models(),
-                    "active": iqa.get_model()})
 
 @app.route("/api/seg_models")
 def api_seg_models():
@@ -11096,128 +11129,6 @@ def api_download_sam3():
             pass
     return jsonify({"success": bool(ok), "message": msg,
                     "present": seg_models.sam3_present()})
-
-@app.route("/api/iqa_scan", methods=["POST"])
-@_auth.require_feature("ai.iqa")
-def iqa_scan():
-    """Run NR-IQA (BRISQUE) and store a 0..5 star quality score on each file row
-    so it can be shown in the list and the detail panel.
-
-    Body:
-      folder    optional; if given, only images in that folder are scored
-                ('/' = library root only). Omitted/'' = whole library.
-      filenames optional explicit list (overrides folder).
-      force     if True, rescore files that already have a score.
-                Files carrying a user rating (rating_user=1) are never scored.
-    """
-    if iqa is None or not iqa.available():
-        return jsonify({"success": False,
-                        "error": "IQA model unavailable (BRISQUE files missing "
-                                 "and could not be downloaded)."})
-    body   = request.json or {}
-    folder = (body.get("folder") or "").strip()
-    force  = bool(body.get("force"))
-    filenames = body.get("filenames") or []
-
-    db = _db()
-    if not filenames:
-        clauses = ["(comic_folder IS NULL OR comic_folder='')"]
-        params  = []
-        if folder == '/':
-            clauses.append("rel_path NOT LIKE '%/%'")
-        elif folder:
-            f = folder.strip('/').replace('\\', '/')
-            clauses.append("rel_path LIKE ? AND rel_path NOT LIKE ?")
-            params += [f + '/%', f + '/%/%']
-        where = " WHERE " + " AND ".join(clauses)
-        rows = db.execute(
-            f"SELECT rel_path, iqa_score, rating_user, iqa_model FROM files{where}",
-            params).fetchall()
-        # Skip files that already have a score from the CURRENTLY SELECTED model
-        # (unless force). A score left behind by a different model is stale — the
-        # numbers aren't comparable across models — so we re-score it. Always skip
-        # files carrying a user rating: the user rating wins, so there's no point
-        # computing a preliminary score that would be hidden anyway.
-        active = iqa.get_model()
-        filenames = [r["rel_path"] for r in rows
-                     if not r["rating_user"]
-                     and (force or r["iqa_score"] is None
-                          or (r["iqa_model"] or "brisque") != active)]
-    if not filenames:
-        return jsonify({"success": True, "scored": 0, "total": 0,
-                        "note": "Nothing to score (already scored — use force to rescan)."})
-
-    total = len(filenames)
-    state["discover_cancel"] = False
-    scored = 0
-    for i, fn in enumerate(filenames):
-        if state.get("discover_cancel"):
-            break
-        # never clobber a user rating
-        row = db.execute(
-            "SELECT rating_user FROM files WHERE rel_path=?", (fn,)).fetchone()
-        if row and row["rating_user"]:
-            continue
-        fp = get_safe_path(MEDIA_DIR, fn)
-        if not fp or not os.path.exists(fp):
-            continue
-        try:
-            img = read_jxl(fp)
-            img = _to_bgr(img) if img is not None else None
-            if img is not None:
-                img = og.downscale_to_cap(img)
-        except Exception:
-            img = None
-        if img is None:
-            continue
-        r = iqa.assess(img)
-        # `quality` is normalized 0..1 (higher=better) for EVERY model, so the
-        # star mapping is identical whether this was BRISQUE or MUSIQ. iqa_brisque
-        # keeps the model's raw number for display/debugging (the column name is
-        # historical — it now holds whichever model's native score).
-        stars = quality_to_stars(r.get("quality"), blank=r.get("blank"))
-        if stars is None:
-            continue
-        db.execute(
-            "UPDATE files SET iqa_score=?, iqa_brisque=?, iqa_model=? "
-            "WHERE rel_path=? AND COALESCE(rating_user,0)=0",
-            (stars, r.get("raw"), r.get("model"), fn))
-        scored += 1
-        if scored % 25 == 0:
-            db.commit()
-        state["status_text"] = f"[IQA] {i+1}/{total} scored…"
-    db.commit()
-    state["status_text"] = f"IQA scan complete — scored {scored} image(s)."
-    return jsonify({"success": True, "scored": scored, "total": total})
-
-@app.route("/api/iqa_set", methods=["POST"])
-@_auth.require_feature("ai.iqa")
-def iqa_set():
-    """Set (or clear) the user's 0..5 star rating for one file. This is the
-    manual-rating entry point: it writes the unified `rating`/`rating_user`
-    columns (not iqa_score, which is reserved for the preliminary BRISQUE
-    estimate), so a user rating always overrides BRISQUE and a rescan never
-    clobbers it. Clearing reverts to the BRISQUE preliminary score."""
-    body  = request.json or {}
-    fn    = body.get("filename", "")
-    stars = body.get("stars", None)
-    fp = get_safe_path(MEDIA_DIR, fn)
-    if not fp or not os.path.exists(fp):
-        return jsonify({"success": False, "error": "File not found."})
-    if stars is None:
-        # Clear the user rating -> fall back to the BRISQUE preliminary score.
-        _db().execute(
-            "UPDATE files SET rating=NULL, rating_user=0 WHERE rel_path=?", (fn,))
-    else:
-        try:
-            stars = int(max(0, min(5, round(float(stars)))))
-        except Exception:
-            return jsonify({"success": False, "error": "Invalid stars value."})
-        _db().execute(
-            "UPDATE files SET rating=?, rating_user=1 WHERE rel_path=?",
-            (stars, fn))
-    _db().commit()
-    return jsonify({"success": True, "stars": stars})
 
 # ════════════════════════════ IMAGE-LEVEL PIPELINE ═══════════════════════════
 # A lighter, image-level layer beneath object discovery. Five MANUAL steps, each
@@ -11580,8 +11491,7 @@ def _entries_for_files(rel_paths):
     CH = 400
     for i in range(0, len(rel_paths), CH):
         chunk = rel_paths[i:i + CH]
-        q = ("SELECT rel_path, tags, description, width, height, iqa_score, "
-             "rating, rating_user "
+        q = ("SELECT rel_path, tags, description, width, height "
              "FROM files WHERE rel_path IN (%s)" % ",".join("?" * len(chunk)))
         for r in _db().execute(q, chunk).fetchall():
             rows[r["rel_path"]] = r
@@ -11590,16 +11500,12 @@ def _entries_for_files(rel_paths):
         r = rows.get(rp)
         if not r:
             continue
-        user_rating = r["rating"] if r["rating_user"] else None
-        eff_rating = user_rating if user_rating is not None else r["iqa_score"]
         out.append({"kind": "image", "filename": r["rel_path"],
                     "tags": json.loads(r["tags"] or "[]"),
                     "description": r["description"] or "",
-                    "iqa_score": r["iqa_score"],
-                    "rating": r["rating"],
-                    "rating_user": bool(r["rating_user"]),
-                    "effective_rating": eff_rating,
                     "width": r["width"] or 0, "height": r["height"] or 0})
+    # Rating fields attached by the rating module's enricher when enabled.
+    module_host.enrich_file_rows(_db(), out)
     return out
 
 def _table_exists(db, name):
@@ -11728,6 +11634,7 @@ def discover_objects_staged():
             depth_model=depth_model, cnn_model=cnn_model,
             max_regions=max_regions, eps=eps, min_cluster=min_cluster,
             brisque_bad=brisque_bad, write_flags=write_flags,
+            score_fn=_iqa_score_fn(), assess_fn=quality_heuristic.assess,
             progress=_prog, should_stop=_stop, stages=stages,
             seed_fn=_seeds)
     except Exception as e:
@@ -11761,8 +11668,7 @@ def discover_objects_staged():
                     "proposals_effective": ("heuristic" if sam_err else prop_src),
                     "sam_error": sam_err,
                     "yolo_seeds": use_seeds,
-                    "iqa_model": (ds.iqa.get_model() if (ds.iqa and ds.iqa.available())
-                                  else "unavailable"),
+                    "iqa_model": (modules.broker.selected_id("iqa") or "unavailable"),
                     "total_objects": total_objs,
                     "clusters": summary[:200] if summary else None})
 
@@ -12271,7 +12177,7 @@ def comic_pipeline_route():
                 errors.append(page); continue
             def _prog(msg, i=i): state["status_text"] = f"Comic {i+1}/{total}: {msg}"
             analysis = run_pipeline(tree, _to_bgr(img), _llm_call,
-                                    pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn,
+                                    pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn, stage_fns=_module_stage_fns(),
                                     person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn,
                                     endpoints=_pipeline_endpoints(), progress=_prog,
                                     known=_known_context(fp))
@@ -13595,6 +13501,7 @@ module_host = modules.host.Host(
     safe_path=get_safe_path,
     save_config=save_config,
     broker=modules.broker,
+    config_registry=modules.config,
 )
 
 # Serve each module's static/ assets at /modules/<id>/static/<file>.
@@ -13619,7 +13526,25 @@ module_registry.register_all(module_host)
 # from persisted config. Kept after register_all so unknown/removed providers
 # are dropped rather than dangling. Written back so save_config persists a clean
 # map.
+# Seed defaults for any config keys modules declared (e.g. rating's iqa_model)
+# that aren't already in state from the loaded config.
+modules.config.seed_defaults(state)
+
 state["model_selection"] = modules.broker.init_selection(state.get("model_selection"))
+# Migrate the legacy single iqa_model setting into the broker's per-capability
+# selection (first run after the IQA refactor). Harmless once migrated.
+_legacy_iqa = state.get("iqa_model")
+if _legacy_iqa and "iqa" not in state["model_selection"]:
+    if modules.broker.select("iqa", _legacy_iqa)[0]:
+        state["model_selection"] = modules.broker.current_selection()
+
+# Create module-owned DB tables and run their startup consistency checks. Done
+# after register_all so every enabled module has declared its tables, and after
+# _init_db so the core schema already exists for foreign references.
+try:
+    module_host.apply_db_tables(_db())
+except Exception as _e:
+    access_logger.error(f"apply_db_tables: {_e}")
 
 
 @app.route("/api/module_assets")
