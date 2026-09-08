@@ -275,11 +275,15 @@
         freeze: num('tr_freeze'), dropout: num('tr_dropout'), seed: num('tr_seed'),
         workers: num('tr_workers'), close_mosaic: num('tr_close_mosaic'),
         cos_lr: $('tr_cos_lr').checked, rect: $('tr_rect').checked, single_cls: $('tr_single_cls').checked,
-        hsv_h: num('tr_hsv_h'), hsv_s: num('tr_hsv_s'), hsv_v: num('tr_hsv_v'),
-        degrees: num('tr_degrees'), translate: num('tr_translate'), scale: num('tr_scale'),
-        shear: num('tr_shear'), perspective: num('tr_perspective'),
-        flipud: num('tr_flipud'), fliplr: num('tr_fliplr'),
-        mosaic: num('tr_mosaic'), mixup: num('tr_mixup'), copy_paste: num('tr_copy_paste'),
+        n_aug: num('tr_n_aug'),
+        aug_rotate_p: num('tr_aug_rotate_p'), aug_rotate: num('tr_aug_rotate'),
+        aug_scale_p: num('tr_aug_scale_p'), aug_scale: num('tr_aug_scale'),
+        aug_translate_p: num('tr_aug_translate_p'), aug_translate: num('tr_aug_translate'),
+        aug_shear_p: num('tr_aug_shear_p'), aug_shear: num('tr_aug_shear'),
+        aug_fliplr_p: num('tr_aug_fliplr_p'), aug_flipud_p: num('tr_aug_flipud_p'),
+        aug_hsv_h_p: num('tr_aug_hsv_h_p'), aug_hsv_h: num('tr_aug_hsv_h'),
+        aug_hsv_s_p: num('tr_aug_hsv_s_p'), aug_hsv_s: num('tr_aug_hsv_s'),
+        aug_hsv_v_p: num('tr_aug_hsv_v_p'), aug_hsv_v: num('tr_aug_hsv_v'),
       });
     }
     return cfg;
@@ -361,13 +365,21 @@
 
     const s = d.summary, c = s.counts;
     const bound = num('tr_val_bound');
-    const below = (s.f1 != null && bound != null && s.f1 < bound);
+    const scored = s.scored !== false && s.f1 != null;
+    const below = (scored && bound != null && s.f1 < bound);
+    if (!scored) {
+      // New-only run: predictions were stored for review, nothing was scored.
+      $('tr_val_summary').innerHTML =
+        `<div class="text-gray-300">Proposed boxes on ${(d.added_new || []).length} new image(s) — review and Accept below.</div>` +
+        `<div class="text-gray-400 mt-0.5">` + chip('added', c.added) + `</div>`;
+    } else {
     $('tr_val_summary').innerHTML =
       `<div>Accuracy: <b class="${below ? 'text-red-400' : 'text-green-400'}">F1 ${fmt(s.f1)}</b>` +
       ` · mean IoU ${fmt(s.mean_iou)} · P ${fmt(s.precision)} / R ${fmt(s.recall)}</div>` +
       `<div class="text-gray-400 mt-0.5">` +
       chip('correct', c.correct) + chip('tightened', c.tightened) + chip('loosened', c.loosened) +
       chip('shifted', c.shifted) + chip('dropped', c.dropped) + chip('added', c.added) + `</div>`;
+    }
 
     vres = {};
     $('tr_val_list').innerHTML = (d.images || []).map((im, i) => {
@@ -390,10 +402,14 @@
     const rt = $('tr_val_retrain');
     if (rt) rt.classList.toggle('hidden', !below);
     const accEl = $('tr_acc');
-    if (accEl) accEl.innerHTML = ` · <span class="${below ? 'text-red-400' : 'text-green-400'}">F1 ${fmt(s.f1)}</span>`;
-    trStatus(below
-      ? `F1 ${fmt(s.f1)} is below your bound ${fmt(bound)} — review, accept fixes, then retrain.`
-      : `F1 ${fmt(s.f1)} meets your bound ${fmt(bound)}.`);
+    if (accEl && scored) accEl.innerHTML = ` · <span class="${below ? 'text-red-400' : 'text-green-400'}">F1 ${fmt(s.f1)}</span>`;
+    if (!scored) {
+      trStatus(`Stored proposals for ${(d.added_new || []).length} new image(s) — review and Accept, then they become labelled training data.`);
+    } else {
+      trStatus(below
+        ? `F1 ${fmt(s.f1)} is below your bound ${fmt(bound)} — review, accept fixes, then retrain.`
+        : `F1 ${fmt(s.f1)} meets your bound ${fmt(bound)}.`);
+    }
   }
 
   function chip(kind, n) {
@@ -472,8 +488,12 @@
     'tr_patience', 'tr_optimizer', 'tr_lr0', 'tr_lrf', 'tr_momentum', 'tr_weight_decay',
     'tr_warmup_epochs', 'tr_freeze', 'tr_dropout', 'tr_seed', 'tr_workers', 'tr_close_mosaic',
     'tr_cos_lr', 'tr_rect', 'tr_single_cls',
-    'tr_hsv_h', 'tr_hsv_s', 'tr_hsv_v', 'tr_degrees', 'tr_translate', 'tr_scale',
-    'tr_shear', 'tr_perspective', 'tr_flipud', 'tr_fliplr', 'tr_mosaic', 'tr_mixup', 'tr_copy_paste',
+    'tr_n_aug',
+    'tr_aug_rotate_p', 'tr_aug_rotate', 'tr_aug_scale_p', 'tr_aug_scale',
+    'tr_aug_translate_p', 'tr_aug_translate', 'tr_aug_shear_p', 'tr_aug_shear',
+    'tr_aug_fliplr_p', 'tr_aug_flipud_p',
+    'tr_aug_hsv_h_p', 'tr_aug_hsv_h', 'tr_aug_hsv_s_p', 'tr_aug_hsv_s',
+    'tr_aug_hsv_v_p', 'tr_aug_hsv_v',
   ];
 
   // Read the current value of a settings field (checkbox → bool, else string).
@@ -635,7 +655,7 @@
   // expose the handlers the pane markup calls
   Object.assign(window, {
     trInit, trOnSetChange, trBuildSet, trClearSet, trDeleteSet,
-    trOpen, trPick, trPickByPath, trStartTraining,
+    trOpen, trPick, trPickByPath, trStartTraining, trChangePage,
     trValidate, trAccept, onBoxesSaved,
     trSetGallerySafe, trClassChanged,
     trPresetSelect, trPresetReload, trPresetOverwrite, trPresetNew, trPresetDelete,

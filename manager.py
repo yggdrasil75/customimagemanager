@@ -60,6 +60,7 @@ import discover_stages as ds
 import image_index as ii
 import training_select as ts
 import training_validate as tv
+import training_augment as ta
 import media_types as mt
 import video_tracks as vt
 import tiering
@@ -3472,6 +3473,7 @@ def yolo_train_worker_cfg(dataset_dir: str, yaml_path: str, base_model: str,
         "hsv_h", "hsv_s", "hsv_v", "degrees", "translate", "scale", "shear",
         "perspective", "flipud", "fliplr", "mosaic", "mixup", "copy_paste",
     }
+    run_name = str((cfg or {}).get("_run_name", "train"))
     clean = {}
     for k, v in (cfg or {}).items():
         if k in ALLOWED and v is not None and v != "":
@@ -3483,7 +3485,6 @@ def yolo_train_worker_cfg(dataset_dir: str, yaml_path: str, base_model: str,
     # Pin the run's output location so validation knows exactly where best.pt is.
     # project/name/exist_ok are Ultralytics-native; we set them here rather than
     # exposing them as tunable cfg (they're plumbing, not hyperparameters).
-    run_name = str(clean.pop("_run_name", "train"))
     clean.setdefault("exist_ok", True)
     try:
         training_logger.info("Starting LOCAL YOLO Training (cfg)")
@@ -12768,6 +12769,35 @@ def api_box_labels():
     return jsonify({"success": True, "labels": sorted(labels)})
 
 
+@app.route("/api/trainer/validate", methods=["POST"])
+@_auth.require_feature("ai.trainer.run", action="trainer_validate", fields=("set",))
+def trainer_validate():
+    """Run the set's trained model over its members, diff predictions against the
+    stored ground-truth boxes, and report per-image and aggregate accuracy."""
+    d = request.json or {}
+    set_name = (d.get("set") or "").strip()
+    if not set_name:
+        return jsonify({"success": False, "error": "set name required"}), 400
+
+    weights = ts.get_meta(_db(), set_name).get("weights") \
+        or state.get("trainer_last_weights")
+    if not weights or not os.path.exists(weights):
+        return jsonify({"success": False,
+                        "error": "No trained model for this set yet — train first."}), 400
+
+    try:
+        conf = float(d.get("conf", 0.25))
+    except (TypeError, ValueError):
+        conf = 0.25
+    try:
+        iou_ok = float(d.get("iou_ok", 0.7))
+    except (TypeError, ValueError):
+        iou_ok = 0.7
+    iou_min = 0.3
+
+    want = d.get("classes")
+    want = [c for c in want if isinstance(c, str) and c.strip()] if isinstance(want, list) else None
+    want_set = set(want) if want else None
 
     # Optionally pull fresh, never-seen images into the set for this validation.
     added_new = []
@@ -12798,24 +12828,42 @@ def api_box_labels():
         bgr = img[:, :, ::-1] if (img.ndim == 3 and img.shape[2] >= 3) else img
         keep_classes = want_set if want_set else None
         pred = _detect_obb_or_box(bgr, weights, conf=conf, keep_classes=keep_classes)
-        gt = (read_metadata(fp) or {}).get("regions", []) or []
-        if want_set:
-            gt = [r for r in gt if (r.get("class_name") or "").strip() in want_set]
-        diff = tv.diff_image(gt, pred, iou_ok=iou_ok, iou_min=iou_min)
-        per_image.append(diff)
+        is_new = rp in new_set
+        if is_new:
+            # New image: no ground truth to compare against. Run the model and
+            # store its predictions for human review — do NOT score it (an
+            # empty-GT diff would read as all-false-positives and drag F1 to 0).
+            diff = tv.propose_image(pred)
+        else:
+            gt = (read_metadata(fp) or {}).get("regions", []) or []
+            if want_set:
+                gt = [r for r in gt if (r.get("class_name") or "").strip() in want_set]
+            diff = tv.diff_image(gt, pred, iou_ok=iou_ok, iou_min=iou_min)
+            per_image.append(diff)
         results.append({
             "rel_path": rp, "thumb": f"/api/thumb/{rp}",
-            "is_new": rp in new_set,
+            "is_new": is_new,
             "mean_iou": diff["mean_iou"], "counts": diff["counts"],
             "boxes": diff["boxes"],
         })
 
-    summary = tv.aggregate(per_image, iou_ok=iou_ok)
-    ts.set_meta(_db(), set_name, accuracy=summary.get("f1"))
+    if per_image:
+        summary = tv.aggregate(per_image, iou_ok=iou_ok)
+        ts.set_meta(_db(), set_name, accuracy=summary.get("f1"))
+    else:
+        # New-only run: nothing to score. Report the proposal counts so the
+        # UI has something to show, but leave f1/precision/recall null and
+        # DON'T overwrite the set's stored accuracy from a real validation.
+        summary = tv.aggregate([], iou_ok=iou_ok)
+        summary["f1"] = summary["precision"] = summary["recall"] = None
+        summary["mean_iou"] = None
+        summary["scored"] = False
+    summary.setdefault("scored", bool(per_image))
     # Worst images first: most dropped/added, then lowest IoU — that's where the
-    # user's confirm/deny attention is best spent.
+    # user's confirm/deny attention is best spent. New rows have mean_iou None
+    # (unscored); sort them after scored rows by treating None as worst.
     results.sort(key=lambda r: (-(r["counts"]["dropped"] + r["counts"]["added"]),
-                                r["mean_iou"]))
+                                r["mean_iou"] if r["mean_iou"] is not None else -1.0))
     return jsonify({"success": True, "set": set_name, "summary": summary,
                     "added_new": added_new, "images": results})
 
@@ -12875,6 +12923,13 @@ def train():
     # the resize at higher effective resolution. Coords are recomputed relative
     # to the crop; the stored image/regions are never touched.
     crop_to_boxes = bool(cfg.pop("crop_to_boxes", d.get("crop_to_boxes", False)))
+    # How many augmented copies to generate per TRAIN image with our own
+    # box-safe pipeline (0 = off). Val images are never augmented.
+    try:
+        n_aug = max(0, int(cfg.pop("n_aug", d.get("n_aug", 0))))
+    except (TypeError, ValueError):
+        n_aug = 0
+    aug_on = n_aug > 0 and ta.any_enabled(cfg)
 
     abs_folder = os.path.abspath(MEDIA_DIR)
     # Each set gets its own reusable dataset subfolder, so a subset's YOLO data
@@ -13034,6 +13089,26 @@ def train():
                         "train": len(tr_pairs), "val": len(va_pairs)})
 
     # ── YOLO backend (default, unchanged) ─────────────────────────────────────
+    def _augment_into(dset_dir, split_dir_img, split_dir_lbl, bn, regions):
+        """Read the just-written train jpg and emit up to n_aug box-safe variants
+        into the same train dirs. Skips a variant if no transform fired."""
+        src = os.path.join(dset_dir, split_dir_img, bn + ".jpg")
+        img = cv2.imread(src)
+        if img is None:
+            return
+        made = 0
+        for k in range(n_aug):
+            aug_img, aug_regs, changed = ta.augment_once(img, regions, cfg)
+            if not changed or not aug_regs:
+                continue
+            abn = f"{bn}_aug{k}"
+            if not cv2.imwrite(os.path.join(dset_dir, split_dir_img, abn + ".jpg"), aug_img):
+                continue
+            _write_label(os.path.join(dset_dir, split_dir_lbl), abn, aug_regs)
+            made += 1
+        return made
+
+    aug_made = 0
     for base, bn, regions in tr_set:
         jpg = os.path.join(dset_dir, "images/train", bn + ".jpg")
         subprocess.run(['djxl', base + ".jxl", jpg],
@@ -13041,6 +13116,8 @@ def train():
         if crop_to_boxes:
             regions = _crop_jpg_to_boxes(jpg, regions)
         _write_label(os.path.join(dset_dir, "labels/train"), bn, regions)
+        if aug_on:
+            aug_made += (_augment_into(dset_dir, "images/train", "labels/train", bn, regions) or 0)
     for base, bn, regions in val_set:
         jpg = os.path.join(dset_dir, "images/val", bn + ".jpg")
         subprocess.run(['djxl', base + ".jxl", jpg],
@@ -13056,8 +13133,14 @@ def train():
     # If there's no val split, tell Ultralytics not to validate.
     if not val_b:
         cfg["val"] = False
+    # When our own box-safe pipeline generated variants, force Ultralytics'
+    # native augments OFF so it can't double-augment (and re-introduce the
+    # every-image affine + mosaic distortion this feature exists to avoid).
+    if aug_on:
+        cfg.update(ta.ULTRALYTICS_OFF)
     cfg["_run_name"] = "set_" + safe
-    state["status_text"] = f"Training… ({len(tr_b)} train | {len(val_b)} val)"
+    aug_note = f" +{aug_made} augmented" if aug_on else ""
+    state["status_text"] = f"Training… ({len(tr_b)} train{aug_note} | {len(val_b)} val)"
     # Where best.pt will land (mirrors what the worker pins).
     weights = os.path.join(os.path.abspath(MODELS_DIR), "runs", "detect",
                            "set_" + safe, "weights", "best.pt")

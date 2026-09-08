@@ -100,6 +100,28 @@ def diff_image(gt, pred, iou_ok=0.7, iou_min=0.3, area_tol=0.15):
     return {"boxes": boxes, "counts": counts, "mean_iou": round(mean_iou, 4)}
 
 
+def propose_image(pred):
+    """For a NEW image with no ground truth: turn the model's raw predictions
+    into review rows without scoring anything. Every predicted box is a proposal
+    the human can Accept as the image's first label. Returns the same shape as
+    diff_image so the frontend renders it identically, but carries no verdicts
+    that would pollute the accuracy score — the caller must NOT feed this into
+    aggregate().
+    """
+    pred = list(pred or [])
+    counts = {"correct": 0, "tightened": 0, "loosened": 0, "shifted": 0,
+              "dropped": 0, "added": 0}
+    boxes = []
+    for p in pred:
+        # 'added' verdict + pred set is exactly what trAccept() writes as the new
+        # label, and it renders under the existing 'added' chip/colour.
+        boxes.append({"verdict": "added",
+                      "class_name": (p.get("class_name") or "").strip(),
+                      "iou": 0.0, "gt": None, "pred": p})
+    counts["added"] = len(boxes)
+    return {"boxes": boxes, "counts": counts, "mean_iou": None, "n_pred": len(boxes)}
+
+
 def aggregate(per_image, iou_ok=0.7):
     """Roll per-image diffs into a dataset score.
 
