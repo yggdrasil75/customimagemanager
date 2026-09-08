@@ -275,11 +275,15 @@
         freeze: num('tr_freeze'), dropout: num('tr_dropout'), seed: num('tr_seed'),
         workers: num('tr_workers'), close_mosaic: num('tr_close_mosaic'),
         cos_lr: $('tr_cos_lr').checked, rect: $('tr_rect').checked, single_cls: $('tr_single_cls').checked,
-        hsv_h: num('tr_hsv_h'), hsv_s: num('tr_hsv_s'), hsv_v: num('tr_hsv_v'),
-        degrees: num('tr_degrees'), translate: num('tr_translate'), scale: num('tr_scale'),
-        shear: num('tr_shear'), perspective: num('tr_perspective'),
-        flipud: num('tr_flipud'), fliplr: num('tr_fliplr'),
-        mosaic: num('tr_mosaic'), mixup: num('tr_mixup'), copy_paste: num('tr_copy_paste'),
+        n_aug: num('tr_n_aug'),
+        aug_rotate_p: num('tr_aug_rotate_p'), aug_rotate: num('tr_aug_rotate'),
+        aug_scale_p: num('tr_aug_scale_p'), aug_scale: num('tr_aug_scale'),
+        aug_translate_p: num('tr_aug_translate_p'), aug_translate: num('tr_aug_translate'),
+        aug_shear_p: num('tr_aug_shear_p'), aug_shear: num('tr_aug_shear'),
+        aug_fliplr_p: num('tr_aug_fliplr_p'), aug_flipud_p: num('tr_aug_flipud_p'),
+        aug_hsv_h_p: num('tr_aug_hsv_h_p'), aug_hsv_h: num('tr_aug_hsv_h'),
+        aug_hsv_s_p: num('tr_aug_hsv_s_p'), aug_hsv_s: num('tr_aug_hsv_s'),
+        aug_hsv_v_p: num('tr_aug_hsv_v_p'), aug_hsv_v: num('tr_aug_hsv_v'),
       });
     }
     return cfg;
@@ -484,8 +488,12 @@
     'tr_patience', 'tr_optimizer', 'tr_lr0', 'tr_lrf', 'tr_momentum', 'tr_weight_decay',
     'tr_warmup_epochs', 'tr_freeze', 'tr_dropout', 'tr_seed', 'tr_workers', 'tr_close_mosaic',
     'tr_cos_lr', 'tr_rect', 'tr_single_cls',
-    'tr_hsv_h', 'tr_hsv_s', 'tr_hsv_v', 'tr_degrees', 'tr_translate', 'tr_scale',
-    'tr_shear', 'tr_perspective', 'tr_flipud', 'tr_fliplr', 'tr_mosaic', 'tr_mixup', 'tr_copy_paste',
+    'tr_n_aug',
+    'tr_aug_rotate_p', 'tr_aug_rotate', 'tr_aug_scale_p', 'tr_aug_scale',
+    'tr_aug_translate_p', 'tr_aug_translate', 'tr_aug_shear_p', 'tr_aug_shear',
+    'tr_aug_fliplr_p', 'tr_aug_flipud_p',
+    'tr_aug_hsv_h_p', 'tr_aug_hsv_h', 'tr_aug_hsv_s_p', 'tr_aug_hsv_s',
+    'tr_aug_hsv_v_p', 'tr_aug_hsv_v',
   ];
 
   // Read the current value of a settings field (checkbox → bool, else string).

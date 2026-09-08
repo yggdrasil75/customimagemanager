@@ -113,9 +113,15 @@ DEFAULT_PRESETS = {
         "tr_imgsz": 640, "tr_patience": 100, "tr_optimizer": "AdamW", "tr_lr0": 0.001,
     },
     "Heavy augmentation": {
-        "tr_epochs": 200, "tr_degrees": 10, "tr_translate": 0.2, "tr_scale": 0.7,
-        "tr_fliplr": 0.5, "tr_flipud": 0.1, "tr_mosaic": 1.0, "tr_mixup": 0.15,
-        "tr_copy_paste": 0.1, "tr_hsv_h": 0.02, "tr_hsv_s": 0.8, "tr_hsv_v": 0.5,
+        "tr_epochs": 200, "tr_n_aug": 4,
+        "tr_aug_rotate_p": 0.3, "tr_aug_rotate": 10,
+        "tr_aug_scale_p": 0.5, "tr_aug_scale": 0.3,
+        "tr_aug_translate_p": 0.3, "tr_aug_translate": 0.2,
+        "tr_aug_shear_p": 0.15, "tr_aug_shear": 8,
+        "tr_aug_fliplr_p": 0.5, "tr_aug_flipud_p": 0.1,
+        "tr_aug_hsv_h_p": 0.3, "tr_aug_hsv_h": 0.02,
+        "tr_aug_hsv_s_p": 0.5, "tr_aug_hsv_s": 0.5,
+        "tr_aug_hsv_v_p": 0.5, "tr_aug_hsv_v": 0.4,
     },
 }
 

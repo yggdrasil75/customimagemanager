@@ -60,6 +60,7 @@ import discover_stages as ds
 import image_index as ii
 import training_select as ts
 import training_validate as tv
+import training_augment as ta
 import media_types as mt
 import video_tracks as vt
 import tiering
@@ -13016,6 +13017,13 @@ def train():
     # the resize at higher effective resolution. Coords are recomputed relative
     # to the crop; the stored image/regions are never touched.
     crop_to_boxes = bool(cfg.pop("crop_to_boxes", d.get("crop_to_boxes", False)))
+    # How many augmented copies to generate per TRAIN image with our own
+    # box-safe pipeline (0 = off). Val images are never augmented.
+    try:
+        n_aug = max(0, int(cfg.pop("n_aug", d.get("n_aug", 0))))
+    except (TypeError, ValueError):
+        n_aug = 0
+    aug_on = n_aug > 0 and ta.any_enabled(cfg)
 
     abs_folder = os.path.abspath(MEDIA_DIR)
     # Each set gets its own reusable dataset subfolder, so a subset's YOLO data
@@ -13175,6 +13183,26 @@ def train():
                         "train": len(tr_pairs), "val": len(va_pairs)})
 
     # ── YOLO backend (default, unchanged) ─────────────────────────────────────
+    def _augment_into(dset_dir, split_dir_img, split_dir_lbl, bn, regions):
+        """Read the just-written train jpg and emit up to n_aug box-safe variants
+        into the same train dirs. Skips a variant if no transform fired."""
+        src = os.path.join(dset_dir, split_dir_img, bn + ".jpg")
+        img = cv2.imread(src)
+        if img is None:
+            return
+        made = 0
+        for k in range(n_aug):
+            aug_img, aug_regs, changed = ta.augment_once(img, regions, cfg)
+            if not changed or not aug_regs:
+                continue
+            abn = f"{bn}_aug{k}"
+            if not cv2.imwrite(os.path.join(dset_dir, split_dir_img, abn + ".jpg"), aug_img):
+                continue
+            _write_label(os.path.join(dset_dir, split_dir_lbl), abn, aug_regs)
+            made += 1
+        return made
+
+    aug_made = 0
     for base, bn, regions in tr_set:
         jpg = os.path.join(dset_dir, "images/train", bn + ".jpg")
         subprocess.run(['djxl', base + ".jxl", jpg],
@@ -13182,6 +13210,8 @@ def train():
         if crop_to_boxes:
             regions = _crop_jpg_to_boxes(jpg, regions)
         _write_label(os.path.join(dset_dir, "labels/train"), bn, regions)
+        if aug_on:
+            aug_made += (_augment_into(dset_dir, "images/train", "labels/train", bn, regions) or 0)
     for base, bn, regions in val_set:
         jpg = os.path.join(dset_dir, "images/val", bn + ".jpg")
         subprocess.run(['djxl', base + ".jxl", jpg],
@@ -13197,8 +13227,14 @@ def train():
     # If there's no val split, tell Ultralytics not to validate.
     if not val_b:
         cfg["val"] = False
+    # When our own box-safe pipeline generated variants, force Ultralytics'
+    # native augments OFF so it can't double-augment (and re-introduce the
+    # every-image affine + mosaic distortion this feature exists to avoid).
+    if aug_on:
+        cfg.update(ta.ULTRALYTICS_OFF)
     cfg["_run_name"] = "set_" + safe
-    state["status_text"] = f"Training… ({len(tr_b)} train | {len(val_b)} val)"
+    aug_note = f" +{aug_made} augmented" if aug_on else ""
+    state["status_text"] = f"Training… ({len(tr_b)} train{aug_note} | {len(val_b)} val)"
     # Where best.pt will land (mirrors what the worker pins).
     weights = os.path.join(os.path.abspath(MODELS_DIR), "runs", "detect",
                            "set_" + safe, "weights", "best.pt")
