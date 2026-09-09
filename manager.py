@@ -3645,6 +3645,21 @@ def _detect_obb_or_box(img_bgr, model_path: str, keep_classes: set | None = None
     @note Input is coerced to 3-channel uint8 BGR first, since YOLO's first conv
           layer requires exactly 3 channels.
     """
+    # Broker dispatch: if a registered 'box' provider handles this model file
+    # (YOLO for .pt, Mayaku for its own format, …), use it. It returns the same
+    # canonical {class_name,cx,cy,w,h} shape. Falls through to the direct YOLO
+    # path below when no provider matches, so this stays safe if modules are off.
+    try:
+        _det = modules.broker.detector_for("box", model_path)
+    except Exception:
+        _det = None
+    if _det is not None:
+        try:
+            return _det(img_bgr, model_path, keep_classes=keep_classes,
+                        conf=conf, as_obb=as_obb)
+        except Exception as e:
+            access_logger.error(f"box provider detect({model_path}): {e}")
+            return []
     try:
         if img_bgr is None or getattr(img_bgr, "size", 0) == 0:
             return []
@@ -3764,6 +3779,19 @@ def _detect_obb_or_box_batch(imgs, model_path: str, keep_classes: set | None = N
     n = len(imgs)
     if n == 0:
         return []
+    # Broker dispatch (batch): prefer a 'box' provider that handles this model
+    # and exposes a .batch form; else fall through to the direct YOLO batch path.
+    try:
+        _det = modules.broker.detector_for("box", model_path)
+    except Exception:
+        _det = None
+    if _det is not None and hasattr(_det, "batch"):
+        try:
+            return _det.batch(imgs, model_path, keep_classes=keep_classes,
+                              conf=conf, as_obb=as_obb)
+        except Exception as e:
+            access_logger.error(f"box provider detect_batch({model_path}): {e}")
+            return [[] for _ in range(n)]
     coerced, valid = [], []
     for im in imgs:
         c = _coerce_bgr3(im)

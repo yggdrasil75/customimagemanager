@@ -15,6 +15,15 @@ passes around.
 
 # cap_id -> contract kwargs for broker.declare()
 CORE_CAPABILITIES = {
+    "box": {
+        "summary": "Run an object/keypoint detector by model path and return "
+                   "normalized boxes. Path-parameterized: providers declare "
+                   "which model files they can run (YOLO .pt, Mayaku, …).",
+        "input": "detect(img_bgr, model_path, keep_classes=None, conf=0.25, "
+                 "as_obb=False)",
+        "output": "list of {class_name, cx, cy, w, h} with coords normalized "
+                  "0..1 center-form (OBB reduced to its enclosing box)",
+    },
     "box.faces": {
         "summary": "Detect faces and return their bounding boxes.",
         "input": "image as HxWx3 uint8 BGR ndarray",

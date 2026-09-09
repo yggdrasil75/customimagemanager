@@ -121,6 +121,28 @@ def _to_bgr_u8(img):
         img = np.clip(img, 0, 255).astype(np.uint8)
     return img
 
+def _mask_at_native(m, xy_i, W, H):
+    """Return a boolean (H,W) mask for detection i at the ORIGINAL image size.
+
+    ultralytics `masks.data` is at the letterboxed model input resolution (a
+    padded square, e.g. 640x640). Resizing that square straight to (W,H) stretches
+    the padding and squishes the mask on non-square (tall/skinny) images. When the
+    result carries `masks.xy` (polygons already mapped back to original pixels) we
+    rasterise those instead, which is letterbox-correct. Fall back to the naive
+    resize only when xy is missing.
+    """
+    if xy_i is not None and len(xy_i) >= 3:
+        canvas = np.zeros((H, W), dtype=np.uint8)
+        poly = np.asarray(xy_i, dtype=np.float32)
+        poly[:, 0] = np.clip(poly[:, 0], 0, W - 1)
+        poly[:, 1] = np.clip(poly[:, 1], 0, H - 1)
+        cv2.fillPoly(canvas, [np.round(poly).astype(np.int32)], 1)
+        return canvas > 0
+    if m.shape[:2] != (H, W):
+        m = cv2.resize(m.astype(np.float32), (W, H),
+                       interpolation=cv2.INTER_NEAREST)
+    return m > 0.5
+
 def _mask_to_instance(mask, W, H, class_name="object", score=None,
                       make_svg=True):
     """Turn a boolean full-image mask into an instance dict (box + mask_svg).
@@ -220,13 +242,13 @@ def _instances_from_result(res, W, H, labels=None):
     if not res or getattr(res[0], "masks", None) is None:
         return out
     r = res[0]
-    data = r.masks.data.cpu().numpy()               # (N,H,W)
+    data = r.masks.data.cpu().numpy()               # (N,mh,mw), letterboxed
+    xy = getattr(r.masks, "xy", None)               # polygons at native size
     rboxes = getattr(r, "boxes", None)
     names = getattr(r, "names", {}) or {}
     for i, m in enumerate(data):
-        if m.shape[:2] != (H, W):
-            m = cv2.resize(m.astype(np.float32), (W, H),
-                           interpolation=cv2.INTER_NEAREST)
+        xy_i = xy[i] if xy is not None and i < len(xy) else None
+        mask_bool = _mask_at_native(m, xy_i, W, H)
         if labels is not None:
             cls_name = labels[i] if i < len(labels) else "object"
         elif rboxes is not None and rboxes.cls is not None and i < len(rboxes.cls):
@@ -243,7 +265,7 @@ def _instances_from_result(res, W, H, labels=None):
         if rboxes is not None and getattr(rboxes, "conf", None) is not None \
                 and i < len(rboxes.conf):
             score = float(rboxes.conf[i].item())
-        inst = _mask_to_instance(m > 0.5, W, H, class_name=cls_name, score=score)
+        inst = _mask_to_instance(mask_bool, W, H, class_name=cls_name, score=score)
         if inst:
             out.append(inst)
     return out
@@ -393,18 +415,19 @@ def _seg_result_to_instances(r, W, H):
     if masks is None or boxes is None:
         return out
     names = getattr(r, "names", {}) or {}
-    data = masks.data.cpu().numpy()             # (N, mh, mw)
+    data = masks.data.cpu().numpy()             # (N, mh, mw), letterboxed
+    xy = getattr(masks, "xy", None)             # polygons at native size
     for i in range(len(data)):
         m = data[i]
-        # ultralytics mask may be at a different resolution than the image;
-        # resize to full frame before tracing so coords normalise correctly.
-        if m.shape[:2] != (H, W):
-            m = cv2.resize(m.astype(np.float32), (W, H),
-                           interpolation=cv2.INTER_NEAREST)
+        # masks.data is at the letterboxed model resolution; resizing the padded
+        # square straight to (W,H) squishes non-square images. Rasterise the
+        # native-size xy polygons instead, falling back to resize when absent.
+        xy_i = xy[i] if xy is not None and i < len(xy) else None
+        mask_bool = _mask_at_native(m, xy_i, W, H)
         cid = int(boxes.cls[i].item()) if boxes.cls is not None else -1
         name = names.get(cid, str(cid))
         score = float(boxes.conf[i].item()) if boxes.conf is not None else None
-        inst = _mask_to_instance(m > 0.5, W, H, class_name=name, score=score)
+        inst = _mask_to_instance(mask_bool, W, H, class_name=name, score=score)
         if inst:
             out.append(inst)
     return out

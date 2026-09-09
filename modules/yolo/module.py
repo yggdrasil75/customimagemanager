@@ -89,6 +89,26 @@ def _loader_for(path):
     return load
 
 
+def _run_yolo_path(model_path, feed, conf):
+    """Run the model at model_path over feed (one image or a list), with the
+    bn/fuse-error unload+retry the old manager path had. Returns ultralytics
+    results or None."""
+    load = _loader_for(model_path)
+    try:
+        return load()(feed, verbose=False, conf=conf)
+    except Exception as ex:
+        if "bn" in str(ex) or "fuse" in str(ex).lower():
+            try:
+                model_registry.unload(f"yolo:{_canon(model_path)}")
+            except Exception:
+                pass
+            try:
+                return load()(feed, verbose=False, conf=conf)
+            except Exception:
+                return None
+        return None
+
+
 # ── path resolution from settings ───────────────────────────────────────────
 def _object_path(config):
     size = (config.get("yolo_size") or "n").lower()
@@ -250,5 +270,56 @@ def register(host):
         transform=_tf_pose, available=_avail, reason=reason,
         cost_mb=250, gpu=model_registry.on_gpu())
 
-    host.logger.info("yolo module: registered providers for box.faces, "
+    # Generic box detector: runs any YOLO .pt (incl. OBB) at a given path and
+    # returns canonical {class_name,cx,cy,w,h}. This is what the box consumers
+    # (faces/persons/panels/objects/video) dispatch to via broker.detector_for,
+    # so a different provider (Mayaku) can answer for its own model files.
+    def _yolo_detect(img_bgr, model_path, keep_classes=None, conf=0.25,
+                     as_obb=False):
+        import manager as _m   # reuse the tested coerce + result parser
+        c = _m._coerce_bgr3(img_bgr)
+        if c is None:
+            return []
+        res = _run_yolo_path(model_path, c, conf)
+        if not res:
+            return []
+        H, W = c.shape[:2]
+        return _m._parse_yolo_result(res[0], H, W, keep_classes, as_obb)
+
+    def _yolo_detect_batch(imgs, model_path, keep_classes=None, conf=0.25,
+                           as_obb=False):
+        import manager as _m
+        import numpy as _np
+        n = len(imgs)
+        if n == 0:
+            return []
+        coerced = [_m._coerce_bgr3(im) for im in imgs]
+        valid = [c is not None for c in coerced]
+        feed = [c if c is not None else _np.zeros((1, 1, 3), _np.uint8)
+                for c in coerced]
+        res = _run_yolo_path(model_path, feed, conf)
+        out = []
+        for i in range(n):
+            if not valid[i] or not res or i >= len(res):
+                out.append([]); continue
+            H, W = coerced[i].shape[:2]
+            try:
+                out.append(_m._parse_yolo_result(res[i], H, W, keep_classes, as_obb))
+            except Exception:
+                out.append([])
+        return out
+
+    # Attach the batch form to the detect fn so a caller with the bound handle
+    # can reach it as handle.batch(...).
+    _yolo_detect.batch = _yolo_detect_batch
+
+    host.provide_model(
+        "box", "yolo",
+        label="YOLO detector",
+        loader=lambda: _yolo_detect,          # bind() returns the detect fn
+        transform=None, available=_avail, reason=reason,
+        handles=lambda mp: bool(mp) and str(mp).lower().endswith(".pt"),
+        cost_mb=250, gpu=model_registry.on_gpu())
+
+    host.logger.info("yolo module: registered providers for box, box.faces, "
                      "box.objects, segment, pose")

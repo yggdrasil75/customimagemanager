@@ -73,7 +73,8 @@ class Capability:
 class Provider:
     """One module's model registered against one capability."""
     def __init__(self, cap_id, provider_id, *, label, loader, transform=None,
-                 available=None, reason="", cost_mb=0, gpu=False, module_id=None):
+                 available=None, reason="", cost_mb=0, gpu=False, module_id=None,
+                 handles=None):
         self.capability = cap_id
         self.id = provider_id                 # unique within the capability
         self.label = label                    # human label for the picker
@@ -84,6 +85,18 @@ class Provider:
         self.cost_mb = cost_mb
         self.gpu = gpu
         self.module_id = module_id
+        # Optional predicate handles(model_path)->bool. For path-parameterized
+        # capabilities like 'box', where several providers coexist and the right
+        # one is chosen by which model file it can run (YOLO .pt vs Mayaku).
+        self._handles = handles
+
+    def handles(self, model_path):
+        if self._handles is None:
+            return False
+        try:
+            return bool(self._handles(model_path))
+        except Exception:
+            return False
 
     def available(self):
         if self._available is None:
@@ -161,7 +174,7 @@ class ModelBroker:
 
     # ── provider registration ────────────────────────────────────────────
     def provide(self, cap_id, provider_id, *, label, loader, transform=None,
-                available=None, reason="", cost_mb=0, gpu=False):
+                available=None, reason="", cost_mb=0, gpu=False, handles=None):
         """Register a provider for a capability. Dedup by (cap_id, provider_id).
 
         The capability must already be declared (by the core or an earlier
@@ -177,7 +190,7 @@ class ModelBroker:
             p = Provider(cap_id, provider_id, label=label, loader=loader,
                          transform=transform, available=available, reason=reason,
                          cost_mb=cost_mb, gpu=gpu,
-                         module_id=self._current_module)
+                         module_id=self._current_module, handles=handles)
             self._providers[cap_id][provider_id] = p
             return p
 
@@ -268,6 +281,33 @@ class ModelBroker:
                     return p.bind()
             raise NoProviderError(cap_id, "none_available",
                 f"no available model for '{cap_id}'")
+
+    def detector_for(self, cap_id, model_path):
+        """Pick the provider that can run `model_path` for a path-parameterized
+        capability (e.g. 'box'). Returns a bound detect handle or None.
+
+        Providers declare handles(model_path); the first available one whose
+        predicate matches wins, with the user-selected provider preferred when
+        it also matches. Returns None when nothing handles the path, so the
+        caller can fall back to its legacy path (keeps the migration safe).
+        """
+        with self._lock:
+            provs = self._providers.get(cap_id, {})
+            if not provs:
+                return None
+            sel = self._selection.get(cap_id)
+            order = ([provs[sel]] if sel and sel in provs else []) + \
+                    [p for pid, p in provs.items() if pid != sel]
+            for p in order:
+                if p.available() and p.handles(model_path):
+                    # Return the loader's detect fn directly (not bind()'s
+                    # wrapper) so attributes like .batch survive; box providers
+                    # already return the canonical shape, so no transform wrap.
+                    try:
+                        return p._loader()
+                    except Exception:
+                        return None
+        return None
 
     def try_request(self, cap_id):
         """request() that returns None instead of raising. For callers that
