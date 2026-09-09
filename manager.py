@@ -889,6 +889,92 @@ def make_tag(name: str, confirmed: bool = True) -> str:
 def count_unconfirmed_tags(tags) -> int:
     return sum(1 for t in (tags or []) if not tag_is_confirmed(t))
 
+def _merge_meta(cur, inc):
+    """! @brief Fold an incoming metadata packet into a file's current metadata.
+
+    Pure: takes and returns plain dicts, no I/O — the same image posted to five
+    boorus gives five packets that all have to land on one file.
+
+    @param cur Current metadata (read_metadata shape: tags/description/regions).
+    @param inc Incoming packet (gdl.apply_mapping shape).
+    @return (tags, description, regions, changed)
+    """
+    tags = list(cur.get("tags") or [])
+    have = {tag_name(t).lower() for t in tags}
+    for t in (inc.get("tags") or []):
+        nm = tag_name(t)
+        if nm and nm.lower() not in have:
+            have.add(nm.lower())
+            tags.append(make_tag(nm, confirmed=tag_is_confirmed(t)))
+
+    desc = (cur.get("description") or "").strip()
+    add  = (inc.get("description") or "").strip()
+    # Substring check, not equality: re-fetching the same site must not stack the
+    # same blurb twice, but a second site's longer write-up still gets appended.
+    if add and add not in desc:
+        desc = (desc + "\n\n" + add) if desc else add
+
+    # ponytail: regions only fill an empty slot — same bytes means same geometry,
+    # so two sites' note boxes would otherwise pile up as near-duplicate overlays.
+    # Union them if per-site translation notes turn out to be worth stacking.
+    regions = cur.get("regions") or list(inc.get("regions") or [])
+
+    changed = (tags != (cur.get("tags") or [])
+               or desc != (cur.get("description") or "").strip()
+               or regions != (cur.get("regions") or []))
+    return tags, desc, regions, changed
+
+def _merge_into_existing(rel_path, meta):
+    """! @brief Apply an upload's metadata to the file that already holds those bytes.
+    @return True if the file's metadata actually changed.
+    """
+    fp = get_safe_path(MEDIA_DIR, rel_path)
+    if not fp or not os.path.exists(fp):
+        return False
+    try:
+        cur = read_metadata(fp)
+    except Exception as e:
+        access_logger.warning(f"dup merge: cannot read {rel_path}: {e}")
+        return False
+
+    changed = False
+    try:
+        tags, desc, regions, changed = _merge_meta(cur, meta)
+        if changed:
+            write_metadata(fp, tags, desc, regions)
+    except Exception as e:
+        access_logger.error(f"dup merge: write failed for {rel_path}: {e}")
+
+    # Must run after write_metadata (it rewrites the sidecar wholesale). Both
+    # patch writers validate and skip unknown tokens, so a bad mapping can't
+    # damage a file that was already in the library.
+    # ponytail: scalar XMP/EXIF properties are last-write-wins across sites —
+    # add per-property conflict rules only if losing the first value bites.
+    for patch, writer, what in (
+            (meta.get("exif"), exif_export.write_exif, "exif"),
+            (meta.get("xmp"),  xmp_export.write_xmp,   "xmp")):
+        if not patch:
+            continue
+        try:
+            writer(fp, patch)
+            changed = True
+        except Exception as e:
+            access_logger.error(f"dup merge: {what} patch failed for {rel_path}: {e}")
+    return changed
+
+def _form_metadata(rel_path=""):
+    """! @brief Parse an upload request's `metadata` form field. Never fatal."""
+    try:
+        meta = json.loads(request.form.get("metadata", "{}") or "{}")
+        if not isinstance(meta, dict):
+            raise ValueError(f"metadata is {type(meta).__name__}, not an object")
+        return meta
+    except (ValueError, TypeError) as e:
+        access_logger.warning(
+            f"upload: bad metadata for {rel_path}: {e}; ingesting file "
+            f"without sidecar metadata")
+        return {}
+
 def _update_meta(rel_path, tags, description):
     _db().execute(
         "UPDATE files SET tags=?, description=? WHERE rel_path=?",
@@ -7546,11 +7632,17 @@ def _run_upload():
             dup = _db().execute(
                 "SELECT rel_path FROM files WHERE sha256=?", (sha,)).fetchone()
             if dup:
+                # Same bytes, different source. Downloading one artist's gallery
+                # off three boorus yields identical files carrying different
+                # tags/descriptions, so fold the new metadata into the copy we
+                # already have rather than discarding it. Only a real path
+                # collision (filename_exists, above) still blocks an ingest.
+                existing = dup["rel_path"]
+                merged = _merge_into_existing(existing, _form_metadata(existing))
                 return jsonify({
-                    "success": False, "error_code": "exact_duplicate",
-                    "error": "File content is an exact duplicate of an existing file.",
-                    "existing_file": dup["rel_path"]
-                }), 409
+                    "success": True, "duplicate": True, "merged": merged,
+                    "filename": existing, "existing_file": existing,
+                }), 200
 
             shutil.move(out, store_path)
 
@@ -7594,15 +7686,7 @@ def _run_upload():
             if is_raw_src:
                 _link_raw_to_image(orig, fname, rel_path, store_path)
 
-            try:
-                meta = json.loads(request.form.get("metadata", "{}") or "{}")
-                if not isinstance(meta, dict):
-                    raise ValueError(f"metadata is {type(meta).__name__}, not an object")
-            except (ValueError, TypeError) as e:
-                access_logger.warning(
-                    f"upload: bad metadata for {rel_path}: {e}; ingesting file "
-                    f"without sidecar metadata")
-                meta = {}
+            meta = _form_metadata(rel_path)
             try:
                 write_metadata(store_path, meta.get("tags", []),
                                meta.get("description", ""), meta.get("regions", []),
@@ -8670,6 +8754,33 @@ def api_gdl_queue_cancel(qid):
     if res == "flag":
         _gdl_mark_cancel(qid)      # worker will stop between files
     return jsonify({"success": True, "status": "canceling" if res == "flag" else res})
+
+@app.route("/api/gdl/queue/<int:qid>/retry", methods=["POST"])
+@_auth.require_feature("fetch")
+def api_gdl_queue_retry(qid):
+    """Re-run a finished row (done/error/canceled) in place: reset it to pending
+    and let the normal worker claim it. Same URL and folder, but current opts and
+    mappings — which is the point, since the usual reason to retry is that a
+    field mapping or auth setting was wrong the first time."""
+    def _retry():
+        db = _db()
+        n = db.execute(
+            "UPDATE gdl_queue SET status='pending', attempts=0, downloaded=0, "
+            "total=0, error='', updated=? WHERE id=? "
+            "AND status IN ('done','error','canceled')",
+            (time.time(), qid)).rowcount
+        db.commit()
+        return n
+    try:
+        n = _db_retry(_retry)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+    if not n:
+        return jsonify({"success": False,
+                        "error": "No finished row with that id."}), 404
+    _gdl_clear_cancel(qid)     # a retried cancel must not stop on the old flag
+    _gdl_workers_wake()
+    return jsonify({"success": True, "status": "pending"}), 202
 
 @app.route("/api/gdl/queue/clear", methods=["POST"])
 @_auth.require_feature("fetch")

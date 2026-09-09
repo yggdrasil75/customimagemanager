@@ -348,6 +348,7 @@ function _gdlQueueRow(it) {
   const prog = it.total ? `${it.downloaded} / ${it.total}`
              : (it.downloaded ? `${it.downloaded}` : '');
   const stopabble = it.status === 'pending' || it.status === 'downloading';
+  const rerunnable = it.status === 'done' || it.status === 'error' || it.status === 'canceled';
   const err = it.error ? `<div class="text-[10px] text-rose-400 truncate" title="${_esc(it.error)}">${_esc(it.error)}</div>` : '';
   return `<div class="flex items-center gap-2 bg-gray-900/40 rounded px-2 py-1">
     <div class="flex-1 min-w-0">
@@ -357,7 +358,10 @@ function _gdlQueueRow(it) {
     <span class="${color} whitespace-nowrap">${it.status}</span>
     <span class="text-gray-500 whitespace-nowrap w-16 text-right">${prog}</span>
     ${stopabble ? `<button onclick="gdlQueueCancel(${it.id})"
-       class="text-[10px] text-gray-500 hover:text-rose-400">cancel</button>` : '<span class="w-10"></span>'}
+       class="text-[10px] text-gray-500 hover:text-rose-400">cancel</button>`
+     : rerunnable ? `<button onclick="gdlQueueRetry(${it.id})"
+       class="text-[10px] text-gray-500 hover:text-sky-400">retry</button>`
+     : '<span class="w-10"></span>'}
   </div>`;
 }
 
@@ -368,6 +372,11 @@ function _esc(s) {
 
 async function gdlQueueCancel(id) {
   await fetch(`/api/gdl/queue/${id}/cancel`, { method: 'POST' }).catch(() => {});
+  gdlQueueRefresh();
+}
+
+async function gdlQueueRetry(id) {
+  await fetch(`/api/gdl/queue/${id}/retry`, { method: 'POST' }).catch(() => {});
   gdlQueueRefresh();
 }
 
