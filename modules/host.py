@@ -97,6 +97,11 @@ class Host:
         # SERVER-SIDE by the controls pane — a module ships pane HTML without any
         # core edit or client fetch. Paired with a registered controls tab.
         self.controls_panes = []
+        # Named services (registry points): a module publishes a service other
+        # modules consume if present. {name: {"obj","module_id"}}. Consumers use
+        # get_service(name) and must shim a None result (missing/disabled
+        # provider), so an optional dependency degrades instead of crashing.
+        self.services = {}
         # which module is currently being registered (set by the loader) so
         # helpers can attribute contributions without the author passing an id
         self._current_module = None
@@ -191,6 +196,51 @@ class Host:
             "key": key, "label": label, "kind": kind, "pane": pane,
             "tab": tab, "options": options, "help": help,
             "admin_only": bool(admin_only), "module_id": self._current_module})
+
+    # ── registry points / services ───────────────────────────────────────
+    def provide_service(self, name, obj):
+        """Publish a named service other modules may consume.
+
+        A "registry point": e.g. a training module exposes "trainer" so a UI
+        module can drive it. Last provider wins (module reload safe). Consumers
+        fetch via get_service(name) and must handle None (provider absent).
+        """
+        self.services[name] = {"obj": obj, "module_id": self._current_module}
+        return name
+
+    def get_service(self, name, default=None):
+        """Fetch a service another module published, or `default` if no module
+        provides it (not installed / disabled). Consumers are expected to shim
+        this: `svc = host.get_service("trainer"); if not svc: <degrade>`."""
+        s = self.services.get(name)
+        return s["obj"] if s else default
+
+    def has_service(self, name):
+        return name in self.services
+
+    def register_feature(self, key, label, *, section="modules",
+                         section_label="Modules", default="write",
+                         role_defaults=None):
+        """Register an auth feature this module owns.
+
+        default       -- the feature's own default LEVEL ("block"/"read"/
+                         "write"); an "inherit" user resolves to this.
+        role_defaults -- optional {role: level} baked into the role bundles, e.g.
+                         admin-only: {"viewer":"block","uploader":"block",
+                         "custom":"block"}. Enforce with host.require_feature.
+        """
+        import features
+        return features.register_feature(
+            key, label, section=section, section_label=section_label,
+            default=default, role_defaults=role_defaults)
+
+    def require_feature(self, feature_key, action=None, fields=(), level="read"):
+        """The auth decorator, so a module gates its own endpoints. Enforces at
+        `level` (read to view, write to modify) using the current user's
+        resolved permission level for feature_key."""
+        import auth
+        return auth.require_feature(feature_key, action=action, fields=fields,
+                                    level=level)
 
     def register_controls_pane(self, tab_id, template, *, feature=None):
         """Contribute a controls-pane partial rendered server-side.

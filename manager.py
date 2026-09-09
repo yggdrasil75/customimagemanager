@@ -5692,119 +5692,7 @@ def static_asset(filename):
     mime = "text/css" if filename.endswith(".css") else "application/javascript"
     return send_file(fp, mimetype=mime)
 
-@app.route("/iptc_editor")
-def iptc_editor_page():
-    """Standalone IPTC editor page (will be embeddable in the index later).
-    Renders the templates/iptc_editor.html fragment inside a minimal shell that
-    pulls in the static css/js. Optional ?filename=... auto-loads a file."""
-    tmpl_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
-    frag_path = os.path.join(tmpl_dir, "iptc_editor.html")
-    try:
-        fragment = open(frag_path, encoding="utf-8").read()
-    except OSError:
-        return "iptc_editor.html template not found", 500
-    fn = request.args.get("filename", "")
-    autoload = (f"<script>window.addEventListener('load',function(){{"
-                f"if(window.iptcEditor)iptcEditor.load({json.dumps(fn)});}});</script>"
-                if fn else "")
-    shell = (
-        "<!doctype html><html><head><meta charset='utf-8'>"
-        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-        "<title>IPTC Editor</title>"
-        "<link rel='stylesheet' href='/static/iptc_editor.css'>"
-        "<style>body{background:#0b1220;margin:0;padding:16px;"
-        "font-family:system-ui,-apple-system,sans-serif;}</style>"
-        "</head><body>"
-        f"{fragment}"
-        "<script src='/static/iptc_editor.js'></script>"
-        f"{autoload}"
-        "</body></html>"
-    )
-    return render_template_string(shell)
-
-@app.route("/api/iptc/schema")
-def api_iptc_schema():
-    """Return the full IPTC field schema (no file needed)."""
-    return jsonify({"success": True, "schema": iptc_fields.schema_dict()})
-
-@app.route("/api/iptc/read", methods=["POST"])
-def api_iptc_read():
-    """Read merged IPTC schema+values for a media file (by rel path under
-    MEDIA_DIR). Returns the structure from iptc_import.read_iptc()."""
-    data = request.get_json(force=True, silent=True) or {}
-    filename = data.get("filename", "")
-    if not filename:
-        return jsonify({"success": False, "error": "filename required"}), 400
-    # Resolve safely under MEDIA_DIR (no traversal outside the library).
-    abs_media = os.path.abspath(MEDIA_DIR)
-    fp = os.path.abspath(os.path.join(MEDIA_DIR, filename))
-    if not (fp == abs_media or fp.startswith(abs_media + os.sep)):
-        return jsonify({"success": False, "error": "invalid path"}), 400
-    if not os.path.exists(fp):
-        return jsonify({"success": False, "error": "file not found"}), 404
-    try:
-        return jsonify({"success": True, "data": iptc_import.read_iptc(fp)})
-    except Exception as e:
-        access_logger.error(f"api_iptc_read {filename}: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
-
 # ── XMP editor (parallels the IPTC editor above; acdsee is read-only) ───────
-@app.route("/xmp_editor")
-def xmp_editor_page():
-    """Standalone XMP editor page (embeddable in the index later).
-    Renders templates/xmp_editor.html inside a minimal shell that pulls in the
-    static css/js. Optional ?filename=... auto-loads a file."""
-    tmpl_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
-    frag_path = os.path.join(tmpl_dir, "xmp_editor.html")
-    try:
-        fragment = open(frag_path, encoding="utf-8").read()
-    except OSError:
-        return "xmp_editor.html template not found", 500
-    fn = request.args.get("filename", "")
-    autoload = (f"<script>window.addEventListener('load',function(){{"
-                f"if(window.xmpEditor)xmpEditor.load({json.dumps(fn)});}});</script>"
-                if fn else "")
-    shell = (
-        "<!doctype html><html><head><meta charset='utf-8'>"
-        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-        "<title>XMP Editor</title>"
-        "<link rel='stylesheet' href='/static/xmp_editor.css'>"
-        "<style>body{background:#0b1220;margin:0;padding:16px;"
-        "font-family:system-ui,-apple-system,sans-serif;}</style>"
-        "</head><body>"
-        f"{fragment}"
-        "<script src='/static/xmp_editor.js'></script>"
-        f"{autoload}"
-        "</body></html>"
-    )
-    return render_template_string(shell)
-
-@app.route("/api/xmp/schema")
-def api_xmp_schema():
-    """Return the full XMP field schema (no file needed)."""
-    return jsonify({"success": True, "schema": xmp_fields.schema_dict()})
-
-@app.route("/api/xmp/read", methods=["POST"])
-def api_xmp_read():
-    """Read merged XMP schema+values for a media file (by rel path under
-    MEDIA_DIR). Returns the structure from xmp_import.read_xmp()."""
-    data = request.get_json(force=True, silent=True) or {}
-    filename = data.get("filename", "")
-    if not filename:
-        return jsonify({"success": False, "error": "filename required"}), 400
-    # Resolve safely under MEDIA_DIR (no traversal outside the library).
-    abs_media = os.path.abspath(MEDIA_DIR)
-    fp = os.path.abspath(os.path.join(MEDIA_DIR, filename))
-    if not (fp == abs_media or fp.startswith(abs_media + os.sep)):
-        return jsonify({"success": False, "error": "invalid path"}), 400
-    if not os.path.exists(fp):
-        return jsonify({"success": False, "error": "file not found"}), 404
-    try:
-        return jsonify({"success": True, "data": xmp_import.read_xmp(fp)})
-    except Exception as e:
-        access_logger.error(f"api_xmp_read {filename}: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
-
 # ── EXIF editor (parallels the IPTC editor above) ───────────────────────────
 # Columns an EXIF db_field is allowed to write. The column name is interpolated
 # into SQL, so this MUST stay a fixed allowlist — never let a tag's db_field
@@ -5823,36 +5711,6 @@ def _resolve_media(filename):
     if not os.path.exists(fp):
         return None, (jsonify({"success": False, "error": "file not found"}), 404)
     return fp, None
-
-@app.route("/exif_editor")
-def exif_editor_page():
-    """Standalone EXIF editor page (embeddable in the index later).
-    Renders templates/exif_editor.html inside a minimal shell that pulls in the
-    static css/js. Optional ?filename=... auto-loads a file."""
-    tmpl_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
-    frag_path = os.path.join(tmpl_dir, "exif_editor.html")
-    try:
-        fragment = open(frag_path, encoding="utf-8").read()
-    except OSError:
-        return "exif_editor.html template not found", 500
-    fn = request.args.get("filename", "")
-    autoload = (f"<script>window.addEventListener('load',function(){{"
-                f"if(window.exifEditor)exifEditor.load({json.dumps(fn)});}});</script>"
-                if fn else "")
-    shell = (
-        "<!doctype html><html><head><meta charset='utf-8'>"
-        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-        "<title>EXIF Editor</title>"
-        "<link rel='stylesheet' href='/static/exif_editor.css'>"
-        "<style>body{background:#0b1220;margin:0;padding:16px;"
-        "font-family:system-ui,-apple-system,sans-serif;}</style>"
-        "</head><body>"
-        f"{fragment}"
-        "<script src='/static/exif_editor.js'></script>"
-        f"{autoload}"
-        "</body></html>"
-    )
-    return render_template_string(shell)
 
 @app.route("/api/metadata/failures")
 def api_metadata_failures():
@@ -5882,114 +5740,24 @@ def api_metadata_failures():
     items = sorted(out.values(), key=lambda x: (x["when"] or 0), reverse=True)
     return jsonify({"success": True, "count": len(items), "failures": items})
 
-@app.route("/api/exif/schema")
-def api_exif_schema():
-    """Return the full EXIF field schema (no file needed)."""
-    return jsonify({"success": True, "schema": exif_fields.schema_dict()})
-
-@app.route("/api/exif/read", methods=["POST"])
-def api_exif_read():
-    """Read merged EXIF schema+values for a media file (rel path under
-    MEDIA_DIR). Returns the structure from exif_import.read_exif()."""
+@app.route("/api/metadata/write", methods=["POST"])
+def api_metadata_write():
+    """Unified metadata write. Body: {kind, filename, patch}. Gates on
+    meta.<kind>.edit, then forwards to the metadata module writer service; the
+    actual write logic lives in the module, not here."""
     data = request.get_json(force=True, silent=True) or {}
-    fp, err = _resolve_media(data.get("filename", ""))
-    if err:
-        return err
-    try:
-        return jsonify({"success": True, "data": exif_import.read_exif(fp)})
-    except Exception as e:
-        access_logger.error(f"api_exif_read {data.get('filename')}: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
-
-@app.route("/api/exif/write", methods=["POST"])
-@_auth.require_feature("meta.exif.edit", action='exif_write', fields=('filename',))
-def api_exif_write():
-    """Apply a {tag_name: value} patch to a media file's EXIF via
-    exif_export.write_exif(). Read-only/unknown tags are skipped server-side."""
-    data = request.get_json(force=True, silent=True) or {}
-    fp, err = _resolve_media(data.get("filename", ""))
-    if err:
-        return err
-    patch = data.get("patch") or {}
-    if not isinstance(patch, dict):
-        return jsonify({"success": False, "error": "patch must be an object"}), 400
-    try:
-        rel = _rel(fp)
-        # Snapshot the current values of the fields about to change so the
-        # changelog can record old -> new for undo (ctrl+z). Only the tags in
-        # the patch are read back; ImageHistory itself is excluded (it's derived).
-        before = {}
-        try:
-            pre = exif_import.read_exif(fp)
-            for g in pre.get("groups", []):
-                for f in g.get("fields", []):
-                    if f.get("name") in patch and f.get("name") != "ImageHistory":
-                        before[f["name"]] = f.get("raw")
-        except Exception:
-            pass
-
-        result = exif_export.write_exif(fp, patch)
-        # Mirror DB-backed EXIF fields (e.g. ImageDescription -> files.description)
-        # into the project database, but only after a successful EXIF write so the
-        # two never diverge. None => clear the column.
-        if result.get("success") and result.get("db"):
-            for col, val in result["db"].items():
-                if col not in _EXIF_DB_COLUMNS:      # guard against odd schema
-                    continue
-                # None -> clear the column (NULL for numeric, "" for text).
-                if val is None:
-                    if col == "rating":
-                        # Clearing the rating drops the user flag too, so a
-                        # later BRISQUE scan can supply a preliminary score.
-                        _db().execute(
-                            "UPDATE files SET rating=NULL, rating_user=0 "
-                            "WHERE rel_path=?", (rel,))
-                        continue
-                    stored = "" if col == "description" else None
-                elif col == "rating":
-                    try:
-                        stored = int(val)
-                    except (ValueError, TypeError):
-                        continue
-                    # A rating set through the editor is a user rating; mark it
-                    # so BRISQUE rescans won't override it.
-                    _db().execute(
-                        "UPDATE files SET rating=?, rating_user=1 WHERE rel_path=?",
-                        (stored, rel))
-                    continue
-                else:
-                    stored = str(val)
-                _db().execute(
-                    f"UPDATE files SET {col}=? WHERE rel_path=?", (stored, rel))
-            _db().commit()
-
-        # Record the edits in the changelog and refresh EXIF ImageHistory so
-        # undo (ctrl+z) and the history view stay current. Done only on success,
-        # and skipped for the ImageHistory field itself (it's derived, not a
-        # user edit). Best-effort: never fail the write over history bookkeeping.
-        if result.get("success"):
-            try:
-                changed = False
-                for tag in [w["tag"].split(".")[-1] for w in result.get("written", [])] \
-                           + [d.split(".")[-1] for d in result.get("deleted", [])]:
-                    if tag == "ImageHistory":
-                        continue
-                    _history_record(rel, f"exif:{tag}",
-                                    before.get(tag), patch.get(tag), commit=False)
-                    changed = True
-                if changed:
-                    _db().commit()
-                    hist = _history_as_imagehistory(rel)
-                    # Write the rendered history back into EXIF ImageHistory.
-                    # Guard against recursion: this write is not itself logged.
-                    exif_export.write_exif(fp, {"ImageHistory": hist})
-            except Exception as e:
-                access_logger.warning(f"exif history {rel}: {e}")
-
-        return jsonify({"success": result.get("success", False), "result": result})
-    except Exception as e:
-        access_logger.error(f"api_exif_write {data.get('filename')}: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+    kind = (data.get("kind") or "exif").lower()
+    if kind not in ("exif", "iptc", "xmp"):
+        return jsonify({"success": False, "error": "bad kind"}), 400
+    u = getattr(g, "user", None) or {}
+    if not u.get("is_admin"):
+        import features as _feat
+        if not _feat.has_level(u.get("features") or {}, "meta." + kind, "write"):
+            return jsonify({"error": "feature not permitted"}), 403
+    writer = module_host.get_service("metadata_write")
+    if not writer:
+        return jsonify({"success": False, "error": "metadata module unavailable"}), 503
+    return writer(kind, data.get("filename", ""), data.get("patch") or {})
 
 @app.route("/api/exif/history", methods=["POST"])
 def api_exif_history():
@@ -6528,7 +6296,7 @@ def api_person_tpose_data(cluster_id, appearance_id):
     return data, 200, {"Content-Type": "application/json"}
 
 @app.route("/api/faces/scan", methods=["POST"])
-@_auth.require_feature("tab.faces.edit")
+@_auth.require_feature("tab.faces", level="write")
 def api_face_scan():
     """Force a rescan (clears face_done) or just recluster what's cached.
 
@@ -6590,7 +6358,7 @@ def api_face_progress():
                     "status": state.get("status_text", "")})
 
 @app.route("/api/faces/name", methods=["POST"])
-@_auth.require_feature("tab.faces.edit", action='face_name', fields=('cluster_id', 'name'))
+@_auth.require_feature("tab.faces", level="write", action='face_name', fields=('cluster_id', 'name'))
 def api_face_name():
     """Bulk-name a cluster. Writes the name into every MWG region it covers —
     metadata is the source of truth, the DB is only the cache."""
@@ -6627,7 +6395,7 @@ def api_face_name():
     return jsonify({"success": True, "named": touched})
 
 @app.route("/api/faces/split", methods=["POST"])
-@_auth.require_feature("tab.faces.edit", action='face_split', fields=('cluster_id',))
+@_auth.require_feature("tab.faces", level="write", action='face_split', fields=('cluster_id',))
 def api_face_split():
     """Kick a wrong face out of its cluster (back to unclustered)."""
     d = request.json or {}
@@ -6679,7 +6447,7 @@ def _strip_mwg_region(rel, cx, cy):
         write_metadata(abs_p, meta["tags"], meta["description"], kept)
 
 @app.route("/api/faces/not_face", methods=["POST"])
-@_auth.require_feature("tab.faces.edit", action='face_not_face', fields=('ids',))
+@_auth.require_feature("tab.faces", level="write", action='face_not_face', fields=('ids',))
 def api_face_not_face():
     """Declare one or more detections to be NOT a face.
 
@@ -6707,7 +6475,7 @@ def api_face_not_face():
     return jsonify({"success": True, "marked": len(ids)})
 
 @app.route("/api/faces/unknown", methods=["POST"])
-@_auth.require_feature("tab.faces.edit", action='face_unknown', fields=('ids',))
+@_auth.require_feature("tab.faces", level="write", action='face_unknown', fields=('ids',))
 def api_face_unknown():
     """Mark faces as 'unknown': a real face that is deliberately NOT a person you
     want to identify (a photobomber, a stranger in the background).
@@ -6732,7 +6500,7 @@ def api_face_unknown():
     return jsonify({"success": True, "marked": len(ids)})
 
 @app.route("/api/faces/unknown_cluster", methods=["POST"])
-@_auth.require_feature("tab.faces.edit", action='face_unknown_cluster',
+@_auth.require_feature("tab.faces", level="write", action='face_unknown_cluster',
                        fields=('cluster_id',))
 def api_face_unknown_cluster():
     """Mark an ENTIRE person (face cluster) as 'unknown' in one shot.
@@ -6757,7 +6525,7 @@ def api_face_unknown_cluster():
     return jsonify({"success": True, "marked": cur.rowcount})
 
 @app.route("/api/faces/unmark", methods=["POST"])
-@_auth.require_feature("tab.faces.edit", action='face_unmark', fields=('ids',))
+@_auth.require_feature("tab.faces", level="write", action='face_unmark', fields=('ids',))
 def api_face_unmark():
     """Clear an unknown / not_face flag, returning the face to the unclustered pool.
     A recluster then folds it back into a group."""
@@ -6777,7 +6545,7 @@ def api_face_unmark():
     return jsonify({"success": True, "unmarked": len(ids)})
 
 @app.route("/api/faces/merge", methods=["POST"])
-@_auth.require_feature("tab.faces.edit", action='face_merge',
+@_auth.require_feature("tab.faces", level="write", action='face_merge',
                        fields=('src', 'dst'))
 def api_face_merge():
     """Merge face cluster `src` into `dst` (both become one).
@@ -7240,7 +7008,7 @@ def api_albums():
     return jsonify({"success": True, "albums": _album_list()})
 
 @app.route("/api/albums/create", methods=["POST"])
-@_auth.require_feature("tab.albums.edit", action='album_create', fields=('name',))
+@_auth.require_feature("tab.albums", level="write", action='album_create', fields=('name',))
 def api_album_create():
     """Create an empty album (optionally seeded with files)."""
     d = request.json or {}
@@ -7258,7 +7026,7 @@ def api_album_create():
     return jsonify({"success": True, "name": name, "added": added})
 
 @app.route("/api/albums/delete", methods=["POST"])
-@_auth.require_feature("tab.albums.edit", action='album_delete', fields=('name',))
+@_auth.require_feature("tab.albums", level="write", action='album_delete', fields=('name',))
 def api_album_delete():
     """Delete an album. Removes the collection from every member's XMP; the
     images themselves are never touched."""
@@ -7275,7 +7043,7 @@ def api_album_delete():
     return jsonify({"success": True, "removed": len(members)})
 
 @app.route("/api/albums/rename", methods=["POST"])
-@_auth.require_feature("tab.albums.edit", action='album_rename', fields=('old', 'new', 'old_name', 'new_name'))
+@_auth.require_feature("tab.albums", level="write", action='album_rename', fields=('old', 'new', 'old_name', 'new_name'))
 def api_album_rename():
     """Rename an album, rewriting the collection name in every member's XMP."""
     d = request.json or {}
@@ -7308,7 +7076,7 @@ def api_album_rename():
     return jsonify({"success": True, "changed": changed})
 
 @app.route("/api/albums/add", methods=["POST"])
-@_auth.require_feature("tab.albums.edit", action='album_add', fields=('name', 'filename', 'filenames'))
+@_auth.require_feature("tab.albums", level="write", action='album_add', fields=('name', 'filename', 'filenames'))
 def api_album_add():
     """Add one or more files to an album (creating it if new)."""
     d = request.json or {}
@@ -7319,7 +7087,7 @@ def api_album_add():
     return jsonify({"success": True, "added": _album_add(files, name)})
 
 @app.route("/api/albums/remove", methods=["POST"])
-@_auth.require_feature("tab.albums.edit", action='album_remove', fields=('name', 'filename', 'filenames'))
+@_auth.require_feature("tab.albums", level="write", action='album_remove', fields=('name', 'filename', 'filenames'))
 def api_album_remove():
     """Remove one or more files from an album."""
     d = request.json or {}
@@ -7330,7 +7098,7 @@ def api_album_remove():
     return jsonify({"success": True, "removed": _album_remove(files, name)})
 
 @app.route("/api/albums/set_cover", methods=["POST"])
-@_auth.require_feature("tab.albums.edit")
+@_auth.require_feature("tab.albums", level="write")
 def api_album_set_cover():
     """Pin a specific member image as the album's cover tile."""
     d = request.json or {}

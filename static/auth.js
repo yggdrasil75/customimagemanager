@@ -281,7 +281,7 @@
       '<div style="display:flex;justify-content:space-between;align-items:center">' +
       '<h2 style="margin:0;font-size:15px">Features · ' + esc(label) + '</h2>' +
       '<button id="cim-feat-close" style="background:none;border:0;color:#9ca3af;font-size:20px;cursor:pointer">&times;</button></div>' +
-      '<p style="color:#9ca3af;margin:6px 0 12px">Tri-state: default (inherit role/group), Allow, or Deny.</p>' +
+      '<p style="color:#9ca3af;margin:6px 0 12px">Per feature: default (role/group), inherit (feature default), or an explicit level — block &lt; read &lt; write.</p>' +
       '<table style="width:100%;border-collapse:collapse">' + rows + '</table>' +
       '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">' +
       '<button id="cim-feat-cancel" style="background:#4b5563;color:#e5e7eb;border:0;border-radius:6px;padding:6px 12px;cursor:pointer">Cancel</button>' +
@@ -293,9 +293,9 @@
     m.querySelector('#cim-feat-save').onclick = async () => {
       const out = {};
       m.querySelectorAll('select[data-fk]').forEach(s => {
-        if (s.value === 'allow') out[s.dataset.fk] = true;
-        else if (s.value === 'deny') out[s.dataset.fk] = false;
-        // 'default' => omit, so role/group takes over
+        // 'default' => omit (role/group takes over). Otherwise store the level
+        // name (inherit/block/read/write).
+        if (s.value !== 'default') out[s.dataset.fk] = s.value;
       });
       const url = kind === 'user' ? '/api/auth/users/update' : '/api/auth/groups/update';
       const r = await post(url, { id, perms: out });
@@ -305,16 +305,24 @@
     };
   }
   function featRow(key, label, val, isSection) {
-    const v = val === true ? 'allow' : val === false ? 'deny' : 'default';
+    // val may be a level name, legacy bool, or undefined (=> default).
+    let v = 'default';
+    if (val === true) v = 'write';
+    else if (val === false) v = 'block';
+    else if (typeof val === 'string' &&
+             ['inherit', 'block', 'read', 'write'].includes(val)) v = val;
+    else if (typeof val === 'number') v = ['block', 'read', 'write'][val] || 'default';
     const pad = isSection ? '' : 'padding-left:18px;';
     const weight = isSection ? 'font-weight:600;' : '';
+    const opt = (o, lbl) => '<option value="' + o + '"' +
+      (v === o ? ' selected' : '') + '>' + (lbl || o) + '</option>';
     return '<tr style="border-top:1px solid #374151">' +
       '<td style="padding:5px 0;' + pad + weight + '">' + esc(label) + '</td>' +
       '<td style="text-align:right"><select data-fk="' + key + '" ' +
       'style="background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:5px;padding:3px">' +
-      '<option value="default"' + (v === 'default' ? ' selected' : '') + '>default</option>' +
-      '<option value="allow"' + (v === 'allow' ? ' selected' : '') + '>allow</option>' +
-      '<option value="deny"' + (v === 'deny' ? ' selected' : '') + '>deny</option>' +
+      opt('default', 'default (role/group)') +
+      opt('inherit', 'inherit (feature default)') +
+      opt('block') + opt('read') + opt('write') +
       '</select></td></tr>';
   }
 

@@ -1,217 +1,248 @@
 """
-Feature / permission registry.
+Feature / permission registry — ORDERED LEVELS.
 ======================================================================
-A single source of truth for the fine-grained things a user or group can
-be allowed or denied. This drives:
+Each feature carries a LEVEL, not a boolean:  block(0) < read(1) < write(2).
 
-  * the effective-permission set the frontend receives (to hide/show UI),
-  * server-side enforcement decorators for the matching endpoints,
-  * the admin UI's checkbox tree.
+- block : no access (default for a not-logged-in visitor).
+- read  : may see/open it (viewer default).
+- write : may see AND modify/run it (normal-user default). write implies read.
 
-A "feature" is an opaque stable string key. UI elements tag themselves
-with data-feature="<key>"; the frontend hides any element whose feature
-is not in the user's effective set.
+This replaces allow/deny booleans and the separate ".edit" keys. An endpoint
+that shows data needs `read`; one that changes it needs `write`. Every feature
+is uniformly block/read/write; for pure actions ("run OCR") the read level is
+just unused (grant=write, deny=block).
 
-Features are grouped into sections purely for display. The whole
-"ai_tooling" section can be hidden at once (a section is itself a feature
-key), and each item under it can be hidden individually.
-
-Default roles ship as named permission bundles; a "custom" group/user
-simply carries its own allow/deny map.
+Overrides may be an explicit level, or symbolic:
+  "inherit" -> the feature's declared DEFAULT level (what the module shipped).
+  "default" -> the role/group default level.
+Resolution: user override, then group override, then role default.
 """
 
-# ── the catalog ─────────────────────────────────────────────────────────────
-# section_key: {label, features:[(key,label), ...]}
-# A section is toggleable as a whole via its own section_key, and each
-# feature under it is individually toggleable.
+BLOCK, READ, WRITE = 0, 1, 2
+LEVELS = {"block": BLOCK, "read": READ, "write": WRITE}
+LEVEL_NAMES = {BLOCK: "block", READ: "read", WRITE: "write"}
+
+
+def level_of(v, fallback=BLOCK):
+    if isinstance(v, bool):
+        return WRITE if v else BLOCK
+    if isinstance(v, int):
+        return max(BLOCK, min(WRITE, v))
+    if isinstance(v, str) and v in LEVELS:
+        return LEVELS[v]
+    return fallback
+
+
+# section_key: {label, features:[(key, label, default_level), ...]}
 FEATURE_SECTIONS = {
     "ai_tooling": {
         "label": "AI Tooling",
         "features": [
-            ("ai.autotag",      "Auto-Tag Image (YOLO)"),
-            ("ai.smarttag",     "Smart Tag (AI pipeline)"),
-            ("ai.pose",         "Pose"),
-            ("ai.ocr",          "OCR"),
-            ("ai.segment",      "Segment (YOLO)"),
-            ("ai.barcodes",     "Scan barcodes"),
-            ("ai.pose_remove",  "Remove skeleton"),
-            ("ai.quicktrain",   "Quick Train"),
-            ("ai.trainer",      "Trainer portal link"),
-            ("ai.trainer.select","Trainer — build/select image sets"),
-            ("ai.trainer.keep", "Trainer — modify persistent sets (keep/clear)"),
-            ("ai.trainer.run",  "Trainer — start a training run"),
-            ("ai.tiers",        "Storage Tiers"),
-            ("ai.bg_autotag",   "Background auto-tag when idle"),
-            ("ai.reconcile",    "Sync with disk"),
-            ("ai.llm",          "LLM actions (✨ AI)"),
-            ("ai.iqa",          "Image quality (IQA)"),
+            ("ai.autotag",       "Auto-Tag Image (YOLO)", "write"),
+            ("ai.smarttag",      "Smart Tag (AI pipeline)", "write"),
+            ("ai.pose",          "Pose", "write"),
+            ("ai.ocr",           "OCR", "write"),
+            ("ai.segment",       "Segment (YOLO)", "write"),
+            ("ai.barcodes",      "Scan barcodes", "write"),
+            ("ai.quicktrain",    "Quick Train", "write"),
+            ("ai.trainer",       "Trainer portal link", "write"),
+            ("ai.trainer.select","Trainer — build/select image sets", "write"),
+            ("ai.trainer.keep",  "Trainer — modify persistent sets", "write"),
+            ("ai.trainer.run",   "Trainer — start a training run", "write"),
+            ("ai.tiers",         "Storage Tiers", "write"),
+            ("ai.bg_autotag",    "Background auto-tag when idle", "write"),
+            ("ai.reconcile",     "Sync with disk", "write"),
+            ("ai.llm",           "LLM actions (✨ AI)", "write"),
+            ("ai.iqa",           "Image quality (IQA)", "write"),
         ],
     },
-    "fetch": {
-        "label": "Fetch (gallery-dl)",
-        "features": [],   # section-level toggle only
-    },
-    "dedup": {
-        "label": "Dupes / dedup",
-        "features": [],
-    },
-    "settings": {
-        "label": "Settings",
-        "features": [
-            ("branding", "Branding (name / logo)"),
-        ],
-    },
+    "fetch":    {"label": "Fetch (gallery-dl)", "features": []},
+    "dedup":    {"label": "Dupes / dedup", "features": []},
+    "settings": {"label": "Settings",
+                 "features": [("branding", "Branding (name / logo)", "write")]},
     "gallery_tabs": {
         "label": "Gallery tabs",
         "features": [
-            ("tab.gallery",  "Gallery tab"),
-            ("tab.albums",   "Albums tab"),
-            ("tab.albums.edit", "Albums — allow create/delete/rename/add"),
-            ("tab.faces",    "Faces tab"),
-            ("tab.faces.edit", "Faces — allow editing"),
-            ("tab.review",   "Review tab"),
-            ("tab.music",    "Music tab"),
-            ("tab.books",    "Books tab"),
-            ("tab.books.delete", "Books — allow deleting"),
-            ("tab.trainer",  "Trainer tab"),
-        ],
-    },
-    "metadata_tabs": {
-        "label": "Metadata editors",
-        "features": [
-            ("meta.exif",      "EXIF tab"),
-            ("meta.exif.edit", "EXIF — allow editing"),
-            ("meta.iptc",      "IPTC tab"),
-            ("meta.iptc.edit", "IPTC — allow editing"),
-            ("meta.xmp",       "XMP tab"),
-            ("meta.xmp.edit",  "XMP — allow editing"),
+            ("tab.gallery", "Gallery tab", "read"),
+            ("tab.albums",  "Albums tab (read=view, write=create/edit)", "read"),
+            ("tab.faces",   "Faces tab (read=view, write=edit clusters)", "read"),
+            ("tab.review",  "Review tab", "write"),
+            ("tab.music",   "Music tab", "read"),
+            ("tab.books",   "Books tab (read=view, write=delete)", "read"),
+            ("tab.trainer", "Trainer tab", "write"),
         ],
     },
     "annotations": {
         "label": "Image annotations",
         "features": [
-            ("annot.description", "Description — allow editing"),
-            ("annot.tags",        "Tags — allow editing"),
-            ("annot.boxes",       "Boxes / regions — allow editing"),
-            ("data.delete",       "Delete files (single + bulk)"),
-            ("data.move",         "Move / relocate files"),
-            ("data.upload",       "Upload / drag-drop files"),
+            ("annot.description", "Description (write=edit)", "write"),
+            ("annot.tags",        "Tags (write=edit)", "write"),
+            ("annot.boxes",       "Boxes / regions (write=edit)", "write"),
+            ("data.delete",       "Delete files (single + bulk)", "write"),
+            ("data.move",         "Move / relocate files", "write"),
+            ("data.upload",       "Upload / drag-drop files", "write"),
         ],
     },
-    "viewers": {
-        "label": "Viewers",
-        "features": [
-            ("view.3d", "3D viewer (mesh / body)"),
-        ],
-    },
+    "viewers": {"label": "Viewers",
+                "features": [("view.3d", "3D viewer (mesh / body)", "read")]},
     "comics": {
         "label": "Comics",
         "features": [
-            ("comics.make",   "Make / create comic"),
-            ("comics.edit",   "Edit comic pages"),
-            ("comics.delete", "Delete comic"),
+            ("comics.make",   "Make / create comic", "write"),
+            ("comics.edit",   "Edit comic pages", "write"),
+            ("comics.delete", "Delete comic", "write"),
         ],
     },
 }
 
-# Flat list of every leaf feature key.
-ALL_FEATURES = [k for s in FEATURE_SECTIONS.values() for k, _ in s["features"]]
-# Section keys are themselves toggleable features (hide the whole section).
-ALL_SECTION_KEYS = list(FEATURE_SECTIONS.keys())
-ALL_KEYS = ALL_SECTION_KEYS + ALL_FEATURES
-
-def _all_allowed():
-    return {k: True for k in ALL_KEYS}
-
-def _all_denied():
-    return {k: False for k in ALL_KEYS}
-
-# ── built-in role bundles ────────────────────────────────────────────────────
-# Each role is a permission map {feature_key: bool}. Missing keys inherit the
-# role's implicit default (see ROLE_DEFAULT_ALLOW).
-ROLE_DEFAULT_ALLOW = {
-    "admin":     True,   # admins get everything regardless (short-circuit)
-    "uploader":  False,  # automation account: locked down, opt-in only
-    "viewer":    False,  # view-only: nothing
-    "custom":    True,    # custom starts open; admin trims from there
+# Legacy ".edit"/".delete" leaves that collapsed into a base feature's WRITE.
+COLLAPSED = {
+    "meta.exif.edit":  "meta.exif",
+    "meta.iptc.edit":  "meta.iptc",
+    "meta.xmp.edit":   "meta.xmp",
+    "tab.albums.edit": "tab.albums",
+    "tab.faces.edit":  "tab.faces",
+    "tab.books.delete":"tab.books",
 }
 
-BUILTIN_ROLES = {
-    "admin":    _all_allowed(),
-    # uploader: only the pieces an automated box/tag uploader needs.
-    "uploader": {**_all_denied(),
-                 "data.upload": True,
-                 "ai_tooling": True,
-                 "ai.autotag": True,
-                 "ai.segment": True},
-    # viewer: read-only browsing. Sees all gallery tabs EXCEPT review, and
-    # can open Faces but not edit clusters (tab.faces without tab.faces.edit).
-    "viewer":   {**_all_denied(),
-                 "gallery_tabs": True,
-                 "tab.gallery": True,
-                 "tab.albums": True,
-                 "tab.albums.edit": False,
-                 "tab.faces": True,
-                 "tab.faces.edit": False,
-                 "tab.review": False,
-                 "tab.music": True,
-                 "tab.books": True,
-                 "tab.books.delete": False,
-                 "tab.trainer": False,
-                 "ai.trainer": False,
-                 "ai.trainer.select": False,
-                 "ai.trainer.keep": False,
-                 "ai.trainer.run": False,
-                 "metadata_tabs": True,
-                 "meta.exif": True,
-                 "meta.exif.edit": False,
-                 "meta.iptc": True,
-                 "meta.iptc.edit": False,
-                 "meta.xmp": True,
-                 "meta.xmp.edit": False,
-                 "annot.description": False,
-                 "annot.tags": False,
-                 "annot.boxes": False,
-                 "data.delete": False,
-                 "data.move": False,
-                 "comics.make": False,
-                 "comics.edit": False,
-                 "comics.delete": False},
-    "custom":   _all_allowed(),
+
+def _rebuild():
+    global FEATURE_DEFAULTS, ALL_FEATURES, ALL_SECTION_KEYS, ALL_KEYS
+    FEATURE_DEFAULTS = {}
+    for skey, s in FEATURE_SECTIONS.items():
+        FEATURE_DEFAULTS[skey] = READ
+        for key, _lbl, dflt in s["features"]:
+            FEATURE_DEFAULTS[key] = level_of(dflt, READ)
+    ALL_FEATURES = [k for s in FEATURE_SECTIONS.values() for k, _, _ in s["features"]]
+    ALL_SECTION_KEYS = list(FEATURE_SECTIONS.keys())
+    ALL_KEYS = ALL_SECTION_KEYS + ALL_FEATURES
+
+
+FEATURE_DEFAULTS = {}
+ALL_FEATURES = ALL_SECTION_KEYS = ALL_KEYS = []
+_rebuild()
+
+
+def register_section(section_key, label):
+    if section_key not in FEATURE_SECTIONS:
+        FEATURE_SECTIONS[section_key] = {"label": label, "features": []}
+        _rebuild()
+    return section_key
+
+
+def register_feature(key, label, *, section="modules", section_label="Modules",
+                     default="write", role_defaults=None):
+    register_section(section, section_label)
+    feats = FEATURE_SECTIONS[section]["features"]
+    dflt = level_of(default, WRITE)
+    for i, (k, _lbl, _d) in enumerate(feats):
+        if k == key:
+            feats[i] = (key, label, dflt); break
+    else:
+        feats.append((key, label, dflt))
+    _rebuild()
+    for role, bundle in ROLE_LEVELS.items():
+        if role == "admin":
+            continue
+        rd = (role_defaults or {}).get(role)
+        if rd is not None:
+            bundle[key] = level_of(rd, dflt)
+    return key
+
+
+def registered_keys():
+    return list(ALL_KEYS)
+
+
+ROLE_DEFAULT_LEVEL = {"admin": WRITE, "uploader": BLOCK, "viewer": READ, "custom": WRITE}
+
+ROLE_LEVELS = {
+    "admin":    {},
+    "uploader": {"data.upload": WRITE, "ai.autotag": WRITE, "ai.segment": WRITE,
+                 "ai_tooling": WRITE},
+    "viewer":   {"tab.review": BLOCK, "tab.trainer": BLOCK,
+                 "ai.trainer": BLOCK, "ai.trainer.select": BLOCK,
+                 "ai.trainer.keep": BLOCK, "ai.trainer.run": BLOCK,
+                 "annot.description": READ, "annot.tags": READ, "annot.boxes": READ,
+                 "data.delete": BLOCK, "data.move": BLOCK, "data.upload": BLOCK,
+                 "comics.make": BLOCK, "comics.edit": BLOCK, "comics.delete": BLOCK},
+    "custom":   {},
 }
 
-def effective_permissions(role, overrides):
-    """Resolve the final {feature_key: bool} for a user.
 
-    role       -- one of BUILTIN_ROLES keys (or 'custom')
-    overrides  -- per-user dict {feature_key: bool} (may be partial/empty)
-
-    Admins short-circuit to all-allowed. Otherwise: start from the role
-    bundle, fall back to the role's implicit default for unmentioned keys,
-    then apply the user's own overrides on top.
-    """
+def _role_level(role, key):
     if role == "admin":
-        return _all_allowed()
-    base = dict(BUILTIN_ROLES.get(role, BUILTIN_ROLES["custom"]))
-    default = ROLE_DEFAULT_ALLOW.get(role, True)
+        return WRITE
+    bundle = ROLE_LEVELS.get(role, ROLE_LEVELS["custom"])
+    if key in bundle:
+        return bundle[key]
+    rdefault = ROLE_DEFAULT_LEVEL.get(role, WRITE)
+    fdefault = FEATURE_DEFAULTS.get(key, READ)
+    return min(rdefault, fdefault)
+
+
+def resolve_level(role, key, user_override=None, group_override=None):
+    if role == "admin":
+        return WRITE
+
+    def _apply(ov):
+        if ov is None or ov == "default":
+            return None
+        if ov == "inherit":
+            return FEATURE_DEFAULTS.get(key, READ)
+        return level_of(ov, FEATURE_DEFAULTS.get(key, READ))
+
+    u = _apply(user_override) if user_override is not None else None
+    if u is not None:
+        return u
+    grp = _apply(group_override) if group_override is not None else None
+    if grp is not None:
+        return grp
+    return _role_level(role, key)
+
+
+def effective_permissions(role, overrides, group_overrides=None):
+    if role == "admin":
+        return {k: WRITE for k in ALL_KEYS}
+    overrides = overrides or {}
+    group_overrides = group_overrides or {}
+    return {k: resolve_level(role, k, overrides.get(k), group_overrides.get(k))
+            for k in ALL_KEYS}
+
+
+def has_level(perms, key, need=READ):
+    if isinstance(need, str):
+        need = LEVELS.get(need, READ)
+    return level_of(perms.get(key, BLOCK), BLOCK) >= need
+
+
+def migrate_perms(old):
+    """Fold legacy {key: bool} overrides into {key: level_name}.
+    true->write, false->block; .edit/.delete collapse into base at write."""
+    if not old:
+        return {}
     out = {}
-    for k in ALL_KEYS:
-        out[k] = base.get(k, default)
-    for k, v in (overrides or {}).items():
-        if k in out:
-            out[k] = bool(v)
+    for k, v in old.items():
+        if k in COLLAPSED:
+            if level_of(v) >= WRITE:
+                out[COLLAPSED[k]] = "write"
+            continue
+        if isinstance(v, bool):
+            out[k] = "write" if v else "block"
+        else:
+            out[k] = v if isinstance(v, str) else LEVEL_NAMES.get(level_of(v), "block")
     return out
 
+
 def catalog():
-    """JSON-serializable description of the feature tree for the admin UI."""
     return {
+        "levels": ["block", "read", "write", "inherit", "default"],
         "sections": [
-            {
-                "key": skey,
-                "label": s["label"],
-                "features": [{"key": k, "label": lbl} for k, lbl in s["features"]],
-            }
+            {"key": skey, "label": s["label"],
+             "features": [{"key": k, "label": lbl,
+                           "default": LEVEL_NAMES.get(dflt, "read")}
+                          for k, lbl, dflt in s["features"]]}
             for skey, s in FEATURE_SECTIONS.items()
         ],
-        "roles": list(BUILTIN_ROLES.keys()),
+        "roles": list(ROLE_DEFAULT_LEVEL.keys()),
     }

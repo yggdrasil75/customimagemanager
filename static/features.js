@@ -19,10 +19,29 @@
     document.head.appendChild(s);
   }
 
+  // Permission levels mirror features.py: block(0) < read(1) < write(2).
+  // The server sends numeric levels. Absent => fail-open (untagged/new keys).
+  function levelOf(feats, key) {
+    const v = feats[key];
+    if (v === undefined || v === null) return 2;   // fail-open
+    if (typeof v === 'boolean') return v ? 2 : 0;  // legacy bool
+    if (typeof v === 'number') return v;
+    const M = { block: 0, read: 1, write: 2 };
+    return (key in M) ? M[key] : (M[v] !== undefined ? M[v] : 2);
+  }
+  function canRead(feats, key) { return levelOf(feats, key) >= 1; }
+  function canWrite(feats, key) { return levelOf(feats, key) >= 2; }
+
+  // Back-compat shim: featureAllowed now means "can read/see". Old ".edit"
+  // keys map to a WRITE check on their base feature.
+  const EDIT_KEY_BASE = {
+    'tab.faces.edit': 'tab.faces', 'tab.albums.edit': 'tab.albums',
+    'tab.books.delete': 'tab.books', 'meta.exif.edit': 'meta.exif',
+    'meta.iptc.edit': 'meta.iptc', 'meta.xmp.edit': 'meta.xmp',
+  };
   function featureAllowed(feats, key) {
-    // Absent from the map => allowed (fail-open for untagged/new keys the
-    // server didn't send). Explicit false => denied.
-    return feats[key] !== false;
+    if (key in EDIT_KEY_BASE) return canWrite(feats, EDIT_KEY_BASE[key]);
+    return canRead(feats, key);
   }
 
   function apply(root) {
@@ -43,22 +62,22 @@
     // Class-based edit gates for dynamically-rendered controls. Buttons/spans
     // in this list are hidden when the mapped key is denied; inputs/textareas
     // with these classes are made read-only instead (handled below).
+    // Class-based EDIT gates: these controls modify data, so they require
+    // WRITE on the mapped key (read = can see, write = can change).
     const HIDE_GATES = {
-      'tag-x': 'annot.tags',            // remove-tag ✕ on each chip
-      'tag-ok': 'annot.tags',           // confirm-tag ✓ on each chip
-      'region-del': 'annot.boxes',      // delete-box ✕ in the region list
-      'region-confirm': 'annot.boxes',  // confirm-box ✓ in the region list
+      'tag-x': 'annot.tags',
+      'tag-ok': 'annot.tags',
+      'region-del': 'annot.boxes',
+      'region-confirm': 'annot.boxes',
     };
     Object.keys(HIDE_GATES).forEach(cls => {
-      const denied = !featureAllowed(feats, HIDE_GATES[cls]);
+      const denied = !canWrite(feats, HIDE_GATES[cls]);
       scope.querySelectorAll('.' + cls).forEach(el =>
         el.classList.toggle(HIDDEN_CLASS, denied));
     });
-    // Inline-editable tag inputs become read-only when tags are locked; the
-    // box class-name inputs when boxes are locked.
-    const tagsDenied = !featureAllowed(feats, 'annot.tags');
+    const tagsDenied = !canWrite(feats, 'annot.tags');
     scope.querySelectorAll('.tag-edit').forEach(el => { el.readOnly = tagsDenied; });
-    const boxesDenied = !featureAllowed(feats, 'annot.boxes');
+    const boxesDenied = !canWrite(feats, 'annot.boxes');
     scope.querySelectorAll('.region-edit').forEach(el => { el.readOnly = boxesDenied; });
     // Annotation edit gates: elements marked data-annot-edit="<key>" become
     // read-only when that key is denied. Inputs/textareas are disabled in place
@@ -66,7 +85,7 @@
     // controls pane and any dynamically-rendered annotation UI.
     scope.querySelectorAll('[data-annot-edit]').forEach(container => {
       const key = container.getAttribute('data-annot-edit');
-      const denied = !featureAllowed(feats, key);
+      const denied = !canWrite(feats, key);   // editing => write level
       const gate = el => {
         if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
           el.readOnly = denied;
@@ -90,12 +109,26 @@
                      window.CIMAuth.user.features) || {};
       return featureAllowed(feats, key);
     },
-    // Force a metadata editor read-only when meta.<type>.edit is denied:
-    // disable every input/select/textarea and hide its save button. Safe to
-    // call repeatedly (editors re-render on tab switch and file change).
+    // Level-aware helpers modules can use.
+    level: function (key) {
+      const feats = (window.CIMAuth && window.CIMAuth.user &&
+                     window.CIMAuth.user.features) || {};
+      return levelOf(feats, key);
+    },
+    canRead: function (key) {
+      const feats = (window.CIMAuth && window.CIMAuth.user &&
+                     window.CIMAuth.user.features) || {};
+      return canRead(feats, key);
+    },
+    canWrite: function (key) {
+      const feats = (window.CIMAuth && window.CIMAuth.user &&
+                     window.CIMAuth.user.features) || {};
+      return canWrite(feats, key);
+    },
+    // Force a metadata editor read-only when the user lacks WRITE on the tab.
     enforceEditor: function (type) {
-      const editKey = 'meta.' + type + '.edit';
-      if (this.allowed(editKey)) return;           // editing permitted, leave as-is
+      const key = 'meta.' + type;                  // write on the base feature
+      if (this.canWrite(key)) return;              // editing permitted
       const rootId = type + '-editor';             // exif-editor / iptc-editor / xmp-editor
       const applyOnce = () => {
         const root = document.getElementById(rootId);

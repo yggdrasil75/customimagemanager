@@ -28,10 +28,12 @@ log.setLevel(logging.INFO)
 COOKIE_NAME = "cim_session"
 _UNSET = object()
 
-def require_feature(feature_key, action=None, fields=()):
-    """@brief Decorator: 403 unless g.user's features explicitly deny feature_key.
+def require_feature(feature_key, action=None, fields=(), level="read"):
+    """@brief Decorator: 403 unless g.user has >= `level` on feature_key.
 
-    @param action optional audit action name; fields are request-body keys to log.
+    level defaults to "read" (may see/open). Write-guarded endpoints pass
+    level="write". @param action optional audit action; fields are body keys
+    to log.
     """
     def deco(fn):
         @functools.wraps(fn)
@@ -39,13 +41,11 @@ def require_feature(feature_key, action=None, fields=()):
             u = g.get("user")
             if not u:
                 return jsonify({"error": "authentication required"}), 401
-            # Capability denials bind even admins: if the box can't run it
-            # (missing dep), the route 503s rather than crashing mid-request.
             if capabilities.capability_denials().get(feature_key) is False:
                 return jsonify({"error": "feature unavailable on this server"}), 503
             if not u.get("is_admin"):
                 feats = u.get("features") or {}
-                if feats.get(feature_key) is False:
+                if not features.has_level(feats, feature_key, level):
                     return jsonify({"error": "feature not permitted"}), 403
             resp = fn(*a, **k)
             if action:
@@ -190,24 +190,25 @@ class Auth:
 
     def _resolve_perms(self, user_row):
         if user_row is None:
-            return features.effective_permissions("viewer", {})
+            # Not logged in: everything blocked (the block default).
+            return {k: features.BLOCK for k in features.ALL_KEYS}
         if user_row["is_admin"]:
             return features.effective_permissions("admin", {})
 
         role = (user_row["role"] if "role" in user_row.keys()
                 else None) or "custom"
-        overrides = self._load_perms(
-            user_row["perms"] if "perms" in user_row.keys() else None)
+        # Migrate legacy bool perms (and fold old .edit keys) to levels. Kept
+        # separate for user vs group so "inherit"/"default" resolve correctly.
+        overrides = features.migrate_perms(self._load_perms(
+            user_row["perms"] if "perms" in user_row.keys() else None))
 
+        group_overrides = {}
         gid = user_row["group_id"] if "group_id" in user_row.keys() else None
         grp = self.get_group(gid)
         if grp:
-            # Start from the group, then layer the user on top.
             role = role if role and role != "custom" else grp["role"]
-            merged = dict(self._load_perms(grp["perms"]))
-            merged.update(overrides)
-            overrides = merged
-        return features.effective_permissions(role, overrides)
+            group_overrides = features.migrate_perms(self._load_perms(grp["perms"]))
+        return features.effective_permissions(role, overrides, group_overrides)
 
     def _row_to_user(self, r):
         if r is None:

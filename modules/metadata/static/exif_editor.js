@@ -271,10 +271,10 @@
     const btn = $("#exif-save");
     if (btn) btn.disabled = true;
     try {
-      const r = await fetch("/api/exif/write", {
+      const r = await fetch("/api/metadata/write", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filename, patch }),
+        body: JSON.stringify({ kind: "exif", filename, patch }),
       });
       const d = await r.json();
       if (!d.success) throw new Error(d.error || "write failed");
