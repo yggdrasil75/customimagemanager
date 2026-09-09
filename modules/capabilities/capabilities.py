@@ -68,9 +68,9 @@ CAPABILITY_PROBES = {
 # A missing capability forces every key here to False. Keys not listed under
 # ANY capability are never touched by the machine layer (fail-open).
 CAPABILITY_FEATURES = {
-    "insightface": ["tab.faces", "tab.faces.edit"],
+    "insightface": ["tab.faces"],
     "trimesh":     ["view.3d"],          # new leaf; see features.py patch
-    "ultralytics": ["ai.autotag", "ai.segment", "ai.pose", "ai.pose_remove"],
+    "ultralytics": ["ai.autotag", "ai.segment", "ai.pose"],
     "torch":       ["ai.smarttag", "ai.iqa", "dedup"],
     "ocr":         ["ai.ocr"],
     "barcodes":    ["ai.barcodes"],

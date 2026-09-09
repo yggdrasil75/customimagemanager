@@ -6764,7 +6764,7 @@ def api_modules():
                     "missing_pip": module_registry.missing_pip()})
 
 @app.route("/api/modules/toggle", methods=["POST"])
-@_auth.require_feature("settings", action='toggle_module', fields=())
+@_auth.require_feature("settings", level="write", action='toggle_module', fields=())
 def api_modules_toggle():
     """Enable/disable a non-core module. Admin-gated via the settings feature.
 
@@ -6793,7 +6793,7 @@ def api_models():
     return jsonify({"capabilities": modules.broker.status()})
 
 @app.route("/api/models/select", methods=["POST"])
-@_auth.require_feature("settings", action='select_model', fields=())
+@_auth.require_feature("settings", level="write", action='select_model', fields=())
 def api_models_select():
     """Choose which provider serves a capability. Admin-gated.
 
@@ -6810,7 +6810,7 @@ def api_models_select():
     return jsonify({"success": True, "capabilities": modules.broker.status()})
 
 @app.route("/api/update_settings", methods=["POST"])
-@_auth.require_feature("settings", action='update_settings', fields=())
+@_auth.require_feature("settings", level="write", action='update_settings', fields=())
 def update_settings():
     d = request.json
     # Registry-owned settings (core or module-declared) are validated, stored,
@@ -6905,7 +6905,7 @@ def update_settings():
     save_config(); return jsonify({"success": True})
 
 @app.route("/api/branding", methods=["POST"])
-@_auth.require_feature("branding", action='update_branding', fields=())
+@_auth.require_feature("branding", level="write", action='update_branding', fields=())
 def update_branding():
     # Locked to admins (or a custom role explicitly granted "branding").
     # require_feature already lets admins through and denies anyone whose
@@ -6996,7 +6996,7 @@ def api_list():
                     "page":page,"page_size": state["page_size"]})
 
 @app.route("/api/dates/backfill", methods=["POST"])
-@_auth.require_feature("settings", action='dates_backfill', fields=())
+@_auth.require_feature("settings", level="write", action='dates_backfill', fields=())
 def api_dates_backfill():
     """Populate the five date buckets for rows that don't have them yet, without a
     full re-index (no re-hash / re-thumbnail). Idempotent and resumable: only
@@ -7328,7 +7328,7 @@ def _process_spooled_inline(spool_path, orig_name, folder, metadata):
     return "retry", payload, (code if code >= 400 else 503)
 
 @app.route("/api/upload", methods=["POST"])
-@_auth.require_feature("data.upload", action='upload', fields=('folder',))
+@_auth.require_feature("data.upload", level="write", action='upload', fields=('folder',))
 def api_upload():
     """Adaptive ingest. Two ways a file can be taken:
 
@@ -8440,7 +8440,7 @@ def _start_spool_janitor():
     access_logger.info("spool janitor started")
 
 @app.route("/api/upload/clean", methods=["POST"])
-@_auth.require_feature("data.upload", action='upload_clean')
+@_auth.require_feature("data.upload", level="write", action='upload_clean')
 def api_upload_clean():
     """Run a cleaning pass now: requeue recoverable errors, re-ingest orphaned
     spool files, drop spools of already-processed originals."""
@@ -8668,7 +8668,7 @@ def api_gdl_config():
     return jsonify({"success": True})
 
 @app.route("/api/gdl/fetch", methods=["POST"])
-@_auth.require_feature("fetch")
+@_auth.require_feature("fetch", level="write")
 def api_gdl_fetch():
     """Add a URL to the gallery-dl download queue and return immediately. A
     background worker downloads it and streams the files into the ingest queue;
@@ -8728,7 +8728,7 @@ def api_gdl_queue():
     })
 
 @app.route("/api/gdl/queue/<int:qid>/cancel", methods=["POST"])
-@_auth.require_feature("fetch")
+@_auth.require_feature("fetch", level="write")
 def api_gdl_queue_cancel(qid):
     """Cancel a queued or in-progress download. Pending rows flip to canceled
     immediately; an in-flight one is flagged and stops between files."""
@@ -8756,7 +8756,7 @@ def api_gdl_queue_cancel(qid):
     return jsonify({"success": True, "status": "canceling" if res == "flag" else res})
 
 @app.route("/api/gdl/queue/<int:qid>/retry", methods=["POST"])
-@_auth.require_feature("fetch")
+@_auth.require_feature("fetch", level="write")
 def api_gdl_queue_retry(qid):
     """Re-run a finished row (done/error/canceled) in place: reset it to pending
     and let the normal worker claim it. Same URL and folder, but current opts and
@@ -8783,7 +8783,7 @@ def api_gdl_queue_retry(qid):
     return jsonify({"success": True, "status": "pending"}), 202
 
 @app.route("/api/gdl/queue/clear", methods=["POST"])
-@_auth.require_feature("fetch")
+@_auth.require_feature("fetch", level="write")
 def api_gdl_queue_clear():
     """Remove finished rows (done/error/canceled) from the queue view. Does not
     touch pending/downloading rows or anything already in the ingest queue."""
@@ -8800,7 +8800,7 @@ def api_gdl_queue_clear():
     return jsonify({"success": True, "removed": n})
 
 @app.route("/api/move", methods=["POST"])
-@_auth.require_feature("data.move", action="move_file",
+@_auth.require_feature("data.move", level="write", action="move_file",
                        fields=("filename", "filenames", "new_folder", "dest", "destination"))
 def api_move():
     filename   = request.json.get("filename","")
@@ -9384,7 +9384,7 @@ def api_tiers_get():
     return jsonify({"success": True, "config": tiering.load_cfg()})
 
 @app.route("/api/tiers", methods=["POST"])
-@_auth.require_feature("settings", action='update_tiers', fields=())
+@_auth.require_feature("settings", level="write", action='update_tiers', fields=())
 def api_tiers_set():
     try:
         cfg = tiering.save_cfg(request.json or {})
@@ -9407,7 +9407,7 @@ def api_tiers_cancel():
     return jsonify({"success": True})
 
 @app.route("/api/delete", methods=["POST"])
-@_auth.require_feature("data.delete")
+@_auth.require_feature("data.delete", level="write")
 def api_delete():
     fn = request.json.get("filename","")
     fp = get_safe_path(MEDIA_DIR, fn)
@@ -9426,7 +9426,7 @@ def api_delete():
     return jsonify({"success":True})
 
 @app.route("/api/reconcile", methods=["POST"])
-@_auth.require_feature("ai.reconcile")
+@_auth.require_feature("ai.reconcile", level="write")
 def api_reconcile():
     """Purge DB rows for files deleted on disk. Externally-edited files are
     picked up by re-indexing (mtime change), so trigger both a reconcile and a
@@ -9437,7 +9437,7 @@ def api_reconcile():
     return jsonify({"success": True, "purged": removed})
 
 @app.route("/api/tag_review", methods=["POST"])
-@_auth.require_feature("tab.review")
+@_auth.require_feature("tab.review", level="write")
 def api_tag_review():
     """Apply a per-tag review decision to one file in a single write.
 
@@ -9484,7 +9484,7 @@ def api_confirm_all_tags():
     return jsonify({"success": True, "tags": out, "confirmed": len(out)})
 
 @app.route("/api/bulk_tag", methods=["POST"])
-@_auth.require_feature("annot.tags")
+@_auth.require_feature("annot.tags", level="write")
 def bulk_tag():
     """Add tags to many files at once without touching regions or description."""
     filenames = request.json.get("filenames", [])
@@ -9521,7 +9521,7 @@ def bulk_tag():
     return jsonify({"success": True, "updated": updated, "errors": errors})
 
 @app.route("/api/bulk_delete", methods=["POST"])
-@_auth.require_feature("data.delete")
+@_auth.require_feature("data.delete", level="write")
 def bulk_delete():
     filenames = request.json.get("filenames", [])
     deleted, errors = 0, []
@@ -9600,19 +9600,19 @@ def dedup_status():
                     "file_count": 0, "created": None, "group_count": 0})
 
 @app.route("/api/dedup_retrain", methods=["POST"])
-@_auth.require_feature("dedup")
+@_auth.require_feature("dedup", level="write")
 def dedup_retrain():
     """! @brief Refit the duplicate model once; called after a bulk auto-resolve."""
     return jsonify({"success": _retrain_dup_model()})
 
 @app.route("/api/dedup_clear", methods=["POST"])
-@_auth.require_feature("dedup")
+@_auth.require_feature("dedup", level="write")
 def dedup_clear():
     _dedup_checkpoint_clear()
     return jsonify({"success": True})
 
 @app.route("/api/dedup_clear_group", methods=["POST"])
-@_auth.require_feature("dedup")
+@_auth.require_feature("dedup", level="write")
 def dedup_clear_group():
     db_id = request.json.get("db_id")
     if db_id:
@@ -9621,7 +9621,7 @@ def dedup_clear_group():
     return jsonify({"success": True})
 
 @app.route("/api/dedup_exclude", methods=["POST"])
-@_auth.require_feature("dedup")
+@_auth.require_feature("dedup", level="write")
 def dedup_exclude():
     """
     Remove a file from a stored group without deleting it, and record
@@ -9682,7 +9682,7 @@ def dedup_exclude():
         return jsonify({"success": True, "group_remains": False})
 
 @app.route("/api/dedup_compare_video", methods=["POST"])
-@_auth.require_feature("dedup")
+@_auth.require_feature("dedup", level="write")
 def dedup_compare_video():
     """Compare two videos frame-by-frame at matched timestamps.
 
@@ -9858,7 +9858,7 @@ def dedup_groups_page():
     return jsonify({"success": True})
 
 @app.route("/api/dedup", methods=["POST"])
-@_auth.require_feature("dedup")
+@_auth.require_feature("dedup", level="write")
 def dedup():
     force = request.json.get("force", False) if request.is_json else False
     try:
@@ -10079,7 +10079,7 @@ def dedup():
         state["status_text"] = "Ready."
 
 @app.route("/api/dedup_merge", methods=["POST"])
-@_auth.require_feature("dedup", action='dedup_merge', fields=('keep', 'remove'))
+@_auth.require_feature("dedup", level="write", action='dedup_merge', fields=('keep', 'remove'))
 def dedup_merge():
     data   = request.json
     target = data.get("target","")
@@ -10158,7 +10158,7 @@ def api_comic_get():
                     "pages": [folder + "/" + p for p in pages]})
 
 @app.route("/api/comic_create", methods=["POST"])
-@_auth.require_feature("comics.make", action='comic_create', fields=('folder', 'title'))
+@_auth.require_feature("comics.make", level="write", action='comic_create', fields=('folder', 'title'))
 def api_comic_create():
     d = request.json or {}
     folder = (d.get("folder", "") or "").strip().strip('/')
@@ -10182,7 +10182,7 @@ def api_comic_create():
     return jsonify({"success": True, "folder": folder})
 
 @app.route("/api/comic_update", methods=["POST"])
-@_auth.require_feature("comics.edit", action='comic_update', fields=('folder', 'title'))
+@_auth.require_feature("comics.edit", level="write", action='comic_update', fields=('folder', 'title'))
 def api_comic_update():
     d = request.json or {}
     folder = (d.get("folder", "") or "").strip().strip('/')
@@ -10199,7 +10199,7 @@ def api_comic_update():
     return jsonify({"success": True})
 
 @app.route("/api/comic_delete", methods=["POST"])
-@_auth.require_feature("comics.delete", action='comic_delete', fields=('folder',))
+@_auth.require_feature("comics.delete", level="write", action='comic_delete', fields=('folder',))
 def api_comic_delete():
     """Unpackage a comic (keeps all images, just removes comic status)."""
     folder = (request.json.get("folder", "") or "").strip().strip('/')
@@ -10300,7 +10300,7 @@ def api_flag():
     return jsonify({"success": True})
 
 @app.route("/api/review_boxes", methods=["POST"])
-@_auth.require_feature("tab.review", action='review_boxes', fields=('filename',))
+@_auth.require_feature("tab.review", level="write", action='review_boxes', fields=('filename',))
 def api_review_boxes():
     """Apply per-box review decisions to one file in a single write.
 
@@ -10366,7 +10366,7 @@ def api_confirm_all():
     return jsonify({"success": True, "confirmed": len(meta["regions"])})
 
 @app.route("/api/bulk_box", methods=["POST"])
-@_auth.require_feature("ai.autotag")
+@_auth.require_feature("ai.autotag", level="write")
 def bulk_box():
     """Run box detection on many files. method 'yolo' uses the given model;
     method 'llm' uses the configured vision model. Boxes are added UNCONFIRMED."""
@@ -10431,7 +10431,7 @@ def bulk_box():
     return jsonify({"success": True, "done": done, "boxed": boxed, "errors": errors})
 
 @app.route("/api/bulk_segment", methods=["POST"])
-@_auth.require_feature("ai.segment")
+@_auth.require_feature("ai.segment", level="write")
 def bulk_segment():
     """Run the selected YOLO-seg (background) model over many files, writing
     masked regions (mask_svg in each region's Extensions) UNCONFIRMED. Mirrors
@@ -10489,7 +10489,7 @@ def bulk_segment():
                     "errors": errors})
 
 @app.route("/api/bulk_llm", methods=["POST"])
-@_auth.require_feature("ai.llm")
+@_auth.require_feature("ai.llm", level="write")
 def bulk_llm():
     """Run a configured AI action on many files, writing the result into each."""
     filenames = request.json.get("filenames", [])
@@ -10660,7 +10660,7 @@ def _apply_pipeline_result(fp, analysis):
     return tags, desc, regions
 
 @app.route("/api/run_pipeline", methods=["POST"])
-@_auth.require_feature("ai.smarttag")
+@_auth.require_feature("ai.smarttag", level="write")
 def run_pipeline_route():
     """Run the configurable AI decision tree against one image: classify, tag,
     describe, box subjects, and describe each subject crop. Writes the merged
@@ -10696,7 +10696,7 @@ def run_pipeline_route():
                     "tags": tags, "description": desc, "regions": regions})
 
 @app.route("/api/bulk_pipeline", methods=["POST"])
-@_auth.require_feature("ai.smarttag")
+@_auth.require_feature("ai.smarttag", level="write")
 def bulk_pipeline():
     """Run the Smart Tag pipeline across many files (mass processing)."""
     filenames = request.json.get("filenames", [])
@@ -12070,7 +12070,7 @@ def _merge_comic_analyses(folder, page_analyses, summarize=True):
     return data
 
 @app.route("/api/comic_pipeline", methods=["POST"])
-@_auth.require_feature("ai.smarttag")
+@_auth.require_feature("ai.smarttag", level="write")
 def comic_pipeline_route():
     """Run the pipeline across every page of a comic IN ORDER, store each page's
     result, then merge tags / characters / description up to the comic level.
@@ -12118,7 +12118,7 @@ def comic_pipeline_route():
                         "description": merged.get("description", "")}})
 
 @app.route("/api/ocr", methods=["POST"])
-@_auth.require_feature("ai.ocr")
+@_auth.require_feature("ai.ocr", level="write")
 def api_ocr():
     """Run OCR on one image and return detected text lines (with boxes). The
     client decides whether to add them as regions / append to the description."""
@@ -12135,7 +12135,7 @@ def api_ocr():
     return jsonify({"success": True, **res})
 
 @app.route("/api/barcodes", methods=["POST"])
-@_auth.require_feature("ai.barcodes")
+@_auth.require_feature("ai.barcodes", level="write")
 def api_barcodes():
     fn = request.json.get("filename", "")
     fp = get_safe_path(MEDIA_DIR, fn)
@@ -12151,7 +12151,7 @@ def api_barcodes():
                     "summary": barcodes.summary_text(res), **res})
 
 @app.route("/api/segment", methods=["POST"])
-@_auth.require_feature("ai.segment")
+@_auth.require_feature("ai.segment", level="write")
 def api_segment():
     """Run the selected YOLO-seg (background) model on one image on demand and
     return masked regions, so the user can trigger class-aware segmentation
@@ -12206,7 +12206,7 @@ def api_segment():
                     "count": len(regions), "note": note})
 
 @app.route("/api/auto_tag", methods=["POST"])
-@_auth.require_feature("ai.autotag")
+@_auth.require_feature("ai.autotag", level="write")
 def auto_tag():
     model_path = request.json.get("model")
     fn  = request.json.get("filename","")
@@ -12234,7 +12234,7 @@ def auto_tag():
         return jsonify({"success":False,"error":str(e)})
 
 @app.route("/api/run_llm", methods=["POST"])
-@_auth.require_feature("ai.llm")
+@_auth.require_feature("ai.llm", level="write")
 def run_llm():
     fn        = request.json.get("filename","")
     action_id = str(request.json.get("action_id",""))
@@ -12423,7 +12423,7 @@ def _sel_paths_to_entries(rel_paths):
 
 
 @app.route("/api/trainer/devices")
-@_auth.require_feature("ai.trainer")
+@_auth.require_feature("ai.trainer", level="write")
 def trainer_devices():
     """Report the compute devices torch can see, so the UI never offers a GPU
     index or an MPS option that doesn't exist on this machine. Backed by the
@@ -12433,13 +12433,13 @@ def trainer_devices():
 
 
 @app.route("/api/trainer/sets")
-@_auth.require_feature("ai.trainer")
+@_auth.require_feature("ai.trainer", level="write")
 def trainer_sets():
     return jsonify({"success": True, "sets": ts.list_sets(_db())})
 
 
 @app.route("/api/trainer/set", methods=["GET"])
-@_auth.require_feature("ai.trainer")
+@_auth.require_feature("ai.trainer", level="write")
 def trainer_set_members():
     name = (request.args.get("set", "") or "").strip()
     if not name:
@@ -12452,7 +12452,7 @@ def trainer_set_members():
 
 
 @app.route("/api/trainer/set", methods=["DELETE"])
-@_auth.require_feature("ai.trainer.keep", action="trainer_set_delete", fields=("set",))
+@_auth.require_feature("ai.trainer.keep", level="write", action="trainer_set_delete", fields=("set",))
 def trainer_set_delete():
     name = (request.args.get("set", "") or (request.json or {}).get("set", "")).strip()
     if not name:
@@ -12463,7 +12463,7 @@ def trainer_set_delete():
 
 
 @app.route("/api/trainer/gallery_safe", methods=["POST"])
-@_auth.require_feature("ai.trainer.keep", action="trainer_gallery_safe", fields=("set",))
+@_auth.require_feature("ai.trainer.keep", level="write", action="trainer_gallery_safe", fields=("set",))
 def trainer_gallery_safe():
     d = request.json or {}
     name = (d.get("set") or "").strip()
@@ -12474,13 +12474,13 @@ def trainer_gallery_safe():
 
 
 @app.route("/api/trainer/presets", methods=["GET"])
-@_auth.require_feature("ai.trainer")
+@_auth.require_feature("ai.trainer", level="write")
 def trainer_presets_list():
     return jsonify({"success": True, "presets": ts.list_presets(_db())})
 
 
 @app.route("/api/trainer/presets", methods=["POST"])
-@_auth.require_feature("ai.trainer", action="trainer_preset_save", fields=("name",))
+@_auth.require_feature("ai.trainer", level="write", action="trainer_preset_save", fields=("name",))
 def trainer_preset_save():
     d = request.json or {}
     name = (d.get("name") or "").strip()
@@ -12497,7 +12497,7 @@ def trainer_preset_save():
 
 
 @app.route("/api/trainer/presets", methods=["DELETE"])
-@_auth.require_feature("ai.trainer", action="trainer_preset_delete", fields=("name",))
+@_auth.require_feature("ai.trainer", level="write", action="trainer_preset_delete", fields=("name",))
 def trainer_preset_delete():
     name = (request.args.get("name", "") or (request.json or {}).get("name", "")).strip()
     if not name:
@@ -12507,7 +12507,7 @@ def trainer_preset_delete():
 
 
 @app.route("/api/trainer/checked", methods=["POST"])
-@_auth.require_feature("ai.trainer", action="trainer_checked", fields=("set",))
+@_auth.require_feature("ai.trainer", level="write", action="trainer_checked", fields=("set",))
 def trainer_checked():
     d = request.json or {}
     name = (d.get("set") or "").strip()
@@ -12525,7 +12525,7 @@ def trainer_checked():
 
 
 @app.route("/api/trainer/select", methods=["POST"])
-@_auth.require_feature("ai.trainer.select", action="trainer_select",
+@_auth.require_feature("ai.trainer.select", level="write", action="trainer_select",
                        fields=("strategy", "n"))
 def trainer_select():
     """Pick N images by strategy, COPY each into the set's isolated input folder
@@ -12564,7 +12564,7 @@ def trainer_select():
 
 
 @app.route("/api/trainer/keep", methods=["POST"])
-@_auth.require_feature("ai.trainer.keep", action="trainer_keep", fields=("set",))
+@_auth.require_feature("ai.trainer.keep", level="write", action="trainer_keep", fields=("set",))
 def trainer_keep():
     """Add rel_paths to an existing set (used when editing a set during review)."""
     d = request.json or {}
@@ -12577,7 +12577,7 @@ def trainer_keep():
 
 
 @app.route("/api/trainer/clear", methods=["POST"])
-@_auth.require_feature("ai.trainer.keep", action="trainer_clear", fields=("set",))
+@_auth.require_feature("ai.trainer.keep", level="write", action="trainer_clear", fields=("set",))
 def trainer_clear():
     """Empty a set. Never touches the gallery/library."""
     d = request.json or {}
@@ -12589,7 +12589,7 @@ def trainer_clear():
 
 
 @app.route("/api/trainer/remove", methods=["POST"])
-@_auth.require_feature("ai.trainer.keep", action="trainer_remove", fields=("set",))
+@_auth.require_feature("ai.trainer.keep", level="write", action="trainer_remove", fields=("set",))
 def trainer_remove():
     """Drop specific rel_paths from a set (does not touch gallery)."""
     d = request.json or {}
@@ -12602,7 +12602,7 @@ def trainer_remove():
 
 
 @app.route("/api/trainer/labels")
-@_auth.require_feature("ai.trainer")
+@_auth.require_feature("ai.trainer", level="write")
 def trainer_labels():
     """Label suggestions for the trainer box editor: the global box-label pool
     plus any class names already used on the given set's members."""
@@ -12631,7 +12631,7 @@ def trainer_labels():
 
 
 @app.route("/api/trainer/boxes", methods=["POST"])
-@_auth.require_feature("ai.trainer", action="trainer_boxes", fields=("filename",))
+@_auth.require_feature("ai.trainer", level="write", action="trainer_boxes", fields=("filename",))
 def trainer_boxes():
     """Read or write boxes for one trainer-set member.
 
@@ -12690,7 +12690,7 @@ def api_box_labels():
 
 
 @app.route("/api/trainer/validate", methods=["POST"])
-@_auth.require_feature("ai.trainer.run", action="trainer_validate", fields=("set",))
+@_auth.require_feature("ai.trainer.run", level="write", action="trainer_validate", fields=("set",))
 def trainer_validate():
     """Run the set's trained model over its members, diff predictions against the
     stored ground-truth boxes, and report per-image and aggregate accuracy."""
@@ -12789,7 +12789,7 @@ def trainer_validate():
 
 
 @app.route("/api/trainer/apply_prediction", methods=["POST"])
-@_auth.require_feature("ai.trainer.keep", action="trainer_apply_pred", fields=("filename",))
+@_auth.require_feature("ai.trainer.keep", level="write", action="trainer_apply_pred", fields=("filename",))
 def trainer_apply_prediction():
     d = request.json or {}
     fn = (d.get("filename") or "").strip()
@@ -12817,7 +12817,7 @@ def trainer_apply_prediction():
 
 
 @app.route("/api/train", methods=["POST"])
-@_auth.require_feature("ai.trainer.run", action="trainer_train", fields=("set",))
+@_auth.require_feature("ai.trainer.run", level="write", action="trainer_train", fields=("set",))
 def train():
     d          = request.json or {}
     set_name   = (d.get("set") or "").strip()

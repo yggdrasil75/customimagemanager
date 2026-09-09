@@ -40,7 +40,6 @@ FEATURE_SECTIONS = {
         "features": [
             ("ai.autotag",       "Auto-Tag Image (YOLO)", "write"),
             ("ai.smarttag",      "Smart Tag (AI pipeline)", "write"),
-            ("ai.pose",          "Pose", "write"),
             ("ai.ocr",           "OCR", "write"),
             ("ai.segment",       "Segment (YOLO)", "write"),
             ("ai.barcodes",      "Scan barcodes", "write"),

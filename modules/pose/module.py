@@ -70,6 +70,13 @@ def _estimate(host, img_bgr):
 def register(host):
     host.add_asset("pose.js")
 
+    # Pose owns its auth feature (was hard-coded in core features.py). read =
+    # see the pose controls; write = run/store/remove a skeleton. Viewer gets
+    # read so they can view stored skeletons but not run or clear them.
+    host.register_feature("ai.pose", "Pose (read=view, write=run/remove)",
+                          section="ai_tooling", section_label="AI Tooling",
+                          default="write", role_defaults={"viewer": "read"})
+
     # Shared pose-model path, read by every pose provider (YOLO, Mayaku, …).
     # Empty = each provider's own default (YOLO derives from pose_size; Mayaku
     # serves nothing). The broker's selected 'pose' provider decides who runs
@@ -178,15 +185,19 @@ def register(host):
         return jsonify({"success": True, "cleared": ri,
                         "remaining_people": len(people)})
 
-    # Feature gates preserved: wrap each view in the same require_feature the
-    # core handlers used, so permissions behave identically.
+    # All three run/store/remove skeletons, so they require WRITE on ai.pose.
+    # (ai.pose_remove no longer exists as a separate key — it collapsed into
+    # ai.pose's write level.)
     auth = _mgr()._auth
-    host.add_route("/api/pose", auth.require_feature("ai.pose")(api_pose),
+    host.add_route("/api/pose",
+                   auth.require_feature("ai.pose", level="write")(api_pose),
                    methods=["POST"])
-    host.add_route("/api/bulk_pose", auth.require_feature("ai.pose")(bulk_pose),
+    host.add_route("/api/bulk_pose",
+                   auth.require_feature("ai.pose", level="write")(bulk_pose),
                    methods=["POST"])
     host.add_route("/api/pose_remove",
-                   auth.require_feature("ai.pose_remove", action="pose_remove",
+                   auth.require_feature("ai.pose", level="write",
+                                        action="pose_remove",
                                         fields=("filename",))(api_pose_remove),
                    methods=["POST"])
 

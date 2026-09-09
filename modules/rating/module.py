@@ -312,9 +312,9 @@ def register(host):
 
     auth = m._auth
     host.add_route("/api/iqa_models", api_iqa_models)
-    host.add_route("/api/iqa_set", auth.require_feature("ai.iqa")(iqa_set),
+    host.add_route("/api/iqa_set", auth.require_feature("ai.iqa", level="write")(iqa_set),
                    methods=["POST"])
-    host.add_route("/api/iqa_scan", auth.require_feature("ai.iqa")(iqa_scan),
+    host.add_route("/api/iqa_scan", auth.require_feature("ai.iqa", level="write")(iqa_scan),
                    methods=["POST"])
 
     host.logger.info("rating module: registered ratings table + iqa endpoints")
