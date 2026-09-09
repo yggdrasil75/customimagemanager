@@ -225,6 +225,21 @@ in the core template anymore. The controls tab bar carries
 `data-ext-area="controls_tabs"`; `onShow(filename)` runs when the tab is opened
 or the selected file changes.
 
+The tab's PANE is a server-rendered partial the module ships in its own
+`templates/` dir (on Jinja's search path) — no client fetch, no core edit:
+
+```python
+def register(host):
+    host.add_asset("myeditor.js")
+    host.add_asset("myeditor.css", kind="css")
+    host.register_controls_pane("mytab", "myeditor.html", feature="meta.mytab")
+```
+
+Core renders every registered pane into `#controls_pane_<tab_id>` at page build,
+so a module ships its tab button (JS), pane HTML (template partial), and editor
+JS/CSS entirely from its own folder — **adding a tab requires zero core edits**,
+which is the whole point of the module system.
+
 Core building blocks (auth, metadata, …) can also expose a `register(host)` now,
 called at startup like a plugin's, so they can contribute UI (tabs, assets)
 while still being imported directly by the core.

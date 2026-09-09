@@ -1,10 +1,9 @@
 /* Metadata module: register the EXIF / IPTC / XMP controls tabs.
  *
- * The module owns these three tabs but not their location — it calls
- * window.registerControlsTab and the core controls-tab controller places the
- * buttons into the controls tab-bar extension area and shows the matching
- * #controls_pane_<id> pane (still provided as core partials for now). onShow
- * wires each tab to its existing editor object's .load(filename). */
+ * The tab BUTTONS are registered here; the PANES are server-rendered partials
+ * the module contributes via host.register_controls_pane (so no client fetch).
+ * onShow wires each tab to its editor object's .load(filename). The module owns
+ * the tabs, panes, and editors — core just places them. */
 (function () {
   function reg() {
     if (!window.registerControlsTab) { setTimeout(reg, 100); return; }
@@ -16,6 +15,7 @@
     for (const t of tabs) {
       registerControlsTab({
         id: t.id, label: t.label, feature: t.feature,
+        // pane is already in the DOM (server-rendered); no paneUrl/paneHtml.
         onShow: (fn) => {
           const ed = t.editor();
           if (ed && typeof ed.load === "function") {

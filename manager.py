@@ -134,6 +134,19 @@ def _iqa_score_fn():
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 app       = Flask(__name__)
+
+# Let modules ship server-rendered template partials: any file in a
+# modules/<id>/templates/ dir becomes includable by name, exactly like a core
+# partial, so a module can contribute pane HTML without editing core templates
+# or shuttling HTML over fetch. The app's own loader stays first (core wins on
+# name clashes); module dirs are appended.
+import glob as _glob
+from jinja2 import ChoiceLoader as _ChoiceLoader, FileSystemLoader as _FSLoader
+_mod_tpl_dirs = sorted(_glob.glob(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "modules", "*", "templates")))
+if _mod_tpl_dirs:
+    app.jinja_loader = _ChoiceLoader([app.jinja_loader,
+                                      _FSLoader(_mod_tpl_dirs)])
 MEDIA_DIR = "media"
 MODELS_DIR = "models"
 DB_PATH   = os.path.join(MEDIA_DIR, "library.db")
@@ -13632,6 +13645,14 @@ def module_static(module_id, filename):
 
 # Call register(host) on every enabled plugin, in dependency order.
 module_registry.register_all(module_host)
+
+@app.context_processor
+def _inject_module_ui():
+    """Expose module-contributed UI to templates. controls panes are filtered
+    to enabled modules so a disabled module's pane isn't rendered."""
+    panes = [p for p in getattr(module_host, "controls_panes", [])
+             if module_registry.is_enabled(p["module_id"])]
+    return {"module_controls_panes": panes}
 
 # Providers are now registered; seed the user's per-capability model selection
 # from persisted config. Kept after register_all so unknown/removed providers

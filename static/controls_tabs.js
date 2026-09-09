@@ -30,6 +30,9 @@
       feature: spec.feature || null,
       onShow: typeof spec.onShow === "function" ? spec.onShow : null,
     };
+    // The pane (#controls_pane_<id>) is contributed server-side by the module
+    // (host.register_controls_pane), so it's already in the DOM — we only wire
+    // the button here.
     renderRegisteredTabs();
   }
   window.registerControlsTab = registerControlsTab;

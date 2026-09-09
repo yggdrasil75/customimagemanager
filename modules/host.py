@@ -92,6 +92,11 @@ class Host:
         # default pane): list of field descriptors read by /api/modules and
         # rendered by the settings modal.
         self.settings_fields = []
+        # Controls-pane partials a module contributes: {tab_id: template_name}.
+        # The template lives in the module's own templates/ dir and is rendered
+        # SERVER-SIDE by the controls pane — a module ships pane HTML without any
+        # core edit or client fetch. Paired with a registered controls tab.
+        self.controls_panes = []
         # which module is currently being registered (set by the loader) so
         # helpers can attribute contributions without the author passing an id
         self._current_module = None
@@ -186,6 +191,20 @@ class Host:
             "key": key, "label": label, "kind": kind, "pane": pane,
             "tab": tab, "options": options, "help": help,
             "admin_only": bool(admin_only), "module_id": self._current_module})
+
+    def register_controls_pane(self, tab_id, template, *, feature=None):
+        """Contribute a controls-pane partial rendered server-side.
+
+        tab_id   -- matches the controls tab id (e.g. "exif"); the pane div
+                    becomes #controls_pane_<tab_id>.
+        template -- template name resolvable by Jinja, living in this module's
+                    templates/ dir (e.g. "exif_editor.html"). Rendered inside the
+                    controls pane at page build — no client fetch, no core edit.
+        feature  -- optional data-feature gate for the pane wrapper.
+        """
+        self.controls_panes.append({
+            "tab_id": tab_id, "template": template, "feature": feature,
+            "module_id": self._current_module})
 
     # ── background workers ───────────────────────────────────────────────
     def add_worker_source(self, name, claim, handle, key_of=None, cost_of=None):

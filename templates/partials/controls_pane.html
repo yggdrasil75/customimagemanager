@@ -219,20 +219,14 @@
       </div>
       </div><!-- /#controls_pane_main -->
 
-      <!-- Tab 2: EXIF -->
-      <div id="controls_pane_exif" class="controls-tab-pane hidden h-full overflow-y-auto p-3">
-        {% include 'exif_editor.html' %}
+      <!-- Module-registered controls panes (metadata EXIF/IPTC/XMP, …) render
+           here server-side — each module ships its own partial; core doesn't
+           hard-code them. Registered via host.register_controls_pane. -->
+      {% for p in module_controls_panes %}
+      <div id="controls_pane_{{ p.tab_id }}" class="controls-tab-pane hidden h-full overflow-y-auto p-3"{% if p.feature %} data-feature="{{ p.feature }}"{% endif %}>
+        {% include p.template ignore missing %}
       </div>
-
-      <!-- Tab 3: IPTC -->
-      <div id="controls_pane_iptc" class="controls-tab-pane hidden h-full overflow-y-auto p-3">
-        {% include 'iptc_editor.html' %}
-      </div>
-
-      <!-- Tab 4: XMP -->
-      <div id="controls_pane_xmp" class="controls-tab-pane hidden h-full overflow-y-auto p-3">
-        {% include 'xmp_editor.html' %}
-      </div>
+      {% endfor %}
 
       <!-- Tab 5: Book (book mode only) -->
       {% include 'partials/book_controls.html' %}
