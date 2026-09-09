@@ -70,6 +70,17 @@ def _estimate(host, img_bgr):
 def register(host):
     host.add_asset("pose.js")
 
+    # Shared pose-model path, read by every pose provider (YOLO, Mayaku, …).
+    # Empty = each provider's own default (YOLO derives from pose_size; Mayaku
+    # serves nothing). The broker's selected 'pose' provider decides who runs
+    # it — there are no per-model pose keys.
+    host.add_config_key("pose_model", default="")
+    host.add_settings_field(
+        key="pose_model", label="Pose model (path)", kind="text", pane="general",
+        help="Optional weights path for pose. Leave blank for the default "
+             "YOLO pose model. Point at a Mayaku artifact and select the "
+             "Mayaku pose provider to use it.")
+
     # Contribute the "pose" pipeline stage. The pipeline calls this with an
     # image (whole image or a cropped region) and expects a pose dict; when this
     # module is disabled the stage isn't registered and the pipeline no-ops it.

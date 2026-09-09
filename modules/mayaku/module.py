@@ -170,12 +170,12 @@ def register(host):
         cost_mb=800, gpu=model_registry.on_gpu())
 
     # Pose from the same Mayaku model (keypoint head), for model files it owns.
+    # Pose from the same Mayaku model (keypoint head). Reads the SAME shared
+    # 'pose_model' path setting YOLO reads — the broker's selected pose provider
+    # is what decides YOLO vs Mayaku, so there is no per-model config key.
     def _pose_loader():
         def run(img_bgr, *a, **k):
-            # Not wired to a specific capability path-selection here; pose goes
-            # through the normal 'pose' capability selection. Uses the settings
-            # pose model path if it's a Mayaku file.
-            mp = host.config.get("pose_model_mayaku") or ""
+            mp = (host.config.get("pose_model") or "").strip()
             if not mp:
                 return []
             pred = _predictor(mp)

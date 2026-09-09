@@ -137,6 +137,11 @@ def _seg_path(config):
 
 
 def _pose_path(config):
+    # Shared 'pose_model' path wins when set (so YOLO and Mayaku read one
+    # setting); otherwise fall back to the stock size-derived YOLO weights.
+    mp = (config.get("pose_model") or "").strip()
+    if mp:
+        return mp
     size = (config.get("pose_size") or "n").lower()
     if size not in _SIZES:
         size = "n"
