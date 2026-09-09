@@ -130,7 +130,7 @@ def mayaku_train_worker(dset_dir: str, base_model: str, cfg: dict,
         script = (
             "import sys, json\n"
             "from pathlib import Path\n"
-            "from modules.mayaku import training\n"
+            "from mayaku import train\n"
             "d = json.loads(sys.argv[1])\n"
             "kw = dict(weights=d['weights'],\n"
             "          train_annotations=Path(d['train_ann']),\n"
