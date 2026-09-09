@@ -3,12 +3,10 @@
       <div id="controls_tabs" class="flex flex-shrink-0 border-b border-gray-700 bg-gray-800 text-xs font-bold">
         <button data-tab="main" onclick="setControlsTab('main')"
           class="controls-tab px-3 py-2 text-white border-b-2 border-blue-500">Editor</button>
-        <button data-tab="exif" onclick="setControlsTab('exif')" data-feature="meta.exif"
-          class="controls-tab px-3 py-2 text-gray-400 border-b-2 border-transparent hover:text-white">EXIF</button>
-        <button data-tab="iptc" onclick="setControlsTab('iptc')" data-feature="meta.iptc"
-          class="controls-tab px-3 py-2 text-gray-400 border-b-2 border-transparent hover:text-white">IPTC</button>
-        <button data-tab="xmp" onclick="setControlsTab('xmp')" data-feature="meta.xmp"
-          class="controls-tab px-3 py-2 text-gray-400 border-b-2 border-transparent hover:text-white">XMP</button>
+        <!-- Modules register their controls tabs here (metadata: EXIF/IPTC/XMP)
+             via window.registerControlsTab — core places them, the module
+             doesn't hard-code a slot. -->
+        <span data-ext-area="controls_tabs" class="contents"></span>
 
         <button data-tab="book" onclick="setControlsTab('book')"
           class="controls-tab hidden px-3 py-2 text-white border-b-2 border-blue-500">Book</button>

@@ -13,13 +13,45 @@
 
   let activeTab = "main";
   // filename last loaded per editor, so switching tabs doesn't refetch needlessly.
-  const loaded = { exif: null, iptc: null, xmp: null };
+  const loaded = {};
 
-  const EDITORS = {
-    exif: () => window.exifEditor,
-    iptc: () => window.iptcEditor,
-    xmp: () => window.xmpEditor,
-  };
+  // ── generic controls-tab registry ──────────────────────────────────────────
+  // Modules register their tabs instead of the core template hard-coding them.
+  // A registered tab: {id, label, feature, onShow(filename)}. The button is
+  // injected into the controls tab-bar extension area; its pane is expected to
+  // exist as #controls_pane_<id> (module-provided partial or injected). The
+  // module doesn't know WHERE its tab goes — core places it.
+  const REGISTERED = {};   // id -> {label, feature, onShow}
+
+  function registerControlsTab(spec) {
+    if (!spec || !spec.id) return;
+    REGISTERED[spec.id] = {
+      label: spec.label || spec.id,
+      feature: spec.feature || null,
+      onShow: typeof spec.onShow === "function" ? spec.onShow : null,
+    };
+    renderRegisteredTabs();
+  }
+  window.registerControlsTab = registerControlsTab;
+
+  function renderRegisteredTabs() {
+    const bar = document.querySelector('[data-ext-area="controls_tabs"]');
+    if (!bar) return;
+    for (const id in REGISTERED) {
+      if (bar.querySelector(`[data-tab="${id}"]`)) continue;   // already placed
+      const t = REGISTERED[id];
+      const btn = document.createElement("button");
+      btn.dataset.tab = id;
+      btn.className = "controls-tab px-3 py-2 text-gray-400 border-b-2 border-transparent hover:text-white";
+      if (t.feature) btn.setAttribute("data-feature", t.feature);
+      btn.textContent = t.label;
+      btn.addEventListener("click", () => setControlsTab(id));
+      bar.appendChild(btn);
+    }
+    if (window.applyFeatureVisibility) applyFeatureVisibility(bar);
+  }
+
+  const EDITORS = {};   // kept for any legacy references; registry supersedes it
 
   function currentFilename() {
     // globals.js owns currentFile.
@@ -30,12 +62,10 @@
     const fn = currentFilename();
     if (!fn) return;
     if (!force && loaded[tab] === fn) return;
-    const ed = EDITORS[tab] && EDITORS[tab]();
-    if (ed && typeof ed.load === "function") {
+    const t = REGISTERED[tab];
+    if (t && t.onShow) {
       loaded[tab] = fn;
-      try { ed.load(fn); } catch (e) { console.error(tab + " load failed", e); }
-      // Editors render asynchronously (load() fetches then builds the fields),
-      // so apply read-only enforcement on the next tick once the DOM exists.
+      try { t.onShow(fn); } catch (e) { console.error(tab + " onShow failed", e); }
       if (window.CIMFeatures && window.CIMFeatures.enforceEditor) {
         setTimeout(() => window.CIMFeatures.enforceEditor(tab), 0);
       }
@@ -43,9 +73,10 @@
   }
 
   function setControlsTab(tab) {
-    // Refuse to switch into a metadata tab the user isn't permitted to see.
-    if (window.CIMFeatures && (tab === 'exif' || tab === 'iptc' || tab === 'xmp') &&
-        !window.CIMFeatures.allowed('meta.' + tab)) {
+    // Refuse to switch into a registered tab the user isn't permitted to see.
+    const reg = REGISTERED[tab];
+    if (reg && reg.feature && window.CIMFeatures &&
+        !window.CIMFeatures.allowed(reg.feature)) {
       tab = 'main';
     }
     activeTab = tab;
@@ -61,15 +92,15 @@
       b.classList.toggle("border-transparent", !on);
     });
 
-    if (EDITORS[tab]) loadEditor(tab, false);
+    if (REGISTERED[tab]) loadEditor(tab, false);
   }
 
   // When the open file changes, refresh the visible metadata tab and drop cached
   // filenames for the hidden ones so they reload lazily on next visit.
   function onFileChanged() {
     const fn = currentFilename();
-    ["exif", "iptc", "xmp"].forEach((t) => { if (t !== activeTab) loaded[t] = null; });
-    if (EDITORS[activeTab] && fn) loadEditor(activeTab, true);
+    Object.keys(REGISTERED).forEach((t) => { if (t !== activeTab) loaded[t] = null; });
+    if (REGISTERED[activeTab] && fn) loadEditor(activeTab, true);
   }
 
   // Wrap selectFile (gallery.js) so we get notified after each selection.

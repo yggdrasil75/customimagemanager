@@ -3550,7 +3550,7 @@ def remote_yolo_train_worker(abs_folder: str, dataset_dir: str, config: dict,
 import pose
 
 # ── Mayaku (COCO-format) training support — parallel backend to YOLO ──────────
-import mayaku_support
+from modules.mayaku import training as mayaku_support
 
 _yolo_registered = set()
 

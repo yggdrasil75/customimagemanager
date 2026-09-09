@@ -35,11 +35,91 @@ window.addEventListener('popstate', (e) => {
   if (pane !== currentPane) setPane(pane);
 });
 
+// ── left-tab registry ─────────────────────────────────────────────────────
+// Modules add left-pane tabs without a fixed slot: registerLeftTab({id, label,
+// feature, paneId, onShow}) injects a button into the left tab-bar extension
+// area and drives it through setPane generically. Built-in tabs (gallery,
+// albums, faces, review, music, books, trainer) keep their existing logic; this
+// only adds new ones. The 6/7 built-ins will migrate onto this as they become
+// modules.
+window._leftTabs = window._leftTabs || {};   // id -> {label,feature,paneId,onShow}
+
+function registerLeftTab(spec) {
+  if (!spec || !spec.id) return;
+  window._leftTabs[spec.id] = {
+    label: spec.label || spec.id,
+    feature: spec.feature || ('tab.' + spec.id),
+    paneId: spec.paneId || (spec.id + '_pane'),
+    onShow: typeof spec.onShow === 'function' ? spec.onShow : null,
+  };
+  _renderLeftTabButtons();
+}
+window.registerLeftTab = registerLeftTab;
+
+function _renderLeftTabButtons() {
+  const bar = document.querySelector('[data-ext-area="left_tabs"]');
+  if (!bar) return;
+  const off = 'flex-1 px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-gray-200 hover:bg-gray-750';
+  for (const id in window._leftTabs) {
+    if (bar.querySelector(`[data-ltab="${id}"]`)) continue;
+    const t = window._leftTabs[id];
+    const btn = document.createElement('button');
+    btn.dataset.ltab = id;
+    btn.className = off;
+    if (t.feature) btn.setAttribute('data-feature', t.feature);
+    btn.textContent = t.label;
+    btn.addEventListener('click', () => setPane(id));
+    bar.appendChild(btn);
+  }
+  if (window.applyFeatureVisibility) applyFeatureVisibility(bar);
+}
+
+function _hideRegisteredPanes() {
+  for (const id in window._leftTabs) {
+    const el = document.getElementById(window._leftTabs[id].paneId);
+    if (el) el.classList.add('hidden');
+  }
+}
+
+function _hideAllLeftPanes() {
+  ['gallery_pane','albums_pane','music_pane','faces_pane','review_pane',
+   'books_pane','trainer_pane'].forEach(pid =>
+    document.getElementById(pid)?.classList.add('hidden'));
+  _hideRegisteredPanes();
+}
+
+function _syncLeftTabChrome(activeId) {
+  const on = 'flex-1 px-4 py-2 border-b-2 border-blue-500 text-blue-400 bg-gray-750';
+  const off = 'flex-1 px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-gray-200 hover:bg-gray-750';
+  // built-in buttons
+  const map = {gallery:'tab_gallery',albums:'tab_albums',music:'tab_music',
+    faces:'tab_faces',review:'tab_review',books:'tab_books',trainer:'tab_trainer'};
+  for (const p in map) { const b=document.getElementById(map[p]); if(b) b.className = (p===activeId?on:off); }
+  // registered buttons
+  document.querySelectorAll('[data-ltab]').forEach(b =>
+    b.className = (b.dataset.ltab===activeId ? on : off));
+}
+
 function setPane(pane) {
   if (window.CIMFeatures && pane !== 'gallery' &&
       !window.CIMFeatures.allowed('tab.' + pane)) {
     pane = 'gallery';
   }
+  // Registered (module-contributed) left tabs are driven generically: hide the
+  // built-in panes and any other registered pane, show this one, call onShow.
+  if (window._leftTabs && window._leftTabs[pane]) {
+    currentPane = pane;
+    _syncPaneUrl(pane);
+    _hideAllLeftPanes();
+    const t = window._leftTabs[pane];
+    const el = document.getElementById(t.paneId);
+    if (el) el.classList.remove('hidden');
+    _syncLeftTabChrome(pane);
+    if (t.onShow) { try { t.onShow(); } catch (e) { console.error(pane + ' onShow', e); } }
+    window._lastPane = pane;
+    return;
+  }
+  _hideRegisteredPanes();   // leaving a registered tab -> ensure they're hidden
   currentPane = pane;
   _syncPaneUrl(pane);
 
@@ -77,6 +157,9 @@ function setPane(pane) {
   if (rv) rv.className = isReview ? on : off;
   if (bk) bk.className = isBooks ? on : off;
   if (tr) tr.className = isTrainer ? on : off;
+  // Registered (module) left tabs are never the active built-in pane here, so
+  // ensure their buttons show the inactive style.
+  document.querySelectorAll('[data-ltab]').forEach(b => b.className = off);
   if (window.CIMFeatures) window.CIMFeatures.apply(document);
   const _fresh = (pane !== window._lastPane);
   if (isFaces && typeof loadFaces === 'function') {

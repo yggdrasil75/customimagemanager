@@ -204,3 +204,27 @@ provides all four core capabilities.
 - No hot reload — changes apply on restart.
 - No automatic pip install — declare deps in `pip`/`requirements.txt`; the
   operator installs them.
+
+## Adding a tab to the controls pane
+
+The right-hand controls pane is tabbed. A module adds its own tab without
+knowing where it goes — it registers, the core places the button in the tab
+bar's extension area and shows the matching pane:
+
+```js
+// in a module front-end asset (host.add_asset)
+registerControlsTab({
+  id: "mytab", label: "My Tab", feature: "meta.mytab",  // feature gate optional
+  onShow: (filename) => { /* fill #controls_pane_mytab for this file */ },
+});
+```
+
+The metadata module registers its EXIF / IPTC / XMP tabs exactly this way
+(`modules/metadata/static/metadata_tabs.js`) — none of the three is hard-coded
+in the core template anymore. The controls tab bar carries
+`data-ext-area="controls_tabs"`; `onShow(filename)` runs when the tab is opened
+or the selected file changes.
+
+Core building blocks (auth, metadata, …) can also expose a `register(host)` now,
+called at startup like a plugin's, so they can contribute UI (tabs, assets)
+while still being imported directly by the core.

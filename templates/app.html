@@ -15,11 +15,14 @@
 <body class="bg-gray-900 text-white h-screen flex overflow-hidden">
 
   <!-- Left column: its own header on top, then the search/gallery pane -->
-  <div class="flex flex-col h-full rpane bg-gray-900 border-r border-gray-700 z-10"
+  <div id="left_pane" class="flex flex-col h-full bg-gray-900 border-r border-gray-700 z-10"
     style="width:32%;min-width:300px;max-width:60vw;padding-bottom:20px">
     {% include 'partials/header.html' %}
     {% include 'partials/left_pane.html' %}
   </div>
+
+  <!-- Drag splitter between the left column and the editor region. -->
+  <div id="left_splitter" class="pane-splitter" data-resize="left"></div>
 
   <!-- Right: editor region (shared media viewer + controls) -->
   <div id="editor_region" class="flex-1 flex h-full overflow-hidden vertical">
@@ -28,6 +31,8 @@
     {% include 'partials/book_reader.html' %}
     {# Person mode swaps in a 3D body-mesh viewer with an appearance scrub bar. #}
     {% include 'partials/person_mesh.html' %}
+    <!-- Drag splitter between the media viewer and the controls pane. -->
+    <div id="controls_splitter" class="pane-splitter" data-resize="controls"></div>
     {% include 'partials/controls_pane.html' %}
   </div>
 
@@ -51,6 +56,7 @@
   <script src="/static/gallery.js"></script>
   <script src="/static/albums.js"></script>
   <script src="/static/panes.js"></script>
+  <script src="/static/panes_resize.js"></script>
   <script src="/static/vendor/three.min.js"></script>
   <script src="/static/vendor/OBJLoader.js"></script>
   <script src="/static/vendor/OrbitControls.js"></script>

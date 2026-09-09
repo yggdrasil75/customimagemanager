@@ -147,22 +147,42 @@ canvas {
   display: block
 }
 
-.rpane {
-  resize: horizontal;
-  overflow: hidden;
-  position: relative
+/* Drag splitters between resizable panes. The vertical bar sits between the
+   left column and the editor, and between the viewer and the controls pane;
+   in horizontal (stacked) layout the controls splitter becomes a row-resizer.
+   JS (panes_resize.js) does the actual sizing + persistence. */
+.pane-splitter {
+  flex: 0 0 6px;
+  background: transparent;
+  position: relative;
+  z-index: 20;
+  cursor: col-resize;
 }
-
-.rpane::after {
-  content: '||';
+.pane-splitter:hover, .pane-splitter.dragging {
+  background: #374151;
+}
+.pane-splitter::after {
+  content: '';
   position: absolute;
-  right: 3px;
-  bottom: 3px;
-  font-size: 11px;
-  color: #6B7280;
-  pointer-events: none;
-  letter-spacing: -2px
+  left: 2px; top: 50%;
+  width: 2px; height: 28px;
+  transform: translateY(-50%);
+  background: #4B5563;
+  border-radius: 1px;
 }
+#editor_region.horizontal #controls_splitter {
+  flex-basis: 6px;
+  cursor: row-resize;
+  width: 100%;
+}
+#editor_region.horizontal #controls_splitter::after {
+  left: 50%; top: 2px;
+  width: 28px; height: 2px;
+  transform: translateX(-50%);
+}
+/* When the media viewer is hidden the controls splitter has nothing to drag
+   against; hide it. */
+.pane-splitter.hidden { display: none; }
 
 .rv {
   resize: vertical;
