@@ -10,7 +10,7 @@ The manager's /api/train route already gathers, per still image:
 and decodes each JXL to a .jpg under images/{train,val}. This module consumes
 exactly that, plus the local class-name list, and emits COCO annotation JSON.
 """
-import annotations
+from __future__ import annotations
 
 import json
 import os
