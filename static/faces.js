@@ -4,6 +4,34 @@
 
 let _faceClusters = [];
 
+const _thumbObserver = ('IntersectionObserver' in window)
+  ? new IntersectionObserver((entries, obs) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        const el = e.target;
+        const url = el.dataset.thumb;
+        if (url) { el.style.backgroundImage = `url('${url}')`; el.removeAttribute('data-thumb'); }
+        obs.unobserve(el);
+      }
+    }, { root: null, rootMargin: '600px', threshold: 0 })
+  : null;
+
+// Attach the observer to every not-yet-painted chip currently in the DOM. Called
+// after any innerHTML render of chips. Without an observer (old browsers) we fall
+// back to painting everything immediately — same as before.
+function _observeLazyThumbs(scope) {
+  const root = scope || document;
+  const chips = root.querySelectorAll('[data-thumb]');
+  if (!_thumbObserver) {
+    chips.forEach(el => {
+      const url = el.dataset.thumb;
+      if (url) { el.style.backgroundImage = `url('${url}')`; el.removeAttribute('data-thumb'); }
+    });
+    return;
+  }
+  chips.forEach(el => _thumbObserver.observe(el));
+}
+
 function faceChip(f, size = 56, pad = 1.6) {
   // Crop a normalised face box out of the full thumbnail.
   //
@@ -46,8 +74,8 @@ function faceChip(f, size = 56, pad = 1.6) {
                   ${sel ? 'ring-2 ring-purple-400' : outlier}"
            title="${relAttr}\nclick to find this exact face in the image${f.dist != null ? '\ndistance from centroid: ' + f.dist : ''}"
            onclick="viewFaceImage('${relAttr}', ${f.cx}, ${f.cy}, ${f.w}, ${f.h})"
-           style="background-image:url('${url}');
-                  background-size:${zx}% ${zy}%;
+           data-thumb="${url}"
+           style="background-size:${zx}% ${zy}%;
                   background-position:${px}% ${py}%"></div>
       <button title="Not this person — remove from cluster"
               onclick="event.stopPropagation();denyFace(${f.id})"
@@ -89,6 +117,7 @@ function _repaintFaceCluster(cid) {
   const wasName = act && act.id === 'fname_' + cid;
   const selStart = wasName ? act.selectionStart : null;
   replaceNode(el, _renderFaceCluster(c));
+  _observeLazyThumbs(document.getElementById('fcluster_' + cid) || document);
   if (wasName) {
     const next = document.getElementById('fname_' + cid);
     if (next) {
@@ -278,6 +307,7 @@ async function loadFaces() {
     }
 
     el.innerHTML = _faceClusters.map(c => _renderFaceCluster(c)).join('');
+    _observeLazyThumbs(el);
   } catch (e) {
     el.innerHTML = '<div class="text-xs text-red-400 p-2">Failed to load faces.</div>';
   }
