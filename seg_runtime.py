@@ -137,8 +137,18 @@ def _mask_at_native(m, xy_i, W, H):
         poly[:, 0] = np.clip(poly[:, 0], 0, W - 1)
         poly[:, 1] = np.clip(poly[:, 1], 0, H - 1)
         cv2.fillPoly(canvas, [np.round(poly).astype(np.int32)], 1)
-        return canvas > 0
-    if m.shape[:2] != (H, W):
+        if canvas.any():
+            return canvas > 0
+        # A polygon that rounds away to nothing (sub-pixel sliver) is worse than
+        # no polygon: fall through to masks.data rather than drop the detection.
+    mh, mw = m.shape[:2]
+    if (mh, mw) != (H, W) and mh and mw and W and H:
+        gain = min(mw / W, mh / H)
+        x0 = int(round(max(0.0, (mw - W * gain) / 2)))
+        y0 = int(round(max(0.0, (mh - H * gain) / 2)))
+        x1, y1 = mw - x0, mh - y0
+        if x1 - x0 >= 1 and y1 - y0 >= 1:
+            m = m[y0:y1, x0:x1]
         m = cv2.resize(m.astype(np.float32), (W, H),
                        interpolation=cv2.INTER_NEAREST)
     return m > 0.5
