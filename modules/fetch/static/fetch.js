@@ -295,9 +295,9 @@ async function gdlFetch() {
 
   const btn = document.getElementById('gdl_fetch_btn');
   btn.disabled = true; btn.classList.add('opacity-50');
-  const r = await fetch('/api/gdl/fetch', { method: 'POST',
+  const r = await fetch('/api/fetch/add', { method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ urls, folder }) }).then(r => r.json()).catch(() => null);
+    body: JSON.stringify({ targets: urls, folder }) }).then(r => r.json()).catch(() => null);
   btn.disabled = false; btn.classList.remove('opacity-50');
 
   if (!r || !r.success) { _gdlStatus(r?.error || 'Could not queue.', 'err'); return; }
@@ -322,19 +322,21 @@ function gdlQueueStartPolling() {
 }
 
 async function gdlQueueRefresh() {
-  const r = await fetch('/api/gdl/queue').then(r => r.json()).catch(() => null);
+  const r = await fetch('/api/fetch/queue').then(r => r.json()).catch(() => null);
   if (!r || !r.success) return;
-  const counts = r.counts || {};
+  const counts = {};
+  (r.queue||[]).forEach(it => { counts[it.status]=(counts[it.status]||0)+1; });
   document.getElementById('gdl_q_counts').textContent =
     Object.keys(counts).length
       ? '· ' + Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(', ')
       : '';
   const wrap = document.getElementById('gdl_queue');
-  if (!r.items.length) {
+  const _items = r.queue || [];
+  if (!_items.length) {
     wrap.innerHTML = '<div class="text-gray-600 text-[10px]">Nothing queued yet.</div>';
     return;
   }
-  wrap.innerHTML = r.items.map(_gdlQueueRow).join('');
+  wrap.innerHTML = _items.map(_gdlQueueRow).join('');
 }
 
 const _GDL_STATUS_COLOR = {
@@ -352,7 +354,7 @@ function _gdlQueueRow(it) {
   const err = it.error ? `<div class="text-[10px] text-rose-400 truncate" title="${_esc(it.error)}">${_esc(it.error)}</div>` : '';
   return `<div class="flex items-center gap-2 bg-gray-900/40 rounded px-2 py-1">
     <div class="flex-1 min-w-0">
-      <div class="truncate text-gray-300" title="${_esc(it.url)}">${_esc(it.url)}</div>
+      <div class="truncate text-gray-300" title="${_esc(it.target||it.url)}">${_esc(it.target||it.url)}</div>
       ${err}
     </div>
     <span class="${color} whitespace-nowrap">${it.status}</span>
@@ -371,16 +373,16 @@ function _esc(s) {
 }
 
 async function gdlQueueCancel(id) {
-  await fetch(`/api/gdl/queue/${id}/cancel`, { method: 'POST' }).catch(() => {});
+  await fetch('/api/fetch/cancel', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({id}) }).catch(() => {});
   gdlQueueRefresh();
 }
 
 async function gdlQueueRetry(id) {
-  await fetch(`/api/gdl/queue/${id}/retry`, { method: 'POST' }).catch(() => {});
+  await fetch('/api/fetch/add', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({retry_id:id}) }).catch(() => {});
   gdlQueueRefresh();
 }
 
 async function gdlQueueClear() {
-  await fetch('/api/gdl/queue/clear', { method: 'POST' }).catch(() => {});
+  await fetch('/api/fetch/clear', { method: 'POST' }).catch(() => {});
   gdlQueueRefresh();
 }

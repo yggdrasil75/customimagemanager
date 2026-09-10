@@ -57,7 +57,6 @@ CAPABILITY_PROBES = {
     "ocr":          lambda: _installed("pytesseract") or _installed("easyocr"),
     # barcode scanning
     "barcodes":     lambda: _installed("pyzbar") or _installed("zxingcpp"),
-    # gallery-dl fetch
     "gallery_dl":   lambda: _installed("gallery_dl"),
     # LLM preprocess actions
     "llm":          lambda: _installed("openai") or _installed("llama_cpp")
@@ -74,7 +73,7 @@ CAPABILITY_FEATURES = {
     "torch":       ["ai.smarttag", "ai.iqa", "dedup"],
     "ocr":         ["ai.ocr"],
     "barcodes":    ["ai.barcodes"],
-    "gallery_dl":  ["fetch"],
+    "gallery_dl":  [],
     "llm":         ["ai.llm"],
 }
 
