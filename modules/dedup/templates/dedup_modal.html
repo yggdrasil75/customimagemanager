@@ -1,0 +1,56 @@
+  <div id="dedup_modal" class="hidden absolute inset-0 bg-black/80 flex items-center justify-center z-50 p-6">
+    <div class="bg-gray-800 rounded-lg border border-gray-600 shadow-xl w-full max-w-5xl h-[85vh] flex flex-col">
+      <div class="flex justify-between items-start p-5 border-b border-gray-700 flex-shrink-0">
+        <div>
+          <h2 class="text-xl font-bold text-indigo-400">Duplicates</h2>
+          <p class="text-xs text-gray-400 mt-1">"Keep & Merge" consolidates metadata into the highest-res copy.</p>
+          <p id="dedup_cache_info" class="text-xs text-gray-500 mt-1"></p>
+        </div>
+        <div class="flex gap-2 ml-4 flex-shrink-0">
+          <button onclick="runDedup(true)"
+            class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs font-bold text-yellow-400">↺
+            Rescan</button>
+          <button onclick="document.getElementById('dedup_modal').classList.add('hidden')"
+            class="bg-gray-700 hover:bg-gray-600 px-4 py-1.5 rounded font-bold text-sm">Done</button>
+        </div>
+      </div>
+      <div id="dedup_content" class="flex-1 overflow-y-auto p-4 space-y-4"></div>
+    </div>
+  </div>
+
+  <div id="dedup_diff_modal" class="hidden absolute inset-0 bg-black/90 flex items-center justify-center z-[60] p-6">
+    <div class="bg-gray-800 rounded-lg border border-gray-600 shadow-xl w-full max-w-6xl h-[90vh] flex flex-col">
+      <div class="flex justify-between items-center p-4 border-b border-gray-700 flex-shrink-0">
+        <h2 class="text-lg font-bold text-indigo-400">Highlight differences</h2>
+        <div class="flex items-center gap-3">
+          <label class="text-xs text-gray-400 flex items-center gap-1">
+            <input id="diff_overlay_toggle" type="checkbox" checked onchange="renderDiffOverlay()"> show diff heatmap</label>
+          <button onclick="document.getElementById('dedup_diff_modal').classList.add('hidden')"
+            class="bg-gray-700 hover:bg-gray-600 px-4 py-1.5 rounded font-bold text-sm">Close</button>
+        </div>
+      </div>
+      <div id="diff_video_bar" class="hidden px-4 pt-3 flex-shrink-0">
+        <p id="diff_video_verdict" class="text-sm font-bold text-amber-300"></p>
+        <p id="diff_video_meta" class="text-[11px] font-mono text-gray-400 mt-1 whitespace-pre-wrap"></p>
+        <div class="flex items-center gap-2 mt-2">
+          <span class="text-[10px] text-gray-400">frame</span>
+          <input id="diff_video_scrub" type="range" min="0" max="0" value="0" class="flex-1" oninput="renderVideoDiffFrame(parseInt(this.value))">
+          <span id="diff_video_ts" class="text-[10px] font-mono text-gray-400 w-16 text-right"></span>
+        </div>
+      </div>
+      <div class="flex-1 overflow-auto p-4 grid grid-cols-3 gap-4">
+        <div class="flex flex-col items-center gap-1">
+          <p id="diff_label_a" class="text-[10px] font-mono text-blue-300 truncate w-full text-center"></p>
+          <canvas id="diff_canvas_a" class="max-w-full border border-gray-700 rounded"></canvas>
+        </div>
+        <div class="flex flex-col items-center gap-1">
+          <p class="text-[10px] font-bold text-gray-400">difference</p>
+          <canvas id="diff_canvas_d" class="max-w-full border border-gray-700 rounded"></canvas>
+        </div>
+        <div class="flex flex-col items-center gap-1">
+          <p id="diff_label_b" class="text-[10px] font-mono text-blue-300 truncate w-full text-center"></p>
+          <canvas id="diff_canvas_b" class="max-w-full border border-gray-700 rounded"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>

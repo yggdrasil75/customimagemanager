@@ -11,5 +11,6 @@
 {% include 'partials/faces_pane.html' %}
 {% include 'partials/review_pane.html' %}
 {% include 'partials/music_pane.html' %}
-{% include 'partials/books_pane.html' %}
 {% include 'partials/trainer_pane.html' %}
+{# Module-contributed left-pane content (books shelf, …), server-rendered. #}
+{% for _p in module_left_panes %}{% include _p.template ignore missing %}{% endfor %}

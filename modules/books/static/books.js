@@ -867,3 +867,21 @@ async function triageDecideAll(ext, reason, decision) {
   const d = await r.json();
   if (d.success) openTriageModal();
 }
+/* Register the Books left tab via the generic left-tab extension point, so the
+ * button + pane are module-owned rather than hard-coded in core panes.js. */
+(function () {
+  function reg() {
+    if (!window.registerLeftTab) { setTimeout(reg, 100); return; }
+    registerLeftTab({
+      id: "books", label: "Books", feature: "tab.books", paneId: "books_pane",
+      onShow: () => {
+        if (typeof booksRefreshStatus === "function") booksRefreshStatus();
+        const l = document.getElementById("books_shelf");
+        if ((!l || !l.children.length) && typeof booksReload === "function") booksReload();
+      },
+    });
+  }
+  if (document.readyState === "loading")
+    window.addEventListener("DOMContentLoaded", reg);
+  else reg();
+})();

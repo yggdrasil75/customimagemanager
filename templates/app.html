@@ -25,7 +25,6 @@
   <div id="editor_region" class="flex-1 flex h-full overflow-hidden vertical">
     {% include 'partials/image_viewer.html' %}
     {# Book mode swaps this in for the image viewer — same slot, same geometry. #}
-    {% include 'partials/book_reader.html' %}
     {# Person mode swaps in a 3D body-mesh viewer with an appearance scrub bar. #}
     {% include 'partials/person_mesh.html' %}
     <!-- Drag splitter between the media viewer and the controls pane. -->
@@ -34,15 +33,15 @@
   </div>
 
   <!-- Modals -->
-  {% include 'partials/dedup_modal.html' %}
   {% include 'partials/region_modal.html' %}
   {% include 'partials/settings_modal.html' %}
   {% include 'partials/gdl_modal.html' %}
   {% include 'partials/popout_modal.html' %}
+  <!-- Module-contributed top-level modals (dedup, …), server-rendered. -->
+  {% for _m in module_app_modals %}{% include _m.template ignore missing %}{% endfor %}
   {% include 'partials/comic_modal.html' %}
   {% include 'partials/review_modal.html' %}
   {% include 'partials/image_pipeline_modal.html' %}
-  {% include 'partials/book_triage_modal.html' %}
 
   <!-- Shared globals first, then per-area modules -->
   <script src="/static/auth.js"></script>
@@ -61,7 +60,6 @@
   <script src="/static/faces.js"></script>
   <script src="/static/editor.js"></script>
   <script src="/static/ai_tools.js"></script>
-  <script src="/static/dedup.js"></script>
   <script src="/static/review.js"></script>
   <script src="/static/comic.js"></script>
   <script src="/static/tiers.js"></script>
@@ -71,8 +69,6 @@
   <script src="/static/controls_tabs.js"></script>
   <script src="/static/pipeline_editor.js"></script>
   <script src="/static/music.js"></script>
-  <script src="/static/books.js"></script>
-  <script src="/static/reader.js"></script>
   <script src="/static/trainer.js"></script>
 </body>
 

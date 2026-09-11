@@ -97,6 +97,12 @@ class Host:
         # SERVER-SIDE by the controls pane — a module ships pane HTML without any
         # core edit or client fetch. Paired with a registered controls tab.
         self.controls_panes = []
+        # Top-level modals a module contributes: server-rendered partials from
+        # the module's templates/ dir, injected into app.html's modal area.
+        self.app_modals = []
+        # Left-pane content partials a module contributes (e.g. the books shelf),
+        # server-rendered into the left column alongside the built-in panes.
+        self.left_panes = []
         # Named services (registry points): a module publishes a service other
         # modules consume if present. {name: {"obj","module_id"}}. Consumers use
         # get_service(name) and must shim a None result (missing/disabled
@@ -241,6 +247,20 @@ class Host:
         import auth
         return auth.require_feature(feature_key, action=action, fields=fields,
                                     level=level)
+
+    def register_app_modal(self, template):
+        """Contribute a top-level modal partial (from this module's templates/
+        dir) rendered into app.html server-side. The module owns the modal
+        markup; the trigger button can stay in core or be injected."""
+        self.app_modals.append({"template": template,
+                                "module_id": self._current_module})
+
+    def register_left_pane(self, template):
+        """Contribute a left-column pane partial (e.g. a shelf), server-rendered
+        into the left pane alongside the built-in panes. Pair with a left tab
+        (register_left_tab) whose pane_id matches the partial's root element."""
+        self.left_panes.append({"template": template,
+                                "module_id": self._current_module})
 
     def register_controls_pane(self, tab_id, template, *, feature=None):
         """Contribute a controls-pane partial rendered server-side.
