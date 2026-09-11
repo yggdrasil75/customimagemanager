@@ -33,6 +33,27 @@ def register(host):
     from flask import g
     from . import book_routes
 
+    # Teach core what a "book" is. Without this the app is a pure image gallery
+    # that never sees an epub/cbz. The ext lists + mime map live with the module.
+    import media_types as mt
+    import book_index as bi
+    _BOOK_MIME = {
+        '.epub': 'application/epub+zip', '.pdf': 'application/pdf',
+        '.mobi': 'application/x-mobipocket-ebook',
+        '.azw': 'application/vnd.amazon.ebook', '.azw3': 'application/vnd.amazon.ebook',
+        '.kf8': 'application/vnd.amazon.ebook', '.kfx': 'application/vnd.amazon.ebook',
+        '.fb2': 'application/x-fictionbook+xml', '.lit': 'application/x-ms-reader',
+        '.chm': 'application/vnd.ms-htmlhelp', '.lrf': 'application/x-sony-bbeb',
+        '.lrx': 'application/x-sony-bbeb', '.rtf': 'application/rtf',
+        '.cbz': 'application/vnd.comicbook+zip',
+        '.cbr': 'application/vnd.comicbook-rar',
+        '.cb7': 'application/x-cb7', '.cbt': 'application/x-cbt',
+        '.txt': 'text/plain; charset=utf-8', '.html': 'text/html; charset=utf-8',
+    }
+    mt.register_media_type(
+        "book", exts=bi.BOOK_EXTS, unambiguous_exts=bi.UNAMBIGUOUS_BOOK_EXTS,
+        uploadable_exts=bi.UPLOADABLE_BOOK_EXTS, mime_map=_BOOK_MIME)
+
     # Auth feature: read = browse the shelf/read, write = delete/triage.
     host.register_feature("tab.books", "Books tab (read=view, write=delete)",
                           section="gallery_tabs", section_label="Gallery tabs",
@@ -65,6 +86,14 @@ def register(host):
         "llm_request":   m._llm_request,
         "current_user":  lambda: (getattr(g, "user", None) or {}).get("username", ""),
     })
+
+    # Search: contribute book + comic results to the gallery search. (The query
+    # fns still live in manager for now; wrap them so core's search loop is
+    # module-driven and drops cleanly when books is disabled.)
+    host.register_search_provider(
+        lambda t, f, s: m._query_books(t, f, s))
+    host.register_search_provider(
+        lambda t, f, s: m._query_comics(t, f, s))
 
     # Service: core's upload/rename/reconcile paths call these.
     host.provide_service("books", {

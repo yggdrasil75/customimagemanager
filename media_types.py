@@ -84,57 +84,82 @@ AUDIO_EXTS = {'.mp3', '.flac', '.aac', '.ogg', '.oga', '.opus',
 # before anything is treated as a book, and parks the undecidable cases in a
 # triage queue rather than guessing. Use `is_book_candidate()` here, then
 # book_index.classify() for the real answer.
-try:
-    import book_index as _bi
-    BOOK_EXTS = set(_bi.BOOK_EXTS)
-    UNAMBIGUOUS_BOOK_EXTS = set(_bi.UNAMBIGUOUS_BOOK_EXTS)
-    # Books that may be accepted on upload: the unambiguous ones plus the
-    # kind-ambiguous ones (e.g. .pdf) that carry a reliable magic signature.
-    # Signature-ambiguous exts (.txt/.htm/…) are intentionally not uploadable.
-    UPLOADABLE_BOOK_EXTS = set(_bi.UPLOADABLE_BOOK_EXTS)
-except Exception:                          # book support optional at import time
-    UNAMBIGUOUS_BOOK_EXTS = {
-        '.epub', '.mobi', '.azw', '.azw3', '.kf8', '.kfx', '.lit', '.fb2',
-        '.lrf', '.lrx', '.chm', '.ceb', '.docx', '.rtf',
-        '.cbz', '.cbr', '.cb7', '.cbt', '.cba',
-    }
-    UPLOADABLE_BOOK_EXTS = UNAMBIGUOUS_BOOK_EXTS | {'.pdf'}
-    BOOK_EXTS = UNAMBIGUOUS_BOOK_EXTS | {
-        '.pdf', '.txt', '.htm', '.html', '.doc', '.pdb', '.pkg', '.opf',
-    }
+# A registered type:
+#   kind              "book" | …            (the media_kind stored per row)
+#   exts              all extensions that are candidates for this kind
+#   unambiguous_exts  exts safe to route on by extension alone
+#   uploadable_exts   exts accepted on upload
+#   mime_map          {ext: mimetype}
+#   classify          optional fn(path)->bool for the ambiguous exts
+_MEDIA_TYPES = {}   # kind -> dict
 
+
+def register_media_type(kind, *, exts=(), unambiguous_exts=None,
+                        uploadable_exts=None, mime_map=None, classify=None):
+    """Teach core about a non-native media kind (called by a module)."""
+    ue = set(unambiguous_exts if unambiguous_exts is not None else exts)
+    _MEDIA_TYPES[kind] = {
+        "exts": set(exts) | ue,
+        "unambiguous_exts": ue,
+        "uploadable_exts": set(uploadable_exts if uploadable_exts is not None else ue),
+        "mime_map": dict(mime_map or {}),
+        "classify": classify,
+    }
+    return kind
+
+
+def unregister_media_type(kind):
+    _MEDIA_TYPES.pop(kind, None)
+
+
+def _kind_for_ext(ext):
+    """The registered kind whose UNAMBIGUOUS exts include `ext`, or None."""
+    for k, spec in _MEDIA_TYPES.items():
+        if ext in spec["unambiguous_exts"]:
+            return k
+    return None
+
+
+def registered_exts(field="exts"):
+    """Union of a field across all registered types (exts/uploadable_exts)."""
+    out = set()
+    for spec in _MEDIA_TYPES.values():
+        out |= spec.get(field, set())
+    return out
+
+
+# ── book predicates (now backed by the registry; empty when no books module) ──
 def is_book_candidate(path: str) -> bool:
-    """True if the extension puts this file in the running for being a book.
+    """True if the extension puts this file in the running for being a book."""
+    return _ext(path) in _MEDIA_TYPES.get("book", {}).get("exts", set())
 
-    NOT a claim that it IS one — see the note above. This is the cheap first
-    filter a directory walk uses before paying for a content sniff.
-    """
-    return _ext(path) in BOOK_EXTS
 
 def is_book(path: str) -> bool:
-    """True for extensions that are unambiguously a book/comic. Safe to use for
-    routing decisions (which viewer, which mime); the ambiguous half of
-    BOOK_EXTS deliberately returns False here."""
-    return _ext(path) in UNAMBIGUOUS_BOOK_EXTS
+    """True for extensions unambiguously a book/comic. False when no books
+    module has registered the 'book' type."""
+    return _ext(path) in _MEDIA_TYPES.get("book", {}).get("unambiguous_exts", set())
+
 
 def is_uploadable_book(path: str) -> bool:
-    """True for any book extension accepted on upload — the unambiguous books
-    plus the kind-ambiguous ones (like .pdf) that are identified by content.
-    Use this (not is_book) in the upload pipeline to route a file to the
-    store-original-bytes path instead of the image transcoder."""
-    return _ext(path) in UPLOADABLE_BOOK_EXTS
+    """True for any book extension accepted on upload."""
+    return _ext(path) in _MEDIA_TYPES.get("book", {}).get("uploadable_exts", set())
 
-# Extensions accepted from an uploader / bulk-upload walk. Raws are accepted so
-# the upload handler can stash them (when keep_raws is on) and derive an image;
-# they are not library assets themselves. Only the UNAMBIGUOUS book extensions
-# are accepted on upload: accepting `.txt` here would mean every dragged-in tag
-# sidecar became a "book" the moment someone bulk-uploaded a folder.
-UPLOAD_EXTS = (JXL_INPUT_EXTS | VIDEO_EXTS | RAW_INPUT_EXTS | AUDIO_EXTS
-               | UPLOADABLE_BOOK_EXTS)
+def UPLOAD_EXTS_now():
+    """Extensions accepted from an uploader / bulk walk — image/video/audio/raw
+    natively, plus whatever media types modules registered as uploadable."""
+    return (JXL_INPUT_EXTS | VIDEO_EXTS | RAW_INPUT_EXTS | AUDIO_EXTS
+            | registered_exts("uploadable_exts"))
 
-# Extensions that count as a stored library ASSET on disk (what a MEDIA_DIR walk
-# should pick up). Sidecars (.txt/.xmp) and thumbnails are NOT assets.
-LIBRARY_EXTS = {'.jxl'} | VIDEO_EXTS | AUDIO_EXTS
+
+def LIBRARY_EXTS_now():
+    """Stored library asset extensions — .jxl/video/audio natively plus module
+    media types' unambiguous exts (books store original bytes as assets)."""
+    return ({'.jxl'} | VIDEO_EXTS | AUDIO_EXTS
+            | registered_exts("unambiguous_exts"))
+
+
+# Back-compat module-level names, recomputed via __getattr__ so they stay live
+# as modules register types (see module __getattr__ at end of file).
 
 # Sidecars that travel next to every asset (metadata / tags / regions).
 # .tracks.json holds time-indexed video bounding boxes (see video_tracks.py).
@@ -165,7 +190,7 @@ def is_jxl(path: str) -> bool:
 def is_library_file(path: str) -> bool:
     """True for a stored asset (a .jxl or a native video). Replaces the old
     scattered `f.endswith('.jxl')` checks in library walks."""
-    return _ext(path) in LIBRARY_EXTS
+    return _ext(path) in LIBRARY_EXTS_now()
 
 def is_animated_input(path: str) -> bool:
     return _ext(path) in ANIMATED_INPUT_EXTS
@@ -336,8 +361,9 @@ def kind(path: str) -> str:
         return 'video'
     if is_audio(path):
         return 'audio'
-    if is_book(path):
-        return 'book'
+    k = _kind_for_ext(_ext(path))
+    if k:
+        return k
     return 'image'
 
 def mime_for(path: str) -> str | None:
@@ -347,7 +373,10 @@ def mime_for(path: str) -> str | None:
     v = _VIDEO_MIME.get(e)
     if v:
         return v
-    return _BOOK_MIME.get(e) if e in BOOK_EXTS else None
+    for spec in _MEDIA_TYPES.values():
+        if e in spec["mime_map"]:
+            return spec["mime_map"][e]
+    return None
 
 def stored_name(input_filename: str) -> str:
     """The on-disk name an uploaded file will take. Images/gifs become <base>.jxl;
@@ -365,40 +394,8 @@ def stored_name(input_filename: str) -> str:
     walking MEDIA_DIR, where the three-layer classifier can see their context.
     """
     base, ext = os.path.splitext(input_filename)
-    keep = VIDEO_EXTS | AUDIO_EXTS | UPLOADABLE_BOOK_EXTS
+    keep = VIDEO_EXTS | AUDIO_EXTS | registered_exts("uploadable_exts")
     return input_filename if ext.lower() in keep else base + '.jxl'
-
-# Mime types for serving a book straight to the browser (Download button, or an
-# external/OPDS reader). The in-app reader never uses these -- it gets rendered
-# page images or sanitized HTML instead.
-_BOOK_MIME = {
-    '.epub': 'application/epub+zip',
-    '.pdf': 'application/pdf',
-    '.mobi': 'application/x-mobipocket-ebook',
-    '.azw': 'application/vnd.amazon.ebook',
-    '.azw3': 'application/vnd.amazon.ebook',
-    '.kf8': 'application/vnd.amazon.ebook',
-    '.kfx': 'application/vnd.amazon.ebook',
-    '.fb2': 'application/x-fictionbook+xml',
-    '.lit': 'application/x-ms-reader',
-    '.chm': 'application/vnd.ms-htmlhelp',
-    '.lrf': 'application/x-sony-bbeb',
-    '.lrx': 'application/x-sony-bbeb',
-    '.rtf': 'application/rtf',
-    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    '.doc': 'application/msword',
-    '.opf': 'application/oebps-package+xml',
-    '.pdb': 'application/vnd.palm',
-    '.ceb': 'application/vnd.founder.ceb',
-    '.cbz': 'application/vnd.comicbook+zip',
-    '.cbr': 'application/vnd.comicbook-rar',
-    '.cb7': 'application/x-cb7',
-    '.cbt': 'application/x-cbt',
-    '.cba': 'application/x-cba',
-    '.txt': 'text/plain; charset=utf-8',
-    '.htm': 'text/html; charset=utf-8',
-    '.html': 'text/html; charset=utf-8',
-}
 
 # ── content sniffing (for misnamed / extension-less uploads) ──────────────────
 # Maps a real, supported extension onto a file whose name lies about its type.
@@ -707,3 +704,18 @@ def transcode_animation_to_video(src_path: str, out_path: str,
             return p.returncode == 0 and os.path.exists(out_path)
     except Exception:
         return False
+
+def __getattr__(name):
+    """Back-compat for module-level names that are now dynamic (they change as
+    modules register media types)."""
+    if name in ("UPLOAD_EXTS",):
+        return UPLOAD_EXTS_now()
+    if name in ("LIBRARY_EXTS",):
+        return LIBRARY_EXTS_now()
+    if name == "BOOK_EXTS":
+        return _MEDIA_TYPES.get("book", {}).get("exts", set())
+    if name == "UNAMBIGUOUS_BOOK_EXTS":
+        return _MEDIA_TYPES.get("book", {}).get("unambiguous_exts", set())
+    if name == "UPLOADABLE_BOOK_EXTS":
+        return _MEDIA_TYPES.get("book", {}).get("uploadable_exts", set())
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

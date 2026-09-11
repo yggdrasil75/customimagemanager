@@ -103,6 +103,9 @@ class Host:
         # Left-pane content partials a module contributes (e.g. the books shelf),
         # server-rendered into the left column alongside the built-in panes.
         self.left_panes = []
+        # Search providers: fn(text, folder, structured) -> [entry]. Modules
+        # (books, …) contribute non-image results merged into the gallery.
+        self.search_providers = []
         # Named services (registry points): a module publishes a service other
         # modules consume if present. {name: {"obj","module_id"}}. Consumers use
         # get_service(name) and must shim a None result (missing/disabled
@@ -254,6 +257,12 @@ class Host:
         markup; the trigger button can stay in core or be injected."""
         self.app_modals.append({"template": template,
                                 "module_id": self._current_module})
+
+    def register_search_provider(self, fn):
+        """Contribute non-image search results merged into the gallery.
+        fn(text, folder, structured) -> list of entry dicts (each with a
+        distinct 'kind' the front end can render, e.g. 'book'/'comic')."""
+        self.search_providers.append(fn)
 
     def register_left_pane(self, template):
         """Contribute a left-column pane partial (e.g. a shelf), server-rendered

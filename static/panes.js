@@ -83,7 +83,7 @@ function _hideRegisteredPanes() {
 
 function _hideAllLeftPanes() {
   ['gallery_pane','albums_pane','music_pane','faces_pane','review_pane',
-   'books_pane','trainer_pane'].forEach(pid =>
+   'trainer_pane'].forEach(pid =>
     document.getElementById(pid)?.classList.add('hidden'));
   _hideRegisteredPanes();
 }
@@ -93,7 +93,7 @@ function _syncLeftTabChrome(activeId) {
   const off = 'flex-1 px-4 py-2 border-b-2 border-transparent text-gray-400 hover:text-gray-200 hover:bg-gray-750';
   // built-in buttons
   const map = {gallery:'tab_gallery',albums:'tab_albums',music:'tab_music',
-    faces:'tab_faces',review:'tab_review',books:'tab_books',trainer:'tab_trainer'};
+    faces:'tab_faces',review:'tab_review',trainer:'tab_trainer'};
   for (const p in map) { const b=document.getElementById(map[p]); if(b) b.className = (p===activeId?on:off); }
   // registered buttons
   document.querySelectorAll('[data-ltab]').forEach(b =>
@@ -124,7 +124,6 @@ function setPane(pane) {
   _syncPaneUrl(pane);
 
   const isMusic = (pane === 'music');
-  const isBooks = (pane === 'books');
   const isAlbums = (pane === 'albums');
   const isGallery = (pane === 'gallery');
   const isFaces = (pane === 'faces');
@@ -137,7 +136,6 @@ function setPane(pane) {
   document.getElementById('music_pane')?.classList.toggle('hidden', !isMusic);
   document.getElementById('faces_pane')?.classList.toggle('hidden', !isFaces);
   document.getElementById('review_pane')?.classList.toggle('hidden', !isReview);
-  document.getElementById('books_pane')?.classList.toggle('hidden', !isBooks);
   document.getElementById('trainer_pane')?.classList.toggle('hidden', !isTrainer);
 
   // Tab chrome
@@ -148,14 +146,12 @@ function setPane(pane) {
   const m = document.getElementById('tab_music');
   const f = document.getElementById('tab_faces');
   const rv = document.getElementById('tab_review');
-  const bk = document.getElementById('tab_books');
   const tr = document.getElementById('tab_trainer');
   if (g) g.className = isGallery ? on : off;
   if (a) a.className = isAlbums ? on : off;
   if (m) m.className = isMusic ? on : off;
   if (f) f.className = isFaces ? on : off;
   if (rv) rv.className = isReview ? on : off;
-  if (bk) bk.className = isBooks ? on : off;
   if (tr) tr.className = isTrainer ? on : off;
   // Registered (module) left tabs are never the active built-in pane here, so
   // ensure their buttons show the inactive style.
@@ -203,13 +199,6 @@ function setPane(pane) {
   // the gallery with a book still open beside it, exactly as you can leave an
   // image loaded while flicking through albums. closeBook() is the only thing
   // that puts the centre pane back to images.
-  if (isBooks) {
-    if (typeof booksRefreshStatus === 'function') booksRefreshStatus();
-    const l = document.getElementById('books_list');
-    if (_fresh && (!l || !l.children.length) && typeof booksReload === 'function') {
-      booksReload();
-    }
-  }
 }
 
 // Trainer mode reshapes the controls pane: it reveals the Trainer controls tab,

@@ -1333,11 +1333,17 @@ def _query_files(search: str, offset: int, limit: int,
     """
     text, where, params, structured = _parse_search(search)
 
-    # comics + books (few; fetched whole, shown first). Skipped for an album:
-    # an album is a flat image set, and books/comics aren't album members.
-    comic_entries = [] if album else _query_comics(text, folder, structured)
-    book_entries = [] if album else _query_books(text, folder, structured)
-    comic_entries = comic_entries + book_entries
+    # Non-image search contributors (books, comics, …) come from modules via
+    # host.register_search_provider; core merges their entries in front of the
+    # image results. Skipped for an album (a flat image set). With no such
+    # module the app searches only images.
+    comic_entries = []
+    if not album and 'module_host' in globals():
+        for prov in getattr(module_host, "search_providers", []):
+            try:
+                comic_entries += prov(text, folder, structured) or []
+            except Exception as e:
+                access_logger.error(f"search provider failed: {e}")
     nc = len(comic_entries)
 
     clauses, p = list(where), list(params)
