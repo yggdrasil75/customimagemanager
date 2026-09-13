@@ -244,7 +244,10 @@ class ModuleRegistry:
         # register(host) to contribute UI (e.g. metadata registering its
         # EXIF/IPTC/XMP controls tabs). Call those first, in declared order.
         import importlib
+        _registered_core = set()
         for cid in self._core:
+            if cid in _registered_core:
+                continue
             for dotted in (f"modules.{cid}", f"modules.{cid}.{cid}"):
                 try:
                     mod = importlib.import_module(dotted)
@@ -260,6 +263,7 @@ class ModuleRegistry:
                         host.logger.error(f"core module '{cid}' register() failed: {e}")
                     finally:
                         host._current_module = None
+                    _registered_core.add(cid)
                     break
 
         for lm in self._ordered_enabled_plugins():
