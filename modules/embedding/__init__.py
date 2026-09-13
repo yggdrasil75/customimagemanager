@@ -90,29 +90,6 @@ def register(host):
             updated   REAL)
     """)
 
-    # ── services ───────────────────────────────────────────────────────────
-    # Provide embedding functions for other modules
-    host.provide_service("embedding", {
-        "embed_image": _embed_image,
-        "search_by_vector": _search_by_vector,
-        "search_by_image": _search_by_image,
-        "stage_embeddings": _stage_embeddings,
-        "stage_embeddings_with": _stage_embeddings_with,
-        "stage_cluster_images": _stage_cluster_images,
-        "stage_build_heuristics": _stage_build_heuristics,
-        "load_heuristics": _load_heuristics,
-        "classify_vector": _classify_vector,
-        "embedding_count": _embedding_count,
-        "cluster_count": _cluster_count,
-        "embedding_model_tag": _embedding_model_tag,
-        "oai_embed_enabled": _oai_embed_enabled,
-        "oai_embed_model": _oai_embed_model,
-        "oai_embed_tag": _oai_embed_tag,
-        "oai_embed_image": _oai_embed_image,
-        "oai_embed_text": _oai_embed_text,
-        "semantic_list": _semantic_list,
-    })
-
     # ── OAI embedding helpers ──────────────────────────────────────────────
     def _embed_endpoint():
         base = _oai_v1_base(host.config.get("oai_endpoint", ""))
@@ -835,3 +812,26 @@ def register(host):
         ]})
 
     host.logger.info("embedding module: embeddings + clustering + semantic search registered")
+
+    # ── services ───────────────────────────────────────────────────────────
+    # Provide embedding functions for other modules
+    host.provide_service("embedding", {
+        "embed_image": _embed_image,
+        "search_by_vector": _search_by_vector,
+        "search_by_image": _search_by_image,
+        "stage_embeddings": _stage_embeddings,
+        "stage_embeddings_with": _stage_embeddings_with,
+        "stage_cluster_images": _stage_cluster_images,
+        "stage_build_heuristics": _stage_build_heuristics,
+        "load_heuristics": _load_heuristics,
+        "classify_vector": _classify_vector,
+        "embedding_count": _embedding_count,
+        "cluster_count": _cluster_count,
+        "embedding_model_tag": _embedding_model_tag,
+        "oai_embed_enabled": _oai_embed_enabled,
+        "oai_embed_model": _oai_embed_model,
+        "oai_embed_tag": _oai_embed_tag,
+        "oai_embed_image": _oai_embed_image,
+        "oai_embed_text": _oai_embed_text,
+        "semantic_list": _semantic_list,
+    })
