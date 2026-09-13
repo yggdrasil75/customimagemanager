@@ -588,6 +588,27 @@ async function applyBulkTag(){
   }
 }
 
+async function bulkEmbed(){
+  const files=[...selectedFiles];
+  if(!files.length) return;
+  const btn=document.querySelector('#bulk_bar button[onclick="bulkEmbed()"]');
+  const orig=btn?btn.innerHTML:''; if(btn){ btn.disabled=true; btn.innerHTML='🧬 …'; }
+  showToast(`Embedding ${files.length} image(s)…`);
+  try{
+    const d=await fetch('/api/embedding/bulk',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({filenames:files})}).then(r=>r.json());
+    if(!d.success){ alert('Embed failed: '+(d.error||'')); }
+    else{
+      const ts=d.text_search?' · text search enabled':'';
+      showToast(`Embeddings (${d.backend}) — ${d.embedded_now} new, ${d.total_embeddings} total${ts}.`);
+      if(currentFile && files.includes(currentFile)) selectFile(currentFile);
+      loadGallery(); refreshReviewCount();
+    }
+  }catch(e){ alert('Network error during embedding.'); }
+  finally{ if(btn){ btn.disabled=false; btn.innerHTML=orig; } }
+}
+
 async function bulkDelete(){
   const files=[...selectedFiles];
   if(!files.length) return;
