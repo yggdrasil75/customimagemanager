@@ -61,7 +61,6 @@ async function loadReviewPane(){
   if(!list) return;
   list.innerHTML='<div class="text-xs text-gray-500 p-2">Loading…</div>';
   _reviewStatus('');
-  if (window.EmbeddingUI) window.EmbeddingUI.refreshEmbedStatus();
   let counts={delete:0,box:0,tag:0}, total=0, rel=[];
   try{
     const head=await fetch('/api/review_list?offset=0&limit=1').then(r=>r.json());
