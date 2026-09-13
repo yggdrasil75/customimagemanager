@@ -12,7 +12,8 @@ let highlightRegionFile=null;
 let currentPage=0, totalFiles=0, currentSearch='', currentFolder='', allFolders=[];
 let imageFilter=null;  // active pipeline result set shown in the grid, or null
 let currentTags=[], currentIqa=null, currentIqaManual=false;
-let PAGE=200
+let PAGE=200;
+let _brandClearLogo = false;
 
 // ── Canvas overlay hooks ─────────────────────────────────────────────────────
 // Modules register a draw function here to paint on top of the image canvas
