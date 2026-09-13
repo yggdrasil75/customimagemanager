@@ -67,7 +67,6 @@ FEATURE_SECTIONS = {
             ("tab.faces",   "Faces tab (read=view, write=edit clusters)", "read"),
             ("tab.review",  "Review tab", "write"),
             ("tab.music",   "Music tab", "read"),
-            ("tab.books",   "Books tab (read=view, write=delete)", "read"),
             ("tab.trainer", "Trainer tab", "write"),
         ],
     },
@@ -101,7 +100,6 @@ COLLAPSED = {
     "meta.xmp.edit":   "meta.xmp",
     "tab.albums.edit": "tab.albums",
     "tab.faces.edit":  "tab.faces",
-    "tab.books.delete":"tab.books",
 }
 
 
