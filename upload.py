@@ -251,42 +251,16 @@ def _post_streaming(session, endpoint, filepath, fname, form_data, timeout):
     headers.update(session.headers())
     return http.post(endpoint, data=body, headers=headers, timeout=timeout)
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-
-# Media the server will accept: still images + gifs (server converts to jxl,
-# animated gifs → animated jxl), video, audio and books (all stored natively).
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.jxl', '.gif', '.apng'}
 VIDEO_EXTENSIONS = {'.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v', '.mpg',
                     '.mpeg', '.wmv', '.flv', '.ts', '.ogv'}
-# Audio: stored natively by the server (organised + tagged in place, never
-# transcoded). Mirrors server media_types.AUDIO_EXTS — the video-overlapping
-# containers (.mp4/.m4a) stay classified as video so a real video is never
-# misfiled as a track.
 AUDIO_EXTENSIONS = {'.mp3', '.flac', '.aac', '.ogg', '.oga', '.opus',
                     '.wav', '.wma', '.aiff', '.aif'}
-# Camera raws: the server develops these into jxl on upload (via rawpy).
 RAW_EXTENSIONS = {
     '.dng', '.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.srf', '.sr2',
     '.raf', '.rw2', '.orf', '.pef', '.ptx', '.raw', '.rwl', '.iiq', '.3fr',
     '.fff', '.mef', '.mos', '.mrw', '.x3f', '.erf', '.kdc', '.dcr',
 }
-# Books & comics: stored natively by the server, exactly like video and audio.
-#
-# ONLY the unambiguous extensions are here, mirroring
-# media_types.UNAMBIGUOUS_BOOK_EXTS. The server accepts nothing else, and the
-# reason is worth stating because it looks like an omission:
-#
-#   .txt  is also this app's tag-sidecar format
-#   .htm(l) is also a saved webpage, or one chapter of an unpacked epub
-#   .pdb  is also a generic Palm database
-#   .opf  is a manifest whose *folder* is the book
-#   .doc  is any OLE2 compound document
-#
-# Deciding those needs the file's bytes AND its neighbours on disk, which is a
-# judgement only the server can make (book_index.classify). Uploading them
-# blindly would turn every tag sidecar in a source tree into a "book". Put text
-# books directly in the media folder and let the server's indexer classify them
-# in context; that path has the triage queue for the genuinely ambiguous ones.
 BOOK_EXTENSIONS = {
     '.epub', '.mobi', '.azw', '.azw3', '.kf8', '.kfx', '.lit', '.fb2',
     '.lrf', '.lrx', '.chm', '.ceb', '.docx', '.rtf', '.pdf',
@@ -295,31 +269,19 @@ BOOK_EXTENSIONS = {
 MEDIA_EXTENSIONS = (IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | RAW_EXTENSIONS
                     | AUDIO_EXTENSIONS | BOOK_EXTENSIONS)
 
-# Files we never want to walk even in --aggressive mode: sidecars and the
-# uploader's own bookkeeping. Everything else is fair game when aggressive.
 NON_MEDIA_EXTENSIONS = {'.txt', '.xmp', '.json', '.md', '.ini', '.log', '.db'}
 
-# Error codes the server sends — determines retry behaviour.
-# Permanent: don't retry; the file will never succeed as-is.
-# Temporary: transient failure; worth retrying with backoff.
 PERMANENT_ERROR_CODES = {
-    "exact_duplicate",    # SHA-256 match — file already exists
-    "filename_exists",    # same name in same folder (not a content check)
-    "bad_folder",         # folder path rejected by server
-    "no_file",            # shouldn't happen, but treat as permanent
-    "conversion_failed",  # cjxl rejected the file — bad image data
+    "exact_duplicate",
+    "filename_exists",
+    "bad_folder",
+    "no_file",
+    "conversion_failed",
 }
 TEMPORARY_ERROR_CODES = {
-    "server_error",       # unhandled exception on server
+    "server_error",
 }
-# Auth failures are their own class: not permanent (a fresh login usually fixes
-# them) but not blind-retryable either — retrying without re-authenticating just
-# burns attempts. These are handled by re-login + retry inside upload_file.
 AUTH_STATUS_CODES = {401, 403}
-# Any HTTP 5xx or network error is also treated as temporary.
-
-# ── Result types ──────────────────────────────────────────────────────────────
-
 class Outcome(Enum):
     SUCCESS   = "success"
     QUEUED    = "queued"       # server spooled it; no final verdict yet

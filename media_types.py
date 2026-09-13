@@ -73,17 +73,16 @@ AUDIO_EXTS = {'.mp3', '.flac', '.aac', '.ogg', '.oga', '.opus',
 
 # Books & comics are stored NATIVELY, like video and audio — there is no
 # universal book container worth transcoding into, and re-encoding someone's
-# purchased epub would be both lossy and rude. See book_index.py, which owns
-# everything that knows what a book actually IS.
+# purchased epub would be both lossy and rude.
 #
 # IMPORTANT: unlike every other set in this module, membership here does NOT
 # imply "this file is a book". Several of these extensions are ambiguous —
 # `.txt` is also this app's tag sidecar, `.htm(l)` is also a saved webpage,
 # `.pdb` is also a generic Palm database. Extension is only the FIRST of three
-# layers; book_index.classify() applies content sniffing and directory context
-# before anything is treated as a book, and parks the undecidable cases in a
-# triage queue rather than guessing. Use `is_book_candidate()` here, then
-# book_index.classify() for the real answer.
+# layers; the books module's classifier applies content sniffing and directory
+# context before anything is treated as a book, and parks the undecidable cases
+# in a triage queue rather than guessing. Use `is_book_candidate()` here, then
+# the module's classify() for the real answer.
 # A registered type:
 #   kind              "book" | …            (the media_kind stored per row)
 #   exts              all extensions that are candidates for this kind

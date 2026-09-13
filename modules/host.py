@@ -106,6 +106,9 @@ class Host:
         # Search providers: fn(text, folder, structured) -> [entry]. Modules
         # (books, …) contribute non-image results merged into the gallery.
         self.search_providers = []
+        # Search type handlers: token_prefix -> fn(token, value) -> (sql_clause, params).
+        # Modules register handlers for custom search tokens (e.g. "exif:Make").
+        self.search_types = {}
         # Named services (registry points): a module publishes a service other
         # modules consume if present. {name: {"obj","module_id"}}. Consumers use
         # get_service(name) and must shim a None result (missing/disabled
@@ -263,6 +266,16 @@ class Host:
         fn(text, folder, structured) -> list of entry dicts (each with a
         distinct 'kind' the front end can render, e.g. 'book'/'comic')."""
         self.search_providers.append(fn)
+
+    def register_search_type(self, prefix, handler):
+        """Register a custom search token handler.
+
+        prefix  -- token prefix including colon, e.g. "exif:" or "iptc:".
+        handler -- fn(token, value) -> (sql_clause, params) or ("", []).
+                   token is the full token (e.g. "exif:Make"), value is the
+                   part after the colon. Return empty clause to ignore.
+        """
+        self.search_types[prefix] = handler
 
     def register_left_pane(self, template):
         """Contribute a left-column pane partial (e.g. a shelf), server-rendered

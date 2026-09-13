@@ -1280,7 +1280,7 @@ def _date_clause(cols: tuple, op: str | None, literal: str) -> tuple[str, list]:
 
 def _parse_search(search: str) -> tuple[str, list, list, list]:
     """!
-    @brief Pull structured filters (width:/height: comparisons, is: flags) out of free text.
+    @brief Pull structured filters (width:/height: comparisons, is: flags, metadata fields) out of free text.
     @return (free_text, [sql_clause...], [param...]).
     """
     text, where, params, structured = [], [], [], []
@@ -1321,6 +1321,20 @@ def _parse_search(search: str) -> tuple[str, list, list, list]:
             where.append("tags LIKE '%\"?%'")     # unconfirmed tags are JSON strings starting with '?'
             structured.append(("is", "tagunconfirmed"))
         else:
+            # Check for module-registered search types (e.g., exif:Make, iptc:Keywords, xmp:dc:creator)
+            if ':' in tok and 'module_host' in globals():
+                prefix = tok.split(':', 1)[0] + ':'
+                handler = getattr(module_host, "search_types", {}).get(prefix)
+                if handler:
+                    try:
+                        clause, cp = handler(tok, tok.split(':', 1)[1])
+                        if clause:
+                            where.append(clause)
+                            params += cp
+                            structured.append(("metadata", tok))
+                            continue
+                    except Exception as e:
+                        access_logger.error(f"search type handler '{prefix}' failed: {e}")
             text.append(tok)
     return ' '.join(text).strip(), where, params, structured
 

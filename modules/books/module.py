@@ -12,8 +12,9 @@ comment in manager even said so); this wraps it as a real module. It:
   - exposes reconcile / sha_exists / index_one / rename_book as the
     'books' service so core's upload/rename/reconcile paths call it.
 
-book_index.py stays in core: it's shared book-format parsing used by
-upload.py / media_types.py / comic_pages.py, not book-UI-specific.
+book_index.py is now part of this module (modules/books/book_index.py) and
+aliased as `book_index` via modules/__init__.py for upload.py / media_types.py
+/ comic_pages.py compatibility.
 """
 
 MANIFEST = {
@@ -32,11 +33,11 @@ MANIFEST = {
 def register(host):
     from flask import g
     from . import book_routes
+    from . import book_index as bi
 
     # Teach core what a "book" is. Without this the app is a pure image gallery
     # that never sees an epub/cbz. The ext lists + mime map live with the module.
     import media_types as mt
-    import book_index as bi
     _BOOK_MIME = {
         '.epub': 'application/epub+zip', '.pdf': 'application/pdf',
         '.mobi': 'application/x-mobipocket-ebook',

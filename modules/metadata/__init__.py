@@ -149,4 +149,66 @@ def register(host):
     # call it without importing this module by name.
     host.provide_service("metadata_write", metadata_write)
 
-    host.logger.info("metadata module: features + tabs + read/schema/write registered")
+    # ── search type handlers for metadata fields ────────────────────────────
+    # Allow searching by metadata field values: exif:Make, iptc:Keywords, xmp:dc:creator
+    # These handlers generate SQL clauses that search the files table for fields
+    # that are mirrored from metadata (description, rating, artist, etc.) or
+    # return empty clauses for fields not yet indexed. A future improvement would
+    # add a dedicated metadata index table for full field search.
+    import exif_fields, iptc_fields, xmp_fields
+
+    def _make_metadata_search_handler(prefix, fields_mod):
+        """Create a search handler for a metadata prefix (exif:, iptc:, xmp:)."""
+        # Build a set of field names that have db_field mappings in the schema
+        indexed_fields = set()
+        for group in getattr(fields_mod, "ALL_GROUPS", []):
+            for field in group:
+                if getattr(field, "db_field", None):
+                    indexed_fields.add(field.name.lower())
+        # Also check module-level field lists
+        for attr in dir(fields_mod):
+            val = getattr(fields_mod, attr)
+            if isinstance(val, list):
+                for field in val:
+                    if hasattr(field, "db_field") and field.db_field:
+                        indexed_fields.add(field.name.lower())
+
+        def handler(token, value):
+            # token is like "exif:Make", value is "Make"
+            field_name = value.lower()
+            # Check if this field is mirrored to a DB column
+            if field_name in indexed_fields:
+                # Find the actual db_field name
+                db_col = None
+                for group in getattr(fields_mod, "ALL_GROUPS", []):
+                    for field in group:
+                        if field.name.lower() == field_name and field.db_field:
+                            db_col = field.db_field
+                            break
+                    if db_col:
+                        break
+                if not db_col:
+                    for attr in dir(fields_mod):
+                        val = getattr(fields_mod, attr)
+                        if isinstance(val, list):
+                            for field in val:
+                                if hasattr(field, "name") and field.name.lower() == field_name and getattr(field, "db_field", None):
+                                    db_col = field.db_field
+                                    break
+                            if db_col:
+                                break
+                if db_col:
+                    # Search in the files table
+                    clause = f"files.{db_col} LIKE ?"
+                    param = f"%{value}%"
+                    return clause, [param]
+            # Field not indexed in DB - return empty clause (no-op)
+            return "", []
+        return handler
+
+    # Register search types for each metadata format
+    host.register_search_type("exif:", _make_metadata_search_handler("exif:", exif_fields))
+    host.register_search_type("iptc:", _make_metadata_search_handler("iptc:", iptc_fields))
+    host.register_search_type("xmp:", _make_metadata_search_handler("xmp:", xmp_fields))
+
+    host.logger.info("metadata module: features + tabs + read/schema/write + search types registered")

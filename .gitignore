@@ -10,3 +10,6 @@ models/
 tiers_config.json
 cookies.txt
 /data
+/**/__pycache__
+*.pyc
+*.pyo
