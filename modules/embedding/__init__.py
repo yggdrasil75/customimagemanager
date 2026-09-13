@@ -6,6 +6,17 @@ clustering, concept maps (heuristics), and semantic/text search.
 All endpoints registered via the host; no core manager.py edits needed.
 """
 
+MANIFEST = {
+    "id":          "embedding",
+    "name":        "Image Embeddings",
+    "version":     "1.0.0",
+    "description": "Whole-image embeddings, clustering, concept maps, and semantic search. Adds the Review tab.",
+    "core":        False,
+    "requires":    [],
+    "pip":         [],
+    "assets":      ["embedding.js", "embedding.css"],
+}
+
 from flask import request, jsonify
 import time
 import numpy as np
