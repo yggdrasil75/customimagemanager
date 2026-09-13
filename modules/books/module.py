@@ -75,15 +75,17 @@ def register(host):
 
     # Wire the actual routes via the existing register(app, ctx). ctx is built
     # from the host + a couple of core helpers reached lazily.
+    # Embedding functions are now provided by the embedding module's service.
+    emb_svc = host.get_service("embedding") or {}
     import manager as m
     book_routes.register(host.app, {
         "db":            host.db,
         "media_dir":     host.media_dir,
         "safe_path":     host.safe_path,
         "logger":        host.logger,
-        "embed_text":    m._oai_embed_text,
-        "embed_enabled": m._oai_embed_enabled,
-        "embed_tag":     m._oai_embed_tag,
+        "embed_text":    emb_svc.get("oai_embed_text"),
+        "embed_enabled": emb_svc.get("oai_embed_enabled"),
+        "embed_tag":     emb_svc.get("oai_embed_tag"),
         "llm_request":   m._llm_request,
         "current_user":  lambda: (getattr(g, "user", None) or {}).get("username", ""),
     })
