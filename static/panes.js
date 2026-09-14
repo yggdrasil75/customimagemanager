@@ -190,15 +190,6 @@ function setPane(pane) {
       musicView(window.musicCurrentView || 'artists');
     }
   }
-
-  // Books. Same temporal-dead-zone caution as music above: books.js also loads
-  // after this file, so everything goes through typeof checks.
-  //
-  // NOTE: leaving the Books TAB does not close an open book. The reader lives
-  // in the centre pane, which is independent of the left pane — you can browse
-  // the gallery with a book still open beside it, exactly as you can leave an
-  // image loaded while flicking through albums. closeBook() is the only thing
-  // that puts the centre pane back to images.
 }
 
 // Trainer mode reshapes the controls pane: it reveals the Trainer controls tab,
