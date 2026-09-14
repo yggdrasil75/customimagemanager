@@ -94,7 +94,7 @@
 
   // ── bulk handler ────────────────────────────────────────────────────────────
   async function bulkPose() {
-    const files = [...(window.selectedFiles || [])];
+    const files = [...(selectedFiles || [])];
     if (!files.length) return;
     const btn = document.querySelector('.pose-bulk-btn');
     const orig = btn ? btn.innerHTML : ""; if (btn) { btn.disabled = true; btn.innerHTML = "🦴 …"; }
