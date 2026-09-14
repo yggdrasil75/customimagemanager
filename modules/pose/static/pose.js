@@ -15,11 +15,12 @@
   // ── overlay ────────────────────────────────────────────────────────────────
   function drawSkeleton(c, dw, dh, scale) {
     const t = document.getElementById("toggle_skeleton");
-    if (!t || !t.checked || !window.currentPose || !currentPose.people) return;
-    const edges = currentPose.edges || [];
+    const pose = window.currentPose;
+    if (!t || !t.checked || !pose || !pose.people) return;
+    const edges = pose.edges || [];
     c.save();
     c.lineWidth = 2 / (scale || 1);
-    currentPose.people.forEach((p) => {
+    pose.people.forEach((p) => {
       const kp = p.keypoints || [];
       c.strokeStyle = "#22d3ee";
       edges.forEach((e) => {
@@ -67,8 +68,9 @@
 
   function syncPoseButtons() {
     const rm = document.getElementById("btn_pose_remove");
+    const pose = window.currentPose;
     if (rm) rm.style.display =
-      (window.currentPose && currentPose.people && currentPose.people.length) ? "block" : "none";
+      (pose && pose.people && pose.people.length) ? "block" : "none";
   }
 
   async function removePose() {
