@@ -102,7 +102,7 @@ async function bulkBox(){
     body:JSON.stringify({filenames:files, method:bm.method, model:bm.model})}).then(r=>r.json());
   if(d.success){
     showToast(`Boxed ${d.boxed}/${d.done} image(s)${d.errors.length?', '+d.errors.length+' errors':''}.`);
-    if(currentFile && files.includes(currentFile)) selectFile(currentFile);
+    if(window.currentFile && files.includes(window.currentFile)) selectFile(window.currentFile);
     loadGallery(); refreshReviewCount();
   } else alert('AI Box failed: '+(d.error||''));
 }
@@ -117,7 +117,7 @@ async function bulkRunAI(){
     body:JSON.stringify({filenames:files, action_id:aid})}).then(r=>r.json());
   if(d.success){
     showToast(`Applied "${name}" to ${d.applied}/${d.done} image(s)${d.errors.length?', '+d.errors.length+' errors':''}.`);
-    if(currentFile && files.includes(currentFile)) selectFile(currentFile);
+    if(window.currentFile && files.includes(window.currentFile)) selectFile(window.currentFile);
     loadGallery(); refreshReviewCount();
   } else alert('Run AI failed: '+(d.error||''));
 }

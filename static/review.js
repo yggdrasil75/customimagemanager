@@ -7,12 +7,12 @@ function renderFlagBanner(){
   } else b.classList.add('hidden');
 }
 function deleteFlaggedCurrent(){
-  if(currentFile && confirm('Delete this image permanently?')) deleteCurrentFile();
+  if(window.currentFile && confirm('Delete this image permanently?')) deleteCurrentFile();
 }
 async function clearCurrentFlag(){
-  if(!currentFile) return;
+  if(!window.currentFile) return;
   await fetch('/api/flag',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename:currentFile,delete:false,reason:''})});
+    body:JSON.stringify({filename:window.currentFile,delete:false,reason:''})});
   currentFlag=null; renderFlagBanner(); refreshReviewCount(); showToast('Flag cleared.');
 }
 async function refreshReviewCount(){
@@ -292,7 +292,7 @@ async function rvSave(advance){
       const res=await fetch('/api/review_boxes',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({filename:it.filename,decisions})}).then(r=>r.json());
       it.unconfirmed=res.remaining_unconfirmed??0;
-      if(currentFile===it.filename) selectFile(it.filename);
+      if(window.currentFile===it.filename) selectFile(it.filename);
     }catch(e){ showToast('Save failed.'); return; }
   }
   showToast('Boxes saved.');
@@ -314,7 +314,7 @@ async function reviewDelete(){
   if(!confirm(`Delete "${it.filename.split('/').pop()}" permanently?`)) return;
   await fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({filename:it.filename})});
-  if(currentFile===it.filename){ currentFile=null;
+  if(window.currentFile===it.filename){ window.currentFile=null;
     document.getElementById('editor_panel').classList.add('opacity-50','pointer-events-none'); }
   showToast('Deleted.'); _reviewRemoveCurrent();
 }
@@ -323,7 +323,7 @@ async function reviewKeep(){
   await fetch('/api/flag',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({filename:it.filename,delete:false,reason:''})});
   it.flagged=false; document.getElementById('review_flag').classList.add('hidden');
-  if(currentFile===it.filename){ currentFlag=null; renderFlagBanner(); }
+  if(window.currentFile===it.filename){ currentFlag=null; renderFlagBanner(); }
   if((it.unconfirmed||0)<=0) _reviewRemoveCurrent();
   showToast('Kept (flag cleared).');
 }

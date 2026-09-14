@@ -1,5 +1,6 @@
 // ── State ──────────────────────────────────────────────────────────────────
-let currentFile=null, currentRegions=[], currentRegionsFile=null, oai_actions_cache=[], hasSettings=false;
+window.currentFile=null;
+let currentRegions=[], currentRegionsFile=null, oai_actions_cache=[], hasSettings=false;
 let autosaveTO=null, drawing=false, startX=0,startY=0,curX=0,curY=0;
 let pendingBox=null, editingBoxIdx=null;
 let vtTagging=false;   // true while the shared tag modal is tagging a VIDEO box
@@ -394,7 +395,7 @@ document.addEventListener('keydown', async e=>{
   }
 
   // Delete key for single current file
-  if(e.key==='Delete' && !inInput && mode==='image' && currentFile && selectedFiles.size===0){
+  if(e.key==='Delete' && !inInput && mode==='image' && window.currentFile && selectedFiles.size===0){
     e.preventDefault();
     deleteCurrentFile();
     return;

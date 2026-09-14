@@ -230,7 +230,7 @@ async function refreshCurrentFileAlbums() {
   const cnt = document.getElementById('album_chip_count');
   if (!box) return;
 
-  if (!currentFile) {
+  if (!window.currentFile) {
     currentFileAlbums = [];
     box.innerHTML = '';
     if (cnt) cnt.textContent = '';
@@ -240,7 +240,7 @@ async function refreshCurrentFileAlbums() {
   try {
     const d = await fetch('/api/albums/of', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: currentFile })
+      body: JSON.stringify({ filename: window.currentFile })
     }).then(r => r.json());
     if (!d.success) return;
     currentFileAlbums = d.albums || [];
@@ -278,7 +278,7 @@ function renderAlbumChips() {
 }
 
 async function addCurrentToAlbum() {
-  if (!currentFile) { alert('Open an image first.'); return; }
+  if (!window.currentFile) { alert('Open an image first.'); return; }
 
   // Make sure the album list is fresh before we offer it.
   if (!allAlbums.length) await loadImageAlbums();
@@ -298,7 +298,7 @@ async function addCurrentToAlbum() {
   try {
     const d = await fetch('/api/albums/add', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ album: n, files: [currentFile] })
+      body: JSON.stringify({ album: n, files: [window.currentFile] })
     }).then(r => r.json());
     if (!d.success) { alert(d.error || 'Could not add to album.'); return; }
 
@@ -311,11 +311,11 @@ async function addCurrentToAlbum() {
 }
 
 async function removeCurrentFromAlbum(name) {
-  if (!currentFile) return;
+  if (!window.currentFile) return;
   try {
     const d = await fetch('/api/albums/remove', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ album: name, files: [currentFile] })
+      body: JSON.stringify({ album: name, files: [window.currentFile] })
     }).then(r => r.json());
     if (!d.success) { alert(d.error || 'Could not remove from album.'); return; }
 

@@ -185,7 +185,7 @@ function makeViewer(prefix, opts) {
     const boxesEditable = () =>
       !window.CIMFeatures || window.CIMFeatures.allowed('annot.boxes');
     canvas.addEventListener('mousedown', e => {
-      if (!currentFile) return;
+      if (!window.currentFile) return;
       if (!boxesEditable()) return;   // read-only: no create/confirm/edit via canvas
       if (e.button === 0) { startX = e.offsetX; startY = e.offsetY; drawing = true; }
       else if (e.button === 1) {
@@ -232,7 +232,7 @@ function makeViewer(prefix, opts) {
       setTimeout(() => document.getElementById('modal_region_name').focus(), 80);
     });
     canvas.addEventListener('contextmenu', e => {
-      e.preventDefault(); if (!currentFile || !regionsVisible()) return;
+      e.preventDefault(); if (!window.currentFile || !regionsVisible()) return;
       if (!boxesEditable()) return;   // read-only: no delete-box via right-click
       for (let i = currentRegions.length - 1; i >= 0; i--) {
         const b = currentRegions[i];
@@ -610,7 +610,7 @@ function makeViewer(prefix, opts) {
   const _cc = P('canvas_container');
   if (_cc) {
     if (isMain) {
-      new ResizeObserver(() => { if (currentFile && imgObj.width) requestAnimationFrame(drawCanvas); })
+      new ResizeObserver(() => { if (window.currentFile && imgObj.width) requestAnimationFrame(drawCanvas); })
         .observe(_cc);
     } else {
       new ResizeObserver(() => { if (imgObj.width && !mediaVideo.classList.contains('hidden') === false) drawCanvas(); })

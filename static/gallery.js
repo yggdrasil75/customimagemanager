@@ -391,7 +391,7 @@ function refreshSelectionUI(){
       chk?.classList.add('hidden');
     }
     // Keep single-select highlight
-    if(f===currentFile && selectedFiles.size===0)
+    if(f===window.currentFile && selectedFiles.size===0)
       el.classList.add('selected-item');
     else
       el.classList.remove('selected-item');
@@ -419,7 +419,7 @@ async function selectFile(fn){
     if(typeof openBook==='function') openBook(fn);
     return;
   }
-  if(typeof autosaveTO!=='undefined' && autosaveTO && currentFile && currentFile!==fn){
+  if(typeof autosaveTO!=='undefined' && autosaveTO && window.currentFile && window.currentFile!==fn){
     clearTimeout(autosaveTO); autosaveTO=null;
     try{ await saveMetadata(); }catch(e){ /* keep navigating even if save failed */ }
   }
@@ -428,7 +428,7 @@ async function selectFile(fn){
   // hidden #image_pane and nothing appears to change.
   if(typeof setMediaMode==='function') setMediaMode('image');
   const _mySeq=++_selectSeq;
-  currentFile=fn;
+  window.currentFile=fn;
   if(typeof highlightRegionFile!=='undefined' && highlightRegionFile!==fn){
     highlightRegionBox=null; highlightRegionFile=null;
   }
@@ -481,7 +481,7 @@ async function selectFile(fn){
     fetch(`/api/is_animated/${encodeURIComponent(fn)}`)
       .then(r=>r.json())
       .then(d=>{
-        if(!d || !d.animated || currentFile!==fn || typeof mainViewer==='undefined') return;
+        if(!d || !d.animated || window.currentFile!==fn || typeof mainViewer==='undefined') return;
         // Long animations are transcoded to real video at UPLOAD, so any animated
         // JXL still in the library is short enough for the boxable filmstrip.
         mainViewer.showAnimatedStrip(fn);
@@ -516,7 +516,7 @@ async function selectFile(fn){
 
 // ── Autosave ───────────────────────────────────────────────────────────────
 function triggerAutosave(){
-  if(!currentFile) return;
+  if(!window.currentFile) return;
   renderRegionsList();
   const ind=document.getElementById('save_indicator');
   ind.classList.remove('hidden','text-green-400'); ind.classList.add('text-yellow-400');
@@ -525,11 +525,11 @@ function triggerAutosave(){
   autosaveTO=setTimeout(saveMetadata,900);
 }
 async function saveMetadata(){
-  if(!currentFile) return;
+  if(!window.currentFile) return;
   const tags=currentTags.slice();
   const desc=document.getElementById('meta_desc').value;
   const r=await fetch('/api/metadata',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({action:'write',filename:currentFile,tags,description:desc,regions:currentRegions})
+    body:JSON.stringify({action:'write',filename:window.currentFile,tags,description:desc,regions:currentRegions})
   }).then(r=>r.json());
   if(r.success){
     const ind=document.getElementById('save_indicator');
@@ -537,26 +537,26 @@ async function saveMetadata(){
     ind.innerText='✓ Saved';
     setTimeout(()=>{ if(ind.innerText==='✓ Saved'){ ind.classList.remove('text-green-400');
       ind.classList.add('text-gray-500'); } },2000);
-    if(typeof window.onBoxesSaved==='function') window.onBoxesSaved(currentFile);
+    if(typeof window.onBoxesSaved==='function') window.onBoxesSaved(window.currentFile);
   }
 }
 
 // ── File ops ───────────────────────────────────────────────────────────────
 async function moveCurrentFile(){
-  if(!currentFile) return;
-  const cur=currentFile.split('/').slice(0,-1).join('/');
+  if(!window.currentFile) return;
+  const cur=window.currentFile.split('/').slice(0,-1).join('/');
   const np=prompt('New folder (blank=root):',cur);
   if(np===null) return;
   const r=await fetch('/api/move',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename:currentFile,new_folder:np})}).then(r=>r.json());
-  if(r.success){ currentFile=null; loadGallery(); }
+    body:JSON.stringify({filename:window.currentFile,new_folder:np})}).then(r=>r.json());
+  if(r.success){ window.currentFile=null; loadGallery(); }
   else alert('Move failed.');
 }
 async function deleteCurrentFile(){
-  if(!currentFile) return;
+  if(!window.currentFile) return;
   await fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename:currentFile})});
-  currentFile=null;
+    body:JSON.stringify({filename:window.currentFile})});
+  window.currentFile=null;
   document.getElementById('editor_panel').classList.add('opacity-50','pointer-events-none');
   document.getElementById('save_indicator').classList.add('hidden');
   loadGallery();
@@ -576,10 +576,10 @@ async function applyBulkTag(){
   if(d.success){
     showToast(`Tagged ${d.updated} file(s) with: ${tags.join(', ')}`);
     // If current file is in the set, refresh its tag display
-    if(currentFile && selectedFiles.has(currentFile)){
+    if(window.currentFile && selectedFiles.has(window.currentFile)){
       const meta = await fetch('/api/metadata',{method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({action:'read',filename:currentFile})}).then(r=>r.json());
+        body:JSON.stringify({action:'read',filename:window.currentFile})}).then(r=>r.json());
       if(meta.success) setTags(meta.metadata.tags||[]);
     }
     loadGallery();
@@ -596,8 +596,8 @@ async function bulkDelete(){
     body:JSON.stringify({filenames:files})}).then(r=>r.json());
   if(d.success){
     showToast(`Deleted ${d.deleted} file(s).`);
-    if(currentFile && files.includes(currentFile)){
-      currentFile=null;
+    if(window.currentFile && files.includes(window.currentFile)){
+      window.currentFile=null;
       document.getElementById('editor_panel').classList.add('opacity-50','pointer-events-none');
       document.getElementById('save_indicator').classList.add('hidden');
     }
@@ -622,7 +622,7 @@ async function bulkSegment(){
     if(!d.success){ alert('Segment failed: '+(d.error||'')); }
     else{
       showToast(`Segmented ${d.segmented}/${d.done} image(s)${d.errors.length?', '+d.errors.length+' errors':''}.`);
-      if(currentFile && files.includes(currentFile)) selectFile(currentFile);
+      if(window.currentFile && files.includes(window.currentFile)) selectFile(window.currentFile);
       loadGallery(); refreshReviewCount();
     }
   }catch(e){ alert('Network error during segmentation.'); }

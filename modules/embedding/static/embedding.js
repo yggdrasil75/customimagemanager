@@ -56,7 +56,7 @@
       else {
         const ts = d.text_search ? ' · text search enabled' : '';
         showToast(`Embeddings (${d.backend}) — ${d.embedded_now} new, ${d.total_embeddings} total${ts}.`);
-        if (window.currentFile && files.includes(currentFile)) selectFile(currentFile);
+        if (window.currentFile && files.includes(window.currentFile)) selectFile(window.currentFile);
         loadGallery(); refreshReviewCount();
       }
     } catch (e) { alert('Network error during embedding.'); }

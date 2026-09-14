@@ -58,7 +58,7 @@
 
   function currentFilename() {
     // globals.js owns currentFile.
-    return (typeof currentFile !== "undefined" && currentFile) ? currentFile : null;
+    return (typeof window.currentFile !== "undefined" && window.currentFile) ? window.currentFile : null;
   }
 
   function loadEditor(tab, force) {

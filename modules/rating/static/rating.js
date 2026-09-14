@@ -42,14 +42,14 @@
   window.setStars = async function (v) {
     if (!window.currentFile) return;
     window.currentIqa = v; window.currentIqaManual = true; renderStars();
-    if (window.ratingSet) await window.ratingSet(currentFile, v);
-    updateTileStar(currentFile, v);
+    if (window.ratingSet) await window.ratingSet(window.currentFile, v);
+    updateTileStar(window.currentFile, v);
   };
   window.clearStars = async function () {
     if (!window.currentFile) return;
     window.currentIqa = null; window.currentIqaManual = false; renderStars();
-    if (window.ratingSet) await window.ratingSet(currentFile, null);
-    updateTileStar(currentFile, null);
+    if (window.ratingSet) await window.ratingSet(window.currentFile, null);
+    updateTileStar(window.currentFile, null);
   };
   window.updateTileStar = function (fn, score) {
     const tile = document.getElementById("t_" + fn.replace(/[^a-zA-Z0-9]/g, "_"));
@@ -69,9 +69,9 @@
     try {
       const d = await fetch("/api/iqa_scan", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filenames: [currentFile], force: true }),
+        body: JSON.stringify({ filenames: [window.currentFile], force: true }),
       }).then((r) => r.json());
-      if (d.success) { if (window.selectFile) selectFile(currentFile); }
+      if (d.success) { if (window.selectFile) selectFile(window.currentFile); }
       else alert("Rate failed: " + (d.error || ""));
     } catch (e) { alert("Network error while rating."); }
     if (btn) { btn.innerText = og; btn.disabled = false; }
@@ -126,7 +126,7 @@
         const st = document.getElementById("status_text");
         if (st) st.innerText = `IQA: scored ${d.scored} of ${d.total}.${note}`;
         loadGallery();
-        if (window.currentFile && files.includes(currentFile)) selectFile(currentFile);
+        if (window.currentFile && files.includes(window.currentFile)) selectFile(window.currentFile);
       }
     } catch (e) { alert("Network error during rating."); }
     finally { document.querySelectorAll(".rating-bulk-btn").forEach((b) => { b.disabled = false; b.innerHTML = orig; }); }
