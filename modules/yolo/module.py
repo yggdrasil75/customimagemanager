@@ -244,34 +244,33 @@ def register(host):
                          "registering nothing")
         return
 
-    cfg = host.config
     reason = "ultralytics not installed"
 
     host.provide_model(
         "box.faces", "yolo-face",
         label="YOLO face detector",
-        loader=lambda: _loader_for(_face_path(cfg))(),
+        loader=lambda: _loader_for(_face_path(host.config))(),
         transform=_tf_faces, available=_avail, reason=reason,
         cost_mb=250, gpu=model_registry.on_gpu())
 
     host.provide_model(
         "box.objects", "yolo-coco",
         label="YOLO (COCO objects)",
-        loader=lambda: _loader_for(_object_path(cfg))(),
+        loader=lambda: _loader_for(_object_path(host.config))(),
         transform=_tf_objects, available=_avail, reason=reason,
         cost_mb=250, gpu=model_registry.on_gpu())
 
     host.provide_model(
         "segment", "yolo-seg",
         label="YOLO segmentation",
-        loader=lambda: _loader_for(_seg_path(cfg))(),
+        loader=lambda: _loader_for(_seg_path(host.config))(),
         transform=_tf_segment, available=_avail, reason=reason,
         cost_mb=300, gpu=model_registry.on_gpu())
 
     host.provide_model(
         "pose", "yolo-pose",
         label="YOLO pose",
-        loader=lambda: _loader_for(_pose_path(cfg))(),
+        loader=lambda: _loader_for(_pose_path(host.config))(),
         transform=_tf_pose, available=_avail, reason=reason,
         cost_mb=250, gpu=model_registry.on_gpu())
 
