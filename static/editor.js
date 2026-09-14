@@ -50,7 +50,7 @@ function cancelRegion(){
 
 // ── Regions list (reliable confirm/edit even when boxes overlap) ────────────
 function setActiveRegion(i){
-  if(isVideoFile(currentFile)){ vtOverlay.setActive(i); return; }
+  if(isVideoFile(window.currentFile)){ vtOverlay.setActive(i); return; }
   activeRegionIdx=i;
   const el=document.getElementById('regions_list');
   if(el)[...el.querySelectorAll('.rrow')].forEach((r,j)=>r.classList.toggle('bg-gray-700', j===i));
@@ -58,7 +58,7 @@ function setActiveRegion(i){
 }
 function renderRegionsList(){
   const el=document.getElementById('regions_list'); if(!el) return;
-  if(isVideoFile(currentFile)){ vtOverlay.renderList(el); return; }
+  if(isVideoFile(window.currentFile)){ vtOverlay.renderList(el); return; }
   if(!currentRegions.length){ el.innerHTML=''; el.classList.add('hidden'); return; }
   el.classList.remove('hidden');
   el.innerHTML=currentRegions.map((b,i)=>{
@@ -82,17 +82,17 @@ function renderRegionsList(){
   if(window.CIMFeatures) window.CIMFeatures.apply(el);
 }
 function renameRegion(i,name){
-  if(isVideoFile(currentFile)){ vtOverlay.rename(i,name); return; }
+  if(isVideoFile(window.currentFile)){ vtOverlay.rename(i,name); return; }
   if(currentRegions[i]){ currentRegions[i].class_name=(name||'').trim()||'region';
     drawCanvas(); if(popoutOpen) drawPopout(); triggerAutosave(); }
 }
 function confirmRegion(i){
-  if(isVideoFile(currentFile)){ vtOverlay.confirm(i); return; }
+  if(isVideoFile(window.currentFile)){ vtOverlay.confirm(i); return; }
   if(currentRegions[i]){ currentRegions[i].confirmed=true;
     drawCanvas(); if(popoutOpen) drawPopout(); triggerAutosave(); }
 }
 function deleteRegion(i){
-  if(isVideoFile(currentFile)){ vtOverlay.remove(i); return; }
+  if(isVideoFile(window.currentFile)){ vtOverlay.remove(i); return; }
   currentRegions.splice(i,1);
   if(activeRegionIdx>=currentRegions.length) activeRegionIdx=-1;
   if(selectedRegionIdx===i){ selectedRegionIdx=-1; closeRegionEditor(); }
@@ -243,10 +243,10 @@ let pPanning=false, pPanSX=0, pPanSY=0, pPanOX=0, pPanOY=0;
 let pDrawing=false, pSX=0, pSY=0, pCX=0, pCY=0;
 
 function openPopout(){
-  if(!currentFile) return;
+  if(!window.currentFile) return;
   popoutOpen=true;
   pZoom=1; pPanX=0; pPanY=0;
-  document.getElementById('popout_filename').innerText=currentFile;
+  document.getElementById('popout_filename').innerText=window.currentFile;
   document.getElementById('popout_modal').classList.remove('hidden');
   // Sync regions checkbox
   document.getElementById('popout_toggle_regions').checked =

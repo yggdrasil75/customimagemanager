@@ -141,7 +141,7 @@ def page_bgr(abs_path: str, fmt: str, n: int, dpi: int = 150,
     reopens and relists the archive, which on a 300-page cbr is the whole cost
     of the job.
     """
-    import book_index as bi
+    from . import book_index as bi
     if fmt == "pdf":
         return decode_bytes(bi.render_pdf_page(abs_path, n, dpi=dpi))
     names = page_names if page_names is not None else bi.comic_page_names(abs_path, fmt)

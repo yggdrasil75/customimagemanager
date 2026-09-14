@@ -12,8 +12,9 @@ comment in manager even said so); this wraps it as a real module. It:
   - exposes reconcile / sha_exists / index_one / rename_book as the
     'books' service so core's upload/rename/reconcile paths call it.
 
-book_index.py stays in core: it's shared book-format parsing used by
-upload.py / media_types.py / comic_pages.py, not book-UI-specific.
+book_index.py is now part of this module (modules/books/book_index.py) and
+aliased as `book_index` via modules/__init__.py for upload.py / media_types.py
+/ comic_pages.py compatibility.
 """
 
 MANIFEST = {
@@ -32,11 +33,11 @@ MANIFEST = {
 def register(host):
     from flask import g
     from . import book_routes
+    from . import book_index as bi
 
     # Teach core what a "book" is. Without this the app is a pure image gallery
     # that never sees an epub/cbz. The ext lists + mime map live with the module.
     import media_types as mt
-    import book_index as bi
     _BOOK_MIME = {
         '.epub': 'application/epub+zip', '.pdf': 'application/pdf',
         '.mobi': 'application/x-mobipocket-ebook',
@@ -74,15 +75,17 @@ def register(host):
 
     # Wire the actual routes via the existing register(app, ctx). ctx is built
     # from the host + a couple of core helpers reached lazily.
+    # Embedding functions are now provided by the embedding module's service.
+    emb_svc = host.get_service("embedding") or {}
     import manager as m
     book_routes.register(host.app, {
         "db":            host.db,
         "media_dir":     host.media_dir,
         "safe_path":     host.safe_path,
         "logger":        host.logger,
-        "embed_text":    m._oai_embed_text,
-        "embed_enabled": m._oai_embed_enabled,
-        "embed_tag":     m._oai_embed_tag,
+        "embed_text":    emb_svc.get("oai_embed_text"),
+        "embed_enabled": emb_svc.get("oai_embed_enabled"),
+        "embed_tag":     emb_svc.get("oai_embed_tag"),
         "llm_request":   m._llm_request,
         "current_user":  lambda: (getattr(g, "user", None) or {}).get("username", ""),
     })

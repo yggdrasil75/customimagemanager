@@ -323,7 +323,6 @@ def register(host):
         label="YOLO detector",
         loader=lambda: _yolo_detect,          # bind() returns the detect fn
         transform=None, available=_avail, reason=reason,
-        handles=lambda mp: bool(mp) and str(mp).lower().endswith(".pt"),
         cost_mb=250, gpu=model_registry.on_gpu())
 
     host.logger.info("yolo module: registered providers for box, box.faces, "

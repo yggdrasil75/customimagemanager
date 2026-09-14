@@ -45,10 +45,14 @@
     const btn = document.getElementById("btn_pose"); const og = btn.innerText;
     btn.innerText = "🦴 …"; btn.disabled = true;
     try {
-      const d = await fetch("/api/pose", {
+      const response = await fetch("/api/pose", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filename: currentFile }),
-      }).then((r) => r.json());
+        body: JSON.stringify({ filename: window.currentFile }),
+      });
+      const text = await response.text();
+      let d;
+      try { d = JSON.parse(text); }
+      catch (e) { alert("Invalid JSON response: " + text.slice(0, 200)); btn.innerText = og; btn.disabled = false; return; }
       if (d.success) {
         window.currentPose = d.pose || null;
         const t = document.getElementById("toggle_skeleton"); if (t) t.checked = true;
@@ -57,7 +61,7 @@
         const n = (d.pose && d.pose.people) ? d.pose.people.length : 0;
         showToast(n ? `Pose: ${n} person(s) detected.` : (d.note || "No people detected."));
       } else alert("Pose failed: " + (d.error || ""));
-    } catch (e) { alert("Network error during pose."); }
+    } catch (e) { alert("Network error during pose: " + e.message); }
     btn.innerText = og; btn.disabled = false;
   }
 
@@ -75,7 +79,7 @@
     try {
       const d = await fetch("/api/pose_remove", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filename: currentFile }),
+        body: JSON.stringify({ filename: window.currentFile }),
       }).then((r) => r.json());
       if (d.success) {
         window.currentPose = null;
@@ -103,7 +107,7 @@
       if (!d.success) { alert("Pose failed: " + (d.error || "")); }
       else {
         showToast(`Pose: ${d.posed}/${d.done} had people${d.errors.length ? ", " + d.errors.length + " errors" : ""}.`);
-        if (window.currentFile && files.includes(currentFile)) selectFile(currentFile);
+        if (window.currentFile && files.includes(window.currentFile)) selectFile(window.currentFile);
         loadGallery(); refreshReviewCount();
       }
     } catch (e) { alert("Network error during pose estimation."); }

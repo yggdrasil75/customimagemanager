@@ -238,33 +238,22 @@ class ModuleRegistry:
         Sets host._current_module around each call so contribution helpers
         (add_asset, add_settings_tab, …) attribute correctly. One module
         raising does not stop the others.
+
+        Core modules (auth, capabilities, metadata, threading, cimlogger) are
+        imported directly by manager and register themselves; register_all()
+        only handles discovered plugins.
         """
-        # Core building blocks (auth/metadata/…) are imported directly by
-        # manager, not discovered as plugins — but they may still expose a
-        # register(host) to contribute UI (e.g. metadata registering its
-        # EXIF/IPTC/XMP controls tabs). Call those first, in declared order.
         import importlib
-        for cid in self._core:
-            for dotted in (f"modules.{cid}", f"modules.{cid}.{cid}"):
-                try:
-                    mod = importlib.import_module(dotted)
-                except Exception:
-                    continue
-                reg = getattr(mod, "register", None)
-                if callable(reg):
-                    host._current_module = cid
-                    try:
-                        reg(host)
-                        host.logger.info(f"core module '{cid}' registered")
-                    except Exception as e:
-                        host.logger.error(f"core module '{cid}' register() failed: {e}")
-                    finally:
-                        host._current_module = None
-                    break
+        if getattr(self, "_register_all_done", False):
+            host.logger.debug("register_all() already called, skipping")
+            return
+        self._register_all_done = True
 
         for lm in self._ordered_enabled_plugins():
             reg = getattr(lm.py_module, "register", None)
             if not callable(reg):
+                continue
+            if lm.registered:
                 continue
             host._current_module = lm.id
             try:

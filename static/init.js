@@ -21,7 +21,6 @@ fetchDedupStatus();
 refreshReviewCount();
 
 // ── Branding ────────────────────────────────────────────────────────────────
-let _brandClearLogo=false;
 
 function applyBranding(s){
   if(!s) return;

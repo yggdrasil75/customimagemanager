@@ -206,9 +206,9 @@ async function keepAndMerge(btn){
     body:JSON.stringify({target,others,db_id:gid,skip_retrain:true})}).then(r=>r.json());
   if(d.success){
     groupDiv.remove();
-    if(others.includes(currentFile)){ currentFile=null;
+    if(others.includes(window.currentFile)){ window.currentFile=null;
       document.getElementById('editor_panel').classList.add('opacity-50','pointer-events-none'); }
-    else if(currentFile===target) selectFile(target);
+    else if(window.currentFile===target) selectFile(target);
     loadGallery();
     reloadIfPageEmpty();
   } else showToast('Merge error: '+d.error);
@@ -221,7 +221,7 @@ async function deleteFromDedup(btn){
   await fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({filename:fn})});
   card.remove();
-  if(currentFile===fn){ currentFile=null;
+  if(window.currentFile===fn){ window.currentFile=null;
     document.getElementById('editor_panel').classList.add('opacity-50','pointer-events-none'); }
   disbandIfTooSmall(gid);
   loadGallery();

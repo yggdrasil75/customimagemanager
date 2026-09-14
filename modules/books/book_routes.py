@@ -48,7 +48,7 @@ from flask import request, jsonify, send_file, Response
 
 import auth
 
-import book_index as bi
+from . import book_index as bi
 
 # Filled in by register().
 CTX: dict = {}
@@ -518,7 +518,7 @@ def _comic_background(rel_path, do_panels, do_ocr, force, rtl, per_panel):
     page 280 should cost one page, not the whole run. It also means the reader
     can show overlays for the pages already done while the rest is still going.
     """
-    import comic_pages as cp
+    from . import comic_pages as cp
     if book_state["comic"]:
         return
     _comic_cancel.clear()
@@ -1049,7 +1049,7 @@ def register(app, ctx: dict):
         every OCR line inside it. Letting someone correct a page is cheaper than
         chasing the last few percent of detector accuracy.
         """
-        import comic_pages as cp
+        from . import comic_pages as cp
         d = request.json or {}
         rp = d.get("rel_path", "")
         n = int(d.get("page", 0))

@@ -282,14 +282,14 @@ async function persistAiSettings(){
   return {ok:true};
 }
 async function runLLM(){
-  if(!currentFile) return;
+  if(!window.currentFile) return;
   const aid=document.getElementById('llm_action_select').value;
   if(!aid){ alert('Select an action.'); return; }
   const btn=document.getElementById('btn_run_llm');
   btn.innerHTML='⏳'; btn.disabled=true;
   try{
     const d=await fetch('/api/run_llm',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filename:currentFile,action_id:aid})}).then(r=>r.json());
+      body:JSON.stringify({filename:window.currentFile,action_id:aid})}).then(r=>r.json());
     if(d.success){
       if(d.target==='flag'){
         currentFlag=d.delete?{delete:true,reason:d.reason}:null;
@@ -309,10 +309,10 @@ async function runLLM(){
   btn.innerHTML='✨ AI'; btn.disabled=false;
 }
 async function runAutoTag(){
-  if(!currentFile) return;
+  if(!window.currentFile) return;
   const btn=document.getElementById('btn_autotag'); btn.innerText='…';
   const d=await fetch('/api/auto_tag',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename:currentFile,model:document.getElementById('model_selector').value})
+    body:JSON.stringify({filename:window.currentFile,model:document.getElementById('model_selector').value})
   }).then(r=>r.json());
   if(d.success){ currentRegions=currentRegions.concat(d.regions); drawCanvas(); triggerAutosave(); }
   else alert(d.error);
@@ -325,12 +325,12 @@ function quickTrain(){
 let currentAnalysis=null;
 function _esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 async function runPipeline(){
-  if(!currentFile){ alert('Select an image first.'); return; }
+  if(!window.currentFile){ alert('Select an image first.'); return; }
   const btn=document.getElementById('btn_smarttag'); const og=btn.innerText;
   btn.innerText='🌳 Running…'; btn.disabled=true;
   try{
     const d=await fetch('/api/run_pipeline',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filename:currentFile})}).then(r=>r.json());
+      body:JSON.stringify({filename:window.currentFile})}).then(r=>r.json());
     if(d.success){
       setTags(d.tags||[]);
       document.getElementById('meta_desc').value=d.description||'';
@@ -366,12 +366,12 @@ function renderAnalysis(){
 }
 
 async function runOCR(){
-  if(!currentFile){ alert('Select an image first.'); return; }
+  if(!window.currentFile){ alert('Select an image first.'); return; }
   const btn=document.getElementById('btn_ocr'); const og=btn.innerText;
   btn.innerText='🔤 …'; btn.disabled=true;
   try{
     const d=await fetch('/api/ocr',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filename:currentFile})}).then(r=>r.json());
+      body:JSON.stringify({filename:window.currentFile})}).then(r=>r.json());
     if(d.success){
       const lines=d.lines||[];
       if(!lines.length){ showToast(d.note||(d.engine?'No text found.':'No OCR engine installed.')); }
@@ -389,12 +389,12 @@ async function runOCR(){
   btn.innerText=og; btn.disabled=false;
 }
 async function runSegment(){
-  if(!currentFile){ alert('Select an image first.'); return; }
+  if(!window.currentFile){ alert('Select an image first.'); return; }
   const btn=document.getElementById('btn_segment'); const og=btn.innerText;
   btn.innerText='🎭 …'; btn.disabled=true;
   try{
     const d=await fetch('/api/segment',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filename:currentFile})}).then(r=>r.json());
+      body:JSON.stringify({filename:window.currentFile})}).then(r=>r.json());
     if(d.success){
       const regs=d.regions||[];
       if(!regs.length){ showToast(d.note||'No objects segmented.'); }
@@ -410,12 +410,12 @@ async function runSegment(){
   btn.innerText=og; btn.disabled=false;
 }
 async function runBarcodes(){
-  if(!currentFile){ alert('Select an image first.'); return; }
+  if(!window.currentFile){ alert('Select an image first.'); return; }
   const btn=document.getElementById('btn_barcodes'); const og=btn.innerText;
   btn.innerText='▥ …'; btn.disabled=true;
   try{
     const d=await fetch('/api/barcodes',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filename:currentFile})}).then(r=>r.json());
+      body:JSON.stringify({filename:window.currentFile})}).then(r=>r.json());
     if(d.success){
       const regs=d.regions||[];
       if(!regs.length){ showToast(d.note||'No barcodes found.'); }
@@ -451,7 +451,7 @@ async function bulkPipeline(){
       body:JSON.stringify({filenames:files})}).then(r=>r.json());
     if(d.success){
       showToast(`Smart Tag done: ${d.done}/${files.length}${d.errors.length?', '+d.errors.length+' errors':''}.`);
-      if(currentFile && files.includes(currentFile)) selectFile(currentFile);
+      if(window.currentFile && files.includes(window.currentFile)) selectFile(window.currentFile);
       loadGallery(); refreshReviewCount();
     } else alert('Smart Tag failed: '+(d.error||''));
   }catch(e){ alert('Network error during Smart Tag.'); }

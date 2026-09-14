@@ -103,9 +103,9 @@ function renderPlClusters(step,d){
 
 // Find visually-similar images to the currently-open one (uses stored embeddings).
 function findSimilarToCurrent(){
-  if(!currentFile){ return; }
-  showImageFilter({query_image:currentFile,top_k:120},
-    `Similar to ${currentFile.split('/').pop()}`);
+  if(!window.currentFile){ return; }
+  showImageFilter({query_image:window.currentFile,top_k:120},
+    `Similar to ${window.currentFile.split('/').pop()}`);
 }
 
 // Show a cluster's member images in the main gallery (tightest first).

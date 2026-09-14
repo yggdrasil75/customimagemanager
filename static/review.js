@@ -7,12 +7,12 @@ function renderFlagBanner(){
   } else b.classList.add('hidden');
 }
 function deleteFlaggedCurrent(){
-  if(currentFile && confirm('Delete this image permanently?')) deleteCurrentFile();
+  if(window.currentFile && confirm('Delete this image permanently?')) deleteCurrentFile();
 }
 async function clearCurrentFlag(){
-  if(!currentFile) return;
+  if(!window.currentFile) return;
   await fetch('/api/flag',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename:currentFile,delete:false,reason:''})});
+    body:JSON.stringify({filename:window.currentFile,delete:false,reason:''})});
   currentFlag=null; renderFlagBanner(); refreshReviewCount(); showToast('Flag cleared.');
 }
 async function refreshReviewCount(){
@@ -33,38 +33,8 @@ async function refreshReviewCount(){
   }catch(e){}
 }
 
-// ── Library embeddings (Review tab) ──────────────────────────────────────────
-// Generate whole-image embeddings, preferring the server's OAI embedding
-// endpoint (image + text share a space -> text search works); local CNN is the
-// fallback. A multiselect variant re-embeds just the selected images.
-let _embedBusy=false;
-
-async function refreshEmbedStatus(){
-  try{
-    const d=await fetch('/api/embed_status').then(r=>r.json());
-    const badge=document.getElementById('embed_backend_badge');
-    if(badge){
-      if(d.oai_available) badge.textContent=`OAI: ${d.oai_model||'ready'}`;
-      else badge.textContent='local CNN (no text search)';
-    }
-  }catch(e){}
-}
-
-async function embedLibrary(force){
-  if(_embedBusy) return;
-  _embedBusy=true;
-  _reviewStatus('Generating library embeddings…');
-  try{
-    const d=await fetch('/api/library_embed',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({force:!!force})}).then(r=>r.json());
-    if(!d.success){ showToast('Embedding failed: '+(d.error||'')); return; }
-    const ts=d.text_search?' · text search enabled':'';
-    showToast(`Embeddings (${d.backend}) — ${d.embedded_now} new, ${d.total_embeddings} total${ts}.`);
-    refreshEmbedStatus();
-  }catch(e){ showToast('Network error during embedding.'); }
-  finally{ _embedBusy=false; _reviewStatus(''); }
-}
+// Library embeddings moved to embedding module (modules/embedding/static/embedding.js)
+// Use window.EmbeddingUI.refreshEmbedStatus() and window.EmbeddingUI.embedLibrary()
 
 // ── Grouped review PANE (Review tab) ─────────────────────────────────────────
 // A cleaner home for the review queue than a single flat modal: the queue is
@@ -91,7 +61,6 @@ async function loadReviewPane(){
   if(!list) return;
   list.innerHTML='<div class="text-xs text-gray-500 p-2">Loading…</div>';
   _reviewStatus('');
-  refreshEmbedStatus();
   let counts={delete:0,box:0,tag:0}, total=0, rel=[];
   try{
     const head=await fetch('/api/review_list?offset=0&limit=1').then(r=>r.json());
@@ -323,7 +292,7 @@ async function rvSave(advance){
       const res=await fetch('/api/review_boxes',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({filename:it.filename,decisions})}).then(r=>r.json());
       it.unconfirmed=res.remaining_unconfirmed??0;
-      if(currentFile===it.filename) selectFile(it.filename);
+      if(window.currentFile===it.filename) selectFile(it.filename);
     }catch(e){ showToast('Save failed.'); return; }
   }
   showToast('Boxes saved.');
@@ -345,7 +314,7 @@ async function reviewDelete(){
   if(!confirm(`Delete "${it.filename.split('/').pop()}" permanently?`)) return;
   await fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({filename:it.filename})});
-  if(currentFile===it.filename){ currentFile=null;
+  if(window.currentFile===it.filename){ window.currentFile=null;
     document.getElementById('editor_panel').classList.add('opacity-50','pointer-events-none'); }
   showToast('Deleted.'); _reviewRemoveCurrent();
 }
@@ -354,7 +323,7 @@ async function reviewKeep(){
   await fetch('/api/flag',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({filename:it.filename,delete:false,reason:''})});
   it.flagged=false; document.getElementById('review_flag').classList.add('hidden');
-  if(currentFile===it.filename){ currentFlag=null; renderFlagBanner(); }
+  if(window.currentFile===it.filename){ currentFlag=null; renderFlagBanner(); }
   if((it.unconfirmed||0)<=0) _reviewRemoveCurrent();
   showToast('Kept (flag cleared).');
 }
