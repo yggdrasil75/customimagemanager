@@ -51,6 +51,20 @@ def _estimate(host, img_bgr):
     provider / failure returns an empty-people dict with a `note`, so the
     endpoints behave exactly as the old handlers did (success:true, no people).
     """
+    # Respect pose_kind setting: "wholebody" uses RTMPose (133 keypoints),
+    # "body" uses the broker's selected pose provider (YOLO COCO-17, Mayaku, etc.)
+    pose_kind = (host.config.get("pose_kind") or "body").lower()
+    if pose_kind == "wholebody":
+        # Use pose.py's run_pose which handles wholebody via RTMPose
+        try:
+            return _pose_core.run_pose(img_bgr)
+        except Exception as e:
+            host.logger.error(f"pose estimate (wholebody): {e}")
+            return {"model": "pose", "kind": "wholebody",
+                    "names": _pose_core.WHOLEBODY_NAMES, "edges": _pose_core.WHOLEBODY_EDGES,
+                    "people": [], "note": f"Wholebody pose failed: {e}"}
+
+    # Body pose via broker (YOLO, Mayaku, etc.)
     base = {"model": "pose", "kind": "body",
             "names": _pose_core.COCO_KP_NAMES, "edges": _pose_core.COCO_SKELETON,
             "people": []}
