@@ -1,23 +1,21 @@
 """
-Pose module (YOLO body pose).
+Pose module (YOLO body pose + RTMPose wholebody).
 ======================================================================
-The YOLO pose feature, extracted from manager.py into a pluggable module.
+The pose feature, extracted from manager.py into a pluggable module.
 It owns the pose ENDPOINTS, the on-image skeleton OVERLAY, the controls-
 panel button, and the gallery bulk-select button. Disable the module and
 all of that disappears; the app still runs.
 
-Scope: the YOLO (COCO-17 body) pose only. The RTMPose/wholebody path, the
-COCO topology constants, and T-pose aggregation stay in the core pose.py,
+Scope: YOLO (COCO-17 body) pose and RTMPose wholebody (133 keypoints).
+The COCO topology constants and T-pose aggregation stay in the core pose.py,
 because person T-pose estimation and the 3D person view consume them. This
 module reuses pose.COCO_KP_NAMES / COCO_SKELETON rather than duplicating
 them.
 
-Estimation goes through the model broker's "pose" capability (satisfied
-by the yolo provider from the model-broker section), not a direct YOLO
-call — so swapping in a different pose model is a provider change, not a
-module edit. The broker returns the capability's canonical shape
-([{keypoints:[{x,y,v}], conf}]); this module folds that into the sidecar
-pose dict the rest of the app already stores and draws.
+Estimation goes through pose.py's run_pose() which handles both backends
+(body via YOLO, wholebody via RTMPose) — so swapping in a different pose
+model is a provider change in pose.py, not a module edit. The result is
+folded into the sidecar pose dict the rest of the app already stores and draws.
 
 Image decode + metadata read/write still live in manager.py; the module
 reaches them the same way pose.py and book_routes always have (import
@@ -28,15 +26,15 @@ a rewrite of the image/metadata layer.
 from flask import request, jsonify
 
 from modules.model_broker import NoProviderError
-import pose as _pose_core          # COCO topology + (unused-here) wholebody/tpose
+import pose as _pose_core          # COCO topology + wholebody/tpose
 
 MANIFEST = {
     "id":          "pose",
     "name":        "Pose (skeleton)",
     "version":     "1.0.0",
-    "description": "Estimate body-pose skeletons (YOLO) on images, draw them on "
-                   "the canvas, and run pose over a bulk selection. Uses the "
-                   "selected 'pose' capability provider.",
+    "description": "Estimate body-pose skeletons (YOLO) and wholebody (RTMPose) "
+                   "on images, draw them on the canvas, and run pose over a "
+                   "bulk selection. Uses the selected 'pose' capability provider.",
     "core":        False,          # ultralight ships without it
     "requires":    [],             # soft-needs a 'pose' provider; degrades if none
     "pip":         [],             # estimation deps come from the provider module

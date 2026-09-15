@@ -80,11 +80,11 @@ def _build(path):
 def _loader_for(path):
     """Return a zero-arg loader that yields a cached, callable YOLO model."""
     key = f"yolo:{_canon(path)}"
+    model_registry.register(
+        key, (lambda p=path: _build(p)),
+        cost_mb=250, gpu=model_registry.on_gpu(), model_path=_canon(path))
 
     def load():
-        model_registry.register(
-            key, (lambda p=path: _build(p)),
-            cost_mb=250, gpu=model_registry.on_gpu(), model_path=_canon(path))
         return model_registry.acquire(key)
     return load
 
