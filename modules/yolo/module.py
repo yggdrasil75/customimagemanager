@@ -78,13 +78,18 @@ def _build(path):
 
 
 def _loader_for(path):
-    """Return a zero-arg loader that yields a cached, callable YOLO model."""
+    """Return a zero-arg loader that yields a cached, callable YOLO model.
+    
+    For the generic 'box' capability which takes model_path at runtime,
+    we register on first use (not at module load time since the path varies)."""
     key = f"yolo:{_canon(path)}"
-    model_registry.register(
-        key, (lambda p=path: _build(p)),
-        cost_mb=250, gpu=model_registry.on_gpu(), model_path=_canon(path))
-
+    
     def load():
+        # Register if not already registered (for dynamic model paths)
+        if key not in model_registry._entries:
+            model_registry.register(
+                key, (lambda p=path: _build(p)),
+                cost_mb=250, gpu=model_registry.on_gpu(), model_path=_canon(path))
         return model_registry.acquire(key)
     return load
 

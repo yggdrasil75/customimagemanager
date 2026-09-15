@@ -287,8 +287,7 @@ def onnx_providers():
     preference and let the caller deal with it."""
     b = backend()
     if b == "rocm":
-        pref = ["ROCMExecutionProvider", "MIGraphXExecutionProvider",
-                "CPUExecutionProvider"]
+        pref = ["MIGraphXExecutionProvider", "CPUExecutionProvider"]
     elif b == "cuda":
         pref = ["CUDAExecutionProvider", "CPUExecutionProvider"]
     else:
