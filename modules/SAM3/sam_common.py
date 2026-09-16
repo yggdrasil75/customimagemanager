@@ -8,11 +8,18 @@ copy the file to every SAM module. Consumers resolve it at call time via
 host.get_service("sam_common").
 
 Helpers: ultralytics result -> canonical polygon instances, box-prompt
-geometry, and the "route a prompt through the vision LLM" path (SAM 2 has no
-text head). SAM providers are *prompted* segmenters: foreground-only, never
-the unprompted background sweep (that's a fixed-class model like YOLO-seg).
+geometry, the "route a prompt through the vision LLM" path, and
+register_sam(): the one registration used by every SAM-family module
+(sam2, sam3, mobilesam, fastsam), so the modules themselves are just a
+weights table + which text path the model has.
+
+SAM models are class-agnostic (no trained class list). Given a prompt they
+segment that; given none they run "segment everything", which is what the
+background sweep gets when a SAM is the background pick.
 """
-VERSION = 3
+VERSION = 4
+
+import os
 
 import numpy as np
 
@@ -116,3 +123,78 @@ def prompt_via_vlm(host, img_bgr, prompt, segment_box):
                    "instance; it only needs to loosely contain the subject.") or []
     seeds = [{**b, "class_name": prompt or b.get("class_name", "object")} for b in rough]
     return segment_box(img_bgr, seeds) if seeds else []
+
+
+def register_sam(host, *, pid, label, family, build, weights, text_mode="vlm",
+                 sizes=None, types=None, settings=None, note="", speed="balanced",
+                 cost_mb=2600, available=None, reason=""):
+    """Register one SAM-family model as both 'segment.box' and 'segment'.
+
+    build(path)        -> loaded ultralytics model (SAM / FastSAM / SAM3 predictor)
+    weights(cap)       -> checkpoint path for the pick in effect (host.model_variant)
+    text_mode          "vlm"   no text head: prompt -> VLM seed boxes -> box masks
+                       "clip"  FastSAM CLIP grounding: model(img, texts=[...])
+                       "native" SAM 3: set_image + model(text=[...])
+    Handle semantics (the 'segment' contract): run(img, prompt="") — prompt
+    given -> segment that; empty -> segment everything.
+    """
+    import model_registry
+
+    def _model(cap):
+        path = weights(cap)
+        key = f"{pid}:{os.path.abspath(path)}"
+        model_registry.register(key, (lambda p=path: build(p)), cost_mb=cost_mb,
+                                gpu=model_registry.on_gpu(),
+                                model_path=path if os.path.exists(path) else None)
+        m = model_registry.acquire(key)
+        if m is None:
+            raise RuntimeError(f"{label}: could not load {path}")
+        return m
+
+    def _call(model, img, **kw):
+        if text_mode == "native":          # SAM3 predictor API
+            model.set_image(img)
+            return model(**kw)
+        return model(img, verbose=False, **kw)
+
+    def _seg_box(model):
+        def run(img_bgr, boxes, *a, **k):
+            img = to_bgr_u8(img_bgr)
+            if img is None or not boxes:
+                return []
+            H, W = img.shape[:2]
+            res = _call(model, img, bboxes=boxes_px(boxes, W, H))
+            return polys_from_result(res, W, H, labels=[b.get("class_name", "object") for b in boxes])
+        return run
+
+    def _seg(model):
+        seg_box = _seg_box(model)
+
+        def run(img_bgr, prompt="", *a, **k):
+            img = to_bgr_u8(img_bgr)
+            if img is None:
+                return []
+            H, W = img.shape[:2]
+            prompt = str(prompt or "").strip()
+            if not prompt:                                   # segment everything
+                out = polys_from_result(_call(model, img), W, H)
+                for o in out:
+                    o["class_name"] = "object"
+                return out
+            concepts = [c.strip() for c in prompt.split(",") if c.strip()] or [prompt]
+            if text_mode == "vlm":
+                return prompt_via_vlm(host, img, prompt, seg_box)
+            res = _call(model, img, text=concepts) if text_mode == "native" \
+                else _call(model, img, texts=concepts)
+            out = polys_from_result(res, W, H)
+            for o in out:
+                o["class_name"] = prompt if len(concepts) == 1 else o["class_name"]
+            return out
+        return run
+
+    common = dict(label=label, family=family, sizes=sizes, types=types,
+                  settings=settings, note=note, speed=speed, cost_mb=cost_mb,
+                  gpu=model_registry.on_gpu(), transform=None,
+                  available=available or (lambda: True), reason=reason)
+    host.provide_model("segment.box", pid, loader=lambda: _seg_box(_model("segment.box")), **common)
+    host.provide_model("segment", pid, loader=lambda: _seg(_model("segment")), **common)

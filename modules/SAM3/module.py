@@ -2,9 +2,10 @@
 SAM 3 / 3.1 provider (Meta Segment Anything 3, via ultralytics'
 SAM3SemanticPredictor).
 ======================================================================
-Native text head, so everything is direct:
+Class-agnostic, and the first SAM with a native text/concept head, so:
   segment.box   boxes in -> masks out
-  segment       prompted: text concepts -> masks (no LLM). Foreground-only.
+  segment       prompt   -> text concepts -> masks (no LLM)
+                no prompt -> segment everything (background sweep)
 Weights: models/sam3/segment/sam3.pt (or sam3.1.pt); ultralytics can't fetch
 these, so a miss is streamed from a HuggingFace repo straight into that path
 (no huggingface_hub dependency, no hidden ~/.cache).
@@ -87,73 +88,32 @@ def _ensure(path, typ):
         raise RuntimeError(f"SAM3 weights unavailable ({url}): {e}")
 
 
-def _model(path, typ):
-    key = f"sam3:{os.path.abspath(path)}"
-
-    def build():
-        return _Pred(overrides={"task": "segment", "mode": "predict",
-                                "model": _ensure(path, typ), "conf": 0.25, "iou": 0.7,
-                                "save": False, "verbose": False})
-    model_registry.register(key, build, cost_mb=3000, gpu=model_registry.on_gpu(),
-                            model_path=path if os.path.exists(path) else None)
-    return model_registry.acquire(key)
-
-
 def register(host):
+    if _Pred is None:
+        host.logger.info("sam3 module: ultralytics build lacks SAM3; registering nothing")
+        return
     host.provide_service("sam_common", _sc_local, priority=_sc_local.VERSION)
 
     class _SC:  # newest sam_common copy across SAM modules, resolved per call
         def __getattr__(self, n):
             return getattr(host.get_service("sam_common", _sc_local), n)
     sc = _SC()
-    if _Pred is None:
-        host.logger.info("sam3 module: ultralytics build lacks SAM3; registering nothing")
-        return
     host.add_config_key("sam3_weights", default="")
     widget = [{"key": "sam3_weights", "label": "Custom weights", "kind": "select",
                "options": lambda: [{"value": "", "label": "Stock (type)"}] +
                           [{"value": p, "label": os.path.basename(p)}
                            for p in model_registry.list_weights("sam3", "segment")]}]
-    common = dict(label="SAM 3", family="SAM 3", types=_TYPES, settings=widget,
-                  available=lambda: True, reason="", cost_mb=3000,
-                  gpu=model_registry.on_gpu(), transform=None, speed="accurate",
-                  note="Concept-prompted masker with a native text head: type what to "
-                       "segment, no LLM needed. Heaviest option; wants a GPU.")
 
-    def _load(cap):
-        return _model(_weights(host, cap), host.model_variant(cap).get("type") or "3")
+    def _build(path):
+        typ = "3.1" if path.endswith("sam3.1.pt") else "3"
+        return _Pred(overrides={"task": "segment", "mode": "predict",
+                                "model": _ensure(path, typ), "conf": 0.25, "iou": 0.7,
+                                "save": False, "verbose": False})
 
-    def _box_fn(cap):
-        model = _load(cap)
-
-        def seg_box(img_bgr, boxes, *a, **k):
-            img = sc.to_bgr_u8(img_bgr)
-            if img is None or not boxes:
-                return []
-            H, W = img.shape[:2]
-            model.set_image(img)
-            res = model(bboxes=sc.boxes_px(boxes, W, H))
-            return sc.polys_from_result(res, W, H, labels=[b.get("class_name", "object") for b in boxes])
-        return seg_box
-
-    def _text_fn(cap):
-        model = _load(cap)
-
-        def seg_text(img_bgr, prompt="", *a, **k):
-            img = sc.to_bgr_u8(img_bgr)
-            concepts = [c.strip() for c in str(prompt or "").split(",") if c.strip()]
-            if img is None or not concepts:
-                return []
-            H, W = img.shape[:2]
-            model.set_image(img)
-            res = model(text=concepts)
-            out = sc.polys_from_result(res, W, H)
-            for o in out:
-                o["class_name"] = prompt if len(concepts) == 1 else o["class_name"]
-            return out
-        return seg_text
-
-    host.provide_model("segment.box", "sam3", loader=lambda: _box_fn("segment.box"), **common)
-    host.provide_model("segment", "sam3", prompted=True,
-                       loader=lambda: _text_fn("segment"), **common)
+    sc.register_sam(
+        host, pid="sam3", label="SAM 3", family="SAM 3", build=_build,
+        weights=lambda cap: _weights(host, cap), text_mode="native", types=_TYPES,
+        settings=widget, speed="accurate", cost_mb=3000,
+        note="Concept-prompted masker with a native text head: type what to segment, "
+             "no LLM needed; segment-everything without a prompt. Heaviest; wants a GPU.")
     host.logger.info("sam3 module: registered segment.box / segment")
