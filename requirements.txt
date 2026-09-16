@@ -8,7 +8,7 @@ rtmlib
 #rapidocr_onnxruntime
 easyocr
 mutagen
-hnswlib
+#hnswlib
 insightface
 pyiqa
 rawpy

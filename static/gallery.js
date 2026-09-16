@@ -502,11 +502,10 @@ async function selectFile(fn){
     currentRegions=d.metadata.regions||[];
     currentAnalysis=d.metadata.analysis||null;
     currentFlag=d.metadata.flag||null;
-    currentPose=d.metadata.pose||null;
     activeRegionIdx=-1;
     selectedRegionIdx=-1;
     closeRegionEditor();
-    if(typeof syncPoseButtons==='function') syncPoseButtons();
+    runFileMetaHooks(d.metadata, fn);
     drawCanvas();
     renderAnalysis();
     renderRegionsList();

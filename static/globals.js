@@ -4,7 +4,7 @@ let currentRegions=[], currentRegionsFile=null, oai_actions_cache=[], hasSetting
 let autosaveTO=null, drawing=false, startX=0,startY=0,curX=0,curY=0;
 let pendingBox=null, editingBoxIdx=null;
 let vtTagging=false;   // true while the shared tag modal is tagging a VIDEO box
-let activeRegionIdx=-1, _suppressPaste=false, currentFlag=null, currentPose=null;
+let activeRegionIdx=-1, _suppressPaste=false, currentFlag=null;
 // selectedRegionIdx is the PINNED region whose tags/description are being edited
 // in the per-region editor (distinct from activeRegionIdx, which is hover-only).
 let selectedRegionIdx=-1;
@@ -30,6 +30,21 @@ function registerCanvasOverlay(fn){
 function runCanvasOverlays(ctx,dw,dh,scale){
   for(const fn of window.canvasOverlays){
     try{ fn(ctx,dw,dh,scale); }catch(e){ /* one bad overlay must not break render */ }
+  }
+}
+
+// ── File-metadata hooks ──────────────────────────────────────────────────────
+// Modules register fn(meta, filename) here to pick their own fields out of the
+// metadata packet each time the viewer loads a file (e.g. the pose module reads
+// meta.pose). Called by selectFile before drawCanvas, so overlays see fresh state.
+window.fileMetaHooks = window.fileMetaHooks || [];
+function registerFileMetaHook(fn){
+  if(typeof fn==='function' && !window.fileMetaHooks.includes(fn))
+    window.fileMetaHooks.push(fn);
+}
+function runFileMetaHooks(meta, fn){
+  for(const h of window.fileMetaHooks){
+    try{ h(meta, fn); }catch(e){ console.error(e); }
   }
 }
 
@@ -283,7 +298,6 @@ function populateSettingsForm(s){
       _set('cfg_apikey', s.oai_key||'');
       _set('cfg_model', s.oai_model||'');
       _set('cfg_embed_model', s.oai_embed_model||'');
-      _set('cfg_yolo_size', s.yolo_size||'n');
       loadSegModels(s.sam_model,s.bg_seg_model,s.bg_seg_enabled,s.bg_seg_classes);
       // faces / people
       const _fb=document.getElementById('cfg_face_bg');
@@ -304,8 +318,6 @@ function populateSettingsForm(s){
             (_g.trained||[]).concat(_g.custom||[]));
       _fill('cfg_our_model', s.our_model,
             (_g.trained||[]).concat(_g.custom||[]));
-      _fill('cfg_barcode_model', s.barcode_model,
-            (_g.trained||[]).concat(_g.custom||[]));
       loadFaceModels(s.face_detector, s.face_recognition);
       const _rd=document.getElementById('cfg_face_reject_drawn');
       if(_rd) _rd.checked=s.face_reject_drawn!==false;
@@ -320,7 +332,6 @@ function populateSettingsForm(s){
       _set('cfg_shape_estimator', s.shape_estimator||'anny_fit');
       _set('cfg_face_estimator', s.face_estimator||'auto');
       _set('cfg_appearance_eps', (s.appearance_eps??0.35));
-      _set('cfg_pose_size', s.pose_size||'n');
       _set('cfg_system', s.oai_system_prompt||'');
       const _chk=(id,v)=>{const e=document.getElementById(id); if(e) e.checked=!!v;};
       const pp=s.llm_preprocess||{}, ppc=pp.compress||{}, ppd=pp.pad||{};

@@ -8,14 +8,25 @@
  * All buttons are injected into named mount points in the core templates; if a
  * mount is absent (template changed), injection is a silent no-op.
  *
- * Reads core viewer state (currentPose, currentFile, selectedFiles) and core
- * helpers (drawCanvas, drawPopout, showToast, selectFile, loadGallery) that
- * remain in the core — this module moved the FEATURE, not the viewer. */
+ * Owns its own state (currentPose, filled from meta.pose via the core
+ * registerFileMetaHook) and its Skeleton toggle (injected into the
+ * viewer_toggles area). Reads core viewer state (currentFile, selectedFiles)
+ * and core helpers (drawCanvas, drawPopout, showToast, selectFile,
+ * loadGallery) that remain in the core. */
 (function () {
+  let currentPose = null;
+  if (window.registerFileMetaHook) registerFileMetaHook((meta) => {
+    currentPose = (meta && meta.pose) || null;
+    syncPoseButtons();
+  });
+
+  function redraw() {
+    drawCanvas(); if (typeof popoutOpen !== "undefined" && popoutOpen) drawPopout();
+  }
   // ── overlay ────────────────────────────────────────────────────────────────
   function drawSkeleton(c, dw, dh, scale) {
     const t = document.getElementById("toggle_skeleton");
-    const pose = window.currentPose;
+    const pose = currentPose;
     if (!t || !t.checked || !pose || !pose.people) return;
     const edges = pose.edges || [];
     c.save();
@@ -55,10 +66,10 @@
       try { d = JSON.parse(text); }
       catch (e) { alert("Invalid JSON response: " + text.slice(0, 200)); btn.innerText = og; btn.disabled = false; return; }
       if (d.success) {
-        window.currentPose = d.pose || null;
+        currentPose = d.pose || null;
         const t = document.getElementById("toggle_skeleton"); if (t) t.checked = true;
         syncPoseButtons();
-        drawCanvas(); if (typeof popoutOpen !== "undefined" && popoutOpen) drawPopout();
+        redraw();
         const n = (d.pose && d.pose.people) ? d.pose.people.length : 0;
         showToast(n ? `Pose: ${n} person(s) detected.` : (d.note || "No people detected."));
       } else alert("Pose failed: " + (d.error || ""));
@@ -68,7 +79,7 @@
 
   function syncPoseButtons() {
     const rm = document.getElementById("btn_pose_remove");
-    const pose = window.currentPose;
+    const pose = currentPose;
     if (rm) rm.style.display =
       (pose && pose.people && pose.people.length) ? "block" : "none";
   }
@@ -84,10 +95,10 @@
         body: JSON.stringify({ filename: window.currentFile }),
       }).then((r) => r.json());
       if (d.success) {
-        window.currentPose = null;
+        currentPose = null;
         const t = document.getElementById("toggle_skeleton"); if (t) t.checked = false;
         syncPoseButtons();
-        drawCanvas(); if (typeof popoutOpen !== "undefined" && popoutOpen) drawPopout();
+        redraw();
         showToast("Skeleton removed.");
       } else alert("Remove failed: " + (d.error || ""));
     } catch (e) { alert("Network error removing skeleton."); }
@@ -120,13 +131,17 @@
   window.runPose = runPose;
   window.removePose = removePose;
   window.bulkPose = bulkPose;
-  window.syncPoseButtons = syncPoseButtons;
+  window.redrawPose = redraw;
 
   // ── button injection ────────────────────────────────────────────────────────
   // Append buttons to the general AI-tools and gallery-bulk extension areas.
   // No pose-specific mount points in the core template — any module can do this.
   function buildButtons() {
     if (!window.registerControlButton) return;
+    registerControlButton("viewer_toggles",
+      '<label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">' +
+      '<input type="checkbox" id="toggle_skeleton" onchange="redrawPose()" class="accent-cyan-500">' +
+      'Skeleton</label>');
     registerControlButton("ai_tools",
       '<button onclick="runPose()" id="btn_pose" data-feature="ai.pose" ' +
       'class="w-full bg-cyan-700 hover:bg-cyan-600 py-1.5 rounded font-bold text-sm">🦴 Pose</button>');

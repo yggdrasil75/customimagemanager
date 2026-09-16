@@ -91,37 +91,21 @@
         </div>
       </div>
       <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
-        <label class="text-xs text-sky-300 font-bold block mb-2">Pose &amp; detection models
-          <span class="font-normal text-gray-500">(auto-downloaded on first use)</span></label>
+        <label class="text-xs text-sky-300 font-bold block mb-2">Models
+          <span class="font-normal text-gray-500">(which module serves each capability)</span></label>
+        <!-- Capability -> provider picker, rendered from /api/models by static/modules.js.
+             Any module that host.provide_model()s shows up here; core knows no providers. -->
+        <div id="model_capabilities" class="grid grid-cols-3 gap-x-4 gap-y-2 mb-2"></div>
+        <!-- Provider-specific model settings (add_settings_field pane="models"). -->
+        <div id="module_settings_fields_models" class="grid grid-cols-3 gap-x-4 gap-y-2 mb-3"></div>
+        <label class="text-xs text-sky-300 font-bold block mb-2">Pose &amp; person estimation</label>
         <div class="grid grid-cols-3 gap-x-4 gap-y-2">
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">YOLO size</span>
-            <select id="cfg_yolo_size"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="n">n · nano</option>
-              <option value="s">s · small</option>
-              <option value="m">m · medium</option>
-              <option value="l">l · large</option>
-              <option value="x">x · xlarge</option>
-            </select>
-          </div>
           <div>
             <span class="text-[10px] text-gray-500 block mb-0.5">Pose type</span>
             <select id="cfg_pose_kind"
               class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
               <option value="body">Body · 17 pts</option>
               <option value="wholebody">Whole-body · 133 (hands+face)</option>
-            </select>
-          </div>
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Pose size</span>
-            <select id="cfg_pose_size"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="n">n · nano</option>
-              <option value="s">s · small</option>
-              <option value="m">m · medium</option>
-              <option value="l">l · large</option>
-              <option value="x">x · xlarge</option>
             </select>
           </div>
           <div>
@@ -151,13 +135,6 @@
               <option value="landmarks3d">Landmarks-3D · no download</option>
               <option value="insight3d">InsightFace 3DMM · needs BFM basis</option>
               <option value="deep3d">Deep3D · needs deep3d_runner</option>
-            </select>
-          </div>
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Barcode model</span>
-            <select id="cfg_barcode_model"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="">Auto (built-in detector)</option>
             </select>
           </div>
           <div>

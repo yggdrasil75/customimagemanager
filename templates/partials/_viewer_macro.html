@@ -76,12 +76,7 @@
         <input type="checkbox" id="{{ p }}toggle_masks" checked onchange="drawCanvas()" class="accent-fuchsia-500">
         Masks
       </label>
-      <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
-        <input type="checkbox" id="{{ p }}toggle_skeleton"
-          onchange="drawCanvas();if(typeof popoutOpen!=='undefined'&&popoutOpen)drawPopout();"
-          class="accent-cyan-500">
-        Skeleton
-      </label>
+      <span data-ext-area="viewer_toggles" class="contents"></span>
     </div>
   </div>
   {% endif %}

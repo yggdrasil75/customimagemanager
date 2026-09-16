@@ -87,7 +87,6 @@ import exif_import, exif_export, exif_fields
 import xmp_import, xmp_fields, xmp_export
 import iptc_import, iptc_fields
 import mwg_fields
-import barcodes
 import quality_heuristic
 try:
     import seg_models
@@ -180,7 +179,6 @@ state = {
     },
     "brand_name": "Media Library",
     "brand_logo": "",   # relative URL under /media, or "" for none
-    "yolo_size": "n",
     "dup_cnn_width": 1.0,   # Siamese dup-CNN channel multiplier (0.25..2.0)
     "face_bg_enabled": False,
     "face_bg_custom": False,
@@ -203,7 +201,6 @@ state = {
     "bg_seg_classes": [],
     "model_groups": {},
     "pose_kind": "body",
-    "pose_size": "n",
     "appearance_eps": 0.35,
     "shape_estimator": "anny_fit",
     "pose_estimator": "atlas",
@@ -1856,12 +1853,12 @@ def load_config():
 
 def save_config():
     keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt",
-            "oai_actions","llm_preprocess","autotag_enabled","keep_raws","pipeline_tree","yolo_size","pose_kind","pose_size",
+            "oai_actions","llm_preprocess","autotag_enabled","keep_raws","pipeline_tree","pose_kind",
             "face_bg_enabled","face_bg_custom","face_detector","face_recognition","face_model","face_size","person_model","our_model","face_cluster_eps",
             "face_reject_drawn","face_drawn_thresh",
             "body_enabled","body_size","body_cluster_eps","object_proposals",
             "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
-            "barcode_model","barcode_conf", "brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
+            "brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
             "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers","dup_cnn_width","modules","model_selection"]
     # Add any keys modules declared through the config registry, so a module's
     # settings persist without being hand-added to this list.
@@ -4767,49 +4764,6 @@ def _run_ocr(img_bgr) -> dict:
     return {"engine": None, "text": "", "lines": [],
             "note": "No OCR engine installed (pip install rapidocr_onnxruntime, or easyocr)."}
 
-def _barcode_model_path() -> str:
-    """!
-    @brief Resolve the configured or auto-discovered barcode YOLO model path.
-    @return Model path, or "" if none is configured or found.
-    """
-    mp = (state.get("barcode_model") or "").strip()
-    if mp:
-        return mp
-    try:
-        for p in sorted(glob.glob(os.path.join(facelib.MODELS_DIR, "*.pt"))):
-            base = os.path.basename(p).lower()
-            if "barcode" in base or "qr" in base:
-                return p
-    except Exception as e:
-        access_logger.warning(f"barcode model autodiscover: {e}")
-    return ""
-
-def _barcode_detect():
-    """!
-    @brief Build a detector callback for barcodes.scan.
-    @return A bgr→boxes callable, or None to make scan use its built-in gradient detector.
-    @note None (not []) is deliberate: [] would mean "a model ran and found nothing",
-          which suppresses the fallback.
-    """
-    mp = _barcode_model_path()
-    if not mp or not os.path.exists(mp):
-        return None
-    conf = float(state.get("barcode_conf", 0.25) or 0.25)
-    return lambda bgr: _detect_obb_or_box(bgr, mp, conf=conf)
-
-def _run_barcodes(img_bgr, deep: bool = True) -> dict:
-    """!
-    @brief Find and decode barcodes; never raises.
-    @return barcodes.scan result, or an error dict with engine None on failure.
-    """
-    try:
-        return barcodes.scan(img_bgr, _barcode_detect(), deep=deep,
-                             min_conf=float(state.get("barcode_conf", 0.25) or 0.25))
-    except Exception as e:
-        access_logger.error(f"barcode scan: {e}")
-        return {"engine": None, "codes": [], "detected": 0, "decoded": 0,
-                "note": f"Barcode scan failed: {e}"}
-
 def _clamp_box(b: dict) -> dict | None:
     """!
     @brief Clamp a normalised center-form box to the image bounds.
@@ -6361,12 +6315,11 @@ def api_state():
     return jsonify({k: state.get(k) for k in
         ("classes","available_models","status_text","remote_ip",
          "oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions",
-         "autotag_enabled","pipeline_tree","yolo_size","pose_kind","pose_size",
+         "autotag_enabled","pipeline_tree","pose_kind",
          "appearance_eps","shape_estimator","pose_estimator","face_estimator",
          "face_bg_enabled","face_bg_custom","face_detector","face_recognition","person_model","our_model",
          "face_cluster_eps","face_reject_drawn","face_drawn_thresh","body_enabled","body_size","body_cluster_eps","object_proposals",
          "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
-         "barcode_model","barcode_conf",
          "model_groups","iqa_model","brand_name","brand_logo","search_quick_filters")})
 
 @app.route("/api/workers")
@@ -6508,21 +6461,15 @@ def update_settings():
                    "AND COALESCE(unknown,0)=0")
         db.commit()
         _face_dirty["v"] = True
-    # Same reasoning for the barcode detector: _detect_obb_or_box memoises by
-    # path, so pointing the setting at a different model has no effect until
-    # the cache is dropped.
-    if "barcode_model" in d and d["barcode_model"] != state.get("barcode_model"):
-        _load_yolo.cache_clear()
     # Same for the "our"/trained model: _detect_obb_or_box memoises by path.
     if "our_model" in d and d["our_model"] != state.get("our_model"):
         _load_yolo.cache_clear()
-    for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","llm_preprocess","pipeline_tree","yolo_size","pose_kind","pose_size",
+    for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","llm_preprocess","pipeline_tree","pose_kind",
               "appearance_eps","shape_estimator","pose_estimator","face_estimator",
               "face_bg_enabled","face_bg_custom","face_detector","face_recognition","person_model","our_model","face_cluster_eps",
             "face_reject_drawn","face_drawn_thresh",
               "body_enabled","body_size","body_cluster_eps","object_proposals",
-              "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
-              "barcode_model","barcode_conf"):
+              "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes"):
         if k in d: state[k] = d[k]
     # Search quick-filters: validate shape so a malformed save can't break the
     # search UI. Each entry must be {id,label,query}; drop anything else.
@@ -10550,22 +10497,6 @@ def api_ocr():
     res = _run_ocr(_to_bgr(img))
     state["status_text"] = "Ready."
     return jsonify({"success": True, **res})
-
-@app.route("/api/barcodes", methods=["POST"])
-@_auth.require_feature("ai.barcodes", level="write")
-def api_barcodes():
-    fn = request.json.get("filename", "")
-    fp = get_safe_path(MEDIA_DIR, fn)
-    if not fp or not os.path.exists(fp):
-        return jsonify({"success": False, "error": "File not found."})
-    img = read_jxl(fp)
-    if img is None:
-        return jsonify({"success": False, "error": "Decode failed."})
-    state["status_text"] = "Scanning for barcodes…"
-    res = _run_barcodes(_to_bgr(img), deep=bool(request.json.get("deep", True)))
-    state["status_text"] = "Ready."
-    return jsonify({"success": True, "regions": barcodes.to_regions(res),
-                    "summary": barcodes.summary_text(res), **res})
 
 @app.route("/api/segment", methods=["POST"])
 @_auth.require_feature("ai.segment", level="write")

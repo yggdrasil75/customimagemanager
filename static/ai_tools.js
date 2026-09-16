@@ -234,7 +234,6 @@ async function persistAiSettings(){
       oai_key:_v('cfg_apikey'),
       oai_model:_v('cfg_model'),
       oai_embed_model:_v('cfg_embed_model'),
-      yolo_size:_v('cfg_yolo_size'),
       sam_model:_v('cfg_sam_model','sam2.1_b'),
       bg_seg_enabled:_c('cfg_bg_seg'),
       bg_seg_model:_v('cfg_bg_seg_model','yolov26n-seg'),
@@ -249,9 +248,7 @@ async function persistAiSettings(){
       body_size:_v('cfg_body_size','s'),
       person_model:_v('cfg_person_model'),
       our_model:_v('cfg_our_model'),
-      barcode_model:_v('cfg_barcode_model'),
       pose_kind:_v('cfg_pose_kind'),
-      pose_size:_v('cfg_pose_size'),
       pose_estimator:_v('cfg_pose_estimator'),
       shape_estimator:_v('cfg_shape_estimator'),
       face_estimator:_v('cfg_face_estimator'),
@@ -407,39 +404,6 @@ async function runSegment(){
       }
     } else alert('Segment failed: '+(d.error||''));
   }catch(e){ alert('Network error during segmentation.'); }
-  btn.innerText=og; btn.disabled=false;
-}
-async function runBarcodes(){
-  if(!window.currentFile){ alert('Select an image first.'); return; }
-  const btn=document.getElementById('btn_barcodes'); const og=btn.innerText;
-  btn.innerText='▥ …'; btn.disabled=true;
-  try{
-    const d=await fetch('/api/barcodes',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filename:window.currentFile})}).then(r=>r.json());
-    if(d.success){
-      const regs=d.regions||[];
-      if(!regs.length){ showToast(d.note||'No barcodes found.'); }
-      else{
-        // The server already shaped these as regions (type BarCode, payload in
-        // barcode_value), so push them through unchanged rather than rebuilding
-        // them here and risking the two shapes drifting apart.
-        regs.forEach(r=>currentRegions.push(r));
-        if(d.summary){
-          const ta=document.getElementById('meta_desc');
-          ta.value=(ta.value?ta.value.trim()+'\n\n':'')+'Barcodes:\n'+d.summary;
-        }
-        drawCanvas(); if(typeof popoutOpen!=='undefined'&&popoutOpen) drawPopout();
-        renderRegionsList(); triggerAutosave();
-        // Report decoded vs found separately — "4 found, 1 read" tells the user
-        // their photos need to be sharper, which "1 barcode" would hide.
-        const undec=d.detected-d.decoded;
-        showToast(`Barcodes: ${d.detected} found, ${d.decoded} decoded`
-          +(undec?` (${undec} not readable)`:'')
-          +(d.detector?` · ${d.detector}`:'')+`.`);
-      }
-      if(d.note) console.info('barcodes:',d.note);
-    } else alert('Barcode scan failed: '+(d.error||''));
-  }catch(e){ alert('Network error during barcode scan.'); }
   btn.innerText=og; btn.disabled=false;
 }
 async function bulkPipeline(){

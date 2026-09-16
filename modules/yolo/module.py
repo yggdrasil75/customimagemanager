@@ -251,6 +251,21 @@ def register(host):
 
     reason = "ultralytics not installed"
 
+    # Model-size settings this provider reads. Declared here (not in core) so
+    # they only exist, persist and render when YOLO is on.
+    sizes = [{"value": k, "label": v} for k, v in
+             (("n", "n · nano"), ("s", "s · small"), ("m", "m · medium"),
+              ("l", "l · large"), ("x", "x · xlarge"))]
+    ok_size = lambda v: v if str(v).lower() in _SIZES else None
+    host.add_config_key("yolo_size", default="n", validate=ok_size)
+    host.add_config_key("pose_size", default="n", validate=ok_size)
+    host.add_settings_field(key="yolo_size", label="YOLO size", kind="select",
+                            pane="models", options=sizes,
+                            help="Stock yolo11 weights for object/person detection.")
+    host.add_settings_field(key="pose_size", label="YOLO pose size", kind="select",
+                            pane="models", options=sizes,
+                            help="Stock yolo11-pose weights when no pose model path is set.")
+
     host.provide_model(
         "box.faces", "yolo-face",
         label="YOLO face detector",

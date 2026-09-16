@@ -101,6 +101,52 @@
     } catch (e) { /* non-fatal */ }
   }
 
+  // ── model capability -> provider picker ───────────────────────────────────
+  // One select per broker capability listing every module that provides it.
+  // Selection posts to /api/models/select; core has no idea what the providers
+  // are (YOLO, Mayaku, …) — it just renders what the broker reports.
+  async function buildModelPicker() {
+    const mount = document.getElementById("model_capabilities");
+    if (!mount) return;
+    let caps = [];
+    try {
+      const d = await fetch("/api/models").then((r) => r.json());
+      caps = (d && d.capabilities) || [];
+    } catch (e) { return; }
+    mount.innerHTML = "";
+    for (const c of caps) {
+      if (!(c.providers || []).length) continue;
+      const wrap = document.createElement("div");
+      const title = document.createElement("span");
+      title.className = "text-[10px] text-gray-500 block mb-0.5";
+      title.textContent = c.id;
+      if (c.summary) title.title = c.summary;
+      const sel = document.createElement("select");
+      sel.className = "w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white";
+      for (const p of c.providers) {
+        const o = document.createElement("option");
+        o.value = p.id;
+        o.textContent = p.label + (p.available ? "" : " (unavailable)");
+        if (!p.available && p.reason) o.title = p.reason;
+        if (p.id === c.selected) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.addEventListener("change", async () => {
+        try {
+          const r = await fetch("/api/models/select", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ capability: c.id, provider: sel.value }),
+          }).then((x) => x.json());
+          if (r && r.error && window.showToast) showToast(r.error);
+        } catch (e) { /* non-fatal */ }
+      });
+      wrap.appendChild(title); wrap.appendChild(sel);
+      mount.appendChild(wrap);
+    }
+    if (window.applyFeatureVisibility) applyFeatureVisibility(mount);
+  }
+  window.buildModelPicker = buildModelPicker;
+
   async function buildSettingsTabs() {
     const tabBar = document.getElementById("module_settings_tabs");
     const paneWrap = document.getElementById("module_settings_panes");
@@ -148,6 +194,7 @@
   function init() {
     injectAssets();
     buildSettingsTabs();
+    buildModelPicker();
   }
 
   if (document.readyState === "loading") {
