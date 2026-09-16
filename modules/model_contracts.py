@@ -110,7 +110,9 @@ CORE_CAPABILITIES = {
     "iqa": {
         "label": "Image quality",
         "summary": "No-reference image quality assessment: a normalized score.",
-        "input": _IMG,
+        "input": "score(img_bgr, rel_path=None) — HxWx3 uint8 BGR; rel_path (library-"
+                 "relative) is passed when known so a provider can use the file's "
+                 "stored tags/regions/pose; providers may ignore it",
         "output": "dict {raw, quality} where quality is normalized 0..1 "
                   "(higher = better) and raw is the model's native score",
     },
