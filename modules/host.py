@@ -309,19 +309,22 @@ class Host:
             name, claim, handle, key_of=key_of, cost_of=cost_of)
 
     # ── model capabilities ───────────────────────────────────────────────
-    def declare_capability(self, cap_id, *, summary, input, output):
+    def declare_capability(self, cap_id, *, summary, input, output, label=None,
+                           background=False):
         """Declare a NEW model capability contract (first declarer owns it).
 
-        The core already declares box.faces / box.objects / segment / pose.
+        The core already declares detect / detect.obb / segment / pose / classify / depth.
         Use this only to add a capability the core doesn't have. Attributed to
         the calling module.
         """
         return self.broker.declare(cap_id, summary=summary, input=input,
-                                   output=output, owner=self._current_module)
+                                   output=output, owner=self._current_module,
+                                   label=label, background=background)
 
     def provide_model(self, cap_id, provider_id, *, label, loader,
                       transform=None, available=None, reason="",
-                      cost_mb=0, gpu=False):
+                      cost_mb=0, gpu=False, handles=None, family=None,
+                      sizes=None, types=None, settings=None, classes=None):
         """Register this module's model as a provider for a capability.
 
         loader()   -> a callable model handle (back it with the runtime
@@ -332,10 +335,30 @@ class Host:
                       shape regardless of which model ran.
         available()-> bool; when False the provider is shown greyed-out and
                       request() raises rather than returning it.
+        handles(model_path) -> bool, for path-parameterized caps ('box').
+        family     -> picker group label ("YOLO", "Mayaku"); defaults to label.
+        sizes      -> size ids the model comes in (["n","s","m","l","x"]);
+                      the picker greys the size select out when < 2.
+        types      -> [{value,label}] variants (pose 17 vs whole-body); same.
+        settings   -> extra widgets for this provider, [{key,label,kind,
+                      options?,help?}] with kind in text|number|toggle|select
+                      (options may be a callable). Each key must be declared
+                      via add_config_key; values save through update_settings.
+        classes()  -> ordered class names the model emits (may load weights);
+                      feeds the background-run class whitelist.
+        The chosen size/type is read back with host.model_variant(cap_id).
         """
         return self.broker.provide(
             cap_id, provider_id, label=label, loader=loader, transform=transform,
-            available=available, reason=reason, cost_mb=cost_mb, gpu=gpu)
+            available=available, reason=reason, cost_mb=cost_mb, gpu=gpu,
+            handles=handles, family=family, sizes=sizes, types=types,
+            settings=settings, classes=classes)
+
+    def model_variant(self, cap_id):
+        """{"size","type","background","classes"} the user picked for a
+        capability (size/type default to the selected provider's first option).
+        Providers call this inside their loader."""
+        return self.broker.variant(cap_id)
 
     def request_model(self, cap_id):
         """Get a ready handle for the user-selected provider of a capability.

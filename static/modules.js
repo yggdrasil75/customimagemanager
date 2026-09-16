@@ -101,10 +101,41 @@
     } catch (e) { /* non-fatal */ }
   }
 
-  // ── model capability -> provider picker ───────────────────────────────────
-  // One select per broker capability listing every module that provides it.
-  // Selection posts to /api/models/select; core has no idea what the providers
-  // are (YOLO, Mayaku, …) — it just renders what the broker reports.
+  // ── model selection tab ───────────────────────────────────────────────────
+  // One row per broker capability: family (provider) / size / type selects,
+  // then the selected provider's own widgets. A select with < 2 choices is
+  // disabled (greyed). Core only renders what /api/models reports — it has no
+  // idea what the providers are.
+  const SEL = "w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white " +
+              "disabled:opacity-40 disabled:cursor-not-allowed";
+  function _select(opts, value, onChange, title) {
+    const sel = document.createElement("select");
+    sel.className = SEL;
+    if (title) sel.title = title;
+    for (const o of opts) {
+      const el = document.createElement("option");
+      el.value = o.value; el.textContent = o.label;
+      if (o.title) el.title = o.title;
+      if (o.value === value) el.selected = true;
+      sel.appendChild(el);
+    }
+    if (opts.length < 2) sel.disabled = true;
+    else sel.addEventListener("change", () => onChange(sel.value));
+    return sel;
+  }
+  function _cell(label, node) {
+    const d = document.createElement("div");
+    const t = document.createElement("span");
+    t.className = "text-[10px] text-gray-500 block mb-0.5"; t.textContent = label;
+    d.appendChild(t); d.appendChild(node); return d;
+  }
+  async function _post(url, body) {
+    try {
+      const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body) }).then((x) => x.json());
+      if (r && r.error && window.showToast) showToast(r.error);
+    } catch (e) { /* non-fatal */ }
+  }
   async function buildModelPicker() {
     const mount = document.getElementById("model_capabilities");
     if (!mount) return;
@@ -115,35 +146,101 @@
     } catch (e) { return; }
     mount.innerHTML = "";
     for (const c of caps) {
-      if (!(c.providers || []).length) continue;
-      const wrap = document.createElement("div");
-      const title = document.createElement("span");
-      title.className = "text-[10px] text-gray-500 block mb-0.5";
-      title.textContent = c.id;
-      if (c.summary) title.title = c.summary;
-      const sel = document.createElement("select");
-      sel.className = "w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white";
-      for (const p of c.providers) {
-        const o = document.createElement("option");
-        o.value = p.id;
-        o.textContent = p.label + (p.available ? "" : " (unavailable)");
-        if (!p.available && p.reason) o.title = p.reason;
-        if (p.id === c.selected) o.selected = true;
-        sel.appendChild(o);
+      const provs = c.providers || [];
+      if (!provs.length) continue;
+      const p = provs.find((x) => x.id === c.selected) || provs[0];
+      const v = c.variant || {};
+      const row = document.createElement("div");
+      row.className = "border border-gray-700 rounded p-2";
+      const head = document.createElement("div");
+      head.className = "text-xs text-sky-300 font-bold mb-1";
+      head.textContent = c.label || c.id; if (c.summary) head.title = c.summary;
+      row.appendChild(head);
+      const grid = document.createElement("div");
+      grid.className = "grid grid-cols-3 gap-x-4 gap-y-2";
+      const pick = (patch) => _post("/api/models/select",
+        { capability: c.id, provider: p.id, size: v.size, type: v.type,
+          background: v.background, classes: v.classes || [], ...patch })
+        .then(buildModelPicker);
+      grid.appendChild(_cell("Family", _select(
+        provs.map((x) => ({ value: x.id, title: x.available ? "" : x.reason,
+          label: x.label + (x.family && x.family !== x.label ? ` (${x.family})` : "")
+                 + (x.available ? "" : " · unavailable") })),
+        p.id, (id) => pick({ provider: id, size: null, type: null }))));
+      grid.appendChild(_cell("Size", _select(
+        (p.sizes || []).map((s) => ({ value: s, label: s })), v.size, (s) => pick({ size: s }))));
+      grid.appendChild(_cell("Type", _select(
+        (p.types || []), v.type, (t) => pick({ type: t }))));
+      for (const f of p.settings || []) grid.appendChild(fieldEl(f));
+      row.appendChild(grid);
+      if (c.background) row.appendChild(backgroundBlock(c, p, v, pick));
+      if (!p.available && p.reason) {
+        const n = document.createElement("p");
+        n.className = "text-[10px] text-amber-400 mt-1"; n.textContent = p.reason;
+        row.appendChild(n);
       }
-      sel.addEventListener("change", async () => {
-        try {
-          const r = await fetch("/api/models/select", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ capability: c.id, provider: sel.value }),
-          }).then((x) => x.json());
-          if (r && r.error && window.showToast) showToast(r.error);
-        } catch (e) { /* non-fatal */ }
-      });
-      wrap.appendChild(title); wrap.appendChild(sel);
-      mount.appendChild(wrap);
+      mount.appendChild(row);
     }
     if (window.applyFeatureVisibility) applyFeatureVisibility(mount);
+  }
+  // "Run on every image" toggle + class whitelist for region-producing
+  // capabilities. Classes come from the selected provider (may load weights).
+  function backgroundBlock(c, p, v, pick) {
+    const wrap = document.createElement("div");
+    wrap.className = "mt-2 border-t border-gray-700 pt-2";
+    const head = document.createElement("div");
+    head.className = "flex items-center justify-between";
+    const lbl = document.createElement("label");
+    lbl.className = "flex items-center gap-2 text-xs text-gray-300 cursor-pointer";
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.className = "accent-cyan-500"; cb.checked = !!v.background;
+    cb.addEventListener("change", () => pick({ background: cb.checked }));
+    lbl.appendChild(cb);
+    lbl.appendChild(document.createTextNode(" Run in background on every image"));
+    head.appendChild(lbl);
+    const box = document.createElement("div");
+    box.className = "hidden mt-1 max-h-32 overflow-y-auto grid grid-cols-4 gap-x-2 gap-y-0.5 " +
+                    "bg-gray-900/50 rounded p-2 border border-gray-700";
+    const note = document.createElement("p");
+    note.className = "text-[10px] text-gray-600 mt-1";
+    if (p.has_classes) {
+      const tog = document.createElement("button");
+      tog.type = "button"; tog.className = "text-[10px] text-cyan-400 hover:text-cyan-300";
+      const sel = new Set(v.classes || []);
+      tog.textContent = sel.size ? `classes (${sel.size} ticked)` : "classes (all)";
+      let loaded = false;
+      tog.addEventListener("click", async () => {
+        const hidden = box.classList.toggle("hidden");
+        if (hidden || loaded) return;
+        box.innerHTML = '<span class="text-[10px] text-gray-500 col-span-4">loading class list…</span>';
+        let classes = [];
+        try {
+          const d = await fetch("/api/models/classes?capability=" + encodeURIComponent(c.id)).then((r) => r.json());
+          classes = d.classes || [];
+        } catch (e) { /* fallthrough */ }
+        box.innerHTML = "";
+        if (!classes.length) { note.textContent = "No class list (model weights unavailable?)."; return; }
+        note.textContent = "None ticked = keep everything the model finds.";
+        loaded = true;
+        for (const name of classes) {
+          const l = document.createElement("label");
+          l.className = "flex items-center gap-1 text-[11px] text-gray-300";
+          const i = document.createElement("input");
+          i.type = "checkbox"; i.className = "accent-cyan-500"; i.checked = sel.has(name);
+          i.addEventListener("change", () => {
+            if (i.checked) sel.add(name); else sel.delete(name);
+            tog.textContent = sel.size ? `classes (${sel.size} ticked)` : "classes (all)";
+            _post("/api/models/select", { capability: c.id, provider: p.id, size: v.size,
+              type: v.type, background: v.background, classes: [...sel] });
+          });
+          l.appendChild(i); l.appendChild(document.createTextNode(" " + name));
+          box.appendChild(l);
+        }
+      });
+      head.appendChild(tog);
+    }
+    wrap.appendChild(head); wrap.appendChild(box); wrap.appendChild(note);
+    return wrap;
   }
   window.buildModelPicker = buildModelPicker;
 
@@ -152,10 +249,11 @@
     const paneWrap = document.getElementById("module_settings_panes");
     if (!tabBar || !paneWrap) return;
     let tabs = [];
+    let fields = [];
     try {
       const data = await fetch("/api/modules").then((r) => r.json());
       tabs = (data && data.settings_tabs) || [];
-      buildSettingsFields((data && data.settings_fields) || []);
+      fields = (data && data.settings_fields) || [];
     } catch (e) {
       return;
     }
@@ -186,9 +284,16 @@
         pane.dataset.settingsPane = tabKey;
         pane.className = "hidden overflow-y-auto flex-1 pr-1";
         if (t.admin_only) pane.setAttribute("data-admin-only", "");
+        // Fields with pane=<tab id> render here (same mount id scheme as core panes).
+        const mount = document.createElement("div");
+        mount.id = "module_settings_fields_" + t.id;
+        mount.className = "space-y-3 mb-3";
+        pane.appendChild(mount);
         paneWrap.appendChild(pane);
       }
     }
+    // Panes exist now, so every field has a mount to land in.
+    buildSettingsFields(fields);
   }
 
   function init() {

@@ -32,8 +32,10 @@ def register(host):
     host.add_asset("embedding.js", kind="js", module_id="embedding")
     host.add_asset("embedding.css", kind="css", module_id="embedding")
 
-    # ── settings tab ───────────────────────────────────────────────────────
-    host.add_settings_tab("embedding", "Embeddings", icon="🧠", admin_only=False)
+    # ── settings ───────────────────────────────────────────────────────────
+    # The OAI endpoint/key/embedding-model live with the other OAI settings in
+    # the core AI pane; the only embedding-specific knob is the local backbone,
+    # so it sits in the General pane rather than owning a tab.
     host.add_config_key("oai_embed_model", default="", save=True,
                         validate=lambda v: isinstance(v, str))
     host.add_config_key("oai_endpoint", default="", save=True,
@@ -42,17 +44,8 @@ def register(host):
                         validate=lambda v: isinstance(v, str))
     host.add_config_key("grouping_cnn", default="efficientnet_b0", save=True,
                         validate=lambda v: isinstance(v, str))
-    host.add_settings_field(key="oai_embed_model", label="OAI Embedding Model",
-                            kind="text", pane="embedding", tab="embedding",
-                            help="OpenAI-compatible embedding model name (e.g. text-embedding-3-small)")
-    host.add_settings_field(key="oai_endpoint", label="OAI API Endpoint",
-                            kind="text", pane="embedding", tab="embedding",
-                            help="Base URL for OpenAI-compatible API (e.g. https://api.openai.com/v1)")
-    host.add_settings_field(key="oai_key", label="OAI API Key",
-                            kind="text", pane="embedding", tab="embedding",
-                            help="API key for the embedding endpoint")
-    host.add_settings_field(key="grouping_cnn", label="Local CNN Model",
-                            kind="select", pane="embedding", tab="embedding",
+    host.add_settings_field(key="grouping_cnn", label="Local embedding CNN",
+                            kind="select", pane="general",
                             options=lambda: [
                                 {"value": "efficientnet_b0", "label": "EfficientNet-B0 (default)"},
                                 {"value": "efficientnet_b1", "label": "EfficientNet-B1"},

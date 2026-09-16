@@ -9,6 +9,8 @@
           class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">⚙ General</button>
         <button data-settings-tab="ai" onclick="settingsTab('ai')"
           class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">🧠 AI / Vision</button>
+        <button data-settings-tab="models" onclick="settingsTab('models')"
+          class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">🧩 Models</button>
         <button data-settings-tab="pipeline" onclick="settingsTab('pipeline')"
           class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">🌳 Pipeline</button>
         <button data-settings-tab="storage" onclick="settingsTab('storage')"
@@ -91,23 +93,9 @@
         </div>
       </div>
       <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
-        <label class="text-xs text-sky-300 font-bold block mb-2">Models
-          <span class="font-normal text-gray-500">(which module serves each capability)</span></label>
-        <!-- Capability -> provider picker, rendered from /api/models by static/modules.js.
-             Any module that host.provide_model()s shows up here; core knows no providers. -->
-        <div id="model_capabilities" class="grid grid-cols-3 gap-x-4 gap-y-2 mb-2"></div>
-        <!-- Provider-specific model settings (add_settings_field pane="models"). -->
-        <div id="module_settings_fields_models" class="grid grid-cols-3 gap-x-4 gap-y-2 mb-3"></div>
-        <label class="text-xs text-sky-300 font-bold block mb-2">Pose &amp; person estimation</label>
+        <label class="text-xs text-sky-300 font-bold block mb-2">Person estimation
+          <span class="font-normal text-gray-500">(detection/pose models are picked in 🧩 Models)</span></label>
         <div class="grid grid-cols-3 gap-x-4 gap-y-2">
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Pose type</span>
-            <select id="cfg_pose_kind"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="body">Body · 17 pts</option>
-              <option value="wholebody">Whole-body · 133 (hands+face)</option>
-            </select>
-          </div>
           <div>
             <span class="text-[10px] text-gray-500 block mb-0.5">Pose estimator</span>
             <select id="cfg_pose_estimator"
@@ -165,11 +153,8 @@
             <p id="cfg_sam_note" class="text-[10px] text-gray-500 mt-1"></p>
           </div>
           <div>
-            <label class="flex items-center gap-2 text-sm text-gray-300 mb-1">
-              <input id="cfg_bg_seg" type="checkbox" class="accent-cyan-500">
-              Background segmentation
-              <span class="text-gray-600 text-[10px]">(class-aware, bulk)</span>
-            </label>
+            <span class="text-[10px] text-gray-500 block mb-0.5">Segment-button model
+              <span class="text-gray-600">(background runs are set in 🧩 Models)</span></span>
             <select id="cfg_bg_seg_model"
               class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
               <!-- populated from /api/seg_models (yolo) -->
@@ -177,23 +162,10 @@
             <p id="cfg_bg_seg_note" class="text-[10px] text-gray-500 mt-1"></p>
           </div>
         </div>
-        <div class="mt-2">
-          <div class="flex items-center justify-between">
-            <span class="text-[10px] text-gray-500">What to segment
-              <span class="text-gray-600">(trained classes &mdash; none ticked = keep all)</span></span>
-            <button id="cfg_bg_classes_toggle" type="button"
-              class="text-[10px] text-cyan-400 hover:text-cyan-300">show classes</button>
-          </div>
-          <div id="cfg_bg_classes" class="hidden mt-1 max-h-32 overflow-y-auto grid grid-cols-3 gap-x-2 gap-y-0.5
-               bg-gray-900/50 rounded p-2 border border-gray-700">
-            <!-- populated from /api/seg_classes -->
-          </div>
-          <p id="cfg_bg_classes_note" class="text-[10px] text-gray-600 mt-1"></p>
-        </div>
         <p class="text-[10px] text-gray-600 mt-1">
           <b class="text-cyan-400">SAM</b> powers the interactive/pipeline masker (masks are stored as
-          compact SVG paths). <b class="text-cyan-400">Background segmentation</b> runs a YOLO-seg model to
-          grab people and other trained-class bounds without a prompt. SAM 2/3 need their runtime +
+          compact SVG paths). The <b class="text-cyan-400">Segment</b> button runs the model picked here;
+          unprompted per-image runs and their class whitelist live in 🧩 Models. SAM 2/3 need their runtime +
           checkpoints in <code>models/seg/sam</code>; extra YOLO-seg weights go in <code>models/seg/yolo</code>.
         </p>
       </div>
@@ -362,6 +334,18 @@
        lives here (moved out of the old standalone popup) so its value is read by
        the single unified Save like every other pane. pipeline_editor.js mounts
        its visual node editor beside this textarea. #}
+    <div data-settings-pane="models" class="hidden overflow-y-auto flex-1 pr-1">
+      <!-- Model selection. Rendered from /api/models by static/modules.js: one
+           row per capability the broker knows, with family / size / type
+           selects (greyed out when a provider offers a single choice) and any
+           widgets the selected provider registered. Core knows no providers. -->
+      <p class="text-[10px] text-gray-500 mb-2">Each capability is served by whichever
+        module you pick here. Family = which module/generation, size and type = that
+        model's own variants. Extra fields belong to the selected model.</p>
+      <div id="model_capabilities" class="space-y-2"></div>
+      <div id="module_settings_fields_models" class="grid grid-cols-3 gap-x-4 gap-y-2 mt-3"></div>
+    </div>
+
     <div data-settings-pane="pipeline" class="hidden overflow-y-auto flex-1 pr-1">
       <div class="flex items-center justify-between mb-2">
         <h2 class="font-bold text-teal-300 text-sm">🌳 Smart Tag pipeline</h2>

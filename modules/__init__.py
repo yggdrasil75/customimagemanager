@@ -37,7 +37,7 @@ from .model_broker import broker  # noqa: F401  the ModelBroker singleton
 from .config_registry import config  # noqa: F401  the ConfigRegistry singleton
 from .model_contracts import declare_core_capabilities
 
-# The core owns the initial capability contracts (box.faces, box.objects,
+# The core owns the initial capability contracts (detect, detect.obb,
 # segment, pose). Declare them before any module registers providers.
 declare_core_capabilities(broker)
 

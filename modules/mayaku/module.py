@@ -1,196 +1,260 @@
 """
-Mayaku detector provider.
+Mayaku model provider.
 ======================================================================
-Mayaku (github.com/datamarkin/mayaku) is a Detectron2-style detector that
-does boxes, masks and keypoints. It's a near drop-in alternative to YOLO,
-so it registers as a provider for the same broker capabilities — 'box',
-'segment', 'pose' — transforming its native output (a Detectron2
-`Instances`, xyxy in original-image pixels) into the canonical normalized
-shapes the consumers already expect. Because every box consumer now goes
-through broker.detector_for('box', model_path), selecting Mayaku for a
-given model file swaps it in everywhere with no consumer change.
+Mayaku (github.com/datamarkin/mayaku) trains and runs detection, instance
+segmentation and keypoint models on a ConvNeXt backbone with a UniQuery
+head. Its zoo ships six sizes (n, s, m, l, xl, xxl), each in three task
+variants named ``mayaku-<size>-{det,seg,key}``; passing the name to
+``from_pretrained`` fetches the checkpoint. Output is a Detectron2-style
+``Instances`` in *original-image pixel* coordinates (COCO conventions), not
+YOLO-normalised results, so every transform here converts to the broker's
+canonical normalised shapes.
 
-Inference API (from the mayaku package):
-    from mayaku.inference import from_pretrained
-    predictor = from_pretrained(path)         # -> Predictor
-    inst = predictor(image_rgb)               # -> Instances
-      inst.pred_boxes.tensor  (N,4) xyxy px, original coords
-      inst.scores             (N,)
-      inst.pred_classes       (N,)
-      inst.pred_keypoints     (N,K,3) x,y,score  [optional]
-      predictor.class_names   list[str] | None
+Registered capabilities: detect, segment, pose (one provider each, sizes
+from the zoo, custom .pth weights via a picker widget), plus the
+path-parameterised 'box' capability for .pth/.mayaku/artifact-dir files so
+core consumers that dispatch by model path can run Mayaku models.
 
-Handles model files by extension/marker: Mayaku deploy artifacts (a
-directory, a .mayaku bundle, or weights the loader accepts). YOLO keeps
-.pt; Mayaku takes the rest it recognizes. Skipped entirely when the
-mayaku package isn't installed.
+Inference API used:
+    from mayaku import from_pretrained
+    predictor = from_pretrained(name_or_path)      # Predictor / ArtifactPredictor
+    inst = predictor(image_rgb_uint8)              # Instances, original coords
+      inst.pred_boxes.tensor   (N,4) xyxy px
+      inst.scores              (N,)
+      inst.pred_classes        (N,)
+      inst.pred_masks.tensor   (N,H,W) bool           [seg models]
+      inst.pred_keypoints      (N,K,3) x,y,score px    [key models]
+      predictor.class_names    list[str] | None
 """
 
 import os
 
 from optional_deps import optional_import
 
-_mayaku_inf, _HAVE_MAYAKU = optional_import("mayaku.inference")
+_mayaku, _HAVE_MAYAKU = optional_import("mayaku")
 cv2, _HAVE_CV2 = optional_import("cv2")
 import model_registry
 
 MANIFEST = {
     "id":          "mayaku",
-    "name":        "Mayaku detector",
-    "version":     "1.0.0",
-    "description": "Detectron2-style detector (boxes/masks/keypoints) as an "
-                   "alternative to YOLO. Provides the box/segment/pose "
-                   "capabilities for Mayaku model files. Needs the mayaku "
-                   "package; skipped otherwise.",
+    "name":        "Mayaku (UniQuery / ConvNeXt)",
+    "version":     "1.1.0",
+    "description": "Mayaku detection / instance-segmentation / keypoint "
+                   "models (Objects365-pretrained zoo, or your own .pth). "
+                   "Provides detect, segment, pose and path-dispatched box.",
     "core":        False,
     "requires":    [],
     "pip":         ["mayaku"],
     "assets":      [],
 }
 
+_SIZES = ["n", "s", "m", "l", "xl", "xxl"]
+_TASK = {"detect": "det", "segment": "seg", "pose": "key"}
+_ARTIFACT_EXT = (".pth", ".mayaku", ".onnx", ".engine", ".mlpackage", ".xml")
+
 
 def _available():
-    return _HAVE_MAYAKU
+    return bool(_HAVE_MAYAKU)
 
 
 def _handles(model_path):
-    """True for model files Mayaku owns. YOLO keeps .pt; Mayaku takes its
-    deploy artifacts (.mayaku bundle, or a directory containing one)."""
+    """True for model files Mayaku owns. YOLO keeps .pt."""
     if not model_path:
         return False
-    p = str(model_path).lower()
-    if p.endswith(".pt"):
-        return False                      # YOLO's territory
-    return p.endswith(".mayaku") or p.endswith(".pth") or os.path.isdir(str(model_path))
+    p = str(model_path)
+    return p.lower().endswith(_ARTIFACT_EXT) or os.path.isdir(p)
+
+
+def _weights_key(cap):
+    return "mayaku_weights_" + cap
 
 
 # ── model loading (cached in the runtime LRU) ────────────────────────────────
-def _predictor(model_path):
-    key = f"mayaku:{os.path.abspath(str(model_path))}"
-    model_registry.register(
-        key, (lambda p=model_path: _mayaku_inf.from_pretrained(p)),
-        cost_mb=800, gpu=model_registry.on_gpu(), model_path=str(model_path))
+def _resolve(source, chore="detect"):
+    """Zoo name -> models/mayaku/<chore>/<name>.pth (fetched there on a miss,
+    never into the cwd); explicit paths pass through."""
+    if os.path.exists(str(source)) or os.path.dirname(str(source)):
+        return str(source)
+    from mayaku.utils.download import download_model
+    return str(download_model(source, cache_dir=__import__("pathlib").Path(
+        model_registry.model_dir("mayaku", chore))))
+
+
+def _predictor(source, chore="detect"):
+    """source: zoo name ('mayaku-n-det') or a .pth / exported artifact path."""
+    local = _resolve(source, chore)
+    key = f"mayaku:{os.path.abspath(local)}"
+    model_registry.register(          # idempotent; keeps a measured cost
+        key, (lambda p=local: _mayaku.from_pretrained(p)),
+        cost_mb=800, gpu=model_registry.on_gpu(), model_path=local)
     return model_registry.acquire(key)
 
 
 def _to_rgb(img_bgr):
     if img_bgr is None:
         return None
+    if img_bgr.ndim == 2:
+        img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_GRAY2BGR) if _HAVE_CV2 \
+            else img_bgr[:, :, None].repeat(3, axis=2)
+    img_bgr = img_bgr[:, :, :3]
     if _HAVE_CV2:
-        return cv2.cvtColor(img_bgr[:, :, :3], cv2.COLOR_BGR2RGB)
+        return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     return img_bgr[:, :, ::-1]
 
 
-# ── transforms: Instances -> canonical shapes ────────────────────────────────
-def _names(pred):
+def _np(t):
     try:
-        return pred.class_names or {}
+        return t.detach().cpu().numpy()
     except Exception:
-        return {}
+        import numpy as np
+        return np.asarray(t)
 
 
-def _boxes_from_instances(inst, names, W, H, keep_classes=None, as_obb=False):
-    """Instances (xyxy px, original coords) -> [{class_name,cx,cy,w,h}] norm."""
+def _class_name(names, cid):
+    if isinstance(names, (list, tuple)) and 0 <= cid < len(names):
+        return names[cid]
+    if isinstance(names, dict):
+        return names.get(cid, str(cid))
+    return str(cid)
+
+
+def _run(source, img_bgr, chore="detect"):
+    """(Instances, names, W, H) or None."""
+    if img_bgr is None:
+        return None
+    pred = _predictor(source, chore)
+    rgb = _to_rgb(img_bgr)
+    H, W = rgb.shape[:2]
+    try:
+        inst = pred(rgb)
+    except Exception:
+        return None
+    try:
+        names = pred.class_names or []
+    except Exception:
+        names = []
+    return inst, names, W, H
+
+
+# ── transforms: Instances (COCO px) -> canonical normalised shapes ──────────
+def _rows(inst, conf):
+    """Indices of instances at/above conf, with scores & classes arrays."""
+    scores = _np(inst.scores) if inst.has("scores") else None
+    classes = _np(inst.pred_classes) if inst.has("pred_classes") else None
+    n = len(inst)
+    keep = [i for i in range(n) if scores is None or float(scores[i]) >= conf]
+    return keep, scores, classes
+
+
+def _tf_boxes(res, *a, conf=0.25, keep_classes=None, **k):
+    if res is None or not res[0].has("pred_boxes"):
+        return []
+    inst, names, W, H = res
+    boxes = _np(inst.pred_boxes.tensor)
+    keep, scores, classes = _rows(inst, conf)
     out = []
-    if inst is None or not hasattr(inst, "pred_boxes"):
-        return out
-    try:
-        boxes = inst.pred_boxes.tensor.cpu().numpy()
-        classes = inst.pred_classes.cpu().numpy() if inst.has("pred_classes") else None
-    except Exception:
-        return out
-    for i in range(len(boxes)):
+    for i in keep:
         x1, y1, x2, y2 = [float(v) for v in boxes[i][:4]]
-        cid = int(classes[i]) if classes is not None else -1
-        name = (names[cid] if isinstance(names, (list, tuple)) and 0 <= cid < len(names)
-                else (names.get(cid, str(cid)) if isinstance(names, dict) else str(cid)))
+        name = _class_name(names, int(classes[i]) if classes is not None else -1)
         if keep_classes and name not in keep_classes:
             continue
         out.append({"class_name": name,
                     "cx": ((x1 + x2) / 2) / W, "cy": ((y1 + y2) / 2) / H,
-                    "w": (x2 - x1) / W, "h": (y2 - y1) / H})
+                    "w": (x2 - x1) / W, "h": (y2 - y1) / H,
+                    "conf": float(scores[i]) if scores is not None else 1.0})
     return out
 
 
-# ── detect fn registered for the 'box' capability ───────────────────────────
-def _make_box_detect():
-    def detect(img_bgr, model_path, keep_classes=None, conf=0.25, as_obb=False):
-        if img_bgr is None:
-            return []
-        pred = _predictor(model_path)
-        rgb = _to_rgb(img_bgr)
-        H, W = rgb.shape[:2]
-        try:
-            inst = pred(rgb)
-        except Exception:
-            return []
-        return _boxes_from_instances(inst, _names(pred), W, H, keep_classes, as_obb)
-
-    def detect_batch(imgs, model_path, keep_classes=None, conf=0.25, as_obb=False):
-        # Mayaku's Predictor is single-image; loop. (Kept for interface parity
-        # with the YOLO provider so callers can use .batch uniformly.)
-        return [detect(im, model_path, keep_classes, conf, as_obb) for im in imgs]
-
-    detect.batch = detect_batch
-    return detect
+def _tf_masks(res, *a, conf=0.25, **k):
+    """BitMasks (N,H,W) -> polygon points normalised 0..1 (largest contour)."""
+    if res is None or not res[0].has("pred_masks") or not _HAVE_CV2:
+        return []
+    inst, names, W, H = res
+    masks = inst.pred_masks
+    masks = _np(getattr(masks, "tensor", masks)).astype("uint8")
+    keep, scores, classes = _rows(inst, conf)
+    out = []
+    for i in keep:
+        cnts, _ = cv2.findContours(masks[i], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            continue
+        c = max(cnts, key=cv2.contourArea)
+        pts = [(float(x) / W, float(y) / H) for x, y in c.reshape(-1, 2)]
+        out.append({"class_name": _class_name(names, int(classes[i]) if classes is not None else -1),
+                    "mask": pts,
+                    "conf": float(scores[i]) if scores is not None else 1.0})
+    return out
 
 
-def _tf_pose_instances(inst_pred, *a, **k):
-    """Mayaku keypoints -> canonical pose [{keypoints:[{x,y,v}], conf}]."""
-    inst, pred, W, H = inst_pred
-    people = []
-    if inst is None or not inst.has("pred_keypoints"):
-        return people
-    try:
-        kps = inst.pred_keypoints.cpu().numpy()   # (N,K,3) x,y,score px
-        scores = inst.scores.cpu().numpy() if inst.has("scores") else None
-    except Exception:
-        return people
-    for i in range(len(kps)):
-        ks = [{"x": float(x) / W, "y": float(y) / H, "v": float(v)}
-              for (x, y, v) in kps[i]]
-        people.append({"keypoints": ks,
-                       "conf": float(scores[i]) if scores is not None else 1.0})
-    return people
+def _tf_pose(res, *a, conf=0.25, **k):
+    """pred_keypoints (N,K,3) x,y,score px -> [{keypoints:[{x,y,v}], conf}]."""
+    if res is None or not res[0].has("pred_keypoints"):
+        return []
+    inst, names, W, H = res
+    kps = _np(inst.pred_keypoints)
+    keep, scores, _ = _rows(inst, conf)
+    return [{"keypoints": [{"x": float(x) / W, "y": float(y) / H, "v": float(v)}
+                           for (x, y, v) in kps[i]],
+             "conf": float(scores[i]) if scores is not None else 1.0}
+            for i in keep]
 
 
+# ── registration ─────────────────────────────────────────────────────────────
 def register(host):
     if not _HAVE_MAYAKU:
-        host.logger.info("mayaku module: package not installed; "
-                         "registering nothing")
+        host.logger.info("mayaku module: package not installed; registering nothing")
         return
 
+    def _source(cap):
+        custom = (host.config.get(_weights_key(cap)) or "").strip()
+        if custom:
+            return custom
+        size = host.model_variant(cap)["size"] or "n"
+        return f"mayaku-{size}-{_TASK[cap]}"
+
+    def _loader(cap):
+        # The handle runs the model; the transform normalises. conf /
+        # keep_classes ride through kwargs like the YOLO provider's.
+        return lambda: (lambda img, *a, **k: _run(_source(cap), img, cap))
+
+    def _weights_opts(cap):
+        def opts():
+            paths = model_registry.list_weights("mayaku", cap, exts=(".pth",))
+            return [{"value": "", "label": "Zoo (size)"}] + \
+                   [{"value": p, "label": os.path.basename(p)} for p in paths]
+        return opts
+
+    for cap, tf, cost in (("detect", _tf_boxes, 800), ("segment", _tf_masks, 900),
+                          ("pose", _tf_pose, 800)):
+        key = _weights_key(cap)
+        host.add_config_key(key, default="")
+        host.provide_model(
+            cap, "mayaku", label="Mayaku", family="Mayaku", sizes=_SIZES,
+            types=[{"value": "objects365", "label": "Objects365 head"}]
+                  if cap != "pose" else [{"value": "body", "label": "Body · 17 pts"}],
+            classes=(lambda c=cap: list(_predictor(_source(c), c).class_names or []))
+                    if cap != "pose" else None,
+            settings=[{"key": key, "label": "Custom weights (.pth)", "kind": "select",
+                       "options": _weights_opts(cap),
+                       "help": "Blank = zoo model for the picked size."}],
+            loader=_loader(cap), transform=tf, available=_available,
+            reason="pip install mayaku", cost_mb=cost, gpu=model_registry.on_gpu())
+
+    # Path-parameterised box detection for Mayaku model files.
+    def _box_detect(img_bgr, model_path, keep_classes=None, conf=0.25, as_obb=False):
+        return [{k: b[k] for k in ("class_name", "cx", "cy", "w", "h")}
+                for b in _tf_boxes(_run(model_path, img_bgr), conf=conf,
+                                   keep_classes=keep_classes)]
+
+    def _box_detect_batch(imgs, model_path, keep_classes=None, conf=0.25, as_obb=False):
+        # ponytail: Predictor.batch exists but per-image keeps the error path simple.
+        return [_box_detect(im, model_path, keep_classes, conf, as_obb) for im in imgs]
+    _box_detect.batch = _box_detect_batch
+
     host.provide_model(
-        "box", "mayaku",
-        label="Mayaku detector",
-        loader=_make_box_detect,          # detector_for returns this fn directly
-        transform=None, available=_available,
-        reason="pip install mayaku",
-        handles=_handles,
+        "box", "mayaku", label="Mayaku detector", family="Mayaku",
+        loader=lambda: _box_detect, transform=None, available=_available,
+        reason="pip install mayaku", handles=_handles,
         cost_mb=800, gpu=model_registry.on_gpu())
 
-    # Pose from the same Mayaku model (keypoint head), for model files it owns.
-    # Pose from the same Mayaku model (keypoint head). Reads the SAME shared
-    # 'pose_model' path setting YOLO reads — the broker's selected pose provider
-    # is what decides YOLO vs Mayaku, so there is no per-model config key.
-    def _pose_loader():
-        def run(img_bgr, *a, **k):
-            mp = (host.config.get("pose_model") or "").strip()
-            if not mp:
-                return []
-            pred = _predictor(mp)
-            rgb = _to_rgb(img_bgr)
-            H, W = rgb.shape[:2]
-            try:
-                inst = pred(rgb)
-            except Exception:
-                return []
-            return _tf_pose_instances((inst, pred, W, H))
-        return run
-    host.provide_model(
-        "pose", "mayaku",
-        label="Mayaku pose",
-        loader=_pose_loader, transform=None, available=_available,
-        reason="pip install mayaku", cost_mb=800, gpu=model_registry.on_gpu())
-
-    host.logger.info("mayaku module: registered box + pose providers")
+    host.logger.info("mayaku module: registered detect/segment/pose + box providers")

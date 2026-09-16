@@ -50,6 +50,20 @@ except Exception:
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
+def model_dir(backend, chore):
+    """models/<backend>/<chore>/ — where every backend keeps its weights for a
+    capability (chore = capability id with dots removed: detect, detectobb,
+    segment, pose, classify, depth). Created on first use."""
+    d = os.path.join(MODELS_DIR, backend, str(chore).replace(".", ""))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def list_weights(backend, chore, exts=(".pt", ".pth")):
+    """Weight files a user dropped (or a backend fetched) under models/<backend>/<chore>/."""
+    d = model_dir(backend, chore)
+    return sorted(os.path.join(d, f) for f in os.listdir(d)
+                  if f.lower().endswith(tuple(exts)))
+
 def _model_device(model):
     if model is None:
         return None

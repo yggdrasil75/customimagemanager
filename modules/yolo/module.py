@@ -2,7 +2,7 @@
 YOLO / Ultralytics model provider.
 ======================================================================
 Registers Ultralytics YOLO as a provider for the core capabilities it can
-satisfy: box.faces, box.objects, segment, pose. This is the first real
+satisfy: detect, detect.obb, segment, classify, pose, depth. This is the first real
 consumer of the model broker — it proves that a module can hand the app a
 model for a named capability, normalize the model's native output to the
 capability's canonical shape, and be swapped out for a different provider
@@ -14,11 +14,10 @@ evict least-recently-used), and each provider ships a transform that turns
 an Ultralytics Results object into the plain normalized dicts the contract
 in modules/model_contracts.py specifies.
 
-Model selection within YOLO (which size, which face weights) still comes
-from the app settings the user already had; this module reads those from
-host.config so it stays a drop-in over the existing behaviour. When a
-second provider module appears, the broker's per-capability selection is
-what chooses between YOLO and it.
+One provider is registered per (family, capability): yolov8 … yolo26 each
+offer the heads that generation ships (see _FAMILIES). The user picks the
+family + size in the Models tab; the loader derives the stock weights name
+from that, unless a custom-weights path is set for the capability.
 """
 
 import os
@@ -30,9 +29,6 @@ YOLO, _HAVE_YOLO = optional_import("ultralytics", attr="YOLO")
 
 # Core infra (always present alongside ultralytics); not plugins.
 import model_registry
-import faces as _faces
-import seg_models as _seg
-import face_models as _facemodels
 
 MANIFEST = {
     "id":          "yolo",
@@ -48,23 +44,23 @@ MANIFEST = {
 }
 
 _SIZES = ("n", "s", "m", "l", "x")
-MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(
-    os.path.dirname(os.path.abspath(__file__)))), "models")
 
 
 # ── loaders (backed by the runtime model_registry LRU) ──────────────────────
-def _canon(path):
-    p = path if os.path.dirname(path) else os.path.join(MODELS_DIR, path)
+def _canon(path, chore="detect"):
+    """Bare stock names live in models/yolo/<chore>/; ultralytics downloads the
+    asset to that exact path when it's missing. Explicit paths pass through."""
+    p = path if os.path.dirname(path) else os.path.join(model_registry.model_dir("yolo", chore), path)
     try:
         return os.path.realpath(p)
     except Exception:
         return os.path.abspath(p)
 
 
-def _build(path):
+def _build(path, chore="detect"):
     if not _HAVE_YOLO:
         raise RuntimeError("ultralytics is not installed")
-    m = YOLO(_canon(path))
+    m = YOLO(_canon(path, chore))
     try:
         if model_registry.on_gpu():
             m.to(model_registry.device())
@@ -77,19 +73,18 @@ def _build(path):
     return m
 
 
-def _loader_for(path):
+def _loader_for(path, chore="detect"):
     """Return a zero-arg loader that yields a cached, callable YOLO model.
-    
+
     For the generic 'box' capability which takes model_path at runtime,
     we register on first use (not at module load time since the path varies)."""
-    key = f"yolo:{_canon(path)}"
-    
+    canon = _canon(path, chore)
+    key = f"yolo:{canon}"
+
     def load():
-        # Register if not already registered (for dynamic model paths)
-        if key not in model_registry._entries:
-            model_registry.register(
-                key, (lambda p=path: _build(p)),
-                cost_mb=250, gpu=model_registry.on_gpu(), model_path=_canon(path))
+        model_registry.register(      # idempotent; dynamic paths register on first use
+            key, (lambda p=path, c=chore: _build(p, c)),
+            cost_mb=250, gpu=model_registry.on_gpu(), model_path=canon)
         return model_registry.acquire(key)
     return load
 
@@ -114,43 +109,35 @@ def _run_yolo_path(model_path, feed, conf):
         return None
 
 
-# ── path resolution from settings ───────────────────────────────────────────
-def _object_path(config):
-    size = (config.get("yolo_size") or "n").lower()
-    if size not in _SIZES:
-        size = "n"
-    return f"yolo11{size}.pt"          # ultralytics auto-downloads stock weights
+# ── families: which heads each ultralytics generation ships ─────────────────
+# stock weights = f"{prefix}{size}{suffix}.pt"; ultralytics auto-downloads.
+_NSMLX = ["n", "s", "m", "l", "x"]
+_FULL = {"detect": "", "detect.obb": "-obb", "segment": "-seg",
+         "classify": "-cls", "pose": "-pose"}
+_FAMILIES = [
+    # (id, label, prefix, sizes, {cap: suffix})
+    ("yolov8",  "YOLOv8",  "yolov8",  _NSMLX,                    _FULL),
+    ("yolov9",  "YOLOv9",  "yolov9",  ["t", "s", "m", "c", "e"], {"detect": "", "segment": "-seg"}),
+    ("yolov10", "YOLOv10", "yolov10", ["n", "s", "m", "b", "l", "x"], {"detect": ""}),
+    ("yolo11",  "YOLO11",  "yolo11",  _NSMLX,                    _FULL),
+    ("yolo12",  "YOLO12",  "yolo12",  _NSMLX,                    _FULL),
+    ("yolo26",  "YOLO26",  "yolo26",  _NSMLX,                    {**_FULL, "depth": "-depth"}),
+]
+# ponytail: yolov9 only ships c/e for -seg; a missing combo fails at download.
 
 
-def _face_path(config):
-    det = _facemodels.resolve_detector_id(config.get("face_detector"))
-    try:
-        return _faces.ensure_face_detector(det) or ""
-    except Exception:
-        return ""
+def _weights_key(cap):
+    return "yolo_weights_" + cap.replace(".", "_")
 
 
-def _seg_path(config):
-    sid = _seg.resolve_yolo_seg_id(config.get("bg_seg_model", _seg.YOLO_SEG_DEFAULT))
-    try:
-        entry = _seg._YOLO_BY_ID.get(sid)
-        if entry and entry.get("weights"):
-            return entry["weights"]         # ultralytics name or file path
-    except Exception:
-        pass
-    return f"{sid}.pt"
-
-
-def _pose_path(config):
-    # Shared 'pose_model' path wins when set (so YOLO and Mayaku read one
-    # setting); otherwise fall back to the stock size-derived YOLO weights.
-    mp = (config.get("pose_model") or "").strip()
-    if mp:
-        return mp
-    size = (config.get("pose_size") or "n").lower()
-    if size not in _SIZES:
-        size = "n"
-    return f"yolo11{size}-pose.pt"
+def _stock_path(host, cap, prefix, suffix):
+    """Custom weights for this capability when set, else the stock name for
+    the picked size."""
+    custom = (host.config.get(_weights_key(cap)) or "").strip()
+    if custom:
+        return custom
+    size = host.model_variant(cap)["size"] or "n"
+    return f"{prefix}{size}{suffix}.pt"
 
 
 # ── transforms: Ultralytics Results -> canonical contract shape ─────────────
@@ -178,10 +165,6 @@ def _norm_boxes(res, want_names=False):
         except Exception:
             continue
     return out
-
-
-def _tf_faces(res, *a, **k):
-    return _norm_boxes(res, want_names=False)
 
 
 def _tf_objects(res, *a, **k):
@@ -237,6 +220,57 @@ def _tf_pose(res, *a, **k):
     return out
 
 
+def _tf_obb(res, *a, **k):
+    out = []
+    r = res[0] if isinstance(res, (list, tuple)) else res
+    obb = getattr(r, "obb", None)
+    if obb is None or getattr(obb, "xywhr", None) is None:
+        return _norm_boxes(res, want_names=True)
+    names = getattr(r, "names", {}) or {}
+    h, w = (getattr(r, "orig_shape", (0, 0)) or (0, 0))[:2]
+    if not h or not w:
+        return out
+    for i, row in enumerate(obb.xywhr.tolist()):
+        try:
+            cx, cy, bw, bh, ang = [float(v) for v in row]
+            conf = float(obb.conf[i]) if obb.conf is not None else 0.0
+            cls = int(obb.cls[i]) if obb.cls is not None else -1
+            out.append({"class_name": names.get(cls, str(cls)), "cx": cx / w,
+                        "cy": cy / h, "w": bw / w, "h": bh / h, "angle": ang,
+                        "conf": conf})
+        except Exception:
+            continue
+    return out
+
+
+def _tf_classify(res, *a, **k):
+    r = res[0] if isinstance(res, (list, tuple)) else res
+    probs = getattr(r, "probs", None)
+    if probs is None:
+        return []
+    names = getattr(r, "names", {}) or {}
+    try:
+        idx = [int(i) for i in probs.top5]
+        conf = [float(c) for c in probs.top5conf.tolist()]
+    except Exception:
+        return []
+    return [{"class_name": names.get(i, str(i)), "conf": c} for i, c in zip(idx, conf)]
+
+
+def _tf_depth(res, *a, **k):
+    # ponytail: ultralytics depth result attr name assumed; adjust when yolo26
+    # depth lands in the installed version.
+    r = res[0] if isinstance(res, (list, tuple)) else res
+    d = getattr(r, "depth", None)
+    if d is None:
+        return None
+    try:
+        import numpy as np
+        return np.asarray(d.cpu().numpy() if hasattr(d, "cpu") else d, dtype="float32")
+    except Exception:
+        return None
+
+
 # ── availability ─────────────────────────────────────────────────────────────
 def _avail():
     return bool(_HAVE_YOLO)
@@ -251,48 +285,46 @@ def register(host):
 
     reason = "ultralytics not installed"
 
-    # Model-size settings this provider reads. Declared here (not in core) so
-    # they only exist, persist and render when YOLO is on.
-    sizes = [{"value": k, "label": v} for k, v in
-             (("n", "n · nano"), ("s", "s · small"), ("m", "m · medium"),
-              ("l", "l · large"), ("x", "x · xlarge"))]
-    ok_size = lambda v: v if str(v).lower() in _SIZES else None
-    host.add_config_key("yolo_size", default="n", validate=ok_size)
-    host.add_config_key("pose_size", default="n", validate=ok_size)
-    host.add_settings_field(key="yolo_size", label="YOLO size", kind="select",
-                            pane="models", options=sizes,
-                            help="Stock yolo11 weights for object/person detection.")
-    host.add_settings_field(key="pose_size", label="YOLO pose size", kind="select",
-                            pane="models", options=sizes,
-                            help="Stock yolo11-pose weights when no pose model path is set.")
+    # One picker widget per capability: optional custom .pt overriding the
+    # stock family/size weights. Custom files live in models/yolo/<chore>/ so a
+    # -seg checkpoint never shows up as a detect option.
+    def _weights_opts(cap):
+        def opts():
+            paths = model_registry.list_weights("yolo", cap, exts=(".pt",))
+            if cap == "detect":   # box-training runs are detect models
+                paths += (host.config.get("model_groups") or {}).get("trained") or []
+            return [{"value": "", "label": "Stock (family + size)"}] + \
+                   [{"value": p, "label": os.path.basename(p)} for p in dict.fromkeys(paths)]
+        return opts
 
-    host.provide_model(
-        "box.faces", "yolo-face",
-        label="YOLO face detector",
-        loader=lambda: _loader_for(_face_path(host.config))(),
-        transform=_tf_faces, available=_avail, reason=reason,
-        cost_mb=250, gpu=model_registry.on_gpu())
+    def _classes_for(cap, prefix, suffix):
+        def classes():   # loads (downloads) the weights: the model owns its list
+            names = getattr(_loader_for(_stock_path(host, cap, prefix, suffix), cap)(), "names", {}) or {}
+            return [names[k] for k in sorted(names)] if isinstance(names, dict) else list(names)
+        return classes
 
-    host.provide_model(
-        "box.objects", "yolo-coco",
-        label="YOLO (COCO objects)",
-        loader=lambda: _loader_for(_object_path(host.config))(),
-        transform=_tf_objects, available=_avail, reason=reason,
-        cost_mb=250, gpu=model_registry.on_gpu())
-
-    host.provide_model(
-        "segment", "yolo-seg",
-        label="YOLO segmentation",
-        loader=lambda: _loader_for(_seg_path(host.config))(),
-        transform=_tf_segment, available=_avail, reason=reason,
-        cost_mb=300, gpu=model_registry.on_gpu())
-
-    host.provide_model(
-        "pose", "yolo-pose",
-        label="YOLO pose",
-        loader=lambda: _loader_for(_pose_path(host.config))(),
-        transform=_tf_pose, available=_avail, reason=reason,
-        cost_mb=250, gpu=model_registry.on_gpu())
+    transforms = {"detect": _tf_objects, "detect.obb": _tf_obb, "segment": _tf_segment,
+                  "classify": _tf_classify, "pose": _tf_pose, "depth": _tf_depth}
+    types = {"pose": [{"value": "body", "label": "Body · 17 pts"}]}
+    declared = set()
+    for fid, flabel, prefix, sizes, caps in _FAMILIES:
+        for cap, suffix in caps.items():
+            key = _weights_key(cap)
+            if key not in declared:
+                host.add_config_key(key, default="")
+                declared.add(key)
+            host.provide_model(
+                cap, fid, label=flabel, family="YOLO", sizes=sizes,
+                types=types.get(cap),
+                classes=_classes_for(cap, prefix, suffix) if cap in ("detect", "detect.obb", "segment") else None,
+                settings=[{"key": key, "label": "Custom weights", "kind": "select",
+                           "options": _weights_opts(cap),
+                           "help": "Blank = stock weights for the picked family/size."}],
+                loader=(lambda c=cap, p=prefix, sfx=suffix:
+                        _loader_for(_stock_path(host, c, p, sfx), c)()),
+                transform=transforms[cap], available=_avail, reason=reason,
+                cost_mb=300 if cap == "segment" else 250,
+                gpu=model_registry.on_gpu())
 
     # Generic box detector: runs any YOLO .pt (incl. OBB) at a given path and
     # returns canonical {class_name,cx,cy,w,h}. This is what the box consumers
@@ -342,7 +374,8 @@ def register(host):
         label="YOLO detector",
         loader=lambda: _yolo_detect,          # bind() returns the detect fn
         transform=None, available=_avail, reason=reason,
+        handles=lambda p: str(p).lower().endswith(".pt"),
         cost_mb=250, gpu=model_registry.on_gpu())
 
-    host.logger.info("yolo module: registered providers for box, box.faces, "
-                     "box.objects, segment, pose")
+    host.logger.info("yolo module: registered %d family providers + box",
+                     sum(len(c) for *_, c in _FAMILIES))

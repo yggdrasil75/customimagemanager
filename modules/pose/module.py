@@ -7,14 +7,14 @@ panel button, and the gallery bulk-select button. Disable the module and
 all of that disappears; the app still runs.
 
 Scope: YOLO (COCO-17 body) pose and RTMPose wholebody (133 keypoints).
-The COCO topology constants and T-pose aggregation stay in the core pose.py,
-because person T-pose estimation and the 3D person view consume them. This
-module reuses pose.COCO_KP_NAMES / COCO_SKELETON rather than duplicating
-them.
+The COCO topology constants, the RTMPose loader and T-pose aggregation live
+in skeleton.py next door (was the core pose.py). Core's person T-pose
+estimation reaches aggregation through the "pose.tpose" service, so it
+degrades with a message when this module is off.
 
-Estimation goes through pose.py's run_pose() which handles both backends
-(body via YOLO, wholebody via RTMPose) — so swapping in a different pose
-model is a provider change in pose.py, not a module edit. The result is
+Estimation goes through the broker's 'pose' capability: YOLO (17-pt body),
+Mayaku and the RTMPose whole-body provider registered here all answer the
+same contract, and the Models tab picks which one runs. The result is
 folded into the sidecar pose dict the rest of the app already stores and draws.
 
 Image decode + metadata read/write still live in manager.py; the module
@@ -26,7 +26,7 @@ a rewrite of the image/metadata layer.
 from flask import request, jsonify
 
 from modules.model_broker import NoProviderError
-import pose as _pose_core          # COCO topology + wholebody/tpose
+from . import skeleton as _pose_core   # COCO topology + wholebody/tpose
 
 MANIFEST = {
     "id":          "pose",
@@ -45,24 +45,11 @@ MANIFEST = {
 def _estimate(host, img_bgr):
     """Run the selected pose provider and shape its output for storage.
 
-    Returns the sidecar pose dict {model, kind, names, edges, people}. On no
-    provider / failure returns an empty-people dict with a `note`, so the
-    endpoints behave exactly as the old handlers did (success:true, no people).
+    Returns the sidecar pose dict {model, kind, names, edges, people}. The
+    topology follows the skeleton the provider returned (17 = COCO body,
+    133 = whole-body), so the picker's type choice needs no extra plumbing.
+    On no provider / failure returns an empty-people dict with a `note`.
     """
-    # Respect pose_kind setting: "wholebody" uses RTMPose (133 keypoints),
-    # "body" uses the broker's selected pose provider (YOLO COCO-17, Mayaku, etc.)
-    pose_kind = (host.config.get("pose_kind") or "body").lower()
-    if pose_kind == "wholebody":
-        # Use pose.py's run_pose which handles wholebody via RTMPose
-        try:
-            return _pose_core.run_pose(img_bgr)
-        except Exception as e:
-            host.logger.error(f"pose estimate (wholebody): {e}")
-            return {"model": "pose", "kind": "wholebody",
-                    "names": _pose_core.WHOLEBODY_NAMES, "edges": _pose_core.WHOLEBODY_EDGES,
-                    "people": [], "note": f"Wholebody pose failed: {e}"}
-
-    # Body pose via broker (YOLO, Mayaku, etc.)
     base = {"model": "pose", "kind": "body",
             "names": _pose_core.COCO_KP_NAMES, "edges": _pose_core.COCO_SKELETON,
             "people": []}
@@ -74,8 +61,12 @@ def _estimate(host, img_bgr):
     try:
         people = detect(img_bgr)          # canonical: [{keypoints:[{x,y,v}], conf}]
         base["people"] = [{"keypoints": p.get("keypoints", [])} for p in people]
+        if any(len(p["keypoints"]) > 17 for p in base["people"]):
+            base.update(kind="wholebody", names=_pose_core.WHOLEBODY_NAMES,
+                        edges=_pose_core.WHOLEBODY_EDGES)
     except Exception as e:
         host.logger.error(f"pose estimate: {e}")
+        base["note"] = f"Pose failed: {e}"
     return base
 
 
@@ -89,16 +80,20 @@ def register(host):
                           section="ai_tooling", section_label="AI Tooling",
                           default="write", role_defaults={"viewer": "read"})
 
-    # Shared pose-model path, read by every pose provider (YOLO, Mayaku, …).
-    # Empty = each provider's own default (YOLO derives from pose_size; Mayaku
-    # serves nothing). The broker's selected 'pose' provider decides who runs
-    # it — there are no per-model pose keys.
-    host.add_config_key("pose_model", default="")
-    host.add_settings_field(
-        key="pose_model", label="Pose model (path)", kind="text", pane="general",
-        help="Optional weights path for pose. Leave blank for the default "
-             "YOLO pose model. Point at a Mayaku artifact and select the "
-             "Mayaku pose provider to use it.")
+    # RTMPose whole-body (133 pts) as its own pose provider. Size maps onto
+    # rtmlib's mode; the picker's type select shows the single whole-body type.
+    # T-pose aggregation for core's person estimator (fn(skeletons) -> dict|None).
+    host.provide_service("pose.tpose", lambda skeletons: _pose_core.aggregate_tpose(
+        skeletons, _pose_core.COCO_KP_NAMES, _pose_core.COCO_SKELETON))
+
+    host.provide_model(
+        "pose", "rtmpose", label="RTMPose", family="RTMPose",
+        sizes=["lite", "balanced", "performance"],
+        types=[{"value": "wholebody", "label": "Whole-body · 133 (hands+face)"}],
+        loader=lambda: (lambda img, *a, **k: _pose_core.wholebody_people(
+            img, host.model_variant("pose")["size"] or "balanced")),
+        transform=None, available=_pose_core.has_wholebody,
+        reason="pip install rtmlib onnxruntime", cost_mb=1000)
 
     # Contribute the "pose" pipeline stage. The pipeline calls this with an
     # image (whole image or a cropped region) and expects a pose dict; when this

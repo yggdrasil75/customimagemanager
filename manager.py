@@ -196,11 +196,8 @@ state = {
     "body_cluster_eps": 0.0,
     "object_proposals": "sam",
     "sam_model": "sam2.1_b",
-    "bg_seg_enabled": False,
     "bg_seg_model": "yolov26n-seg",
-    "bg_seg_classes": [],
     "model_groups": {},
-    "pose_kind": "body",
     "appearance_eps": 0.35,
     "shape_estimator": "anny_fit",
     "pose_estimator": "atlas",
@@ -1853,11 +1850,11 @@ def load_config():
 
 def save_config():
     keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt",
-            "oai_actions","llm_preprocess","autotag_enabled","keep_raws","pipeline_tree","pose_kind",
+            "oai_actions","llm_preprocess","autotag_enabled","keep_raws","pipeline_tree",
             "face_bg_enabled","face_bg_custom","face_detector","face_recognition","face_model","face_size","person_model","our_model","face_cluster_eps",
             "face_reject_drawn","face_drawn_thresh",
             "body_enabled","body_size","body_cluster_eps","object_proposals",
-            "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
+            "sam_model","bg_seg_model",
             "brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
             "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers","dup_cnn_width","modules","model_selection"]
     # Add any keys modules declared through the config registry, so a module's
@@ -3372,9 +3369,6 @@ def remote_yolo_train_worker(abs_folder: str, dataset_dir: str, config: dict,
     finally:
         if os.path.exists(zip_p): os.remove(zip_p)
 
-# ── Pose / skeleton: extracted to pose.py ─────────────────────────────────────
-import pose
-
 # ── Mayaku (COCO-format) training support — parallel backend to YOLO ──────────
 from modules.mayaku import training as mayaku_support
 
@@ -3450,12 +3444,30 @@ def _load_yolo_cache_clear():
 _load_yolo.cache_clear = _load_yolo_cache_clear
 
 _SIZES = ("n", "s", "m", "l", "x")
-def _pose_size():
-    s = (state.get("pose_size") or "n").lower()
-    return s if s in _SIZES else "n"
-def _yolo_size():
-    s = (state.get("yolo_size") or "n").lower()
-    return s if s in _SIZES else "n"
+def _detect_objects(img_bgr, keep_classes: set | None = None, conf: float = 0.25) -> list:
+    """!
+    @brief Run the 'detect' capability's selected provider (family/size picked in
+           the Models tab) and return normalised center-form boxes.
+    @return List of {class_name, cx, cy, w, h, conf}; [] when no provider is
+            available or it fails.
+    """
+    try:
+        run = modules.broker.request("detect")
+    except modules.model_broker.NoProviderError as e:
+        access_logger.warning(f"detect: {e}")
+        return []
+    try:
+        c = _coerce_bgr3(img_bgr)
+        if c is None:
+            return []
+        boxes = run(c, conf=conf, verbose=False) or []
+    except Exception as e:
+        access_logger.error(f"detect provider: {e}")
+        return []
+    if keep_classes:
+        boxes = [b for b in boxes if b.get("class_name") in keep_classes]
+    return boxes
+
 def _face_detector_id():
     return facemodels.resolve_detector_id(state.get("face_detector"))
 
@@ -3662,8 +3674,7 @@ def _run_person(img_bgr) -> list:
         boxes = _detect_obb_or_box(img_bgr, obb, as_obb=True)
         if boxes:
             return boxes
-    model_path = f"yolo11{_yolo_size()}.pt"
-    return _detect_obb_or_box(img_bgr, model_path, keep_classes={"person"})
+    return _detect_objects(img_bgr, keep_classes={"person"})
 
 def _run_panels(img_bgr) -> list:
     """!
@@ -3760,6 +3771,83 @@ def _iou_center(a, b) -> float:
     ua = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
     return inter / ua if ua > 0 else 0.0
 
+def _polygon_mask_svg(poly, W, H):
+    """Normalised polygon -> mask_svg paths dict (what regions store), or None."""
+    try:
+        import mask_svg
+        pts = np.array([[int(round(x * W)), int(round(y * H))] for x, y in poly], np.int32)
+        if len(pts) < 3:
+            return None
+        m = np.zeros((H, W), np.uint8)
+        cv2.fillPoly(m, [pts], 255)
+        return mask_svg.mask_to_svg_paths(m > 0, method="all") or None
+    except Exception:
+        return None
+
+def _background_instances(img_bgr) -> list:
+    """!
+    @brief Run every capability whose "run in background" switch is on (Models tab)
+           and return region-shaped instances: {class_name, cx, cy, w, h, conf,
+           mask_svg?}. Class whitelist per capability; empty = keep all.
+    @note Provider-agnostic: whatever family/size the user picked serves it.
+    """
+    out = []
+    c = _coerce_bgr3(img_bgr)
+    if c is None:
+        return out
+    H, W = c.shape[:2]
+    for cap in modules.broker.background_capabilities():
+        try:
+            run = modules.broker.request(cap)
+        except modules.model_broker.NoProviderError as e:
+            access_logger.warning(f"background {cap}: {e}")
+            continue
+        want = set(modules.broker.variant(cap).get("classes") or [])
+        try:
+            hits = run(c, verbose=False) or []
+        except Exception as e:
+            access_logger.error(f"background {cap} provider: {e}")
+            continue
+        for h in hits:
+            name = h.get("class_name", "object")
+            if want and name not in want:
+                continue
+            inst = {"class_name": name, "cx": h["cx"], "cy": h["cy"], "w": h["w"],
+                    "h": h["h"], "conf": h.get("conf")} if "cx" in h else None
+            if cap == "segment":
+                poly = h.get("mask") or []
+                if not poly:
+                    continue
+                xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+                inst = {"class_name": name, "cx": (min(xs) + max(xs)) / 2,
+                        "cy": (min(ys) + max(ys)) / 2, "w": max(xs) - min(xs),
+                        "h": max(ys) - min(ys), "conf": h.get("conf"),
+                        "mask_svg": _polygon_mask_svg(poly, W, H)}
+            if inst:
+                out.append(inst)
+    return out
+
+def _fold_background(insts, person_regions, out):
+    """Attach background instances to region lists: a segment 'person' mask
+    snaps onto an overlapping detected person box; everything else becomes its
+    own unconfirmed region."""
+    for inst in insts:
+        if inst.get("class_name") == "person" and inst.get("mask_svg"):
+            best, best_iou = None, 0.0
+            for r in person_regions:
+                iou = _iou_center(r, inst)
+                if iou > best_iou:
+                    best, best_iou = r, iou
+            if best is not None and best_iou >= 0.5:
+                best["mask_svg"] = inst["mask_svg"]
+                continue
+        reg = {"class_name": inst.get("class_name", "object"), "region_name": "",
+               "cx": inst["cx"], "cy": inst["cy"], "w": inst["w"], "h": inst["h"],
+               "confirmed": False, "region_tags": [], "region_description": ""}
+        if inst.get("mask_svg"):
+            reg["mask_svg"] = inst["mask_svg"]
+        (person_regions if reg["class_name"] == "person" else out).append(reg)
+
 def _face_regions_for(img, rel: str) -> list:
     """!
     @brief Detect faces + people (+ optional custom model) in one image.
@@ -3776,39 +3864,7 @@ def _face_regions_for(img, rel: str) -> list:
                     "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
                     "confirmed": False, "region_tags": [], "region_description": ""})
 
-    if state.get("bg_seg_enabled") and seg_runtime is not None and seg_models is not None:
-        try:
-            cids = seg_models.wanted_class_ids(
-                state.get("bg_seg_model"), state.get("bg_seg_classes") or [])
-            insts = seg_runtime.segment_background(
-                img, model_id=state.get("bg_seg_model"), class_ids=cids)
-        except Exception:
-            insts = []
-        for inst in insts:
-            if not inst.get("mask_svg"):
-                continue
-            if inst.get("class_name") == "person":
-                best, best_iou = None, 0.0
-                for r in person_regions:
-                    iou = _iou_center(r, inst)
-                    if iou > best_iou:
-                        best, best_iou = r, iou
-                if best is not None and best_iou >= 0.5:
-                    best["mask_svg"] = inst["mask_svg"]
-                else:
-                    person_regions.append({
-                        "class_name": "person", "region_name": "",
-                        "cx": inst["cx"], "cy": inst["cy"],
-                        "w": inst["w"], "h": inst["h"], "confirmed": False,
-                        "region_tags": [], "region_description": "",
-                        "mask_svg": inst["mask_svg"]})
-            else:
-                out.append({
-                    "class_name": inst.get("class_name", "object"),
-                    "region_name": "", "cx": inst["cx"], "cy": inst["cy"],
-                    "w": inst["w"], "h": inst["h"], "confirmed": False,
-                    "region_tags": [], "region_description": "",
-                    "mask_svg": inst["mask_svg"]})
+    _fold_background(_background_instances(img), person_regions, out)
 
     out.extend(person_regions)
     if state.get("face_bg_custom"):
@@ -3853,7 +3909,7 @@ def _person_model_paths():
            or (state.get("person_obb_model") or "")).strip()
     if obb:
         return obb, True, None
-    return f"yolo11{_yolo_size()}.pt", False, {"person"}
+    return None, False, {"person"}
 
 def _face_regions_for_batch(imgs, rels) -> list:
     """!
@@ -3882,8 +3938,11 @@ def _face_regions_for_batch(imgs, rels) -> list:
 
     # People — one forward pass over the batch.
     pmodel, pobb, pkeep = _person_model_paths()
-    person_batches = _detect_obb_or_box_batch(imgs, pmodel, keep_classes=pkeep,
-                                              as_obb=pobb)
+    if pmodel:
+        person_batches = _detect_obb_or_box_batch(imgs, pmodel, keep_classes=pkeep,
+                                                  as_obb=pobb)
+    else:   # stock detector via the broker; ponytail: per-image, no batch API on the handle
+        person_batches = [_detect_objects(im, keep_classes=pkeep) for im in imgs]
     person_regions_per = [[] for _ in range(n)]
     for i, boxes in enumerate(person_batches):
         for b in boxes:
@@ -3892,49 +3951,10 @@ def _face_regions_for_batch(imgs, rels) -> list:
                                           "w": b["w"], "h": b["h"], "confirmed": False,
                                           "region_tags": [], "region_description": ""})
 
-    # Optional per-image background segmentation (only when enabled — off by default).
-    bg_on = (state.get("bg_seg_enabled") and seg_runtime is not None
-             and seg_models is not None)
-    if bg_on:
-        try:
-            cids = seg_models.wanted_class_ids(
-                state.get("bg_seg_model"), state.get("bg_seg_classes") or [])
-        except Exception:
-            cids = None
-        try:
-            seg_batches = seg_runtime.segment_background_batch(
-                imgs, model_id=state.get("bg_seg_model"), class_ids=cids)
-        except Exception:
-            seg_batches = [[] for _ in range(n)]
-        for i in range(n):
-            if imgs[i] is None:
-                continue
-            insts = seg_batches[i] if i < len(seg_batches) else []
-            for inst in insts:
-                if not inst.get("mask_svg"):
-                    continue
-                if inst.get("class_name") == "person":
-                    best, best_iou = None, 0.0
-                    for r in person_regions_per[i]:
-                        iou = _iou_center(r, inst)
-                        if iou > best_iou:
-                            best, best_iou = r, iou
-                    if best is not None and best_iou >= 0.5:
-                        best["mask_svg"] = inst["mask_svg"]
-                    else:
-                        person_regions_per[i].append({
-                            "class_name": "person", "region_name": "",
-                            "cx": inst["cx"], "cy": inst["cy"],
-                            "w": inst["w"], "h": inst["h"], "confirmed": False,
-                            "region_tags": [], "region_description": "",
-                            "mask_svg": inst["mask_svg"]})
-                else:
-                    results[i].append({
-                        "class_name": inst.get("class_name", "object"),
-                        "region_name": "", "cx": inst["cx"], "cy": inst["cy"],
-                        "w": inst["w"], "h": inst["h"], "confirmed": False,
-                        "region_tags": [], "region_description": "",
-                        "mask_svg": inst["mask_svg"]})
+    # Background capabilities (Models tab) — per image; ponytail: no batch API on handles.
+    for i in range(n):
+        if imgs[i] is not None:
+            _fold_background(_background_instances(imgs[i]), person_regions_per[i], results[i])
 
     for i in range(n):
         results[i].extend(person_regions_per[i])
@@ -4049,7 +4069,8 @@ def _face_scan_lease_keys():
     try:
         obb = ((state.get("person_model") or "")
                or (state.get("person_obb_model") or "")).strip()
-        keys.append(_yolo_key(obb) if obb else _yolo_key(f"yolo11{_yolo_size()}.pt"))
+        if obb:
+            keys.append(_yolo_key(obb))   # stock detect model is warmed by its provider
     except Exception:
         pass
     if state.get("face_bg_custom"):
@@ -4583,7 +4604,10 @@ def estimate_person_tpose(cluster_id: int, appearance_id: Optional[str] = None):
         return False, ("No pose skeletons found for this appearance. Run the pose "
                        "stage on these images first (Pipeline \u2192 Pose), or check "
                        "that .xmp sidecars with keypoints exist next to the images.")
-    tpose = pose.aggregate_tpose(skeletons, pose.COCO_KP_NAMES, pose.COCO_SKELETON)
+    aggregate = module_host.get_service("pose.tpose")
+    if aggregate is None:
+        return False, "The pose module is disabled; enable it to estimate T-poses."
+    tpose = aggregate(skeletons)
     if tpose is None:
         return False, (f"Found {len(skeletons)} skeleton(s), but too few have both "
                        "shoulders and hips visible to anchor a T-pose (need at least "
@@ -6315,11 +6339,11 @@ def api_state():
     return jsonify({k: state.get(k) for k in
         ("classes","available_models","status_text","remote_ip",
          "oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions",
-         "autotag_enabled","pipeline_tree","pose_kind",
+         "autotag_enabled","pipeline_tree",
          "appearance_eps","shape_estimator","pose_estimator","face_estimator",
          "face_bg_enabled","face_bg_custom","face_detector","face_recognition","person_model","our_model",
          "face_cluster_eps","face_reject_drawn","face_drawn_thresh","body_enabled","body_size","body_cluster_eps","object_proposals",
-         "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes",
+         "sam_model","bg_seg_model",
          "model_groups","iqa_model","brand_name","brand_logo","search_quick_filters")})
 
 @app.route("/api/workers")
@@ -6385,31 +6409,61 @@ def api_modules_toggle():
     save_config()
     return jsonify({"success": True, "modules": module_registry.status()})
 
+def _models_payload():
+    """Broker snapshot for the Models tab, JSON-safe: hidden capabilities are
+    dropped, callable widget option-lists are resolved and current values
+    attached."""
+    caps = []
+    for c in modules.broker.status():
+        if c.get("hidden"):
+            continue
+        for p in c["providers"]:
+            for f in p.get("settings", []):
+                opts = f.get("options")
+                if callable(opts):
+                    try:
+                        opts = opts()
+                    except Exception:
+                        opts = []
+                f["options"] = opts
+                f["value"] = state.get(f["key"])
+        caps.append(c)
+    return caps
+
 @app.route("/api/models")
 def api_models():
     """Model capabilities, their providers, and the current selection.
 
-    Feeds a model-picker UI: for each capability the user sees the available
-    providers (YOLO now, others later) and which one is selected.
+    Feeds the Models tab: for each capability the user sees the available
+    providers (families), their sizes/types and widgets, and the selection.
     """
-    return jsonify({"capabilities": modules.broker.status()})
+    return jsonify({"capabilities": _models_payload()})
+
+@app.route("/api/models/classes")
+def api_models_classes():
+    """Class names the selected provider for ?capability= emits (may load the
+    weights on first call), for the background-run whitelist."""
+    cap = request.args.get("capability", "")
+    return jsonify({"capability": cap, "classes": modules.broker.provider_classes(cap)})
 
 @app.route("/api/models/select", methods=["POST"])
 @_auth.require_feature("settings", level="write", action='select_model', fields=())
 def api_models_select():
-    """Choose which provider serves a capability. Admin-gated.
+    """Choose which provider (+ size/type) serves a capability. Admin-gated.
 
-    Body: {"capability": "<cap_id>", "provider": "<provider_id>"}. Selecting
+    Body: {"capability", "provider", "size"?, "type"?, "background"?, "classes"?}. Selecting
     an unavailable provider is allowed (weights may appear later); the choice
     persists to app_config.json.
     """
     d = request.json or {}
-    ok, err = modules.broker.select(d.get("capability"), d.get("provider"))
+    ok, err = modules.broker.select(d.get("capability"), d.get("provider"),
+                                    d.get("size"), d.get("type"),
+                                    d.get("background"), d.get("classes"))
     if not ok:
         return jsonify({"error": err or "selection failed"}), 400
     state["model_selection"] = modules.broker.current_selection()
     save_config()
-    return jsonify({"success": True, "capabilities": modules.broker.status()})
+    return jsonify({"success": True, "capabilities": _models_payload()})
 
 @app.route("/api/update_settings", methods=["POST"])
 @_auth.require_feature("settings", level="write", action='update_settings', fields=())
@@ -6464,12 +6518,12 @@ def update_settings():
     # Same for the "our"/trained model: _detect_obb_or_box memoises by path.
     if "our_model" in d and d["our_model"] != state.get("our_model"):
         _load_yolo.cache_clear()
-    for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","llm_preprocess","pipeline_tree","pose_kind",
+    for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","llm_preprocess","pipeline_tree",
               "appearance_eps","shape_estimator","pose_estimator","face_estimator",
               "face_bg_enabled","face_bg_custom","face_detector","face_recognition","person_model","our_model","face_cluster_eps",
             "face_reject_drawn","face_drawn_thresh",
               "body_enabled","body_size","body_cluster_eps","object_proposals",
-              "sam_model","bg_seg_enabled","bg_seg_model","bg_seg_classes"):
+              "sam_model","bg_seg_model"):
         if k in d: state[k] = d[k]
     # Search quick-filters: validate shape so a malformed save can't break the
     # search UI. Each entry must be {id,label,query}; drop anything else.
@@ -8022,12 +8076,11 @@ def api_jxl_track(filename):
         ua = a["w"] * a["h"] + b["w"] * b["h"] - inter
         return inter / ua if ua > 0 else 0.0
 
-    model_path = f"yolo11{_yolo_size()}.pt"
     # Detect once per keyframe, reused across all tracks.
     dets_by_frame = []
     for rgb in frames:
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        dets_by_frame.append(_detect_obb_or_box(bgr, model_path, conf=0.30))
+        dets_by_frame.append(_detect_objects(bgr, conf=0.30))
 
     out = []
     for tr in in_tracks:
@@ -8170,7 +8223,6 @@ def api_video_detect(filename):
     # Sample ~1 frame every 0.5s, capped so long clips stay responsive.
     n = max(2, min(48, int(dur / 0.5)))
     times = [dur * i / (n - 1) for i in range(n)]
-    model_path = f"yolo11{_yolo_size()}.pt"
 
     def iou(a, b):
         ax1, ay1 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
@@ -8195,7 +8247,7 @@ def api_video_detect(filename):
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
-            dets = _detect_obb_or_box(frame, model_path, conf=0.35)
+            dets = _detect_objects(frame, conf=0.35)
             used = set()
             for d in dets:
                 # match to an existing open track of the same class by best IoU
@@ -8848,7 +8900,7 @@ def bulk_segment():
     model_id = state.get("bg_seg_model") or seg_models.YOLO_SEG_DEFAULT
     sel = request.json.get("classes")
     if sel is None:
-        sel = state.get("bg_seg_classes") or []
+        sel = modules.broker.variant("segment").get("classes") or []
     try:
         cids = seg_models.wanted_class_ids(model_id, sel)
     except Exception:
@@ -9356,8 +9408,6 @@ def api_seg_models():
         "yolo": seg_models.list_yolo_seg_models(),
         "active_sam": state.get("sam_model"),
         "active_bg": state.get("bg_seg_model"),
-        "bg_enabled": bool(state.get("bg_seg_enabled")),
-        "bg_classes": state.get("bg_seg_classes") or [],
         # SAM3 needs a manual weight fetch; tell the UI whether it's present and
         # whether this build even has the SAM3 code (so it can show a Download
         # button vs. an 'unsupported build' note).
@@ -9383,46 +9433,6 @@ def api_face_models():
         "active_detector": _face_detector_id(),
         "active_recognition": facelib.recognition_model(),
         "model_error": facelib.face_model_error(),
-    })
-
-@app.route("/api/seg_classes")
-def api_seg_classes():
-    """Trained-class catalog for a background-seg model, so the settings UI can
-    show 'what do you want segmented' checkboxes. Query: ?model=<id> (defaults
-    to the active bg model). Returns an ordered list of {id,name} and the user's
-    current selection. Loading the catalog reads the checkpoint's class names
-    (no inference); empty if ultralytics/weights are unavailable.
-    """
-    if seg_models is None:
-        return jsonify({"success": False, "error": "seg_models unavailable",
-                        "classes": [], "selected": [], "downloadable": False})
-    model_id = (request.args.get("model") or state.get("bg_seg_model")
-                or seg_models.YOLO_SEG_DEFAULT)
-    want_dl = request.args.get("download") in ("1", "true", "yes")
-    present = seg_models.weights_present(model_id)
-    if not present and not want_dl:
-        # Weights not cached and the user hasn't asked to fetch — offer the button.
-        return jsonify({
-            "success": True, "model": model_id, "classes": [],
-            "selected": state.get("bg_seg_classes") or [],
-            "downloadable": True, "downloading": False,
-            "note": "This segmentation model isn't downloaded yet. Download it "
-                    "to choose which classes to segment (or it'll fetch on first "
-                    "use).",
-        })
-    catalog = seg_models.class_catalog(model_id, download=want_dl)
-    classes = [{"id": cid, "name": name}
-               for cid, name in sorted(catalog.items())]
-    return jsonify({
-        "success": True,
-        "model": model_id,
-        "classes": classes,
-        "selected": state.get("bg_seg_classes") or [],
-        "downloadable": False,
-        "note": ("" if classes else
-                 ("Download failed or the model has no class list; it will still "
-                  "fetch on first use." if want_dl else
-                  "Class list needs ultralytics and the model weights.")),
     })
 
 @app.route("/api/download_sam3", methods=["POST"])
@@ -10506,7 +10516,7 @@ def api_segment():
     manually from the AI Tools panel instead of waiting for the idle worker.
 
     Body: {filename, classes?}. `classes` (optional list of class names) overrides
-    the saved whitelist for this run; omitted -> use state['bg_seg_classes']
+    the saved whitelist for this run; omitted -> the segment capability's whitelist (Models tab)
     ([] = every class the model knows). Returns regions with mask_svg attached;
     the client adds them to the canvas and autosaves (same flow as OCR/pose).
     """
@@ -10524,7 +10534,7 @@ def api_segment():
         state["status_text"] = "Downloading segmentation model…"
     sel = request.json.get("classes")
     if sel is None:
-        sel = state.get("bg_seg_classes") or []
+        sel = modules.broker.variant("segment").get("classes") or []
     try:
         cids = seg_models.wanted_class_ids(model_id, sel)
     except Exception:
@@ -11180,7 +11190,7 @@ def train():
     if backend == "mayaku":
         base_model = (d.get("base_model") or "mayaku-n-det")
     else:
-        base_model = (d.get("base_model") or f"yolo11{_yolo_size()}.pt")
+        base_model = (d.get("base_model") or "yolo11n.pt")   # trainer default; trainer is yolo-specific until it moves to a module
     try:
         val_frac = float(cfg.pop("val_split", d.get("val_split", 0.05)))
     except (TypeError, ValueError):

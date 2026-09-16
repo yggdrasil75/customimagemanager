@@ -14,8 +14,11 @@ passes around.
 """
 
 # cap_id -> contract kwargs for broker.declare()
+_IMG = "image as HxWx3 uint8 BGR ndarray"
 CORE_CAPABILITIES = {
     "box": {
+        "label": "Detector (by model path)",
+        "hidden": True,   # internal dispatch seam, not a user-facing pick
         "summary": "Run an object/keypoint detector by model path and return "
                    "normalized boxes. Path-parameterized: providers declare "
                    "which model files they can run (YOLO .pt, Mayaku, …).",
@@ -24,33 +27,60 @@ CORE_CAPABILITIES = {
         "output": "list of {class_name, cx, cy, w, h} with coords normalized "
                   "0..1 center-form (OBB reduced to its enclosing box)",
     },
-    "box.faces": {
-        "summary": "Detect faces and return their bounding boxes.",
-        "input": "image as HxWx3 uint8 BGR ndarray",
-        "output": "list of {cx, cy, w, h, conf} with box coords normalized "
-                  "0..1 center-form; conf 0..1",
-    },
-    "box.objects": {
-        "summary": "Detect general objects and return labelled bounding boxes.",
-        "input": "image as HxWx3 uint8 BGR ndarray",
+    "detect": {
+        "label": "Detection",
+        "background": True,
+        "summary": "Detect objects (incl. faces/people for models trained on them) "
+                   "and return labelled bounding boxes.",
+        "input": _IMG,
         "output": "list of {class_name, cx, cy, w, h, conf} with box coords "
                   "normalized 0..1 center-form; conf 0..1",
     },
+    "detect.obb": {
+        "label": "Oriented detection",
+        "summary": "Detect objects as rotated boxes.",
+        "input": _IMG,
+        "output": "list of {class_name, cx, cy, w, h, angle, conf}; box "
+                  "normalized 0..1 center-form, angle in radians",
+    },
     "segment": {
+        "label": "Segmentation",
+        "background": True,
         "summary": "Instance segmentation: labelled masks for detected objects.",
-        "input": "image as HxWx3 uint8 BGR ndarray",
+        "input": _IMG,
         "output": "list of {class_name, mask, conf} where mask is a list of "
                   "normalized 0..1 (x, y) polygon points; conf 0..1",
     },
+    "segment.semantic": {
+        "label": "Semantic segmentation",
+        "summary": "Per-pixel class labels.",
+        "input": _IMG,
+        "output": "{mask, names} where mask is an HxW int ndarray of class ids "
+                  "and names maps id -> class_name",
+    },
     "pose": {
+        "label": "Pose / keypoints",
         "summary": "Human pose estimation: per-person keypoints.",
-        "input": "image as HxWx3 uint8 BGR ndarray",
+        "input": _IMG,
         "output": "list of {keypoints, conf} where keypoints is a list of "
                   "{x, y, v} with x,y normalized 0..1 and v visibility 0..1",
     },
+    "depth": {
+        "label": "Depth",
+        "summary": "Monocular depth estimation.",
+        "input": _IMG,
+        "output": "HxW float32 ndarray of relative depth (larger = farther)",
+    },
+    "classify": {
+        "label": "Classification",
+        "summary": "Whole-image classification.",
+        "input": _IMG,
+        "output": "list of {class_name, conf} sorted by conf desc",
+    },
     "iqa": {
+        "label": "Image quality",
         "summary": "No-reference image quality assessment: a normalized score.",
-        "input": "image as HxWx3 uint8 BGR ndarray",
+        "input": _IMG,
         "output": "dict {raw, quality} where quality is normalized 0..1 "
                   "(higher = better) and raw is the model's native score",
     },

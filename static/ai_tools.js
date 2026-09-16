@@ -79,20 +79,17 @@ function renderSegNote(sel,cache,noteEl){
   noteEl.innerText=m?(m.note+(m.available?'':('  ('+(m.reason||'unavailable')+')'))):'';
 }
 
-async function loadSegModels(activeSam,activeBg,bgEnabled,bgClasses){
+async function loadSegModels(activeSam,activeBg){
   const samSel=document.getElementById('cfg_sam_model');
   const bgSel=document.getElementById('cfg_bg_seg_model');
-  const bgChk=document.getElementById('cfg_bg_seg');
   try{
     const d=await fetch('/api/seg_models').then(r=>r.json());
     if(!d.success) return;
     segSamCache=d.sam||[]; segYoloCache=d.yolo||[];
     fillSegSelect(samSel,segSamCache,activeSam||d.active_sam);
     fillSegSelect(bgSel,segYoloCache,activeBg||d.active_bg);
-    if(bgChk) bgChk.checked=(bgEnabled!==undefined?bgEnabled:d.bg_enabled)||false;
     renderSegNote(samSel,segSamCache,document.getElementById('cfg_sam_note'));
     renderSegNote(bgSel,segYoloCache,document.getElementById('cfg_bg_seg_note'));
-    window._bgClassSel=new Set(bgClasses||d.bg_classes||[]);
   }catch(e){}
 }
 let faceDetCache=[], faceRecCache=[];
@@ -139,76 +136,18 @@ async function loadFaceModels(activeDetector,activeRecognition){
   }catch(e){}
 }
 
-// The class picker is loaded lazily (reading a checkpoint's class list needs
-// the weights). We do NOT pre-download seg models, so on first open the weights
-// may be absent — the API then reports downloadable:true and we show a button
-// rather than blocking or showing an empty list.
-async function loadSegClasses(forceDownload){
-  const box=document.getElementById('cfg_bg_classes');
-  const note=document.getElementById('cfg_bg_classes_note');
-  const model=document.getElementById('cfg_bg_seg_model')?.value;
-  if(!box) return;
-  box.innerHTML='<span class="text-[10px] text-gray-500">'+
-    (forceDownload?'downloading model…':'loading…')+'</span>';
-  try{
-    let url='/api/seg_classes?model='+encodeURIComponent(model||'');
-    if(forceDownload) url+='&download=1';
-    const d=await fetch(url).then(r=>r.json());
-    box.innerHTML='';
-    if(d.downloadable){
-      // weights not cached yet — offer an explicit fetch
-      note.innerText=d.note||'';
-      const btn=document.createElement('button');
-      btn.type='button';
-      btn.className='text-[11px] px-2 py-1 rounded bg-cyan-700 hover:bg-cyan-600 text-white';
-      btn.innerText='Download & load classes';
-      btn.onclick=()=>loadSegClasses(true);
-      box.appendChild(btn);
-      return;
-    }
-    if(!d.success||!d.classes.length){
-      note.innerText=d.note||'No class list available.'; return;
-    }
-    note.innerText='';
-    const sel=window._bgClassSel||new Set(d.selected||[]);
-    window._bgClassSel=sel;
-    d.classes.forEach(c=>{
-      const lbl=document.createElement('label');
-      lbl.className='flex items-center gap-1 text-[11px] text-gray-300';
-      lbl.innerHTML='<input type="checkbox" class="accent-cyan-500 bg-class-cb" '+
-        'data-name="'+c.name+'" '+(sel.has(c.name)?'checked':'')+'> '+c.name;
-      box.appendChild(lbl);
-    });
-  }catch(e){ box.innerHTML=''; note.innerText='Failed to load classes.'; }
-}
-
 document.addEventListener('change',e=>{
   if(!e.target) return;
   if(e.target.id==='cfg_sam_model')
     renderSegNote(e.target,segSamCache,document.getElementById('cfg_sam_note'));
-  if(e.target.id==='cfg_bg_seg_model'){
+  if(e.target.id==='cfg_bg_seg_model')
     renderSegNote(e.target,segYoloCache,document.getElementById('cfg_bg_seg_note'));
-    // model changed -> class list is stale; clear selection cache and reload if open
-    window._bgClassSel=new Set();
-    if(!document.getElementById('cfg_bg_classes').classList.contains('hidden')) loadSegClasses();
-  }
   if(e.target.id==='cfg_face_detector')
     renderSegNote(e.target,faceDetCache,document.getElementById('cfg_face_detector_note'));
   if(e.target.id==='cfg_face_recognition')
     renderSegNote(e.target,faceRecCache,document.getElementById('cfg_face_recognition_note'));
-  if(e.target.classList&&e.target.classList.contains('bg-class-cb')){
-    const s=window._bgClassSel||(window._bgClassSel=new Set());
-    if(e.target.checked) s.add(e.target.dataset.name); else s.delete(e.target.dataset.name);
-  }
 });
-document.addEventListener('click',e=>{
-  if(e.target&&e.target.id==='cfg_bg_classes_toggle'){
-    const box=document.getElementById('cfg_bg_classes');
-    const hidden=box.classList.toggle('hidden');
-    e.target.innerText=hidden?'show classes':'hide classes';
-    if(!hidden) loadSegClasses();
-  }
-});
+
 
 // Persist the AI/Vision pane. Returns {ok:true} or {ok:false, error}. Does NOT
 // close the modal — the unified Save orchestrates close after all panes persist.
@@ -235,9 +174,7 @@ async function persistAiSettings(){
       oai_model:_v('cfg_model'),
       oai_embed_model:_v('cfg_embed_model'),
       sam_model:_v('cfg_sam_model','sam2.1_b'),
-      bg_seg_enabled:_c('cfg_bg_seg'),
       bg_seg_model:_v('cfg_bg_seg_model','yolov26n-seg'),
-      bg_seg_classes:[...(window._bgClassSel||[])],
       face_bg_enabled:_c('cfg_face_bg'),
       face_bg_custom:_c('cfg_face_custom'),
       face_detector:_v('cfg_face_detector','yolov11n-face'),
@@ -248,7 +185,6 @@ async function persistAiSettings(){
       body_size:_v('cfg_body_size','s'),
       person_model:_v('cfg_person_model'),
       our_model:_v('cfg_our_model'),
-      pose_kind:_v('cfg_pose_kind'),
       pose_estimator:_v('cfg_pose_estimator'),
       shape_estimator:_v('cfg_shape_estimator'),
       face_estimator:_v('cfg_face_estimator'),
