@@ -34,6 +34,11 @@ Everything ML-specific is on the provider side of the seam.
 
 import threading
 
+# Which run is being served: "fg" (the manual button / pipeline) or "bg" (the
+# on-every-image sweep). Set by request(role=...) while binding, so a provider
+# loader that asks variant(cap) gets the pick for the run it's serving.
+_ROLE = threading.local()
+
 
 class BrokerError(Exception):
     """Base for broker errors."""
@@ -83,8 +88,20 @@ class Provider:
     def __init__(self, cap_id, provider_id, *, label, loader, transform=None,
                  available=None, reason="", cost_mb=0, gpu=False, module_id=None,
                  handles=None, family=None, sizes=None, types=None, settings=None,
-                 classes=None):
+                 classes=None, prompted=False, note="", speed="", supports_conf=None):
         self.capability = cap_id
+        # note: one-liner on when to use this model (shown under the picker);
+        # speed: rough cost class "fast" | "balanced" | "accurate".
+        self.note = note or ""
+        self.speed = speed or ""
+        # supports_conf: the handle honours conf=<0..1>; the picker then offers
+        # a min-confidence input. Defaults on for region-producing caps.
+        self.supports_conf = (cap_id.split(".")[0] in ("detect", "segment", "pose")
+                              if supports_conf is None else bool(supports_conf))
+        # prompted=True: the handle needs a text prompt (vision LLM, open-vocab
+        # detector); such a provider is a foreground-only choice — a background
+        # sweep has no prompt to give it.
+        self.prompted = bool(prompted)
         # classes() -> ordered list of class names the model emits (may load
         # weights). Feeds the background-processing whitelist; None = unknown.
         self._classes = classes
@@ -143,6 +160,8 @@ class Provider:
         return {"id": self.id, "label": self.label, "family": self.family,
                 "sizes": self.sizes, "types": self.types,
                 "has_classes": self._classes is not None,
+                "prompted": self.prompted, "note": self.note, "speed": self.speed,
+                "supports_conf": self.supports_conf,
                 "settings": [dict(f) for f in self.settings],
                 "available": self.available(), "reason": self.reason(),
                 "cost_mb": self.cost_mb, "gpu": self.gpu,
@@ -176,7 +195,11 @@ class ModelBroker:
         self._caps = {}                       # cap_id -> Capability
         self._providers = {}                  # cap_id -> {provider_id -> Provider}
         self._selection = {}                  # cap_id -> provider_id (user choice)
-        self._variant = {}                    # cap_id -> {"size","type"} (user choice)
+        self._variant = {}                    # cap_id -> {"size","type",...} (user choice)
+        # Optional separate pick for the background sweep: cap_id ->
+        # {"provider","size","type"}. Absent = same model as foreground.
+        self._bg = {}
+        self._on_select = []                  # fns(cap_id) run after a selection changes
         self._current_module = None           # set by loader during register()
 
     # ── capability declaration ───────────────────────────────────────────
@@ -211,7 +234,8 @@ class ModelBroker:
     # ── provider registration ────────────────────────────────────────────
     def provide(self, cap_id, provider_id, *, label, loader, transform=None,
                 available=None, reason="", cost_mb=0, gpu=False, handles=None,
-                family=None, sizes=None, types=None, settings=None, classes=None):
+                family=None, sizes=None, types=None, settings=None, classes=None,
+                prompted=False, note="", speed="", supports_conf=None):
         """Register a provider for a capability. Dedup by (cap_id, provider_id).
 
         The capability must already be declared (by the core or an earlier
@@ -229,13 +253,14 @@ class ModelBroker:
                          cost_mb=cost_mb, gpu=gpu,
                          module_id=self._current_module, handles=handles,
                          family=family, sizes=sizes, types=types, settings=settings,
-                         classes=classes)
+                         classes=classes, prompted=prompted, note=note, speed=speed,
+                         supports_conf=supports_conf)
             self._providers[cap_id][provider_id] = p
             return p
 
     # ── selection ────────────────────────────────────────────────────────
     def select(self, cap_id, provider_id, size=None, type=None,
-               background=None, classes=None):
+               background=None, classes=None, bg=None, conf=None):
         """Set the user's chosen provider (+ size/type variant) for a
         capability. Returns (ok, err).
 
@@ -260,47 +285,49 @@ class ModelBroker:
                 v["background"] = bool(background)
             if classes is not None:
                 v["classes"] = [str(c) for c in classes]
+            if conf is not None:
+                try:
+                    v["conf"] = max(0.0, min(1.0, float(conf)))
+                except (TypeError, ValueError):
+                    pass
             self._variant[cap_id] = v
-            return True, None
+            # bg: {"provider","size","type"} for a different background model;
+            # {} / None / a provider not registered => same as foreground.
+            bp = (bg or {}).get("provider") if isinstance(bg, dict) else None
+            pb = self._providers[cap_id].get(bp) if bp else None
+            if pb is None or pb.prompted:      # a prompted model can't run unprompted
+                self._bg.pop(cap_id, None)
+            else:
+                b = {"provider": bp}
+                if bg.get("size") in pb.sizes:
+                    b["size"] = bg["size"]
+                if bg.get("type") in [t["value"] for t in pb.types]:
+                    b["type"] = bg["type"]
+                self._bg[cap_id] = b
+        for fn in list(self._on_select):
+            try:
+                fn(cap_id)
+            except Exception:
+                pass
+        return True, None
 
-    def variant(self, cap_id):
-        """{"size","type"} in effect for a capability: the user's choice when
-        the selected provider declares it, else the provider's first option,
-        else None. Providers read this in their loaders."""
-        with self._lock:
-            pid = self.selected_id(cap_id)
-            p = self._providers.get(cap_id, {}).get(pid)
-            v = self._variant.get(cap_id, {})
-            if p is None:
-                return {"size": None, "type": None, "background": False, "classes": []}
-            size = v.get("size") if v.get("size") in p.sizes else (p.sizes[0] if p.sizes else None)
-            tvals = [t["value"] for t in p.types]
-            typ = v.get("type") if v.get("type") in tvals else (tvals[0] if tvals else None)
-            return {"size": size, "type": typ,
-                    "background": bool(v.get("background")),
-                    "classes": list(v.get("classes") or [])}
+    def on_select(self, fn):
+        """Register fn(cap_id) to run after any selection change (a module can
+        keep a side-effect, e.g. a checkpoint path, in sync with the pick)."""
+        self._on_select.append(fn)
 
-    def background_capabilities(self):
-        """[cap_id] whose background run is switched on and has a provider."""
-        with self._lock:
-            return [c for c, cap in self._caps.items()
-                    if cap.background and self._variant.get(c, {}).get("background")
-                    and self._providers.get(c)]
-
-    def provider_classes(self, cap_id):
-        """Class names the selected provider for cap_id emits ([] if unknown)."""
-        with self._lock:
-            p = self._providers.get(cap_id, {}).get(self.selected_id(cap_id))
-        return p.classes() if p else []
-
-    def selected_id(self, cap_id):
-        """The chosen provider id for a capability, or the default.
+    def selected_id(self, cap_id, role=None):
+        """The chosen provider id for a capability (role "bg" = the background
+        sweep's own pick when set), or the default.
 
         Default = first-registered provider that is currently available; if
         none is available, the first registered at all (so the UI shows a
         sensible pre-selection even when weights are missing).
         """
         with self._lock:
+            role = role or getattr(_ROLE, "value", None)
+            if role == "bg" and cap_id in self._bg:
+                return self._bg[cap_id]["provider"]
             sel = self._selection.get(cap_id)
             provs = self._providers.get(cap_id, {})
             if sel and sel in provs:
@@ -309,6 +336,51 @@ class ModelBroker:
                 if p.available():
                     return pid
             return next(iter(provs), None)
+
+    def variant(self, cap_id, role=None):
+        """{"size","type","background","classes"} in effect for a capability
+        (role "bg" = the background sweep's own model when one is set): the
+        user's choice when the selected provider declares it, else the
+        provider's first option, else None. Providers read this in their
+        loaders; inside request() the role is implied."""
+        with self._lock:
+            role = role or getattr(_ROLE, "value", None)
+            pid = self.selected_id(cap_id, role)
+            p = self._providers.get(cap_id, {}).get(pid)
+            v = self._variant.get(cap_id, {})
+            if role == "bg" and cap_id in self._bg:
+                v = {**v, **self._bg[cap_id]}
+            if p is None:
+                return {"size": None, "type": None, "background": False, "classes": []}
+            size = v.get("size") if v.get("size") in p.sizes else (p.sizes[0] if p.sizes else None)
+            tvals = [t["value"] for t in p.types]
+            typ = v.get("type") if v.get("type") in tvals else (tvals[0] if tvals else None)
+            base = self._variant.get(cap_id, {})
+            return {"size": size, "type": typ,
+                    "background": bool(base.get("background")),
+                    "classes": list(base.get("classes") or []),
+                    "conf": float(base.get("conf", 0.25))}
+
+    def background_capabilities(self):
+        """[cap_id] whose background run is switched on and whose background
+        provider (own pick, else the foreground one) is unprompted."""
+        with self._lock:
+            out = []
+            for c, cap in self._caps.items():
+                if not (cap.background and self._variant.get(c, {}).get("background")):
+                    continue
+                p = self._providers.get(c, {}).get(self.selected_id(c, "bg"))
+                if p is not None and not p.prompted:
+                    out.append(c)
+            return out
+
+    def provider_classes(self, cap_id):
+        """Class names the *background* provider for cap_id emits ([] if
+        unknown) — the whitelist filters the unprompted run, so it lists what
+        that model was trained on."""
+        with self._lock:
+            p = self._providers.get(cap_id, {}).get(self.selected_id(cap_id, "bg"))
+        return p.classes() if p else []
 
     def init_selection(self, persisted):
         """Seed selections from persisted config.
@@ -320,25 +392,30 @@ class ModelBroker:
         """
         persisted = persisted or {}
         with self._lock:
-            self._selection, self._variant = {}, {}
+            self._selection, self._variant, self._bg = {}, {}, {}
             for cap_id, v in persisted.items():
                 if isinstance(v, str):
                     v = {"provider": v}
                 if not isinstance(v, dict):
                     continue
                 self.select(cap_id, v.get("provider"), v.get("size"), v.get("type"),
-                            v.get("background"), v.get("classes"))
+                            v.get("background"), v.get("classes"), v.get("bg"),
+                            v.get("conf"))
             return self.current_selection()
 
     def current_selection(self):
         """{cap_id: {provider, size, type}} to persist — explicit choices only."""
         with self._lock:
-            return {c: {"provider": pid, **self._variant.get(c, {})}
+            return {c: {"provider": pid, **self._variant.get(c, {}),
+                        **({"bg": self._bg[c]} if c in self._bg else {})}
                     for c, pid in self._selection.items()}
 
     # ── the consumer entry point ─────────────────────────────────────────
-    def request(self, cap_id):
-        """Return a ready callable handle for the selected provider.
+    def request(self, cap_id, role="fg", provider=None):
+        """Return a ready callable handle for the selected provider. role "bg"
+        serves the background sweep, which may have its own model pick.
+        provider=<id> bypasses the selection (a consumer that needs a specific
+        kind, e.g. SAM 2 needing a prompted detector for seed boxes).
 
         Raises NoProviderError (a typed error the consumer handles) when:
           - the capability was never declared        (unknown_capability)
@@ -356,20 +433,26 @@ class ModelBroker:
             if not provs:
                 raise NoProviderError(cap_id, "no_providers",
                     f"no model is registered for '{cap_id}'")
-            sel = self._selection.get(cap_id)
-            if sel and sel in provs:
-                p = provs[sel]
-                if not p.available():
-                    raise NoProviderError(cap_id, "selected_unavailable",
-                        f"selected model '{p.label}' for '{cap_id}' is "
-                        f"unavailable: {p.reason()}")
-                return p.bind()
-            # no explicit selection: first available provider
-            for p in provs.values():
-                if p.available():
+            sel = provider or (self._bg[cap_id]["provider"] if role == "bg" and cap_id in self._bg
+                               else self._selection.get(cap_id))
+            prev = getattr(_ROLE, "value", None)
+            _ROLE.value = role          # loaders resolve variant() for this run
+            try:
+                if sel and sel in provs:
+                    p = provs[sel]
+                    if not p.available():
+                        raise NoProviderError(cap_id, "selected_unavailable",
+                            f"selected model '{p.label}' for '{cap_id}' is "
+                            f"unavailable: {p.reason()}")
                     return p.bind()
-            raise NoProviderError(cap_id, "none_available",
-                f"no available model for '{cap_id}'")
+                # no explicit selection: first available provider
+                for p in provs.values():
+                    if p.available():
+                        return p.bind()
+                raise NoProviderError(cap_id, "none_available",
+                    f"no available model for '{cap_id}'")
+            finally:
+                _ROLE.value = prev
 
     def detector_for(self, cap_id, model_path):
         """Pick the provider that can run `model_path` for a path-parameterized
@@ -418,8 +501,13 @@ class ModelBroker:
             for cap_id, cap in self._caps.items():
                 out.append({
                     **cap.as_dict(),
-                    "selected": self.selected_id(cap_id),
-                    "variant": self.variant(cap_id),
+                    "selected": self.selected_id(cap_id, "fg"),
+                    "variant": self.variant(cap_id, "fg"),
+                    # background sweep's own pick, or None (= same as foreground)
+                    "bg": ({"provider": self._bg[cap_id]["provider"],
+                            **{k: v for k, v in self.variant(cap_id, "bg").items()
+                               if k in ("size", "type")}}
+                           if cap_id in self._bg else None),
                     "providers": [p.as_dict()
                                   for p in self._providers.get(cap_id, {}).values()],
                 })

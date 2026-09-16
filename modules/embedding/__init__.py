@@ -32,27 +32,13 @@ def register(host):
     host.add_asset("embedding.js", kind="js", module_id="embedding")
     host.add_asset("embedding.css", kind="css", module_id="embedding")
 
-    # ── settings ───────────────────────────────────────────────────────────
-    # The OAI endpoint/key/embedding-model live with the other OAI settings in
-    # the core AI pane; the only embedding-specific knob is the local backbone,
-    # so it sits in the General pane rather than owning a tab.
+    # ── settings (shared OAI keys; the core AI pane renders them) ──────────
     host.add_config_key("oai_embed_model", default="", save=True,
                         validate=lambda v: isinstance(v, str))
     host.add_config_key("oai_endpoint", default="", save=True,
                         validate=lambda v: isinstance(v, str))
     host.add_config_key("oai_key", default="", save=True,
                         validate=lambda v: isinstance(v, str))
-    host.add_config_key("grouping_cnn", default="efficientnet_b0", save=True,
-                        validate=lambda v: isinstance(v, str))
-    host.add_settings_field(key="grouping_cnn", label="Local embedding CNN",
-                            kind="select", pane="general",
-                            options=lambda: [
-                                {"value": "efficientnet_b0", "label": "EfficientNet-B0 (default)"},
-                                {"value": "efficientnet_b1", "label": "EfficientNet-B1"},
-                                {"value": "efficientnet_b2", "label": "EfficientNet-B2"},
-                                {"value": "mobilenet_v3", "label": "MobileNetV3"},
-                            ],
-                            help="Local CNN backbone for image embeddings when OAI is not configured")
 
     # ── database tables ────────────────────────────────────────────────────
     host.add_table("""
@@ -83,6 +69,16 @@ def register(host):
             updated   REAL)
     """)
 
+    # ── which embedder: the 'embed' capability's pick in the Models tab ──────
+    _CNN_ARCHS = ["efficientnet_b0", "efficientnet_b1", "efficientnet_b2", "mobilenet_v3"]
+
+    def _cnn_choice():
+        v = host.model_variant("embed")
+        return v.get("size") if v.get("size") in _CNN_ARCHS else "efficientnet_b0"
+
+    def _embed_provider():
+        return host.broker.selected_id("embed")
+
     # ── OAI embedding helpers ──────────────────────────────────────────────
     def _embed_endpoint():
         base = _oai_v1_base(host.config.get("oai_endpoint", ""))
@@ -90,8 +86,11 @@ def register(host):
             return ""
         return base + ("/embeddings" if base.endswith("/v1") else "/v1/embeddings")
 
-    def _oai_embed_enabled():
+    def _oai_configured():
         return bool((host.config.get("oai_embed_model") or "").strip()) and bool(_embed_endpoint())
+
+    def _oai_embed_enabled():
+        return _embed_provider() == "oai" and _oai_configured()
 
     def _oai_embed_model():
         return (host.config.get("oai_embed_model") or "").strip()
@@ -196,11 +195,26 @@ def register(host):
         except Exception:
             return None
 
+    # ── model providers for the 'embed' capability ─────────────────────────
+    host.provide_model(
+        "embed", "cnn", label="Local CNN", family="torchvision", sizes=_CNN_ARCHS,
+        loader=lambda: (lambda arch: (lambda img, *a, **k: _embed_image(img, arch)))(_cnn_choice()),
+        transform=None,
+        available=lambda: __import__("optional_deps").optional_import("torch")[1],
+        reason="pip install torch torchvision", cost_mb=300)
+    host.provide_model(
+        "embed", "oai", label="OpenAI-compatible", family="OAI",
+        settings=[{"key": "oai_embed_model", "label": "Embedding model", "kind": "text",
+                   "help": "e.g. text-embedding-3-small; endpoint/key are in AI settings."}],
+        loader=lambda: (lambda img, *a, **k: _oai_embed_image(img)),
+        transform=None, available=_oai_configured,
+        reason="set OAI endpoint + embedding model", cost_mb=0)
+
     def _stage_embeddings(db, file_list, loader, cnn_model=None, mtime_of=None,
                           force=False, progress=None, should_stop=None):
         import object_grouping as og
         ensure_tables(db)
-        model = cnn_model or host.config.get("grouping_cnn", "efficientnet_b0")
+        model = cnn_model or _cnn_choice()
         total = len(file_list)
         done = 0
         embedded = 0
@@ -617,7 +631,7 @@ def register(host):
                     db, file_list, _img_loader, _oai_embed_image, tag,
                     mtime_of=_img_mtime, force=force)
             else:
-                cnn_model = (host.config.get("grouping_cnn") or "").strip() or None
+                cnn_model = _cnn_choice()
                 n = _stage_embeddings(
                     db, file_list, _img_loader, cnn_model=cnn_model,
                     mtime_of=_img_mtime, force=force)
@@ -669,7 +683,7 @@ def register(host):
                     db, file_list, _img_loader, _oai_embed_image, tag,
                     mtime_of=_img_mtime, force=force)
             else:
-                cnn_model = (host.config.get("grouping_cnn") or "").strip() or None
+                cnn_model = _cnn_choice()
                 n = _stage_embeddings(
                     db, file_list, _img_loader, cnn_model=cnn_model,
                     mtime_of=_img_mtime, force=force)
@@ -718,7 +732,7 @@ def register(host):
                     db, filenames, _img_loader, _oai_embed_image, tag,
                     mtime_of=_img_mtime, force=True)
             else:
-                cnn_model = (host.config.get("grouping_cnn") or "").strip() or None
+                cnn_model = _cnn_choice()
                 n = _stage_embeddings(
                     db, filenames, _img_loader, cnn_model=cnn_model,
                     mtime_of=_img_mtime, force=True)
@@ -798,7 +812,7 @@ def register(host):
         if img is None:
             return jsonify({"success": False, "error": "could not read image"}), 400
         db = host.db()
-        cnn_model = (host.config.get("grouping_cnn") or "").strip() or None
+        cnn_model = _cnn_choice()
         hits = _search_by_image(db, img, cnn_model=cnn_model, top_k=top_k)
         return jsonify({"success": True, "results": [
             {"filename": n, "score": round(s, 4)} for n, s in hits
@@ -823,6 +837,7 @@ def register(host):
         "embedding_model_tag": _embedding_model_tag,
         "oai_embed_enabled": _oai_embed_enabled,
         "oai_embed_model": _oai_embed_model,
+        "cnn_choice": _cnn_choice,
         "oai_embed_tag": _oai_embed_tag,
         "oai_embed_image": _oai_embed_image,
         "oai_embed_text": _oai_embed_text,

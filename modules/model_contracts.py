@@ -30,29 +30,53 @@ CORE_CAPABILITIES = {
     "detect": {
         "label": "Detection",
         "background": True,
-        "summary": "Detect objects (incl. faces/people for models trained on them) "
-                   "and return labelled bounding boxes.",
-        "input": _IMG,
-        "output": "list of {class_name, cx, cy, w, h, conf} with box coords "
-                  "normalized 0..1 center-form; conf 0..1",
+        "summary": "Objects as boxes. Foreground pick serves the pipeline and "
+                   "manual buttons (may be a prompted model such as a vision "
+                   "LLM); background pick is the small unprompted model that "
+                   "runs on every image. Some providers offer an oriented-box "
+                   "type; those boxes carry an extra `angle`.",
+        "input": "detect(img_bgr, prompt='') — HxWx3 uint8 BGR; prompt is used "
+                 "only by providers flagged prompted",
+        "output": "list of {class_name, cx, cy, w, h, conf?, angle?} normalized "
+                  "0..1 center-form; angle in radians for oriented boxes",
     },
-    "detect.obb": {
-        "label": "Oriented detection",
-        "summary": "Detect objects as rotated boxes.",
+    "detect.faces": {
+        "label": "Face detection",
+        "summary": "Faces as boxes (dedicated face detectors; feeds the person "
+                   "module).",
         "input": _IMG,
-        "output": "list of {class_name, cx, cy, w, h, angle, conf}; box "
-                  "normalized 0..1 center-form, angle in radians",
+        "output": "list of {cx, cy, w, h, conf} normalized 0..1 center-form",
+    },
+    "detect.barcodes": {
+        "label": "Barcode detection",
+        "summary": "Locate barcodes / QR codes as boxes; the barcodes module "
+                   "decodes them. The built-in detector needs no model.",
+        "input": _IMG,
+        "output": "list of {class_name, cx, cy, w, h, conf?} normalized 0..1 "
+                  "center-form",
     },
     "segment": {
         "label": "Segmentation",
         "background": True,
-        "summary": "Instance segmentation: labelled masks for detected objects.",
-        "input": _IMG,
-        "output": "list of {class_name, mask, conf} where mask is a list of "
-                  "normalized 0..1 (x, y) polygon points; conf 0..1",
+        "summary": "Objects as masks. Foreground pick serves the pipeline and "
+                   "manual buttons (may be a prompted model: SAM 2/3 given a "
+                   "text query); background pick is the fixed-class model that "
+                   "runs unprompted on every image.",
+        "input": "segment(img_bgr, prompt='') — HxWx3 uint8 BGR; prompt is "
+                 "used only by providers flagged prompted",
+        "output": "list of {class_name, mask, conf?} where mask is a list of "
+                  "normalized 0..1 (x, y) polygon points",
+    },
+    "segment.box": {
+        "label": "Box-prompted masks",
+        "hidden": True,   # served by whichever segmenter is picked; not a separate pick
+        "summary": "Refine given boxes into masks (SAM-style box prompt).",
+        "input": "segment(img_bgr, boxes) — HxWx3 uint8 BGR + normalized boxes",
+        "output": "list of {class_name, mask, conf?} where mask is a list of "
+                  "normalized 0..1 (x, y) polygon points, one per input box",
     },
     "segment.semantic": {
-        "label": "Semantic segmentation",
+        "label": "Semantic segmentation (per-pixel)",
         "summary": "Per-pixel class labels.",
         "input": _IMG,
         "output": "{mask, names} where mask is an HxW int ndarray of class ids "
@@ -76,6 +100,12 @@ CORE_CAPABILITIES = {
         "summary": "Whole-image classification.",
         "input": _IMG,
         "output": "list of {class_name, conf} sorted by conf desc",
+    },
+    "embed": {
+        "label": "Image embedding",
+        "summary": "Whole-image embedding vector for similarity search / clustering.",
+        "input": _IMG,
+        "output": "1-D float32 ndarray, L2-normalised; None on failure",
     },
     "iqa": {
         "label": "Image quality",

@@ -210,14 +210,20 @@ class Host:
             "admin_only": bool(admin_only), "module_id": self._current_module})
 
     # ── registry points / services ───────────────────────────────────────
-    def provide_service(self, name, obj):
+    def provide_service(self, name, obj, priority=0):
         """Publish a named service other modules may consume.
 
         A "registry point": e.g. a training module exposes "trainer" so a UI
-        module can drive it. Last provider wins (module reload safe). Consumers
-        fetch via get_service(name) and must handle None (provider absent).
+        module can drive it. Highest priority wins; ties go to the later
+        registration (module reload safe). Modules that each ship a copy of a
+        shared helper publish it with priority=<its VERSION> so the newest copy
+        serves every module and nothing lives in the core. Consumers fetch via
+        get_service(name) and must handle None (provider absent).
         """
-        self.services[name] = {"obj": obj, "module_id": self._current_module}
+        cur = self.services.get(name)
+        if cur is None or priority >= cur.get("priority", 0):
+            self.services[name] = {"obj": obj, "module_id": self._current_module,
+                                   "priority": priority}
         return name
 
     def get_service(self, name, default=None):
@@ -313,7 +319,7 @@ class Host:
                            background=False):
         """Declare a NEW model capability contract (first declarer owns it).
 
-        The core already declares detect / detect.obb / segment / pose / classify / depth.
+        The core already declares detect / detect.faces / segment / pose / classify / depth.
         Use this only to add a capability the core doesn't have. Attributed to
         the calling module.
         """
@@ -324,7 +330,8 @@ class Host:
     def provide_model(self, cap_id, provider_id, *, label, loader,
                       transform=None, available=None, reason="",
                       cost_mb=0, gpu=False, handles=None, family=None,
-                      sizes=None, types=None, settings=None, classes=None):
+                      sizes=None, types=None, settings=None, classes=None,
+                      prompted=False, note="", speed="", supports_conf=None):
         """Register this module's model as a provider for a capability.
 
         loader()   -> a callable model handle (back it with the runtime
@@ -346,28 +353,35 @@ class Host:
                       via add_config_key; values save through update_settings.
         classes()  -> ordered class names the model emits (may load weights);
                       feeds the background-run class whitelist.
+        prompted   -> the handle takes (img, prompt) and needs the prompt (a
+                      vision LLM); foreground-only, never the background pick.
+        note       -> one-liner on when to pick this model (shown in the picker).
+        speed      -> "fast" | "balanced" | "accurate" cost class badge.
+        supports_conf -> the handle honours conf=<0..1>; the picker offers a
+                      min-confidence input. Defaults on for detect/segment/pose.
         The chosen size/type is read back with host.model_variant(cap_id).
         """
         return self.broker.provide(
             cap_id, provider_id, label=label, loader=loader, transform=transform,
             available=available, reason=reason, cost_mb=cost_mb, gpu=gpu,
             handles=handles, family=family, sizes=sizes, types=types,
-            settings=settings, classes=classes)
+            settings=settings, classes=classes, prompted=prompted, note=note,
+            speed=speed, supports_conf=supports_conf)
 
-    def model_variant(self, cap_id):
+    def model_variant(self, cap_id, role=None):
         """{"size","type","background","classes"} the user picked for a
         capability (size/type default to the selected provider's first option).
         Providers call this inside their loader."""
-        return self.broker.variant(cap_id)
+        return self.broker.variant(cap_id, role)
 
-    def request_model(self, cap_id):
+    def request_model(self, cap_id, role="fg", provider=None):
         """Get a ready handle for the user-selected provider of a capability.
 
         Raises broker.NoProviderError (typed) when nothing satisfies it — the
         consumer is expected to catch and degrade. The handle returns the
         capability's canonical output shape.
         """
-        return self.broker.request(cap_id)
+        return self.broker.request(cap_id, role, provider)
 
     # ── pipeline stages ──────────────────────────────────────────────────
     def register_pipeline_stage(self, name, fn, *, label=None, editor=None):

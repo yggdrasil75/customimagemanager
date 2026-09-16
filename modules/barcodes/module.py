@@ -1,7 +1,7 @@
 """
 Barcodes module (detect + decode, mark as MWG BarCode regions).
 ======================================================================
-Owns the /api/barcodes endpoint, the barcode_model / barcode_conf settings,
+Owns the /api/barcodes endpoint, the 'detect.barcodes' model providers,
 the ai.barcodes auth feature and the "Scan barcodes" control button. The
 detect/decode engine lives next door in scan.py (was the core barcodes.py).
 
@@ -40,48 +40,68 @@ def register(host):
         import manager as m
         return m
 
-    def _model_groups():
-        g = host.config.get("model_groups") or {}
-        paths = (g.get("trained") or []) + (g.get("custom") or [])
-        return [{"value": "", "label": "Auto (built-in detector)"}] + \
-               [{"value": p, "label": os.path.basename(p)} for p in paths]
+    # Two 'detect.barcodes' providers (picked in the Models tab): a YOLO model
+    # trained on barcodes/QR (weights in models/barcodes/detectbarcodes/ or a
+    # *barcode*/*qr*.pt discovered in models/), and the built-in OpenCV
+    # gradient detector that needs no model.
+    import model_registry as _mr
+    host.add_config_key("barcode_weights", default="")
 
-    # Swapping the model must drop the YOLO cache (memoised by path) or the
-    # old weights keep answering.
-    host.add_config_key("barcode_model", default="",
-                        on_change=lambda new, old: _mgr()._load_yolo_cache_clear())
-    host.add_config_key("barcode_conf", default=0.25,
-                        validate=lambda v: float(v) if v not in (None, "") else 0.25)
-    host.add_settings_field(key="barcode_model", label="Barcode model", kind="select",
-                            pane="general", options=_model_groups,
-                            help="YOLO model trained on barcodes/QR. Blank = auto-discover "
-                                 "*barcode*/*qr* in models/, else the built-in detector.")
-    host.add_settings_field(key="barcode_conf", label="Barcode detect confidence",
-                            kind="number", pane="general")
-
-    def _model_path():
-        mp = (host.config.get("barcode_model") or "").strip()
-        if mp:
-            return mp
+    def _yolo_weights():
+        w = (host.config.get("barcode_weights") or "").strip()
+        if w:
+            return w
+        found = _mr.list_weights("barcodes", "detect.barcodes", exts=(".pt",))
+        if found:
+            return found[0]
         try:
-            for p in sorted(glob.glob(os.path.join(_mgr().MODELS_DIR, "*.pt"))):
-                base = os.path.basename(p).lower()
+            for q in sorted(glob.glob(os.path.join(_mr.MODELS_DIR, "*.pt"))):
+                base = os.path.basename(q).lower()
                 if "barcode" in base or "qr" in base:
-                    return p
-        except Exception as e:
-            host.logger.warning(f"barcode model autodiscover: {e}")
+                    return q
+        except Exception:
+            pass
         return ""
 
+    def _weights_opts():
+        paths = _mr.list_weights("barcodes", "detect.barcodes", exts=(".pt",))
+        return [{"value": "", "label": "Auto-discover"}] + \
+               [{"value": q, "label": os.path.basename(q)} for q in paths]
+
+    host.provide_model(
+        "detect.barcodes", "yolo-barcode", label="YOLO barcode model", family="YOLO",
+        speed="balanced",
+        note="A YOLO detector trained on barcodes/QR. Far better recall on cluttered "
+             "photos than the built-in detector; needs weights.",
+        settings=[{"key": "barcode_weights", "label": "Weights", "kind": "select",
+                   "options": _weights_opts}],
+        loader=lambda: (lambda mp: (lambda img, *a, conf=0.25, **k:
+                                    _mgr()._detect_obb_or_box(img, mp, conf=conf)))(_yolo_weights()),
+        transform=None,
+        available=lambda: bool(_yolo_weights()) and os.path.exists(_yolo_weights()),
+        reason="no barcode YOLO weights found", cost_mb=250)
+    host.provide_model(
+        "detect.barcodes", "builtin", label="Built-in gradient detector", family="OpenCV",
+        speed="fast", supports_conf=False,
+        note="No model: morphological gradient search. Fine for flat scans and "
+             "labels, misses small or skewed codes.",
+        loader=lambda: (lambda img, *a, **k: []),   # scan.py runs its own CV search
+        transform=None, available=lambda: True, reason="")
+
     def _conf():
-        return float(host.config.get("barcode_conf", 0.25) or 0.25)
+        return float(host.model_variant("detect.barcodes")["conf"])
 
     def _detect_fn():
-        """None (not []) when no model: [] would suppress scan's CV fallback."""
-        mp = _model_path()
-        if not mp or not os.path.exists(mp):
+        """The picked detector; None = the built-in (scan's own fallback)."""
+        if host.broker.selected_id("detect.barcodes") == "builtin":
+            return None
+        try:
+            fn = host.request_model("detect.barcodes")
+        except Exception as e:
+            host.logger.warning(f"barcode detector unavailable, using built-in: {e}")
             return None
         conf = _conf()
-        return lambda bgr: _mgr()._detect_obb_or_box(bgr, mp, conf=conf)
+        return lambda bgr: fn(bgr, conf=conf)
 
     def run(img_bgr, deep=True):
         try:

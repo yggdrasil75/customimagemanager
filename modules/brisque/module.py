@@ -96,7 +96,9 @@ def _scorer():
 def register(host):
     host.provide_model(
         "iqa", "brisque",
-        label="BRISQUE (legacy, CPU)",
+        label="BRISQUE (legacy, CPU)", family="OpenCV", speed="fast",
+        note="2012 hand-crafted NSS baseline. No deps, CPU-only, distortion only — "
+             "no sense of aesthetics. Kept as the fallback.",
         loader=_scorer,
         available=_have_brisque,
         reason="opencv-contrib (cv2.quality) not installed",

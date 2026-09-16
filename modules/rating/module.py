@@ -78,15 +78,6 @@ def register(host):
             v in [p["id"] for p in host.broker.providers_for("iqa")] else v
     host.add_config_key("iqa_model", default="brisque",
                         on_change=_on_iqa_model)
-    # Surface it as a single select field in the default (General) settings pane,
-    # populated from the broker's iqa providers.
-    host.add_settings_field(
-        key="iqa_model", label="Image-quality model", kind="select",
-        pane="general",
-        options=(lambda: [{"value": p["id"], "label": p["label"]}
-                          for p in host.broker.providers_for("iqa")]),
-        help="Which model scores image quality for ratings.")
-
     def _to_stars(q, blank=False):
         """Normalized quality (0..1, higher=better) -> 0..5 half-stars.
 

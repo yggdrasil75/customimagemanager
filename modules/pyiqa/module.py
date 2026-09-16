@@ -34,15 +34,24 @@ MANIFEST = {
 
 # id -> spec. lower_better + lo/hi drive normalization; pyiqa is the metric name.
 _MODELS = [
-    {"id": "niqe", "label": "NIQE", "pyiqa": "niqe", "lower_better": True,  "lo": 0.0, "hi": 15.0},
-    {"id": "brisque_pyiqa", "label": "BRISQUE (pyiqa reimpl.)", "pyiqa": "brisque", "lower_better": True, "lo": 0.0, "hi": 100.0},
-    {"id": "nima", "label": "NIMA (aesthetic)", "pyiqa": "nima", "lower_better": False, "lo": 1.0, "hi": 10.0},
-    {"id": "hyperiqa", "label": "HyperIQA", "pyiqa": "hyperiqa", "lower_better": False, "lo": 0.0, "hi": 1.0},
-    {"id": "dbcnn", "label": "DBCNN", "pyiqa": "dbcnn", "lower_better": False, "lo": 0.0, "hi": 1.0},
-    {"id": "clipiqa", "label": "CLIP-IQA+", "pyiqa": "clipiqa+", "lower_better": False, "lo": 0.0, "hi": 1.0},
-    {"id": "musiq", "label": "MUSIQ", "pyiqa": "musiq", "lower_better": False, "lo": 0.0, "hi": 100.0},
-    {"id": "maniqa", "label": "MANIQA", "pyiqa": "maniqa", "lower_better": False, "lo": 0.0, "hi": 1.0},
-    {"id": "topiq", "label": "TOPIQ", "pyiqa": "topiq_nr", "lower_better": False, "lo": 0.0, "hi": 1.0},
+    {"id": "niqe", "label": "NIQE", "pyiqa": "niqe", "lower_better": True, "lo": 0.0, "hi": 15.0,
+     "speed": "fast", "note": "Opinion-unaware NSS metric. Fast, no training bias, but like BRISQUE it only sees distortion."},
+    {"id": "brisque_pyiqa", "label": "BRISQUE (pyiqa reimpl.)", "pyiqa": "brisque", "lower_better": True, "lo": 0.0, "hi": 100.0,
+     "speed": "fast", "note": "Same metric as legacy BRISQUE but via pyiqa; slightly different numbers. Useful for apples-to-apples comparison."},
+    {"id": "nima", "label": "NIMA (aesthetic)", "pyiqa": "nima", "lower_better": False, "lo": 1.0, "hi": 10.0,
+     "speed": "balanced", "note": "Predicts the AVA mean-opinion score. Rates *aesthetics*, not just distortion — a sharp but boring photo scores low."},
+    {"id": "hyperiqa", "label": "HyperIQA", "pyiqa": "hyperiqa", "lower_better": False, "lo": 0.0, "hi": 1.0,
+     "speed": "balanced", "note": "Content-adaptive CNN, trained on in-the-wild photos. Good quality/cost tradeoff for a full-library scan."},
+    {"id": "dbcnn", "label": "DBCNN", "pyiqa": "dbcnn", "lower_better": False, "lo": 0.0, "hi": 1.0,
+     "speed": "balanced", "note": "Two-stream CNN handling both synthetic and authentic distortion. Solid, well-tested all-rounder."},
+    {"id": "clipiqa", "label": "CLIP-IQA+", "pyiqa": "clipiqa+", "lower_better": False, "lo": 0.0, "hi": 1.0,
+     "speed": "balanced", "note": "CLIP-based; understands image *content*, so it punishes junk and placeholders that pure distortion metrics call 'clean'."},
+    {"id": "musiq", "label": "MUSIQ", "pyiqa": "musiq", "lower_better": False, "lo": 0.0, "hi": 100.0,
+     "speed": "accurate", "note": "Multi-scale transformer, native resolution (no resize crop). Excellent human correlation. Wants a GPU for bulk work."},
+    {"id": "maniqa", "label": "MANIQA", "pyiqa": "maniqa", "lower_better": False, "lo": 0.0, "hi": 1.0,
+     "speed": "accurate", "note": "ViT-based, NTIRE 2022 NR-IQA winner. Top-tier accuracy, slowest of the set."},
+    {"id": "topiq", "label": "TOPIQ", "pyiqa": "topiq_nr", "lower_better": False, "lo": 0.0, "hi": 1.0,
+     "speed": "accurate", "note": "Top-down semantic-guided IQA. Among the strongest NR models; GPU recommended."},
 ]
 
 
@@ -104,7 +113,7 @@ def register(host):
     for spec in _MODELS:
         host.provide_model(
             "iqa", spec["id"],
-            label=spec["label"],
+            label=spec["label"], family="pyiqa", speed=spec["speed"], note=spec["note"],
             loader=(lambda s=spec: _scorer(s)),
             available=_available,
             reason="pip install pyiqa (needs torch)",

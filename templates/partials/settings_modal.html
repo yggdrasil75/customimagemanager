@@ -141,35 +141,6 @@
           download automatically on first use.</p>
       </div>
       <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
-        <label class="text-xs text-cyan-300 font-bold block mb-2">Segmentation</label>
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="text-xs text-gray-400 block mb-1">SAM model
-              <span class="text-gray-600">(AI tools &amp; pipeline)</span></label>
-            <select id="cfg_sam_model"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <!-- populated from /api/seg_models (sam) -->
-            </select>
-            <p id="cfg_sam_note" class="text-[10px] text-gray-500 mt-1"></p>
-          </div>
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Segment-button model
-              <span class="text-gray-600">(background runs are set in 🧩 Models)</span></span>
-            <select id="cfg_bg_seg_model"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <!-- populated from /api/seg_models (yolo) -->
-            </select>
-            <p id="cfg_bg_seg_note" class="text-[10px] text-gray-500 mt-1"></p>
-          </div>
-        </div>
-        <p class="text-[10px] text-gray-600 mt-1">
-          <b class="text-cyan-400">SAM</b> powers the interactive/pipeline masker (masks are stored as
-          compact SVG paths). The <b class="text-cyan-400">Segment</b> button runs the model picked here;
-          unprompted per-image runs and their class whitelist live in 🧩 Models. SAM 2/3 need their runtime +
-          checkpoints in <code>models/seg/sam</code>; extra YOLO-seg weights go in <code>models/seg/yolo</code>.
-        </p>
-      </div>
-      <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
         <label class="text-xs text-indigo-300 font-bold block mb-2">System prompt
           <span class="font-normal text-gray-500">(prepended to every vision-model call)</span></label>
         <textarea id="cfg_system" rows="2"

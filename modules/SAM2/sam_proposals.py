@@ -80,35 +80,20 @@ SEED_DEDUP_IOU = 0.55
 _sam = {"checked": False, "generator": None, "err": ""}
 _lock = threading.Lock()
 
-# Active segmentation-model id chosen in settings (see seg_models.py). None ==
+# Active checkpoint (kept in sync by the SAM 2 module's picker). None ==
 # "use the env-configured classic checkpoint above" so this module still works
 # standalone without the registry. manager pushes the setting down via
 # set_model() on config load / settings save.
 _active_model_id = None
 
-def set_model(model_id):
-    """Point the *proposal* generator at a seg_models checkpoint. This module is
-    the tag-driven region *proposer* (find similar untagged regions), which is a
-    separate job from the AI-tools segmenter in seg_runtime.py. It happens to use
-    a SAM checkpoint for its automatic mask generator, so we let settings repoint
-    that checkpoint here and reset the cached generator.
-
-    The interactive/pipeline segmenter that actually produces reusable masks
-    lives in seg_runtime.py and loads the selected family's real runtime; this
-    only affects proposal boxes. Unknown ids / a missing registry leave the env
-    default in place. Cheap and never raises.
-    """
-    global _active_model_id, SAM_CHECKPOINT
-    _active_model_id = model_id
-    try:
-        import seg_models as _sm
-    except Exception:
+def set_checkpoint(path):
+    """Point the proposal generator at a checkpoint file directly (the SAM 2
+    module keeps this in sync with the Models-tab pick). No-op on same path."""
+    global SAM_CHECKPOINT, _active_model_id
+    if not path or path == SAM_CHECKPOINT:
         return
-    info = _sm.sam_info(model_id)
-    wp = _sm.sam_weights_path(model_id)
-    if wp:
-        SAM_CHECKPOINT = wp
-    # invalidate the cached generator so new weights take effect
+    SAM_CHECKPOINT = path
+    _active_model_id = path
     with _lock:
         _sam["checked"] = False
         _sam["generator"] = None
@@ -117,16 +102,9 @@ def set_model(model_id):
         model_registry.unload("sam:proposals")
     except Exception:
         pass
-    # keep the real segmenter's cache in sync too
-    try:
-        import seg_runtime as _sr
-        _sr.clear_cache()
-    except Exception:
-        pass
-    return info.get("id") if info else None
 
 def active_model():
-    """The seg_models id currently selected, or None if using the env default."""
+    """The checkpoint currently selected, or None if using the env default."""
     return _active_model_id
 
 def available():

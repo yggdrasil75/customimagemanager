@@ -1,5 +1,5 @@
 """! @file face_models.py
-@brief Face DETECTOR + RECOGNITION model registries, mirroring seg_models.py.
+@brief Face DETECTOR + RECOGNITION model registries.
 
 Two independent selectors feed the Faces settings pane, kept apart because they do
 different jobs and the old single "face model" box conflated them:

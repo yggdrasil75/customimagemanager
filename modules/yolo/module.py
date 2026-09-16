@@ -2,7 +2,8 @@
 YOLO / Ultralytics model provider.
 ======================================================================
 Registers Ultralytics YOLO as a provider for the core capabilities it can
-satisfy: detect, detect.obb, segment, classify, pose, depth. This is the first real
+satisfy: detect (box / oriented-box types), detect.faces, segment, classify,
+pose, depth. This is the first real
 consumer of the model broker — it proves that a module can hand the app a
 model for a named capability, normalize the model's native output to the
 capability's canonical shape, and be swapped out for a different provider
@@ -112,17 +113,25 @@ def _run_yolo_path(model_path, feed, conf):
 # ── families: which heads each ultralytics generation ships ─────────────────
 # stock weights = f"{prefix}{size}{suffix}.pt"; ultralytics auto-downloads.
 _NSMLX = ["n", "s", "m", "l", "x"]
-_FULL = {"detect": "", "detect.obb": "-obb", "segment": "-seg",
-         "classify": "-cls", "pose": "-pose"}
+_FULL = {"detect": "", "segment": "-seg", "classify": "-cls", "pose": "-pose"}
+_OBB_FAMILIES = {"yolov8", "yolo11", "yolo12", "yolo26"}   # ship -obb heads
 _FAMILIES = [
-    # (id, label, prefix, sizes, {cap: suffix})
-    ("yolov8",  "YOLOv8",  "yolov8",  _NSMLX,                    _FULL),
-    ("yolov9",  "YOLOv9",  "yolov9",  ["t", "s", "m", "c", "e"], {"detect": "", "segment": "-seg"}),
-    ("yolov10", "YOLOv10", "yolov10", ["n", "s", "m", "b", "l", "x"], {"detect": ""}),
-    ("yolo11",  "YOLO11",  "yolo11",  _NSMLX,                    _FULL),
-    ("yolo12",  "YOLO12",  "yolo12",  _NSMLX,                    _FULL),
-    ("yolo26",  "YOLO26",  "yolo26",  _NSMLX,                    {**_FULL, "depth": "-depth"}),
+    # (id, label, prefix, sizes, {cap: suffix}, note)
+    ("yolov8",  "YOLOv8",  "yolov8",  _NSMLX,                    _FULL,
+     "2023 all-rounder with every head. Widest third-party weight support."),
+    ("yolov9",  "YOLOv9",  "yolov9",  ["t", "s", "m", "c", "e"], {"detect": "", "segment": "-seg"},
+     "PGI/GELAN; strong detect accuracy per FLOP. Segment only ships c/e."),
+    ("yolov10", "YOLOv10", "yolov10", ["n", "s", "m", "b", "l", "x"], {"detect": ""},
+     "NMS-free, lowest latency detector. Detect only."),
+    ("yolo11",  "YOLO11",  "yolo11",  _NSMLX,                    _FULL,
+     "Default pick: fewer params than v8 at higher accuracy, every head."),
+    ("yolo12",  "YOLO12",  "yolo12",  _NSMLX,                    _FULL,
+     "Attention-centric; slightly better accuracy than 11, slower on CPU."),
+    ("yolo26",  "YOLO26",  "yolo26",  _NSMLX,                    {**_FULL, "depth": "-depth"},
+     "Newest; first generation with a depth head."),
 ]
+_SPEED = {"n": "fast", "t": "fast", "s": "fast", "m": "balanced", "b": "balanced",
+          "c": "balanced", "l": "accurate", "e": "accurate", "x": "accurate"}
 # ponytail: yolov9 only ships c/e for -seg; a missing combo fails at download.
 
 
@@ -132,12 +141,20 @@ def _weights_key(cap):
 
 def _stock_path(host, cap, prefix, suffix):
     """Custom weights for this capability when set, else the stock name for
-    the picked size."""
+    the picked size (and, for detect, the picked box type: '' or '-obb')."""
     custom = (host.config.get(_weights_key(cap)) or "").strip()
     if custom:
         return custom
-    size = host.model_variant(cap)["size"] or "n"
-    return f"{prefix}{size}{suffix}.pt"
+    v = host.model_variant(cap)
+    if cap == "detect" and v.get("type") == "obb":
+        suffix = "-obb"
+    return f"{prefix}{v['size'] or 'n'}{suffix}.pt"
+
+
+def _tf_detect(res, *a, **k):
+    """Boxes, or oriented boxes (with angle) when the result has an obb head."""
+    r = res[0] if isinstance(res, (list, tuple)) else res
+    return _tf_obb(res) if getattr(r, "obb", None) is not None else _tf_objects(res)
 
 
 # ── transforms: Ultralytics Results -> canonical contract shape ─────────────
@@ -303,11 +320,11 @@ def register(host):
             return [names[k] for k in sorted(names)] if isinstance(names, dict) else list(names)
         return classes
 
-    transforms = {"detect": _tf_objects, "detect.obb": _tf_obb, "segment": _tf_segment,
+    transforms = {"detect": _tf_detect, "segment": _tf_segment,
                   "classify": _tf_classify, "pose": _tf_pose, "depth": _tf_depth}
-    types = {"pose": [{"value": "body", "label": "Body · 17 pts"}]}
+    box_types = [{"value": "box", "label": "Boxes"}, {"value": "obb", "label": "Oriented boxes"}]
     declared = set()
-    for fid, flabel, prefix, sizes, caps in _FAMILIES:
+    for fid, flabel, prefix, sizes, caps, fnote in _FAMILIES:
         for cap, suffix in caps.items():
             key = _weights_key(cap)
             if key not in declared:
@@ -315,16 +332,35 @@ def register(host):
                 declared.add(key)
             host.provide_model(
                 cap, fid, label=flabel, family="YOLO", sizes=sizes,
-                types=types.get(cap),
-                classes=_classes_for(cap, prefix, suffix) if cap in ("detect", "detect.obb", "segment") else None,
+                types=({"pose": [{"value": "body", "label": "Body · 17 pts"}],
+                        "detect": box_types if fid in _OBB_FAMILIES else None}.get(cap)),
+                classes=_classes_for(cap, prefix, suffix) if cap in ("detect", "segment") else None,
                 settings=[{"key": key, "label": "Custom weights", "kind": "select",
                            "options": _weights_opts(cap),
                            "help": "Blank = stock weights for the picked family/size."}],
                 loader=(lambda c=cap, p=prefix, sfx=suffix:
                         _loader_for(_stock_path(host, c, p, sfx), c)()),
                 transform=transforms[cap], available=_avail, reason=reason,
+                note=fnote + " Size n…x trades speed for accuracy.",
                 cost_mb=300 if cap == "segment" else 250,
                 gpu=model_registry.on_gpu())
+
+    # Dedicated face detector (yolo-face weights from the face registry; the
+    # person module consumes 'detect.faces').
+    def _face_path():
+        import face_models as _fm, faces as _faces
+        det = _fm.resolve_detector_id(host.config.get("face_detector"))
+        try:
+            return _faces.ensure_face_detector(det) or ""
+        except Exception:
+            return ""
+
+    host.provide_model(
+        "detect.faces", "yolo-face", label="YOLO face", family="YOLO",
+        loader=lambda: _loader_for(_face_path(), "detectfaces")(),
+        transform=lambda res, *a, **k: _norm_boxes(res, want_names=False),
+        available=lambda: _avail() and bool(_face_path()), reason=reason,
+        cost_mb=250, gpu=model_registry.on_gpu())
 
     # Generic box detector: runs any YOLO .pt (incl. OBB) at a given path and
     # returns canonical {class_name,cx,cy,w,h}. This is what the box consumers
@@ -378,4 +414,4 @@ def register(host):
         cost_mb=250, gpu=model_registry.on_gpu())
 
     host.logger.info("yolo module: registered %d family providers + box",
-                     sum(len(c) for *_, c in _FAMILIES))
+                     sum(len(f[4]) for f in _FAMILIES))

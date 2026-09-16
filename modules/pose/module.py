@@ -90,8 +90,8 @@ def register(host):
         "pose", "rtmpose", label="RTMPose", family="RTMPose",
         sizes=["lite", "balanced", "performance"],
         types=[{"value": "wholebody", "label": "Whole-body · 133 (hands+face)"}],
-        loader=lambda: (lambda img, *a, **k: _pose_core.wholebody_people(
-            img, host.model_variant("pose")["size"] or "balanced")),
+        loader=lambda: (lambda mode: (lambda img, *a, **k: _pose_core.wholebody_people(img, mode)))(
+            host.model_variant("pose")["size"] or "balanced"),
         transform=None, available=_pose_core.has_wholebody,
         reason="pip install rtmlib onnxruntime", cost_mb=1000)
 

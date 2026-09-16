@@ -89,14 +89,6 @@ import iptc_import, iptc_fields
 import mwg_fields
 import quality_heuristic
 try:
-    import seg_models
-except Exception:
-    seg_models = None
-try:
-    import seg_runtime
-except Exception:
-    seg_runtime = None
-try:
     import rawpy
 except Exception:
     rawpy = None
@@ -195,8 +187,6 @@ state = {
     "body_size": "s",
     "body_cluster_eps": 0.0,
     "object_proposals": "sam",
-    "sam_model": "sam2.1_b",
-    "bg_seg_model": "yolov26n-seg",
     "model_groups": {},
     "appearance_eps": 0.35,
     "shape_estimator": "anny_fit",
@@ -1837,16 +1827,6 @@ def load_config():
     # (IQA model selection is now the broker's job — see model_selection /
     # broker.init_selection after register_all; the legacy iqa_model setting is
     # migrated into it there.)
-    if seg_models is not None:
-        state["sam_model"] = seg_models.resolve_sam_id(
-            state.get("sam_model", seg_models.SAM_DEFAULT))
-        state["bg_seg_model"] = seg_models.resolve_yolo_seg_id(
-            state.get("bg_seg_model", seg_models.YOLO_SEG_DEFAULT))
-        try:
-            import sam_proposals as _sp
-            _sp.set_model(state["sam_model"])
-        except Exception:
-            pass
 
 def save_config():
     keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt",
@@ -1854,7 +1834,6 @@ def save_config():
             "face_bg_enabled","face_bg_custom","face_detector","face_recognition","face_model","face_size","person_model","our_model","face_cluster_eps",
             "face_reject_drawn","face_drawn_thresh",
             "body_enabled","body_size","body_cluster_eps","object_proposals",
-            "sam_model","bg_seg_model",
             "brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
             "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers","dup_cnn_width","modules","model_selection"]
     # Add any keys modules declared through the config registry, so a module's
@@ -3444,7 +3423,7 @@ def _load_yolo_cache_clear():
 _load_yolo.cache_clear = _load_yolo_cache_clear
 
 _SIZES = ("n", "s", "m", "l", "x")
-def _detect_objects(img_bgr, keep_classes: set | None = None, conf: float = 0.25) -> list:
+def _detect_objects(img_bgr, keep_classes: set | None = None, conf: float | None = None) -> list:
     """!
     @brief Run the 'detect' capability's selected provider (family/size picked in
            the Models tab) and return normalised center-form boxes.
@@ -3456,6 +3435,8 @@ def _detect_objects(img_bgr, keep_classes: set | None = None, conf: float = 0.25
     except modules.model_broker.NoProviderError as e:
         access_logger.warning(f"detect: {e}")
         return []
+    if conf is None:
+        conf = modules.broker.variant("detect")["conf"]
     try:
         c = _coerce_bgr3(img_bgr)
         if c is None:
@@ -3740,14 +3721,38 @@ def _face_err(msg, *args):
     when the scan misbehaves, instead of grepping it out of access.log."""
     access_logger.error("face: " + (msg % args if args else msg))
 
-def _attach_masks(img, regions: list) -> None:
-    if seg_runtime is None or not regions:
-        return
+def _segment_boxes(img, boxes: list) -> list:
+    """Masks for boxes via the picked segmenter (broker 'segment.box'). Returns
+    instance dicts {class_name, cx, cy, w, h, mask_svg}; [] if none/failed."""
+    if not boxes:
+        return []
     try:
-        insts = seg_runtime.segment_boxes(img, regions,
-                                          model_id=state.get("sam_model"))
-    except Exception:
-        return
+        run = modules.broker.request("segment.box")
+    except modules.model_broker.NoProviderError:
+        return []
+    c = _coerce_bgr3(img)
+    if c is None:
+        return []
+    H, W = c.shape[:2]
+    out = []
+    try:
+        hits = run(c, boxes) or []
+    except Exception as e:
+        access_logger.error(f"segment.box provider: {e}")
+        return []
+    for h in hits:
+        poly = h.get("mask") or []
+        if not poly:
+            continue
+        xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+        out.append({"class_name": h.get("class_name", "object"),
+                    "cx": (min(xs) + max(xs)) / 2, "cy": (min(ys) + max(ys)) / 2,
+                    "w": max(xs) - min(xs), "h": max(ys) - min(ys),
+                    "mask_svg": _polygon_mask_svg(poly, W, H)})
+    return out
+
+def _attach_masks(img, regions: list) -> None:
+    insts = _segment_boxes(img, regions)
     for inst in insts:
         best, best_iou = None, 0.0
         for r in regions:
@@ -3798,13 +3803,14 @@ def _background_instances(img_bgr) -> list:
     H, W = c.shape[:2]
     for cap in modules.broker.background_capabilities():
         try:
-            run = modules.broker.request(cap)
+            run = modules.broker.request(cap, role="bg")   # may be a different model than the button
         except modules.model_broker.NoProviderError as e:
             access_logger.warning(f"background {cap}: {e}")
             continue
-        want = set(modules.broker.variant(cap).get("classes") or [])
+        v = modules.broker.variant(cap, "bg")
+        want = set(v.get("classes") or [])
         try:
-            hits = run(c, verbose=False) or []
+            hits = run(c, conf=v["conf"], verbose=False) or []
         except Exception as e:
             access_logger.error(f"background {cap} provider: {e}")
             continue
@@ -3825,6 +3831,34 @@ def _background_instances(img_bgr) -> list:
                         "mask_svg": _polygon_mask_svg(poly, W, H)}
             if inst:
                 out.append(inst)
+    return out
+
+def _segment_image(img_bgr, classes=None) -> list:
+    """Run the picked fixed-class segmenter (broker 'segment', foreground pick)
+    and return region dicts {class_name, cx, cy, w, h, confirmed, mask_svg,
+    score}. classes: whitelist (None = the capability's picker whitelist;
+    [] = keep all). Raises NoProviderError when nothing serves it."""
+    run = modules.broker.request("segment")
+    v = modules.broker.variant("segment")
+    want = set(v.get("classes") or []) if classes is None else set(classes)
+    c = _coerce_bgr3(img_bgr)
+    if c is None:
+        return []
+    H, W = c.shape[:2]
+    out = []
+    for h in run(c, conf=v["conf"], verbose=False) or []:
+        name = h.get("class_name", "object")
+        poly = h.get("mask") or []
+        if not poly or (want and name not in want):
+            continue
+        svg = _polygon_mask_svg(poly, W, H)
+        if not svg:
+            continue
+        xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+        out.append({"class_name": name, "cx": (min(xs) + max(xs)) / 2,
+                    "cy": (min(ys) + max(ys)) / 2, "w": max(xs) - min(xs),
+                    "h": max(ys) - min(ys), "confirmed": False, "mask_svg": svg,
+                    "score": h.get("conf")})
     return out
 
 def _fold_background(insts, person_regions, out):
@@ -3917,8 +3951,8 @@ def _face_regions_for_batch(imgs, rels) -> list:
     @return List (len == len(imgs)) of MWG-shaped region-dict lists.
     @note Runs each detector ONCE over the whole batch (face, person, optional
           custom) — the real YOLO batching. Per-image background segmentation is
-          still done per image (seg_runtime is not batch-aware); it is skipped in
-          the batched path only when bg_seg is disabled, which is the default.
+          still done per image (segmenters are not batch-aware); it is skipped in
+          the batched path only when no background capability is on (the default).
     """
     n = len(imgs)
     results = [[] for _ in range(n)]
@@ -5220,41 +5254,30 @@ def _compose_description(analysis, existing=""):
     return "\n\n".join(p for p in parts if p) or existing
 
 def _segment_regions(bgr, query):
-    """Run the AI-tools segmenter (SAM/FastSAM) for `query` on a BGR image and
-    return unconfirmed region dicts (box + mask_svg), or []. Shared by the batch
-    action runner and the interactive run_llm endpoint so both take the SAM path
-    instead of falling through to the vision LLM. Never raises."""
-    if seg_runtime is None:
-        return []
+    """Segment whatever `query` describes with the picked foreground segmenter
+    (broker 'segment': SAM 3 natively, SAM 2 via VLM seed boxes; a fixed-class
+    model ignores the prompt) and return unconfirmed region dicts (box +
+    mask_svg), or []. Never raises."""
     query = (query or "").strip()
-    sam_id = state.get("sam_model")
     insts = []
     try:
-        mode = seg_runtime.sam_text_mode(sam_id)
-        if mode and query:
-            # SAM 3 or FastSAM: hand the text straight to the model.
-            insts = seg_runtime.segment_text(bgr, query, model_id=sam_id) or []
-        else:
-            # SAM 2.1 / MobileSAM: no text path. Use the LLM only as a rough
-            # locator — a loose box around the subject — then let SAM produce
-            # the actual mask; the mask's bounds, not the LLM box, are stored.
-            rough = _llm_call(
-                (query or "the main subject") +
-                "\n\nReturn a rough bounding box (normalised 0..1) around "
-                "each instance. It only needs to loosely contain the "
-                "subject; precision is not required.", bgr, "boxes") or []
-            seed = []
-            for b in rough:
-                try:
-                    seed.append({"class_name": query or b.get("class_name", "object"),
-                                 "cx": float(b["cx"]), "cy": float(b["cy"]),
-                                 "w": float(b["w"]), "h": float(b["h"])})
-                except Exception:
-                    pass
-            if seed:
-                insts = seg_runtime.segment_boxes(bgr, seed, model_id=sam_id) or []
-    except Exception:
-        insts = []
+        run = modules.broker.request("segment")
+        c = _coerce_bgr3(bgr)
+        if c is not None:
+            H, W = c.shape[:2]
+            for h in run(c, query, conf=modules.broker.variant("segment")["conf"]) or []:
+                poly = h.get("mask") or []
+                if not poly:
+                    continue
+                xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+                insts.append({"class_name": h.get("class_name") or query,
+                              "cx": (min(xs) + max(xs)) / 2, "cy": (min(ys) + max(ys)) / 2,
+                              "w": max(xs) - min(xs), "h": max(ys) - min(ys),
+                              "mask_svg": _polygon_mask_svg(poly, W, H)})
+    except modules.model_broker.NoProviderError as e:
+        access_logger.warning(f"segment: {e}")
+    except Exception as e:
+        access_logger.error(f"segment provider: {e}")
     new = []
     for inst in insts:
         if not inst.get("mask_svg"):
@@ -5316,8 +5339,6 @@ def _apply_llm_action(fp, action):
     if target == "body":
         return _apply_body_action(_rel(fp), bgr, action)
     if target == "segment":
-        if seg_runtime is None:
-            return True
         query = (prompt or "").strip()
         new = _segment_regions(bgr, query)
         if new:
@@ -6343,7 +6364,6 @@ def api_state():
          "appearance_eps","shape_estimator","pose_estimator","face_estimator",
          "face_bg_enabled","face_bg_custom","face_detector","face_recognition","person_model","our_model",
          "face_cluster_eps","face_reject_drawn","face_drawn_thresh","body_enabled","body_size","body_cluster_eps","object_proposals",
-         "sam_model","bg_seg_model",
          "model_groups","iqa_model","brand_name","brand_logo","search_quick_filters")})
 
 @app.route("/api/workers")
@@ -6451,14 +6471,17 @@ def api_models_classes():
 def api_models_select():
     """Choose which provider (+ size/type) serves a capability. Admin-gated.
 
-    Body: {"capability", "provider", "size"?, "type"?, "background"?, "classes"?}. Selecting
+    Body: {"capability", "provider", "size"?, "type"?, "background"?, "classes"?,
+           "bg"?: {"provider","size","type"} for a separate background model,
+           "conf"?: min confidence 0..1}. Selecting
     an unavailable provider is allowed (weights may appear later); the choice
     persists to app_config.json.
     """
     d = request.json or {}
     ok, err = modules.broker.select(d.get("capability"), d.get("provider"),
                                     d.get("size"), d.get("type"),
-                                    d.get("background"), d.get("classes"))
+                                    d.get("background"), d.get("classes"),
+                                    d.get("bg"), d.get("conf"))
     if not ok:
         return jsonify({"error": err or "selection failed"}), 400
     state["model_selection"] = modules.broker.current_selection()
@@ -6523,7 +6546,7 @@ def update_settings():
               "face_bg_enabled","face_bg_custom","face_detector","face_recognition","person_model","our_model","face_cluster_eps",
             "face_reject_drawn","face_drawn_thresh",
               "body_enabled","body_size","body_cluster_eps","object_proposals",
-              "sam_model","bg_seg_model"):
+              ):
         if k in d: state[k] = d[k]
     # Search quick-filters: validate shape so a malformed save can't break the
     # search UI. Each entry must be {id,label,query}; drop anything else.
@@ -6539,19 +6562,6 @@ def update_settings():
             clean.append({"id": str(it.get("id") or (i + 1)),
                           "label": label, "query": query})
         state["search_quick_filters"] = clean
-    if seg_models is not None:
-        if "sam_model" in d:
-            state["sam_model"] = seg_models.resolve_sam_id(state["sam_model"])
-            try:
-                import sam_proposals as _sp
-                _sp.set_model(state["sam_model"])
-            except Exception:
-                pass
-        if "bg_seg_model" in d:
-            state["bg_seg_model"] = seg_models.resolve_yolo_seg_id(
-                state["bg_seg_model"])
-            if seg_runtime is not None:
-                seg_runtime.clear_cache()
     save_config(); return jsonify({"success": True})
 
 @app.route("/api/branding", methods=["POST"])
@@ -8890,23 +8900,15 @@ def bulk_box():
 @app.route("/api/bulk_segment", methods=["POST"])
 @_auth.require_feature("ai.segment", level="write")
 def bulk_segment():
-    """Run the selected YOLO-seg (background) model over many files, writing
-    masked regions (mask_svg in each region's Extensions) UNCONFIRMED. Mirrors
-    bulk_box but produces masks instead of plain boxes. Body: {filenames,
-    classes?} - classes overrides the saved whitelist for this run."""
-    if seg_runtime is None or seg_models is None:
-        return jsonify({"success": False, "error": "Segmentation unavailable."})
+    """Run the picked segmenter (Models tab → Segmentation) over many files,
+    writing masked regions (mask_svg in each region's Extensions) UNCONFIRMED.
+    Body: {filenames, classes?} - classes overrides the saved whitelist."""
     filenames = request.json.get("filenames", [])
-    model_id = state.get("bg_seg_model") or seg_models.YOLO_SEG_DEFAULT
     sel = request.json.get("classes")
-    if sel is None:
-        sel = modules.broker.variant("segment").get("classes") or []
     try:
-        cids = seg_models.wanted_class_ids(model_id, sel)
-    except Exception:
-        cids = None
-    if not seg_models.weights_present(model_id):
-        state["status_text"] = "Downloading segmentation model..."
+        modules.broker.request("segment")
+    except modules.model_broker.NoProviderError as e:
+        return jsonify({"success": False, "error": f"Segmentation unavailable: {e}"})
     done, segmented, errors = 0, 0, []
     total = len(filenames)
     for fn in filenames:
@@ -8917,16 +8919,8 @@ def bulk_segment():
             img = read_jxl(fp)
             if img is None:
                 errors.append(fn); continue
-            insts = seg_runtime.segment_background(
-                _to_bgr(img), model_id=model_id, class_ids=cids) or []
-            new = []
-            for inst in insts:
-                if not inst.get("mask_svg"):
-                    continue
-                new.append({"class_name": inst.get("class_name", "object"),
-                            "cx": inst["cx"], "cy": inst["cy"],
-                            "w": inst["w"], "h": inst["h"],
-                            "confirmed": False, "mask_svg": inst["mask_svg"]})
+            new = [{k: r[k] for k in ("class_name", "cx", "cy", "w", "h", "confirmed", "mask_svg")}
+                   for r in _segment_image(_to_bgr(img), sel)]
             if new:
                 meta = read_metadata(fp)
                 for n in new:
@@ -9012,12 +9006,7 @@ def _panel_fn(bgr):
 def _seg_fn(bgr, boxes):
     """Pipeline seg hook: mask the given boxes with the selected SAM model.
     Returns instance dicts (box + mask_svg). [] if the segmenter's unavailable."""
-    if seg_runtime is None or not boxes:
-        return []
-    try:
-        return seg_runtime.segment_boxes(bgr, boxes, model_id=state.get("sam_model"))
-    except Exception:
-        return []
+    return _segment_boxes(bgr, boxes)
 
 def _pipeline_endpoints():
     """Endpoint URLs for parallel pipeline runs. Reads state['oai_endpoints']
@@ -9387,37 +9376,6 @@ def quality_sweep():
                     "flagged": sorted(bad)[:500],
                     "wrote_flags": write_flags})
 
-@app.route("/api/seg_models")
-def api_seg_models():
-    """Segmentation-model registries for the settings dropdowns:
-      sam   — the AI-tools segmenter (SAM 3.1 / 2.1 sizes / MobileSAM / FastSAM),
-              plus anything discovered in models/seg/sam.
-      yolo  — the background (class-aware) segmenter (yolov26*-seg), plus
-              anything in models/seg/yolo.
-    Each entry carries a `speed` badge and an `available`/`reason` pair so the
-    UI can grey out options whose deps or checkpoints are missing — same shape
-    as /api/iqa_models.
-    """
-    if seg_models is None:
-        return jsonify({"success": False, "error": "seg_models unavailable",
-                        "sam": [], "yolo": [],
-                        "active_sam": None, "active_bg": None})
-    return jsonify({
-        "success": True,
-        "sam": seg_models.list_sam_models(),
-        "yolo": seg_models.list_yolo_seg_models(),
-        "active_sam": state.get("sam_model"),
-        "active_bg": state.get("bg_seg_model"),
-        # SAM3 needs a manual weight fetch; tell the UI whether it's present and
-        # whether this build even has the SAM3 code (so it can show a Download
-        # button vs. an 'unsupported build' note).
-        "sam3": {
-            "present": seg_models.sam3_present(),
-            "have_code": seg_models._have_sam3_code(),
-            "repo": seg_models.SAM3_HF_REPO,
-        },
-    })
-
 @app.route("/api/face_models")
 def api_face_models():
     """Face-model registries for the settings dropdowns:
@@ -9425,7 +9383,7 @@ def api_face_models():
                     user dropped in models/face/yolo.
       recognition — insightface identity packs (buffalo l/m/s/sc, antelopev2).
     Each entry carries a `speed` badge and an `available`/`reason` pair, same shape
-    as /api/seg_models, so the UI can grey out options whose deps are missing."""
+    so the UI can grey out options whose deps are missing."""
     return jsonify({
         "success": True,
         "detectors": facemodels.list_detectors(),
@@ -9434,37 +9392,6 @@ def api_face_models():
         "active_recognition": facelib.recognition_model(),
         "model_error": facelib.face_model_error(),
     })
-
-@app.route("/api/download_sam3", methods=["POST"])
-def api_download_sam3():
-    """Fetch the SAM3 checkpoint from HuggingFace into models/seg/sam/sam3.pt.
-    SAM3's weight isn't auto-downloadable by ultralytics, so this backs the
-    'Download SAM3' button. Optional body: {repo, token} to override the source
-    repo or supply a token for a gated repo. Returns {success, message,
-    present}."""
-    if seg_models is None:
-        return jsonify({"success": False, "error": "seg_models unavailable"})
-    body = request.json or {}
-    repo = (body.get("repo") or "").strip() or None
-    token = (body.get("token") or "").strip() or None
-    if seg_models.sam3_present():
-        return jsonify({"success": True, "message": "SAM3 weight already present.",
-                        "present": True})
-    state["status_text"] = "Downloading SAM3…"
-    try:
-        ok, msg = seg_models.download_sam3(repo=repo, token=token)
-    except Exception as e:
-        state["status_text"] = "Ready."
-        return jsonify({"success": False, "error": str(e), "present": False})
-    state["status_text"] = "Ready."
-    # New weight changes availability; drop any cached (None) SAM3 loader.
-    if ok and seg_runtime is not None:
-        try:
-            seg_runtime.clear_cache()
-        except Exception:
-            pass
-    return jsonify({"success": bool(ok), "message": msg,
-                    "present": seg_models.sam3_present()})
 
 # ════════════════════════════ IMAGE-LEVEL PIPELINE ═══════════════════════════
 # A lighter, image-level layer beneath object discovery. Five MANUAL steps, each
@@ -9546,7 +9473,7 @@ def img_embed():
     file_list = _eligible_files()
     if not file_list:
         return jsonify({"success": False, "error": "No eligible images found."})
-    cnn_model = (state.get("grouping_cnn") or "").strip() or None
+    cnn_model = (modules.broker.variant("embed").get("size") or None)
     state["discover_cancel"] = False
     db = _db()
     emb_svc = module_host.get_service("embedding") if 'module_host' in globals() else None
@@ -9653,7 +9580,7 @@ def img_detect():
         return jsonify({"success": False, "error": "No clustered images to scan."})
 
     depth_model = (state.get("depth_model") or "").strip() or None
-    cnn_model = (state.get("grouping_cnn") or "").strip() or None
+    cnn_model = (modules.broker.variant("embed").get("size") or None)
     state["discover_cancel"] = False
 
     per_cluster = []
@@ -9740,7 +9667,7 @@ def img_search():
     img = _img_loader(qi)
     if img is None:
         return jsonify({"success": False, "error": "Query image not found."})
-    cnn_model = (state.get("grouping_cnn") or "").strip() or None
+    cnn_model = (modules.broker.variant("embed").get("size") or None)
     hits = emb_svc["search_by_image"](db, img, cnn_model=cnn_model, top_k=top_k)
     score = {n: s for n, s in hits}
     entries = _entries_for_files([n for n, _ in hits])
@@ -9859,7 +9786,7 @@ def discover_objects_staged():
         return jsonify({"success": False, "error": "No eligible images found."})
 
     depth_model = (state.get("depth_model") or "").strip() or None
-    cnn_model = (state.get("grouping_cnn") or "").strip() or None
+    cnn_model = (modules.broker.variant("embed").get("size") or None)
     # Region-proposal backend: 'sam' -> Segment Anything (sharper boxes, falls
     # back to heuristic if unavailable); anything else -> the heuristic proposer.
     # Body may override per-run so a one-off SAM run doesn't require a settings
@@ -9989,7 +9916,7 @@ def discover_objects():
         filenames = [rp for (rp, w, h) in rows
                      if not (w and h) or min(w, h) >= og.MIN_IMAGE_PX]
     depth_model = (state.get("depth_model") or "").strip() or None
-    cnn_model = (state.get("grouping_cnn") or "").strip() or None
+    cnn_model = (modules.broker.variant("embed").get("size") or None)
     max_regions = int(body.get("max_regions", 40))
     # Select the proposal backend before the cache signature is computed, so a
     # heuristic<->SAM switch invalidates cached embeddings instead of mixing
@@ -10520,8 +10447,6 @@ def api_segment():
     ([] = every class the model knows). Returns regions with mask_svg attached;
     the client adds them to the canvas and autosaves (same flow as OCR/pose).
     """
-    if seg_runtime is None or seg_models is None:
-        return jsonify({"success": False, "error": "Segmentation unavailable."})
     fn = request.json.get("filename", "")
     fp = get_safe_path(MEDIA_DIR, fn)
     if not fp or not os.path.exists(fp):
@@ -10529,39 +10454,19 @@ def api_segment():
     img = read_jxl(fp)
     if img is None:
         return jsonify({"success": False, "error": "Decode failed."})
-    model_id = state.get("bg_seg_model") or seg_models.YOLO_SEG_DEFAULT
-    if not seg_models.weights_present(model_id):
-        state["status_text"] = "Downloading segmentation model…"
-    sel = request.json.get("classes")
-    if sel is None:
-        sel = modules.broker.variant("segment").get("classes") or []
-    try:
-        cids = seg_models.wanted_class_ids(model_id, sel)
-    except Exception:
-        cids = None
     state["status_text"] = "Segmenting…"
     try:
-        insts = seg_runtime.segment_background(
-            _to_bgr(img), model_id=model_id, class_ids=cids) or []
+        regions = _segment_image(_to_bgr(img), request.json.get("classes"))
+    except modules.model_broker.NoProviderError as e:
+        state["status_text"] = "Ready."
+        return jsonify({"success": False, "error": f"Segmentation unavailable: {e}"})
     except Exception as e:
         state["status_text"] = "Ready."
         return jsonify({"success": False, "error": f"Segment failed: {e}"})
     state["status_text"] = "Ready."
-    regions = []
-    for inst in insts:
-        if not inst.get("mask_svg"):
-            continue
-        regions.append({
-            "class_name": inst.get("class_name", "object"),
-            "cx": inst["cx"], "cy": inst["cy"], "w": inst["w"], "h": inst["h"],
-            "confirmed": False, "mask_svg": inst["mask_svg"],
-            "score": inst.get("score")})
-    note = ""
-    if not regions:
-        note = ("No objects segmented." if seg_models.weights_present(model_id)
-                else "Model not downloaded yet, or no objects found.")
-    return jsonify({"success": True, "regions": regions, "model": model_id,
-                    "count": len(regions), "note": note})
+    return jsonify({"success": True, "regions": regions,
+                    "model": modules.broker.selected_id("segment"),
+                    "count": len(regions), "note": "" if regions else "No objects segmented."})
 
 @app.route("/api/auto_tag", methods=["POST"])
 @_auth.require_feature("ai.autotag", level="write")

@@ -298,7 +298,6 @@ function populateSettingsForm(s){
       _set('cfg_apikey', s.oai_key||'');
       _set('cfg_model', s.oai_model||'');
       _set('cfg_embed_model', s.oai_embed_model||'');
-      loadSegModels(s.sam_model,s.bg_seg_model);
       // faces / people
       const _fb=document.getElementById('cfg_face_bg');
       if(_fb) _fb.checked=!!s.face_bg_enabled;

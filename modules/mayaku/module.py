@@ -215,7 +215,8 @@ def register(host):
     def _loader(cap):
         # The handle runs the model; the transform normalises. conf /
         # keep_classes ride through kwargs like the YOLO provider's.
-        return lambda: (lambda img, *a, **k: _run(_source(cap), img, cap))
+        # resolve the pick at bind time (inside request()'s role context)
+        return lambda: (lambda src: (lambda img, *a, **k: _run(src, img, cap)))(_source(cap))
 
     def _weights_opts(cap):
         def opts():
@@ -230,6 +231,9 @@ def register(host):
         host.add_config_key(key, default="")
         host.provide_model(
             cap, "mayaku", label="Mayaku", family="Mayaku", sizes=_SIZES,
+            speed="balanced",
+            note="ConvNeXt + UniQuery head, Objects365-pretrained (365 classes vs "
+                 "COCO's 80). Slower than YOLO; better on long-tail objects.",
             types=[{"value": "objects365", "label": "Objects365 head"}]
                   if cap != "pose" else [{"value": "body", "label": "Body · 17 pts"}],
             classes=(lambda c=cap: list(_predictor(_source(c), c).class_names or []))

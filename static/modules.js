@@ -106,6 +106,7 @@
   // then the selected provider's own widgets. A select with < 2 choices is
   // disabled (greyed). Core only renders what /api/models reports — it has no
   // idea what the providers are.
+const SPEED_BADGE = { fast: "⚡", balanced: "⚖", accurate: "🎯" };
   const SEL = "w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white " +
               "disabled:opacity-40 disabled:cursor-not-allowed";
   function _select(opts, value, onChange, title) {
@@ -160,19 +161,35 @@
       grid.className = "grid grid-cols-3 gap-x-4 gap-y-2";
       const pick = (patch) => _post("/api/models/select",
         { capability: c.id, provider: p.id, size: v.size, type: v.type,
-          background: v.background, classes: v.classes || [], ...patch })
+          background: v.background, classes: v.classes || [], bg: c.bg || null,
+          conf: v.conf, ...patch })
         .then(buildModelPicker);
       grid.appendChild(_cell("Family", _select(
         provs.map((x) => ({ value: x.id, title: x.available ? "" : x.reason,
-          label: x.label + (x.family && x.family !== x.label ? ` (${x.family})` : "")
+          label: (SPEED_BADGE[x.speed] ? SPEED_BADGE[x.speed] + " " : "") + x.label
+                 + (x.family && x.family !== x.label ? ` (${x.family})` : "")
+                 + (x.prompted ? " · prompted" : "")
                  + (x.available ? "" : " · unavailable") })),
         p.id, (id) => pick({ provider: id, size: null, type: null }))));
       grid.appendChild(_cell("Size", _select(
         (p.sizes || []).map((s) => ({ value: s, label: s })), v.size, (s) => pick({ size: s }))));
       grid.appendChild(_cell("Type", _select(
         (p.types || []), v.type, (t) => pick({ type: t }))));
+      if (p.supports_conf) {
+        const n = document.createElement("input");
+        n.type = "number"; n.min = "0"; n.max = "1"; n.step = "0.05";
+        n.value = (v.conf != null ? v.conf : 0.25);
+        n.className = "w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white";
+        n.addEventListener("change", () => pick({ conf: parseFloat(n.value) }));
+        grid.appendChild(_cell("Min confidence", n));
+      }
       for (const f of p.settings || []) grid.appendChild(fieldEl(f));
       row.appendChild(grid);
+      if (p.note) {
+        const nt = document.createElement("p");
+        nt.className = "text-[10px] text-gray-500 mt-1"; nt.textContent = p.note;
+        row.appendChild(nt);
+      }
       if (c.background) row.appendChild(backgroundBlock(c, p, v, pick));
       if (!p.available && p.reason) {
         const n = document.createElement("p");
@@ -208,6 +225,7 @@
       tog.type = "button"; tog.className = "text-[10px] text-cyan-400 hover:text-cyan-300";
       const sel = new Set(v.classes || []);
       tog.textContent = sel.size ? `classes (${sel.size} ticked)` : "classes (all)";
+      tog.title = "Classes the background model was trained on; the whitelist filters the unprompted run.";
       let loaded = false;
       tog.addEventListener("click", async () => {
         const hidden = box.classList.toggle("hidden");
@@ -231,7 +249,8 @@
             if (i.checked) sel.add(name); else sel.delete(name);
             tog.textContent = sel.size ? `classes (${sel.size} ticked)` : "classes (all)";
             _post("/api/models/select", { capability: c.id, provider: p.id, size: v.size,
-              type: v.type, background: v.background, classes: [...sel] });
+              type: v.type, background: v.background, classes: [...sel], bg: c.bg || null,
+              conf: v.conf });
           });
           l.appendChild(i); l.appendChild(document.createTextNode(" " + name));
           box.appendChild(l);
@@ -240,6 +259,29 @@
       head.appendChild(tog);
     }
     wrap.appendChild(head); wrap.appendChild(box); wrap.appendChild(note);
+    // Background may run a different (usually cheaper) model than the button.
+    if (v.background) {
+      // background is non-interactive: only unprompted models qualify
+      const provs = (c.providers || []).filter((x) => !x.prompted);
+      const bp = c.bg ? provs.find((x) => x.id === c.bg.provider) : null;
+      const grid = document.createElement("div");
+      grid.className = "grid grid-cols-3 gap-x-4 gap-y-2 mt-2";
+      const pickBg = (patch) => {
+        const cur = c.bg || {};
+        const next = { ...cur, ...patch };
+        return pick({ bg: next.provider ? next : null });
+      };
+      grid.appendChild(_cell("Background family", _select(
+        [{ value: "", label: "Same as foreground" }].concat(
+          provs.map((x) => ({ value: x.id, label: x.label + (x.available ? "" : " · unavailable") }))),
+        bp ? bp.id : "", (id) => pickBg({ provider: id, size: null, type: null }))));
+      grid.appendChild(_cell("Background size", _select(
+        bp ? (bp.sizes || []).map((s) => ({ value: s, label: s })) : [],
+        c.bg && c.bg.size, (s) => pickBg({ size: s }))));
+      grid.appendChild(_cell("Background type", _select(
+        bp ? (bp.types || []) : [], c.bg && c.bg.type, (t) => pickBg({ type: t }))));
+      wrap.appendChild(grid);
+    }
     return wrap;
   }
   window.buildModelPicker = buildModelPicker;
