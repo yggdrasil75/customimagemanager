@@ -11,7 +11,6 @@ let selectedRegionIdx=-1;
 let highlightRegionBox=null;
 let highlightRegionFile=null;
 let currentPage=0, totalFiles=0, currentSearch='', currentFolder='', allFolders=[];
-let imageFilter=null;  // active pipeline result set shown in the grid, or null
 let currentTags=[], currentIqa=null, currentIqaManual=false;
 let PAGE=200;
 let _brandClearLogo = false;
@@ -412,9 +411,6 @@ document.addEventListener('keydown', async e=>{
 
   // Escape: clear selection or close popout
   if(e.key==='Escape'){
-    if(!document.getElementById('pipeline_modal').classList.contains('hidden')){
-      closePipeline(); return;
-    }
     if(!document.getElementById('popout_modal').classList.contains('hidden')){
       closePopout(); return;
     }

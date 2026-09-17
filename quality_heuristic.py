@@ -7,7 +7,7 @@ selected via the broker) plus cheap structural stats, decide whether an
 image is junk and map quality to stars.
 
 This is the ~90 lines that genuinely belong in core: the pipeline
-(discover_stages) and the rating flow both need a shared "is this image
+the rating flow needs a shared "is this image
 bad, and how many stars" verdict, independent of which model scored it.
 All model/scoring code moved into the brisque and pyiqa provider modules;
 nothing here imports torch, pyiqa, or a model registry.

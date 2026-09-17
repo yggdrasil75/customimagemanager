@@ -302,7 +302,78 @@ def register(host):
         return jsonify({"success": True, "scored": scored, "total": total})
 
     auth = m._auth
+    def quality_sweep():
+        """Score image quality with the picked IQA model and flag junk for
+        review (files.flagged_delete / flag_reason), so it shows in the review
+        queue. Was a core route; lives here with the rest of IQA.
+
+        Body:
+          filenames     optional list; default = whole library
+          brisque_bad   optional threshold (higher = stricter; legacy 0..100 scale)
+          quality_bad   optional normalised threshold 0..1 (preferred)
+          flag_junk     write flags to files table (default True)
+          dry_run       if True, score but don't write flags (default False)
+        """
+        import quality_heuristic
+        try:
+            detect = host.request_model("iqa")
+        except NoProviderError as e:
+            return jsonify({"success": False, "error": f"No IQA model available: {e.reason}"})
+        body = request.json or {}
+        db = m._db()
+        filenames = body.get("filenames") or []
+        if not filenames:
+            rows = db.execute("SELECT rel_path, width, height FROM files "
+                              "WHERE (comic_folder IS NULL OR comic_folder='')").fetchall()
+            filenames = sorted(r["rel_path"] for r in rows
+                               if not (r["width"] and r["height"])
+                               or min(r["width"], r["height"]) >= m.og.MIN_IMAGE_PX)
+        if not filenames:
+            return jsonify({"success": False, "error": "No eligible images found."})
+        bb = body.get("brisque_bad"); qb = body.get("quality_bad")
+        write_flags = bool(body.get("flag_junk", True)) and not body.get("dry_run")
+        total = len(filenames); m.state["discover_cancel"] = False
+        bad, scored = [], 0
+        for i, fn in enumerate(filenames):
+            if m.state.get("discover_cancel"):
+                break
+            fp = m.get_safe_path(m.MEDIA_DIR, fn)
+            if not fp or not m.os.path.exists(fp):
+                continue
+            try:
+                img = m.read_jxl(fp)
+                img = m.og.downscale_to_cap(m._to_bgr(img)) if img is not None else None
+            except Exception:
+                img = None
+            if img is None:
+                continue
+            try:
+                sc = detect(img)
+                r = quality_heuristic.assess(img, sc.get("quality"), raw=sc.get("raw"),
+                                             model=_selected_iqa_id(),
+                                             quality_bad=float(qb) if qb is not None else None,
+                                             brisque_bad=float(bb) if bb is not None else None)
+            except Exception as e:
+                host.logger.error(f"quality sweep {fn}: {e}")
+                continue
+            scored += 1
+            if r.get("bad"):
+                bad.append(fn)
+                if write_flags:
+                    db.execute("UPDATE files SET flagged_delete=1, flag_reason=? WHERE rel_path=?",
+                               (r.get("reason") or "low quality", fn))
+            if scored % 25 == 0:
+                db.commit()
+            m.state["status_text"] = f"[quality] {i+1}/{total}"
+        db.commit()
+        m.state["status_text"] = "Quality sweep complete."
+        return jsonify({"success": True, "scored": scored, "total": total,
+                        "flagged": sorted(bad)[:500], "wrote_flags": write_flags})
+
     host.add_route("/api/iqa_models", api_iqa_models)
+    host.add_route("/api/quality_sweep",
+                   auth.require_feature("ai.iqa", level="write")(quality_sweep),
+                   methods=["POST"])
     host.add_route("/api/iqa_set", auth.require_feature("ai.iqa", level="write")(iqa_set),
                    methods=["POST"])
     host.add_route("/api/iqa_scan", auth.require_feature("ai.iqa", level="write")(iqa_scan),

@@ -22,7 +22,6 @@ import json
 import random
 import numpy as np
 
-import image_index as ii
 
 
 # ── schema ────────────────────────────────────────────────────────────────────
@@ -337,15 +336,23 @@ def select_random(db, n, exclude, kinds=None):
     return random.sample(pool, n)
 
 
-def select_diverse(db, n, exclude, kinds=None):
+def select_diverse(db, n, exclude, kinds=None, iter_emb=None):
     """Greedy farthest-point sampling over whole-image embeddings.
 
     Picks a random seed, then repeatedly adds the image whose nearest already-
     picked image is farthest away (max-min cosine distance). Spreads picks across
     embedding space. Falls back to random for any images that have no embedding.
+
+    iter_emb -- iter(db, dim) -> (names, matrix) batches of whole-image
+                embeddings; the caller passes the embedding module's service
+                function. None (module off) degrades to random.
     """
-    ii.ensure_tables(db)
-    dim_row = db.execute("SELECT dim FROM image_embeddings LIMIT 1").fetchone()
+    dim_row = None
+    if iter_emb:
+        try:
+            dim_row = db.execute("SELECT dim FROM image_embeddings LIMIT 1").fetchone()
+        except Exception:
+            dim_row = None
     if not dim_row:
         # no embeddings computed — nothing to be diverse over
         return select_random(db, n, exclude, kinds)
@@ -357,7 +364,7 @@ def select_diverse(db, n, exclude, kinds=None):
                    db.execute("SELECT rel_path FROM files" + where, params).fetchall()}
 
     names, mats = [], []
-    for nm, mat in ii._iter_embeddings_ordered(db, dim):
+    for nm, mat in iter_emb(db, dim):
         for i, rp in enumerate(nm):
             if rp in exclude:
                 continue
@@ -389,7 +396,7 @@ STRATEGIES = {"recent": select_recent, "random": select_random, "diverse": selec
 
 
 def select(db, strategy, n, exclude_all_sets=True, set_name=None, extra_exclude=None,
-           kinds=None):
+           kinds=None, iter_emb=None):
     """Return a list of rel_paths chosen by strategy.
 
     exclude_all_sets -- when True, skip any image that already lives in ANY set,
@@ -399,6 +406,8 @@ def select(db, strategy, n, exclude_all_sets=True, set_name=None, extra_exclude=
                         own members are excluded (used for topping up one set).
     kinds            -- allowed media_kind values ({'image'} or {'image','video'});
                         None means no filter. Audio is never trainable by YOLO.
+    iter_emb         -- embedding iterator for the 'diverse' strategy (see
+                        select_diverse); ignored by the others.
     """
     ensure_tables(db)
     n = max(0, int(n))
@@ -411,6 +420,8 @@ def select(db, strategy, n, exclude_all_sets=True, set_name=None, extra_exclude=
     if extra_exclude:
         exclude |= set(extra_exclude)
     fn = STRATEGIES.get(strategy, select_random)
+    if fn is select_diverse:
+        return fn(db, n, exclude, kinds, iter_emb=iter_emb)
     return fn(db, n, exclude, kinds)
 
 

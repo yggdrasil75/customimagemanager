@@ -65,15 +65,4 @@ def register(host):
         text_mode="vlm", sizes=_SIZES, types=_TYPES, settings=widget, speed="balanced",
         note="Meta's promptable masker: best mask quality from a box, and segment-"
              "everything with no prompt. No text head — text goes via the vision LLM.")
-
-    # The tag-driven region proposer uses a SAM checkpoint too; keep it on the
-    # SAM 2 pick (it can't use SAM 3's semantic predictor).
-    def _sync_proposals(*_):
-        try:
-            import sam_proposals
-            sam_proposals.set_checkpoint(_weights("segment.box"))
-        except Exception:
-            pass
-    host.broker.on_select(_sync_proposals)
-    _sync_proposals()
     host.logger.info("sam2 module: registered segment.box / segment")

@@ -32,9 +32,6 @@ function onFolderChange(){
   const sel=document.getElementById('folder_select');
   if(!sel) return;
   currentFolder=sel.value;
-  imageFilter=null;
-  const fb=document.getElementById('filter_banner');
-  if(fb){ fb.classList.add('hidden'); fb.classList.remove('flex'); }
   currentPage=0; loadGallery();
 }
 
@@ -45,9 +42,6 @@ document.getElementById('search_input').addEventListener('input',e=>{
   clearTimeout(searchDebounce);
   searchDebounce=setTimeout(()=>{
     currentSearch=e.target.value.trim(); currentPage=0;
-    if(imageFilter){ imageFilter=null;
-      document.getElementById('filter_banner').classList.add('hidden');
-      document.getElementById('filter_banner').classList.remove('flex'); }
     loadGallery();
   },300);
 });
@@ -203,7 +197,6 @@ function syncUrl(){
 }
 
 async function loadGallery(){
-  if(imageFilter){ renderImageFilter(); return; }
   syncUrl();
   const params=new URLSearchParams({page:currentPage,q:currentSearch,folder:currentFolder});
   // When the gallery modal was opened from an album, scope the listing to that
@@ -226,36 +219,6 @@ async function loadGallery(){
 }
 
 // Render a fixed result set (cluster members / similar / outliers) in the grid.
-function renderImageFilter(){
-  const f=imageFilter; if(!f) return;
-  document.getElementById('filter_banner').classList.remove('hidden');
-  document.getElementById('filter_banner').classList.add('flex');
-  document.getElementById('filter_banner_text').textContent=f.text;
-  renderGallery(f.files);
-  document.getElementById('showing_info').innerText=`${f.files.length} result(s)`;
-  document.getElementById('page_info').innerText='Filtered';
-  document.getElementById('btn_prev').disabled=true;
-  document.getElementById('btn_next').disabled=true;
-  document.getElementById('gallery_scroll').scrollTop=0;
-}
-function clearImageFilter(){
-  imageFilter=null;
-  document.getElementById('filter_banner').classList.add('hidden');
-  document.getElementById('filter_banner').classList.remove('flex');
-  loadGallery();
-}
-// Fetch a pipeline result set and show it in the gallery.
-async function showImageFilter(body, text){
-  try{
-    const d=await fetch('/api/img_search',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(body)}).then(r=>r.json());
-    if(!d.success){ alert('Search failed: '+(d.error||'')); return; }
-    imageFilter={text:`${text} — ${d.count} image(s)`, files:d.files||[]};
-    closePipeline();
-    renderImageFilter();
-  }catch(e){ alert('Network error during search.'); }
-}
-
 function renderGallery(files){
   // Books and comics are not part of the image multi-select / bulk-op set:
   // "confirm all boxes" or "run pose" over an epub is meaningless, and letting
