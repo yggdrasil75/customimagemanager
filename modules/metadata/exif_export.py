@@ -30,7 +30,10 @@ try:
 except Exception:                      # pragma: no cover - env without pyexiv2
     pyexiv2 = None
 
-import exif_fields as efields
+from . import exif_fields as efields
+import shutil
+import subprocess
+import tempfile
 
 log = logging.getLogger("exif_export")
 
@@ -298,7 +301,6 @@ def _repackage_jxl_bare(path):
     (re)write the Exif it cares about — and it only ever runs as a last-resort
     fallback for legacy containered files.
     """
-    import shutil, subprocess, tempfile
     if shutil.which("cjxl") is None:
         log.warning("cannot repackage JXL: cjxl not found on PATH")
         return False

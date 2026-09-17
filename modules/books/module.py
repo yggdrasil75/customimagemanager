@@ -9,13 +9,17 @@ comment in manager even said so); this wraps it as a real module. It:
   - serves books.js + reader.js as assets,
   - registers the 'books' auth feature (read=view, write=delete),
   - calls book_routes.register(app, ctx) with a ctx built from the host,
-  - exposes reconcile / sha_exists / index_one / rename_book as the
-    'books' service so core's upload/rename/reconcile paths call it.
+  - subscribes to core events (library.reconcile, upload.duplicate_check,
+    upload.stored, file.renamed) so the shelf tracks the library without
+    core knowing books exist.
 
 book_index.py is now part of this module (modules/books/book_index.py) and
 aliased as `book_index` via modules/__init__.py for upload.py / media_types.py
 / comic_pages.py compatibility.
 """
+
+from . import book_routes
+from . import book_index as bi
 
 MANIFEST = {
     "id":          "books",
@@ -31,13 +35,8 @@ MANIFEST = {
 
 
 def register(host):
-    from flask import g
-    from . import book_routes
-    from . import book_index as bi
-
     # Teach core what a "book" is. Without this the app is a pure image gallery
     # that never sees an epub/cbz. The ext lists + mime map live with the module.
-    import media_types as mt
     _BOOK_MIME = {
         '.epub': 'application/epub+zip', '.pdf': 'application/pdf',
         '.mobi': 'application/x-mobipocket-ebook',
@@ -51,7 +50,7 @@ def register(host):
         '.cb7': 'application/x-cb7', '.cbt': 'application/x-cbt',
         '.txt': 'text/plain; charset=utf-8', '.html': 'text/html; charset=utf-8',
     }
-    mt.register_media_type(
+    host.register_media_type(
         "book", exts=bi.BOOK_EXTS, unambiguous_exts=bi.UNAMBIGUOUS_BOOK_EXTS,
         uploadable_exts=bi.UPLOADABLE_BOOK_EXTS, mime_map=_BOOK_MIME)
 
@@ -77,36 +76,40 @@ def register(host):
     # from the host + a couple of core helpers reached lazily.
     # Embedding functions are now provided by the embedding module's service.
     emb_svc = host.get_service("embedding") or {}
-    import manager as m
+    core = host.core
     book_routes.register(host.app, {
         "db":            host.db,
         "media_dir":     host.media_dir,
         "safe_path":     host.safe_path,
         "logger":        host.logger,
+        "auth":          core.auth,
+        "media":         host.media,
+        "folder_scope_clause": core.folder_scope_clause,
+        "table_exists":  core.table_exists,
+        "norm_date_literal": core.norm_date_literal,
         "embed_text":    emb_svc.get("oai_embed_text"),
         "embed_enabled": emb_svc.get("oai_embed_enabled"),
         "embed_tag":     emb_svc.get("oai_embed_tag"),
-        "llm_request":   m._llm_request,
-        "current_user":  lambda: (getattr(g, "user", None) or {}).get("username", ""),
+        "llm_request":   core.llm_request,
+        "current_user":  host.current_user,
     })
 
-    # Search: contribute book + comic results to the gallery search. (The query
-    # fns still live in manager for now; wrap them so core's search loop is
-    # module-driven and drops cleanly when books is disabled.)
-    host.register_search_provider(
-        lambda t, f, s: m._query_books(t, f, s))
-    host.register_search_provider(
-        lambda t, f, s: m._query_comics(t, f, s))
+    # Search: contribute book + comic results to the gallery search.
+    host.register_search_provider(book_routes.query_books)
+    host.register_search_provider(book_routes.query_comics)
 
-    # Service: core's upload/rename/reconcile paths call these.
-    host.provide_service("books", {
-        "reconcile":   book_routes.reconcile,
-        "sha_exists":  book_routes.sha_exists,
-        "index_one":   book_routes.index_one,
-        "rename_book": book_routes.rename_book,
-    })
+    # Core events: the library scan, uploads and renames don't know about
+    # books; they emit, and this module keeps the shelf in step.
+    mt = host.media
+    host.on("library.reconcile", lambda: book_routes.reconcile())
+    host.on("upload.duplicate_check",
+            lambda sha, filename: book_routes.sha_exists(sha) if mt.is_book(filename) else None)
+    host.on("upload.stored",
+            lambda rel_path, filename: book_routes.index_one(rel_path) if mt.is_book(filename) else None)
+    host.on("file.renamed",
+            lambda old_rel, new_rel: book_routes.rename_book(old_rel, new_rel) if mt.is_book(old_rel) else None)
 
     # Background indexer, once the server is up.
     host.on_startup(book_routes.start_background)
 
-    host.logger.info("books module: tab + reader + routes + service registered")
+    host.logger.info("books module: tab + reader + routes + events registered")

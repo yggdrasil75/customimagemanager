@@ -36,8 +36,8 @@ from typing import Optional
 # alongside the legacy IIM records, so the IPTC schema lives in one place. We
 # build the XMPField lists from that module's factories (no import cycle: it
 # doesn't import us — we pass our XMPField class and TYPE_* constants in).
-import iptc_fields
-import mwg_fields
+from . import iptc_fields
+from . import mwg_fields
 
 # ── Data / value types ──────────────────────────────────────────────────────
 # Short strings so the frontend can choose an input widget per type. XMP adds a

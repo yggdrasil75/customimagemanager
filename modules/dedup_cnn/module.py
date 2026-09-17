@@ -37,6 +37,12 @@ def register(host):
         return
 
     models_dir = os.path.abspath(os.path.join(host.media_dir, "..", "models"))
+    # Siamese dup-CNN channel multiplier (0.25..2.0); this module's own key.
+    host.add_config_key("dup_cnn_width", default=1.0,
+                        validate=lambda v: max(0.25, min(2.0, float(v))))
+    host.add_settings_field(key="dup_cnn_width", label="Dup-CNN width multiplier",
+                            kind="number", pane="general",
+                            help="0.25..2.0 - channel multiplier for the duplicate-detection CNN.")
     width = host.config.get("dup_cnn_width", 1.0)
     img_path = os.path.join(models_dir, "dup_cnn.pt")
     vid_path = os.path.join(models_dir, "dup_cnn_video.pt")
@@ -73,10 +79,9 @@ def register(host):
 
     # Retrain service (best-effort; core feedback endpoint calls it).
     def _retrain():
-        import manager as m
         ok = False
         try:
-            rows = m._db().execute("SELECT feat,label FROM dup_samples").fetchall()
+            rows = host.db().execute("SELECT feat,label FROM dup_samples").fetchall()
             samples = [(r[0], r[1]) for r in rows]
             if img_cnn and img_cnn.available and img_cnn.fit(samples):
                 img_cnn.save(img_path); ok = True

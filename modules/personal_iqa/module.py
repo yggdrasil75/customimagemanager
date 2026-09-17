@@ -24,10 +24,16 @@ Capacity tier follows the rating count; growing vs rebuilding is a setting.
 """
 import json, os, random, threading, time, zlib
 
-from flask import jsonify, request
+from flask import jsonify
+
+from modules.model_broker import NoProviderError
 from optional_deps import optional_import
 
 torch, _HAVE_TORCH = optional_import("torch")
+AVAILABLE = _HAVE_TORCH
+UNAVAILABLE_REASON = "torch not installed"
+if _HAVE_TORCH:
+    from . import net
 np, _ = optional_import("numpy")
 import model_registry
 
@@ -72,8 +78,7 @@ def _norm_pose(kps):
 
 
 def register(host):
-    from modules.model_broker import NoProviderError
-    from . import net
+    core = host.core
 
     host.add_asset("personal_iqa.js")
     host.add_settings_tab("personal_iqa", "Personal IQA", icon="🎯")
@@ -97,18 +102,17 @@ def register(host):
 
     # ── expensive, image-only parts (cached on mtime+key) ────────────────
     def _encode(img):
-        import manager as m
         enc = _cap("embed", host.config.get("personal_iqa_encoder"))
         embed, tiles = [], []
         if enc:
             try:
-                v = enc(m.og.downscale_to_cap(img))
+                v = enc(core.object_grouping.downscale_to_cap(img))
                 embed = [float(x) for x in v] if v is not None else []
                 H, W = img.shape[:2]
                 for gy in range(GRID):
                     for gx in range(GRID):
                         t = img[gy * H // GRID:(gy + 1) * H // GRID, gx * W // GRID:(gx + 1) * W // GRID]
-                        v = enc(m.og.downscale_to_cap(t))
+                        v = enc(core.object_grouping.downscale_to_cap(t))
                         if v is not None:
                             tiles.append([float(x) for x in v])
             except Exception as e:
@@ -123,8 +127,7 @@ def register(host):
         return embed, tiles, base_q
 
     def _decode(rel_path):
-        import manager as m
-        return m._to_bgr(m.read_jxl(m.get_safe_path(m.MEDIA_DIR, rel_path)))
+        return core.to_bgr(core.read_image(host.safe_path(host.media_dir, rel_path)))
 
     def _cached(db, rel_path, mtime):
         """Encoder/base outputs for one file; on miss decodes at FULL resolution, computes and stores."""
@@ -141,20 +144,18 @@ def register(host):
 
     # ── live parts (tags / faces / pose from where the app stores them) ──
     def _live(db, rel_path, img=None):
-        import manager as m
-        import faces
         out = {"face": [], "pose17": [], "pose133": [], "tags": net.hash_tags([])}
-        fp = m.get_safe_path(m.MEDIA_DIR, rel_path) if rel_path else None
+        fp = host.safe_path(host.media_dir, rel_path) if rel_path else None
         pose = None
         if rel_path:
             r = db.execute("SELECT tags FROM files WHERE rel_path=?", (rel_path,)).fetchone()
             if r and r["tags"]:
-                out["tags"] = net.hash_tags([m.tag_name(t) for t in json.loads(r["tags"])])
+                out["tags"] = net.hash_tags([core.tag_name(t) for t in json.loads(r["tags"])])
             for r in db.execute("SELECT shape FROM face_regions WHERE rel_path=? AND shape IS NOT NULL "
                                 "AND COALESCE(not_face,0)=0", (rel_path,)):
                 out["face"].append(np.frombuffer(r["shape"], np.float32).tolist())
             try:
-                pose = m.read_metadata(fp).get("pose")
+                pose = core.read_metadata(fp).get("pose")
             except Exception:
                 pass
         if img is None and rel_path and (not out["face"] or not pose):
@@ -163,11 +164,11 @@ def register(host):
             except Exception:
                 pass
         if img is not None:
-            small = m.og.downscale_to_cap(img)
+            small = core.object_grouping.downscale_to_cap(img)
             if not out["face"] and (fn := _cap("detect.faces")):        # no face scan yet: compute, don't store
                 try:
                     if boxes := fn(small):
-                        _, _, shapes = faces.embed_faces(small, boxes, want_shape=True)
+                        _, _, shapes = core.embed_faces(small, boxes, want_shape=True)
                         out["face"] = [s.tolist() for s in shapes if s is not None]
                 except Exception:
                     pass
@@ -232,8 +233,7 @@ def register(host):
                 "base_spearman": net.spearman([b[0] for b in base], [b[1] for b in base]) if base else 0.0}
 
     def _train():
-        import manager as m
-        db = m._db()
+        db = core.db()
         try:
             rows = db.execute(
                 "SELECT r.rel_path, r.user_stars, f.mtime, c.trained, c.mtime cm, c.key "
@@ -302,7 +302,7 @@ def register(host):
             host.logger.error(f"personal_iqa train: {e}")
             state["text"] = f"Personal IQA: training failed — {e}"
         finally:
-            m._db_close(); state["busy"] = False
+            core.db_close(); state["busy"] = False
 
     # ── iqa provider ─────────────────────────────────────────────────────
     model_registry.register(_KEY, _load_model, cost_mb=400, gpu=model_registry.on_gpu())
@@ -345,7 +345,6 @@ def register(host):
         cost_mb=400, gpu=model_registry.on_gpu())
 
     # ── endpoints ────────────────────────────────────────────────────────
-    import manager as mgr
     def api_train():
         if not _HAVE_TORCH:
             return jsonify({"success": False, "error": "torch not installed"})
@@ -366,5 +365,5 @@ def register(host):
 
     host.add_route("/api/personal_iqa/status", api_status)
     host.add_route("/api/personal_iqa/train",
-                   mgr._auth.require_feature("ai.iqa", level="write")(api_train), methods=["POST"])
+                   core.auth.require_feature("ai.iqa", level="write")(api_train), methods=["POST"])
     host.logger.info("personal_iqa: registered iqa provider 'personal'")

@@ -28,9 +28,6 @@ MANIFEST = {
 
 
 def register(host):
-    if not _HAVE_SAM:
-        host.logger.info("mobilesam module: ultralytics not installed; registering nothing")
-        return
     host.provide_service("sam_common", _sc_local, priority=_sc_local.VERSION)
 
     class _SC:  # newest sam_common copy across SAM modules, resolved per call

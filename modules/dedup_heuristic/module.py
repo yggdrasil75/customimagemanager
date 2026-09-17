@@ -15,6 +15,7 @@ import os
 import json
 
 from . import dup_heuristics
+import numpy as np
 
 MANIFEST = {
     "id":          "dedup_heuristic",
@@ -45,8 +46,7 @@ def register(host):
         if ctx.get("is_video"):
             rf, of = ctx.get("ref_frames"), ctx.get("other_frames")
             if rf and of:
-                import manager as m
-                a = m._to_bgr(rf[len(rf)//2]); b = m._to_bgr(of[len(of)//2])
+                a = host.core.to_bgr(rf[len(rf)//2]); b = host.core.to_bgr(of[len(of)//2])
         if a is None or b is None:
             return None
         try:
@@ -62,12 +62,10 @@ def register(host):
 
     # Training service: core feedback endpoints add samples + call retrain.
     def _retrain(min_samples=8):
-        import manager as m
         try:
-            rows = m._db().execute("SELECT feat,label FROM dup_samples").fetchall()
+            rows = host.db().execute("SELECT feat,label FROM dup_samples").fetchall()
             if len(rows) < min_samples:
                 return False
-            import numpy as np
             X = np.array([json.loads(r[0]) for r in rows], dtype=np.float64)
             y = np.array([r[1] for r in rows], dtype=np.float64)
             if model.fit(X, y):

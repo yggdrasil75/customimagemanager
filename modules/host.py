@@ -39,6 +39,12 @@ class Host:
         host.media_dir      absolute path to the media library root
         host.safe_path      get_safe_path(root, rel) path-traversal guard
         host.save_config    persist host.config to disk
+        host.core           namespace of core helpers the core hands over
+                            (read_image, to_bgr, resolve_media, read/write_
+                            metadata, auth, llm_call, ...). Modules never import
+                            the app; the app populates this before register().
+        host.media          the media-type registry (kind(path), is_video, ...)
+                            plus host.register_media_type() for new kinds.
 
     Contribution helpers (recorded, wired by manager.py):
         host.add_route(rule, view, **opts)          register a Flask route
@@ -51,7 +57,7 @@ class Host:
 
     def __init__(self, *, app, db, config, logger, thread_manager,
                  media_dir, safe_path, save_config, broker=None,
-                 config_registry=None):
+                 config_registry=None, core=None, media=None):
         # ── raw handles ──────────────────────────────────────────────────
         self.app = app
         self.db = db
@@ -67,6 +73,9 @@ class Host:
         # Config registry: declared settings (defaults, validation, change
         # handlers, persistence). Modules own their settings through it.
         self.config_registry = config_registry
+        # Core helper namespace + media-type registry (see class docstring).
+        self.core = core
+        self.media = media
 
         # ── recorded contributions (read back by manager.py after load) ──
         # asset  = {"module_id","filename","kind"}  kind in {"js","css"}
@@ -75,6 +84,7 @@ class Host:
         self.settings_tabs = []
         # startup hook = zero-arg callable, run inside __main__ after serve setup
         self.startup_hooks = []
+        self.event_hooks = {}         # event name -> [fn(**kw)]
         # pipeline stages a module contributes: name -> {"fn", "label",
         # "editor"}. manager spreads the fns into run_pipeline and exposes the
         # list so the pipeline editor only offers stages whose module is on.
@@ -247,8 +257,7 @@ class Host:
                          admin-only: {"viewer":"block","uploader":"block",
                          "custom":"block"}. Enforce with host.require_feature.
         """
-        import features
-        return features.register_feature(
+        return self.core.features.register_feature(
             key, label, section=section, section_label=section_label,
             default=default, role_defaults=role_defaults)
 
@@ -256,8 +265,7 @@ class Host:
         """The auth decorator, so a module gates its own endpoints. Enforces at
         `level` (read to view, write to modify) using the current user's
         resolved permission level for feature_key."""
-        import auth
-        return auth.require_feature(feature_key, action=action, fields=fields,
+        return self.core.auth.require_feature(feature_key, action=action, fields=fields,
                                     level=level)
 
     def register_app_modal(self, template):
@@ -464,6 +472,43 @@ class Host:
         thread manager already wired.
         """
         self.startup_hooks.append(fn)
+
+    # ── media types ──────────────────────────────────────────────────────
+    def register_media_type(self, kind, **spec):
+        """Declare a new file kind (extensions, mime, flags) with the core
+        media registry. The core then routes uploads / listings / kind()
+        for those extensions; the module never edits media_types.py."""
+        return self.media.register_media_type(kind, **spec)
+
+    def current_user(self):
+        """Username of the request's authenticated user ('' if none)."""
+        from_g = getattr(self.core, "current_user", None)
+        return from_g() if from_g else ""
+
+    # ── core events ──────────────────────────────────────────────────────
+    def on(self, event, fn):
+        """Subscribe fn(**kw) to a core event. Core emits, modules react, and
+        the core never has to know which module cares. Current events:
+          library.reconcile            after the image index scan (no args)
+          upload.duplicate_check(sha, filename) -> existing rel_path | None
+          upload.stored(rel_path, filename)     after a file lands in the library
+          file.renamed(old_rel, new_rel)        after a rename / move
+        """
+        self.event_hooks.setdefault(event, []).append(fn)
+
+    def emit(self, event, **kw):
+        """Run every subscriber for event; returns the list of non-None results
+        (a failing subscriber is logged and skipped)."""
+        out = []
+        for fn in self.event_hooks.get(event, []):
+            try:
+                r = fn(**kw)
+            except Exception as e:
+                self.logger.error(f"event {event} handler failed: {e}")
+                continue
+            if r is not None:
+                out.append(r)
+        return out
 
     def run_startup_hooks(self):
         """Called by manager.py from __main__ after core startup."""

@@ -31,6 +31,9 @@ import json
 import shutil
 import tempfile
 
+from flask import request, jsonify
+from werkzeug.utils import secure_filename
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS fetch_queue (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,9 +126,7 @@ def register(host):
                           default="write", role_defaults={"viewer": "read"})
 
     # ── queue helpers (lazy manager import for core DB + upload ingest) ────
-    def _mgr():
-        import manager as m
-        return m
+    m = host.core
 
     def _attr(f, name, default=None):
         return f.get(name, default) if isinstance(f, dict) else getattr(f, name, default)
@@ -133,17 +134,17 @@ def register(host):
     def _update(qid, **cols):
         if not cols:
             return
-        m = _mgr(); cols["updated"] = time.time()
+        cols["updated"] = time.time()
         sets = ", ".join(f"{k}=?" for k in cols)
         vals = list(cols.values()) + [qid]
         def _upd():
-            db = m._db()
+            db = m.db()
             db.execute(f"UPDATE fetch_queue SET {sets} WHERE id=?", vals)
             db.commit()
         try:
-            m._db_retry(_upd)
+            m.db_retry(_upd)
         except Exception as e:
-            m.access_logger.error(f"fetch_queue update {qid} failed: {e}")
+            host.logger.error(f"fetch_queue update {qid} failed: {e}")
 
     # cancel flags reuse the same in-memory set pattern as the old gdl code
     _cancel = set()
@@ -152,14 +153,13 @@ def register(host):
 
     def _process(job):
         """Run the job's fetcher, streaming produced files into upload_queue."""
-        m = _mgr()
         qid, target, folder = job["id"], job["target"], job["folder"]
         fetcher = registry.get(job.get("fetcher")) or registry.for_target(target)
         if fetcher is None:
             return False, "no fetcher handles this target"
         fetch_fn = _attr(fetcher, "fetch")
         map_meta = _attr(fetcher, "map_meta")
-        os.makedirs(m._UPLOAD_SPOOL_DIR, exist_ok=True)
+        os.makedirs(m.upload_spool_dir, exist_ok=True)
         tmp = tempfile.mkdtemp(prefix="fetch-")
         downloaded = 0; now = time.time(); canceled = False
         site_seen = {"cat": ""}
@@ -169,26 +169,25 @@ def register(host):
             if not site_seen["cat"]:
                 site_seen["cat"] = (meta or {}).get("category", "")
             packet = map_meta(meta) if callable(map_meta) else dict(meta or {})
-            from werkzeug.utils import secure_filename
             orig = secure_filename(os.path.basename(media_path)) or "fetch.bin"
-            fd, spool = tempfile.mkstemp(dir=m._UPLOAD_SPOOL_DIR, prefix="up-",
+            fd, spool = tempfile.mkstemp(dir=m.upload_spool_dir, prefix="up-",
                                          suffix="-" + orig)
             os.close(fd); shutil.copyfile(media_path, spool)
             meta_json = json.dumps(packet)
             def _enq(sp=spool, on=orig, mj=meta_json):
-                db = m._db()
+                db = m.db()
                 db.execute("INSERT INTO upload_queue"
                            "(spool_path, orig_name, folder, metadata, status, created, updated) "
                            "VALUES(?,?,?,?,'pending',?,?)", (sp, on, folder, mj, now, now))
                 db.commit()
             try:
-                m._db_retry(_enq); downloaded += 1
+                m.db_retry(_enq); downloaded += 1
                 _update(qid, downloaded=downloaded)
-                m._upload_workers_wake()
+                m.upload_workers_wake()
             except Exception as e:
                 try: os.remove(spool)
                 except OSError: pass
-                m.access_logger.error(f"fetch enqueue failed for {orig}: {e}")
+                host.logger.error(f"fetch enqueue failed for {orig}: {e}")
 
         try:
             gen = fetch_fn(target, tmp, on_file=_on_file)
@@ -205,7 +204,7 @@ def register(host):
             _update(qid, downloaded=downloaded, total=downloaded, site=site_seen["cat"])
             return True, ""
         except Exception as e:
-            m.access_logger.error(f"fetch job {qid} crashed: {e}", exc_info=True)
+            host.logger.error(f"fetch job {qid} crashed: {e}", exc_info=True)
             return False, str(e)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -224,9 +223,9 @@ def register(host):
 
     def _claim():
         """Peek pending rows; claim the first whose target_key bucket is free."""
-        m = _mgr(); tm = m.thread_manager
+        tm = host.thread_manager
         try:
-            rows = m._db().execute(
+            rows = m.db().execute(
                 "SELECT * FROM fetch_queue WHERE status='pending' "
                 "ORDER BY id LIMIT 20").fetchall()
         except Exception:
@@ -242,14 +241,14 @@ def register(host):
             if not tm.try_acquire_key(bucket):
                 continue
             def _take(qid=row["id"]):
-                db = m._db(); db.rollback()
+                db = m.db(); db.rollback()
                 n = db.execute("UPDATE fetch_queue SET status='downloading', "
                                "attempts=attempts+1, updated=? WHERE id=? AND status='pending'",
                                (time.time(), qid)).rowcount
                 db.commit()
                 return db.execute("SELECT * FROM fetch_queue WHERE id=?", (qid,)).fetchone() if n else None
             try:
-                claimed = m._db_retry(_take)
+                claimed = m.db_retry(_take)
             except Exception:
                 tm.release_key(bucket); return None
             if claimed is None:
@@ -258,11 +257,10 @@ def register(host):
         return None
 
     def _worker(job):
-        m = _mgr()
         try:
             _handle(job["row"])
         finally:
-            m.thread_manager.release_key(job["bucket"])
+            host.thread_manager.release_key(job["bucket"])
 
     def _key(job):
         return job["bucket"]
@@ -272,11 +270,9 @@ def register(host):
     host.on_startup(_start)
 
     # ── endpoints ─────────────────────────────────────────────────────────
-    from flask import request, jsonify
-    auth = _mgr()._auth
+    auth = m.auth
 
     def api_fetch_add():
-        m = _mgr()
         d = request.get_json(force=True, silent=True) or {}
         targets = d.get("targets") or ([d["target"]] if d.get("target") else [])
         folder = (d.get("folder") or "").strip()
@@ -287,16 +283,15 @@ def register(host):
                 continue
             f = registry.for_target(t)
             fid = _attr(f, "id") if f else ""
-            m._db().execute(
+            m.db().execute(
                 "INSERT INTO fetch_queue(fetcher, target, folder, created, updated) "
                 "VALUES(?,?,?,?,?)", (fid or "", t, folder, now, now))
             added += 1
-        m._db().commit(); m.thread_manager.wake()
+        m.db().commit(); host.thread_manager.wake()
         return jsonify({"success": True, "added": added})
 
     def api_fetch_queue():
-        m = _mgr()
-        rows = m._db().execute(
+        rows = m.db().execute(
             "SELECT * FROM fetch_queue ORDER BY id DESC LIMIT 200").fetchall()
         return jsonify({"success": True, "queue": [dict(r) for r in rows],
                         "fetchers": registry.available_fetchers()})
@@ -309,9 +304,8 @@ def register(host):
         return jsonify({"success": True})
 
     def api_fetch_clear():
-        m = _mgr()
-        m._db().execute("DELETE FROM fetch_queue WHERE status IN ('done','error','canceled')")
-        m._db().commit()
+        m.db().execute("DELETE FROM fetch_queue WHERE status IN ('done','error','canceled')")
+        m.db().commit()
         return jsonify({"success": True})
 
     host.add_route("/api/fetch/add",

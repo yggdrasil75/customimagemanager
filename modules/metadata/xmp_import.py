@@ -33,8 +33,9 @@ try:
 except Exception:                      # pragma: no cover - env without pyexiv2
     pyexiv2 = None
 
-import xmp_fields as xfields
-import iptc_fields as ifields
+from . import xmp_fields as xfields
+from . import iptc_fields as ifields
+import re
 
 log = logging.getLogger("xmp_import")
 
@@ -225,16 +226,6 @@ def _langalt_text(value):
     lst = _as_list(value)
     return str(lst[0]) if lst else ""
 
-def folded_values(filepath):
-    """Extract only the acdsee (and any other feeds='...') values that fold into
-    the fields we already maintain, so the scan/ingest path can merge them.
-
-    Returns {"description": str|None, "tags": [str,...], "rating": float|None}.
-    - description: from acdsee:Caption (to append to our description)
-    - tags:        from acdsee:Keywords (to extend our tag list)
-    - rating:      from acdsee:Rating (coerced to float when parseable)
-    Missing sources come back as None / [] so callers can decide how to merge.
-    """
 def _flatten_hierarchical_tag(path):
     """Reduce a hierarchical tag path to a flat booru tag.
 
@@ -526,7 +517,6 @@ def _parse_dataonscreen_regions(xmp):
     We tolerate both the nested struct path and the pre-flattened
     'DataOnScreenRegionX' leaf names ExifTool sometimes reports.
     """
-    import re
     indices = sorted({int(m.group(1))
                       for k in xmp.keys()
                       if k.startswith(_DOS_BASE + "[")
@@ -618,7 +608,6 @@ def _parse_acdsee_regions(xmp):
     ACDSee's Type (e.g. 'Face') maps to class_name only as a fallback when Name
     is absent; Name is the labelled subject and is what we key on.
     """
-    import re
     regions = []
     indices = sorted({int(m.group(1))
                       for k in xmp.keys()

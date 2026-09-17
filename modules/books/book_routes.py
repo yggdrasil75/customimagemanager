@@ -46,9 +46,10 @@ import threading
 
 from flask import request, jsonify, send_file, Response
 
-import auth
 
 from . import book_index as bi
+import hashlib
+from . import comic_pages as cp
 
 # Filled in by register().
 CTX: dict = {}
@@ -392,7 +393,6 @@ def sha_exists(sha: str) -> str | None:
     return None
 
 def _sha256_file(path: str) -> str:
-    import hashlib
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -518,7 +518,6 @@ def _comic_background(rel_path, do_panels, do_ocr, force, rtl, per_panel):
     page 280 should cost one page, not the whole run. It also means the reader
     can show overlays for the pages already done while the rest is still going.
     """
-    from . import comic_pages as cp
     if book_state["comic"]:
         return
     _comic_cancel.clear()
@@ -686,6 +685,170 @@ def _row_dict(r):
 # ══════════════════════════════════════════════════════════════════════════════
 # register()
 # ══════════════════════════════════════════════════════════════════════════════
+
+# ── gallery search providers (core search loop calls these per query) ─────────
+def db():
+    return CTX["db"]()
+
+def folder_scope_clause(column, folder):
+    return CTX["folder_scope_clause"](column, folder)
+
+def table_exists(conn, name):
+    return CTX["table_exists"](conn, name)
+
+def _norm_date_literal(text, end=False):
+    return CTX["norm_date_literal"](text, end)
+
+
+def structured_book_date(structured: list | None):
+    """Translate structured search tokens for the books/comics tables.
+
+    Returns (clause, params):
+      ("", [])          no structured tokens, or none that apply — no filter.
+      (sql, params)     a `published`-column date filter to AND in.
+      (None, [])        an image-only token is present (person:/width:/is:…);
+                        the caller should exclude books/comics entirely.
+
+    date:/datetime:/dateoriginal:/… all collapse to the single `published`
+    column here (books have no separate actual/original/digitized buckets), so
+    any date token narrows by publication date. Multiple date tokens AND together.
+    """
+    if not structured:
+        return "", []
+    ors, params = [], []
+    for tok in structured:
+        kind = tok[0]
+        if kind == "date":
+            _, _token, op, literal = tok
+            clause, cp = _published_clause(op, literal)
+            if clause:
+                ors.append(clause)
+                params += cp
+            else:
+                # An unparseable date literal shouldn't silently pass every book.
+                return None, []
+        else:
+            # dim/person/is — nothing a book row can satisfy.
+            return None, []
+    if not ors:
+        return "", []
+    return "(" + " AND ".join(ors) + ")", params
+
+def _published_clause(op: str | None, literal: str):
+    """A WHERE fragment matching the books.published text column against a date
+    literal/range, reusing the image date normaliser. STRICT: empty/NULL
+    published never matches. Mirrors _date_clause but for one text column."""
+    col = "published"
+    guard = f"{col} IS NOT NULL AND {col}!=''"
+    if '..' in literal:
+        lo_raw, hi_raw = literal.split('..', 1)
+        lo = _norm_date_literal(lo_raw, end=False)
+        hi = _norm_date_literal(hi_raw, end=True)
+        if not lo or not hi:
+            return "", []
+        return f"({guard} AND substr({col},1,10) BETWEEN ? AND ?)", [lo, hi]
+    if op in ("<", "<="):
+        bound = _norm_date_literal(literal, end=(op == "<="))
+        cmp = "<" if op == "<" else "<="
+    elif op in (">", ">="):
+        bound = _norm_date_literal(literal, end=(op == ">"))
+        cmp = ">" if op == ">" else ">="
+    else:
+        lo = _norm_date_literal(literal, end=False)
+        hi = _norm_date_literal(literal, end=True)
+        if not lo or not hi:
+            return "", []
+        return f"({guard} AND substr({col},1,10) BETWEEN ? AND ?)", [lo, hi]
+    if not bound:
+        return "", []
+    return f"({guard} AND substr({col},1,10) {cmp} ?)", [bound]
+
+def query_comics(text: str, folder: str, structured: list | None = None) -> list:
+    """!
+    @brief Comic cover entries matching the folder scope and free-text search.
+    @return List of comic dicts (kind='comic') with cover dimensions resolved.
+    """
+    if structured:
+        return []
+    clauses, p = folder_scope_clause("folder", folder)
+    if text:
+        like = f"%{text}%"
+        clauses.append("(folder LIKE ? OR title LIKE ? OR tags LIKE ? OR characters LIKE ?)")
+        p += [like, like, like, like]
+    where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = db().execute(
+        f"SELECT folder,cover,title,page_order,tags FROM comics{where_sql} ORDER BY folder", p
+    ).fetchall()
+    out = []
+    for r in rows:
+        cover = r["cover"] or ""
+        cover_rel = (r["folder"] + "/" + cover) if cover else ""
+        cw = ch = 0
+        if cover_rel:
+            fr = db().execute("SELECT width,height FROM files WHERE rel_path=?",
+                               (cover_rel,)).fetchone()
+            if fr:
+                cw, ch = fr["width"] or 0, fr["height"] or 0
+        out.append({
+            "kind": "comic",
+            "folder": r["folder"],
+            "cover": cover_rel,
+            "title": r["title"] or r["folder"].split('/')[-1],
+            "page_count": len(json.loads(r["page_order"] or "[]")),
+            "tags": json.loads(r["tags"] or "[]"),
+            "width": cw, "height": ch,
+        })
+    return out
+
+def query_books(text: str, folder: str, structured: list | None = None) -> list:
+    """!
+    @brief Book entries matching the folder scope and free-text search.
+    @return List of book dicts (kind='book'); [] if the books table is absent.
+    @note Mirrors _query_comics; books live in their own table (not `files`) and
+          are stitched into the same flat list so mixed folders show both.
+    """
+    if not table_exists(db(), "books"):
+        return []
+    # A structured token that books can't evaluate means the user is filtering on
+    # an image-only property; a book cannot match it, so drop books entirely
+    # rather than leave them all on screen (the original bug).
+    dclause, dparams = structured_book_date(structured)
+    if dclause is None:
+        return []
+    clauses, p = folder_scope_clause("rel_path", folder)
+    if dclause:
+        clauses.append(dclause)
+        p += dparams
+    if text:
+        like = f"%{text}%"
+        clauses.append("(title LIKE ? OR authors LIKE ? OR series LIKE ? "
+                       "OR tags LIKE ? OR subjects LIKE ?)")
+        p += [like] * 5
+    where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = db().execute(
+        f"SELECT rel_path,title,authors,kind,fmt,page_count,cover,tags,rating "
+        f"FROM books{where_sql} ORDER BY sort_title COLLATE NOCASE", p).fetchall()
+    out = []
+    for r in rows:
+        out.append({
+            "kind": "book",
+            "filename": r["rel_path"],
+            "rel_path": r["rel_path"],
+            "title": r["title"] or r["rel_path"].split('/')[-1],
+            "authors": json.loads(r["authors"] or "[]"),
+            "book_kind": r["kind"],
+            "fmt": r["fmt"],
+            "page_count": r["page_count"] or 0,
+            "has_cover": bool(r["cover"]),
+            "tags": json.loads(r["tags"] or "[]"),
+            "iqa_score": None,
+            # Book covers are 2:3-ish; comics vary. The grid needs *an* aspect
+            # ratio up front or every tile reflows once its image loads.
+            "width": 2, "height": 3,
+        })
+    return out
+
+
 
 def register(app, ctx: dict):
     CTX.clear()
@@ -1049,7 +1212,6 @@ def register(app, ctx: dict):
         every OCR line inside it. Letting someone correct a page is cheaper than
         chasing the last few percent of detector accuracy.
         """
-        from . import comic_pages as cp
         d = request.json or {}
         rp = d.get("rel_path", "")
         n = int(d.get("page", 0))
@@ -1184,7 +1346,7 @@ def register(app, ctx: dict):
         return jsonify({"success": True, "results": out})
 
     @app.route("/api/books/delete", methods=["POST"])
-    @auth.require_feature("tab.books", level="write", action="book_delete", fields=("rel_path", "keep_file"))
+    @ctx["auth"].require_feature("tab.books", level="write", action="book_delete", fields=("rel_path", "keep_file"))
     def books_delete():
         """Delete a book. `keep_file` removes it from the library but leaves the
         bytes on disk — useful when the shelf is wrong but the file isn't."""

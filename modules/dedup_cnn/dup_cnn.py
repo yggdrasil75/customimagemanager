@@ -10,6 +10,10 @@ cannot share dup_heuristics' dup_samples table.
 
 import io
 import numpy as np
+import os
+
+from optional_deps import optional_import
+cv2, _HAVE_CV2 = optional_import("cv2")
 
 try:
     import torch
@@ -30,7 +34,6 @@ def _to_work_bgr(img: "np.ndarray | None") -> "np.ndarray | None":
     if img is None:
         return None
     try:
-        import cv2
         if img.ndim == 2:
             img = np.repeat(img[:, :, None], 3, axis=2)
         bgr = img[:, :, :3]
@@ -135,7 +138,6 @@ class DupCNN:
             tmp = path + ".tmp"
             torch.save({"state_dict": self.net.state_dict(),
                         "width_mult": self.width_mult}, tmp)
-            import os
             os.replace(tmp, path)
             return True
         except Exception:

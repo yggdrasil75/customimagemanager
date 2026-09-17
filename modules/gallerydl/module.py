@@ -16,6 +16,9 @@ The fetch contract this satisfies:
 import os
 import json
 
+from flask import request, jsonify
+from werkzeug.utils import secure_filename
+
 from . import gdl
 
 MANIFEST = {
@@ -42,7 +45,6 @@ def register(host):
 
     # ── per-site auth -> gallery-dl opt strings ──────────────────────────
     def _write_cookie_file(key, text):
-        from werkzeug.utils import secure_filename
         try:
             os.makedirs(_COOKIE_DIR, exist_ok=True)
             safe = secure_filename(key) or "site"
@@ -136,11 +138,8 @@ def register(host):
     })
 
     # ── gallery-dl-specific config endpoints ─────────────────────────────
-    from flask import request, jsonify
-    def _mgr():
-        import manager as m
-        return m
-    auth = _mgr()._auth
+    m = host.core
+    auth = m.auth
 
     def api_available():
         return jsonify({"available": gdl.available()})
@@ -163,7 +162,6 @@ def register(host):
                             "opts": cfg.get("gdl_opts", {}),
                             "auth": {s: _auth_public(s) for s in cfg.get("gdl_auth", {})}})
         d = request.get_json(force=True, silent=True) or {}
-        m = _mgr()
         if "sites" in d: cfg["gdl_sites"] = d["sites"]
         if "opts" in d: cfg["gdl_opts"] = d["opts"]
         if "auth" in d:
@@ -175,7 +173,7 @@ def register(host):
                             if k not in ("has_password", "has_cookies")})
                 existing[site] = cur
             cfg["gdl_auth"] = existing
-        m.save_config()
+        host.save_config()
         return jsonify({"success": True})
 
     def api_site():
@@ -195,10 +193,10 @@ def register(host):
                         "auth": _auth_public(site)})
 
     def api_targets():
-        import exif_fields, xmp_fields
+        schemas = host.get_service("metadata_schema") or {}
         exif_groups, xmp_groups = [], []
         try:
-            for grp in exif_fields.schema_dict().get("groups", []):
+            for grp in schemas.get("exif", lambda: {})().get("groups", []):
                 tags = [f["name"] for f in grp.get("fields", []) if f.get("writable")]
                 if tags:
                     exif_groups.append({"group": grp.get("title") or grp.get("name") or "EXIF",
@@ -206,7 +204,7 @@ def register(host):
         except Exception as e:
             host.logger.error(f"gdl targets exif: {e}")
         try:
-            for ns in xmp_fields.schema_dict().get("namespaces", []):
+            for ns in schemas.get("xmp", lambda: {})().get("namespaces", []):
                 toks = [f"Xmp.{ns['ns']}.{f['name']}" for f in ns.get("fields", [])]
                 if toks:
                     xmp_groups.append({"group": ns.get("title") or ns["ns"],

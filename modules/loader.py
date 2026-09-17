@@ -243,7 +243,6 @@ class ModuleRegistry:
         imported directly by manager and register themselves; register_all()
         only handles discovered plugins.
         """
-        import importlib
         if getattr(self, "_register_all_done", False):
             host.logger.debug("register_all() already called, skipping")
             return
@@ -254,6 +253,14 @@ class ModuleRegistry:
             if not callable(reg):
                 continue
             if lm.registered:
+                continue
+            # Availability gate: a module either loads whole or not at all. Its
+            # manifest 'pip' deps must import, and a module may set AVAILABLE /
+            # UNAVAILABLE_REASON at import time (a lazy probe of a heavy dep).
+            why = self._unavailable_reason(lm)
+            if why:
+                lm.error = why
+                host.logger.info(f"module '{lm.id}' disabled: {why}")
                 continue
             host._current_module = lm.id
             try:
@@ -267,6 +274,21 @@ class ModuleRegistry:
                 host._current_module = None
 
     # ── UI / API snapshot ────────────────────────────────────────────────
+    @staticmethod
+    def _unavailable_reason(lm):
+        """Why a plugin can't load whole: an AVAILABLE=False probe at import
+        time, or a manifest 'pip' dep that doesn't import. None = fine."""
+        if getattr(lm.py_module, "AVAILABLE", True) is False:
+            return getattr(lm.py_module, "UNAVAILABLE_REASON", None) or "unavailable"
+        for dep in lm.manifest.get("pip", []):
+            pip_name, _, import_name = dep.partition(":")
+            mod = import_name or pip_name.replace("-", "_")
+            try:
+                importlib.import_module(mod)
+            except Exception:
+                return f"pip dependency '{pip_name.strip()}' not installed"
+        return None
+
     def status(self):
         """Descriptor list for /api/modules and the settings tab."""
         out = []

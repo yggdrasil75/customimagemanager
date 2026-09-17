@@ -28,10 +28,14 @@ Inference API used:
 """
 
 import os
+from pathlib import Path
+
+import numpy as np
 
 from optional_deps import optional_import
 
 _mayaku, _HAVE_MAYAKU = optional_import("mayaku")
+_download_model, _ = optional_import("mayaku.utils.download", attr="download_model")
 cv2, _HAVE_CV2 = optional_import("cv2")
 import model_registry
 
@@ -75,9 +79,7 @@ def _resolve(source, chore="detect"):
     never into the cwd); explicit paths pass through."""
     if os.path.exists(str(source)) or os.path.dirname(str(source)):
         return str(source)
-    from mayaku.utils.download import download_model
-    return str(download_model(source, cache_dir=__import__("pathlib").Path(
-        model_registry.model_dir("mayaku", chore))))
+    return str(_download_model(source, cache_dir=Path(model_registry.model_dir("mayaku", chore))))
 
 
 def _predictor(source, chore="detect"):
@@ -106,7 +108,6 @@ def _np(t):
     try:
         return t.detach().cpu().numpy()
     except Exception:
-        import numpy as np
         return np.asarray(t)
 
 
@@ -201,9 +202,6 @@ def _tf_pose(res, *a, conf=0.25, **k):
 
 # ── registration ─────────────────────────────────────────────────────────────
 def register(host):
-    if not _HAVE_MAYAKU:
-        host.logger.info("mayaku module: package not installed; registering nothing")
-        return
 
     def _source(cap):
         custom = (host.config.get(_weights_key(cap)) or "").strip()

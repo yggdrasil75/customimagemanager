@@ -15,7 +15,6 @@ circular import.
 """
 import numpy as np
 from typing import Optional
-import os
 
 import model_registry  # pins TORCH_HOME (rtmlib weights -> models/) before rtmlib loads
 
@@ -25,7 +24,6 @@ try:
 except Exception:
     _HAVE_WHOLEBODY = False
 
-import functools
 
 # ── Keypoint topology ─────────────────────────────────────────────────────────
 COCO_KP_NAMES = ["nose", "left_eye", "right_eye", "left_ear", "right_ear",

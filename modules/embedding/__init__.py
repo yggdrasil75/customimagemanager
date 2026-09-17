@@ -17,9 +17,20 @@ MANIFEST = {
     "assets":      ["embedding.js", "embedding.css"],
 }
 
-from flask import request, jsonify
+import base64
+import json
+import os
 import time
+from collections import Counter
+
 import numpy as np
+from flask import request, jsonify
+
+import object_grouping as og
+from optional_deps import optional_import
+
+cv2, _HAVE_CV2 = optional_import("cv2")
+requests, _HAVE_REQUESTS = optional_import("requests")
 
 
 def register(host):
@@ -81,7 +92,7 @@ def register(host):
 
     # ── OAI embedding helpers ──────────────────────────────────────────────
     def _embed_endpoint():
-        base = _oai_v1_base(host.config.get("oai_endpoint", ""))
+        base = host.core.oai_v1_base(host.config.get("oai_endpoint", ""))
         if not base:
             return ""
         return base + ("/embeddings" if base.endswith("/v1") else "/v1/embeddings")
@@ -99,7 +110,6 @@ def register(host):
         return "oai:" + _oai_embed_model()
 
     def _oai_embed_request(inputs, timeout=120):
-        import requests
         endpoint = _embed_endpoint()
         model = _oai_embed_model()
         if not endpoint or not model:
@@ -116,8 +126,6 @@ def register(host):
         return [np.asarray(d["embedding"], np.float32) for d in data]
 
     def _oai_embed_image(img_bgr, timeout=120):
-        import cv2
-        import base64
         if img_bgr is None:
             return None
         ok, buf = cv2.imencode(".jpg", img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -183,14 +191,12 @@ def register(host):
         if img_bgr is None:
             return None
         try:
-            import object_grouping as og
             if og._load_cnn(cnn_model):
                 emb = og._cnn_embed([img_bgr])
                 return _normalise(emb[0].astype(np.float32))
         except Exception:
             pass
         try:
-            import object_grouping as og
             return _normalise(og._cv2_embed_one(img_bgr, None).astype(np.float32))
         except Exception:
             return None
@@ -212,8 +218,6 @@ def register(host):
 
     def _stage_embeddings(db, file_list, loader, cnn_model=None, mtime_of=None,
                           force=False, progress=None, should_stop=None):
-        import object_grouping as og
-        ensure_tables(db)
         model = cnn_model or _cnn_choice()
         total = len(file_list)
         done = 0
@@ -249,7 +253,6 @@ def register(host):
     def _stage_embeddings_with(db, file_list, loader, embed_fn, model_tag,
                                mtime_of=None, force=False, progress=None,
                                should_stop=None):
-        ensure_tables(db)
         total = len(file_list)
         done = 0
         embedded = 0
@@ -289,18 +292,14 @@ def register(host):
         return row["model"] if row else None
 
     def _embedding_count(db):
-        ensure_tables(db)
         return db.execute("SELECT COUNT(*) FROM image_embeddings").fetchone()[0]
 
     def _cluster_count(db):
-        ensure_tables(db)
         row = db.execute(
             "SELECT COUNT(DISTINCT label) FROM image_clusters WHERE label>=0").fetchone()
         return row[0] if row else 0
 
     def _stage_cluster_images(db, eps=0.16, min_cluster=2, progress=None):
-        import object_grouping as og
-        ensure_tables(db)
         dim_row = db.execute(
             "SELECT dim FROM image_embeddings LIMIT 1").fetchone()
         if not dim_row:
@@ -347,7 +346,6 @@ def register(host):
         return len({int(x) for x in labels if x >= 0})
 
     def _bruteforce_cluster(db, dim, total, eps, min_cluster, prog=None):
-        from collections import Counter
         names, mats = [], []
         for nm, mat in _iter_embeddings_ordered(db, dim):
             names.extend(nm)
@@ -391,8 +389,6 @@ def register(host):
         return np.array([keep.get(int(r), -1) for r in roots], dtype=int)
 
     def _stage_build_heuristics(db, tag_of=None, margin=2.0, progress=None):
-        from collections import Counter
-        ensure_tables(db)
         dim_row = db.execute("SELECT dim FROM image_embeddings LIMIT 1").fetchone()
         if not dim_row:
             return []
@@ -448,7 +444,6 @@ def register(host):
         return summaries
 
     def _load_heuristics(db):
-        ensure_tables(db)
         rows = db.execute(
             "SELECT label,size,centroid,dim,radius,spread,suggested "
             "FROM image_cluster_meta").fetchall()
@@ -477,7 +472,6 @@ def register(host):
                 "residual": d - r, "belongs": bool(d <= r + margin * s)}
 
     def _search_by_vector(db, query_vec, top_k=60):
-        ensure_tables(db)
         dim_row = db.execute("SELECT dim FROM image_embeddings LIMIT 1").fetchone()
         if not dim_row:
             return []
@@ -591,6 +585,7 @@ def register(host):
         """Generate (or regenerate) library embeddings for the Review tab.
         Matches the original manager.py API signature."""
         body = request.json or {}
+        db = host.db()
         force = bool(body.get("force"))
         sel = body.get("files") or None
 
@@ -605,19 +600,15 @@ def register(host):
             return jsonify({"success": False, "error": "No eligible images found."})
 
         def _img_loader(rel):
-            import manager as m
-            fp, err = m._resolve_media(rel)
+            fp, err = host.core.resolve_media(rel)
             if err:
                 return None
-            import cv2
             return cv2.imread(fp)
 
         def _img_mtime(rel):
-            import manager as m
-            fp, err = m._resolve_media(rel)
+            fp, err = host.core.resolve_media(rel)
             if err:
                 return None
-            import os
             try:
                 return os.path.getmtime(fp)
             except Exception:
@@ -654,19 +645,15 @@ def register(host):
         db = host.db()
 
         def _img_loader(rel):
-            import manager as m
-            fp, err = m._resolve_media(rel)
+            fp, err = host.core.resolve_media(rel)
             if err:
                 return None
-            import cv2
             return cv2.imread(fp)
 
         def _img_mtime(rel):
-            import manager as m
-            fp, err = m._resolve_media(rel)
+            fp, err = host.core.resolve_media(rel)
             if err:
                 return None
-            import os
             try:
                 return os.path.getmtime(fp)
             except Exception:
@@ -706,19 +693,15 @@ def register(host):
         db = host.db()
 
         def _img_loader(rel):
-            import manager as m
-            fp, err = m._resolve_media(rel)
+            fp, err = host.core.resolve_media(rel)
             if err:
                 return None
-            import cv2
             return cv2.imread(fp)
 
         def _img_mtime(rel):
-            import manager as m
-            fp, err = m._resolve_media(rel)
+            fp, err = host.core.resolve_media(rel)
             if err:
                 return None
-            import os
             try:
                 return os.path.getmtime(fp)
             except Exception:
@@ -769,7 +752,6 @@ def register(host):
             row = db.execute("SELECT tags FROM files WHERE rel_path=?", (rel,)).fetchone()
             if not row:
                 return []
-            import json
             return json.loads(row["tags"] or "[]")
 
         summaries = _stage_build_heuristics(db, tag_of=tag_of, margin=margin)
@@ -803,11 +785,9 @@ def register(host):
         top_k = min(200, int(body.get("top_k", 60)))
         if not filename:
             return jsonify({"success": False, "error": "filename required"})
-        import manager as m
-        fp, err = m._resolve_media(filename)
+        fp, err = host.core.resolve_media(filename)
         if err:
             return err
-        import cv2
         img = cv2.imread(fp)
         if img is None:
             return jsonify({"success": False, "error": "could not read image"}), 400

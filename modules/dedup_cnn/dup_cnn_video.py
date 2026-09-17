@@ -32,11 +32,15 @@ Samples are whole clip tensors, so this has its OWN store
 
 import io
 import numpy as np
+import os
+import random
+
+from optional_deps import optional_import
+cv2, _HAVE_CV2 = optional_import("cv2")
 
 try:
     import torch
     from torch import nn
-    import torch.nn.functional as F
     _HAVE_TORCH = True
 except Exception:
     _HAVE_TORCH = False
@@ -54,7 +58,6 @@ def _to_work_frame(img: "np.ndarray | None") -> "np.ndarray | None":
     if img is None:
         return None
     try:
-        import cv2
         if img.ndim == 2:
             img = np.repeat(img[:, :, None], 3, axis=2)
         bgr = img[:, :, :3]
@@ -159,7 +162,6 @@ def _augment_drop(vol: "np.ndarray", max_drop: int = 2) -> "np.ndarray":
     previous frame to keep length T. Teaches the model that a clip with a missing
     frame is still the same clip — the frame-drop tolerance you actually want,
     learned rather than hand-coded."""
-    import random
     T = vol.shape[1]
     k = random.randint(0, max_drop)
     if k == 0:
@@ -215,7 +217,6 @@ class DupVideoCNN:
         if not self.available:
             return False
         try:
-            import os
             tmp = path + ".tmp"
             torch.save({"state_dict": self.net.state_dict(),
                         "width_mult": self.width_mult}, tmp)

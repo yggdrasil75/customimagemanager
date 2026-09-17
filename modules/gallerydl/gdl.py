@@ -34,8 +34,6 @@ other's settings.
 import json
 import logging
 import os
-import shutil
-import tempfile
 import threading
 
 from optional_deps import optional_import

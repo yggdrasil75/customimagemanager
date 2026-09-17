@@ -11,6 +11,9 @@ wider is a warm start (old weights copied into the top-left slice).
 """
 import torch
 import torch.nn as nn
+import zlib
+
+import numpy as np
 
 TAG_BUCKETS = 4096   # ponytail: tags hashed into fixed buckets, no vocab file to keep in sync
 TIERS = [(5000, 128, 2), (50000, 384, 6), (float("inf"), 768, 12)]   # (max_ratings, D, depth)
@@ -91,7 +94,6 @@ def _copy_slice(dst, src):
 
 def hash_tags(tag_names, max_len=32):
     """Tag names -> stable bucket ids (1..TAG_BUCKETS), padded with 0."""
-    import zlib
     ids = [1 + zlib.crc32(t.lower().encode()) % TAG_BUCKETS for t in tag_names][:max_len]
     return ids + [0] * (max_len - len(ids))
 
@@ -112,7 +114,6 @@ def batch(samples, dims, device):
 
 
 def spearman(a, b):
-    import numpy as np
     def rank(x):
         r = np.empty(len(x)); r[np.argsort(x)] = np.arange(len(x)); return r
     if len(a) < 3:

@@ -48,15 +48,14 @@ inside this file.
 from __future__ import annotations
 
 import io
-import os
-import math
 
 import numpy as np
+from optional_deps import optional_import
+from . import book_index as bi
+cv2, _HAVE_CV2 = optional_import("cv2")
+Image, _HAVE_PIL = optional_import("PIL", attr="Image")
+imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
 
-try:
-    import cv2
-except Exception:                                    # pragma: no cover
-    cv2 = None
 
 # ── tunables ─────────────────────────────────────────────────────────────────
 # Fractions of the page unless noted. These are deliberately loose: a missed
@@ -96,14 +95,12 @@ def decode_bytes(data: bytes) -> np.ndarray | None:
         except Exception:
             pass
     try:
-        from PIL import Image
         im = Image.open(io.BytesIO(data))
         im.load()
         return _rgb_to_bgr(np.asarray(im.convert("RGB")))
     except Exception:
         pass
     try:
-        import imagecodecs
         arr = imagecodecs.imread(data)
         if arr is not None:
             return _norm_array(arr)
@@ -141,7 +138,6 @@ def page_bgr(abs_path: str, fmt: str, n: int, dpi: int = 150,
     reopens and relists the archive, which on a 300-page cbr is the whole cost
     of the job.
     """
-    from . import book_index as bi
     if fmt == "pdf":
         return decode_bytes(bi.render_pdf_page(abs_path, n, dpi=dpi))
     names = page_names if page_names is not None else bi.comic_page_names(abs_path, fmt)

@@ -26,7 +26,7 @@ does NOT gate on that flag; it gates on the token existing in the schema at all.
 """
 import os
 
-import xmp_fields as xfields
+from . import xmp_fields as xfields
 
 try:
     import pyexiv2

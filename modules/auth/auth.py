@@ -19,6 +19,8 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import features
 import capabilities
 from cimlogger import audit
+from optional_deps import optional_import
+ldap3, _HAVE_LDAP3 = optional_import("ldap3")
 
 log = logging.getLogger("auth")
 if not log.handlers:
@@ -380,9 +382,7 @@ class Auth:
         return self.get_user(username)
 
     def _auth_ldap(self, username, password):
-        try:
-            import ldap3
-        except ImportError:
+        if not _HAVE_LDAP3:
             log.error("ldap mode configured but ldap3 is not installed "
                       "(pip install ldap3)")
             return None
@@ -463,7 +463,6 @@ class Auth:
 
     @staticmethod
     def _autobind(c):
-        import ldap3
         return ldap3.AUTO_BIND_TLS_BEFORE_BIND if c.get("start_tls") \
             else ldap3.AUTO_BIND_NO_TLS
 

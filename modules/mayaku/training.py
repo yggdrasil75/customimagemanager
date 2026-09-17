@@ -17,6 +17,9 @@ import os
 import subprocess
 import sys
 from datetime import datetime
+from optional_deps import optional_import
+Image, _HAVE_PIL = optional_import("PIL", attr="Image")
+cv2, _HAVE_CV2 = optional_import("cv2")
 
 
 # ── YOLO(normalised cx,cy,w,h) → COCO(abs x,y,w,h, top-left) ──────────────────
@@ -43,13 +46,11 @@ def yolo_region_to_coco_bbox(r: dict, img_w: int, img_h: int):
 def _image_size(jpg_path: str):
     """(width, height) of a written jpg. Tries PIL, falls back to cv2."""
     try:
-        from PIL import Image
         with Image.open(jpg_path) as im:
             return im.width, im.height
     except Exception:
         pass
     try:
-        import cv2
         im = cv2.imread(jpg_path)
         if im is not None:
             h, w = im.shape[:2]

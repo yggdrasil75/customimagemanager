@@ -36,9 +36,6 @@ _TYPES = [{"value": "2.1", "label": "SAM 2.1"}, {"value": "2.0", "label": "SAM 2
 
 
 def register(host):
-    if not _HAVE_SAM:
-        host.logger.info("sam2 module: ultralytics not installed; registering nothing")
-        return
     host.provide_service("sam_common", _sc_local, priority=_sc_local.VERSION)
 
     class _SC:  # newest sam_common copy across SAM modules, resolved per call

@@ -5,11 +5,13 @@ Owns the /api/barcodes endpoint, the 'detect.barcodes' model providers,
 the ai.barcodes auth feature and the "Scan barcodes" control button. The
 detect/decode engine lives next door in scan.py (was the core barcodes.py).
 
-YOLO detection and image decode come from manager (imported lazily inside
-the handlers, same as the pose module) so this stays a feature move.
+YOLO detection and image decode come from host.core so this stays a
+feature move.
 """
 import glob
 import os
+
+import model_registry
 
 from flask import request, jsonify
 
@@ -36,26 +38,23 @@ def register(host):
                           section="ai_tooling", section_label="AI Tooling",
                           default="write")
 
-    def _mgr():
-        import manager as m
-        return m
+    core = host.core
 
     # Two 'detect.barcodes' providers (picked in the Models tab): a YOLO model
     # trained on barcodes/QR (weights in models/barcodes/detectbarcodes/ or a
     # *barcode*/*qr*.pt discovered in models/), and the built-in OpenCV
     # gradient detector that needs no model.
-    import model_registry as _mr
     host.add_config_key("barcode_weights", default="")
 
     def _yolo_weights():
         w = (host.config.get("barcode_weights") or "").strip()
         if w:
             return w
-        found = _mr.list_weights("barcodes", "detect.barcodes", exts=(".pt",))
+        found = model_registry.list_weights("barcodes", "detect.barcodes", exts=(".pt",))
         if found:
             return found[0]
         try:
-            for q in sorted(glob.glob(os.path.join(_mr.MODELS_DIR, "*.pt"))):
+            for q in sorted(glob.glob(os.path.join(model_registry.MODELS_DIR, "*.pt"))):
                 base = os.path.basename(q).lower()
                 if "barcode" in base or "qr" in base:
                     return q
@@ -64,7 +63,7 @@ def register(host):
         return ""
 
     def _weights_opts():
-        paths = _mr.list_weights("barcodes", "detect.barcodes", exts=(".pt",))
+        paths = model_registry.list_weights("barcodes", "detect.barcodes", exts=(".pt",))
         return [{"value": "", "label": "Auto-discover"}] + \
                [{"value": q, "label": os.path.basename(q)} for q in paths]
 
@@ -76,7 +75,7 @@ def register(host):
         settings=[{"key": "barcode_weights", "label": "Weights", "kind": "select",
                    "options": _weights_opts}],
         loader=lambda: (lambda mp: (lambda img, *a, conf=0.25, **k:
-                                    _mgr()._detect_obb_or_box(img, mp, conf=conf)))(_yolo_weights()),
+                                    core.detect_boxes(img, mp, conf=conf)))(_yolo_weights()),
         transform=None,
         available=lambda: bool(_yolo_weights()) and os.path.exists(_yolo_weights()),
         reason="no barcode YOLO weights found", cost_mb=250)
@@ -114,16 +113,15 @@ def register(host):
     host.provide_service("barcodes", run)
 
     def api_barcodes():
-        m = _mgr()
         d = request.json or {}
         fp = host.safe_path(host.media_dir, d.get("filename", ""))
         if not fp or not os.path.exists(fp):
             return jsonify({"success": False, "error": "File not found."})
-        img = m.read_jxl(fp)
+        img = core.read_image(fp)
         if img is None:
             return jsonify({"success": False, "error": "Decode failed."})
         host.config["status_text"] = "Scanning for barcodes…"
-        res = run(m._to_bgr(img), deep=bool(d.get("deep", True)))
+        res = run(core.to_bgr(img), deep=bool(d.get("deep", True)))
         host.config["status_text"] = "Ready."
         return jsonify({"success": True, "regions": _scan.to_regions(res),
                         "summary": _scan.summary_text(res), **res})

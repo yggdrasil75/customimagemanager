@@ -11,26 +11,38 @@ while still using the shared indexing/runtime primitives.
 
 import os
 import json
-import time
+import base64
+import math
+
 import numpy as np
+from flask import request, jsonify
+
+from optional_deps import optional_import
+cv2, _HAVE_CV2 = optional_import("cv2")
+
+from . import dedup_core as core
 
 # Bound from manager in register(); declared so the function bodies resolve.
-_MANAGER_NAMES = ['_db', 'state', 'MEDIA_DIR', 'get_safe_path', 'read_jxl', '_to_bgr', 'mt', 'thread_manager', '_index_file', '_enumerate_library', '_getmtime_loose', 'tiering', '_thumb_drop', '_delete_file_row', '_purge_file_everywhere', 'audit', 'access_logger', '_dedup_checkpoint_get', '_dedup_checkpoint_set', '_dedup_checkpoint_clear', '_dedup_save_groups', '_dedup_load_groups', '_dedup_remove_file', '_dedup_is_stale', '_record_dup_sample', '_record_dup_video_sample', '_retrain_dup_model', '_excl_key', '_add_exclusions', '_is_excluded', '_load_exclusion_set', '_db_release_pool']
 app = None
 _auth = None
-_db, state, MEDIA_DIR, get_safe_path, read_jxl, _to_bgr, mt, thread_manager, _index_file, _enumerate_library, _getmtime_loose, tiering, _thumb_drop, _delete_file_row, _purge_file_everywhere, audit, access_logger, _dedup_checkpoint_get, _dedup_checkpoint_set, _dedup_checkpoint_clear, _dedup_save_groups, _dedup_load_groups, _dedup_remove_file, _dedup_is_stale, _record_dup_sample, _record_dup_video_sample, _retrain_dup_model, _excl_key, _add_exclusions, _is_excluded, _load_exclusion_set, _db_release_pool = (None,) * 32
+_db, state, MEDIA_DIR, get_safe_path, read_jxl, _to_bgr, mt, thread_manager, _index_file, _enumerate_library, _getmtime_loose, tiering, _thumb_drop, _delete_file_row, _purge_file_everywhere, audit, access_logger, _db_release_pool = (None,) * 18
 
 
 def _bind(host):
-    """Pull the core names the endpoint bodies reference out of manager into
-    this module's globals, plus the Flask request/jsonify helpers."""
-    import manager as m
-    g = globals()
-    for name in _MANAGER_NAMES:
-        g[name] = getattr(m, name, None)
-    from flask import request, jsonify
-    g["request"] = request
-    g["jsonify"] = jsonify
+    """Bind the core helpers the endpoint bodies reference (all handed over
+    by the app via host / host.core) into this module's globals."""
+    c = host.core
+    globals()["_HOST"] = host
+    globals().update({
+        "_db": host.db, "state": host.config, "MEDIA_DIR": host.media_dir,
+        "get_safe_path": host.safe_path, "read_jxl": c.read_image, "_to_bgr": c.to_bgr,
+        "mt": host.media, "thread_manager": host.thread_manager,
+        "_index_file": c.index_file, "_enumerate_library": c.enumerate_library,
+        "_getmtime_loose": c.getmtime_loose, "tiering": c.tiering, "_thumb_drop": c.thumb_drop,
+        "_delete_file_row": c.delete_file_row, "_purge_file_everywhere": c.purge_file_everywhere,
+        "audit": c.audit, "access_logger": host.logger, "_db_release_pool": c.db_release_pool,
+        "read_metadata": c.read_metadata, "write_metadata": c.write_metadata,
+    })
 
 
 # ── Dedup - numpy matrix hamming ───────────────────────────────────────────────
@@ -111,7 +123,7 @@ def _dedup_format_groups(cached_groups, rows_by_path):
 
 def dedup_status():
     """Returns what stage the cached scan reached and how many groups are stored."""
-    cp = _dedup_checkpoint_get()
+    cp = core.checkpoint_get()
     group_count = _db().execute("SELECT COUNT(*) FROM dedup_groups").fetchone()[0]
     if cp:
         return jsonify({"has_cache": True, "stage": cp["stage"],
@@ -122,10 +134,10 @@ def dedup_status():
 
 def dedup_retrain():
     """! @brief Refit the duplicate model once; called after a bulk auto-resolve."""
-    return jsonify({"success": _retrain_dup_model()})
+    return jsonify({"success": core.retrain()})
 
 def dedup_clear():
-    _dedup_checkpoint_clear()
+    core.checkpoint_clear()
     return jsonify({"success": True})
 
 def dedup_clear_group():
@@ -158,7 +170,7 @@ def dedup_exclude():
 
     # Record exclusion with every other member
     others = [m for m in members if m != file]
-    _add_exclusions(file, others)
+    core.add_exclusions(file, others)
 
     # Teach the heuristic: this file is NOT a duplicate of the others.
     try:
@@ -167,11 +179,11 @@ def dedup_exclude():
             for o in others:
                 ob = read_jxl(get_safe_path(MEDIA_DIR, o))
                 if ob is not None:
-                    _record_dup_sample(fa, ob, 0)
+                    core.record_sample(fa, ob, 0)
         # Video clip-pair negative sample (fires only for video/video pairs).
         for o in others:
-            _record_dup_video_sample(file, o, 0)
-        _retrain_dup_model()
+            core.record_video_sample(file, o, 0)
+        core.retrain()
     except Exception as e:
         access_logger.warning(f"dedup_exclude sample: {e}")
 
@@ -206,7 +218,6 @@ def dedup_compare_video():
       - the two clips' metadata side by side,
       - base64 PNGs of the sampled frames so the client can show the overlay.
     """
-    import base64, io as _io
     fa = (request.json or {}).get("a", "")
     fb = (request.json or {}).get("b", "")
     samples = int((request.json or {}).get("samples", 12))
@@ -238,7 +249,6 @@ def dedup_compare_video():
         return jsonify({"success": False, "error": "one or both videos have no readable duration"}), 500
 
     def _encode(rgb):
-        import cv2
         ok, buf = cv2.imencode('.png', cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
         return base64.b64encode(buf.tobytes()).decode('ascii') if ok else None
 
@@ -255,7 +265,6 @@ def dedup_compare_video():
             continue
         # Match sizes before diffing.
         h = min(ra.shape[0], rb.shape[0]); w = min(ra.shape[1], rb.shape[1])
-        import cv2
         ra2 = cv2.resize(ra, (w, h)); rb2 = cv2.resize(rb, (w, h))
         mad = float(np.abs(ra2.astype(np.int16) - rb2.astype(np.int16)).mean())
         profile.append({"t": round(ts, 3), "diff": round(mad, 3)})
@@ -364,14 +373,14 @@ def dedup_groups_page():
     return jsonify({"success": True, "groups": groups,
                     "total": total, "page": page, "page_size": page_size})
 
-    _dedup_checkpoint_clear()
+    core.checkpoint_clear()
     return jsonify({"success": True})
 
 def _CLIP_T():
     """Frames-per-clip for video dedup sampling. Comes from the CNN-video
     scorer module when installed, else a sane default (16)."""
     try:
-        s = module_host.get_service("dedup_scorers")
+        s = _HOST.get_service("dedup_scorers")
         if s:
             for sc in getattr(s, "_scorers", []):
                 ct = sc.get("clip_t") if isinstance(sc, dict) else getattr(sc, "clip_t", None)
@@ -392,8 +401,8 @@ def dedup():
         disk_count = len(files_on_disk)
 
         # ── 0b. Return cached result if still valid ───────────────────────
-        if not force and not _dedup_is_stale(disk_count):
-            cp = _dedup_checkpoint_get()
+        if not force and not core.is_stale(disk_count):
+            cp = core.checkpoint_get()
             if cp and cp["stage"] == "verified":
                 total_groups = _db().execute("SELECT COUNT(*) FROM dedup_groups").fetchone()[0]
                 if total_groups > 0:
@@ -423,7 +432,7 @@ def dedup():
 
         hashed_count = _db().execute(
             "SELECT COUNT(*) FROM files WHERE phash8 IS NOT NULL").fetchone()[0]
-        _dedup_checkpoint_set(disk_count, hashed_count, "indexed")
+        core.checkpoint_set(disk_count, hashed_count, "indexed")
 
         # ── 2. Load hashes ────────────────────────────────────────────────
         state["status_text"] = "Dedup 2/4: Loading hashes…"
@@ -431,8 +440,8 @@ def dedup():
             "SELECT rel_path,sha256,phash8,phash32,width,height FROM files "
             "WHERE phash8 IS NOT NULL").fetchall()
         if not rows:
-            _dedup_checkpoint_set(disk_count, 0, "verified")
-            _dedup_save_groups([])
+            core.checkpoint_set(disk_count, 0, "verified")
+            core.save_groups([])
             return jsonify({"success": True, "total_groups": 0})
 
         rows_by_path = {r["rel_path"]: r for r in rows}
@@ -449,8 +458,8 @@ def dedup():
 
         # Checkpoint after exact stage — save what we have so far
         exact_members = [[rows[i]["rel_path"] for i in g] for g in exact_row_groups]
-        _dedup_save_groups([("exact", m, [1.0] * len(m)) for m in exact_members])
-        _dedup_checkpoint_set(disk_count, hashed_count, "exact")
+        core.save_groups([("exact", m, [1.0] * len(m)) for m in exact_members])
+        core.checkpoint_set(disk_count, hashed_count, "exact")
 
         # ── 4. Perceptual similarity (streaming pair-finder, O(1) peak memory) ──
         state["status_text"] = f"Dedup 4/4: Perceptual scan ({len(remaining_idx)} images)…"
@@ -477,7 +486,7 @@ def dedup():
                                   for a, b in pairs32}
 
                 # Load exclusions once — O(1) set lookup per pair
-                exclusions = _load_exclusion_set()
+                exclusions = core.load_exclusion_set()
 
                 adj: dict[int, set] = {i: set() for i in range(n)}
                 for a, b_ in candidate_pairs:
@@ -486,7 +495,7 @@ def dedup():
                     # Check persistent exclusion between the two file paths
                     path_a = rows[remaining_idx[a]]["rel_path"]
                     path_b = rows[remaining_idx[b_]]["rel_path"]
-                    ea, eb = _excl_key(path_a, path_b)
+                    ea, eb = core.excl_key(path_a, path_b)
                     if (ea, eb) in exclusions:
                         continue
                     adj[a].add(b_); adj[b_].add(a)
@@ -505,11 +514,11 @@ def dedup():
 
         # Checkpoint after perceptual — save perceptual candidates (unverified, no scores yet)
         perceptual_members = [[rows[i]["rel_path"] for i in g] for g in sim_groups_raw]
-        _dedup_save_groups(
+        core.save_groups(
             [("exact",   m, [1.0] * len(m)) for m in exact_members] +
             [("similar", m, [])             for m in perceptual_members]
         )
-        _dedup_checkpoint_set(disk_count, hashed_count, "perceptual")
+        core.checkpoint_set(disk_count, hashed_count, "perceptual")
 
         # ── 5. Pixel verify sim groups ────────────────────────────────────
         state["status_text"] = f"Dedup: Pixel-verifying {len(sim_groups_raw)} groups…"
@@ -534,7 +543,7 @@ def dedup():
 
             keep_idx    = [group_row_indices[0]]
             keep_scores = [1.0]   # reference is 100% similar to itself
-            _scorers = (module_host.get_service("dedup_scorers")
+            _scorers = (_HOST.get_service("dedup_scorers")
                         if 'module_host' in globals() else None)
             for i in group_row_indices[1:]:
                 other_path = get_safe_path(MEDIA_DIR, rows[i]["rel_path"])
@@ -585,11 +594,11 @@ def dedup():
             _db_release_pool(ex, 4)
 
         # Final checkpoint — verified groups with scores
-        _dedup_save_groups(
+        core.save_groups(
             [("exact",   m, [1.0] * len(m)) for m in exact_members] +
             [("similar", m, s) for m, s in zip(verified_members, verified_scores)]
         )
-        _dedup_checkpoint_set(disk_count, hashed_count, "verified")
+        core.checkpoint_set(disk_count, hashed_count, "verified")
 
         # ── 6. Format and return — count only, client fetches pages ─────────
         total_groups = (len(exact_members) + len(verified_members))
@@ -622,9 +631,9 @@ def dedup_merge():
                 if _target_img is not None:
                     oi = read_jxl(op)
                     if oi is not None:
-                        _record_dup_sample(_target_img, oi, 1)
+                        core.record_sample(_target_img, oi, 1)
                 # Video clip-pair positive sample (fires only for video/video).
-                _record_dup_video_sample(target, other, 1)
+                core.record_video_sample(target, other, 1)
             except Exception:
                 pass
             om = read_metadata(op)
@@ -650,13 +659,13 @@ def dedup_merge():
                     if os.path.exists(member): tiering.safe_remove(member)
                 _thumb_drop(other)
                 _delete_file_row(other)
-                _dedup_remove_file(other)
+                core.remove_file(other)
             # Remove the whole group row if db_id was provided
             if db_id:
                 _db().execute("DELETE FROM dedup_groups WHERE id=?", (db_id,))
                 _db().commit()
             if not skip_retrain:
-                _retrain_dup_model()
+                core.retrain()
             return jsonify({"success":True})
         return jsonify({"success":False,"error":"Write failed"})
     except Exception as e:
@@ -665,8 +674,7 @@ def dedup_merge():
 
 def register(host):
     _bind(host)
-    import auth as _authmod
-    a = _authmod
+    a = host.core.auth
     host.add_route('/api/dedup_status', dedup_status, methods=['GET'], endpoint='dedup_ep_dedup_status')
     host.add_route('/api/dedup_retrain', a.require_feature("dedup", level="write")(dedup_retrain), methods=["POST"], endpoint='dedup_ep_dedup_retrain')
     host.add_route('/api/dedup_clear', a.require_feature("dedup", level="write")(dedup_clear), methods=["POST"], endpoint='dedup_ep_dedup_clear')

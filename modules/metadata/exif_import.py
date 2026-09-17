@@ -21,7 +21,7 @@ try:
 except Exception:                      # pragma: no cover - env without pyexiv2
     pyexiv2 = None
 
-import exif_fields as efields
+from . import exif_fields as efields
 
 log = logging.getLogger("exif_import")
 

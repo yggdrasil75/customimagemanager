@@ -23,6 +23,8 @@ manager inside the request handlers). That keeps this a feature-move, not
 a rewrite of the image/metadata layer.
 """
 
+import os
+
 from flask import request, jsonify
 
 from modules.model_broker import NoProviderError
@@ -102,27 +104,21 @@ def register(host):
         return _estimate(host, img_bgr)
     host.register_pipeline_stage("pose", _pipeline_pose, label="Pose (skeleton)")
 
-    # Manager internals reused by the handlers (image decode + metadata IO).
-    # Imported lazily inside each view so this module never imports manager at
-    # load time (avoids an import cycle; mirrors pose.py / book_routes).
-    def _mgr():
-        import manager as m
-        return m
+    core = host.core        # image decode + metadata IO handed over by the app
 
     # ── POST /api/pose ───────────────────────────────────────────────────
     def api_pose():
-        m = _mgr()
         fn = (request.json or {}).get("filename", "")
         fp = host.safe_path(host.media_dir, fn)
-        if not fp or not m.os.path.exists(fp):
+        if not fp or not os.path.exists(fp):
             return jsonify({"success": False, "error": "File not found."})
-        img = m.read_jxl(fp)
+        img = core.read_image(fp)
         if img is None:
             return jsonify({"success": False, "error": "Decode failed."})
         host.config["status_text"] = "Estimating pose…"
-        pose_data = _estimate(host, m._to_bgr(img))
-        meta = m.read_metadata(fp)
-        m.write_metadata(fp, meta["tags"], meta["description"], meta["regions"],
+        pose_data = _estimate(host, core.to_bgr(img))
+        meta = core.read_metadata(fp)
+        core.write_metadata(fp, meta["tags"], meta["description"], meta["regions"],
                          pose=pose_data)
         host.config["status_text"] = "Ready."
         if not pose_data.get("people"):
@@ -133,21 +129,20 @@ def register(host):
 
     # ── POST /api/bulk_pose ──────────────────────────────────────────────
     def bulk_pose():
-        m = _mgr()
         filenames = (request.json or {}).get("filenames", [])
         done, posed, errors = 0, 0, []
         total = len(filenames)
         for fn in filenames:
             fp = host.safe_path(host.media_dir, fn)
-            if not fp or not m.os.path.exists(fp):
+            if not fp or not os.path.exists(fp):
                 errors.append(fn); continue
             try:
-                img = m.read_jxl(fp)
+                img = core.read_image(fp)
                 if img is None:
                     errors.append(fn); continue
-                pose_data = _estimate(host, m._to_bgr(img))
-                meta = m.read_metadata(fp)
-                m.write_metadata(fp, meta["tags"], meta["description"],
+                pose_data = _estimate(host, core.to_bgr(img))
+                meta = core.read_metadata(fp)
+                core.write_metadata(fp, meta["tags"], meta["description"],
                                  meta["regions"], pose=pose_data)
                 if (pose_data or {}).get("people"):
                     posed += 1
@@ -162,19 +157,18 @@ def register(host):
 
     # ── POST /api/pose_remove ────────────────────────────────────────────
     def api_pose_remove():
-        m = _mgr()
         d = request.json or {}
         fn = d.get("filename", "")
         fp = host.safe_path(host.media_dir, fn)
-        if not fp or not m.os.path.exists(fp):
+        if not fp or not os.path.exists(fp):
             return jsonify({"success": False, "error": "File not found."})
-        meta = m.read_metadata(fp)
+        meta = core.read_metadata(fp)
         ri = d.get("region_index", None)
         if ri is None:
             regions = []
             for r in meta["regions"]:
                 r = dict(r); r.pop("pose", None); regions.append(r)
-            m.write_metadata(fp, meta["tags"], meta["description"], regions,
+            core.write_metadata(fp, meta["tags"], meta["description"], regions,
                              analysis=meta.get("analysis"), pose={"clear": True})
             return jsonify({"success": True, "cleared": "image"})
         try:
@@ -187,7 +181,7 @@ def register(host):
         regions[ri].pop("pose", None)
         people = [r["pose"] for r in regions if r.get("pose")]
         new_pose = {"kind": "body", "people": people} if people else {"clear": True}
-        m.write_metadata(fp, meta["tags"], meta["description"], regions,
+        core.write_metadata(fp, meta["tags"], meta["description"], regions,
                          analysis=meta.get("analysis"), pose=new_pose)
         return jsonify({"success": True, "cleared": ri,
                         "remaining_people": len(people)})
@@ -195,7 +189,7 @@ def register(host):
     # All three run/store/remove skeletons, so they require WRITE on ai.pose.
     # (ai.pose_remove no longer exists as a separate key — it collapsed into
     # ai.pose's write level.)
-    auth = _mgr()._auth
+    auth = core.auth
     host.add_route("/api/pose",
                    auth.require_feature("ai.pose", level="write")(api_pose),
                    methods=["POST"])

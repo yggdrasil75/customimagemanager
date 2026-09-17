@@ -14,6 +14,9 @@ job; noted so it isn't mistaken for fully done.
 
 from flask import request, jsonify
 
+from . import (exif_fields, iptc_fields, xmp_fields,
+               exif_import, iptc_import, xmp_import, exif_export)
+
 
 def register(host):
     # ── auth features (were hard-coded in core features.py) ──────────────
@@ -42,27 +45,21 @@ def register(host):
     host.register_controls_pane("xmp",  "xmp_editor.html",  feature="meta.xmp")
 
     # ── schema/read endpoints (self-contained; write stays core for now) ──
-    import exif_fields, iptc_fields, xmp_fields
-    import exif_import, iptc_import, xmp_import
-
-    def _resolve():
-        import manager as m
-        return m
+    m = host.core
 
     def _schema(fields_mod):
         return lambda: jsonify({"success": True, "schema": fields_mod.schema_dict()})
 
     def _reader(read_fn, tag):
         def view():
-            m = _resolve()
             data = request.get_json(force=True, silent=True) or {}
-            fp, err = m._resolve_media(data.get("filename", ""))
+            fp, err = m.resolve_media(data.get("filename", ""))
             if err:
                 return err
             try:
                 return jsonify({"success": True, "data": read_fn(fp)})
             except Exception as e:
-                m.access_logger.error(f"api_{tag}_read: {e}")
+                host.logger.error(f"api_{tag}_read: {e}")
                 return jsonify({"success": False, "error": str(e)}), 500
         return view
 
@@ -82,9 +79,7 @@ def register(host):
     # DB mirroring + changelog/undo) lives here in the module; manager keeps
     # only a thin shim that gates + forwards (see manager /api/metadata/write).
     def metadata_write(kind, filename, patch):
-        import exif_export
-        m = _resolve()
-        fp, err = m._resolve_media(filename or "")
+        fp, err = m.resolve_media(filename or "")
         if err:
             return err
         if not isinstance(patch, dict):
@@ -95,7 +90,7 @@ def register(host):
             return jsonify({"success": False,
                             "error": f"{kind} write not supported"}), 400
         try:
-            rel = m._rel(fp)
+            rel = m.rel(fp)
             before = {}
             try:
                 pre = exif_import.read_exif(fp)
@@ -108,22 +103,22 @@ def register(host):
             result = exif_export.write_exif(fp, patch)
             if result.get("success") and result.get("db"):
                 for col, val in result["db"].items():
-                    if col not in m._EXIF_DB_COLUMNS:
+                    if col not in m.EXIF_DB_COLUMNS:
                         continue
                     if val is None:
                         if col == "rating":
-                            m._db().execute("UPDATE files SET rating=NULL, rating_user=0 "
+                            m.db().execute("UPDATE files SET rating=NULL, rating_user=0 "
                                             "WHERE rel_path=?", (rel,)); continue
                         stored = "" if col == "description" else None
                     elif col == "rating":
                         try: stored = int(val)
                         except (ValueError, TypeError): continue
-                        m._db().execute("UPDATE files SET rating=?, rating_user=1 "
+                        m.db().execute("UPDATE files SET rating=?, rating_user=1 "
                                         "WHERE rel_path=?", (stored, rel)); continue
                     else:
                         stored = str(val)
-                    m._db().execute(f"UPDATE files SET {col}=? WHERE rel_path=?", (stored, rel))
-                m._db().commit()
+                    m.db().execute(f"UPDATE files SET {col}=? WHERE rel_path=?", (stored, rel))
+                m.db().commit()
             if result.get("success"):
                 try:
                     changed = False
@@ -131,23 +126,31 @@ def register(host):
                                + [d.split(".")[-1] for d in result.get("deleted", [])]:
                         if tag == "ImageHistory":
                             continue
-                        m._history_record(rel, f"exif:{tag}", before.get(tag),
+                        m.history_record(rel, f"exif:{tag}", before.get(tag),
                                           patch.get(tag), commit=False)
                         changed = True
                     if changed:
-                        m._db().commit()
-                        hist = m._history_as_imagehistory(rel)
+                        m.db().commit()
+                        hist = m.history_as_imagehistory(rel)
                         exif_export.write_exif(fp, {"ImageHistory": hist})
                 except Exception as e:
-                    m.access_logger.warning(f"exif history {rel}: {e}")
+                    host.logger.warning(f"exif history {rel}: {e}")
             return jsonify({"success": result.get("success", False), "result": result})
         except Exception as e:
-            m.access_logger.error(f"metadata_write {filename}: {e}")
+            host.logger.error(f"metadata_write {filename}: {e}")
             return jsonify({"success": False, "error": str(e)}), 500
 
     # Expose the writer as a service so the manager shim (and anyone else) can
     # call it without importing this module by name.
     host.provide_service("metadata_write", metadata_write)
+    # Raw EXIF read/write for modules that mirror a field (rating -> Rating).
+    host.provide_service("exif", {"read": exif_import.read_exif,
+                                  "write": exif_export.write_exif})
+    # Field schemas per standard, for modules that map external fields onto
+    # them (gallery-dl targets).
+    host.provide_service("metadata_schema", {"exif": exif_fields.schema_dict,
+                                             "iptc": iptc_fields.schema_dict,
+                                             "xmp": xmp_fields.schema_dict})
 
     # ── search type handlers for metadata fields ────────────────────────────
     # Allow searching by metadata field values: exif:Make, iptc:Keywords, xmp:dc:creator
@@ -155,7 +158,6 @@ def register(host):
     # that are mirrored from metadata (description, rating, artist, etc.) or
     # return empty clauses for fields not yet indexed. A future improvement would
     # add a dedicated metadata index table for full field search.
-    import exif_fields, iptc_fields, xmp_fields
 
     def _make_metadata_search_handler(prefix, fields_mod):
         """Create a search handler for a metadata prefix (exif:, iptc:, xmp:)."""

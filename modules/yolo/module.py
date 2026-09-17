@@ -22,7 +22,8 @@ from that, unless a custom-weights path is set for the capability.
 """
 
 import os
-import glob
+
+import numpy as np
 
 from optional_deps import optional_import
 
@@ -282,10 +283,37 @@ def _tf_depth(res, *a, **k):
     if d is None:
         return None
     try:
-        import numpy as np
         return np.asarray(d.cpu().numpy() if hasattr(d, "cpu") else d, dtype="float32")
     except Exception:
         return None
+
+
+def _parse_yolo_result(r, H, W, keep_classes, as_obb):
+    """Turn one ultralytics Result into normalised center-form boxes. Same logic
+    the single-image path uses; factored out so batched detect reuses it."""
+    out = []
+    obb = getattr(r, "obb", None)
+    if as_obb and obb is not None and len(obb) > 0:
+        names = r.names
+        for i in range(len(obb)):
+            cid = int(obb.cls[i].item()); name = names.get(cid, str(cid))
+            if keep_classes and name not in keep_classes:
+                continue
+            pts = obb.xyxyxyxy[i].cpu().numpy().reshape(-1, 2)
+            x1, y1 = pts[:, 0].min() / W, pts[:, 1].min() / H
+            x2, y2 = pts[:, 0].max() / W, pts[:, 1].max() / H
+            out.append({"class_name": name, "cx": (x1 + x2) / 2,
+                        "cy": (y1 + y2) / 2, "w": x2 - x1, "h": y2 - y1})
+        return out
+    if r.boxes is not None:
+        names = r.names
+        for b in r.boxes:
+            cid = int(b.cls[0].item()); name = names.get(cid, str(cid))
+            if keep_classes and name not in keep_classes:
+                continue
+            cx, cy, w, h = b.xywhn[0].tolist()
+            out.append({"class_name": name, "cx": cx, "cy": cy, "w": w, "h": h})
+    return out
 
 
 # ── availability ─────────────────────────────────────────────────────────────
@@ -295,11 +323,6 @@ def _avail():
 
 # ── registration ─────────────────────────────────────────────────────────────
 def register(host):
-    if not _HAVE_YOLO:
-        host.logger.info("yolo module: ultralytics not installed; "
-                         "registering nothing")
-        return
-
     reason = "ultralytics not installed"
 
     # One picker widget per capability: optional custom .pt overriding the
@@ -348,10 +371,8 @@ def register(host):
     # Dedicated face detector (yolo-face weights from the face registry; the
     # person module consumes 'detect.faces').
     def _face_path():
-        import face_models as _fm, faces as _faces
-        det = _fm.resolve_detector_id(host.config.get("face_detector"))
         try:
-            return _faces.ensure_face_detector(det) or ""
+            return host.core.face_detector_path() or ""
         except Exception:
             return ""
 
@@ -368,26 +389,23 @@ def register(host):
     # so a different provider (Mayaku) can answer for its own model files.
     def _yolo_detect(img_bgr, model_path, keep_classes=None, conf=0.25,
                      as_obb=False):
-        import manager as _m   # reuse the tested coerce + result parser
-        c = _m._coerce_bgr3(img_bgr)
+        c = host.core.coerce_bgr(img_bgr)
         if c is None:
             return []
         res = _run_yolo_path(model_path, c, conf)
         if not res:
             return []
         H, W = c.shape[:2]
-        return _m._parse_yolo_result(res[0], H, W, keep_classes, as_obb)
+        return _parse_yolo_result(res[0], H, W, keep_classes, as_obb)
 
     def _yolo_detect_batch(imgs, model_path, keep_classes=None, conf=0.25,
                            as_obb=False):
-        import manager as _m
-        import numpy as _np
         n = len(imgs)
         if n == 0:
             return []
-        coerced = [_m._coerce_bgr3(im) for im in imgs]
+        coerced = [host.core.coerce_bgr(im) for im in imgs]
         valid = [c is not None for c in coerced]
-        feed = [c if c is not None else _np.zeros((1, 1, 3), _np.uint8)
+        feed = [c if c is not None else np.zeros((1, 1, 3), np.uint8)
                 for c in coerced]
         res = _run_yolo_path(model_path, feed, conf)
         out = []
@@ -396,7 +414,7 @@ def register(host):
                 out.append([]); continue
             H, W = coerced[i].shape[:2]
             try:
-                out.append(_m._parse_yolo_result(res[i], H, W, keep_classes, as_obb))
+                out.append(_parse_yolo_result(res[i], H, W, keep_classes, as_obb))
             except Exception:
                 out.append([])
         return out

@@ -21,6 +21,9 @@ try:
     from ultralytics.models.sam import SAM3SemanticPredictor as _Pred
 except Exception:
     _Pred = None
+# Whole-module availability: the installed ultralytics must ship SAM3.
+AVAILABLE = _Pred is not None
+UNAVAILABLE_REASON = "installed ultralytics has no SAM3SemanticPredictor"
 
 MANIFEST = {
     "id":          "sam3",
@@ -89,9 +92,6 @@ def _ensure(path, typ):
 
 
 def register(host):
-    if _Pred is None:
-        host.logger.info("sam3 module: ultralytics build lacks SAM3; registering nothing")
-        return
     host.provide_service("sam_common", _sc_local, priority=_sc_local.VERSION)
 
     class _SC:  # newest sam_common copy across SAM modules, resolved per call

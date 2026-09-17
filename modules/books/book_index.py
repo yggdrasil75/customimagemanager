@@ -67,11 +67,8 @@ finds the book AND the page.
 """
 from __future__ import annotations
 
-import io
 import os
 import re
-import json
-import time
 import struct
 import zipfile
 import tarfile
@@ -83,6 +80,19 @@ import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 
 import numpy as np
+import base64 as _b64
+import shutil as _sh
+import tempfile
+
+from optional_deps import optional_import
+# Format backends are optional; each extractor checks its flag and reports
+# 'needs_backend' rather than failing the module.
+fitz, _HAVE_FITZ = optional_import("fitz")             # PyMuPDF
+rarfile, _HAVE_RARFILE = optional_import("rarfile")
+py7zr, _HAVE_PY7ZR = optional_import("py7zr")
+docx, _HAVE_DOCX = optional_import("docx")             # python-docx
+_rtf_to_text, _HAVE_STRIPRTF = optional_import("striprtf.striprtf", attr="rtf_to_text")
+cv2, _HAVE_CV2 = optional_import("cv2")
 
 COMIC_ARCHIVE_EXTS = {'.cbz', '.cbr', '.cb7', '.cbt', '.cba'}
 
@@ -979,9 +989,7 @@ def _meta_pdf(path: str, meta: dict):
             pass
 
 def _open_pdf(path):
-    try:
-        import fitz            # PyMuPDF
-    except Exception:
+    if not _HAVE_FITZ:
         return None
     try:
         return fitz.open(path)
@@ -1001,11 +1009,9 @@ def comic_page_names(abs_path: str, fmt: str) -> list[str]:
             with tarfile.open(abs_path) as t:
                 names = [m.name for m in t.getmembers() if m.isfile()]
         elif fmt == 'cbr':
-            import rarfile
             with rarfile.RarFile(abs_path) as r:
                 names = [i.filename for i in r.infolist() if not i.isdir()]
         elif fmt == 'cb7':
-            import py7zr
             with py7zr.SevenZipFile(abs_path) as s:
                 names = [n for n in s.getnames()]
         elif fmt == 'cba':
@@ -1030,11 +1036,9 @@ def comic_page_bytes(abs_path: str, fmt: str, name: str) -> bytes | None:
                 f = t.extractfile(name)
                 return f.read() if f else None
         if fmt == 'cbr':
-            import rarfile
             with rarfile.RarFile(abs_path) as r:
                 return r.read(name)
         if fmt == 'cb7':
-            import py7zr
             with py7zr.SevenZipFile(abs_path) as s:
                 got = s.read([name])
                 if got and name in got:
@@ -1095,7 +1099,6 @@ def _parse_comicinfo(data: bytes, meta: dict):
 
 # ── fb2 ───────────────────────────────────────────────────────────────────────
 def _meta_fb2(path: str, meta: dict):
-    import base64 as _b64
     try:
         root = ET.parse(path).getroot()
     except Exception:
@@ -1468,9 +1471,7 @@ def _extract_fb2(path: str) -> ExtractResult:
     return _finish(sections)
 
 def _extract_docx(path: str) -> ExtractResult:
-    try:
-        import docx                      # python-docx
-    except Exception:
+    if not _HAVE_DOCX:
         return _extract_docx_raw(path)
     try:
         d = docx.Document(path)
@@ -1514,13 +1515,11 @@ def _extract_docx_raw(path: str) -> ExtractResult:
     return _finish([{'title': '', 'html': '\n'.join(paras)}])
 
 def _extract_rtf(path: str) -> ExtractResult:
-    try:
-        from striprtf.striprtf import rtf_to_text
-    except Exception:
+    if not _HAVE_STRIPRTF:
         return ExtractResult('needs_backend',
                              error='install `striprtf` to read RTF')
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
-        text = rtf_to_text(f.read(), errors='ignore')
+        text = _rtf_to_text(f.read(), errors='ignore')
     return _finish([{'title': '', 'html': _paras_to_html(text.splitlines())}])
 
 # ── Calibre fallback ──────────────────────────────────────────────────────────
@@ -1528,7 +1527,6 @@ _CALIBRE_FORMATS = {'mobi', 'azw3', 'kfx', 'lit', 'chm', 'ceb', 'lrf',
                     'doc', 'palmdoc', 'ereader', 'plucker', 'ztxt', 'opf'}
 
 def have_calibre() -> bool:
-    import shutil as _sh
     return _sh.which('ebook-convert') is not None
 
 def _extract_via_calibre(abs_path: str, fmt: str) -> ExtractResult:
@@ -1543,7 +1541,6 @@ def _extract_via_calibre(abs_path: str, fmt: str) -> ExtractResult:
             'needs_backend',
             error=f'{fmt} needs Calibre — install it and make `ebook-convert` '
                   f'available on PATH (apt install calibre)')
-    import tempfile
     with tempfile.TemporaryDirectory() as td:
         out = os.path.join(td, 'out.epub')
         try:
@@ -1753,7 +1750,6 @@ def make_cover_jpeg(data: bytes, max_edge: int = 640) -> bytes | None:
     if not data:
         return None
     try:
-        import cv2
         arr = np.frombuffer(data, np.uint8)
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if img is None:

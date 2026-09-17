@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import base64
 import logging
-import math
 
 import numpy as np
 from optional_deps import optional_import
+zx, _HAVE_ZXING = optional_import("zxingcpp")
 cv2, _HAVE_CV2 = optional_import("cv2")
 
 log = logging.getLogger(__name__)
@@ -220,7 +220,6 @@ def _decode_zxing(img: np.ndarray) -> list[dict] | None:
         if "mod" in _zxing_cache:
             zx = _zxing_cache["mod"]
         else:
-            import zxingcpp as zx
             _zxing_cache["mod"] = zx
     except Exception:
         return None

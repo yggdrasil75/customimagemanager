@@ -89,6 +89,9 @@ class ScorerRegistry:
         return naive_score, "naive"
 
 
+from . import dedup_core as core
+from . import dedup_endpoints
+
 MANIFEST = {
     "id":          "dedup",
     "name":        "Duplicate detection",
@@ -103,30 +106,87 @@ MANIFEST = {
 }
 
 
+# All dedup state lives in tables this module owns (was in the core schema).
+# dup_samples / dup_cnn_* are the feedback stores the scorer modules train
+# from; dedup_core is the only writer, so they live here with it.
+_DDL = """
+CREATE TABLE IF NOT EXISTS dedup_groups (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind      TEXT NOT NULL,
+    members   TEXT NOT NULL,
+    scores    TEXT NOT NULL DEFAULT '[]',
+    created   REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dedup_checkpoint (
+    id            INTEGER PRIMARY KEY CHECK (id=1),
+    file_count    INTEGER,
+    hashed_count  INTEGER,
+    stage         TEXT,
+    created       REAL
+);
+
+
+-- Persistent "never group these two together" pairs.
+-- Stored with a < b so lookups are a single normalised query.
+CREATE TABLE IF NOT EXISTS dedup_exclusions (
+    a    TEXT NOT NULL,
+    b    TEXT NOT NULL,
+    PRIMARY KEY (a, b)
+);
+CREATE INDEX IF NOT EXISTS idx_excl_a ON dedup_exclusions(a);
+CREATE INDEX IF NOT EXISTS idx_excl_b ON dedup_exclusions(b);
+
+-- Feature vectors + labels for the duplicate heuristic.
+-- label 1 = user merged them (true duplicate),
+-- label 0 = user said "not a duplicate".
+CREATE TABLE IF NOT EXISTS dup_samples (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    feat    TEXT NOT NULL,
+    label   INTEGER NOT NULL,
+    created REAL NOT NULL
+);
+
+-- Encoded image-pair tensors + labels for the Siamese dup-CNN.
+-- Separate from dup_samples: the CNN needs pixels, not 9-float features.
+CREATE TABLE IF NOT EXISTS dup_cnn_samples (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    blob    BLOB NOT NULL,
+    label   INTEGER NOT NULL,
+    created REAL NOT NULL
+);
+
+-- Encoded video clip-pair volumes + labels for the 3D Siamese dup-CNN.
+-- Separate again: these blobs are [C,T,H,W] clip tensors, not frame pairs.
+CREATE TABLE IF NOT EXISTS dup_cnn_video_samples (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    blob    BLOB NOT NULL,
+    label   INTEGER NOT NULL,
+    created REAL NOT NULL
+);
+"""
+
+
+def _migrate_scores(db):
+    """Older DBs predate the scores column on dedup_groups."""
+    try:
+        db.execute("ALTER TABLE dedup_groups ADD COLUMN scores TEXT NOT NULL DEFAULT '[]'")
+        db.commit()
+    except Exception:
+        pass
+
+
 def register(host):
-    from . import dedup_core as core
+    core.HOST = host
     registry = ScorerRegistry()
     host.provide_service("dedup_scorers", registry)
-    # The dedup state logic (checkpoint/groups/exclusions/feedback) lives in
-    # dedup_core now; expose it as a service so core hooks (file-delete ->
-    # remove_file) and the endpoints call the module rather than manager owning
-    # the logic.
-    host.provide_service("dedup", {
-        "checkpoint_get": core.checkpoint_get, "checkpoint_set": core.checkpoint_set,
-        "checkpoint_clear": core.checkpoint_clear, "is_stale": core.is_stale,
-        "save_groups": core.save_groups, "load_groups": core.load_groups,
-        "remove_file": core.remove_file, "excl_key": core.excl_key,
-        "add_exclusions": core.add_exclusions, "is_excluded": core.is_excluded,
-        "load_exclusion_set": core.load_exclusion_set,
-        "record_sample": core.record_sample,
-        "record_video_sample": core.record_video_sample,
-        "retrain": core.retrain,
-    })
+    host.add_table(_DDL, check=_migrate_scores)
+    # Core tells us when a file is gone; groups that referenced it shrink.
+    host.on("file.deleted", lambda rel_path: core.remove_file(rel_path))
     host.add_asset("dedup.js")
     host.register_app_modal("dedup_modal.html")
     # The naive pipeline endpoints (/api/dedup + siblings) live in
     # dedup_endpoints; register them here.
-    from . import dedup_endpoints
     dedup_endpoints.register(host)
     host.register_feature("dedup", "Duplicate detection (read=view, write=run)",
                           section="dedup", section_label="Dupes / dedup",

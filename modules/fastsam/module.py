@@ -29,9 +29,6 @@ _SIZES = ["s", "x"]
 
 
 def register(host):
-    if not _HAVE:
-        host.logger.info("fastsam module: ultralytics not installed; registering nothing")
-        return
     host.provide_service("sam_common", _sc_local, priority=_sc_local.VERSION)
 
     class _SC:  # newest sam_common copy across SAM modules, resolved per call

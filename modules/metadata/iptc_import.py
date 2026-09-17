@@ -24,7 +24,7 @@ try:
 except Exception:                      # pragma: no cover - env without pyexiv2
     pyexiv2 = None
 
-import iptc_fields as ifields
+from . import iptc_fields as ifields
 
 log = logging.getLogger("iptc_import")
 

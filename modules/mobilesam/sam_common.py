@@ -17,11 +17,13 @@ SAM models are class-agnostic (no trained class list). Given a prompt they
 segment that; given none they run "segment everything", which is what the
 background sweep gets when a SAM is the background pick.
 """
-VERSION = 4
+VERSION = 5
 
 import os
 
 import numpy as np
+
+import model_registry
 
 from optional_deps import optional_import
 cv2, _HAVE_CV2 = optional_import("cv2")
@@ -138,8 +140,6 @@ def register_sam(host, *, pid, label, family, build, weights, text_mode="vlm",
     Handle semantics (the 'segment' contract): run(img, prompt="") — prompt
     given -> segment that; empty -> segment everything.
     """
-    import model_registry
-
     def _model(cap):
         path = weights(cap)
         key = f"{pid}:{os.path.abspath(path)}"

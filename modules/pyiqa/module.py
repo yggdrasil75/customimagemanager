@@ -106,10 +106,6 @@ def _scorer(spec):
 
 
 def register(host):
-    if not _available():
-        host.logger.info("pyiqa module: pyiqa/torch not installed; "
-                         "registering nothing")
-        return
     for spec in _MODELS:
         host.provide_model(
             "iqa", spec["id"],

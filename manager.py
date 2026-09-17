@@ -20,7 +20,8 @@ Key architectural decisions vs the naive version:
 """
 
 import os, glob, yaml, subprocess, shutil, sys, numpy as np
-import tempfile, io, time, random, json, threading, logging
+from types import SimpleNamespace
+import tempfile, io, time, random, json, threading
 import requests, base64, re, xml.sax.saxutils as saxutils
 from optional_deps import optional_import
 # Install the modules package FIRST: importing it registers the core modules
@@ -32,16 +33,15 @@ import modules
 from modules import registry as module_registry
 cv2, _HAVE_CV2 = optional_import("cv2")
 pyexiv2, _HAVE_PYEXIV2 = optional_import("pyexiv2")
-import hashlib, sqlite3, uuid, math, mimetypes, functools
+import hashlib, sqlite3, uuid, functools
 import urllib.request, urllib.parse
 import atexit, contextlib
 from datetime import datetime
 from typing import Optional
-from collections import OrderedDict, Counter
-from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict
 import thread_manager
 from werkzeug.utils import secure_filename
-from flask import Flask, render_template, render_template_string, request, jsonify, send_file, Response, g
+from flask import Flask, render_template, request, jsonify, send_file, Response, g
 YOLO, _HAVE_YOLO = optional_import("ultralytics", attr="YOLO")
 import faces as facelib
 import bodies as bodylib
@@ -81,39 +81,19 @@ def _getmtime_loose(path):
         return 0.0
 
 import auth as _auth
-import exif_import, exif_export, exif_fields
-import xmp_import, xmp_fields, xmp_export
-import iptc_import, iptc_fields
+import features
+import exif_import, exif_export
+import xmp_import, xmp_export
+import iptc_import
 import mwg_fields
-import quality_heuristic
 try:
     import rawpy
 except Exception:
     rawpy = None
 from pipeline import DEFAULT_PIPELINE, run_pipeline, _kpts_in_box
 import llm_preprocess
-from templates import HTML
 
 easyocr, _HAVE_EASYOCR = optional_import("easyocr")
-
-# ── NR-IQA star mapping ───────────────────────────────────────────────────────
-# Quality scoring now comes from the broker-selected IQA provider (brisque /
-# pyiqa modules), which returns a NORMALIZED quality in 0..1 (higher = better).
-# The star mapping + junk gate live in quality_heuristic (core, model-agnostic).
-def quality_to_stars(q, blank=False):
-    """Map normalized quality (0..1, higher=better) to 0..5 stars."""
-    return quality_heuristic.to_stars(q, blank=blank)
-
-def _iqa_score_fn():
-    """Broker-selected IQA scorer as fn(img_bgr)->{raw,quality}, or None.
-
-    None when no IQA provider is available (no brisque/pyiqa module, or deps
-    missing), so callers treat quality as unknown and skip the gate."""
-    try:
-        return modules.broker.request("iqa")
-    except Exception:
-        return None
-
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 app       = Flask(__name__)
@@ -149,8 +129,7 @@ os.makedirs("logs",     exist_ok=True)
 
 # All loggers and the audit helpers live in cimlogger so any module can import
 # them without reaching back into manager.py. See cimlogger.py.
-from cimlogger import (training_logger, access_logger, audit_logger,
-                       audit, audited)
+from cimlogger import training_logger, access_logger, audit
 
 state = {
     "classes": ["object"], "available_models": [],
@@ -169,7 +148,6 @@ state = {
     },
     "brand_name": "Media Library",
     "brand_logo": "",   # relative URL under /media, or "" for none
-    "dup_cnn_width": 1.0,   # Siamese dup-CNN channel multiplier (0.25..2.0)
     "face_bg_enabled": False,
     "face_bg_custom": False,
     "face_detector": "yolov11n-face",
@@ -392,11 +370,6 @@ def _db_close():
             pass
 
 
-def _books_svc():
-    """Books module service (reconcile/sha_exists/index_one/rename_book) or None
-    when the books module is disabled."""
-    return module_host.get_service("books") if 'module_host' in globals() else None
-
 def _db_release_pool(ex, n_workers):
     """Close the DB connection held by each worker thread in `ex`.
 
@@ -490,22 +463,6 @@ def _init_db():
             uuid        TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS dedup_groups (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            kind      TEXT NOT NULL,
-            members   TEXT NOT NULL,
-            scores    TEXT NOT NULL DEFAULT '[]',
-            created   REAL NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS dedup_checkpoint (
-            id            INTEGER PRIMARY KEY CHECK (id=1),
-            file_count    INTEGER,
-            hashed_count  INTEGER,
-            stage         TEXT,
-            created       REAL
-        );
-
         -- Durable ingest queue. The upload request only spools the raw bytes
         -- here and returns; a worker pool drains it and runs the heavy
         -- convert/index chain. Survives restart: rows in 'pending'/'processing'
@@ -524,44 +481,6 @@ def _init_db():
             updated     REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_uq_status ON upload_queue(status, id);
-
-        -- Persistent "never group these two together" pairs.
-        -- Stored with a < b so lookups are a single normalised query.
-        CREATE TABLE IF NOT EXISTS dedup_exclusions (
-            a    TEXT NOT NULL,
-            b    TEXT NOT NULL,
-            PRIMARY KEY (a, b)
-        );
-        CREATE INDEX IF NOT EXISTS idx_excl_a ON dedup_exclusions(a);
-        CREATE INDEX IF NOT EXISTS idx_excl_b ON dedup_exclusions(b);
-
-        -- Feature vectors + labels for the duplicate heuristic.
-        -- label 1 = user merged them (true duplicate),
-        -- label 0 = user said "not a duplicate".
-        CREATE TABLE IF NOT EXISTS dup_samples (
-            id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            feat    TEXT NOT NULL,
-            label   INTEGER NOT NULL,
-            created REAL NOT NULL
-        );
-
-        -- Encoded image-pair tensors + labels for the Siamese dup-CNN.
-        -- Separate from dup_samples: the CNN needs pixels, not 9-float features.
-        CREATE TABLE IF NOT EXISTS dup_cnn_samples (
-            id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            blob    BLOB NOT NULL,
-            label   INTEGER NOT NULL,
-            created REAL NOT NULL
-        );
-
-        -- Encoded video clip-pair volumes + labels for the 3D Siamese dup-CNN.
-        -- Separate again: these blobs are [C,T,H,W] clip tensors, not frame pairs.
-        CREATE TABLE IF NOT EXISTS dup_cnn_video_samples (
-            id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            blob    BLOB NOT NULL,
-            label   INTEGER NOT NULL,
-            created REAL NOT NULL
-        );
 
         -- A comic is a folder of ordered page images plus its own metadata.
         -- Source of truth is <folder>/comic.json (portable); this is a cache.
@@ -635,7 +554,6 @@ def _init_db():
     db.commit()
     # Migrations for existing DBs
     for ddl in [
-        "ALTER TABLE dedup_groups ADD COLUMN scores TEXT NOT NULL DEFAULT '[]'",
         "ALTER TABLE files ADD COLUMN unconfirmed_count INTEGER DEFAULT 0",
         "ALTER TABLE files ADD COLUMN autotag_done INTEGER DEFAULT 0",
         "ALTER TABLE files ADD COLUMN face_done INTEGER DEFAULT 0",
@@ -1354,42 +1272,6 @@ def _query_files(search: str, offset: int, limit: int,
         entries.extend(batch)
     return entries, total
 
-# ── Dedup: thin shims -> dedup module service ────────────────────────────────
-# The dedup state logic (checkpoint / groups / exclusions / feedback) lives in
-# modules/dedup/dedup_core.py as well as any other module to implement the dedup logic
-def _dedup_svc():
-    return module_host.get_service("dedup") if 'module_host' in globals() else None
-
-def _dedup_checkpoint_get():
-    s=_dedup_svc(); return s["checkpoint_get"]() if s else None
-def _dedup_checkpoint_set(file_count, hashed_count, stage):
-    s=_dedup_svc();  s and s["checkpoint_set"](file_count, hashed_count, stage)
-def _dedup_checkpoint_clear():
-    s=_dedup_svc();  s and s["checkpoint_clear"]()
-def _dedup_is_stale(disk_count):
-    s=_dedup_svc(); return s["is_stale"](disk_count) if s else True
-def _dedup_save_groups(groups_by_kind):
-    s=_dedup_svc();  s and s["save_groups"](groups_by_kind)
-def _dedup_load_groups():
-    s=_dedup_svc(); return s["load_groups"]() if s else []
-def _dedup_remove_file(rel_path):
-    s=_dedup_svc();  s and s["remove_file"](rel_path)
-def _excl_key(a, b):
-    return (a, b) if a < b else (b, a)
-def _add_exclusions(file, others):
-    s=_dedup_svc();  s and s["add_exclusions"](file, others)
-def _is_excluded(a, b):
-    s=_dedup_svc(); return s["is_excluded"](a, b) if s else False
-def _load_exclusion_set():
-    s=_dedup_svc(); return s["load_exclusion_set"]() if s else set()
-def _record_dup_sample(img_a, img_b, label):
-    s=_dedup_svc();  s and s["record_sample"](img_a, img_b, label)
-def _record_dup_video_sample(rel_a, rel_b, label):
-    s=_dedup_svc();  s and s["record_video_sample"](rel_a, rel_b, label)
-def _retrain_dup_model(min_samples=8):
-    s=_dedup_svc(); return s["retrain"](min_samples) if s else False
-
-
 # ── Path safety ────────────────────────────────────────────────────────────────
 def get_safe_path(base_dir: str, user_path: str) -> str | None:
     """!
@@ -1730,11 +1612,7 @@ def _build_index_background():
     # nothing else — but it means a book dropped into the media folder while the
     # server was down is on the shelf by the time the image index finishes,
     # rather than waiting for someone to press Reindex.
-    try:
-        _bs=_books_svc()
-        _bs and _bs["reconcile"]()
-    except Exception as e:
-        access_logger.error(f"book reconcile: {e}")
+    module_host.emit("library.reconcile")
 
 def _enumerate_library():
     """Every library-file rel_path, whether loose on disk OR folded into a pack.
@@ -1805,7 +1683,7 @@ def save_config():
             "face_reject_drawn","face_drawn_thresh",
             "body_enabled","body_size","body_cluster_eps",
             "brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
-            "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers","dup_cnn_width","modules","model_selection"]
+            "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers","modules","model_selection"]
     # Add any keys modules declared through the config registry, so a module's
     # settings persist without being hand-added to this list.
     try:
@@ -3427,84 +3305,25 @@ def _face_detector_id():
 def _detect_obb_or_box(img_bgr, model_path: str, keep_classes: set | None = None,
                        conf: float = 0.25, as_obb: bool = False) -> list:
     """!
-    @brief Run a YOLO (optionally OBB) model and return normalised center-form boxes.
+    @brief Run the detector that owns `model_path` (broker 'box' capability:
+           YOLO for .pt, Mayaku for its own files, ...) and return normalised
+           center-form boxes.
     @param keep_classes If set, only boxes whose class name is in it are returned.
     @param as_obb Reduce oriented boxes to their axis-aligned enclosing box.
-    @return List of {class_name, cx, cy, w, h}; [] on empty input or failure.
-    @note Input is coerced to 3-channel uint8 BGR first, since YOLO's first conv
-          layer requires exactly 3 channels.
+    @return List of {class_name, cx, cy, w, h}; [] on empty input, no provider
+            or failure. Core has no detector of its own.
     """
-    # Broker dispatch: if a registered 'box' provider handles this model file
-    # (YOLO for .pt, Mayaku for its own format, …), use it. It returns the same
-    # canonical {class_name,cx,cy,w,h} shape. Falls through to the direct YOLO
-    # path below when no provider matches, so this stays safe if modules are off.
     try:
-        _det = modules.broker.detector_for("box", model_path)
+        det = modules.broker.detector_for("box", model_path)
     except Exception:
-        _det = None
-    if _det is not None:
-        try:
-            return _det(img_bgr, model_path, keep_classes=keep_classes,
-                        conf=conf, as_obb=as_obb)
-        except Exception as e:
-            access_logger.error(f"box provider detect({model_path}): {e}")
-            return []
+        det = None
+    if det is None:
+        access_logger.warning(f"detect({model_path}): no provider handles this model file")
+        return []
     try:
-        if img_bgr is None or getattr(img_bgr, "size", 0) == 0:
-            return []
-        if img_bgr.ndim == 2:                       # grayscale
-            img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_GRAY2BGR)
-        elif img_bgr.ndim == 3 and img_bgr.shape[2] != 3:
-            c = img_bgr.shape[2]
-            if c == 1:
-                img_bgr = cv2.cvtColor(img_bgr[:, :, 0], cv2.COLOR_GRAY2BGR)
-            elif c == 2:                            # gray + alpha
-                img_bgr = cv2.cvtColor(img_bgr[:, :, 0], cv2.COLOR_GRAY2BGR)
-            elif c == 4:                            # BGRA/RGBA -> drop alpha
-                img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_BGRA2BGR)
-            else:
-                img_bgr = img_bgr[:, :, :3]
-        if img_bgr.dtype != np.uint8:
-            img_bgr = np.clip(img_bgr, 0, 255).astype(np.uint8)
-        try:
-            res = _load_yolo(model_path)(img_bgr, verbose=False, conf=conf)
-        except Exception as ex:
-            if "bn" in str(ex) or "fuse" in str(ex).lower():
-                try:
-                    model_registry.unload(_yolo_key(model_path))
-                except Exception:
-                    pass
-                res = _load_yolo(model_path)(img_bgr, verbose=False, conf=conf)
-            else:
-                raise
-        if not res:
-            return []
-        r = res[0]; H, W = img_bgr.shape[:2]
-        out = []
-        obb = getattr(r, "obb", None)
-        if as_obb and obb is not None and len(obb) > 0:
-            names = r.names
-            for i in range(len(obb)):
-                cid = int(obb.cls[i].item()); name = names.get(cid, str(cid))
-                if keep_classes and name not in keep_classes:
-                    continue
-                pts = obb.xyxyxyxy[i].cpu().numpy().reshape(-1, 2)   # -> AA enclosing box
-                x1, y1 = pts[:, 0].min() / W, pts[:, 1].min() / H
-                x2, y2 = pts[:, 0].max() / W, pts[:, 1].max() / H
-                out.append({"class_name": name, "cx": (x1 + x2) / 2,
-                            "cy": (y1 + y2) / 2, "w": x2 - x1, "h": y2 - y1})
-            return out
-        if r.boxes is not None:
-            names = r.names
-            for b in r.boxes:
-                cid = int(b.cls[0].item()); name = names.get(cid, str(cid))
-                if keep_classes and name not in keep_classes:
-                    continue
-                cx, cy, w, h = b.xywhn[0].tolist()
-                out.append({"class_name": name, "cx": cx, "cy": cy, "w": w, "h": h})
-        return out
+        return det(img_bgr, model_path, keep_classes=keep_classes, conf=conf, as_obb=as_obb)
     except Exception as e:
-        access_logger.error(f"detect({model_path}): {e}")
+        access_logger.error(f"box provider detect({model_path}): {e}")
         return []
 
 def _coerce_bgr3(img_bgr):
@@ -3526,93 +3345,29 @@ def _coerce_bgr3(img_bgr):
         img_bgr = np.clip(img_bgr, 0, 255).astype(np.uint8)
     return img_bgr
 
-def _parse_yolo_result(r, H, W, keep_classes, as_obb):
-    """Turn one ultralytics Result into normalised center-form boxes. Same logic
-    the single-image path uses; factored out so batched detect reuses it."""
-    out = []
-    obb = getattr(r, "obb", None)
-    if as_obb and obb is not None and len(obb) > 0:
-        names = r.names
-        for i in range(len(obb)):
-            cid = int(obb.cls[i].item()); name = names.get(cid, str(cid))
-            if keep_classes and name not in keep_classes:
-                continue
-            pts = obb.xyxyxyxy[i].cpu().numpy().reshape(-1, 2)
-            x1, y1 = pts[:, 0].min() / W, pts[:, 1].min() / H
-            x2, y2 = pts[:, 0].max() / W, pts[:, 1].max() / H
-            out.append({"class_name": name, "cx": (x1 + x2) / 2,
-                        "cy": (y1 + y2) / 2, "w": x2 - x1, "h": y2 - y1})
-        return out
-    if r.boxes is not None:
-        names = r.names
-        for b in r.boxes:
-            cid = int(b.cls[0].item()); name = names.get(cid, str(cid))
-            if keep_classes and name not in keep_classes:
-                continue
-            cx, cy, w, h = b.xywhn[0].tolist()
-            out.append({"class_name": name, "cx": cx, "cy": cy, "w": w, "h": h})
-    return out
-
 def _detect_obb_or_box_batch(imgs, model_path: str, keep_classes: set | None = None,
                              conf: float = 0.25, as_obb: bool = False) -> list:
     """!
-    @brief Batched form of _detect_obb_or_box: run ONE YOLO forward pass over a
-           list of images instead of N sequential single-image calls.
-    @param imgs List of BGR images (may contain None; those yield []).
+    @brief Batched _detect_obb_or_box through the owning provider's .batch handle.
     @return List (len == len(imgs)) of per-image box lists, order preserved.
-    @note ultralytics accepts a list and batches it on-GPU; this is where the
-          real batch speedup lives. Result i maps to input i; images that fail
-          coercion are passed as a 1x1 black frame so the result list stays
-          index-aligned, and their output is forced to [].
     """
     n = len(imgs)
     if n == 0:
         return []
-    # Broker dispatch (batch): prefer a 'box' provider that handles this model
-    # and exposes a .batch form; else fall through to the direct YOLO batch path.
     try:
-        _det = modules.broker.detector_for("box", model_path)
+        det = modules.broker.detector_for("box", model_path)
     except Exception:
-        _det = None
-    if _det is not None and hasattr(_det, "batch"):
-        try:
-            return _det.batch(imgs, model_path, keep_classes=keep_classes,
-                              conf=conf, as_obb=as_obb)
-        except Exception as e:
-            access_logger.error(f"box provider detect_batch({model_path}): {e}")
-            return [[] for _ in range(n)]
-    coerced, valid = [], []
-    for im in imgs:
-        c = _coerce_bgr3(im)
-        valid.append(c is not None)
-        coerced.append(c if c is not None else np.zeros((1, 1, 3), np.uint8))
-    try:
-        try:
-            res = _load_yolo(model_path)(coerced, verbose=False, conf=conf)
-        except Exception as ex:
-            if "bn" in str(ex) or "fuse" in str(ex).lower():
-                try:
-                    model_registry.unload(_yolo_key(model_path))
-                except Exception:
-                    pass
-                res = _load_yolo(model_path)(coerced, verbose=False, conf=conf)
-            else:
-                raise
-    except Exception as e:
-        access_logger.error(f"detect_batch({model_path}): {e}")
+        det = None
+    if det is None:
+        access_logger.warning(f"detect batch({model_path}): no provider handles this model file")
         return [[] for _ in range(n)]
-    out = []
-    for i in range(n):
-        if not valid[i] or res is None or i >= len(res):
-            out.append([])
-            continue
-        H, W = coerced[i].shape[:2]
-        try:
-            out.append(_parse_yolo_result(res[i], H, W, keep_classes, as_obb))
-        except Exception as e:
-            access_logger.error(f"detect_batch parse[{i}]({model_path}): {e}")
-            out.append([])
-    return out
+    try:
+        if hasattr(det, "batch"):
+            return det.batch(imgs, model_path, keep_classes=keep_classes, conf=conf, as_obb=as_obb)
+        return [det(im, model_path, keep_classes=keep_classes, conf=conf, as_obb=as_obb) for im in imgs]
+    except Exception as e:
+        access_logger.error(f"box provider batch({model_path}): {e}")
+        return [[] for _ in range(n)]
 
 def _run_person(img_bgr) -> list:
     """!
@@ -4946,154 +4701,6 @@ def _folder_scope_clause(column: str, folder: str) -> tuple[list, list]:
         return [f"({column} LIKE ? AND {column} NOT LIKE ?)"], [f + '/%', f + '/%/%']
     return [], []
 
-def _structured_book_date(structured: list | None):
-    """Translate structured search tokens for the books/comics tables.
-
-    Returns (clause, params):
-      ("", [])          no structured tokens, or none that apply — no filter.
-      (sql, params)     a `published`-column date filter to AND in.
-      (None, [])        an image-only token is present (person:/width:/is:…);
-                        the caller should exclude books/comics entirely.
-
-    date:/datetime:/dateoriginal:/… all collapse to the single `published`
-    column here (books have no separate actual/original/digitized buckets), so
-    any date token narrows by publication date. Multiple date tokens AND together.
-    """
-    if not structured:
-        return "", []
-    ors, params = [], []
-    for tok in structured:
-        kind = tok[0]
-        if kind == "date":
-            _, _token, op, literal = tok
-            clause, cp = _published_clause(op, literal)
-            if clause:
-                ors.append(clause)
-                params += cp
-            else:
-                # An unparseable date literal shouldn't silently pass every book.
-                return None, []
-        else:
-            # dim/person/is — nothing a book row can satisfy.
-            return None, []
-    if not ors:
-        return "", []
-    return "(" + " AND ".join(ors) + ")", params
-
-def _published_clause(op: str | None, literal: str):
-    """A WHERE fragment matching the books.published text column against a date
-    literal/range, reusing the image date normaliser. STRICT: empty/NULL
-    published never matches. Mirrors _date_clause but for one text column."""
-    col = "published"
-    guard = f"{col} IS NOT NULL AND {col}!=''"
-    if '..' in literal:
-        lo_raw, hi_raw = literal.split('..', 1)
-        lo = _norm_date_literal(lo_raw, end=False)
-        hi = _norm_date_literal(hi_raw, end=True)
-        if not lo or not hi:
-            return "", []
-        return f"({guard} AND substr({col},1,10) BETWEEN ? AND ?)", [lo, hi]
-    if op in ("<", "<="):
-        bound = _norm_date_literal(literal, end=(op == "<="))
-        cmp = "<" if op == "<" else "<="
-    elif op in (">", ">="):
-        bound = _norm_date_literal(literal, end=(op == ">"))
-        cmp = ">" if op == ">" else ">="
-    else:
-        lo = _norm_date_literal(literal, end=False)
-        hi = _norm_date_literal(literal, end=True)
-        if not lo or not hi:
-            return "", []
-        return f"({guard} AND substr({col},1,10) BETWEEN ? AND ?)", [lo, hi]
-    if not bound:
-        return "", []
-    return f"({guard} AND substr({col},1,10) {cmp} ?)", [bound]
-
-def _query_comics(text: str, folder: str, structured: list | None = None) -> list:
-    """!
-    @brief Comic cover entries matching the folder scope and free-text search.
-    @return List of comic dicts (kind='comic') with cover dimensions resolved.
-    """
-    if structured:
-        return []
-    clauses, p = _folder_scope_clause("folder", folder)
-    if text:
-        like = f"%{text}%"
-        clauses.append("(folder LIKE ? OR title LIKE ? OR tags LIKE ? OR characters LIKE ?)")
-        p += [like, like, like, like]
-    where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-    rows = _db().execute(
-        f"SELECT folder,cover,title,page_order,tags FROM comics{where_sql} ORDER BY folder", p
-    ).fetchall()
-    out = []
-    for r in rows:
-        cover = r["cover"] or ""
-        cover_rel = (r["folder"] + "/" + cover) if cover else ""
-        cw = ch = 0
-        if cover_rel:
-            fr = _db().execute("SELECT width,height FROM files WHERE rel_path=?",
-                               (cover_rel,)).fetchone()
-            if fr:
-                cw, ch = fr["width"] or 0, fr["height"] or 0
-        out.append({
-            "kind": "comic",
-            "folder": r["folder"],
-            "cover": cover_rel,
-            "title": r["title"] or r["folder"].split('/')[-1],
-            "page_count": len(json.loads(r["page_order"] or "[]")),
-            "tags": json.loads(r["tags"] or "[]"),
-            "width": cw, "height": ch,
-        })
-    return out
-
-def _query_books(text: str, folder: str, structured: list | None = None) -> list:
-    """!
-    @brief Book entries matching the folder scope and free-text search.
-    @return List of book dicts (kind='book'); [] if the books table is absent.
-    @note Mirrors _query_comics; books live in their own table (not `files`) and
-          are stitched into the same flat list so mixed folders show both.
-    """
-    if not _table_exists(_db(), "books"):
-        return []
-    # A structured token that books can't evaluate means the user is filtering on
-    # an image-only property; a book cannot match it, so drop books entirely
-    # rather than leave them all on screen (the original bug).
-    dclause, dparams = _structured_book_date(structured)
-    if dclause is None:
-        return []
-    clauses, p = _folder_scope_clause("rel_path", folder)
-    if dclause:
-        clauses.append(dclause)
-        p += dparams
-    if text:
-        like = f"%{text}%"
-        clauses.append("(title LIKE ? OR authors LIKE ? OR series LIKE ? "
-                       "OR tags LIKE ? OR subjects LIKE ?)")
-        p += [like] * 5
-    where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-    rows = _db().execute(
-        f"SELECT rel_path,title,authors,kind,fmt,page_count,cover,tags,rating "
-        f"FROM books{where_sql} ORDER BY sort_title COLLATE NOCASE", p).fetchall()
-    out = []
-    for r in rows:
-        out.append({
-            "kind": "book",
-            "filename": r["rel_path"],
-            "rel_path": r["rel_path"],
-            "title": r["title"] or r["rel_path"].split('/')[-1],
-            "authors": json.loads(r["authors"] or "[]"),
-            "book_kind": r["kind"],
-            "fmt": r["fmt"],
-            "page_count": r["page_count"] or 0,
-            "has_cover": bool(r["cover"]),
-            "tags": json.loads(r["tags"] or "[]"),
-            "iqa_score": None,
-            # Book covers are 2:3-ish; comics vary. The grid needs *an* aspect
-            # ratio up front or every tile reflows once its image loads.
-            "width": 2, "height": 3,
-        })
-    return out
-
 # ── LLM helpers (shared by actions + pipeline) ────────────────────────────────
 def _oai_v1_base(endpoint):
     """Reduce any OpenAI-compatible URL to its `.../v1` base (no trailing
@@ -5457,8 +5064,7 @@ def api_metadata_write():
         return jsonify({"success": False, "error": "bad kind"}), 400
     u = getattr(g, "user", None) or {}
     if not u.get("is_admin"):
-        import features as _feat
-        if not _feat.has_level(u.get("features") or {}, "meta." + kind, "write"):
+        if not features.has_level(u.get("features") or {}, "meta." + kind, "write"):
             return jsonify({"error": "feature not permitted"}), 403
     writer = module_host.get_service("metadata_write")
     if not writer:
@@ -5798,7 +5404,11 @@ def _person_tag_frequency(cluster_id: int) -> tuple:
             tags = []
         # Fall back to on-disk metadata for images not yet in the files cache.
         if not tags:
-            tags = _img_tags(rel)
+            fp = get_safe_path(MEDIA_DIR, rel)
+            try:
+                tags = read_metadata(fp).get("tags", []) if fp else []
+            except Exception:
+                tags = []
         seen = set()
         for t in tags:
             name = str(t).lstrip("?").strip()
@@ -7212,18 +6822,14 @@ def _run_upload():
                     }), 422
 
             sha = _sha256(out)
-            # Books aren't in `files`, so the image dedup query below would never
-            # see an epub you already have. Check the book library by content
-            # hash instead — re-uploading the same book from a second device is
-            # the single most common way a book library grows duplicates.
-            if mt.is_book(fname):
-                _bs=_books_svc(); bdup = _bs["sha_exists"](sha) if _bs else None
-                if bdup:
-                    return jsonify({
-                        "success": False, "error_code": "exact_duplicate",
-                        "error": "This book is already in the library.",
-                        "existing_file": bdup
-                    }), 409
+            # Modules that keep their own library (books) get first say on
+            # whether this content already exists; `files` only knows images.
+            for bdup in module_host.emit("upload.duplicate_check", sha=sha, filename=fname):
+                return jsonify({
+                    "success": False, "error_code": "exact_duplicate",
+                    "error": "This file is already in the library.",
+                    "existing_file": bdup
+                }), 409
             dup = _db().execute(
                 "SELECT rel_path FROM files WHERE sha256=?", (sha,)).fetchone()
             if dup:
@@ -7246,11 +6852,8 @@ def _run_upload():
             # response means "it's in the library and readable", rather than
             # kicking off a whole-tree walk per uploaded file — a 3000-book
             # bulk upload would otherwise start 3000 full scans.
+            module_host.emit("upload.stored", rel_path=rel_path, filename=fname)
             if mt.is_book(fname):
-                try:
-                    _bs=_books_svc(); _bs and _bs["index_one"](rel_path)
-                except Exception as e:
-                    access_logger.warning(f"book index after upload: {e}")
                 resp = {"success": True, "filename": rel_path, "media_kind": "book"}
                 if corrected_from is not None:
                     resp["corrected_extension"] = {"from": corrected_from,
@@ -7839,11 +7442,8 @@ def api_move():
         # book_authors, book_sections, book_chunks, book_progress,
         # book_bookmarks). Moving the file without repointing them silently
         # orphans the extracted text, every bookmark, and how far you'd read.
+        module_host.emit("file.renamed", old_rel=filename, new_rel=new_rel)
         if mt.is_book(old_path):
-            try:
-                _bs=_books_svc(); _bs and _bs["rename_book"](filename, new_rel)
-            except Exception as e:
-                access_logger.error(f"book move {filename}: {e}")
             return jsonify({"success": True})
         _delete_file_row(filename)
         if not _index_file(new_rel, force=True):
@@ -8432,7 +8032,7 @@ def api_delete():
             if os.path.exists(member): tiering.safe_remove(member)
         _thumb_drop(fn)
         _purge_file_everywhere(fn)
-        _dedup_remove_file(fn)
+        module_host.emit("file.deleted", rel_path=fn)
         audit("delete_file", f"file={fn!r} existed={existed}")
     else:
         audit("delete_file_rejected", f"file={fn!r} (unsafe path)")
@@ -8549,7 +8149,7 @@ def bulk_delete():
                 if os.path.exists(member): tiering.safe_remove(member)
             _thumb_drop(fn)
             _delete_file_row(fn)
-            _dedup_remove_file(fn)
+            module_host.emit("file.deleted", rel_path=fn)
             deleted += 1
         except Exception as e:
             errors.append(fn)
@@ -10595,6 +10195,31 @@ def music_shuffle():
 # and the thread manager. book_routes above is effectively a hand-wired module;
 # this generalizes that pattern so strangers can do the same without editing
 # manager.py.
+# Everything a module may need from the core, handed over as one namespace so
+# no module ever imports manager. Add here rather than reaching in.
+_core_api = SimpleNamespace(
+    db=_db, db_retry=_db_retry, db_close=_db_close, db_release_pool=_db_release_pool,
+    read_image=read_jxl, to_bgr=_to_bgr, coerce_bgr=_coerce_bgr3,
+    resolve_media=_resolve_media, rel=_rel, getmtime_loose=_getmtime_loose,
+    read_metadata=read_metadata, write_metadata=write_metadata,
+    parse_mwg_regions=_parse_mwg_regions,
+    EXIF_DB_COLUMNS=_EXIF_DB_COLUMNS,
+    history_record=_history_record, history_as_imagehistory=_history_as_imagehistory,
+    index_file=_index_file, enumerate_library=_enumerate_library,
+    thumb_drop=_thumb_drop, delete_file_row=_delete_file_row,
+    purge_file_everywhere=_purge_file_everywhere, audit=audit, tiering=tiering,
+    detect_boxes=_detect_obb_or_box, llm_call=_llm_call, llm_request=_llm_request,
+    folder_scope_clause=_folder_scope_clause, table_exists=_table_exists,
+    norm_date_literal=_norm_date_literal, oai_v1_base=_oai_v1_base,
+    upload_spool_dir=_UPLOAD_SPOOL_DIR, upload_workers_wake=_upload_workers_wake,
+    api_upload=api_upload, auth=_auth, features=features, tag_name=tag_name,
+    embed_faces=facelib.embed_faces,
+    face_detector_path=lambda: facelib.ensure_face_detector(
+        facemodels.resolve_detector_id(state.get("face_detector"))),
+    current_user=lambda: (getattr(g, "user", None) or {}).get("username", ""),
+    object_grouping=og,
+)
+
 module_host = modules.host.Host(
     app=app,
     db=_db,
@@ -10606,6 +10231,8 @@ module_host = modules.host.Host(
     save_config=save_config,
     broker=modules.broker,
     config_registry=modules.config,
+    core=_core_api,
+    media=mt,
 )
 
 # Serve each module's static/ assets at /modules/<id>/static/<file>.
@@ -10623,7 +10250,12 @@ def module_static(module_id, filename):
     from flask import send_file as _send_file
     return _send_file(fp)
 
-# Call register(host) on every enabled plugin, in dependency order.
+# Core (always-on) modules register first, then every enabled plugin in
+# dependency order. The core ones aren't discovered by the loader, so they're
+# wired here explicitly; without this the metadata panes/services never existed.
+module_host._current_module = "metadata"
+modules.metadata.register(module_host)
+module_host._current_module = None
 module_registry.register_all(module_host)
 
 @app.context_processor

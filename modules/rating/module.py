@@ -23,7 +23,12 @@ Because this is the first module to add a searchable table + enrich core
 rows, it exercises host.add_table + host.register_file_enricher.
 """
 
+import os
+
 from flask import request, jsonify
+
+from modules.model_broker import NoProviderError
+from . import quality_heuristic
 
 MANIFEST = {
     "id":          "rating",
@@ -62,9 +67,8 @@ def _effective(row):
 def register(host):
     host.add_asset("rating.js")
 
-    import manager as m           # image decode + safe paths + XMP helpers
-    from modules.model_broker import NoProviderError
-    exif_export = __import__("exif_export")   # metadata write path (aliased)
+    core = host.core
+    exif = host.get_service("exif") or {}     # metadata module's EXIF writer
 
     # The rating module OWNS the iqa_model setting now: declaring it here seeds
     # the default, persists it, and — via on_change — points the broker at the
@@ -91,7 +95,7 @@ def register(host):
         return stars
 
     def _selected_iqa_id():
-        return m.modules.broker.selected_id("iqa")
+        return host.broker.selected_id("iqa")
 
     # ── table + consistency check ────────────────────────────────────────
     def _consistency_check(db):
@@ -121,8 +125,8 @@ def register(host):
         try:
             rows = db.execute("SELECT rel_path FROM ratings").fetchall()
             gone = [r["rel_path"] for r in rows
-                    if not m.get_safe_path(m.MEDIA_DIR, r["rel_path"])
-                    or not m.os.path.exists(m.get_safe_path(m.MEDIA_DIR, r["rel_path"]))]
+                    if not host.safe_path(host.media_dir, r["rel_path"])
+                    or not os.path.exists(host.safe_path(host.media_dir, r["rel_path"]))]
             for i in range(0, len(gone), 400):
                 chunk = gone[i:i+400]
                 db.execute("DELETE FROM ratings WHERE rel_path IN (%s)"
@@ -172,9 +176,9 @@ def register(host):
         stars = _to_stars(q)
         if rel_path and stars is not None:
             try:
-                _write_iqa(m._db(), rel_path, stars, res.get("raw"),
+                _write_iqa(core.db(), rel_path, stars, res.get("raw"),
                            _selected_iqa_id())
-                m._db().commit()
+                core.db().commit()
             except Exception as e:
                 host.logger.error(f"pipeline rate write {rel_path}: {e}")
         return {"quality": q, "stars": stars, "raw": res.get("raw")}
@@ -186,14 +190,14 @@ def register(host):
         """Write a user rating: XMP first (source of truth), then cache."""
         if stars is None:
             try:
-                exif_export.write_exif(fp, {"Rating": 0})
+                exif.get("write", lambda *a: None)(fp, {"Rating": 0})
             except Exception as e:
                 host.logger.error(f"rating XMP clear {rel_path}: {e}")
             db.execute("UPDATE ratings SET user_stars=NULL WHERE rel_path=?",
                        (rel_path,))
         else:
             try:
-                exif_export.write_exif(fp, {"Rating": int(stars) * 2})  # 0..10 halfstars
+                exif.get("write", lambda *a: None)(fp, {"Rating": int(stars) * 2})  # 0..10 halfstars
             except Exception as e:
                 host.logger.error(f"rating XMP write {rel_path}: {e}")
             db.execute(
@@ -213,7 +217,7 @@ def register(host):
     # ── endpoints ────────────────────────────────────────────────────────
     def api_iqa_models():
         # Model list now comes from the broker's iqa providers, not iqa.py.
-        provs = m.modules.broker.providers_for("iqa")
+        provs = host.broker.providers_for("iqa")
         models = [{"id": p["id"], "label": p["label"],
                    "available": p["available"]} for p in provs]
         return jsonify({"success": True, "models": models,
@@ -223,15 +227,15 @@ def register(host):
         body = request.json or {}
         fn = body.get("filename", "")
         stars = body.get("stars", None)
-        fp = m.get_safe_path(m.MEDIA_DIR, fn)
-        if not fp or not m.os.path.exists(fp):
+        fp = host.safe_path(host.media_dir, fn)
+        if not fp or not os.path.exists(fp):
             return jsonify({"success": False, "error": "File not found."})
         if stars is not None:
             try:
                 stars = int(max(0, min(5, round(float(stars)))))
             except Exception:
                 return jsonify({"success": False, "error": "Invalid stars value."})
-        _write_user_rating(m._db(), fp, fn, stars)
+        _write_user_rating(core.db(), fp, fn, stars)
         return jsonify({"success": True, "stars": stars})
 
     def iqa_scan():
@@ -239,7 +243,7 @@ def register(host):
         folder = (body.get("folder") or "").strip()
         force = bool(body.get("force"))
         filenames = body.get("filenames") or []
-        db = m._db()
+        db = core.db()
         try:
             detect = host.request_model("iqa")
         except NoProviderError as e:
@@ -272,18 +276,18 @@ def register(host):
         if not filenames:
             return jsonify({"success": True, "scored": 0, "total": 0,
                             "note": "Nothing to score (use force to rescan)."})
-        total = len(filenames); m.state["discover_cancel"] = False; scored = 0
+        total = len(filenames); host.config["discover_cancel"] = False; scored = 0
         for i, fn in enumerate(filenames):
-            if m.state.get("discover_cancel"):
+            if host.config.get("discover_cancel"):
                 break
-            fp = m.get_safe_path(m.MEDIA_DIR, fn)
-            if not fp or not m.os.path.exists(fp):
+            fp = host.safe_path(host.media_dir, fn)
+            if not fp or not os.path.exists(fp):
                 continue
             try:
-                img = m.read_jxl(fp)
-                img = m._to_bgr(img) if img is not None else None
+                img = core.read_image(fp)
+                img = core.to_bgr(img) if img is not None else None
                 if img is not None:
-                    img = m.og.downscale_to_cap(img)
+                    img = core.object_grouping.downscale_to_cap(img)
             except Exception:
                 img = None
             if img is None:
@@ -296,12 +300,12 @@ def register(host):
             scored += 1
             if scored % 25 == 0:
                 db.commit()
-            m.state["status_text"] = f"[IQA] {i+1}/{total} scored…"
+            host.config["status_text"] = f"[IQA] {i+1}/{total} scored…"
         db.commit()
-        m.state["status_text"] = f"IQA scan complete — scored {scored} image(s)."
+        host.config["status_text"] = f"IQA scan complete — scored {scored} image(s)."
         return jsonify({"success": True, "scored": scored, "total": total})
 
-    auth = m._auth
+    auth = core.auth
     def quality_sweep():
         """Score image quality with the picked IQA model and flag junk for
         review (files.flagged_delete / flag_reason), so it shows in the review
@@ -314,35 +318,34 @@ def register(host):
           flag_junk     write flags to files table (default True)
           dry_run       if True, score but don't write flags (default False)
         """
-        import quality_heuristic
         try:
             detect = host.request_model("iqa")
         except NoProviderError as e:
             return jsonify({"success": False, "error": f"No IQA model available: {e.reason}"})
         body = request.json or {}
-        db = m._db()
+        db = core.db()
         filenames = body.get("filenames") or []
         if not filenames:
             rows = db.execute("SELECT rel_path, width, height FROM files "
                               "WHERE (comic_folder IS NULL OR comic_folder='')").fetchall()
             filenames = sorted(r["rel_path"] for r in rows
                                if not (r["width"] and r["height"])
-                               or min(r["width"], r["height"]) >= m.og.MIN_IMAGE_PX)
+                               or min(r["width"], r["height"]) >= core.object_grouping.MIN_IMAGE_PX)
         if not filenames:
             return jsonify({"success": False, "error": "No eligible images found."})
         bb = body.get("brisque_bad"); qb = body.get("quality_bad")
         write_flags = bool(body.get("flag_junk", True)) and not body.get("dry_run")
-        total = len(filenames); m.state["discover_cancel"] = False
+        total = len(filenames); host.config["discover_cancel"] = False
         bad, scored = [], 0
         for i, fn in enumerate(filenames):
-            if m.state.get("discover_cancel"):
+            if host.config.get("discover_cancel"):
                 break
-            fp = m.get_safe_path(m.MEDIA_DIR, fn)
-            if not fp or not m.os.path.exists(fp):
+            fp = host.safe_path(host.media_dir, fn)
+            if not fp or not os.path.exists(fp):
                 continue
             try:
-                img = m.read_jxl(fp)
-                img = m.og.downscale_to_cap(m._to_bgr(img)) if img is not None else None
+                img = core.read_image(fp)
+                img = core.object_grouping.downscale_to_cap(core.to_bgr(img)) if img is not None else None
             except Exception:
                 img = None
             if img is None:
@@ -364,9 +367,9 @@ def register(host):
                                (r.get("reason") or "low quality", fn))
             if scored % 25 == 0:
                 db.commit()
-            m.state["status_text"] = f"[quality] {i+1}/{total}"
+            host.config["status_text"] = f"[quality] {i+1}/{total}"
         db.commit()
-        m.state["status_text"] = "Quality sweep complete."
+        host.config["status_text"] = "Quality sweep complete."
         return jsonify({"success": True, "scored": scored, "total": total,
                         "flagged": sorted(bad)[:500], "wrote_flags": write_flags})
 
