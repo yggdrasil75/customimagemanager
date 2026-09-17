@@ -233,7 +233,7 @@ def register(host):
                 "base_spearman": net.spearman([b[0] for b in base], [b[1] for b in base]) if base else 0.0}
 
     def _train():
-        db = core.db()
+        db = host.db()
         try:
             rows = db.execute(
                 "SELECT r.rel_path, r.user_stars, f.mtime, c.trained, c.mtime cm, c.key "

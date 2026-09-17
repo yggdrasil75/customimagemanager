@@ -176,9 +176,9 @@ def register(host):
         stars = _to_stars(q)
         if rel_path and stars is not None:
             try:
-                _write_iqa(core.db(), rel_path, stars, res.get("raw"),
+                _write_iqa(host.db(), rel_path, stars, res.get("raw"),
                            _selected_iqa_id())
-                core.db().commit()
+                host.db().commit()
             except Exception as e:
                 host.logger.error(f"pipeline rate write {rel_path}: {e}")
         return {"quality": q, "stars": stars, "raw": res.get("raw")}
@@ -235,7 +235,7 @@ def register(host):
                 stars = int(max(0, min(5, round(float(stars)))))
             except Exception:
                 return jsonify({"success": False, "error": "Invalid stars value."})
-        _write_user_rating(core.db(), fp, fn, stars)
+        _write_user_rating(host.db(), fp, fn, stars)
         return jsonify({"success": True, "stars": stars})
 
     def iqa_scan():
@@ -243,7 +243,7 @@ def register(host):
         folder = (body.get("folder") or "").strip()
         force = bool(body.get("force"))
         filenames = body.get("filenames") or []
-        db = core.db()
+        db = host.db()
         try:
             detect = host.request_model("iqa")
         except NoProviderError as e:
@@ -323,7 +323,7 @@ def register(host):
         except NoProviderError as e:
             return jsonify({"success": False, "error": f"No IQA model available: {e.reason}"})
         body = request.json or {}
-        db = core.db()
+        db = host.db()
         filenames = body.get("filenames") or []
         if not filenames:
             rows = db.execute("SELECT rel_path, width, height FROM files "

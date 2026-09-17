@@ -138,7 +138,7 @@ def register(host):
         sets = ", ".join(f"{k}=?" for k in cols)
         vals = list(cols.values()) + [qid]
         def _upd():
-            db = m.db()
+            db = host.db()
             db.execute(f"UPDATE fetch_queue SET {sets} WHERE id=?", vals)
             db.commit()
         try:
@@ -175,7 +175,7 @@ def register(host):
             os.close(fd); shutil.copyfile(media_path, spool)
             meta_json = json.dumps(packet)
             def _enq(sp=spool, on=orig, mj=meta_json):
-                db = m.db()
+                db = host.db()
                 db.execute("INSERT INTO upload_queue"
                            "(spool_path, orig_name, folder, metadata, status, created, updated) "
                            "VALUES(?,?,?,?,'pending',?,?)", (sp, on, folder, mj, now, now))
@@ -225,7 +225,7 @@ def register(host):
         """Peek pending rows; claim the first whose target_key bucket is free."""
         tm = host.thread_manager
         try:
-            rows = m.db().execute(
+            rows = host.db().execute(
                 "SELECT * FROM fetch_queue WHERE status='pending' "
                 "ORDER BY id LIMIT 20").fetchall()
         except Exception:
@@ -241,7 +241,7 @@ def register(host):
             if not tm.try_acquire_key(bucket):
                 continue
             def _take(qid=row["id"]):
-                db = m.db(); db.rollback()
+                db = host.db(); db.rollback()
                 n = db.execute("UPDATE fetch_queue SET status='downloading', "
                                "attempts=attempts+1, updated=? WHERE id=? AND status='pending'",
                                (time.time(), qid)).rowcount
@@ -283,15 +283,15 @@ def register(host):
                 continue
             f = registry.for_target(t)
             fid = _attr(f, "id") if f else ""
-            m.db().execute(
+            host.db().execute(
                 "INSERT INTO fetch_queue(fetcher, target, folder, created, updated) "
                 "VALUES(?,?,?,?,?)", (fid or "", t, folder, now, now))
             added += 1
-        m.db().commit(); host.thread_manager.wake()
+        host.db().commit(); host.thread_manager.wake()
         return jsonify({"success": True, "added": added})
 
     def api_fetch_queue():
-        rows = m.db().execute(
+        rows = host.db().execute(
             "SELECT * FROM fetch_queue ORDER BY id DESC LIMIT 200").fetchall()
         return jsonify({"success": True, "queue": [dict(r) for r in rows],
                         "fetchers": registry.available_fetchers()})
@@ -304,8 +304,8 @@ def register(host):
         return jsonify({"success": True})
 
     def api_fetch_clear():
-        m.db().execute("DELETE FROM fetch_queue WHERE status IN ('done','error','canceled')")
-        m.db().commit()
+        host.db().execute("DELETE FROM fetch_queue WHERE status IN ('done','error','canceled')")
+        host.db().commit()
         return jsonify({"success": True})
 
     host.add_route("/api/fetch/add",

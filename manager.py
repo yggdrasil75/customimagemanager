@@ -10198,7 +10198,7 @@ def music_shuffle():
 # Everything a module may need from the core, handed over as one namespace so
 # no module ever imports manager. Add here rather than reaching in.
 _core_api = SimpleNamespace(
-    db=_db, db_retry=_db_retry, db_close=_db_close, db_release_pool=_db_release_pool,
+    db_retry=_db_retry, db_close=_db_close, db_release_pool=_db_release_pool,
     read_image=read_jxl, to_bgr=_to_bgr, coerce_bgr=_coerce_bgr3,
     resolve_media=_resolve_media, rel=_rel, getmtime_loose=_getmtime_loose,
     read_metadata=read_metadata, write_metadata=write_metadata,

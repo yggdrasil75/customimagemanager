@@ -107,18 +107,18 @@ def register(host):
                         continue
                     if val is None:
                         if col == "rating":
-                            m.db().execute("UPDATE files SET rating=NULL, rating_user=0 "
+                            host.db().execute("UPDATE files SET rating=NULL, rating_user=0 "
                                             "WHERE rel_path=?", (rel,)); continue
                         stored = "" if col == "description" else None
                     elif col == "rating":
                         try: stored = int(val)
                         except (ValueError, TypeError): continue
-                        m.db().execute("UPDATE files SET rating=?, rating_user=1 "
+                        host.db().execute("UPDATE files SET rating=?, rating_user=1 "
                                         "WHERE rel_path=?", (stored, rel)); continue
                     else:
                         stored = str(val)
-                    m.db().execute(f"UPDATE files SET {col}=? WHERE rel_path=?", (stored, rel))
-                m.db().commit()
+                    host.db().execute(f"UPDATE files SET {col}=? WHERE rel_path=?", (stored, rel))
+                host.db().commit()
             if result.get("success"):
                 try:
                     changed = False
@@ -130,7 +130,7 @@ def register(host):
                                           patch.get(tag), commit=False)
                         changed = True
                     if changed:
-                        m.db().commit()
+                        host.db().commit()
                         hist = m.history_as_imagehistory(rel)
                         exif_export.write_exif(fp, {"ImageHistory": hist})
                 except Exception as e:
