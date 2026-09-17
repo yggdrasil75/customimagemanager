@@ -167,7 +167,7 @@ def register(host):
         except NoProviderError as e:
             return {"quality": None, "stars": None,
                     "note": f"no iqa model: {e.reason}"}
-        res = detect(img_bgr) or {}
+        res = detect(img_bgr, rel_path=rel_path) or {}
         q = res.get("quality")
         stars = _to_stars(q)
         if rel_path and stars is not None:
@@ -288,7 +288,7 @@ def register(host):
                 img = None
             if img is None:
                 continue
-            res = detect(img)                     # {raw, quality}
+            res = detect(img, rel_path=fn)        # {raw, quality}
             stars = _to_stars(res.get("quality"))
             if stars is None:
                 continue

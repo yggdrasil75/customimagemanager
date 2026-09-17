@@ -319,10 +319,33 @@ def _iou(a, b):
     union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
     return inter / union if union > 0 else 0.0
 
-def embed_faces(img_bgr, boxes):
+def face_shape(f):
+    """106 2-D landmarks aligned to a canonical frame (eye midpoint at origin,
+    unit inter-ocular distance, eye line horizontal) + head pose (pitch,yaw,roll).
+    Pure facial geometry, deliberately NOT identity-invariant. 215 floats, or None."""
+    lm = getattr(f, "landmark_2d_106", None)
+    kps = getattr(f, "kps", None)
+    if lm is None or kps is None:
+        return None
+    lm = np.asarray(lm, np.float32); kps = np.asarray(kps, np.float32)
+    le, re = kps[0], kps[1]
+    c = (le + re) / 2.0
+    v = re - le
+    scale = float(np.linalg.norm(v)) or 1.0
+    ang = np.arctan2(v[1], v[0])
+    rot = np.array([[np.cos(-ang), -np.sin(-ang)], [np.sin(-ang), np.cos(-ang)]], np.float32)
+    pts = ((lm - c) @ rot.T) / scale
+    pose = getattr(f, "pose", None)
+    pose = np.asarray(pose, np.float32) if pose is not None else np.zeros(3, np.float32)
+    return np.concatenate([pts.ravel(), pose]).astype(np.float32)
+
+FACE_SHAPE_DIM = 215
+
+def embed_faces(img_bgr, boxes, want_shape=False):
     """Embed each face crop. `boxes` are normalised center-form dicts.
 
-    Returns (vectors, mode) where mode is 'arcface' or 'appearance'. Vectors are
+    Returns (vectors, mode), or (vectors, mode, shapes) with want_shape (shapes
+    from face_shape(), one per box, None where unmatched). Vectors are
     L2-normalised so cosine distance == what group_embeddings expects.
 
     We run insightface ONCE over the whole image rather than per-crop. Its
@@ -334,8 +357,11 @@ def embed_faces(img_bgr, boxes):
     full frame gives it the context it wants; we then match its detections back
     to the YOLO boxes by IoU so the caller's box list stays authoritative.
     """
+    def _ret(vecs, mode, shapes=None):
+        return (vecs, mode, shapes or [None] * len(vecs)) if want_shape else (vecs, mode)
+
     if img_bgr is None or not boxes:
-        return [], "none"
+        return _ret([], "none")
 
     # Same 3-channel expectation as YOLO: insightface's detector and ArcFace head
     # both assume BGR uint8. Callers should hand us BGR already, but guard here
@@ -343,7 +369,7 @@ def embed_faces(img_bgr, boxes):
     # error deep in onnxruntime.
     img_bgr = _as_bgr(img_bgr)
     if img_bgr is None:
-        return [], "none"
+        return _ret([], "none")
 
     app = _load_insight()
 
@@ -368,17 +394,19 @@ def embed_faces(img_bgr, boxes):
                               "cy": ((y1 + y2) / 2) / max(1, H),
                               "w": (x2 - x1) / max(1, W),
                               "h": (y2 - y1) / max(1, H)},
-                             np.asarray(f.normed_embedding, dtype=np.float32)))
-            vecs = []
+                             np.asarray(f.normed_embedding, dtype=np.float32),
+                             face_shape(f)))
+            vecs, shapes = [], []
             for b in boxes:
                 best, best_iou = None, 0.0
-                for db, v in dets:
+                for db, v, sh in dets:
                     i = _iou(b, db)
                     if i > best_iou:
-                        best, best_iou = v, i
-                vecs.append(best if best_iou >= MATCH_IOU else None)
+                        best, best_iou = (v, sh), i
+                ok = best_iou >= MATCH_IOU
+                vecs.append(best[0] if ok else None); shapes.append(best[1] if ok else None)
             if any(v is not None for v in vecs):
-                return vecs, "arcface"
+                return _ret(vecs, "arcface", shapes)
 
     # Degraded: appearance-only. Clusters WILL split the same person across
     # pose/lighting; the UI surfaces this so the user knows why.
@@ -391,9 +419,9 @@ def embed_faces(img_bgr, boxes):
             v = np.asarray(v, dtype=np.float32)
             n = np.linalg.norm(v)
             out.append(v / n if n else None)
-        return out, "appearance"
+        return _ret(out, "appearance")
     except Exception:
-        return [], "none"
+        return _ret([], "none")
 
 # ── clustering ────────────────────────────────────────────────────────────────
 def cluster(vectors, mode="arcface", min_cluster=2, eps=None):

@@ -645,6 +645,9 @@ def _init_db():
         "ALTER TABLE files ADD COLUMN body_done INTEGER DEFAULT 0",
         "ALTER TABLE face_regions ADD COLUMN unknown INTEGER DEFAULT 0",
         "ALTER TABLE face_regions ADD COLUMN not_face INTEGER DEFAULT 0",
+        # Aligned 106-pt facial geometry + head pose (facelib.face_shape), for
+        # taste models that care about face *shape* rather than identity.
+        "ALTER TABLE face_regions ADD COLUMN shape BLOB",
         "ALTER TABLE files ADD COLUMN analysis TEXT DEFAULT ''",
         "ALTER TABLE files ADD COLUMN comic_folder TEXT DEFAULT ''",
         "ALTER TABLE files ADD COLUMN flagged_delete INTEGER DEFAULT 0",
@@ -4028,8 +4031,10 @@ def _cache_faces(rel: str, img, regions: list) -> None:
         fboxes = [b for b in fboxes if not _is_tomb(b)]
         if not fboxes:
             return
-    vecs, mode = facelib.embed_faces(img, fboxes)
-    _upsert_region_embeddings("face_regions", rel, fboxes, vecs, mode)
+    vecs, mode, shapes = facelib.embed_faces(img, fboxes, want_shape=True)
+    extra = [{"shape": np.asarray(sh, np.float32).tobytes()} if sh is not None else None
+             for sh in shapes]
+    _upsert_region_embeddings("face_regions", rel, fboxes, vecs, mode, extra=extra)
 
 def _cache_bodies(rel: str, img, regions: list) -> None:
     """! @brief Embed and cache person boxes, binding each to the face row it contains."""
