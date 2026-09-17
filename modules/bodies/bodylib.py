@@ -14,39 +14,28 @@ person box. Body and face vectors live in separate spaces and are never compared
 directly.
 """
 
-import os
 import functools
 import threading
 from typing import Any, Optional
 
 import numpy as np
 
-import faces as facelib
 import object_grouping as og
 import model_registry
+from optional_deps import optional_import
 
-try:
-    import cv2
-except Exception:
-    cv2 = None
-
-try:
-    import torch
-    from transformers import AutoImageProcessor, AutoModel
-except Exception:
-    torch = None
-    AutoImageProcessor = None
-    AutoModel = None
-
-# SMPLest-X is a research repo, not a pip package, and needs the (license-gated)
-# SMPL body-model files alongside its own weights. Treat it exactly like the DINO
-# and insightface backends: optional, lazily loaded, degrades to None when the
-# import or its model files are absent. `smplestx_runner` is a thin adapter the
-# user drops next to this module exposing infer(img_bgr, box) -> (verts, faces).
-try:
-    import smplestx_runner as _smplx_mod
-except Exception:
-    _smplx_mod = None
+cv2, _HAVE_CV2 = optional_import("cv2")
+torch, _HAVE_TORCH = optional_import("torch")
+AutoImageProcessor, _ = optional_import("transformers", attr="AutoImageProcessor")
+AutoModel, _HAVE_TRANSFORMERS = optional_import("transformers", attr="AutoModel")
+# Body-shape estimation (SMPLest-X / SHAPY / ANNY) is NOT implemented: `smplx`
+# only provides the parametric body model, not an image-to-parameters
+# estimator. A runner would expose infer(img_bgr, box) -> {betas, faces,
+# vertices, confidence}; until one exists this stays None and the provider
+# reports why.
+_smplx_mod = None
+BODY_ESTIMATOR_REASON = ("no body-shape estimator implemented (smplx is only the "
+                         "body model; an SMPLest-X-style inference runner is needed)")
 
 ## Cosine distance for DINO identity vectors.
 BODY_EPS_REID = 0.20
@@ -64,29 +53,40 @@ FACE_IN_BODY_CONTAINMENT = 0.9
 ## ponytail: these are the pretrain-lvd1689m repos; confirm the strings resolve
 ## and aren't gated (v3 repos have required an HF token where v2 did not). If
 ## gated, from_pretrained below takes token=..., wire it to a setting then.
-_BODY_MODELS = {
-    "s": "facebook/dinov3-vits16-pretrain-lvd1689m",
-    "b": "facebook/dinov3-vitb16-pretrain-lvd1689m",
-    "l": "facebook/dinov3-vitl16-pretrain-lvd1689m",
-    "g": "facebook/dinov3-vit7b16-pretrain-lvd1689m",
+BODY_MODELS = {
+    # DINOv2: public, ungated, the default. Sizes s/b/l/g.
+    "dinov2": {"s": "facebook/dinov2-small", "b": "facebook/dinov2-base",
+               "l": "facebook/dinov2-large", "g": "facebook/dinov2-giant"},
+    # DINOv3: gated on HF (needs an accepted licence + token in the HF cache).
+    "dinov3": {"s": "facebook/dinov3-vits16-pretrain-lvd1689m",
+               "b": "facebook/dinov3-vitb16-pretrain-lvd1689m",
+               "l": "facebook/dinov3-vitl16-pretrain-lvd1689m",
+               "g": "facebook/dinov3-vit7b16-pretrain-lvd1689m"},
 }
+_BODY_MODELS = BODY_MODELS["dinov2"]      # legacy alias (size -> id)
 _BODY_DEFAULT = "s"
+# Which (family, size) the module picked; set by module.py from the broker.
+_ACTIVE = {"model_id": BODY_MODELS["dinov2"]["s"]}
 
 ## Weights land here (project models dir), not a hidden ~/.cache, matching the
 ## house download convention.
-_HF_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "dino")
+_HF_CACHE = model_registry.model_dir("bodies", "embed.bodies")
 
 _lock = threading.Lock()
 
-def _body_size() -> str:
-    """! @brief Resolve the configured body-embedder size, defaulting to 's'."""
-    import manager as m
-    s = (m.state.get("body_size") or _BODY_DEFAULT).lower()
-    return s if s in _BODY_MODELS else _BODY_DEFAULT
+def set_model(model_id: str) -> None:
+    """! @brief Point the embedder at a HF backbone id (module.py calls this from
+    the Models-tab pick). Vectors are stored with the id as embed_mode, so a
+    change never mixes spaces."""
+    _ACTIVE["model_id"] = model_id or BODY_MODELS["dinov2"][_BODY_DEFAULT]
+
+
+def active_model() -> str:
+    return _ACTIVE["model_id"]
 
 def _build_reid(model_id: str):
     """! @brief Construct (model, processor) for a DINO backbone id, or None."""
-    if AutoModel is None:
+    if not (_HAVE_TRANSFORMERS and _HAVE_TORCH):
         return None
     try:
         device = "cuda" if og.has_gpu() else "cpu"
@@ -107,7 +107,7 @@ def _load_reid() -> Optional[tuple]:
     pressure instead of held for the process lifetime.
     @return (model, processor, model_id) tuple, or None if unavailable.
     """
-    model_id = _BODY_MODELS[_body_size()]
+    model_id = active_model()
     key = f"bodies:reid:{model_id}"
     with _lock:
         if key not in _reid_registered:
@@ -124,7 +124,7 @@ def _load_reid() -> Optional[tuple]:
 def reid_registry_key():
     """! @brief Registry key for the current body-reid backbone, so a batched task
     can lease it resident across many embeds instead of reloading it per image."""
-    return f"bodies:reid:{_BODY_MODELS[_body_size()]}"
+    return f"bodies:reid:{active_model()}"
 
 def have_body_embedder() -> bool:
     """! @brief Whether the DINO backbone is up (else callers degrade to appearance)."""
@@ -167,7 +167,7 @@ def embed_bodies(img_bgr: np.ndarray, boxes: list[dict]) -> tuple[list, str]:
     """
     if img_bgr is None or not boxes:
         return [], "none"
-    img_bgr = facelib._as_bgr(img_bgr)
+    img_bgr = og.as_bgr(img_bgr)
     if img_bgr is None:
         return [], "none"
 
@@ -186,7 +186,10 @@ def embed_bodies(img_bgr: np.ndarray, boxes: list[dict]) -> tuple[list, str]:
                 inputs = proc(images=crops, return_tensors="pt").to(model.device)
                 with torch.no_grad():
                     out = model(**inputs)
-                feats = out.pooler_output.detach().cpu().numpy().astype(np.float32)
+                pooled = getattr(out, "pooler_output", None)
+                if pooled is None:                       # DINOv2 has no pooler: use CLS
+                    pooled = out.last_hidden_state[:, 0]
+                feats = pooled.detach().cpu().numpy().astype(np.float32)
                 for slot, f in zip(slots, feats):
                     vecs[slot] = _normalise(f)
             except Exception:
@@ -262,7 +265,7 @@ def estimate_params(img_bgr: np.ndarray, box: dict) -> Optional[dict]:
     runner = _load_smplx()
     if runner is None or img_bgr is None:
         return None
-    img_bgr = facelib._as_bgr(img_bgr)
+    img_bgr = og.as_bgr(img_bgr)
     if img_bgr is None:
         return None
     try:
@@ -275,22 +278,6 @@ def estimate_params(img_bgr: np.ndarray, box: dict) -> Optional[dict]:
             "faces": np.asarray(out["faces"], np.int32),
             "vertices": np.asarray(out["vertices"], np.float32),
             "confidence": float(out.get("confidence", 1.0))}
-
-def _drop_beta_outliers(betas: np.ndarray, max_mad: float = 5.0) -> np.ndarray:
-    """! @brief Keep shape vectors within max_mad median-absolute-deviations of the median.
-    @return Boolean mask of inliers. MAD is used over std so one bad fit (occlusion,
-            truncation, a second person leaking into the crop) can't drag the gate.
-            The threshold is loose (a bad SMPL fit scores hundreds of MADs off, while
-            a tight-but-honest cluster can push a good view past 3), and when the
-            spread is negligible (all fits agree) every view is kept.
-    """
-    med = np.median(betas, axis=0)
-    dist = np.linalg.norm(betas - med, axis=1)
-    spread = np.abs(dist - np.median(dist))
-    mad = np.median(spread)
-    if mad < 1e-4:
-        return np.ones(len(betas), dtype=bool)
-    return (spread / mad) <= max_mad
 
 def estimate_shape(crops: list, min_views: int = 3,
                    min_confidence: float = 0.3) -> Optional[tuple]:
@@ -315,7 +302,7 @@ def estimate_shape(crops: list, min_views: int = 3,
         return None
     betas = np.stack([f["betas"] for f in fits])
     conf = np.array([f["confidence"] for f in fits], np.float32)
-    keep = _drop_beta_outliers(betas)
+    keep = og.drop_beta_outliers(betas)
     betas, conf = betas[keep], conf[keep]
     if conf.sum() == 0:
         conf = np.ones_like(conf)
@@ -327,15 +314,4 @@ def estimate_shape(crops: list, min_views: int = 3,
         return None
     return (np.asarray(verts, np.float32), np.asarray(faces, np.int32))
 
-def mesh_to_obj(vertices: np.ndarray, faces: np.ndarray) -> bytes:
-    """! @brief Serialise a vertex/face mesh to Wavefront OBJ text.
-    @return UTF-8 OBJ bytes (v lines + 1-indexed f lines), ready to store as the
-            person container's mesh member. OBJ carries the shape and skeleton
-            we need with no binary chunking.
-    """
-    verts = np.asarray(vertices, np.float32).copy()
-    verts[:, 0] *= -1.0                        # flip X: estimator frame -> viewer frame
-    faces = np.asarray(faces, np.int32)[:, ::-1] + 1  # reverse winding, then OBJ 1-based
-    lines = [f"v {x:.6f} {y:.6f} {z:.6f}" for x, y, z in verts]
-    lines += [f"f {a} {b} {c}" for a, b, c in faces]
-    return ("\n".join(lines) + "\n").encode()
+mesh_to_obj = og.mesh_to_obj

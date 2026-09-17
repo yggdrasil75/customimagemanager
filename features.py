@@ -63,7 +63,6 @@ FEATURE_SECTIONS = {
         "features": [
             ("tab.gallery", "Gallery tab", "read"),
             ("tab.albums",  "Albums tab (read=view, write=create/edit)", "read"),
-            ("tab.faces",   "Faces tab (read=view, write=edit clusters)", "read"),
             ("tab.review",  "Review tab", "write"),
             ("tab.music",   "Music tab", "read"),
             ("tab.trainer", "Trainer tab", "write"),

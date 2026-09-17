@@ -39,9 +39,20 @@
   // Render module-contributed settings fields into their target pane. For now
   // pane="general" is supported (the default pane); a field's value is saved
   // through the same /api/update_settings path core settings use.
+  // Fields with pane="module" belong to a per-module Settings popover in the
+  // Modules tab (tiers.js renders the button); they are not global settings.
+  window._moduleFields = {};
   function buildSettingsFields(fields) {
     const byPane = {};
-    for (const f of fields) (byPane[f.pane || "general"] ||= []).push(f);
+    window._moduleFields = {};
+    for (const f of fields) {
+      if ((f.pane || "general") === "module") {
+        (window._moduleFields[f.module_id] ||= []).push(f);
+        continue;
+      }
+      (byPane[f.pane || "general"] ||= []).push(f);
+    }
+    if (window.renderModuleSettingsButtons) renderModuleSettingsButtons();
     for (const pane in byPane) {
       const mount = document.getElementById("module_settings_fields_" + pane);
       if (!mount) continue;
@@ -285,6 +296,7 @@ const SPEED_BADGE = { fast: "⚡", balanced: "⚖", accurate: "🎯" };
     return wrap;
   }
   window.buildModelPicker = buildModelPicker;
+  window.moduleFieldEl = fieldEl;
 
   async function buildSettingsTabs() {
     const tabBar = document.getElementById("module_settings_tabs");

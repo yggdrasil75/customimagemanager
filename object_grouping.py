@@ -13,26 +13,23 @@ work (downscale_to_cap) so huge originals never hit the GPU at full size.
 
 import os
 import gc
-import json
-import math
-import queue
-import threading
-import functools
 import numpy as np
 import model_registry
-from concurrent.futures import ThreadPoolExecutor
+from optional_deps import optional_import
 
-try:
-    import cv2
-    _HAVE_CV2 = True
-except Exception:
-    _HAVE_CV2 = False
+cv2, _HAVE_CV2 = optional_import("cv2")
+torch, _HAVE_TORCH = optional_import("torch")
+# The rest are accelerators with pure-numpy fallbacks below; a miss is normal
+# (hnswlib needs a C++ toolchain on Windows), so don't warn about them.
+timm, _HAVE_TIMM = optional_import("timm", quiet=True)
+F, _ = optional_import("torch.nn.functional", quiet=True)
+DBSCAN, _HAVE_SKLEARN = optional_import("sklearn.cluster", attr="DBSCAN", quiet=True)
+PCA, _ = optional_import("sklearn.decomposition", attr="PCA", quiet=True)
+hnswlib, _HAVE_HNSW = optional_import("hnswlib", quiet=True)
+cKDTree, _HAVE_SCIPY = optional_import("scipy.spatial", attr="cKDTree", quiet=True)
+from collections import Counter
 
 _CNN = {"loaded": False, "model": None, "path": None, "dim": 0}
-try:
-    import torch
-except Exception:
-    torch = None
 # ── tunables ──────────────────────────────────────────────────────────────────
 MIN_IMAGE_PX = 256          # skip images whose short side is below this
 MAX_IMAGE_PX = 2048         # HARD cap on the LONG side; downscale before anything
@@ -71,11 +68,9 @@ def has_gpu():
 # ── CNN backbone (optional) ───────────────────────────────────────────────────
 def _build_cnn(arch):
     """Construct (model, dim) for a timm arch, or None."""
-    if not _have_torch():
+    if not (_HAVE_TORCH and _HAVE_TIMM):
         return None
     try:
-        torch = _get_torch()
-        import timm
         model = timm.create_model(arch, pretrained=True, num_classes=0)
         model.eval()
         if has_gpu():
@@ -102,8 +97,6 @@ def _load_cnn(model_path=None):
 def _cnn_embed(crops_bgr):
     """Embed a list of BGR crops with the CNN backbone -> (N, dim) float32.
     Assumes _load_cnn() already succeeded."""
-    torch = _get_torch()
-    import torch.nn.functional as F
     xs = []
     for c in crops_bgr:
         rgb = cv2.cvtColor(c[:, :, :3], cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
@@ -160,8 +153,17 @@ def embed_regions(img_bgr, boxes, depth=None, cnn_model=None):
     if not boxes or img_bgr is None or not _HAVE_CV2:
         return np.zeros((0, _EMB_FALLBACK_DIM), np.float32)
     crops, dcrops = [], []
+    H, W = img_bgr.shape[:2]
     for b in boxes:
-        x1, y1, x2, y2 = b["_px"]
+        if "_px" in b:                         # already pixel xyxy
+            x1, y1, x2, y2 = b["_px"]
+        else:                                  # normalised centre-form (faces/bodies)
+            x1 = int(round((b["cx"] - b["w"] / 2) * W)); x2 = int(round((b["cx"] + b["w"] / 2) * W))
+            y1 = int(round((b["cy"] - b["h"] / 2) * H)); y2 = int(round((b["cy"] + b["h"] / 2) * H))
+        x1, x2 = max(0, min(W, x1)), max(0, min(W, x2))
+        y1, y2 = max(0, min(H, y1)), max(0, min(H, y2))
+        if x2 - x1 < 2 or y2 - y1 < 2:
+            x1, y1, x2, y2 = 0, 0, max(2, min(W, 2)), max(2, min(H, 2))
         crops.append(img_bgr[y1:y2, x1:x2])
         dcrops.append(depth[y1:y2, x1:x2] if depth is not None else None)
     try:
@@ -218,7 +220,6 @@ def group_embeddings(embeddings, min_cluster=2, eps=0.18):
     low_dim = X.shape[1] <= 30
     try:
         if n_small and low_dim:
-            from sklearn.cluster import DBSCAN
             euc_eps = float(np.sqrt(max(2.0 * eps, 1e-9)))
             return DBSCAN(eps=euc_eps, min_samples=min_cluster, metric="euclidean",
                           algorithm="ball_tree", n_jobs=-1).fit_predict(X).astype(int)
@@ -229,7 +230,6 @@ def group_embeddings(embeddings, min_cluster=2, eps=0.18):
 def _finalise_labels(roots, min_cluster, n):
     """Union-find roots -> contiguous cluster ids, dropping sub-min_cluster
     groups to noise (-1)."""
-    from collections import Counter
     cnt = Counter(roots.tolist())
     remap, nxt = {}, 0
     out = np.full(n, -1, dtype=int)
@@ -280,12 +280,8 @@ def group_embeddings_streaming(batch_iter, total, dim, eps=0.18, min_cluster=2,
     Returns a label array (total,), -1 == noise/ungrouped. Falls back to a single
     empty result on hard failure. Never raises.
     """
-    if total < min_cluster or dim <= 0:
+    if total < min_cluster or dim <= 0 or not _HAVE_HNSW:
         return np.full(max(total, 0), -1, dtype=int)
-    try:
-        import hnswlib
-    except Exception:
-        return np.full(total, -1, dtype=int)
 
     nt = max(1, os.cpu_count() or 1)
     index = None
@@ -370,7 +366,6 @@ def _hnsw_group(X, eps, min_cluster, ef=100, M=16, k=24):
     index BUILD dominates wall time, so threading it is the main speed lever
     (110k×256d: ~25s threaded vs minutes single-threaded). `k` neighbours per
     point bounds how many same-cluster links we can find."""
-    import hnswlib
     n, dim = X.shape
     nt = max(1, os.cpu_count() or 1)
     index = None
@@ -416,11 +411,9 @@ def _greedy_group(X, eps, min_cluster):
     hnswlib is unavailable. A KD-tree is useless above ~20 dims, so reduce with
     PCA first; this keeps it O(n log n) in time and memory instead of degrading
     to brute force. Strictly bounded — never allocates an n x n matrix."""
-    from scipy.spatial import cKDTree
     Xr = X
     if X.shape[1] > 16 and X.shape[0] > 1000:
         try:
-            from sklearn.decomposition import PCA
             k = min(16, X.shape[1], X.shape[0] - 1)
             Xr = PCA(n_components=k, svd_solver="randomized",
                      random_state=0).fit_transform(X).astype(np.float32)
@@ -448,3 +441,54 @@ def _greedy_group(X, eps, min_cluster):
                     if ra != rb: parent[rb] = ra
     roots = np.fromiter((find(i) for i in range(len(Xr))), dtype=int, count=len(Xr))
     return _finalise_labels(roots, min_cluster, len(Xr))
+
+
+# ── shared region / shape helpers (faces, bodies, people) ────────────────────
+def as_bgr(img):
+    """Coerce any decoded array to 3-channel uint8 BGR, or None."""
+    if img is None or getattr(img, "size", 0) == 0:
+        return None
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    elif img.ndim == 3 and img.shape[2] != 3:
+        c = img.shape[2]
+        if c in (1, 2):
+            img = cv2.cvtColor(img[:, :, 0], cv2.COLOR_GRAY2BGR)
+        elif c == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        else:
+            img = img[:, :, :3]
+    if img.dtype != np.uint8:
+        img = np.clip(img, 0, 255).astype(np.uint8)
+    return img
+
+
+def drop_beta_outliers(betas: np.ndarray, max_mad: float = 5.0) -> np.ndarray:
+    """! @brief Keep shape vectors within max_mad median-absolute-deviations of the median.
+    @return Boolean mask of inliers. MAD is used over std so one bad fit (occlusion,
+            truncation, a second person leaking into the crop) can't drag the gate.
+            The threshold is loose (a bad SMPL fit scores hundreds of MADs off, while
+            a tight-but-honest cluster can push a good view past 3), and when the
+            spread is negligible (all fits agree) every view is kept.
+    """
+    med = np.median(betas, axis=0)
+    dist = np.linalg.norm(betas - med, axis=1)
+    spread = np.abs(dist - np.median(dist))
+    mad = np.median(spread)
+    if mad < 1e-4:
+        return np.ones(len(betas), dtype=bool)
+    return (spread / mad) <= max_mad
+
+
+def mesh_to_obj(vertices: np.ndarray, faces: np.ndarray) -> bytes:
+    """! @brief Serialise a vertex/face mesh to Wavefront OBJ text.
+    @return UTF-8 OBJ bytes (v lines + 1-indexed f lines), ready to store as the
+            person container's mesh member. OBJ carries the shape and skeleton
+            we need with no binary chunking.
+    """
+    verts = np.asarray(vertices, np.float32).copy()
+    verts[:, 0] *= -1.0                        # flip X: estimator frame -> viewer frame
+    faces = np.asarray(faces, np.int32)[:, ::-1] + 1  # reverse winding, then OBJ 1-based
+    lines = [f"v {x:.6f} {y:.6f} {z:.6f}" for x, y, z in verts]
+    lines += [f"f {a} {b} {c}" for a, b, c in faces]
+    return ("\n".join(lines) + "\n").encode()

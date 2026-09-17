@@ -23,15 +23,27 @@ Nothing here raises: every public call returns None / False on any failure.
 
 import os
 import threading
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
+import urllib.request
 
-import faces as facelib
-import bodies as bodylib          # reuse mesh_to_obj + the _as_bgr coercion via faces
+from optional_deps import optional_import
+get_object, _HAVE_INSIGHT_DATA = optional_import("insightface.data", attr="get_object")
+MorphabelModel, _HAVE_FACE3D = optional_import("insightface.thirdparty.face3d.morphable_model", attr="MorphabelModel")
+mm_fit, _ = optional_import("insightface.thirdparty.face3d.morphable_model", attr="fit", quiet=True)
+# Deep3DFaceRecon is not implemented (there is no runner in the repo); the
+# 'deep3d' provider stays unavailable until one exposing
+# infer(img_bgr, box) -> {vertices, faces, coeff, confidence} exists.
+_d, _HAVE_DEEP3D = None, False
+DEEP3D_REASON = "no Deep3DFaceRecon runner implemented"
+Delaunay, _HAVE_SCIPY = optional_import("scipy.spatial", attr="Delaunay")
+
+import object_grouping as og
 import model_registry
+from . import facelib
 
-MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+MODELS_DIR = facelib.MODELS_DIR
 
 # Fewest per-crop fits we'll trust an average over — a single view carries the
 # artist's/camera's angle baked in, so one is never canonical.
@@ -52,7 +64,6 @@ def _meanshape() -> np.ndarray:
         return _MEANSHAPE["pts"]
     with _lock:
         if _MEANSHAPE["pts"] is None:
-            from insightface.data import get_object
             m = np.asarray(get_object("meanshape_68.pkl"), np.float32)
             if m.shape != (68, 3):
                 raise ValueError(
@@ -80,8 +91,6 @@ def _build_insight3d():
         # The morphable model. insightface ships the fitting utilities under
         # thirdparty.face3d; the BFM basis file is fetched to models/face3d on
         # first use (small relative to buffalo_l).
-        from insightface.thirdparty import face3d  # noqa: F401
-        from insightface.thirdparty.face3d.morphable_model import MorphabelModel
         bfm_path = os.path.join(MODELS_DIR, "face3d", "BFM.mat")
         if not os.path.exists(bfm_path):
             return None                     # basis not provisioned; caller falls back
@@ -114,7 +123,6 @@ def _load_deep3d():
         return _deep3d["runner"]
     _deep3d["tried"] = True
     try:
-        import deep3d_runner as _d
         _deep3d["runner"] = _d.load(models_dir=MODELS_DIR)
     except Exception:
         _deep3d["runner"] = None
@@ -139,7 +147,6 @@ def ensure_basis(timeout: int = 120) -> bool:
         return True
     if not os.path.exists(_BFM_PATH):
         try:
-            import urllib.request
             os.makedirs(_BFM_DIR, exist_ok=True)
             tmp = _BFM_PATH + ".part"
             with _lock:
@@ -180,7 +187,6 @@ def _landmark68_triangles() -> np.ndarray:
         return _LM_TRI["tri"]
     tmpl = _meanshape()[:, :2]
     try:
-        from scipy.spatial import Delaunay
         tri = Delaunay(tmpl).simplices.astype(np.int32)
     except Exception:
         pass
@@ -367,7 +373,6 @@ def _fit_insight3d(img_bgr, box) -> Optional[dict]:
         # Fit the morphable model to the landmarks: solve for shape (sp),
         # expression (ep) and the affine transform. face3d exposes this as
         # fit.fit_points; we keep sp as the person-stable identity coefficients.
-        from insightface.thirdparty.face3d.morphable_model import fit as mm_fit
         x = lmk[:, :2] if lmk.shape[1] >= 2 else lmk
         # BFM landmark indices for the 68-point scheme.
         kpt_idx = bfm.kpt_ind
@@ -434,7 +439,7 @@ def estimate_shape(crops: list, min_views: int = MIN_VIEWS,
 
     coeffs = np.stack([f["coeff"] for f in fits])
     conf = np.array([f["confidence"] for f in fits], np.float32)
-    keep = bodylib._drop_beta_outliers(coeffs)   # same MAD gate as body shapes
+    keep = og.drop_beta_outliers(coeffs)   # same MAD gate as body shapes
     coeffs, conf = coeffs[keep], conf[keep]
     kept_fits = [f for f, k in zip(fits, keep) if k]
     if conf.sum() == 0:
@@ -465,4 +470,4 @@ def estimate_shape(crops: list, min_views: int = MIN_VIEWS,
 
 
 # Serialisation is identical to bodies — one OBJ contract for both meshes.
-mesh_to_obj = bodylib.mesh_to_obj
+mesh_to_obj = og.mesh_to_obj

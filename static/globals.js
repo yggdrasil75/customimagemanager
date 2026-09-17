@@ -298,10 +298,6 @@ function populateSettingsForm(s){
       _set('cfg_model', s.oai_model||'');
       _set('cfg_embed_model', s.oai_embed_model||'');
       // faces / people
-      const _fb=document.getElementById('cfg_face_bg');
-      if(_fb) _fb.checked=!!s.face_bg_enabled;
-      const _fc=document.getElementById('cfg_face_custom');
-      if(_fc) _fc.checked=!!s.face_bg_custom;
       const _g=s.model_groups||{};
       const _fill=(id,cur,list,label)=>{
         const el=document.getElementById(id); if(!el) return;
@@ -316,18 +312,8 @@ function populateSettingsForm(s){
             (_g.trained||[]).concat(_g.custom||[]));
       _fill('cfg_our_model', s.our_model,
             (_g.trained||[]).concat(_g.custom||[]));
-      loadFaceModels(s.face_detector, s.face_recognition);
-      const _rd=document.getElementById('cfg_face_reject_drawn');
-      if(_rd) _rd.checked=s.face_reject_drawn!==false;
-      const _dt=document.getElementById('cfg_face_drawn_thresh');
-      if(_dt) _dt.value=(s.face_drawn_thresh!=null?s.face_drawn_thresh:0.55);
-      const _be=document.getElementById('cfg_body_enabled');
-      if(_be) _be.checked=!!s.body_enabled;
-      const _bs=document.getElementById('cfg_body_size');
-      if(_bs) _bs.value=s.body_size||'s';
       _set('cfg_pose_estimator', s.pose_estimator||'atlas');
       _set('cfg_shape_estimator', s.shape_estimator||'anny_fit');
-      _set('cfg_face_estimator', s.face_estimator||'auto');
       _set('cfg_appearance_eps', (s.appearance_eps??0.35));
       _set('cfg_system', s.oai_system_prompt||'');
       const _chk=(id,v)=>{const e=document.getElementById(id); if(e) e.checked=!!v;};

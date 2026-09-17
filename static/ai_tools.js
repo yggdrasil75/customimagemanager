@@ -37,65 +37,7 @@ function updateActionDropdown(){
     if(prev&&[...sel.options].some(o=>o.value===prev)) sel.value=prev;
   });
 }
-// ── model-select helpers (speed badge + availability note), used by the face pickers ──
-const SEG_SPEED_LABEL={fast:'\u26a1 fast',balanced:'\u2696 balanced',accurate:'\ud83c\udfaf accurate'};
-function renderSegNote(sel,cache,noteEl){
-  if(!sel||!noteEl) return;
-  const m=cache.find(x=>x.id===sel.value);
-  noteEl.innerText=m?(m.note+(m.available?'':('  ('+(m.reason||'unavailable')+')'))):'';
-}
 
-let faceDetCache=[], faceRecCache=[];
-
-function fillFaceSelect(sel,models,selected){
-  if(!sel) return;
-  sel.innerHTML='';
-  ['fast','balanced','accurate'].forEach(sp=>{
-    const inGroup=models.filter(m=>m.speed===sp && !m.custom);
-    if(!inGroup.length) return;
-    const g=document.createElement('optgroup');
-    g.label=SEG_SPEED_LABEL[sp]||sp;
-    inGroup.forEach(m=>{
-      const o=document.createElement('option');
-      o.value=m.id;
-      o.text=m.label+(m.available?'':'  \u2014 needs deps');
-      o.disabled=!m.available;
-      g.appendChild(o);
-    });
-    sel.appendChild(g);
-  });
-  const customs=models.filter(m=>m.custom);
-  if(customs.length){
-    const g=document.createElement('optgroup'); g.label='\ud83d\udcc1 custom';
-    customs.forEach(m=>{ const o=document.createElement('option');
-      o.value=m.id; o.text=m.label+(m.available?'':'  \u2014 needs deps');
-      o.disabled=!m.available; g.appendChild(o); });
-    sel.appendChild(g);
-  }
-  if(selected) sel.value=selected;
-}
-
-async function loadFaceModels(activeDetector,activeRecognition){
-  const detSel=document.getElementById('cfg_face_detector');
-  const recSel=document.getElementById('cfg_face_recognition');
-  try{
-    const d=await fetch('/api/face_models').then(r=>r.json());
-    if(!d.success) return;
-    faceDetCache=d.detectors||[]; faceRecCache=d.recognition||[];
-    fillFaceSelect(detSel,faceDetCache,activeDetector||d.active_detector);
-    fillFaceSelect(recSel,faceRecCache,activeRecognition||d.active_recognition);
-    renderSegNote(detSel,faceDetCache,document.getElementById('cfg_face_detector_note'));
-    renderSegNote(recSel,faceRecCache,document.getElementById('cfg_face_recognition_note'));
-  }catch(e){}
-}
-
-document.addEventListener('change',e=>{
-  if(!e.target) return;
-  if(e.target.id==='cfg_face_detector')
-    renderSegNote(e.target,faceDetCache,document.getElementById('cfg_face_detector_note'));
-  if(e.target.id==='cfg_face_recognition')
-    renderSegNote(e.target,faceRecCache,document.getElementById('cfg_face_recognition_note'));
-});
 
 
 // Persist the AI/Vision pane. Returns {ok:true} or {ok:false, error}. Does NOT
@@ -122,19 +64,10 @@ async function persistAiSettings(){
       oai_key:_v('cfg_apikey'),
       oai_model:_v('cfg_model'),
       oai_embed_model:_v('cfg_embed_model'),
-      face_bg_enabled:_c('cfg_face_bg'),
-      face_bg_custom:_c('cfg_face_custom'),
-      face_detector:_v('cfg_face_detector','yolov11n-face'),
-      face_recognition:_v('cfg_face_recognition','buffalo_l'),
-      face_reject_drawn:_c('cfg_face_reject_drawn'),
-      face_drawn_thresh:parseFloat(_v('cfg_face_drawn_thresh','0.55'))||0.55,
-      body_enabled:_c('cfg_body_enabled'),
-      body_size:_v('cfg_body_size','s'),
       person_model:_v('cfg_person_model'),
       our_model:_v('cfg_our_model'),
       pose_estimator:_v('cfg_pose_estimator'),
       shape_estimator:_v('cfg_shape_estimator'),
-      face_estimator:_v('cfg_face_estimator'),
       appearance_eps:parseFloat(_v('cfg_appearance_eps'))||0.35,
       oai_system_prompt:_v('cfg_system'),
       llm_preprocess:{

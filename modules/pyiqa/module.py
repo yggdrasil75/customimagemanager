@@ -16,7 +16,7 @@ from optional_deps import optional_import
 pyiqa, _HAVE_IQA = optional_import("pyiqa")
 torch, _HAVE_TORCH = optional_import("torch")
 cv2, _HAVE_CV2 = optional_import("cv2")
-np, _ = optional_import("numpy")
+import numpy as np
 import model_registry
 
 MANIFEST = {

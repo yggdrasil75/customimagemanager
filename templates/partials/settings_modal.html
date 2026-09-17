@@ -116,16 +116,6 @@
             </select>
           </div>
           <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Face estimator</span>
-            <select id="cfg_face_estimator"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="auto">Auto (best available)</option>
-              <option value="landmarks3d">Landmarks-3D · no download</option>
-              <option value="insight3d">InsightFace 3DMM · needs BFM basis</option>
-              <option value="deep3d">Deep3D · needs deep3d_runner</option>
-            </select>
-          </div>
-          <div>
             <span class="text-[10px] text-gray-500 block mb-0.5">Appearance split (eps)</span>
             <input id="cfg_appearance_eps" type="number" step="0.01" min="0" max="1"
               class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
@@ -194,53 +184,14 @@
       <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
         <label class="text-xs text-purple-300 font-bold block mb-2">Faces &amp; People
           <span class="font-normal text-gray-500">(detect, embed, and cluster who&rsquo;s in each image)</span></label>
-        <label class="flex items-center gap-2 text-sm text-gray-300 mb-3 cursor-pointer">
-          <input id="cfg_face_bg" type="checkbox" class="accent-purple-500">
-          Detect faces &amp; people on every scan
-          <span class="text-gray-600 text-[10px]">(background boxing)</span>
-        </label>
+        <p class="text-[10px] text-gray-500 mb-3">The background face/people scan and its
+          options live with the People module (General → People, when it's enabled).</p>
         <div class="grid grid-cols-2 gap-4">
           <div class="border border-gray-700 rounded p-3">
             <div class="text-[11px] font-bold text-purple-200/80 mb-2">Faces</div>
-            <div class="space-y-2">
-              <div>
-                <span class="text-[10px] text-gray-500 block mb-0.5">Face detector
-                  <span class="text-gray-600">(boxes faces)</span></span>
-                <select id="cfg_face_detector"
-                  class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-                </select>
-                <p id="cfg_face_detector_note" class="text-[10px] text-gray-600 mt-1"></p>
-              </div>
-              <div>
-                <span class="text-[10px] text-gray-500 block mb-0.5">Recognition model
-                  <span class="text-gray-600">(identity embedding)</span></span>
-                <select id="cfg_face_recognition"
-                  class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-                </select>
-                <p id="cfg_face_recognition_note" class="text-[10px] text-gray-600 mt-1"></p>
-              </div>
-              <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer select-none pt-0.5">
-                <input type="checkbox" id="cfg_face_reject_drawn" class="accent-purple-500">
-                Skip drawn faces
-                <span class="text-gray-600 text-[10px]">(cartoon / anime / illustration)</span>
-              </label>
-              <div>
-                <span class="text-[10px] text-gray-500 block mb-0.5">Drawn cutoff
-                  <span class="text-gray-600">(0&ndash;1, higher = stricter)</span></span>
-                <input type="number" id="cfg_face_drawn_thresh" min="0" max="1" step="0.05"
-                  class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              </div>
-            </div>
-            <p class="text-[10px] text-gray-600 mt-2">The <b>detector</b> is a YOLO model with a
-              &ldquo;face&rdquo; class — a bigger size catches small / profile faces (the ones cluster
-              density needs) at more cost. The <b>recognition</b> pack turns each face into an
-              identity vector; changing it rebuilds embeddings (a rescan is queued automatically).
-              Drop extra face detectors in <code>models/face/yolo</code>; insightface packs live in
-              <code>models/face/insightface</code>.</p>
-            <p class="text-[10px] text-gray-600 mt-2">Illustrated faces detect as faces but the
-              same character is drawn many ways, so they never cluster to a real identity. When on,
-              crops scoring at/above the cutoff are kept out of the People tab. Set the cutoff to
-              <code>1</code> to disable; changing this needs a <b>Rescan all</b>.</p>
+            <p class="text-[10px] text-gray-500">Face detector, recognition pack, 3D face shape and
+              the drawn-face filter are picked in <b>🧩 Models</b> (Face detection / Face identity /
+              Face 3D shape). Changing the recognition pack rebuilds embeddings automatically.</p>
           </div>
           <div class="border border-gray-700 rounded p-3">
             <div class="text-[11px] font-bold text-purple-200/80 mb-2">People &amp; bodies</div>
@@ -252,33 +203,12 @@
                   <option value="">Common (COCO · person)</option>
                 </select>
               </div>
-              <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer select-none pt-0.5">
-                <input type="checkbox" id="cfg_body_enabled" class="accent-purple-500">
-                Body re-id
-                <span class="text-gray-600 text-[10px]">(cluster bodies, link to faces)</span>
-              </label>
-              <div>
-                <span class="text-[10px] text-gray-500 block mb-0.5">Body size
-                  <span class="text-gray-600">(DINOv3)</span></span>
-                <select id="cfg_body_size"
-                  class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-                  <option value="s">s · small</option>
-                  <option value="b">b · base</option>
-                  <option value="l">l · large</option>
-                  <option value="g">g · giant</option>
-                </select>
-              </div>
             </div>
-            <p class="text-[10px] text-gray-600 mt-2">Bodies are only embedded on images scanned
-              while re-id is on. Enabling it needs a <b>Rescan all</b> from the Faces pane to
-              embed the existing library.</p>
+            <p class="text-[10px] text-gray-600 mt-2">Body re-id (the backbone, and whether it
+              runs during the face scan) is picked in <b>🧩 Models → Body identity</b>. Turning it
+              on needs a <b>Rescan all</b> from the Faces pane to embed the existing library.</p>
           </div>
         </div>
-        <label class="flex items-center gap-2 text-sm text-gray-300 mt-3 cursor-pointer">
-          <input id="cfg_face_custom" type="checkbox" class="accent-purple-500">
-          Also run our trained model
-          <span class="text-gray-600 text-[10px]">(alongside the community weights above)</span>
-        </label>
         <div class="mt-2 max-w-sm">
           <span class="text-[10px] text-gray-500 block mb-0.5">Our model</span>
           <select id="cfg_our_model"
@@ -286,7 +216,6 @@
             <option value="">Latest trained (auto)</option>
           </select>
         </div>
-        <p id="cfg_face_mode" class="text-[10px] text-gray-500 mt-2"></p>
       </div>
       <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
         <div class="flex justify-between items-center mb-2">

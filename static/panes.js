@@ -82,7 +82,7 @@ function _hideRegisteredPanes() {
 }
 
 function _hideAllLeftPanes() {
-  ['gallery_pane','albums_pane','music_pane','faces_pane','review_pane',
+  ['gallery_pane','albums_pane','music_pane','review_pane',
    'trainer_pane'].forEach(pid =>
     document.getElementById(pid)?.classList.add('hidden'));
   _hideRegisteredPanes();
@@ -126,7 +126,6 @@ function setPane(pane) {
   const isMusic = (pane === 'music');
   const isAlbums = (pane === 'albums');
   const isGallery = (pane === 'gallery');
-  const isFaces = (pane === 'faces');
   const isReview = (pane === 'review');
   const isTrainer = (pane === 'trainer');
 
@@ -134,7 +133,6 @@ function setPane(pane) {
   document.getElementById('gallery_pane')?.classList.toggle('hidden', !isGallery);
   document.getElementById('albums_pane')?.classList.toggle('hidden', !isAlbums);
   document.getElementById('music_pane')?.classList.toggle('hidden', !isMusic);
-  document.getElementById('faces_pane')?.classList.toggle('hidden', !isFaces);
   document.getElementById('review_pane')?.classList.toggle('hidden', !isReview);
   document.getElementById('trainer_pane')?.classList.toggle('hidden', !isTrainer);
 
@@ -144,13 +142,11 @@ function setPane(pane) {
   const g = document.getElementById('tab_gallery');
   const a = document.getElementById('tab_albums');
   const m = document.getElementById('tab_music');
-  const f = document.getElementById('tab_faces');
   const rv = document.getElementById('tab_review');
   const tr = document.getElementById('tab_trainer');
   if (g) g.className = isGallery ? on : off;
   if (a) a.className = isAlbums ? on : off;
   if (m) m.className = isMusic ? on : off;
-  if (f) f.className = isFaces ? on : off;
   if (rv) rv.className = isReview ? on : off;
   if (tr) tr.className = isTrainer ? on : off;
   // Registered (module) left tabs are never the active built-in pane here, so
@@ -158,10 +154,6 @@ function setPane(pane) {
   document.querySelectorAll('[data-ltab]').forEach(b => b.className = off);
   if (window.CIMFeatures) window.CIMFeatures.apply(document);
   const _fresh = (pane !== window._lastPane);
-  if (isFaces && typeof loadFaces === 'function') {
-    const l = document.getElementById('faces_list');
-    if (_fresh && (!l || !l.children.length)) loadFaces();
-  }
   if (isReview && typeof loadReviewPane === 'function') {
     const l = document.getElementById('review_pane_list');
     if (_fresh && (!l || !l.children.length)) loadReviewPane();
@@ -313,3 +305,42 @@ function toggleGalleryChrome(show) {
     if (el) el.classList.toggle('hidden', !show);
   });
 }
+
+// ── media modes: what the centre pane shows ─────────────────────────────────
+// 'image' is built in (the viewer + the Main/EXIF/IPTC/XMP tabs). A module
+// that takes over the centre (a book reader, a person's mesh) registers a mode
+// naming its centre element and controls tab; setMediaMode shows exactly one.
+let mediaMode = 'image';
+window._mediaModes = window._mediaModes || {};
+const IMAGE_ONLY_TABS = ['main', 'exif', 'iptc', 'xmp'];
+
+function registerMediaMode(spec) {
+  window._mediaModes[spec.id] = spec;   // {id, centreId, controlsTab}
+}
+window.registerMediaMode = registerMediaMode;
+
+function setMediaMode(mode) {
+  if (mode === mediaMode) return;
+  mediaMode = mode;
+  const isImage = (mode === 'image');
+  document.getElementById('image_pane')?.classList.toggle('hidden', !isImage);
+  for (const id in window._mediaModes) {
+    const m = window._mediaModes[id];
+    document.getElementById(m.centreId)?.classList.toggle('hidden', mode !== id);
+  }
+  const modeTabs = Object.values(window._mediaModes).map(m => m.controlsTab).filter(Boolean);
+  document.querySelectorAll('.controls-tab').forEach(btn => {
+    const t = btn.dataset.tab;
+    if (IMAGE_ONLY_TABS.includes(t)) btn.classList.toggle('hidden', !isImage);
+    if (modeTabs.includes(t)) {
+      const owner = Object.values(window._mediaModes).find(m => m.controlsTab === t);
+      btn.classList.toggle('hidden', !(owner && owner.id === mode));
+    }
+  });
+  document.querySelectorAll('[data-media]').forEach(el =>
+    el.classList.toggle('hidden', el.dataset.media !== mode));
+  const cur = window._mediaModes[mode];
+  if (typeof setControlsTab === 'function')
+    setControlsTab(cur && cur.controlsTab ? cur.controlsTab : 'main');
+}
+window.setMediaMode = setMediaMode;

@@ -110,6 +110,7 @@ class Host:
         # Top-level modals a module contributes: server-rendered partials from
         # the module's templates/ dir, injected into app.html's modal area.
         self.app_modals = []
+        self.centre_panes = []
         # Left-pane content partials a module contributes (e.g. the books shelf),
         # server-rendered into the left column alongside the built-in panes.
         self.left_panes = []
@@ -267,6 +268,13 @@ class Host:
         resolved permission level for feature_key."""
         return self.core.auth.require_feature(feature_key, action=action, fields=fields,
                                     level=level)
+
+    def register_centre_pane(self, template):
+        """Contribute a centre-pane partial (rendered beside the image viewer,
+        hidden until its media mode is entered — pair with registerMediaMode
+        in your JS)."""
+        self.centre_panes.append({"template": template,
+                                  "module_id": self._current_module})
 
     def register_app_modal(self, template):
         """Contribute a top-level modal partial (from this module's templates/

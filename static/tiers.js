@@ -69,7 +69,7 @@ function renderModules(modules) {
       || (!m.core && !m.enabled && m.registered);
     const restart = needsRestart
       ? '<span class="text-[10px] text-amber-300 ml-2">restart to apply</span>' : '';
-    return `<div class="flex items-start gap-3 bg-gray-900/40 border border-gray-700 rounded p-3">
+    return `<div class="flex items-start gap-3 bg-gray-900/40 border border-gray-700 rounded p-3" data-module-row="${m.id}">
       <label class="flex items-center ${cursor} pt-0.5">
         <input type="checkbox" class="accent-indigo-500" ${checked} ${disabled}
           onchange="toggleModule('${m.id}', this.checked, this)">
@@ -77,12 +77,40 @@ function renderModules(modules) {
       <div class="flex-1 min-w-0">
         <div class="flex items-center flex-wrap">
           <span class="text-sm font-bold text-gray-200">${escapeHtml(m.name)}</span>${coreBadge}${ver}${restart}
+          <span class="ml-auto" data-module-settings-btn="${m.id}"></span>
         </div>
         <p class="text-[11px] text-gray-500 mt-0.5">${escapeHtml(m.description || '')}</p>
         ${req}${err}
+        <div class="hidden mt-2 pt-2 border-t border-gray-700 grid grid-cols-2 gap-x-4 gap-y-2"
+             data-module-settings="${m.id}"></div>
       </div>
     </div>`;
   }).join('');
+  renderModuleSettingsButtons();
+}
+
+// A module with pane="module" fields gets a Settings button on its row that
+// unfolds those fields in place (they save through the normal settings path).
+function renderModuleSettingsButtons() {
+  const fields = window._moduleFields || {};
+  document.querySelectorAll('[data-module-settings-btn]').forEach(slot => {
+    const id = slot.dataset.moduleSettingsBtn;
+    const list = fields[id];
+    slot.innerHTML = '';
+    if (!list || !list.length) return;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'text-[11px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded';
+    btn.textContent = '⚙ Settings';
+    btn.addEventListener('click', () => {
+      const box = document.querySelector(`[data-module-settings="${id}"]`);
+      if (!box) return;
+      const open = box.classList.toggle('hidden');
+      if (!open && !box.children.length && window.moduleFieldEl)
+        for (const f of list) box.appendChild(moduleFieldEl(f));
+    });
+    slot.appendChild(btn);
+  });
 }
 
 async function toggleModule(id, enabled, el) {

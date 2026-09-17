@@ -87,7 +87,9 @@ import tempfile
 from optional_deps import optional_import
 # Format backends are optional; each extractor checks its flag and reports
 # 'needs_backend' rather than failing the module.
-fitz, _HAVE_FITZ = optional_import("fitz")             # PyMuPDF
+fitz, _HAVE_FITZ = optional_import("pymupdf", quiet=True)   # PyMuPDF (new name)
+if not _HAVE_FITZ:
+    fitz, _HAVE_FITZ = optional_import("fitz")               # PyMuPDF < 1.24
 rarfile, _HAVE_RARFILE = optional_import("rarfile")
 py7zr, _HAVE_PY7ZR = optional_import("py7zr")
 docx, _HAVE_DOCX = optional_import("docx")             # python-docx

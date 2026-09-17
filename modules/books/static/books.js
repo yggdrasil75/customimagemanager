@@ -1,20 +1,11 @@
-/* books.js — the Books tab, the book metadata editor, and the media-mode switch.
- *
- * Three responsibilities, kept in one file because they're one feature:
+/* books.js — the Books tab and the book metadata editor.
  *
  *   1. The left-pane browser (shelf / authors / series / comics + search).
- *   2. setMediaMode() — the centre-pane swap and the controls-pane pruning.
- *   3. The book metadata editor that lives in the controls pane.
+ *   2. The book metadata editor that lives in the controls pane.
  *
- * The reader itself is in reader.js.
- *
- * WHY setMediaMode LIVES HERE
- * The image editor assumes a pixel surface: bounding boxes, pose skeletons,
- * BRISQUE stars, EXIF. None of that means anything for an epub. Rather than
- * teach every one of those widgets to check "am I looking at a book?", we hide
- * whole regions declaratively — anything marked data-media="image" disappears in
- * book mode, and the book pane appears. One switch, no per-widget conditionals,
- * and the image path is byte-for-byte unchanged when mode === 'image'.
+ * The reader itself is in reader.js. The centre-pane swap is the core media-
+ * mode registry (panes.js): this file registers the 'book' mode and calls
+ * setMediaMode('book') / ('image').
  */
 
 let booksCurrentView = 'shelf';
@@ -24,7 +15,6 @@ let booksFilter = {};        // {author} | {series} | {kind}
 let currentBook = null;      // the open book's detail object
 let booksSaveTimer = null;
 let booksSearchTimer = null;
-let mediaMode = 'image';     // 'image' | 'book'
 
 const BOOKS_PER_PAGE = 120;
 
@@ -44,45 +34,9 @@ function _fmtBytes(n) {
   return `${n.toFixed(i ? 1 : 0)} ${u[i]}`;
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
- * MEDIA MODE — the centre-pane swap
- * ══════════════════════════════════════════════════════════════════════════ */
-
-/* Controls-pane tabs that only make sense for images. EXIF/IPTC/XMP are image
- * container metadata; a book has none of them. They're hidden rather than
- * removed so switching back to an image restores everything untouched. */
-const IMAGE_ONLY_TABS = ['exif', 'iptc', 'xmp'];
-
-function setMediaMode(mode) {
-  if (mode === mediaMode) return;
-  mediaMode = mode;
-  const isBook = (mode === 'book');
-  const isPerson = (mode === 'person');
-  const isImage = (mode === 'image');
-
-  // Centre pane: image viewer ↔ reader ↔ person mesh. Exactly one is visible.
-  _bq('image_pane')?.classList.toggle('hidden', !isImage);
-  _bq('book_reader')?.classList.toggle('hidden', !isBook);
-  _bq('person_pane')?.classList.toggle('hidden', !isPerson);
-
-  // Controls pane: swap the body and prune impossible tabs.
-  document.querySelectorAll('.controls-tab').forEach(btn => {
-    const t = btn.dataset.tab;
-    if (IMAGE_ONLY_TABS.includes(t)) btn.classList.toggle('hidden', !isImage);
-    if (t === 'main') btn.classList.toggle('hidden', !isImage);
-    if (t === 'book') btn.classList.toggle('hidden', !isBook);
-    if (t === 'person') btn.classList.toggle('hidden', !isPerson);
-  });
-
-  // Anything explicitly marked image-only inside the shared chrome.
-  document.querySelectorAll('[data-media="image"]').forEach(el =>
-    el.classList.toggle('hidden', !isImage));
-  document.querySelectorAll('[data-media="book"]').forEach(el =>
-    el.classList.toggle('hidden', !isBook));
-
-  if (typeof setControlsTab === 'function')
-    setControlsTab(isBook ? 'book' : isPerson ? 'person' : 'main');
-}
+// Centre-pane mode for books: the reader replaces the image viewer and the
+// "Book" controls tab appears (core registry in panes.js).
+registerMediaMode({ id: 'book', centreId: 'book_reader', controlsTab: 'book' });
 
 /* ══════════════════════════════════════════════════════════════════════════
  * STATUS + WORKERS

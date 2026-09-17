@@ -125,7 +125,7 @@ touching `media_types.py`.
 | `host.register_search_provider(fn)` / `register_search_type(prefix, handler)` | add results / token handlers to gallery search |
 | `host.register_pipeline_stage(name, fn, label=)` | an AI-pipeline node type |
 | `host.add_worker_source(name, claim, handle, …)` | a background worker source |
-| `host.register_controls_pane(tab_id, template, feature=)` / `register_left_pane` / `register_app_modal` | server-rendered UI partials from your `templates/` |
+| `host.register_controls_pane(tab_id, template, feature=)` / `register_left_pane` / `register_centre_pane` / `register_app_modal` | server-rendered UI partials from your `templates/` |
 | `host.provide_service(name, obj, priority=0)` / `get_service(name)` | publish / consume module-to-module APIs |
 | `host.on(event, fn)` / `host.emit(event, **kw)` | subscribe to / raise core events |
 | `host.on_startup(fn)` | run once after the server is up |
@@ -134,9 +134,12 @@ touching `media_types.py`.
 
 A module owns its settings: declare the key (default, validation, change
 hook) and, if the user should see it, a widget. Widgets render in the General
-pane by default, in your own tab with `pane=<tab id>`, or in the Models tab
-with `pane="models"`. Model *selection* is never a settings field — see
-capabilities.
+pane by default, in your own tab with `pane=<tab id>`, in the Models tab with
+`pane="models"` (only for things that genuinely belong next to a model pick),
+or — for module-specific knobs that aren't global settings — with
+`pane="module"`, which puts a ⚙ Settings button on the module's row in the
+Modules tab that unfolds them. Model *selection* is never a settings field —
+see capabilities.
 
 ```python
 host.add_config_key("dup_cnn_width", default=1.0,
@@ -155,6 +158,8 @@ The core emits, modules react; the core never names a module.
 | `upload.stored` | `rel_path, filename` | index a file you own after upload |
 | `file.renamed` | `old_rel, new_rel` | repoint your tables |
 | `file.deleted` | `rel_path` | drop your rows |
+| `regions.cached` | `rel_path` → region dicts | supply cached regions for an image with no sidecar |
+| `labels.pool` | — → class names | extend the trainer's label pool |
 
 `emit()` returns every non-None handler result; the books module answers
 `upload.duplicate_check`, dedup answers `file.deleted`.
@@ -165,7 +170,7 @@ The core emits, modules react; the core never names a module.
 later registration. Consumers `get_service(name)` and must handle `None` (the
 provider is off). Current services: `metadata_write`, `exif` (`read`/`write`),
 `metadata_schema`, `embedding`, `dedup_scorers`, `barcodes`, `pose.tpose`,
-`sam_common`, `fetch`.
+`sam_common`, `fetch`, `faces`, `bodies`, `people`.
 
 ### Your own table + searchable field
 
@@ -194,8 +199,8 @@ The editor offers the node only while the module is enabled. See `pose/`.
 
 The app has a **model broker**. A *capability* is a named job with a fixed I/O
 contract (`detect`, `detect.faces`, `detect.barcodes`, `segment`,
-`segment.semantic`, `pose`, `depth`, `classify`, `embed`, `iqa`; `box` and
-`segment.box` are internal). Contracts live in
+`segment.semantic`, `pose`, `depth`, `classify`, `embed`, `embed.faces`,
+`face.shape`, `embed.bodies`, `body.shape`, `iqa`; `box` and `segment.box` are internal). Contracts live in
 [`model_contracts.py`](model_contracts.py). Modules register **providers**;
 the user picks one per capability in **Settings → 🧩 Models**; consumers ask
 the broker and never name a model.
@@ -251,7 +256,10 @@ To add a **new** capability, `host.declare_capability(id, summary=, input=,
 output=, label=, background=)` — the first module to declare an id owns it.
 Worked examples: `yolo/` (one provider per family × head, oriented-box type),
 `mayaku/`, `SAM2`/`SAM3`/`mobilesam`/`fastsam` (shared `register_sam` factory),
-`vlm/` (prompted detector), `embedding/`, `pyiqa/` + `brisque/`, `barcodes/`.
+`vlm/` (prompted detector), `embedding/`, `pyiqa/` + `brisque/`, `barcodes/`,
+`faces/` (detector + identity packs as types + 3D shape, exposing a `faces`
+service for the core's people machinery), `bodies/` (DINO re-id that bridges a
+face cluster to face-less photos; `bodies` service).
 
 ## Front-end
 
@@ -262,6 +270,10 @@ Assets are served at `/modules/<id>/static/<file>` and injected on page load.
   server-rendered pane.
 - **Buttons**: `registerControlButton("ai_tools", html)` (areas:
   `ai_tools`, `viewer_toggles`, …).
+- **Left tab / centre pane**: `registerLeftTab({id, label, feature, paneId, onShow})`
+  pairs with `host.register_left_pane`; a module that takes over the centre
+  (a reader, a person's mesh) pairs `host.register_centre_pane` with
+  `registerMediaMode({id, centreId, controlsTab})` and calls `setMediaMode(id)`.
 - **Canvas overlays**: `registerCanvasOverlay(fn)`.
 - **Per-file state**: `registerFileMetaHook((meta, filename) => …)` runs
   every time the viewer loads a file — keep your state in your own module

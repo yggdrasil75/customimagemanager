@@ -34,7 +34,7 @@ AVAILABLE = _HAVE_TORCH
 UNAVAILABLE_REASON = "torch not installed"
 if _HAVE_TORCH:
     from . import net
-np, _ = optional_import("numpy")
+import numpy as np
 import model_registry
 
 MANIFEST = {

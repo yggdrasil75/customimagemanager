@@ -30,8 +30,13 @@ Nothing here raises: discovery degrades to the built-in list on any error.
 import os
 import glob
 
-MODELS_DIR = os.environ.get("CIM_MODELS_DIR",
-                            os.path.join(os.path.dirname(os.path.abspath(__file__)), "models"))
+import model_registry
+from optional_deps import optional_import
+
+_, _HAVE_ULTRALYTICS = optional_import("ultralytics")
+_, _HAVE_INSIGHTFACE = optional_import("insightface")
+
+MODELS_DIR = os.environ.get("CIM_MODELS_DIR", model_registry.MODELS_DIR)
 FACE_DIR = os.path.join(MODELS_DIR, "face")
 YOLO_FACE_DIR = os.path.join(FACE_DIR, "yolo")
 INSIGHT_DIR = os.path.join(FACE_DIR, "insightface")
@@ -105,19 +110,11 @@ def _scan(d, exts):
 
 
 def _have_ultralytics():
-    try:
-        import ultralytics  # noqa: F401
-        return True
-    except Exception:
-        return False
+    return bool(_HAVE_ULTRALYTICS)
 
 
 def _have_insightface():
-    try:
-        import insightface  # noqa: F401
-        return True
-    except Exception:
-        return False
+    return bool(_HAVE_INSIGHTFACE)
 
 
 def _detector_weight_path(entry):

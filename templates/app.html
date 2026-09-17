@@ -24,9 +24,11 @@
   <!-- Right: editor region (shared media viewer + controls) -->
   <div id="editor_region" class="flex-1 flex h-full overflow-hidden vertical">
     {% include 'partials/image_viewer.html' %}
+    {# Module centre panes (a reader, a person's mesh) share this slot and are
+       swapped in by the media-mode registry (panes.js). #}
+    {% for _c in module_centre_panes %}{% include _c.template ignore missing %}{% endfor %}
     {# Book mode swaps this in for the image viewer — same slot, same geometry. #}
     {# Person mode swaps in a 3D body-mesh viewer with an appearance scrub bar. #}
-    {% include 'partials/person_mesh.html' %}
     <!-- Drag splitter between the media viewer and the controls pane. -->
     <div id="controls_splitter" class="pane-splitter" data-resize="controls"></div>
     {% include 'partials/controls_pane.html' %}
@@ -55,8 +57,6 @@
   <script src="/static/vendor/three.min.js"></script>
   <script src="/static/vendor/OBJLoader.js"></script>
   <script src="/static/vendor/OrbitControls.js"></script>
-  <script src="/static/person_view.js"></script>
-  <script src="/static/faces.js"></script>
   <script src="/static/editor.js"></script>
   <script src="/static/ai_tools.js"></script>
   <script src="/static/review.js"></script>

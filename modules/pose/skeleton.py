@@ -19,7 +19,7 @@ from typing import Optional
 import model_registry  # pins TORCH_HOME (rtmlib weights -> models/) before rtmlib loads
 
 try:
-    from rtmlib import Wholebody
+    from rtmlib import YOLOX, RTMPose, Wholebody
     _HAVE_WHOLEBODY = True
 except Exception:
     _HAVE_WHOLEBODY = False
@@ -48,25 +48,65 @@ WHOLEBODY_NAMES = COCO_KP_NAMES + [f"kp{i}" for i in range(17, 133)]
 
 _WB_REGISTERED = set()
 
-def _load_wholebody(mode: str):
+# Official ONNX SDK checkpoints (mmpose release names). Sizes are the paper's
+# t/s/m/l/x for RTMPose-body and m/l/x for RTMW (whole-body, 133 kpts) — not
+# rtmlib's "lightweight/balanced/performance" presets.
+_SDK = "https://download.openmmlab.com/mmpose/v1/projects/"
+_DET = {"tiny": (_SDK + "rtmposev1/onnx_sdk/yolox_tiny_8xb8-300e_humanart-6f3252f9.zip", (416, 416)),
+        "m":    (_SDK + "rtmposev1/onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip", (640, 640)),
+        "x":    (_SDK + "rtmposev1/onnx_sdk/yolox_x_8xb8-300e_humanart-a39d44ed.zip", (640, 640))}
+BODY_SIZES = {   # RTMPose-{size} body7 (17 kpts): (pose url, input (w,h), detector)
+    "t": (_SDK + "rtmposev1/onnx_sdk/rtmpose-t_simcc-body7_pt-body7_420e-256x192-026a1439_20230504.zip", (192, 256), "tiny"),
+    "s": (_SDK + "rtmposev1/onnx_sdk/rtmpose-s_simcc-body7_pt-body7_420e-256x192-acd4a1ef_20230504.zip", (192, 256), "tiny"),
+    "m": (_SDK + "rtmposev1/onnx_sdk/rtmpose-m_simcc-body7_pt-body7_420e-256x192-e48f03d0_20230504.zip", (192, 256), "m"),
+    "l": (_SDK + "rtmposev1/onnx_sdk/rtmpose-l_simcc-body7_pt-body7_420e-384x288-3f5a1437_20230504.zip", (288, 384), "m"),
+    "x": (_SDK + "rtmposev1/onnx_sdk/rtmpose-x_simcc-body7_pt-body7_700e-384x288-71d7b7e9_20230629.zip", (288, 384), "x"),
+}
+WHOLEBODY_SIZES = {   # RTMW-{size} cocktail14 (133 kpts)
+    "m": (_SDK + "rtmw/onnx_sdk/rtmw-dw-m-s_simcc-cocktail14_270e-256x192_20231122.zip", (192, 256), "m"),
+    "l": (_SDK + "rtmw/onnx_sdk/rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.zip", (288, 384), "m"),
+    "x": (_SDK + "rtmw/onnx_sdk/rtmw-x_simcc-cocktail13_pt-ucoco_270e-384x288-0949e3a9_20230925.zip", (288, 384), "x"),
+}
+
+
+def _load_rtm(kind: str, size: str):
+    """kind 'body' (RTMPose) or 'wholebody' (RTMW); size an official letter."""
+    table = BODY_SIZES if kind == "body" else WHOLEBODY_SIZES
+    pose_url, pose_in, det_key = table[size]
+    det_url, det_in = _DET[det_key]
     dev = model_registry.backend()
-    key = f"pose:wholebody:{mode}:{dev}"
+    key = f"pose:rtm:{kind}:{size}:{dev}"
     if key not in _WB_REGISTERED:
-        model_registry.register(
-            key, (lambda m=mode, d=dev: Wholebody(mode=m, backend="onnxruntime", device=d)),
-            cost_mb=1000, gpu=(dev != "cpu"))
+        def build():
+            det = YOLOX(det_url, model_input_size=det_in, backend="onnxruntime", device=dev)
+            pose = RTMPose(pose_url, model_input_size=pose_in, backend="onnxruntime", device=dev)
+            def run(img):
+                return pose(img, bboxes=det(img))
+            return run
+        model_registry.register(key, build, cost_mb=400 if size in ("t", "s") else 1000,
+                                gpu=(dev != "cpu"))
         _WB_REGISTERED.add(key)
     return model_registry.acquire(key)
 
-def wholebody_people(img_bgr, mode: str = "balanced") -> list:
+
+def _load_wholebody(mode: str):
+    """Legacy entry: rtmlib preset -> official RTMW size."""
+    return _load_rtm("wholebody", {"lightweight": "m", "balanced": "l", "performance": "x"}.get(mode, "l"))
+
+
+def rtm_people(img_bgr, kind: str = "wholebody", size: str = "l") -> list:
     """!
-    @brief Whole-body pose (133 keypoints incl. hands + face) via RTMPose / rtmlib.
+    @brief RTMPose (17-pt body, sizes t/s/m/l/x) or RTMW (133-pt whole-body,
+           sizes m/l/x) via rtmlib's ONNX runners.
     @return Canonical [{keypoints:[{x,y,v}], conf}] (the broker 'pose' contract);
             [] when estimation fails. Raises if rtmlib is absent.
     """
     if not _HAVE_WHOLEBODY:
-        raise RuntimeError("rtmlib not installed (whole-body pose)")
-    kpts, scores = _load_wholebody(mode)(img_bgr)
+        raise RuntimeError("rtmlib not installed (RTMPose)")
+    model = _load_rtm(kind, size)
+    if model is None:
+        raise RuntimeError(f"RTMPose {kind}-{size} failed to load")
+    kpts, scores = model(img_bgr)
     kpts = np.asarray(kpts); scores = np.asarray(scores)
     H, W = img_bgr.shape[:2]
     people = []
@@ -80,6 +120,12 @@ def wholebody_people(img_bgr, mode: str = "balanced") -> list:
                         "y": round(max(0.0, min(1.0, y)), 4), "v": round(v, 3)})
         people.append({"keypoints": pts, "conf": 1.0})
     return people
+
+def wholebody_people(img_bgr, mode: str = "balanced") -> list:
+    """Legacy wrapper (rtmlib preset names)."""
+    return rtm_people(img_bgr, "wholebody",
+                      {"lightweight": "m", "balanced": "l", "performance": "x"}.get(mode, "l"))
+
 
 def has_wholebody() -> bool:
     return bool(_HAVE_WHOLEBODY)

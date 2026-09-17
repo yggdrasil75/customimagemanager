@@ -18,7 +18,7 @@ import subprocess
 import sys
 from datetime import datetime
 from optional_deps import optional_import
-Image, _HAVE_PIL = optional_import("PIL", attr="Image")
+Image, _HAVE_PIL = optional_import("PIL.Image")
 cv2, _HAVE_CV2 = optional_import("cv2")
 
 

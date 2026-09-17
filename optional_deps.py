@@ -64,8 +64,13 @@ def optional_import(name, attr=None, quiet=False):
         LOADED[name] = False                   # broken native wheel throws.
         if not quiet and name not in _reported:
             _reported.add(name)
+            # A ModuleNotFoundError deep inside a package (e.g. an unbuilt
+            # cython extension) names the real culprit in e.name; show it.
+            culprit = e.name if isinstance(e, ModuleNotFoundError) else None
+            detail = (f"missing module {culprit!r}" if culprit and culprit != name
+                      else e.__class__.__name__)
             _log.warning("optional dependency %r unavailable (%s); "
-                         "related features disabled", name, e.__class__.__name__)
+                         "related features disabled", name, detail)
         return None, False
 
 

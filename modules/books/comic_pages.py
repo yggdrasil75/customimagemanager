@@ -53,7 +53,7 @@ import numpy as np
 from optional_deps import optional_import
 from . import book_index as bi
 cv2, _HAVE_CV2 = optional_import("cv2")
-Image, _HAVE_PIL = optional_import("PIL", attr="Image")
+Image, _HAVE_PIL = optional_import("PIL.Image")
 imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
 
 

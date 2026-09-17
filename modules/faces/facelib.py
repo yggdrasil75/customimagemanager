@@ -24,7 +24,6 @@ Nothing here raises: every public call degrades to an empty result.
 
 import os
 import glob
-import json
 import threading
 import concurrent.futures as _futures
 
@@ -32,18 +31,19 @@ import numpy as np
 
 import object_grouping as og
 import model_registry
-import face_models as facemodels
+from . import registry as facemodels
 import urllib.request
 from optional_deps import optional_import
+import sys as _sys
+
+FaceAnalysis, _HAVE_INSIGHT_APP = optional_import("insightface.app", attr="FaceAnalysis")
 cv2, _HAVE_CV2 = optional_import("cv2")
 
-MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+MODELS_DIR = facemodels.MODELS_DIR
 
 FACE_DIR = os.path.join(MODELS_DIR, "face")
 YOLO_FACE_DIR = os.path.join(FACE_DIR, "yolo")
 INSIGHT_DIR = os.path.join(FACE_DIR, "insightface")
-_INSIGHT_INFER_POOL = _futures.ThreadPoolExecutor(
-    max_workers=1, thread_name_prefix="insight-infer")
 try:
     INSIGHT_INFER_TIMEOUT_S = float(os.environ.get("CIM_INSIGHT_TIMEOUT", "120"))
 except (TypeError, ValueError):
@@ -260,8 +260,9 @@ def _insight_providers():
 
 def _build_insight():
     """Construct insightface's FaceAnalysis app, or None on any failure."""
+    if not _HAVE_INSIGHT_APP:
+        return None
     try:
-        from insightface.app import FaceAnalysis
         app = FaceAnalysis(name=_recog_model["v"],
                            root=INSIGHT_DIR,
                            providers=_insight_providers())
@@ -289,23 +290,7 @@ def insight_registry_key():
 def have_identity_embedder():
     return _load_insight() is not None
 
-def _as_bgr(img):
-    """Coerce any decoded array to 3-channel uint8 BGR, or None."""
-    if img is None or getattr(img, "size", 0) == 0:
-        return None
-    if img.ndim == 2:
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-    elif img.ndim == 3 and img.shape[2] != 3:
-        c = img.shape[2]
-        if c in (1, 2):
-            img = cv2.cvtColor(img[:, :, 0], cv2.COLOR_GRAY2BGR)
-        elif c == 4:
-            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-        else:
-            img = img[:, :, :3]
-    if img.dtype != np.uint8:
-        img = np.clip(img, 0, 255).astype(np.uint8)
-    return img
+_as_bgr = og.as_bgr   # shared coercion (object_grouping)
 
 def _iou(a, b):
     """IoU between two normalised center-form boxes."""
@@ -378,7 +363,6 @@ def embed_faces(img_bgr, boxes, want_shape=False):
             fut = _INSIGHT_INFER_POOL.submit(app.get, img_bgr)
             found = fut.result(timeout=INSIGHT_INFER_TIMEOUT_S)   # full-image detect + align + embed
         except _futures.TimeoutError:
-            import sys as _sys
             print("INSIGHT_INFER_TIMEOUT: app.get exceeded "
                   f"{INSIGHT_INFER_TIMEOUT_S:.0f}s; degrading to appearance",
                   file=_sys.stderr, flush=True)
@@ -408,8 +392,18 @@ def embed_faces(img_bgr, boxes, want_shape=False):
             if any(v is not None for v in vecs):
                 return _ret(vecs, "arcface", shapes)
 
-    # Degraded: appearance-only. Clusters WILL split the same person across
-    # pose/lighting; the UI surfaces this so the user knows why.
+    return embed_faces_appearance(img_bgr, boxes, want_shape)
+
+
+def embed_faces_appearance(img_bgr, boxes, want_shape=False):
+    """Appearance-only face vectors (cv2 colour/shape) — the degraded path when
+    no ArcFace pack loads, and the 'appearance' embed.faces provider. Clusters
+    WILL split the same person across pose/lighting; the UI surfaces this."""
+    def _ret(vecs, mode, shapes=None):
+        return (vecs, mode, shapes or [None] * len(vecs)) if want_shape else (vecs, mode)
+    img_bgr = _as_bgr(img_bgr)
+    if img_bgr is None or not boxes:
+        return _ret([], "none")
     try:
         vecs = og.embed_regions(img_bgr, boxes)
         out = []
@@ -422,6 +416,7 @@ def embed_faces(img_bgr, boxes, want_shape=False):
         return _ret(out, "appearance")
     except Exception:
         return _ret([], "none")
+
 
 # ── clustering ────────────────────────────────────────────────────────────────
 def cluster(vectors, mode="arcface", min_cluster=2, eps=None):

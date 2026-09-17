@@ -88,14 +88,24 @@ def register(host):
     host.provide_service("pose.tpose", lambda skeletons: _pose_core.aggregate_tpose(
         skeletons, _pose_core.COCO_KP_NAMES, _pose_core.COCO_SKELETON))
 
-    host.provide_model(
-        "pose", "rtmpose", label="RTMPose", family="RTMPose",
-        sizes=["lite", "balanced", "performance"],
-        types=[{"value": "wholebody", "label": "Whole-body · 133 (hands+face)"}],
-        loader=lambda: (lambda mode: (lambda img, *a, **k: _pose_core.wholebody_people(img, mode)))(
-            host.model_variant("pose")["size"] or "balanced"),
-        transform=None, available=_pose_core.has_wholebody,
-        reason="pip install rtmlib onnxruntime", cost_mb=1000)
+    # RTMPose family with the official checkpoint sizes: 17-pt body (t/s/m/l/x)
+    # and RTMW whole-body 133 pts (m/l/x) as separate providers because the
+    # size ladders differ.
+    for pid, label, kind, sizes, types, note in (
+        ("rtmpose", "RTMPose", "body", ["t", "s", "m", "l", "x"],
+         [{"value": "body", "label": "Body · 17 pts"}],
+         "OpenMMLab SimCC top-down body pose; strong accuracy per FLOP, official t..x sizes."),
+        ("rtmw", "RTMW (whole-body)", "wholebody", ["m", "l", "x"],
+         [{"value": "wholebody", "label": "Whole-body · 133 (hands+face)"}],
+         "RTMPose whole-body: adds feet, hands and face keypoints. Official m/l/x."),
+    ):
+        host.provide_model(
+            "pose", pid, label=label, family="RTMPose", sizes=sizes, types=types,
+            note=note, speed="balanced",
+            loader=(lambda k=kind: (lambda sz: (lambda img, *a, **kw: _pose_core.rtm_people(img, k, sz)))(
+                host.model_variant("pose")["size"] or ("l" if k == "wholebody" else "m"))),
+            transform=None, available=_pose_core.has_wholebody,
+            reason="pip install rtmlib onnxruntime", cost_mb=1000)
 
     # Contribute the "pose" pipeline stage. The pipeline calls this with an
     # image (whole image or a cropped region) and expects a pose dict; when this
