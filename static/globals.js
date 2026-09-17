@@ -316,15 +316,6 @@ function populateSettingsForm(s){
       _set('cfg_shape_estimator', s.shape_estimator||'anny_fit');
       _set('cfg_appearance_eps', (s.appearance_eps??0.35));
       _set('cfg_system', s.oai_system_prompt||'');
-      const _chk=(id,v)=>{const e=document.getElementById(id); if(e) e.checked=!!v;};
-      const pp=s.llm_preprocess||{}, ppc=pp.compress||{}, ppd=pp.pad||{};
-      _chk('cfg_pp_compress', ppc.enabled);
-      _set('cfg_pp_maxside', ppc.max_side||1024);
-      _set('cfg_pp_interp', ppc.interp||'area');
-      _chk('cfg_pp_pad', ppd.enabled);
-      _set('cfg_pp_fill', ppd.fill||'black');
-      {const rs=new Set(ppd.ratios||['square','16:9','9:16']);
-       document.querySelectorAll('#cfg_pp_ratios input').forEach(c=>{c.checked=rs.has(c.value);});}
       oai_actions_cache=s.oai_actions||[];
       renderAiActions(); updateActionDropdown();
       if(typeof renderQuickFilterEditor==='function') renderQuickFilterEditor();

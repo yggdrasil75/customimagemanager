@@ -111,6 +111,7 @@ class Host:
         # the module's templates/ dir, injected into app.html's modal area.
         self.app_modals = []
         self.centre_panes = []
+        self.action_targets = {}      # AI-action target -> fn(fp, bgr, meta, action)
         # Left-pane content partials a module contributes (e.g. the books shelf),
         # server-rendered into the left column alongside the built-in panes.
         self.left_panes = []
@@ -400,6 +401,12 @@ class Host:
         return self.broker.request(cap_id, role, provider)
 
     # ── pipeline stages ──────────────────────────────────────────────────
+    def register_action_target(self, name, fn):
+        """Contribute an AI-action target (the "target" of a configured action,
+        next to the core's description/tags/regions/flag). fn(fp, bgr, meta,
+        action) does the work and returns the regions it added (or True)."""
+        self.action_targets[name] = fn
+
     def register_pipeline_stage(self, name, fn, *, label=None, editor=None):
         """Contribute a stage the AI pipeline can run.
 

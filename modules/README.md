@@ -124,6 +124,7 @@ touching `media_types.py`.
 | `host.register_file_enricher(fn)` | attach per-file fields to gallery/list/detail rows |
 | `host.register_search_provider(fn)` / `register_search_type(prefix, handler)` | add results / token handlers to gallery search |
 | `host.register_pipeline_stage(name, fn, label=)` | an AI-pipeline node type |
+| `host.register_action_target(name, fn)` | an AI-action target (`fn(fp, bgr, meta, action)`) |
 | `host.add_worker_source(name, claim, handle, …)` | a background worker source |
 | `host.register_controls_pane(tab_id, template, feature=)` / `register_left_pane` / `register_centre_pane` / `register_app_modal` | server-rendered UI partials from your `templates/` |
 | `host.provide_service(name, obj, priority=0)` / `get_service(name)` | publish / consume module-to-module APIs |
@@ -160,6 +161,8 @@ The core emits, modules react; the core never names a module.
 | `file.deleted` | `rel_path` | drop your rows |
 | `regions.cached` | `rel_path` → region dicts | supply cached regions for an image with no sidecar |
 | `labels.pool` | — → class names | extend the trainer's label pool |
+| `llm.image` | `image` (BGR) → transformed image | preprocess every image bound for the vision LLM |
+| `regions.masks` | `instances, width, height` | fill `mask_svg` from each instance's `polygon` (segmentation) |
 
 `emit()` returns every non-None handler result; the books module answers
 `upload.duplicate_check`, dedup answers `file.deleted`.
@@ -170,7 +173,7 @@ The core emits, modules react; the core never names a module.
 later registration. Consumers `get_service(name)` and must handle `None` (the
 provider is off). Current services: `metadata_write`, `exif` (`read`/`write`),
 `metadata_schema`, `embedding`, `dedup_scorers`, `barcodes`, `pose.tpose`,
-`sam_common`, `fetch`, `faces`, `bodies`, `people`.
+`sam_common`, `fetch`, `faces`, `bodies`, `people`, `segmentation`.
 
 ### Your own table + searchable field
 

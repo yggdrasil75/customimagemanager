@@ -70,15 +70,6 @@ async function persistAiSettings(){
       shape_estimator:_v('cfg_shape_estimator'),
       appearance_eps:parseFloat(_v('cfg_appearance_eps'))||0.35,
       oai_system_prompt:_v('cfg_system'),
-      llm_preprocess:{
-        compress:{
-          enabled:_c('cfg_pp_compress'),
-          max_side:parseInt(_v('cfg_pp_maxside'),10)||1024,
-          interp:_v('cfg_pp_interp')},
-        pad:{
-          enabled:_c('cfg_pp_pad'),
-          fill:_v('cfg_pp_fill'),
-          ratios:[...document.querySelectorAll('#cfg_pp_ratios input:checked')].map(c=>c.value)}},
       oai_actions:oai_actions_cache};
   if(tree!==null) body.pipeline_tree=tree;
   // Fold in the General pane's search quick-filters so the single settings POST
@@ -199,27 +190,6 @@ async function runOCR(){
       }
     } else alert('OCR failed: '+(d.error||''));
   }catch(e){ alert('Network error during OCR.'); }
-  btn.innerText=og; btn.disabled=false;
-}
-async function runSegment(){
-  if(!window.currentFile){ alert('Select an image first.'); return; }
-  const btn=document.getElementById('btn_segment'); const og=btn.innerText;
-  btn.innerText='🎭 …'; btn.disabled=true;
-  try{
-    const d=await fetch('/api/segment',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filename:window.currentFile})}).then(r=>r.json());
-    if(d.success){
-      const regs=d.regions||[];
-      if(!regs.length){ showToast(d.note||'No objects segmented.'); }
-      else{
-        regs.forEach(r=>currentRegions.push({class_name:r.class_name,
-          cx:r.cx,cy:r.cy,w:r.w,h:r.h,confirmed:false,mask_svg:r.mask_svg}));
-        drawCanvas(); if(typeof popoutOpen!=='undefined'&&popoutOpen) drawPopout();
-        renderRegionsList(); triggerAutosave();
-        showToast(`Segment: ${regs.length} region(s) added.`);
-      }
-    } else alert('Segment failed: '+(d.error||''));
-  }catch(e){ alert('Network error during segmentation.'); }
   btn.innerText=og; btn.disabled=false;
 }
 async function bulkPipeline(){

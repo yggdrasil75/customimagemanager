@@ -41,7 +41,6 @@ FEATURE_SECTIONS = {
             ("ai.autotag",       "Auto-Tag Image (YOLO)", "write"),
             ("ai.smarttag",      "Smart Tag (AI pipeline)", "write"),
             ("ai.ocr",           "OCR", "write"),
-            ("ai.segment",       "Segment (YOLO)", "write"),
             ("ai.quicktrain",    "Quick Train", "write"),
             ("ai.trainer",       "Trainer portal link", "write"),
             ("ai.trainer.select","Trainer — build/select image sets", "write"),

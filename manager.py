@@ -84,7 +84,6 @@ try:
 except Exception:
     rawpy = None
 from pipeline import DEFAULT_PIPELINE, run_pipeline, _kpts_in_box
-import llm_preprocess
 
 easyocr, _HAVE_EASYOCR = optional_import("easyocr")
 
@@ -169,7 +168,6 @@ state = {
     "gdl_opts": {}, 
     "gdl_auth": {},
     "oai_system_prompt": "You are an expert image analysis AI. Provide concise, highly detailed, and accurate responses.",
-    "llm_preprocess": llm_preprocess.DEFAULT,
     "oai_actions": [
         {"id":"1","name":"Describe Scene","prompt":"Describe the overall scene, lighting, and composition in a detailed paragraph.","target":"description"},
         {"id":"2","name":"Describe Clothes","prompt":"Focus entirely on the subject's clothing, style, and accessories.","target":"description"},
@@ -1595,7 +1593,7 @@ def load_config():
 
 def save_config():
     keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt",
-            "oai_actions","llm_preprocess","autotag_enabled","keep_raws","pipeline_tree",
+            "oai_actions","autotag_enabled","keep_raws","pipeline_tree",
             "person_model","our_model",
             "brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
             "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers","modules","model_selection"]
@@ -3291,47 +3289,6 @@ def _run_panels(img_bgr) -> list:
         return []
     return _detect_obb_or_box(img_bgr, pm, as_obb=True)
 
-def _segment_boxes(img, boxes: list) -> list:
-    """Masks for boxes via the picked segmenter (broker 'segment.box'). Returns
-    instance dicts {class_name, cx, cy, w, h, mask_svg}; [] if none/failed."""
-    if not boxes:
-        return []
-    try:
-        run = modules.broker.request("segment.box")
-    except modules.model_broker.NoProviderError:
-        return []
-    c = _coerce_bgr3(img)
-    if c is None:
-        return []
-    H, W = c.shape[:2]
-    out = []
-    try:
-        hits = run(c, boxes) or []
-    except Exception as e:
-        access_logger.error(f"segment.box provider: {e}")
-        return []
-    for h in hits:
-        poly = h.get("mask") or []
-        if not poly:
-            continue
-        xs, ys = [p[0] for p in poly], [p[1] for p in poly]
-        out.append({"class_name": h.get("class_name", "object"),
-                    "cx": (min(xs) + max(xs)) / 2, "cy": (min(ys) + max(ys)) / 2,
-                    "w": max(xs) - min(xs), "h": max(ys) - min(ys),
-                    "mask_svg": _polygon_mask_svg(poly, W, H)})
-    return out
-
-def _attach_masks(img, regions: list) -> None:
-    insts = _segment_boxes(img, regions)
-    for inst in insts:
-        best, best_iou = None, 0.0
-        for r in regions:
-            iou = _iou_center(r, inst)
-            if iou > best_iou:
-                best, best_iou = r, iou
-        if best is not None and best_iou >= 0.5 and inst.get("mask_svg"):
-            best["mask_svg"] = inst["mask_svg"]
-
 def _iou_center(a, b) -> float:
     """IoU of two normalised center-form boxes."""
     ax1, ay1 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
@@ -3345,19 +3302,6 @@ def _iou_center(a, b) -> float:
         return 0.0
     ua = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
     return inter / ua if ua > 0 else 0.0
-
-def _polygon_mask_svg(poly, W, H):
-    """Normalised polygon -> mask_svg paths dict (what regions store), or None."""
-    try:
-        import mask_svg
-        pts = np.array([[int(round(x * W)), int(round(y * H))] for x, y in poly], np.int32)
-        if len(pts) < 3:
-            return None
-        m = np.zeros((H, W), np.uint8)
-        cv2.fillPoly(m, [pts], 255)
-        return mask_svg.mask_to_svg_paths(m > 0, method="all") or None
-    except Exception:
-        return None
 
 def _background_instances(img_bgr) -> list:
     """!
@@ -3398,37 +3342,15 @@ def _background_instances(img_bgr) -> list:
                 inst = {"class_name": name, "cx": (min(xs) + max(xs)) / 2,
                         "cy": (min(ys) + max(ys)) / 2, "w": max(xs) - min(xs),
                         "h": max(ys) - min(ys), "conf": h.get("conf"),
-                        "mask_svg": _polygon_mask_svg(poly, W, H)}
+                        "polygon": poly}
             if inst:
                 out.append(inst)
-    return out
-
-def _segment_image(img_bgr, classes=None) -> list:
-    """Run the picked fixed-class segmenter (broker 'segment', foreground pick)
-    and return region dicts {class_name, cx, cy, w, h, confirmed, mask_svg,
-    score}. classes: whitelist (None = the capability's picker whitelist;
-    [] = keep all). Raises NoProviderError when nothing serves it."""
-    run = modules.broker.request("segment")
-    v = modules.broker.variant("segment")
-    want = set(v.get("classes") or []) if classes is None else set(classes)
-    c = _coerce_bgr3(img_bgr)
-    if c is None:
-        return []
-    H, W = c.shape[:2]
-    out = []
-    for h in run(c, conf=v["conf"], verbose=False) or []:
-        name = h.get("class_name", "object")
-        poly = h.get("mask") or []
-        if not poly or (want and name not in want):
-            continue
-        svg = _polygon_mask_svg(poly, W, H)
-        if not svg:
-            continue
-        xs, ys = [p[0] for p in poly], [p[1] for p in poly]
-        out.append({"class_name": name, "cx": (min(xs) + max(xs)) / 2,
-                    "cy": (min(ys) + max(ys)) / 2, "w": max(xs) - min(xs),
-                    "h": max(ys) - min(ys), "confirmed": False, "mask_svg": svg,
-                    "score": h.get("conf")})
+    # Polygons -> stored mask form (mask_svg) is the segmentation module's job;
+    # without it the sweep still yields boxes.
+    for _ in module_host.emit("regions.masks", instances=out, width=W, height=H):
+        pass
+    for inst in out:
+        inst.pop("polygon", None)
     return out
 
 def _fold_background(insts, person_regions, out):
@@ -3707,13 +3629,15 @@ _BOX_TOOL = [{"type": "function", "function": {
         "required": ["class_name", "cx", "cy", "w", "h"]}}}, "required": ["boxes"]}}}]
 
 def _encode_for_llm(image_bgr, quality=85):
-    """Preprocess (compress/pad per state['llm_preprocess']) then JPEG-encode a
-    BGR image to a data-URL. Single chokepoint for every image sent to a vision
-    LLM — pipeline, SAM exemplar identification, and AI actions all pass through
-    here. Returns the data-URL string, or None if encoding fails."""
+    """JPEG-encode a BGR image to a data-URL: the single chokepoint for every
+    image sent to a vision LLM (pipeline, prompted detection, AI actions).
+    Modules subscribed to `llm.image` (llm_preprocess: compress/pad) transform
+    it first. Returns the data-URL string, or None if encoding fails."""
     if image_bgr is None:
         return None
-    image_bgr = llm_preprocess.preprocess(image_bgr, state.get("llm_preprocess"))
+    for out in module_host.emit("llm.image", image=image_bgr):
+        if out is not None:
+            image_bgr = out
     ok, buf = cv2.imencode('.jpg', image_bgr, [cv2.IMWRITE_JPEG_QUALITY, quality])
     if not ok:
         return None
@@ -3785,47 +3709,6 @@ def _compose_description(analysis, existing=""):
             parts.append(" ".join(seg))
     return "\n\n".join(p for p in parts if p) or existing
 
-def _segment_regions(bgr, query):
-    """Segment whatever `query` describes with the picked foreground segmenter
-    (broker 'segment': SAM 3 natively, SAM 2 via VLM seed boxes; a fixed-class
-    model ignores the prompt) and return unconfirmed region dicts (box +
-    mask_svg), or []. Never raises."""
-    query = (query or "").strip()
-    insts = []
-    try:
-        run = modules.broker.request("segment")
-        c = _coerce_bgr3(bgr)
-        if c is not None:
-            H, W = c.shape[:2]
-            for h in run(c, query, conf=modules.broker.variant("segment")["conf"]) or []:
-                poly = h.get("mask") or []
-                if not poly:
-                    continue
-                xs, ys = [p[0] for p in poly], [p[1] for p in poly]
-                insts.append({"class_name": h.get("class_name") or query,
-                              "cx": (min(xs) + max(xs)) / 2, "cy": (min(ys) + max(ys)) / 2,
-                              "w": max(xs) - min(xs), "h": max(ys) - min(ys),
-                              "mask_svg": _polygon_mask_svg(poly, W, H)})
-    except modules.model_broker.NoProviderError as e:
-        access_logger.warning(f"segment: {e}")
-    except Exception as e:
-        access_logger.error(f"segment provider: {e}")
-    new = []
-    for inst in insts:
-        if not inst.get("mask_svg"):
-            continue
-        new.append({"class_name": inst.get("class_name") or query or "object",
-                    "cx": inst["cx"], "cy": inst["cy"],
-                    "w": inst["w"], "h": inst["h"],
-                    "confirmed": False, "region_tags": [],
-                    "region_description": "", "mask_svg": inst["mask_svg"]})
-    for n in new:
-        if n["class_name"] not in state["classes"]:
-            state["classes"].append(n["class_name"])
-    if new:
-        save_classes()
-    return new
-
 def _apply_body_action(rel, bgr, action):
     """! @brief Fill the fixed body-description slots for each identified person in an image.
     @return True once run. For every face cluster present in the image, one LLM
@@ -3871,13 +3754,9 @@ def _apply_llm_action(fp, action):
         return True
     if target == "body":
         return _apply_body_action(_rel(fp), bgr, action)
-    if target == "segment":
-        query = (prompt or "").strip()
-        new = _segment_regions(bgr, query)
-        if new:
-            write_metadata(fp, meta["tags"], meta["description"],
-                           _merge_regions(meta["regions"], new))
-        return True
+    handler = module_host.action_targets.get(target) if 'module_host' in globals() else None
+    if handler:   # module-provided action target (segmentation: "segment")
+        return bool(handler(fp, bgr, meta, action))
     if target == "regions":
         boxes = _llm_call(prompt + "\n\nReturn bounding boxes normalised 0..1.", bgr, "boxes") or []
         new = []
@@ -4297,7 +4176,7 @@ def update_settings():
     # Same for the "our"/trained model: _detect_obb_or_box memoises by path.
     if "our_model" in d and d["our_model"] != state.get("our_model"):
         _load_yolo.cache_clear()
-    for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","llm_preprocess","pipeline_tree",
+    for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","pipeline_tree",
               "appearance_eps","shape_estimator","pose_estimator",
               "person_model","our_model",):
         if k in d: state[k] = d[k]
@@ -6629,47 +6508,6 @@ def bulk_box():
     state["status_text"] = "Ready."
     return jsonify({"success": True, "done": done, "boxed": boxed, "errors": errors})
 
-@app.route("/api/bulk_segment", methods=["POST"])
-@_auth.require_feature("ai.segment", level="write")
-def bulk_segment():
-    """Run the picked segmenter (Models tab → Segmentation) over many files,
-    writing masked regions (mask_svg in each region's Extensions) UNCONFIRMED.
-    Body: {filenames, classes?} - classes overrides the saved whitelist."""
-    filenames = request.json.get("filenames", [])
-    sel = request.json.get("classes")
-    try:
-        modules.broker.request("segment")
-    except modules.model_broker.NoProviderError as e:
-        return jsonify({"success": False, "error": f"Segmentation unavailable: {e}"})
-    done, segmented, errors = 0, 0, []
-    total = len(filenames)
-    for fn in filenames:
-        fp = get_safe_path(MEDIA_DIR, fn)
-        if not fp or not os.path.exists(fp):
-            errors.append(fn); continue
-        try:
-            img = read_jxl(fp)
-            if img is None:
-                errors.append(fn); continue
-            new = [{k: r[k] for k in ("class_name", "cx", "cy", "w", "h", "confirmed", "mask_svg")}
-                   for r in _segment_image(_to_bgr(img), sel)]
-            if new:
-                meta = read_metadata(fp)
-                for n in new:
-                    if n["class_name"] not in state["classes"]:
-                        state["classes"].append(n["class_name"])
-                save_classes()
-                write_metadata(fp, meta["tags"], meta["description"],
-                               _merge_regions(meta["regions"], new))
-                segmented += 1
-            done += 1
-            state["status_text"] = f"Segment: {done}/{total} ({segmented} done)..."
-        except Exception as e:
-            errors.append(fn)
-            access_logger.error(f"bulk_segment {fn}: {e}")
-    state["status_text"] = "Ready."
-    return jsonify({"success": True, "done": done, "segmented": segmented,
-                    "errors": errors})
 
 @app.route("/api/bulk_llm", methods=["POST"])
 @_auth.require_feature("ai.llm", level="write")
@@ -6720,8 +6558,8 @@ def _module_stage_fns():
         return {}
     out = {}
     for name, s in module_host.pipeline_stages.items():
-        if name == "pose":
-            continue   # handled via the dedicated pose_fn kwarg
+        if name in ("pose", "segment_boxes"):
+            continue   # handled via the dedicated pose_fn / seg_fn kwargs
         if module_registry.is_enabled(s["module_id"]):
             out[name] = s["fn"]
     return out
@@ -6735,10 +6573,12 @@ def _person_fn(bgr):
 def _panel_fn(bgr):
     return _run_panels(bgr)
 
-def _seg_fn(bgr, boxes):
-    """Pipeline seg hook: mask the given boxes with the selected SAM model.
-    Returns instance dicts (box + mask_svg). [] if the segmenter's unavailable."""
-    return _segment_boxes(bgr, boxes)
+def _seg_fn():
+    """The pipeline's box-masking hook, registered by the segmentation module
+    as stage "segment_boxes" (fn(image_bgr, boxes) -> instances with mask_svg);
+    None when the module is off, and the pipeline's segment node is a no-op."""
+    stage = module_host.pipeline_stages.get("segment_boxes") if 'module_host' in globals() else None
+    return stage["fn"] if stage else None
 
 def _pipeline_endpoints():
     """Endpoint URLs for parallel pipeline runs. Reads state['oai_endpoints']
@@ -6861,7 +6701,7 @@ def run_pipeline_route():
 
     try:
         analysis = run_pipeline(tree, bgr, _llm_call, pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn, stage_fns=_module_stage_fns(),
-                                person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn,
+                                person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn(),
                                 endpoints=_pipeline_endpoints(), progress=_progress,
                                 known=_known_context(fp))
     except Exception as e:
@@ -6894,7 +6734,7 @@ def bulk_pipeline():
             def _prog(msg, i=i): state["status_text"] = f"Smart Tag {i+1}/{total}: {msg}"
             analysis = run_pipeline(tree, _to_bgr(img), _llm_call,
                                     pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn, stage_fns=_module_stage_fns(),
-                                    person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn,
+                                    person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn(),
                                     endpoints=_pipeline_endpoints(), progress=_prog,
                                     known=_known_context(fp))
             _apply_pipeline_result(fp, analysis)
@@ -7011,7 +6851,7 @@ def comic_pipeline_route():
             def _prog(msg, i=i): state["status_text"] = f"Comic {i+1}/{total}: {msg}"
             analysis = run_pipeline(tree, _to_bgr(img), _llm_call,
                                     pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn, stage_fns=_module_stage_fns(),
-                                    person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn,
+                                    person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn(),
                                     endpoints=_pipeline_endpoints(), progress=_prog,
                                     known=_known_context(fp))
             _apply_pipeline_result(fp, analysis)      # store per-page result too
@@ -7046,38 +6886,6 @@ def api_ocr():
     state["status_text"] = "Ready."
     return jsonify({"success": True, **res})
 
-@app.route("/api/segment", methods=["POST"])
-@_auth.require_feature("ai.segment", level="write")
-def api_segment():
-    """Run the selected YOLO-seg (background) model on one image on demand and
-    return masked regions, so the user can trigger class-aware segmentation
-    manually from the AI Tools panel instead of waiting for the idle worker.
-
-    Body: {filename, classes?}. `classes` (optional list of class names) overrides
-    the saved whitelist for this run; omitted -> the segment capability's whitelist (Models tab)
-    ([] = every class the model knows). Returns regions with mask_svg attached;
-    the client adds them to the canvas and autosaves (same flow as OCR/pose).
-    """
-    fn = request.json.get("filename", "")
-    fp = get_safe_path(MEDIA_DIR, fn)
-    if not fp or not os.path.exists(fp):
-        return jsonify({"success": False, "error": "File not found."})
-    img = read_jxl(fp)
-    if img is None:
-        return jsonify({"success": False, "error": "Decode failed."})
-    state["status_text"] = "Segmenting…"
-    try:
-        regions = _segment_image(_to_bgr(img), request.json.get("classes"))
-    except modules.model_broker.NoProviderError as e:
-        state["status_text"] = "Ready."
-        return jsonify({"success": False, "error": f"Segmentation unavailable: {e}"})
-    except Exception as e:
-        state["status_text"] = "Ready."
-        return jsonify({"success": False, "error": f"Segment failed: {e}"})
-    state["status_text"] = "Ready."
-    return jsonify({"success": True, "regions": regions,
-                    "model": modules.broker.selected_id("segment"),
-                    "count": len(regions), "note": "" if regions else "No objects segmented."})
 
 @app.route("/api/auto_tag", methods=["POST"])
 @_auth.require_feature("ai.autotag", level="write")
@@ -7133,13 +6941,12 @@ def run_llm():
             write_metadata(fp, meta["tags"], meta["description"], meta["regions"],
                            flag={"delete":delete,"reason":reason})
             return jsonify({"success":True,"target":"flag","delete":delete,"reason":reason})
-        if action["target"]=="segment":
-            new = _segment_regions(_to_bgr(img), action.get("prompt",""))
-            if new:
-                meta=read_metadata(fp)
-                write_metadata(fp, meta["tags"], meta["description"],
-                               _merge_regions(meta["regions"], new))
-            return jsonify({"success":True,"target":"regions","regions":new})
+        handler = module_host.action_targets.get(action["target"])
+        if handler:   # module-provided action target (segmentation: "segment")
+            meta=read_metadata(fp)
+            res = handler(fp, _to_bgr(img), meta, action)
+            return jsonify({"success":True,"target":"regions",
+                            "regions": res if isinstance(res, list) else []})
         data_url = _encode_for_llm(_to_bgr(img))
         hdrs = {"Content-Type":"application/json"}
         if api_key: hdrs["Authorization"] = f"Bearer {api_key}"
@@ -8360,6 +8167,7 @@ _core_api = SimpleNamespace(
     upload_spool_dir=_UPLOAD_SPOOL_DIR, upload_workers_wake=_upload_workers_wake,
     api_upload=api_upload, auth=_auth, features=features, tag_name=tag_name,
     background_instances=_background_instances, fold_background=_fold_background,
+    save_classes=save_classes, iou_center=_iou_center,
     detect_boxes_batch=_detect_obb_or_box_batch, detect_objects=_detect_objects,
     model_key=_yolo_key, run_person=_run_person, merge_regions=_merge_regions,
     read_pose_from_xmp=_read_pose_from_xmp, kpts_in_box=_kpts_in_box,
