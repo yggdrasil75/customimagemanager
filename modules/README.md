@@ -205,7 +205,7 @@ The editor offers the node only while the module is enabled. See `pose/`.
 The app has a **model broker**. A *capability* is a named job with a fixed I/O
 contract (`detect`, `detect.persons`, `detect.faces`, `detect.barcodes`, `segment`,
 `segment.semantic`, `pose`, `depth`, `classify`, `tag`, `describe`, `embed`, `embed.faces`,
-`face.shape`, `embed.bodies`, `body.shape`, `iqa`; `box` and `segment.box` are internal). Contracts live in
+`face.shape`, `embed.bodies`, `body.shape`, `body.mesh`, `iqa`; `box` and `segment.box` are internal). Contracts live in
 [`model_contracts.py`](model_contracts.py). Modules register **providers**;
 the user picks one per capability in **Settings → 🧩 Models**; consumers ask
 the broker and never name a model.

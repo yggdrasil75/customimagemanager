@@ -136,12 +136,7 @@ state = {
     },
     "brand_name": "Media Library",
     "brand_logo": "",   # relative URL under /media, or "" for none
-    "our_model": "",
-    "our_model_bg": False,     # also run the trained box model on every background scan
     "model_groups": {},
-    "appearance_eps": 0.35,
-    "shape_estimator": "anny_fit",
-    "pose_estimator": "atlas",
     "page_size": 200,
     "tiers": None,
     # Per-install module on/off map, {module_id: bool}. Left empty here on
@@ -1572,7 +1567,6 @@ def load_config():
 def save_config():
     keys = ["remote_ip",
             "autotag_enabled","keep_raws","pipeline_tree",
-            "our_model","our_model_bg"
             "brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
             "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers","modules","model_selection"]
     # Add any keys modules declared through the config registry, so a module's
@@ -3326,15 +3320,6 @@ def _background_instances(img_bgr) -> list:
                         "polygon": poly}
             if inst:
                 out.append(inst)
-    # Our trained box model (Trainer output) as an extra background detector.
-    if state.get("our_model_bg"):
-        models = (state.get("model_groups") or {}).get("trained") or []
-        chosen = (state.get("our_model") or "").strip()
-        mp = chosen if (chosen and chosen in models) else (models[-1] if models else None)
-        if mp:
-            for b in _detect_obb_or_box(c, mp):
-                out.append({"class_name": b["class_name"], "cx": b["cx"], "cy": b["cy"],
-                            "w": b["w"], "h": b["h"], "conf": b.get("conf")})
     # Polygons -> stored mask form (mask_svg) is the segmentation module's job;
     # without it the sweep still yields boxes.
     for _ in module_host.emit("regions.masks", instances=out, width=W, height=H):
@@ -3834,8 +3819,6 @@ def api_state():
     return jsonify({k: state.get(k) for k in
         ("classes","available_models","status_text","remote_ip",
          "autotag_enabled","pipeline_tree",
-         "appearance_eps","shape_estimator","pose_estimator",
-         "our_model","our_model_bg",
          "model_groups","iqa_model","brand_name","brand_logo","search_quick_filters")})
 
 @app.route("/api/workers")
@@ -3974,16 +3957,7 @@ def update_settings():
         handled, err = modules.config.apply(_k, d[_k], state)
         if handled and err:
             _reg_errors[_k] = err
-    # A face_size change means the NEXT detect must load different weights. The
-    # detector is memoised by path in _face_cache, and _run_faces resolves the
-    # path from the setting, so the cache would keep serving the old model until
-    # a restart. Drop it here.
-    # Same for the "our"/trained model: _detect_obb_or_box memoises by path.
-    if "our_model" in d and d["our_model"] != state.get("our_model"):
-        _load_yolo.cache_clear()
-    for k in ("pipeline_tree",
-              "appearance_eps","shape_estimator","pose_estimator",
-              "our_model","our_model_bg",):
+    for k in ("pipeline_tree"):
         if k in d: state[k] = d[k]
     # Search quick-filters: validate shape so a malformed save can't break the
     # search UI. Each entry must be {id,label,query}; drop anything else.

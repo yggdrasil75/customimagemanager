@@ -76,59 +76,9 @@
           the Embedding module (🧩 Models → Image embedding).</p>
       </div>
       <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
-        <label class="text-xs text-sky-300 font-bold block mb-2">Person estimation
-          <span class="font-normal text-gray-500">(detection/pose models are picked in 🧩 Models)</span></label>
-        <div class="grid grid-cols-3 gap-x-4 gap-y-2">
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Pose estimator</span>
-            <select id="cfg_pose_estimator"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="atlas">ATLAS</option>
-              <option value="yolo">YOLO pose</option>
-              <option value="wholebody">RTMPose whole-body</option>
-            </select>
-          </div>
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Shape estimator</span>
-            <select id="cfg_shape_estimator"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="anny_fit">ANNY-Fit (any age)</option>
-              <option value="anny">ANNY</option>
-              <option value="smplest_x">SMPLest-X (adult-anchored)</option>
-              <option value="shapy">SHAPY (adult-anchored)</option>
-            </select>
-          </div>
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Appearance split (eps)</span>
-            <input id="cfg_appearance_eps" type="number" step="0.01" min="0" max="1"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-          </div>
-        </div>
-        <p class="text-[10px] text-gray-600 mt-1.5">Appearance split groups a person's photos
-          into life-eras by face-embedding drift; lower eps = more, tighter eras. Shape/pose
-          estimators are optional body-mesh backends. Face estimator picks the 3D
-          face backend: Landmarks-3D works with no extra download; InsightFace 3DMM
-          needs a BFM basis; Deep3D needs the optional runner.</p>
-        <p class="text-[10px] text-gray-600 mt-1">Whole-body pose needs <code>rtmlib</code> +
-          <code>onnxruntime</code>; OCR needs <code>rapidocr_onnxruntime</code> or <code>easyocr</code>. Weights
-          download automatically on first use.</p>
-      </div>
-      <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
-        <label class="text-xs text-purple-300 font-bold block mb-2">Trained box model
-          <span class="font-normal text-gray-500">(the Trainer's output, run alongside the picked models)</span></label>
-        <div class="grid grid-cols-2 gap-4">
-          <div>
-            <span class="text-[10px] text-gray-500 block mb-0.5">Our model</span>
-            <select id="cfg_our_model"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-              <option value="">Latest trained (auto)</option>
-            </select>
-            <label class="flex items-center gap-2 text-[11px] text-gray-300 mt-1 cursor-pointer">
-              <input id="cfg_our_model_bg" type="checkbox" class="accent-purple-500">
-              Also run it on every background scan
-            </label>
-          </div>
-        </div>
+        <p class="text-[10px] text-gray-600">Pose, body shape, body mesh and face models are picked in
+          🧩 Models; OCR needs <code>rapidocr_onnxruntime</code> or <code>easyocr</code>. Weights download
+          automatically on first use.</p>
       </div>
     </div>
 

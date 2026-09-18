@@ -14,11 +14,7 @@ async function persistAiSettings(){
   // whole unified Save (that's the bug that made Save silently do nothing).
   const _v=(id,d='')=>{ const e=document.getElementById(id); return e?e.value:d; };
   const _c=(id)=>{ const e=document.getElementById(id); return !!(e&&e.checked); };
-  const body={our_model:_v('cfg_our_model'),
-      our_model_bg:_c('cfg_our_model_bg'),
-      pose_estimator:_v('cfg_pose_estimator'),
-      shape_estimator:_v('cfg_shape_estimator'),
-      appearance_eps:parseFloat(_v('cfg_appearance_eps'))||0.35,
+  const body={
       };
   if(tree!==null) body.pipeline_tree=tree;
   // Fold in the General pane's search quick-filters so the single settings POST

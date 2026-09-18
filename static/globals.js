@@ -304,12 +304,6 @@ function populateSettingsForm(s){
           if(p===cur) o.selected=true; el.appendChild(o);
         });
       };
-      const _ob=document.getElementById('cfg_our_model_bg'); if(_ob) _ob.checked=!!s.our_model_bg;
-      _fill('cfg_our_model', s.our_model,
-            (_g.trained||[]).concat(_g.custom||[]));
-      _set('cfg_pose_estimator', s.pose_estimator||'atlas');
-      _set('cfg_shape_estimator', s.shape_estimator||'anny_fit');
-      _set('cfg_appearance_eps', (s.appearance_eps??0.35));
       if(typeof renderQuickFilterEditor==='function') renderQuickFilterEditor();
       _set('cfg_pipeline', JSON.stringify(s.pipeline_tree||{},null,2));
       const at=document.getElementById('autotag_toggle');

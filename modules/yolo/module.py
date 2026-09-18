@@ -492,5 +492,27 @@ def register(host):
         handles=lambda p: str(p).lower().endswith(".pt"),
         cost_mb=250, gpu=model_registry.on_gpu())
 
+    # Service for modules that own their own YOLO weights (personal_box):
+    # a canonical-boxes handle (with .batch / .registry_key) and the class list.
+    def _detector(model_path, chore="detect"):
+        loader = _loader_for(model_path, chore)
+
+        def run(img_bgr, *a, conf=0.25, keep_classes=None, as_obb=False, **k):
+            return _yolo_detect(img_bgr, model_path, keep_classes=keep_classes, conf=conf, as_obb=as_obb)
+
+        def batch(imgs, *a, conf=0.25, keep_classes=None, as_obb=False, **k):
+            return _yolo_detect_batch(imgs, model_path, keep_classes=keep_classes, conf=conf, as_obb=as_obb)
+        run.batch = batch
+        run.model_path = model_path
+        run.registry_key = f"yolo:{_canon(model_path, chore)}"
+        loader()
+        return run
+
+    def _classes_of(model_path, chore="detect"):
+        names = getattr(_loader_for(model_path, chore)(), "names", {}) or {}
+        return [names[k] for k in sorted(names)] if isinstance(names, dict) else list(names)
+
+    host.provide_service("yolo", {"detector": _detector, "classes": _classes_of})
+
     host.logger.info("yolo module: registered %d family providers + box",
                      sum(len(f[4]) for f in _FAMILIES))

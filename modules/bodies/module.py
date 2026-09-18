@@ -1,6 +1,6 @@
 """
 Bodies module — face↔body binding, body re-id clustering knobs, the cv2
-appearance fallback and the (unimplemented) SMPL body-shape estimator.
+appearance fallback, and the shape-fit fusion the estimator modules share.
 The DINO backbones that actually do body re-id live in the dino module.
 ======================================================================
 Faces are the primary identity signal. A body vector only bridges a face
@@ -12,7 +12,9 @@ live in separate spaces and are never compared directly.
 Model picks (Settings → Models):
   embed.bodies   the dino module's DINOv2 / DINOv3 (or the cv2 appearance
                  fallback registered here).
-  body.shape     SMPLest-X body mesh (only when the runner is installed).
+  body.shape     provided by the estimator modules (anny / shapy / atlas /
+                 smplx); this module owns the crop-fusion they all use
+  body.mesh      parameters -> mesh (smplx / anny).
 
 The people machinery in the core (scan worker, body_regions table, People
 tab) reaches this module through the "bodies" service.
@@ -55,9 +57,16 @@ def register(host):
         output="(vectors: list[np.ndarray|None], mode: backbone id | 'appearance')")
     host.declare_capability(
         "body.shape", label="Body 3D shape",
-        summary="Fuse a person's crops into a neutral-pose SMPL mesh.",
+        summary="Fuse a person's crops into a neutral-pose body mesh (ANNY, SHAPY, "
+                "ATLAS, SMPLest-X modules provide; this module owns the fusion).",
         input="estimate_shape(crops: list[(img_bgr, box)])",
         output="(vertices, faces) mesh or None when too few clean fits")
+    host.declare_capability(
+        "body.mesh", label="Body mesh (from parameters)",
+        summary="Parametric body model: shape parameters -> neutral-pose mesh "
+                "(SMPL-X, ANNY).",
+        input="mesh(betas: ndarray) — the model's shape vector",
+        output="(vertices, faces)")
 
     host.provide_model(
         "embed.bodies", "appearance", label="Appearance (cv2)", family="OpenCV",
@@ -66,15 +75,6 @@ def register(host):
              "when no backbone loads.",
         loader=lambda: (lambda img, boxes, *a, **k: bodylib.embed_bodies_appearance(img, boxes)),
         transform=None, available=lambda: True, reason="", cost_mb=0)
-    host.provide_model(
-        "body.shape", "smplestx", label="SMPLest-X", family="SMPL",
-        note="Image -> SMPL shape parameters, fused across a person's crops. Needs an "
-             "estimator implementation (SMPLest-X / SHAPY) on top of smplx.",
-        speed="accurate", supports_conf=False,
-        loader=lambda: (lambda crops, *a, **k: bodylib.estimate_shape(crops)),
-        transform=None, available=bodylib.have_mesh_estimator,
-        reason=bodylib.BODY_ESTIMATOR_REASON, cost_mb=1200)
-
     # A backbone change moves vectors to a different space: clear the
     # unconfirmed body rows so the next scan rebuilds them.
     _last = {"v": None}
@@ -127,7 +127,11 @@ def register(host):
         except NoProviderError:
             return None
 
+    def have_mesh_estimator():
+        return any(p["available"] for p in host.broker.providers_for("body.shape"))
+
     host.provide_service("bodies", {
+        "fuse_shape": bodylib.fuse_shape,
         "enabled": lambda: bool(host.config.get("body_enabled")),
         "embed_bodies": embed_bodies,
         "associate_faces_bodies": bodylib.associate_faces_bodies,
@@ -137,7 +141,7 @@ def register(host):
                                  or (bodylib.BODY_EPS_APPEARANCE if mode == "appearance"
                                      else bodylib.BODY_EPS_REID)),
         "estimate_shape": estimate_shape,
-        "have_mesh_estimator": bodylib.have_mesh_estimator,
+        "have_mesh_estimator": have_mesh_estimator,
         "mesh_to_obj": bodylib.mesh_to_obj,
     })
     host.logger.info("bodies module: registered embed.bodies / body.shape")

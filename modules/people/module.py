@@ -101,6 +101,12 @@ def register(host):
     host.add_table(_DDL, check=_migrate)
     host.add_config_key("face_cluster_eps", default=0.0,
                         validate=lambda v: max(0.0, min(1.0, float(v or 0))))
+    host.add_config_key("appearance_eps", default=0.35,
+                        validate=lambda v: max(0.0, min(1.0, float(v or 0.35))))
+    host.add_settings_field(key="appearance_eps", label="Appearance split (eps)",
+                            kind="number", pane="module",
+                            help="Groups a person's photos into life-eras by face-embedding "
+                                 "drift; lower = more, tighter eras.")
     host.add_settings_field(key="face_cluster_eps", label="Face cluster distance (0 = auto)",
                             kind="number", pane="module")
     host.register_feature("tab.faces", "People tab (read=view, write=edit clusters)",
@@ -130,7 +136,7 @@ def register(host):
                                sel.get("size"), sel.get("type"), True, sel.get("classes"))
             cfg["model_selection"] = host.broker.current_selection()
         if "face_bg_custom" in cfg:
-            cfg["our_model_bg"] = bool(cfg.pop("face_bg_custom"))
+            cfg["our_model_bg"] = bool(cfg.pop("face_bg_custom"))   # personal_box migrates it on
     host.on_startup(_migrate_settings)
     host.on_startup(pc._register_face_source)
     host.on_startup(lambda: pc.rebuild_persons_cache())

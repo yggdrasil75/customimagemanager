@@ -21,16 +21,6 @@ import numpy as np
 
 import object_grouping as og
 
-# Body-shape estimation (SMPLest-X / SHAPY / ANNY) is NOT implemented: `smplx`
-# only provides the parametric body model, not an image-to-parameters
-# estimator. A runner would expose infer(img_bgr, box) -> {betas, faces,
-# vertices, confidence}; until one exists this stays None and the provider
-# reports why.
-_smplx_mod = None
-BODY_ESTIMATOR_REASON = ("no body-shape estimator implemented (smplx is only the "
-                         "body model; an SMPLest-X-style inference runner is needed)")
-
-## Cosine distance for DINO identity vectors.
 BODY_EPS_REID = 0.20
 ## Appearance fallback needs a tighter radius.
 BODY_EPS_APPEARANCE = 0.25
@@ -102,65 +92,33 @@ def associate_faces_bodies(faces: list[dict], bodies: list[dict]) -> list[tuple[
 
 # ── SMPLest-X body mesh ───────────────────────────────────────────────────────
 @functools.lru_cache(maxsize=1)
-def _load_smplx() -> Optional[Any]:
-    """! @brief Lazily bring up the SMPLest-X runner; memoised after the first call.
-    @return The runner module (exposing infer), or None when the dependency or its
-            model files are unavailable so callers degrade instead of raising.
+def fuse_shape(crops: list, infer, pose_neutral, min_views: int = 3,
+               min_confidence: float = 0.3):
+    """! @brief Fuse many per-crop body fits into one canonical, outlier-robust mesh.
+    Estimator-agnostic: every shape module (ANNY, SHAPY, ATLAS, SMPLest-X …) hands
+    in its own two callables and gets the same fusion.
+    @param crops   List of (img_bgr, box) for a person's reasonably-sized regions.
+    @param infer   infer(img_bgr, box) -> {betas, faces, vertices?, confidence} or None.
+                   confidence in [0,1] is the fit quality (low for baggy/occluded
+                   crops); estimators that don't report one return 1.0.
+    @param pose_neutral  pose_neutral(mean_betas) -> vertices in the canonical pose.
+    @return (vertices, faces) for a NEUTRAL-POSE mesh rebuilt from the confidence-
+            weighted mean of the surviving shape params (params are pose-independent
+            and averageable; vertices are not), or None when too few crops survive.
     """
-    if _smplx_mod is not None and hasattr(_smplx_mod, "infer"):
-        return _smplx_mod
-    return None
-
-def have_mesh_estimator() -> bool:
-    """! @brief Whether SMPLest-X is up (else no mesh is produced)."""
-    return _load_smplx() is not None
-
-def estimate_params(img_bgr: np.ndarray, box: dict) -> Optional[dict]:
-    """! @brief Run the shape estimator on one crop and return its SMPL parameters + mesh.
-    @param box Normalised center-form person box.
-    @return {betas, faces, vertices, confidence} where betas is the pose-independent
-            shape vector (identical in expectation across images of one person),
-            faces is the SMPL topology, vertices is this crop's posed mesh, and
-            confidence is the runner's fit quality in [0,1] (low for baggy clothing,
-            occlusion or truncation, which inflate reprojection error); or None when
-            the estimator is absent or inference fails. Confidence defaults to 1.0
-            for runners that don't report it, so behaviour is unchanged without it.
-    """
-    runner = _load_smplx()
-    if runner is None or img_bgr is None:
-        return None
-    img_bgr = og.as_bgr(img_bgr)
-    if img_bgr is None:
-        return None
-    try:
-        out = runner.infer(img_bgr, box)
-    except Exception:
-        return None
-    if not out or out.get("betas") is None:
-        return None
-    return {"betas": np.asarray(out["betas"], np.float32),
-            "faces": np.asarray(out["faces"], np.int32),
-            "vertices": np.asarray(out["vertices"], np.float32),
-            "confidence": float(out.get("confidence", 1.0))}
-
-def estimate_shape(crops: list, min_views: int = 3,
-                   min_confidence: float = 0.3) -> Optional[tuple]:
-    """! @brief Fuse many per-image SMPL fits into one canonical, outlier-robust body shape.
-    @param crops List of (img_bgr, box) for a person's reasonably-sized regions.
-    @param min_views Fewest surviving fits required to trust an average.
-    @param min_confidence Drop fits below this quality before averaging — this is the
-           clothing/occlusion filter: a baggy or occluded crop scores low because it
-           inflates the reprojection error the runner reports. Skipped when the runner
-           reports no confidence (all default to 1.0).
-    @return (vertices, faces) for a NEUTRAL-POSE mesh rebuilt from the averaged
-            shape, or None when too few crops survive. Shape params (beta) are a
-            CONFIDENCE-WEIGHTED mean -- not vertices, which are pose-dependent and
-            meaningless to average -- then the runner reposes them to canonical.
-    """
-    runner = _load_smplx()
-    if runner is None:
-        return None
-    fits = [p for p in (estimate_params(img, box) for img, box in crops) if p is not None]
+    fits = []
+    for img, box in crops:
+        img = og.as_bgr(img)
+        if img is None:
+            continue
+        try:
+            out = infer(img, box)
+        except Exception:
+            out = None
+        if out and out.get("betas") is not None and out.get("faces") is not None:
+            fits.append({"betas": np.asarray(out["betas"], np.float32),
+                         "faces": np.asarray(out["faces"], np.int32),
+                         "confidence": float(out.get("confidence", 1.0))})
     fits = [f for f in fits if f["confidence"] >= min_confidence]
     if len(fits) < min_views:
         return None
@@ -171,11 +129,11 @@ def estimate_shape(crops: list, min_views: int = 3,
     if conf.sum() == 0:
         conf = np.ones_like(conf)
     mean_beta = np.average(betas, axis=0, weights=conf)
-    faces = fits[0]["faces"]
     try:
-        verts = runner.pose_neutral(mean_beta)   # SMPL forward pass, zero pose
+        verts = pose_neutral(mean_beta)
     except Exception:
         return None
-    return (np.asarray(verts, np.float32), np.asarray(faces, np.int32))
+    return (np.asarray(verts, np.float32), np.asarray(fits[0]["faces"], np.int32))
+
 
 mesh_to_obj = og.mesh_to_obj
