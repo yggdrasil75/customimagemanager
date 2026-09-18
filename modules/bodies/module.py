@@ -1,6 +1,7 @@
 """
-Bodies module — person (body) identity embedding, face↔body binding, and
-the SMPL body-shape estimator.
+Bodies module — face↔body binding, body re-id clustering knobs, the cv2
+appearance fallback and the (unimplemented) SMPL body-shape estimator.
+The DINO backbones that actually do body re-id live in the dino module.
 ======================================================================
 Faces are the primary identity signal. A body vector only bridges a face
 cluster to photos where that person's face is turned, cropped, or too
@@ -9,9 +10,8 @@ cluster then carries the name to face-less images. Body and face vectors
 live in separate spaces and are never compared directly.
 
 Model picks (Settings → Models):
-  embed.bodies   DINOv2 (public, default) or DINOv3 (gated) backbone, sizes
-                 s/b/l/g, weights under models/bodies/embedbodies/; plus the
-                 cv2 appearance fallback.
+  embed.bodies   the dino module's DINOv2 / DINOv3 (or the cv2 appearance
+                 fallback registered here).
   body.shape     SMPLest-X body mesh (only when the runner is installed).
 
 The people machinery in the core (scan worker, body_regions table, People
@@ -32,8 +32,6 @@ MANIFEST = {
     "pip":         [],          # torch/transformers optional per provider
     "assets":      [],
 }
-
-_SIZES = ["s", "b", "l", "g"]
 
 
 def register(host):
@@ -61,38 +59,12 @@ def register(host):
         input="estimate_shape(crops: list[(img_bgr, box)])",
         output="(vertices, faces) mesh or None when too few clean fits")
 
-    def _pick():
-        v = host.model_variant("embed.bodies")
-        fam = host.broker.selected_id("embed.bodies") or "dinov2"
-        table = bodylib.BODY_MODELS.get(fam, bodylib.BODY_MODELS["dinov2"])
-        return table.get(v.get("size") or "s", table["s"])
-
-    def _dino_loader():
-        bodylib.set_model(_pick())
-        if not bodylib.have_body_embedder():
-            raise RuntimeError("body backbone unavailable (torch/transformers or weights)")
-        return lambda img, boxes, *a, **k: bodylib.embed_bodies(img, boxes)
-
-    for fam, label, note, avail in (
-        ("dinov2", "DINOv2", "Public, ungated self-supervised ViT. The reliable default; "
-                             "'s' is enough for album re-id.", bodylib._HAVE_TRANSFORMERS),
-        ("dinov3", "DINOv3", "Newer backbone, gated on HuggingFace: accept the licence and "
-                             "log in (huggingface-cli) or loading fails.", bodylib._HAVE_TRANSFORMERS),
-    ):
-        host.provide_model(
-            "embed.bodies", fam, label=label, family="DINO", sizes=_SIZES,
-            note=note, speed="balanced", supports_conf=False,
-            loader=_dino_loader, transform=None,
-            available=(lambda a=avail: bool(a)), reason="pip install torch transformers",
-            cost_mb=1600, gpu=bodylib.og.has_gpu())
     host.provide_model(
         "embed.bodies", "appearance", label="Appearance (cv2)", family="OpenCV",
         speed="fast", supports_conf=False,
         note="Colour/shape fallback: groups by outfit, not identity. Used automatically "
              "when no backbone loads.",
-        loader=lambda: (lambda img, boxes, *a, **k:
-                        ([bodylib._normalise(v) for v in bodylib.og.embed_regions(bodylib.og.as_bgr(img), boxes)],
-                         "appearance") if img is not None and boxes else ([], "none")),
+        loader=lambda: (lambda img, boxes, *a, **k: bodylib.embed_bodies_appearance(img, boxes)),
         transform=None, available=lambda: True, reason="", cost_mb=0)
     host.provide_model(
         "body.shape", "smplestx", label="SMPLest-X", family="SMPL",
@@ -103,19 +75,18 @@ def register(host):
         transform=None, available=bodylib.have_mesh_estimator,
         reason=bodylib.BODY_ESTIMATOR_REASON, cost_mb=1200)
 
-    # Changing the backbone moves vectors to a different space: clear the
+    # A backbone change moves vectors to a different space: clear the
     # unconfirmed body rows so the next scan rebuilds them.
     _last = {"v": None}
 
     def _on_select(cap_id):
         if cap_id != "embed.bodies":
             return
-        mid = _pick()
+        mid = host.broker.selected_id("embed.bodies") + ":" + str(host.model_variant("embed.bodies")["size"])
         if mid == _last["v"]:
             return
         first = _last["v"] is None
         _last["v"] = mid
-        bodylib.set_model(mid)
         if first:
             return
         try:
@@ -129,9 +100,8 @@ def register(host):
     host.broker.on_select(_on_select)
 
     def _migrate():
-        # legacy core key body_size -> picker size
         size = (host.config.pop("body_size", "") or "").strip().lower()
-        if size in _SIZES and not host.broker.current_selection().get("embed.bodies"):
+        if size in ("s", "b", "l", "g") and not host.broker.current_selection().get("embed.bodies"):
             host.broker.select("embed.bodies", "dinov2", size, None)
             host.config["model_selection"] = host.broker.current_selection()
         _on_select("embed.bodies")
@@ -142,7 +112,14 @@ def register(host):
         try:
             return host.request_model("embed.bodies")(img, boxes)
         except NoProviderError:
-            return [], "none"
+            return bodylib.embed_bodies_appearance(img, boxes)
+
+    def reid_registry_key():
+        """Registry key of the picked backbone (for batch leases), or None."""
+        try:
+            return getattr(host.request_model("embed.bodies"), "registry_key", None)
+        except NoProviderError:
+            return None
 
     def estimate_shape(crops):
         try:
@@ -154,8 +131,8 @@ def register(host):
         "enabled": lambda: bool(host.config.get("body_enabled")),
         "embed_bodies": embed_bodies,
         "associate_faces_bodies": bodylib.associate_faces_bodies,
-        "reid_registry_key": bodylib.reid_registry_key,
-        "have_body_embedder": bodylib.have_body_embedder,
+        "reid_registry_key": reid_registry_key,
+        "have_body_embedder": lambda: host.broker.selected_id("embed.bodies") not in (None, "appearance"),
         "eps_for": lambda mode: (float(host.config.get("body_cluster_eps") or 0)
                                  or (bodylib.BODY_EPS_APPEARANCE if mode == "appearance"
                                      else bodylib.BODY_EPS_REID)),

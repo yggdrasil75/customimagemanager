@@ -238,16 +238,21 @@ class ModelBroker:
                 prompted=False, note="", speed="", supports_conf=None):
         """Register a provider for a capability. Dedup by (cap_id, provider_id).
 
-        The capability must already be declared (by the core or an earlier
-        module) — providing for an unknown capability raises, so a typo can't
-        silently create a dead slot. Re-providing the same id replaces the
-        earlier registration (last writer wins), which is what you want when a
-        module is reloaded.
+        The predefined capabilities (model_contracts) exist so providers of the
+        same job stay interchangeable; a module may still provide for an
+        arbitrary capability id, which is declared on the fly with a generic
+        contract owned by that module (declare it explicitly to document I/O).
+        Re-providing the same id replaces the earlier registration (last
+        writer wins), which is what you want when a module is reloaded.
         """
         with self._lock:
             if cap_id not in self._caps:
-                raise BrokerError(
-                    f"cannot provide for undeclared capability '{cap_id}'")
+                self._caps[cap_id] = Capability(
+                    cap_id, summary=f"Module-defined capability '{cap_id}'.",
+                    input="see the providing module", output="see the providing module",
+                    owner=self._current_module or "module",
+                    label=cap_id.replace(".", " · ").replace("_", " ").title())
+                self._providers.setdefault(cap_id, {})
             p = Provider(cap_id, provider_id, label=label, loader=loader,
                          transform=transform, available=available, reason=reason,
                          cost_mb=cost_mb, gpu=gpu,
@@ -332,6 +337,11 @@ class ModelBroker:
             provs = self._providers.get(cap_id, {})
             if sel and sel in provs:
                 return sel
+            # Default: an available UNPROMPTED provider first (a vision LLM is
+            # never a sensible default — it needs a prompt and costs a call).
+            for pid, p in provs.items():
+                if p.available() and not p.prompted:
+                    return pid
             for pid, p in provs.items():
                 if p.available():
                     return pid
@@ -445,10 +455,12 @@ class ModelBroker:
                             f"selected model '{p.label}' for '{cap_id}' is "
                             f"unavailable: {p.reason()}")
                     return p.bind()
-                # no explicit selection: first available provider
-                for p in provs.values():
-                    if p.available():
-                        return p.bind()
+                # no explicit selection: the same default selected_id() shows
+                # (available and unprompted first, then any available)
+                pid = self.selected_id(cap_id, role)
+                p = provs.get(pid)
+                if p is not None and p.available():
+                    return p.bind()
                 raise NoProviderError(cap_id, "none_available",
                     f"no available model for '{cap_id}'")
             finally:

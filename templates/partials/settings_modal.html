@@ -114,39 +114,20 @@
           download automatically on first use.</p>
       </div>
       <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
-        <label class="text-xs text-purple-300 font-bold block mb-2">Faces &amp; People
-          <span class="font-normal text-gray-500">(detect, embed, and cluster who&rsquo;s in each image)</span></label>
-        <p class="text-[10px] text-gray-500 mb-3">The background face/people scan and its
-          options live with the People module (General → People, when it's enabled).</p>
+        <label class="text-xs text-purple-300 font-bold block mb-2">Trained box model
+          <span class="font-normal text-gray-500">(the Trainer's output, run alongside the picked models)</span></label>
         <div class="grid grid-cols-2 gap-4">
-          <div class="border border-gray-700 rounded p-3">
-            <div class="text-[11px] font-bold text-purple-200/80 mb-2">Faces</div>
-            <p class="text-[10px] text-gray-500">Face detector, recognition pack, 3D face shape and
-              the drawn-face filter are picked in <b>🧩 Models</b> (Face detection / Face identity /
-              Face 3D shape). Changing the recognition pack rebuilds embeddings automatically.</p>
+          <div>
+            <span class="text-[10px] text-gray-500 block mb-0.5">Our model</span>
+            <select id="cfg_our_model"
+              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+              <option value="">Latest trained (auto)</option>
+            </select>
+            <label class="flex items-center gap-2 text-[11px] text-gray-300 mt-1 cursor-pointer">
+              <input id="cfg_our_model_bg" type="checkbox" class="accent-purple-500">
+              Also run it on every background scan
+            </label>
           </div>
-          <div class="border border-gray-700 rounded p-3">
-            <div class="text-[11px] font-bold text-purple-200/80 mb-2">People &amp; bodies</div>
-            <div class="space-y-2">
-              <div>
-                <span class="text-[10px] text-gray-500 block mb-0.5">Person model</span>
-                <select id="cfg_person_model"
-                  class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-                  <option value="">Common (COCO · person)</option>
-                </select>
-              </div>
-            </div>
-            <p class="text-[10px] text-gray-600 mt-2">Body re-id (the backbone, and whether it
-              runs during the face scan) is picked in <b>🧩 Models → Body identity</b>. Turning it
-              on needs a <b>Rescan all</b> from the Faces pane to embed the existing library.</p>
-          </div>
-        </div>
-        <div class="mt-2 max-w-sm">
-          <span class="text-[10px] text-gray-500 block mb-0.5">Our model</span>
-          <select id="cfg_our_model"
-            class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-            <option value="">Latest trained (auto)</option>
-          </select>
         </div>
       </div>
     </div>

@@ -22,7 +22,7 @@ from . import client, actions
 MANIFEST = {
     "id":          "vlm",
     "name":        "Vision LLM (OpenAI-compatible)",
-    "version":     "1.0.0",
+    "version":     "1.1.0",
     "description": "Uses the configured vision-capable chat model for detection, "
                    "classification, tagging, description and quality judgement.",
     "core":        False,

@@ -15,19 +15,12 @@ directly.
 """
 
 import functools
-import threading
 from typing import Any, Optional
 
 import numpy as np
 
 import object_grouping as og
-import model_registry
-from optional_deps import optional_import
 
-cv2, _HAVE_CV2 = optional_import("cv2")
-torch, _HAVE_TORCH = optional_import("torch")
-AutoImageProcessor, _ = optional_import("transformers", attr="AutoImageProcessor")
-AutoModel, _HAVE_TRANSFORMERS = optional_import("transformers", attr="AutoModel")
 # Body-shape estimation (SMPLest-X / SHAPY / ANNY) is NOT implemented: `smplx`
 # only provides the parametric body model, not an image-to-parameters
 # estimator. A runner would expose infer(img_bgr, box) -> {betas, faces,
@@ -53,150 +46,21 @@ FACE_IN_BODY_CONTAINMENT = 0.9
 ## ponytail: these are the pretrain-lvd1689m repos; confirm the strings resolve
 ## and aren't gated (v3 repos have required an HF token where v2 did not). If
 ## gated, from_pretrained below takes token=..., wire it to a setting then.
-BODY_MODELS = {
-    # DINOv2: public, ungated, the default. Sizes s/b/l/g.
-    "dinov2": {"s": "facebook/dinov2-small", "b": "facebook/dinov2-base",
-               "l": "facebook/dinov2-large", "g": "facebook/dinov2-giant"},
-    # DINOv3: gated on HF (needs an accepted licence + token in the HF cache).
-    "dinov3": {"s": "facebook/dinov3-vits16-pretrain-lvd1689m",
-               "b": "facebook/dinov3-vitb16-pretrain-lvd1689m",
-               "l": "facebook/dinov3-vitl16-pretrain-lvd1689m",
-               "g": "facebook/dinov3-vit7b16-pretrain-lvd1689m"},
-}
-_BODY_MODELS = BODY_MODELS["dinov2"]      # legacy alias (size -> id)
-_BODY_DEFAULT = "s"
-# Which (family, size) the module picked; set by module.py from the broker.
-_ACTIVE = {"model_id": BODY_MODELS["dinov2"]["s"]}
-
-## Weights land here (project models dir), not a hidden ~/.cache, matching the
-## house download convention.
-_HF_CACHE = model_registry.model_dir("bodies", "embed.bodies")
-
-_lock = threading.Lock()
-
-def set_model(model_id: str) -> None:
-    """! @brief Point the embedder at a HF backbone id (module.py calls this from
-    the Models-tab pick). Vectors are stored with the id as embed_mode, so a
-    change never mixes spaces."""
-    _ACTIVE["model_id"] = model_id or BODY_MODELS["dinov2"][_BODY_DEFAULT]
-
-
-def active_model() -> str:
-    return _ACTIVE["model_id"]
-
-def _build_reid(model_id: str):
-    """! @brief Construct (model, processor) for a DINO backbone id, or None."""
-    if not (_HAVE_TRANSFORMERS and _HAVE_TORCH):
-        return None
-    try:
-        device = "cuda" if og.has_gpu() else "cpu"
-        proc = AutoImageProcessor.from_pretrained(model_id, cache_dir=_HF_CACHE)
-        model = AutoModel.from_pretrained(model_id, cache_dir=_HF_CACHE).to(device).eval()
-        return (model, proc)
-    except Exception:
-        return None
-
-# One registry entry per body size (the size knob repoints which id we load).
-# DINOv3 backbones run ~1-2GB on GPU depending on size; register lazily so we
-# only ever register the ids we actually touch.
-_reid_registered: set = set()
-
-def _load_reid() -> Optional[tuple]:
-    """! @brief Lazily bring up the DINOv3 backbone for the current body size,
-    via the central load-on-demand registry so it's evicted under memory
-    pressure instead of held for the process lifetime.
-    @return (model, processor, model_id) tuple, or None if unavailable.
-    """
-    model_id = active_model()
-    key = f"bodies:reid:{model_id}"
-    with _lock:
-        if key not in _reid_registered:
-            model_registry.register(
-                key, (lambda mid=model_id: _build_reid(mid)),
-                cost_mb=1600, gpu=og.has_gpu())
-            _reid_registered.add(key)
-    got = model_registry.acquire(key)
-    if not got:
-        return None
-    model, proc = got
-    return (model, proc, model_id)
-
-def reid_registry_key():
-    """! @brief Registry key for the current body-reid backbone, so a batched task
-    can lease it resident across many embeds instead of reloading it per image."""
-    return f"bodies:reid:{active_model()}"
-
-def have_body_embedder() -> bool:
-    """! @brief Whether the DINO backbone is up (else callers degrade to appearance)."""
-    return _load_reid() is not None
-
-def _crop(img_bgr: np.ndarray, box: dict) -> Optional[np.ndarray]:
-    """! @brief Extract the pixel crop for a normalised center-form box.
-    @return The crop, or None if empty or below MIN_BODY_PX on a side.
-    """
-    H, W = img_bgr.shape[:2]
-    x1 = max(0, int(round((box["cx"] - box["w"] / 2) * W)))
-    y1 = max(0, int(round((box["cy"] - box["h"] / 2) * H)))
-    x2 = min(W, int(round((box["cx"] + box["w"] / 2) * W)))
-    y2 = min(H, int(round((box["cy"] + box["h"] / 2) * H)))
-    if x2 - x1 < MIN_BODY_PX or y2 - y1 < MIN_BODY_PX:
-        return None
-    crop = img_bgr[y1:y2, x1:x2]
-    return crop if crop.size else None
-
 def _normalise(v: Any) -> Optional[np.ndarray]:
-    """! @brief L2-normalise a vector to unit length.
-    @return The unit vector, or None if the input is None or zero-norm.
-    """
+    """! @brief L2-normalise a vector to unit length; None for None / zero-norm."""
     if v is None:
         return None
     v = np.asarray(v, dtype=np.float32)
     n = np.linalg.norm(v)
-    return (v / n) if n else None
+    return v / n if n > 0 else None
 
-def embed_bodies(img_bgr: np.ndarray, boxes: list[dict]) -> tuple[list, str]:
-    """! @brief Embed each person crop, mirroring faces.embed_faces.
-    @return (vectors, mode) where mode is the DINOv3 model id for identity
-            vectors, 'appearance' for the fallback, or 'none'. Storing the model
-            id (not a generic 'reid') lets rows from different models cluster in
-            separate spaces and be regenerated per-model. Vectors are
-            L2-normalised; a box too small or a failed embed yields None in that
-            slot. Unlike faces (which re-detect on the full frame), DINO has no
-            detector and embeds exactly the crops it is handed, so the caller's
-            box list stays authoritative with no IoU re-matching.
-    """
+
+def embed_bodies_appearance(img_bgr: np.ndarray, boxes: list[dict]) -> tuple[list, str]:
+    """! @brief Appearance-only body vectors (cv2 colour/shape): the fallback when
+    no backbone module (DINO) is picked. Groups by outfit, not identity."""
+    img_bgr = og.as_bgr(img_bgr)
     if img_bgr is None or not boxes:
         return [], "none"
-    img_bgr = og.as_bgr(img_bgr)
-    if img_bgr is None:
-        return [], "none"
-
-    loaded = _load_reid()
-    if loaded is not None:
-        model, proc, model_id = loaded
-        crops, slots = [], []
-        for idx, b in enumerate(boxes):
-            c = _crop(img_bgr, b)
-            if c is not None:
-                crops.append(cv2.cvtColor(c, cv2.COLOR_BGR2RGB))
-                slots.append(idx)
-        vecs: list = [None] * len(boxes)
-        if crops:
-            try:
-                inputs = proc(images=crops, return_tensors="pt").to(model.device)
-                with torch.no_grad():
-                    out = model(**inputs)
-                pooled = getattr(out, "pooler_output", None)
-                if pooled is None:                       # DINOv2 has no pooler: use CLS
-                    pooled = out.last_hidden_state[:, 0]
-                feats = pooled.detach().cpu().numpy().astype(np.float32)
-                for slot, f in zip(slots, feats):
-                    vecs[slot] = _normalise(f)
-            except Exception:
-                vecs = [None] * len(boxes)
-        if any(v is not None for v in vecs):
-            return vecs, model_id
-
     try:
         return [_normalise(v) for v in og.embed_regions(img_bgr, boxes)], "appearance"
     except Exception:

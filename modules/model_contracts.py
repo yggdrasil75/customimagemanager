@@ -40,8 +40,17 @@ CORE_CAPABILITIES = {
         "output": "list of {class_name, cx, cy, w, h, conf?, angle?} normalized "
                   "0..1 center-form; angle in radians for oriented boxes",
     },
+    "detect.persons": {
+        "label": "Person detection",
+        "summary": "People/characters as boxes: the picked Detection model's person "
+                   "class, or dedicated (often oriented-box) person weights.",
+        "input": _IMG,
+        "output": "list of {class_name:'person', cx, cy, w, h, conf?} normalized "
+                  "0..1 center-form",
+    },
     "detect.faces": {
         "label": "Face detection",
+        "background": True,
         "summary": "Faces as boxes (dedicated face detectors; feeds the person "
                    "module).",
         "input": _IMG,
@@ -97,9 +106,22 @@ CORE_CAPABILITIES = {
     },
     "classify": {
         "label": "Classification",
-        "summary": "Whole-image classification.",
+        "summary": "Whole-image classification against a fixed label set.",
         "input": _IMG,
         "output": "list of {class_name, conf} sorted by conf desc",
+    },
+    "tag": {
+        "label": "Tagging",
+        "summary": "Open-set image tags (booru-style taggers such as WD, or a vision "
+                   "LLM with a prompt).",
+        "input": "tag(img_bgr, prompt='') — prompt used only by prompted providers",
+        "output": "list of {tag, conf} sorted by conf desc; conf 0..1",
+    },
+    "describe": {
+        "label": "Description",
+        "summary": "Natural-language caption / description of the image.",
+        "input": "describe(img_bgr, prompt='') — prompt used only by prompted providers",
+        "output": "str",
     },
     "embed": {
         "label": "Image embedding",

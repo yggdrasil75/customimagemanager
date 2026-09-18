@@ -136,8 +136,8 @@ state = {
     },
     "brand_name": "Media Library",
     "brand_logo": "",   # relative URL under /media, or "" for none
-    "person_model": "",
     "our_model": "",
+    "our_model_bg": False,     # also run the trained box model on every background scan
     "model_groups": {},
     "appearance_eps": 0.35,
     "shape_estimator": "anny_fit",
@@ -1572,7 +1572,7 @@ def load_config():
 def save_config():
     keys = ["remote_ip",
             "autotag_enabled","keep_raws","pipeline_tree",
-            "person_model","our_model",
+            "our_model","our_model_bg"
             "brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
             "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers","modules","model_selection"]
     # Add any keys modules declared through the config registry, so a module's
@@ -3246,16 +3246,19 @@ def _detect_obb_or_box_batch(imgs, model_path: str, keep_classes: set | None = N
 
 def _run_person(img_bgr) -> list:
     """!
-    @brief Detect characters via a configured OBB model, else the COCO 'person' class.
+    @brief People/character boxes via the picked 'detect.persons' provider
+           (Models tab: the Detection model's person class, or dedicated weights).
     @return Center-form boxes; [] lets the pipeline fall back to the LLM.
     """
-    obb = ((state.get("person_model") or "")
-           or (state.get("person_obb_model") or "")).strip()
-    if obb:
-        boxes = _detect_obb_or_box(img_bgr, obb, as_obb=True)
-        if boxes:
-            return boxes
-    return _detect_objects(img_bgr, keep_classes={"person"})
+    try:
+        run = modules.broker.request("detect.persons")
+    except modules.model_broker.NoProviderError:
+        return []
+    try:
+        return run(_coerce_bgr3(img_bgr), conf=modules.broker.variant("detect.persons")["conf"]) or []
+    except Exception as e:
+        access_logger.error(f"detect.persons: {e}")
+        return []
 
 def _run_panels(img_bgr) -> list:
     """!
@@ -3323,6 +3326,15 @@ def _background_instances(img_bgr) -> list:
                         "polygon": poly}
             if inst:
                 out.append(inst)
+    # Our trained box model (Trainer output) as an extra background detector.
+    if state.get("our_model_bg"):
+        models = (state.get("model_groups") or {}).get("trained") or []
+        chosen = (state.get("our_model") or "").strip()
+        mp = chosen if (chosen and chosen in models) else (models[-1] if models else None)
+        if mp:
+            for b in _detect_obb_or_box(c, mp):
+                out.append({"class_name": b["class_name"], "cx": b["cx"], "cy": b["cy"],
+                            "w": b["w"], "h": b["h"], "conf": b.get("conf")})
     # Polygons -> stored mask form (mask_svg) is the segmentation module's job;
     # without it the sweep still yields boxes.
     for _ in module_host.emit("regions.masks", instances=out, width=W, height=H):
@@ -3823,7 +3835,7 @@ def api_state():
         ("classes","available_models","status_text","remote_ip",
          "autotag_enabled","pipeline_tree",
          "appearance_eps","shape_estimator","pose_estimator",
-         "person_model","our_model",
+         "our_model","our_model_bg",
          "model_groups","iqa_model","brand_name","brand_logo","search_quick_filters")})
 
 @app.route("/api/workers")
@@ -3971,7 +3983,7 @@ def update_settings():
         _load_yolo.cache_clear()
     for k in ("pipeline_tree",
               "appearance_eps","shape_estimator","pose_estimator",
-              "person_model","our_model",):
+              "our_model","our_model_bg",):
         if k in d: state[k] = d[k]
     # Search quick-filters: validate shape so a malformed save can't break the
     # search UI. Each entry must be {id,label,query}; drop anything else.

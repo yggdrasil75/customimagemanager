@@ -44,8 +44,8 @@ def _feature(*a, **k):
 # core names bound by _bind(host); declared so linters and readers see them
 _db = state = MEDIA_DIR = get_safe_path = read_jxl = _to_bgr = read_metadata = None
 write_metadata = access_logger = thread_manager = _background_instances = None
-_fold_background = _detect_obb_or_box = _detect_obb_or_box_batch = _detect_objects = None
-_yolo_key = _run_person = _faces = _bodies = _body_on = HOST = None
+_fold_background = _detect_obb_or_box = None
+_run_person = _faces = _bodies = _body_on = HOST = None
 _merge_regions = _read_pose_from_xmp = _kpts_in_box = _last_activity = None
 
 
@@ -57,8 +57,7 @@ def _bind(host):
         "read_metadata": c.read_metadata, "write_metadata": c.write_metadata,
         "access_logger": host.logger, "thread_manager": host.thread_manager,
         "_background_instances": c.background_instances, "_fold_background": c.fold_background,
-        "_detect_obb_or_box": c.detect_boxes, "_detect_obb_or_box_batch": c.detect_boxes_batch,
-        "_detect_objects": c.detect_objects, "_yolo_key": c.model_key, "_run_person": c.run_person,
+        "_detect_obb_or_box": c.detect_boxes, "_run_person": c.run_person,
         "_merge_regions": c.merge_regions, "_read_pose_from_xmp": c.read_pose_from_xmp,
         "_kpts_in_box": c.kpts_in_box, "_last_activity": c.last_activity,
         "_faces": lambda: host.get_service("faces"),
@@ -129,32 +128,7 @@ def _face_regions_for(img, rel: str) -> list:
     _fold_background(_background_instances(img), person_regions, out)
 
     out.extend(person_regions)
-    if state.get("face_bg_custom"):
-        models = (state.get("model_groups") or {}).get("trained") or []
-        chosen = (state.get("our_model") or "").strip()
-        if chosen and chosen in models:
-            model_path = chosen
-        else:
-            model_path = models[-1] if models else None
-        if model_path:
-            for b in _detect_obb_or_box(img, model_path):
-                out.append({"class_name": b["class_name"], "region_name": "",
-                            "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
-                            "confirmed": False, "region_tags": [],
-                            "region_description": ""})
     return out
-
-def _person_model_paths():
-    """(primary_model_path, as_obb, keep_classes) for the person detector, matching
-    _run_person's selection logic. Returned so the batched path can pick one model
-    for the whole batch. The OBB-then-fallback retry _run_person does per image is
-    not reproduced per element; batched scan uses the COCO person model when no OBB
-    model is configured, and the OBB model when one is."""
-    obb = ((state.get("person_model") or "")
-           or (state.get("person_obb_model") or "")).strip()
-    if obb:
-        return obb, True, None
-    return None, False, {"person"}
 
 def _face_regions_for_batch(imgs, rels) -> list:
     """!
@@ -185,13 +159,17 @@ def _face_regions_for_batch(imgs, rels) -> list:
                                "confirmed": False, "region_tags": [],
                                "region_description": ""})
 
-    # People — one forward pass over the batch.
-    pmodel, pobb, pkeep = _person_model_paths()
-    if pmodel:
-        person_batches = _detect_obb_or_box_batch(imgs, pmodel, keep_classes=pkeep,
-                                                  as_obb=pobb)
-    else:   # stock detector via the broker; ponytail: per-image, no batch API on the handle
-        person_batches = [_detect_objects(im, keep_classes=pkeep) for im in imgs]
+    # People — the picked 'detect.persons' provider, batched when it can.
+    try:
+        prun = HOST.request_model("detect.persons")
+        pconf = HOST.broker.variant("detect.persons")["conf"]
+        person_batches = (prun.batch(imgs, conf=pconf) if hasattr(prun, "batch")
+                          else [prun(im, conf=pconf) if im is not None else [] for im in imgs])
+    except NoProviderError:
+        person_batches = [[] for _ in imgs]
+    except Exception as e:
+        access_logger.error(f"detect.persons batch: {e}")
+        person_batches = [[] for _ in imgs]
     person_regions_per = [[] for _ in range(n)]
     for i, boxes in enumerate(person_batches):
         for b in boxes:
@@ -208,19 +186,6 @@ def _face_regions_for_batch(imgs, rels) -> list:
     for i in range(n):
         results[i].extend(person_regions_per[i])
 
-    # Optional custom trained model — one forward pass over the batch.
-    if state.get("face_bg_custom"):
-        models = (state.get("model_groups") or {}).get("trained") or []
-        chosen = (state.get("our_model") or "").strip()
-        model_path = chosen if (chosen and chosen in models) else (models[-1] if models else None)
-        if model_path:
-            custom_batches = _detect_obb_or_box_batch(imgs, model_path)
-            for i, boxes in enumerate(custom_batches):
-                for b in boxes:
-                    results[i].append({"class_name": b["class_name"], "region_name": "",
-                                       "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
-                                       "confirmed": False, "region_tags": [],
-                                       "region_description": ""})
     return results
 
 def _upsert_region_embeddings(table: str, rel: str, boxes: list, vecs: list,
@@ -316,9 +281,12 @@ def _face_scan_lease_keys():
     keys = []
     fs = _faces()
     if fs:
-        det = fs["detector_path"]()
-        if det:
-            keys.append(_yolo_key(det))
+        try:
+            fk = getattr(HOST.request_model("detect.faces"), "registry_key", None)
+            if fk:
+                keys.append(fk)
+        except Exception:
+            pass
         keys.append(fs["insight_registry_key"]())
     if _body_on():
         try:
@@ -326,21 +294,11 @@ def _face_scan_lease_keys():
         except Exception:
             pass
     try:
-        obb = ((state.get("person_model") or "")
-               or (state.get("person_obb_model") or "")).strip()
-        if obb:
-            keys.append(_yolo_key(obb))   # stock detect model is warmed by its provider
+        pk = getattr(HOST.request_model("detect.persons"), "registry_key", None)
+        if pk:
+            keys.append(pk)
     except Exception:
         pass
-    if state.get("face_bg_custom"):
-        try:
-            models = (state.get("model_groups") or {}).get("trained") or []
-            chosen = (state.get("our_model") or "").strip()
-            mp = chosen if (chosen and chosen in models) else (models[-1] if models else None)
-            if mp:
-                keys.append(_yolo_key(mp))
-        except Exception:
-            pass
     # De-dup while preserving order (person may equal face in odd configs).
     seen = set()
     return [k for k in keys if not (k in seen or seen.add(k))]
@@ -495,7 +453,7 @@ def _claim_face_job():
     """! @brief One face-scan unit for the shared background processor, or None.
     """
     forced = _face_force["v"]
-    if not forced and not state.get("face_bg_enabled"):
+    if not forced and not HOST.broker.variant("detect.faces")["background"]:
         _face_skip("skip: bg scan disabled and not forced")
         return None
     if not forced and not thread_manager.is_idle():
@@ -1537,7 +1495,7 @@ def api_face_progress():
     idle_wait = 0 if forced else max(0, int(60 - (time.time() - _last_activity())))
     return jsonify({"success": True, "pending": pending, "total": total,
                     "faces": cached, "done": total - pending,
-                    "enabled": bool(state.get("face_bg_enabled")),
+                    "enabled": bool(HOST.broker.variant("detect.faces")["background"]),
                     "forced": forced, "idle_wait": idle_wait,
                     "identity": bool(fs and fs["have_identity_embedder"]()),
                     # '' when healthy. Non-empty means the detector never loaded,

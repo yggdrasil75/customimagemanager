@@ -99,17 +99,8 @@ def _migrate(db):
 def register(host):
     pc._bind(host)
     host.add_table(_DDL, check=_migrate)
-    host.add_config_key("face_bg_enabled", default=False, validate=bool)
-    host.add_config_key("face_bg_custom", default=False, validate=bool)
     host.add_config_key("face_cluster_eps", default=0.0,
                         validate=lambda v: max(0.0, min(1.0, float(v or 0))))
-    host.add_settings_field(key="face_bg_enabled", label="Detect faces & people on every scan",
-                            kind="toggle", pane="module",
-                            help="Background boxing: caches faces/bodies for the People tab as "
-                                 "the library is scanned.")
-    host.add_settings_field(key="face_bg_custom", label="Also run our trained model",
-                            kind="toggle", pane="module",
-                            help="Runs the 'Our model' detector alongside the community weights.")
     host.add_settings_field(key="face_cluster_eps", label="Face cluster distance (0 = auto)",
                             kind="number", pane="module")
     host.register_feature("tab.faces", "People tab (read=view, write=edit clusters)",
@@ -129,6 +120,18 @@ def register(host):
     host.register_centre_pane("person_mesh.html")
 
     # ── background scan worker + persons cache ────────────────────────────
+    # Legacy: the People module used to own "detect faces on every scan"; that
+    # is the Face-detection model's own background switch now.
+    def _migrate_settings():
+        cfg = host.config
+        if cfg.pop("face_bg_enabled", None):
+            sel = host.broker.current_selection().get("detect.faces") or {}
+            host.broker.select("detect.faces", sel.get("provider") or host.broker.selected_id("detect.faces"),
+                               sel.get("size"), sel.get("type"), True, sel.get("classes"))
+            cfg["model_selection"] = host.broker.current_selection()
+        if "face_bg_custom" in cfg:
+            cfg["our_model_bg"] = bool(cfg.pop("face_bg_custom"))
+    host.on_startup(_migrate_settings)
     host.on_startup(pc._register_face_source)
     host.on_startup(lambda: pc.rebuild_persons_cache())
 

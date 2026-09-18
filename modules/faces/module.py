@@ -107,6 +107,7 @@ def register(host):
             return [(_filter(im, bx) if im is not None else []) for im, bx in zip(imgs, raw)]
         run.batch = batch
         run.model_path = path
+        run.registry_key = host.core.model_key(path)
         return run
 
     host.provide_model(

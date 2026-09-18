@@ -203,7 +203,7 @@ The editor offers the node only while the module is enabled. See `pose/`.
 ## Models: capabilities, providers, the Models tab
 
 The app has a **model broker**. A *capability* is a named job with a fixed I/O
-contract (`detect`, `detect.faces`, `detect.barcodes`, `segment`,
+contract (`detect`, `detect.persons`, `detect.faces`, `detect.barcodes`, `segment`,
 `segment.semantic`, `pose`, `depth`, `classify`, `tag`, `describe`, `embed`, `embed.faces`,
 `face.shape`, `embed.bodies`, `body.shape`, `iqa`; `box` and `segment.box` are internal). Contracts live in
 [`model_contracts.py`](model_contracts.py). Modules register **providers**;
@@ -257,14 +257,11 @@ except NoProviderError as e:
     ...  # e.reason in {unknown_capability, no_providers, selected_unavailable, none_available}
 ```
 
-To add a **new** capability, `host.declare_capability(id, summary=, input=,
-output=, label=, background=)` — the first module to declare an id owns it.
-Worked examples: `yolo/` (one provider per family × head, oriented-box type),
-`mayaku/`, `SAM2`/`SAM3`/`mobilesam`/`fastsam` (shared `register_sam` factory),
-`vlm/` (detect / classify / tag / describe / iqa with per-capability editable default prompts), `embedding/`, `pyiqa/` + `brisque/`, `barcodes/`,
-`faces/` (detector + identity packs as types + 3D shape, exposing a `faces`
-service for the core's people machinery), `bodies/` (DINO re-id that bridges a
-face cluster to face-less photos; `bodies` service).
+The predefined capabilities keep providers of the same job interchangeable,
+but any id works: `provide_model("depth.anything", …)` declares it on the
+fly; `host.declare_capability(id, summary=, input=, output=, label=,
+background=)` documents its I/O contract — the first module to declare an id
+owns it.
 
 ## Front-end
 
@@ -284,7 +281,11 @@ Assets are served at `/modules/<id>/static/<file>` and injected on page load.
   every time the viewer loads a file — keep your state in your own module
   (the pose overlay does this) rather than in core globals.
 - **Settings tab**: fields render automatically; for custom UI listen for the
-  `module-settings-tab` event with `ev.detail === "<id>"`.
+  `module-settings-tab` event with `ev.detail === "<id>"`; save on change
+  by posting your key to `/api/update_settings`, the same way the rendered
+  fields do (the vlm module's AI-actions editor does this).
+- **Ext areas** for injected controls: `ai_tools`, `viewer_toggles`,
+  `gallery_bulk`, `description_tools`, `comic_tools`, `controls_tabs`.
 
 ## Enable / disable
 

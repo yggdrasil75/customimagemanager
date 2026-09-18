@@ -383,6 +383,67 @@ def register(host):
         available=lambda: _avail() and bool(_face_path()), reason=reason,
         cost_mb=250, gpu=model_registry.on_gpu())
 
+    # Person detection: (a) the picked Detection model filtered to 'person'
+    # (any family/size), (b) dedicated person weights (custom OBB/box .pt in
+    # models/yolo/detectpersons/) — the old core "person model".
+    def _persons_from_detect():
+        def run(img_bgr, *a, conf=0.25, **k):
+            try:
+                det = host.request_model("detect")
+            except Exception:
+                return []
+            return [b for b in (det(img_bgr, conf=conf) or []) if b.get("class_name") == "person"]
+        return run
+
+    host.add_config_key("person_weights", default="")
+
+    def _persons_custom():
+        mp = (host.config.get("person_weights") or "").strip()
+        if not mp:
+            found = model_registry.list_weights("yolo", "detect.persons", exts=(".pt",))
+            mp = found[0] if found else ""
+        if not mp:
+            raise RuntimeError("no person weights set")
+        loader = _loader_for(mp, "detectpersons")
+
+        def run(img_bgr, *a, conf=0.25, **k):
+            boxes = _yolo_detect(img_bgr, mp, conf=conf, as_obb=True)
+            for b in boxes:
+                b["class_name"] = "person"
+            return boxes
+
+        def batch(imgs, *a, conf=0.25, **k):
+            out = _yolo_detect_batch(imgs, mp, conf=conf, as_obb=True)
+            for boxes in out:
+                for b in boxes:
+                    b["class_name"] = "person"
+            return out
+        run.batch = batch
+        run.model_path = mp
+        run.registry_key = f"yolo:{_canon(mp, 'detectpersons')}"
+        loader()   # warm/validate
+        return run
+
+    host.provide_model(
+        "detect.persons", "detect-class", label="Detection model · person class", family="YOLO",
+        speed="fast", note="Uses whatever Detection model is picked and keeps its 'person' boxes. "
+                           "Nothing extra to load.",
+        loader=_persons_from_detect, transform=None, available=_avail, reason=reason, cost_mb=0)
+    host.provide_model(
+        "detect.persons", "custom-person", label="Dedicated person weights", family="YOLO",
+        speed="balanced",
+        note="Your own person/character detector (OBB or box .pt). Drop it in "
+             "models/yolo/detectpersons/ or pick it here.",
+        settings=[{"key": "person_weights", "label": "Weights", "kind": "select",
+                   "options": lambda: [{"value": "", "label": "First file in models/yolo/detectpersons"}] +
+                              [{"value": q, "label": os.path.basename(q)}
+                               for q in model_registry.list_weights("yolo", "detect.persons", exts=(".pt",))
+                               + ((host.config.get("model_groups") or {}).get("trained") or [])]}],
+        loader=_persons_custom, transform=None,
+        available=lambda: _avail() and bool((host.config.get("person_weights") or "").strip()
+                                            or model_registry.list_weights("yolo", "detect.persons", exts=(".pt",))),
+        reason="no person weights configured", cost_mb=250, gpu=model_registry.on_gpu())
+
     # Generic box detector: runs any YOLO .pt (incl. OBB) at a given path and
     # returns canonical {class_name,cx,cy,w,h}. This is what the box consumers
     # (faces/persons/panels/objects/video) dispatch to via broker.detector_for,

@@ -34,6 +34,10 @@ MANIFEST = {
 }
 
 
+def _no_llm(*a, **k):
+    raise RuntimeError("LLM not available (vlm module disabled)")
+
+
 def register(host):
     # Teach core what a "book" is. Without this the app is a pure image gallery
     # that never sees an epub/cbz. The ext lists + mime map live with the module.
@@ -90,7 +94,7 @@ def register(host):
         "embed_text":    emb_svc.get("oai_embed_text"),
         "embed_enabled": emb_svc.get("oai_embed_enabled"),
         "embed_tag":     emb_svc.get("oai_embed_tag"),
-        "llm_request":   core.llm_request,
+        "llm_request":   lambda *a, **k: (host.get_service("llm") or {}).get("request", _no_llm)(*a, **k),
         "current_user":  host.current_user,
     })
 

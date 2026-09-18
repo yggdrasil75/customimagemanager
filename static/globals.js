@@ -304,8 +304,7 @@ function populateSettingsForm(s){
           if(p===cur) o.selected=true; el.appendChild(o);
         });
       };
-      _fill('cfg_person_model', s.person_model,
-            (_g.trained||[]).concat(_g.custom||[]));
+      const _ob=document.getElementById('cfg_our_model_bg'); if(_ob) _ob.checked=!!s.our_model_bg;
       _fill('cfg_our_model', s.our_model,
             (_g.trained||[]).concat(_g.custom||[]));
       _set('cfg_pose_estimator', s.pose_estimator||'atlas');

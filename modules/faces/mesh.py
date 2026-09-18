@@ -21,7 +21,11 @@ identical OBJLoader path — the only difference downstream is which member it r
 Nothing here raises: every public call returns None / False on any failure.
 """
 
+import importlib
+import importlib.util
+import logging
 import os
+import sys
 import threading
 from typing import Optional
 
@@ -29,9 +33,45 @@ import numpy as np
 import urllib.request
 
 from optional_deps import optional_import
+
+_log = logging.getLogger(__name__)
 get_object, _HAVE_INSIGHT_DATA = optional_import("insightface.data", attr="get_object")
-MorphabelModel, _HAVE_FACE3D = optional_import("insightface.thirdparty.face3d.morphable_model", attr="MorphabelModel")
-mm_fit, _ = optional_import("insightface.thirdparty.face3d.morphable_model", attr="fit", quiet=True)
+
+
+# insightface's face3d morphable model only needs mesh.transform (pure numpy),
+# but its package __init__ imports the cython mesh, which pip never ships or
+# builds. face3d ships an identical numpy implementation (mesh_numpy), so we
+# alias that in as `mesh` and import the morphable model normally — no build
+# step, nothing for the user to do.
+def _load_face3d():
+    try:
+        base = "insightface.thirdparty.face3d"
+        if base + ".mesh" not in sys.modules:
+            # face3d/__init__ imports .mesh first, so the alias must exist
+            # before the package runs: load mesh_numpy straight from its path.
+            tp = importlib.util.find_spec("insightface.thirdparty")
+            root = os.path.join(list(tp.submodule_search_locations)[0], "face3d")
+            for name in ("insightface.thirdparty.face3d",):   # namespace shell
+                if name not in sys.modules:
+                    pkg = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+                        name, os.path.join(root, "__init__.py"), submodule_search_locations=[root]))
+                    sys.modules[name] = pkg      # registered but NOT executed yet
+            spec = importlib.util.spec_from_file_location(
+                base + ".mesh_numpy", os.path.join(root, "mesh_numpy", "__init__.py"),
+                submodule_search_locations=[os.path.join(root, "mesh_numpy")])
+            mn = importlib.util.module_from_spec(spec)
+            sys.modules[base + ".mesh_numpy"] = mn
+            spec.loader.exec_module(mn)
+            sys.modules[base + ".mesh"] = mn
+        mm = importlib.import_module(base + ".morphable_model")
+        return mm.MorphabelModel, mm.fit, True
+    except Exception as e:
+        _log.warning("insightface face3d unavailable (%s); insight3d face shape disabled",
+                     getattr(e, "name", None) or e.__class__.__name__)
+        return None, None, False
+
+
+MorphabelModel, mm_fit, _HAVE_FACE3D = _load_face3d()
 # Deep3DFaceRecon is not implemented (there is no runner in the repo); the
 # 'deep3d' provider stays unavailable until one exposing
 # infer(img_bgr, box) -> {vertices, faces, coeff, confidence} exists.
