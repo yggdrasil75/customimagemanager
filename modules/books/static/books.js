@@ -303,6 +303,9 @@ async function openBook(relPath, section) {
   const r = await fetch('/api/books/detail?rel_path=' + encodeURIComponent(relPath));
   const d = await r.json();
   if (!d.success) { alert('Could not open that book.'); return; }
+  // Comic archives are the comics module's: same reader + metadata editor as
+  // folder comics. Falls back to the paged text reader when it's off.
+  if (d.book.kind === 'comic' && window.openComicArchive) { openComicArchive(relPath); return; }
   currentBook = d.book;
 
   setMediaMode('book');

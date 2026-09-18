@@ -1,0 +1,24 @@
+{# Controls-pane "Comic" tab (body only; the core renders #controls_pane_comic).
+   Rendered by comic.js from /api/comics/schema in the same grouped-field format
+   as the EXIF / IPTC / XMP editors: folder comics map Title / Writer / Summary /
+   Tags / Characters to comic.json; archives edit ComicInfo.xml in place. #}
+<div class="flex items-center justify-between mb-2">
+  <div>
+    <h2 class="text-sm font-bold text-purple-300">Comic metadata</h2>
+    <span id="comic_meta_source" class="text-[10px] text-gray-500"></span>
+  </div>
+  <div class="flex items-center gap-2">
+    <label class="text-[10px] text-gray-400 flex items-center gap-1">
+      <input type="checkbox" id="comic_show_empty"> show empty
+    </label>
+    <button onclick="comicSaveMeta()" id="comic_meta_save" data-feature="comics.edit"
+      class="text-xs bg-green-600 hover:bg-green-500 px-3 py-1 rounded font-bold disabled:opacity-40">Save</button>
+  </div>
+</div>
+<p id="comic_meta_note" class="hidden text-[10px] text-amber-300 mb-2"></p>
+<div id="comic_meta_groups" class="space-y-3"></div>
+<div class="mt-3 pt-3 border-t border-gray-700 space-y-1" data-comic-kind="folder">
+  <button onclick="setComicCover()" data-feature="comics.edit" class="w-full bg-gray-700 hover:bg-gray-600 py-1 rounded text-xs">Set current page as cover</button>
+  <button onclick="openComicPageInEditor()" data-feature="comics.edit" class="w-full bg-indigo-700 hover:bg-indigo-600 py-1 rounded text-xs">Edit current page metadata</button>
+  <button onclick="unpackageComic()" data-feature="comics.delete" class="w-full bg-red-800 hover:bg-red-700 py-1 rounded text-xs text-red-200">Unpackage comic</button>
+</div>

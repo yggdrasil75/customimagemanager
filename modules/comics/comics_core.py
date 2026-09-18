@@ -13,6 +13,8 @@ import time
 
 from flask import request, jsonify
 
+from . import comicinfo
+
 COMIC_SCHEMA = "mm.comic/1"
 _ROUTES = []
 
@@ -336,3 +338,95 @@ def comic_pipeline_route():
                         "tags": merged.get("tags", []),
                         "characters": merged.get("characters", []),
                         "description": merged.get("description", "")}})
+
+
+# ── unified viewer/editor API: folder comics and archive comics look the same ──
+# ComicInfo field <-> comic.json key, so one editor serves both kinds.
+_FOLDER_MAP = {"Title": "title", "Writer": "author", "Summary": "description",
+               "Tags": "tags", "Characters": "characters"}
+_LIST_KEYS = {"tags", "characters"}
+
+
+def _folder_values(data):
+    out = {}
+    for ci, key in _FOLDER_MAP.items():
+        v = data.get(key, "")
+        out[ci] = ", ".join(v) if isinstance(v, list) else (v or "")
+    return out
+
+
+def _archive_row(rel):
+    return _db().execute("SELECT fmt, reader, title, page_count FROM books WHERE rel_path=?",
+                         (rel,)).fetchone()
+
+
+@_route("/api/comics/schema")
+def api_comics_schema():
+    return jsonify({"success": True, "schema": comicinfo.schema_dict()})
+
+
+@_route("/api/comics/open")
+def api_comics_open():
+    """Everything the viewer + editor need for one comic: kind, title, page
+    image URLs, ComicInfo-shaped values, and whether metadata is writable."""
+    target = request.args.get("target", "").strip()
+    row = _archive_row(target)
+    if row is not None:
+        fmt = row["fmt"]
+        ap = get_safe_path(MEDIA_DIR, target)
+        n = int(row["page_count"] or 0)
+        info = comicinfo.read(ap, fmt) if ap and os.path.exists(ap) else {"values": {}, "writable": False}
+        vals = dict(info["values"]); vals.setdefault("PageCount", str(n))
+        return jsonify({"success": True, "kind": "archive", "target": target, "fmt": fmt,
+                        "title": vals.get("Title") or row["title"] or os.path.basename(target),
+                        "pages": [f"/api/books/page/{target}?n={i}" for i in range(n)],
+                        "thumbs": [f"/api/books/page/{target}?n={i}&dpi=72" for i in range(n)],
+                        "values": vals, "writable": bool(info.get("writable")),
+                        "note": "" if info.get("writable") else f"{fmt} archives are read-only"})
+    data = _load_comic_json(target)
+    if data is None:
+        return jsonify({"success": False, "error": "Not a comic."})
+    pages = _comic_ordered_pages(target, data)
+    full = [target + "/" + p for p in pages]
+    vals = _folder_values(data); vals["PageCount"] = str(len(pages))
+    return jsonify({"success": True, "kind": "folder", "target": target, "fmt": "folder",
+                    "title": data.get("title") or target.split("/")[-1],
+                    "pages": [f"/api/file/{p}" for p in full], "thumbs": [f"/api/thumb/{p}" for p in full],
+                    "page_files": full, "cover": data.get("cover", pages[0] if pages else ""),
+                    "values": vals, "writable": True, "note": ""})
+
+
+@_route("/api/comics/write", methods=["POST"])
+@_feature("comics.edit", level="write", action="comic_meta", fields=("target",))
+def api_comics_write():
+    d = request.json or {}
+    target = (d.get("target") or "").strip()
+    patch = d.get("patch") or {}
+    row = _archive_row(target)
+    if row is not None:
+        ap = get_safe_path(MEDIA_DIR, target)
+        if not ap or not os.path.exists(ap):
+            return jsonify({"success": False, "error": "file missing"}), 404
+        try:
+            res = comicinfo.write(ap, row["fmt"], patch)
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+        if "Title" in patch and patch["Title"]:
+            _db().execute("UPDATE books SET title=? WHERE rel_path=?", (patch["Title"], target))
+            _db().commit()
+        return jsonify({"success": True, **res})
+    data = _load_comic_json(target)
+    if data is None:
+        return jsonify({"success": False, "error": "Not a comic."})
+    written = []
+    for ci, key in _FOLDER_MAP.items():
+        if ci in patch:
+            v = patch[ci] or ""
+            data[key] = [t.strip() for t in str(v).split(",") if t.strip()] if key in _LIST_KEYS else str(v)
+            written.append({"tag": ci, "value": v})
+    if not _write_comic_json(target, data):
+        return jsonify({"success": False, "error": "could not write comic.json"}), 500
+    _upsert_comic_row(target, data)
+    return jsonify({"success": True, "written": written,
+                    "skipped": [{"tag": k, "reason": "folder comics keep Title/Writer/Summary/Tags/Characters"}
+                                for k in patch if k not in _FOLDER_MAP]})

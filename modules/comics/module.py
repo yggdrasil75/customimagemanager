@@ -69,7 +69,8 @@ def register(host):
         view = host.core.auth.require_feature(*feat[0], **feat[1])(fn) if feat else fn
         host.add_route(rule, view, **opts)
     host.add_asset("comic.js")
-    host.register_app_modal("comic_modal.html")
+    host.register_centre_pane("comic_pane.html")
+    host.register_controls_pane("comic", "comic_editor.html", feature="comics.edit")
 
     # Pages of a comic folder never appear in the flat gallery / folder counts.
     host.register_gallery_filter("(comic_folder IS NULL OR comic_folder='')")
