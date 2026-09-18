@@ -22,7 +22,7 @@ from . import client, actions
 MANIFEST = {
     "id":          "vlm",
     "name":        "Vision LLM (OpenAI-compatible)",
-    "version":     "1.1.0",
+    "version":     "1.2.0",
     "description": "Uses the configured vision-capable chat model for detection, "
                    "classification, tagging, description and quality judgement.",
     "core":        False,
@@ -39,6 +39,9 @@ _PROMPTS = {
                 "mood and notable details of this image. Respond ONLY as a JSON list of strings.",
     "describe": "Describe this image in two or three factual sentences: the subject, "
                 "the setting, and anything notable. No preamble.",
+    "ocr":      "Transcribe every piece of readable text in this image. Respond ONLY as JSON: "
+                "{\"lines\": [{\"text\": \"...\", \"cx\": 0..1, \"cy\": 0..1, \"w\": 0..1, \"h\": 0..1}]} "
+                "with each line's box normalised to the image; omit the box keys if you cannot place it.",
     "iqa":      "Judge the technical quality of this image (sharpness, exposure, noise, "
                 "compression, composition). Respond ONLY as JSON: {\"quality\": 0..1, "
                 "\"reason\": \"short\"} where 1 is excellent.",
@@ -185,4 +188,23 @@ def register(host):
                             "not comparable across models — a fallback, not a metric.",
                        settings=_settings("iqa", "Ask for JSON with a 0..1 'quality'."), **common)
 
-    host.logger.info("vlm module: registered detect / classify / tag / describe / iqa providers")
+    #  ocr: transcription (boxes are rough; omitted when the model can't place them)
+    def _ocr(img_bgr, *a, **k):
+        res = core.llm_call(_prompt("ocr"), core.to_bgr(img_bgr), "json") or {}
+        lines = []
+        for l in res.get("lines") or []:
+            t = str(l.get("text", "")).strip()
+            if not t:
+                continue
+            try:
+                lines.append({"text": t, "conf": 1.0, "cx": float(l["cx"]), "cy": float(l["cy"]),
+                              "w": float(l["w"]), "h": float(l["h"])})
+            except (KeyError, TypeError, ValueError):
+                lines.append({"text": t, "conf": 1.0, "cx": 0.5, "cy": 0.5, "w": 0.0, "h": 0.0})
+        return {"text": " ".join(l["text"] for l in lines), "lines": lines}
+    host.provide_model("ocr", "vlm", loader=lambda: _ocr,
+                       note="Reads text with the chat model. Handles handwriting and context the "
+                            "engines miss; boxes are rough or absent, and it costs a call.",
+                       settings=_settings("ocr", "Ask for JSON lines with normalised boxes."), **common)
+
+    host.logger.info("vlm module: registered detect / classify / tag / describe / iqa / ocr providers")

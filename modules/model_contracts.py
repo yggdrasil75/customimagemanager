@@ -123,6 +123,13 @@ CORE_CAPABILITIES = {
         "input": "describe(img_bgr, prompt='') — prompt used only by prompted providers",
         "output": "str",
     },
+    "ocr": {
+        "label": "OCR (text in images)",
+        "summary": "Read text: engines (RapidOCR, EasyOCR) or a vision LLM.",
+        "input": _IMG,
+        "output": "{text: str, lines: [{text, conf, cx, cy, w, h}]} with boxes normalized "
+                  "0..1 center-form (an LLM may return lines without boxes)",
+    },
     "embed": {
         "label": "Image embedding",
         "summary": "Whole-image embedding vector for similarity search / clustering.",

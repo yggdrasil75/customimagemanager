@@ -84,7 +84,6 @@ except Exception:
     rawpy = None
 from pipeline import DEFAULT_PIPELINE, run_pipeline, _kpts_in_box
 
-easyocr, _HAVE_EASYOCR = optional_import("easyocr")
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 app       = Flask(__name__)
@@ -3349,56 +3348,6 @@ def _fold_background(insts, person_regions, out):
             reg["mask_svg"] = inst["mask_svg"]
         (person_regions if reg["class_name"] == "person" else out).append(reg)
 
-# ── OCR ─────────────────────────────────────────────────────────────────────--
-@functools.lru_cache(maxsize=1)
-def _load_rapidocr():
-    """! @brief Memoised RapidOCR reader (ONNX, models bundled with the wheel)."""
-    from rapidocr_onnxruntime import RapidOCR
-    return RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)
-
-@functools.lru_cache(maxsize=1)
-def _load_easyocr():
-    """! @brief Memoised EasyOCR reader (models auto-download on first use)."""
-    return easyocr.Reader(["en"], gpu=False)
-
-def _ocr_line(text: str, score: float, x1: float, y1: float, x2: float, y2: float,
-              W: int, H: int) -> dict:
-    """! @brief Normalise one OCR detection (pixel box → clamped center-form line dict)."""
-    cx = ((x1 + x2) / 2) / max(1, W); cy = ((y1 + y2) / 2) / max(1, H)
-    w = (x2 - x1) / max(1, W); h = (y2 - y1) / max(1, H)
-    cb = _clamp_box({"cx": cx, "cy": cy, "w": w, "h": h}) or {"cx": cx, "cy": cy, "w": w, "h": h}
-    return {"text": str(text).strip(), "conf": round(float(score), 3),
-            "cx": round(cb["cx"], 4), "cy": round(cb["cy"], 4),
-            "w": round(cb["w"], 4), "h": round(cb["h"], 4)}
-
-def _run_ocr(img_bgr) -> dict:
-    """!
-    @brief Read text from an image, trying RapidOCR then EasyOCR.
-    @return {engine, text, lines:[{text,conf,box}]}; engine None if neither is installed.
-    """
-    H, W = img_bgr.shape[:2]
-    try:
-        ocr = _load_rapidocr()
-        res, _ = ocr(img_bgr)
-        lines = []
-        for box, text, score in (res or []):
-            xs = [p[0] for p in box]; ys = [p[1] for p in box]
-            lines.append(_ocr_line(text, score, min(xs), min(ys), max(xs), max(ys), W, H))
-        return {"engine": "rapidocr", "text": " ".join(l["text"] for l in lines), "lines": lines}
-    except Exception as e:
-        access_logger.warning(f"rapidocr unavailable: {e}")
-    try:
-        reader = _load_easyocr()
-        lines = []
-        for box, text, score in reader.readtext(img_bgr):
-            xs = [p[0] for p in box]; ys = [p[1] for p in box]
-            lines.append(_ocr_line(text, float(score), min(xs), min(ys), max(xs), max(ys), W, H))
-        return {"engine": "easyocr", "text": " ".join(l["text"] for l in lines), "lines": lines}
-    except Exception as e:
-        access_logger.warning(f"easyocr unavailable: {e}")
-    return {"engine": None, "text": "", "lines": [],
-            "note": "No OCR engine installed (pip install rapidocr_onnxruntime, or easyocr)."}
-
 def _clamp_box(b: dict) -> dict | None:
     """!
     @brief Clamp a normalised center-form box to the image bounds.
@@ -6302,14 +6251,17 @@ def _module_stage_fns():
         return {}
     out = {}
     for name, s in module_host.pipeline_stages.items():
-        if name in ("pose", "segment_boxes"):
-            continue   # handled via the dedicated pose_fn / seg_fn kwargs
+        if name in ("pose", "segment_boxes", "ocr"):
+            continue   # handled via the dedicated pose_fn / seg_fn / ocr_fn kwargs
         if module_registry.is_enabled(s["module_id"]):
             out[name] = s["fn"]
     return out
 
-def _ocr_fn(bgr):
-    return _run_ocr(bgr)
+def _ocr_fn():
+    """The pipeline's OCR hook, registered by the ocr module as stage "ocr"
+    (fn(image_bgr) -> {text, lines}); None when the module is off."""
+    stage = module_host.pipeline_stages.get("ocr") if 'module_host' in globals() else None
+    return stage["fn"] if stage else None
 
 def _person_fn(bgr):
     return _run_person(bgr)
@@ -6444,7 +6396,7 @@ def run_pipeline_route():
         state["status_text"] = f"Smart Tag: {msg}"
 
     try:
-        analysis = run_pipeline(tree, bgr, _llm_call, pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn, stage_fns=_module_stage_fns(),
+        analysis = run_pipeline(tree, bgr, _llm_call, pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn(), stage_fns=_module_stage_fns(),
                                 person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn(),
                                 endpoints=_pipeline_endpoints(), progress=_progress,
                                 known=_known_context(fp))
@@ -6477,7 +6429,7 @@ def bulk_pipeline():
                 errors.append(fn); continue
             def _prog(msg, i=i): state["status_text"] = f"Smart Tag {i+1}/{total}: {msg}"
             analysis = run_pipeline(tree, _to_bgr(img), _llm_call,
-                                    pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn, stage_fns=_module_stage_fns(),
+                                    pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn(), stage_fns=_module_stage_fns(),
                                     person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn(),
                                     endpoints=_pipeline_endpoints(), progress=_prog,
                                     known=_known_context(fp))
@@ -6594,7 +6546,7 @@ def comic_pipeline_route():
                 errors.append(page); continue
             def _prog(msg, i=i): state["status_text"] = f"Comic {i+1}/{total}: {msg}"
             analysis = run_pipeline(tree, _to_bgr(img), _llm_call,
-                                    pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn, stage_fns=_module_stage_fns(),
+                                    pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn(), stage_fns=_module_stage_fns(),
                                     person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn(),
                                     endpoints=_pipeline_endpoints(), progress=_prog,
                                     known=_known_context(fp))
@@ -6612,24 +6564,6 @@ def comic_pipeline_route():
                         "tags": merged.get("tags", []),
                         "characters": merged.get("characters", []),
                         "description": merged.get("description", "")}})
-
-@app.route("/api/ocr", methods=["POST"])
-@_auth.require_feature("ai.ocr", level="write")
-def api_ocr():
-    """Run OCR on one image and return detected text lines (with boxes). The
-    client decides whether to add them as regions / append to the description."""
-    fn = request.json.get("filename", "")
-    fp = get_safe_path(MEDIA_DIR, fn)
-    if not fp or not os.path.exists(fp):
-        return jsonify({"success": False, "error": "File not found."})
-    img = read_jxl(fp)
-    if img is None:
-        return jsonify({"success": False, "error": "Decode failed."})
-    state["status_text"] = "Reading text…"
-    res = _run_ocr(_to_bgr(img))
-    state["status_text"] = "Ready."
-    return jsonify({"success": True, **res})
-
 
 @app.route("/api/auto_tag", methods=["POST"])
 @_auth.require_feature("ai.autotag", level="write")

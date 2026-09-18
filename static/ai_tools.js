@@ -86,29 +86,6 @@ function renderAnalysis(){
   body.innerHTML=html;
 }
 
-async function runOCR(){
-  if(!window.currentFile){ alert('Select an image first.'); return; }
-  const btn=document.getElementById('btn_ocr'); const og=btn.innerText;
-  btn.innerText='🔤 …'; btn.disabled=true;
-  try{
-    const d=await fetch('/api/ocr',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filename:window.currentFile})}).then(r=>r.json());
-    if(d.success){
-      const lines=d.lines||[];
-      if(!lines.length){ showToast(d.note||(d.engine?'No text found.':'No OCR engine installed.')); }
-      else{
-        lines.forEach(l=>currentRegions.push({class_name:('text: '+l.text).slice(0,48),
-          cx:l.cx,cy:l.cy,w:l.w,h:l.h,confirmed:false}));
-        const ta=document.getElementById('meta_desc');
-        ta.value=(ta.value?ta.value.trim()+'\n\n':'')+'Detected text: '+d.text;
-        drawCanvas(); if(typeof popoutOpen!=='undefined'&&popoutOpen) drawPopout();
-        renderRegionsList(); triggerAutosave();
-        showToast(`OCR (${d.engine}): ${lines.length} line(s) added.`);
-      }
-    } else alert('OCR failed: '+(d.error||''));
-  }catch(e){ alert('Network error during OCR.'); }
-  btn.innerText=og; btn.disabled=false;
-}
 async function bulkPipeline(){
   const files=[...selectedFiles]; if(!files.length){ showToast('Select some images first.'); return; }
   if(!confirm(`Run the Smart Tag pipeline on ${files.length} image(s)? This makes many AI calls and can take a while.`)) return;
