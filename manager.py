@@ -51,7 +51,6 @@ import training_augment as ta
 import media_types as mt
 import video_tracks as vt
 import tiering
-import music_index as mi
 
 # ── loose-disk file helpers (formerly routed through packio) ─────────────────
 # Everything lives as ordinary files on disk now; these keep the old call sites
@@ -968,7 +967,6 @@ def _purge_file_everywhere(rel_path):
         "DELETE FROM book_chunks       WHERE rel_path=?",
         "DELETE FROM book_progress     WHERE rel_path=?",
         "DELETE FROM book_bookmarks    WHERE rel_path=?",
-        "DELETE FROM music             WHERE rel_path=?",
     ):
         try:
             db.execute(sql, (rel_path,))
@@ -1336,13 +1334,9 @@ def _index_file(rel_path: str, force: bool = False,
     abs_path = get_safe_path(MEDIA_DIR, rel_path)
     if not abs_path or not os.path.exists(abs_path):
         return False
-    _ext = os.path.splitext(abs_path)[1].lower()
-    _is_music = _ext in mi.MUSIC_EXTS
-    if _is_music and not mt.is_library_file(abs_path):
-        try:
-            _music_upsert(rel_path, abs_path, force=force)
-        except Exception as e:
-            access_logger.error(f"music index {rel_path}: {e}")
+    # Kinds a module owns (audio): the module indexes them on file.index and
+    # the row never enters the image tables.
+    if module_host.emit("file.index", rel_path=rel_path, abs_path=abs_path, force=force):
         return True
     try:
         mtime = _getmtime_loose(abs_path)
@@ -1477,11 +1471,6 @@ def _index_file(rel_path: str, force: bool = False,
                           (int(_pc), rel_path))
         _db().commit()
         _set_media_kind(rel_path)
-        if _is_music:
-            try:
-                _music_upsert(rel_path, abs_path, force=force)
-            except Exception as e:
-                access_logger.error(f"music index {rel_path}: {e}")
         return True
     except Exception as e:
         access_logger.error(f"_index_file {rel_path}: {e}")
@@ -1545,7 +1534,7 @@ def _enumerate_library():
         for f in filenames:
             if f.startswith('.'):
                 continue
-            if not (mt.is_library_file(f) or os.path.splitext(f)[1].lower() in mi.MUSIC_EXTS):
+            if not mt.is_library_file(f):   # registered kinds (audio, books) included
                 continue
             rel = _rel(os.path.join(root, f))
             if rel not in seen:
@@ -4910,17 +4899,10 @@ def _run_upload():
                                                    "to": in_ext}
                 return jsonify(resp), 200
 
-            # Audio is not an image asset: skip bpp/XMP/image-index entirely and
-            # let the music indexer pick it up (it walks MEDIA_DIR for MUSIC_EXTS
-            # and is resumable, so this is a cheap incremental scan).
+            # Audio is not an image asset: the music module indexes it on
+            # upload.stored (emitted below); skip bpp/XMP/image-index entirely.
             if mt.is_audio(fname):
-                try:
-                    # Resumable + self-guarding: no-ops if a scan is already
-                    # running, and skips unchanged tracks otherwise.
-                    threading.Thread(target=_music_index_background,
-                                     daemon=True).start()
-                except Exception as e:
-                    access_logger.warning(f"music reindex after upload: {e}")
+                module_host.emit("upload.stored", rel_path=rel_path, filename=fname)
                 resp = {"success": True, "filename": rel_path}
                 if corrected_from is not None:
                     resp["corrected_extension"] = {"from": corrected_from,
@@ -7822,310 +7804,6 @@ def _claim_autotag_job():
 
 def _register_autotag_source():
     thread_manager.register_source("autotag", _claim_autotag_job, _autotag_process_one)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MUSIC  —  artists / albums / songs, embeddings, clustering, shuffle-by-X
-# Self-contained: all music logic lives behind /api/music/* and music_index.py.
-# Audio is organised + tagged in place (no lossless shrink exists), unlike images.
-# ══════════════════════════════════════════════════════════════════════════════
-
-try:
-    mi.ensure_tables(_db())
-except Exception as e:
-    access_logger.error(f"music ensure_tables: {e}")
-
-# progress shared with the UI
-music_state = {"indexing": False, "indexed": 0, "total": 0,
-               "embedding": False, "emb_done": 0, "emb_total": 0,
-               "clustering": False, "status": "idle"}
-
-def _music_upsert(rel_path, abs_path, force=False):
-    """Index one track if new or changed. Returns True if (re)indexed."""
-    try:
-        st = os.stat(abs_path)
-    except OSError:
-        return False
-    mtime, size = st.st_mtime, st.st_size
-    if not force:
-        row = _db().execute("SELECT mtime FROM music WHERE rel_path=?", (rel_path,)).fetchone()
-        if row and abs(row["mtime"] - mtime) < 1e-6:
-            return False
-    m = mi.read_audio_metadata(abs_path)
-    _db().execute("""
-        INSERT INTO music(rel_path,mtime,size,duration,bitrate,samplerate,channels,
-                          title,artist,album,albumartist,track,disc,year,genre,
-                          composer,comment,tags,created)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'[]',?)
-        ON CONFLICT(rel_path) DO UPDATE SET
-            mtime=excluded.mtime, size=excluded.size, duration=excluded.duration,
-            bitrate=excluded.bitrate, samplerate=excluded.samplerate,
-            channels=excluded.channels, title=excluded.title, artist=excluded.artist,
-            album=excluded.album, albumartist=excluded.albumartist, track=excluded.track,
-            disc=excluded.disc, year=excluded.year, genre=excluded.genre,
-            composer=excluded.composer, comment=excluded.comment
-    """, (rel_path, mtime, size, m["duration"], m["bitrate"], m["samplerate"],
-          m["channels"], m["title"] or os.path.splitext(os.path.basename(rel_path))[0],
-          m["artist"], m["album"], m["albumartist"], m["track"], m["disc"],
-          m["year"], m["genre"], m["composer"], m["comment"], time.time()))
-    _db().commit()
-    return True
-
-def _music_index_background(force=False):
-    if music_state["indexing"]:
-        return
-    music_state["indexing"] = True
-    music_state["status"]   = "scanning"
-    try:
-        paths = []
-        for root, dirs, files in os.walk(MEDIA_DIR):
-            if os.path.basename(root).startswith('.'):
-                continue
-            for f in files:
-                if os.path.splitext(f)[1].lower() in mi.MUSIC_EXTS:
-                    ap = os.path.join(root, f)
-                    paths.append((_rel(ap), ap))
-        music_state["total"] = len(paths)
-        music_state["indexed"] = 0
-        for rp, ap in paths:
-            try:
-                _music_upsert(rp, ap, force=force)
-            except Exception as e:
-                access_logger.error(f"music index {rp}: {e}")
-            music_state["indexed"] += 1
-        music_state["status"] = "idle"
-    finally:
-        music_state["indexing"] = False
-
-def _music_embed_background(force=False):
-    """Compute embeddings for tracks missing one (or all if force). Resumable."""
-    if music_state["embedding"]:
-        return
-    music_state["embedding"] = True
-    music_state["status"]    = "embedding"
-    try:
-        sig = mi.EMB_SIG
-        if force:
-            rows = _db().execute("SELECT rel_path FROM music").fetchall()
-        else:
-            rows = _db().execute(
-                "SELECT rel_path FROM music WHERE emb IS NULL OR emb_sig IS NULL OR emb_sig!=?",
-                (sig,)).fetchall()
-        music_state["emb_total"] = len(rows)
-        music_state["emb_done"]  = 0
-        for r in rows:
-            rp = r["rel_path"]
-            ap = get_safe_path(MEDIA_DIR, rp)
-            if ap and os.path.exists(ap):
-                vec = mi.compute_embedding(ap)
-                if vec is not None:
-                    _db().execute("UPDATE music SET emb=?, emb_sig=? WHERE rel_path=?",
-                                  (mi._pack_emb(vec), sig, rp))
-                    _db().commit()
-            music_state["emb_done"] += 1
-        music_state["status"] = "idle"
-    finally:
-        music_state["embedding"] = False
-
-def _music_load_embeddings():
-    """Return (paths, np.array(embs)) for every track that has one."""
-    rows = _db().execute("SELECT rel_path, emb FROM music WHERE emb IS NOT NULL").fetchall()
-    paths, embs = [], []
-    for r in rows:
-        v = mi.unpack_emb(r["emb"])
-        if v is not None and v.size == mi.EMB_DIM:
-            paths.append(r["rel_path"]); embs.append(v)
-    return paths, embs
-
-# ── music routes ───────────────────────────────────────────────────────────────
-@app.route("/api/music/status")
-def music_status():
-    counts = _db().execute(
-        "SELECT COUNT(*) tot, "
-        "SUM(CASE WHEN emb IS NOT NULL THEN 1 ELSE 0 END) emb, "
-        "COUNT(DISTINCT artist) artists, COUNT(DISTINCT album) albums "
-        "FROM music").fetchone()
-    nclust = _db().execute(
-        "SELECT COUNT(DISTINCT cluster) c FROM music WHERE cluster>=0").fetchone()["c"]
-    return jsonify({"success": True, "state": music_state,
-                    "tracks": counts["tot"] or 0, "embedded": counts["emb"] or 0,
-                    "artists": counts["artists"] or 0, "albums": counts["albums"] or 0,
-                    "clusters": nclust})
-
-@app.route("/api/music/reindex", methods=["POST"])
-def music_reindex():
-    force = bool((request.json or {}).get("force"))
-    if force:
-        threading.Thread(target=_music_index_background, args=(True,), daemon=True).start()
-    else:
-        threading.Thread(target=_build_index_background, daemon=True).start()
-    return jsonify({"success": True})
-
-@app.route("/api/music/embed", methods=["POST"])
-def music_embed():
-    force = bool((request.json or {}).get("force"))
-    threading.Thread(target=_music_embed_background, args=(force,), daemon=True).start()
-    return jsonify({"success": True})
-
-@app.route("/api/music/cluster", methods=["POST"])
-def music_cluster():
-    if music_state["clustering"]:
-        return jsonify({"success": False, "error": "already clustering"})
-    k = (request.json or {}).get("k")
-    paths, embs = _music_load_embeddings()
-    if len(paths) < 2:
-        return jsonify({"success": False,
-                        "error": "Need at least 2 embedded tracks. Run 'Generate embeddings' first."})
-    music_state["clustering"] = True
-    try:
-        labels, kk = mi.cluster_embeddings(paths, embs, k=int(k) if k else None)
-        for rp, c in labels.items():
-            _db().execute("UPDATE music SET cluster=? WHERE rel_path=?", (c, rp))
-        _db().execute("DELETE FROM music_clusters")
-        for c in range(kk):
-            members = [p for p, cc in labels.items() if cc == c]
-            # label a cluster by its most common artist
-            top = _db().execute(
-                "SELECT artist, COUNT(*) n FROM music WHERE cluster=? AND artist!='' "
-                "GROUP BY artist ORDER BY n DESC LIMIT 1", (c,)).fetchone()
-            lbl = (top["artist"] if top else "") or f"Cluster {c}"
-            _db().execute(
-                "INSERT INTO music_clusters(cluster,label,size,created) VALUES(?,?,?,?)",
-                (c, lbl, len(members), time.time()))
-        _db().commit()
-        return jsonify({"success": True, "k": kk})
-    finally:
-        music_state["clustering"] = False
-
-@app.route("/api/music/clusterlist")
-def music_clusterlist():
-    rows = _db().execute(
-        "SELECT cluster, label, size FROM music_clusters ORDER BY size DESC").fetchall()
-    return jsonify({"success": True, "clusters": [dict(r) for r in rows]})
-
-@app.route("/api/music/artists")
-def music_artists():
-    rows = _db().execute("""
-        SELECT COALESCE(NULLIF(albumartist,''), NULLIF(artist,''), '(unknown)') AS name,
-               COUNT(*) AS tracks, COUNT(DISTINCT album) AS albums
-        FROM music GROUP BY name ORDER BY name COLLATE NOCASE""").fetchall()
-    return jsonify({"success": True,
-                    "artists": [dict(r) for r in rows]})
-
-@app.route("/api/music/albums")
-def music_albums():
-    artist = request.args.get("artist", "").strip()
-    where, params = "", []
-    if artist:
-        where = ("WHERE COALESCE(NULLIF(albumartist,''),NULLIF(artist,''),'(unknown)')=? ")
-        params = [artist]
-    rows = _db().execute(f"""
-        SELECT COALESCE(NULLIF(album,''),'(unknown)') AS album,
-               COALESCE(NULLIF(albumartist,''),NULLIF(artist,''),'(unknown)') AS artist,
-               COUNT(*) AS tracks, MIN(year) AS year
-        FROM music {where}
-        GROUP BY album, artist ORDER BY year, album COLLATE NOCASE""", params).fetchall()
-    return jsonify({"success": True, "albums": [dict(r) for r in rows]})
-
-def _music_row_dict(r):
-    return {"rel_path": r["rel_path"], "title": r["title"], "artist": r["artist"],
-            "album": r["album"], "albumartist": r["albumartist"], "track": r["track"],
-            "disc": r["disc"], "year": r["year"], "genre": r["genre"],
-            "composer": r["composer"], "comment": r["comment"],
-            "duration": r["duration"], "bitrate": r["bitrate"],
-            "samplerate": r["samplerate"], "channels": r["channels"],
-            "cluster": r["cluster"], "tags": json.loads(r["tags"] or "[]"),
-            "has_emb": r["emb"] is not None}
-
-@app.route("/api/music/songs")
-def music_songs():
-    """Browse/search songs. Filters: artist, album, cluster, q (free text)."""
-    artist  = request.args.get("artist", "").strip()
-    album   = request.args.get("album", "").strip()
-    cluster = request.args.get("cluster", "").strip()
-    q       = request.args.get("q", "").strip()
-    page    = max(0, int(request.args.get("page", 0)))
-    per     = 200
-    clauses, params = [], []
-    if artist:
-        clauses.append("COALESCE(NULLIF(albumartist,''),NULLIF(artist,''),'(unknown)')=?")
-        params.append(artist)
-    if album:
-        clauses.append("COALESCE(NULLIF(album,''),'(unknown)')=?")
-        params.append(album)
-    if cluster != "":
-        clauses.append("cluster=?"); params.append(int(cluster))
-    if q:
-        like = f"%{q}%"
-        clauses.append("(title LIKE ? OR artist LIKE ? OR album LIKE ? OR genre LIKE ? OR tags LIKE ?)")
-        params += [like, like, like, like, like]
-    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-    total = _db().execute(f"SELECT COUNT(*) FROM music{where}", params).fetchone()[0]
-    rows = _db().execute(
-        f"SELECT * FROM music{where} ORDER BY albumartist COLLATE NOCASE, "
-        f"album COLLATE NOCASE, disc, track, title COLLATE NOCASE LIMIT ? OFFSET ?",
-        (*params, per, page * per)).fetchall()
-    return jsonify({"success": True, "total": total, "page": page, "page_size": per,
-                    "songs": [_music_row_dict(r) for r in rows]})
-
-@app.route("/api/music/meta", methods=["POST"])
-def music_meta():
-    """Edit metadata for one track — writes to DB and back into the file."""
-    d = request.json or {}
-    rp = d.get("rel_path", "")
-    ap = get_safe_path(MEDIA_DIR, rp)
-    if not ap or not os.path.exists(ap):
-        return jsonify({"success": False, "error": "file not found"}), 404
-    fields = {k: d[k] for k in
-              ("title", "artist", "album", "albumartist", "track", "disc",
-               "year", "genre", "composer", "comment") if k in d}
-    wrote = mi.write_audio_metadata(ap, fields)
-    sets, params = [], []
-    for k, v in fields.items():
-        sets.append(f"{k}=?"); params.append(v)
-    if "tags" in d:
-        sets.append("tags=?"); params.append(json.dumps(d["tags"]))
-    if sets:
-        params.append(rp)
-        _db().execute(f"UPDATE music SET {','.join(sets)} WHERE rel_path=?", params)
-        _db().commit()
-    return jsonify({"success": True, "file_written": wrote})
-
-@app.route("/api/music/stream/<path:filename>")
-def music_stream(filename):
-    """Serve the audio file for the in-browser player (supports range)."""
-    fp = get_safe_path(MEDIA_DIR, filename)
-    if not fp or not os.path.exists(fp):
-        return jsonify({"success": False, "error": "not found"}), 404
-    return send_file(fp, conditional=True)
-
-@app.route("/api/music/shuffle", methods=["POST"])
-def music_shuffle():
-    """Shuffle-by-X. seed_type in {song, artist}; seed is the rel_path or name."""
-    d = request.json or {}
-    seed_type = d.get("seed_type", "song")
-    seed      = d.get("seed", "")
-    temp      = float(d.get("temperature", 0.25))
-    if seed_type == "artist":
-        rows = _db().execute(
-            "SELECT emb FROM music WHERE emb IS NOT NULL AND "
-            "COALESCE(NULLIF(albumartist,''),NULLIF(artist,''),'(unknown)')=?",
-            (seed,)).fetchall()
-    else:
-        rows = _db().execute(
-            "SELECT emb FROM music WHERE emb IS NOT NULL AND rel_path=?", (seed,)).fetchall()
-    seed_vecs = [v for v in (mi.unpack_emb(r["emb"]) for r in rows) if v is not None]
-    if not seed_vecs:
-        return jsonify({"success": False,
-                        "error": "Seed has no embedding. Generate embeddings first."})
-    paths, embs = _music_load_embeddings()
-    order = mi.shuffle_by(seed_vecs, paths, embs, temperature=temp)
-    by_path = {}
-    if order:
-        qmarks = ",".join("?" * len(order))
-        for r in _db().execute(f"SELECT * FROM music WHERE rel_path IN ({qmarks})", order):
-            by_path[r["rel_path"]] = _music_row_dict(r)
-    playlist = [by_path[p] for p in order if p in by_path]
-    return jsonify({"success": True, "playlist": playlist})
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BOOKS & COMICS

@@ -155,6 +155,7 @@ The core emits, modules react; the core never names a module.
 | event | args | use |
 |---|---|---|
 | `library.reconcile` | — | after the image index scan |
+| `file.index` | `rel_path, abs_path, force` → truthy if handled | index a file of a kind you own; core skips its image path |
 | `upload.duplicate_check` | `sha, filename` → existing rel_path or None | veto an upload as a duplicate |
 | `upload.stored` | `rel_path, filename` | index a file you own after upload |
 | `file.renamed` | `old_rel, new_rel` | repoint your tables |
@@ -173,7 +174,7 @@ The core emits, modules react; the core never names a module.
 later registration. Consumers `get_service(name)` and must handle `None` (the
 provider is off). Current services: `metadata_write`, `exif` (`read`/`write`),
 `metadata_schema`, `embedding`, `dedup_scorers`, `barcodes`, `pose.tpose`,
-`sam_common`, `fetch`, `faces`, `bodies`, `people`, `segmentation`.
+`sam_common`, `fetch`, `faces`, `bodies`, `people`, `segmentation`, `music`.
 
 ### Your own table + searchable field
 

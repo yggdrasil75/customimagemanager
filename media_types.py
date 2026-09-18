@@ -68,9 +68,6 @@ VIDEO_EXTS = {'.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v', '.mpg',
 # with music_index.MUSIC_EXTS, MINUS the containers that overlap with video
 # (.mp4, .m4a are treated as video here so a real video is never misfiled as a
 # track). A pure-audio .m4a will still index fine on the music side.
-AUDIO_EXTS = {'.mp3', '.flac', '.aac', '.ogg', '.oga', '.opus',
-              '.wav', '.wma', '.aiff', '.aif'}
-
 # Books & comics are stored NATIVELY, like video and audio — there is no
 # universal book container worth transcoding into, and re-encoding someone's
 # purchased epub would be both lossy and rude.
@@ -146,14 +143,14 @@ def is_uploadable_book(path: str) -> bool:
 def UPLOAD_EXTS_now():
     """Extensions accepted from an uploader / bulk walk — image/video/audio/raw
     natively, plus whatever media types modules registered as uploadable."""
-    return (JXL_INPUT_EXTS | VIDEO_EXTS | RAW_INPUT_EXTS | AUDIO_EXTS
+    return (JXL_INPUT_EXTS | VIDEO_EXTS | RAW_INPUT_EXTS
             | registered_exts("uploadable_exts"))
 
 
 def LIBRARY_EXTS_now():
     """Stored library asset extensions — .jxl/video/audio natively plus module
     media types' unambiguous exts (books store original bytes as assets)."""
-    return ({'.jxl'} | VIDEO_EXTS | AUDIO_EXTS
+    return ({'.jxl'} | VIDEO_EXTS
             | registered_exts("unambiguous_exts"))
 
 
@@ -181,7 +178,9 @@ def is_video(path: str) -> bool:
     return _ext(path) in VIDEO_EXTS
 
 def is_audio(path: str) -> bool:
-    return _ext(path) in AUDIO_EXTS
+    """True when the music module registered the 'audio' kind and the extension
+    is one of its; False (audio is just an unknown file) without it."""
+    return _ext(path) in _MEDIA_TYPES.get("audio", {}).get("exts", set())
 
 def is_jxl(path: str) -> bool:
     return _ext(path) == '.jxl'
@@ -358,8 +357,6 @@ def kind(path: str) -> str:
     """
     if is_video(path):
         return 'video'
-    if is_audio(path):
-        return 'audio'
     k = _kind_for_ext(_ext(path))
     if k:
         return k
@@ -393,7 +390,7 @@ def stored_name(input_filename: str) -> str:
     walking MEDIA_DIR, where the three-layer classifier can see their context.
     """
     base, ext = os.path.splitext(input_filename)
-    keep = VIDEO_EXTS | AUDIO_EXTS | registered_exts("uploadable_exts")
+    keep = VIDEO_EXTS | registered_exts("uploadable_exts")
     return input_filename if ext.lower() in keep else base + '.jxl'
 
 # ── content sniffing (for misnamed / extension-less uploads) ──────────────────
