@@ -125,6 +125,8 @@ touching `media_types.py`.
 | `host.register_search_provider(fn)` / `register_search_type(prefix, handler)` | add results / token handlers to gallery search |
 | `host.register_pipeline_stage(name, fn, label=)` | an AI-pipeline node type |
 | `host.register_action_target(name, fn)` | an AI-action target (`fn(fp, bgr, meta, action)`) |
+| `host.register_gallery_filter(clause)` | hide container members (comic pages) from the flat gallery |
+| `host.extend_media_type(kind, exts=, mime_map=)` | add extensions to a kind another module owns (comics → book) |
 | `host.add_worker_source(name, claim, handle, …)` | a background worker source |
 | `host.register_controls_pane(tab_id, template, feature=)` / `register_left_pane` / `register_centre_pane` / `register_app_modal` | server-rendered UI partials from your `templates/` |
 | `host.provide_service(name, obj, priority=0)` / `get_service(name)` | publish / consume module-to-module APIs |
@@ -272,7 +274,9 @@ Assets are served at `/modules/<id>/static/<file>` and injected on page load.
   server-rendered pane.
 - **Buttons**: `registerControlButton("ai_tools", html)` (areas:
   `ai_tools`, `viewer_toggles`, …).
-- **Left tab / centre pane**: `registerLeftTab({id, label, feature, paneId, onShow})`
+- **Left tab / centre pane**: `registerLeftTab({id, label, feature, paneId, onShow, controlsTab})`
+  (`controlsTab` names a `registerControlsTab({…, modeTab: true})` tab that only
+  shows while your left tab is active — the Trainer does this)
   pairs with `host.register_left_pane`; a module that takes over the centre
   (a reader, a person's mesh) pairs `host.register_centre_pane` with
   `registerMediaMode({id, centreId, controlsTab})` and calls `setMediaMode(id)`.
@@ -285,7 +289,8 @@ Assets are served at `/modules/<id>/static/<file>` and injected on page load.
   by posting your key to `/api/update_settings`, the same way the rendered
   fields do (the vlm module's AI-actions editor does this).
 - **Ext areas** for injected controls: `ai_tools`, `viewer_toggles`,
-  `gallery_bulk`, `description_tools`, `comic_tools`, `controls_tabs`.
+  `gallery_bulk`, `gallery_tools`, `description_tools`, `comic_tools`,
+  `ai_tooling_links`, `controls_tabs`.
 
 ## Enable / disable
 

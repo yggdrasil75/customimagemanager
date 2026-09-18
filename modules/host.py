@@ -112,6 +112,7 @@ class Host:
         self.app_modals = []
         self.centre_panes = []
         self.action_targets = {}      # AI-action target -> fn(fp, bgr, meta, action)
+        self.gallery_filters = []     # SQL clauses hiding container members from the flat gallery
         # Left-pane content partials a module contributes (e.g. the books shelf),
         # server-rendered into the left column alongside the built-in panes.
         self.left_panes = []
@@ -401,6 +402,12 @@ class Host:
         return self.broker.request(cap_id, role, provider)
 
     # ── pipeline stages ──────────────────────────────────────────────────
+    def register_gallery_filter(self, clause):
+        """Hide rows from the flat gallery/folders listing: `clause` is a SQL
+        condition on the files table (no params), e.g. a comics module hiding
+        pages that belong to a comic folder."""
+        self.gallery_filters.append(clause)
+
     def register_action_target(self, name, fn):
         """Contribute an AI-action target (the "target" of a configured action,
         next to the core's description/tags/regions/flag). fn(fp, bgr, meta,
@@ -494,6 +501,10 @@ class Host:
         media registry. The core then routes uploads / listings / kind()
         for those extensions; the module never edits media_types.py."""
         return self.media.register_media_type(kind, **spec)
+
+    def extend_media_type(self, kind, **spec):
+        """Add extensions/mimes to a kind another module owns (comics -> book)."""
+        return self.media.extend_media_type(kind, **spec)
 
     def current_user(self):
         """Username of the request's authenticated user ('' if none)."""

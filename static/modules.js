@@ -83,6 +83,18 @@
     } else if (f.kind === "toggle") {
       input = document.createElement("input");
       input.type = "checkbox"; input.checked = !!f.value;
+    } else if (f.kind === "textarea") {
+      input = document.createElement("textarea");
+      input.rows = 4;
+      input.className = "w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs font-mono";
+      input.value = f.value == null ? "" : f.value;
+      if (f.default != null) {
+        const reset = document.createElement("button");
+        reset.type = "button"; reset.textContent = "reset to default";
+        reset.className = "text-[10px] text-cyan-400 hover:text-cyan-300 ml-2";
+        reset.addEventListener("click", () => { input.value = f.default; saveSetting(f.key, f.default); });
+        wrap.querySelector("div")?.appendChild(reset);
+      }
     } else {
       input = document.createElement("input");
       input.type = f.kind === "number" ? "number" : "text";

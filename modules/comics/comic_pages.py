@@ -51,7 +51,10 @@ import io
 
 import numpy as np
 from optional_deps import optional_import
-from . import book_index as bi
+
+# The archive/PDF readers live in the books module; bound by module.register
+# from its 'book_archive' service.
+BOOKS = None
 cv2, _HAVE_CV2 = optional_import("cv2")
 Image, _HAVE_PIL = optional_import("PIL.Image")
 imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
@@ -139,11 +142,11 @@ def page_bgr(abs_path: str, fmt: str, n: int, dpi: int = 150,
     of the job.
     """
     if fmt == "pdf":
-        return decode_bytes(bi.render_pdf_page(abs_path, n, dpi=dpi))
-    names = page_names if page_names is not None else bi.comic_page_names(abs_path, fmt)
+        return decode_bytes(BOOKS["render_pdf_page"](abs_path, n, dpi=dpi))
+    names = page_names if page_names is not None else BOOKS["comic_page_names"](abs_path, fmt)
     if not names or n < 0 or n >= len(names):
         return None
-    return decode_bytes(bi.comic_page_bytes(abs_path, fmt, names[n]))
+    return decode_bytes(BOOKS["comic_page_bytes"](abs_path, fmt, names[n]))
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Geometry helpers

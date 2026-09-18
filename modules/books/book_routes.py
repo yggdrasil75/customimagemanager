@@ -49,7 +49,6 @@ from flask import request, jsonify, send_file, Response
 
 from . import book_index as bi
 import hashlib
-from . import comic_pages as cp
 
 # Filled in by register().
 CTX: dict = {}
@@ -83,6 +82,12 @@ def _cache_dir():
     d = os.path.join(_media(), ".bookcache")
     os.makedirs(d, exist_ok=True)
     return d
+
+def _cp():
+    """Comic page renderer/analyser from the comics module, or None."""
+    f = CTX.get("comic_pages")
+    return f() if f else None
+
 
 def _user():
     """Current username, or '' when auth is off. Progress is per-user so a
@@ -566,7 +571,11 @@ def _comic_background(rel_path, do_panels, do_ocr, force, rtl, per_panel):
                     if (not do_panels or have_p) and (not do_ocr or have_o):
                         book_state["comic_done"] = n + 1
                         continue
-                bgr = cp.page_bgr(ap, fmt, n, page_names=names)
+                cp = _cp()
+                if cp is None:
+                    book_state["comic_done"] = n + 1
+                    continue
+                bgr = cp["page_bgr"](ap, fmt, n, page_names=names)
                 if bgr is None:
                     book_state["comic_done"] = n + 1
                     continue
@@ -581,7 +590,7 @@ def _comic_background(rel_path, do_panels, do_ocr, force, rtl, per_panel):
                     # left-to-right, and the transcript comes out scrambled with
                     # nothing on screen to explain why.
                     page_rtl = bool(prev["rtl"])
-                res = cp.analyze_page(
+                res = cp["analyze_page"](
                     bgr, panel_fn=panel_fn, ocr_fn=ocr_fn,
                     do_panels=do_panels, do_ocr=do_ocr,
                     rtl=page_rtl, per_panel=per_panel, known_panels=known)
@@ -1216,7 +1225,8 @@ def register(app, ctx: dict):
         rp = d.get("rel_path", "")
         n = int(d.get("page", 0))
         rtl = bool(d.get("rtl"))
-        panels = cp.order_panels([
+        cp = _cp() or {}
+        panels = (cp.get("order_panels") or (lambda p, rtl=False: p))([
             {"cx": float(p["cx"]), "cy": float(p["cy"]),
              "w": float(p["w"]), "h": float(p["h"])}
             for p in (d.get("panels") or [])], rtl)
@@ -1225,11 +1235,11 @@ def register(app, ctx: dict):
         # Rebind existing OCR lines to the corrected panels — that's the whole
         # point of fixing a box, so it shouldn't need a re-run of OCR.
         for ln in lines:
-            ln["panel"] = cp._assign_panel(ln, panels)
+            ln["panel"] = (cp.get("assign_panel") or (lambda l, p: None))(ln, panels)
         _save_page(rp, n, {
             "w": prev["w"] if prev else 0, "h": prev["h"] if prev else 0,
             "panels": panels, "lines": lines,
-            "text": cp.build_text(panels, lines, rtl),
+            "text": (cp.get("build_text") or (lambda p, l, r: " ".join(x["text"] for x in l)))(panels, lines, rtl),
             "panel_src": "manual",
             "engine": prev["engine"] if prev else "", "rtl": rtl})
         return jsonify({"success": True, "panels": panels})

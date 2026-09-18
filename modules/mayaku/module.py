@@ -33,6 +33,7 @@ from pathlib import Path
 import numpy as np
 
 from optional_deps import optional_import
+from . import training
 
 _mayaku, _HAVE_MAYAKU = optional_import("mayaku")
 _download_model, _ = optional_import("mayaku.utils.download", attr="download_model")
@@ -259,4 +260,7 @@ def register(host):
         reason="pip install mayaku", handles=_handles,
         cost_mb=800, gpu=model_registry.on_gpu())
 
+    # COCO-format training backend for the trainer module (parallel to YOLO).
+    host.provide_service("mayaku_training", {"write_coco_split": training.write_coco_split,
+                                             "mayaku_train_worker": training.mayaku_train_worker})
     host.logger.info("mayaku module: registered detect/segment/pose + box providers")

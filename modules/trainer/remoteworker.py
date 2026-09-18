@@ -5,7 +5,6 @@ import time
 import threading
 import subprocess
 import sys
-import traceback
 import yaml
 from flask import Flask, request, jsonify, send_file
 

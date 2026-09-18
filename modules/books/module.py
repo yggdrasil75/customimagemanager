@@ -49,14 +49,14 @@ def register(host):
         '.fb2': 'application/x-fictionbook+xml', '.lit': 'application/x-ms-reader',
         '.chm': 'application/vnd.ms-htmlhelp', '.lrf': 'application/x-sony-bbeb',
         '.lrx': 'application/x-sony-bbeb', '.rtf': 'application/rtf',
-        '.cbz': 'application/vnd.comicbook+zip',
-        '.cbr': 'application/vnd.comicbook-rar',
-        '.cb7': 'application/x-cb7', '.cbt': 'application/x-cbt',
         '.txt': 'text/plain; charset=utf-8', '.html': 'text/html; charset=utf-8',
     }
+    # Comic archives (cbz/cbr/cb7…) are books too, but the comics module owns
+    # them: it extends this kind with its extensions and page renderer.
     host.register_media_type(
-        "book", exts=bi.BOOK_EXTS, unambiguous_exts=bi.UNAMBIGUOUS_BOOK_EXTS,
-        uploadable_exts=bi.UPLOADABLE_BOOK_EXTS, mime_map=_BOOK_MIME)
+        "book", exts=bi.BOOK_EXTS - bi.COMIC_ARCHIVE_EXTS,
+        unambiguous_exts=bi.UNAMBIGUOUS_BOOK_EXTS - bi.COMIC_ARCHIVE_EXTS,
+        uploadable_exts=bi.UPLOADABLE_BOOK_EXTS - bi.COMIC_ARCHIVE_EXTS, mime_map=_BOOK_MIME)
 
     # Auth feature: read = browse the shelf/read, write = delete/triage.
     host.register_feature("tab.books", "Books tab (read=view, write=delete)",
@@ -95,8 +95,14 @@ def register(host):
         "embed_enabled": emb_svc.get("oai_embed_enabled"),
         "embed_tag":     emb_svc.get("oai_embed_tag"),
         "llm_request":   lambda *a, **k: (host.get_service("llm") or {}).get("request", _no_llm)(*a, **k),
+        "comic_pages":   lambda: host.get_service("comic_pages"),   # comics module, or None
         "current_user":  host.current_user,
     })
+
+    # Archive / PDF page access for the comics module (cbz/cbr/cb7 pages).
+    host.provide_service("book_archive", {"comic_page_bytes": bi.comic_page_bytes,
+                                          "comic_page_names": bi.comic_page_names,
+                                          "render_pdf_page": bi.render_pdf_page})
 
     # Search: contribute book + comic results to the gallery search.
     host.register_search_provider(book_routes.query_books)

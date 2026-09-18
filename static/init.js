@@ -1,4 +1,4 @@
-const VALID_PANES=['gallery','albums','music','faces','review','books','trainer'];
+const VALID_PANES=['gallery','albums','review'];   // module tabs validate themselves via registerLeftTab
 let _initialPane='gallery';
 
 (function(){

@@ -40,11 +40,6 @@ FEATURE_SECTIONS = {
         "features": [
             ("ai.autotag",       "Auto-Tag Image (YOLO)", "write"),
             ("ai.smarttag",      "Smart Tag (AI pipeline)", "write"),
-            ("ai.quicktrain",    "Quick Train", "write"),
-            ("ai.trainer",       "Trainer portal link", "write"),
-            ("ai.trainer.select","Trainer — build/select image sets", "write"),
-            ("ai.trainer.keep",  "Trainer — modify persistent sets", "write"),
-            ("ai.trainer.run",   "Trainer — start a training run", "write"),
             ("ai.tiers",         "Storage Tiers", "write"),
             ("ai.bg_autotag",    "Background auto-tag when idle", "write"),
             ("ai.reconcile",     "Sync with disk", "write"),
@@ -61,7 +56,6 @@ FEATURE_SECTIONS = {
             ("tab.gallery", "Gallery tab", "read"),
             ("tab.albums",  "Albums tab (read=view, write=create/edit)", "read"),
             ("tab.review",  "Review tab", "write"),
-            ("tab.trainer", "Trainer tab", "write"),
         ],
     },
     "annotations": {
@@ -77,14 +71,6 @@ FEATURE_SECTIONS = {
     },
     "viewers": {"label": "Viewers",
                 "features": [("view.3d", "3D viewer (mesh / body)", "read")]},
-    "comics": {
-        "label": "Comics",
-        "features": [
-            ("comics.make",   "Make / create comic", "write"),
-            ("comics.edit",   "Edit comic pages", "write"),
-            ("comics.delete", "Delete comic", "write"),
-        ],
-    },
 }
 
 # Legacy ".edit"/".delete" leaves that collapsed into a base feature's WRITE.
@@ -151,12 +137,10 @@ ROLE_LEVELS = {
     "admin":    {},
     "uploader": {"data.upload": WRITE, "ai.autotag": WRITE, "ai.segment": WRITE,
                  "ai_tooling": WRITE},
-    "viewer":   {"tab.review": BLOCK, "tab.trainer": BLOCK,
-                 "ai.trainer": BLOCK, "ai.trainer.select": BLOCK,
-                 "ai.trainer.keep": BLOCK, "ai.trainer.run": BLOCK,
+    "viewer":   {"tab.review": BLOCK,
                  "annot.description": READ, "annot.tags": READ, "annot.boxes": READ,
                  "data.delete": BLOCK, "data.move": BLOCK, "data.upload": BLOCK,
-                 "comics.make": BLOCK, "comics.edit": BLOCK, "comics.delete": BLOCK},
+                 },
     "custom":   {},
 }
 

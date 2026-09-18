@@ -6,7 +6,6 @@
   <title>Media Library</title>
   <script src="/tailwind"></script>
   <link rel="stylesheet" href="/static/app.css">
-  <link rel="stylesheet" href="/static/trainer.css">
 </head>
 
 <body class="bg-gray-900 text-white h-screen flex overflow-hidden">
@@ -41,7 +40,6 @@
   {% include 'partials/popout_modal.html' %}
   <!-- Module-contributed top-level modals (dedup, …), server-rendered. -->
   {% for _m in module_app_modals %}{% include _m.template ignore missing %}{% endfor %}
-  {% include 'partials/comic_modal.html' %}
   {% include 'partials/review_modal.html' %}
 
   <!-- Shared globals first, then per-area modules -->
@@ -60,13 +58,11 @@
   <script src="/static/editor.js"></script>
   <script src="/static/ai_tools.js"></script>
   <script src="/static/review.js"></script>
-  <script src="/static/comic.js"></script>
   <script src="/static/tiers.js"></script>
   <script src="/static/modules.js"></script>
   <script src="/static/init.js"></script>
   <script src="/static/controls_tabs.js"></script>
   <script src="/static/pipeline_editor.js"></script>
-  <script src="/static/trainer.js"></script>
 </body>
 
 </html>

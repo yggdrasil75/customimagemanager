@@ -12,8 +12,6 @@
           class="controls-tab hidden px-3 py-2 text-white border-b-2 border-blue-500">Book</button>
 
 
-        <button data-tab="trainer" onclick="setControlsTab('trainer')"
-          class="controls-tab hidden px-3 py-2 text-white border-b-2 border-blue-500">Trainer</button>
       </div>
 
       <!-- Tab panes -->
@@ -172,10 +170,7 @@
       <div class="p-3 flex flex-col gap-2 border-t border-gray-700" data-feature="ai_tooling">
         <div class="flex justify-between items-center">
           <h3 class="font-bold text-purple-400 text-sm">AI Tooling</h3>
-          <div class="flex gap-2">
-            <button type="button" onclick="setPane('trainer')" data-feature="tab.trainer"
-              class="text-xs text-purple-300 bg-gray-700 px-2 py-1 rounded hover:bg-gray-600 border border-purple-800">Trainer</button>
-          </div>
+          <div class="flex gap-2" data-ext-area="ai_tooling_links"></div>
         </div>
         <div id="yolo_controls" class="opacity-50 pointer-events-none" data-feature="ai.autotag">
           <select id="model_selector"
@@ -189,8 +184,6 @@
         <!-- Extension region: modules append control buttons here via
              registerControlButton('ai_tools', html). Not pose-specific. -->
         <div id="ext_ai_tools" data-ext-area="ai_tools" class="flex flex-col gap-2"></div>
-        <button onclick="quickTrain()" data-feature="ai.quicktrain"
-          class="w-full bg-purple-600 hover:bg-purple-500 py-1.5 rounded font-bold text-sm">Quick Train</button>
 
         <label class="flex items-center justify-between text-xs text-gray-300 mt-1 cursor-pointer" data-feature="ai.bg_autotag">
           <span>Background auto-tag when idle</span>
@@ -213,9 +206,6 @@
       </div>
       {% endfor %}
 
-      <!-- Tab 7: Trainer (trainer tab only) — training settings + validation,
-           moved out of the left pane to declutter it. -->
-      {% include 'partials/controls_pane_trainer.html' %}
 
       </div><!-- /#controls_tab_bodies -->
     </div>

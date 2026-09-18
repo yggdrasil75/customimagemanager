@@ -19,10 +19,10 @@ Key architectural decisions vs the naive version:
 - Background workers use daemon threads; startup is non-blocking.
 """
 
-import os, glob, yaml, subprocess, shutil, sys, numpy as np
+import os, glob, subprocess, shutil, numpy as np
 from types import SimpleNamespace
 import tempfile, io, time, random, json, threading
-import requests, base64, re, xml.sax.saxutils as saxutils
+import base64, re, xml.sax.saxutils as saxutils
 from optional_deps import optional_import
 # Install the modules package FIRST: importing it registers the core modules
 # (auth, capabilities, metadata, threading) under both their new dotted paths
@@ -45,9 +45,6 @@ YOLO, _HAVE_YOLO = optional_import("ultralytics", attr="YOLO")
 imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
 import object_grouping as og
 import model_registry
-import training_select as ts
-import training_validate as tv
-import training_augment as ta
 import media_types as mt
 import video_tracks as vt
 import tiering
@@ -105,7 +102,6 @@ MODELS_DIR = "models"
 DB_PATH   = os.path.join(MEDIA_DIR, "library.db")
 THUMB_DB  = os.path.join(MEDIA_DIR, "thumbs.db")   # disposable BLOB cache
 CFG_FILE  = "app_config.json"
-COMIC_SCHEMA = "mm.comic/1"
 
 
 # Updated on every request; the background auto-tagger only runs when the
@@ -119,7 +115,7 @@ os.makedirs("logs",     exist_ok=True)
 
 # All loggers and the audit helpers live in cimlogger so any module can import
 # them without reaching back into manager.py. See cimlogger.py.
-from cimlogger import training_logger, access_logger, audit
+from cimlogger import access_logger, audit, training_logger as cimlogger_training_logger
 
 state = {
     "classes": ["object"], "available_models": [],
@@ -394,20 +390,6 @@ def _init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_uq_status ON upload_queue(status, id);
 
-        -- A comic is a folder of ordered page images plus its own metadata.
-        -- Source of truth is <folder>/comic.json (portable); this is a cache.
-        CREATE TABLE IF NOT EXISTS comics (
-            folder      TEXT PRIMARY KEY,
-            title       TEXT,
-            author      TEXT,
-            description TEXT,
-            tags        TEXT,
-            characters  TEXT,
-            cover       TEXT,
-            page_order  TEXT,
-            created     REAL,
-            mtime       REAL
-        );
         -- Per-file edit changelog. Backs undo (ctrl+z) and the EXIF
         -- ImageHistory (0x9213) view: each row is one reversible change to a
         -- file's metadata. `seq` orders edits per file; `field` is the logical
@@ -469,7 +451,6 @@ def _init_db():
         "ALTER TABLE files ADD COLUMN unconfirmed_count INTEGER DEFAULT 0",
         "ALTER TABLE files ADD COLUMN autotag_done INTEGER DEFAULT 0",
         "ALTER TABLE files ADD COLUMN analysis TEXT DEFAULT ''",
-        "ALTER TABLE files ADD COLUMN comic_folder TEXT DEFAULT ''",
         "ALTER TABLE files ADD COLUMN flagged_delete INTEGER DEFAULT 0",
         "ALTER TABLE files ADD COLUMN flag_reason TEXT DEFAULT ''",
         # NR-IQA (BRISQUE) per-image quality. iqa_score is 0..5 stars (NULL =
@@ -598,11 +579,6 @@ def _init_db():
             # authoritative user rating now lives in rating/rating_user.
             db.execute("UPDATE files SET iqa_manual=0 WHERE COALESCE(iqa_manual,0)=1")
             db.commit()
-    except Exception:
-        pass
-    # persistent training-selection sets
-    try:
-        ts.ensure_tables(db)
     except Exception:
         pass
 
@@ -1129,7 +1105,9 @@ def _query_files(search: str, offset: int, limit: int,
     nc = len(comic_entries)
 
     clauses, p = list(where), list(params)
-    clauses.append("(comic_folder IS NULL OR comic_folder='')")
+    # Modules that group files into a container (comics: a folder of pages)
+    # register a clause that hides members from the flat gallery.
+    clauses.extend(module_host.gallery_filters)
     if album:
         clauses.append(
             "rel_path IN (SELECT rel_path FROM album_members WHERE album=?)")
@@ -1490,10 +1468,6 @@ def _build_index_background():
         access_logger.error(f"reconcile: {e}")
         state["status_text"] = f"Ready. (indexed {count} new/changed files)"
     access_logger.info(f"Background index complete: {count} files updated")
-    try:
-        _scan_comics()
-    except Exception as e:
-        access_logger.error(f"comic scan: {e}")
     # Books ride along with the same startup pass. Its own walk is resumable and
     # skips unchanged mtimes, so on a warm library this costs one os.walk and
     # nothing else — but it means a book dropped into the media folder while the
@@ -2953,121 +2927,6 @@ def serve_thumb(rel_path: str, abs_path: str, mtime: float | None = None):
     _thumb_lru_put(rel_path, mtime, data)
     return _finish(data, 'image/jpeg')
 
-def yolo_train_worker(abs_folder: str, dataset_dir: str, yaml_path: str,
-                      epochs: int, batch: int, imgsz: int, device, base_model: str) -> None:
-    """! @brief Run a local YOLO training subprocess and refresh the model list on completion."""
-    try:
-        training_logger.info("Starting LOCAL YOLO Training")
-        script = ("import sys\nfrom ultralytics import YOLO\n"
-                  "yp,bm,ep,bt,sz,dv=sys.argv[1:7]\n"
-                  "ep,bt,sz=int(ep),int(bt),int(sz)\n"
-                  "dv=-1 if dv=='-1' else int(dv) if dv.isdigit() else dv\n"
-                  "YOLO(bm).train(data=yp,epochs=ep,batch=bt,imgsz=sz,device=dv)\n")
-        cmd = [sys.executable,"-c",script,yaml_path,base_model,
-               str(epochs),str(batch),str(imgsz),str(device)]
-        run_dir = os.path.abspath(MODELS_DIR)
-        os.makedirs(run_dir, exist_ok=True)
-        with open("logs/training.log","w") as lf:
-            lf.write(f"[{datetime.now()}] YOLO Training Started\n"); lf.flush()
-            subprocess.run(cmd,check=True,cwd=run_dir,stdout=lf,stderr=subprocess.STDOUT)
-        populate_model_selector()
-        state["status_text"] = "Training Complete!"
-    except Exception as e:
-        state["status_text"] = f"Training error: {e}"
-        training_logger.error(e)
-
-def yolo_train_worker_cfg(dataset_dir: str, yaml_path: str, base_model: str,
-                          cfg: dict) -> None:
-    """! @brief Local YOLO training with an arbitrary Ultralytics hyperparameter
-    dict. Only a vetted allow-list of keys is forwarded, so a bad field in the
-    request can't inject arbitrary kwargs. Runs in a subprocess and refreshes the
-    model list on completion."""
-    # Ultralytics train() kwargs we expose. Values are coerced client- and
-    # server-side; anything not here is dropped.
-    ALLOWED = {
-        "epochs", "batch", "imgsz", "device", "patience", "optimizer", "lr0",
-        "lrf", "momentum", "weight_decay", "warmup_epochs", "cos_lr", "dropout",
-        "freeze", "seed", "workers", "rect", "single_cls", "val", "fraction",
-        "close_mosaic", "label_smoothing",
-        # augmentation
-        "hsv_h", "hsv_s", "hsv_v", "degrees", "translate", "scale", "shear",
-        "perspective", "flipud", "fliplr", "mosaic", "mixup", "copy_paste",
-    }
-    run_name = str((cfg or {}).get("_run_name", "train"))
-    clean = {}
-    for k, v in (cfg or {}).items():
-        if k in ALLOWED and v is not None and v != "":
-            clean[k] = v
-    # Device: '-1' (CPU) / '0' (GPU idx) / 'cpu' / 'mps' etc.
-    dv = clean.get("device", -1)
-    if isinstance(dv, str):
-        clean["device"] = -1 if dv == "-1" else (int(dv) if dv.isdigit() else dv)
-    # Pin the run's output location so validation knows exactly where best.pt is.
-    # project/name/exist_ok are Ultralytics-native; we set them here rather than
-    # exposing them as tunable cfg (they're plumbing, not hyperparameters).
-    clean.setdefault("exist_ok", True)
-    try:
-        training_logger.info("Starting LOCAL YOLO Training (cfg)")
-        script = (
-            "import sys, json\n"
-            "from ultralytics import YOLO\n"
-            "yp, bm, cfg = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])\n"
-            "YOLO(bm).train(data=yp, **cfg)\n"
-        )
-        run_dir = os.path.abspath(MODELS_DIR)
-        clean.setdefault("project", os.path.join(run_dir, "runs", "detect"))
-        clean.setdefault("name", run_name)
-        cmd = [sys.executable, "-c", script, yaml_path, base_model, json.dumps(clean)]
-        os.makedirs(run_dir, exist_ok=True)
-        best = os.path.join(clean["project"], clean["name"], "weights", "best.pt")
-        state["trainer_last_weights"] = best
-        with open("logs/training.log", "w", encoding="utf-8", errors="replace") as lf:
-            lf.write(f"[{datetime.now()}] YOLO Training Started\n")
-            lf.write(f"base={base_model}  cfg={json.dumps(clean)}\n")
-            lf.flush()
-            subprocess.run(cmd, check=True, cwd=run_dir, stdout=lf, stderr=subprocess.STDOUT)
-        populate_model_selector()
-        state["status_text"] = "Training Complete!"
-    except Exception as e:
-        state["status_text"] = f"Training error: {e}"
-        training_logger.error(e)
-
-def remote_yolo_train_worker(abs_folder: str, dataset_dir: str, config: dict,
-                             remote_ip: str) -> None:
-    """! @brief Zip the dataset, run YOLO training on a remote host, and fetch the weights back."""
-    zip_p = os.path.join(abs_folder,"yolo_dataset.zip")
-    try:
-        state["status_text"] = f"Zipping → {remote_ip}…"
-        shutil.make_archive(zip_p.replace('.zip',''),'zip',dataset_dir)
-        with open(zip_p,'rb') as f:
-            res = requests.post(f"http://{remote_ip}/api/start_train",
-                                files={'dataset':f},data={'config':json.dumps(config)},timeout=30)
-        if res.status_code!=200: raise Exception(res.text)
-        job_id = res.json()['job_id']
-        state["status_text"] = f"Remote job {job_id}"
-        while True:
-            time.sleep(3)
-            s = requests.get(f"http://{remote_ip}/api/status/{job_id}",timeout=10).json()
-            if s.get('log'):
-                with open("logs/training.log","w") as lf: lf.write(s['log'])
-            if s.get('status') in ('completed','failed'): break
-        if s.get('status')=='completed':
-            dl = requests.get(f"http://{remote_ip}/api/download/{job_id}",timeout=60)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            td = os.path.join(os.path.abspath(MODELS_DIR),f"runs/detect/train_remote_{ts}/weights")
-            os.makedirs(td,exist_ok=True)
-            with open(os.path.join(td,"best.pt"),'wb') as wf: wf.write(dl.content)
-            populate_model_selector()
-            state["status_text"] = "Remote training done!"
-        else:
-            raise Exception("Remote job failed")
-    except Exception as e:
-        state["status_text"] = f"Remote error: {e}"
-    finally:
-        if os.path.exists(zip_p): os.remove(zip_p)
-
-# ── Mayaku (COCO-format) training support — parallel backend to YOLO ──────────
-from modules.mayaku import training as mayaku_support
 
 _yolo_registered = set()
 
@@ -3365,127 +3224,6 @@ def _clamp_box(b: dict) -> dict | None:
     nb["cx"], nb["cy"] = (x1 + x2)/2, (y1 + y2)/2
     nb["w"], nb["h"] = x2 - x1, y2 - y1
     return nb
-
-# ── Comics ────────────────────────────────────────────────────────────────────
-# A comic = a folder of page images + comic-level metadata. The metadata lives
-# in <folder>/comic.json (the portable source of truth); the `comics` table and
-# the files.comic_folder column are caches rebuilt from it on index.
-
-def _comic_json_path(folder: str) -> str:
-    """! @brief Resolve a folder's comic.json path (safe-joined under MEDIA_DIR)."""
-    rel = (folder + "/comic.json") if folder else "comic.json"
-    return get_safe_path(MEDIA_DIR, rel)
-
-def _auto_pages(folder: str) -> list:
-    """!
-    @brief List library asset filenames directly inside a folder, sorted.
-    @return Relative filenames (images/video); [] if the folder is missing.
-    """
-    base = get_safe_path(MEDIA_DIR, folder) if folder else os.path.abspath(MEDIA_DIR)
-    if not base or not os.path.isdir(base):
-        return []
-    return sorted(f for f in os.listdir(base)
-                  if mt.is_library_file(f) and os.path.isfile(os.path.join(base, f)))
-
-def _load_comic_json(folder: str) -> dict | None:
-    """! @brief Load a folder's comic.json, or None if absent/unreadable."""
-    p = _comic_json_path(folder)
-    if not p or not os.path.exists(p):
-        return None
-    try:
-        with open(p, encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        access_logger.warning(f"_load_comic_json {folder}: {e}")
-        return None
-
-def _write_comic_json(folder: str, data: dict) -> bool:
-    """! @brief Write a folder's comic.json. @return True on success."""
-    p = _comic_json_path(folder)
-    if not p:
-        return False
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    return True
-
-def _set_comic_membership(folder: str) -> None:
-    """! @brief Flag a folder's page files as comic members so they leave the flat gallery."""
-    if not folder:
-        return
-    _db().execute(
-        "UPDATE files SET comic_folder=? WHERE rel_path LIKE ? AND rel_path NOT LIKE ?",
-        (folder, folder + '/%', folder + '/%/%'))
-    _db().commit()
-
-def _write_comic_page_count(folder: str, data: dict) -> None:
-    """!
-    @brief Write prism:PageCount into the comic's cover-page XMP so the count travels with the file.
-    @note Best-effort; leaves tags/description/regions untouched. No-op if the cover can't be resolved.
-    """
-    try:
-        pages = _comic_ordered_pages(folder, data)
-        if not pages:
-            return
-        cover = data.get("cover") or pages[0]
-        cover_rel = f"{folder}/{cover}" if folder else cover
-        fp = get_safe_path(MEDIA_DIR, cover_rel)
-        if not fp or not os.path.exists(fp):
-            return
-        meta = read_metadata(fp)
-        write_metadata(fp, meta.get("tags", []), meta.get("description", ""),
-                       meta.get("regions", []), page_count=len(pages))
-    except Exception as e:
-        access_logger.warning(f"_write_comic_page_count {folder}: {e}")
-
-def _upsert_comic_row(folder, data):
-    pages = data.get("pages") or _auto_pages(folder)
-    _db().execute("""
-        INSERT INTO comics(folder,title,author,description,tags,characters,cover,page_order,created,mtime)
-        VALUES(?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(folder) DO UPDATE SET
-            title=excluded.title, author=excluded.author, description=excluded.description,
-            tags=excluded.tags, characters=excluded.characters, cover=excluded.cover,
-            page_order=excluded.page_order, mtime=excluded.mtime
-    """, (folder, data.get("title", ""), data.get("author", ""), data.get("description", ""),
-          json.dumps(data.get("tags", [])), json.dumps(data.get("characters", [])),
-          data.get("cover", pages[0] if pages else ""), json.dumps(pages),
-          data.get("created", time.time()), time.time()))
-    _db().commit()
-
-def _comic_ordered_pages(folder, data=None):
-    """Declared order, dropping missing files and appending any new ones."""
-    data = data or _load_comic_json(folder) or {}
-    declared = data.get("pages") or []
-    auto = _auto_pages(folder)
-    ordered = [p for p in declared if p in auto] + [p for p in auto if p not in declared]
-    return ordered
-
-def _scan_comics() -> None:
-    """! @brief Walk MEDIA_DIR for comic.json files and rebuild the comics cache."""
-    found = {}
-    for root, dirs, files in os.walk(MEDIA_DIR):
-        dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'runs']
-        if 'comic.json' in files:
-            rel = _rel(root)
-            if rel == '.':
-                continue   # don't treat the whole library as one comic
-            data = _load_comic_json(rel)
-            if data is not None:
-                found[rel] = data
-    existing = {r["folder"] for r in _db().execute("SELECT folder FROM comics").fetchall()}
-    for folder, data in found.items():
-        _upsert_comic_row(folder, data)
-        _set_comic_membership(folder)
-    for gone in existing - set(found):
-        _db().execute("DELETE FROM comics WHERE folder=?", (gone,))
-        _db().execute("UPDATE files SET comic_folder='' WHERE comic_folder=?", (gone,))
-    _db().commit()
-    access_logger.info(f"Comic scan: {len(found)} comic(s)")
-
-def _comic_folder_set() -> set:
-    """! @brief Set of all folders currently registered as comics."""
-    return {r["folder"] for r in _db().execute("SELECT folder FROM comics").fetchall()}
 
 def _folder_scope_clause(column: str, folder: str) -> tuple[list, list]:
     """!
@@ -3976,8 +3714,8 @@ def branding_logo():
 
 @app.route("/api/folders")
 def api_folders():
-    rows = _db().execute(
-        "SELECT rel_path FROM files WHERE comic_folder IS NULL OR comic_folder=''").fetchall()
+    where = (" WHERE " + " AND ".join(module_host.gallery_filters)) if module_host.gallery_filters else ""
+    rows = _db().execute(f"SELECT rel_path FROM files{where}").fetchall()
     counts = {}
     for (rp,) in rows:
         folder = rp.rsplit('/', 1)[0] if '/' in rp else '/'
@@ -4710,10 +4448,7 @@ def _run_upload():
             _row = _get_file_row(rel_path)
             if _row is not None:
                 _set_compressed_bpp(store_path, _row["width"], _row["height"])
-            # If uploaded into an existing comic folder, hide it from the flat list
-            up_folder = os.path.dirname(rel_path)
-            if up_folder and _load_comic_json(up_folder) is not None:
-                _set_comic_membership(up_folder)
+            module_host.emit("upload.stored", rel_path=rel_path, filename=fname)
             resp = {"success": True, "filename": rel_path}
             if corrected_from is not None:
                 resp["corrected_extension"] = {"from": corrected_from,
@@ -5219,9 +4954,7 @@ def api_move():
         _delete_file_row(filename)
         if not _index_file(new_rel, force=True):
           print("move failed")
-        mv_folder = os.path.dirname(new_rel)
-        if mv_folder and _load_comic_json(mv_folder) is not None:
-            _set_comic_membership(mv_folder)
+        module_host.emit("file.renamed", old_rel=filename, new_rel=new_rel)
     return jsonify({"success":True})
 
 _FULLJPG_LRU: "OrderedDict[tuple[str,float], bytes]" = OrderedDict()
@@ -5939,77 +5672,6 @@ def api_audit_log():
         tail = f.readlines()[-n:]
     return jsonify({"lines": [l.rstrip("\n") for l in tail]})
 
-@app.route("/api/comic")
-def api_comic_get():
-    folder = request.args.get("folder", "").strip()
-    data = _load_comic_json(folder)
-    if data is None:
-        return jsonify({"success": False, "error": "Not a comic."})
-    pages = _comic_ordered_pages(folder, data)
-    return jsonify({"success": True,
-                    "comic": {"folder": folder,
-                              "title": data.get("title", ""),
-                              "author": data.get("author", ""),
-                              "description": data.get("description", ""),
-                              "tags": data.get("tags", []),
-                              "characters": data.get("characters", []),
-                              "cover": data.get("cover", pages[0] if pages else "")},
-                    "pages": [folder + "/" + p for p in pages]})
-
-@app.route("/api/comic_create", methods=["POST"])
-@_auth.require_feature("comics.make", level="write", action='comic_create', fields=('folder', 'title'))
-def api_comic_create():
-    d = request.json or {}
-    folder = (d.get("folder", "") or "").strip().strip('/')
-    if not folder:
-        return jsonify({"success": False, "error": "A folder is required."})
-    if not get_safe_path(MEDIA_DIR, folder):
-        return jsonify({"success": False, "error": "Invalid folder."})
-    pages = _auto_pages(folder)
-    if not pages:
-        return jsonify({"success": False, "error": "Folder has no images."})
-    data = {"schema": COMIC_SCHEMA,
-            "title": d.get("title") or folder.split('/')[-1],
-            "author": d.get("author", ""), "description": d.get("description", ""),
-            "tags": d.get("tags", []), "characters": d.get("characters", []),
-            "cover": pages[0], "pages": pages, "created": time.time()}
-    if not _write_comic_json(folder, data):
-        return jsonify({"success": False, "error": "Could not write comic.json."})
-    _upsert_comic_row(folder, data)
-    _set_comic_membership(folder)
-    _write_comic_page_count(folder, data)
-    return jsonify({"success": True, "folder": folder})
-
-@app.route("/api/comic_update", methods=["POST"])
-@_auth.require_feature("comics.edit", level="write", action='comic_update', fields=('folder', 'title'))
-def api_comic_update():
-    d = request.json or {}
-    folder = (d.get("folder", "") or "").strip().strip('/')
-    data = _load_comic_json(folder)
-    if data is None:
-        return jsonify({"success": False, "error": "Not a comic."})
-    for k in ("title", "author", "description", "tags", "characters", "cover", "pages"):
-        if k in d:
-            data[k] = d[k]
-    data["schema"] = COMIC_SCHEMA
-    _write_comic_json(folder, data)
-    _upsert_comic_row(folder, data)
-    _write_comic_page_count(folder, data)
-    return jsonify({"success": True})
-
-@app.route("/api/comic_delete", methods=["POST"])
-@_auth.require_feature("comics.delete", level="write", action='comic_delete', fields=('folder',))
-def api_comic_delete():
-    """Unpackage a comic (keeps all images, just removes comic status)."""
-    folder = (request.json.get("folder", "") or "").strip().strip('/')
-    p = _comic_json_path(folder)
-    if p and os.path.exists(p):
-        os.remove(p)
-    _db().execute("DELETE FROM comics WHERE folder=?", (folder,))
-    _db().execute("UPDATE files SET comic_folder='' WHERE comic_folder=?", (folder,))
-    _db().commit()
-    return jsonify({"success": True})
-
 @app.route("/api/review_list")
 def review_list():
     """Images with pending AI suggestions: a deletion flag and/or unconfirmed boxes.
@@ -6231,6 +5893,16 @@ def bulk_box():
 
 
 
+def _run_pipeline_on(bgr, fp=None, tree=None, progress=None):
+    """Run the Smart Tag decision tree on one image with every registered hook
+    wired in (pose / ocr / segment stages from modules, person + panel
+    detectors, LLM endpoints, known context from the file's metadata)."""
+    return run_pipeline(tree or state.get("pipeline_tree") or DEFAULT_PIPELINE, bgr, _llm_call,
+                        pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn(), stage_fns=_module_stage_fns(),
+                        person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn(),
+                        endpoints=_pipeline_endpoints(), progress=progress,
+                        known=_known_context(fp) if fp else None)
+
 def _pose_stage_fn():
     """Pose pipeline stage, or None when the pose module is disabled/absent.
 
@@ -6396,10 +6068,7 @@ def run_pipeline_route():
         state["status_text"] = f"Smart Tag: {msg}"
 
     try:
-        analysis = run_pipeline(tree, bgr, _llm_call, pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn(), stage_fns=_module_stage_fns(),
-                                person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn(),
-                                endpoints=_pipeline_endpoints(), progress=_progress,
-                                known=_known_context(fp))
+        analysis = _run_pipeline_on(bgr, fp, tree, _progress)
     except Exception as e:
         state["status_text"] = "Ready."
         return jsonify({"success": False, "error": str(e)})
@@ -6428,11 +6097,7 @@ def bulk_pipeline():
             if img is None:
                 errors.append(fn); continue
             def _prog(msg, i=i): state["status_text"] = f"Smart Tag {i+1}/{total}: {msg}"
-            analysis = run_pipeline(tree, _to_bgr(img), _llm_call,
-                                    pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn(), stage_fns=_module_stage_fns(),
-                                    person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn(),
-                                    endpoints=_pipeline_endpoints(), progress=_prog,
-                                    known=_known_context(fp))
+            analysis = _run_pipeline_on(_to_bgr(img), fp, tree, _prog)
             _apply_pipeline_result(fp, analysis)
             done += 1
         except Exception as e:
@@ -6465,106 +6130,6 @@ def _table_exists(db, name):
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
         (name,)).fetchone() is not None
 
-def _merge_comic_analyses(folder, page_analyses, summarize=True):
-    """Aggregate per-page pipeline analyses into comic-level metadata.
-
-    - tags: union across all pages (order-preserving, deduped)
-    - characters: distinct subject labels across pages, each with the longest
-      per-page description seen for that label (a reasonable 'best' blurb)
-    - description: per-page scene summaries joined into a synopsis; if
-      `summarize` and an LLM is configured, condensed into a short series blurb
-    Writes the result into comic.json + the comics DB row. Returns the dict.
-    """
-    all_tags, seen = [], set()
-    characters = {}            # label -> best (longest) description
-    page_lines = []
-    for idx, (page, analysis) in enumerate(page_analyses):
-        for t in analysis.get("tags", []):
-            if t and t.lower() not in seen:
-                all_tags.append(t); seen.add(t.lower())
-        for s in analysis.get("subjects", []):
-            label = (s.get("label") or "").strip()
-            if not label:
-                continue
-            desc = (s.get("detail") or "").strip()
-            if label not in characters or len(desc) > len(characters[label]):
-                characters[label] = desc
-        scene = (analysis.get("summary") or "").strip()
-        if scene:
-            page_lines.append(f"Page {idx + 1}: {scene}")
-
-    synopsis = "\n".join(page_lines)
-    if summarize and synopsis and state.get("oai_endpoint") and state.get("oai_model"):
-        try:
-            prompt = ("Below are one-line summaries of each page of a comic, in order. "
-                      "Write a short synopsis (2-4 sentences) of the comic as a whole.\n\n"
-                      + synopsis)
-            condensed = (_llm_call(prompt, None, "text") or "").strip()
-            if condensed:
-                synopsis = condensed
-        except Exception as e:
-            access_logger.warning(f"comic synopsis {folder}: {e}")
-
-    data = _load_comic_json(folder) or {}
-    data["tags"] = all_tags
-    data["characters"] = sorted(characters.keys())
-    data["character_notes"] = characters          # label -> blurb
-    data["description"] = synopsis
-    if "pages" not in data:
-        data["pages"] = _comic_ordered_pages(folder)
-    data.setdefault("schema", COMIC_SCHEMA)
-    _write_comic_json(folder, data)
-    _upsert_comic_row(folder, data)
-    return data
-
-@app.route("/api/comic_pipeline", methods=["POST"])
-@_auth.require_feature("ai.smarttag", level="write")
-def comic_pipeline_route():
-    """Run the pipeline across every page of a comic IN ORDER, store each page's
-    result, then merge tags / characters / description up to the comic level.
-    Expects {"folder": "<comic folder rel path>"}. Uses the comic pipeline tree
-    if configured (state['comic_pipeline_tree']), else the default tree."""
-    folder = (request.json.get("folder") or "").strip().strip("/")
-    if not folder:
-        return jsonify({"success": False, "error": "No comic folder given."})
-    if not state.get("oai_endpoint") or not state.get("oai_model"):
-        return jsonify({"success": False, "error": "LLM not configured."})
-    pages = _comic_ordered_pages(folder)
-    if not pages:
-        return jsonify({"success": False, "error": "No pages found in comic."})
-    tree = state.get("comic_pipeline_tree") or state.get("pipeline_tree") or DEFAULT_PIPELINE
-    total = len(pages)
-    page_analyses, errors = [], []
-    for i, page in enumerate(pages):
-        rel = f"{folder}/{page}"
-        fp = get_safe_path(MEDIA_DIR, rel)
-        if not fp or not os.path.exists(fp):
-            errors.append(page); continue
-        try:
-            img = read_jxl(fp)
-            if img is None:
-                errors.append(page); continue
-            def _prog(msg, i=i): state["status_text"] = f"Comic {i+1}/{total}: {msg}"
-            analysis = run_pipeline(tree, _to_bgr(img), _llm_call,
-                                    pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn(), stage_fns=_module_stage_fns(),
-                                    person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn(),
-                                    endpoints=_pipeline_endpoints(), progress=_prog,
-                                    known=_known_context(fp))
-            _apply_pipeline_result(fp, analysis)      # store per-page result too
-            page_analyses.append((page, analysis))
-        except Exception as e:
-            errors.append(page)
-            access_logger.error(f"comic_pipeline {rel}: {e}")
-    state["status_text"] = "Merging comic…"
-    merged = _merge_comic_analyses(folder, page_analyses,
-                                   summarize=request.json.get("summarize", True))
-    state["status_text"] = "Ready."
-    return jsonify({"success": True, "pages_done": len(page_analyses),
-                    "errors": errors, "comic": {
-                        "tags": merged.get("tags", []),
-                        "characters": merged.get("characters", []),
-                        "description": merged.get("description", "")}})
-
 @app.route("/api/auto_tag", methods=["POST"])
 @_auth.require_feature("ai.autotag", level="write")
 def auto_tag():
@@ -6593,363 +6158,6 @@ def auto_tag():
     except Exception as e:
         return jsonify({"success":False,"error":str(e)})
 
-# ── training-selection: persistent image sets ────────────────────────────────
-# A "set" is a named, persistent bag of rel_paths curated for a training run. It
-# survives restarts, so a 5000-image pick is still there next week. See
-# training_select.py for the selection strategies and storage.
-#
-# ISOLATION: each set keeps an editable COPY of every image under
-# media/.training_sets/<set>/input/. The gallery scan skips dot-dirs, so these
-# copies are invisible to the gallery yet fully addressable by the normal editor
-# (get_safe_path/thumb/file/metadata all resolve any rel_path under MEDIA_DIR).
-# Editing, adding, or removing boxes on a set image therefore only ever mutates
-# the copy — the gallery original is never touched.
-
-TRAIN_SETS_DIR = ".training_sets"   # under MEDIA_DIR
-
-
-def _set_safe(set_name):
-    return "".join(c if (c.isalnum() or c in "-_") else "_" for c in set_name).strip("_") or "set"
-
-
-def _set_work_reldir(set_name):
-    return f"{TRAIN_SETS_DIR}/{_set_safe(set_name)}/input"
-
-
-def _copy_into_set(set_name, src_rel):
-    """Copy a gallery image (its .jxl + sidecar .txt/.xmp if present) into the
-    set's isolated input folder. Returns the work rel_path (under MEDIA_DIR), or
-    None if the source can't be resolved. Idempotent: re-copying overwrites."""
-    src_abs = get_safe_path(MEDIA_DIR, src_rel)
-    if not src_abs or not os.path.exists(src_abs):
-        return None
-    work_reldir = _set_work_reldir(set_name)
-    work_absdir = get_safe_path(MEDIA_DIR, work_reldir)
-    os.makedirs(work_absdir, exist_ok=True)
-    bn = os.path.basename(src_rel)
-    work_rel = f"{work_reldir}/{bn}"
-    work_abs = get_safe_path(MEDIA_DIR, work_rel)
-    try:
-        shutil.copy2(src_abs, work_abs)
-        # bring along sibling label/sidecar so existing boxes come with the copy
-        sbase = os.path.splitext(src_abs)[0]
-        wbase = os.path.splitext(work_abs)[0]
-        for ext in (".txt", ".xmp"):
-            if os.path.exists(sbase + ext):
-                shutil.copy2(sbase + ext, wbase + ext)
-    except OSError as e:
-        training_logger.error(f"copy_into_set failed for {src_rel}: {e}")
-        return None
-    return work_rel
-
-
-def _remove_set_workdir(set_name):
-    d = get_safe_path(MEDIA_DIR, f"{TRAIN_SETS_DIR}/{_set_safe(set_name)}")
-    if d:
-        shutil.rmtree(d, ignore_errors=True)
-
-
-def _member_entry_for_record(rec, want=None):
-    """Status entry for ONE member record. `want` is a set of in-scope class
-    names (or None = all). Reads metadata for this one file only."""
-    rp = rec["rel_path"]
-    wp = rec["work_path"] or rp
-    wabs = get_safe_path(MEDIA_DIR, wp)
-    regions = []
-    if wabs and os.path.exists(wabs):
-        regions = (read_metadata(wabs) or {}).get("regions", []) or []
-    scoped = [r for r in regions
-              if want is None or (r.get("class_name") or "").strip() in want]
-    has_conf = any(r.get("confirmed", True) for r in scoped)
-    has_unconf = any(not r.get("confirmed", True) for r in scoped)
-    with_data = len(scoped) > 0
-    if rec["checked"]:
-        color = "green"
-    elif has_conf:
-        color = "blue"
-    elif has_unconf:
-        color = "yellow"
-    else:
-        color = "none"
-    return {
-        "rel_path": wp,          # the editable copy — clicking edits THIS
-        "src_path": rp,          # gallery source (provenance)
-        "thumb": f"/api/thumb/{wp}",
-        "checked": rec["checked"],
-        "with_data": with_data,
-        "color": color,
-    }
-
-
-def _member_entries(set_name, want_classes=None):
-    db = _db()
-    want = set(want_classes) if want_classes else None
-    return [_member_entry_for_record(rec, want) for rec in ts.member_records(db, set_name)]
-
-
-def _sel_paths_to_entries(rel_paths):
-    """Legacy simple entries (thumb + has_label) for ad-hoc lists."""
-    db = _db()
-    out = []
-    for rp in rel_paths:
-        abs_path = get_safe_path(MEDIA_DIR, rp)
-        base = os.path.splitext(abs_path)[0] if abs_path else ""
-        has_label = bool(base) and os.path.exists(base + ".txt") \
-            and os.path.getsize(base + ".txt") > 0
-        out.append({"rel_path": rp, "thumb": f"/api/thumb/{rp}", "has_label": has_label})
-    return out
-
-
-@app.route("/api/trainer/devices")
-@_auth.require_feature("ai.trainer", level="write")
-def trainer_devices():
-    """Report the compute devices torch can see, so the UI never offers a GPU
-    index or an MPS option that doesn't exist on this machine. Backed by the
-    model registry, which imports torch once at module load and caches the
-    device list, so this route never re-imports torch per request."""
-    return jsonify({"success": True, "devices": model_registry.available_devices()})
-
-
-@app.route("/api/trainer/sets")
-@_auth.require_feature("ai.trainer", level="write")
-def trainer_sets():
-    return jsonify({"success": True, "sets": ts.list_sets(_db())})
-
-
-@app.route("/api/trainer/set", methods=["GET"])
-@_auth.require_feature("ai.trainer", level="write")
-def trainer_set_members():
-    name = (request.args.get("set", "") or "").strip()
-    if not name:
-        return jsonify({"success": False, "error": "set name required"}), 400
-    classes = request.args.getlist("class") or None
-    meta = ts.get_meta(_db(), name)
-    files = _member_entries(name, want_classes=classes)
-    return jsonify({"success": True, "name": name, "count": len(files),
-                    "gallery_safe": meta.get("gallery_safe", False), "files": files})
-
-
-@app.route("/api/trainer/set", methods=["DELETE"])
-@_auth.require_feature("ai.trainer.keep", level="write", action="trainer_set_delete", fields=("set",))
-def trainer_set_delete():
-    name = (request.args.get("set", "") or (request.json or {}).get("set", "")).strip()
-    if not name:
-        return jsonify({"success": False, "error": "set name required"}), 400
-    ts.delete_set(_db(), name)
-    _remove_set_workdir(name)      # drop the isolated copies too
-    return jsonify({"success": True})
-
-
-@app.route("/api/trainer/gallery_safe", methods=["POST"])
-@_auth.require_feature("ai.trainer.keep", level="write", action="trainer_gallery_safe", fields=("set",))
-def trainer_gallery_safe():
-    d = request.json or {}
-    name = (d.get("set") or "").strip()
-    if not name:
-        return jsonify({"success": False, "error": "set name required"}), 400
-    ts.set_meta(_db(), name, gallery_safe=bool(d.get("gallery_safe")))
-    return jsonify({"success": True, "gallery_safe": bool(d.get("gallery_safe"))})
-
-
-@app.route("/api/trainer/presets", methods=["GET"])
-@_auth.require_feature("ai.trainer", level="write")
-def trainer_presets_list():
-    return jsonify({"success": True, "presets": ts.list_presets(_db())})
-
-
-@app.route("/api/trainer/presets", methods=["POST"])
-@_auth.require_feature("ai.trainer", level="write", action="trainer_preset_save", fields=("name",))
-def trainer_preset_save():
-    d = request.json or {}
-    name = (d.get("name") or "").strip()
-    settings = d.get("settings")
-    if not name:
-        return jsonify({"success": False, "error": "preset name required"}), 400
-    if not isinstance(settings, dict):
-        return jsonify({"success": False, "error": "settings must be an object"}), 400
-    try:
-        ts.save_preset(_db(), name, settings)
-    except ValueError as e:
-        return jsonify({"success": False, "error": str(e)}), 400
-    return jsonify({"success": True, "name": name})
-
-
-@app.route("/api/trainer/presets", methods=["DELETE"])
-@_auth.require_feature("ai.trainer", level="write", action="trainer_preset_delete", fields=("name",))
-def trainer_preset_delete():
-    name = (request.args.get("name", "") or (request.json or {}).get("name", "")).strip()
-    if not name:
-        return jsonify({"success": False, "error": "preset name required"}), 400
-    ts.delete_preset(_db(), name)
-    return jsonify({"success": True})
-
-
-@app.route("/api/trainer/checked", methods=["POST"])
-@_auth.require_feature("ai.trainer", level="write", action="trainer_checked", fields=("set",))
-def trainer_checked():
-    d = request.json or {}
-    name = (d.get("set") or "").strip()
-    src = (d.get("rel_path") or "").strip()   # may be work_path or src; match either
-    if not name or not src:
-        return jsonify({"success": False, "error": "set + rel_path required"}), 400
-    # rel_path from the grid is the work copy; map it back to the member's source
-    matched = None
-    for rec in ts.member_records(_db(), name):
-        if rec["work_path"] == src or rec["rel_path"] == src:
-            matched = rec["rel_path"]; break
-    if matched:
-        ts.set_checked(_db(), name, matched, bool(d.get("checked", True)))
-    return jsonify({"success": True})
-
-
-@app.route("/api/trainer/select", methods=["POST"])
-@_auth.require_feature("ai.trainer.select", level="write", action="trainer_select",
-                       fields=("strategy", "n"))
-def trainer_select():
-    """Pick N images by strategy, COPY each into the set's isolated input folder
-    (media/.training_sets/<set>/input/), and store both source and work paths.
-    Editing the set never touches the gallery original."""
-    d = request.json or {}
-    strategy = d.get("strategy", "random")
-    if strategy not in ts.STRATEGIES:
-        return jsonify({"success": False, "error": f"unknown strategy {strategy!r}"}), 400
-    try:
-        n = max(0, int(d.get("n", 0)))
-    except (TypeError, ValueError):
-        return jsonify({"success": False, "error": "n must be an integer"}), 400
-    exclude_all_sets = bool(d.get("exclude_all_sets", True))
-    media = (d.get("media") or "image")
-    kinds = {"image"} if media == "image" else {"image", "video"}
-    gallery_safe = bool(d.get("gallery_safe", False))
-    try:
-        name = ts.next_set_name(_db())
-        picks = ts.select(_db(), strategy, n, exclude_all_sets=exclude_all_sets, kinds=kinds,
-                          iter_emb=_embedding_iter())
-        ts.create_set(_db(), name)
-        ts.set_meta(_db(), name, gallery_safe=gallery_safe)
-        # Copy each pick into the isolated folder; store rel->work mapping.
-        work_map = {}
-        for rp in picks:
-            wp = _copy_into_set(name, rp)
-            if wp:
-                work_map[rp] = wp
-        ts.keep(_db(), name, picks, work_paths_map=work_map)
-    except Exception as e:
-        training_logger.error(f"select failed: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
-    return jsonify({"success": True, "set": name, "strategy": strategy,
-                    "gallery_safe": gallery_safe,
-                    "count": len(picks), "files": _member_entries(name)})
-
-
-@app.route("/api/trainer/keep", methods=["POST"])
-@_auth.require_feature("ai.trainer.keep", level="write", action="trainer_keep", fields=("set",))
-def trainer_keep():
-    """Add rel_paths to an existing set (used when editing a set during review)."""
-    d = request.json or {}
-    set_name = (d.get("set") or "").strip()
-    if not set_name:
-        return jsonify({"success": False, "error": "set name required"}), 400
-    paths = [p for p in (d.get("paths") or []) if isinstance(p, str)]
-    total = ts.keep(_db(), set_name, paths)
-    return jsonify({"success": True, "added": len(paths), "count": total})
-
-
-@app.route("/api/trainer/clear", methods=["POST"])
-@_auth.require_feature("ai.trainer.keep", level="write", action="trainer_clear", fields=("set",))
-def trainer_clear():
-    """Empty a set. Never touches the gallery/library."""
-    d = request.json or {}
-    set_name = (d.get("set") or "").strip()
-    if not set_name:
-        return jsonify({"success": False, "error": "set name required"}), 400
-    ts.clear(_db(), set_name)
-    return jsonify({"success": True})
-
-
-@app.route("/api/trainer/remove", methods=["POST"])
-@_auth.require_feature("ai.trainer.keep", level="write", action="trainer_remove", fields=("set",))
-def trainer_remove():
-    """Drop specific rel_paths from a set (does not touch gallery)."""
-    d = request.json or {}
-    set_name = (d.get("set") or "").strip()
-    if not set_name:
-        return jsonify({"success": False, "error": "set name required"}), 400
-    paths = [p for p in (d.get("paths") or []) if isinstance(p, str)]
-    ts.remove(_db(), set_name, paths)
-    return jsonify({"success": True, "removed": len(paths)})
-
-
-@app.route("/api/trainer/labels")
-@_auth.require_feature("ai.trainer", level="write")
-def trainer_labels():
-    """Label suggestions for the trainer box editor: the global box-label pool
-    plus any class names already used on the given set's members."""
-    labels = set(l for l in (state.get("classes") or []) if l and l != "object")
-    for extra in module_host.emit("labels.pool"):
-        labels.update(extra or [])
-    name = (request.args.get("set", "") or "").strip()
-    if name:
-        try:
-            for rec in ts.member_records(_db(), name):
-                wp = rec["work_path"] or rec["rel_path"]
-                wabs = get_safe_path(MEDIA_DIR, wp)
-                if wabs and os.path.exists(wabs):
-                    for r in (read_metadata(wabs) or {}).get("regions", []) or []:
-                        nm = (r.get("class_name") or "").strip()
-                        if nm:
-                            labels.add(nm)
-        except Exception:
-            pass
-    return jsonify({"success": True, "labels": sorted(labels)})
-
-
-@app.route("/api/trainer/boxes", methods=["POST"])
-@_auth.require_feature("ai.trainer", level="write", action="trainer_boxes", fields=("filename",))
-def trainer_boxes():
-    """Read or write boxes for one trainer-set member.
-
-    Body: {action:'read'|'write', filename, regions?}
-      - filename is the member's WORK copy rel_path (under
-        media/.training_sets/<set>/input/), as returned by /api/trainer/set.
-      - 'read'  -> {success, regions:[{cx,cy,w,h,class_name,confirmed}, ...]}
-      - 'write' -> replaces the region list on the work copy only, then
-                   {success, count}.
-    Because this only ever touches the isolated copy, boxes persist in the
-    training set without mutating (or deleting clutter from) the gallery.
-    """
-    d = request.json or {}
-    action = (d.get("action") or "read").lower()
-    fn = (d.get("filename") or "").strip()
-    fp = get_safe_path(MEDIA_DIR, fn)
-    if not fp or not os.path.exists(fp):
-        return jsonify({"success": False, "error": "File not found."}), 404
-
-    if action == "read":
-        regions = (read_metadata(fp) or {}).get("regions", []) or []
-        return jsonify({"success": True, "regions": regions})
-
-    if action == "write":
-        meta = read_metadata(fp) or {}
-        clean = []
-        for r in (d.get("regions") or []):
-            cb = _clamp_box(r)
-            if not cb:
-                continue
-            clean.append({
-                "class_name": (r.get("class_name") or "").strip(),
-                "cx": cb["cx"], "cy": cb["cy"], "w": cb["w"], "h": cb["h"],
-                # boxes drawn/edited in the trainer are user-authored -> confirmed
-                "confirmed": r.get("confirmed", True) is not False,
-            })
-        ok = write_metadata(fp, meta.get("tags", []), meta.get("description", ""), clean)
-        if not ok:
-            return jsonify({"success": False, "error": "write failed"}), 500
-        return jsonify({"success": True, "count": len(clean)})
-
-    return jsonify({"success": False, "error": f"unknown action {action!r}"}), 400
-
-
 @app.route("/api/box_labels")
 def api_box_labels():
     labels = set(l for l in (state.get("classes") or []) if l and l != "object")
@@ -6957,401 +6165,6 @@ def api_box_labels():
         labels.update(extra or [])
     return jsonify({"success": True, "labels": sorted(labels)})
 
-
-@app.route("/api/trainer/validate", methods=["POST"])
-@_auth.require_feature("ai.trainer.run", level="write", action="trainer_validate", fields=("set",))
-def trainer_validate():
-    """Run the set's trained model over its members, diff predictions against the
-    stored ground-truth boxes, and report per-image and aggregate accuracy."""
-    d = request.json or {}
-    set_name = (d.get("set") or "").strip()
-    if not set_name:
-        return jsonify({"success": False, "error": "set name required"}), 400
-
-    weights = ts.get_meta(_db(), set_name).get("weights") \
-        or state.get("trainer_last_weights")
-    if not weights or not os.path.exists(weights):
-        return jsonify({"success": False,
-                        "error": "No trained model for this set yet — train first."}), 400
-
-    try:
-        conf = float(d.get("conf", 0.25))
-    except (TypeError, ValueError):
-        conf = 0.25
-    try:
-        iou_ok = float(d.get("iou_ok", 0.7))
-    except (TypeError, ValueError):
-        iou_ok = 0.7
-    iou_min = 0.3
-
-    want = d.get("classes")
-    want = [c for c in want if isinstance(c, str) and c.strip()] if isinstance(want, list) else None
-    want_set = set(want) if want else None
-
-    # Optionally pull fresh, never-seen images into the set for this validation.
-    added_new = []
-    if d.get("source") == "new":
-        try:
-            k = max(0, int(d.get("add_new", 20)))
-        except (TypeError, ValueError):
-            k = 20
-        if k:
-            added_new = ts.select(_db(), d.get("strategy", "random"), k, iter_emb=_embedding_iter(),
-                                   exclude_all_sets=True, kinds={"image"})
-            if added_new:
-                ts.keep(_db(), set_name, added_new)
-
-    per_image = []
-    results = []
-    new_set = set(added_new)
-    for rp in ts.members(_db(), set_name):
-        fp = get_safe_path(MEDIA_DIR, rp)
-        if not fp or not os.path.exists(fp):
-            continue
-        base = os.path.splitext(fp)[0]
-        if not os.path.exists(base + ".jxl"):     # stills only; skip video members
-            continue
-        img = read_jxl(fp)
-        if img is None:
-            continue
-        bgr = img[:, :, ::-1] if (img.ndim == 3 and img.shape[2] >= 3) else img
-        keep_classes = want_set if want_set else None
-        pred = _detect_obb_or_box(bgr, weights, conf=conf, keep_classes=keep_classes)
-        is_new = rp in new_set
-        if is_new:
-            # New image: no ground truth to compare against. Run the model and
-            # store its predictions for human review — do NOT score it (an
-            # empty-GT diff would read as all-false-positives and drag F1 to 0).
-            diff = tv.propose_image(pred)
-        else:
-            gt = (read_metadata(fp) or {}).get("regions", []) or []
-            if want_set:
-                gt = [r for r in gt if (r.get("class_name") or "").strip() in want_set]
-            diff = tv.diff_image(gt, pred, iou_ok=iou_ok, iou_min=iou_min)
-            per_image.append(diff)
-        results.append({
-            "rel_path": rp, "thumb": f"/api/thumb/{rp}",
-            "is_new": is_new,
-            "mean_iou": diff["mean_iou"], "counts": diff["counts"],
-            "boxes": diff["boxes"],
-        })
-
-    if per_image:
-        summary = tv.aggregate(per_image, iou_ok=iou_ok)
-        ts.set_meta(_db(), set_name, accuracy=summary.get("f1"))
-    else:
-        # New-only run: nothing to score. Report the proposal counts so the
-        # UI has something to show, but leave f1/precision/recall null and
-        # DON'T overwrite the set's stored accuracy from a real validation.
-        summary = tv.aggregate([], iou_ok=iou_ok)
-        summary["f1"] = summary["precision"] = summary["recall"] = None
-        summary["mean_iou"] = None
-        summary["scored"] = False
-    summary.setdefault("scored", bool(per_image))
-    # Worst images first: most dropped/added, then lowest IoU — that's where the
-    # user's confirm/deny attention is best spent. New rows have mean_iou None
-    # (unscored); sort them after scored rows by treating None as worst.
-    results.sort(key=lambda r: (-(r["counts"]["dropped"] + r["counts"]["added"]),
-                                r["mean_iou"] if r["mean_iou"] is not None else -1.0))
-    return jsonify({"success": True, "set": set_name, "summary": summary,
-                    "added_new": added_new, "images": results})
-
-
-@app.route("/api/trainer/apply_prediction", methods=["POST"])
-@_auth.require_feature("ai.trainer.keep", level="write", action="trainer_apply_pred", fields=("filename",))
-def trainer_apply_prediction():
-    d = request.json or {}
-    fn = (d.get("filename") or "").strip()
-    fp = get_safe_path(MEDIA_DIR, fn)
-    if not fp or not os.path.exists(fp):
-        return jsonify({"success": False, "error": "not found"}), 404
-    accepted = d.get("regions") or []
-    scope = d.get("classes")
-    if isinstance(scope, list) and scope:
-        scope_set = {c for c in scope if isinstance(c, str) and c.strip()}
-    else:
-        scope_set = {(r.get("class_name") or "").strip() for r in accepted if r.get("class_name")}
-
-    cur = read_metadata(fp) or {}
-    existing = cur.get("regions", []) or []
-    # Keep every box whose class is NOT in scope; replace the in-scope ones.
-    preserved = [r for r in existing
-                 if (r.get("class_name") or "").strip() not in scope_set]
-    merged = preserved + accepted
-    ok = write_metadata(fp, cur.get("tags", []) or [],
-                        cur.get("description", "") or "", merged)
-    _meta_cache_drop(fn)
-    return jsonify({"success": bool(ok), "count": len(merged),
-                    "preserved": len(preserved), "replaced_scope": sorted(scope_set)})
-
-
-@app.route("/api/train", methods=["POST"])
-@_auth.require_feature("ai.trainer.run", level="write", action="trainer_train", fields=("set",))
-def train():
-    d          = request.json or {}
-    set_name   = (d.get("set") or "").strip()
-    if not set_name:
-        return jsonify({"success": False, "error": "set name required"}), 400
-    cfg        = dict(d.get("cfg") or {})
-    # Training backend: "yolo" (default, unchanged) or "mayaku" (COCO-format).
-    # Adds bonus Mayaku support without touching the YOLO path.
-    backend    = (d.get("backend") or cfg.pop("backend", "yolo") or "yolo").strip().lower()
-    if backend not in ("yolo", "mayaku"):
-        backend = "yolo"
-    if backend == "mayaku":
-        base_model = (d.get("base_model") or "mayaku-n-det")
-    else:
-        base_model = (d.get("base_model") or "yolo11n.pt")   # trainer default; trainer is yolo-specific until it moves to a module
-    try:
-        val_frac = float(cfg.pop("val_split", d.get("val_split", 0.05)))
-    except (TypeError, ValueError):
-        val_frac = 0.05
-    val_frac = min(max(val_frac, 0.0), 0.9)
-    # Crop-to-boxes: before YOLO downscales each image to imgsz, crop tightly
-    # around the boxes we're training on (plus a margin) so the objects survive
-    # the resize at higher effective resolution. Coords are recomputed relative
-    # to the crop; the stored image/regions are never touched.
-    crop_to_boxes = bool(cfg.pop("crop_to_boxes", d.get("crop_to_boxes", False)))
-    # How many augmented copies to generate per TRAIN image with our own
-    # box-safe pipeline (0 = off). Val images are never augmented.
-    try:
-        n_aug = max(0, int(cfg.pop("n_aug", d.get("n_aug", 0))))
-    except (TypeError, ValueError):
-        n_aug = 0
-    aug_on = n_aug > 0 and ta.any_enabled(cfg)
-
-    abs_folder = os.path.abspath(MEDIA_DIR)
-    # Each set gets its own reusable dataset subfolder, so a subset's YOLO data
-    # persists and doesn't clobber another set's. e.g. media/yolo_datasets/Set_1/
-    safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in set_name).strip("_") or "set"
-    dset_dir   = os.path.join(abs_folder, "yolo_datasets", safe)
-    shutil.rmtree(dset_dir, ignore_errors=True)
-    for sub in ("images/train", "images/val", "labels/train", "labels/val"):
-        os.makedirs(os.path.join(dset_dir, sub), exist_ok=True)
-    state["status_text"] = "Preparing dataset…"
-
-    # Which box classes to train on. When the caller passes a non-empty list, we
-    # train on ONLY those classes and every other box on the image is ignored —
-    # crucially WITHOUT editing the image's stored regions or the sidecar .txt.
-    # We build fresh, locally-indexed labels straight from metadata, so unrelated
-    # boxes you don't want to train on are never disturbed. Empty/omitted => all
-    # classes found across the set.
-    want = d.get("classes")
-    want = [c for c in want if isinstance(c, str) and c.strip()] if isinstance(want, list) else None
-    want_set = set(want) if want else None
-
-    # Gather, per still image, only the regions whose class we're training on.
-    labelled = []            # (base, jpg_name, [regions])
-    skipped_video = 0
-    present_classes = set()
-    for rp in ts.work_paths(_db(), set_name):
-        abs_path = get_safe_path(MEDIA_DIR, rp)
-        if not abs_path:
-            continue
-        base = os.path.splitext(abs_path)[0]
-        if not os.path.exists(base + ".jxl"):
-            skipped_video += 1
-            continue
-        regions = (read_metadata(abs_path) or {}).get("regions", []) or []
-        keep = []
-        for r in regions:
-            nm = (r.get("class_name") or "").strip()
-            if not nm or not r.get("confirmed", True):
-                continue
-            if not all(k in r for k in ("cx", "cy", "w", "h")):
-                continue
-            if want_set is not None and nm not in want_set:
-                continue          # a box we're deliberately NOT training on
-            keep.append(r)
-            present_classes.add(nm)
-        if keep:
-            labelled.append((base, os.path.basename(base), keep))
-
-    if not labelled:
-        state["status_text"] = "No matching labelled images in this set!"
-        msg = ("No boxes of the selected class(es) in this set."
-               if want_set else "No labelled still images in this set. Draw boxes first.")
-        return jsonify({"success": False, "error": msg}), 400
-
-    # Local, contiguous class indexing for THIS dataset only — independent of the
-    # app-wide state["classes"], so training a subset can't renumber anything.
-    names = sorted(want_set) if want_set else sorted(present_classes)
-    cls_id = {n: i for i, n in enumerate(names)}
-
-    def _write_label(dst_dir, bn, regions):
-        with open(os.path.join(dst_dir, bn + ".txt"), "w") as f:
-            for r in regions:
-                nm = (r.get("class_name") or "").strip()
-                if nm not in cls_id:
-                    continue
-                try:
-                    f.write(f"{cls_id[nm]} {float(r['cx']):.6f} {float(r['cy']):.6f} "
-                            f"{float(r['w']):.6f} {float(r['h']):.6f}\n")
-                except (TypeError, ValueError):
-                    continue
-
-    def _crop_jpg_to_boxes(jpg_path, regions, margin=0.10):
-        """Crop the decoded jpg in place to the union of `regions` (normalised
-        cx,cy,w,h) expanded by `margin` of the union size, and return regions
-        re-normalised to the crop. On any failure, leave the file and return the
-        original regions unchanged."""
-        try:
-            img = cv2.imread(jpg_path)
-            if img is None:
-                return regions
-            H, W = img.shape[:2]
-            xs0, ys0, xs1, ys1 = [], [], [], []
-            for r in regions:
-                cx, cy, w, h = float(r["cx"]), float(r["cy"]), float(r["w"]), float(r["h"])
-                xs0.append(cx - w / 2); xs1.append(cx + w / 2)
-                ys0.append(cy - h / 2); ys1.append(cy + h / 2)
-            ux0, uy0, ux1, uy1 = min(xs0), min(ys0), max(xs1), max(ys1)
-            mx, my = (ux1 - ux0) * margin, (uy1 - uy0) * margin
-            ux0 = max(0.0, ux0 - mx); uy0 = max(0.0, uy0 - my)
-            ux1 = min(1.0, ux1 + mx); uy1 = min(1.0, uy1 + my)
-            px0, py0 = int(ux0 * W), int(uy0 * H)
-            px1, py1 = int(round(ux1 * W)), int(round(uy1 * H))
-            if px1 - px0 < 2 or py1 - py0 < 2:
-                return regions
-            crop = img[py0:py1, px0:px1]
-            ch, cw = crop.shape[:2]
-            if not cv2.imwrite(jpg_path, crop):
-                return regions
-            out = []
-            for r in regions:
-                nr = dict(r)
-                nr["cx"] = (float(r["cx"]) * W - px0) / cw
-                nr["cy"] = (float(r["cy"]) * H - py0) / ch
-                nr["w"] = float(r["w"]) * W / cw
-                nr["h"] = float(r["h"]) * H / ch
-                out.append(nr)
-            return out
-        except Exception as e:
-            access_logger.warning(f"crop_to_boxes {jpg_path}: {e}")
-            return regions
-
-    random.shuffle(labelled)
-    val_n = min(len(labelled) - 1, int(round(len(labelled) * val_frac))) if len(labelled) > 1 else 0
-    val_n = max(val_n, 1 if (val_frac > 0 and len(labelled) > 1) else 0)
-    val_set, tr_set = labelled[:val_n], labelled[val_n:]
-
-    # ── Mayaku backend: COCO-format dataset + Mayaku training worker ──────────
-    # Mayaku expects each split's images and its _annotations.coco.json in the
-    # SAME directory (Roboflow layout), so we decode jpgs into {train,val}/ and
-    # write the COCO json alongside. Region gathering, class indexing (`cls_id`)
-    # and crop-to-boxes above are shared with YOLO and untouched.
-    if backend == "mayaku":
-        def _decode_coco_split(pairs, split):
-            img_dst = os.path.join(dset_dir, split)
-            os.makedirs(img_dst, exist_ok=True)
-            out = []
-            for base, bn, regions in pairs:
-                jpg = os.path.join(img_dst, bn + ".jpg")
-                subprocess.run(['djxl', base + ".jxl", jpg],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if crop_to_boxes:
-                    regions = _crop_jpg_to_boxes(jpg, regions)
-                out.append((bn, regions))
-            return img_dst, out
-
-        tr_dir, tr_pairs = _decode_coco_split(tr_set, "train")
-        va_dir, va_pairs = _decode_coco_split(val_set, "val") if val_set else (None, [])
-        mayaku_support.write_coco_split(
-            tr_dir, os.path.join(tr_dir, "_annotations.coco.json"), tr_pairs, cls_id)
-        if va_pairs:
-            mayaku_support.write_coco_split(
-                va_dir, os.path.join(va_dir, "_annotations.coco.json"), va_pairs, cls_id)
-
-        run_name = "set_" + safe
-        # Mayaku hyperparameter keys differ from Ultralytics; forward only the
-        # ones the worker understands. The rest of cfg is ignored for Mayaku.
-        weights = os.path.join(os.path.abspath(MODELS_DIR), "runs", "mayaku",
-                               run_name, "best.pt")
-        ts.set_meta(_db(), set_name, weights=weights)
-        state["status_text"] = f"Training (Mayaku)… ({len(tr_pairs)} train | {len(va_pairs)} val)"
-        threading.Thread(
-            target=mayaku_support.mayaku_train_worker, daemon=True,
-            args=(dset_dir, base_model, cfg, run_name, MODELS_DIR,
-                  state, training_logger, populate_model_selector)).start()
-        return jsonify({"success": True, "set": set_name, "backend": "mayaku",
-                        "weights": weights,
-                        "train": len(tr_pairs), "val": len(va_pairs)})
-
-    # ── YOLO backend (default, unchanged) ─────────────────────────────────────
-    def _augment_into(dset_dir, split_dir_img, split_dir_lbl, bn, regions):
-        """Read the just-written train jpg and emit up to n_aug box-safe variants
-        into the same train dirs. Skips a variant if no transform fired."""
-        src = os.path.join(dset_dir, split_dir_img, bn + ".jpg")
-        img = cv2.imread(src)
-        if img is None:
-            return
-        made = 0
-        for k in range(n_aug):
-            aug_img, aug_regs, changed = ta.augment_once(img, regions, cfg)
-            if not changed or not aug_regs:
-                continue
-            abn = f"{bn}_aug{k}"
-            if not cv2.imwrite(os.path.join(dset_dir, split_dir_img, abn + ".jpg"), aug_img):
-                continue
-            _write_label(os.path.join(dset_dir, split_dir_lbl), abn, aug_regs)
-            made += 1
-        return made
-
-    aug_made = 0
-    for base, bn, regions in tr_set:
-        jpg = os.path.join(dset_dir, "images/train", bn + ".jpg")
-        subprocess.run(['djxl', base + ".jxl", jpg],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if crop_to_boxes:
-            regions = _crop_jpg_to_boxes(jpg, regions)
-        _write_label(os.path.join(dset_dir, "labels/train"), bn, regions)
-        if aug_on:
-            aug_made += (_augment_into(dset_dir, "images/train", "labels/train", bn, regions) or 0)
-    for base, bn, regions in val_set:
-        jpg = os.path.join(dset_dir, "images/val", bn + ".jpg")
-        subprocess.run(['djxl', base + ".jxl", jpg],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if crop_to_boxes:
-            regions = _crop_jpg_to_boxes(jpg, regions)
-        _write_label(os.path.join(dset_dir, "labels/val"), bn, regions)
-    tr_b, val_b = tr_set, val_set   # keep the names the rest of the route uses
-    yaml_p = os.path.join(dset_dir, "dataset.yaml")
-    with open(yaml_p, 'w') as f:
-        yaml.dump({"path": dset_dir, "train": "images/train", "val": "images/val",
-                   "nc": len(names), "names": names}, f)
-    # If there's no val split, tell Ultralytics not to validate.
-    if not val_b:
-        cfg["val"] = False
-    # When our own box-safe pipeline generated variants, force Ultralytics'
-    # native augments OFF so it can't double-augment (and re-introduce the
-    # every-image affine + mosaic distortion this feature exists to avoid).
-    if aug_on:
-        cfg.update(ta.ULTRALYTICS_OFF)
-    cfg["_run_name"] = "set_" + safe
-    aug_note = f" +{aug_made} augmented" if aug_on else ""
-    state["status_text"] = f"Training… ({len(tr_b)} train{aug_note} | {len(val_b)} val)"
-    # Where best.pt will land (mirrors what the worker pins).
-    weights = os.path.join(os.path.abspath(MODELS_DIR), "runs", "detect",
-                           "set_" + safe, "weights", "best.pt")
-    ts.set_meta(_db(), set_name, weights=weights)
-    threading.Thread(target=yolo_train_worker_cfg, daemon=True,
-                     args=(dset_dir, yaml_p, base_model, cfg)).start()
-    return jsonify({"success": True, "set": set_name, "backend": "yolo",
-                    "weights": weights,
-                    "train": len(tr_b), "val": len(val_b)})
-
-@app.route("/api/training_log")
-def get_training_log():
-    if not os.path.exists('logs/training.log'):
-        return jsonify({"log":"Awaiting start…"})
-    # Ultralytics writes UTF-8 (progress bars, box-drawing glyphs); read with an
-    # explicit encoding and tolerate stray bytes so a Windows cp1252 default
-    # locale can't 500 the poller.
-    try:
-        with open('logs/training.log', encoding='utf-8', errors='replace') as f:
-            return jsonify({"log": "".join(f.readlines()[-200:])})
-    except OSError as e:
-        return jsonify({"log": f"(log unavailable: {e})"})
 
 @app.route("/tailwind")
 def get_tailwind():
@@ -7454,7 +6267,10 @@ _core_api = SimpleNamespace(
     index_file=_index_file, enumerate_library=_enumerate_library,
     thumb_drop=_thumb_drop, delete_file_row=_delete_file_row,
     purge_file_everywhere=_purge_file_everywhere, audit=audit, tiering=tiering,
-    detect_boxes=_detect_obb_or_box, llm_call=_llm_call,
+    detect_boxes=_detect_obb_or_box, llm_call=_llm_call, run_pipeline=_run_pipeline_on,
+    models_dir=MODELS_DIR, training_logger=cimlogger_training_logger,
+    refresh_model_groups=populate_model_selector, clamp_box=_clamp_box, meta_cache_drop=_meta_cache_drop,
+    apply_pipeline_result=_apply_pipeline_result, default_pipeline=DEFAULT_PIPELINE,
     folder_scope_clause=_folder_scope_clause, table_exists=_table_exists,
     norm_date_literal=_norm_date_literal, oai_v1_base=_oai_v1_base,
     upload_spool_dir=_UPLOAD_SPOOL_DIR, upload_workers_wake=_upload_workers_wake,

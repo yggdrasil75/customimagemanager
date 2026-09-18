@@ -235,7 +235,7 @@ function renderGallery(files){
       div.dataset.folder=item.folder;
       const cover=item.cover;
       if(cover) div.dataset.src=`/api/thumb/${encodeURIComponent(cover)}`;
-      div.addEventListener('click',()=>openComic(item.folder));
+      div.addEventListener('click',()=>{ if(window.openComic) openComic(item.folder); });
       div.style.aspectRatio=(item.width&&item.height)?`${item.width}/${item.height}`:'2/3';
       div.innerHTML=`<div class="skeleton"></div>
         ${cover?'<img alt="">':'<div class="absolute inset-0 flex items-center justify-center text-4xl">📚</div>'}

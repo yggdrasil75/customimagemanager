@@ -3,8 +3,8 @@
      trainer.css) with min/max widths, so when the controls pane is docked at the
      BOTTOM (wide) they reflow into many columns, and when docked at the RIGHT
      (narrow) they collapse to one or two. -->
-<div id="controls_pane_trainer" class="controls-tab-pane hidden h-full overflow-y-auto p-3 space-y-3"
-     data-feature="ai.trainer.run">
+{# Wrapper #controls_pane_trainer is rendered by the core controls pane; this is its body. #}
+
 
   <div class="flex justify-between items-center">
     <span class="text-sm font-bold text-purple-300">Train box model</span>
@@ -149,4 +149,3 @@
         Retrain on corrected labels</button>
     </div>
   </details>
-</div>

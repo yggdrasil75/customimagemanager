@@ -53,6 +53,10 @@ class ConfigRegistry:
     def declares(self, key):
         return key in self._settings
 
+    def default_of(self, key):
+        d = self._settings.get(key)
+        return d["default"] if d else None
+
     def owner(self, key):
         d = self._settings.get(key)
         return d["owner"] if d else None

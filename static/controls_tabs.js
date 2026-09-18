@@ -29,6 +29,7 @@
       label: spec.label || spec.id,
       feature: spec.feature || null,
       onShow: typeof spec.onShow === "function" ? spec.onShow : null,
+      modeTab: !!spec.modeTab,   // hidden unless a left tab claims it (panes.js applyControlsMode)
     };
     // The pane (#controls_pane_<id>) is contributed server-side by the module
     // (host.register_controls_pane), so it's already in the DOM — we only wire
@@ -47,6 +48,7 @@
       btn.dataset.tab = id;
       btn.className = "controls-tab px-3 py-2 text-gray-400 border-b-2 border-transparent hover:text-white";
       if (t.feature) btn.setAttribute("data-feature", t.feature);
+      if (t.modeTab) { btn.setAttribute("data-mode-tab", ""); btn.classList.add("hidden"); }
       btn.textContent = t.label;
       btn.addEventListener("click", () => setControlsTab(id));
       bar.appendChild(btn);

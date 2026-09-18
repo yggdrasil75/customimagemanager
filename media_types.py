@@ -104,6 +104,22 @@ def register_media_type(kind, *, exts=(), unambiguous_exts=None,
     return kind
 
 
+def extend_media_type(kind, *, exts=(), unambiguous_exts=None, uploadable_exts=None,
+                      mime_map=None):
+    """Add extensions to a kind another module registered (comics extend
+    'book' with cbz/cbr/cb7). No-op with a warning-free skip if the kind is
+    absent — the extending module then simply has nothing to attach to."""
+    spec = _MEDIA_TYPES.get(kind)
+    if spec is None:
+        return None
+    ue = set(unambiguous_exts if unambiguous_exts is not None else exts)
+    spec["exts"] |= set(exts) | ue
+    spec["unambiguous_exts"] |= ue
+    spec["uploadable_exts"] |= set(uploadable_exts if uploadable_exts is not None else ue)
+    spec["mime_map"].update(mime_map or {})
+    return kind
+
+
 def unregister_media_type(kind):
     _MEDIA_TYPES.pop(kind, None)
 
