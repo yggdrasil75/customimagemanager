@@ -1,6 +1,6 @@
 // ── State ──────────────────────────────────────────────────────────────────
 window.currentFile=null;
-let currentRegions=[], currentRegionsFile=null, oai_actions_cache=[], hasSettings=false;
+let currentRegions=[], currentRegionsFile=null, hasSettings=false;
 let autosaveTO=null, drawing=false, startX=0,startY=0,curX=0,curY=0;
 let pendingBox=null, editingBoxIdx=null;
 let vtTagging=false;   // true while the shared tag modal is tagging a VIDEO box
@@ -293,10 +293,6 @@ async function fetchState(){
 function populateSettingsForm(s){
   try{
       const _set=(id,v)=>{const e=document.getElementById(id); if(e) e.value=v;};
-      _set('cfg_endpoint', s.oai_endpoint||'');
-      _set('cfg_apikey', s.oai_key||'');
-      _set('cfg_model', s.oai_model||'');
-      _set('cfg_embed_model', s.oai_embed_model||'');
       // faces / people
       const _g=s.model_groups||{};
       const _fill=(id,cur,list,label)=>{
@@ -315,9 +311,6 @@ function populateSettingsForm(s){
       _set('cfg_pose_estimator', s.pose_estimator||'atlas');
       _set('cfg_shape_estimator', s.shape_estimator||'anny_fit');
       _set('cfg_appearance_eps', (s.appearance_eps??0.35));
-      _set('cfg_system', s.oai_system_prompt||'');
-      oai_actions_cache=s.oai_actions||[];
-      renderAiActions(); updateActionDropdown();
       if(typeof renderQuickFilterEditor==='function') renderQuickFilterEditor();
       _set('cfg_pipeline', JSON.stringify(s.pipeline_tree||{},null,2));
       const at=document.getElementById('autotag_toggle');

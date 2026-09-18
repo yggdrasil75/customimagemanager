@@ -125,9 +125,6 @@ from cimlogger import training_logger, access_logger, audit
 state = {
     "classes": ["object"], "available_models": [],
     "status_text": "Ready.", "remote_ip": "",
-    "oai_endpoint": "http://localhost:5001/v1/chat/completions",
-    "oai_key": "", "oai_model": "gpt-4o-mini",
-    "oai_embed_model": "",
     "autotag_enabled": False,
     "keep_raws": False,
     "pipeline_tree": DEFAULT_PIPELINE,
@@ -165,15 +162,7 @@ state = {
     "cjxl_threads": max(1, (os.cpu_count() or 8) // 4),
     "gdl_sites": {},
     "gdl_opts": {}, 
-    "gdl_auth": {},
-    "oai_system_prompt": "You are an expert image analysis AI. Provide concise, highly detailed, and accurate responses.",
-    "oai_actions": [
-        {"id":"1","name":"Describe Scene","prompt":"Describe the overall scene, lighting, and composition in a detailed paragraph.","target":"description"},
-        {"id":"2","name":"Describe Clothes","prompt":"Focus entirely on the subject's clothing, style, and accessories.","target":"description"},
-        {"id":"3","name":"Booru Tags","prompt":"Generate a comma-separated list of Danbooru-style tags for the subjects and scene.","target":"tags"},
-        {"id":"4","name":"Box Objects","prompt":"Identify the primary objects in this image and create bounding boxes for them.","target":"regions"},
-        {"id":"5","name":"Flag if bad","prompt":"Assess this image's quality. If it is blurry, corrupt, blank/near-empty, a junk/placeholder image, or otherwise not worth keeping, mark it for deletion. Otherwise keep it.","target":"flag"},
-    ]
+    "gdl_auth": {}
 }
 
 # In-memory thumbnail LRU (hot files only; disk cache handles the rest)
@@ -1581,8 +1570,8 @@ def load_config():
     # migrated into it there.)
 
 def save_config():
-    keys = ["remote_ip","oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt",
-            "oai_actions","autotag_enabled","keep_raws","pipeline_tree",
+    keys = ["remote_ip",
+            "autotag_enabled","keep_raws","pipeline_tree",
             "person_model","our_model",
             "brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
             "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers","modules","model_selection"]
@@ -3565,124 +3554,21 @@ def _folder_scope_clause(column: str, folder: str) -> tuple[list, list]:
         return [f"({column} LIKE ? AND {column} NOT LIKE ?)"], [f + '/%', f + '/%/%']
     return [], []
 
-# ── LLM helpers (shared by actions + pipeline) ────────────────────────────────
+# ── LLM client: lives in the vlm module ("llm" service). These thin wrappers
+#    keep the core's call sites unchanged and make them no-ops when it's off.
+def _llm():
+    return module_host.get_service("llm") if 'module_host' in globals() else None
+
 def _oai_v1_base(endpoint):
-    """Reduce any OpenAI-compatible URL to its `.../v1` base (no trailing
-    slash), stripping a known operation suffix if present. '' -> ''."""
-    base = (endpoint or "").strip().rstrip('/')
-    if not base:
-        return ""
-    for suffix in ("/chat/completions", "/completions", "/embeddings"):
-        if base.endswith(suffix):
-            return base[: -len(suffix)]
-    return base
-
-def _normalize_endpoint(endpoint):
-    """Auto-complete a base URL to the OpenAI chat-completions path."""
-    base = _oai_v1_base(endpoint)
-    if not base:
-        return ""
-    return base + ("/chat/completions" if base.endswith("/v1")
-                   else "/v1/chat/completions")
-
-def _llm_request(messages, tools=None, tool_choice=None, timeout=600, endpoint=None):
-    """Low-level OpenAI-compatible chat call. Returns the message dict or raises.
-    `endpoint` overrides the configured one (used to spread load across several
-    model instances during a parallel pipeline run)."""
-    endpoint = _normalize_endpoint(endpoint or state.get("oai_endpoint", ""))
-    model    = state.get("oai_model", "").strip()
-    key      = state.get("oai_key", "").strip()
-    if not endpoint or not model:
-        raise RuntimeError("LLM not configured")
-    hdrs = {"Content-Type": "application/json"}
-    if key:
-        hdrs["Authorization"] = f"Bearer {key}"
-    payload = {"model": model, "max_tokens": 1000, "messages": messages}
-    if tools:
-        payload["tools"] = tools
-        payload["tool_choice"] = tool_choice
-    r = requests.post(endpoint, headers=hdrs, json=payload, timeout=timeout)
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]
-
-# OAI embedding functions moved to embedding module.
-# Use module_host.get_service("embedding") to access them.
-
-_BOX_TOOL = [{"type": "function", "function": {
-    "name": "create_bounding_boxes",
-    "description": "Bounding boxes normalised 0..1",
-    "parameters": {"type": "object", "properties": {"boxes": {"type": "array", "items": {
-        "type": "object", "properties": {
-            "class_name": {"type": "string"}, "cx": {"type": "number"},
-            "cy": {"type": "number"}, "w": {"type": "number"}, "h": {"type": "number"}},
-        "required": ["class_name", "cx", "cy", "w", "h"]}}}, "required": ["boxes"]}}}]
-
-def _encode_for_llm(image_bgr, quality=85):
-    """JPEG-encode a BGR image to a data-URL: the single chokepoint for every
-    image sent to a vision LLM (pipeline, prompted detection, AI actions).
-    Modules subscribed to `llm.image` (llm_preprocess: compress/pad) transform
-    it first. Returns the data-URL string, or None if encoding fails."""
-    if image_bgr is None:
-        return None
-    for out in module_host.emit("llm.image", image=image_bgr):
-        if out is not None:
-            image_bgr = out
-    ok, buf = cv2.imencode('.jpg', image_bgr, [cv2.IMWRITE_JPEG_QUALITY, quality])
-    if not ok:
-        return None
-    b64 = base64.b64encode(buf.tobytes()).decode()
-    return f"data:image/jpeg;base64,{b64}"
+    svc = _llm()
+    return svc["v1_base"](endpoint) if svc else ""
 
 def _llm_call(prompt, image_bgr, want="text", choices=None, endpoint=None):
-    """Typed single-turn call used by the pipeline engine. `want` controls parsing.
-    `endpoint` (optional) pins this call to a specific model instance."""
-    content = [{"type": "text", "text": prompt}]
-    if image_bgr is not None:
-        url = _encode_for_llm(image_bgr)
-        if url:
-            content.append({"type": "image_url",
-                            "image_url": {"url": url}})
-    messages = [{"role": "system", "content": state.get("oai_system_prompt", "")},
-                {"role": "user", "content": content}]
-
-    if want == "boxes":
-        msg = _llm_request(messages, _BOX_TOOL,
-                           {"type": "function", "function": {"name": "create_bounding_boxes"}},
-                           endpoint=endpoint)
-        boxes = []
-        if msg.get("tool_calls"):
-            try:
-                boxes = json.loads(msg["tool_calls"][0]["function"]["arguments"]).get("boxes", [])
-            except Exception:
-                pass
-        if not boxes and msg.get("content"):
-            try:
-                c = msg["content"]; boxes = json.loads(c[c.find('{'):c.rfind('}')+1]).get("boxes", [])
-            except Exception:
-                pass
-        return [cb for cb in (_clamp_box(b) for b in boxes) if cb]
-
-    msg  = _llm_request(messages, endpoint=endpoint)
-    text = (msg.get("content") or "").strip()
-    if want == "tags":
-        return [t.strip() for t in re.split(r'[,\n]', text) if t.strip()]
-    if want == "bool":
-        low = text.lower().lstrip("*_ \"'`")
-        return low.startswith(("y", "true")) or low[:8].find("yes") != -1
-    if want == "choice":
-        low = text.lower()
-        if choices:
-            for c in choices:
-                if c.lower() in low:
-                    return c
-            return choices[0]
-        return text
-    if want == "json":
-        try:
-            return json.loads(text[text.find('{'):text.rfind('}')+1])
-        except Exception:
-            return {}
-    return text
+    svc = _llm()
+    if not svc:
+        return {} if want == "json" else [] if want in ("boxes", "tags") else \
+            (False if want == "bool" else ((choices or [""])[0] if want == "choice" else ""))
+    return svc["call"](prompt, image_bgr, want=want, choices=choices, endpoint=endpoint)
 
 def _compose_description(analysis, existing=""):
     """Build a human-readable description from a structured analysis."""
@@ -3697,87 +3583,6 @@ def _compose_description(analysis, existing=""):
         if len(seg) > 1:
             parts.append(" ".join(seg))
     return "\n\n".join(p for p in parts if p) or existing
-
-def _apply_body_action(rel, bgr, action):
-    """! @brief Fill the fixed body-description slots for each identified person in an image.
-    @return True once run. For every face cluster present in the image, one LLM
-            call returns the BODY_FIELDS as JSON and each is written through the
-            shared store, so the person record gains structured, reusable fields.
-    """
-    people = module_host.get_service("people")
-    if not people:
-        return True
-    clusters = people["clusters_in_image"](rel)
-    if not clusters:
-        return True
-    fields = ", ".join(people["BODY_FIELDS"])
-    prompt = (action.get("prompt", "") +
-              f"\n\nDescribe the person. Respond ONLY as JSON with these keys: {fields}. "
-              "Use a short phrase per key, empty string if unknown.")
-    res = _llm_call(prompt, bgr, "json") or {}
-    for cid in clusters:
-        for key in people["BODY_FIELDS"]:
-            val = str(res.get(key, "")).strip()
-            if val:
-                people["store_person_field"](cid, "body", key, val)
-    return True
-
-def _apply_llm_action(fp, action):
-    """Run one configured AI action against a file and merge the result into its
-    metadata (tags appended/deduped, description appended, boxes added as
-    unconfirmed). Returns True if it ran."""
-    target = action.get("target", "description")
-    prompt = action.get("prompt", "")
-    img = read_jxl(fp)
-    if img is None:
-        return False
-    bgr  = _to_bgr(img)
-    meta = read_metadata(fp)
-    if target == "flag":
-        res = _llm_call(prompt + '\n\nRespond ONLY as JSON: {"delete": true|false, "reason": "short reason"}',
-                        bgr, "json") or {}
-        delete = bool(res.get("delete"))
-        reason = str(res.get("reason", ""))[:300]
-        write_metadata(fp, meta["tags"], meta["description"], meta["regions"],
-                       flag={"delete": delete, "reason": reason})
-        return True
-    if target == "body":
-        return _apply_body_action(_rel(fp), bgr, action)
-    handler = module_host.action_targets.get(target) if 'module_host' in globals() else None
-    if handler:   # module-provided action target (segmentation: "segment")
-        return bool(handler(fp, bgr, meta, action))
-    if target == "regions":
-        boxes = _llm_call(prompt + "\n\nReturn bounding boxes normalised 0..1.", bgr, "boxes") or []
-        new = []
-        for b in boxes:
-            try:
-                new.append({"class_name": b.get("class_name", "object"),
-                            "cx": float(b["cx"]), "cy": float(b["cy"]),
-                            "w": float(b["w"]), "h": float(b["h"]), "confirmed": False})
-            except Exception:
-                pass
-        if new:
-            for n in new:
-                if n["class_name"] not in state["classes"]:
-                    state["classes"].append(n["class_name"])
-            save_classes()
-            write_metadata(fp, meta["tags"], meta["description"], meta["regions"] + new)
-    elif target == "tags":
-        tags = _llm_call(prompt, bgr, "tags") or []
-        merged = list(meta["tags"])
-        seen = {tag_name(t).lower() for t in meta["tags"]}
-        for t in tags:
-            nm = tag_name(t)
-            if nm and nm.lower() not in seen:
-                merged.append(make_tag(nm, confirmed=False))   # AI suggestion → unconfirmed
-                seen.add(nm.lower())
-        write_metadata(fp, merged, meta["description"], meta["regions"])
-    else:  # description
-        text = (_llm_call(prompt, bgr, "text") or "").strip()
-        if text:
-            desc = (meta["description"] + "\n\n" + text).strip() if meta["description"].strip() else text
-            write_metadata(fp, meta["tags"], desc, meta["regions"])
-    return True
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 # Endpoints that are POLLED by a UI on a timer. These must NOT count as user
@@ -4016,7 +3821,6 @@ def api_state():
     # entire front-end.
     return jsonify({k: state.get(k) for k in
         ("classes","available_models","status_text","remote_ip",
-         "oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions",
          "autotag_enabled","pipeline_tree",
          "appearance_eps","shape_estimator","pose_estimator",
          "person_model","our_model",
@@ -4165,7 +3969,7 @@ def update_settings():
     # Same for the "our"/trained model: _detect_obb_or_box memoises by path.
     if "our_model" in d and d["our_model"] != state.get("our_model"):
         _load_yolo.cache_clear()
-    for k in ("oai_endpoint","oai_key","oai_model","oai_embed_model","oai_system_prompt","oai_actions","pipeline_tree",
+    for k in ("pipeline_tree",
               "appearance_eps","shape_estimator","pose_estimator",
               "person_model","our_model",):
         if k in d: state[k] = d[k]
@@ -6491,34 +6295,6 @@ def bulk_box():
     return jsonify({"success": True, "done": done, "boxed": boxed, "errors": errors})
 
 
-@app.route("/api/bulk_llm", methods=["POST"])
-@_auth.require_feature("ai.llm", level="write")
-def bulk_llm():
-    """Run a configured AI action on many files, writing the result into each."""
-    filenames = request.json.get("filenames", [])
-    action_id = str(request.json.get("action_id", ""))
-    action = next((a for a in state.get("oai_actions", []) if str(a["id"]) == action_id), None)
-    if not action:
-        return jsonify({"success": False, "error": "Unknown AI action."})
-    if not state.get("oai_endpoint") or not state.get("oai_model"):
-        return jsonify({"success": False, "error": "LLM not configured."})
-    done, applied, errors = 0, 0, []
-    total = len(filenames)
-    for fn in filenames:
-        fp = get_safe_path(MEDIA_DIR, fn)
-        if not fp or not os.path.exists(fp):
-            errors.append(fn); continue
-        try:
-            if _apply_llm_action(fp, action):
-                applied += 1
-            done += 1
-            state["status_text"] = f"AI ({action.get('name','action')}): {done}/{total}…"
-        except Exception as e:
-            errors.append(fn)
-            access_logger.error(f"bulk_llm {fn}: {e}")
-    state["status_text"] = "Ready."
-    return jsonify({"success": True, "done": done, "applied": applied,
-                    "errors": errors, "target": action.get("target")})
 
 def _pose_stage_fn():
     """Pose pipeline stage, or None when the pose module is disabled/absent.
@@ -6894,87 +6670,6 @@ def auto_tag():
                 if name not in state["classes"]: state["classes"].append(name)
         save_classes()
         return jsonify({"success":True,"regions":regions})
-    except Exception as e:
-        return jsonify({"success":False,"error":str(e)})
-
-@app.route("/api/run_llm", methods=["POST"])
-@_auth.require_feature("ai.llm", level="write")
-def run_llm():
-    fn        = request.json.get("filename","")
-    action_id = str(request.json.get("action_id",""))
-    fp        = get_safe_path(MEDIA_DIR, fn)
-    if not fp or not os.path.exists(fp):
-        return jsonify({"success":False,"error":"File not found."})
-    endpoint  = _normalize_endpoint(state.get("oai_endpoint",""))
-    model     = state.get("oai_model","").strip()
-    api_key   = state.get("oai_key","").strip()
-    sys_p     = state.get("oai_system_prompt","")
-    action    = next((a for a in state.get("oai_actions",[]) if str(a["id"])==action_id), None)
-    if not endpoint or not model or not action:
-        return jsonify({"success":False,"error":"LLM not configured."})
-    try:
-        img = read_jxl(fp)
-        if img is None: raise Exception("Decode failed")
-        if action["target"]=="flag":
-            res=_llm_call(action["prompt"]+'\n\nRespond ONLY as JSON: {"delete": true|false, "reason": "short reason"}',
-                          _to_bgr(img), "json") or {}
-            delete=bool(res.get("delete")); reason=str(res.get("reason",""))[:300]
-            meta=read_metadata(fp)
-            write_metadata(fp, meta["tags"], meta["description"], meta["regions"],
-                           flag={"delete":delete,"reason":reason})
-            return jsonify({"success":True,"target":"flag","delete":delete,"reason":reason})
-        handler = module_host.action_targets.get(action["target"])
-        if handler:   # module-provided action target (segmentation: "segment")
-            meta=read_metadata(fp)
-            res = handler(fp, _to_bgr(img), meta, action)
-            return jsonify({"success":True,"target":"regions",
-                            "regions": res if isinstance(res, list) else []})
-        data_url = _encode_for_llm(_to_bgr(img))
-        hdrs = {"Content-Type":"application/json"}
-        if api_key: hdrs["Authorization"] = f"Bearer {api_key}"
-        user_p = action["prompt"]
-        if action["target"]=="regions":
-            user_p += '\n\nRespond ONLY in JSON: {"boxes":[{"class_name":"x","cx":0.5,"cy":0.5,"w":0.1,"h":0.1}]}'
-        payload = {"model":model,"max_tokens":1000,
-                   "messages":[{"role":"system","content":sys_p},
-                                {"role":"user","content":[
-                                    {"type":"text","text":user_p},
-                                    {"type":"image_url","image_url":{"url":data_url}}]}]}
-        if action["target"]=="regions":
-            payload["tools"]=[{"type":"function","function":{"name":"create_bounding_boxes",
-                "description":"Bounding boxes normalised 0..1",
-                "parameters":{"type":"object","properties":{"boxes":{"type":"array","items":{
-                    "type":"object","properties":{
-                        "class_name":{"type":"string"},"cx":{"type":"number"},
-                        "cy":{"type":"number"},"w":{"type":"number"},"h":{"type":"number"}},
-                    "required":["class_name","cx","cy","w","h"]}}},"required":["boxes"]}}}]
-            payload["tool_choice"]={"type":"function","function":{"name":"create_bounding_boxes"}}
-        r    = requests.post(endpoint,headers=hdrs,json=payload,timeout=600)
-        r.raise_for_status()
-        msg  = r.json()["choices"][0]["message"]
-        if action["target"]=="regions":
-            boxes=[]
-            if msg.get("tool_calls"):
-                try: boxes=json.loads(msg["tool_calls"][0]["function"]["arguments"]).get("boxes",[])
-                except Exception: pass
-            if not boxes and msg.get("content"):
-                try:
-                    c=msg["content"]; js=c[c.find('{'):c.rfind('}')+1]
-                    boxes=json.loads(js).get("boxes",[])
-                except Exception: pass
-            for b in boxes:
-                if b.get("class_name") and b["class_name"] not in state["classes"]:
-                    state["classes"].append(b["class_name"])
-            save_classes()
-            boxes=[cb for cb in (_clamp_box(b) for b in boxes) if cb]
-            for _b in boxes:
-                _b["confirmed"] = False   # LLM boxes start unconfirmed
-            return jsonify({"success":True,"target":"regions","regions":boxes})
-        elif action["target"]=="tags":
-            tags=[t.strip() for t in msg.get("content","").split(",") if t.strip()]
-            return jsonify({"success":True,"target":"tags","tags":tags})
-        else:
-            return jsonify({"success":True,"target":"description","description":msg.get("content","")})
     except Exception as e:
         return jsonify({"success":False,"error":str(e)})
 
@@ -7839,11 +7534,11 @@ _core_api = SimpleNamespace(
     index_file=_index_file, enumerate_library=_enumerate_library,
     thumb_drop=_thumb_drop, delete_file_row=_delete_file_row,
     purge_file_everywhere=_purge_file_everywhere, audit=audit, tiering=tiering,
-    detect_boxes=_detect_obb_or_box, llm_call=_llm_call, llm_request=_llm_request,
+    detect_boxes=_detect_obb_or_box, llm_call=_llm_call,
     folder_scope_clause=_folder_scope_clause, table_exists=_table_exists,
     norm_date_literal=_norm_date_literal, oai_v1_base=_oai_v1_base,
     upload_spool_dir=_UPLOAD_SPOOL_DIR, upload_workers_wake=_upload_workers_wake,
-    api_upload=api_upload, auth=_auth, features=features, tag_name=tag_name,
+    api_upload=api_upload, auth=_auth, features=features, tag_name=tag_name, make_tag=make_tag,
     background_instances=_background_instances, fold_background=_fold_background,
     save_classes=save_classes, iou_center=_iou_center,
     detect_boxes_batch=_detect_obb_or_box_batch, detect_objects=_detect_objects,

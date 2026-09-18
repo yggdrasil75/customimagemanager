@@ -49,7 +49,6 @@ FEATURE_SECTIONS = {
             ("ai.tiers",         "Storage Tiers", "write"),
             ("ai.bg_autotag",    "Background auto-tag when idle", "write"),
             ("ai.reconcile",     "Sync with disk", "write"),
-            ("ai.llm",           "LLM actions (✨ AI)", "write"),
             ("ai.iqa",           "Image quality (IQA)", "write"),
         ],
     },

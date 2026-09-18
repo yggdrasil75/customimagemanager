@@ -70,27 +70,10 @@
 
     <div data-settings-pane="ai" class="hidden overflow-y-auto flex-1 grid grid-cols-2 gap-x-6 gap-y-3 pr-1 items-start">
       <div class="col-span-2">
-        <label class="text-xs text-indigo-300 font-bold block mb-2">LLM connection
-          <span class="font-normal text-gray-500">(vision model for Smart Tag &amp; AI actions)</span></label>
-        <div class="grid grid-cols-2 gap-x-6 gap-y-3">
-          <div><label class="text-xs text-gray-400 block mb-1">Endpoint</label>
-            <input id="cfg_endpoint" type="text"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-          </div>
-          <div><label class="text-xs text-gray-400 block mb-1">API Key</label>
-            <input id="cfg_apikey" type="password"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-          </div>
-          <div><label class="text-xs text-gray-400 block mb-1">Model</label>
-            <input id="cfg_model" type="text"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-          </div>
-          <div><label class="text-xs text-gray-400 block mb-1">Embedding model
-              <span class="text-gray-600">(blank = local CNN, no text search)</span></label>
-            <input id="cfg_embed_model" type="text" placeholder="e.g. clip-ViT-B-32"
-              class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
-          </div>
-        </div>
+        <label class="text-xs text-indigo-300 font-bold block mb-2">LLM connection</label>
+        <p class="text-[10px] text-gray-500">The vision-LLM endpoint, key, chat model and system prompt
+          live with the <b>Vision LLM</b> module (Modules → ⚙ Settings); the OAI embedding model with
+          the Embedding module (🧩 Models → Image embedding).</p>
       </div>
       <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
         <label class="text-xs text-sky-300 font-bold block mb-2">Person estimation
@@ -131,12 +114,6 @@
           download automatically on first use.</p>
       </div>
       <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
-        <label class="text-xs text-indigo-300 font-bold block mb-2">System prompt
-          <span class="font-normal text-gray-500">(prepended to every vision-model call)</span></label>
-        <textarea id="cfg_system" rows="2"
-          class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
-      </div>
-      <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
         <label class="text-xs text-purple-300 font-bold block mb-2">Faces &amp; People
           <span class="font-normal text-gray-500">(detect, embed, and cluster who&rsquo;s in each image)</span></label>
         <p class="text-[10px] text-gray-500 mb-3">The background face/people scan and its
@@ -171,17 +148,6 @@
             <option value="">Latest trained (auto)</option>
           </select>
         </div>
-      </div>
-      <div class="col-span-2 border-t border-gray-700 pt-3 mt-1">
-        <div class="flex justify-between items-center mb-2">
-          <label class="text-xs text-rose-300 font-bold">AI actions
-            <span class="font-normal text-gray-500">(named prompts you can run on an image)</span></label>
-          <button onclick="addAiAction()"
-            class="text-xs bg-indigo-600 hover:bg-indigo-500 px-2 py-0.5 rounded font-bold">+ Add</button>
-        </div>
-        <div id="actions_container" class="grid grid-cols-2 gap-3"></div>
-        <p id="actions_empty" class="hidden text-[11px] text-gray-500 border border-dashed border-gray-700 rounded p-4 text-center">
-          No actions yet. Add one to run a custom prompt on any image.</p>
       </div>
     </div>
 

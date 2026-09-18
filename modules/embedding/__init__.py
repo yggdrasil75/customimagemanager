@@ -17,7 +17,6 @@ MANIFEST = {
     "assets":      ["embedding.js", "embedding.css"],
 }
 
-import base64
 import json
 import os
 import time
@@ -30,7 +29,6 @@ import object_grouping as og
 from optional_deps import optional_import
 
 cv2, _HAVE_CV2 = optional_import("cv2")
-requests, _HAVE_REQUESTS = optional_import("requests")
 
 
 def register(host):
@@ -44,12 +42,6 @@ def register(host):
     host.add_asset("embedding.css", kind="css", module_id="embedding")
 
     # ── settings (shared OAI keys; the core AI pane renders them) ──────────
-    host.add_config_key("oai_embed_model", default="", save=True,
-                        validate=lambda v: isinstance(v, str))
-    host.add_config_key("oai_endpoint", default="", save=True,
-                        validate=lambda v: isinstance(v, str))
-    host.add_config_key("oai_key", default="", save=True,
-                        validate=lambda v: isinstance(v, str))
 
     # ── database tables ────────────────────────────────────────────────────
     host.add_table("""
@@ -91,60 +83,29 @@ def register(host):
         return host.broker.selected_id("embed")
 
     # ── OAI embedding helpers ──────────────────────────────────────────────
-    def _embed_endpoint():
-        base = host.core.oai_v1_base(host.config.get("oai_endpoint", ""))
-        if not base:
-            return ""
-        return base + ("/embeddings" if base.endswith("/v1") else "/v1/embeddings")
-
-    def _oai_configured():
-        return bool((host.config.get("oai_embed_model") or "").strip()) and bool(_embed_endpoint())
+    # The remote (OAI) embedder belongs to the vlm module; when it is the
+    # selected 'embed' provider, text search goes through its embed_text.
+    def _remote():
+        return host.get_service("llm") if _embed_provider() == "oai" else None
 
     def _oai_embed_enabled():
-        return _embed_provider() == "oai" and _oai_configured()
+        r = _remote()
+        return bool(r and r["embed_configured"]())
 
     def _oai_embed_model():
         return (host.config.get("oai_embed_model") or "").strip()
 
     def _oai_embed_tag():
-        return "oai:" + _oai_embed_model()
+        r = _remote()
+        return r["embed_tag"]() if r else ""
 
-    def _oai_embed_request(inputs, timeout=120):
-        endpoint = _embed_endpoint()
-        model = _oai_embed_model()
-        if not endpoint or not model:
-            raise RuntimeError("OAI embeddings not configured")
-        key = (host.config.get("oai_key") or "").strip()
-        headers = {"Content-Type": "application/json"}
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
-        payload = {"model": model, "input": inputs}
-        r = requests.post(endpoint, json=payload, headers=headers, timeout=timeout)
-        r.raise_for_status()
-        data = r.json().get("data", [])
-        data = sorted(data, key=lambda d: d.get("index", 0))
-        return [np.asarray(d["embedding"], np.float32) for d in data]
+    def _oai_embed_image(img_bgr):
+        r = _remote()
+        return r["embed_image"](img_bgr) if r else None
 
-    def _oai_embed_image(img_bgr, timeout=120):
-        if img_bgr is None:
-            return None
-        ok, buf = cv2.imencode(".jpg", img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        if not ok:
-            return None
-        b64 = base64.b64encode(buf.tobytes()).decode()
-        vecs = _oai_embed_request([f"data:image/jpeg;base64,{b64}"], timeout=timeout)
-        if not vecs:
-            return None
-        return _normalise(vecs[0])
-
-    def _oai_embed_text(text, timeout=60):
-        try:
-            vecs = _oai_embed_request([text], timeout=timeout)
-            if not vecs:
-                return None
-            return _normalise(vecs[0])
-        except Exception:
-            return None
+    def _oai_embed_text(text):
+        r = _remote()
+        return r["embed_text"](text) if r else None
 
     # ── core embedding functions ───────────────────────────────────────────
     def _normalise(v):
@@ -208,14 +169,6 @@ def register(host):
         transform=None,
         available=lambda: __import__("optional_deps").optional_import("torch")[1],
         reason="pip install torch torchvision", cost_mb=300)
-    host.provide_model(
-        "embed", "oai", label="OpenAI-compatible", family="OAI",
-        settings=[{"key": "oai_embed_model", "label": "Embedding model", "kind": "text",
-                   "help": "e.g. text-embedding-3-small; endpoint/key are in AI settings."}],
-        loader=lambda: (lambda img, *a, **k: _oai_embed_image(img)),
-        transform=None, available=_oai_configured,
-        reason="set OAI endpoint + embedding model", cost_mb=0)
-
     def _stage_embeddings(db, file_list, loader, cnn_model=None, mtime_of=None,
                           force=False, progress=None, should_stop=None):
         model = cnn_model or _cnn_choice()

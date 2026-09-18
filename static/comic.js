@@ -106,33 +106,6 @@ async function bulkBox(){
     loadGallery(); refreshReviewCount();
   } else alert('AI Box failed: '+(d.error||''));
 }
-async function bulkRunAI(){
-  const files=[...selectedFiles]; if(!files.length) return;
-  const sel=document.getElementById('bulk_action_select');
-  const aid=sel.value;
-  if(!aid){ alert('No AI action selected. Add actions in ⚙ Settings.'); return; }
-  const name=sel.selectedOptions[0]?.text||'AI';
-  showToast(`Running "${name}" on ${files.length} image(s)…`);
-  const d=await fetch('/api/bulk_llm',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filenames:files, action_id:aid})}).then(r=>r.json());
-  if(d.success){
-    showToast(`Applied "${name}" to ${d.applied}/${d.done} image(s)${d.errors.length?', '+d.errors.length+' errors':''}.`);
-    if(window.currentFile && files.includes(window.currentFile)) selectFile(window.currentFile);
-    loadGallery(); refreshReviewCount();
-  } else alert('Run AI failed: '+(d.error||''));
-}
-async function comicRunAI(){
-  if(!comicState.pages.length) return;
-  const sel=document.getElementById('comic_action_select');
-  const aid=sel.value;
-  if(!aid){ alert('No AI action selected. Add actions in ⚙ Settings.'); return; }
-  const name=sel.selectedOptions[0]?.text||'AI';
-  showToast(`Running "${name}" on ${comicState.pages.length} page(s)…`);
-  const d=await fetch('/api/bulk_llm',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filenames:comicState.pages, action_id:aid})}).then(r=>r.json());
-  if(d.success) showToast(`Applied "${name}" to ${d.applied}/${d.done} page(s). Open a page to review.`);
-  else alert('Run AI failed: '+(d.error||''));
-}
 document.addEventListener('keydown',e=>{
   if(document.getElementById('comic_modal').classList.contains('hidden')) return;
   const tag=document.activeElement.tagName;

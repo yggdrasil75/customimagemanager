@@ -3,10 +3,7 @@
       <span class="text-purple-300 font-bold">📚 <span id="comic_title_h">Comic</span></span>
       <span id="comic_pageinfo" class="text-xs text-gray-400"></span>
       <div class="ml-auto flex gap-2 items-center">
-        <select id="comic_action_select" title="AI action to run on every page" data-feature="ai.llm"
-          class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-1 max-w-[130px]"></select>
-        <button onclick="comicRunAI()" data-feature="ai.llm" class="text-xs bg-yellow-600 hover:bg-yellow-500 px-3 py-1 rounded font-bold">✨
-          Run AI</button>
+        <span data-ext-area="comic_tools" class="contents"></span>
         <button onclick="comicPipeline()" data-feature="ai.smarttag" class="text-xs bg-teal-600 hover:bg-teal-500 px-3 py-1 rounded font-bold">🌳
           Smart Tag</button>
         <button onclick="comicBoxAll()" data-feature="ai.autotag" class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1 rounded font-bold">🤖 Box

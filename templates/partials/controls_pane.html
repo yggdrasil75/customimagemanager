@@ -155,12 +155,7 @@
         <div>
           <div class="flex justify-between items-center mb-1">
             <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Description</label>
-            <div class="flex items-center gap-1" data-feature="ai.llm">
-              <select id="llm_action_select"
-                class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-0.5 max-w-[130px]"></select>
-              <button onclick="runLLM()" id="btn_run_llm"
-                class="text-xs bg-yellow-600 hover:bg-yellow-500 px-2 py-0.5 rounded font-bold">✨ AI</button>
-            </div>
+            <span data-ext-area="description_tools" class="flex items-center gap-1"></span>
           </div>
           <textarea id="meta_desc" oninput="triggerAutosave()" rows="4" data-annot-edit="annot.description"
             class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>

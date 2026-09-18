@@ -174,7 +174,8 @@ The core emits, modules react; the core never names a module.
 later registration. Consumers `get_service(name)` and must handle `None` (the
 provider is off). Current services: `metadata_write`, `exif` (`read`/`write`),
 `metadata_schema`, `embedding`, `dedup_scorers`, `barcodes`, `pose.tpose`,
-`sam_common`, `fetch`, `faces`, `bodies`, `people`, `segmentation`, `music`.
+`sam_common`, `fetch`, `faces`, `bodies`, `people`, `segmentation`, `music`,
+`llm` (the vlm module's OpenAI-compatible client: `call`, `request`, `encode_image`).
 
 ### Your own table + searchable field
 
@@ -203,7 +204,7 @@ The editor offers the node only while the module is enabled. See `pose/`.
 
 The app has a **model broker**. A *capability* is a named job with a fixed I/O
 contract (`detect`, `detect.faces`, `detect.barcodes`, `segment`,
-`segment.semantic`, `pose`, `depth`, `classify`, `embed`, `embed.faces`,
+`segment.semantic`, `pose`, `depth`, `classify`, `tag`, `describe`, `embed`, `embed.faces`,
 `face.shape`, `embed.bodies`, `body.shape`, `iqa`; `box` and `segment.box` are internal). Contracts live in
 [`model_contracts.py`](model_contracts.py). Modules register **providers**;
 the user picks one per capability in **Settings → 🧩 Models**; consumers ask
@@ -260,7 +261,7 @@ To add a **new** capability, `host.declare_capability(id, summary=, input=,
 output=, label=, background=)` — the first module to declare an id owns it.
 Worked examples: `yolo/` (one provider per family × head, oriented-box type),
 `mayaku/`, `SAM2`/`SAM3`/`mobilesam`/`fastsam` (shared `register_sam` factory),
-`vlm/` (prompted detector), `embedding/`, `pyiqa/` + `brisque/`, `barcodes/`,
+`vlm/` (detect / classify / tag / describe / iqa with per-capability editable default prompts), `embedding/`, `pyiqa/` + `brisque/`, `barcodes/`,
 `faces/` (detector + identity packs as types + 3D shape, exposing a `faces`
 service for the core's people machinery), `bodies/` (DINO re-id that bridges a
 face cluster to face-less photos; `bodies` service).

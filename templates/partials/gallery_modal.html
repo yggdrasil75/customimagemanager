@@ -68,10 +68,6 @@
           <!-- Extension region: modules append bulk buttons here via
                registerControlButton('gallery_bulk', html). -->
           <span data-ext-area="gallery_bulk" class="contents"></span>
-          <select id="bulk_action_select" title="AI action to run on each selected image"
-            class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-1.5 max-w-[130px]"></select>
-          <button onclick="bulkRunAI()" data-feature="ai.llm" title="Run the chosen AI action on every selected image"
-            class="text-xs bg-yellow-600 hover:bg-yellow-500 px-3 py-1.5 rounded font-bold">✨ Run AI</button>
           <button onclick="bulkPipeline()" data-feature="ai.smarttag" title="Run the full Smart Tag pipeline on every selected image"
             class="text-xs bg-teal-600 hover:bg-teal-500 px-3 py-1.5 rounded font-bold">🌳 Smart Tag</button>
           <button onclick="bulkEmbed()" title="Generate/regenerate embeddings for every selected image (OAI endpoint if configured, else local)"
