@@ -1458,12 +1458,20 @@ def _reconcile_deleted():
     return removed
 
 # ── Config / classes ──────────────────────────────────────────────────────────
+_SAVED_CONFIG = {}   # raw app_config.json; module-declared keys are picked up from it later
+
 def load_config():
+    """Load app_config.json into state. Core keys apply now; keys a module
+    declares later (add_config_key runs after this) are resolved from the same
+    file when the registry seeds defaults — a saved module setting must win
+    over the module's default, not be dropped for not existing yet."""
+    global _SAVED_CONFIG
     if os.path.exists(CFG_FILE):
         try:
             with open(CFG_FILE) as f:
-                for k, v in json.load(f).items():
-                    if k in state: state[k] = v
+                _SAVED_CONFIG = json.load(f)
+            for k, v in _SAVED_CONFIG.items():
+                if k in state: state[k] = v
         except Exception as e:
             access_logger.error(f"load_config: {e}")
     # Normalize the module on/off map: force core modules True, drop unknown
@@ -5895,7 +5903,7 @@ def _inject_module_ui():
 # map.
 # Seed defaults for any config keys modules declared (e.g. rating's iqa_model)
 # that aren't already in state from the loaded config.
-modules.config.seed_defaults(state)
+modules.config.seed_defaults(state, saved=_SAVED_CONFIG)
 
 state["model_selection"] = modules.broker.init_selection(state.get("model_selection"))
 # Migrate the legacy single iqa_model setting into the broker's per-capability

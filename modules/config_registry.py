@@ -62,15 +62,18 @@ class ConfigRegistry:
         return d["owner"] if d else None
 
     # ── defaults / persistence ───────────────────────────────────────────
-    def seed_defaults(self, state):
+    def seed_defaults(self, state, saved=None):
         """Fill state with declared defaults for any key it's missing.
 
         Called at startup after all settings are declared. Never overwrites a
-        value already present (loaded config wins over a default)."""
+        value already present; `saved` (the raw config file) wins over the
+        default so a module's persisted setting survives a restart even though
+        the module declared it after the file was loaded."""
+        saved = saved or {}
         with self._lock:
             for key, d in self._settings.items():
                 if key not in state:
-                    state[key] = d["default"]
+                    state[key] = saved[key] if key in saved else d["default"]
 
     def save_keys(self):
         """The declared keys that should be persisted."""
