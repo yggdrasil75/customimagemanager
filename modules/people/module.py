@@ -198,5 +198,6 @@ def register(host):
             "SELECT DISTINCT cluster_id FROM face_regions WHERE rel_path=? AND cluster_id>=0",
             (rel,)).fetchall()],
         "recluster": pc._recluster,
+        "run_person": pc._run_person,
     })
     host.logger.info("people module: registered People tab, person records, scan worker")

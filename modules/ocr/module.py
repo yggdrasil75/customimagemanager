@@ -12,6 +12,7 @@ import os
 from flask import request, jsonify
 
 from modules.model_broker import NoProviderError
+import common
 
 MANIFEST = {
     "id":          "ocr",
@@ -51,7 +52,7 @@ def register(host):
             return {"engine": None, "text": "", "lines": [],
                     "note": f"No OCR model available: {e.reason}"}
         try:
-            res = fn(core.coerce_bgr(img_bgr)) or {}
+            res = fn(common.coerce_bgr(img_bgr)) or {}
         except Exception as e:
             host.logger.error(f"ocr: {e}")
             return {"engine": None, "text": "", "lines": [], "note": f"OCR failed: {e}"}

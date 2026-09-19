@@ -19,6 +19,7 @@ from flask import jsonify
 
 from modules.model_broker import NoProviderError
 from . import facelib, registry, mesh
+import common
 
 MANIFEST = {
     "id":          "faces",
@@ -95,7 +96,7 @@ def register(host):
             raise RuntimeError(facelib.face_model_error() or "face detector unavailable")
 
         def run(img_bgr, *a, conf=0.25, **k):
-            img = core.coerce_bgr(img_bgr)
+            img = common.coerce_bgr(img_bgr)
             if img is None:
                 return []
             return _filter(img, core.detect_boxes(img, path, conf=conf))

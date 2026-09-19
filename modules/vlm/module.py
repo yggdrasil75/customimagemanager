@@ -13,7 +13,7 @@ for every capability a prompt can drive:
 Each provider ships a default prompt as an editable setting that shows in
 the Models tab only while this provider is the pick for that capability.
 A runtime prompt (an AI action's text, a detect query) overrides it.
-Uses core's chat plumbing (host.core.llm_call) so this is only a seam.
+Uses this module's own OpenAI-compatible client (client.py).
 """
 from flask import jsonify
 
@@ -126,7 +126,7 @@ def register(host):
 
     # ── detect: open-vocabulary boxes (prompt required at run time) ───────
     def _detect(img_bgr, prompt="", *a, **k):
-        boxes = core.llm_call(_prompt("detect", prompt) + "\n\nReturn bounding boxes normalised 0..1.",
+        boxes = client.call(_prompt("detect", prompt) + "\n\nReturn bounding boxes normalised 0..1.",
                               core.to_bgr(img_bgr), "boxes") or []
         return [{"class_name": b.get("class_name", "object"), "cx": float(b["cx"]),
                  "cy": float(b["cy"]), "w": float(b["w"]), "h": float(b["h"])} for b in boxes]
@@ -139,7 +139,7 @@ def register(host):
     def _classify(img_bgr, prompt="", *a, **k):
         classes = [c for c in (host.config.get("classes") or []) if c and c != "object"]
         p = _prompt("classify", prompt).replace("{classes}", ", ".join(classes) or "(none)")
-        res = core.llm_call(p, core.to_bgr(img_bgr), "json") or {}
+        res = client.call(p, core.to_bgr(img_bgr), "json") or {}
         name = str(res.get("class_name", "")).strip()
         if not name:
             return []
@@ -155,7 +155,7 @@ def register(host):
 
     # ── tag: free-form tags ────────────────────────────────────────────────
     def _tag(img_bgr, prompt="", *a, **k):
-        tags = core.llm_call(_prompt("tag", prompt), core.to_bgr(img_bgr), "tags") or []
+        tags = client.call(_prompt("tag", prompt), core.to_bgr(img_bgr), "tags") or []
         out, seen = [], set()
         for i, t in enumerate(tags):
             t = str(t).strip().lower()
@@ -170,14 +170,14 @@ def register(host):
 
     # ── describe ───────────────────────────────────────────────────────────
     def _describe(img_bgr, prompt="", *a, **k):
-        return (core.llm_call(_prompt("describe", prompt), core.to_bgr(img_bgr), "text") or "").strip()
+        return (client.call(_prompt("describe", prompt), core.to_bgr(img_bgr), "text") or "").strip()
     host.provide_model("describe", "vlm", loader=lambda: _describe,
                        note="Caption / description from the chat model.",
                        settings=_settings("describe", "The description prompt."), **common)
 
     # ── iqa: an opinion, not a metric ──────────────────────────────────────
     def _iqa(img_bgr, *a, **k):
-        res = core.llm_call(_prompt("iqa"), core.to_bgr(img_bgr), "json") or {}
+        res = client.call(_prompt("iqa"), core.to_bgr(img_bgr), "json") or {}
         try:
             q = max(0.0, min(1.0, float(res.get("quality", 0.5))))
         except (TypeError, ValueError):
@@ -190,7 +190,7 @@ def register(host):
 
     #  ocr: transcription (boxes are rough; omitted when the model can't place them)
     def _ocr(img_bgr, *a, **k):
-        res = core.llm_call(_prompt("ocr"), core.to_bgr(img_bgr), "json") or {}
+        res = client.call(_prompt("ocr"), core.to_bgr(img_bgr), "json") or {}
         lines = []
         for l in res.get("lines") or []:
             t = str(l.get("text", "")).strip()

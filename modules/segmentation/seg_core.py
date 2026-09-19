@@ -23,6 +23,7 @@ from flask import request, jsonify
 from modules.model_broker import NoProviderError
 from optional_deps import optional_import
 from . import mask_svg
+import common
 
 cv2, _HAVE_CV2 = optional_import("cv2")
 
@@ -54,9 +55,9 @@ def _bind(host):
     globals().update({
         "HOST": host, "_db": host.db, "state": host.config, "MEDIA_DIR": host.media_dir,
         "get_safe_path": host.safe_path, "read_jxl": c.read_image, "_to_bgr": c.to_bgr,
-        "_coerce_bgr3": c.coerce_bgr, "read_metadata": c.read_metadata,
+        "_coerce_bgr3": common.coerce_bgr, "read_metadata": c.read_metadata,
         "write_metadata": c.write_metadata, "_merge_regions": c.merge_regions,
-        "access_logger": host.logger, "save_classes": c.save_classes, "_iou_center": c.iou_center,
+        "access_logger": host.logger, "save_classes": c.save_classes, "_iou_center": common.iou_center,
     })
 
 

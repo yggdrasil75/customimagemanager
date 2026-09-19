@@ -22,6 +22,7 @@ from modules.model_broker import NoProviderError
 import model_registry
 import object_grouping as og
 from . import personlib, appearances
+import common
 
 # ── deferred registration: routes/feature gates are collected at import and
 #    attached in register(host) once the app + auth exist ─────────────────────
@@ -46,7 +47,7 @@ def _feature(*a, **k):
 _db = state = MEDIA_DIR = get_safe_path = read_jxl = _to_bgr = read_metadata = None
 write_metadata = access_logger = thread_manager = _background_instances = None
 _fold_background = _detect_obb_or_box = None
-_run_person = _faces = _bodies = _body_on = HOST = None
+_faces = _bodies = _body_on = HOST = None
 _merge_regions = _read_pose_from_xmp = _kpts_in_box = _last_activity = None
 
 
@@ -58,7 +59,7 @@ def _bind(host):
         "read_metadata": c.read_metadata, "write_metadata": c.write_metadata,
         "access_logger": host.logger, "thread_manager": host.thread_manager,
         "_background_instances": c.background_instances, "_fold_background": c.fold_background,
-        "_detect_obb_or_box": c.detect_boxes, "_run_person": c.run_person,
+        "_detect_obb_or_box": c.detect_boxes,
         "_merge_regions": c.merge_regions, "_read_pose_from_xmp": c.read_pose_from_xmp,
         "_kpts_in_box": og.kpts_in_box, "_last_activity": c.last_activity,
         "_faces": lambda: host.get_service("faces"),
@@ -108,6 +109,22 @@ def _run_faces(img_bgr) -> list:
         return []
     except Exception as e:
         access_logger.error(f"detect.faces: {e}")
+        return []
+
+def _run_person(img_bgr) -> list:
+    """!
+    @brief People/character boxes via the picked 'detect.persons' provider
+           (Models tab: the Detection model's person class, or dedicated weights).
+    @return Center-form boxes; [] lets the pipeline fall back to the LLM.
+    """
+    try:
+        run = HOST.broker.request("detect.persons")
+    except NoProviderError:
+        return []
+    try:
+        return run(common.coerce_bgr(img_bgr), conf=HOST.broker.variant("detect.persons")["conf"]) or []
+    except Exception as e:
+        access_logger.error(f"detect.persons: {e}")
         return []
 
 def _face_regions_for(img, rel: str) -> list:

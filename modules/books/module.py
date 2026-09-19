@@ -20,10 +20,11 @@ aliased as `book_index` via modules/__init__.py for upload.py / media_types.py
 
 from . import book_routes
 from . import book_index as bi
+import common
 
 MANIFEST = {
     "id":          "books",
-    "name":        "Books & comics",
+    "name":        "Books",
     "version":     "1.0.0",
     "description": "Ebook / comic library: reader, shelf, passage search, "
                    "triage. Adds the Books tab.",
@@ -89,8 +90,8 @@ def register(host):
         "auth":          core.auth,
         "media":         host.media,
         "folder_scope_clause": core.folder_scope_clause,
-        "table_exists":  core.table_exists,
-        "norm_date_literal": core.norm_date_literal,
+        "table_exists":  common.table_exists,
+        "norm_date_literal": common.norm_date_literal,
         "embed_text":    emb_svc.get("oai_embed_text"),
         "embed_enabled": emb_svc.get("oai_embed_enabled"),
         "embed_tag":     emb_svc.get("oai_embed_tag"),

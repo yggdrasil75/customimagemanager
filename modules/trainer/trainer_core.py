@@ -22,6 +22,7 @@ import model_registry
 from . import training_select as ts
 from . import training_validate as tv
 from . import training_augment as ta
+import common
 
 _ROUTES = []
 
@@ -61,7 +62,7 @@ def _bind(host):
         "MODELS_DIR": c.models_dir, "get_safe_path": host.safe_path, "read_jxl": c.read_image,
         "read_metadata": c.read_metadata, "write_metadata": c.write_metadata,
         "access_logger": host.logger, "training_logger": c.training_logger,
-        "populate_model_selector": c.refresh_model_groups, "_clamp_box": c.clamp_box,
+        "populate_model_selector": c.refresh_model_groups, "_clamp_box": common.clamp_box,
         "_detect_obb_or_box": c.detect_boxes, "_meta_cache_drop": c.meta_cache_drop,
     })
 

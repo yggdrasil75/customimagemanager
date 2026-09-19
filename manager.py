@@ -45,6 +45,7 @@ YOLO, _HAVE_YOLO = optional_import("ultralytics", attr="YOLO")
 imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
 import object_grouping as og
 import model_registry
+import common
 import media_types as mt
 import video_tracks as vt
 import tiering
@@ -62,12 +63,6 @@ def _read_bytes_loose(path):
 def _read_text_loose(path, encoding="utf-8", errors="replace"):
     data = _read_bytes_loose(path)
     return None if data is None else data.decode(encoding, errors)
-
-def _getmtime_loose(path):
-    try:
-        return os.path.getmtime(path)
-    except OSError:
-        return 0.0
 
 import auth as _auth
 import features
@@ -598,24 +593,11 @@ def _upsert_file(rel_path, mtime, width, height, sha256, phash8, phash32, tags, 
 # (an AI/auto suggestion the user hasn't accepted yet) we prefix it with a single
 # '?' sentinel, e.g. "?redhead". This mirrors how boxes carry confirmed=False,
 # survives the JSON-list storage + `tags LIKE` search, and needs no schema change.
-_TAG_UNCONF = '?'
-
-def tag_is_confirmed(tag: str) -> bool:
-    """A tag is unconfirmed iff it starts with the '?' sentinel."""
-    return not str(tag).startswith(_TAG_UNCONF)
-
-def tag_name(tag: str) -> str:
-    """The display/comparison name of a tag, sentinel stripped."""
-    t = str(tag)
-    return t[len(_TAG_UNCONF):] if t.startswith(_TAG_UNCONF) else t
-
-def make_tag(name: str, confirmed: bool = True) -> str:
-    """Build a stored tag string from a bare name + confirmed flag."""
-    n = tag_name(name)   # never double-prefix
-    return n if confirmed else (_TAG_UNCONF + n)
-
-def count_unconfirmed_tags(tags) -> int:
-    return sum(1 for t in (tags or []) if not tag_is_confirmed(t))
+_TAG_UNCONF = common.TAG_UNCONF
+tag_is_confirmed, tag_name, make_tag = common.tag_is_confirmed, common.tag_name, common.make_tag
+count_unconfirmed_tags = common.count_unconfirmed_tags
+_norm_date_literal, _clamp_box, _iou_center = common.norm_date_literal, common.clamp_box, common.iou_center
+_coerce_bgr3, _table_exists, _getmtime_loose = common.coerce_bgr, common.table_exists, common.getmtime_loose
 
 def _merge_meta(cur, inc):
     """! @brief Fold an incoming metadata packet into a file's current metadata.
@@ -955,32 +937,6 @@ _DATE_RE = re.compile(
     r'(<=|>=|<|>|=)?'
     r'([0-9]{4}(?:[-/][0-9]{1,2}){0,2}'
     r'(?:\.\.[0-9]{4}(?:[-/][0-9]{1,2}){0,2})?)$', re.I)
-
-def _norm_date_literal(s: str, end: bool = False) -> str | None:
-    """Normalize a user date literal to 'YYYY-MM-DD'. Partial dates expand to the
-    first (or, with end=True, the last) day of the given period so range/compare
-    math is well defined. Returns None if unparseable."""
-    s = s.strip().replace('/', '-')
-    parts = s.split('-')
-    try:
-        if len(parts) == 1:            # YYYY
-            y = int(parts[0])
-            return f"{y:04d}-12-31" if end else f"{y:04d}-01-01"
-        if len(parts) == 2:            # YYYY-MM
-            y, mo = int(parts[0]), int(parts[1])
-            if not (1 <= mo <= 12):
-                return None
-            if end:
-                from calendar import monthrange
-                return f"{y:04d}-{mo:02d}-{monthrange(y, mo)[1]:02d}"
-            return f"{y:04d}-{mo:02d}-01"
-        if len(parts) == 3:            # YYYY-MM-DD
-            y, mo, d = int(parts[0]), int(parts[1]), int(parts[2])
-            datetime(y, mo, d)          # validate
-            return f"{y:04d}-{mo:02d}-{d:02d}"
-    except Exception:
-        return None
-    return None
 
 def _date_clause(cols: tuple, op: str | None, literal: str) -> tuple[str, list]:
     """Build a SQL WHERE fragment + params matching any of `cols` against a date
@@ -3049,25 +3005,6 @@ def _detect_obb_or_box(img_bgr, model_path: str, keep_classes: set | None = None
         access_logger.error(f"box provider detect({model_path}): {e}")
         return []
 
-def _coerce_bgr3(img_bgr):
-    """Coerce to 3-channel uint8 BGR, or None if unusable. YOLO's first conv
-    needs exactly 3 channels; shared by the single and batched detect paths."""
-    if img_bgr is None or getattr(img_bgr, "size", 0) == 0:
-        return None
-    if img_bgr.ndim == 2:
-        img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_GRAY2BGR)
-    elif img_bgr.ndim == 3 and img_bgr.shape[2] != 3:
-        c = img_bgr.shape[2]
-        if c in (1, 2):
-            img_bgr = cv2.cvtColor(img_bgr[:, :, 0], cv2.COLOR_GRAY2BGR)
-        elif c == 4:
-            img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_BGRA2BGR)
-        else:
-            img_bgr = img_bgr[:, :, :3]
-    if img_bgr.dtype != np.uint8:
-        img_bgr = np.clip(img_bgr, 0, 255).astype(np.uint8)
-    return img_bgr
-
 def _detect_obb_or_box_batch(imgs, model_path: str, keep_classes: set | None = None,
                              conf: float = 0.25, as_obb: bool = False) -> list:
     """!
@@ -3091,36 +3028,6 @@ def _detect_obb_or_box_batch(imgs, model_path: str, keep_classes: set | None = N
     except Exception as e:
         access_logger.error(f"box provider batch({model_path}): {e}")
         return [[] for _ in range(n)]
-
-def _run_person(img_bgr) -> list:
-    """!
-    @brief People/character boxes via the picked 'detect.persons' provider
-           (Models tab: the Detection model's person class, or dedicated weights).
-    @return Center-form boxes; [] lets the pipeline fall back to the LLM.
-    """
-    try:
-        run = modules.broker.request("detect.persons")
-    except modules.model_broker.NoProviderError:
-        return []
-    try:
-        return run(_coerce_bgr3(img_bgr), conf=modules.broker.variant("detect.persons")["conf"]) or []
-    except Exception as e:
-        access_logger.error(f"detect.persons: {e}")
-        return []
-
-def _iou_center(a, b) -> float:
-    """IoU of two normalised center-form boxes."""
-    ax1, ay1 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
-    ax2, ay2 = a["cx"] + a["w"] / 2, a["cy"] + a["h"] / 2
-    bx1, by1 = b["cx"] - b["w"] / 2, b["cy"] - b["h"] / 2
-    bx2, by2 = b["cx"] + b["w"] / 2, b["cy"] + b["h"] / 2
-    ix = max(0.0, min(ax2, bx2) - max(ax1, bx1))
-    iy = max(0.0, min(ay2, by2) - max(ay1, by1))
-    inter = ix * iy
-    if inter <= 0:
-        return 0.0
-    ua = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
-    return inter / ua if ua > 0 else 0.0
 
 def _background_instances(img_bgr) -> list:
     """!
@@ -3193,24 +3100,6 @@ def _fold_background(insts, person_regions, out):
             reg["mask_svg"] = inst["mask_svg"]
         (person_regions if reg["class_name"] == "person" else out).append(reg)
 
-def _clamp_box(b: dict) -> dict | None:
-    """!
-    @brief Clamp a normalised center-form box to the image bounds.
-    @return A new box dict, or None if the input is malformed or clamps to empty.
-    """
-    try:
-        cx, cy, w, h = float(b["cx"]), float(b["cy"]), float(b["w"]), float(b["h"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    x1, y1 = max(0.0, cx - w/2), max(0.0, cy - h/2)
-    x2, y2 = min(1.0, cx + w/2), min(1.0, cy + h/2)
-    if x2 - x1 < 1e-4 or y2 - y1 < 1e-4:
-        return None
-    nb = dict(b)
-    nb["cx"], nb["cy"] = (x1 + x2)/2, (y1 + y2)/2
-    nb["w"], nb["h"] = x2 - x1, y2 - y1
-    return nb
-
 def _folder_scope_clause(column: str, folder: str) -> tuple[list, list]:
     """!
     @brief Build the SQL clause(s) restricting `column` to one folder's direct children.
@@ -3223,22 +3112,6 @@ def _folder_scope_clause(column: str, folder: str) -> tuple[list, list]:
         f = folder.strip('/').replace('\\', '/')
         return [f"({column} LIKE ? AND {column} NOT LIKE ?)"], [f + '/%', f + '/%/%']
     return [], []
-
-# ── LLM client: lives in the vlm module ("llm" service). These thin wrappers
-#    keep the core's call sites unchanged and make them no-ops when it's off.
-def _llm():
-    return module_host.get_service("llm") if 'module_host' in globals() else None
-
-def _oai_v1_base(endpoint):
-    svc = _llm()
-    return svc["v1_base"](endpoint) if svc else ""
-
-def _llm_call(prompt, image_bgr, want="text", choices=None, endpoint=None):
-    svc = _llm()
-    if not svc:
-        return {} if want == "json" else [] if want in ("boxes", "tags") else \
-            (False if want == "bool" else ((choices or [""])[0] if want == "choice" else ""))
-    return svc["call"](prompt, image_bgr, want=want, choices=choices, endpoint=endpoint)
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 # Endpoints that are POLLED by a UI on a timer. These must NOT count as user
@@ -5501,7 +5374,7 @@ def api_delete():
     return jsonify({"success":True})
 
 @app.route("/api/reconcile", methods=["POST"])
-@_auth.require_feature("ai.reconcile", level="write")
+@_auth.require_feature("library.reconcile", level="write")
 def api_reconcile():
     """Purge DB rows for files deleted on disk. Externally-edited files are
     picked up by re-indexing (mtime change), so trigger both a reconcile and a
@@ -5834,7 +5707,8 @@ def bulk_box():
                             new.append({"class_name": name, "cx": cb["cx"], "cy": cb["cy"],
                                         "w": cb["w"], "h": cb["h"], "confirmed": False})
             else:
-                boxes = _llm_call(prompt, _to_bgr(img), "boxes") or []
+                svc = module_host.get_service("llm")
+                boxes = svc["call"](prompt, _to_bgr(img), "boxes") if svc else []
                 for b in boxes:
                     try:
                         new.append({"class_name": b.get("class_name", "object"),
@@ -5878,11 +5752,6 @@ def _embedding_iter():
     module is off (training's 'diverse' pick then degrades to random)."""
     svc = module_host.get_service("embedding") if 'module_host' in globals() else None
     return (svc or {}).get("iter_embeddings_ordered")
-
-def _table_exists(db, name):
-    return db.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        (name,)).fetchone() is not None
 
 @app.route("/api/auto_tag", methods=["POST"])
 @_auth.require_feature("ai.autotag", level="write")
@@ -5950,27 +5819,22 @@ def get_tailwind():
 # Everything a module may need from the core, handed over as one namespace so
 # no module ever imports manager. Add here rather than reaching in.
 _core_api = SimpleNamespace(
+    detect_boxes=_detect_obb_or_box, refresh_model_groups=populate_model_selector,
+    meta_cache_drop=_meta_cache_drop, folder_scope_clause=_folder_scope_clause,
+    api_upload=api_upload, auth=_auth, features=features, save_classes=save_classes,
+    model_key=_yolo_key, merge_regions=_merge_regions,
+    read_image=read_jxl, to_bgr=_to_bgr, resolve_media=_resolve_media, rel=_rel,
     db_retry=_db_retry, db_close=_db_close, db_release_pool=_db_release_pool,
-    read_image=read_jxl, to_bgr=_to_bgr, coerce_bgr=_coerce_bgr3,
-    resolve_media=_resolve_media, rel=_rel, getmtime_loose=_getmtime_loose,
     read_metadata=read_metadata, write_metadata=write_metadata,
-    parse_mwg_regions=_parse_mwg_regions,
-    EXIF_DB_COLUMNS=_EXIF_DB_COLUMNS,
+    parse_mwg_regions=_parse_mwg_regions, EXIF_DB_COLUMNS=_EXIF_DB_COLUMNS,
     history_record=_history_record, history_as_imagehistory=_history_as_imagehistory,
     index_file=_index_file, enumerate_library=_enumerate_library,
     thumb_drop=_thumb_drop, delete_file_row=_delete_file_row,
     purge_file_everywhere=_purge_file_everywhere, audit=audit, tiering=tiering,
-    detect_boxes=_detect_obb_or_box, llm_call=_llm_call,
     models_dir=MODELS_DIR, training_logger=cimlogger_training_logger,
-    refresh_model_groups=populate_model_selector, clamp_box=_clamp_box, meta_cache_drop=_meta_cache_drop,
-    folder_scope_clause=_folder_scope_clause, table_exists=_table_exists,
-    norm_date_literal=_norm_date_literal, oai_v1_base=_oai_v1_base,
     upload_spool_dir=_UPLOAD_SPOOL_DIR, upload_workers_wake=_upload_workers_wake,
-    api_upload=api_upload, auth=_auth, features=features, tag_name=tag_name, make_tag=make_tag,
     background_instances=_background_instances, fold_background=_fold_background,
-    save_classes=save_classes, iou_center=_iou_center,
     detect_boxes_batch=_detect_obb_or_box_batch, detect_objects=_detect_objects,
-    model_key=_yolo_key, run_person=_run_person, merge_regions=_merge_regions,
     read_pose_from_xmp=_read_pose_from_xmp,
     last_activity=lambda: _last_activity,
     current_user=lambda: (getattr(g, "user", None) or {}).get("username", ""),

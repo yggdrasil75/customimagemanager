@@ -9,6 +9,7 @@ import re
 from flask import request, jsonify
 
 from .engine import DEFAULT_PIPELINE, run_pipeline
+import common
 
 _ROUTES = []
 
@@ -41,9 +42,11 @@ def _bind(host):
         "get_safe_path": host.safe_path, "read_jxl": c.read_image, "_to_bgr": c.to_bgr,
         "read_metadata": c.read_metadata, "write_metadata": c.write_metadata,
         "access_logger": host.logger, "thread_manager": host.thread_manager,
-        "_llm_call": c.llm_call, "_detect_obb_or_box": c.detect_boxes, "_run_person": c.run_person,
-        "_merge_regions": c.merge_regions, "tag_name": c.tag_name, "make_tag": c.make_tag,
-        "_coerce_bgr3": c.coerce_bgr, "_rel": c.rel, "_clamp_box": c.clamp_box,
+        "_llm_call": lambda *a, **k: (host.get_service("llm") or {"call": lambda *x, **y: None})["call"](*a, **k),
+        "_detect_obb_or_box": c.detect_boxes,
+        "_run_person": lambda bgr: (host.get_service("people") or {"run_person": lambda b: []})["run_person"](bgr),
+        "_merge_regions": c.merge_regions, "tag_name": common.tag_name, "make_tag": common.make_tag,
+        "_coerce_bgr3": common.coerce_bgr, "_rel": c.rel, "_clamp_box": common.clamp_box,
         "save_config": host.save_config, "save_classes": c.save_classes,
     })
 

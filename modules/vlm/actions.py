@@ -12,6 +12,7 @@ import os
 from flask import request, jsonify
 
 from . import client
+import common
 
 HOST = None
 
@@ -87,11 +88,11 @@ def apply(fp, action):
     if target == "tags":
         tags = client.call(prompt, bgr, "tags") or []
         merged = list(meta["tags"])
-        seen = {c.tag_name(t).lower() for t in meta["tags"]}
+        seen = {common.tag_name(t).lower() for t in meta["tags"]}
         for t in tags:
-            nm = c.tag_name(t)
+            nm = common.tag_name(t)
             if nm and nm.lower() not in seen:
-                merged.append(c.make_tag(nm, confirmed=False))   # AI suggestion → unconfirmed
+                merged.append(common.make_tag(nm, confirmed=False))   # AI suggestion → unconfirmed
                 seen.add(nm.lower())
         c.write_metadata(fp, merged, meta["description"], meta["regions"])
         return tags

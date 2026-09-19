@@ -31,6 +31,7 @@ YOLO, _HAVE_YOLO = optional_import("ultralytics", attr="YOLO")
 
 # Core infra (always present alongside ultralytics); not plugins.
 import model_registry
+import common
 
 MANIFEST = {
     "id":          "yolo",
@@ -450,7 +451,7 @@ def register(host):
     # so a different provider (Mayaku) can answer for its own model files.
     def _yolo_detect(img_bgr, model_path, keep_classes=None, conf=0.25,
                      as_obb=False):
-        c = host.core.coerce_bgr(img_bgr)
+        c = common.coerce_bgr(img_bgr)
         if c is None:
             return []
         res = _run_yolo_path(model_path, c, conf)
@@ -464,7 +465,7 @@ def register(host):
         n = len(imgs)
         if n == 0:
             return []
-        coerced = [host.core.coerce_bgr(im) for im in imgs]
+        coerced = [common.coerce_bgr(im) for im in imgs]
         valid = [c is not None for c in coerced]
         feed = [c if c is not None else np.zeros((1, 1, 3), np.uint8)
                 for c in coerced]

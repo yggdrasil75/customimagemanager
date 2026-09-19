@@ -36,6 +36,7 @@ if _HAVE_TORCH:
     from . import net
 import numpy as np
 import model_registry
+import common
 
 MANIFEST = {
     "id":          "personal_iqa",
@@ -150,7 +151,7 @@ def register(host):
         if rel_path:
             r = db.execute("SELECT tags FROM files WHERE rel_path=?", (rel_path,)).fetchone()
             if r and r["tags"]:
-                out["tags"] = net.hash_tags([core.tag_name(t) for t in json.loads(r["tags"])])
+                out["tags"] = net.hash_tags([common.tag_name(t) for t in json.loads(r["tags"])])
             for r in db.execute("SELECT shape FROM face_regions WHERE rel_path=? AND shape IS NOT NULL "
                                 "AND COALESCE(not_face,0)=0", (rel_path,)):
                 out["face"].append(np.frombuffer(r["shape"], np.float32).tolist())

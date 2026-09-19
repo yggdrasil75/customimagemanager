@@ -68,8 +68,10 @@ if _HAVE_TORCH:
   (below). If something is missing there, add it to `_core_api` in
   `manager.py` — don't reach in.
 - Files inside your package import each other relatively (`from . import x`).
-- Shared library code the core exposes as plain libraries (`model_registry`,
-  `optional_deps`, `object_grouping`) may be imported directly.
+- Shared library code the core exposes as plain libraries (`common` — pure
+  string/box/date helpers such as `tag_name`, `clamp_box`, `norm_date_literal`;
+  `model_registry`, `optional_deps`, `object_grouping`) may be imported
+  directly; none of them import the app.
 - Two modules that need the same helper each ship a copy and publish it with a
   `priority` (see services) so the newest copy wins — nothing shared lives in
   the core. The four SAM modules do this with `sam_common.py`.
@@ -98,13 +100,14 @@ Handles: `host.app`, `host.db()`, `host.config` (the live settings dict),
 `host.save_config()`, `host.broker`, `host.current_user()`.
 
 `host.core` — a namespace of core helpers the app hands over before any
-module registers: `read_image`, `to_bgr`, `coerce_bgr`, `resolve_media`, `rel`,
-`read_metadata` / `write_metadata`, `parse_mwg_regions`, `history_record`,
-`index_file`, `enumerate_library`, `thumb_drop`, `delete_file_row`,
-`purge_file_everywhere`, `audit`, `tiering`, `detect_boxes`, `llm_call`,
-`llm_request`, `folder_scope_clause`, `table_exists`, `norm_date_literal`,
-`oai_v1_base`, `upload_spool_dir`, `upload_workers_wake`, `api_upload`, `auth`,
-`features`, `tag_name`, `embed_faces`, `face_detector_path`, `object_grouping`.
+module registers: `read_image`,
+`to_bgr`, `resolve_media`, `rel`, `read_metadata` / `write_metadata`,
+`parse_mwg_regions`, `history_record`, `index_file`, `enumerate_library`,
+`thumb_drop`, `delete_file_row`, `purge_file_everywhere`, `audit`, `tiering`,
+`detect_boxes`, `merge_regions`, `folder_scope_clause`, `save_classes`,
+`upload_spool_dir`, `upload_workers_wake`, `api_upload`, `auth`, `features`,
+`object_grouping`. Pure helpers live in `common` (import it); an LLM call is
+the `llm` service, person detection the `people` service's `run_person`.
 
 `host.media` — the media-type registry (`kind(path)`, `is_video`, …) plus
 `host.register_media_type(kind, exts=, mime_map=, …)` so a module can teach

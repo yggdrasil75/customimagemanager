@@ -52,7 +52,7 @@ def _bind(host):
         "HOST": host, "_db": host.db, "state": host.config, "MEDIA_DIR": host.media_dir,
         "get_safe_path": host.safe_path, "read_jxl": c.read_image, "_to_bgr": c.to_bgr,
         "read_metadata": c.read_metadata, "write_metadata": c.write_metadata,
-        "access_logger": host.logger, "_rel": c.rel, "mt": host.media, "_llm_call": c.llm_call,
+        "access_logger": host.logger, "_rel": c.rel, "mt": host.media, "_llm_call": lambda *a, **k: (host.get_service("llm") or {"call": lambda *x, **y: None})["call"](*a, **k),
         "_run_pipeline_on": lambda *a, **k: _pipe()["run"](*a, **k),
         "_apply_pipeline_result": lambda *a, **k: _pipe()["apply"](*a, **k),
         "DEFAULT_PIPELINE": (host.get_service("pipeline") or {}).get("default_tree", {}),

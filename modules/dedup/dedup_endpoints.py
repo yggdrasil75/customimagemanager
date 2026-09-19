@@ -21,6 +21,7 @@ from optional_deps import optional_import
 cv2, _HAVE_CV2 = optional_import("cv2")
 
 from . import dedup_core as core
+import common
 
 # Bound from manager in register(); declared so the function bodies resolve.
 app = None
@@ -38,7 +39,7 @@ def _bind(host):
         "get_safe_path": host.safe_path, "read_jxl": c.read_image, "_to_bgr": c.to_bgr,
         "mt": host.media, "thread_manager": host.thread_manager,
         "_index_file": c.index_file, "_enumerate_library": c.enumerate_library,
-        "_getmtime_loose": c.getmtime_loose, "tiering": c.tiering, "_thumb_drop": c.thumb_drop,
+        "_getmtime_loose": common.getmtime_loose, "tiering": c.tiering, "_thumb_drop": c.thumb_drop,
         "_delete_file_row": c.delete_file_row, "_purge_file_everywhere": c.purge_file_everywhere,
         "audit": c.audit, "access_logger": host.logger, "_db_release_pool": c.db_release_pool,
         "read_metadata": c.read_metadata, "write_metadata": c.write_metadata,
