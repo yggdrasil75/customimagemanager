@@ -365,6 +365,20 @@ def rename_book(old_rel: str, new_rel: str) -> bool:
     db.commit()
     return True
 
+def remove_book(rel_path: str) -> None:
+    """Drop every book table row for a file (delete / vanished on disk). A book
+    is keyed by rel_path across all of them; leaving any behind is how a
+    deleted book keeps showing up with a broken cover or resurrects bookmarks."""
+    db = _db()
+    for tbl in ("books", "book_authors", "book_sections", "book_chunks", "book_pages",
+                "book_progress", "book_bookmarks", "book_triage"):
+        try:
+            db.execute(f"DELETE FROM {tbl} WHERE rel_path=?", (rel_path,))
+        except Exception:
+            pass
+    db.commit()
+
+
 def sha_exists(sha: str) -> str | None:
     """rel_path of a book whose content hash matches, or None.
 

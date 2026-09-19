@@ -384,4 +384,13 @@ def register(host):
     host.add_route("/api/iqa_scan", auth.require_feature("ai.iqa", level="write")(iqa_scan),
                    methods=["POST"])
 
+    def _file_deleted(rel_path):
+        db = host.db()
+        for tbl in ("ratings",):
+            try:
+                db.execute(f"DELETE FROM {tbl} WHERE rel_path=?", (rel_path,))
+            except Exception:
+                pass
+        db.commit()
+    host.on("file.deleted", _file_deleted)
     host.logger.info("rating module: registered ratings table + iqa endpoints")

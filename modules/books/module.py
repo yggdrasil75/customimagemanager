@@ -117,6 +117,7 @@ def register(host):
             lambda sha, filename: book_routes.sha_exists(sha) if mt.is_book(filename) else None)
     host.on("upload.stored",
             lambda rel_path, filename: book_routes.index_one(rel_path) if mt.is_book(filename) else None)
+    host.on("file.deleted", lambda rel_path: book_routes.remove_book(rel_path))
     host.on("file.renamed",
             lambda old_rel, new_rel: book_routes.rename_book(old_rel, new_rel) if mt.is_book(old_rel) else None)
 

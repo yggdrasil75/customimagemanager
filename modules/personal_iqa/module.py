@@ -367,4 +367,12 @@ def register(host):
     host.add_route("/api/personal_iqa/status", api_status)
     host.add_route("/api/personal_iqa/train",
                    core.auth.require_feature("ai.iqa", level="write")(api_train), methods=["POST"])
+    def _file_deleted(rel_path):
+        db = host.db()
+        try:
+            db.execute("DELETE FROM personal_iqa_cache WHERE rel_path=?", (rel_path,))
+            db.commit()
+        except Exception:
+            pass
+    host.on("file.deleted", _file_deleted)
     host.logger.info("personal_iqa: registered iqa provider 'personal'")

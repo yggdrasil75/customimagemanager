@@ -881,36 +881,21 @@ def _delete_file_row(rel_path):
     _db().commit()
 
 def _purge_file_everywhere(rel_path):
-    """Remove EVERY DB trace of a file across all rel_path-keyed tables.
-
-    _delete_file_row only clears `files`; a file deleted on disk also leaves
-    rows in file_history and the book tables. Left behind, those stale rows are
-    why a deleted-on-disk file still shows up as a blank tile. This is the
-    single place that knows the full set of dependent tables, so both the
-    delete route and the reconcile scan stay consistent.
-
-    Each DELETE is guarded independently: a table may not exist yet on an older
-    DB, and we never want cleanup of one table to abort the rest.
+    """Remove EVERY DB trace of a file: the core rows (`files`, `file_history`)
+    here, and every module's rel_path-keyed rows through the `file.deleted`
+    event (books, people, dedup, music, ratings, embeddings, training sets…).
+    The delete routes and the reconcile scan all go through this, so a file
+    that vanished on disk is forgotten everywhere, not just in the gallery.
     """
     db = _db()
-    for sql in (
-        "DELETE FROM files             WHERE rel_path=?",
-        "DELETE FROM file_history      WHERE rel_path=?",
-        # Book tables. A book is keyed by rel_path across all six; leaving these
-        # behind is how a deleted book keeps showing up on the shelf with a
-        # broken cover, and how its bookmarks resurrect if you re-add the file.
-        "DELETE FROM books             WHERE rel_path=?",
-        "DELETE FROM book_authors      WHERE rel_path=?",
-        "DELETE FROM book_sections     WHERE rel_path=?",
-        "DELETE FROM book_chunks       WHERE rel_path=?",
-        "DELETE FROM book_progress     WHERE rel_path=?",
-        "DELETE FROM book_bookmarks    WHERE rel_path=?",
-    ):
+    for sql in ("DELETE FROM files        WHERE rel_path=?",
+                "DELETE FROM file_history WHERE rel_path=?"):
         try:
             db.execute(sql, (rel_path,))
         except Exception as e:
             access_logger.debug(f"_purge_file_everywhere {rel_path}: {e}")
     db.commit()
+    module_host.emit("file.deleted", rel_path=rel_path)
 
 def _get_file_row(rel_path):
     return _db().execute("SELECT * FROM files WHERE rel_path=?", (rel_path,)).fetchone()
@@ -5367,7 +5352,6 @@ def api_delete():
             if os.path.exists(member): tiering.safe_remove(member)
         _thumb_drop(fn)
         _purge_file_everywhere(fn)
-        module_host.emit("file.deleted", rel_path=fn)
         audit("delete_file", f"file={fn!r} existed={existed}")
     else:
         audit("delete_file_rejected", f"file={fn!r} (unsafe path)")
@@ -5483,8 +5467,7 @@ def bulk_delete():
                 member = base + ext
                 if os.path.exists(member): tiering.safe_remove(member)
             _thumb_drop(fn)
-            _delete_file_row(fn)
-            module_host.emit("file.deleted", rel_path=fn)
+            _purge_file_everywhere(fn)
             deleted += 1
         except Exception as e:
             errors.append(fn)
@@ -5794,17 +5777,6 @@ def get_tailwind():
     if not os.path.exists('static/tailwindcss.js'):
         return jsonify({"error":"not found"}),404
     return open('static/tailwindcss.js').read(),200,{'Content-Type':'application/javascript'}
-
-# ══════════════════════════════════════════════════════════════════════════════
-# BOOKS & COMICS
-# ══════════════════════════════════════════════════════════════════════════════
-# Unlike the music block above, the book endpoints live in their own module.
-# manager.py is already 8.5k lines; a twelfth inline feature block would not
-# have made it more maintainable. Everything book_routes needs from here is
-# handed over explicitly, so there's no import cycle and no second copy of the
-# DB/config logic.
-#
-
 # ── Pluggable module system ───────────────────────────────────────────────--
 # Everything above this line is the application core. Below, third-party
 # modules discovered in modules/ get their register(host) called so they can

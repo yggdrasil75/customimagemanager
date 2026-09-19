@@ -63,4 +63,13 @@ def register(host):
     host.add_asset("trainer.css", kind="css")
     host.register_left_pane("trainer_pane.html")
     host.register_controls_pane("trainer", "controls_pane_trainer.html", feature="tab.trainer")
+    def _file_deleted(rel_path):
+        db = host.db()
+        for tbl in ("training_set_members",):
+            try:
+                db.execute(f"DELETE FROM {tbl} WHERE rel_path=?", (rel_path,))
+            except Exception:
+                pass
+        db.commit()
+    host.on("file.deleted", _file_deleted)
     host.logger.info("trainer module: registered sets, routes, Trainer tab")

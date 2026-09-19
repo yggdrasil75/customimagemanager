@@ -751,6 +751,15 @@ def register(host):
             {"filename": n, "score": round(s, 4)} for n, s in hits
         ]})
 
+    def _file_deleted(rel_path):
+        db = host.db()
+        for tbl in ("image_embeddings", "image_clusters"):
+            try:
+                db.execute(f"DELETE FROM {tbl} WHERE rel_path=?", (rel_path,))
+            except Exception:
+                pass
+        db.commit()
+    host.on("file.deleted", _file_deleted)
     host.logger.info("embedding module: embeddings + clustering + semantic search registered")
 
     # ── services ───────────────────────────────────────────────────────────
