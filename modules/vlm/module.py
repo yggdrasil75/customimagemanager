@@ -95,13 +95,20 @@ def register(host):
 
     # embed: the endpoint's /v1/embeddings (a multimodal embedding model puts
     # images and text in one space, which is what semantic text search needs).
+    # The handle carries what the embedding module needs without it knowing
+    # this is OAI: .embed_text (text search) and .space (the vector space tag).
+    def _embed_handle():
+        fn = lambda img, *a, **k: client.embed_image(img)
+        fn.embed_text = client.embed_text
+        fn.space = client.embed_tag()
+        return fn
     host.provide_model(
         "embed", "oai", label="OpenAI-compatible embeddings", family="LLM",
         speed="balanced", supports_conf=False,
         settings=[{"key": "oai_embed_model", "label": "Embedding model", "kind": "text",
                    "help": "Model name at the endpoint's /v1/embeddings, e.g. a CLIP-style "
                            "multimodal model. Text search needs one that embeds text too."}],
-        loader=lambda: (lambda img, *a, **k: client.embed_image(img)),
+        loader=_embed_handle,
         transform=None, available=client.embed_configured,
         reason="set the OAI endpoint and an embedding model", cost_mb=0)
 

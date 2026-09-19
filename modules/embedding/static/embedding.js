@@ -15,8 +15,8 @@
       const d = await fetch('/api/embed_status').then(r => r.json());
       const badge = document.getElementById('embed_backend_badge');
       if (badge) {
-        if (d.oai_available) badge.textContent = `OAI: ${d.oai_model || 'ready'}`;
-        else badge.textContent = 'local CNN (no text search)';
+        badge.textContent = `${d.provider || '?'}: ${d.space || ''}` +
+          (d.text_search ? ' · text search' : ' (no text search)');
         badge.title = d.note || '';
       }
     } catch (e) {}

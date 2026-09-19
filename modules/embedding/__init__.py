@@ -83,38 +83,48 @@ def register(host):
     def _embed_provider():
         return host.broker.selected_id("embed")
 
-    # ── OAI embedding helpers ──────────────────────────────────────────────
-    # The remote (OAI) embedder belongs to the vlm module; when it is the
-    # selected 'embed' provider, text search goes through its embed_text.
-    def _remote():
-        return host.get_service("llm") if _embed_provider() == "oai" else None
+    # ── the picked embedder, via the broker ───────────────────────────────
+    # This module never names a model. The broker hands back the provider the
+    # user picked under Models → Embeddings; the handle embeds an image, and a
+    # provider that can ALSO embed text (a multimodal endpoint) exposes
+    # handle.model.embed_text, which is what text search needs. handle.model.space
+    # names the vector space (rows are tagged with it so a model switch is
+    # detected); providers that don't declare one get "<provider>:<size>".
+    def _handle():
+        """Bound embed handle for the current pick; raises RuntimeError with
+        the broker's reason when the pick isn't usable."""
+        try:
+            return host.request_model("embed")
+        except NoProviderError as e:
+            raise RuntimeError(str(e))
 
-    def _oai_embed_enabled():
-        r = _remote()
-        return bool(r and r["embed_configured"]())
+    def _try_handle():
+        try:
+            return _handle()
+        except RuntimeError:
+            return None
 
-    def _why_local():
-        """Hint shown when the pick isn't OAI ('' when it is): only OAI vectors
-        support text search."""
-        if _embed_provider() == "oai":
-            return ""
-        return ("Text search needs 'OpenAI-compatible embeddings' under "
-                "Settings → Models → Embeddings.")
+    def _embed_tag(handle=None):
+        handle = handle or _try_handle()
+        space = getattr(getattr(handle, "model", None), "space", None)
+        if space:
+            return str(space)
+        pid = _embed_provider()
+        return f"{pid}:{host.model_variant('embed').get('size') or ''}"
 
-    def _oai_embed_model():
-        return (host.config.get("oai_embed_model") or "").strip()
+    def _text_embedder(handle=None):
+        """embed_text(text) -> vector of the picked provider, or None if it
+        can't embed text."""
+        handle = handle or _try_handle()
+        fn = getattr(getattr(handle, "model", None), "embed_text", None)
+        return fn if callable(fn) else None
 
-    def _oai_embed_tag():
-        r = _remote()
-        return r["embed_tag"]() if r else ""
+    def _text_search_enabled():
+        return _text_embedder() is not None
 
-    def _oai_embed_image(img_bgr):
-        r = _remote()
-        return r["embed_image"](img_bgr) if r else None
-
-    def _oai_embed_text(text):
-        r = _remote()
-        return r["embed_text"](text) if r else None
+    def _why_no_text():
+        return "" if _text_search_enabled() else \
+            "The picked embedding model can't embed text, so text search is off."
 
     # ── core embedding functions ───────────────────────────────────────────
     def _normalise(v):
@@ -172,9 +182,13 @@ def register(host):
             return None
 
     # ── model providers for the 'embed' capability ─────────────────────────
+    def _cnn_handle(arch):
+        fn = lambda img, *a, **k: _embed_image(img, arch)
+        fn.space = arch          # rows written by older versions are tagged by arch
+        return fn
     host.provide_model(
         "embed", "cnn", label="Local CNN", family="torchvision", sizes=_CNN_ARCHS,
-        loader=lambda: (lambda arch: (lambda img, *a, **k: _embed_image(img, arch)))(_cnn_choice()),
+        loader=lambda: _cnn_handle(_cnn_choice()),
         transform=None,
         available=lambda: __import__("optional_deps").optional_import("torch")[1],
         reason="pip install torch torchvision", cost_mb=300)
@@ -213,19 +227,12 @@ def register(host):
             _flush_embeddings(db, pending)
         return embedded
 
-    def _embed_tag():
-        """Model tag stored with each vector (the space it lives in). 'oai:'
-        prefix and bare CNN arch keep existing rows and _semantic_list valid."""
-        pid = _embed_provider()
-        if pid == "oai":
-            return _oai_embed_tag()
-        if pid == "cnn":
-            return _cnn_choice()
-        return f"{pid}:{host.model_variant('embed').get('size') or ''}"
-
     def _img_loader(rel):
         fp, err = host.core.resolve_media(rel)
-        return None if err else cv2.imread(fp)
+        if err:
+            return None
+        img = host.core.read_image(fp)        # core decoder: JXL too, unlike cv2.imread
+        return og.downscale_to_cap(host.core.to_bgr(img)) if img is not None else None
 
     def _img_mtime(rel):
         fp, err = host.core.resolve_media(rel)
@@ -237,22 +244,43 @@ def register(host):
             return None
 
     def _run_embed(db, file_list, force=False):
-        """Embed file_list with the provider picked under Models → Embeddings.
-        Goes through the broker like every other consumer, so an unavailable
-        pick (OAI without an embedding model, say) raises with its reason
-        instead of silently running another model. Progress goes to the header
-        status while the request runs. Returns (embedded, provider_id)."""
-        try:
-            handle = host.request_model("embed")
-        except NoProviderError as e:
-            raise RuntimeError(str(e))
+        """Embed file_list with whatever the broker serves for 'embed'. Nothing
+        here knows which model that is. Progress goes to the header status;
+        a pick that isn't usable raises with the broker's reason, and a run
+        where every image failed (unreadable files, endpoint down) raises too
+        instead of finishing 'successfully' with nothing stored.
+        Returns (embedded, provider_id)."""
+        handle = _handle()
         pid, total = _embed_provider(), len(file_list)
+        failed = {"load": 0, "embed": 0, "last": ""}
         host.config["status_text"] = f"[embed:{pid}] 0/{total}…"
         def _progress(_phase, done, tot, what):
             host.config["status_text"] = f"[embed:{pid}] {done}/{tot} {what}…"
-        n = _stage_embeddings_with(db, file_list, _img_loader, handle, _embed_tag(),
+        def _embed(img):
+            try:
+                v = handle(img)
+            except Exception as e:                 # endpoint/model error: count, keep going
+                failed["embed"] += 1; failed["last"] = str(e)[:200]
+                return None
+            if v is None:
+                failed["embed"] += 1
+            return v
+        def _load(rel):
+            img = _img_loader(rel)
+            if img is None:
+                failed["load"] += 1
+            return img
+        n = _stage_embeddings_with(db, file_list, _load, _embed, _embed_tag(handle),
                                    mtime_of=_img_mtime, force=force, progress=_progress)
-        host.config["status_text"] = f"Embeddings ({pid}): {n} new, {total} checked."
+        summary = f"Embeddings ({pid}): {n} new, {total} checked"
+        if failed["load"] or failed["embed"]:
+            summary += f", {failed['load']} unreadable, {failed['embed']} failed"
+            if failed["last"]:
+                summary += f" ({failed['last']})"
+        host.config["status_text"] = summary + "."
+        if n == 0 and (failed["load"] or failed["embed"]) and not any(
+                _have_embedding(db, r, _embed_tag(handle), _img_mtime(r)) for r in file_list[:50]):
+            raise RuntimeError(summary)
         return n, pid
 
     def _embedding_model_tag(db):
@@ -458,26 +486,25 @@ def register(host):
         order = np.argsort(-best_scores)[:top_k]
         return [(best_names[i], float(best_scores[i])) for i in order]
 
-    def _search_by_image(db, img_bgr, cnn_model=None, top_k=60):
-        v = _embed_image(img_bgr, cnn_model)
+    def _search_by_image(db, img_bgr, top_k=60):
+        v = _handle()(img_bgr)
         if v is None:
             return []
-        return _search_by_vector(db, v, top_k=top_k)
+        return _search_by_vector(db, _normalise(np.asarray(v, np.float32)), top_k=top_k)
 
     def _semantic_list(query, offset, limit, folder='', album=''):
         db = host.db()
         if _embedding_count(db) == 0:
             return [], 0, "No embeddings yet — generate library embeddings first."
-        if not _oai_embed_enabled():
-            return [], 0, "Semantic search needs an OAI embedding model (set it in Settings)."
+        embed_text = _text_embedder()
+        if embed_text is None:
+            return [], 0, ("Text search needs an embedding model that embeds text too "
+                           "(Settings → Models → Embeddings).")
         stored_tag = _embedding_model_tag(db)
-        if not (stored_tag and str(stored_tag).startswith("oai:")):
-            return [], 0, ("Stored embeddings are local (image-only). Regenerate with "
-                           "OAI to enable text search.")
-        if stored_tag != _oai_embed_tag():
+        if stored_tag != _embed_tag():
             return [], 0, (f"Stored embeddings use '{stored_tag}', not the current model. "
                            "Regenerate to search.")
-        qv = _oai_embed_text(query)
+        qv = embed_text(query)
         if qv is None:
             return [], 0, "Failed to embed query."
         hits = _search_by_vector(db, qv, top_k=2000)
@@ -529,11 +556,12 @@ def register(host):
         db = host.db()
         stored_tag = _embedding_model_tag(db)
         return jsonify({
-            "oai_available": _oai_embed_enabled(),
-            "oai_model": _oai_embed_model(),
-            "note": _why_local(),
+            "provider": _embed_provider(),
+            "space": _embed_tag(),
+            "text_search": _text_search_enabled(),
+            "note": _why_no_text(),
             "stored_model": stored_tag,
-            "stored_is_oai": bool(stored_tag and str(stored_tag).startswith("oai:")),
+            "stored_matches": bool(stored_tag) and stored_tag == _embed_tag(),
             "total": _embedding_count(db),
         })
 
@@ -544,11 +572,12 @@ def register(host):
         db = host.db()
         stored_tag = _embedding_model_tag(db)
         return jsonify({
-            "oai_available": _oai_embed_enabled(),
-            "oai_model": _oai_embed_model(),
-            "note": _why_local(),
+            "provider": _embed_provider(),
+            "space": _embed_tag(),
+            "text_search": _text_search_enabled(),
+            "note": _why_no_text(),
             "stored_model": stored_tag,
-            "stored_is_oai": bool(stored_tag and str(stored_tag).startswith("oai:")),
+            "stored_matches": bool(stored_tag) and stored_tag == _embed_tag(),
             "total": _embedding_count(db),
         })
 
@@ -578,12 +607,10 @@ def register(host):
             return jsonify({"success": False, "error": str(e)})
 
         total = _embedding_count(db)
-        use_oai = backend == "oai"
-        text_search = bool(use_oai)
         return jsonify({"success": True, "embedded_now": n,
                         "total_embeddings": total, "backend": backend,
                         "scope": "selected" if sel else "library",
-                        "text_search": text_search, "note": _why_local()})
+                        "text_search": _text_search_enabled(), "note": _why_no_text()})
 
     @host.app.route("/api/embedding/generate", methods=["POST"])
     def embedding_generate():
@@ -602,11 +629,10 @@ def register(host):
             return jsonify({"success": False, "error": str(e)})
 
         total = _embedding_count(db)
-        use_oai = backend == "oai"
         return jsonify({"success": True, "embedded_now": n,
                         "total_embeddings": total, "backend": backend,
                         "scope": "selected" if sel else "library",
-                        "note": _why_local()})
+                        "text_search": _text_search_enabled(), "note": _why_no_text()})
 
     @host.app.route("/api/embedding/bulk", methods=["POST"])
     def embedding_bulk():
@@ -624,11 +650,9 @@ def register(host):
             return jsonify({"success": False, "error": str(e)})
 
         total = _embedding_count(db)
-        use_oai = backend == "oai"
-        text_search = bool(use_oai)
         return jsonify({"success": True, "embedded_now": n,
                         "total_embeddings": total, "backend": backend,
-                        "text_search": text_search, "note": _why_local()})
+                        "text_search": _text_search_enabled(), "note": _why_no_text()})
 
     @host.app.route("/api/embedding/cluster", methods=["POST"])
     def embedding_cluster():
@@ -668,10 +692,11 @@ def register(host):
         db = host.db()
         if _embedding_count(db) == 0:
             return jsonify({"success": False, "error": "No embeddings — generate first."})
-        if not _oai_embed_enabled():
+        embed_text = _text_embedder()
+        if embed_text is None:
             return jsonify({"success": False,
-                            "error": "Semantic search needs an OAI embedding model."})
-        qv = _oai_embed_text(query)
+                            "error": "The picked embedding model can't embed text."})
+        qv = embed_text(query)
         if qv is None:
             return jsonify({"success": False, "error": "failed to embed query"})
         hits = _search_by_vector(db, qv, top_k=top_k)
@@ -689,12 +714,14 @@ def register(host):
         fp, err = host.core.resolve_media(filename)
         if err:
             return err
-        img = cv2.imread(fp)
+        img = _img_loader(filename)
         if img is None:
             return jsonify({"success": False, "error": "could not read image"}), 400
         db = host.db()
-        cnn_model = _cnn_choice()
-        hits = _search_by_image(db, img, cnn_model=cnn_model, top_k=top_k)
+        try:
+            hits = _search_by_image(db, img, top_k=top_k)
+        except RuntimeError as e:
+            return jsonify({"success": False, "error": str(e)})
         return jsonify({"success": True, "results": [
             {"filename": n, "score": round(s, 4)} for n, s in hits
         ]})
@@ -713,7 +740,7 @@ def register(host):
     # ── services ───────────────────────────────────────────────────────────
     # Provide embedding functions for other modules
     host.provide_service("embedding", {
-        "embed_image": _embed_image,
+        "embed_image": lambda img: _handle()(img),      # whatever Models → Embeddings picked
         "search_by_vector": _search_by_vector,
         "search_by_image": _search_by_image,
         "stage_embeddings_with": _stage_embeddings_with,
@@ -725,11 +752,8 @@ def register(host):
         "embedding_count": _embedding_count,
         "cluster_count": _cluster_count,
         "embedding_model_tag": _embedding_model_tag,
-        "oai_embed_enabled": _oai_embed_enabled,
-        "oai_embed_model": _oai_embed_model,
-        "cnn_choice": _cnn_choice,
-        "oai_embed_tag": _oai_embed_tag,
-        "oai_embed_image": _oai_embed_image,
-        "oai_embed_text": _oai_embed_text,
+        "embed_tag": _embed_tag,
+        "text_embed_enabled": _text_search_enabled,
+        "embed_text": lambda text: (lambda f: f(text) if f else None)(_text_embedder()),
         "semantic_list": _semantic_list,
     })

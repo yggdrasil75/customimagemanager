@@ -92,9 +92,9 @@ def register(host):
         "folder_scope_clause": core.folder_scope_clause,
         "table_exists":  common.table_exists,
         "norm_date_literal": common.norm_date_literal,
-        "embed_text":    emb_svc.get("oai_embed_text"),
-        "embed_enabled": emb_svc.get("oai_embed_enabled"),
-        "embed_tag":     emb_svc.get("oai_embed_tag"),
+        "embed_text":    emb_svc.get("embed_text"),
+        "embed_enabled": emb_svc.get("text_embed_enabled"),
+        "embed_tag":     emb_svc.get("embed_tag"),
         "llm_request":   lambda *a, **k: (host.get_service("llm") or {}).get("request", _no_llm)(*a, **k),
         "comic_pages":   lambda: host.get_service("comic_pages"),   # comics module, or None
         "current_user":  host.current_user,
