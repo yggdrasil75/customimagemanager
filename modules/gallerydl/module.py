@@ -214,6 +214,7 @@ def register(host):
         return jsonify({"success": True, "exif_groups": exif_groups,
                         "xmp_groups": xmp_groups})
 
+    host.register_app_modal("gdl_modal.html")
     host.add_route("/api/gdl/site",
                    auth.require_feature("fetch", level="write")(api_site),
                    methods=["POST"], endpoint="gdl_site")
