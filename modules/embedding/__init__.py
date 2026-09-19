@@ -26,6 +26,7 @@ import numpy as np
 from flask import request, jsonify
 
 import object_grouping as og
+from modules.model_broker import NoProviderError
 from optional_deps import optional_import
 
 cv2, _HAVE_CV2 = optional_import("cv2")
@@ -93,18 +94,12 @@ def register(host):
         return bool(r and r["embed_configured"]())
 
     def _why_local():
-        """One line on why the OAI embedder is NOT being used ('' when it is),
-        so the fallback to the local CNN is never silent."""
-        if _oai_embed_enabled():
+        """Hint shown when the pick isn't OAI ('' when it is): only OAI vectors
+        support text search."""
+        if _embed_provider() == "oai":
             return ""
-        if _embed_provider() != "oai":
-            return ("OAI not used: pick 'OpenAI-compatible embeddings' under "
-                    "Settings → Models → Embeddings.")
-        if not _remote():
-            return "OAI not used: the Vision LLM module is off."
-        if not _oai_embed_model():
-            return "OAI not used: set its Embedding model in Settings → Models → Embeddings."
-        return "OAI not used: set the OAI endpoint in the Vision LLM module settings."
+        return ("Text search needs 'OpenAI-compatible embeddings' under "
+                "Settings → Models → Embeddings.")
 
     def _oai_embed_model():
         return (host.config.get("oai_embed_model") or "").strip()
@@ -183,40 +178,6 @@ def register(host):
         transform=None,
         available=lambda: __import__("optional_deps").optional_import("torch")[1],
         reason="pip install torch torchvision", cost_mb=300)
-    def _stage_embeddings(db, file_list, loader, cnn_model=None, mtime_of=None,
-                          force=False, progress=None, should_stop=None):
-        model = cnn_model or _cnn_choice()
-        total = len(file_list)
-        done = 0
-        embedded = 0
-        pending = []
-        for rel_path in file_list:
-            if should_stop and should_stop():
-                break
-            done += 1
-            mt = mtime_of(rel_path) if mtime_of else None
-            if not force and _have_embedding(db, rel_path, model, mt):
-                if progress and done % 50 == 0:
-                    progress("embeddings", done, total, "cached")
-                continue
-            img = None
-            try:
-                img = loader(rel_path)
-            except Exception:
-                img = None
-            vec = _embed_image(img, cnn_model) if img is not None else None
-            if vec is not None:
-                pending.append((rel_path, len(vec), _pack(vec), model, mt, time.time()))
-                embedded += 1
-            if len(pending) >= 64:
-                _flush_embeddings(db, pending)
-                pending = []
-            if progress:
-                progress("embeddings", done, total, "embedding")
-        if pending:
-            _flush_embeddings(db, pending)
-        return embedded
-
     def _stage_embeddings_with(db, file_list, loader, embed_fn, model_tag,
                                mtime_of=None, force=False, progress=None,
                                should_stop=None):
@@ -251,6 +212,48 @@ def register(host):
         if pending:
             _flush_embeddings(db, pending)
         return embedded
+
+    def _embed_tag():
+        """Model tag stored with each vector (the space it lives in). 'oai:'
+        prefix and bare CNN arch keep existing rows and _semantic_list valid."""
+        pid = _embed_provider()
+        if pid == "oai":
+            return _oai_embed_tag()
+        if pid == "cnn":
+            return _cnn_choice()
+        return f"{pid}:{host.model_variant('embed').get('size') or ''}"
+
+    def _img_loader(rel):
+        fp, err = host.core.resolve_media(rel)
+        return None if err else cv2.imread(fp)
+
+    def _img_mtime(rel):
+        fp, err = host.core.resolve_media(rel)
+        if err:
+            return None
+        try:
+            return os.path.getmtime(fp)
+        except Exception:
+            return None
+
+    def _run_embed(db, file_list, force=False):
+        """Embed file_list with the provider picked under Models → Embeddings.
+        Goes through the broker like every other consumer, so an unavailable
+        pick (OAI without an embedding model, say) raises with its reason
+        instead of silently running another model. Progress goes to the header
+        status while the request runs. Returns (embedded, provider_id)."""
+        try:
+            handle = host.request_model("embed")
+        except NoProviderError as e:
+            raise RuntimeError(str(e))
+        pid, total = _embed_provider(), len(file_list)
+        host.config["status_text"] = f"[embed:{pid}] 0/{total}…"
+        def _progress(_phase, done, tot, what):
+            host.config["status_text"] = f"[embed:{pid}] {done}/{tot} {what}…"
+        n = _stage_embeddings_with(db, file_list, _img_loader, handle, _embed_tag(),
+                                   mtime_of=_img_mtime, force=force, progress=_progress)
+        host.config["status_text"] = f"Embeddings ({pid}): {n} new, {total} checked."
+        return n, pid
 
     def _embedding_model_tag(db):
         row = db.execute(
@@ -568,38 +571,14 @@ def register(host):
         if not file_list:
             return jsonify({"success": False, "error": "No eligible images found."})
 
-        def _img_loader(rel):
-            fp, err = host.core.resolve_media(rel)
-            if err:
-                return None
-            return cv2.imread(fp)
-
-        def _img_mtime(rel):
-            fp, err = host.core.resolve_media(rel)
-            if err:
-                return None
-            try:
-                return os.path.getmtime(fp)
-            except Exception:
-                return None
-
-        use_oai = _oai_embed_enabled()
         try:
-            if use_oai:
-                tag = _oai_embed_tag()
-                n = _stage_embeddings_with(
-                    db, file_list, _img_loader, _oai_embed_image, tag,
-                    mtime_of=_img_mtime, force=force)
-            else:
-                cnn_model = _cnn_choice()
-                n = _stage_embeddings(
-                    db, file_list, _img_loader, cnn_model=cnn_model,
-                    mtime_of=_img_mtime, force=force)
+            n, backend = _run_embed(db, file_list, force=force)
         except Exception as e:
+            host.config["status_text"] = f"Embeddings failed: {e}"
             return jsonify({"success": False, "error": str(e)})
 
         total = _embedding_count(db)
-        backend = "oai" if use_oai else "local"
+        use_oai = backend == "oai"
         text_search = bool(use_oai)
         return jsonify({"success": True, "embedded_now": n,
                         "total_embeddings": total, "backend": backend,
@@ -613,41 +592,17 @@ def register(host):
         sel = body.get("filenames") or []
         db = host.db()
 
-        def _img_loader(rel):
-            fp, err = host.core.resolve_media(rel)
-            if err:
-                return None
-            return cv2.imread(fp)
-
-        def _img_mtime(rel):
-            fp, err = host.core.resolve_media(rel)
-            if err:
-                return None
-            try:
-                return os.path.getmtime(fp)
-            except Exception:
-                return None
-
         file_list = sel if sel else [r[0] for r in db.execute(
             "SELECT rel_path FROM files WHERE media_kind='image' ORDER BY rel_path").fetchall()]
 
-        use_oai = _oai_embed_enabled()
         try:
-            if use_oai:
-                tag = _oai_embed_tag()
-                n = _stage_embeddings_with(
-                    db, file_list, _img_loader, _oai_embed_image, tag,
-                    mtime_of=_img_mtime, force=force)
-            else:
-                cnn_model = _cnn_choice()
-                n = _stage_embeddings(
-                    db, file_list, _img_loader, cnn_model=cnn_model,
-                    mtime_of=_img_mtime, force=force)
+            n, backend = _run_embed(db, file_list, force=force)
         except Exception as e:
+            host.config["status_text"] = f"Embeddings failed: {e}"
             return jsonify({"success": False, "error": str(e)})
 
         total = _embedding_count(db)
-        backend = "oai" if use_oai else "local"
+        use_oai = backend == "oai"
         return jsonify({"success": True, "embedded_now": n,
                         "total_embeddings": total, "backend": backend,
                         "scope": "selected" if sel else "library",
@@ -662,38 +617,14 @@ def register(host):
             return jsonify({"success": False, "error": "No filenames provided"})
         db = host.db()
 
-        def _img_loader(rel):
-            fp, err = host.core.resolve_media(rel)
-            if err:
-                return None
-            return cv2.imread(fp)
-
-        def _img_mtime(rel):
-            fp, err = host.core.resolve_media(rel)
-            if err:
-                return None
-            try:
-                return os.path.getmtime(fp)
-            except Exception:
-                return None
-
-        use_oai = _oai_embed_enabled()
         try:
-            if use_oai:
-                tag = _oai_embed_tag()
-                n = _stage_embeddings_with(
-                    db, filenames, _img_loader, _oai_embed_image, tag,
-                    mtime_of=_img_mtime, force=True)
-            else:
-                cnn_model = _cnn_choice()
-                n = _stage_embeddings(
-                    db, filenames, _img_loader, cnn_model=cnn_model,
-                    mtime_of=_img_mtime, force=True)
+            n, backend = _run_embed(db, filenames, force=True)
         except Exception as e:
+            host.config["status_text"] = f"Embeddings failed: {e}"
             return jsonify({"success": False, "error": str(e)})
 
         total = _embedding_count(db)
-        backend = "oai" if use_oai else "local"
+        use_oai = backend == "oai"
         text_search = bool(use_oai)
         return jsonify({"success": True, "embedded_now": n,
                         "total_embeddings": total, "backend": backend,
@@ -785,8 +716,8 @@ def register(host):
         "embed_image": _embed_image,
         "search_by_vector": _search_by_vector,
         "search_by_image": _search_by_image,
-        "stage_embeddings": _stage_embeddings,
         "stage_embeddings_with": _stage_embeddings_with,
+        "run_embed": _run_embed,
         "stage_cluster_images": _stage_cluster_images,
         "stage_build_heuristics": _stage_build_heuristics,
         "load_heuristics": _load_heuristics,
