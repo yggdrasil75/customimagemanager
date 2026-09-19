@@ -63,6 +63,7 @@
     finally { document.querySelectorAll('.embedding-bulk-btn').forEach(b => { b.disabled = false; b.innerHTML = orig; }); }
   }
   window.bulkEmbed = bulkEmbed;
+  window.embedLibrary = embedLibrary;   // the injected review-pane button calls this by name
 
   // Export for use by review.js
   window.EmbeddingUI = {
