@@ -38,8 +38,9 @@ next section's job; the seam is now here for it.
 
 import os
 import importlib
-import importlib.util
 import traceback
+
+from . import deps
 
 
 # ── built-in core descriptors (imported directly by manager, shown locked) ──
@@ -316,18 +317,15 @@ class ModuleRegistry:
     def missing_pip(self):
         """Best-effort list of declared pip deps that don't import.
 
-        Advisory only — used to warn in the UI. Uses the dep's top-level
-        import name when the author gives 'pkg:import_name', else the pip
-        name with '-' -> '_'.
+        Advisory only — used to warn in the UI. The pip-name -> import-name
+        rules live in deps.py so the Modules tab and the installer agree on
+        what counts as installed.
         """
         missing = {}
         for pid, lm in self._plugins.items():
-            miss = []
-            for dep in lm.manifest.get("pip", []):
-                pip_name, _, import_name = dep.partition(":")
-                mod = import_name or pip_name.replace("-", "_")
-                if importlib.util.find_spec(mod.split("[")[0].strip()) is None:
-                    miss.append(pip_name.strip())
+            miss = [dep.partition(":")[0].strip()
+                    for dep in lm.manifest.get("pip", [])
+                    if not deps.installed(dep)]
             if miss:
                 missing[pid] = miss
         return missing

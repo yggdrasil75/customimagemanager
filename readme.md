@@ -1,19 +1,43 @@
 install:
 
 ```
-apt install build-essential libjxl-dev
 git clone https://github.com/yggdrasil75/customimagemanager
 cd customimagemanager
-wget https://cdn.tailwindcss.com/3.4.17 -O static/tailwindcss.js
-mkdir -p static/vendor
-wget https://unpkg.com/three@0.137.5/build/three.min.js -O static/vendor/three.min.js
-wget https://unpkg.com/three@0.137.5/examples/js/loaders/OBJLoader.js -O static/vendor/OBJLoader.js
-wget https://unpkg.com/three@0.137.5/examples/js/controls/OrbitControls.js -O static/vendor/OrbitControls.js
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-python manager.py
+./install.sh
+./run.sh
 ```
+
+`install.sh` asks which profile you want (or takes `--profile`), installs the
+system packages for your distro, builds the venv, pulls the python deps that
+profile actually needs, fetches the vendored front-end JS, and writes the
+module on/off map plus the chosen profile/backend into `app_config.json`. GPU
+backend is detected (`--backend cpu|cuda|rocm` to force it). The resolution
+lives in `modules/deps.py`, next to the rest of the module system — the
+scripts are thin wrappers around it.
+
+profiles:
+
+| profile | what's in it |
+|---|---|
+| `ultralight` | viewer + metadata editing. no torch, no ML stack. |
+| `light` | + the small/fast models: YOLO, MobileSAM, RTMPose, faces, rapidocr, dedup. |
+| `heavy-only` | + only the large ones: SAM 2/3, DINO, pyiqa, SMPL-X, embeddings, trainer. |
+| `full` | everything. |
+
+```
+./install.sh --profile light --backend cuda   # non-interactive
+./run.sh --profile heavy-only                 # switch profile later
+./update.sh                                   # git pull + re-sync deps
+python3 modules/deps.py tiers                 # what's on/off and why
+```
+
+A module you enable yourself in Settings -> Modules gets its pip deps
+installed by `run.sh` on the next start; nothing to install by hand. Three
+packages aren't on pypi under a usable name (`anny`, `atlas`, `shapy`) — those
+modules stay off until you install them yourself, and say so in the Modules
+tab.
+
+Windows: use docker, or WSL.
 
 alternatively:
 

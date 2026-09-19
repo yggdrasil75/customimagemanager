@@ -31,6 +31,7 @@ from optional_deps import optional_import
 # the move into modules/ subfolders. See modules/__init__.py.
 import modules
 from modules import registry as module_registry
+modules.config.declare("install", default={}, owner="core")
 cv2, _HAVE_CV2 = optional_import("cv2")
 pyexiv2, _HAVE_PYEXIV2 = optional_import("pyexiv2")
 import hashlib, sqlite3, uuid, functools
