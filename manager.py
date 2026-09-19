@@ -1370,6 +1370,7 @@ def _index_file(rel_path: str, force: bool = False,
                           (int(_pc), rel_path))
         _db().commit()
         _set_media_kind(rel_path)
+        module_host.emit("file.indexed", rel_path=rel_path, abs_path=abs_path)
         return True
     except Exception as e:
         access_logger.error(f"_index_file {rel_path}: {e}")
@@ -3420,6 +3421,28 @@ def _models_payload():
                 f["value"] = state.get(f["key"])
         caps.append(c)
     return caps
+
+# ── Settings → Info: what this install can do, from the core + every module ──
+_CORE_SEARCH_HELP = [
+    ("free text", "words match description, tags and file names; quote for phrases"),
+    ("tag:<name>", "images carrying that tag"),
+    ("is:untagged / is:tagged", "no tags at all / at least one tag"),
+    ("is:unconfirmed / is:tagunconfirmed", "has unconfirmed boxes / unconfirmed tags"),
+    ("width<N height>=N", "pixel size filters, any of < <= > >= ="),
+    ("date:<YYYY[-MM[-DD]]>", "any date bucket; datetime:, dateoriginal:, datedigitized:, capture_date:, modified: pick one; ranges a..b and < <= > >= = work"),
+    ("sem:<text>", "semantic search by image embedding (embedding module)"),
+]
+
+@app.route("/api/info")
+def api_info():
+    filters = [{"token": t, "help": h, "source": "core"} for t, h in _CORE_SEARCH_HELP]
+    for prefix, meta in sorted(module_host.search_help.items()):
+        filters.append({"token": prefix + "…", "help": meta["help"], "source": meta["module_id"] or "module"})
+    return jsonify({"success": True, "sections": [
+        {"id": "search", "title": "Search filters",
+         "description": "Type these in the gallery search box; combine freely.",
+         "rows": filters},
+    ]})
 
 @app.route("/api/models")
 def api_models():

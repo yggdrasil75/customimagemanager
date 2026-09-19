@@ -111,6 +111,7 @@ class Host:
         # the module's templates/ dir, injected into app.html's modal area.
         self.app_modals = []
         self.centre_panes = []
+        self.search_help = {}         # search prefix -> {help, module_id}
         self.action_targets = {}      # AI-action target -> fn(fp, bgr, meta, action)
         self.gallery_filters = []     # SQL clauses hiding container members from the flat gallery
         # Left-pane content partials a module contributes (e.g. the books shelf),
@@ -291,15 +292,17 @@ class Host:
         distinct 'kind' the front end can render, e.g. 'book'/'comic')."""
         self.search_providers.append(fn)
 
-    def register_search_type(self, prefix, handler):
+    def register_search_type(self, prefix, handler, *, help=None):
         """Register a custom search token handler.
 
         prefix  -- token prefix including colon, e.g. "exif:" or "iptc:".
         handler -- fn(token, value) -> (sql_clause, params) or ("", []).
                    token is the full token (e.g. "exif:Make"), value is the
                    part after the colon. Return empty clause to ignore.
+        help    -- one line shown in Settings → Info (syntax + example).
         """
         self.search_types[prefix] = handler
+        self.search_help[prefix] = {"help": help or "", "module_id": self._current_module}
 
     def register_left_pane(self, template):
         """Contribute a left-column pane partial (e.g. a shelf), server-rendered

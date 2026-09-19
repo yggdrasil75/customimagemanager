@@ -26,9 +26,9 @@ function settingsTab(name) {
   });
   if (name === 'storage') loadStorageTab();
   else stopTiersPoll();
-  if (name === 'pipeline') window.pipelineEditorRefresh && window.pipelineEditorRefresh();
   if (name === 'users') window.openUserAdmin && window.openUserAdmin();
   if (name === 'modules') loadModulesTab();
+  if (name === 'info') loadInfoTab();
 }
 
 /* ── Modules tab ───────────────────────────────────────────────────────────

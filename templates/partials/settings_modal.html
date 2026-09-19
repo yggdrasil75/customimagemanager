@@ -7,14 +7,14 @@
       <div class="flex gap-1">
         <button data-settings-tab="general" onclick="settingsTab('general')"
           class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">⚙ General</button>
-        <button data-settings-tab="ai" onclick="settingsTab('ai')"
-          class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">🧠 AI / Vision</button>
         <button data-settings-tab="models" onclick="settingsTab('models')"
           class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">🧩 Models</button>
         <button data-settings-tab="storage" onclick="settingsTab('storage')"
           class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">🗄 Storage</button>
         <button data-settings-tab="users" onclick="settingsTab('users')"
           class="settings-tab hidden px-3 py-1.5 rounded-t text-sm font-bold" data-admin-only>👤 Users</button>
+        <button data-settings-tab="info" onclick="settingsTab('info')"
+          class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold text-gray-400 hover:text-white">ℹ Info</button>
         <button data-settings-tab="modules" onclick="settingsTab('modules')"
           class="settings-tab hidden px-3 py-1.5 rounded-t text-sm font-bold" data-admin-only>🧩 Modules</button>
         <!-- Pluggable modules inject their own tab buttons here (static/modules.js). -->
@@ -66,15 +66,6 @@
       </div>
     </div>
 
-    <div data-settings-pane="ai" class="hidden overflow-y-auto flex-1 grid grid-cols-2 gap-x-6 gap-y-3 pr-1 items-start">
-      <div class="col-span-2">
-        <label class="text-xs text-indigo-300 font-bold block mb-2">LLM connection</label>
-        <p class="text-[10px] text-gray-500">The vision-LLM endpoint, key, chat model and system prompt
-          live with the <b>Vision LLM</b> module (Modules → ⚙ Settings); the OAI embedding model with
-          the Embedding module (🧩 Models → Image embedding).</p>
-      </div>
-    </div>
-
     <div data-settings-pane="models" class="hidden overflow-y-auto flex-1 pr-1">
       <!-- Model selection. Rendered from /api/models by static/modules.js: one
            row per capability the broker knows, with family / size / type
@@ -121,6 +112,12 @@
 
     <div data-settings-pane="users" data-admin-only class="hidden overflow-y-auto flex-1 pr-1">
       <div id="settings_users_mount"></div>
+    </div>
+
+    <div data-settings-pane="info" class="hidden overflow-y-auto flex-1 pr-1">
+      <!-- Filled by static/info.js from /api/info: what this install can do,
+           gathered from the core and every enabled module. -->
+      <div id="info_sections" class="space-y-4 text-sm"></div>
     </div>
 
     <div data-settings-pane="modules" data-admin-only class="hidden overflow-y-auto flex-1 pr-1">

@@ -188,7 +188,8 @@ def register(host):
                       f"WHERE cluster_id IN ({','.join('?' * len(bcids))})))")
             params += bcids
         return clause, params
-    host.register_search_type("person:", _person_search)
+    host.register_search_type("person:", _person_search,
+        help="person:<id> — photos of a person (face cluster id, plus body-bridged photos when bodies are on)")
 
     host.provide_service("people", {
         "person_for_cluster": pc.person_for_cluster,

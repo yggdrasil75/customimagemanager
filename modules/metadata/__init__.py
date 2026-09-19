@@ -12,6 +12,8 @@ Left in core for now: exif/write (welded to core DB rating/description mirroring
 job; noted so it isn't mistaken for fully done.
 """
 
+import threading
+
 from flask import request, jsonify
 
 from . import (exif_fields, iptc_fields, xmp_fields,
@@ -135,6 +137,11 @@ def register(host):
                         exif_export.write_exif(fp, {"ImageHistory": hist})
                 except Exception as e:
                     host.logger.warning(f"exif history {rel}: {e}")
+            if result.get("success"):
+                try:
+                    index_file(rel, fp)          # keep meta: search current
+                except Exception as e:
+                    host.logger.warning(f"metadata index {rel}: {e}")
             return jsonify({"success": result.get("success", False), "result": result})
         except Exception as e:
             host.logger.error(f"metadata_write {filename}: {e}")
@@ -159,58 +166,117 @@ def register(host):
     # return empty clauses for fields not yet indexed. A future improvement would
     # add a dedicated metadata index table for full field search.
 
-    def _make_metadata_search_handler(prefix, fields_mod):
-        """Create a search handler for a metadata prefix (exif:, iptc:, xmp:)."""
-        # Build a set of field names that have db_field mappings in the schema
-        indexed_fields = set()
-        for group in getattr(fields_mod, "ALL_GROUPS", []):
-            for field in group:
-                if getattr(field, "db_field", None):
-                    indexed_fields.add(field.name.lower())
-        # Also check module-level field lists
-        for attr in dir(fields_mod):
-            val = getattr(fields_mod, attr)
-            if isinstance(val, list):
-                for field in val:
-                    if hasattr(field, "db_field") and field.db_field:
-                        indexed_fields.add(field.name.lower())
+    # ── metadata index: every present EXIF / IPTC / XMP field of every image,
+    #    flattened to (ns, tag, value), so search can filter on any of them:
+    #      meta:<tag>:<value>   any namespace   (meta:Make:Canon, meta:dc:creator:Ann)
+    #      exif:<tag>:<value>   one namespace   (exif:Model:R5, xmp:Rating:5)
+    #      meta:<tag>           the tag is present at all
+    #    Rebuilt per file after the core indexes it (file.indexed) and after a
+    #    metadata write; a full backfill is POST /api/metadata/reindex.
+    host.add_table("""
+        CREATE TABLE IF NOT EXISTS metadata_index (
+            rel_path TEXT NOT NULL,
+            ns       TEXT NOT NULL,     -- exif | iptc | xmp
+            tag      TEXT NOT NULL,     -- Make, Keywords, dc:creator ...
+            value    TEXT NOT NULL,
+            PRIMARY KEY (rel_path, ns, tag)
+        );
+        CREATE INDEX IF NOT EXISTS idx_meta_tag ON metadata_index(tag COLLATE NOCASE, value COLLATE NOCASE);
+    """)
 
+    def _flatten(fp):
+        rows = []
+        for ns, reader, key in (("exif", exif_import.read_exif, "groups"),
+                                ("iptc", iptc_import.read_iptc, "records"),
+                                ("xmp", xmp_import.read_xmp, "namespaces")):
+            try:
+                data = reader(fp) or {}
+            except Exception:
+                continue
+            for grp in data.get(key) or []:
+                pre = (grp.get("ns") + ":") if ns == "xmp" and grp.get("ns") else ""
+                for f in grp.get("fields") or []:
+                    if not f.get("present"):
+                        continue
+                    v = f.get("display", f.get("raw"))
+                    if isinstance(v, (list, tuple)):
+                        v = ", ".join(str(x) for x in v)
+                    v = str(v).strip() if v is not None else ""
+                    if v:
+                        rows.append((ns, pre + f["name"], v[:2000]))
+                for u in grp.get("unknown") or []:
+                    v = u.get("raw")
+                    if v not in (None, ""):
+                        rows.append((ns, pre + str(u.get("name")), str(v)[:2000]))
+        return rows
+
+    def index_file(rel_path, abs_path=None):
+        fp = abs_path or m.resolve_media(rel_path)[0]
+        if not fp:
+            return 0
+        rows = _flatten(fp)
+        db = host.db()
+        db.execute("DELETE FROM metadata_index WHERE rel_path=?", (rel_path,))
+        db.executemany("INSERT OR REPLACE INTO metadata_index(rel_path, ns, tag, value) VALUES(?,?,?,?)",
+                       [(rel_path, ns, tag, val) for ns, tag, val in rows])
+        db.commit()
+        return len(rows)
+
+    host.on("file.indexed", lambda rel_path, abs_path=None: index_file(rel_path, abs_path))
+    host.on("file.deleted", lambda rel_path: (host.db().execute(
+        "DELETE FROM metadata_index WHERE rel_path=?", (rel_path,)), host.db().commit()))
+    host.on("file.renamed", lambda old_rel, new_rel: (host.db().execute(
+        "UPDATE metadata_index SET rel_path=? WHERE rel_path=?", (new_rel, old_rel)), host.db().commit()))
+
+    _reidx = {"running": False, "done": 0, "total": 0}
+
+    def _reindex_all():
+        _reidx.update(running=True, done=0)
+        try:
+            rels = [r[0] for r in host.db().execute(
+                "SELECT rel_path FROM files WHERE COALESCE(media_kind,'image')='image'").fetchall()]
+            _reidx["total"] = len(rels)
+            for rel in rels:
+                try:
+                    index_file(rel)
+                except Exception as e:
+                    host.logger.warning(f"metadata index {rel}: {e}")
+                _reidx["done"] += 1
+        finally:
+            _reidx["running"] = False
+
+    def api_meta_reindex():
+        if not _reidx["running"]:
+            threading.Thread(target=_reindex_all, daemon=True).start()
+        return jsonify({"success": True, **_reidx})
+    host.add_route("/api/metadata/reindex",
+                   m.auth.require_feature("metadata_tabs", level="write")(api_meta_reindex), methods=["POST"])
+    host.add_route("/api/metadata/reindex/status", lambda: jsonify({"success": True, **_reidx}))
+
+    def _meta_search(ns):
         def handler(token, value):
-            # token is like "exif:Make", value is "Make"
-            field_name = value.lower()
-            # Check if this field is mirrored to a DB column
-            if field_name in indexed_fields:
-                # Find the actual db_field name
-                db_col = None
-                for group in getattr(fields_mod, "ALL_GROUPS", []):
-                    for field in group:
-                        if field.name.lower() == field_name and field.db_field:
-                            db_col = field.db_field
-                            break
-                    if db_col:
-                        break
-                if not db_col:
-                    for attr in dir(fields_mod):
-                        val = getattr(fields_mod, attr)
-                        if isinstance(val, list):
-                            for field in val:
-                                if hasattr(field, "name") and field.name.lower() == field_name and getattr(field, "db_field", None):
-                                    db_col = field.db_field
-                                    break
-                            if db_col:
-                                break
-                if db_col:
-                    # Search in the files table
-                    clause = f"files.{db_col} LIKE ?"
-                    param = f"%{value}%"
-                    return clause, [param]
-            # Field not indexed in DB - return empty clause (no-op)
-            return "", []
+            # value is what follows the prefix: "<tag>" or "<tag>:<value>"; the
+            # value is the LAST segment so xmp tags like dc:creator survive.
+            parts = value.split(":")
+            if len(parts) >= 2 and parts[-1] != "":
+                tag, val = ":".join(parts[:-1]), parts[-1]
+            else:
+                tag, val = value.rstrip(":"), None
+            if not tag:
+                return "", []
+            clause = "rel_path IN (SELECT rel_path FROM metadata_index WHERE tag=? COLLATE NOCASE"
+            params = [tag]
+            if ns:
+                clause += " AND ns=?"; params.append(ns)
+            if val is not None:
+                clause += " AND value LIKE ? COLLATE NOCASE"; params.append(f"%{val}%")
+            return clause + ")", params
         return handler
-
-    # Register search types for each metadata format
-    host.register_search_type("exif:", _make_metadata_search_handler("exif:", exif_fields))
-    host.register_search_type("iptc:", _make_metadata_search_handler("iptc:", iptc_fields))
-    host.register_search_type("xmp:", _make_metadata_search_handler("xmp:", xmp_fields))
+    host.register_search_type("meta:", _meta_search(None),
+        help="meta:<tag>:<value> — any EXIF/IPTC/XMP field containing value; meta:<tag> = tag present. e.g. meta:Make:canon, meta:dc:creator:ann")
+    host.register_search_type("exif:", _meta_search("exif"), help="exif:<tag>:<value> — EXIF only, e.g. exif:Model:R5")
+    host.register_search_type("iptc:", _meta_search("iptc"), help="iptc:<tag>:<value> — IPTC only, e.g. iptc:Keywords:beach")
+    host.register_search_type("xmp:", _meta_search("xmp"), help="xmp:<ns:tag>:<value> — XMP only, e.g. xmp:dc:creator:ann")
+    host.provide_service("metadata_index", {"index_file": index_file, "reindex_all": _reindex_all})
 
     host.logger.info("metadata module: features + tabs + read/schema/write + search types registered")

@@ -125,7 +125,7 @@ touching `media_types.py`.
 | `host.register_feature(key, label, section=, default=, role_defaults=)` | an auth permission; gate routes with `host.require_feature` / `core.auth.require_feature` |
 | `host.add_table(ddl, check=)` | own DB tables (created after all modules load; `check(db)` runs once) |
 | `host.register_file_enricher(fn)` | attach per-file fields to gallery/list/detail rows |
-| `host.register_search_provider(fn)` / `register_search_type(prefix, handler)` | add results / token handlers to gallery search |
+| `host.register_search_provider(fn)` / `register_search_type(prefix, handler, help=)` | add results / token handlers to gallery search (`help` shows in Settings → Info) |
 | `host.register_pipeline_stage(name, fn, label=)` | an AI-pipeline node type |
 | `host.register_action_target(name, fn)` | an AI-action target (`fn(fp, bgr, meta, action)`) |
 | `host.register_gallery_filter(clause)` | hide container members (comic pages) from the flat gallery |
@@ -169,6 +169,7 @@ The core emits, modules react; the core never names a module.
 | `labels.pool` | — → class names | extend the trainer's label pool |
 | `llm.image` | `image` (BGR) → transformed image | preprocess every image bound for the vision LLM |
 | `regions.masks` | `instances, width, height` | fill `mask_svg` from each instance's `polygon` (segmentation) |
+| `file.indexed` | `rel_path, abs_path` | after the core indexed an image (metadata module refreshes `metadata_index`) |
 
 `emit()` returns every non-None handler result; the books module answers
 `upload.duplicate_check`, dedup answers `file.deleted`.
