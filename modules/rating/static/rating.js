@@ -9,6 +9,17 @@
  *   - iqaScan: rate the whole library (review pane button);
  *   - injected buttons in the gallery bulk area and the review pane. */
 (function () {
+  // Per-file state lives HERE, filled from meta.iqa_score / meta.iqa_manual by
+  // the core file-meta hook on every selectFile — never in core globals (a
+  // top-level `let` in globals.js is not window.X, which is how the old shared
+  // `window.currentIqa` ended up showing one rating on every image).
+  let iqa = null, manual = false;
+  if (window.registerFileMetaHook) registerFileMetaHook((meta) => {
+    iqa = (meta && meta.iqa_score !== undefined) ? meta.iqa_score : null;
+    manual = !!(meta && meta.iqa_manual);
+    renderStars();
+  });
+
   // ── star display primitives (moved from core globals.js) ─────────────────────
   // Compact star badge for a gallery tile. Kept a simple display fn so the core
   // tile template can call it (guarded) — it renders whatever iqa_score the
@@ -24,7 +35,7 @@
   // Interactive 0..5 star control in the per-image controls pane.
   window.renderStars = function () {
     const el = document.getElementById("meta_stars"); if (!el) return;
-    const score = window.currentIqa;
+    const score = iqa;
     let html = "";
     for (let i = 1; i <= 5; i++) {
       const on = (score !== null && score !== undefined && score >= i - 0.001);
@@ -34,20 +45,20 @@
     }
     el.innerHTML = html;
     const badge = document.getElementById("iqa_manual_badge");
-    if (badge) badge.classList.toggle("hidden", !window.currentIqaManual);
+    if (badge) badge.classList.toggle("hidden", !manual);
     const hint = document.getElementById("iqa_brisque_hint");
     if (hint) hint.textContent = (score === null || score === undefined) ? "unscored" : `${score}/5`;
   };
 
   window.setStars = async function (v) {
     if (!window.currentFile) return;
-    window.currentIqa = v; window.currentIqaManual = true; renderStars();
+    iqa = v; manual = true; renderStars();
     if (window.ratingSet) await window.ratingSet(window.currentFile, v);
     updateTileStar(window.currentFile, v);
   };
   window.clearStars = async function () {
     if (!window.currentFile) return;
-    window.currentIqa = null; window.currentIqaManual = false; renderStars();
+    iqa = null; manual = false; renderStars();
     if (window.ratingSet) await window.ratingSet(window.currentFile, null);
     updateTileStar(window.currentFile, null);
   };
@@ -103,6 +114,7 @@
         const st = document.getElementById("status_text");
         if (st) st.innerText = `IQA: scored ${d.scored} of ${d.total}.${note}`;
         loadGallery();
+        if (window.currentFile) selectFile(window.currentFile);
       }
     } catch (e) { alert("Network error during IQA scan."); }
     finally { document.querySelectorAll(".rating-scan-btn").forEach((b) => { b.disabled = false; b.innerHTML = orig; }); }
@@ -111,7 +123,7 @@
 
   // Rate the current selection.
   async function bulkRate() {
-    const files = [...(window.selectedFiles || [])];
+    const files = [...(selectedFiles || [])];
     if (!files.length) return;
     const btn = document.querySelector(".rating-bulk-btn");
     const orig = btn ? btn.innerHTML : ""; if (btn) { btn.disabled = true; btn.innerHTML = "Rating…"; }

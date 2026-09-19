@@ -13,6 +13,8 @@ tags, description, boxes and flags, plus the auto-tag background worker.
 Other modules run the tree through the "pipeline" service (comics: page-wise
 Smart Tag + summary).
 """
+import json
+
 from . import pipeline_core as pc
 from .engine import DEFAULT_PIPELINE
 
@@ -47,6 +49,22 @@ def register(host):
         feat = getattr(fn, "_feature", None)
         view = host.core.auth.require_feature(*feat[0], **feat[1])(fn) if feat else fn
         host.add_route(rule, view, **opts)
+    # The structured analysis this module writes (files.analysis, mirrored in
+    # the sidecar) reaches the metadata packet through the enricher; pipeline.js
+    # picks it up with registerFileMetaHook. Core never names it.
+    def _enrich(db, rel_paths):
+        out = {}
+        for i in range(0, len(rel_paths), 400):
+            chunk = rel_paths[i:i + 400]
+            q = ("SELECT rel_path, analysis FROM files WHERE analysis != '' "
+                 "AND rel_path IN (%s)" % ",".join("?" * len(chunk)))
+            for r in db.execute(q, chunk).fetchall():
+                try:
+                    out[r["rel_path"]] = {"analysis": json.loads(r["analysis"])}
+                except (TypeError, ValueError):
+                    pass
+        return out   # ponytail: rides on gallery pages too; gate on len==1 if pages get heavy
+    host.register_file_enricher(_enrich)
     host.add_asset("pipeline.js")
     host.add_asset("pipeline_editor.js")
     host.add_settings_tab("pipeline", "Pipeline", icon="✨", admin_only=True)

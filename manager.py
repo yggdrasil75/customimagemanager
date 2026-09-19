@@ -5234,7 +5234,8 @@ def _fast_metadata(fn, fp):
     triple XMP pass that made this take ~30s per packed 4K image."""
     db = _db()
     row = db.execute(
-        "SELECT tags, description, artist, language, event, catalog_sets "
+        "SELECT tags, description, artist, language, event, catalog_sets, "
+        "flagged_delete, flag_reason "
         "FROM files WHERE rel_path=?", (fn,)).fetchone()
     if row is None:
         # Not indexed yet — read the file's XMP directly.
@@ -5254,6 +5255,11 @@ def _fast_metadata(fn, fp):
                    if isinstance(default, list) else default
 
     tags = _loads(row["tags"], [])
+    # The deletion flag is core (review queue, /api/flag, banner) and is cached
+    # on the row like tags/description; returning None here hid the banner.
+    # Module-owned fields (analysis, ratings, …) arrive via file enrichers.
+    flag = ({"delete": True, "reason": row["flag_reason"] or ""}
+            if row["flagged_delete"] else None)
 
     _side_xmp = os.path.splitext(fp)[0] + '.xmp'
     regions = []
@@ -5291,7 +5297,7 @@ def _fast_metadata(fn, fp):
         "event": row["event"] or "",
         "catalog_sets": row["catalog_sets"] or "",
         "regions": regions,
-        "analysis": None, "flag": None, "pose": pose,
+        "analysis": None, "flag": flag, "pose": pose,
         "ai_generated": False, "model_age": None, "persons": "",
         "genre": "", "alt_of": "", "page_count": None, "albums": [],
     }
@@ -5315,6 +5321,9 @@ def api_metadata():
         _rr = [{"filename": fn}]
         module_host.enrich_file_rows(_db(), _rr)
         _r = _rr[0]
+        # Every enricher field rides into the packet (analysis, …); the rating
+        # lines below keep their legacy names on top.
+        meta.update({k: v for k, v in _r.items() if k != "filename"})
         brisque = _r.get("iqa_score")
         user = _r.get("rating") if _r.get("rating_user") else None
         meta["iqa_score"]   = _r.get("effective_rating")

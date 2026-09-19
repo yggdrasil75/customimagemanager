@@ -458,19 +458,14 @@ async function selectFile(fn){
     currentRegionsFile=fn;
     setTags(d.metadata.tags||[]);
     document.getElementById('meta_desc').value=d.metadata.description;
-    currentIqa=(d.metadata.iqa_score===undefined?null:d.metadata.iqa_score);
-    currentIqaManual=!!d.metadata.iqa_manual;
-    if(typeof renderStars==='function') renderStars();
     const ti=document.getElementById('tag_add_input'); if(ti) ti.value='';
     currentRegions=d.metadata.regions||[];
-    window.currentAnalysis=d.metadata.analysis||null;
     currentFlag=d.metadata.flag||null;
     activeRegionIdx=-1;
     selectedRegionIdx=-1;
     closeRegionEditor();
     runFileMetaHooks(d.metadata, fn);
     drawCanvas();
-    if(window.renderAnalysis) renderAnalysis();
     renderRegionsList();
     renderFlagBanner();
   }

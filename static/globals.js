@@ -11,7 +11,7 @@ let selectedRegionIdx=-1;
 let highlightRegionBox=null;
 let highlightRegionFile=null;
 let currentPage=0, totalFiles=0, currentSearch='', currentFolder='', allFolders=[];
-let currentTags=[], currentIqa=null, currentIqaManual=false;
+let currentTags=[];
 let PAGE=200;
 let _brandClearLogo = false;
 
@@ -222,7 +222,9 @@ function adoptMirrorTags(){
   setTags(m.value.split(',').map(s=>s.trim()).filter(Boolean));
 }
 
-let selectedFiles = new Set();   // rel_paths currently selected
+// window.* (not `let`) so module scripts can read it as window.selectedFiles
+// as well as bare selectedFiles. Never reassigned — mutate in place.
+window.selectedFiles = new Set();   // rel_paths currently selected
 let lastClickedFile = null;      // for shift-range selection
 let galleryFiles = [];           // current page's file list, in render order
 

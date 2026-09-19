@@ -2,6 +2,11 @@
    AI Analysis panel in the editor, and the Pipeline settings tab that hosts
    the JSON textarea the visual node editor (pipeline_editor.js) mounts on. */
 window.currentAnalysis = window.currentAnalysis || null;
+// Filled from meta.analysis (this module's enricher) on every selectFile.
+if (window.registerFileMetaHook) registerFileMetaHook((meta) => {
+  window.currentAnalysis = (meta && meta.analysis) || null;
+  renderAnalysis();
+});
 function _esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 async function runPipeline(){
   if(!window.currentFile){ alert('Select an image first.'); return; }

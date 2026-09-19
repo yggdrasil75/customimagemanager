@@ -41,7 +41,7 @@
 
   // Embed the current selection.
   async function bulkEmbed() {
-    const files = [...(window.selectedFiles || [])];
+    const files = [...(selectedFiles || [])];
     if (!files.length) return;
     const btn = document.querySelector('.embedding-bulk-btn');
     const orig = btn ? btn.innerHTML : "";
