@@ -75,6 +75,18 @@
       </div>
     </div>
 
+    <div data-settings-pane="models" class="hidden overflow-y-auto flex-1 pr-1">
+      <!-- Model selection. Rendered from /api/models by static/modules.js: one
+           row per capability the broker knows, with family / size / type
+           selects (greyed out when a provider offers a single choice) and any
+           widgets the selected provider registered. Core knows no providers. -->
+      <p class="text-[10px] text-gray-500 mb-2">Each capability is served by whichever
+        module you pick here. Family = which module/generation, size and type = that
+        model's own variants. Extra fields belong to the selected model.</p>
+      <div id="model_capabilities" class="space-y-2"></div>
+      <div id="module_settings_fields_models" class="grid grid-cols-3 gap-x-4 gap-y-2 mt-3"></div>
+    </div>
+
     <div data-settings-pane="storage" class="hidden overflow-y-auto flex-1 pr-1">
         <label class="flex items-center gap-2 text-sm text-gray-300 mb-3 cursor-pointer">
           <input type="checkbox" id="tiers_enabled" class="accent-amber-500"> Enable automatic tiering
