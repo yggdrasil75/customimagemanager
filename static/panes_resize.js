@@ -61,11 +61,13 @@
     function applySaved() {
       const vertical = region.classList.contains("vertical");
       if (vertical) {
+        pane.style.height = "";
         const w = LS && LS.getItem(KEY_CTRL_W);
-        if (w) { pane.style.width = w; pane.style.height = ""; }
+        if (w) pane.style.width = w;
       } else {
+        pane.style.width = "";
         const h = LS && LS.getItem(KEY_CTRL_H);
-        if (h) { pane.style.height = h; pane.style.width = ""; }
+        if (h) pane.style.height = h;
       }
     }
     applySaved();
