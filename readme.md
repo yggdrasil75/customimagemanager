@@ -7,35 +7,25 @@ cd customimagemanager
 ./run.sh
 ```
 
-`install.sh` asks which profile you want (or takes `--profile`), installs the
-system packages for your distro, builds the venv, pulls the python deps that
-profile actually needs, fetches the vendored front-end JS, and writes the
-module on/off map plus the chosen profile/backend into `app_config.json`. GPU
-backend is detected (`--backend cpu|cuda|rocm` to force it). The resolution
-lives in `modules/deps.py`, next to the rest of the module system — the
-scripts are thin wrappers around it.
-
-profiles:
-
-| profile | what's in it |
-|---|---|
-| `ultralight` | viewer + metadata editing. no torch, no ML stack. |
-| `light` | + the small/fast models: YOLO, MobileSAM, RTMPose, faces, rapidocr, dedup. |
-| `heavy-only` | + only the large ones: SAM 2/3, DINO, pyiqa, SMPL-X, embeddings, trainer. |
-| `full` | everything. |
+`install.sh` installs the system packages, builds the venv, installs the
+python deps and fetches the vendored front-end JS. Modes are the docker ones:
 
 ```
-./install.sh --profile light --backend cuda   # non-interactive
-./run.sh --profile heavy-only                 # switch profile later
-./update.sh                                   # git pull + re-sync deps
-python3 modules/deps.py tiers                 # what's on/off and why
+./install.sh                 # detect GPU (cuda/rocm/cpu), full deps
+./install.sh ultralight      # viewer + metadata only: no torch, no ML
+./install.sh cuda            # force a backend: cpu | cuda | rocm
+./install.sh cpu --minimal   # backend wheels only, nothing optional
+./update.sh                  # git pull + reinstall that mode's deps
 ```
 
-A module you enable yourself in Settings -> Modules gets its pip deps
-installed by `run.sh` on the next start; nothing to install by hand. Three
-packages aren't on pypi under a usable name (`anny`, `atlas`, `shapy`) — those
-modules stay off until you install them yourself, and say so in the Modules
-tab.
+Modules are enabled and disabled in Settings -> Modules, and enabling one
+installs its declared pip deps for you — that is the whole procedure, no
+requirements file to hunt down. torch / torchvision / onnxruntime are the
+exception: they come from `requirements-<backend>.txt` so they resolve against
+the right wheel index, so a module needing them says so and waits for
+`./install.sh cpu|cuda|rocm`. `CIM_NO_AUTO_INSTALL=1` turns the auto-install
+off. So `--minimal` plus toggles is the "light" install, and a module whose
+dep won't install just reports it and stays off.
 
 Windows: use docker, or WSL.
 

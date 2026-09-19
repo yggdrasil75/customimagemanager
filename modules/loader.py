@@ -36,11 +36,52 @@ plugins. Converting one of them to load through register(host) is the
 next section's job; the seam is now here for it.
 """
 
+import logging
 import os
 import importlib
+import importlib.util
+import subprocess
+import sys
 import traceback
 
-from . import deps
+_log = logging.getLogger("modules.loader")
+
+# Wheels that must come from requirements-<backend>.txt (right wheel index),
+# never from a module's manifest at runtime — auto-installing these would drag
+# a 2 GB CUDA torch onto a CPU box.
+_BACKEND_PIP = {"torch", "torchvision", "onnxruntime", "onnxruntime-gpu",
+                "onnxruntime-rocm", "onnxruntime-migraphx"}
+
+
+def _dep_installed(dep):
+    """Is a manifest dep spec ('pkg' or 'pkg:import_name') importable?"""
+    pip_name, _, import_name = dep.partition(":")
+    mod = (import_name or pip_name.replace("-", "_")).split("[")[0].strip()
+    try:
+        return importlib.util.find_spec(mod) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _pip_install(deps, logger):
+    """pip-install manifest deps. Returns what it installed.
+
+    Subprocess, not `import pip`: pip has no library API, and it must not run
+    inside the interpreter it's installing into. Failure is not fatal — the
+    module just keeps reporting its missing dep."""
+    want = [d.partition(":")[0].strip() for d in deps]
+    skip = [p for p in want if p in _BACKEND_PIP]
+    want = [p for p in want if p not in _BACKEND_PIP]
+    if skip:
+        logger.info("module deps %s come from requirements-<backend>.txt; "
+                    "run ./install.sh cpu|cuda|rocm" % ", ".join(skip))
+    if not want:
+        return []
+    logger.info("installing module deps: %s" % " ".join(want))
+    if subprocess.call([sys.executable, "-m", "pip", "install", *want]):
+        logger.warning("pip install failed for: %s" % " ".join(want))
+        return []
+    return want
 
 
 # ── built-in core descriptors (imported directly by manager, shown locked) ──
@@ -187,7 +228,23 @@ class ModuleRegistry:
         if self.is_core(module_id):
             return True, None  # already always-on
         self._enabled[module_id] = bool(value)
+        if value:
+            self.install_deps(module_id)
         return True, None
+
+    def install_deps(self, module_id, logger=None):
+        """pip-install a module's declared deps that aren't importable yet.
+
+        Called when the user enables a module, so 'enable it in Settings' is
+        the whole procedure — the restart that loads it finds its deps there.
+        Never fatal: a dep that won't install just leaves the module reporting
+        it in the Modules tab. CIM_NO_AUTO_INSTALL=1 turns this off.
+        """
+        lm = self._plugins.get(module_id)
+        if not lm or os.environ.get("CIM_NO_AUTO_INSTALL"):
+            return []
+        need = [d for d in lm.manifest.get("pip", []) if not _dep_installed(d)]
+        return _pip_install(need, logger or _log) if need else []
 
     def current_state(self):
         state = {mid: True for mid in self._core}
@@ -317,15 +374,15 @@ class ModuleRegistry:
     def missing_pip(self):
         """Best-effort list of declared pip deps that don't import.
 
-        Advisory only — used to warn in the UI. The pip-name -> import-name
-        rules live in deps.py so the Modules tab and the installer agree on
-        what counts as installed.
+        Advisory only — used to warn in the UI. Uses the dep's top-level
+        import name when the author gives 'pkg:import_name', else the pip
+        name with '-' -> '_'.
         """
         missing = {}
         for pid, lm in self._plugins.items():
             miss = [dep.partition(":")[0].strip()
                     for dep in lm.manifest.get("pip", [])
-                    if not deps.installed(dep)]
+                    if not _dep_installed(dep)]
             if miss:
                 missing[pid] = miss
         return missing
