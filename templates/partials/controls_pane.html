@@ -159,11 +159,6 @@
             class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
         </div>
 
-        <div id="analysis_panel" class="hidden">
-          <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">AI Analysis</label>
-          <div id="analysis_body"
-            class="text-xs bg-gray-900 border border-gray-700 rounded p-2 space-y-2 max-h-48 overflow-y-auto"></div>
-        </div>
       </div>
 
       <!-- AI Tools -->
@@ -178,9 +173,6 @@
           <button onclick="runAutoTag()" id="btn_autotag"
             class="w-full bg-indigo-600 hover:bg-indigo-500 py-1.5 rounded font-bold text-sm">Auto-Tag Image</button>
         </div>
-        <button onclick="runPipeline()" id="btn_smarttag" data-feature="ai.smarttag"
-          class="w-full bg-teal-600 hover:bg-teal-500 py-1.5 rounded font-bold text-sm">🌳 Smart Tag (AI
-          pipeline)</button>
         <!-- Extension region: modules append control buttons here via
              registerControlButton('ai_tools', html). Not pose-specific. -->
         <div id="ext_ai_tools" data-ext-area="ai_tools" class="flex flex-col gap-2"></div>

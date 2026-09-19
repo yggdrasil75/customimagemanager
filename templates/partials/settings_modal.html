@@ -11,8 +11,6 @@
           class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">🧠 AI / Vision</button>
         <button data-settings-tab="models" onclick="settingsTab('models')"
           class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">🧩 Models</button>
-        <button data-settings-tab="pipeline" onclick="settingsTab('pipeline')"
-          class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">🌳 Pipeline</button>
         <button data-settings-tab="storage" onclick="settingsTab('storage')"
           class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">🗄 Storage</button>
         <button data-settings-tab="users" onclick="settingsTab('users')"
@@ -74,36 +72,6 @@
         <p class="text-[10px] text-gray-500">The vision-LLM endpoint, key, chat model and system prompt
           live with the <b>Vision LLM</b> module (Modules → ⚙ Settings); the OAI embedding model with
           the Embedding module (🧩 Models → Image embedding).</p>
-      </div>
-    </div>
-
-    {# Pipeline pane: the Smart Tag decision tree. The #cfg_pipeline textarea now
-       lives here (moved out of the old standalone popup) so its value is read by
-       the single unified Save like every other pane. pipeline_editor.js mounts
-       its visual node editor beside this textarea. #}
-    <div data-settings-pane="models" class="hidden overflow-y-auto flex-1 pr-1">
-      <!-- Model selection. Rendered from /api/models by static/modules.js: one
-           row per capability the broker knows, with family / size / type
-           selects (greyed out when a provider offers a single choice) and any
-           widgets the selected provider registered. Core knows no providers. -->
-      <p class="text-[10px] text-gray-500 mb-2">Each capability is served by whichever
-        module you pick here. Family = which module/generation, size and type = that
-        model's own variants. Extra fields belong to the selected model.</p>
-      <div id="model_capabilities" class="space-y-2"></div>
-      <div id="module_settings_fields_models" class="grid grid-cols-3 gap-x-4 gap-y-2 mt-3"></div>
-    </div>
-
-    <div data-settings-pane="pipeline" class="hidden overflow-y-auto flex-1 pr-1">
-      <div class="flex items-center justify-between mb-2">
-        <h2 class="font-bold text-teal-300 text-sm">🌳 Smart Tag pipeline</h2>
-        <span class="text-[10px] text-gray-500">decision tree run by 🌳 Smart Tag</span>
-      </div>
-      <div class="border border-gray-600 rounded p-3">
-        <label class="text-xs font-bold text-gray-400 block mb-1">Pipeline (advanced JSON)</label>
-        <p class="text-[10px] text-gray-500 mb-1">Edit visually below, or toggle to raw JSON. Edit carefully.</p>
-        <textarea id="cfg_pipeline" rows="10"
-          class="w-full p-2 bg-gray-900 rounded border border-gray-600 text-xs text-white font-mono resize-y"></textarea>
-        <p id="cfg_pipeline_err" class="text-[10px] text-red-400 mt-1 hidden"></p>
       </div>
     </div>
 

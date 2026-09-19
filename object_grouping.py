@@ -492,3 +492,15 @@ def mesh_to_obj(vertices: np.ndarray, faces: np.ndarray) -> bytes:
     lines = [f"v {x:.6f} {y:.6f} {z:.6f}" for x, y, z in verts]
     lines += [f"f {a} {b} {c}" for a, b, c in faces]
     return ("\n".join(lines) + "\n").encode()
+
+
+def kpts_in_box(person, box, vis_thresh=0.2):
+    """Fraction of a skeleton's *visible* keypoints that fall inside a
+    normalised center-form box (pose <-> region matching)."""
+    pts = [p for p in person.get("keypoints", []) if p.get("v", 0) >= vis_thresh]
+    if not pts:
+        return 0.0
+    x1, y1 = box["cx"] - box["w"] / 2, box["cy"] - box["h"] / 2
+    x2, y2 = box["cx"] + box["w"] / 2, box["cy"] + box["h"] / 2
+    inside = sum(1 for p in pts if x1 <= p["x"] <= x2 and y1 <= p["y"] <= y2)
+    return inside / len(pts)

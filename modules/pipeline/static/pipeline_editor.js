@@ -412,13 +412,9 @@
         mounted = true;
     }
 
-    // The AI settings modal fills the textarea in fetchState(); mount once the
-    // textarea exists, and refresh the editor whenever the modal is opened.
-    document.addEventListener('DOMContentLoaded', () => {
-        const tryMount = setInterval(() => {
-            if (textarea()) { clearInterval(tryMount); mount(); }
-        }, 300);
-    });
+    // pipeline.js creates the textarea when the Pipeline settings tab opens and
+    // calls mountPipelineEditor() once it is filled.
+    window.mountPipelineEditor = function () { if (!mounted) mount(); mergeModuleStages(); loadFromTextarea(); render(); };
 
     // Merge module-contributed pipeline stages into the node-type list. Runs
     // once; safe to call repeatedly. A stage only comes back from /api/modules

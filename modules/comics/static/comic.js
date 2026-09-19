@@ -68,6 +68,9 @@ async function openComic(target) {
   document.getElementById('comic_kind_badge').innerText = d.kind === 'archive' ? d.fmt : 'folder';
   document.querySelectorAll('[data-comic-kind]').forEach(el =>
     el.classList.toggle('hidden', el.dataset.comicKind !== d.kind));
+  // Smart Tag needs the pipeline module; the button simply isn't offered without it.
+  const st = document.querySelector('#comic_pane [onclick="comicPipeline()"]');
+  if (st) st.classList.toggle('hidden', d.kind !== 'folder' || !d.pipeline);
   setMediaMode('comic');
   renderComicStrip();
   showComicPage(0);

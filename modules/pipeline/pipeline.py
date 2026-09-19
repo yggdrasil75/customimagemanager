@@ -53,7 +53,10 @@ Prompts may contain {image_type} and (inside for_each_box) {label}; they are
 substituted before the call.
 """
 
-import numpy as np
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+import object_grouping as og
 from optional_deps import optional_import
 cv2, _HAVE_CV2 = optional_import("cv2")
 
@@ -196,14 +199,7 @@ def _box_corners(b):
     w, h = float(b["w"]), float(b["h"])
     return cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2
 
-def _kpts_in_box(person, box, vis_thresh=0.2):
-    """Fraction of a skeleton's *visible* keypoints that fall inside `box`."""
-    pts = [p for p in person.get("keypoints", []) if p.get("v", 0) >= vis_thresh]
-    if not pts:
-        return 0.0
-    x1, y1, x2, y2 = _box_corners(box)
-    inside = sum(1 for p in pts if x1 <= p["x"] <= x2 and y1 <= p["y"] <= y2)
-    return inside / len(pts)
+_kpts_in_box = og.kpts_in_box
 
 def _box_from_kpts(person, vis_thresh=0.2, pad=0.03):
     """Synthesise a normalised box from a skeleton's visible-keypoint extent."""
@@ -295,8 +291,6 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
 
     Returns a structured analysis dict. Individual model failures degrade to
     empty results rather than aborting the whole run."""
-    import threading
-    from concurrent.futures import ThreadPoolExecutor
 
     nodes = {n["id"]: n for n in tree.get("nodes", [])}
     if not nodes:

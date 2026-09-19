@@ -305,7 +305,6 @@ function populateSettingsForm(s){
         });
       };
       if(typeof renderQuickFilterEditor==='function') renderQuickFilterEditor();
-      _set('cfg_pipeline', JSON.stringify(s.pipeline_tree||{},null,2));
       const at=document.getElementById('autotag_toggle');
       if(at) at.checked=!!s.autotag_enabled;
       const bn=document.getElementById('cfg_brand_name');

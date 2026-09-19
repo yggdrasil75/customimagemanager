@@ -463,14 +463,14 @@ async function selectFile(fn){
     if(typeof renderStars==='function') renderStars();
     const ti=document.getElementById('tag_add_input'); if(ti) ti.value='';
     currentRegions=d.metadata.regions||[];
-    currentAnalysis=d.metadata.analysis||null;
+    window.currentAnalysis=d.metadata.analysis||null;
     currentFlag=d.metadata.flag||null;
     activeRegionIdx=-1;
     selectedRegionIdx=-1;
     closeRegionEditor();
     runFileMetaHooks(d.metadata, fn);
     drawCanvas();
-    renderAnalysis();
+    if(window.renderAnalysis) renderAnalysis();
     renderRegionsList();
     renderFlagBanner();
   }

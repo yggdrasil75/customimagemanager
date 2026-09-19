@@ -39,7 +39,6 @@ FEATURE_SECTIONS = {
         "label": "AI Tooling",
         "features": [
             ("ai.autotag",       "Auto-Tag Image (YOLO)", "write"),
-            ("ai.smarttag",      "Smart Tag (AI pipeline)", "write"),
             ("ai.tiers",         "Storage Tiers", "write"),
             ("ai.bg_autotag",    "Background auto-tag when idle", "write"),
             ("ai.reconcile",     "Sync with disk", "write"),

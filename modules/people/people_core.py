@@ -20,6 +20,7 @@ import numpy as np
 from flask import request, jsonify
 from modules.model_broker import NoProviderError
 import model_registry
+import object_grouping as og
 from . import personlib, appearances
 
 # ── deferred registration: routes/feature gates are collected at import and
@@ -59,7 +60,7 @@ def _bind(host):
         "_background_instances": c.background_instances, "_fold_background": c.fold_background,
         "_detect_obb_or_box": c.detect_boxes, "_run_person": c.run_person,
         "_merge_regions": c.merge_regions, "_read_pose_from_xmp": c.read_pose_from_xmp,
-        "_kpts_in_box": c.kpts_in_box, "_last_activity": c.last_activity,
+        "_kpts_in_box": og.kpts_in_box, "_last_activity": c.last_activity,
         "_faces": lambda: host.get_service("faces"),
         "_bodies": lambda: host.get_service("bodies"),
         "_body_on": lambda: bool((host.get_service("bodies") or {}).get("enabled", lambda: False)()),

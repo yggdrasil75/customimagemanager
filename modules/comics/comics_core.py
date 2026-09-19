@@ -39,6 +39,13 @@ write_metadata = access_logger = _rel = mt = _llm_call = _run_pipeline_on = None
 _apply_pipeline_result = DEFAULT_PIPELINE = None
 
 
+def _pipe():
+    svc = HOST.get_service("pipeline")
+    if not svc:
+        raise RuntimeError("Smart Tag pipeline module is disabled")
+    return svc
+
+
 def _bind(host):
     c = host.core
     globals().update({
@@ -46,8 +53,9 @@ def _bind(host):
         "get_safe_path": host.safe_path, "read_jxl": c.read_image, "_to_bgr": c.to_bgr,
         "read_metadata": c.read_metadata, "write_metadata": c.write_metadata,
         "access_logger": host.logger, "_rel": c.rel, "mt": host.media, "_llm_call": c.llm_call,
-        "_run_pipeline_on": c.run_pipeline, "_apply_pipeline_result": c.apply_pipeline_result,
-        "DEFAULT_PIPELINE": c.default_pipeline,
+        "_run_pipeline_on": lambda *a, **k: _pipe()["run"](*a, **k),
+        "_apply_pipeline_result": lambda *a, **k: _pipe()["apply"](*a, **k),
+        "DEFAULT_PIPELINE": (host.get_service("pipeline") or {}).get("default_tree", {}),
     })
 
 
@@ -378,6 +386,7 @@ def api_comics_open():
         info = comicinfo.read(ap, fmt) if ap and os.path.exists(ap) else {"values": {}, "writable": False}
         vals = dict(info["values"]); vals.setdefault("PageCount", str(n))
         return jsonify({"success": True, "kind": "archive", "target": target, "fmt": fmt,
+                        "pipeline": HOST.has_service("pipeline"),
                         "title": vals.get("Title") or row["title"] or os.path.basename(target),
                         "pages": [f"/api/books/page/{target}?n={i}" for i in range(n)],
                         "thumbs": [f"/api/books/page/{target}?n={i}&dpi=72" for i in range(n)],
@@ -390,6 +399,7 @@ def api_comics_open():
     full = [target + "/" + p for p in pages]
     vals = _folder_values(data); vals["PageCount"] = str(len(pages))
     return jsonify({"success": True, "kind": "folder", "target": target, "fmt": "folder",
+                    "pipeline": HOST.has_service("pipeline"),
                     "title": data.get("title") or target.split("/")[-1],
                     "pages": [f"/api/file/{p}" for p in full], "thumbs": [f"/api/thumb/{p}" for p in full],
                     "page_files": full, "cover": data.get("cover", pages[0] if pages else ""),
