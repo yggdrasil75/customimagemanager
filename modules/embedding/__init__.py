@@ -92,6 +92,20 @@ def register(host):
         r = _remote()
         return bool(r and r["embed_configured"]())
 
+    def _why_local():
+        """One line on why the OAI embedder is NOT being used ('' when it is),
+        so the fallback to the local CNN is never silent."""
+        if _oai_embed_enabled():
+            return ""
+        if _embed_provider() != "oai":
+            return ("OAI not used: pick 'OpenAI-compatible embeddings' under "
+                    "Settings → Models → Embeddings.")
+        if not _remote():
+            return "OAI not used: the Vision LLM module is off."
+        if not _oai_embed_model():
+            return "OAI not used: set its Embedding model in Settings → Models → Embeddings."
+        return "OAI not used: set the OAI endpoint in the Vision LLM module settings."
+
     def _oai_embed_model():
         return (host.config.get("oai_embed_model") or "").strip()
 
@@ -514,6 +528,7 @@ def register(host):
         return jsonify({
             "oai_available": _oai_embed_enabled(),
             "oai_model": _oai_embed_model(),
+            "note": _why_local(),
             "stored_model": stored_tag,
             "stored_is_oai": bool(stored_tag and str(stored_tag).startswith("oai:")),
             "total": _embedding_count(db),
@@ -528,6 +543,7 @@ def register(host):
         return jsonify({
             "oai_available": _oai_embed_enabled(),
             "oai_model": _oai_embed_model(),
+            "note": _why_local(),
             "stored_model": stored_tag,
             "stored_is_oai": bool(stored_tag and str(stored_tag).startswith("oai:")),
             "total": _embedding_count(db),
@@ -588,7 +604,7 @@ def register(host):
         return jsonify({"success": True, "embedded_now": n,
                         "total_embeddings": total, "backend": backend,
                         "scope": "selected" if sel else "library",
-                        "text_search": text_search})
+                        "text_search": text_search, "note": _why_local()})
 
     @host.app.route("/api/embedding/generate", methods=["POST"])
     def embedding_generate():
@@ -634,7 +650,8 @@ def register(host):
         backend = "oai" if use_oai else "local"
         return jsonify({"success": True, "embedded_now": n,
                         "total_embeddings": total, "backend": backend,
-                        "scope": "selected" if sel else "library"})
+                        "scope": "selected" if sel else "library",
+                        "note": _why_local()})
 
     @host.app.route("/api/embedding/bulk", methods=["POST"])
     def embedding_bulk():
@@ -680,7 +697,7 @@ def register(host):
         text_search = bool(use_oai)
         return jsonify({"success": True, "embedded_now": n,
                         "total_embeddings": total, "backend": backend,
-                        "text_search": text_search})
+                        "text_search": text_search, "note": _why_local()})
 
     @host.app.route("/api/embedding/cluster", methods=["POST"])
     def embedding_cluster():

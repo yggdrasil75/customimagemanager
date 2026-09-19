@@ -17,6 +17,7 @@
       if (badge) {
         if (d.oai_available) badge.textContent = `OAI: ${d.oai_model || 'ready'}`;
         else badge.textContent = 'local CNN (no text search)';
+        badge.title = d.note || '';
       }
     } catch (e) {}
   }
@@ -33,7 +34,8 @@
       }).then(r => r.json());
       if (!d.success) { showToast('Embedding failed: ' + (d.error || '')); return; }
       const ts = d.text_search ? ' · text search enabled' : '';
-      showToast(`Embeddings (${d.backend}) — ${d.embedded_now} new, ${d.total_embeddings} total${ts}.`);
+      showToast(`Embeddings (${d.backend}) — ${d.embedded_now} new, ${d.total_embeddings} total${ts}.` +
+                (d.note ? ' ' + d.note : ''));
       refreshEmbedStatus();
     } catch (e) { showToast('Network error during embedding.'); }
     finally { _embedBusy = false; _reviewStatus(''); }
@@ -55,7 +57,8 @@
       if (!d.success) { alert('Embed failed: ' + (d.error || '')); }
       else {
         const ts = d.text_search ? ' · text search enabled' : '';
-        showToast(`Embeddings (${d.backend}) — ${d.embedded_now} new, ${d.total_embeddings} total${ts}.`);
+        showToast(`Embeddings (${d.backend}) — ${d.embedded_now} new, ${d.total_embeddings} total${ts}.` +
+                  (d.note ? ' ' + d.note : ''));
         if (window.currentFile && files.includes(window.currentFile)) selectFile(window.currentFile);
         loadGallery(); refreshReviewCount();
       }
