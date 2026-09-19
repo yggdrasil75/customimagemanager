@@ -362,6 +362,13 @@ const SPEED_BADGE = { fast: "⚡", balanced: "⚖", accurate: "🎯" };
     buildSettingsFields(fields);
   }
 
+  // Settings open → refetch, so module fields show what the server has now
+  // rather than the values captured at page load (tiers.js openSettings).
+  window.refreshModuleSettings = async function () {
+    await buildSettingsTabs();
+    await buildModelPicker();
+  };
+
   function init() {
     injectAssets();
     buildSettingsTabs();

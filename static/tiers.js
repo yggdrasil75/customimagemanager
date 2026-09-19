@@ -153,6 +153,7 @@ async function openSettings(tab = 'general') {
     const s = await fetch('/api/state').then(r => r.json());
     quick_filters_cache = s.search_quick_filters || [];
     if (typeof populateSettingsForm === 'function') populateSettingsForm(s);
+    if (window.refreshModuleSettings) await refreshModuleSettings();   // module fields + model picks
   } catch (e) { /* keep whatever cache we have */ }
   window._settingsOpen = true;
   document.getElementById('settings_modal').classList.remove('hidden');
