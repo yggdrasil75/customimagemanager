@@ -305,8 +305,6 @@ function populateSettingsForm(s){
         });
       };
       if(typeof renderQuickFilterEditor==='function') renderQuickFilterEditor();
-      const at=document.getElementById('autotag_toggle');
-      if(at) at.checked=!!s.autotag_enabled;
       const bn=document.getElementById('cfg_brand_name');
       if(bn) bn.value=s.brand_name||'';
       const bp=document.getElementById('cfg_brand_logo_preview');

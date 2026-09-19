@@ -5459,7 +5459,7 @@ def api_tiers_get():
     return jsonify({"success": True, "config": tiering.load_cfg()})
 
 @app.route("/api/tiers", methods=["POST"])
-@_auth.require_feature("settings", level="write", action='update_tiers', fields=())
+@_auth.require_feature("settings.tiers", level="write", action='update_tiers', fields=())
 def api_tiers_set():
     try:
         cfg = tiering.save_cfg(request.json or {})

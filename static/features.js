@@ -34,11 +34,7 @@
 
   // Back-compat shim: featureAllowed now means "can read/see". Old ".edit"
   // keys map to a WRITE check on their base feature.
-  const EDIT_KEY_BASE = {
-    'tab.faces.edit': 'tab.faces', 'tab.albums.edit': 'tab.albums',
-    'tab.books.delete': 'tab.books', 'meta.exif.edit': 'meta.exif',
-    'meta.iptc.edit': 'meta.iptc', 'meta.xmp.edit': 'meta.xmp',
-  };
+  const EDIT_KEY_BASE = { 'tab.albums.edit': 'tab.albums' };
   function featureAllowed(feats, key) {
     if (key in EDIT_KEY_BASE) return canWrite(feats, EDIT_KEY_BASE[key]);
     return canRead(feats, key);
@@ -52,12 +48,6 @@
     scope.querySelectorAll('[data-feature]').forEach(el => {
       const key = el.getAttribute('data-feature');
       el.classList.toggle(HIDDEN_CLASS, !featureAllowed(feats, key));
-    });
-    const EDIT_GATES = { 'faces-edit-only': 'tab.faces.edit' };
-    Object.keys(EDIT_GATES).forEach(cls => {
-      const allowed = featureAllowed(feats, EDIT_GATES[cls]);
-      scope.querySelectorAll('.' + cls).forEach(el =>
-        el.classList.toggle(HIDDEN_CLASS, !allowed));
     });
     // Class-based edit gates for dynamically-rendered controls. Buttons/spans
     // in this list are hidden when the mapped key is denied; inputs/textareas

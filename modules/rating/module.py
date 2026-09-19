@@ -66,6 +66,8 @@ def _effective(row):
 
 def register(host):
     host.add_asset("rating.js")
+    host.register_feature("ai.iqa", "Image quality (IQA)", section="ai_tooling",
+                          section_label="AI Tooling", default="write")
 
     core = host.core
     exif = host.get_service("exif") or {}     # metadata module's EXIF writer

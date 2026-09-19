@@ -177,11 +177,7 @@
              registerControlButton('ai_tools', html). Not pose-specific. -->
         <div id="ext_ai_tools" data-ext-area="ai_tools" class="flex flex-col gap-2"></div>
 
-        <label class="flex items-center justify-between text-xs text-gray-300 mt-1 cursor-pointer" data-feature="ai.bg_autotag">
-          <span>Background auto-tag when idle</span>
-          <input type="checkbox" id="autotag_toggle" onchange="toggleAutotag()" class="accent-purple-500">
-        </label>
-        <button onclick="reconcileLibrary()" id="btn_reconcile" data-feature="ai.reconcile"
+        <button onclick="reconcileLibrary()" id="btn_reconcile" data-feature="library.reconcile"
           title="Purge DB entries for files deleted on disk and re-read externally edited files"
           class="w-full bg-gray-700 hover:bg-gray-600 py-1.5 rounded font-bold text-sm border border-teal-700 text-teal-300">🔄
           Sync with disk</button>

@@ -39,16 +39,15 @@ FEATURE_SECTIONS = {
         "label": "AI Tooling",
         "features": [
             ("ai.autotag",       "Auto-Tag Image (YOLO)", "write"),
-            ("ai.tiers",         "Storage Tiers", "write"),
-            ("ai.bg_autotag",    "Background auto-tag when idle", "write"),
-            ("ai.reconcile",     "Sync with disk", "write"),
-            ("ai.iqa",           "Image quality (IQA)", "write"),
         ],
     },
-    "fetch":    {"label": "Fetch (gallery-dl)", "features": []},
-    "dedup":    {"label": "Dupes / dedup", "features": []},
+    "library": {
+        "label": "Library maintenance",
+        "features": [("library.reconcile", "Sync with disk", "write")],
+    },
     "settings": {"label": "Settings",
-                 "features": [("branding", "Branding (name / logo)", "write")]},
+                 "features": [("branding", "Branding (name / logo)", "write"),
+                              ("settings.tiers", "Storage tiers", "write")]},
     "gallery_tabs": {
         "label": "Gallery tabs",
         "features": [
@@ -72,14 +71,11 @@ FEATURE_SECTIONS = {
                 "features": [("view.3d", "3D viewer (mesh / body)", "read")]},
 }
 
-# Legacy ".edit"/".delete" leaves that collapsed into a base feature's WRITE.
-COLLAPSED = {
-    "meta.exif.edit":  "meta.exif",
-    "meta.iptc.edit":  "meta.iptc",
-    "meta.xmp.edit":   "meta.xmp",
-    "tab.albums.edit": "tab.albums",
-    "tab.faces.edit":  "tab.faces",
-}
+# Legacy ".edit" leaves that collapsed into a base feature's WRITE (module
+# features handle their own; only the core album tab is left here). Old keys
+# such as ai.tiers / ai.reconcile are renamed on migration too.
+COLLAPSED = {"tab.albums.edit": "tab.albums"}
+RENAMED = {"ai.tiers": "settings.tiers", "ai.reconcile": "library.reconcile"}
 
 
 def _rebuild():
@@ -197,6 +193,9 @@ def migrate_perms(old):
         return {}
     out = {}
     for k, v in old.items():
+        k = RENAMED.get(k, k)
+        if k in ("ai.bg_autotag",):       # feature no longer exists
+            continue
         if k in COLLAPSED:
             if level_of(v) >= WRITE:
                 out[COLLAPSED[k]] = "write"
