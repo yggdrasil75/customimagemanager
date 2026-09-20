@@ -651,6 +651,7 @@ async function rescanFaces() {
     if (window.registerLeftTab) {
       registerLeftTab({
         id: "faces", label: "People", feature: "tab.faces", paneId: "faces_pane",
+        controlsTab: "person",
         onShow: () => {
           const l = document.getElementById("faces_list");
           if (!l || !l.children.length) loadFaces();
@@ -659,7 +660,7 @@ async function rescanFaces() {
     }
     if (window.registerControlsTab) {
       registerControlsTab({ id: "person", label: "Person", feature: "tab.faces",
-                            onShow: () => {} });
+                            modeTab: true, onShow: () => {} });
     }
     if (window.registerMediaMode) {
       registerMediaMode({ id: "person", centreId: "person_pane", controlsTab: "person" });
