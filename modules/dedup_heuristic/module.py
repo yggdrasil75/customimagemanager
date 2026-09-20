@@ -38,7 +38,10 @@ def register(host):
 
     model_path = os.path.join(host.media_dir, "..", "models", "dup_model.json")
     model_path = os.path.abspath(model_path)
-    model = dup_heuristics.DuplicateClassifier.load(model_path)
+    # No model of the user's yet → the shipped one (built with the dedup_train
+    # module from large public datasets); feedback refines from it.
+    shipped = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pretrained", "dup_model.json")
+    model = dup_heuristics.DuplicateClassifier.load(model_path, fallback=shipped)
 
     def _score(ctx):
         # Stills only for the logistic model; for video use the middle frame.
@@ -69,6 +72,7 @@ def register(host):
             X = np.array([json.loads(r[0]) for r in rows], dtype=np.float64)
             y = np.array([r[1] for r in rows], dtype=np.float64)
             if model.fit(X, y):
+                model.source = "feedback"
                 model.save(model_path)
                 return True
         except Exception as e:
@@ -80,5 +84,6 @@ def register(host):
 
     host.provide_service("dedup_heuristic", {
         "retrain": _retrain, "extract_features": _extract, "model": model,
+        "status": lambda: {"trained": model.trained, "source": model.source or "defaults"},
     })
     host.logger.info("dedup_heuristic: registered scorer + training service")

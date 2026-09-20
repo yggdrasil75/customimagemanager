@@ -163,6 +163,50 @@ class DupCNN:
         except Exception:
             return None
 
+    def fit_batches(self, batches, lr: float = 1e-3, device: str = "cpu",
+                    _opt_holder: dict = None) -> "float | None":
+        """!
+        @brief One pass of minibatch training over an iterable of (a, b, y)
+               numpy batches (a, b: [n,3,WORK,WORK] float32 as encode_pair stores
+               them; y: [n] in {0,1}). For datasets that don't fit in memory
+               (dedup_train streams millions of synthetic pairs through this).
+        @param _opt_holder dict kept by the caller across calls so the optimizer
+               state (Adam moments) survives between passes.
+        @return Mean loss of the pass, or None when torch is missing.
+        """
+        if not self.available:
+            return None
+        self.net.to(device).train()
+        holder = _opt_holder if _opt_holder is not None else {}
+        opt = holder.get("opt")
+        if opt is None or holder.get("lr") != lr:
+            opt = torch.optim.Adam(self.net.parameters(), lr=lr)
+            holder["opt"], holder["lr"] = opt, lr
+        loss_fn = nn.BCEWithLogitsLoss()
+        total, n = 0.0, 0
+        for a, b, y in batches:
+            ta = torch.from_numpy(np.ascontiguousarray(a)).to(device)
+            tb = torch.from_numpy(np.ascontiguousarray(b)).to(device)
+            ty = torch.as_tensor(np.asarray(y, np.float32)).to(device)
+            opt.zero_grad()
+            loss = loss_fn(self.net(ta, tb), ty)
+            loss.backward()
+            opt.step()
+            total += float(loss.item()) * len(ty); n += len(ty)
+        self.net.eval()
+        self.trained = self.trained or n > 0
+        return total / n if n else None
+
+    def predict_batch(self, a, b, device: str = "cpu"):
+        """! @brief Probabilities for prepared [n,3,WORK,WORK] float32 batches."""
+        if not self.available:
+            return None
+        self.net.to(device).eval()
+        with torch.no_grad():
+            z = self.net(torch.from_numpy(np.ascontiguousarray(a)).to(device),
+                         torch.from_numpy(np.ascontiguousarray(b)).to(device))
+            return torch.sigmoid(z).cpu().numpy()
+
     def fit(self, samples: "list[tuple[bytes, int]]", epochs: int = 30,
             lr: float = 1e-3, min_samples: int = 32) -> bool:
         """!

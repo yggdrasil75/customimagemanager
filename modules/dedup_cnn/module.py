@@ -47,7 +47,10 @@ def register(host):
     img_path = os.path.join(models_dir, "dup_cnn.pt")
     vid_path = os.path.join(models_dir, "dup_cnn_video.pt")
 
-    img_cnn = _cnn_mod.DupCNN.load(img_path, width)
+    # No checkpoint of the user's yet → the shipped one (built with the
+    # dedup_train module from large public datasets), if present.
+    shipped = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pretrained", "dup_cnn.pt")
+    img_cnn = _cnn_mod.DupCNN.load(img_path if os.path.exists(img_path) else shipped, width)
     vid_cnn = _vid_mod.DupVideoCNN.load(vid_path, width)
 
     def _available():
@@ -93,6 +96,8 @@ def register(host):
 
     host.provide_service("dedup_cnn", {
         "retrain": _retrain, "img": img_cnn, "video": vid_cnn,
+        "status": lambda: {"available": bool(img_cnn and img_cnn.available),
+                           "trained": bool(img_cnn and img_cnn.trained)},
         "clip_t": _vid_mod.CLIP_T,
         "encode_pair": _cnn_mod.encode_pair,
         "encode_clip_pair": _vid_mod.encode_pair,

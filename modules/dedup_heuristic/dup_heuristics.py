@@ -196,22 +196,39 @@ class DuplicateClassifier:
     predict() returns probability the pair is a TRUE duplicate (0..1).
     """
 
-    def __init__(self, weights=None, bias=None, trained=False):
+    def __init__(self, weights=None, bias=None, trained=False, prior=None, source=""):
         self.w = np.array(weights, dtype=np.float64) if weights is not None \
                  else _DEFAULT_WEIGHTS.copy()
         self.b = float(bias) if bias is not None else _DEFAULT_BIAS
         self.trained = trained
+        # The anchor user feedback nudges from: the pretrained weights when the
+        # model was pretrained (synthetic pairs, shipped or from the Trainer),
+        # else the hand-tuned defaults. Feedback refines; it never resets.
+        pw, pb = (prior or {}).get("weights"), (prior or {}).get("bias")
+        self.prior_w = np.array(pw, dtype=np.float64) if pw is not None and len(pw) == N_FEATURES \
+            else self.w.copy()
+        self.prior_b = float(pb) if pb is not None else self.b
+        self.source = source            # "" | "shipped" | "pretrained" | "feedback"
 
     # -- persistence ----------------------------------------------------------
     @classmethod
-    def load(cls, path):
-        try:
-            with open(path) as f:
-                d = json.load(f)
-            if len(d.get("weights", [])) == N_FEATURES:
-                return cls(d["weights"], d["bias"], d.get("trained", True))
-        except Exception:
-            pass
+    def load(cls, path, fallback=None):
+        """The user's model at `path`; else the shipped pretrained file
+        (`fallback`), whose weights also become the feedback prior."""
+        for p, src in ((path, ""), (fallback, "shipped")):
+            if not p:
+                continue
+            try:
+                with open(p) as f:
+                    d = json.load(f)
+                if len(d.get("weights", [])) == N_FEATURES:
+                    m = cls(d["weights"], d["bias"], d.get("trained", True),
+                            prior=d.get("prior"), source=d.get("source") or src)
+                    if src == "shipped":
+                        m.prior_w, m.prior_b = m.w.copy(), m.b
+                    return m
+            except Exception:
+                pass
         return cls()   # defaults
 
     def save(self, path):
@@ -219,12 +236,21 @@ class DuplicateClassifier:
             tmp = path + ".tmp"
             with open(tmp, "w") as f:
                 json.dump({"weights": list(self.w), "bias": self.b,
-                           "trained": self.trained,
+                           "trained": self.trained, "source": self.source,
+                           "prior": {"weights": list(self.prior_w), "bias": self.prior_b},
                            "feature_names": FEATURE_NAMES}, f, indent=2)
             os.replace(tmp, path)
             return True
         except Exception:
             return False
+
+    def pretrain(self, X, y, epochs=800, lr=0.2, l2=1e-4):
+        """Fit from a large labelled set (synthetic pairs) with no anchor, then
+        make the result the new prior for later feedback fits."""
+        if not self.fit(X, y, epochs=epochs, lr=lr, l2=l2, keep_prior=False):
+            return False
+        self.prior_w, self.prior_b, self.source = self.w.copy(), self.b, "pretrained"
+        return True
 
     # -- inference ------------------------------------------------------------
     def predict(self, features):
@@ -254,8 +280,8 @@ class DuplicateClassifier:
 
         w = self.w.copy()
         b = self.b
-        w0 = _DEFAULT_WEIGHTS if keep_prior else np.zeros(N_FEATURES)
-        b0 = _DEFAULT_BIAS if keep_prior else 0.0
+        w0 = self.prior_w if keep_prior else np.zeros(N_FEATURES)
+        b0 = self.prior_b if keep_prior else 0.0
         n = X.shape[0]
 
         for _ in range(epochs):

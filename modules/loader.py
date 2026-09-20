@@ -18,6 +18,7 @@ A pluggable module is a directory under modules/ containing a module.py
         "requires":    [],                # other module ids that must load first
         "pip":         [],                # pip deps the author expects present
         "assets":      [],                # optional; static files to inject
+        "default_enabled": True,          # optional; False => off until the user turns it on
     }
 
     def register(host):                   # called at startup if enabled
@@ -188,7 +189,8 @@ class ModuleRegistry:
         """Seed enable-state from app_config.json's "modules" dict.
 
         Core modules are forced True. Unknown ids in the persisted dict are
-        dropped. Plugins default to enabled unless persisted False.
+        dropped. Plugins default to enabled unless persisted False or their
+        manifest says default_enabled: False (tooling most users never need).
         Returns the normalized {id: bool} map to write back.
         """
         persisted = persisted or {}
@@ -197,7 +199,7 @@ class ModuleRegistry:
             if lm.manifest.get("core"):
                 self._enabled[pid] = True
             else:
-                self._enabled[pid] = bool(persisted.get(pid, True))
+                self._enabled[pid] = bool(persisted.get(pid, lm.manifest.get("default_enabled", True)))
         return self.current_state()
 
     def is_core(self, module_id):

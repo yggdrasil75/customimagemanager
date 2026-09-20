@@ -1,0 +1,36 @@
+<!-- Tab: Dedup train (module "dedup_train", off by default). Builds the SHIPPED
+     duplicate-detector models from dataset folders on disk — not the library. -->
+<div id="dedup_train_pane" class="hidden flex-1 flex-col overflow-y-auto p-4 gap-3 text-sm">
+  <div>
+    <div class="font-bold text-gray-200">Build shipped duplicate detectors</div>
+    <p class="text-xs text-gray-400 mt-1">Images under these folders are turned into synthetic pairs — re-encoded,
+      resized, nudged, slightly cropped (duplicates); boxed over, cropped hard, paired with unrelated images
+      (not duplicates) — and the logistic heuristic + siamese CNN are fitted on them. Every epoch draws fresh
+      pairs. A held-out slice of images scores the result per pair kind. Output goes to the modules'
+      <code>pretrained/</code> folders, ready to commit.</p>
+  </div>
+  <label class="text-xs text-gray-400">Dataset folders (one per line, scanned recursively)</label>
+  <textarea id="ddt_folders" rows="3" class="w-full bg-gray-900 border border-gray-700 rounded p-2 text-xs font-mono"
+            placeholder="/data/AVA/images&#10;/data/gelbooru&#10;/data/e621"></textarea>
+  <div class="grid grid-cols-4 gap-2 text-xs">
+    <div><label class="text-gray-400">Max images</label><input id="ddt_max" type="number" value="200000" min="40" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
+    <div><label class="text-gray-400">Pairs / image</label><input id="ddt_per" type="number" value="6" min="2" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
+    <div><label class="text-gray-400">Epochs</label><input id="ddt_epochs" type="number" value="3" min="1" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
+    <div><label class="text-gray-400">Hold-out</label><input id="ddt_holdout" type="number" value="0.03" step="0.01" min="0" max="0.5" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
+    <div><label class="text-gray-400">Chunk (images)</label><input id="ddt_chunk" type="number" value="256" min="8" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
+    <div><label class="text-gray-400">CNN batch</label><input id="ddt_batch" type="number" value="32" min="4" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
+    <div><label class="text-gray-400">CNN width</label><input id="ddt_width" type="number" value="1.0" step="0.25" min="0.25" max="2" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
+    <div><label class="text-gray-400">Decode workers</label><input id="ddt_workers" type="number" value="4" min="1" max="32" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
+  </div>
+  <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+    <label class="flex items-center gap-1"><input type="checkbox" id="ddt_heur" checked class="accent-purple-500"> Heuristic (logistic)</label>
+    <label class="flex items-center gap-1"><input type="checkbox" id="ddt_cnn" checked class="accent-purple-500"> CNN (torch)</label>
+    <label class="flex items-center gap-1"><input type="checkbox" id="ddt_install" class="accent-purple-500"> Also install into this app's models/</label>
+  </div>
+  <div class="flex gap-2">
+    <button onclick="ddtBuild()" id="ddt_build" class="bg-teal-700 hover:bg-teal-600 px-4 py-1.5 rounded font-bold">Build</button>
+    <button onclick="ddtStop()" id="ddt_stop" class="bg-gray-700 hover:bg-gray-600 px-4 py-1.5 rounded font-bold" disabled>Stop</button>
+    <span id="ddt_phase" class="self-center text-xs text-gray-400"></span>
+  </div>
+  <pre id="ddt_report" class="text-xs bg-gray-900 border border-gray-800 rounded p-2 whitespace-pre-wrap text-gray-300 min-h-[4rem]"></pre>
+</div>
