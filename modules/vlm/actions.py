@@ -25,8 +25,13 @@ DEFAULT_ACTIONS = [
 ]
 
 
+def all_actions():
+    """The user's action list (editable in the module tab)."""
+    return list(HOST.config.get("oai_actions", []) or [])
+
+
 def _action(action_id):
-    return next((a for a in HOST.config.get("oai_actions", []) if str(a["id"]) == str(action_id)), None)
+    return next((a for a in all_actions() if str(a["id"]) == str(action_id)), None)
 
 
 def apply_body(rel, bgr, action):
@@ -103,10 +108,52 @@ def apply(fp, action):
     return text
 
 
+def run_one(action, fp, bgr, meta=None):
+    """Run one action on one decoded image; return the editor-apply dict
+    ({regions} | {tags} | {description} | {flag}) — the core AI picker's
+    contract. Nothing is written except the flag (it lives in the sidecar,
+    not the editor's autosave)."""
+    c = HOST.core
+    t = action["target"]
+    if t == "flag":
+        res = client.call(action["prompt"] + '\n\nRespond ONLY as JSON: {"delete": true|false, "reason": "short reason"}',
+                          bgr, "json") or {}
+        delete, reason = bool(res.get("delete")), str(res.get("reason", ""))[:300]
+        meta = meta or c.read_metadata(fp)
+        c.write_metadata(fp, meta["tags"], meta["description"], meta["regions"],
+                         flag={"delete": delete, "reason": reason})
+        return {"flag": {"delete": delete, "reason": reason},
+                "note": ("🚩 Flagged for deletion: " + reason) if delete else "AI says keep."}
+    if t == "body" or t in HOST.action_targets:
+        res = apply(fp, action)
+        return {"regions": res if isinstance(res, list) else []}
+    if t == "regions":
+        boxes = [{**b, "confirmed": False} for b in
+                 (client.call(action["prompt"] + "\n\nReturn bounding boxes normalised 0..1.", bgr, "boxes") or [])]
+        classes = HOST.config["classes"]
+        for b in boxes:
+            if b.get("class_name") and b["class_name"] not in classes:
+                classes.append(b["class_name"])
+        c.save_classes()
+        return {"regions": boxes}
+    if t == "tags":
+        return {"tags": client.call(action["prompt"], bgr, "tags") or []}
+    return {"description": client.call(action["prompt"], bgr, "text") or ""}
+
+
+def picker_run(action_id, fp, bgr, meta):
+    """host.register_ai_actions run_fn: the "Vision LLM" class."""
+    action = _action(action_id)
+    if not action:
+        raise RuntimeError("Unknown AI action.")
+    return run_one(action, fp, bgr, meta)
+
+
 # ── routes ────────────────────────────────────────────────────────────────────
 def run_llm():
     """Run one action on one file and return the raw result for the editor to
-    apply live (it is NOT written here; the editor's autosave does that)."""
+    apply live (it is NOT written here; the editor's autosave does that).
+    Kept for the bulk / comic bars; the editor itself uses /api/ai/run."""
     c = HOST.core
     fp = HOST.safe_path(HOST.media_dir, request.json.get("filename", ""))
     action = _action(request.json.get("action_id", ""))
@@ -118,33 +165,14 @@ def run_llm():
         img = c.read_image(fp)
         if img is None:
             raise RuntimeError("Decode failed")
-        bgr = c.to_bgr(img)
-        t = action["target"]
-        if t == "flag":
-            res = client.call(action["prompt"] + '\n\nRespond ONLY as JSON: {"delete": true|false, "reason": "short reason"}',
-                              bgr, "json") or {}
-            delete, reason = bool(res.get("delete")), str(res.get("reason", ""))[:300]
-            meta = c.read_metadata(fp)
-            c.write_metadata(fp, meta["tags"], meta["description"], meta["regions"],
-                             flag={"delete": delete, "reason": reason})
-            return jsonify({"success": True, "target": "flag", "delete": delete, "reason": reason})
-        if t == "body" or t in HOST.action_targets:
-            res = apply(fp, action)
-            return jsonify({"success": True, "target": "regions",
-                            "regions": res if isinstance(res, list) else []})
-        if t == "regions":
-            boxes = [{**b, "confirmed": False} for b in
-                     (client.call(action["prompt"] + "\n\nReturn bounding boxes normalised 0..1.", bgr, "boxes") or [])]
-            classes = HOST.config["classes"]
-            for b in boxes:
-                if b.get("class_name") and b["class_name"] not in classes:
-                    classes.append(b["class_name"])
-            c.save_classes()
-            return jsonify({"success": True, "target": "regions", "regions": boxes})
-        if t == "tags":
-            return jsonify({"success": True, "target": "tags", "tags": client.call(action["prompt"], bgr, "tags")})
-        return jsonify({"success": True, "target": "description",
-                        "description": client.call(action["prompt"], bgr, "text")})
+        res = run_one(action, fp, c.to_bgr(img))
+        if "flag" in res:
+            return jsonify({"success": True, "target": "flag", **res["flag"]})
+        if "regions" in res:
+            return jsonify({"success": True, "target": "regions", "regions": res["regions"]})
+        if "tags" in res:
+            return jsonify({"success": True, "target": "tags", "tags": res["tags"]})
+        return jsonify({"success": True, "target": "description", "description": res.get("description", "")})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 

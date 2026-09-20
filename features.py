@@ -38,7 +38,7 @@ FEATURE_SECTIONS = {
     "ai_tooling": {
         "label": "AI Tooling",
         "features": [
-            ("ai.autotag",       "Auto-Tag Image (YOLO)", "write"),
+            ("ai.autotag",       "Detect objects (AI picker: Detection class)", "write"),
         ],
     },
     "library": {

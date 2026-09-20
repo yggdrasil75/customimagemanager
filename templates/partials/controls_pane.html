@@ -162,11 +162,18 @@
           <h3 class="font-bold text-purple-400 text-sm">AI Tooling</h3>
           <div class="flex gap-2" data-ext-area="ai_tooling_links"></div>
         </div>
-        <div id="yolo_controls" class="opacity-50 pointer-events-none" data-feature="ai.autotag">
-          <select id="model_selector"
-            class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm mb-1"></select>
-          <button onclick="runAutoTag()" id="btn_autotag"
-            class="w-full bg-indigo-600 hover:bg-indigo-500 py-1.5 rounded font-bold text-sm">Auto-Tag Image</button>
+        <!-- AI picker: class (Detection / Vision LLM / OCR / …, from
+             host.register_ai_actions) → action (only shown when the class
+             has more than one) → Run on the open image. Models themselves
+             are picked in Settings → Models. -->
+        <div id="ai_picker" class="opacity-50 pointer-events-none flex flex-col gap-1">
+          <div class="flex gap-1">
+            <select id="ai_group" onchange="aiGroupChanged()" title="Kind of AI action"
+              class="flex-1 min-w-0 p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm"></select>
+            <select id="ai_action" title="Action" class="flex-1 min-w-0 p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm hidden"></select>
+          </div>
+          <button onclick="runAiAction()" id="btn_ai_run"
+            class="w-full bg-indigo-600 hover:bg-indigo-500 py-1.5 rounded font-bold text-sm">Run on this image</button>
         </div>
         <!-- Extension region: modules append control buttons here via
              registerControlButton('ai_tools', html). Not pose-specific. -->

@@ -33,8 +33,7 @@ async function unpackageComic(){
 
 // ── per-comic AI actions (folder comics: pages are library files) ───────────
 function _boxMethod() {
-  const m = document.getElementById('model_selector')?.value || '';
-  return { method: m ? 'yolo' : 'llm', model: m };
+  return { method: 'detect', model: '' };          // the picked Detection model (Models tab)
 }
 async function comicBoxAll() {
   if (comicState.kind !== 'folder' || !comicState.pageFiles.length) return;

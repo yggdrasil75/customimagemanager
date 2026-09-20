@@ -18,20 +18,60 @@ async function persistAiSettings(){
   }catch(e){ return {ok:false, error:'Settings save failed'}; }
   return {ok:true};
 }
-async function runAutoTag(){
-  if(!window.currentFile) return;
-  const btn=document.getElementById('btn_autotag'); btn.innerText='…';
-  const d=await fetch('/api/auto_tag',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({filename:window.currentFile,model:document.getElementById('model_selector').value})
-  }).then(r=>r.json());
-  if(d.success){ currentRegions=currentRegions.concat(d.regions); drawCanvas(); triggerAutosave(); }
-  else alert(d.error);
-  btn.innerText='Auto-Tag Image';
+// ── AI picker: class → action → run (classes come from /api/ai/actions) ─────
+let _aiGroups=[];
+async function loadAiActions(){
+  try{
+    const d=await fetch('/api/ai/actions').then(r=>r.json());
+    _aiGroups=(d&&d.groups)||[];
+  }catch(e){ _aiGroups=[]; }
+  const g=document.getElementById('ai_group'); if(!g) return;
+  const prev=g.value; g.innerHTML='';
+  _aiGroups.forEach(x=>{const o=document.createElement('option');o.value=x.group;o.text=x.group;g.appendChild(o);});
+  if(!_aiGroups.length){const o=document.createElement('option');o.value='';o.text='No AI actions';g.appendChild(o);}
+  if(prev&&[...g.options].some(o=>o.value===prev)) g.value=prev;
+  aiGroupChanged();
 }
-// ── AI box (bulk) ──────────────────────────────────────────────────────────
+function aiGroupChanged(){
+  const g=document.getElementById('ai_group'), a=document.getElementById('ai_action'); if(!g||!a) return;
+  const grp=_aiGroups.find(x=>x.group===g.value); const acts=(grp&&grp.actions)||[];
+  const prev=a.value; a.innerHTML='';
+  acts.forEach(x=>{const o=document.createElement('option');o.value=x.id;o.text=x.label;a.appendChild(o);});
+  if(prev&&[...a.options].some(o=>o.value===prev)) a.value=prev;
+  a.classList.toggle('hidden', acts.length<2);          // one action: the class IS the action
+  const btn=document.getElementById('btn_ai_run');
+  if(btn) btn.innerText=acts.length===1?acts[0].label:'Run on this image';
+}
+// Apply a run result to the open editor (saved by autosave, like any edit).
+function applyAiResult(d){
+  if(d.regions&&d.regions.length){ currentRegions=currentRegions.concat(d.regions); drawCanvas();
+    if(typeof popoutOpen!=='undefined'&&popoutOpen&&typeof drawPopout==='function') drawPopout();
+    renderRegionsList(); }
+  if(d.tags&&d.tags.length) setTags((currentTags||[]).concat(d.tags));
+  if(d.description){ const ta=document.getElementById('meta_desc');
+    ta.value=(ta.value?ta.value.trim()+'\n\n':'')+d.description; }
+  if(d.flag){ currentFlag=d.flag.delete?{delete:true,reason:d.flag.reason}:null;
+    if(typeof renderFlagBanner==='function') renderFlagBanner();
+    if(typeof refreshReviewCount==='function') refreshReviewCount(); }
+  if(d.regions||d.tags||d.description||d.flag) triggerAutosave();
+  if(d.note) showToast(d.note);
+}
+async function runAiAction(){
+  if(!window.currentFile) return;
+  const g=document.getElementById('ai_group').value, a=document.getElementById('ai_action').value;
+  if(!g) return;
+  const btn=document.getElementById('btn_ai_run'); const og=btn.innerText; btn.innerText='…'; btn.disabled=true;
+  try{
+    const d=await fetch('/api/ai/run',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({filename:window.currentFile,group:g,action:a})}).then(r=>r.json());
+    if(d.success) applyAiResult(d); else alert('AI failed: '+(d.error||''));
+  }catch(e){ alert('Network error running AI action.'); }
+  btn.innerText=og; btn.disabled=false;
+}
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',loadAiActions); else loadAiActions();
+// ── AI box (bulk): the picked Detection model (Models tab) ──────────────────
 function _boxMethod(){
-  const m=document.getElementById('model_selector').value;
-  return {method: m?'yolo':'llm', model:m};
+  return {method:'detect', model:''};
 }
 async function comicBoxAll(){
   if(!comicState.pages.length) return;

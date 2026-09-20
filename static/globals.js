@@ -281,13 +281,6 @@ async function fetchState(){
       quick_filters_cache = s.search_quick_filters || [];
       if(typeof renderQuickFilters==='function') renderQuickFilters();
     }
-    const sel=document.getElementById('model_selector');
-    const prev=sel.value;
-    const models=s.available_models||[];
-    sel.innerHTML=models.length?'':'<option value="">No Models</option>';
-    models.forEach(m=>{const o=document.createElement('option');o.value=m;
-      const pts=m.split(/[\/\\]/);o.text=pts.slice(-3).join('/');sel.appendChild(o);});
-    if(prev) sel.value=prev;
     if(!hasSettings){ populateSettingsForm(s); hasSettings=true; }
   }catch(e){}
 }

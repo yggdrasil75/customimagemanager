@@ -144,11 +144,6 @@
   // ── wiring ───────────────────────────────────────────────────────────────
   function init() {
     if (window.registerControlButton) {
-      registerControlButton('description_tools',
-        '<select id="llm_action_select" data-ai-actions data-feature="ai.llm" ' +
-        'class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-0.5 max-w-[130px]"></select>' +
-        '<button onclick="runLLM()" id="btn_run_llm" data-feature="ai.llm" ' +
-        'class="text-xs bg-yellow-600 hover:bg-yellow-500 px-2 py-0.5 rounded font-bold">✨ AI</button>');
       registerControlButton('gallery_bulk',
         '<select id="bulk_action_select" data-ai-actions data-feature="ai.llm" title="AI action to run on each selected image" ' +
         'class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-1.5 max-w-[130px]"></select>' +

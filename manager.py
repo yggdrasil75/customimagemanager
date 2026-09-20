@@ -5699,10 +5699,11 @@ def api_confirm_all():
 @app.route("/api/bulk_box", methods=["POST"])
 @_auth.require_feature("ai.autotag", level="write")
 def bulk_box():
-    """Run box detection on many files. method 'yolo' uses the given model;
-    method 'llm' uses the configured vision model. Boxes are added UNCONFIRMED."""
+    """Run box detection on many files. method 'detect' uses the picked
+    Detection model (Models tab; the default); 'yolo' a given .pt path;
+    'llm' the configured vision model. Boxes are added UNCONFIRMED."""
     filenames = request.json.get("filenames", [])
-    method    = request.json.get("method", "llm")
+    method    = request.json.get("method", "detect")
     model     = request.json.get("model", "")
     prompt    = request.json.get("prompt") or (
         "Identify the main subjects/objects in this image and return a bounding "
@@ -5713,6 +5714,12 @@ def bulk_box():
         return jsonify({"success": False, "error": "LLM not configured."})
 
     yolo = _load_yolo(model) if method == "yolo" else None
+    detect = None
+    if method == "detect":
+        try:
+            detect = modules.broker.request("detect")
+        except Exception as e:
+            return jsonify({"success": False, "error": f"No detection model: {e}"})
     done, boxed, errors = 0, 0, []
     total = len(filenames)
     for fn in filenames:
@@ -5724,7 +5731,13 @@ def bulk_box():
             if img is None:
                 errors.append(fn); continue
             new = []
-            if method == "yolo":
+            if method == "detect":
+                for b in (detect(_to_bgr(img), conf=modules.broker.variant("detect")["conf"]) or []):
+                    cb = _clamp_box({"cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"]})
+                    if cb:
+                        new.append({"class_name": b.get("class_name") or "object", "cx": cb["cx"], "cy": cb["cy"],
+                                    "w": cb["w"], "h": cb["h"], "confirmed": False})
+            elif method == "yolo":
                 res = yolo(img, verbose=False, conf=0.25)
                 if res and res[0].boxes:
                     for box in res[0].boxes:
@@ -5781,33 +5794,88 @@ def _embedding_iter():
     svc = module_host.get_service("embedding") if 'module_host' in globals() else None
     return (svc or {}).get("iter_embeddings_ordered")
 
-@app.route("/api/auto_tag", methods=["POST"])
-@_auth.require_feature("ai.autotag", level="write")
-def auto_tag():
-    model_path = request.json.get("model")
-    fn  = request.json.get("filename","")
-    fp  = get_safe_path(MEDIA_DIR, fn)
-    if not model_path or not os.path.exists(model_path) or not fp or not os.path.exists(fp):
-        return jsonify({"success":False,"error":"Invalid model or file."})
-    try:
-        img = read_jxl(fp)
-        if img is None: raise Exception("Decode failed")
-        results = _load_yolo(model_path)(img, verbose=False, conf=0.25)
-        regions = []
-        if results[0].boxes:
-            for box in results[0].boxes:
-                cid  = int(box.cls[0].item())
-                name = results[0].names[cid]
-                cx,cy,w,h = box.xywhn[0].tolist()
-                cb = _clamp_box({"cx":cx,"cy":cy,"w":w,"h":h})
-                if not cb: continue
-                regions.append({"class_name":name,"cx":cb["cx"],"cy":cb["cy"],"w":cb["w"],"h":cb["h"],
-                                "confirmed":False})
-                if name not in state["classes"]: state["classes"].append(name)
-        save_classes()
-        return jsonify({"success":True,"regions":regions})
-    except Exception as e:
-        return jsonify({"success":False,"error":str(e)})
+# ── AI actions: class → action → run (the editor's AI picker) ───────────────
+# Classes come from modules (host.register_ai_actions); the core contributes
+# "Detection" = the picked Detection model (Models tab), which is what the old
+# Auto-Tag button with its raw-.pt dropdown did.
+def _ai_groups():
+    out = []
+    for g in module_host.ai_action_groups:
+        if g["module_id"] and not module_registry.is_enabled(g["module_id"]):
+            continue
+        try:
+            acts = list(g["list"]() or [])
+        except Exception:
+            acts = []
+        if acts:
+            out.append({"group": g["group"], "feature": g["feature"], "actions": acts, "_g": g})
+    return out
+
+
+def _detect_action(action_id, fp, bgr, meta):
+    conf = modules.broker.variant("detect")["conf"]
+    boxes = modules.broker.request("detect")(bgr, conf=conf) or []
+    regions = []
+    for b in boxes:
+        cb = _clamp_box({"cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"]})
+        if not cb:
+            continue
+        name = b.get("class_name") or "object"
+        regions.append({"class_name": name, "cx": cb["cx"], "cy": cb["cy"], "w": cb["w"], "h": cb["h"],
+                        "confirmed": False, "region_tags": [], "region_description": ""})
+        if name not in state["classes"]:
+            state["classes"].append(name)
+    save_classes()
+    return {"regions": regions, "note": f"{len(regions)} box(es)" if not regions else None}
+
+
+@app.route("/api/ai/actions")
+@_auth.require_feature("ai_tooling")
+def api_ai_actions():
+    return jsonify({"success": True, "groups": [
+        {"group": g["group"], "feature": g["feature"], "actions": g["actions"]} for g in _ai_groups()]})
+
+
+@app.route("/api/ai/run", methods=["POST"])
+@_auth.require_feature("ai_tooling", level="write")
+def api_ai_run():
+    d = request.json or {}
+    group = next((g for g in _ai_groups() if g["group"] == d.get("group")), None)
+    if not group or not any(a["id"] == d.get("action") for a in group["actions"]):
+        return jsonify({"success": False, "error": "Unknown AI action."})
+    files = d.get("filenames") or ([d["filename"]] if d.get("filename") else [])
+    if not files:
+        return jsonify({"success": False, "error": "No file."})
+    bulk = "filenames" in d
+    out, done, errors = None, 0, []
+    for fn in files:
+        fp = get_safe_path(MEDIA_DIR, fn)
+        if not fp or not os.path.exists(fp):
+            errors.append(f"{fn}: not found"); continue
+        try:
+            img = read_jxl(fp)
+            if img is None:
+                raise RuntimeError("Decode failed")
+            meta = read_metadata(fp)
+            res = group["_g"]["run"](d["action"], fp, _to_bgr(img), meta) or {}
+            if bulk:                                   # persist here; the editor applies live otherwise
+                tags = list(meta["tags"]) + list(res.get("tags") or [])
+                desc = meta["description"]
+                if res.get("description"):
+                    desc = (desc.strip() + "\n\n" + res["description"]).strip()
+                write_metadata(fp, tags, desc, meta["regions"] + list(res.get("regions") or []),
+                               flag=res.get("flag"))
+            else:
+                out = res
+            done += 1
+        except Exception as e:
+            errors.append(f"{fn}: {e}")
+    if bulk:
+        return jsonify({"success": True, "done": done, "errors": errors})
+    if out is None:
+        return jsonify({"success": False, "error": errors[0] if errors else "failed"})
+    return jsonify({"success": True, **out})
+
 
 @app.route("/api/box_labels")
 def api_box_labels():
@@ -5891,6 +5959,10 @@ def module_static(module_id, filename):
 # Core (always-on) modules register first, then every enabled plugin in
 # dependency order. The core ones aren't discovered by the loader, so they're
 # wired here explicitly; without this the metadata panes/services never existed.
+# The core's own AI action class: the picked Detection model → boxes.
+module_host.register_ai_actions(
+    "Detection", lambda: [{"id": "boxes", "label": "Detect objects (boxes)"}], _detect_action,
+    feature="ai.autotag")
 module_host._current_module = "metadata"
 modules.metadata.register(module_host)
 module_host._current_module = "threading"

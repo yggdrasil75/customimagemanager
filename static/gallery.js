@@ -410,7 +410,7 @@ async function selectFile(fn, opts){
   document.getElementById('t_'+fn.replace(/[^a-zA-Z0-9]/g,'_'))?.classList.add('selected-item');
   document.getElementById('selected_filename').innerText=fn;
   document.getElementById('editor_panel').classList.remove('opacity-50','pointer-events-none');
-  document.getElementById('yolo_controls').classList.remove('opacity-50','pointer-events-none');
+  document.getElementById('ai_picker')?.classList.remove('opacity-50','pointer-events-none');
   document.getElementById('btn_delete').classList.remove('hidden');
   document.getElementById('save_indicator').classList.add('hidden');
   // Repopulate the editor pane's album chips for this file (fire-and-forget:

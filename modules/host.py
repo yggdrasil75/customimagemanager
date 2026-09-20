@@ -118,6 +118,7 @@ class Host:
         self.centre_panes = []
         self.search_help = {}         # search prefix -> {help, module_id}
         self.action_targets = {}      # AI-action target -> fn(fp, bgr, meta, action)
+        self.ai_action_groups = []    # the editor's AI action picker: see register_ai_actions
         self.gallery_filters = []     # SQL clauses hiding container members from the flat gallery
         # Left-pane content partials a module contributes (e.g. the books shelf),
         # server-rendered into the left column alongside the built-in panes.
@@ -526,6 +527,23 @@ class Host:
         condition on the files table (no params), e.g. a comics module hiding
         pages that belong to a comic folder."""
         self.gallery_filters.append(clause)
+
+    def register_ai_actions(self, group, list_fn, run_fn, *, feature=None):
+        """Put a class of AI actions in the editor's AI picker (class dropdown →
+        action dropdown → Run) and the bulk bar.
+
+        group    -- the class label ("Detection", "Vision LLM", "OCR"…)
+        list_fn  -- () -> [{"id", "label"}] — evaluated per request, so a
+                    module whose actions the user edits stays current
+        run_fn   -- (action_id, fp, bgr, meta) -> dict, any of:
+                    regions (list, added unconfirmed), tags (list, added),
+                    description (str, appended), flag ({delete, reason}),
+                    note (str, shown as a toast). Single-image runs are
+                    applied live by the editor and saved by its autosave;
+                    bulk runs are written here.
+        feature  -- auth feature gating the class (omit = ai_tooling)."""
+        self.ai_action_groups.append({"group": group, "list": list_fn, "run": run_fn,
+                                      "feature": feature, "module_id": self._current_module})
 
     def register_action_target(self, name, fn):
         """Contribute an AI-action target (the "target" of a configured action,

@@ -76,6 +76,22 @@ def register(host):
         return new
     host.register_action_target("ocr", _action)
 
+    def _picker_run(action_id, fp, bgr, meta):
+        res = run(bgr)
+        lines = [{"class_name": ("text: " + l["text"])[:48], "cx": l["cx"], "cy": l["cy"], "w": l["w"], "h": l["h"],
+                  "confirmed": False, "region_tags": [], "region_description": ""}
+                 for l in res.get("lines", []) if l.get("w")]
+        out = {"regions": lines}
+        if res.get("text"):
+            out["description"] = "Detected text: " + res["text"]
+        if not lines and not res.get("text"):
+            out["note"] = res.get("note") or ("No text found." if res.get("engine") else "No OCR model picked.")
+        elif res.get("engine"):
+            out["note"] = f"OCR ({res['engine']}): {len(lines)} line(s)."
+        return out
+    host.register_ai_actions("OCR", lambda: [{"id": "read", "label": "Read text"}], _picker_run,
+                             feature="ai.ocr")
+
     def api_ocr():
         fp = host.safe_path(host.media_dir, request.json.get("filename", ""))
         if not fp or not os.path.exists(fp):
