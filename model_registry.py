@@ -317,21 +317,27 @@ def onnx_providers():
     except Exception:
         return pref
 
+def onnx_provider():
+    """THE execution provider name every ONNX model in this app runs on (the
+    first of onnx_providers()): "MIGraphXExecutionProvider" on a ROCm box
+    with the MIGraphX wheel, "CUDAExecutionProvider" on CUDA, else CPU. A
+    module that builds an onnxruntime session passes onnx_providers(); one
+    that talks to a library taking a single provider name passes this."""
+    return onnx_providers()[0]
+
+
 _ONNX_STD = {"installed": False}
 
 
 def standardize_onnx(log=None):
-    """Make every ONNX Runtime session in this process use onnx_providers().
-
-    Libraries hardcode provider names from their own device string — rtmlib
-    turns device='rocm' into ROCMExecutionProvider, ultralytics asks for CUDA
-    whenever torch says cuda — so on a MIGraphX or CPU-only onnxruntime wheel
-    they get ORT's 'EP Error … falling back to CPU' and run on the CPU. This
-    wraps InferenceSession once: a request naming a provider this wheel
-    doesn't have is replaced by the app's standard preference list (filtered
-    to what is installed); requests that are all satisfiable pass through
-    untouched. One log line per distinct substitution. Idempotent, safe
-    without onnxruntime."""
+    """Route every ONNX Runtime session in this process through
+    onnx_providers(). Libraries derive provider names from their own device
+    strings (rtmlib: device='rocm' -> ROCMExecutionProvider), so on a wheel
+    that ships MIGraphX instead they ask for a provider that isn't there and
+    ORT drops them to the CPU. This wraps InferenceSession once: a request
+    naming a provider this wheel doesn't have is replaced by the app's list;
+    satisfiable requests pass through untouched. One log line per distinct
+    substitution. Idempotent, safe without onnxruntime."""
     if _ONNX_STD["installed"]:
         return True
     try:

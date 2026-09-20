@@ -69,12 +69,26 @@ WHOLEBODY_SIZES = {   # RTMW-{size} cocktail14 (133 kpts)
 }
 
 
+def _rtm_device():
+    """rtmlib picks its ONNX provider from a device string through its own
+    table (device='rocm' -> ROCMExecutionProvider, which a MIGraphX wheel
+    doesn't have). Point that table entry at the app's common provider so
+    RTMPose runs on the same EP as every other ONNX model here."""
+    dev = model_registry.backend()
+    try:
+        from rtmlib.tools.base import RTMLIB_SETTINGS
+        RTMLIB_SETTINGS["onnxruntime"][dev] = model_registry.onnx_provider()
+    except Exception:
+        pass
+    return dev
+
+
 def _load_rtm(kind: str, size: str):
     """kind 'body' (RTMPose) or 'wholebody' (RTMW); size an official letter."""
     table = BODY_SIZES if kind == "body" else WHOLEBODY_SIZES
     pose_url, pose_in, det_key = table[size]
     det_url, det_in = _DET[det_key]
-    dev = model_registry.backend()
+    dev = _rtm_device()
     key = f"pose:rtm:{kind}:{size}:{dev}"
     if key not in _WB_REGISTERED:
         def build():

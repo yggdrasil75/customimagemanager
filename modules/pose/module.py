@@ -91,7 +91,16 @@ def register(host):
 
     # RTMPose family with the official checkpoint sizes: 17-pt body (t/s/m/l/x)
     # and RTMW whole-body 133 pts (m/l/x) as separate providers because the
-    # size ladders differ.
+    # size ladders differ. Top-down: person boxes come from the app's picked
+    # person detector (Models → Person detection, torch/YOLO on the GPU), so
+    # rtmlib's bundled YOLOX ONNX detector is only loaded when there is none.
+    def _persons():
+        try:
+            det = host.request_model("detect.persons")
+        except NoProviderError:
+            return None
+        return lambda img: det(img, conf=0.25)
+
     for pid, label, kind, sizes, types, note in (
         ("rtmpose", "RTMPose", "body", ["t", "s", "m", "l", "x"],
          [{"value": "body", "label": "Body · 17 pts"}],
@@ -103,8 +112,8 @@ def register(host):
         host.provide_model(
             "pose", pid, label=label, family="RTMPose", sizes=sizes, types=types,
             note=note, speed="balanced",
-            loader=(lambda k=kind: (lambda sz: (lambda img, *a, **kw: _pose_core.rtm_people(img, k, sz)))(
-                host.model_variant("pose")["size"] or ("l" if k == "wholebody" else "m"))),
+            loader=(lambda k=kind: (lambda sz, pf: (lambda img, *a, **kw: _pose_core.rtm_people(img, k, sz, pf)))(
+                host.model_variant("pose")["size"] or ("l" if k == "wholebody" else "m"), _persons())),
             transform=None, available=_pose_core.has_wholebody,
             reason="pip install rtmlib onnxruntime", cost_mb=1000)
 
