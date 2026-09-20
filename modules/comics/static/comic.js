@@ -71,6 +71,11 @@ async function openComic(target) {
   // Smart Tag needs the pipeline module; the button simply isn't offered without it.
   const st = document.querySelector('#comic_pane [onclick="comicPipeline()"]');
   if (st) st.classList.toggle('hidden', d.kind !== 'folder' || !d.pipeline);
+  // The comic is what the centre shows now: it takes the gallery ring and the
+  // image it replaced gets it back on close.
+  if (typeof mediaMode === 'undefined' || mediaMode === 'image') _comicPrevFile = window.currentFile;
+  window.currentFile = target;
+  if (typeof refreshSelectionUI === 'function') refreshSelectionUI();
   setMediaMode('comic');
   renderComicStrip();
   showComicPage(0);
@@ -78,10 +83,14 @@ async function openComic(target) {
 }
 window.openComic = openComic;
 window.openComicArchive = openComic;   // books shelf: cbz/cbr/cb7 open here, not in the text reader
+let _comicPrevFile = null;
 
 function closeComic() {
   comicState = { target: null, kind: null, pages: [], thumbs: [], pageFiles: [], idx: 0, values: {}, writable: false };
   setMediaMode('image');
+  const prev = _comicPrevFile; _comicPrevFile = null;
+  if (prev && typeof selectFile === 'function') selectFile(prev);
+  else { window.currentFile = null; if (typeof refreshSelectionUI === 'function') refreshSelectionUI(); }
 }
 window.closeComic = closeComic;
 

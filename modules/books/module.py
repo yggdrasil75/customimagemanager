@@ -68,7 +68,7 @@ def register(host):
     # the shelf pane and book controls are their own partials (server-rendered).
     host.add_asset("books.js")
     host.add_asset("reader.js")
-    host.register_app_modal("book_reader.html")
+    host.register_centre_pane("book_reader.html")     # swaps in for the image viewer (media mode 'book')
     host.register_app_modal("book_triage_modal.html")
     host.register_left_pane("books_pane.html")       # left-pane shelf content
     host.register_controls_pane("book", "book_controls.html")
@@ -79,8 +79,11 @@ def register(host):
 
     # Wire the actual routes via the existing register(app, ctx). ctx is built
     # from the host + a couple of core helpers reached lazily.
-    # Embedding functions are now provided by the embedding module's service.
-    emb_svc = host.get_service("embedding") or {}
+    # Embedding functions come from the embedding module's service, reached
+    # lazily like llm/comic_pages: it may register after books, or be disabled,
+    # and either way the Books tab must still open (search just reads not-ready).
+    def _emb(key, default):
+        return (host.get_service("embedding") or {}).get(key) or default
     core = host.core
     book_routes.register(host.app, {
         "db":            host.db,
@@ -92,9 +95,9 @@ def register(host):
         "folder_scope_clause": core.folder_scope_clause,
         "table_exists":  common.table_exists,
         "norm_date_literal": common.norm_date_literal,
-        "embed_text":    emb_svc.get("embed_text"),
-        "embed_enabled": emb_svc.get("text_embed_enabled"),
-        "embed_tag":     emb_svc.get("embed_tag"),
+        "embed_text":    lambda text: _emb("embed_text", lambda t: None)(text),
+        "embed_enabled": lambda: bool(_emb("text_embed_enabled", lambda: False)()),
+        "embed_tag":     lambda: _emb("embed_tag", lambda: "")(),
         "llm_request":   lambda *a, **k: (host.get_service("llm") or {}).get("request", _no_llm)(*a, **k),
         "comic_pages":   lambda: host.get_service("comic_pages"),   # comics module, or None
         "current_user":  host.current_user,

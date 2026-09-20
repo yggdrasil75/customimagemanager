@@ -233,6 +233,7 @@ function renderGallery(files){
       div.className='gallery-item';
       div.dataset.kind='comic';
       div.dataset.folder=item.folder;
+      div.dataset.filename=item.folder;   // what currentFile holds while the comic is open
       const cover=item.cover;
       if(cover) div.dataset.src=`/api/thumb/${encodeURIComponent(cover)}`;
       div.addEventListener('click',()=>{ if(window.openComic) openComic(item.folder); });
@@ -353,7 +354,7 @@ function refreshSelectionUI(){
       el.classList.remove('multi-selected');
       chk?.classList.add('hidden');
     }
-    // Keep single-select highlight
+    // Keep single-select highlight: whatever the centre is showing (image, book, comic)
     if(f===window.currentFile && selectedFiles.size===0)
       el.classList.add('selected-item');
     else

@@ -308,16 +308,25 @@ async function openBook(relPath, section) {
   if (d.book.kind === 'comic' && window.openComicArchive) { openComicArchive(relPath); return; }
   currentBook = d.book;
 
+  // The book is what the centre shows now: it takes the gallery ring and the
+  // image it replaced gets it back on close.
+  if (typeof mediaMode === 'undefined' || mediaMode === 'image') _bookPrevFile = window.currentFile;
+  window.currentFile = relPath;
+  if (typeof refreshSelectionUI === 'function') refreshSelectionUI();
   setMediaMode('book');
   fillBookControls(currentBook);
   loadBookmarks();
   if (typeof openReader === 'function') openReader(currentBook, section);
 }
+let _bookPrevFile = null;
 
 function closeBook() {
   currentBook = null;
   if (typeof closeReader === 'function') closeReader();
   setMediaMode('image');
+  const prev = _bookPrevFile; _bookPrevFile = null;
+  if (prev && typeof selectFile === 'function') selectFile(prev);
+  else { window.currentFile = null; if (typeof refreshSelectionUI === 'function') refreshSelectionUI(); }
 }
 
 /* Delete the open book (the Delete key in book mode routes here). Removes the
