@@ -5962,6 +5962,7 @@ if __name__=='__main__':
     thread_manager.set_activity_source(lambda: _last_activity)
     model_registry.set_memory_hook(lambda cost_mb, gpu: thread_manager.reserve_model(cost_mb, gpu))
     model_registry.log_backend(access_logger)
+    model_registry.standardize_onnx(access_logger)   # every ORT session (rtmlib, insightface, ultralytics .onnx…) → onnx_providers()
 
     access_logger.info("Starting background indexer…")
     threading.Thread(target=_build_index_background, daemon=True).start()

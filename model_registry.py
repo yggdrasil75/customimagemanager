@@ -317,6 +317,49 @@ def onnx_providers():
     except Exception:
         return pref
 
+_ONNX_STD = {"installed": False}
+
+
+def standardize_onnx(log=None):
+    """Make every ONNX Runtime session in this process use onnx_providers().
+
+    Libraries hardcode provider names from their own device string — rtmlib
+    turns device='rocm' into ROCMExecutionProvider, ultralytics asks for CUDA
+    whenever torch says cuda — so on a MIGraphX or CPU-only onnxruntime wheel
+    they get ORT's 'EP Error … falling back to CPU' and run on the CPU. This
+    wraps InferenceSession once: a request naming a provider this wheel
+    doesn't have is replaced by the app's standard preference list (filtered
+    to what is installed); requests that are all satisfiable pass through
+    untouched. One log line per distinct substitution. Idempotent, safe
+    without onnxruntime."""
+    if _ONNX_STD["installed"]:
+        return True
+    try:
+        import onnxruntime as ort
+    except Exception:
+        return False
+    orig = ort.InferenceSession.__init__
+    avail = set(ort.get_available_providers())
+    seen = set()
+
+    def _init(self, path_or_bytes, sess_options=None, providers=None, provider_options=None, **kw):
+        names = [p if isinstance(p, str) else p[0] for p in (providers or [])]
+        missing = [n for n in names if n not in avail]
+        if missing:
+            std = onnx_providers()
+            key = (tuple(names), tuple(std))
+            if key not in seen:
+                seen.add(key)
+                msg = (f"onnx: {', '.join(missing)} not in this onnxruntime build "
+                       f"({', '.join(sorted(avail))}); using {std[0]}")
+                (log.info if log else lambda m: print(m, file=sys.stderr))(msg)
+            providers, provider_options = std, None
+        return orig(self, path_or_bytes, sess_options, providers, provider_options, **kw)
+    ort.InferenceSession.__init__ = _init
+    _ONNX_STD["installed"] = True
+    return True
+
+
 def onnx_device_id():
     """ctx/device id for ONNX-style APIs that take an int (insightface's ctx_id,
     rtmlib device string suffix, ...): 0 on a GPU backend, -1 on CPU."""
