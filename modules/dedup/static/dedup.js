@@ -438,3 +438,5 @@ async function bulkResolveAll() {
   loadGallery();
   await loadDedupPage(0);
 }
+
+fetchDedupStatus();   // initial badge, once this script is in

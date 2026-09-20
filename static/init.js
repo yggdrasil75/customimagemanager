@@ -17,7 +17,6 @@ loadFolders();
 loadImageAlbums();
 setPane(_initialPane);
 loadGallery();
-fetchDedupStatus();
 refreshReviewCount();
 
 // ── Branding ────────────────────────────────────────────────────────────────
