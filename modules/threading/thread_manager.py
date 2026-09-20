@@ -1,6 +1,7 @@
 import os
 import time
 import threading
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 
 try:
@@ -88,6 +89,9 @@ def _detect_mem_limit_mb():
 def _default_max():
     n = os.cpu_count() or 8
     return max(2, n)
+
+_TLS = threading.local()   # .worker: True on a thread running a dispatched job
+
 
 class ThreadManager:
     """Global slot allocator. Thread-safe. Not a fixed executor: it tracks how
@@ -266,9 +270,11 @@ class ThreadManager:
                 cost = 0.0
         self._commit_mem(cost)
         def _run(j=job, k=key, c=cost):
+            _TLS.worker = True
             try:
                 handle(j)
             finally:
+                _TLS.worker = False
                 self._uncommit_mem(c)
                 if k:
                     self.release_key(k)
@@ -586,6 +592,45 @@ class ThreadManager:
                 return False
             held.add(key)
             return True
+
+    # ── shared external resources ─────────────────────────────────────────
+    # A model served by one external endpoint (a vision LLM) is a resource the
+    # slot/memory budget can't see: every spare thread would hit it at once.
+    # Providers name their resource + parallel budget; the background sweep
+    # takes a slot before claiming, and interactive callers mark the resource
+    # busy so no new background slot is handed out while they wait on it.
+    def try_acquire_slot(self, resource, limit=1):
+        """Claim one of `limit` background slots on `resource`. Returns the slot
+        key to release_key() when done, or None if all are taken or a
+        foreground caller is using the resource (foreground_use)."""
+        with self._lock:
+            if getattr(self, "_fg_use", {}).get(resource, 0) > 0:
+                return None
+        for i in range(max(1, int(limit or 1))):
+            key = f"{resource}#{i}"
+            if self.try_acquire_key(key):
+                return key
+        return None
+
+    @contextmanager
+    def foreground_use(self, resource):
+        """Mark `resource` as in interactive use for the block: background
+        claims on it wait (in-flight background jobs finish normally)."""
+        with self._lock:
+            fg = getattr(self, "_fg_use", None)
+            if fg is None:
+                fg = self._fg_use = {}
+            fg[resource] = fg.get(resource, 0) + 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._fg_use[resource] = max(0, self._fg_use.get(resource, 1) - 1)
+            self.wake()
+
+    def in_worker(self):
+        """True on a thread running one of this manager's dispatched jobs."""
+        return bool(getattr(_TLS, "worker", False))
 
     def key_free(self, key):
         """True if `key` is not currently held. Non-mutating peek, for sources

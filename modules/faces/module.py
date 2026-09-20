@@ -90,38 +90,9 @@ def register(host):
             out.append(b)
         return out
 
-    def _face_loader():
-        path = _detector_path()
-        if not path:
-            raise RuntimeError(facelib.face_model_error() or "face detector unavailable")
-
-        def run(img_bgr, *a, conf=0.25, **k):
-            img = common.coerce_bgr(img_bgr)
-            if img is None:
-                return []
-            return _filter(img, core.detect_boxes(img, path, conf=conf))
-
-        def batch(imgs, *a, conf=0.25, **k):
-            det = host.broker.detector_for("box", path)
-            raw = (det.batch(imgs, path, conf=conf) if det is not None and hasattr(det, "batch")
-                   else [core.detect_boxes(im, path, conf=conf) for im in imgs])
-            return [(_filter(im, bx) if im is not None else []) for im, bx in zip(imgs, raw)]
-        run.batch = batch
-        run.model_path = path
-        run.registry_key = host.core.model_key(path)
-        return run
-
-    host.provide_model(
-        "detect.faces", "yolo-face", label="YOLO11 face", family="YOLO", sizes=_SIZES,
-        settings=[{"key": "face_weights", "label": "Custom weights", "kind": "select",
-                   "options": lambda: [{"value": "", "label": "Stock (size)"}] +
-                              [{"value": d["id"], "label": d["label"]}
-                               for d in registry.list_detectors() if d.get("custom")]}],
-        note="akanametov yolo-face weights. Nano misses small/profile faces — the "
-             "ones cluster density depends on; go larger if you can afford it.",
-        speed="fast", loader=_face_loader, transform=None,
-        available=registry._have_ultralytics, reason="pip install ultralytics",
-        cost_mb=250)
+    # The detect.faces provider itself is the yolo module's (it is the
+    # ultralytics runtime); it takes the weights and the filter from the
+    # service below. face_weights (custom .pt) is the picker setting it shows.
 
     # ── embed.faces: insightface packs + appearance fallback ──────────────
     def _pack():
@@ -196,6 +167,10 @@ def register(host):
         "have_face_estimator": mesh.have_face_estimator,
         "face_estimator_name": lambda: host.broker.selected_id("face.shape") or "",
         "detector_path": _detector_path,
+        "filter_boxes": _filter,
+        "detector_options": lambda: [{"value": "", "label": "Stock (size)"}] +
+                                    [{"value": d["id"], "label": d["label"]}
+                                     for d in registry.list_detectors() if d.get("custom")],
         "insight_registry_key": facelib.insight_registry_key,
         "have_identity_embedder": facelib.have_identity_embedder,
         "recognition_model": facelib.recognition_model,
@@ -270,4 +245,4 @@ def register(host):
                         "active_recognition": facelib.recognition_model(),
                         "model_error": facelib.face_model_error()})
     host.add_route("/api/face_models", api_face_models)
-    host.logger.info("faces module: registered detect.faces / embed.faces / face.shape")
+    host.logger.info("faces module: registered embed.faces / face.shape (+ detect.faces weights)")

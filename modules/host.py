@@ -362,6 +362,15 @@ class Host:
             cap = caps[self._sweep_rr]
             if self._sweep_idle.get(cap, 0) > now:
                 continue
+            # A provider on a shared external resource (a vision LLM) gets at
+            # most its parallel budget across every sweep using it, and
+            # nothing new while a foreground caller is on it.
+            prov = self.broker.provider_for(cap, "bg")
+            slot = None
+            if prov is not None and prov.resource:
+                slot = self.thread_manager.try_acquire_slot(prov.resource, prov.limit())
+                if slot is None:
+                    continue
             n = 16
             while True:
                 try:
@@ -373,10 +382,12 @@ class Host:
                         continue
                     key = f"sweep:{cap}:{rel}"
                     if self.thread_manager.try_acquire_key(key):
-                        return {"cap": cap, "rel_path": rel, "key": key}
+                        return {"cap": cap, "rel_path": rel, "key": key, "slot": slot}
                 if len(rows) < n or n >= 512:      # exhausted (or only failures left)
                     break
                 n *= 4
+            if slot:
+                self.thread_manager.release_key(slot)
             self._sweep_idle[cap] = now + 60       # nothing to do: look again in a minute
         return None
 
@@ -396,6 +407,8 @@ class Host:
             self.logger.error(f"background {cap} {rel}: {e}")
         finally:
             self.thread_manager.release_key(job["key"])
+            if job.get("slot"):
+                self.thread_manager.release_key(job["slot"])
 
     def _start_sweeps(self):
         if self.background_sweeps:
@@ -419,7 +432,8 @@ class Host:
                       transform=None, available=None, reason="",
                       cost_mb=0, gpu=False, handles=None, family=None,
                       sizes=None, types=None, settings=None, classes=None,
-                      prompted=False, note="", speed="", supports_conf=None):
+                      prompted=False, note="", speed="", supports_conf=None,
+                      resource=None, concurrency=1):
         """Register this module's model as a provider for a capability.
 
         loader()   -> a callable model handle (back it with the runtime
@@ -447,6 +461,9 @@ class Host:
         speed      -> "fast" | "balanced" | "accurate" cost class badge.
         supports_conf -> the handle honours conf=<0..1>; the picker offers a
                       min-confidence input. Defaults on for detect/segment/pose.
+        resource   -> name of the shared backend this model runs on (an external
+                      endpoint); every provider naming it shares one background
+                      budget of `concurrency` parallel jobs (int or callable).
         The chosen size/type is read back with host.model_variant(cap_id).
         """
         return self.broker.provide(
@@ -454,7 +471,8 @@ class Host:
             available=available, reason=reason, cost_mb=cost_mb, gpu=gpu,
             handles=handles, family=family, sizes=sizes, types=types,
             settings=settings, classes=classes, prompted=prompted, note=note,
-            speed=speed, supports_conf=supports_conf)
+            speed=speed, supports_conf=supports_conf,
+            resource=resource, concurrency=concurrency)
 
     def model_variant(self, cap_id, role=None):
         """{"size","type","background","classes"} the user picked for a

@@ -369,19 +369,54 @@ def register(host):
                 cost_mb=300 if cap == "segment" else 250,
                 gpu=model_registry.on_gpu())
 
-    # Dedicated face detector (yolo-face weights from the face registry; the
-    # person module consumes 'detect.faces').
-    def _face_path():
-        try:
-            return host.core.face_detector_path() or ""
-        except Exception:
-            return ""
+    # Dedicated face detector: akanametov yolo-face weights (sizes n/s/m/l, or
+    # a custom .pt). This module runs them — it is the ultralytics runtime —
+    # while the faces module owns the weight registry (download, custom files)
+    # and the face filter (min size, drawn-face rejection) and hands both over
+    # on its service; the person module consumes 'detect.faces'.
+    def _faces():
+        return host.get_service("faces") or {}
+
+    def _face_loader():
+        svc = _faces()
+        if not svc:
+            raise RuntimeError("faces module is off (it holds the face weights)")
+        path = svc["detector_path"]()
+        if not path:
+            raise RuntimeError(svc["face_model_error"]() or "face weights unavailable")
+        model = _loader_for(path, "detectfaces")()
+        filt = svc["filter_boxes"]
+
+        def run(img_bgr, *a, conf=0.25, **k):
+            c = common.coerce_bgr(img_bgr)
+            if c is None:
+                return []
+            res = _run_yolo_path(path, c, conf)
+            return filt(c, _norm_boxes(res)) if res else []
+
+        def batch(imgs, *a, conf=0.25, **k):
+            coerced = [common.coerce_bgr(im) for im in imgs]
+            feed = [c if c is not None else np.zeros((1, 1, 3), np.uint8) for c in coerced]
+            res = _run_yolo_path(path, feed, conf) if feed else None
+            return [(filt(c, _norm_boxes(r)) if c is not None and r is not None else [])
+                    for c, r in zip(coerced, (res or [None] * len(feed)))]
+        run.batch = batch
+        run.model_path = path
+        run.registry_key = f"yolo:{_canon(path, 'detectfaces')}"
+        run.model = model
+        return run
 
     host.provide_model(
-        "detect.faces", "yolo-face", label="YOLO face", family="YOLO",
-        loader=lambda: _loader_for(_face_path(), "detectfaces")(),
-        transform=lambda res, *a, **k: _norm_boxes(res, want_names=False),
-        available=lambda: _avail() and bool(_face_path()), reason=reason,
+        "detect.faces", "yolo-face", label="YOLO11 face", family="YOLO",
+        sizes=["n", "s", "m", "l"], speed="fast",
+        settings=[{"key": "face_weights", "label": "Custom weights", "kind": "select",
+                   "options": lambda: (_faces().get("detector_options") or (lambda: []))(),
+                   "help": "Blank = stock yolo-face weights for the picked size."}],
+        note="akanametov yolo-face weights. Nano misses small/profile faces — the ones "
+             "cluster density depends on; go larger if you can afford it.",
+        loader=_face_loader, transform=None,
+        available=lambda: _avail() and bool(_faces()),
+        reason="ultralytics not installed, or the Faces module (which holds the weights) is off",
         cost_mb=250, gpu=model_registry.on_gpu())
 
     # Person detection: (a) the picked Detection model filtered to 'person'

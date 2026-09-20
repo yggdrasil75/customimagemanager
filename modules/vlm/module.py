@@ -70,6 +70,17 @@ def register(host):
     host.add_settings_field(key="oai_model", label="Chat model", kind="text", pane="module")
     host.add_settings_field(key="oai_system_prompt", label="System prompt", kind="textarea",
                             pane="module")
+    # How many background requests the endpoint takes at once. Everything this
+    # module provides (IQA, classify, tag, describe, embeddings…) shares it, so
+    # ticking every "Run in background" box still sends the server this many.
+    host.add_config_key("oai_concurrency", default=1,
+                        validate=lambda v: max(1, min(32, int(v or 1))))
+    host.add_settings_field(key="oai_concurrency", label="Parallel background requests",
+                            kind="number", pane="module",
+                            help="Max in-flight background requests to the endpoint across "
+                                 "all capabilities. 1 unless the server batches.")
+    _shared = dict(resource=client.RESOURCE,
+                   concurrency=lambda: int(host.config.get("oai_concurrency") or 1))
     host.add_config_key("oai_embed_model", default="", validate=lambda v: str(v or ""))
     # ── AI actions (named prompts run on an image / a selection) ─────────
     actions.HOST = host
@@ -112,7 +123,7 @@ def register(host):
                            "multimodal model. Text search needs one that embeds text too."}],
         loader=_embed_handle,
         transform=None, available=client.embed_configured,
-        reason="set the OAI endpoint and an embedding model", cost_mb=0)
+        reason="set the OAI endpoint and an embedding model", cost_mb=0, **_shared)
 
     def _configured():
         return bool((host.config.get("oai_endpoint") or "").strip()
@@ -131,7 +142,7 @@ def register(host):
 
     common = dict(label="Vision LLM", family="LLM", speed="accurate", supports_conf=False,
                   transform=None, available=_configured,
-                  reason="set OAI endpoint + chat model in AI settings", cost_mb=0)
+                  reason="set OAI endpoint + chat model in AI settings", cost_mb=0, **_shared)
 
     # ── detect: open-vocabulary boxes (prompt required at run time) ───────
     def _detect(img_bgr, prompt="", *a, **k):

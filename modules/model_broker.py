@@ -88,8 +88,15 @@ class Provider:
     def __init__(self, cap_id, provider_id, *, label, loader, transform=None,
                  available=None, reason="", cost_mb=0, gpu=False, module_id=None,
                  handles=None, family=None, sizes=None, types=None, settings=None,
-                 classes=None, prompted=False, note="", speed="", supports_conf=None):
+                 classes=None, prompted=False, note="", speed="", supports_conf=None,
+                 resource=None, concurrency=1):
         self.capability = cap_id
+        # resource: shared backend this model runs on (an external endpoint);
+        # providers naming the same resource share its parallel budget in the
+        # background sweep. concurrency: that budget (int, or a callable read
+        # when needed so a setting can drive it). None = local, no cap.
+        self.resource = resource
+        self.concurrency = concurrency
         # note: one-liner on when to use this model (shown under the picker);
         # speed: rough cost class "fast" | "balanced" | "accurate".
         self.note = note or ""
@@ -156,6 +163,14 @@ class Provider:
     def reason(self):
         return "" if self.available() else (self._reason or "unavailable")
 
+    def limit(self):
+        """Parallel budget on this provider's resource (>= 1)."""
+        try:
+            c = self.concurrency() if callable(self.concurrency) else self.concurrency
+            return max(1, int(c or 1))
+        except Exception:
+            return 1
+
     def as_dict(self):
         return {"id": self.id, "label": self.label, "family": self.family,
                 "sizes": self.sizes, "types": self.types,
@@ -184,6 +199,12 @@ class Provider:
             return transform(raw, *args, **kwargs) if transform else raw
         run.model = model            # escape hatch: raw handle if a caller needs it
         run.provider = self
+        # A provider-shaped handle may offer a batched entry point and name its
+        # weights; consumers look for these on the bound handle (people_core's
+        # `run.batch(imgs)`), so carry them over.
+        for k in ("batch", "model_path", "registry_key"):
+            if hasattr(model, k):
+                setattr(run, k, getattr(model, k))
         return run
 
 
@@ -235,7 +256,8 @@ class ModelBroker:
     def provide(self, cap_id, provider_id, *, label, loader, transform=None,
                 available=None, reason="", cost_mb=0, gpu=False, handles=None,
                 family=None, sizes=None, types=None, settings=None, classes=None,
-                prompted=False, note="", speed="", supports_conf=None):
+                prompted=False, note="", speed="", supports_conf=None,
+                resource=None, concurrency=1):
         """Register a provider for a capability. Dedup by (cap_id, provider_id).
 
         The predefined capabilities (model_contracts) exist so providers of the
@@ -259,7 +281,8 @@ class ModelBroker:
                          module_id=self._current_module, handles=handles,
                          family=family, sizes=sizes, types=types, settings=settings,
                          classes=classes, prompted=prompted, note=note, speed=speed,
-                         supports_conf=supports_conf)
+                         supports_conf=supports_conf,
+                resource=resource, concurrency=concurrency)
             self._providers[cap_id][provider_id] = p
             return p
 
@@ -370,6 +393,12 @@ class ModelBroker:
                     "background": bool(base.get("background")),
                     "classes": list(base.get("classes") or []),
                     "conf": float(base.get("conf", 0.25))}
+
+    def provider_for(self, cap_id, role="fg"):
+        """The Provider object currently picked for a capability (role "bg" =
+        the background sweep's pick), or None."""
+        with self._lock:
+            return self._providers.get(cap_id, {}).get(self.selected_id(cap_id, role))
 
     def background_capabilities(self):
         """[cap_id] whose background run is switched on and whose background

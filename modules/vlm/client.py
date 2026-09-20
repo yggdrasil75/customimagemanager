@@ -6,8 +6,11 @@ that delegate here, so the pipeline, AI actions, comics and books all talk
 to one client that this module owns and configures.
 """
 import base64
+import contextlib
 import json
+import random
 import re
+import time
 
 import numpy as np
 import requests
@@ -16,6 +19,30 @@ from optional_deps import optional_import
 cv2, _HAVE_CV2 = optional_import("cv2")
 
 HOST = None      # bound by module.register
+
+# The endpoint is one shared resource however many capabilities point at it.
+# Providers register with this name so the background sweep runs at most
+# `oai_concurrency` requests on it at a time (see thread_manager slots).
+RESOURCE = "oai-endpoint"
+_BUSY = (429, 502, 503, 504)
+
+
+def _post(url, *, json, headers, timeout):
+    """POST to the endpoint. An interactive call (not on a worker thread)
+    marks the resource busy so the sweep hands out no new background slot
+    while it waits; a busy/overloaded reply is retried with backoff instead
+    of failing the job."""
+    tm = getattr(HOST, "thread_manager", None)
+    fg = (tm.foreground_use(RESOURCE) if tm is not None and not tm.in_worker()
+          else contextlib.nullcontext())
+    with fg:
+        for attempt in range(4):
+            r = requests.post(url, json=json, headers=headers, timeout=timeout)
+            if r.status_code in _BUSY and attempt < 3:
+                time.sleep(2 * 2 ** attempt + random.random())      # 2s, 4s, 8s (+jitter)
+                continue
+            r.raise_for_status()
+            return r
 
 
 def _cfg():
@@ -73,8 +100,7 @@ def request(messages, tools=None, tool_choice=None, timeout=600, endpoint=None):
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = tool_choice
-    r = requests.post(endpoint, headers=hdrs, json=payload, timeout=timeout)
-    r.raise_for_status()
+    r = _post(endpoint, headers=hdrs, json=payload, timeout=timeout)
     return r.json()["choices"][0]["message"]
 
 BOX_TOOL = [{"type": "function", "function": {
@@ -189,9 +215,8 @@ def embed_request(inputs, timeout=120):
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
-    r = requests.post(endpoint, json={"model": model, "input": inputs}, headers=headers,
-                      timeout=timeout)
-    r.raise_for_status()
+    r = _post(endpoint, json={"model": model, "input": inputs}, headers=headers,
+              timeout=timeout)
     data = sorted(r.json().get("data", []), key=lambda d: d.get("index", 0))
     return [np.asarray(d["embedding"], np.float32) for d in data]
 
