@@ -24,6 +24,7 @@ a rewrite of the image/metadata layer.
 """
 
 import os
+import time
 
 from flask import request, jsonify
 
@@ -44,7 +45,7 @@ MANIFEST = {
 }
 
 
-def _estimate(host, img_bgr):
+def _estimate(host, img_bgr, detect=None):
     """Run the selected pose provider and shape its output for storage.
 
     Returns the sidecar pose dict {model, kind, names, edges, people}. The
@@ -56,7 +57,7 @@ def _estimate(host, img_bgr):
             "names": _pose_core.COCO_KP_NAMES, "edges": _pose_core.COCO_SKELETON,
             "people": []}
     try:
-        detect = host.request_model("pose")
+        detect = detect or host.request_model("pose")
     except NoProviderError as e:
         base["note"] = f"No pose model available: {e.reason}"
         return base
@@ -116,6 +117,41 @@ def register(host):
 
     core = host.core        # image decode + metadata IO handed over by the app
 
+    # Pose itself lives in the sidecar (write_metadata pose=); this marker is
+    # what lets the background sweep find images not yet posed by a model
+    # without opening every XMP.
+    host.add_table("CREATE TABLE IF NOT EXISTS pose_runs("
+                   "rel_path TEXT PRIMARY KEY, model TEXT, people INTEGER, updated REAL)")
+
+    def _mark(rel, pose_data, model=None):
+        model = model or host.broker.selected_id("pose") or ""
+        db = host.db()
+        db.execute("INSERT INTO pose_runs(rel_path, model, people, updated) VALUES(?,?,?,?) "
+                   "ON CONFLICT(rel_path) DO UPDATE SET model=excluded.model, "
+                   "people=excluded.people, updated=excluded.updated",
+                   (rel, model, len((pose_data or {}).get("people") or []), time.time()))
+        db.commit()
+
+    # Background sweep (Models → Pose → "Run in background").
+    def _bg_pending(db, n):
+        model = host.broker.selected_id("pose", "bg") or ""
+        return [r["rel_path"] for r in db.execute(
+            "SELECT f.rel_path FROM files f LEFT JOIN pose_runs p ON p.rel_path=f.rel_path AND p.model=? "
+            "WHERE f.media_kind='image' AND (f.comic_folder IS NULL OR f.comic_folder='') "
+            "AND p.rel_path IS NULL ORDER BY f.rel_path LIMIT ?", (model, n)).fetchall()]
+
+    def _bg_run(rel, fp, handle):
+        img = core.read_image(fp)
+        if img is None:
+            raise RuntimeError("decode failed")
+        pose_data = _estimate(host, core.to_bgr(img), detect=handle)
+        if pose_data.get("note") and not pose_data.get("people"):
+            raise RuntimeError(pose_data["note"])
+        meta = core.read_metadata(fp)
+        core.write_metadata(fp, meta["tags"], meta["description"], meta["regions"], pose=pose_data)
+        _mark(rel, pose_data, host.broker.selected_id("pose", "bg"))
+    host.add_background_sweep("pose", _bg_pending, _bg_run)
+
     # ── POST /api/pose ───────────────────────────────────────────────────
     def api_pose():
         fn = (request.json or {}).get("filename", "")
@@ -130,6 +166,7 @@ def register(host):
         meta = core.read_metadata(fp)
         core.write_metadata(fp, meta["tags"], meta["description"], meta["regions"],
                          pose=pose_data)
+        _mark(fn, pose_data)
         host.config["status_text"] = "Ready."
         if not pose_data.get("people"):
             return jsonify({"success": True, "pose": pose_data,
@@ -154,6 +191,7 @@ def register(host):
                 meta = core.read_metadata(fp)
                 core.write_metadata(fp, meta["tags"], meta["description"],
                                  meta["regions"], pose=pose_data)
+                _mark(fn, pose_data)
                 if (pose_data or {}).get("people"):
                     posed += 1
                 done += 1

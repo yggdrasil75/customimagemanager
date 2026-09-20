@@ -25,7 +25,8 @@ Nothing here imports manager.py. manager.py builds ONE Host, hands it to
 the loader, and reads back the contributions. That keeps the dependency
 arrow pointing from the core into the module system, never the reverse.
 """
-
+import os
+import time
 
 class Host:
     """API surface handed to each module's register(host).
@@ -94,6 +95,8 @@ class Host:
         # startup for read-cache consistency. This is how a module adds a new
         # searchable feature backed by its own table.
         self.db_tables = []
+        self.background_sweeps = {}   # cap_id -> {pending, run, module_id}
+        self._sweep_rr, self._sweep_idle, self._sweep_skip, self._sweep_done = 0, {}, set(), {}
         # File-row enrichers a module contributes: fn(db, rel_paths) -> {rel_path:
         # {field: value}}. Core folds these into gallery/list rows, so a module
         # can attach its own per-file data (e.g. rating) without a core column.
@@ -335,6 +338,70 @@ class Host:
         self.thread_manager.register_source(
             name, claim, handle, key_of=key_of, cost_of=cost_of)
 
+    # ── background sweeps ────────────────────────────────────────────────
+    def add_background_sweep(self, cap_id, pending, run):
+        """Give a non-region capability's "Run in background on every image"
+        switch (Models tab) something to do. The module that STORES the output
+        registers it: pending(db, n) -> up to n rel_paths still lacking this
+        capability's output under the background model; run(rel_path,
+        abs_path, handle) computes and stores it, handle being the background
+        provider's bound model. The core sweep source claims one file at a
+        time from every switched-on sweep, round robin, on the thread
+        manager's spare slots — new uploads are picked up the same way.
+        Region-shaped capabilities (detect/segment) keep the ingest path."""
+        self.background_sweeps[cap_id] = {"pending": pending, "run": run,
+                                          "module_id": self._current_module}
+
+    def _sweep_claim(self):
+        caps = [c for c in self.broker.background_capabilities() if c in self.background_sweeps]
+        if not caps:
+            return None
+        now = time.time()
+        for _ in range(len(caps)):
+            self._sweep_rr = (self._sweep_rr + 1) % len(caps)
+            cap = caps[self._sweep_rr]
+            if self._sweep_idle.get(cap, 0) > now:
+                continue
+            n = 16
+            while True:
+                try:
+                    rows = list(self.background_sweeps[cap]["pending"](self.db(), n))
+                except Exception as e:
+                    self.logger.error(f"background {cap} pending: {e}"); rows = []
+                for rel in rows:
+                    if (cap, rel) in self._sweep_skip:
+                        continue
+                    key = f"sweep:{cap}:{rel}"
+                    if self.thread_manager.try_acquire_key(key):
+                        return {"cap": cap, "rel_path": rel, "key": key}
+                if len(rows) < n or n >= 512:      # exhausted (or only failures left)
+                    break
+                n *= 4
+            self._sweep_idle[cap] = now + 60       # nothing to do: look again in a minute
+        return None
+
+    def _sweep_handle(self, job):
+        cap, rel = job["cap"], job["rel_path"]
+        try:
+            fp = self.safe_path(self.media_dir, rel)
+            if not fp or not os.path.exists(fp):
+                self._sweep_skip.add((cap, rel)); return
+            handle = self.broker.request(cap, "bg")
+            self.background_sweeps[cap]["run"](rel, fp, handle)
+            n = self._sweep_done[cap] = self._sweep_done.get(cap, 0) + 1
+            if n % 25 == 0:
+                self.config["status_text"] = f"[bg {cap}] {n} done…"
+        except Exception as e:
+            self._sweep_skip.add((cap, rel))       # don't spin on the same failure
+            self.logger.error(f"background {cap} {rel}: {e}")
+        finally:
+            self.thread_manager.release_key(job["key"])
+
+    def _start_sweeps(self):
+        if self.background_sweeps:
+            self.thread_manager.register_source("background_sweep", self._sweep_claim,
+                                                self._sweep_handle, key_of=lambda j: j["key"])
+
     # ── model capabilities ───────────────────────────────────────────────
     def declare_capability(self, cap_id, *, summary, input, output, label=None,
                            background=False):
@@ -546,6 +613,7 @@ class Host:
                 fn()
             except Exception as e:
                 self.logger.error(f"module startup hook failed: {e}")
+        self._start_sweeps()
 
     def apply_db_tables(self, db):
         """Create module-owned tables and run their consistency checks once.

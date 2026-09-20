@@ -104,13 +104,13 @@ def register(host):
         except RuntimeError:
             return None
 
-    def _embed_tag(handle=None):
+    def _embed_tag(handle=None, role="fg"):
         handle = handle or _try_handle()
         space = getattr(getattr(handle, "model", None), "space", None)
         if space:
             return str(space)
-        pid = _embed_provider()
-        return f"{pid}:{host.model_variant('embed').get('size') or ''}"
+        pid = host.broker.selected_id("embed", role)
+        return f"{pid}:{host.model_variant('embed', role).get('size') or ''}"
 
     def _text_embedder(handle=None):
         """embed_text(text) -> vector of the picked provider, or None if it
@@ -282,6 +282,23 @@ def register(host):
                 _have_embedding(db, r, _embed_tag(handle), _img_mtime(r)) for r in file_list[:50]):
             raise RuntimeError(summary)
         return n, pid
+
+    # Background sweep (Models → Embeddings → "Run in background"): every image
+    # without a vector in the background model's space, one at a time.
+    def _bg_pending(db, n):
+        tag = _embed_tag(host.request_model("embed", role="bg"), role="bg")
+        return [r["rel_path"] for r in db.execute(
+            "SELECT f.rel_path FROM files f LEFT JOIN image_embeddings e "
+            "ON e.rel_path=f.rel_path AND e.model=? "
+            "WHERE f.media_kind='image' AND e.rel_path IS NULL ORDER BY f.rel_path LIMIT ?",
+            (tag, n)).fetchall()]
+
+    def _bg_run(rel, fp, handle):
+        n = _stage_embeddings_with(host.db(), [rel], _img_loader, handle,
+                                   _embed_tag(handle, role="bg"), mtime_of=_img_mtime)
+        if not n:
+            raise RuntimeError("no vector produced")
+    host.add_background_sweep("embed", _bg_pending, _bg_run)
 
     def _embedding_model_tag(db):
         row = db.execute(
@@ -563,6 +580,8 @@ def register(host):
             "stored_model": stored_tag,
             "stored_matches": bool(stored_tag) and stored_tag == _embed_tag(),
             "total": _embedding_count(db),
+            "images": db.execute("SELECT COUNT(*) FROM files WHERE media_kind='image'").fetchone()[0],
+            "background": "embed" in host.broker.background_capabilities(),
         })
 
     # Backward-compatible endpoints (matching original manager.py API)
@@ -579,6 +598,8 @@ def register(host):
             "stored_model": stored_tag,
             "stored_matches": bool(stored_tag) and stored_tag == _embed_tag(),
             "total": _embedding_count(db),
+            "images": db.execute("SELECT COUNT(*) FROM files WHERE media_kind='image'").fetchone()[0],
+            "background": "embed" in host.broker.background_capabilities(),
         })
 
     @host.app.route("/api/library_embed", methods=["POST"])

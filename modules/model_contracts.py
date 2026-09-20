@@ -93,6 +93,7 @@ CORE_CAPABILITIES = {
     },
     "pose": {
         "label": "Pose / keypoints",
+        "background": True,   # non-region: served by the module's background sweep
         "summary": "Human pose estimation: per-person keypoints.",
         "input": _IMG,
         "output": "list of {keypoints, conf} where keypoints is a list of "
@@ -106,6 +107,7 @@ CORE_CAPABILITIES = {
     },
     "classify": {
         "label": "Classification",
+        "background": True,   # non-region: served by the module's background sweep
         "summary": "Whole-image classification against a fixed label set.",
         "input": _IMG,
         "output": "list of {class_name, conf} sorted by conf desc",
@@ -132,12 +134,14 @@ CORE_CAPABILITIES = {
     },
     "embed": {
         "label": "Image embedding",
+        "background": True,   # non-region: served by the module's background sweep
         "summary": "Whole-image embedding vector for similarity search / clustering.",
         "input": _IMG,
         "output": "1-D float32 ndarray, L2-normalised; None on failure",
     },
     "iqa": {
         "label": "Image quality",
+        "background": True,   # non-region: served by the module's background sweep
         "summary": "No-reference image quality assessment: a normalized score.",
         "input": "score(img_bgr, rel_path=None) — HxWx3 uint8 BGR; rel_path (library-"
                  "relative) is passed when known so a provider can use the file's "

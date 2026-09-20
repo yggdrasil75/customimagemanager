@@ -15,6 +15,8 @@ the Models tab only while this provider is the pick for that capability.
 A runtime prompt (an AI action's text, a detect query) overrides it.
 Uses this module's own OpenAI-compatible client (client.py).
 """
+import time
+
 from flask import jsonify
 
 from . import client, actions
@@ -159,6 +161,41 @@ def register(host):
                        note="Asks the model to choose among your tag classes. {classes} in the "
                             "prompt expands to the current list.",
                        settings=_settings("classify", "{classes} expands to the app's class list."), **common)
+
+    # Background sweep (Models → Classification → "Run in background"): each
+    # image is classified once per model and the chosen class is applied as a
+    # tag — the app's classes ARE tag classes, so that is where a
+    # classification lives. classify_runs remembers what was done (including
+    # "nothing chosen") so the sweep never re-asks the model.
+    host.add_table("CREATE TABLE IF NOT EXISTS classify_runs("
+                   "rel_path TEXT PRIMARY KEY, model TEXT, class_name TEXT, conf REAL, updated REAL)")
+
+    def _cls_pending(db, n):
+        model = host.broker.selected_id("classify", "bg") or ""
+        return [r["rel_path"] for r in db.execute(
+            "SELECT f.rel_path FROM files f LEFT JOIN classify_runs c ON c.rel_path=f.rel_path AND c.model=? "
+            "WHERE f.media_kind='image' AND (f.comic_folder IS NULL OR f.comic_folder='') "
+            "AND c.rel_path IS NULL ORDER BY f.rel_path LIMIT ?", (model, n)).fetchall()]
+
+    def _cls_run(rel, fp, handle):
+        img = core.read_image(fp)
+        if img is None:
+            raise RuntimeError("decode failed")
+        hits = handle(core.to_bgr(img)) or []
+        top = hits[0] if hits else None
+        if top and top.get("class_name"):
+            meta = core.read_metadata(fp)
+            tags = list(meta["tags"] or [])
+            if top["class_name"] not in tags:
+                core.write_metadata(fp, tags + [top["class_name"]], meta["description"], meta["regions"])
+        db = host.db()
+        db.execute("INSERT INTO classify_runs(rel_path, model, class_name, conf, updated) VALUES(?,?,?,?,?) "
+                   "ON CONFLICT(rel_path) DO UPDATE SET model=excluded.model, class_name=excluded.class_name, "
+                   "conf=excluded.conf, updated=excluded.updated",
+                   (rel, host.broker.selected_id("classify", "bg") or "",
+                    (top or {}).get("class_name", ""), (top or {}).get("conf"), time.time()))
+        db.commit()
+    host.add_background_sweep("classify", _cls_pending, _cls_run)
 
     # ── tag: free-form tags ────────────────────────────────────────────────
     def _tag(img_bgr, prompt="", *a, **k):

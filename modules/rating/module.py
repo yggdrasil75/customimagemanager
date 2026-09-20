@@ -216,6 +216,31 @@ def register(host):
             "iqa_model=excluded.iqa_model",
             (rel_path, stars, raw, model))
 
+    # Background sweep (Models → Image quality → "Run in background"): images
+    # with no user rating that the background IQA model hasn't scored yet.
+    def _bg_pending(db, n):
+        model = host.broker.selected_id("iqa", "bg") or ""
+        return [r["rel_path"] for r in db.execute(
+            "SELECT f.rel_path FROM files f LEFT JOIN ratings r ON r.rel_path=f.rel_path "
+            "WHERE f.media_kind='image' AND (f.comic_folder IS NULL OR f.comic_folder='') "
+            "AND (r.rel_path IS NULL OR (r.user_stars IS NULL AND "
+            "(r.iqa_stars IS NULL OR COALESCE(r.iqa_model,'')<>?))) "
+            "ORDER BY f.rel_path LIMIT ?", (model, n)).fetchall()]
+
+    def _bg_run(rel, fp, detect):
+        img = core.read_image(fp)
+        img = core.to_bgr(img) if img is not None else None
+        if img is None:
+            raise RuntimeError("decode failed")
+        res = detect(core.object_grouping.downscale_to_cap(img), rel_path=rel)
+        stars = _to_stars(res.get("quality"))
+        if stars is None:
+            raise RuntimeError("no score")
+        db = host.db()
+        _write_iqa(db, rel, stars, res.get("raw"), host.broker.selected_id("iqa", "bg") or "")
+        db.commit()
+    host.add_background_sweep("iqa", _bg_pending, _bg_run)
+
     # ── endpoints ────────────────────────────────────────────────────────
     def api_iqa_models():
         # Model list now comes from the broker's iqa providers, not iqa.py.

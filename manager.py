@@ -3037,6 +3037,8 @@ def _background_instances(img_bgr) -> list:
         return out
     H, W = c.shape[:2]
     for cap in modules.broker.background_capabilities():
+        if cap in module_host.background_sweeps:      # embed/pose/iqa/…: the module's sweep, not regions
+            continue
         try:
             run = modules.broker.request(cap, role="bg")   # may be a different model than the button
         except modules.model_broker.NoProviderError as e:
@@ -3489,6 +3491,7 @@ def api_models_select():
         return jsonify({"error": err or "selection failed"}), 400
     state["model_selection"] = modules.broker.current_selection()
     save_config()
+    thread_manager.wake()                    # a background switch just flipped: start sweeping now
     return jsonify({"success": True, "capabilities": _models_payload()})
 
 @app.route("/api/update_settings", methods=["POST"])

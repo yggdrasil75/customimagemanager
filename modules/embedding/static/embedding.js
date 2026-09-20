@@ -16,29 +16,13 @@
       const badge = document.getElementById('embed_backend_badge');
       if (badge) {
         badge.textContent = `${d.provider || '?'}: ${d.space || ''}` +
-          (d.text_search ? ' · text search' : ' (no text search)');
-        badge.title = d.note || '';
+          (d.text_search ? ' · text search' : ' (no text search)') +
+          ` · ${d.total || 0}/${d.images || 0} embedded` +
+          (d.background ? ' · background on' : '');
+        badge.title = (d.note ? d.note + ' ' : '') +
+          'Library embedding runs in the background: Settings → Models → Embeddings → Run in background.';
       }
     } catch (e) {}
-  }
-
-  async function embedLibrary(force) {
-    if (_embedBusy) return;
-    _embedBusy = true;
-    _reviewStatus('Generating library embeddings…');
-    try {
-      const d = await fetch('/api/library_embed', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ force: !!force })
-      }).then(r => r.json());
-      if (!d.success) { showToast('Embedding failed: ' + (d.error || '')); return; }
-      const ts = d.text_search ? ' · text search enabled' : '';
-      showToast(`Embeddings (${d.backend}) — ${d.embedded_now} new, ${d.total_embeddings} total${ts}.` +
-                (d.note ? ' ' + d.note : ''));
-      refreshEmbedStatus();
-    } catch (e) { showToast('Network error during embedding.'); }
-    finally { _embedBusy = false; _reviewStatus(''); }
   }
 
   // Embed the current selection.
@@ -66,13 +50,9 @@
     finally { document.querySelectorAll('.embedding-bulk-btn').forEach(b => { b.disabled = false; b.innerHTML = orig; }); }
   }
   window.bulkEmbed = bulkEmbed;
-  window.embedLibrary = embedLibrary;   // the injected review-pane button calls this by name
 
   // Export for use by review.js
-  window.EmbeddingUI = {
-    refreshEmbedStatus,
-    embedLibrary
-  };
+  window.EmbeddingUI = { refreshEmbedStatus };
 
   // Inject buttons into the general extension areas.
   function buildButtons() {
@@ -85,12 +65,6 @@
       '<button onclick="bulkEmbed()" data-feature="ai.embedding" ' +
       'title="Generate/regenerate embeddings for every selected image (OAI endpoint if configured, else local)" ' +
       'class="embedding-bulk-btn text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">🧬 Embed selected</button>');
-
-    // Review pane: "Generate embeddings" button
-    registerControlButton("review_actions",
-      '<button onclick="embedLibrary(false)" data-feature="ai.embedding" ' +
-      'title="Generate embeddings for the whole library (OAI endpoint if configured, else local). Powers similarity + text search." ' +
-      'class="text-xs bg-purple-800 hover:bg-purple-700 px-2 py-1 rounded font-bold">Generate embeddings</button>');
   }
   if (document.readyState === "loading")
     window.addEventListener("DOMContentLoaded", buildButtons);
