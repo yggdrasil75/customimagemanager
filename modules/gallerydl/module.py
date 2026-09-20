@@ -162,16 +162,32 @@ def register(host):
                             "opts": cfg.get("gdl_opts", {}),
                             "auth": {s: _auth_public(s) for s in cfg.get("gdl_auth", {})}})
         d = request.get_json(force=True, silent=True) or {}
-        if "sites" in d: cfg["gdl_sites"] = d["sites"]
-        if "opts" in d: cfg["gdl_opts"] = d["opts"]
+        # Two shapes: the modal saves ONE site — {site, auth:{method,…},
+        # mapping:{…}, opts:"one per line"} — while a whole-config client sends
+        # the maps {sites:{site:mapping}, opts:{site:[…]}, auth:{site:blob}}.
+        site = (d.get("site") or "").strip()
+        if "sites" in d:
+            cfg["gdl_sites"] = d["sites"] or {}
+        if "mapping" in d and site:
+            cfg.setdefault("gdl_sites", {})[site] = d["mapping"] or {}
+        if "opts" in d:
+            if isinstance(d["opts"], dict):
+                cfg["gdl_opts"] = d["opts"]
+            elif site:                                   # textarea: one option per line
+                lines = d["opts"] if isinstance(d["opts"], list) else str(d["opts"] or "").splitlines()
+                cfg.setdefault("gdl_opts", {})[site] = [l.strip() for l in lines if l.strip()]
         if "auth" in d:
+            auth = d["auth"] or {}
+            per_site = {site: auth} if site and "method" in auth else auth   # flat blob vs {site: blob}
             # merge, preserving secrets when the client sends redacted blobs
             existing = cfg.get("gdl_auth", {})
-            for site, blob in (d["auth"] or {}).items():
-                cur = dict(existing.get(site, {}))
+            for s_, blob in per_site.items():
+                if not isinstance(blob, dict):
+                    continue
+                cur = dict(existing.get(s_, {}))
                 cur.update({k: v for k, v in blob.items()
                             if k not in ("has_password", "has_cookies")})
-                existing[site] = cur
+                existing[s_] = cur
             cfg["gdl_auth"] = existing
         host.save_config()
         return jsonify({"success": True})
