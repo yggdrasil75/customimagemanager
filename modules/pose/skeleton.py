@@ -83,19 +83,35 @@ def _rtm_device():
     return dev
 
 
-def _load_rtm(kind: str, size: str):
-    """kind 'body' (RTMPose) or 'wholebody' (RTMW); size an official letter."""
+def _load_rtm(kind: str, size: str, own_detector: bool = False):
+    """kind 'body' (RTMPose) or 'wholebody' (RTMW); size an official letter.
+
+    RTMPose is top-down: it needs person boxes. The cached handle is
+    run(img, persons): persons is fn(img_bgr) -> normalized center-form boxes
+    (the broker's detect.persons handle, passed per call so a changed pick
+    takes effect without a rebuild). rtmlib's bundled YOLOX ONNX detector is
+    built only with own_detector (no app detector to lean on): it is a second
+    model, and its 640-px TopK is one MIGraphX can't compile on some GPUs."""
     table = BODY_SIZES if kind == "body" else WHOLEBODY_SIZES
     pose_url, pose_in, det_key = table[size]
     det_url, det_in = _DET[det_key]
     dev = _rtm_device()
-    key = f"pose:rtm:{kind}:{size}:{dev}"
+    key = f"pose:rtm:{kind}:{size}:{dev}:{'yolox' if own_detector else 'app-det'}"
     if key not in _WB_REGISTERED:
         def build():
-            det = YOLOX(det_url, model_input_size=det_in, backend="onnxruntime", device=dev)
             pose = RTMPose(pose_url, model_input_size=pose_in, backend="onnxruntime", device=dev)
-            def run(img):
-                return pose(img, bboxes=det(img))
+            det = YOLOX(det_url, model_input_size=det_in, backend="onnxruntime", device=dev) \
+                if own_detector else None
+            def run(img, persons=None):
+                if persons is not None:
+                    H, W = img.shape[:2]
+                    boxes = [[(b["cx"] - b["w"] / 2) * W, (b["cy"] - b["h"] / 2) * H,
+                              (b["cx"] + b["w"] / 2) * W, (b["cy"] + b["h"] / 2) * H]
+                             for b in (persons(img) or [])]
+                    if not boxes:
+                        return np.zeros((0, 1, 2), np.float32), np.zeros((0, 1), np.float32)
+                    return pose(img, bboxes=boxes)
+                return pose(img, bboxes=det(img)) if det is not None else pose(img)
             return run
         model_registry.register(key, build, cost_mb=400 if size in ("t", "s") else 1000,
                                 gpu=(dev != "cpu"))
@@ -108,7 +124,7 @@ def _load_wholebody(mode: str):
     return _load_rtm("wholebody", {"lightweight": "m", "balanced": "l", "performance": "x"}.get(mode, "l"))
 
 
-def rtm_people(img_bgr, kind: str = "wholebody", size: str = "l") -> list:
+def rtm_people(img_bgr, kind: str = "wholebody", size: str = "l", persons=None) -> list:
     """!
     @brief RTMPose (17-pt body, sizes t/s/m/l/x) or RTMW (133-pt whole-body,
            sizes m/l/x) via rtmlib's ONNX runners.
@@ -117,10 +133,10 @@ def rtm_people(img_bgr, kind: str = "wholebody", size: str = "l") -> list:
     """
     if not _HAVE_WHOLEBODY:
         raise RuntimeError("rtmlib not installed (RTMPose)")
-    model = _load_rtm(kind, size)
+    model = _load_rtm(kind, size, own_detector=persons is None)
     if model is None:
         raise RuntimeError(f"RTMPose {kind}-{size} failed to load")
-    kpts, scores = model(img_bgr)
+    kpts, scores = model(img_bgr, persons)
     kpts = np.asarray(kpts); scores = np.asarray(scores)
     H, W = img_bgr.shape[:2]
     people = []
