@@ -36,7 +36,7 @@ from optional_deps import optional_import
 _, _HAVE_ULTRALYTICS = optional_import("ultralytics")
 _, _HAVE_INSIGHTFACE = optional_import("insightface")
 
-MODELS_DIR = os.environ.get("CIM_MODELS_DIR", model_registry.MODELS_DIR)
+MODELS_DIR = model_registry.MODELS_DIR          # honours CIM_MODELS_DIR there
 FACE_DIR = os.path.join(MODELS_DIR, "face")
 YOLO_FACE_DIR = os.path.join(FACE_DIR, "yolo")
 INSIGHT_DIR = os.path.join(FACE_DIR, "insightface")

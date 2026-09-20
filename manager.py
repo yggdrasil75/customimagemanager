@@ -29,6 +29,7 @@ from optional_deps import optional_import
 # and their legacy flat names, so every `import auth` / `import thread_manager`
 # / `import exif_import` below (and inside sibling files) keeps resolving after
 # the move into modules/ subfolders. See modules/__init__.py.
+import model_registry          # first: pins TORCH_HOME / HF_HOME under models/ before any library reads them
 import modules
 from modules import registry as module_registry
 modules.config.declare("install", default={}, owner="core")

@@ -48,7 +48,12 @@ try:
 except Exception:
     psutil = None
 
-MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+# Every model file the app pulls in lives under here — the app's own weights
+# (models/<backend>/<chore>/) and every library cache it can redirect (below).
+# CIM_MODELS_DIR moves the whole tree, e.g. onto the big model drive: nothing
+# is supposed to land in a hidden ~/.cache on the OS disk.
+MODELS_DIR = (os.environ.get("CIM_MODELS_DIR") or "").strip() or \
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
 def model_dir(backend, chore):
     """models/<backend>/<chore>/ — where every backend keeps its weights for a
@@ -86,18 +91,31 @@ def _model_device(model):
     return None
 
 
+# Library caches redirected under MODELS_DIR unless the user set the variable
+# themselves. Must run before those libraries are imported (they read the
+# environment at import), which is why this module is imported first.
+#   TORCH_HOME  torch.hub / rtmlib / pyiqa checkpoints        -> models/torch
+#   HF_HOME     huggingface_hub: hub snapshots (transformers,
+#               diffusers, timm …) AND the xet chunk cache the
+#               downloader keeps beside them — the part that
+#               silently eats the OS disk for a 16 GB model     -> models/huggingface
+_PINNED = {"TORCH_HOME": "torch", "HF_HOME": "huggingface"}
+
+
 def pin_cache_dir():
-    """Point TORCH_HOME at MODELS_DIR/torch if the user hasn't set their own, so
-    torch.hub/rtmlib/pyiqa downloads land under models/ and survive rebuilds.
-    Idempotent. Returns the effective TORCH_HOME."""
-    if not os.environ.get("TORCH_HOME"):
-        try:
-            th = os.path.join(MODELS_DIR, "torch")
-            os.makedirs(th, exist_ok=True)
-            os.environ["TORCH_HOME"] = th
-        except Exception:
-            pass
-    return os.environ.get("TORCH_HOME")
+    """Point each library cache at MODELS_DIR/<sub> if the user hasn't set it.
+    Idempotent. Returns {var: effective path}."""
+    out = {}
+    for var, sub in _PINNED.items():
+        if not os.environ.get(var):
+            try:
+                d = os.path.join(MODELS_DIR, sub)
+                os.makedirs(d, exist_ok=True)
+                os.environ[var] = d
+            except Exception:
+                pass
+        out[var] = os.environ.get(var)
+    return out
 
 pin_cache_dir()
 
