@@ -77,6 +77,8 @@ async function openComic(target) {
   window.currentFile = target;
   if (typeof refreshSelectionUI === 'function') refreshSelectionUI();
   setMediaMode('comic');
+  if (typeof applyMediaModeTabs === 'function') applyMediaModeTabs();   // kind may differ from the last comic
+  if (d.kind === 'archive' && window.booksShowFor) booksShowFor(target, false);
   renderComicStrip();
   showComicPage(0);
   await comicRenderEditor();
@@ -99,6 +101,10 @@ function showComicPage(i) {
   comicState.idx = Math.max(0, Math.min(comicState.pages.length - 1, i));
   const src = comicState.pages[comicState.idx];
   document.getElementById('comic_page_img').src = src + (src.includes('?') ? '&' : '?') + 'ts=' + Date.now();
+  // Folder comic pages are library images: put the page in the editor so the
+  // Editor/EXIF/IPTC/XMP tabs work on it, without leaving the reader.
+  const pf = comicState.kind === 'folder' ? comicState.pageFiles[comicState.idx] : null;
+  if (pf && typeof selectFile === 'function' && window.currentFile !== pf) selectFile(pf, { keepCentre: true });
   document.getElementById('comic_pageinfo').innerText = `Page ${comicState.idx + 1} / ${comicState.pages.length}`;
   [...document.querySelectorAll('#comic_strip .cstrip')].forEach((el, j) => {
     el.classList.toggle('ring-2', j === comicState.idx);
@@ -202,7 +208,12 @@ document.addEventListener('keydown', e => {
 (function () {
   function init() {
     if (window.registerMediaMode)
-      registerMediaMode({ id: 'comic', centreId: 'comic_pane', controlsTab: 'comic' });
+      // Archives are also books: their Book tab (books module) rides along.
+      // Folder comics are pages in the library: the image tabs edit the page
+      // showing in the reader (showComicPage loads it with keepCentre).
+      registerMediaMode({ id: 'comic', centreId: 'comic_pane', controlsTab: 'comic',
+                          tabs: () => comicState.kind === 'archive' && window.booksShowFor ? ['book']
+                              : comicState.kind === 'folder' ? ['main', 'exif', 'iptc', 'xmp'] : [] });
     if (window.registerControlsTab)
       registerControlsTab({ id: 'comic', label: 'Comic', feature: 'comics.edit', modeTab: true,
                             onShow: comicRenderEditor });

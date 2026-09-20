@@ -795,6 +795,134 @@ def read_metadata(abs_path: str, fmt: str) -> dict:
         meta['source'] = _guess_source(abs_path, meta)
     return meta
 
+def embedded_metadata(abs_path: str, fmt: str) -> list[dict]:
+    """The metadata the FILE carries, listed raw: [{group, key, value}].
+    This is what the format tab shows (EPUB / MOBI / PDF / FB2 / DOCX /
+    ComicInfo); the Book tab holds the normalised, editable DB copy. Plain
+    text and HTML carry nothing, so they return [] and get no tab. Never
+    raises."""
+    out = []
+    add = lambda g, k, v: out.append({"group": g, "key": k, "value": str(v).strip()}) \
+        if v not in (None, "", [], {}) else None
+    try:
+        if fmt in ('epub', 'opf-folder'):
+            if fmt == 'epub':
+                with zipfile.ZipFile(abs_path) as z:
+                    name = _epub_opf_name(z)
+                    root = ET.fromstring(z.read(name)) if name else None
+                    add("Package", "files", len(z.namelist()))
+            else:
+                root = ET.parse(abs_path).getroot()
+            if root is not None:
+                add("Package", "version", root.get("version"))
+                add("Package", "unique-identifier", root.get("unique-identifier"))
+                for el in root.iter():
+                    if el.tag.startswith(_DC):
+                        key = el.tag[len(_DC):]
+                        qual = el.get(_OPF + 'role') or el.get('role') or \
+                            el.get(_OPF + 'scheme') or el.get('scheme') or el.get(_OPF + 'event')
+                        add("Dublin Core", f"{key} ({qual})" if qual else key, el.text)
+                    elif el.tag == _OPF + 'meta':
+                        add("OPF meta", el.get('name') or el.get('property') or 'meta',
+                            el.get('content') or el.text)
+                add("Package", "manifest items", sum(1 for e in root.iter(_OPF + 'item')))
+                add("Package", "spine items", sum(1 for e in root.iter(_OPF + 'itemref')))
+        elif fmt == 'pdf':
+            doc = _open_pdf(abs_path)
+            if doc is not None:
+                try:
+                    for k, v in (doc.metadata or {}).items():
+                        add("Info", k, v)
+                    add("Document", "pages", doc.page_count)
+                    add("Document", "encrypted", "yes" if getattr(doc, "is_encrypted", False) else "")
+                finally:
+                    doc.close()
+        elif fmt in ('mobi', 'azw3', 'palmdoc'):
+            _raw_mobi(abs_path, add)
+        elif fmt == 'fb2':
+            root = ET.parse(abs_path).getroot()
+            for block in root.iter():
+                if not block.tag.endswith('}description'):
+                    continue
+                for section in block:                       # title-info, document-info, publish-info…
+                    g = section.tag.split('}')[-1]
+                    for el in section:
+                        k = el.tag.split('}')[-1]
+                        if k == 'author' or k == 'translator':
+                            add(g, k, ' '.join((c.text or '').strip() for c in el if c.text))
+                        elif k == 'sequence':
+                            add(g, k, ' '.join(f"{a}={v}" for a, v in el.attrib.items()))
+                        elif k == 'annotation':
+                            add(g, k, _strip_tags(ET.tostring(el, encoding='unicode')))
+                        else:
+                            add(g, k, el.text)
+        elif fmt == 'docx':
+            with zipfile.ZipFile(abs_path) as z:
+                for part, g in (('docProps/core.xml', 'Core'), ('docProps/app.xml', 'App')):
+                    try:
+                        root = ET.fromstring(z.read(part))
+                    except Exception:
+                        continue
+                    for el in root:
+                        add(g, el.tag.split('}')[-1], el.text)
+        elif fmt == 'cbz':
+            with zipfile.ZipFile(abs_path) as z:
+                for n in z.namelist():
+                    if os.path.basename(n).lower() == 'comicinfo.xml':
+                        for el in ET.fromstring(z.read(n)):
+                            add("ComicInfo", el.tag.split('}')[-1], el.text)
+                        break
+    except Exception:
+        pass
+    return out
+
+# EXTH record names (MobileRead wiki); unknown ids are shown by number.
+_EXTH = {100: 'author', 101: 'publisher', 102: 'imprint', 103: 'description', 104: 'isbn',
+         105: 'subject', 106: 'published', 107: 'review', 108: 'contributor', 109: 'rights',
+         110: 'subject code', 111: 'type', 112: 'source', 113: 'asin', 114: 'version',
+         117: 'adult', 118: 'retail price', 119: 'retail price currency', 125: 'resource count',
+         129: 'KF8 cover URI', 200: 'dictionary short name', 204: 'creator software',
+         205: 'creator major', 206: 'creator minor', 207: 'creator build', 208: 'watermark',
+         501: 'cde type', 502: 'last update', 503: 'updated title', 504: 'asin',
+         524: 'language', 525: 'writing mode', 527: 'page progression', 535: 'creator build number'}
+_EXTH_INT = {114, 125, 204, 205, 206, 207, 535}
+
+def _raw_mobi(path, add):
+    with open(path, 'rb') as f:
+        data = f.read(4096)
+        rec0_off = struct.unpack('>I', data[78:82])[0]
+        f.seek(rec0_off)
+        rec0 = f.read(16384)
+    add("PDB", "name", data[:32].split(b'\0')[0].decode('latin-1', 'replace'))
+    add("PDB", "type/creator", data[60:68].decode('latin-1', 'replace'))
+    if rec0[16:20] != b'MOBI':
+        return
+    header_len = struct.unpack('>I', rec0[20:24])[0]
+    add("MOBI", "type", struct.unpack('>I', rec0[24:28])[0])
+    add("MOBI", "encoding", {1252: 'cp1252', 65001: 'utf-8'}.get(struct.unpack('>I', rec0[28:32])[0], ''))
+    add("MOBI", "version", struct.unpack('>I', rec0[36:40])[0])
+    name_off, name_len = struct.unpack('>II', rec0[0x54:0x5C])
+    if name_len and name_off + name_len <= len(rec0):
+        add("MOBI", "full name", rec0[name_off:name_off + name_len].decode('utf-8', 'replace'))
+    if not (struct.unpack('>I', rec0[0x80:0x84])[0] & 0x40):
+        return
+    exth = 16 + header_len
+    if rec0[exth:exth + 4] != b'EXTH':
+        return
+    count = struct.unpack('>I', rec0[exth + 8:exth + 12])[0]
+    pos = exth + 12
+    for _ in range(count):
+        rec_type, rec_len = struct.unpack('>II', rec0[pos:pos + 8])
+        payload = rec0[pos + 8:pos + rec_len]
+        if rec_type in _EXTH_INT and len(payload) == 4:
+            val = struct.unpack('>I', payload)[0]
+        elif rec_type in (201, 202, 203, 121, 131, 300):     # offsets / binary
+            val = ''
+        else:
+            val = payload.decode('utf-8', 'replace')
+        add("EXTH", _EXTH.get(rec_type, f"#{rec_type}"), val)
+        pos += rec_len
+
 def _title_from_filename(path: str) -> str:
     stem = os.path.splitext(os.path.basename(path))[0]
     # "Author - Title (Series 03)" and "Title - Author" are both everywhere.

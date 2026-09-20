@@ -72,6 +72,7 @@ def register(host):
     host.register_app_modal("book_triage_modal.html")
     host.register_left_pane("books_pane.html")       # left-pane shelf content
     host.register_controls_pane("book", "book_controls.html")
+    host.register_controls_pane("book_fmt", "book_format.html")   # the file's own metadata, read-only
 
     # The Books LEFT TAB is registered from books.js via window.registerLeftTab
     # (the tab bar is a front-end extension area), so the button + onShow live

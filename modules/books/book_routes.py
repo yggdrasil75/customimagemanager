@@ -1009,6 +1009,25 @@ def register(app, ctx: dict):
         ).fetchone()["n"]
         return jsonify({"success": True, "book": d})
 
+    @app.route("/api/books/embedded")
+    def books_embedded():
+        """Raw metadata carried by the file itself, grouped, for the format tab.
+        [] for plain text/HTML (DB only)."""
+        rp = request.args.get("rel_path", "")
+        r = _db().execute("SELECT fmt FROM books WHERE rel_path=?", (rp,)).fetchone()
+        if not r:
+            return jsonify({"success": False, "error": "not found"}), 404
+        fields = bi.embedded_metadata(_abs(rp), r["fmt"])
+        groups, order = {}, []
+        for f in fields:
+            if f["group"] not in groups:
+                groups[f["group"]] = []; order.append(f["group"])
+            groups[f["group"]].append({"key": f["key"], "value": f["value"]})
+        return jsonify({"success": True, "fmt": r["fmt"],
+                        "label": {"opf-folder": "OPF", "palmdoc": "MOBI", "cbz": "ComicInfo"}.get(
+                            r["fmt"], r["fmt"].upper()),
+                        "groups": [{"label": g, "fields": groups[g]} for g in order]})
+
     @app.route("/api/books/meta", methods=["POST"])
     def books_meta():
         d = request.json or {}

@@ -354,8 +354,11 @@ function refreshSelectionUI(){
       el.classList.remove('multi-selected');
       chk?.classList.add('hidden');
     }
-    // Keep single-select highlight: whatever the centre is showing (image, book, comic)
-    if(f===window.currentFile && selectedFiles.size===0)
+    // Keep single-select highlight: whatever the centre is showing (image, book,
+    // comic — a comic tile also rings while one of its pages is in the editor)
+    const cf=window.currentFile||'';
+    const isCur=f===cf || (el.dataset.kind==='comic' && cf.startsWith(f+'/'));
+    if(isCur && selectedFiles.size===0)
       el.classList.add('selected-item');
     else
       el.classList.remove('selected-item');
@@ -374,7 +377,10 @@ function refreshSelectionUI(){
 
 // ── File select (single) ───────────────────────────────────────────────────
 let _selectSeq=0;   // bumped each selectFile call; a load applies only if still latest
-async function selectFile(fn){
+// opts.keepCentre: load the file into the editor/controls without swapping the
+// centre back to the image viewer — a comic page shown by the comic reader.
+async function selectFile(fn, opts){
+  opts = opts || {};
   // A book is not an image. Everything below this line assumes a decodable
   // pixel surface — it reads /api/metadata (which decodes the file), pokes the
   // canvas, and enables the YOLO controls. Handing it an epub produces a broken
@@ -390,7 +396,7 @@ async function selectFile(fn){
   // Coming from book/person mode, the centre pane is showing the reader or the
   // 3d mesh; switch it back to the image viewer or the load below lands in a
   // hidden #image_pane and nothing appears to change.
-  if(typeof setMediaMode==='function') setMediaMode('image');
+  if(!opts.keepCentre && typeof setMediaMode==='function') setMediaMode('image');
   const _mySeq=++_selectSeq;
   window.currentFile=fn;
   if(typeof highlightRegionFile!=='undefined' && highlightRegionFile!==fn){

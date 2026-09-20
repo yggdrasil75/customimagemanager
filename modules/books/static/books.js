@@ -36,7 +36,16 @@ function _fmtBytes(n) {
 
 // Centre-pane mode for books: the reader replaces the image viewer and the
 // "Book" controls tab appears (core registry in panes.js).
-registerMediaMode({ id: 'book', centreId: 'book_reader', controlsTab: 'book' });
+// Controls tabs are the module's: Book (editable DB copy — all a plain-text
+// book has) and the format tab (EPUB/MOBI/PDF/…: what the file itself carries,
+// read-only), shown only when the open book has any.
+let _bookFmtAvailable = false;
+if (window.registerControlsTab) {
+  registerControlsTab({ id: 'book', label: 'Book', modeTab: true });
+  registerControlsTab({ id: 'book_fmt', label: 'Format', modeTab: true });
+}
+registerMediaMode({ id: 'book', centreId: 'book_reader', controlsTab: 'book',
+                    tabs: () => _bookFmtAvailable ? ['book_fmt'] : [] });
 
 /* ══════════════════════════════════════════════════════════════════════════
  * STATUS + WORKERS
@@ -299,6 +308,45 @@ async function booksSemanticSearch(q) {
  * OPENING A BOOK
  * ══════════════════════════════════════════════════════════════════════════ */
 
+// Fill the Book tab (and, in book mode, the format tab) for a book. Shared
+// with the comics module, which calls booksShowFor(archive) so a cbz opened in
+// its reader gets the same Book tab. Returns false when relPath isn't a book.
+async function booksShowFor(relPath, withFormat) {
+  const r = await fetch('/api/books/detail?rel_path=' + encodeURIComponent(relPath));
+  const d = await r.json();
+  if (!d.success) return false;
+  currentBook = d.book;
+  fillBookControls(currentBook);
+  loadBookmarks();
+  _bookFmtAvailable = false;
+  if (withFormat) loadBookFormat(relPath);
+  return true;
+}
+window.booksShowFor = booksShowFor;
+
+async function loadBookFormat(relPath) {
+  const mount = _bq('book_fmt_groups'); if (!mount) return;
+  mount.innerHTML = '';
+  let d = null;
+  try { d = await (await fetch('/api/books/embedded?rel_path=' + encodeURIComponent(relPath))).json(); } catch (e) {}
+  if (!currentBook || currentBook.rel_path !== relPath) return;   // moved on meanwhile
+  const groups = (d && d.success && d.groups) || [];
+  _bookFmtAvailable = groups.length > 0;
+  const btn = document.querySelector('.controls-tab[data-tab="book_fmt"]');
+  if (btn) btn.textContent = (d && d.label) || 'Format';
+  const t = _bq('book_fmt_title'); if (t) t.textContent = ((d && d.label) || 'Embedded') + ' metadata';
+  mount.innerHTML = groups.map(g => `
+    <div>
+      <div class="text-[10px] font-bold text-gray-400 uppercase tracking-wider border-b border-gray-800 pb-0.5 mb-1">${_esc(g.label)}</div>
+      ${g.fields.map(f => `
+        <div class="flex gap-2 py-0.5">
+          <span class="w-28 flex-shrink-0 text-gray-500 truncate" title="${_esc(f.key)}">${_esc(f.key)}</span>
+          <span class="text-gray-200 break-words min-w-0 whitespace-pre-wrap">${_esc(f.value)}</span>
+        </div>`).join('')}
+    </div>`).join('');
+  if (typeof applyMediaModeTabs === 'function') applyMediaModeTabs();
+}
+
 async function openBook(relPath, section) {
   const r = await fetch('/api/books/detail?rel_path=' + encodeURIComponent(relPath));
   const d = await r.json();
@@ -316,6 +364,8 @@ async function openBook(relPath, section) {
   setMediaMode('book');
   fillBookControls(currentBook);
   loadBookmarks();
+  _bookFmtAvailable = false;
+  loadBookFormat(relPath);
   if (typeof openReader === 'function') openReader(currentBook, section);
 }
 let _bookPrevFile = null;

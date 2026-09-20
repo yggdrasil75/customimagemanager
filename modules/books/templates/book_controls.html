@@ -17,9 +17,13 @@
        Faces, quality stars    — no faces in a text file; IQA is a pixel metric.
        Albums                  — books use Series + Shelves instead.
 
-     What replaces them: bibliographic metadata, reading state, and text tools. -->
-<div id="controls_pane_book" class="controls-tab-pane hidden h-full overflow-y-auto">
-  <div id="book_panel" class="p-3 flex flex-col gap-3">
+     What replaces them: bibliographic metadata, reading state, and text tools.
+
+     Body only: the core wraps this in #controls_pane_book (register_controls_pane).
+     The file's own embedded metadata is listed read-only in the format tab
+     (book_format.html); this tab is the editable DB copy, which is all a plain
+     text book has. -->
+  <div id="book_panel" class="flex flex-col gap-3">
 
     <div class="flex justify-between items-center gap-2">
       <span class="text-sm font-bold text-gray-300">Book</span>

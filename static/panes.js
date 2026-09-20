@@ -295,12 +295,34 @@ window._mediaModes = window._mediaModes || {};
 const IMAGE_ONLY_TABS = ['main', 'exif', 'iptc', 'xmp'];
 
 function registerMediaMode(spec) {
-  window._mediaModes[spec.id] = spec;   // {id, centreId, controlsTab}
+  // {id, centreId, controlsTab, tabs}: controlsTab is the tab the mode lands
+  // on; tabs (array, or a function of current state) are the other controls
+  // tabs it keeps visible — another module's mode tab ('book') or the image
+  // tabs ('main','exif','iptc','xmp') when the mode's content is images.
+  window._mediaModes[spec.id] = spec;
 }
 window.registerMediaMode = registerMediaMode;
 
+// Which controls tabs the current media mode shows. Modules call this after
+// changing the state their `tabs` function reads (a different comic kind, a
+// book that turned out to carry embedded metadata).
+function applyMediaModeTabs() {
+  const isImage = (mediaMode === 'image');
+  const cur = window._mediaModes[mediaMode];
+  const extra = cur ? ((typeof cur.tabs === 'function' ? cur.tabs() : cur.tabs) || []) : [];
+  const allModeTabs = Object.values(window._mediaModes).map(m => m.controlsTab).filter(Boolean);
+  document.querySelectorAll('.controls-tab').forEach(btn => {
+    const t = btn.dataset.tab;
+    if (!IMAGE_ONLY_TABS.includes(t) && !allModeTabs.includes(t) && !btn.hasAttribute('data-mode-tab')) return;
+    const show = (isImage && IMAGE_ONLY_TABS.includes(t)) ||
+                 (cur && (t === cur.controlsTab || extra.includes(t)));
+    btn.classList.toggle('hidden', !show);
+  });
+}
+window.applyMediaModeTabs = applyMediaModeTabs;
+
 function setMediaMode(mode) {
-  if (mode === mediaMode) return;
+  if (mode === mediaMode) { applyMediaModeTabs(); return; }
   mediaMode = mode;
   const isImage = (mode === 'image');
   document.getElementById('image_pane')?.classList.toggle('hidden', !isImage);
@@ -308,15 +330,7 @@ function setMediaMode(mode) {
     const m = window._mediaModes[id];
     document.getElementById(m.centreId)?.classList.toggle('hidden', mode !== id);
   }
-  const modeTabs = Object.values(window._mediaModes).map(m => m.controlsTab).filter(Boolean);
-  document.querySelectorAll('.controls-tab').forEach(btn => {
-    const t = btn.dataset.tab;
-    if (IMAGE_ONLY_TABS.includes(t)) btn.classList.toggle('hidden', !isImage);
-    if (modeTabs.includes(t)) {
-      const owner = Object.values(window._mediaModes).find(m => m.controlsTab === t);
-      btn.classList.toggle('hidden', !(owner && owner.id === mode));
-    }
-  });
+  applyMediaModeTabs();
   document.querySelectorAll('[data-media]').forEach(el =>
     el.classList.toggle('hidden', el.dataset.media !== mode));
   const cur = window._mediaModes[mode];

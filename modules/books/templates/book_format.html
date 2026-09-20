@@ -1,0 +1,9 @@
+{# Controls-pane format tab (EPUB / MOBI / PDF / FB2 / DOCX / OPF): the metadata
+   the file itself carries, listed raw and read-only from /api/books/embedded.
+   Body only — the core renders #controls_pane_book_fmt around it. The tab is
+   only shown for books that have any (books.js registerMediaMode tabs). #}
+<div class="flex items-center justify-between mb-2">
+  <span id="book_fmt_title" class="text-sm font-bold text-gray-300">Embedded metadata</span>
+  <span class="text-[10px] text-gray-500">read-only · from the file</span>
+</div>
+<div id="book_fmt_groups" class="flex flex-col gap-3 text-xs"></div>
