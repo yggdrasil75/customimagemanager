@@ -42,6 +42,7 @@ CORE_CAPABILITIES = {
     },
     "detect.persons": {
         "label": "Person detection",
+        "background": True,   # the body sweep (people module): boxes + body identity per image
         "summary": "People/characters as boxes: the picked Detection model's person "
                    "class, or dedicated (often oriented-box) person weights.",
         "input": _IMG,

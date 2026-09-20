@@ -138,7 +138,8 @@ def register(host):
         if "face_bg_custom" in cfg:
             cfg["our_model_bg"] = bool(cfg.pop("face_bg_custom"))   # personal_box migrates it on
     host.on_startup(_migrate_settings)
-    host.on_startup(pc._register_face_source)
+    host.on_startup(pc._register_face_source)      # the forced "Scan faces" button
+    pc._register_sweeps()                          # Face / Person detection background switches
     host.on_startup(lambda: pc.rebuild_persons_cache())
 
     # ── core integration ──────────────────────────────────────────────────

@@ -38,15 +38,21 @@ MANIFEST = {
 
 def register(host):
     # ── settings this module owns ─────────────────────────────────────────
-    host.add_config_key("body_enabled", default=False, validate=bool)
+    # Bodies run as the Person detection background sweep (Models tab →
+    # Person detection → "Run in background"), not a toggle of their own.
+    # The legacy body_enabled toggle folds into that switch once.
     host.add_config_key("body_cluster_eps", default=0.0,
                         validate=lambda v: max(0.0, min(1.0, float(v or 0))))
-    host.add_settings_field(key="body_enabled", label="Embed bodies during the face scan",
-                            kind="toggle", pane="module",
-                            help="Finds a known person in photos where their face is turned "
-                                 "or hidden. Costs one extra backbone pass per image.")
     host.add_settings_field(key="body_cluster_eps", label="Body cluster distance (0 = auto)",
                             kind="number", pane="module")
+
+    def _migrate_toggle():
+        if host.config.pop("body_enabled", None):
+            sel = host.broker.current_selection().get("detect.persons") or {}
+            host.broker.select("detect.persons", sel.get("provider") or host.broker.selected_id("detect.persons"),
+                               sel.get("size"), sel.get("type"), True, sel.get("classes"))
+            host.config["model_selection"] = host.broker.current_selection()
+    host.on_startup(_migrate_toggle)
 
     # ── capabilities ──────────────────────────────────────────────────────
     host.declare_capability(
@@ -132,7 +138,7 @@ def register(host):
 
     host.provide_service("bodies", {
         "fuse_shape": bodylib.fuse_shape,
-        "enabled": lambda: bool(host.config.get("body_enabled")),
+        "enabled": lambda: bool(host.broker.variant("detect.persons")["background"]),
         "embed_bodies": embed_bodies,
         "associate_faces_bodies": bodylib.associate_faces_bodies,
         "reid_registry_key": reid_registry_key,

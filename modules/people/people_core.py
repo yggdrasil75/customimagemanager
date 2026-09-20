@@ -148,7 +148,8 @@ def _face_regions_for(img, rel: str) -> list:
     out.extend(person_regions)
     return out
 
-def _face_regions_for_batch(imgs, rels) -> list:
+def _face_regions_for_batch(imgs, rels, face_run=None, person_run=None,
+                            faces=True, bodies=True) -> list:
     """!
     @brief Batched equivalent of _face_regions_for for a list of images.
     @return List (len == len(imgs)) of MWG-shaped region-dict lists.
@@ -160,11 +161,13 @@ def _face_regions_for_batch(imgs, rels) -> list:
     n = len(imgs)
     results = [[] for _ in range(n)]
 
-    # Faces — one forward pass over the batch through the picked provider.
+    # Faces — one forward pass over the batch through the picked provider
+    # (the sweep hands in the background pick; a forced scan uses the foreground one).
     try:
-        run = HOST.broker.request("detect.faces")
-        face_batches = run.batch(imgs) if hasattr(run, "batch") else \
-            [run(im) if im is not None else [] for im in imgs]
+        run = face_run or HOST.broker.request("detect.faces")
+        face_batches = ([[] for _ in imgs] if not faces else
+                        run.batch(imgs) if hasattr(run, "batch") else
+                        [run(im) if im is not None else [] for im in imgs])
     except NoProviderError:
         face_batches = [[] for _ in imgs]
     except Exception as e:
@@ -179,9 +182,10 @@ def _face_regions_for_batch(imgs, rels) -> list:
 
     # People — the picked 'detect.persons' provider, batched when it can.
     try:
-        prun = HOST.request_model("detect.persons")
-        pconf = HOST.broker.variant("detect.persons")["conf"]
-        person_batches = (prun.batch(imgs, conf=pconf) if hasattr(prun, "batch")
+        prun = person_run or HOST.request_model("detect.persons")
+        pconf = HOST.broker.variant("detect.persons", "bg" if person_run else None)["conf"]
+        person_batches = ([[] for _ in imgs] if not bodies else
+                          prun.batch(imgs, conf=pconf) if hasattr(prun, "batch")
                           else [prun(im, conf=pconf) if im is not None else [] for im in imgs])
     except NoProviderError:
         person_batches = [[] for _ in imgs]
@@ -196,9 +200,10 @@ def _face_regions_for_batch(imgs, rels) -> list:
                                           "w": b["w"], "h": b["h"], "confirmed": False,
                                           "region_tags": [], "region_description": ""})
 
-    # Background capabilities (Models tab) — per image; ponytail: no batch API on handles.
+    # Region-shaped background capabilities (detect/segment, Models tab) ride
+    # the face pass — per image; ponytail: no batch API on handles.
     for i in range(n):
-        if imgs[i] is not None:
+        if faces and imgs[i] is not None:
             _fold_background(_background_instances(imgs[i]), person_regions_per[i], results[i])
 
     for i in range(n):
@@ -378,7 +383,8 @@ def _face_process_one(job) -> None:
         except Exception as e:
             _face_err("batch end check failed: %s", e)
 
-def _face_detect_batch(rels: list) -> int:
+def _face_detect_batch(rels: list, face_run=None, person_run=None,
+                       faces=True, bodies=None) -> int:
     """!
     @brief Detect faces/people for a whole batch with ONE YOLO forward pass per
            detector, then finish (metadata + embed) per image.
@@ -389,14 +395,19 @@ def _face_detect_batch(rels: list) -> int:
           write and embedding stay per image (they are not GPU-batchable here).
     """
     failed = 0
+    if bodies is None:
+        bodies = _body_on()
+    def _done(rel):
+        if faces:
+            _mark_face_done(rel)
+        if bodies:
+            _mark_body_done(rel)
     # ── decode phase: load every image up front so detection sees a full batch ──
     abs_paths, imgs, decoded_rels = [], [], []
     for rel in rels:
         abs_p = get_safe_path(MEDIA_DIR, rel)
         if not abs_p or not os.path.exists(abs_p):
-            _mark_face_done(rel)
-            if _body_on():
-                _mark_body_done(rel)
+            _done(rel)
             continue
         _t = time.time()
         try:
@@ -405,17 +416,13 @@ def _face_detect_batch(rels: list) -> int:
             _face_err("decode failed (%s): %s", rel, e); img = None
         _face_t["decode"] += time.time() - _t
         if img is None:
-            _mark_face_done(rel)
-            if _body_on():
-                _mark_body_done(rel)
+            _done(rel)
             continue
         try:
             bgr = _to_bgr(img)             # read_jxl may return gray/RGBA; YOLO needs 3-ch BGR
         except Exception as e:
             _face_err("to_bgr failed (%s): %s", rel, e)
-            _mark_face_done(rel)
-            if _body_on():
-                _mark_body_done(rel)
+            _done(rel)
             continue
         abs_paths.append(abs_p); imgs.append(bgr); decoded_rels.append(rel)
 
@@ -425,15 +432,14 @@ def _face_detect_batch(rels: list) -> int:
     # ── detect phase: single batched forward pass per detector ──
     _t = time.time()
     try:
-        regions_per = _face_regions_for_batch(imgs, decoded_rels)
+        regions_per = _face_regions_for_batch(imgs, decoded_rels, face_run, person_run,
+                                              faces=faces, bodies=bodies)
     except Exception as e:
         # Detection blew up for the whole batch — fall back so the queue still drains.
         _face_err("batch detect failed, marking %d done: %s", len(decoded_rels), e)
         for rel in decoded_rels:
             failed += 1
-            _mark_face_done(rel)
-            if _body_on():
-                _mark_body_done(rel)
+            _done(rel)
         _face_t["detect"] += time.time() - _t
         return failed
     _face_t["detect"] += time.time() - _t
@@ -448,36 +454,32 @@ def _face_detect_batch(rels: list) -> int:
                 write_metadata(abs_p, meta["tags"], meta["description"], merged)
                 _face_t["meta"] += time.time() - _t
                 _t = time.time()
-                _cache_faces(rel, bgr, found)
-                if _body_on():
-                    _cache_bodies(rel, bgr, found)   # same decoded image, gated on body_enabled
+                if faces:
+                    _cache_faces(rel, bgr, found)
+                    _face_dirty["v"] = True
+                if bodies:
+                    _cache_bodies(rel, bgr, found)   # same decoded image
+                    _body_dirty["v"] = True
                 _face_t["embed"] += time.time() - _t
-                _face_dirty["v"] = True
-            _mark_face_done(rel)
-            if _body_on():
-                _mark_body_done(rel)
+            _done(rel)
         except Exception as e:
             failed += 1
             _face_err("image failed (%s): %s", rel, e)
             try:
-                _mark_face_done(rel)
-                if _body_on():
-                    _mark_body_done(rel)
+                _done(rel)
             except Exception as e2:
                 _face_err("mark-done FAILED for %s: %s", rel, e2)
     return failed
 
 def _claim_face_job():
-    """! @brief One face-scan unit for the shared background processor, or None.
+    """! @brief One unit of a FORCED face scan ("Scan faces" button) for the
+    shared background processor, or None. The unforced background pass is the
+    Models tab's business: the detect.faces / detect.persons sweeps below.
     """
     forced = _face_force["v"]
-    if not forced and not HOST.broker.variant("detect.faces")["background"]:
-        _face_skip("skip: bg scan disabled and not forced")
+    if not forced:
         return None
-    if not forced and not thread_manager.is_idle():
-        _face_skip("skip: waiting for idle")
-        return None
-    if not forced and time.time() < _face_setup_backoff["until"]:
+    if time.time() < _face_setup_backoff["until"]:
         _face_skip("skip: in setup backoff")
         return None
     if not thread_manager.try_acquire_key("face-scan"):
@@ -505,15 +507,45 @@ def _claim_face_job():
         "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
     _face_log("claimed %d (%s), %d left", len(rows),
               "forced" if forced else "idle", left)
-    state["status_text"] = (
-        f"Face scan: {left} image(s) left…" if forced
-        else f"Face scan (idle): {left} image(s) left…")
+    state["status_text"] = f"Face scan: {left} image(s) left…"
     return [r[0] for r in rows]
 
 def _register_face_source():
     thread_manager.register_source(
         "face", _claim_face_job, _face_process_one,
         key_of=lambda job: "face-scan")
+
+# ── Models-tab sweeps: Face detection and Person detection, each on its own ──
+# switch, each marking only its own *_done column. The host batches files for
+# them (FACE_BATCH) so the detector still gets one forward pass per batch.
+_body_dirty = {"v": False}
+
+def _face_sweep_pending(db, n):
+    rows = db.execute("SELECT rel_path FROM files WHERE COALESCE(face_done,0)=0 "
+                      "AND media_kind='image' ORDER BY rel_path LIMIT ?", (n,)).fetchall()
+    if not rows and _face_dirty["v"]:            # drained: trailing cluster pass
+        _face_dirty["v"] = False
+        state["status_text"] = "Face scan: clustering…"
+        state["status_text"] = f"Face scan: done ({_recluster()} cluster(s))."
+    return [r[0] for r in rows]
+
+def _face_sweep_run(rels, fps, handle):
+    _face_detect_batch(rels, face_run=handle, faces=True, bodies=False)
+
+def _body_sweep_pending(db, n):
+    rows = db.execute("SELECT rel_path FROM files WHERE COALESCE(body_done,0)=0 "
+                      "AND media_kind='image' ORDER BY rel_path LIMIT ?", (n,)).fetchall()
+    if not rows and _body_dirty["v"]:
+        _body_dirty["v"] = False
+        state["status_text"] = f"Body scan: done ({_recluster_bodies()} cluster(s))."
+    return [r[0] for r in rows]
+
+def _body_sweep_run(rels, fps, handle):
+    _face_detect_batch(rels, person_run=handle, faces=False, bodies=True)
+
+def _register_sweeps():
+    HOST.add_background_sweep("detect.faces", _face_sweep_pending, _face_sweep_run, batch=FACE_BATCH)
+    HOST.add_background_sweep("detect.persons", _body_sweep_pending, _body_sweep_run, batch=FACE_BATCH)
 
 def _mark_face_done(rel: str) -> None:
     """! @brief Mark a file's face-boxing pass complete."""

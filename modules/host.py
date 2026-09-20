@@ -339,7 +339,7 @@ class Host:
             name, claim, handle, key_of=key_of, cost_of=cost_of)
 
     # ── background sweeps ────────────────────────────────────────────────
-    def add_background_sweep(self, cap_id, pending, run):
+    def add_background_sweep(self, cap_id, pending, run, batch=1):
         """Give a non-region capability's "Run in background on every image"
         switch (Models tab) something to do. The module that STORES the output
         registers it: pending(db, n) -> up to n rel_paths still lacking this
@@ -348,8 +348,12 @@ class Host:
         provider's bound model. The core sweep source claims one file at a
         time from every switched-on sweep, round robin, on the thread
         manager's spare slots — new uploads are picked up the same way.
-        Region-shaped capabilities (detect/segment) keep the ingest path."""
+        Region-shaped capabilities (detect/segment) keep the ingest path.
+        batch > 1: up to that many files go into one job and run is called as
+        run(rel_paths, abs_paths, handle) — for detectors that batch a forward
+        pass."""
         self.background_sweeps[cap_id] = {"pending": pending, "run": run,
+                                          "batch": max(1, int(batch or 1)),
                                           "module_id": self._current_module}
 
     def _sweep_claim(self):
@@ -371,18 +375,25 @@ class Host:
                 slot = self.thread_manager.try_acquire_slot(prov.resource, prov.limit())
                 if slot is None:
                     continue
-            n = 16
+            want = self.background_sweeps[cap]["batch"]
+            n = max(16, want)
             while True:
                 try:
                     rows = list(self.background_sweeps[cap]["pending"](self.db(), n))
                 except Exception as e:
                     self.logger.error(f"background {cap} pending: {e}"); rows = []
+                rels, keys = [], []
                 for rel in rows:
                     if (cap, rel) in self._sweep_skip:
                         continue
                     key = f"sweep:{cap}:{rel}"
                     if self.thread_manager.try_acquire_key(key):
-                        return {"cap": cap, "rel_path": rel, "key": key, "slot": slot}
+                        rels.append(rel); keys.append(key)
+                        if len(rels) >= want:
+                            break
+                if rels:
+                    return {"cap": cap, "rel_path": rels[0], "rel_paths": rels,
+                            "key": keys[0], "keys": keys, "slot": slot}
                 if len(rows) < n or n >= 512:      # exhausted (or only failures left)
                     break
                 n *= 4
@@ -392,21 +403,32 @@ class Host:
         return None
 
     def _sweep_handle(self, job):
-        cap, rel = job["cap"], job["rel_path"]
+        cap = job["cap"]
+        rels = job.get("rel_paths") or [job["rel_path"]]
+        sweep = self.background_sweeps[cap]
         try:
-            fp = self.safe_path(self.media_dir, rel)
-            if not fp or not os.path.exists(fp):
-                self._sweep_skip.add((cap, rel)); return
+            fps = [self.safe_path(self.media_dir, r) for r in rels]
+            ok = [(r, f) for r, f in zip(rels, fps) if f and os.path.exists(f)]
+            for r, f in zip(rels, fps):
+                if not (f and os.path.exists(f)):
+                    self._sweep_skip.add((cap, r))
+            if not ok:
+                return
             handle = self.broker.request(cap, "bg")
-            self.background_sweeps[cap]["run"](rel, fp, handle)
-            n = self._sweep_done[cap] = self._sweep_done.get(cap, 0) + 1
-            if n % 25 == 0:
+            if sweep["batch"] > 1:
+                sweep["run"]([r for r, _ in ok], [f for _, f in ok], handle)
+            else:
+                sweep["run"](ok[0][0], ok[0][1], handle)
+            n = self._sweep_done[cap] = self._sweep_done.get(cap, 0) + len(ok)
+            if n // 25 != (n - len(ok)) // 25:
                 self.config["status_text"] = f"[bg {cap}] {n} done…"
         except Exception as e:
-            self._sweep_skip.add((cap, rel))       # don't spin on the same failure
-            self.logger.error(f"background {cap} {rel}: {e}")
+            for r in rels:                          # don't spin on the same failure
+                self._sweep_skip.add((cap, r))
+            self.logger.error(f"background {cap} {rels[0]}{' +%d' % (len(rels) - 1) if len(rels) > 1 else ''}: {e}")
         finally:
-            self.thread_manager.release_key(job["key"])
+            for k in job.get("keys") or [job["key"]]:
+                self.thread_manager.release_key(k)
             if job.get("slot"):
                 self.thread_manager.release_key(job["slot"])
 
