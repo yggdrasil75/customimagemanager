@@ -24,12 +24,24 @@
   // Compact star badge for a gallery tile. Kept a simple display fn so the core
   // tile template can call it (guarded) — it renders whatever iqa_score the
   // rating enricher attached, and returns '' when the module is off.
-  window.starBadge = function (score) {
+  // Tile badge. Takes the gallery row (or a bare number): a manual rating
+  // wins over the IQA estimate — the enricher's effective_rating — and is
+  // marked so the two are told apart at a glance.
+  window.starBadge = function (item) {
+    let score, manual = false;
+    if (item !== null && typeof item === "object") {
+      manual = !!item.rating_user;
+      score = item.effective_rating !== undefined && item.effective_rating !== null
+        ? item.effective_rating : item.iqa_score;
+    } else {
+      score = item;
+    }
     if (score === null || score === undefined) return "";
     const full = Math.floor(score), half = (score - full) >= 0.5;
     let s = "★".repeat(full) + (half ? "½" : "");
     if (!s) s = "·";
-    return `<span class="iqa-stars" title="Quality: ${score}/5">${s}</span>`;
+    const title = manual ? `Your rating: ${score}/5` : `Quality (estimated): ${score}/5`;
+    return `<span class="iqa-stars${manual ? " iqa-stars-manual" : ""}" title="${title}">${s}</span>`;
   };
 
   // Interactive 0..5 star control in the per-image controls pane.
@@ -62,12 +74,15 @@
     if (window.ratingSet) await window.ratingSet(window.currentFile, null);
     updateTileStar(window.currentFile, null);
   };
-  window.updateTileStar = function (fn, score) {
+  // After a manual set/clear: the tile shows the new effective value now
+  // (manual until cleared; after a clear the IQA estimate returns on reload).
+  window.updateTileStar = function (fn, score, manual) {
     const tile = document.getElementById("t_" + fn.replace(/[^a-zA-Z0-9]/g, "_"));
     if (!tile) return;
     tile.querySelector(".iqa-stars")?.remove();
     if (score !== null && score !== undefined) {
-      const tmp = document.createElement("div"); tmp.innerHTML = starBadge(score);
+      const tmp = document.createElement("div");
+      tmp.innerHTML = starBadge({ effective_rating: score, rating_user: manual !== false });
       const node = tmp.firstElementChild; if (node) tile.appendChild(node);
     }
   };

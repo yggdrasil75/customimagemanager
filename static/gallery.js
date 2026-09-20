@@ -281,7 +281,7 @@ function renderGallery(files){
       <img alt="">
       ${isVideoFile(f)?'<span class="absolute inset-0 flex items-center justify-center text-4xl text-white/80 pointer-events-none drop-shadow-lg">▶</span>':''}
       ${item.tags.length?`<span class="tag-badge">${item.tags.length}</span>`:''}
-      ${typeof starBadge==='function'?starBadge(item.iqa_score):''}
+      ${typeof starBadge==='function'?starBadge(item):''}
       <span class="label">${f.split('/').pop()}</span>
       <span class="sel-check hidden absolute top-1 left-1 w-4 h-4 rounded-full bg-blue-500 border-2 border-white flex items-center justify-center text-[8px] font-bold text-white">✓</span>`;
     grid.appendChild(div);

@@ -398,7 +398,8 @@ canvas {
   padding: 1px 5px;
   font-size: 9px;
   font-weight: 700;
-  color: #fbbf24;
+  color: #cbd5e1;              /* IQA estimate: muted */
   letter-spacing: 1px;
   line-height: 1.2
 }
+.iqa-stars-manual { color: #fbbf24; }   /* a rating you set: amber */
