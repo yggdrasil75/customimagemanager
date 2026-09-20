@@ -528,21 +528,26 @@ class Host:
         pages that belong to a comic folder."""
         self.gallery_filters.append(clause)
 
-    def register_ai_actions(self, group, list_fn, run_fn, *, feature=None):
-        """Put a class of AI actions in the editor's AI picker (class dropdown →
-        action dropdown → Run) and the bulk bar.
+    def register_ai_actions(self, source, list_fn, run_fn, *, feature=None):
+        """Contribute actions to the editor's AI picker (target → action → Run)
+        and the bulk bar.
 
-        group    -- the class label ("Detection", "Vision LLM", "OCR"…)
-        list_fn  -- () -> [{"id", "label"}] — evaluated per request, so a
-                    module whose actions the user edits stays current
-        run_fn   -- (action_id, fp, bgr, meta) -> dict, any of:
-                    regions (list, added unconfirmed), tags (list, added),
-                    description (str, appended), flag ({delete, reason}),
-                    note (str, shown as a toast). Single-image runs are
+        source   -- short id for this contributor ("vlm", "ocr", "detect")
+        list_fn  -- () -> [{"id", "label", "target"}] — target is WHAT the
+                    action produces: description | tags | regions (boxes) |
+                    segment | flag | body | ocr … (the same targets the VLM
+                    action editor uses). The picker's first dropdown is the
+                    target, the second the actions every contributor offers
+                    for it. Evaluated per request, so an editable list stays
+                    current.
+        run_fn   -- (action_id, fp, bgr, meta) -> dict, any of: regions (added
+                    unconfirmed), tags (added), description (appended), flag
+                    ({delete, reason}), note (toast). Single-image runs are
                     applied live by the editor and saved by its autosave;
-                    bulk runs are written here.
-        feature  -- auth feature gating the class (omit = ai_tooling)."""
-        self.ai_action_groups.append({"group": group, "list": list_fn, "run": run_fn,
+                    bulk runs are written by the core.
+        feature  -- auth feature gating this contributor (omit = ai_tooling).
+        Which MODEL runs an action is the Models tab's business."""
+        self.ai_action_groups.append({"source": source, "list": list_fn, "run": run_fn,
                                       "feature": feature, "module_id": self._current_module})
 
     def register_action_target(self, name, fn):

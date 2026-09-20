@@ -30,7 +30,7 @@ MANIFEST = {
     "core":        False,
     "requires":    ["fetch"],       # needs the fetch module's registry service
     "pip":         ["gallery-dl"],
-    "assets":      [],
+    "assets":      ["gdl_sites.js"],
 }
 
 
@@ -41,6 +41,12 @@ def register(host):
         return
 
     cfg = host.config
+    # {site: {"fields": [every field ever discovered], "hidden": [...]}}.
+    # Discovery only ever ADDS fields (a video post exposes keys an image post
+    # doesn't); the user hides what they don't want to see.
+    host.add_config_key("gdl_fields", default={})
+    host.add_asset("gdl_sites.js")
+    host.add_settings_tab("gdl_sites", "Fetch sites", icon="\u2b07")
     _COOKIE_DIR = os.path.join(os.path.dirname(host.media_dir), "gdl_cookies")
 
     # ── per-site auth -> gallery-dl opt strings ──────────────────────────
@@ -113,9 +119,47 @@ def register(host):
                 "has_password": bool(a.get("password")),
                 "has_cookies": bool(a.get("cookies_text"))}
 
+    def _fields_rec(site):
+        return cfg.setdefault("gdl_fields", {}).setdefault(
+            site, {"fields": [], "hidden": []})
+
+    def _learn_fields(site, fields):
+        """Union newly discovered fields into the site's known list (never
+        removes). Saves only if something actually changed."""
+        if not site:
+            return
+        rec = _fields_rec(site)
+        new = [f for f in fields if f not in rec["fields"]]
+        if new or site not in cfg.get("gdl_sites", {}):
+            rec["fields"] = sorted(rec["fields"] + new)
+            cfg.setdefault("gdl_sites", {}).setdefault(site, {})
+            host.save_config()
+
+    def _site_public(site):
+        rec = _fields_rec(site)
+        return {"site": site, "fields": rec["fields"], "hidden": rec["hidden"],
+                "mapping": cfg.get("gdl_sites", {}).get(site, {}),
+                "opts": cfg.get("gdl_opts", {}).get(site, []),
+                "auth": _auth_public(site)}
+
+    def _known_sites():
+        keys = set()
+        for k in ("gdl_fields", "gdl_sites", "gdl_opts", "gdl_auth"):
+            keys.update(s for s in cfg.get(k, {}) if s)
+        return sorted(keys)
+
     # ── the fetcher ──────────────────────────────────────────────────────
     def _fetch(url, tmpdir, on_file=None):
-        return gdl.download(url, tmpdir, opts=_resolve_opts(url), on_file=on_file)
+        # A sidecar that never landed (or a site that omits "category") would
+        # otherwise map to no site and lose all metadata: pin the category
+        # from the extractor so the saved mapping still applies.
+        cat = _target_key(url)
+        def _on(mpath, meta):
+            meta = dict(meta or {})
+            meta.setdefault("category", cat)
+            if on_file:
+                on_file(mpath, meta)
+        return gdl.download(url, tmpdir, opts=_resolve_opts(url), on_file=_on)
 
     def _target_key(url):
         try:
@@ -154,28 +198,44 @@ def register(host):
         except gdl.GdlError as e:
             return jsonify({"success": False, "error": str(e)})
         site = found.get("site") or ""
-        # Same shape as /api/gdl/site plus the field list: the modal renders
-        # rows from `fields` and pre-fills mapping / opts / auth for the site.
-        return jsonify({"success": True, "site": site, "fields": found.get("fields") or [],
-                        "mapping": cfg.get("gdl_sites", {}).get(site, {}),
-                        "opts": cfg.get("gdl_opts", {}).get(site, []),
-                        "auth": _auth_public(site) if site else {"method": "none"}})
+        _learn_fields(site, found.get("fields") or [])
+        # Same shape as /api/gdl/site: `fields` is the site's full known list
+        # (this discovery unioned with every earlier one), plus `hidden`.
+        return jsonify({"success": True, **_site_public(site),
+                        "new_fields": found.get("fields") or []})
 
     def api_config():
         if request.method == "GET":
             return jsonify({"success": True,
                             "sites": cfg.get("gdl_sites", {}),
+                            "fields": cfg.get("gdl_fields", {}),
                             "opts": cfg.get("gdl_opts", {}),
                             "auth": {s: _auth_public(s) for s in cfg.get("gdl_auth", {})}})
         d = request.get_json(force=True, silent=True) or {}
-        # Two shapes: the modal saves ONE site — {site, auth:{method,…},
-        # mapping:{…}, opts:"one per line"} — while a whole-config client sends
-        # the maps {sites:{site:mapping}, opts:{site:[…]}, auth:{site:blob}}.
+        # Two shapes: the modal/settings tab save ONE site — {site,
+        # auth:{method,…}, mapping:{…}, hidden:[…], opts:"one per line"} —
+        # while a whole-config client sends the maps {sites:{site:mapping},
+        # opts:{site:[…]}, auth:{site:blob}}.
         site = (d.get("site") or "").strip()
         if "sites" in d:
             cfg["gdl_sites"] = d["sites"] or {}
         if "mapping" in d and site:
-            cfg.setdefault("gdl_sites", {})[site] = d["mapping"] or {}
+            # MERGE: only fields the client mentions change ("ignore" drops
+            # one). Fields it didn't render (hidden, or not shown by this
+            # post) keep their saved target instead of being wiped.
+            cur = cfg.setdefault("gdl_sites", {}).setdefault(site, {})
+            for f, t in (d["mapping"] or {}).items():
+                if not t or t == "ignore":
+                    cur.pop(f, None)
+                else:
+                    cur[f] = t
+        if "hidden" in d and site:
+            _fields_rec(site)["hidden"] = [str(f) for f in (d["hidden"] or [])]
+        if d.get("forget") and site:
+            for k in ("gdl_fields", "gdl_sites", "gdl_opts", "gdl_auth"):
+                cfg.get(k, {}).pop(site, None)
+            host.save_config()
+            return jsonify({"success": True})
         if "opts" in d:
             if isinstance(d["opts"], dict):
                 cfg["gdl_opts"] = d["opts"]
@@ -209,10 +269,20 @@ def register(host):
         if not site:
             return jsonify({"success": False,
                             "error": "No gallery-dl extractor matches that URL."}), 400
-        return jsonify({"success": True, "site": site,
-                        "mapping": cfg.get("gdl_sites", {}).get(site, {}),
-                        "opts": cfg.get("gdl_opts", {}).get(site, []),
-                        "auth": _auth_public(site)})
+        _learn_fields(site, [])          # a URL for a new site registers it
+        return jsonify({"success": True, **_site_public(site)})
+
+    def api_sites():
+        """Every site we know anything about, for the settings tab's list."""
+        if request.method == "POST":     # {site} -> full record
+            site = (request.get_json(force=True, silent=True) or {}).get("site", "").strip()
+            if not site:
+                return jsonify({"success": False, "error": "site required"}), 400
+            return jsonify({"success": True, **_site_public(site)})
+        return jsonify({"success": True, "sites": [
+            {"site": s, "fields": len(_fields_rec(s)["fields"]),
+             "mapped": len(cfg.get("gdl_sites", {}).get(s, {})),
+             "auth": _auth_public(s)["method"]} for s in _known_sites()]})
 
     def api_targets():
         schemas = host.get_service("metadata_schema") or {}
@@ -240,6 +310,9 @@ def register(host):
     host.add_route("/api/gdl/site",
                    auth.require_feature("fetch", level="write")(api_site),
                    methods=["POST"], endpoint="gdl_site")
+    host.add_route("/api/gdl/sites",
+                   auth.require_feature("fetch", level="write")(api_sites),
+                   methods=["GET", "POST"], endpoint="gdl_sites")
     host.add_route("/api/gdl/targets", auth.require_feature("fetch")(api_targets),
                    endpoint="gdl_targets")
     host.add_route("/api/gdl/available", auth.require_feature("fetch")(api_available),

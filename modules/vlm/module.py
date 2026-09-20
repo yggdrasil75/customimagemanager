@@ -275,10 +275,12 @@ def register(host):
                             "engines miss; boxes are rough or absent, and it costs a call.",
                        settings=_settings("ocr", "Ask for JSON lines with normalised boxes."), **common)
 
-    # The editor's AI picker: class "Vision LLM" = the (user-editable) prompt
-    # actions; evaluated per request so edits in the module tab show up.
+    # The editor's AI picker: the (user-editable) prompt actions, each under
+    # its own target (description / tags / regions / segment / flag / body);
+    # evaluated per request so edits in the module tab show up.
     host.register_ai_actions(
-        "Vision LLM",
-        lambda: [{"id": a["id"], "label": a["name"]} for a in actions.all_actions()],
+        "vlm",
+        lambda: [{"id": a["id"], "label": a["name"], "target": a.get("target") or "description"}
+                 for a in actions.all_actions()],
         actions.picker_run, feature="ai.llm")
     host.logger.info("vlm module: registered detect / classify / tag / describe / iqa / ocr providers")

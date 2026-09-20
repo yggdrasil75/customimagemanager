@@ -27,18 +27,18 @@ async function loadAiActions(){
   }catch(e){ _aiGroups=[]; }
   const g=document.getElementById('ai_group'); if(!g) return;
   const prev=g.value; g.innerHTML='';
-  _aiGroups.forEach(x=>{const o=document.createElement('option');o.value=x.group;o.text=x.group;g.appendChild(o);});
+  _aiGroups.forEach(x=>{const o=document.createElement('option');o.value=x.target;o.text=x.label;g.appendChild(o);});
   if(!_aiGroups.length){const o=document.createElement('option');o.value='';o.text='No AI actions';g.appendChild(o);}
   if(prev&&[...g.options].some(o=>o.value===prev)) g.value=prev;
   aiGroupChanged();
 }
 function aiGroupChanged(){
   const g=document.getElementById('ai_group'), a=document.getElementById('ai_action'); if(!g||!a) return;
-  const grp=_aiGroups.find(x=>x.group===g.value); const acts=(grp&&grp.actions)||[];
+  const grp=_aiGroups.find(x=>x.target===g.value); const acts=(grp&&grp.actions)||[];
   const prev=a.value; a.innerHTML='';
   acts.forEach(x=>{const o=document.createElement('option');o.value=x.id;o.text=x.label;a.appendChild(o);});
   if(prev&&[...a.options].some(o=>o.value===prev)) a.value=prev;
-  a.classList.toggle('hidden', acts.length<2);          // one action: the class IS the action
+  a.classList.toggle('hidden', acts.length<2);          // one action for this target: the target IS the action
   const btn=document.getElementById('btn_ai_run');
   if(btn) btn.innerText=acts.length===1?acts[0].label:'Run on this image';
 }
@@ -58,12 +58,12 @@ function applyAiResult(d){
 }
 async function runAiAction(){
   if(!window.currentFile) return;
-  const g=document.getElementById('ai_group').value, a=document.getElementById('ai_action').value;
-  if(!g) return;
+  const a=document.getElementById('ai_action').value;
+  if(!a) return;
   const btn=document.getElementById('btn_ai_run'); const og=btn.innerText; btn.innerText='…'; btn.disabled=true;
   try{
     const d=await fetch('/api/ai/run',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filename:window.currentFile,group:g,action:a})}).then(r=>r.json());
+      body:JSON.stringify({filename:window.currentFile,action:a})}).then(r=>r.json());
     if(d.success) applyAiResult(d); else alert('AI failed: '+(d.error||''));
   }catch(e){ alert('Network error running AI action.'); }
   btn.innerText=og; btn.disabled=false;

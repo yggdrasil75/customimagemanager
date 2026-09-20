@@ -39,6 +39,15 @@ def register(host):
         return new
     host.register_action_target("segment", _action)
 
+    # The editor's AI picker: target "segment" → everything the picked
+    # segmentation model finds (masks become regions).
+    def _picker_run(action_id, fp, bgr, meta):
+        regs = sc._segment_regions(bgr, "") or []
+        return {"regions": [{**r, "confirmed": False} for r in regs],
+                "note": None if regs else "No objects segmented."}
+    host.register_ai_actions("segment", lambda: [{"id": "all", "label": "Segment objects (picked model)", "target": "segment"}],
+                             _picker_run, feature="ai.segment")
+
     # Background sweep: polygons -> mask_svg on the instances the core built.
     def _masks(instances, width, height):
         for inst in instances:

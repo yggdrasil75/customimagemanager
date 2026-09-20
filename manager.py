@@ -5794,22 +5794,46 @@ def _embedding_iter():
     svc = module_host.get_service("embedding") if 'module_host' in globals() else None
     return (svc or {}).get("iter_embeddings_ordered")
 
-# ── AI actions: class → action → run (the editor's AI picker) ───────────────
-# Classes come from modules (host.register_ai_actions); the core contributes
-# "Detection" = the picked Detection model (Models tab), which is what the old
-# Auto-Tag button with its raw-.pt dropdown did.
-def _ai_groups():
-    out = []
+# ── AI actions: target → action → run (the editor's AI picker) ──────────────
+# Contributors (host.register_ai_actions) offer actions tagged with what they
+# produce; the picker's first dropdown is that target, the second the actions
+# for it from every contributor. The core contributes "Detect objects" (the
+# picked Detection model → boxes), which is what the old Auto-Tag button did.
+AI_TARGET_LABELS = [("description", "📝 Description"), ("tags", "🏷 Tags"), ("regions", "📦 Boxes"),
+                    ("segment", "🎭 Segment"), ("flag", "🚩 Flag"), ("body", "🧍 Body"),
+                    ("ocr", "🔤 OCR"), ("pose", "🕺 Pose")]
+
+
+def _ai_sources():
     for g in module_host.ai_action_groups:
         if g["module_id"] and not module_registry.is_enabled(g["module_id"]):
             continue
         try:
             acts = list(g["list"]() or [])
-        except Exception:
-            acts = []
-        if acts:
-            out.append({"group": g["group"], "feature": g["feature"], "actions": acts, "_g": g})
-    return out
+        except Exception as e:
+            access_logger.error(f"ai actions {g['source']}: {e}"); acts = []
+        for a in acts:
+            yield g, a
+
+
+def _ai_groups():
+    """[{target, label, actions:[{id: "source:action", label}]}] in a fixed
+    target order, unknown targets after, empty targets dropped."""
+    by = {}
+    for g, a in _ai_sources():
+        by.setdefault(str(a.get("target") or "description"), []).append(
+            {"id": f"{g['source']}:{a['id']}", "label": a.get("label") or a["id"]})
+    order = [t for t, _ in AI_TARGET_LABELS] + sorted(t for t in by if t not in dict(AI_TARGET_LABELS))
+    labels = dict(AI_TARGET_LABELS)
+    return [{"target": t, "label": labels.get(t, t.title()), "actions": by[t]} for t in order if by.get(t)]
+
+
+def _ai_resolve(action_id):
+    src, _, aid = str(action_id or "").partition(":")
+    for g, a in _ai_sources():
+        if g["source"] == src and str(a["id"]) == aid:
+            return g, a
+    return None, None
 
 
 def _detect_action(action_id, fp, bgr, meta):
@@ -5826,22 +5850,21 @@ def _detect_action(action_id, fp, bgr, meta):
         if name not in state["classes"]:
             state["classes"].append(name)
     save_classes()
-    return {"regions": regions, "note": f"{len(regions)} box(es)" if not regions else None}
+    return {"regions": regions, "note": None if regions else "No objects detected."}
 
 
 @app.route("/api/ai/actions")
 @_auth.require_feature("ai_tooling")
 def api_ai_actions():
-    return jsonify({"success": True, "groups": [
-        {"group": g["group"], "feature": g["feature"], "actions": g["actions"]} for g in _ai_groups()]})
+    return jsonify({"success": True, "groups": _ai_groups()})
 
 
 @app.route("/api/ai/run", methods=["POST"])
 @_auth.require_feature("ai_tooling", level="write")
 def api_ai_run():
     d = request.json or {}
-    group = next((g for g in _ai_groups() if g["group"] == d.get("group")), None)
-    if not group or not any(a["id"] == d.get("action") for a in group["actions"]):
+    g, a = _ai_resolve(d.get("action"))
+    if not g:
         return jsonify({"success": False, "error": "Unknown AI action."})
     files = d.get("filenames") or ([d["filename"]] if d.get("filename") else [])
     if not files:
@@ -5857,7 +5880,7 @@ def api_ai_run():
             if img is None:
                 raise RuntimeError("Decode failed")
             meta = read_metadata(fp)
-            res = group["_g"]["run"](d["action"], fp, _to_bgr(img), meta) or {}
+            res = g["run"](str(a["id"]), fp, _to_bgr(img), meta) or {}
             if bulk:                                   # persist here; the editor applies live otherwise
                 tags = list(meta["tags"]) + list(res.get("tags") or [])
                 desc = meta["description"]
@@ -5959,10 +5982,10 @@ def module_static(module_id, filename):
 # Core (always-on) modules register first, then every enabled plugin in
 # dependency order. The core ones aren't discovered by the loader, so they're
 # wired here explicitly; without this the metadata panes/services never existed.
-# The core's own AI action class: the picked Detection model → boxes.
+# The core's own AI action: the picked Detection model → boxes.
 module_host.register_ai_actions(
-    "Detection", lambda: [{"id": "boxes", "label": "Detect objects (boxes)"}], _detect_action,
-    feature="ai.autotag")
+    "detect", lambda: [{"id": "boxes", "label": "Detect objects (picked Detection model)", "target": "regions"}],
+    _detect_action, feature="ai.autotag")
 module_host._current_module = "metadata"
 modules.metadata.register(module_host)
 module_host._current_module = "threading"

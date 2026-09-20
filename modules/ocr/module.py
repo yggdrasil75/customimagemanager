@@ -89,7 +89,7 @@ def register(host):
         elif res.get("engine"):
             out["note"] = f"OCR ({res['engine']}): {len(lines)} line(s)."
         return out
-    host.register_ai_actions("OCR", lambda: [{"id": "read", "label": "Read text"}], _picker_run,
+    host.register_ai_actions("OCR", lambda: [{"id": "read", "label": "Read text", "target": "ocr"}], _picker_run,
                              feature="ai.ocr")
 
     def api_ocr():

@@ -73,51 +73,65 @@ function _gdlGuessTarget(field) {
   return 'ignore';
 }
 
-// Build one row per field: "<field>  ->  [target dropdown] [xmp token input]".
-// `saved` is the site's stored {field: target} map (empty for a new site).
-// A target of "xmp:<Token>" selects the "XMP property…" sentinel and pre-fills
-// the token input; on save the input's value is re-prefixed with "xmp:".
-async function _gdlRenderRows(saved) {
+// One mapping row: "<field>  ->  [target dropdown] [xmp token | tag prefix]".
+// `chosen` is the saved target. A target of "xmp:<Token>" selects the "XMP
+// property…" sentinel and pre-fills the token input; on save the input's
+// value is re-prefixed with "xmp:". Shared by the fetch modal and the
+// Settings › Fetch sites tab (gdl_sites.js).
+function _gdlFieldRow(field, chosen, optsHTML) {
+  const isXmp = typeof chosen === 'string' && chosen.startsWith('xmp:');
+  const isTags = chosen === 'tags' || (typeof chosen === 'string' && chosen.startsWith('tags:'));
+  const row = document.createElement('div');
+  row.className = 'gdl-map-row flex items-center gap-2 py-0.5';
+  row.dataset.field = field;
+  row.innerHTML =
+    `<code class="flex-1 text-xs text-gray-300 truncate" title="${_esc(field)}">${_esc(field)}</code>` +
+    `<select data-field="${_esc(field)}"
+       class="gdl-map-sel w-52 p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white">
+       ${optsHTML}</select>` +
+    `<input class="gdl-xmp-tok w-52 p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white font-mono hidden"
+       list="gdl_xmp_tokens" placeholder="Xmp.dc.creator">` +
+    `<input class="gdl-tag-pfx w-28 p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white font-mono hidden"
+       title="Prefix added to each tag from this field (e.g. 'character:')" placeholder="prefix">`;
+  const sel = row.querySelector('select');
+  const tok = row.querySelector('.gdl-xmp-tok');
+  const pfx = row.querySelector('.gdl-tag-pfx');
+  // reveal the right extra input for the current target
+  sel.addEventListener('change', () => {
+    tok.classList.toggle('hidden', sel.value !== _GDL_XMP_SENTINEL);
+    pfx.classList.toggle('hidden', sel.value !== 'tags');
+  });
+  if (isXmp) {
+    sel.value = _GDL_XMP_SENTINEL;
+    tok.value = chosen.slice('xmp:'.length);
+    tok.classList.remove('hidden');
+  } else if (isTags) {
+    sel.value = 'tags';                              // base option carries the prefix separately
+    pfx.value = chosen.startsWith('tags:') ? chosen.slice('tags:'.length) : '';
+    pfx.classList.remove('hidden');
+  } else {
+    sel.value = chosen;
+    if (sel.value !== chosen) sel.value = 'ignore';  // saved target no longer offered
+  }
+  return row;
+}
+
+// Target to show for a field: its saved one; for a site with no mapping yet,
+// a guess. A site that HAS a mapping keeps unmapped fields ignored (they were
+// ignored on purpose — don't re-guess them every time).
+function _gdlTargetFor(field, saved) {
+  if (saved[field]) return saved[field];
+  return Object.keys(saved).length ? 'ignore' : _gdlGuessTarget(field);
+}
+
+// Build the modal's rows for the current site, skipping hidden fields.
+async function _gdlRenderRows(saved, hidden) {
   const wrap = document.getElementById('gdl_rows');
   wrap.innerHTML = '';
   const optsHTML = await _gdlTargetOptionsHTML();
-  _gdlFields.forEach(field => {
-    const chosen = saved[field] ?? _gdlGuessTarget(field);
-    const isXmp = typeof chosen === 'string' && chosen.startsWith('xmp:');
-    const isTags = chosen === 'tags' || (typeof chosen === 'string' && chosen.startsWith('tags:'));
-    const row = document.createElement('div');
-    row.className = 'flex items-center gap-2 py-0.5';
-    row.innerHTML =
-      `<code class="flex-1 text-xs text-gray-300 truncate" title="${_esc(field)}">${_esc(field)}</code>` +
-      `<select data-field="${field}"
-         class="gdl-map-sel w-52 p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white">
-         ${optsHTML}</select>` +
-      `<input class="gdl-xmp-tok w-52 p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white font-mono hidden"
-         list="gdl_xmp_tokens" placeholder="Xmp.dc.creator">` +
-      `<input class="gdl-tag-pfx w-28 p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white font-mono hidden"
-         title="Prefix added to each tag from this field (e.g. 'character:')" placeholder="prefix">`;
-    const sel = row.querySelector('select');
-    const tok = row.querySelector('.gdl-xmp-tok');
-    const pfx = row.querySelector('.gdl-tag-pfx');
-    // reveal the right extra input for the current target
-    sel.addEventListener('change', () => {
-      tok.classList.toggle('hidden', sel.value !== _GDL_XMP_SENTINEL);
-      pfx.classList.toggle('hidden', sel.value !== 'tags');
-    });
-    if (isXmp) {
-      sel.value = _GDL_XMP_SENTINEL;
-      tok.value = chosen.slice('xmp:'.length);
-      tok.classList.remove('hidden');
-    } else if (isTags) {
-      sel.value = 'tags';                              // base option carries the prefix separately
-      pfx.value = chosen.startsWith('tags:') ? chosen.slice('tags:'.length) : '';
-      pfx.classList.remove('hidden');
-    } else {
-      sel.value = chosen;
-      if (sel.value !== chosen) sel.value = 'ignore';  // saved target no longer offered
-    }
-    wrap.appendChild(row);
-  });
+  const hide = new Set(hidden || []);
+  _gdlFields.filter(f => !hide.has(f)).forEach(field =>
+    wrap.appendChild(_gdlFieldRow(field, _gdlTargetFor(field, saved), optsHTML)));
 }
 
 async function gdlDiscover() {
@@ -135,11 +149,13 @@ async function gdlDiscover() {
   const saved = r.mapping || {};
   document.getElementById('gdl_mapping_known').classList.toggle(
     'hidden', Object.keys(saved).length === 0);
-  await _gdlRenderRows(saved);
+  await _gdlRenderRows(saved, r.hidden);
   document.getElementById('gdl_opts').value = (r.opts || []).join('\n');
   _gdlLoadAuth(r.auth || { method: 'none' });
   document.getElementById('gdl_mapping').classList.remove('hidden');
-  _gdlStatus(`${_gdlFields.length} fields found.`, 'ok');
+  const hiddenN = (r.hidden || []).length;
+  _gdlStatus(`${_gdlFields.length} fields known` +
+    (hiddenN ? ` (${hiddenN} hidden — see Settings › Fetch sites)` : '') + '.', 'ok');
 }
 
 // ── auth UI ─────────────────────────────────────────────────────────────────
@@ -243,7 +259,7 @@ async function gdlSaveAuth() {
   const payload = { site: _gdlSite, auth };
   // Only send a mapping if rows are actually on screen; otherwise the server
   // keeps whatever mapping is already saved for this site.
-  if (document.querySelector('.gdl-map-sel')) payload.mapping = _gdlCurrentMapping();
+  if (document.querySelector('#gdl_rows .gdl-map-sel')) payload.mapping = _gdlCurrentMapping();
   const r = await fetch('/api/gdl/config', { method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload) })
@@ -252,15 +268,18 @@ async function gdlSaveAuth() {
              r?.success ? 'ok' : 'err');
 }
 
-function _gdlCurrentMapping() {
+// Read {field: target} from the rows under `root` (default: the modal).
+// "ignore" is sent explicitly: the server MERGES mappings, so a field that
+// isn't mentioned keeps its saved target.
+function _gdlCurrentMapping(root) {
   const out = {};
-  document.querySelectorAll('.gdl-map-sel').forEach(sel => {
+  (root || document.getElementById('gdl_rows')).querySelectorAll('.gdl-map-sel').forEach(sel => {
     const field = sel.dataset.field;
-    if (!sel.value || sel.value === 'ignore') return;
+    if (!sel.value || sel.value === 'ignore') { out[field] = 'ignore'; return; }
     if (sel.value === _GDL_XMP_SENTINEL) {
       const tok = sel.parentElement.querySelector('.gdl-xmp-tok');
       const t = (tok?.value || '').trim();
-      if (t) out[field] = 'xmp:' + t;
+      out[field] = t ? 'xmp:' + t : 'ignore';
     } else if (sel.value === 'tags') {
       // a non-empty prefix input turns "tags" into "tags:<prefix>"
       const p = (sel.parentElement.querySelector('.gdl-tag-pfx')?.value || '').trim();
@@ -290,8 +309,10 @@ async function gdlFetch() {
   const urls = multi.length ? multi : (single ? [single] : []);
   if (!urls.length) { _gdlStatus('Enter at least one URL.', 'err'); return; }
   const folder = document.getElementById('gdl_folder').value.trim();
-  // If a mapping is on screen, persist it so this fetch uses the latest choice.
-  if (_gdlSite) await gdlSaveMapping();
+  // If a mapping is on screen, persist it so this fetch uses the latest
+  // choice. Without rows (URL pasted, Check fields skipped) there is nothing
+  // to save — saving here used to wipe the site's stored mapping.
+  if (_gdlSite && document.querySelector('#gdl_rows .gdl-map-sel')) await gdlSaveMapping();
 
   const btn = document.getElementById('gdl_fetch_btn');
   btn.disabled = true; btn.classList.add('opacity-50');

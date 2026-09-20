@@ -162,13 +162,14 @@
           <h3 class="font-bold text-purple-400 text-sm">AI Tooling</h3>
           <div class="flex gap-2" data-ext-area="ai_tooling_links"></div>
         </div>
-        <!-- AI picker: class (Detection / Vision LLM / OCR / …, from
-             host.register_ai_actions) → action (only shown when the class
-             has more than one) → Run on the open image. Models themselves
-             are picked in Settings → Models. -->
+        <!-- AI picker: target (Description / Tags / Boxes / Segment / Flag /
+             Body / OCR …) → the actions every module offers for it
+             (host.register_ai_actions; the action dropdown only shows when
+             there is more than one) → Run on the open image. Which MODEL
+             runs an action is picked in Settings → Models. -->
         <div id="ai_picker" class="opacity-50 pointer-events-none flex flex-col gap-1">
           <div class="flex gap-1">
-            <select id="ai_group" onchange="aiGroupChanged()" title="Kind of AI action"
+            <select id="ai_group" onchange="aiGroupChanged()" title="What to produce"
               class="flex-1 min-w-0 p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm"></select>
             <select id="ai_action" title="Action" class="flex-1 min-w-0 p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm hidden"></select>
           </div>
