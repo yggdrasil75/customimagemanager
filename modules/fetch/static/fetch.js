@@ -301,7 +301,7 @@ async function gdlFetch() {
   btn.disabled = false; btn.classList.remove('opacity-50');
 
   if (!r || !r.success) { _gdlStatus(r?.error || 'Could not queue.', 'err'); return; }
-  _gdlStatus(`Added ${r.queued} download${r.queued === 1 ? '' : 's'} to the queue.`, 'ok');
+  _gdlStatus(`Added ${r.added} download${r.added === 1 ? '' : 's'} to the queue.`, 'ok');
   document.getElementById('gdl_urls').value = '';
   gdlQueueRefresh();
 }

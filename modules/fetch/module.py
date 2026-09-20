@@ -287,7 +287,12 @@ def register(host):
                 "INSERT INTO fetch_queue(fetcher, target, folder, created, updated) "
                 "VALUES(?,?,?,?,?)", (fid or "", t, folder, now, now))
             added += 1
-        host.db().commit(); host.thread_manager.wake()
+        host.db().commit()
+        if added:
+            # User-queued downloads start now, ahead of background sweeps; the
+            # promotion auto-clears once the queue drains.
+            host.thread_manager.set_foreground("fetch")
+        host.thread_manager.wake()
         return jsonify({"success": True, "added": added})
 
     def api_fetch_queue():

@@ -97,6 +97,7 @@ class Host:
         self.db_tables = []
         self.background_sweeps = {}   # cap_id -> {pending, run, module_id}
         self._sweep_rr, self._sweep_idle, self._sweep_skip, self._sweep_done = 0, {}, set(), {}
+        self._sweep_inflight = 0
         # File-row enrichers a module contributes: fn(db, rel_paths) -> {rel_path:
         # {field: value}}. Core folds these into gallery/list rows, so a module
         # can attach its own per-file data (e.g. rating) without a core column.
@@ -360,6 +361,15 @@ class Host:
         caps = [c for c in self.broker.background_capabilities() if c in self.background_sweeps]
         if not caps:
             return None
+        # A library sweep never drains, so as the thread manager's lead source
+        # it would fill every free slot every tick and nothing else (downloads,
+        # uploads, a forced scan) would ever run. Take at most half the pool.
+        try:
+            cap = max(1, int(self.thread_manager.max_slots()) // 2)
+        except Exception:
+            cap = 1
+        if self._sweep_inflight >= cap:
+            return None
         now = time.time()
         for _ in range(len(caps)):
             self._sweep_rr = (self._sweep_rr + 1) % len(caps)
@@ -392,6 +402,7 @@ class Host:
                         if len(rels) >= want:
                             break
                 if rels:
+                    self._sweep_inflight += 1
                     return {"cap": cap, "rel_path": rels[0], "rel_paths": rels,
                             "key": keys[0], "keys": keys, "slot": slot}
                 if len(rows) < n or n >= 512:      # exhausted (or only failures left)
@@ -427,10 +438,12 @@ class Host:
                 self._sweep_skip.add((cap, r))
             self.logger.error(f"background {cap} {rels[0]}{' +%d' % (len(rels) - 1) if len(rels) > 1 else ''}: {e}")
         finally:
+            self._sweep_inflight = max(0, self._sweep_inflight - 1)
             for k in job.get("keys") or [job["key"]]:
                 self.thread_manager.release_key(k)
             if job.get("slot"):
                 self.thread_manager.release_key(job["slot"])
+            self.thread_manager.wake()
 
     def _start_sweeps(self):
         if self.background_sweeps:
