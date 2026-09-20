@@ -163,6 +163,10 @@ class Provider:
     def reason(self):
         return "" if self.available() else (self._reason or "unavailable")
 
+    @property
+    def key(self):
+        return f"{self.capability}:{self.id}"
+
     def limit(self):
         """Parallel budget on this provider's resource (>= 1)."""
         try:
@@ -284,6 +288,10 @@ class ModelBroker:
                          supports_conf=supports_conf,
                 resource=resource, concurrency=concurrency)
             self._providers[cap_id][provider_id] = p
+            tm = getattr(self, "thread_manager", None)
+            if tm is not None:          # sign the model up: what it runs on, how many at once
+                tm.register_model(p.key, gpu=gpu, resource=resource, concurrency=concurrency,
+                                  cost_mb=cost_mb)
             return p
 
     # ── selection ────────────────────────────────────────────────────────

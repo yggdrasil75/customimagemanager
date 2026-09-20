@@ -3375,7 +3375,7 @@ def api_modules():
     # the front end gets concrete choices (e.g. current iqa providers).
     fields = []
     for f in getattr(module_host, "settings_fields", []):
-        if not module_registry.is_enabled(f["module_id"]):
+        if f["module_id"] and not module_registry.is_enabled(f["module_id"]):   # None = core
             continue
         opts = f.get("options")
         if callable(opts):
@@ -5893,6 +5893,8 @@ def module_static(module_id, filename):
 # wired here explicitly; without this the metadata panes/services never existed.
 module_host._current_module = "metadata"
 modules.metadata.register(module_host)
+module_host._current_module = "threading"
+modules.threading.register(module_host)
 module_host._current_module = None
 module_registry.register_all(module_host)
 

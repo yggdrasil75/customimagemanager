@@ -294,10 +294,14 @@ def register(host):
             (tag, n)).fetchall()]
 
     def _bg_run(rel, fp, handle):
-        n = _stage_embeddings_with(host.db(), [rel], _img_loader, handle,
+        img = _img_loader(rel)
+        if img is None:
+            raise RuntimeError("decode failed")
+        n = _stage_embeddings_with(host.db(), [rel], lambda _r: img, handle,
                                    _embed_tag(handle, role="bg"), mtime_of=_img_mtime)
         if not n:
-            raise RuntimeError("no vector produced")
+            raise RuntimeError("embedder returned nothing for a decoded image "
+                               "(endpoint rejected it, or an existing row already covers it)")
     host.add_background_sweep("embed", _bg_pending, _bg_run)
 
     def _embedding_model_tag(db):

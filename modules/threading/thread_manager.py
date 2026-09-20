@@ -593,12 +593,119 @@ class ThreadManager:
             held.add(key)
             return True
 
-    # ── shared external resources ─────────────────────────────────────────
-    # A model served by one external endpoint (a vision LLM) is a resource the
-    # slot/memory budget can't see: every spare thread would hit it at once.
-    # Providers name their resource + parallel budget; the background sweep
-    # takes a slot before claiming, and interactive callers mark the resource
-    # busy so no new background slot is handed out while they wait on it.
+    # ── models: signed up by the broker, admitted here ───────────────────
+    # Memory is budgeted at load time (can_load_model / reserve_model); this is
+    # the job side. The broker registers every provider it takes
+    # (register_model) with what it runs on and what it costs; background
+    # sources ask try_acquire_model before claiming a job for it.
+    #   GPU model   → admitted by MEMORY: each running job reserves a working
+    #                 set sized from the model (activations + batch), against
+    #                 the device budget minus loaded models. So a 5090 runs
+    #                 dozens of yolo-n jobs and one or two 16 GB embedders,
+    #                 a 1080 Ti ten Mayaku jobs, a Pi two — the card decides,
+    #                 not a count. gpu_max_jobs (this module's setting) is an
+    #                 optional ceiling on top; 0 = memory alone.
+    #   external    → the concurrency its provider declared (an endpoint).
+    #   CPU model   → ungated here; slots and the RAM budget bound it.
+    JOB_MIN_MB = 384            # even a 6 MB yolo-n needs activations + batch
+    JOB_FRAC = 0.5              # working set ≈ half the model's own footprint
+
+    def register_model(self, key, *, gpu=False, resource=None, concurrency=1, cost_mb=0):
+        """Sign a model up: key = "<capability>:<provider>". resource names an
+        external shared backend (its budget = concurrency, int or callable);
+        gpu=True puts it on the device memory budget; neither = CPU."""
+        with self._lock:
+            models = getattr(self, "_models", None)
+            if models is None:
+                models = self._models = {}
+            models[key] = {"gpu": bool(gpu), "resource": resource,
+                           "concurrency": concurrency, "cost_mb": float(cost_mb or 0)}
+
+    def models(self):
+        with self._lock:
+            return dict(getattr(self, "_models", {}))
+
+    def set_gpu_max_jobs(self, n_or_fn):
+        """Optional ceiling on concurrent background GPU jobs (int or callable);
+        0 = by memory alone."""
+        self._gpu_max_jobs = n_or_fn
+
+    def gpu_max_jobs(self):
+        v = getattr(self, "_gpu_max_jobs", 0)
+        try:
+            return max(0, int((v() if callable(v) else v) or 0))
+        except Exception:
+            return 0
+
+    def job_cost_mb(self, key):
+        m = self.models().get(key) or {}
+        return max(self.JOB_MIN_MB, m.get("cost_mb", 0.0) * self.JOB_FRAC)
+
+    def gpu_job_headroom_mb(self):
+        """Device memory left for jobs: budget − loaded models − running jobs.
+        Dedicated card: the VRAM budget; APU / iGPU: the RAM budget."""
+        with self._lock:
+            jobs = getattr(self, "_committed_gpu_job_mb", 0.0)
+            loaded = getattr(self, "_committed_vram_mb", 0.0)
+        if self.gpu_kind() == "dedicated":
+            budget = self.vram_budget_mb()
+            return (budget - loaded - jobs) if budget > 0 else float("inf")
+        return self.mem_headroom_mb() - jobs
+
+    def gpu_jobs_running(self):
+        with self._lock:
+            return len(getattr(self, "_gpu_jobs", {}))
+
+    def try_acquire_model(self, key):
+        """Admission for one background job on model `key`: a token to
+        release_model() when done ("" when the model is ungated), or None when
+        its device/resource can't take another job now or a foreground caller
+        is on it."""
+        m = self.models().get(key) or {}
+        if m.get("resource"):
+            c = m.get("concurrency", 1)
+            try:
+                limit = int(c() if callable(c) else c) or 1
+            except Exception:
+                limit = 1
+            return self.try_acquire_slot(m["resource"], limit)
+        if not (m.get("gpu") and self.gpu_kind() != "none"):
+            return ""
+        with self._lock:
+            if getattr(self, "_fg_use", {}).get("gpu", 0) > 0:
+                return None
+            jobs = getattr(self, "_gpu_jobs", None)
+            if jobs is None:
+                jobs = self._gpu_jobs = {}
+            ceiling = self.gpu_max_jobs()
+            if ceiling and len(jobs) >= ceiling:
+                return None
+            if len(jobs) >= self.spare():
+                return None
+            cost = self.job_cost_mb(key)
+            if jobs and self.gpu_job_headroom_mb() < cost:      # one always runs (deadlock guard)
+                return None
+            tok = f"gpujob#{getattr(self, '_gpu_job_seq', 0)}"
+            self._gpu_job_seq = getattr(self, "_gpu_job_seq", 0) + 1
+            jobs[tok] = cost
+            self._committed_gpu_job_mb = getattr(self, "_committed_gpu_job_mb", 0.0) + cost
+            return tok
+
+    def release_model(self, token):
+        """Give back what try_acquire_model handed out."""
+        if not token:
+            return
+        with self._lock:
+            jobs = getattr(self, "_gpu_jobs", {})
+            if token in jobs:
+                self._committed_gpu_job_mb = max(0.0, getattr(self, "_committed_gpu_job_mb", 0.0) - jobs.pop(token))
+                self.wake()
+                return
+        self.release_key(token)
+
+    # ── shared resources (the slots behind try_acquire_model) ────────────
+    # Interactive callers mark a resource busy (foreground_use) so no new
+    # background slot on it is handed out while they wait on it.
     def try_acquire_slot(self, resource, limit=1):
         """Claim one of `limit` background slots on `resource`. Returns the slot
         key to release_key() when done, or None if all are taken or a

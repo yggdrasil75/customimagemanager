@@ -71,6 +71,7 @@ class Host:
         # Model capability broker. Modules provide/request models through the
         # helpers below rather than importing it, so the seam stays one object.
         self.broker = broker
+
         # Config registry: declared settings (defaults, validation, change
         # handlers, persistence). Modules own their settings through it.
         self.config_registry = config_registry
@@ -376,15 +377,10 @@ class Host:
             cap = caps[self._sweep_rr]
             if self._sweep_idle.get(cap, 0) > now:
                 continue
-            # A provider on a shared external resource (a vision LLM) gets at
-            # most its parallel budget across every sweep using it, and
-            # nothing new while a foreground caller is on it.
             prov = self.broker.provider_for(cap, "bg")
-            slot = None
-            if prov is not None and prov.resource:
-                slot = self.thread_manager.try_acquire_slot(prov.resource, prov.limit())
-                if slot is None:
-                    continue
+            slot = self.thread_manager.try_acquire_model(prov.key) if prov is not None else ""
+            if slot is None:
+                continue
             want = self.background_sweeps[cap]["batch"]
             n = max(16, want)
             while True:
@@ -442,7 +438,7 @@ class Host:
             for k in job.get("keys") or [job["key"]]:
                 self.thread_manager.release_key(k)
             if job.get("slot"):
-                self.thread_manager.release_key(job["slot"])
+                self.thread_manager.release_model(job["slot"])
             self.thread_manager.wake()
 
     def _start_sweeps(self):
