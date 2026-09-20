@@ -942,3 +942,17 @@ release_key = MANAGER.release_key
 held_keys = MANAGER.held_keys
 seconds_since_activity = MANAGER.seconds_since_activity
 status = MANAGER.status
+# models: broker sign-up + job admission (see try_acquire_model)
+register_model = MANAGER.register_model
+models = MANAGER.models
+try_acquire_model = MANAGER.try_acquire_model
+release_model = MANAGER.release_model
+set_gpu_max_jobs = MANAGER.set_gpu_max_jobs
+gpu_max_jobs = MANAGER.gpu_max_jobs
+gpu_jobs_running = MANAGER.gpu_jobs_running
+job_cost_mb = MANAGER.job_cost_mb
+gpu_job_headroom_mb = MANAGER.gpu_job_headroom_mb
+# shared resources (an external endpoint) + interactive-use marking
+try_acquire_slot = MANAGER.try_acquire_slot
+foreground_use = MANAGER.foreground_use
+in_worker = MANAGER.in_worker
