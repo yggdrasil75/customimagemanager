@@ -1,1 +1,1 @@
-from . import module.register
+from .module import register
