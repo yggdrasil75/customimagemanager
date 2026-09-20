@@ -79,6 +79,18 @@ def register(host):
                             kind="number", pane="module",
                             help="Max in-flight background requests to the endpoint across "
                                  "all capabilities. 1 unless the server batches.")
+    # Classification = the image's overarching category, one of these. Stored
+    # as analysis.image_type (what the pipeline's classify node writes and the
+    # AI panel shows as "Type") — never as a tag.
+    host.add_config_key("image_categories",
+                        default="photo, illustration, 3D render, screenshot, document, comic page, explicit",
+                        validate=lambda v: str(v or ""))
+    host.add_settings_field(key="image_categories", label="Image categories (classify)", kind="text",
+                            pane="module", help="Comma-separated. Classification picks exactly one; "
+                                                "it becomes the image's Type in the AI analysis.")
+    def _categories():
+        return [c.strip() for c in str(host.config.get("image_categories") or "").split(",") if c.strip()]
+
     _shared = dict(resource=client.RESOURCE,
                    concurrency=lambda: int(host.config.get("oai_concurrency") or 1))
     host.add_config_key("oai_embed_model", default="", validate=lambda v: str(v or ""))
@@ -157,7 +169,7 @@ def register(host):
 
     # ── classify: pick from the app's class list ───────────────────────────
     def _classify(img_bgr, prompt="", *a, **k):
-        classes = [c for c in (host.config.get("classes") or []) if c and c != "object"]
+        classes = _categories()
         p = _prompt("classify", prompt).replace("{classes}", ", ".join(classes) or "(none)")
         res = client.call(p, core.to_bgr(img_bgr), "json") or {}
         name = str(res.get("class_name", "")).strip()
@@ -169,15 +181,14 @@ def register(host):
             conf = 0.5
         return [{"class_name": name, "conf": conf}]
     host.provide_model("classify", "vlm", loader=lambda: _classify,
-                       note="Asks the model to choose among your tag classes. {classes} in the "
-                            "prompt expands to the current list.",
-                       settings=_settings("classify", "{classes} expands to the app's class list."), **common)
+                       note="Asks the model for the image's category, one of the Image "
+                            "categories setting. {classes} in the prompt expands to that list.",
+                       settings=_settings("classify", "{classes} expands to the Image categories setting."), **common)
 
     # Background sweep (Models → Classification → "Run in background"): each
-    # image is classified once per model and the chosen class is applied as a
-    # tag — the app's classes ARE tag classes, so that is where a
-    # classification lives. classify_runs remembers what was done (including
-    # "nothing chosen") so the sweep never re-asks the model.
+    # image gets its category once per model, written as analysis.image_type
+    # (merged into the stored analysis, so the AI panel shows "Type: …").
+    # classify_runs remembers what was done so the model is never re-asked.
     host.add_table("CREATE TABLE IF NOT EXISTS classify_runs("
                    "rel_path TEXT PRIMARY KEY, model TEXT, class_name TEXT, conf REAL, updated REAL)")
 
@@ -192,19 +203,21 @@ def register(host):
         img = core.read_image(fp)
         if img is None:
             raise RuntimeError("decode failed")
-        hits = handle(core.to_bgr(img)) or []
+        hits = handle(core.to_bgr(img), verbose=False) or []
         top = hits[0] if hits else None
-        if top and top.get("class_name"):
+        name = (top or {}).get("class_name") or ""
+        if name:
             meta = core.read_metadata(fp)
-            tags = list(meta["tags"] or [])
-            if top["class_name"] not in tags:
-                core.write_metadata(fp, tags + [top["class_name"]], meta["description"], meta["regions"])
+            analysis = dict(meta.get("analysis") or {})
+            if analysis.get("image_type") != name:
+                analysis["image_type"] = name
+                core.write_metadata(fp, meta["tags"], meta["description"], meta["regions"],
+                                    analysis=analysis)
         db = host.db()
         db.execute("INSERT INTO classify_runs(rel_path, model, class_name, conf, updated) VALUES(?,?,?,?,?) "
                    "ON CONFLICT(rel_path) DO UPDATE SET model=excluded.model, class_name=excluded.class_name, "
                    "conf=excluded.conf, updated=excluded.updated",
-                   (rel, host.broker.selected_id("classify", "bg") or "",
-                    (top or {}).get("class_name", ""), (top or {}).get("conf"), time.time()))
+                   (rel, host.broker.selected_id("classify", "bg") or "", name, (top or {}).get("conf"), time.time()))
         db.commit()
     host.add_background_sweep("classify", _cls_pending, _cls_run)
 

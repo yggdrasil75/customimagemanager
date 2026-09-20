@@ -108,9 +108,13 @@ CORE_CAPABILITIES = {
     "classify": {
         "label": "Classification",
         "background": True,   # non-region: served by the module's background sweep
-        "summary": "Whole-image classification against a fixed label set.",
+        "summary": "One overarching category for the whole image from a small fixed "
+                   "set (photo / illustration / screenshot… / explicit) — the image's "
+                   "type, as the pipeline's classify node means it. Not tags: a "
+                   "1000-noun ImageNet head belongs under 'tag'.",
         "input": _IMG,
-        "output": "list of {class_name, conf} sorted by conf desc",
+        "output": "list of {class_name, conf} sorted by conf desc; class_name one of "
+                  "the configured categories",
     },
     "tag": {
         "label": "Tagging",

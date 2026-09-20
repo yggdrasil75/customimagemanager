@@ -2,7 +2,7 @@
 YOLO / Ultralytics model provider.
 ======================================================================
 Registers Ultralytics YOLO as a provider for the core capabilities it can
-satisfy: detect (box / oriented-box types), detect.faces, segment, classify,
+satisfy: detect (box / oriented-box types), detect.faces, segment, tag (-cls),
 pose, depth. This is the first real
 consumer of the model broker — it proves that a module can hand the app a
 model for a named capability, normalize the model's native output to the
@@ -115,7 +115,10 @@ def _run_yolo_path(model_path, feed, conf):
 # ── families: which heads each ultralytics generation ships ─────────────────
 # stock weights = f"{prefix}{size}{suffix}.pt"; ultralytics auto-downloads.
 _NSMLX = ["n", "s", "m", "l", "x"]
-_FULL = {"detect": "", "segment": "-seg", "classify": "-cls", "pose": "-pose"}
+# -cls is an ImageNet-1000 head: it names things in the picture, so it serves
+# 'tag' (its weights still live in models/yolo/classify/), not 'classify' —
+# that capability is the image's overarching category from a fixed set.
+_FULL = {"detect": "", "segment": "-seg", "tag": "-cls", "pose": "-pose"}
 _OBB_FAMILIES = {"yolov8", "yolo11", "yolo12", "yolo26"}   # ship -obb heads
 _FAMILIES = [
     # (id, label, prefix, sizes, {cap: suffix}, note)
@@ -262,7 +265,8 @@ def _tf_obb(res, *a, **k):
     return out
 
 
-def _tf_classify(res, *a, **k):
+def _tf_tag(res, *a, **k):
+    """-cls head -> the 'tag' contract: [{tag, conf}] top-5, conf desc."""
     r = res[0] if isinstance(res, (list, tuple)) else res
     probs = getattr(r, "probs", None)
     if probs is None:
@@ -273,7 +277,7 @@ def _tf_classify(res, *a, **k):
         conf = [float(c) for c in probs.top5conf.tolist()]
     except Exception:
         return []
-    return [{"class_name": names.get(i, str(i)), "conf": c} for i, c in zip(idx, conf)]
+    return [{"tag": str(names.get(i, str(i))).replace("_", " "), "conf": c} for i, c in zip(idx, conf)]
 
 
 def _tf_depth(res, *a, **k):
@@ -331,7 +335,7 @@ def register(host):
     # -seg checkpoint never shows up as a detect option.
     def _weights_opts(cap):
         def opts():
-            paths = model_registry.list_weights("yolo", cap, exts=(".pt",))
+            paths = model_registry.list_weights("yolo", "classify" if cap == "tag" else cap, exts=(".pt",))
             if cap == "detect":   # box-training runs are detect models
                 paths += (host.config.get("model_groups") or {}).get("trained") or []
             return [{"value": "", "label": "Stock (family + size)"}] + \
@@ -345,7 +349,7 @@ def register(host):
         return classes
 
     transforms = {"detect": _tf_detect, "segment": _tf_segment,
-                  "classify": _tf_classify, "pose": _tf_pose, "depth": _tf_depth}
+                  "tag": _tf_tag, "pose": _tf_pose, "depth": _tf_depth}
     box_types = [{"value": "box", "label": "Boxes"}, {"value": "obb", "label": "Oriented boxes"}]
     declared = set()
     for fid, flabel, prefix, sizes, caps, fnote in _FAMILIES:
@@ -363,7 +367,7 @@ def register(host):
                            "options": _weights_opts(cap),
                            "help": "Blank = stock weights for the picked family/size."}],
                 loader=(lambda c=cap, p=prefix, sfx=suffix:
-                        _loader_for(_stock_path(host, c, p, sfx), c)()),
+                        _loader_for(_stock_path(host, c, p, sfx), "classify" if c == "tag" else c)()),
                 transform=transforms[cap], available=_avail, reason=reason,
                 note=fnote + " Size n…x trades speed for accuracy.",
                 cost_mb=300 if cap == "segment" else 250,
