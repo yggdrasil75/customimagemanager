@@ -150,10 +150,16 @@ def register(host):
         if not url:
             return jsonify({"success": False, "error": "no url"})
         try:
-            return jsonify({"success": True,
-                            "fields": gdl.discover_fields(url, opts=_resolve_opts(url))})
+            found = gdl.discover_fields(url, opts=_resolve_opts(url))   # {"site", "fields": [...]}
         except gdl.GdlError as e:
             return jsonify({"success": False, "error": str(e)})
+        site = found.get("site") or ""
+        # Same shape as /api/gdl/site plus the field list: the modal renders
+        # rows from `fields` and pre-fills mapping / opts / auth for the site.
+        return jsonify({"success": True, "site": site, "fields": found.get("fields") or [],
+                        "mapping": cfg.get("gdl_sites", {}).get(site, {}),
+                        "opts": cfg.get("gdl_opts", {}).get(site, []),
+                        "auth": _auth_public(site) if site else {"method": "none"}})
 
     def api_config():
         if request.method == "GET":
