@@ -164,7 +164,7 @@ class DupCNN:
             return None
 
     def fit_batches(self, batches, lr: float = 1e-3, device: str = "cpu",
-                    _opt_holder: dict = None) -> "float | None":
+                    _opt_holder: dict = None, amp: bool = False) -> "float | None":
         """!
         @brief One pass of minibatch training over an iterable of (a, b, y)
                numpy batches (a, b: [n,3,WORK,WORK] float32 as encode_pair stores
@@ -184,12 +184,17 @@ class DupCNN:
             holder["opt"], holder["lr"] = opt, lr
         loss_fn = nn.BCEWithLogitsLoss()
         total, n = 0.0, 0
+        # bf16 autocast on a GPU (CUDA or ROCm): ~2x throughput for the same
+        # result on a net this small; no grad scaler needed with bf16.
+        use_amp = bool(amp) and device != "cpu"
         for a, b, y in batches:
-            ta = torch.from_numpy(np.ascontiguousarray(a)).to(device)
-            tb = torch.from_numpy(np.ascontiguousarray(b)).to(device)
-            ty = torch.as_tensor(np.asarray(y, np.float32)).to(device)
-            opt.zero_grad()
-            loss = loss_fn(self.net(ta, tb), ty)
+            ta = torch.from_numpy(np.ascontiguousarray(a)).to(device, non_blocking=True)
+            tb = torch.from_numpy(np.ascontiguousarray(b)).to(device, non_blocking=True)
+            ty = torch.as_tensor(np.asarray(y, np.float32)).to(device, non_blocking=True)
+            opt.zero_grad(set_to_none=True)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+                logit = self.net(ta, tb)
+            loss = loss_fn(logit.float(), ty)
             loss.backward()
             opt.step()
             total += float(loss.item()) * len(ty); n += len(ty)

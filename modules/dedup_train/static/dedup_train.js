@@ -45,6 +45,7 @@
       epochs: +$('ddt_epochs').value, holdout: +$('ddt_holdout').value, chunk: +$('ddt_chunk').value,
       batch: +$('ddt_batch').value, width: +$('ddt_width').value, workers: +$('ddt_workers').value,
       heuristic: $('ddt_heur').checked, cnn: $('ddt_cnn').checked, install: $('ddt_install').checked,
+      cache_side: +$('ddt_cache_side').value, in_ram: $('ddt_in_ram').checked, amp: $('ddt_amp').checked,
     };
     const r = await fetch('/api/dedup_train/build', { method: 'POST', headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify(body) }).then(r => r.json()).catch(() => null);

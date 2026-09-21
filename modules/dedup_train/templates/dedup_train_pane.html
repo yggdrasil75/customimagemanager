@@ -17,15 +17,18 @@
     <div><label class="text-gray-400">Pairs / image</label><input id="ddt_per" type="number" value="6" min="2" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
     <div><label class="text-gray-400">Epochs</label><input id="ddt_epochs" type="number" value="3" min="1" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
     <div><label class="text-gray-400">Hold-out</label><input id="ddt_holdout" type="number" value="0.03" step="0.01" min="0" max="0.5" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
-    <div><label class="text-gray-400">Chunk (images)</label><input id="ddt_chunk" type="number" value="256" min="8" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
-    <div><label class="text-gray-400">CNN batch</label><input id="ddt_batch" type="number" value="32" min="4" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
+    <div><label class="text-gray-400">Chunk (images)</label><input id="ddt_chunk" type="number" value="1024" min="8" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
+    <div><label class="text-gray-400">CNN batch</label><input id="ddt_batch" type="number" value="256" min="4" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
     <div><label class="text-gray-400">CNN width</label><input id="ddt_width" type="number" value="1.0" step="0.25" min="0.25" max="2" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
-    <div><label class="text-gray-400">Decode workers</label><input id="ddt_workers" type="number" value="4" min="1" max="32" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
+    <div><label class="text-gray-400">Decode workers (processes)</label><input id="ddt_workers" type="number" value="8" min="1" max="64" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
+    <div><label class="text-gray-400">Cache side (px)</label><input id="ddt_cache_side" type="number" value="256" min="128" max="512" step="64" class="w-full bg-gray-900 border border-gray-700 rounded p-1"></div>
   </div>
   <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs">
     <label class="flex items-center gap-1"><input type="checkbox" id="ddt_heur" checked class="accent-purple-500"> Heuristic (logistic)</label>
     <label class="flex items-center gap-1"><input type="checkbox" id="ddt_cnn" checked class="accent-purple-500"> CNN (torch)</label>
     <label class="flex items-center gap-1"><input type="checkbox" id="ddt_install" class="accent-purple-500"> Also install into this app's models/</label>
+    <label class="flex items-center gap-1" title="Load the whole decoded cache into RAM instead of memory-mapping it (side²·3 bytes per image: 196 KB at 256 px)"><input type="checkbox" id="ddt_in_ram" class="accent-purple-500"> Hold cache in RAM</label>
+    <label class="flex items-center gap-1" title="bf16 autocast on the GPU"><input type="checkbox" id="ddt_amp" checked class="accent-purple-500"> Mixed precision</label>
   </div>
   <div class="flex gap-2">
     <button onclick="ddtBuild()" id="ddt_build" class="bg-teal-700 hover:bg-teal-600 px-4 py-1.5 rounded font-bold">Build</button>
