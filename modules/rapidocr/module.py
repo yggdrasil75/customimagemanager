@@ -4,9 +4,15 @@ RapidOCR provider — ONNX OCR, models bundled with the wheel (fast, CPU-friendl
 import model_registry
 from optional_deps import optional_import
 
-RapidOCR, _HAVE = optional_import("rapidocr_onnxruntime", attr="RapidOCR")
+# `rapidocr` (3.x) is the current package; `rapidocr_onnxruntime` is its
+# retired 1.x name. Both run on onnxruntime's CPU provider — no CUDA needed.
+RapidOCR, _HAVE = optional_import("rapidocr", attr="RapidOCR")
+_LEGACY = False
+if not _HAVE:
+    RapidOCR, _HAVE = optional_import("rapidocr_onnxruntime", attr="RapidOCR")
+    _LEGACY = bool(_HAVE)
 AVAILABLE = bool(_HAVE)
-UNAVAILABLE_REASON = "pip install rapidocr_onnxruntime"
+UNAVAILABLE_REASON = "pip install rapidocr"
 
 MANIFEST = {
     "id":          "rapidocr",
@@ -22,8 +28,13 @@ MANIFEST = {
 
 def _reader():
     key = "ocr:rapidocr"
-    model_registry.register(key, (lambda: RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)),
-                            cost_mb=120, gpu=False)
+    def _make():
+        if _LEGACY:
+            return RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)
+        return RapidOCR(params={"Global.log_level": "warning",
+                                "EngineConfig.onnxruntime.intra_op_num_threads": 1,
+                                "EngineConfig.onnxruntime.inter_op_num_threads": 1})
+    model_registry.register(key, _make, cost_mb=120, gpu=False)
     return model_registry.acquire(key)
 
 
@@ -37,9 +48,13 @@ def register(host):
 
         def run(img_bgr, *a, **k):
             H, W = img_bgr.shape[:2]
-            res, _ = rd(img_bgr)
+            out = rd(img_bgr)
+            if _LEGACY:
+                res = out[0] or []
+            else:   # 3.x: RapidOCROutput with parallel boxes / txts / scores
+                res = list(zip(out.boxes, out.txts, out.scores)) if out.boxes is not None else []
             lines = []
-            for box, text, score in (res or []):
+            for box, text, score in res:
                 xs = [p[0] for p in box]; ys = [p[1] for p in box]
                 lines.append(line(text, score, min(xs), min(ys), max(xs), max(ys), W, H))
             return {"text": " ".join(l["text"] for l in lines), "lines": lines}

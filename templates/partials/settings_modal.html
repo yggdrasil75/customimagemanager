@@ -2,26 +2,27 @@
    and "Storage" (tiers + small-file packing). Tab bodies are the two former
    modals verbatim, so all field IDs and their JS handlers are unchanged. #}
 <div id="settings_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
-  <div class="bg-gray-800 p-6 rounded-lg border border-gray-600 w-[880px] max-w-[95vw] flex flex-col max-h-[90vh]">
-    <div class="flex justify-between items-center mb-3 flex-shrink-0">
-      <div class="flex gap-1">
+  <div class="bg-gray-800 p-6 rounded-lg border border-gray-600 w-[1040px] max-w-[95vw] flex flex-col max-h-[90vh]">
+    <div class="flex flex-1 min-h-0 gap-4">
+      {# Vertical tab rail: core tabs, then the module-contributed ones under a
+         divider. It scrolls on its own, so any number of modules fits. #}
+      <nav id="settings_tab_rail" class="w-44 flex-shrink-0 overflow-y-auto flex flex-col gap-1 pr-2 border-r border-gray-700">
         <button data-settings-tab="general" onclick="settingsTab('general')"
-          class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">⚙ General</button>
+          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">⚙ General</button>
         <button data-settings-tab="models" onclick="settingsTab('models')"
-          class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">🧩 Models</button>
+          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">🧩 Models</button>
         <button data-settings-tab="storage" onclick="settingsTab('storage')"
-          class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold">🗄 Storage</button>
+          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">🗄 Storage</button>
         <button data-settings-tab="users" onclick="settingsTab('users')"
-          class="settings-tab hidden px-3 py-1.5 rounded-t text-sm font-bold" data-admin-only>👤 Users</button>
-        <button data-settings-tab="info" onclick="settingsTab('info')"
-          class="settings-tab px-3 py-1.5 rounded-t text-sm font-bold text-gray-400 hover:text-white">ℹ Info</button>
+          class="settings-tab hidden px-3 py-1.5 rounded text-sm font-bold text-left" data-admin-only>👤 Users</button>
         <button data-settings-tab="modules" onclick="settingsTab('modules')"
-          class="settings-tab hidden px-3 py-1.5 rounded-t text-sm font-bold" data-admin-only>🧩 Modules</button>
+          class="settings-tab hidden px-3 py-1.5 rounded text-sm font-bold text-left" data-admin-only>🧩 Modules</button>
+        <button data-settings-tab="info" onclick="settingsTab('info')"
+          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left text-gray-400 hover:text-white">ℹ Info</button>
         <!-- Pluggable modules inject their own tab buttons here (static/modules.js). -->
-        <span id="module_settings_tabs" class="contents"></span>
-      </div>
-    </div>
-
+        <div id="module_settings_tabs" class="contents"></div>
+      </nav>
+      <div class="flex-1 min-w-0 flex flex-col min-h-0">
     <div data-settings-pane="general" class="overflow-y-auto flex-1 pr-1">
       <!-- Module-contributed settings fields (pane="general") render here. -->
       <div id="module_settings_fields_general" class="space-y-3 mb-3"></div>
@@ -131,6 +132,8 @@
 
     <!-- Pluggable modules inject their own settings panes here (static/modules.js). -->
     <div id="module_settings_panes" class="contents"></div>
+      </div>
+    </div>
 
     <div class="flex justify-between items-center pt-3 border-t border-gray-700 mt-3 flex-shrink-0">
       <div class="flex gap-2" data-settings-pane="storage">

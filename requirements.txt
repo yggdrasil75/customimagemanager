@@ -8,7 +8,7 @@ rtmlib
 mediapipe
 rfdetr
 #ai-edge-litert #optional: MoveNet module (tflite-runtime also works)
-#rapidocr_onnxruntime
+rapidocr
 easyocr
 mutagen
 #hnswlib #optional, use if you are able to install

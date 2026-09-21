@@ -30,7 +30,8 @@ MANIFEST = {
     "description": "Meta's ATLAS body model: pose keypoints and body shape from images.",
     "core":        False,
     "requires":    ["bodies"],
-    "pip":         ["atlas"],
+    "pip":         [],   # NOT the pypi "atlas" package (unrelated): install from github.com/facebookresearch/ATLAS
+    "default_enabled": False,
     "assets":      [],
 }
 

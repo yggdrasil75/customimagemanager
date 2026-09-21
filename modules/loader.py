@@ -248,6 +248,33 @@ class ModuleRegistry:
         need = [d for d in lm.manifest.get("pip", []) if not _dep_installed(d)]
         return _pip_install(need, logger or _log) if need else []
 
+    def install_all_deps(self, config_path="app_config.json", logger=None):
+        """Pre-launch pass (run.sh): pip-install the missing declared deps of
+        every ENABLED plugin, so a module switched on in Settings has its
+        packages by the time the real process imports it. Runs in its own
+        interpreter on purpose: optional_import decides at import time, so a
+        dep installed after the app imported the module wouldn't be seen
+        until the next start anyway. Returns {module_id: [installed pkgs]}."""
+        import json
+        log = logger or _log
+        persisted = {}
+        try:
+            with open(config_path) as f:
+                persisted = (json.load(f) or {}).get("modules") or {}
+        except Exception:
+            pass
+        self.init_state(persisted)
+        done = {}
+        for pid, lm in self._plugins.items():
+            if not self.is_enabled(pid) or lm.manifest.get("core"):
+                continue
+            need = [d for d in lm.manifest.get("pip", []) if not _dep_installed(d)]
+            if need:
+                got = _pip_install(need, log)
+                if got:
+                    done[pid] = got
+        return done
+
     def current_state(self):
         state = {mid: True for mid in self._core}
         state.update({pid: self.is_enabled(pid) for pid in self._plugins})

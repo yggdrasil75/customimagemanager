@@ -25,7 +25,8 @@ MANIFEST = {
     "description": "SMPL-X body shape regressed from a single image.",
     "core":        False,
     "requires":    ["bodies", "smplx"],
-    "pip":         ["shapy"],
+    "pip":         [],   # NOT the pypi "shapy" package (unrelated): install from github.com/muelea/shapy
+    "default_enabled": False,
     "assets":      [],
 }
 

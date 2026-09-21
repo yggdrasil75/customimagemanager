@@ -340,6 +340,12 @@ const SPEED_BADGE = { fast: "⚡", balanced: "⚖", accurate: "🎯" };
       return;
     }
     tabBar.innerHTML = "";
+    if (tabs.length) {   // divider between the core rail and the module tabs
+      const hd = document.createElement("div");
+      hd.className = "text-[10px] uppercase tracking-wide text-gray-500 mt-3 mb-1 px-3";
+      hd.textContent = "Modules";
+      tabBar.appendChild(hd);
+    }
     // Keep panes that already exist (module JS may have rendered into them);
     // only add missing ones.
     for (const t of tabs) {
@@ -347,7 +353,7 @@ const SPEED_BADGE = { fast: "⚡", balanced: "⚖", accurate: "🎯" };
       const btn = document.createElement("button");
       btn.dataset.settingsTab = tabKey;
       btn.className =
-        "settings-tab px-3 py-1.5 rounded-t text-sm font-bold" +
+        "settings-tab px-3 py-1.5 rounded text-sm font-bold text-left truncate" +
         (t.admin_only ? " hidden" : "");
       if (t.admin_only) btn.setAttribute("data-admin-only", "");
       btn.textContent = (t.icon ? t.icon + " " : "") + t.label;
