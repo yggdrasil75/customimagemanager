@@ -80,6 +80,22 @@
         if (o.value === f.value) opt.selected = true;
         input.appendChild(opt);
       }
+    } else if (f.kind === "combo") {
+      // free text + a datalist of suggestions (e.g. models the endpoint
+      // reports); typing anything else still saves, so it degrades to manual.
+      input = document.createElement("input");
+      input.type = "text";
+      input.className = "w-full bg-gray-900 border border-gray-700 rounded px-2 py-1";
+      input.value = f.value == null ? "" : f.value;
+      const dl = document.createElement("datalist");
+      dl.id = "dl_" + f.key;
+      for (const o of f.options || []) {
+        const opt = document.createElement("option");
+        opt.value = o.value; opt.label = o.label || o.value;
+        dl.appendChild(opt);
+      }
+      input.setAttribute("list", dl.id);
+      wrap.appendChild(dl);
     } else if (f.kind === "toggle") {
       input = document.createElement("input");
       input.type = "checkbox"; input.checked = !!f.value;

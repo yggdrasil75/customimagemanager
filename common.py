@@ -126,3 +126,48 @@ def getmtime_loose(path):
 def rel_path(root: str, path: str) -> str:
     """Absolute path -> forward-slash path relative to `root`."""
     return os.path.relpath(path, root).replace(os.sep, "/")
+
+# ── model-file / top-down pose helpers (shared by the pose provider modules) ──
+def fetch_file(url: str, dest: str, min_bytes: int = 1 << 16) -> str:
+    """Download `url` to `dest` once (atomic via .part). A CDN 404 still writes
+    an HTML page, so anything under min_bytes is rejected as not-a-model."""
+    if os.path.exists(dest):
+        return dest
+    import urllib.request
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    tmp = dest + ".part"
+    try:
+        urllib.request.urlretrieve(url, tmp)
+        if os.path.getsize(tmp) < min_bytes:
+            raise RuntimeError(f"{url}: {os.path.getsize(tmp)} bytes, not a model")
+        os.replace(tmp, dest)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return dest
+
+
+def person_crops(img_bgr, persons=None, pad: float = 0.15) -> list:
+    """Top-down pose helper. persons = fn(img) -> normalized center-form boxes
+    (the broker's detect.persons handle) or None. Returns [(crop, x0, y0, w, h)]
+    in pixels: one padded crop per person, the whole image when there is no
+    detector, [] when the detector finds nobody."""
+    H, W = img_bgr.shape[:2]
+    if persons is None:
+        return [(img_bgr, 0, 0, W, H)]
+    out = []
+    for b in persons(img_bgr) or []:
+        bw, bh = b["w"] * (1 + 2 * pad), b["h"] * (1 + 2 * pad)
+        x0 = int(max(0, (b["cx"] - bw / 2) * W)); y0 = int(max(0, (b["cy"] - bh / 2) * H))
+        x1 = int(min(W, (b["cx"] + bw / 2) * W)); y1 = int(min(H, (b["cy"] + bh / 2) * H))
+        if x1 - x0 > 4 and y1 - y0 > 4:
+            out.append((img_bgr[y0:y1, x0:x1], x0, y0, x1 - x0, y1 - y0))
+    return out
+
+
+def crop_keypoints(pts, x0, y0, w, h, W, H) -> list:
+    """Map crop-local normalized [(x, y, v)] back to whole-image normalized
+    {x,y,v} dicts (the broker 'pose' contract)."""
+    return [{"x": round(max(0.0, min(1.0, (x0 + x * w) / W)), 4),
+             "y": round(max(0.0, min(1.0, (y0 + y * h) / H)), 4),
+             "v": round(float(v), 3)} for x, y, v in pts]

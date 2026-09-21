@@ -67,7 +67,11 @@ def register(host):
     host.add_settings_field(key="oai_endpoint", label="OpenAI-compatible endpoint", kind="text",
                             pane="module", help="Base URL or /v1/chat/completions.")
     host.add_settings_field(key="oai_key", label="API key", kind="text", pane="module")
-    host.add_settings_field(key="oai_model", label="Chat model", kind="text", pane="module")
+    # Chat model: the endpoint's /v1/models list as suggestions (polled at
+    # render), free text for backends that report none.
+    host.add_settings_field(key="oai_model", label="Chat model", kind="combo", pane="module",
+                            options=lambda: [{"value": m, "label": m} for m in client.list_models()],
+                            help="Pick from what the endpoint reports, or type a name if it lists none.")
     host.add_settings_field(key="oai_system_prompt", label="System prompt", kind="textarea",
                             pane="module")
     # How many background requests the endpoint takes at once. Everything this
@@ -114,6 +118,7 @@ def register(host):
     host.provide_service("llm", {"call": client.call, "request": client.request,
                                  "encode_image": client.encode_image, "v1_base": client.v1_base,
                                  "chat_url": client.chat_url, "clamp_box": client.clamp_box,
+                                 "list_models": client.list_models,
                                  "embed_image": client.embed_image, "embed_text": client.embed_text,
                                  "embed_tag": client.embed_tag,
                                  "embed_configured": client.embed_configured})

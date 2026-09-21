@@ -49,8 +49,9 @@ def _estimate(host, img_bgr, detect=None):
     """Run the selected pose provider and shape its output for storage.
 
     Returns the sidecar pose dict {model, kind, names, edges, people}. The
-    topology follows the skeleton the provider returned (17 = COCO body,
-    133 = whole-body), so the picker's type choice needs no extra plumbing.
+    topology follows the keypoint count the provider returned (17 COCO body,
+    33 BlazePose, 133 whole-body, 543 holistic — see skeleton.TOPOLOGIES), so
+    the picker's type choice needs no extra plumbing.
     On no provider / failure returns an empty-people dict with a `note`.
     """
     base = {"model": "pose", "kind": "body",
@@ -64,9 +65,9 @@ def _estimate(host, img_bgr, detect=None):
     try:
         people = detect(img_bgr)          # canonical: [{keypoints:[{x,y,v}], conf}]
         base["people"] = [{"keypoints": p.get("keypoints", [])} for p in people]
-        if any(len(p["keypoints"]) > 17 for p in base["people"]):
-            base.update(kind="wholebody", names=_pose_core.WHOLEBODY_NAMES,
-                        edges=_pose_core.WHOLEBODY_EDGES)
+        if base["people"]:
+            kind, names, edges = _pose_core.topology(max(len(p["keypoints"]) for p in base["people"]))
+            base.update(kind=kind, names=names, edges=edges)
     except Exception as e:
         host.logger.error(f"pose estimate: {e}")
         base["note"] = f"Pose failed: {e}"

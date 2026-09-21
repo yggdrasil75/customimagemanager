@@ -5,6 +5,9 @@ numpy
 pyexiv2
 imagecodecs
 rtmlib
+mediapipe
+rfdetr
+#ai-edge-litert #optional: MoveNet module (tflite-runtime also works)
 #rapidocr_onnxruntime
 easyocr
 mutagen

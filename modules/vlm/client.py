@@ -84,6 +84,36 @@ def chat_url(endpoint):
     return base + ("/chat/completions" if base.endswith("/v1")
                    else "/v1/chat/completions")
 
+_MODELS_CACHE = {}     # v1 base -> (expires, [ids])
+
+def list_models(endpoint=None, key=None, ttl=20):
+    """Model ids the endpoint reports on GET /v1/models (OpenAI, koboldcpp,
+    llama.cpp, vLLM, Ollama…). [] when the server has no list (older backends)
+    or is down, so the settings field falls back to manual entry."""
+    base = v1_base(endpoint or _cfg().get("oai_endpoint", ""))
+    if not base:
+        return []
+    now = time.time()
+    hit = _MODELS_CACHE.get(base)
+    if hit and hit[0] > now:
+        return hit[1]
+    key = (key if key is not None else _cfg().get("oai_key", "")).strip()
+    hdrs = {"Authorization": f"Bearer {key}"} if key else {}
+    ids = []
+    try:
+        r = requests.get(base + ("" if base.endswith("/v1") else "/v1") + "/models",
+                         headers=hdrs, timeout=3)
+        r.raise_for_status()
+        d = r.json()
+        rows = d.get("data") if isinstance(d, dict) else d
+        ids = [str(m.get("id") or m.get("name")) for m in (rows or []) if isinstance(m, dict)]
+        ids = [i for i in ids if i and i != "None"]
+    except Exception:
+        ids = []
+    _MODELS_CACHE[base] = (now + ttl, ids)
+    return ids
+
+
 def request(messages, tools=None, tool_choice=None, timeout=600, endpoint=None):
     """Low-level OpenAI-compatible chat call. Returns the message dict or raises.
     `endpoint` overrides the configured one (used to spread load across several

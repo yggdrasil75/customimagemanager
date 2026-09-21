@@ -46,6 +46,36 @@ WHOLEBODY_EDGES = (COCO_SKELETON
                    + _hand_edges(91) + _hand_edges(112))                            # finger chains
 WHOLEBODY_NAMES = COCO_KP_NAMES + [f"kp{i}" for i in range(17, 133)]
 
+# MediaPipe BlazePose-33: 0-10 face, 11-22 arms/hands, 23-32 legs/feet.
+BLAZEPOSE_NAMES = ["nose", "left_eye_inner", "left_eye", "left_eye_outer", "right_eye_inner",
+                   "right_eye", "right_eye_outer", "left_ear", "right_ear", "mouth_left",
+                   "mouth_right", "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+                   "left_wrist", "right_wrist", "left_pinky", "right_pinky", "left_index",
+                   "right_index", "left_thumb", "right_thumb", "left_hip", "right_hip",
+                   "left_knee", "right_knee", "left_ankle", "right_ankle", "left_heel",
+                   "right_heel", "left_foot_index", "right_foot_index"]
+BLAZEPOSE_EDGES = [[0, 1], [1, 2], [2, 3], [3, 7], [0, 4], [4, 5], [5, 6], [6, 8], [9, 10],
+                   [11, 12], [11, 13], [13, 15], [15, 17], [15, 19], [15, 21], [17, 19],
+                   [12, 14], [14, 16], [16, 18], [16, 20], [16, 22], [18, 20],
+                   [11, 23], [12, 24], [23, 24], [23, 25], [25, 27], [27, 29], [27, 31], [29, 31],
+                   [24, 26], [26, 28], [28, 30], [28, 32], [30, 32]]
+# MediaPipe Holistic-543: 0-32 pose, 33-500 face mesh (468, points only),
+# 501-521 left hand, 522-542 right hand.
+HOLISTIC_NAMES = BLAZEPOSE_NAMES + [f"face{i}" for i in range(468)] + \
+                 [f"lhand{i}" for i in range(21)] + [f"rhand{i}" for i in range(21)]
+HOLISTIC_EDGES = BLAZEPOSE_EDGES + [[15, 501], [16, 522]] + _hand_edges(501) + _hand_edges(522)
+
+# keypoint count -> (kind, names, edges); the pose module folds a provider's
+# output into the sidecar by looking up len(keypoints) here.
+TOPOLOGIES = {17:  ("body",      COCO_KP_NAMES,   COCO_SKELETON),
+              33:  ("blazepose", BLAZEPOSE_NAMES, BLAZEPOSE_EDGES),
+              133: ("wholebody", WHOLEBODY_NAMES, WHOLEBODY_EDGES),
+              543: ("holistic",  HOLISTIC_NAMES,  HOLISTIC_EDGES)}
+
+def topology(n_kp: int):
+    """(kind, names, edges) for a keypoint count; unknown counts draw as bare points."""
+    return TOPOLOGIES.get(n_kp, ("body", [f"kp{i}" for i in range(n_kp)], []))
+
 _WB_REGISTERED = set()
 
 # Official ONNX SDK checkpoints (mmpose release names). Sizes are the paper's
@@ -173,13 +203,15 @@ def _normalise_skeleton(keypoints: list, vis_thresh: float = 0.2) -> Optional[np
     """
     pts = np.array([[p.get("x", 0.0), p.get("y", 0.0), p.get("v", 0.0)]
                     for p in keypoints], dtype=np.float32)
-    if len(pts) <= max(_L_HIP, _R_HIP):
+    ls, rs, lh, rh = (11, 12, 23, 24) if len(pts) in (33, 543) else \
+                     (_L_SHOULDER, _R_SHOULDER, _L_HIP, _R_HIP)
+    if len(pts) <= max(lh, rh):
         return None
-    for i in (_L_SHOULDER, _R_SHOULDER, _L_HIP, _R_HIP):
+    for i in (ls, rs, lh, rh):
         if pts[i, 2] < vis_thresh:
             return None
-    pelvis = (pts[_L_HIP, :2] + pts[_R_HIP, :2]) / 2.0
-    neck = (pts[_L_SHOULDER, :2] + pts[_R_SHOULDER, :2]) / 2.0
+    pelvis = (pts[lh, :2] + pts[rh, :2]) / 2.0
+    neck = (pts[ls, :2] + pts[rs, :2]) / 2.0
     torso = float(np.linalg.norm(neck - pelvis))
     if torso < 1e-4:
         return None
