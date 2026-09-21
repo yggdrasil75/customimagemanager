@@ -63,7 +63,11 @@ RUN mkdir -p static/vendor && \
     curl -fsSL https://unpkg.com/three@0.137.5/examples/js/loaders/OBJLoader.js \
         -o static/vendor/OBJLoader.js && \
     curl -fsSL https://unpkg.com/three@0.137.5/examples/js/controls/OrbitControls.js \
-        -o static/vendor/OrbitControls.js
+        -o static/vendor/OrbitControls.js && \
+    curl -fsSL https://unpkg.com/drawflow@0.0.60/dist/drawflow.min.js \
+        -o static/vendor/drawflow.min.js && \
+    curl -fsSL https://unpkg.com/drawflow@0.0.60/dist/drawflow.min.css \
+        -o static/vendor/drawflow.min.css
 
 EXPOSE 8000
 

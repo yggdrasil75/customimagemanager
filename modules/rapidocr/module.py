@@ -4,12 +4,12 @@ RapidOCR provider — ONNX OCR, models bundled with the wheel (fast, CPU-friendl
 import model_registry
 from optional_deps import optional_import
 
-# `rapidocr` (3.x) is the current package; `rapidocr_onnxruntime` is its
+# `rapidocr` (3.x) is the current package; `rapidocr` is its
 # retired 1.x name. Both run on onnxruntime's CPU provider — no CUDA needed.
 RapidOCR, _HAVE = optional_import("rapidocr", attr="RapidOCR")
 _LEGACY = False
 if not _HAVE:
-    RapidOCR, _HAVE = optional_import("rapidocr_onnxruntime", attr="RapidOCR")
+    RapidOCR, _HAVE = optional_import("rapidocr", attr="RapidOCR")
     _LEGACY = bool(_HAVE)
 AVAILABLE = bool(_HAVE)
 UNAVAILABLE_REASON = "pip install rapidocr"
@@ -21,7 +21,7 @@ MANIFEST = {
     "description": "RapidOCR (PaddleOCR models on ONNX Runtime) as an OCR provider.",
     "core":        False,
     "requires":    ["ocr"],
-    "pip":         ["rapidocr_onnxruntime"],
+    "pip":         ["rapidocr"],
     "assets":      [],
 }
 

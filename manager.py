@@ -6079,8 +6079,9 @@ def api_module_assets():
     for a in module_host.assets:
         if not module_registry.is_enabled(a["module_id"]):
             continue
+        fn = a["filename"]
         out.append({
-            "url": f"/modules/{a['module_id']}/static/{a['filename']}",
+            "url": fn if fn.startswith("/") else f"/modules/{a['module_id']}/static/{fn}",
             "kind": a["kind"],
             "module_id": a["module_id"],
         })

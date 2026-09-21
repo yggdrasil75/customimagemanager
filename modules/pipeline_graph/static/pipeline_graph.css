@@ -1,0 +1,51 @@
+/* pipeline_graph.css — dark theme for Drawflow inside the settings modal. */
+#plg_wrap { display: flex; gap: .5rem; height: 66vh; min-height: 420px; }
+#plg_canvas { flex: 1; min-width: 0; position: relative; border: 1px solid #374151; border-radius: .375rem;
+  background: #0b0f17 radial-gradient(#1f2937 1px, transparent 1px); background-size: 20px 20px; overflow: hidden; }
+#plg_inspector { width: 17rem; flex: none; overflow-y: auto; }
+
+#plg_canvas .drawflow { width: 100%; height: 100%; }
+#plg_canvas .drawflow .drawflow-node {
+  background: #1f2937; color: #e5e7eb; border: 1px solid #4b5563; border-radius: .375rem;
+  min-height: 0; width: 210px; padding: 0; font-size: 11px; box-shadow: 0 2px 8px #0008;
+}
+#plg_canvas .drawflow .drawflow-node.selected { border-color: #2dd4bf; box-shadow: 0 0 0 2px #2dd4bf55; }
+#plg_canvas .drawflow .drawflow-node .drawflow_content_node { width: 100%; }
+#plg_canvas .drawflow .drawflow-node .input,
+#plg_canvas .drawflow .drawflow-node .output { background: #9ca3af; border: 2px solid #111827; width: 14px; height: 14px; }
+#plg_canvas .drawflow .drawflow-node .output:hover,
+#plg_canvas .drawflow .drawflow-node .input:hover { background: #2dd4bf; }
+#plg_canvas .drawflow .connection .main-path { stroke: #6b7280; stroke-width: 3px; }
+#plg_canvas .drawflow .connection .main-path:hover,
+#plg_canvas .drawflow .connection.selected .main-path { stroke: #2dd4bf; }
+#plg_canvas .drawflow-delete { background: #b91c1c; border: 2px solid #7f1d1d; }
+
+.plg-title { padding: 5px 8px 2px; font-weight: 700; color: #f3f4f6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plg-type { padding: 0 8px 4px; color: #9ca3af; font-size: 10px; }
+.plg-olabel, .plg-ilabel { position: absolute; top: -2px; white-space: nowrap; font-size: 10px; color: #cbd5e1;
+  pointer-events: none; line-height: 14px; }
+.plg-olabel { right: 20px; }
+.plg-ilabel { left: 20px; }
+#plg_canvas .drawflow .drawflow-node { align-items: flex-start; }
+#plg_canvas .drawflow .drawflow-node .outputs, #plg_canvas .drawflow .drawflow-node .inputs { padding-top: 44px; }
+#plg_canvas .drawflow .drawflow-node .input, #plg_canvas .drawflow .drawflow-node .output { margin-bottom: 5px; }
+/* port type colours */
+#plg_canvas .plg-t-image { background: #f59e0b; }  #plg_canvas .plg-t-text { background: #e5e7eb; }
+#plg_canvas .plg-t-tags { background: #34d399; }   #plg_canvas .plg-t-bool { background: #f472b6; }
+#plg_canvas .plg-t-boxes, #plg_canvas .plg-t-subjects { background: #60a5fa; }
+#plg_canvas .plg-t-json { background: #a78bfa; }   #plg_canvas .plg-t-metadata { background: #fb7185; }
+#plg_canvas .plg-t-any { background: #9ca3af; }
+/* node kind accents */
+#plg_canvas .drawflow .drawflow-node.plg-k-io { background: #134e4a; border-color: #14b8a6; }
+#plg_canvas .drawflow .drawflow-node.plg-k-ai { border-color: #fbbf24; }
+#plg_canvas .drawflow .drawflow-node.plg-k-flow { border-color: #a78bfa; }
+#plg_canvas .drawflow .drawflow-node.plg-k-meta { border-color: #fb7185; }
+#plg_canvas .drawflow .drawflow-node.plg-k-vision { border-color: #60a5fa; }
+#plg_canvas .drawflow .drawflow-node.plg-k-module { border-color: #34d399; }
+
+.plg-field label { display: block; font-size: 10px; color: #9ca3af; margin: 6px 0 2px; }
+.plg-field input, .plg-field select, .plg-field textarea { width: 100%; background: #111827; color: #e5e7eb;
+  border: 1px solid #374151; border-radius: .25rem; padding: 4px 6px; font-size: 11px; }
+.plg-field textarea { min-height: 90px; font-family: ui-monospace, monospace; resize: vertical; }
+.plg-step { border: 1px solid #4c1d95; border-radius: .25rem; padding: 4px 6px; margin-top: 6px; background: #1e1b4b33; }
+.plg-step summary { cursor: pointer; color: #c4b5fd; font-size: 11px; }

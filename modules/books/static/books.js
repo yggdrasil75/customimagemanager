@@ -762,7 +762,7 @@ function renderComicSummary(s) {
     + `🔤 ocr ${s.with_ocr}/${s.page_count} (${pct(s.with_ocr)}%)</span>`;
   if (!s.ocr_available) {
     el.innerHTML += '<div class="text-amber-400 mt-0.5">No OCR engine on the '
-                  + 'server — install rapidocr_onnxruntime or easyocr.</div>';
+                  + 'server — install rapidocr or easyocr.</div>';
   }
   const tbtn = _bq('comic_transcript_btn');
   if (tbtn) tbtn.classList.toggle('hidden', !s.with_text);

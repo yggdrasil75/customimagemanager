@@ -46,9 +46,32 @@ def register(host):
                             pane="module", help="Optional OBB/box weights for the pipeline's panel node.")
     host.register_feature("ai.smarttag", "Smart Tag (AI pipeline)", section="ai_tooling",
                           section_label="AI Tooling", default="write")
-    host.add_route("/api/pipeline_tree", lambda: jsonify(
-        {"success": True, "pipeline_tree": host.config.get("pipeline_tree") or DEFAULT_PIPELINE}),
-        feature="settings")
+    from . import graph_engine
+    from flask import request
+
+    def _tree():
+        t = host.config.get("pipeline_tree") or DEFAULT_PIPELINE
+        # ?graph=1: the graph editor wants graph/1; convert a legacy tree on the
+        # fly (saved back only when the user saves).
+        if request.args.get("graph") and not graph_engine.is_graph(t):
+            t = graph_engine.tree_to_graph(t)
+        stages = {n: s["label"] for n, s in host.pipeline_stages.items()}
+        return jsonify({"success": True, "pipeline_tree": t, "catalog": graph_engine.catalog(stages),
+                        "is_graph": graph_engine.is_graph(host.config.get("pipeline_tree") or DEFAULT_PIPELINE)})
+    host.add_route("/api/pipeline_tree", _tree, feature="settings")
+
+    def _meta_fields():
+        """EXIF field names the metadata module knows (for meta_get/meta_set pickers)."""
+        sch = host.get_service("metadata_schema")
+        names = ["tags", "description", "rating", "artist", "event", "persons", "genre"]
+        if sch:
+            try:
+                for g in (sch["exif"]() or {}).get("groups", []):
+                    names += [f["name"] for f in g.get("fields", []) if f.get("name")]
+            except Exception:
+                pass
+        return jsonify({"success": True, "fields": sorted(set(names), key=str.lower)})
+    host.add_route("/api/pipeline_meta_fields", _meta_fields, feature="settings")
     host.add_route("/api/run_pipeline", pc.run_pipeline_route, methods=["POST"], feature="ai.smarttag", level="write")
     host.add_route("/api/bulk_pipeline", pc.bulk_pipeline, methods=["POST"], feature="ai.smarttag", level="write")
     host.add_route("/api/autotag_toggle", pc.autotag_toggle, methods=["POST"], feature="ai.smarttag", level="write", action="autotag_toggle", fields=("enabled",))

@@ -176,7 +176,8 @@ class Host:
         """Inject a static file into the main app page.
 
         filename -- path relative to the module's own static/ folder,
-                    e.g. "hello.js".
+                    e.g. "hello.js"; or an absolute URL path ("/static/vendor/x.js")
+                    for a core-vendored library install.sh fetches.
         kind     -- "js" or "css"; inferred from the extension if omitted.
         The file is served at /modules/<module_id>/static/<filename> by the
         route manager.py mounts, and injected into app.html on load.

@@ -9,6 +9,7 @@ import re
 from flask import request, jsonify
 
 from .engine import DEFAULT_PIPELINE, run_pipeline
+from . import graph_engine
 import common
 
 HOST = None
@@ -66,14 +67,56 @@ def _compose_description(analysis, existing=""):
 # (This is why an open Faces tab could sit at "queued" and never advance.)
 
 def _run_pipeline_on(bgr, fp=None, tree=None, progress=None):
-    """Run the Smart Tag decision tree on one image with every registered hook
+    """Run the Smart Tag pipeline on one image with every registered hook
     wired in (pose / ocr / segment stages from modules, person + panel
-    detectors, LLM endpoints, known context from the file's metadata)."""
-    return run_pipeline(tree or state.get("pipeline_tree") or DEFAULT_PIPELINE, bgr, _llm_call,
-                        pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn(), stage_fns=_module_stage_fns(),
-                        person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn(),
-                        endpoints=_pipeline_endpoints(), progress=progress,
-                        known=_known_context(fp) if fp else None)
+    detectors, LLM endpoints, known context from the file's metadata).
+    A graph/1 config runs on graph_engine; the legacy `next`-chain tree on
+    engine.run_pipeline."""
+    tree = tree or state.get("pipeline_tree") or DEFAULT_PIPELINE
+    hooks = dict(pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn(), stage_fns=_module_stage_fns(),
+                 person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn(),
+                 endpoints=_pipeline_endpoints(), progress=progress,
+                 known=_known_context(fp) if fp else None)
+    if graph_engine.is_graph(tree):
+        return graph_engine.run_graph(tree, bgr, _llm_call, metadata=_metadata_context(fp) if fp else {}, **hooks)
+    return run_pipeline(tree, bgr, _llm_call, **hooks)
+
+
+def _metadata_context(fp):
+    """What the graph's Start.metadata port carries: the sidecar dict (tags,
+    description, regions, rating, analysis, …) plus a flat `exif` map
+    {TagName: raw} from the metadata module, so meta_get can read
+    DateTimeOriginal / Artist / … and the editor can list the names."""
+    meta = dict(read_metadata(fp) or {})
+    exif = {}
+    svc = HOST.get_service("exif") if HOST else None
+    if svc:
+        try:
+            for g in (svc["read"](fp) or {}).get("groups", []):
+                for f in g.get("fields", []):
+                    if f.get("present") and f.get("name"):
+                        exif[f["name"]] = f.get("raw")
+        except Exception as e:
+            access_logger.warning(f"pipeline exif read {fp}: {e}")
+    meta["exif"] = exif
+    return meta
+
+
+def _apply_metadata_patch(fp, patch):
+    """End.metadata wires -> EXIF write through the metadata module (no-op
+    when it is off or the patch is empty)."""
+    if not patch:
+        return
+    svc = HOST.get_service("exif") if HOST else None
+    if not svc:
+        access_logger.warning("pipeline: metadata patch ignored (metadata module off)"); return
+    try:
+        svc["write"](fp, {k: v for k, v in patch.items() if k not in ("tags", "description")})
+        idx = HOST.get_service("metadata_index")
+        if idx:
+            idx["index_file"](_rel(fp), fp)
+    except Exception as e:
+        access_logger.error(f"pipeline metadata patch {fp}: {e}")
 
 def _pose_stage_fn():
     """Pose pipeline stage, or None when the pose module is disabled/absent.
@@ -211,6 +254,7 @@ def _apply_pipeline_result(fp, analysis):
         if people:
             pose = {"kind": "body", "people": people}
     write_metadata(fp, tags, desc, regions, analysis=analysis, pose=pose)
+    _apply_metadata_patch(fp, analysis.get("metadata"))
     return tags, desc, regions
 
 def run_pipeline_route():

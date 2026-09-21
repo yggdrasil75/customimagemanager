@@ -76,6 +76,9 @@ get https://cdn.tailwindcss.com/3.4.17 static/tailwindcss.js
 for f in build/three.min.js examples/js/loaders/OBJLoader.js examples/js/controls/OrbitControls.js; do
     get "https://unpkg.com/three@0.137.5/$f" "static/vendor/$(basename "$f")"
 done
+for f in drawflow.min.js drawflow.min.css; do      # pipeline_graph module (MIT)
+    get "https://unpkg.com/drawflow@0.0.60/dist/$f" "static/vendor/$f"
+done
 
 mkdir -p media data logs models
 venv/bin/python - "$MODE" <<'PY'
