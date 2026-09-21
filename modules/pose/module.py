@@ -246,18 +246,10 @@ def register(host):
     # All three run/store/remove skeletons, so they require WRITE on ai.pose.
     # (ai.pose_remove no longer exists as a separate key — it collapsed into
     # ai.pose's write level.)
-    auth = core.auth
-    host.add_route("/api/pose",
-                   auth.require_feature("ai.pose", level="write")(api_pose),
-                   methods=["POST"])
-    host.add_route("/api/bulk_pose",
-                   auth.require_feature("ai.pose", level="write")(bulk_pose),
-                   methods=["POST"])
-    host.add_route("/api/pose_remove",
-                   auth.require_feature("ai.pose", level="write",
-                                        action="pose_remove",
-                                        fields=("filename",))(api_pose_remove),
-                   methods=["POST"])
+    host.add_route("/api/pose", api_pose, methods=["POST"], feature="ai.pose", level="write")
+    host.add_route("/api/bulk_pose", bulk_pose, methods=["POST"], feature="ai.pose", level="write")
+    host.add_route("/api/pose_remove", api_pose_remove, methods=["POST"], feature="ai.pose",
+                   level="write", action="pose_remove", fields=("filename",))
 
     host.logger.info("pose module: registered /api/pose, /api/bulk_pose, "
                      "/api/pose_remove")

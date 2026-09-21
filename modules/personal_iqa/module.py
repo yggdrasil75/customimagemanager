@@ -365,8 +365,7 @@ def register(host):
                         "text": state["text"], "torch": _HAVE_TORCH})
 
     host.add_route("/api/personal_iqa/status", api_status)
-    host.add_route("/api/personal_iqa/train",
-                   core.auth.require_feature("ai.iqa", level="write")(api_train), methods=["POST"])
+    host.add_route("/api/personal_iqa/train", api_train, methods=["POST"], feature="ai.iqa", level="write")
     def _file_deleted(rel_path):
         db = host.db()
         try:

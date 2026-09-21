@@ -3226,6 +3226,7 @@ def api_metadata_write():
     return writer(kind, data.get("filename", ""), data.get("patch") or {})
 
 @app.route("/api/exif/history", methods=["POST"])
+@_auth.require_feature("meta.exif")
 def api_exif_history():
     """Return a file's edit changelog (oldest first) for display / the undo UI."""
     data = request.get_json(force=True, silent=True) or {}
@@ -3238,6 +3239,7 @@ def api_exif_history():
                     "history": _history_entries(rel, include_undone)})
 
 @app.route("/api/exif/undo", methods=["POST"])
+@_auth.require_feature("meta.exif", level="write", action="exif_undo", fields=("filename",))
 def api_exif_undo():
     """Undo the most recent EXIF edit on a file (ctrl+z): revert the changed tag
     to its previous value on disk and in the DB, and refresh ImageHistory."""
@@ -3252,6 +3254,7 @@ def api_exif_undo():
     return _apply_history_step(fp, rel, entry, "old")
 
 @app.route("/api/exif/redo", methods=["POST"])
+@_auth.require_feature("meta.exif", level="write", action="exif_redo", fields=("filename",))
 def api_exif_redo():
     """Redo the most recently undone EXIF edit: re-apply the tag's new value."""
     data = request.get_json(force=True, silent=True) or {}
@@ -3303,6 +3306,7 @@ def _apply_history_step(fp, rel, entry, which):
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route("/api/raw/info", methods=["POST"])
+@_auth.require_feature("tab.gallery")
 def api_raw_info():
     """Report whether a library image has a stored original raw, and its details
     (so the UI can show an 'Open raw' button). Returns has_raw + uid/orig_name."""
@@ -3318,6 +3322,7 @@ def api_raw_info():
                     "orig_name": row["orig_name"] if row else None})
 
 @app.route("/api/raw/open/<uid>")
+@_auth.require_feature("tab.gallery")
 def api_raw_open(uid):
     """Serve the stored original raw for a given RawDataUniqueID, so a button can
     open it. The raw lives in the hidden store; this is the only way to reach it
@@ -3334,6 +3339,7 @@ def api_raw_open(uid):
                      download_name=row["orig_name"] or os.path.basename(abs_path))
 
 @app.route("/api/raw/keep", methods=["POST"])
+@_auth.require_feature("settings", level="write", action="raw_keep", fields=("enabled",))
 def api_raw_keep():
     """Get or set the keep_raws option (store uploaded camera raws hidden)."""
     if request.method == "POST" and request.json is not None and "enabled" in (request.json or {}):
@@ -3466,6 +3472,7 @@ def api_models():
     return jsonify({"capabilities": _models_payload()})
 
 @app.route("/api/models/classes")
+@_auth.require_feature("settings")
 def api_models_classes():
     """Class names the selected provider for ?capability= emits (may load the
     weights on first call), for the background-run whitelist."""
@@ -3576,6 +3583,7 @@ def branding_logo():
     return ("", 404)
 
 @app.route("/api/folders")
+@_auth.require_feature("tab.gallery")
 def api_folders():
     where = (" WHERE " + " AND ".join(module_host.gallery_filters)) if module_host.gallery_filters else ""
     rows = _db().execute(f"SELECT rel_path FROM files{where}").fetchall()
@@ -3587,6 +3595,7 @@ def api_folders():
     return jsonify({"success": True, "folders": folders})
 
 @app.route("/api/list")
+@_auth.require_feature("tab.gallery")
 def api_list():
     search = request.args.get("q","").strip()
     folder = request.args.get("folder","").strip()
@@ -3673,6 +3682,7 @@ def _semantic_list(query, offset, limit, folder='', album=''):
 # cached in the DB, so everything here writes through to the sidecars.
 
 @app.route("/api/albums")
+@_auth.require_feature("tab.albums")
 def api_albums():
     """List every album with a member count and a cover thumbnail."""
     return jsonify({"success": True, "albums": _album_list()})
@@ -3781,6 +3791,7 @@ def api_album_set_cover():
     return jsonify({"success": True})
 
 @app.route("/api/albums/of", methods=["POST"])
+@_auth.require_feature("tab.albums")
 def api_albums_of():
     """Which albums is this file in? Powers the per-image album chips."""
     d = request.json or {}
@@ -4703,6 +4714,7 @@ def api_upload_clean():
     return jsonify({"success": True, "result": _janitor_sweep()})
 
 @app.route("/api/upload/queue")
+@_auth.require_feature("data.upload")
 def api_upload_queue_status():
     """Queue depth by status — lets the Pis or an admin see backlog/health."""
     db = _db()
@@ -4736,6 +4748,7 @@ def api_upload_queue_status():
                     "jobs": err_out})
 
 @app.route("/api/upload/retry", methods=["POST"])
+@_auth.require_feature("data.upload", level="write", action="upload_retry", fields=("id",))
 def api_upload_retry():
     """Requeue errored jobs whose spooled original still exists. Pass {"id": N}
     for one job, or nothing to retry every recoverable errored job. Jobs whose
@@ -4767,6 +4780,7 @@ def api_upload_retry():
                     "unrecoverable": unrecoverable})
 
 @app.route("/api/upload/discard", methods=["POST"])
+@_auth.require_feature("data.upload", level="write", action="upload_discard", fields=("id",))
 def api_upload_discard():
     """Intentionally drop a parked-error job and its spooled bytes. Explicit,
     never automatic — the only sanctioned way an errored original is deleted."""
@@ -4856,6 +4870,7 @@ def _client_supports_jxl() -> bool:
     return 'image/jxl' in (request.headers.get('Accept') or '')
 
 @app.route("/api/file/<path:filename>")
+@_auth.require_feature("tab.gallery")
 def api_file(filename):
     fp = get_safe_path(MEDIA_DIR, filename)
     if not fp:
@@ -4895,6 +4910,7 @@ def api_client_log():
     return jsonify({"success": True})
 
 @app.route("/api/thumb/<path:filename>")
+@_auth.require_feature("tab.gallery")
 def api_thumb(filename):
     fp = get_safe_path(MEDIA_DIR, filename)
     if not fp: return "",404
@@ -4917,6 +4933,7 @@ def _jxl_duration_s(fp):
     return None
 
 @app.route("/api/is_animated/<path:filename>")
+@_auth.require_feature("tab.gallery")
 def api_is_animated(filename):
     """Report whether a stored asset is animated, plus its duration and whether
     it should be treated as a video (>30s), so the viewer can route it to a
@@ -4938,6 +4955,7 @@ def api_is_animated(filename):
     })
 
 @app.route("/api/jxl_frames/<path:filename>")
+@_auth.require_feature("tab.gallery")
 def api_jxl_frames(filename):
     """Return the boxable keyframe strip for an animated JXL: a list of frames
     (index + normalised time t in [0,1]) plus a JPEG for each, so the viewer can
@@ -4978,6 +4996,7 @@ def api_jxl_frames(filename):
     return jsonify({"success": True, "n_frames": n, "frames": out_frames})
 
 @app.route("/api/jxl_track/<path:filename>", methods=["POST"])
+@_auth.require_feature("ai.autotag", level="write")
 def api_jxl_track(filename):
     """Track every user-defined box across the keyframe strip of an animated JXL.
 
@@ -5071,6 +5090,7 @@ def api_jxl_track(filename):
     return jsonify({"success": True, "tracks": out})
 
 @app.route("/api/crop")
+@_auth.require_feature("tab.gallery")
 def api_crop():
     """Serve a cropped, downscaled JPEG of one normalised box within an image.
     Query: file, cx, cy, w, h (all normalised). Used by the object-grouping UI to
@@ -5104,6 +5124,7 @@ def api_crop():
         return "", 500
 
 @app.route("/api/video_tracks/<path:filename>", methods=["GET"])
+@_auth.require_feature("annot.boxes")
 def api_video_tracks_get(filename):
     """Return the time-indexed bounding-box tracks for a video. Optional ?t=<sec>
     also returns the interpolated boxes visible at that instant (handy for the
@@ -5122,6 +5143,7 @@ def api_video_tracks_get(filename):
     return jsonify(resp)
 
 @app.route("/api/video_tracks/<path:filename>", methods=["POST"])
+@_auth.require_feature("annot.boxes", level="write", action="video_tracks_set")
 def api_video_tracks_set(filename):
     """Persist the tracks document for a video (whole-document replace). The video
     file is never touched — only the .tracks.json sidecar."""
@@ -5154,6 +5176,7 @@ def api_video_tracks_set(filename):
     return jsonify({"success": True, "tracks": saved["tracks"], "labels": lbls})
 
 @app.route("/api/video_detect/<path:filename>", methods=["POST"])
+@_auth.require_feature("ai.autotag", level="write")
 def api_video_detect(filename):
     """Sample frames across a video, run the existing COCO YOLO detector on each,
     and associate detections into tracks (greedy IoU matching per class). Returns
@@ -5307,6 +5330,7 @@ def _fast_metadata(fn, fp):
     }
 
 @app.route("/api/metadata", methods=["POST"])
+@_auth.require_feature("tab.gallery")
 def api_metadata():
     d  = request.json
     fn = d.get("filename","")
@@ -5338,9 +5362,11 @@ def api_metadata():
         return jsonify({"success":True,"metadata":meta})
     elif d.get("action")=="write":
         u = g.get("user") or {}
-        feats = {} if u.get("is_admin") else (u.get("features") or {})
         def _denied(key):
-            return feats.get(key) is False
+            return not u.get("is_admin") and not features.has_level(
+                u.get("features") or {}, key, "write")
+        if all(_denied(k) for k in ("annot.description", "annot.tags", "annot.boxes")):
+            return jsonify({"error": "feature not permitted"}), 403
         tags = d.get("tags", [])
         desc = d.get("description", "")
         regions = d.get("regions", [])
@@ -5358,6 +5384,7 @@ def api_metadata():
 
 # ── Tiered storage ───────────────────────────────────────────────────────────
 @app.route("/api/tiers", methods=["GET"])
+@_auth.require_feature("settings.tiers")
 def api_tiers_get():
     return jsonify({"success": True, "config": tiering.load_cfg()})
 
@@ -5371,15 +5398,18 @@ def api_tiers_set():
         return jsonify({"success": False, "error": str(e)}), 400
 
 @app.route("/api/tiers/status")
+@_auth.require_feature("settings.tiers")
 def api_tiers_status():
     return jsonify({"success": True, **tiering.status()})
 
 @app.route("/api/tiers/rebalance", methods=["POST"])
+@_auth.require_feature("settings.tiers", level="write", action="tiers_rebalance")
 def api_tiers_rebalance():
     tiering.rebalance(block=False)
     return jsonify({"success": True})
 
 @app.route("/api/tiers/cancel", methods=["POST"])
+@_auth.require_feature("settings.tiers", level="write", action="tiers_cancel")
 def api_tiers_cancel():
     tiering._state["run"]["cancel"] = True
     return jsonify({"success": True})
@@ -5449,6 +5479,7 @@ def api_tag_review():
                     "remaining_unconfirmed_tags": count_unconfirmed_tags(out)})
 
 @app.route("/api/confirm_all_tags", methods=["POST"])
+@_auth.require_feature("annot.tags", level="write", action="confirm_all_tags", fields=("filename",))
 def api_confirm_all_tags():
     """Mark every tag on a file as confirmed (accept all AI tag suggestions)."""
     fn = (request.json or {}).get("filename", "")
@@ -5543,6 +5574,7 @@ def api_audit_log():
     return jsonify({"lines": [l.rstrip("\n") for l in tail]})
 
 @app.route("/api/review_list")
+@_auth.require_feature("tab.review")
 def review_list():
     """Images with pending AI suggestions: a deletion flag and/or unconfirmed boxes.
 
@@ -5617,6 +5649,7 @@ def review_list():
                     "offset": offset, "limit": limit, "returned": len(items)})
 
 @app.route("/api/flag", methods=["POST"])
+@_auth.require_feature("tab.review", level="write", action="flag", fields=("filename", "delete"))
 def api_flag():
     """Manually set or clear the deletion flag on a file."""
     fn = request.json.get("filename", "")
@@ -5684,6 +5717,7 @@ def api_review_boxes():
                     "remaining_unconfirmed": remaining})
 
 @app.route("/api/confirm_all", methods=["POST"])
+@_auth.require_feature("annot.boxes", level="write", action="confirm_all_boxes", fields=("filename",))
 def api_confirm_all():
     """Mark every region on a file as confirmed (accept all AI boxes)."""
     fn = request.json.get("filename", "")

@@ -24,23 +24,6 @@ from . import training_validate as tv
 from . import training_augment as ta
 import common
 
-_ROUTES = []
-
-
-def _route(rule, **opts):
-    def deco(fn):
-        _ROUTES.append((rule, fn, opts))
-        return fn
-    return deco
-
-
-def _feature(*a, **k):
-    def deco(fn):
-        fn._feature = (a, k)
-        return fn
-    return deco
-
-
 HOST = None
 _db = state = MEDIA_DIR = MODELS_DIR = get_safe_path = read_jxl = read_metadata = None
 write_metadata = access_logger = training_logger = populate_model_selector = None
@@ -150,23 +133,25 @@ def remote_yolo_train_worker(abs_folder: str, dataset_dir: str, config: dict,
                              remote_ip: str) -> None:
     """! @brief Zip the dataset, run YOLO training on a remote host, and fetch the weights back."""
     zip_p = os.path.join(abs_folder,"yolo_dataset.zip")
+    hdr = {"X-Worker-Token": os.environ.get("CIM_WORKER_TOKEN", "")}
     try:
         state["status_text"] = f"Zipping → {remote_ip}…"
         shutil.make_archive(zip_p.replace('.zip',''),'zip',dataset_dir)
         with open(zip_p,'rb') as f:
             res = requests.post(f"http://{remote_ip}/api/start_train",
-                                files={'dataset':f},data={'config':json.dumps(config)},timeout=30)
+                                files={'dataset':f},data={'config':json.dumps(config)},
+                                headers=hdr,timeout=30)
         if res.status_code!=200: raise Exception(res.text)
         job_id = res.json()['job_id']
         state["status_text"] = f"Remote job {job_id}"
         while True:
             time.sleep(3)
-            s = requests.get(f"http://{remote_ip}/api/status/{job_id}",timeout=10).json()
+            s = requests.get(f"http://{remote_ip}/api/status/{job_id}",headers=hdr,timeout=10).json()
             if s.get('log'):
                 with open("logs/training.log","w") as lf: lf.write(s['log'])
             if s.get('status') in ('completed','failed'): break
         if s.get('status')=='completed':
-            dl = requests.get(f"http://{remote_ip}/api/download/{job_id}",timeout=60)
+            dl = requests.get(f"http://{remote_ip}/api/download/{job_id}",headers=hdr,timeout=60)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             td = os.path.join(os.path.abspath(MODELS_DIR),f"runs/detect/train_remote_{ts}/weights")
             os.makedirs(td,exist_ok=True)
@@ -288,8 +273,6 @@ def _sel_paths_to_entries(rel_paths):
     return out
 
 
-@_route("/api/trainer/devices")
-@_feature("ai.trainer", level="write")
 def trainer_devices():
     """Report the compute devices torch can see, so the UI never offers a GPU
     index or an MPS option that doesn't exist on this machine. Backed by the
@@ -298,14 +281,10 @@ def trainer_devices():
     return jsonify({"success": True, "devices": model_registry.available_devices()})
 
 
-@_route("/api/trainer/sets")
-@_feature("ai.trainer", level="write")
 def trainer_sets():
     return jsonify({"success": True, "sets": ts.list_sets(_db())})
 
 
-@_route("/api/trainer/set", methods=["GET"])
-@_feature("ai.trainer", level="write")
 def trainer_set_members():
     name = (request.args.get("set", "") or "").strip()
     if not name:
@@ -317,8 +296,6 @@ def trainer_set_members():
                     "gallery_safe": meta.get("gallery_safe", False), "files": files})
 
 
-@_route("/api/trainer/set", methods=["DELETE"])
-@_feature("ai.trainer.keep", level="write", action="trainer_set_delete", fields=("set",))
 def trainer_set_delete():
     name = (request.args.get("set", "") or (request.json or {}).get("set", "")).strip()
     if not name:
@@ -328,8 +305,6 @@ def trainer_set_delete():
     return jsonify({"success": True})
 
 
-@_route("/api/trainer/gallery_safe", methods=["POST"])
-@_feature("ai.trainer.keep", level="write", action="trainer_gallery_safe", fields=("set",))
 def trainer_gallery_safe():
     d = request.json or {}
     name = (d.get("set") or "").strip()
@@ -339,14 +314,10 @@ def trainer_gallery_safe():
     return jsonify({"success": True, "gallery_safe": bool(d.get("gallery_safe"))})
 
 
-@_route("/api/trainer/presets", methods=["GET"])
-@_feature("ai.trainer", level="write")
 def trainer_presets_list():
     return jsonify({"success": True, "presets": ts.list_presets(_db())})
 
 
-@_route("/api/trainer/presets", methods=["POST"])
-@_feature("ai.trainer", level="write", action="trainer_preset_save", fields=("name",))
 def trainer_preset_save():
     d = request.json or {}
     name = (d.get("name") or "").strip()
@@ -362,8 +333,6 @@ def trainer_preset_save():
     return jsonify({"success": True, "name": name})
 
 
-@_route("/api/trainer/presets", methods=["DELETE"])
-@_feature("ai.trainer", level="write", action="trainer_preset_delete", fields=("name",))
 def trainer_preset_delete():
     name = (request.args.get("name", "") or (request.json or {}).get("name", "")).strip()
     if not name:
@@ -372,8 +341,6 @@ def trainer_preset_delete():
     return jsonify({"success": True})
 
 
-@_route("/api/trainer/checked", methods=["POST"])
-@_feature("ai.trainer", level="write", action="trainer_checked", fields=("set",))
 def trainer_checked():
     d = request.json or {}
     name = (d.get("set") or "").strip()
@@ -390,9 +357,6 @@ def trainer_checked():
     return jsonify({"success": True})
 
 
-@_route("/api/trainer/select", methods=["POST"])
-@_feature("ai.trainer.select", level="write", action="trainer_select",
-                       fields=("strategy", "n"))
 def trainer_select():
     """Pick N images by strategy, COPY each into the set's isolated input folder
     (media/.training_sets/<set>/input/), and store both source and work paths.
@@ -430,8 +394,6 @@ def trainer_select():
                     "count": len(picks), "files": _member_entries(name)})
 
 
-@_route("/api/trainer/keep", methods=["POST"])
-@_feature("ai.trainer.keep", level="write", action="trainer_keep", fields=("set",))
 def trainer_keep():
     """Add rel_paths to an existing set (used when editing a set during review)."""
     d = request.json or {}
@@ -443,8 +405,6 @@ def trainer_keep():
     return jsonify({"success": True, "added": len(paths), "count": total})
 
 
-@_route("/api/trainer/clear", methods=["POST"])
-@_feature("ai.trainer.keep", level="write", action="trainer_clear", fields=("set",))
 def trainer_clear():
     """Empty a set. Never touches the gallery/library."""
     d = request.json or {}
@@ -455,8 +415,6 @@ def trainer_clear():
     return jsonify({"success": True})
 
 
-@_route("/api/trainer/remove", methods=["POST"])
-@_feature("ai.trainer.keep", level="write", action="trainer_remove", fields=("set",))
 def trainer_remove():
     """Drop specific rel_paths from a set (does not touch gallery)."""
     d = request.json or {}
@@ -468,8 +426,6 @@ def trainer_remove():
     return jsonify({"success": True, "removed": len(paths)})
 
 
-@_route("/api/trainer/labels")
-@_feature("ai.trainer", level="write")
 def trainer_labels():
     """Label suggestions for the trainer box editor: the global box-label pool
     plus any class names already used on the given set's members."""
@@ -492,8 +448,6 @@ def trainer_labels():
     return jsonify({"success": True, "labels": sorted(labels)})
 
 
-@_route("/api/trainer/boxes", methods=["POST"])
-@_feature("ai.trainer", level="write", action="trainer_boxes", fields=("filename",))
 def trainer_boxes():
     """Read or write boxes for one trainer-set member.
 
@@ -538,9 +492,6 @@ def trainer_boxes():
     return jsonify({"success": False, "error": f"unknown action {action!r}"}), 400
 
 
-
-@_route("/api/trainer/validate", methods=["POST"])
-@_feature("ai.trainer.run", level="write", action="trainer_validate", fields=("set",))
 def trainer_validate():
     """Run the set's trained model over its members, diff predictions against the
     stored ground-truth boxes, and report per-image and aggregate accuracy."""
@@ -638,8 +589,6 @@ def trainer_validate():
                     "added_new": added_new, "images": results})
 
 
-@_route("/api/trainer/apply_prediction", methods=["POST"])
-@_feature("ai.trainer.keep", level="write", action="trainer_apply_pred", fields=("filename",))
 def trainer_apply_prediction():
     d = request.json or {}
     fn = (d.get("filename") or "").strip()
@@ -666,8 +615,6 @@ def trainer_apply_prediction():
                     "preserved": len(preserved), "replaced_scope": sorted(scope_set)})
 
 
-@_route("/api/train", methods=["POST"])
-@_feature("ai.trainer.run", level="write", action="trainer_train", fields=("set",))
 def train():
     d          = request.json or {}
     set_name   = (d.get("set") or "").strip()
@@ -921,7 +868,6 @@ def train():
                     "weights": weights,
                     "train": len(tr_b), "val": len(val_b)})
 
-@_route("/api/training_log")
 def get_training_log():
     if not os.path.exists('logs/training.log'):
         return jsonify({"log":"Awaiting start…"})

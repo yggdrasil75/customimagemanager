@@ -48,7 +48,8 @@ class Host:
                             plus host.register_media_type() for new kinds.
 
     Contribution helpers (recorded, wired by manager.py):
-        host.add_route(rule, view, **opts)          register a Flask route
+        host.add_route(rule, view, feature=, level=, **opts)  register a (gated) Flask route
+        @host.route(rule, feature=, level=, **opts)  decorator form of add_route
         host.add_asset(module_id, filename, kind)   inject a JS/CSS file
         host.add_settings_tab(id, label, ...)       add a settings modal tab
         host.add_worker_source(name, claim, handle) register a thread source
@@ -139,17 +140,36 @@ class Host:
         self._current_module = None
 
     # ── route registration ──────────────────────────────────────────────
-    def add_route(self, rule, view_func, **options):
+    def add_route(self, rule, view_func, *, feature=None, level="read",
+                  action=None, fields=(), **options):
         """Register a Flask route. Thin pass-through to app.add_url_rule.
 
+        feature -- auth feature key to gate on (see require_feature). level
+                   defaults to "read"; pass level="write" for mutations. action
+                   and fields feed the audit log. No feature = login-only.
         endpoint defaults to a module-namespaced name so two modules can
         both define a view called `list` without colliding.
         """
+        if feature:
+            view_func = self.require_feature(feature, action=action,
+                                             fields=fields, level=level)(view_func)
         endpoint = options.pop("endpoint", None)
         if endpoint is None:
             mod = self._current_module or "mod"
             endpoint = f"module_{mod}_{view_func.__name__}"
         self.app.add_url_rule(rule, endpoint, view_func, **options)
+
+    def route(self, rule, **options):
+        """Decorator form of add_route — use instead of @host.app.route so the
+        gate is declared next to the view:
+
+            @host.route("/api/thing", methods=["POST"], feature="tab.thing", level="write")
+            def api_thing(): ...
+        """
+        def deco(fn):
+            self.add_route(rule, fn, **options)
+            return fn
+        return deco
 
     # ── front-end assets ─────────────────────────────────────────────────
     def add_asset(self, filename, kind=None, module_id=None):

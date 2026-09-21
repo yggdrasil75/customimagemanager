@@ -75,10 +75,9 @@ def register(host):
     def api_stop():
         return jsonify({"success": True, "was_running": bd.stop()})
 
-    guard = host.core.auth.require_feature("tab.dedup_train")
-    host.add_route("/api/dedup_train/status", guard(api_status))
-    host.add_route("/api/dedup_train/build", guard(api_build), methods=["POST"])
-    host.add_route("/api/dedup_train/stop", guard(api_stop), methods=["POST"])
+    host.add_route("/api/dedup_train/status", api_status, feature="tab.dedup_train")
+    host.add_route("/api/dedup_train/build", api_build, methods=["POST"], feature="tab.dedup_train")
+    host.add_route("/api/dedup_train/stop", api_stop, methods=["POST"], feature="tab.dedup_train")
     host.add_asset("dedup_train.js")
     host.register_left_pane("dedup_train_pane.html")
     host.logger.info("dedup_train: registered (tab + build routes)")

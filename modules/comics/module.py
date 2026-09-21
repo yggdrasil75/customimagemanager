@@ -64,10 +64,14 @@ def register(host):
                        ("comics.delete", "Delete comic")):
         host.register_feature(key, label, section="comics", section_label="Comics", default="write",
                               role_defaults={"viewer": "block"})
-    for rule, fn, opts in cc._ROUTES:
-        feat = getattr(fn, "_feature", None)
-        view = host.core.auth.require_feature(*feat[0], **feat[1])(fn) if feat else fn
-        host.add_route(rule, view, **opts)
+    host.add_route("/api/comic", cc.api_comic_get)
+    host.add_route("/api/comic_create", cc.api_comic_create, methods=["POST"], feature="comics.make", level="write", action='comic_create', fields=('folder', 'title'))
+    host.add_route("/api/comic_update", cc.api_comic_update, methods=["POST"], feature="comics.edit", level="write", action='comic_update', fields=('folder', 'title'))
+    host.add_route("/api/comic_delete", cc.api_comic_delete, methods=["POST"], feature="comics.delete", level="write", action='comic_delete', fields=('folder',))
+    host.add_route("/api/comic_pipeline", cc.comic_pipeline_route, methods=["POST"], feature="ai.smarttag", level="write")
+    host.add_route("/api/comics/schema", cc.api_comics_schema)
+    host.add_route("/api/comics/open", cc.api_comics_open)
+    host.add_route("/api/comics/write", cc.api_comics_write, methods=["POST"], feature="comics.edit", level="write", action="comic_meta", fields=("target",))
     host.add_asset("comic.js")
     host.register_centre_pane("comic_pane.html")
     host.register_controls_pane("comic", "comic_editor.html", feature="comics.edit")

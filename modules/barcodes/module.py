@@ -126,7 +126,5 @@ def register(host):
         return jsonify({"success": True, "regions": _scan.to_regions(res),
                         "summary": _scan.summary_text(res), **res})
 
-    host.add_route("/api/barcodes",
-                   host.require_feature("ai.barcodes", level="write")(api_barcodes),
-                   methods=["POST"])
+    host.add_route("/api/barcodes", api_barcodes, methods=["POST"], feature="ai.barcodes", level="write")
     host.logger.info("barcodes module: registered /api/barcodes")

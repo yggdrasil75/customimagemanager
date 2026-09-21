@@ -50,7 +50,6 @@ def register(host):
                           section="gallery_tabs", section_label="Gallery tabs", default="read")
     host.add_asset("music.js")
     host.register_left_pane("music_pane.html")
-    require = host.core.auth.require_feature
 
     # progress shared with the UI
     state = {"indexing": False, "indexed": 0, "total": 0,
@@ -313,9 +312,8 @@ def register(host):
                 by_path[r["rel_path"]] = row_dict(r)
         return jsonify({"success": True, "songs": [by_path[p] for p in order if p in by_path]})
 
-    R = require("tab.music")                       # read
-    W = require("tab.music", level="write")
-    for rule, fn, methods, gate in (
+    R, W = "read", "write"
+    for rule, fn, methods, level in (
         ("/api/music/status", status, ["GET"], R), ("/api/music/reindex", reindex, ["POST"], W),
         ("/api/music/embed", embed, ["POST"], W), ("/api/music/cluster", cluster, ["POST"], W),
         ("/api/music/clusterlist", clusterlist, ["GET"], R), ("/api/music/artists", artists, ["GET"], R),
@@ -323,7 +321,7 @@ def register(host):
         ("/api/music/meta", meta, ["POST"], W), ("/api/music/stream/<path:filename>", stream, ["GET"], R),
         ("/api/music/shuffle", shuffle, ["POST"], R),
     ):
-        host.add_route(rule, gate(fn), methods=methods)
+        host.add_route(rule, fn, methods=methods, feature="tab.music", level=level)
 
     host.provide_service("music", {"index_all": index_all, "upsert": upsert, "state": state})
     log.info("music module: audio kind, tables, /api/music/*, Music tab registered")

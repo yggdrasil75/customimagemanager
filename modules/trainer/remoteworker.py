@@ -12,6 +12,18 @@ app = Flask(__name__)
 WORKSPACE = os.path.abspath("worker_workspace")
 os.makedirs(WORKSPACE, exist_ok=True)
 
+# Shared secret: the worker listens on 0.0.0.0 and runs arbitrary training
+# jobs, so refuse everything unless the caller presents CIM_WORKER_TOKEN
+# (the main app sends it from the same env var).
+TOKEN = os.environ.get("CIM_WORKER_TOKEN", "")
+
+@app.before_request
+def _require_token():
+    if not TOKEN:
+        return jsonify({"error": "CIM_WORKER_TOKEN not set on worker"}), 503
+    if request.headers.get("X-Worker-Token", "") != TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+
 jobs = {}
 
 def yolo_train_thread(job_id, dataset_path, config):
@@ -122,6 +134,12 @@ def start_train():
     zip_file.save(zip_path)
     
     dataset_path = os.path.join(job_dir, "dataset")
+    # Zip-slip guard: refuse archives with entries that would land outside dataset_path.
+    import zipfile
+    with zipfile.ZipFile(zip_path) as zf:
+        for n in zf.namelist():
+            if not os.path.abspath(os.path.join(dataset_path, n)).startswith(dataset_path + os.sep):
+                return jsonify({"error": "bad archive entry"}), 400
     shutil.unpack_archive(zip_path, extract_dir=dataset_path)
     
     config = json.loads(request.form['config'])

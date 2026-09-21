@@ -7,6 +7,7 @@ Configuration lives in app_config.json under "auth": enabled, mode
 """
 
 import json
+import re
 import time
 import secrets
 import functools
@@ -28,6 +29,12 @@ if not log.handlers:
 log.setLevel(logging.INFO)
 
 COOKIE_NAME = "cim_session"
+# Usernames reach LDAP DN templates and search filters via .format(); a strict
+# allowlist is the whole injection defence (and what local names look like).
+_USERNAME_RE = re.compile(r"^[\w.@+-]{1,128}$")
+# Login brute-force throttle: (ip, username) -> [fail_count, first_fail_ts]
+_LOGIN_FAILS = {}
+_LOGIN_MAX, _LOGIN_WINDOW = 10, 900
 _UNSET = object()
 
 def require_feature(feature_key, action=None, fields=(), level="read"):
@@ -64,6 +71,7 @@ def require_feature(feature_key, action=None, fields=(), level="read"):
                 except Exception:
                     pass
             return resp
+        wrap._cim_gate = (feature_key, level)
         return wrap
     return deco
 
@@ -72,6 +80,7 @@ _PUBLIC_PATHS = {
     "/api/auth/config",   # exposes only which modes are enabled (no secrets)
     "/login",
     "/favicon.ico",
+    "/tailwind",          # the login page loads it
 }
 _PUBLIC_PREFIXES = ("/static/",)
 
@@ -246,8 +255,8 @@ class Auth:
                           display_name=None, email=None, role=None,
                           group_id=None, perms=None):
         username = (username or "").strip()
-        if not username:
-            raise ValueError("username required")
+        if not _USERNAME_RE.match(username):
+            raise ValueError("invalid username")
         if not password:
             raise ValueError("password required")
         if role is None:
@@ -357,7 +366,7 @@ class Auth:
         """@brief Return a user Row on success, else None. Honors the configured mode."""
         mode = self.cfg().get("mode", "local")
         username = (username or "").strip()
-        if not username or password is None:
+        if not _USERNAME_RE.match(username) or password is None:
             return None
 
         if mode in ("ldap", "both"):
@@ -589,6 +598,13 @@ class Auth:
         app = self.app
         app.before_request(self._gate)
 
+        @app.after_request
+        def _headers(resp):
+            resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+            resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+            resp.headers.setdefault("Referrer-Policy", "same-origin")
+            return resp
+
         @app.route("/login")
         def _login_page():
             return render_template("login.html")
@@ -605,8 +621,15 @@ class Auth:
         @app.route("/api/auth/login", methods=["POST"])
         def _login():
             data = request.get_json(silent=True) or {}
-            username = data.get("username", "")
-            password = data.get("password", "")
+            username = str(data.get("username", ""))[:128]
+            password = str(data.get("password", ""))[:1024]
+
+            key = (request.remote_addr, username.lower())
+            fails = _LOGIN_FAILS.get(key)
+            if fails and time.time() - fails[1] > _LOGIN_WINDOW:
+                _LOGIN_FAILS.pop(key, None); fails = None
+            if fails and fails[0] >= _LOGIN_MAX:
+                return jsonify({"error": "too many failed attempts, try later"}), 429
 
             if (self.enabled() and self.user_count() == 0
                     and self.cfg().get("mode") in ("local", "both")):
@@ -618,14 +641,19 @@ class Auth:
 
             u = self.authenticate(username, password)
             if not u:
+                f = _LOGIN_FAILS.setdefault(key, [0, time.time()])
+                f[0] += 1
+                audit("login_failed", f"user={username!r} ip={request.remote_addr}")
                 return jsonify({"error": "invalid credentials"}), 401
+            _LOGIN_FAILS.pop(key, None)
             token, csrf = self._new_session(u["id"])
             resp = jsonify({
                 "ok": True,
                 "user": self._row_to_user(u),
                 "csrf": csrf,
             })
-            secure = request.is_secure
+            secure = (request.is_secure or
+                      request.headers.get("X-Forwarded-Proto", "").lower() == "https")
             resp.set_cookie(
                 COOKIE_NAME, token, httponly=True, samesite="Lax",
                 secure=secure, max_age=self.cfg().get("session_days", 14) * 86400)
@@ -664,6 +692,10 @@ class Auth:
             if not new:
                 return jsonify({"error": "new password required"}), 400
             self.set_password(g.user["id"], new)
+            # Drop every other session for this user; keep the current one.
+            self._db().execute("DELETE FROM auth_sessions WHERE user_id=? AND token<>?",
+                               (g.user["id"], g.session["token"]))
+            self._db().commit()
             return jsonify({"ok": True})
 
         def require_admin(fn):
@@ -672,6 +704,7 @@ class Auth:
                 if not g.get("user") or not g.user.get("is_admin"):
                     return jsonify({"error": "admin required"}), 403
                 return fn(*a, **k)
+            wrap._cim_gate = ("admin", "write")
             return wrap
 
         @app.route("/api/auth/users")
@@ -685,6 +718,8 @@ class Auth:
         @require_admin
         def _create_user():
             d = request.get_json(silent=True) or {}
+            if d.get("role") is not None and d["role"] not in features.ROLE_DEFAULT_LEVEL:
+                return jsonify({"error": "unknown role"}), 400
             try:
                 u = self.create_local_user(
                     d.get("username"), d.get("password"),
@@ -711,13 +746,18 @@ class Auth:
                 if len(admins) <= 1 and admins and admins[0]["id"] == uid:
                     return jsonify({"error": "cannot demote/disable the last "
                                     "active admin"}), 400
+            if d.get("role") is not None and d["role"] not in features.ROLE_DEFAULT_LEVEL:
+                return jsonify({"error": "unknown role"}), 400
             kw = dict(is_admin=d.get("is_admin"), disabled=d.get("disabled"),
                       display_name=d.get("display_name"), email=d.get("email"),
                       role=d.get("role"), perms=d.get("perms"))
             if "group_id" in d:
                 kw["group_id"] = d.get("group_id")
             self.update_user(uid, **kw)
-            if d.get("disabled") is True:
+            # Any permission change invalidates cached sessions' assumptions only
+            # loosely (perms are re-read per request), but disabling or demoting
+            # must kick the user out now.
+            if d.get("disabled") is True or d.get("is_admin") is False:
                 self.revoke_user_sessions(uid)
             return jsonify({"ok": True})
 

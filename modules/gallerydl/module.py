@@ -183,7 +183,6 @@ def register(host):
 
     # ── gallery-dl-specific config endpoints ─────────────────────────────
     m = host.core
-    auth = m.auth
 
     def api_available():
         return jsonify({"available": gdl.available()})
@@ -307,21 +306,15 @@ def register(host):
                         "xmp_groups": xmp_groups})
 
     host.register_app_modal("gdl_modal.html")
-    host.add_route("/api/gdl/site",
-                   auth.require_feature("fetch", level="write")(api_site),
-                   methods=["POST"], endpoint="gdl_site")
-    host.add_route("/api/gdl/sites",
-                   auth.require_feature("fetch", level="write")(api_sites),
-                   methods=["GET", "POST"], endpoint="gdl_sites")
-    host.add_route("/api/gdl/targets", auth.require_feature("fetch")(api_targets),
-                   endpoint="gdl_targets")
-    host.add_route("/api/gdl/available", auth.require_feature("fetch")(api_available),
-                   endpoint="gdl_available")
-    host.add_route("/api/gdl/fields",
-                   auth.require_feature("fetch", level="write")(api_fields),
-                   methods=["POST"], endpoint="gdl_fields")
-    host.add_route("/api/gdl/config",
-                   auth.require_feature("fetch", level="write")(api_config),
-                   methods=["GET", "POST"], endpoint="gdl_config")
+    host.add_route("/api/gdl/site", api_site, methods=["POST"], endpoint="gdl_site",
+                   feature="fetch", level="write")
+    host.add_route("/api/gdl/sites", api_sites, methods=["GET", "POST"], endpoint="gdl_sites",
+                   feature="fetch", level="write")
+    host.add_route("/api/gdl/targets", api_targets, endpoint="gdl_targets", feature="fetch")
+    host.add_route("/api/gdl/available", api_available, endpoint="gdl_available", feature="fetch")
+    host.add_route("/api/gdl/fields", api_fields, methods=["POST"], endpoint="gdl_fields",
+                   feature="fetch", level="write")
+    host.add_route("/api/gdl/config", api_config, methods=["GET", "POST"], endpoint="gdl_config",
+                   feature="fetch", level="write")
 
     host.logger.info("gallerydl: registered fetcher + config endpoints")

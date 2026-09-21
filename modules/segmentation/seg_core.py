@@ -27,23 +27,6 @@ import common
 
 cv2, _HAVE_CV2 = optional_import("cv2")
 
-_ROUTES = []
-
-
-def _route(rule, **opts):
-    def deco(fn):
-        _ROUTES.append((rule, fn, opts))
-        return fn
-    return deco
-
-
-def _feature(*a, **k):
-    def deco(fn):
-        fn._feature = (a, k)
-        return fn
-    return deco
-
-
 HOST = None
 _db = state = MEDIA_DIR = get_safe_path = read_jxl = _to_bgr = _coerce_bgr3 = None
 read_metadata = write_metadata = _merge_regions = access_logger = save_classes = None
@@ -187,8 +170,6 @@ def _segment_regions(bgr, query):
     return new
 
 
-@_route("/api/bulk_segment", methods=["POST"])
-@_feature("ai.segment", level="write")
 def bulk_segment():
     """Run the picked segmenter (Models tab → Segmentation) over many files,
     writing masked regions (mask_svg in each region's Extensions) UNCONFIRMED.
@@ -229,8 +210,6 @@ def bulk_segment():
     return jsonify({"success": True, "done": done, "segmented": segmented,
                     "errors": errors})
 
-@_route("/api/segment", methods=["POST"])
-@_feature("ai.segment", level="write")
 def api_segment():
     """Run the selected YOLO-seg (background) model on one image on demand and
     return masked regions, so the user can trigger class-aware segmentation

@@ -24,25 +24,6 @@ import object_grouping as og
 from . import personlib, appearances
 import common
 
-# ── deferred registration: routes/feature gates are collected at import and
-#    attached in register(host) once the app + auth exist ─────────────────────
-_ROUTES = []
-
-
-def _route(rule, **opts):
-    def deco(fn):
-        _ROUTES.append((rule, fn, opts))
-        return fn
-    return deco
-
-
-def _feature(*a, **k):
-    def deco(fn):
-        fn._feature = (a, k)
-        return fn
-    return deco
-
-
 # core names bound by _bind(host); declared so linters and readers see them
 _db = state = MEDIA_DIR = get_safe_path = read_jxl = _to_bgr = read_metadata = None
 write_metadata = access_logger = thread_manager = _background_instances = None
@@ -1094,7 +1075,6 @@ def _cluster_outlier_dists(cluster_ids):
             dists[fid] = float(1.0 - float(np.dot(vv / vn, centroid)))
     return dists
 
-@_route("/api/faces/clusters")
 def api_face_clusters():
     """Clusters for the Faces tab, biggest first. Unnamed clusters lead.
 
@@ -1173,7 +1153,6 @@ def _attach_body_info(clusters: list, sample: int = 12) -> None:
                         "h": r[5], "bridged": r[1] not in face_rels}
                        for r in rows[:sample]]
 
-@_route("/api/bodies/clusters")
 def api_body_clusters():
     """Body (re-id) clusters for the Faces tab, biggest first. Each cluster
     reports how many of its members are linked to a face (associated) so the UI
@@ -1189,7 +1168,6 @@ def api_body_clusters():
                     "enabled": bool(_body_on()),
                     "identity": bool(_bodies() and _bodies()["have_body_embedder"]())})
 
-@_route("/api/bodies/deny", methods=["POST"])
 def api_body_deny():
     """A body chip on a person card is wrong: unbind it from its face and push it
     out of its cluster (-1) so the person no longer reaches that photo through
@@ -1204,7 +1182,6 @@ def api_body_deny():
     db.commit()
     return jsonify({"success": True})
 
-@_route("/api/bodies/name", methods=["POST"])
 def api_body_name():
     """Bulk-name a body cluster. Writes the name into every MWG 'person' region
     it covers (metadata is the source of truth), same contract as face naming."""
@@ -1307,7 +1284,6 @@ def _person_tag_frequency(cluster_id: int) -> tuple:
                      key=lambda c: (-c["count"], c["tag"].lower()))
     return ordered, image_total
 
-@_route("/api/persons/<int:cluster_id>/tag_suggestions")
 def api_person_tag_suggestions(cluster_id):
     """! @brief Suggested person tags derived from the tags on this person's images.
     Returns every tag with its occurrence count so the client can apply a threshold
@@ -1328,7 +1304,6 @@ def api_person_tag_suggestions(cluster_id):
     return jsonify({"success": True, "suggestions": counts,
                     "image_total": image_total})
 
-@_route("/api/persons/<int:cluster_id>")
 def api_person_get(cluster_id):
     """The unified person record for a face cluster (created on first view).
     Each appearance reports whether its T-pose and mesh exist, plus any faces whose
@@ -1355,7 +1330,6 @@ def api_person_get(cluster_id):
                     "face_estimator": bool(_faces() and _faces()["have_face_estimator"]()),
                     "face_estimator_name": (_faces() or {}).get("face_estimator_name", lambda: "")()})
 
-@_route("/api/persons/<int:cluster_id>/field", methods=["POST"])
 def api_person_field(cluster_id):
     """Set one body/bio/list field, through the same store the pipeline uses.
     Body fields target an appearance (defaults to the largest era)."""
@@ -1364,7 +1338,6 @@ def api_person_field(cluster_id):
                             d.get("value", ""), d.get("appearance_id"))
     return jsonify({"success": ok})
 
-@_route("/api/persons/<int:cluster_id>/relationship", methods=["POST"])
 def api_person_relationship(cluster_id):
     """Replace one relationship line and write the reciprocal edge on each linked
     person, so both records hold the link. External edges (name only) write one side."""
@@ -1379,7 +1352,6 @@ def api_person_relationship(cluster_id):
         _write_reciprocal_edges(person_uuid, line, edges)
     return jsonify({"success": ok})
 
-@_route("/api/persons/directory")
 def api_persons_directory():
     """Typeahead source: every KNOWN (named) person as {uuid, name, cluster_id}.
 
@@ -1415,7 +1387,6 @@ def api_persons_directory():
         out.append({"uuid": None, "name": name, "cluster_id": cid})
     return jsonify({"success": True, "people": sorted(out, key=lambda p: p["name"].lower())})
 
-@_route("/api/persons/review")
 def api_persons_review():
     """One-sided relationship edges for the review tab (never auto-repaired)."""
     return jsonify({"success": True, "problems": personlib.check_reciprocity(MEDIA_DIR)})
@@ -1432,26 +1403,22 @@ def _run_estimator(fn, cluster_id, appearance_id):
         ok, reason = False, f"{type(e).__name__}: {e}"
     return jsonify({"success": ok, "reason": reason})
 
-@_route("/api/persons/<int:cluster_id>/tpose", methods=["POST"])
 def api_person_tpose(cluster_id):
     """Estimate and store the canonical T-pose for one appearance."""
     d = request.json or {}
     return _run_estimator(estimate_person_tpose, cluster_id, d.get("appearance_id"))
 
-@_route("/api/persons/<int:cluster_id>/mesh", methods=["POST"])
 def api_person_mesh(cluster_id):
     """Estimate and store the body mesh for one appearance (no-op if estimator absent)."""
     d = request.json or {}
     return _run_estimator(estimate_person_mesh, cluster_id, d.get("appearance_id"))
 
-@_route("/api/persons/<int:cluster_id>/face_mesh", methods=["POST"])
 def api_person_face_mesh(cluster_id):
     """Estimate and store the 3D FACE mesh for one appearance (no-op if no face
     estimator is installed)."""
     d = request.json or {}
     return _run_estimator(estimate_person_face_mesh, cluster_id, d.get("appearance_id"))
 
-@_route("/api/persons/<int:cluster_id>/face_mesh_data/<appearance_id>")
 def api_person_face_mesh_data(cluster_id, appearance_id):
     """Serve one appearance's canonical FACE mesh as a raw .obj, for the 3D viewer's
     Face mode. 404 when the person, appearance, or face-mesh member is absent so the
@@ -1465,7 +1432,6 @@ def api_person_face_mesh_data(cluster_id, appearance_id):
         return "", 404
     return data, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
-@_route("/api/persons/<int:cluster_id>/mesh_data/<appearance_id>")
 def api_person_mesh_data(cluster_id, appearance_id):
     """Serve one appearance's canonical body mesh as a raw .obj, for the 3D viewer.
 
@@ -1480,7 +1446,6 @@ def api_person_mesh_data(cluster_id, appearance_id):
         return "", 404
     return data, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
-@_route("/api/persons/<int:cluster_id>/tpose_data/<appearance_id>")
 def api_person_tpose_data(cluster_id, appearance_id):
     """Serve one appearance's canonical T-pose keypoints as JSON, for the 3D
     viewer's skeleton fallback when no mesh has been estimated yet."""
@@ -1493,8 +1458,6 @@ def api_person_tpose_data(cluster_id, appearance_id):
         return "", 404
     return data, 200, {"Content-Type": "application/json"}
 
-@_route("/api/faces/scan", methods=["POST"])
-@_feature("tab.faces", level="write")
 def api_face_scan():
     """Force a rescan (clears face_done) or just recluster what's cached.
 
@@ -1529,7 +1492,6 @@ def api_face_scan():
     _face_dirty["v"] = False
     return jsonify({"success": True, "clusters": n})
 
-@_route("/api/faces/progress")
 def api_face_progress():
     """Poll target for the Faces tab: how much of the library is still queued."""
     db = _db()
@@ -1556,8 +1518,6 @@ def api_face_progress():
                     "face_recognition": fs["recognition_model"]() if fs else "",
                     "status": state.get("status_text", "")})
 
-@_route("/api/faces/name", methods=["POST"])
-@_feature("tab.faces", level="write", action='face_name', fields=('cluster_id', 'name'))
 def api_face_name():
     """Bulk-name a cluster. Writes the name into every MWG region it covers —
     metadata is the source of truth, the DB is only the cache."""
@@ -1593,8 +1553,6 @@ def api_face_name():
     _db().commit()
     return jsonify({"success": True, "named": touched})
 
-@_route("/api/faces/split", methods=["POST"])
-@_feature("tab.faces", level="write", action='face_split', fields=('cluster_id',))
 def api_face_split():
     """Kick a wrong face out of its cluster (back to unclustered)."""
     d = request.json or {}
@@ -1645,8 +1603,6 @@ def _strip_mwg_region(rel, cx, cy):
     if len(kept) != len(meta["regions"]):
         write_metadata(abs_p, meta["tags"], meta["description"], kept)
 
-@_route("/api/faces/not_face", methods=["POST"])
-@_feature("tab.faces", level="write", action='face_not_face', fields=('ids',))
 def api_face_not_face():
     """Declare one or more detections to be NOT a face.
 
@@ -1673,8 +1629,6 @@ def api_face_not_face():
     db.commit()
     return jsonify({"success": True, "marked": len(ids)})
 
-@_route("/api/faces/unknown", methods=["POST"])
-@_feature("tab.faces", level="write", action='face_unknown', fields=('ids',))
 def api_face_unknown():
     """Mark faces as 'unknown': a real face that is deliberately NOT a person you
     want to identify (a photobomber, a stranger in the background).
@@ -1698,9 +1652,6 @@ def api_face_unknown():
     db.commit()
     return jsonify({"success": True, "marked": len(ids)})
 
-@_route("/api/faces/unknown_cluster", methods=["POST"])
-@_feature("tab.faces", level="write", action='face_unknown_cluster',
-                       fields=('cluster_id',))
 def api_face_unknown_cluster():
     """Mark an ENTIRE person (face cluster) as 'unknown' in one shot.
 
@@ -1723,8 +1674,6 @@ def api_face_unknown_cluster():
     db.commit()
     return jsonify({"success": True, "marked": cur.rowcount})
 
-@_route("/api/faces/unmark", methods=["POST"])
-@_feature("tab.faces", level="write", action='face_unmark', fields=('ids',))
 def api_face_unmark():
     """Clear an unknown / not_face flag, returning the face to the unclustered pool.
     A recluster then folds it back into a group."""
@@ -1743,9 +1692,6 @@ def api_face_unmark():
     db.commit()
     return jsonify({"success": True, "unmarked": len(ids)})
 
-@_route("/api/faces/merge", methods=["POST"])
-@_feature("tab.faces", level="write", action='face_merge',
-                       fields=('src', 'dst'))
 def api_face_merge():
     """Merge face cluster `src` into `dst` (both become one).
 
@@ -1787,7 +1733,6 @@ def api_face_merge():
     return jsonify({"success": True, "cluster_id": dst, "moved": moved,
                     "name": keep_name})
 
-@_route("/api/bodies/split", methods=["POST"])
 def api_body_split():
     """Kick a wrong body out of its cluster (back to unclustered), or carve a
     selection into a new cluster. Same contract as /api/faces/split."""
@@ -1816,4 +1761,3 @@ def api_body_split():
         f"UPDATE body_regions SET cluster_id=-1 WHERE id IN ({ph})", ids)
     db.commit()
     return jsonify({"success": True, "moved": len(ids)})
-

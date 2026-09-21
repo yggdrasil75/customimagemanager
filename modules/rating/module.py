@@ -332,7 +332,6 @@ def register(host):
         host.config["status_text"] = f"IQA scan complete — scored {scored} image(s)."
         return jsonify({"success": True, "scored": scored, "total": total})
 
-    auth = core.auth
     def quality_sweep():
         """Score image quality with the picked IQA model and flag junk for
         review (files.flagged_delete / flag_reason), so it shows in the review
@@ -401,13 +400,9 @@ def register(host):
                         "flagged": sorted(bad)[:500], "wrote_flags": write_flags})
 
     host.add_route("/api/iqa_models", api_iqa_models)
-    host.add_route("/api/quality_sweep",
-                   auth.require_feature("ai.iqa", level="write")(quality_sweep),
-                   methods=["POST"])
-    host.add_route("/api/iqa_set", auth.require_feature("ai.iqa", level="write")(iqa_set),
-                   methods=["POST"])
-    host.add_route("/api/iqa_scan", auth.require_feature("ai.iqa", level="write")(iqa_scan),
-                   methods=["POST"])
+    host.add_route("/api/quality_sweep", quality_sweep, methods=["POST"], feature="ai.iqa", level="write")
+    host.add_route("/api/iqa_set", iqa_set, methods=["POST"], feature="ai.iqa", level="write")
+    host.add_route("/api/iqa_scan", iqa_scan, methods=["POST"], feature="ai.iqa", level="write")
 
     def _file_deleted(rel_path):
         db = host.db()

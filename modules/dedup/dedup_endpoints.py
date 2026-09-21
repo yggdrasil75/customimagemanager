@@ -675,14 +675,13 @@ def dedup_merge():
 
 def register(host):
     _bind(host)
-    a = host.core.auth
-    host.add_route('/api/dedup_status', dedup_status, methods=['GET'], endpoint='dedup_ep_dedup_status')
-    host.add_route('/api/dedup_retrain', a.require_feature("dedup", level="write")(dedup_retrain), methods=["POST"], endpoint='dedup_ep_dedup_retrain')
-    host.add_route('/api/dedup_clear', a.require_feature("dedup", level="write")(dedup_clear), methods=["POST"], endpoint='dedup_ep_dedup_clear')
-    host.add_route('/api/dedup_clear_group', a.require_feature("dedup", level="write")(dedup_clear_group), methods=["POST"], endpoint='dedup_ep_dedup_clear_group')
-    host.add_route('/api/dedup_exclude', a.require_feature("dedup", level="write")(dedup_exclude), methods=["POST"], endpoint='dedup_ep_dedup_exclude')
-    host.add_route('/api/dedup_compare_video', a.require_feature("dedup", level="write")(dedup_compare_video), methods=["POST"], endpoint='dedup_ep_dedup_compare_video')
-    host.add_route('/api/dedup_groups', dedup_groups_page, methods=['GET'], endpoint='dedup_ep_dedup_groups_page')
-    host.add_route('/api/dedup', a.require_feature("dedup", level="write")(dedup), methods=["POST"], endpoint='dedup_ep_dedup')
-    host.add_route('/api/dedup_merge', a.require_feature("dedup", level="write", action='dedup_merge', fields=('keep', 'remove'))(dedup_merge), methods=["POST"], endpoint='dedup_ep_dedup_merge')
+    host.add_route('/api/dedup_status', dedup_status, methods=['GET'], endpoint='dedup_ep_dedup_status', feature="dedup")
+    host.add_route('/api/dedup_retrain', dedup_retrain, methods=['POST'], endpoint='dedup_ep_dedup_retrain', feature="dedup", level="write")
+    host.add_route('/api/dedup_clear', dedup_clear, methods=['POST'], endpoint='dedup_ep_dedup_clear', feature="dedup", level="write")
+    host.add_route('/api/dedup_clear_group', dedup_clear_group, methods=['POST'], endpoint='dedup_ep_dedup_clear_group', feature="dedup", level="write")
+    host.add_route('/api/dedup_exclude', dedup_exclude, methods=['POST'], endpoint='dedup_ep_dedup_exclude', feature="dedup", level="write")
+    host.add_route('/api/dedup_compare_video', dedup_compare_video, methods=['POST'], endpoint='dedup_ep_dedup_compare_video', feature="dedup", level="write")
+    host.add_route('/api/dedup_groups', dedup_groups_page, methods=['GET'], endpoint='dedup_ep_dedup_groups_page', feature="dedup")
+    host.add_route('/api/dedup', dedup, methods=['POST'], endpoint='dedup_ep_dedup', feature="dedup", level="write")
+    host.add_route('/api/dedup_merge', dedup_merge, methods=['POST'], endpoint='dedup_ep_dedup_merge', feature="dedup", level="write", action='dedup_merge', fields=('keep', 'remove'))
     host.logger.info("dedup: pipeline endpoints registered")

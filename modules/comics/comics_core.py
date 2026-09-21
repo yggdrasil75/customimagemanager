@@ -16,23 +16,6 @@ from flask import request, jsonify
 from . import comicinfo
 
 COMIC_SCHEMA = "mm.comic/1"
-_ROUTES = []
-
-
-def _route(rule, **opts):
-    def deco(fn):
-        _ROUTES.append((rule, fn, opts))
-        return fn
-    return deco
-
-
-def _feature(*a, **k):
-    def deco(fn):
-        fn._feature = (a, k)
-        return fn
-    return deco
-
-
 HOST = None
 _db = state = MEDIA_DIR = get_safe_path = read_jxl = _to_bgr = read_metadata = None
 write_metadata = access_logger = _rel = mt = _llm_call = _run_pipeline_on = None
@@ -232,7 +215,6 @@ def _merge_comic_analyses(folder, page_analyses, summarize=True):
     return data
 
 
-@_route("/api/comic")
 def api_comic_get():
     folder = request.args.get("folder", "").strip()
     data = _load_comic_json(folder)
@@ -249,8 +231,6 @@ def api_comic_get():
                               "cover": data.get("cover", pages[0] if pages else "")},
                     "pages": [folder + "/" + p for p in pages]})
 
-@_route("/api/comic_create", methods=["POST"])
-@_feature("comics.make", level="write", action='comic_create', fields=('folder', 'title'))
 def api_comic_create():
     d = request.json or {}
     folder = (d.get("folder", "") or "").strip().strip('/')
@@ -273,8 +253,6 @@ def api_comic_create():
     _write_comic_page_count(folder, data)
     return jsonify({"success": True, "folder": folder})
 
-@_route("/api/comic_update", methods=["POST"])
-@_feature("comics.edit", level="write", action='comic_update', fields=('folder', 'title'))
 def api_comic_update():
     d = request.json or {}
     folder = (d.get("folder", "") or "").strip().strip('/')
@@ -290,8 +268,6 @@ def api_comic_update():
     _write_comic_page_count(folder, data)
     return jsonify({"success": True})
 
-@_route("/api/comic_delete", methods=["POST"])
-@_feature("comics.delete", level="write", action='comic_delete', fields=('folder',))
 def api_comic_delete():
     """Unpackage a comic (keeps all images, just removes comic status)."""
     folder = (request.json.get("folder", "") or "").strip().strip('/')
@@ -303,8 +279,6 @@ def api_comic_delete():
     _db().commit()
     return jsonify({"success": True})
 
-@_route("/api/comic_pipeline", methods=["POST"])
-@_feature("ai.smarttag", level="write")
 def comic_pipeline_route():
     """Run the pipeline across every page of a comic IN ORDER, store each page's
     result, then merge tags / characters / description up to the comic level.
@@ -368,12 +342,10 @@ def _archive_row(rel):
                          (rel,)).fetchone()
 
 
-@_route("/api/comics/schema")
 def api_comics_schema():
     return jsonify({"success": True, "schema": comicinfo.schema_dict()})
 
 
-@_route("/api/comics/open")
 def api_comics_open():
     """Everything the viewer + editor need for one comic: kind, title, page
     image URLs, ComicInfo-shaped values, and whether metadata is writable."""
@@ -406,8 +378,6 @@ def api_comics_open():
                     "values": vals, "writable": True, "note": ""})
 
 
-@_route("/api/comics/write", methods=["POST"])
-@_feature("comics.edit", level="write", action="comic_meta", fields=("target",))
 def api_comics_write():
     d = request.json or {}
     target = (d.get("target") or "").strip()

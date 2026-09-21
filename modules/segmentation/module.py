@@ -21,10 +21,8 @@ def register(host):
     sc._bind(host)
     host.register_feature("ai.segment", "Segment (masks)", section="ai_tooling",
                           section_label="AI Tooling", default="write")
-    for rule, fn, opts in sc._ROUTES:
-        feat = getattr(fn, "_feature", None)
-        view = host.core.auth.require_feature(*feat[0], **feat[1])(fn) if feat else fn
-        host.add_route(rule, view, **opts)
+    host.add_route("/api/bulk_segment", sc.bulk_segment, methods=["POST"], feature="ai.segment", level="write")
+    host.add_route("/api/segment", sc.api_segment, methods=["POST"], feature="ai.segment", level="write")
     host.add_asset("segmentation.js")
 
     # Pipeline: the segment node's box-masking hook (run_pipeline seg_fn).

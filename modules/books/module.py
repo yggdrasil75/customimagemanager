@@ -86,12 +86,11 @@ def register(host):
     def _emb(key, default):
         return (host.get_service("embedding") or {}).get(key) or default
     core = host.core
-    book_routes.register(host.app, {
+    book_routes.register(host, {
         "db":            host.db,
         "media_dir":     host.media_dir,
         "safe_path":     host.safe_path,
         "logger":        host.logger,
-        "auth":          core.auth,
         "media":         host.media,
         "folder_scope_clause": core.folder_scope_clause,
         "table_exists":  common.table_exists,

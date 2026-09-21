@@ -69,11 +69,11 @@ def register(host):
     host.add_route("/api/iptc/schema", _schema(iptc_fields), endpoint="meta_iptc_schema")
     host.add_route("/api/xmp/schema",  _schema(xmp_fields),  endpoint="meta_xmp_schema")
     host.add_route("/api/exif/read", _reader(exif_import.read_exif, "exif"),
-                   methods=["POST"], endpoint="meta_exif_read")
+                   methods=["POST"], endpoint="meta_exif_read", feature="meta.exif")
     host.add_route("/api/iptc/read", _reader(iptc_import.read_iptc, "iptc"),
-                   methods=["POST"], endpoint="meta_iptc_read")
+                   methods=["POST"], endpoint="meta_iptc_read", feature="meta.iptc")
     host.add_route("/api/xmp/read", _reader(xmp_import.read_xmp, "xmp"),
-                   methods=["POST"], endpoint="meta_xmp_read")
+                   methods=["POST"], endpoint="meta_xmp_read", feature="meta.xmp")
 
     # ── one unified write endpoint ───────────────────────────────────────
     # POST /api/metadata/write {kind:"exif"|"iptc"|"xmp", filename, patch}.
@@ -249,9 +249,10 @@ def register(host):
         if not _reidx["running"]:
             threading.Thread(target=_reindex_all, daemon=True).start()
         return jsonify({"success": True, **_reidx})
-    host.add_route("/api/metadata/reindex",
-                   m.auth.require_feature("metadata_tabs", level="write")(api_meta_reindex), methods=["POST"])
-    host.add_route("/api/metadata/reindex/status", lambda: jsonify({"success": True, **_reidx}))
+    host.add_route("/api/metadata/reindex", api_meta_reindex, methods=["POST"],
+                   feature="metadata_tabs", level="write")
+    host.add_route("/api/metadata/reindex/status", lambda: jsonify({"success": True, **_reidx}),
+                   endpoint="meta_reindex_status", feature="metadata_tabs")
 
     def _meta_search(ns):
         def handler(token, value):

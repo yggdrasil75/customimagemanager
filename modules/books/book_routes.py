@@ -873,7 +873,9 @@ def query_books(text: str, folder: str, structured: list | None = None) -> list:
 
 
 
-def register(app, ctx: dict):
+def register(host, ctx: dict):
+    # Every books endpoint sits behind tab.books: read = browse/read/annotate
+    # your own progress, write = anything that changes the shelf or runs a job.
     CTX.clear()
     CTX.update(ctx)
 
@@ -883,7 +885,7 @@ def register(app, ctx: dict):
         ctx["logger"].error(f"book ensure_tables: {e}")
 
     # ── status / workers ─────────────────────────────────────────────────────
-    @app.route("/api/books/status")
+    @host.route("/api/books/status", feature="tab.books")
     def books_status():
         db = _db()
         c = db.execute(
@@ -909,13 +911,13 @@ def register(app, ctx: dict):
             "search_ready": bool(ctx["embed_enabled"]()),
         })
 
-    @app.route("/api/books/reindex", methods=["POST"])
+    @host.route("/api/books/reindex", methods=["POST"], feature="tab.books", level="write")
     def books_reindex():
         force = bool((request.json or {}).get("force"))
         threading.Thread(target=_index_background, args=(force,), daemon=True).start()
         return jsonify({"success": True})
 
-    @app.route("/api/books/extract", methods=["POST"])
+    @host.route("/api/books/extract", methods=["POST"], feature="tab.books", level="write")
     def books_extract():
         d = request.json or {}
         if d.get("rel_path"):
@@ -924,7 +926,7 @@ def register(app, ctx: dict):
                          daemon=True).start()
         return jsonify({"success": True})
 
-    @app.route("/api/books/embed", methods=["POST"])
+    @host.route("/api/books/embed", methods=["POST"], feature="tab.books", level="write")
     def books_embed():
         force = bool((request.json or {}).get("force"))
         if not ctx["embed_enabled"]():
@@ -934,7 +936,7 @@ def register(app, ctx: dict):
         return jsonify({"success": True})
 
     # ── browsing ─────────────────────────────────────────────────────────────
-    @app.route("/api/books/list")
+    @host.route("/api/books/list", feature="tab.books")
     def books_list():
         a = request.args
         clauses, params = [], []
@@ -977,7 +979,7 @@ def register(app, ctx: dict):
         return jsonify({"success": True, "total": total, "page": page,
                         "page_size": per, "books": [_row_dict(r) for r in rows]})
 
-    @app.route("/api/books/authors")
+    @host.route("/api/books/authors", feature="tab.books")
     def books_authors():
         rows = _db().execute("""
             SELECT ba.author AS name, COUNT(*) AS books
@@ -985,7 +987,7 @@ def register(app, ctx: dict):
             ORDER BY ba.author COLLATE NOCASE""").fetchall()
         return jsonify({"success": True, "authors": [dict(r) for r in rows]})
 
-    @app.route("/api/books/series")
+    @host.route("/api/books/series", feature="tab.books")
     def books_series():
         rows = _db().execute("""
             SELECT series AS name, COUNT(*) AS books, MIN(published) AS started
@@ -993,7 +995,7 @@ def register(app, ctx: dict):
             ORDER BY series COLLATE NOCASE""").fetchall()
         return jsonify({"success": True, "series": [dict(r) for r in rows]})
 
-    @app.route("/api/books/detail")
+    @host.route("/api/books/detail", feature="tab.books")
     def books_detail():
         rp = request.args.get("rel_path", "")
         r = _db().execute("SELECT * FROM books WHERE rel_path=?", (rp,)).fetchone()
@@ -1009,7 +1011,7 @@ def register(app, ctx: dict):
         ).fetchone()["n"]
         return jsonify({"success": True, "book": d})
 
-    @app.route("/api/books/embedded")
+    @host.route("/api/books/embedded", feature="tab.books")
     def books_embedded():
         """Raw metadata carried by the file itself, grouped, for the format tab.
         [] for plain text/HTML (DB only)."""
@@ -1028,7 +1030,7 @@ def register(app, ctx: dict):
                             r["fmt"], r["fmt"].upper()),
                         "groups": [{"label": g, "fields": groups[g]} for g in order]})
 
-    @app.route("/api/books/meta", methods=["POST"])
+    @host.route("/api/books/meta", methods=["POST"], feature="tab.books", level="write")
     def books_meta():
         d = request.json or {}
         rp = d.get("rel_path", "")
@@ -1072,7 +1074,7 @@ def register(app, ctx: dict):
         return jsonify({"success": True})
 
     # ── assets ───────────────────────────────────────────────────────────────
-    @app.route("/api/books/cover/<path:rel_path>")
+    @host.route("/api/books/cover/<path:rel_path>", feature="tab.books")
     def books_cover(rel_path):
         r = _db().execute("SELECT cover FROM books WHERE rel_path=?",
                           (rel_path,)).fetchone()
@@ -1083,14 +1085,14 @@ def register(app, ctx: dict):
             return jsonify({"success": False, "error": "no cover"}), 404
         return send_file(p, mimetype="image/jpeg", conditional=True)
 
-    @app.route("/api/books/toc/<path:rel_path>")
+    @host.route("/api/books/toc/<path:rel_path>", feature="tab.books")
     def books_toc(rel_path):
         rows = _db().execute(
             "SELECT idx, title, chars FROM book_sections WHERE rel_path=? ORDER BY idx",
             (rel_path,)).fetchall()
         return jsonify({"success": True, "toc": [dict(r) for r in rows]})
 
-    @app.route("/api/books/section/<path:rel_path>")
+    @host.route("/api/books/section/<path:rel_path>", feature="tab.books")
     def books_section(rel_path):
         idx = int(request.args.get("idx", 0))
         r = _db().execute(
@@ -1115,7 +1117,7 @@ def register(app, ctx: dict):
         return jsonify({"success": True, "idx": r["idx"], "title": r["title"],
                         "html": r["html"], "total": total})
 
-    @app.route("/api/books/page/<path:rel_path>")
+    @host.route("/api/books/page/<path:rel_path>", feature="tab.books")
     def books_page(rel_path):
         """One page of a paged book (PDF / cb*) as an image."""
         n = int(request.args.get("n", 0))
@@ -1151,7 +1153,7 @@ def register(app, ctx: dict):
         return Response(data, mimetype=mime)
 
     # ── comic pages: panels + OCR ────────────────────────────────────────────
-    @app.route("/api/books/comic/analyze", methods=["POST"])
+    @host.route("/api/books/comic/analyze", methods=["POST"], feature="tab.books", level="write")
     def books_comic_analyze():
         """Kick off panel detection and/or OCR over a comic's pages.
 
@@ -1185,12 +1187,12 @@ def register(app, ctx: dict):
             daemon=True).start()
         return jsonify({"success": True})
 
-    @app.route("/api/books/comic/cancel", methods=["POST"])
+    @host.route("/api/books/comic/cancel", methods=["POST"], feature="tab.books", level="write")
     def books_comic_cancel():
         _comic_cancel.set()
         return jsonify({"success": True})
 
-    @app.route("/api/books/comic/page")
+    @host.route("/api/books/comic/page", feature="tab.books")
     def books_comic_page():
         """Stored analysis for one page — what the reader overlay draws."""
         rp = request.args.get("rel_path", "")
@@ -1207,7 +1209,7 @@ def register(app, ctx: dict):
                         "panel_src": r["panel_src"], "engine": r["engine"],
                         "rtl": bool(r["rtl"])})
 
-    @app.route("/api/books/comic/summary")
+    @host.route("/api/books/comic/summary", feature="tab.books")
     def books_comic_summary():
         """How much of this comic has been analysed, for the controls pane."""
         rp = request.args.get("rel_path", "")
@@ -1230,7 +1232,7 @@ def register(app, ctx: dict):
                         "running": bool(book_state["comic"]),
                         "ocr_available": bool(CTX.get("ocr_fn"))})
 
-    @app.route("/api/books/comic/text")
+    @host.route("/api/books/comic/text", feature="tab.books")
     def books_comic_text():
         """The whole transcript, in reading order. Also the thing worth feeding
         to an LLM or a search index."""
@@ -1246,7 +1248,7 @@ def register(app, ctx: dict):
                         "pages": [{"page": r["page"], "text": r["text"]}
                                   for r in rows]})
 
-    @app.route("/api/books/comic/panels", methods=["POST"])
+    @host.route("/api/books/comic/panels", methods=["POST"], feature="tab.books", level="write")
     def books_comic_set_panels():
         """Replace one page's panels by hand.
 
@@ -1277,7 +1279,7 @@ def register(app, ctx: dict):
             "engine": prev["engine"] if prev else "", "rtl": rtl})
         return jsonify({"success": True, "panels": panels})
 
-    @app.route("/api/books/download/<path:rel_path>")
+    @host.route("/api/books/download/<path:rel_path>", feature="tab.books")
     def books_download(rel_path):
         ap = _abs(rel_path)
         if not ap or not os.path.exists(ap):
@@ -1285,7 +1287,7 @@ def register(app, ctx: dict):
         return send_file(ap, as_attachment=True, conditional=True)
 
     # ── reading position ─────────────────────────────────────────────────────
-    @app.route("/api/books/progress", methods=["GET", "POST"])
+    @host.route("/api/books/progress", methods=["GET", "POST"], feature="tab.books")
     def books_progress():
         if request.method == "GET":
             rp = request.args.get("rel_path", "")
@@ -1308,7 +1310,7 @@ def register(app, ctx: dict):
         _db().commit()
         return jsonify({"success": True})
 
-    @app.route("/api/books/bookmarks", methods=["GET", "POST", "DELETE"])
+    @host.route("/api/books/bookmarks", methods=["GET", "POST", "DELETE"], feature="tab.books")
     def books_bookmarks():
         db = _db()
         if request.method == "GET":
@@ -1332,7 +1334,7 @@ def register(app, ctx: dict):
         return jsonify({"success": True, "id": cur.lastrowid})
 
     # ── search ───────────────────────────────────────────────────────────────
-    @app.route("/api/books/search", methods=["POST"])
+    @host.route("/api/books/search", methods=["POST"], feature="tab.books")
     def books_search():
         """Passage-level semantic search. Returns matching PASSAGES grouped by
         book, so you land on the page rather than on the cover."""
@@ -1388,8 +1390,8 @@ def register(app, ctx: dict):
             out.append(e)
         return jsonify({"success": True, "results": out})
 
-    @app.route("/api/books/delete", methods=["POST"])
-    @ctx["auth"].require_feature("tab.books", level="write", action="book_delete", fields=("rel_path", "keep_file"))
+    @host.route("/api/books/delete", methods=["POST"], feature="tab.books", level="write",
+                action="book_delete", fields=("rel_path", "keep_file"))
     def books_delete():
         """Delete a book. `keep_file` removes it from the library but leaves the
         bytes on disk — useful when the shelf is wrong but the file isn't."""
@@ -1401,7 +1403,7 @@ def register(app, ctx: dict):
         return jsonify({"success": ok})
 
     # ── LLM ──────────────────────────────────────────────────────────────────
-    @app.route("/api/books/summarize", methods=["POST"])
+    @host.route("/api/books/summarize", methods=["POST"], feature="tab.books", level="write")
     def books_summarize():
         """Blurb a book with the configured LLM.
 
@@ -1453,14 +1455,14 @@ def register(app, ctx: dict):
         return jsonify({"success": True, "description": text})
 
     # ── triage ───────────────────────────────────────────────────────────────
-    @app.route("/api/books/triage")
+    @host.route("/api/books/triage", feature="tab.books")
     def books_triage():
         rows = _db().execute(
             "SELECT * FROM book_triage WHERE decision IS NULL "
             "ORDER BY size DESC LIMIT 500").fetchall()
         return jsonify({"success": True, "items": [dict(r) for r in rows]})
 
-    @app.route("/api/books/triage/decide", methods=["POST"])
+    @host.route("/api/books/triage/decide", methods=["POST"], feature="tab.books", level="write")
     def books_triage_decide():
         d = request.json or {}
         rp = d.get("rel_path", "")
@@ -1481,7 +1483,7 @@ def register(app, ctx: dict):
             _purge_book(rp)
         return jsonify({"success": True})
 
-    @app.route("/api/books/triage/decide_all", methods=["POST"])
+    @host.route("/api/books/triage/decide_all", methods=["POST"], feature="tab.books", level="write")
     def books_triage_decide_all():
         """Bulk-answer every pending item sharing an extension + reason. With
         thousands of ao3 dumps the queue is repetitive by nature; one click

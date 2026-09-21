@@ -270,7 +270,6 @@ def register(host):
     host.on_startup(_start)
 
     # ── endpoints ─────────────────────────────────────────────────────────
-    auth = m.auth
 
     def api_fetch_add():
         d = request.get_json(force=True, silent=True) or {}
@@ -313,17 +312,12 @@ def register(host):
         host.db().commit()
         return jsonify({"success": True})
 
-    host.add_route("/api/fetch/add",
-                   auth.require_feature("fetch", level="write")(api_fetch_add),
-                   methods=["POST"], endpoint="fetch_add")
-    host.add_route("/api/fetch/queue",
-                   auth.require_feature("fetch")(api_fetch_queue),
-                   endpoint="fetch_queue")
-    host.add_route("/api/fetch/cancel",
-                   auth.require_feature("fetch", level="write")(api_fetch_cancel),
-                   methods=["POST"], endpoint="fetch_cancel")
-    host.add_route("/api/fetch/clear",
-                   auth.require_feature("fetch", level="write")(api_fetch_clear),
-                   methods=["POST"], endpoint="fetch_clear")
+    host.add_route("/api/fetch/add", api_fetch_add, methods=["POST"], endpoint="fetch_add",
+                   feature="fetch", level="write")
+    host.add_route("/api/fetch/queue", api_fetch_queue, endpoint="fetch_queue", feature="fetch")
+    host.add_route("/api/fetch/cancel", api_fetch_cancel, methods=["POST"], endpoint="fetch_cancel",
+                   feature="fetch", level="write")
+    host.add_route("/api/fetch/clear", api_fetch_clear, methods=["POST"], endpoint="fetch_clear",
+                   feature="fetch", level="write")
 
     host.logger.info("fetch module: registry + queue + worker + endpoints registered")

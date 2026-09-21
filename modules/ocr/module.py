@@ -103,6 +103,5 @@ def register(host):
         res = run(core.to_bgr(img))
         host.config["status_text"] = "Ready."
         return jsonify({"success": True, **res})
-    host.add_route("/api/ocr", core.auth.require_feature("ai.ocr", level="write")(api_ocr),
-                   methods=["POST"])
+    host.add_route("/api/ocr", api_ocr, methods=["POST"], feature="ai.ocr", level="write")
     host.logger.info("ocr module: registered /api/ocr, pipeline stage, action target")

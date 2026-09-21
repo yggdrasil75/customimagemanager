@@ -11,23 +11,6 @@ from flask import request, jsonify
 from .engine import DEFAULT_PIPELINE, run_pipeline
 import common
 
-_ROUTES = []
-
-
-def _route(rule, **opts):
-    def deco(fn):
-        _ROUTES.append((rule, fn, opts))
-        return fn
-    return deco
-
-
-def _feature(*a, **k):
-    def deco(fn):
-        fn._feature = (a, k)
-        return fn
-    return deco
-
-
 HOST = None
 _db = state = MEDIA_DIR = get_safe_path = read_jxl = _to_bgr = read_metadata = None
 write_metadata = access_logger = thread_manager = _llm_call = _detect_obb_or_box = None
@@ -230,8 +213,6 @@ def _apply_pipeline_result(fp, analysis):
     write_metadata(fp, tags, desc, regions, analysis=analysis, pose=pose)
     return tags, desc, regions
 
-@_route("/api/run_pipeline", methods=["POST"])
-@_feature("ai.smarttag", level="write")
 def run_pipeline_route():
     """Run the configurable AI decision tree against one image: classify, tag,
     describe, box subjects, and describe each subject crop. Writes the merged
@@ -263,8 +244,6 @@ def run_pipeline_route():
     return jsonify({"success": True, "analysis": analysis, "pose": analysis.get("pose"),
                     "tags": tags, "description": desc, "regions": regions})
 
-@_route("/api/bulk_pipeline", methods=["POST"])
-@_feature("ai.smarttag", level="write")
 def bulk_pipeline():
     """Run the Smart Tag pipeline across many files (mass processing)."""
     filenames = request.json.get("filenames", [])
@@ -291,7 +270,6 @@ def bulk_pipeline():
     state["status_text"] = "Ready."
     return jsonify({"success": True, "done": done, "errors": errors})
 
-@_route("/api/autotag_toggle", methods=["POST"])
 def autotag_toggle():
     state["autotag_enabled"] = bool(request.json.get("enabled", False))
     save_config()

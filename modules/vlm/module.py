@@ -100,11 +100,11 @@ def register(host):
                         validate=lambda v: v if isinstance(v, list) else actions.DEFAULT_ACTIONS)
     host.register_feature("ai.llm", "LLM actions (✨ AI)", section="ai_tooling",
                           section_label="AI Tooling", default="write")
-    W = core.auth.require_feature("ai.llm", level="write")
-    host.add_route("/api/run_llm", W(actions.run_llm), methods=["POST"])
-    host.add_route("/api/bulk_llm", W(actions.bulk_llm), methods=["POST"])
+    host.add_route("/api/run_llm", actions.run_llm, methods=["POST"], feature="ai.llm", level="write")
+    host.add_route("/api/bulk_llm", actions.bulk_llm, methods=["POST"], feature="ai.llm", level="write")
     host.add_route("/api/ai_actions", lambda: jsonify(
-        {"success": True, "actions": host.config.get("oai_actions", [])}))
+        {"success": True, "actions": host.config.get("oai_actions", [])}),
+        endpoint="vlm_ai_actions", feature="ai.llm")
     host.add_asset("actions.js")
     # The actions editor is custom UI: give the module a settings tab and let
     # actions.js draw the editor into it (module-settings-tab event).

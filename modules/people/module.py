@@ -112,11 +112,32 @@ def register(host):
     host.register_feature("tab.faces", "People tab (read=view, write=edit clusters)",
                           section="gallery_tabs", section_label="Gallery tabs", default="read")
 
-    # ── routes (collected at import by pc._route / pc._feature) ───────────
-    for rule, fn, opts in pc._ROUTES:
-        feat = getattr(fn, "_feature", None)
-        view = host.core.auth.require_feature(*feat[0], **feat[1])(fn) if feat else fn
-        host.add_route(rule, view, **opts)
+    host.add_route("/api/faces/clusters", pc.api_face_clusters, feature="tab.faces")
+    host.add_route("/api/bodies/clusters", pc.api_body_clusters, feature="tab.faces")
+    host.add_route("/api/bodies/deny", pc.api_body_deny, methods=["POST"], feature="tab.faces", level="write")
+    host.add_route("/api/bodies/name", pc.api_body_name, methods=["POST"], feature="tab.faces", level="write")
+    host.add_route("/api/persons/<int:cluster_id>/tag_suggestions", pc.api_person_tag_suggestions, feature="tab.faces")
+    host.add_route("/api/persons/<int:cluster_id>", pc.api_person_get, feature="tab.faces")
+    host.add_route("/api/persons/<int:cluster_id>/field", pc.api_person_field, methods=["POST"], feature="tab.faces", level="write")
+    host.add_route("/api/persons/<int:cluster_id>/relationship", pc.api_person_relationship, methods=["POST"], feature="tab.faces", level="write")
+    host.add_route("/api/persons/directory", pc.api_persons_directory, feature="tab.faces")
+    host.add_route("/api/persons/review", pc.api_persons_review, feature="tab.faces")
+    host.add_route("/api/persons/<int:cluster_id>/tpose", pc.api_person_tpose, methods=["POST"], feature="tab.faces", level="write")
+    host.add_route("/api/persons/<int:cluster_id>/mesh", pc.api_person_mesh, methods=["POST"], feature="tab.faces", level="write")
+    host.add_route("/api/persons/<int:cluster_id>/face_mesh", pc.api_person_face_mesh, methods=["POST"], feature="tab.faces", level="write")
+    host.add_route("/api/persons/<int:cluster_id>/face_mesh_data/<appearance_id>", pc.api_person_face_mesh_data, feature="tab.faces")
+    host.add_route("/api/persons/<int:cluster_id>/mesh_data/<appearance_id>", pc.api_person_mesh_data, feature="tab.faces")
+    host.add_route("/api/persons/<int:cluster_id>/tpose_data/<appearance_id>", pc.api_person_tpose_data, feature="tab.faces")
+    host.add_route("/api/faces/scan", pc.api_face_scan, methods=["POST"], feature="tab.faces", level="write")
+    host.add_route("/api/faces/progress", pc.api_face_progress, feature="tab.faces")
+    host.add_route("/api/faces/name", pc.api_face_name, methods=["POST"], feature="tab.faces", level="write", action='face_name', fields=('cluster_id', 'name'))
+    host.add_route("/api/faces/split", pc.api_face_split, methods=["POST"], feature="tab.faces", level="write", action='face_split', fields=('cluster_id',))
+    host.add_route("/api/faces/not_face", pc.api_face_not_face, methods=["POST"], feature="tab.faces", level="write", action='face_not_face', fields=('ids',))
+    host.add_route("/api/faces/unknown", pc.api_face_unknown, methods=["POST"], feature="tab.faces", level="write", action='face_unknown', fields=('ids',))
+    host.add_route("/api/faces/unknown_cluster", pc.api_face_unknown_cluster, methods=["POST"], feature="tab.faces", level="write", action='face_unknown_cluster', fields=('cluster_id',))
+    host.add_route("/api/faces/unmark", pc.api_face_unmark, methods=["POST"], feature="tab.faces", level="write", action='face_unmark', fields=('ids',))
+    host.add_route("/api/faces/merge", pc.api_face_merge, methods=["POST"], feature="tab.faces", level="write", action='face_merge', fields=('src', 'dst'))
+    host.add_route("/api/bodies/split", pc.api_body_split, methods=["POST"], feature="tab.faces", level="write")
 
     # ── UI: People tab (left pane) + Person editor (controls pane) + mesh ──
     for a in MANIFEST["assets"]:

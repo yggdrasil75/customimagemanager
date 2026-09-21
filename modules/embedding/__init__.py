@@ -572,7 +572,7 @@ def register(host):
         return entries, total, None
 
     # ── API endpoints ──────────────────────────────────────────────────────
-    @host.app.route("/api/embedding/status")
+    @host.route("/api/embedding/status", feature="tab.review")
     def embedding_status():
         db = host.db()
         stored_tag = _embedding_model_tag(db)
@@ -589,7 +589,7 @@ def register(host):
         })
 
     # Backward-compatible endpoints (matching original manager.py API)
-    @host.app.route("/api/embed_status")
+    @host.route("/api/embed_status", feature="tab.review")
     def embed_status():
         """Status probe for the Review-tab button."""
         db = host.db()
@@ -606,7 +606,7 @@ def register(host):
             "background": "embed" in host.broker.background_capabilities(),
         })
 
-    @host.app.route("/api/library_embed", methods=["POST"])
+    @host.route("/api/library_embed", methods=["POST"], feature="tab.review", level="write")
     def library_embed():
         """Generate (or regenerate) library embeddings for the Review tab.
         Matches the original manager.py API signature."""
@@ -637,7 +637,7 @@ def register(host):
                         "scope": "selected" if sel else "library",
                         "text_search": _text_search_enabled(), "note": _why_no_text()})
 
-    @host.app.route("/api/embedding/generate", methods=["POST"])
+    @host.route("/api/embedding/generate", methods=["POST"], feature="tab.review", level="write")
     def embedding_generate():
         body = request.json or {}
         force = bool(body.get("force"))
@@ -659,7 +659,7 @@ def register(host):
                         "scope": "selected" if sel else "library",
                         "text_search": _text_search_enabled(), "note": _why_no_text()})
 
-    @host.app.route("/api/embedding/bulk", methods=["POST"])
+    @host.route("/api/embedding/bulk", methods=["POST"], feature="tab.review", level="write")
     def embedding_bulk():
         """Bulk embed selected images. Called from gallery bulk actions."""
         body = request.json or {}
@@ -679,7 +679,7 @@ def register(host):
                         "total_embeddings": total, "backend": backend,
                         "text_search": _text_search_enabled(), "note": _why_no_text()})
 
-    @host.app.route("/api/embedding/cluster", methods=["POST"])
+    @host.route("/api/embedding/cluster", methods=["POST"], feature="tab.review", level="write")
     def embedding_cluster():
         body = request.json or {}
         eps = float(body.get("eps", 0.16))
@@ -692,7 +692,7 @@ def register(host):
         return jsonify({"success": True, "clusters": n,
                         "embeddings": _embedding_count(db)})
 
-    @host.app.route("/api/embedding/heuristics", methods=["POST"])
+    @host.route("/api/embedding/heuristics", methods=["POST"], feature="tab.review", level="write")
     def embedding_heuristics():
         body = request.json or {}
         margin = float(body.get("margin", 2.0))
@@ -707,7 +707,7 @@ def register(host):
         summaries = _stage_build_heuristics(db, tag_of=tag_of, margin=margin)
         return jsonify({"success": True, "clusters": summaries})
 
-    @host.app.route("/api/embedding/search", methods=["POST"])
+    @host.route("/api/embedding/search", methods=["POST"], feature="tab.review")
     def embedding_search():
         body = request.json or {}
         query = (body.get("q") or "").strip()
@@ -729,7 +729,7 @@ def register(host):
             {"filename": n, "score": round(s, 4)} for n, s in hits
         ]})
 
-    @host.app.route("/api/embedding/search_image", methods=["POST"])
+    @host.route("/api/embedding/search_image", methods=["POST"], feature="tab.review")
     def embedding_search_image():
         body = request.json or {}
         filename = body.get("filename", "")

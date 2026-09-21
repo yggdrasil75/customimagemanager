@@ -45,10 +45,9 @@ def register(host):
                             pane="module", help="Optional OBB/box weights for the pipeline's panel node.")
     host.register_feature("ai.smarttag", "Smart Tag (AI pipeline)", section="ai_tooling",
                           section_label="AI Tooling", default="write")
-    for rule, fn, opts in pc._ROUTES:
-        feat = getattr(fn, "_feature", None)
-        view = host.core.auth.require_feature(*feat[0], **feat[1])(fn) if feat else fn
-        host.add_route(rule, view, **opts)
+    host.add_route("/api/run_pipeline", pc.run_pipeline_route, methods=["POST"], feature="ai.smarttag", level="write")
+    host.add_route("/api/bulk_pipeline", pc.bulk_pipeline, methods=["POST"], feature="ai.smarttag", level="write")
+    host.add_route("/api/autotag_toggle", pc.autotag_toggle, methods=["POST"], feature="ai.smarttag", level="write", action="autotag_toggle", fields=("enabled",))
     # The structured analysis this module writes (files.analysis, mirrored in
     # the sidecar) reaches the metadata packet through the enricher; pipeline.js
     # picks it up with registerFileMetaHook. Core never names it.
