@@ -25,7 +25,7 @@ def register(host):
     host.add_config_key("gpu_max_jobs", default=0,
                         validate=lambda v: max(0, min(256, int(v or 0))))
     host.add_settings_field(key="gpu_max_jobs", label="Max background GPU jobs (0 = by memory)",
-                            kind="number", pane="models",
+                            kind="number", pane="general",
                             help="Background model jobs are admitted by device memory: small "
                                  "models run many at once, a 16 GB embedder one or two. Set a "
                                  "number only to cap that (e.g. if you see 'NMS time limit exceeded').")

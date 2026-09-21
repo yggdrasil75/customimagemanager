@@ -93,7 +93,7 @@ async function bulkPipeline(){
     const ta = mount.querySelector('#cfg_pipeline');
     ta.addEventListener('input', () => { clearTimeout(_saveTimer); _saveTimer = setTimeout(savePipeline, 600); });
     ta.addEventListener('change', savePipeline);
-    fetch('/api/state').then(r => r.json()).then(s => {
+    fetch('/api/pipeline_tree').then(r => r.json()).then(s => {
       ta.value = JSON.stringify(s.pipeline_tree || {}, null, 2);
       if (window.mountPipelineEditor) mountPipelineEditor();
     }).catch(() => {});

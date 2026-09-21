@@ -13,6 +13,7 @@ tags, description, boxes and flags, plus the auto-tag background worker.
 Other modules run the tree through the "pipeline" service (comics: page-wise
 Smart Tag + summary).
 """
+from flask import jsonify
 import json
 
 from . import pipeline_core as pc
@@ -45,6 +46,9 @@ def register(host):
                             pane="module", help="Optional OBB/box weights for the pipeline's panel node.")
     host.register_feature("ai.smarttag", "Smart Tag (AI pipeline)", section="ai_tooling",
                           section_label="AI Tooling", default="write")
+    host.add_route("/api/pipeline_tree", lambda: jsonify(
+        {"success": True, "pipeline_tree": host.config.get("pipeline_tree") or DEFAULT_PIPELINE}),
+        feature="settings")
     host.add_route("/api/run_pipeline", pc.run_pipeline_route, methods=["POST"], feature="ai.smarttag", level="write")
     host.add_route("/api/bulk_pipeline", pc.bulk_pipeline, methods=["POST"], feature="ai.smarttag", level="write")
     host.add_route("/api/autotag_toggle", pc.autotag_toggle, methods=["POST"], feature="ai.smarttag", level="write", action="autotag_toggle", fields=("enabled",))
