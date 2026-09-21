@@ -472,6 +472,12 @@ class ModelBroker:
         The returned handle normalizes output to the capability's canonical
         shape via the provider's transform.
         """
+        # Resolve the pick under the lock, but LOAD outside it: bind() runs the
+        # loader (a weights download, a multi-second model load), and holding
+        # the broker lock across that stalls status() — i.e. the Models tab and
+        # the whole settings modal — for as long as a background sweep is
+        # loading something. Loaders back themselves with model_registry, which
+        # has its own per-key load lock, so concurrent binds stay safe.
         with self._lock:
             if cap_id not in self._caps:
                 raise NoProviderError(cap_id, "unknown_capability",
@@ -482,26 +488,25 @@ class ModelBroker:
                     f"no model is registered for '{cap_id}'")
             sel = provider or (self._bg[cap_id]["provider"] if role == "bg" and cap_id in self._bg
                                else self._selection.get(cap_id))
-            prev = getattr(_ROLE, "value", None)
-            _ROLE.value = role          # loaders resolve variant() for this run
-            try:
-                if sel and sel in provs:
-                    p = provs[sel]
-                    if not p.available():
-                        raise NoProviderError(cap_id, "selected_unavailable",
-                            f"selected model '{p.label}' for '{cap_id}' is "
-                            f"unavailable: {p.reason()}")
-                    return p.bind()
+            if sel and sel in provs:
+                p = provs[sel]
+                if not p.available():
+                    raise NoProviderError(cap_id, "selected_unavailable",
+                        f"selected model '{p.label}' for '{cap_id}' is "
+                        f"unavailable: {p.reason()}")
+            else:
                 # no explicit selection: the same default selected_id() shows
                 # (available and unprompted first, then any available)
-                pid = self.selected_id(cap_id, role)
-                p = provs.get(pid)
-                if p is not None and p.available():
-                    return p.bind()
-                raise NoProviderError(cap_id, "none_available",
-                    f"no available model for '{cap_id}'")
-            finally:
-                _ROLE.value = prev
+                p = provs.get(self.selected_id(cap_id, role))
+                if p is None or not p.available():
+                    raise NoProviderError(cap_id, "none_available",
+                        f"no available model for '{cap_id}'")
+        prev = getattr(_ROLE, "value", None)
+        _ROLE.value = role          # loaders resolve variant() for this run
+        try:
+            return p.bind()
+        finally:
+            _ROLE.value = prev
 
     def detector_for(self, cap_id, model_path):
         """Pick the provider that can run `model_path` for a path-parameterized

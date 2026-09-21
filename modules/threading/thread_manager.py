@@ -93,6 +93,17 @@ def _default_max():
 _TLS = threading.local()   # .worker: True on a thread running a dispatched job
 
 
+def _nice_worker(nice=10):
+    """Lower the calling thread's scheduling priority (Linux: niceness is
+    per-thread, so this touches only pool workers, never the request threads).
+    Background model runs then yield the CPU to the web front end on a
+    saturated box instead of competing with it as equals. No-op elsewhere."""
+    try:
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), nice)
+    except Exception:
+        pass
+
+
 class ThreadManager:
     """Global slot allocator. Thread-safe. Not a fixed executor: it tracks how
     many logical tasks are active and computes each task's fair share of the
@@ -242,7 +253,7 @@ class ThreadManager:
         self._wake = threading.Event()
         self._inflight = set()          # live futures, for slot accounting
         self._ex = ThreadPoolExecutor(max_workers=self.max_slots(),
-                                      thread_name_prefix="bg")
+                                      thread_name_prefix="bg", initializer=_nice_worker)
         threading.Thread(target=self._process_loop, daemon=True,
                          name="bg-processor").start()
 
@@ -896,7 +907,7 @@ class _ManagedPool:
     def __enter__(self):
         self._tm._enter()
         workers = self._tm.slots_for(self._want)
-        kw = {"max_workers": workers}
+        kw = {"max_workers": workers, "initializer": _nice_worker}
         if self._name:
             kw["thread_name_prefix"] = self._name
         self._ex = ThreadPoolExecutor(**kw)

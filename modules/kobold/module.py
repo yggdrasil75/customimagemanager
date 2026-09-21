@@ -199,7 +199,7 @@ def register(host):
         """Write the vlm settings from koboldcpp's own model list."""
         llm = host.get_service("llm") or {}
         cfg["oai_endpoint"] = _url(cfg, "/v1/chat/completions")
-        ids = llm["list_models"](cfg["oai_endpoint"], "", ttl=0) if llm.get("list_models") else []
+        ids = llm["list_models"](cfg["oai_endpoint"], "", ttl=0, wait=True) if llm.get("list_models") else []
         if ids:
             cfg["oai_model"] = ids[0]
         elif not cfg.get("oai_model"):

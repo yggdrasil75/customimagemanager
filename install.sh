@@ -32,7 +32,16 @@ fi
 SYS="build-essential python3-venv python3-dev curl git libjxl-tools libexiv2-dev libboost-python-dev libgomp1"
 [ "$MODE" = ultralight ] || SYS="$SYS ffmpeg libgl1 libglib2.0-0 p7zip-full unrar-free calibre"
 if [ "$SYSTEM" = 1 ]; then
-    SUDO=""; [ "$(id -u)" = 0 ] || SUDO="sudo"
+    SUDO=""
+    if [ "$(id -u)" != 0 ]; then
+        # Only use sudo when it works without a prompt; a box where sudo is
+        # not allowed (or needs a password we can't ask for) skips the system
+        # packages instead of erroring out of the whole install.
+        if command -v sudo >/dev/null && sudo -n true 2>/dev/null; then SUDO="sudo"
+        else SYSTEM=0; echo "warn: no root/sudo — skipping system packages. Ask an admin for: $SYS" >&2; fi
+    fi
+fi
+if [ "$SYSTEM" = 1 ]; then
     if command -v apt-get >/dev/null; then
         echo "==> apt: $SYS"
         $SUDO apt-get update -qq && $SUDO apt-get install -y --no-install-recommends $SYS \

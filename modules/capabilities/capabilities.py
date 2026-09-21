@@ -59,8 +59,7 @@ CAPABILITY_PROBES = {
     "barcodes":     lambda: _installed("pyzbar") or _installed("zxingcpp"),
     "gallery_dl":   lambda: _installed("gallery_dl"),
     # LLM preprocess actions
-    "llm":          lambda: _installed("openai") or _installed("llama_cpp")
-                            or _installed("ollama"),
+    "llm":          lambda: _installed("requests"),
 }
 
 # ── capability -> feature keys it enables ────────────────────────────────────

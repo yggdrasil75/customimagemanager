@@ -10,6 +10,7 @@ import contextlib
 import json
 import random
 import re
+import threading
 import time
 
 import numpy as np
@@ -85,19 +86,9 @@ def chat_url(endpoint):
                    else "/v1/chat/completions")
 
 _MODELS_CACHE = {}     # v1 base -> (expires, [ids])
+_MODELS_INFLIGHT = set()
 
-def list_models(endpoint=None, key=None, ttl=20):
-    """Model ids the endpoint reports on GET /v1/models (OpenAI, koboldcpp,
-    llama.cpp, vLLM, Ollama…). [] when the server has no list (older backends)
-    or is down, so the settings field falls back to manual entry."""
-    base = v1_base(endpoint or _cfg().get("oai_endpoint", ""))
-    if not base:
-        return []
-    now = time.time()
-    hit = _MODELS_CACHE.get(base)
-    if hit and hit[0] > now:
-        return hit[1]
-    key = (key if key is not None else _cfg().get("oai_key", "")).strip()
+def _fetch_models(base, key, ttl):
     hdrs = {"Authorization": f"Bearer {key}"} if key else {}
     ids = []
     try:
@@ -110,8 +101,32 @@ def list_models(endpoint=None, key=None, ttl=20):
         ids = [i for i in ids if i and i != "None"]
     except Exception:
         ids = []
-    _MODELS_CACHE[base] = (now + ttl, ids)
+    _MODELS_CACHE[base] = (time.time() + ttl, ids)
+    _MODELS_INFLIGHT.discard(base)
     return ids
+
+def list_models(endpoint=None, key=None, ttl=20, wait=False):
+    """Model ids the endpoint reports on GET /v1/models (OpenAI, koboldcpp,
+    llama.cpp, vLLM, Ollama…). [] when the server has no list (older backends)
+    or is down, so the settings field falls back to manual entry.
+
+    Never blocks the caller on the network unless wait=True: a stale/missing
+    entry is refreshed on a background thread and the last known list (or [])
+    is returned now, so opening Settings stays instant while a model server is
+    still coming up."""
+    base = v1_base(endpoint or _cfg().get("oai_endpoint", ""))
+    if not base:
+        return []
+    key = (key if key is not None else _cfg().get("oai_key", "")).strip()
+    hit = _MODELS_CACHE.get(base)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    if wait:
+        return _fetch_models(base, key, ttl)
+    if base not in _MODELS_INFLIGHT:
+        _MODELS_INFLIGHT.add(base)
+        threading.Thread(target=_fetch_models, args=(base, key, ttl), daemon=True).start()
+    return hit[1] if hit else []
 
 
 def request(messages, tools=None, tool_choice=None, timeout=600, endpoint=None):

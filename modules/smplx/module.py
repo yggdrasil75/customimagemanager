@@ -80,7 +80,9 @@ def register(host):
         note="Meta/MPI parametric body. Needs the licensed SMPLX_<GENDER>.npz files in "
              "models/smplx/bodymesh (not auto-downloaded).",
         speed="fast", supports_conf=False, loader=_loader, transform=None,
-        available=lambda: bool(model_file(_gender())),
+        # Any gender file counts: availability must not read the pick (that
+        # would recurse: variant() -> selected_id() -> available()).
+        available=lambda: any(model_file(g["value"]) for g in _GENDERS),
         reason=f"put SMPLX_NEUTRAL.npz in {_DIR}", cost_mb=200)
 
     # pose_neutral for estimator modules that regress SMPL-X betas.
