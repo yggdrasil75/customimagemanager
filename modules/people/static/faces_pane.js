@@ -62,8 +62,12 @@ function faceChip(f, size = 56, pad = 1.6) {
   const px = bw >= 1 ? 50 : clamp01((f.cx - bw / 2) / (1 - bw)) * 100;
   const py = bh >= 1 ? 50 : clamp01((f.cy - bh / 2) / (1 - bh)) * 100;
 
-  const url = '/api/thumb/' + encodeURI(f.rel);
-  const relAttr = (f.rel || '').replace(/"/g, '&quot;');
+  // encodeURIComponent (as gallery.js does): encodeURI leaves # ? % alone,
+  // which is why some chips came up blank. The path goes in a data attribute
+  // and the handler reads this.dataset.rel, so a quote in a filename can't
+  // break the inline JS.
+  const url = '/api/thumb/' + encodeURIComponent(f.rel || '');
+  const relAttr = escapeHtml(f.rel || '');
   const sel = _faceSel.has(f.id);
   // An outlier (far from the cluster centroid) is the one most likely swept in by
   // mistake; ring it amber so the eye goes straight to it.
@@ -75,7 +79,7 @@ function faceChip(f, size = 56, pad = 1.6) {
       <div class="w-full h-full rounded bg-gray-900 bg-no-repeat cursor-zoom-in
                   ${sel ? 'ring-2 ring-purple-400' : outlier}"
            title="${relAttr}\nclick to find this exact face in the image${f.dist != null ? '\ndistance from centroid: ' + f.dist : ''}"
-           onclick="viewFaceImage('${relAttr}', ${f.cx}, ${f.cy}, ${f.w}, ${f.h})"
+           onclick="viewFaceImage(this.dataset.rel, ${+f.cx}, ${+f.cy}, ${+f.w}, ${+f.h})" data-rel="${relAttr}"
            data-thumb="${url}"
            style="background-size:${zx}% ${zy}%;
                   background-position:${px}% ${py}%"></div>
@@ -111,13 +115,13 @@ function bodyChip(b, size = 56) {
   const zx = 100 / bw, zy = 100 / bh;
   const px = bw >= 1 ? 50 : clamp01((b.cx - bw / 2) / (1 - bw)) * 100;
   const py = bh >= 1 ? 50 : clamp01((b.cy - bh / 2) / (1 - bh)) * 100;
-  const url = '/api/thumb/' + encodeURI(b.rel);
-  const relAttr = (b.rel || '').replace(/"/g, '&quot;');
+  const url = '/api/thumb/' + encodeURIComponent(b.rel || '');
+  const relAttr = escapeHtml(b.rel || '');
   return `<div class="relative flex-shrink-0 group" style="width:${Math.round(size*0.7)}px;height:${size}px">
       <div class="w-full h-full rounded bg-gray-900 bg-no-repeat cursor-zoom-in
                   ${b.bridged ? 'ring-2 ring-emerald-500' : 'ring-1 ring-gray-600'}"
            title="${relAttr}${b.bridged ? '\nfound by body only (no usable face here)' : '\nbody bound to a face of this person'}"
-           onclick="viewFaceImage('${relAttr}', ${b.cx}, ${b.cy}, ${b.w}, ${b.h})"
+           onclick="viewFaceImage(this.dataset.rel, ${+b.cx}, ${+b.cy}, ${+b.w}, ${+b.h})" data-rel="${relAttr}"
            data-thumb="${url}"
            style="background-size:${zx}% ${zy}%;background-position:${px}% ${py}%"></div>
       <button title="Not this person's body — unbind"
@@ -572,7 +576,7 @@ function viewFaceImage(rel, cx, cy, w, h) {
   } else {
     // Should not happen in the app, but don't die silently if faces.js somehow
     // loads without the gallery viewer present.
-    window.open('/api/file/' + encodeURI(rel), '_blank');
+    window.open('/api/file/' + encodeURIComponent(rel), '_blank');
   }
 }
 
