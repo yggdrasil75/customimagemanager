@@ -1729,7 +1729,7 @@ def _region_desc_to_json(region):
         tags.append(entry)
     payload = {"description": region.get("region_description", "") or "", "tags": tags}
     cls = region.get("class_name", "") or ""
-    if cls and cls != (region.get("region_name", "") or ""):
+    if cls and cls != (region.get("region_type", "") or ""):
         payload["class"] = cls
     return json.dumps(payload, ensure_ascii=False)
 

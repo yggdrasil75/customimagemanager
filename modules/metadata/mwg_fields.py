@@ -310,6 +310,11 @@ def parse_region_list(xmp, desc_from_json):
         # Instance name lives in mwg-rs:Name ("jill"); the class ("girl") rides
         # in the Description JSON. Fall back to Name for class on legacy files.
         inst_name = xmp.get(f'{p}/mwg-rs:Name', '') or ''
+        if inst_name and not rclass and not rtype:
+            # Legacy writer put the class in Name when no instance name was
+            # set (an instance name always came with a JSON class). Lift it
+            # back to class so Name starts blank and Type gets the class.
+            rtype, inst_name = inst_name, ''
         bc_val = xmp.get(f'{p}/mwg-rs:Extensions/cim:BarCodeValue', '') or ''
         bc_fmt = xmp.get(f'{p}/mwg-rs:Extensions/cim:BarCodeFormat', '') or ''
         bc_bin = xmp.get(f'{p}/mwg-rs:Extensions/cim:BarCodeBinary', '') or ''
@@ -319,9 +324,9 @@ def parse_region_list(xmp, desc_from_json):
         mask_over = xmp.get(f'{p}/mwg-rs:Extensions/cim:MaskOverscan', '') or ''
         mask_center = xmp.get(f'{p}/mwg-rs:Extensions/cim:MaskCenterline', '') or ''
         regions.append({
-            "class_name": rclass or inst_name or 'object',
+            "class_name": rclass or rtype or inst_name or 'object',
             "region_name": inst_name,
-            "region_type": rtype,
+            "region_type": rtype or rclass or 'object',
             "cx": cx, "cy": cy, "w": w, "h": h,
             "confirmed": confirmed,
             "uuid": str(xmp.get(f'{p}/mwg-rs:BarCodeValue', '')) or None,
@@ -354,14 +359,15 @@ def build_region_list_xml(regions, esc, desc_to_json, see_also_link, new_uuid):
     items = []
     for b in regions:
         confirmed = b.get('confirmed', True)
-        # mwg-rs:Name = the individual/instance name ("jill"); fall back to the
-        # class ("girl") when no instance name is set so Name is never empty.
-        inst = b.get("region_name") or b.get("class_name", "object")
-        name = esc(inst)
-        # mwg-rs:Type = the real region type ("Face", "Full body", …). Emitted
-        # only when set, so we don't write empty type elements.
-        rtype = (b.get("region_type") or "").strip()
-        type_el = f'<mwg-rs:Type>{esc(rtype)}</mwg-rs:Type>' if rtype else ''
+        # mwg-rs:Name = the individual/instance name ("jill"). Starts blank;
+        # the class no longer leaks into Name.
+        name = esc(b.get("region_name") or "")
+        # mwg-rs:Type = the class ("person", "face", "girl"). Always the class
+        # unless the user set an explicit type; persisted back on the dict so
+        # in-memory regions carry it too (same as uuid).
+        rtype = (b.get("region_type") or b.get("class_name") or "object").strip()
+        b["region_type"] = rtype
+        type_el = f'<mwg-rs:Type>{esc(rtype)}</mwg-rs:Type>'
         uid = b.get("uuid") or new_uuid()
         b["uuid"] = uid
         desc_json = esc(desc_to_json(b))

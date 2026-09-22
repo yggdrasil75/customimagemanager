@@ -20,12 +20,14 @@ function saveRegion(){
     document.getElementById('region_modal').classList.add('hidden'); return; }
   const name=document.getElementById('modal_region_name').value.trim()||'region';
   let openIdx=-1;
-  if(editingBoxIdx!==null){currentRegions[editingBoxIdx].class_name=name;openIdx=editingBoxIdx;editingBoxIdx=null;}
+  if(editingBoxIdx!==null){const r=currentRegions[editingBoxIdx];
+    if(!r.region_type||r.region_type===r.class_name) r.region_type=name;   // type tracks the class unless overridden
+    r.class_name=name;openIdx=editingBoxIdx;editingBoxIdx=null;}
   else if(pendingBox){pendingBox.class_name=name;pendingBox.confirmed=true;
     pendingBox.region_tags=pendingBox.region_tags||[];
     pendingBox.region_description=pendingBox.region_description||'';
     pendingBox.region_name=pendingBox.region_name||'';   // instance name (mwg-rs:Name)
-    pendingBox.region_type=pendingBox.region_type||'';   // region type (mwg-rs:Type)
+    pendingBox.region_type=pendingBox.region_type||name; // region type (mwg-rs:Type) = the class
     pendingBox.uuid=pendingBox.uuid||null;   // backend assigns on save
     // If boxing on an animated-JXL filmstrip frame, anchor this box to that
     // frame's time so YOLO tracking and re-selection stay frame-aware.
