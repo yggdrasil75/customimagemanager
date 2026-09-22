@@ -3,11 +3,32 @@
 // static/*.js in the page's <script> order, and stubs the two things jsdom
 // lacks: <canvas> 2D contexts and fetch(). fetch is routed to an in-memory
 // API stub so every call is recorded and any response can be scripted.
+// Boot-time GET responses default to what the real server returned
+// (_api_snapshot.json), so the page boots against the backend's actual shapes.
+// boot({modules: true | ["people", ...]}) also evaluates enabled modules' JS.
 const fs = require("fs"), path = require("path"), vm = require("vm");
 const { JSDOM } = require("jsdom");
 
 const ROOT = path.resolve(__dirname, "..", "..");
 const HTML = path.join(__dirname, "_app.html");
+const SNAP = path.join(__dirname, "_api_snapshot.json");
+const MODS = path.join(__dirname, "_module_assets.json");
+
+function readJson(p, dflt) { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return dflt; } }
+
+/** Enabled modules' JS assets: [{module_id, url, file}] in load order. */
+function moduleAssets() {
+  const m = readJson(MODS, { assets: [], dirs: {} });
+  return (m.assets || []).filter(a => a.kind !== "css" && !a.url.startsWith("/static/vendor/"))
+    .map(a => {
+      if (a.url.startsWith("/static/"))            // a core static file a module pulls in
+        return { module_id: a.module_id, url: a.url, file: path.join(ROOT, a.url.slice(1)) };
+      const rel = a.url.replace(`/modules/${a.module_id}/static/`, "");
+      const dir = m.dirs[a.module_id] || path.join(ROOT, "modules", a.module_id);
+      return { module_id: a.module_id, url: a.url, file: path.join(dir, "static", rel) };
+    });
+}
+function hasModule(id) { return moduleAssets().some(a => a.module_id === id); }
 
 function makeApi() {
   const calls = [];
@@ -26,6 +47,7 @@ function makeApi() {
     "/api/features": { success: true },
     "/api/metadata": { success: true, metadata: { tags: [], description: "", regions: [], albums: [] } },
   };
+  Object.assign(defaults, readJson(SNAP, {}));   // real server shapes win
   const api = {
     calls,
     on(key, val) { routes[key] = val; return api; },
@@ -101,6 +123,15 @@ function boot(opts = {}) {
     try { run(fs.readFileSync(p, "utf8"), s); }
     catch (e) { errors.push(`${s}: ${e && e.stack || e}`); }
   }
+  if (opts.modules) {
+    const want = opts.modules === true ? null : new Set(opts.modules);
+    for (const a of moduleAssets()) {
+      if (want && !want.has(a.module_id)) continue;
+      if (!a.file || !fs.existsSync(a.file)) { errors.push(`${a.url}: asset file not found`); continue; }
+      try { run(fs.readFileSync(a.file, "utf8"), a.url); }
+      catch (e) { errors.push(`${a.url}: ${e && e.stack || e}`); }
+    }
+  }
   const tick = (ms = 0) => new Promise(r => setTimeout(r, ms));
   // val(): like run() but returns a plain-realm copy, so node's strict
   // deepEqual doesn't trip over jsdom-realm Array/Object prototypes.
@@ -108,4 +139,4 @@ function boot(opts = {}) {
   return { window, document: window.document, api, run, val, errors, tick, dom };
 }
 
-module.exports = { boot, makeApi };
+module.exports = { boot, makeApi, moduleAssets, hasModule };

@@ -29,6 +29,7 @@ MANIFEST = {
 
 def line(text, score, x1, y1, x2, y2, W, H):
     """One detection: pixel box -> clamped, normalised center-form line dict."""
+    x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
     x1, x2 = max(0.0, min(W, x1)), max(0.0, min(W, x2))
     y1, y2 = max(0.0, min(H, y1)), max(0.0, min(H, y2))
     W, H = max(1, W), max(1, H)

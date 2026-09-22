@@ -2,7 +2,7 @@
 files via the `upload` fixture, which deletes them afterwards."""
 import io, os
 import pytest
-from conftest import png_bytes
+from cimtest import png_bytes
 
 
 def _read(client, fn):

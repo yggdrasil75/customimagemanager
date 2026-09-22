@@ -525,7 +525,8 @@ class Host:
             handles=handles, family=family, sizes=sizes, types=types,
             settings=settings, classes=classes, prompted=prompted, note=note,
             speed=speed, supports_conf=supports_conf,
-            resource=resource, concurrency=concurrency)
+            resource=resource, concurrency=concurrency,
+            module_id=self._current_module)
 
     def model_variant(self, cap_id, role=None):
         """{"size","type","background","classes"} the user picked for a

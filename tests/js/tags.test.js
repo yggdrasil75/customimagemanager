@@ -1,4 +1,4 @@
-const { page, test, assert } = require("./_setup");
+const { page, test, assert } = require("cim");
 const b = page();
 const $ = id => b.document.getElementById(id);
 

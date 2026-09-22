@@ -261,7 +261,7 @@ class ModelBroker:
                 available=None, reason="", cost_mb=0, gpu=False, handles=None,
                 family=None, sizes=None, types=None, settings=None, classes=None,
                 prompted=False, note="", speed="", supports_conf=None,
-                resource=None, concurrency=1):
+                resource=None, concurrency=1, module_id=None):
         """Register a provider for a capability. Dedup by (cap_id, provider_id).
 
         The predefined capabilities (model_contracts) exist so providers of the
@@ -271,18 +271,19 @@ class ModelBroker:
         Re-providing the same id replaces the earlier registration (last
         writer wins), which is what you want when a module is reloaded.
         """
+        module_id = module_id or self._current_module
         with self._lock:
             if cap_id not in self._caps:
                 self._caps[cap_id] = Capability(
                     cap_id, summary=f"Module-defined capability '{cap_id}'.",
                     input="see the providing module", output="see the providing module",
-                    owner=self._current_module or "module",
+                    owner=module_id or "module",
                     label=cap_id.replace(".", " · ").replace("_", " ").title())
                 self._providers.setdefault(cap_id, {})
             p = Provider(cap_id, provider_id, label=label, loader=loader,
                          transform=transform, available=available, reason=reason,
                          cost_mb=cost_mb, gpu=gpu,
-                         module_id=self._current_module, handles=handles,
+                         module_id=module_id, handles=handles,
                          family=family, sizes=sizes, types=types, settings=settings,
                          classes=classes, prompted=prompted, note=note, speed=speed,
                          supports_conf=supports_conf,
@@ -361,6 +362,13 @@ class ModelBroker:
         sensible pre-selection even when weights are missing).
         """
         with self._lock:
+            # While request() binds a provider, its loader asks variant(cap) /
+            # selected_id(cap); answer with the provider being bound, not the
+            # user's pick, or request(cap, provider=X) hands X the selected
+            # model's size/type (e.g. vitpose getting mediapipe's "lite").
+            bound = getattr(_ROLE, "binding", None)
+            if bound and bound[0] == cap_id:
+                return bound[1]
             role = role or getattr(_ROLE, "value", None)
             if role == "bg" and cap_id in self._bg:
                 return self._bg[cap_id]["provider"]
@@ -392,7 +400,9 @@ class ModelBroker:
             if role == "bg" and cap_id in self._bg:
                 v = {**v, **self._bg[cap_id]}
             if p is None:
-                return {"size": None, "type": None, "background": False, "classes": []}
+                base = self._variant.get(cap_id, {})
+                return {"size": None, "type": None, "background": False, "classes": [],
+                        "conf": float(base.get("conf", 0.25))}
             size = v.get("size") if v.get("size") in p.sizes else (p.sizes[0] if p.sizes else None)
             tvals = [t["value"] for t in p.types]
             typ = v.get("type") if v.get("type") in tvals else (tvals[0] if tvals else None)
@@ -502,11 +512,14 @@ class ModelBroker:
                     raise NoProviderError(cap_id, "none_available",
                         f"no available model for '{cap_id}'")
         prev = getattr(_ROLE, "value", None)
+        prev_bind = getattr(_ROLE, "binding", None)
         _ROLE.value = role          # loaders resolve variant() for this run
+        _ROLE.binding = (cap_id, p.id)
         try:
             return p.bind()
         finally:
             _ROLE.value = prev
+            _ROLE.binding = prev_bind
 
     def detector_for(self, cap_id, model_path):
         """Pick the provider that can run `model_path` for a path-parameterized

@@ -3,7 +3,7 @@ import os
 import numpy as np
 import pytest
 import media_types as mt
-from conftest import png_bytes
+from cimtest import png_bytes
 
 
 def test_stored_name():

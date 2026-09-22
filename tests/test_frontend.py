@@ -1,13 +1,19 @@
-"""Frontend: renders the real `/` page through Flask, hands it to the jsdom
-harness in tests/js/ and runs `node --test` there. Skips if node is missing.
-`npm install` in tests/js once (jsdom is the only dependency)."""
-import os, shutil, subprocess
+"""Frontend: renders the real `/` page through Flask, snapshots the boot-time
+API responses and the enabled modules' asset list, then runs `node --test`
+over tests/js/*.test.js and every modules/<id>/tests/*.test.js. Skips if node
+is missing; installs jsdom (the only dependency) into tests/js on first run."""
+import glob, json, os, shutil, subprocess
 import pytest
 
 JS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "js")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# GET endpoints the page calls while booting; their real responses become the
+# harness defaults so the frontend is exercised against the backend's shapes.
+SNAPSHOT = ["/api/state", "/api/modules", "/api/module_assets", "/api/auth/me",
+            "/api/auth/config", "/api/models", "/api/ai/actions", "/api/box_labels"]
 
 
-def test_js_suite(client):
+def test_js_suite(client, app):
     node = shutil.which("node")
     if not node:
         pytest.skip("node not installed")
@@ -20,7 +26,22 @@ def test_js_suite(client):
     assert "<script" in html
     with open(os.path.join(JS, "_app.html"), "w", encoding="utf-8") as fh:
         fh.write(html)
-    p = subprocess.run([node, "--test"], cwd=JS, capture_output=True, text=True, timeout=300)
+    snap = {}
+    for url in SNAPSHOT:
+        r = client.get(url)
+        if r.status_code == 200 and r.is_json:
+            snap[url] = r.get_json()
+    with open(os.path.join(JS, "_api_snapshot.json"), "w", encoding="utf-8") as fh:
+        json.dump(snap, fh)
+    dirs = {lm.id: lm.path for lm in app.module_registry._plugins.values()}
+    with open(os.path.join(JS, "_module_assets.json"), "w", encoding="utf-8") as fh:
+        json.dump({"assets": snap.get("/api/module_assets", {}).get("assets", []), "dirs": dirs}, fh)
+    files = sorted(glob.glob(os.path.join(JS, "*.test.js"))) + \
+        sorted(glob.glob(os.path.join(ROOT, "modules", "*", "tests", "*.test.js")))
+    # NODE_PATH lets module test files `require("cim")` from tests/js.
+    env = dict(os.environ, NODE_PATH=JS)
+    p = subprocess.run([node, "--test", *files], cwd=JS, capture_output=True, text=True,
+                       timeout=600, env=env)
     # TAP: a failing test is "not ok N - name" followed by an indented YAML
     # block (error, expected/actual, stack). Keep the whole block so the
     # pytest failure says WHY, not just which.

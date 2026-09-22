@@ -1,4 +1,4 @@
-const { page, test, assert } = require("./_setup");
+const { page, test, assert } = require("cim");
 const b = page();
 const $ = id => b.document.getElementById(id);
 const box = (o = {}) => Object.assign({ class_name: "person", cx: .5, cy: .5, w: .4, h: .8, confirmed: false, region_tags: [], region_description: "" }, o);

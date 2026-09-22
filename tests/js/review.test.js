@@ -1,4 +1,4 @@
-const { page, test, assert } = require("./_setup");
+const { page, test, assert } = require("cim");
 const b = page();
 
 test("rvDecide / rvAll / rvName build the decisions rvSave posts", async () => {
