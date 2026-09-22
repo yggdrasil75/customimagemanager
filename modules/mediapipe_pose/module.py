@@ -63,9 +63,9 @@ def _build(kind, size):
     from mediapipe.tasks.python.core.base_options import BaseOptions
     from mediapipe.tasks.python import vision
     if kind == "holistic":
-        opts = vision.holistic_landmarker.HolisticLandmarkerOptions(
+        opts = vision.HolisticLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=_task(_HOLISTIC_URL)))
-        lm = vision.holistic_landmarker.HolisticLandmarker.create_from_options(opts)
+        lm = vision.HolisticLandmarker.create_from_options(opts)
 
         def run(crop):
             r = lm.detect(_mp_image(crop))
@@ -74,10 +74,10 @@ def _build(kind, size):
             return [_lm(r.pose_landmarks, 33) + _lm(r.face_landmarks, 468)
                     + _lm(r.left_hand_landmarks, 21) + _lm(r.right_hand_landmarks, 21)]
     else:
-        opts = vision.pose_landmarker.PoseLandmarkerOptions(
+        opts = vision.PoseLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=_task(_POSE_URL.format(s=size))),
             num_poses=1)
-        lm = vision.pose_landmarker.PoseLandmarker.create_from_options(opts)
+        lm = vision.PoseLandmarker.create_from_options(opts)
 
         def run(crop):
             return [_lm(p, 33) for p in lm.detect(_mp_image(crop)).pose_landmarks]
