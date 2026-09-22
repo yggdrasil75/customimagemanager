@@ -1,0 +1,7 @@
+{
+  "name": "cim-frontend-tests",
+  "private": true,
+  "type": "commonjs",
+  "scripts": { "test": "node --test" },
+  "devDependencies": { "jsdom": "^24.1.0" }
+}

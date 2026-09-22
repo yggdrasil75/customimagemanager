@@ -141,7 +141,7 @@ function renderRegionEditor(){
   uidEl.textContent = b.uuid ? b.uuid.slice(0,8) : '(id on save)';
   document.getElementById('region_desc').value = b.region_description||'';
   const rn=document.getElementById('region_name'); if(rn) rn.value=b.region_name||'';
-  const rt=document.getElementById('region_type'); if(rt) rt.value=b.region_type||'';
+  const rt=document.getElementById('region_type'); if(rt) rt.value=b.region_type||b.class_name||'';
   renderRegionTags();
 }
 function renderRegionTags(){

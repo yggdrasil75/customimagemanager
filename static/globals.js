@@ -92,6 +92,11 @@ function syncTagMirror(){
   if(m) m.value=currentTags.join(', ');
 }
 // A tag prefixed with '?' is an unconfirmed (AI/auto) suggestion.
+// HTML-escape for innerHTML templates. Core-owned: gallery.js/globals.js use it,
+// so it must not depend on a module script (books/fetch/pipeline redefine it
+// identically for their own files).
+function _esc(s){ return String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function tagIsConfirmed(t){ return !String(t).startsWith('?'); }
 function tagName(t){ t=String(t); return t.startsWith('?')?t.slice(1):t; }
 function renderTags(){

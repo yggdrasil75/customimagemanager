@@ -13,3 +13,8 @@ cookies.txt
 /**/__pycache__
 *.pyc
 *.pyo
+# local-only test media (see tests/fixtures/README.md)
+tests/fixtures/*
+!tests/fixtures/README.md
+tests/js/node_modules/
+tests/js/_app.html

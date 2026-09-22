@@ -1512,7 +1512,7 @@ def register(host, ctx: dict):
         _db().commit()
         return jsonify({"success": True, "count": len(rows)})
 
-    return app
+    return host
 
 def start_background(force=False):
     """Called from manager.py's __main__ block, mirroring the music indexer."""
