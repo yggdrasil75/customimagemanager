@@ -4,7 +4,7 @@ propagation from the Faces/Bodies tabs into the image's MWG regions.
 Model-free tests hand _face_detect_batch fake detectors; the last test uses
 the real picked detectors on tests/fixtures/person_single.jpg."""
 import pytest
-from cimtest import read_meta, write_meta, box, media_path
+from cimtest import picked_model, read_meta, write_meta, box, media_path
 
 from modules.people import people_core as pc
 
@@ -111,13 +111,11 @@ def test_read_routes(client, route, ungated):
 
 def test_real_detectors_on_single_person(client, upload, app):
     """The picked detect.persons / detect.faces on a real one-person photo."""
-    from modules.model_broker import NoProviderError
-    try:
-        app.module_host.broker.request("detect.persons")
-    except NoProviderError as e:
-        pytest.skip(f"no detect.persons model: {e}")
+    picked_model(app, "detect.persons")
     fn = upload.media("person_single.jpg")
     assert pc._face_detect_batch([fn], faces=True, bodies=True) == 0
     regs = read_meta(client, fn)["regions"]
-    assert len(_by_class(regs, "person")) == 1, regs
+    assert len(_by_class(regs, "person")) == 1, (
+        f"{len(_by_class(regs, 'person'))} person boxes from the picked detectors; "
+        f"tests/test_fixtures.py says whether person_single.jpg is the problem. Got: {regs}")
     assert all(r["region_type"] == r["class_name"] for r in regs)

@@ -37,7 +37,8 @@ def test_exif_write_then_undo_redo(client, upload):
                                                  "patch": {"Artist": "CIM Tester"}}).get_json()
     assert j.get("success"), j
     read = lambda: _field(client.post("/api/exif/read", json={"filename": fn}).get_json()["data"], "Artist")
-    assert read() == "CIM Tester"
+    assert read() == "CIM Tester", ("/api/metadata/write reported success but the value is not "
+                                    "readable back — the write is being dropped for this format")
     hist = client.post("/api/exif/history", json={"filename": fn}).get_json()
     assert hist["success"] and any("Artist" in h["field"] for h in hist["history"])
     assert client.post("/api/exif/undo", json={"filename": fn}).get_json()["success"]

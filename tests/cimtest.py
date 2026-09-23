@@ -14,6 +14,7 @@ Command-line options (./run_tests.sh --help lists them under "cim")
   --cim-remote         also run providers on an external endpoint (vision
                        LLM, OAI embeddings); off by default
   --cim-fixtures DIR   fixture media folder (default tests/fixtures)
+  --cim-no-models      skip every test that loads a real model (fast run)
 
 Fixtures
   ungated      lift the machine-capability 503 gate for one test
@@ -26,7 +27,9 @@ Fixtures
   host         app.module_host
 
 Helpers
-  fixture(name)  path to a fixture file, or skip
+  fixture(name)  path to a fixture file (any equivalent extension), or skip
+  picked_model(app, cap)  handle for the capability's picked provider, or skip
+  text_matches(want, got)  does the read text match the .txt expectation?
   expected(name) the optional <name>.txt expectation, or None
   png_bytes()    tiny synthetic PNG
   read_meta / write_meta   /api/metadata read/write through the client
@@ -60,6 +63,10 @@ def pytest_addoption(parser):
                 help="also test providers that call an external endpoint (LLM / OAI)")
     g.addoption("--cim-fixtures", metavar="DIR", default=None,
                 help="fixture media folder (default tests/fixtures)")
+    g.addoption("--cim-no-models", action="store_true", default=False,
+                help="skip everything that loads a real model (the provider suite "
+                     "and each module's real-model test); the fake-model logic "
+                     "tests still run, and the suite finishes in seconds")
 
 
 def pytest_configure(config):
@@ -234,7 +241,13 @@ def _module_gate(request):
 
 def pytest_collection_modifyitems(session, config, items):
     """Run provider tests grouped by provider so each model loads once instead
-    of being evicted and reloaded between test functions."""
+    of being evicted and reloaded between test functions, and honour
+    --cim-no-models."""
+    if config.getoption("--cim-no-models"):
+        mark = pytest.mark.skip(reason="--cim-no-models")
+        for it in items:
+            if "P" in getattr(it, "fixturenames", ()) or it.name.startswith("test_real_"):
+                it.add_marker(mark)
     idx = {id(it): i for i, it in enumerate(items)}
 
     def key(it):
@@ -290,23 +303,68 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
+# The README names fixtures with one extension, but any equivalent format is
+# fine: barcode_qr.jpg satisfies barcode_qr.png.
+_ALT_EXTS = {
+    ".png":  (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".jxl"),
+    ".jpg":  (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".jxl"),
+    ".gif":  (".gif", ".webp", ".apng", ".png"),
+    ".mp4":  (".mp4", ".mkv", ".mov", ".webm", ".avi"),
+    ".epub": (".epub", ".mobi", ".azw3", ".pdf", ".fb2"),
+    ".cbz":  (".cbz", ".cbr", ".cb7", ".cbt"),
+    ".mp3":  (".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav"),
+    ".xmp":  (".xmp",),
+}
+
+
+def find_fixture(name):
+    """Path to a fixture, accepting any equivalent extension, or None."""
+    base, ext = os.path.splitext(name)
+    for e in _ALT_EXTS.get(ext.lower(), (ext,)):
+        for cand in (base + e, base + e.upper()):
+            p = os.path.join(FIXTURES, cand)
+            if os.path.exists(p):
+                return p
+    return None
+
+
 def fixture(name):
-    p = os.path.join(FIXTURES, name)
-    if not os.path.exists(p):
+    p = find_fixture(name)
+    if p is None:
         pytest.skip(f"fixture media missing: {name} (see tests/fixtures/README.md)")
     return p
 
 
 def has_fixture(name):
-    return os.path.exists(os.path.join(FIXTURES, name))
+    return find_fixture(name) is not None
 
 
 def expected(name):
+    """The <name>.txt expectation next to a fixture, or None."""
     p = os.path.join(FIXTURES, os.path.splitext(name)[0] + ".txt")
     if not os.path.exists(p):
         return None
     with open(p, encoding="utf-8") as fh:
         return fh.read().strip()
+
+
+def text_matches(want, got, recall=0.6):
+    """Does `got` contain what `want` says? A short expectation (one line, few
+    words — a barcode payload, a phrase) must appear verbatim; a long one (a
+    whole paragraph of a scanned page) is matched on word recall, because OCR
+    legitimately differs on layout, hyphenation and reading order.
+    Returns (ok, detail)."""
+    w = " ".join((want or "").split()).lower()
+    g = " ".join((got or "").split()).lower()
+    if not w:
+        return True, ""
+    words = w.split()
+    if len(words) <= 12 and "\n" not in (want or "").strip():
+        return (w in g), f"looked for {w!r}"
+    seen = set(g.split())
+    hit = [x for x in words if x in seen]
+    frac = len(hit) / len(words)
+    return frac >= recall, f"{frac:.0%} of the expected words found (need {recall:.0%})"
 
 
 def load_image(name):
@@ -348,6 +406,24 @@ def write_meta(client, fn, tags=None, desc="", regions=None):
                                            "regions": regions or []}).get_json()
     assert j and j.get("success"), j
     return j
+
+
+def picked_model(app, cap, why=""):
+    """The handle for the capability's picked provider, or skip: no provider,
+    deps missing, or the pick runs on an external endpoint without
+    --cim-remote (a test must never depend on a server being up)."""
+    from modules.model_broker import NoProviderError
+    b = app.module_host.broker
+    pid = b.selected_id(cap)
+    p = b._providers.get(cap, {}).get(pid) if pid else None
+    if p is not None and p.resource and not REMOTE:
+        pytest.skip(f"picked {cap} provider '{pid}' runs on {p.resource} (pass --cim-remote)")
+    try:
+        return b.request(cap)
+    except NoProviderError as e:
+        pytest.skip(f"no {cap} model{(' — ' + why) if why else ''}: {e}")
+    except (ImportError, ModuleNotFoundError) as e:
+        pytest.skip(f"{cap} provider deps missing: {e}")
 
 
 def post_json(client, url, body):

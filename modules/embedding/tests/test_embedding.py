@@ -2,7 +2,7 @@
 image-to-image search finding the near-duplicate first."""
 import numpy as np
 import pytest
-from cimtest import post_json
+from cimtest import picked_model, post_json
 
 
 def _unit(v):
@@ -22,15 +22,13 @@ def test_generate_with_fake_model(client, upload, fake_model):
     a, b = upload(seed=801), upload(seed=802)
     j = post_json(client, "/api/embedding/generate", {"filenames": [a, b], "force": True})
     assert j["success"] and j["embedded_now"] == 2, j
-    assert j["total_embeddings"] >= 2
+    assert j["total_embeddings"] >= 2, (
+        f"embedded {j['embedded_now']} images but the library reports "
+        f"{j['total_embeddings']} embeddings: they are being overwritten or miscounted")
 
 
 def test_search_image_finds_near_dup(client, upload, app):
-    from modules.model_broker import NoProviderError
-    try:
-        app.module_host.broker.request("embed")
-    except NoProviderError as e:
-        pytest.skip(f"no embed model: {e}")
+    picked_model(app, "embed")
     a = upload.media("near_dup_a.jpg")
     b = upload.media("near_dup_b.jpg")
     o = upload.media("no_person.jpg")

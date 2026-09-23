@@ -41,12 +41,8 @@ def test_models_route(client):
 def test_real_iqa_prefers_sharp(client, upload, app):
     """The picked iqa model rates the sharp fixture above a blurred copy."""
     import cv2, io
-    from cimtest import load_image
-    from modules.model_broker import NoProviderError
-    try:
-        app.module_host.broker.request("iqa")
-    except NoProviderError as e:
-        pytest.skip(f"no iqa model: {e}")
+    from cimtest import load_image, picked_model
+    picked_model(app, "iqa")
     img = load_image("person_single.jpg")
     blur = cv2.GaussianBlur(img, (0, 0), 6)
     names = []
@@ -57,5 +53,6 @@ def test_real_iqa_prefers_sharp(client, upload, app):
         names.append(j["filename"]); upload.made.append(j["filename"])
     post_json(client, "/api/iqa_scan", {"filenames": names, "force": True})
     sharp, blurred = (read_meta(client, n)["iqa_score"] for n in names)
-    assert sharp is not None and blurred is not None
-    assert sharp >= blurred, f"sharp rated {sharp} stars, blurred {blurred}"
+    assert sharp is not None and blurred is not None, \
+        f"picked iqa model scored nothing (sharp={sharp}, blurred={blurred})"
+    assert sharp >= blurred, f"sharp rated {sharp} stars, heavily blurred copy {blurred}"

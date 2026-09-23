@@ -1,7 +1,7 @@
 """Segmentation module: /api/segment and /api/bulk_segment with masks, and
 merging a mask onto an existing box instead of stacking a second one."""
 import pytest
-from cimtest import post_json, read_meta, write_meta, box
+from cimtest import post_json, picked_model, read_meta, write_meta, box
 
 POLY = [(.3, .15), (.7, .15), (.7, .95), (.3, .95)]      # person-ish, matches box()
 
@@ -52,11 +52,9 @@ def test_no_provider(client, upload, app, fake_model):
 
 
 def test_real_segment_person(client, upload, app):
-    from modules.model_broker import NoProviderError
-    try:
-        app.module_host.broker.request("segment")
-    except NoProviderError as e:
-        pytest.skip(f"no segment model: {e}")
+    picked_model(app, "segment")
     fn = upload.media("person_single.jpg")
     j = post_json(client, "/api/segment", {"filename": fn, "classes": []})
-    assert j["success"] and j["regions"], j
+    assert j["success"], j
+    assert j["regions"], ("the picked segment model produced no masks for person_single.jpg — "
+                          "see tests/test_fixtures.py before blaming the model")

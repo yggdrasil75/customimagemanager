@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 
 import cimtest
-from cimtest import load_app, load_image, has_fixture, expected
+from cimtest import load_app, load_image, has_fixture, expected, text_matches
 
 # Where a generic expectation doesn't apply to a specific provider. Keep the
 # reason honest: this table is the list of known contract deviations.
@@ -30,8 +30,12 @@ EXEMPT = {
 
 # Capabilities the generic suite can't call without provider-specific input.
 NO_GENERIC_CALL = {
-    "box":       "path-parameterized (needs a model path); covered via detect/*",
-    "body.mesh": "betas dimensionality is provider-specific; test in the providing module",
+    "box": "the 'box' capability binds to a weights file chosen per call, so there is "
+           "nothing generic to call here; the same detectors are covered under detect/*",
+    "body.mesh": "mesh(betas) takes a body-model shape vector whose length is specific to "
+                 "the model (SMPL-X uses 10-300, ANNY its own): the generic suite can't "
+                 "invent a valid one. Test it in the providing module's tests, where the "
+                 "right betas are known.",
 }
 
 SPEEDS = {"", "fast", "balanced", "accurate"}
@@ -74,14 +78,18 @@ def P(prov, app):
     if p.resource and not cimtest.REMOTE:
         pytest.skip(f"runs on external endpoint '{p.resource}' (pass --cim-remote)")
     if prov in _LOAD_ERR:
-        pytest.fail(f"available() is True but loading failed: {_LOAD_ERR[prov]}")
+        pytest.skip(f"provider does not load (reported by test_contract[{cap}:{pid}])")
     try:
         # Not cached: the loader is LRU-backed, and holding every handle would
         # pin every model in memory at once.
         h = b.request(cap, provider=pid)
     except Exception as e:
         _LOAD_ERR[prov] = f"{type(e).__name__}: {e}"
-        pytest.fail(f"available() is True but loading failed: {_LOAD_ERR[prov]}")
+        pytest.fail(f"{cap}:{pid} says available() is True, then fails to load: "
+                    f"{_LOAD_ERR[prov]}\n"
+                    f"Either available() should return False here (so the app hides "
+                    f"the model instead of erroring at use time) or the weights/deps "
+                    f"it needs are missing on this machine.")
     return p, h
 
 
@@ -226,8 +234,11 @@ def v_embed_boxes(out, cap, n):
             assert v.ndim == 1 and v.size > 0
 
 
-def v_iqa(out, cap):
+def v_iqa(out, cap, blank=False):
     assert isinstance(out, dict) and "quality" in out and "raw" in out
+    if out["quality"] is None:
+        assert blank, "iqa returned quality=None for a normal image (it must score it or raise)"
+        return
     _num01(out["quality"], "quality")
 
 
@@ -286,7 +297,7 @@ def validate(p, out, img, n_boxes=1, blank=False):
     if cap in ("embed.faces", "embed.bodies"):
         return v_embed_boxes(out, cap, n_boxes)
     if cap == "iqa":
-        return v_iqa(out, cap)
+        return v_iqa(out, cap, blank=blank)
     if cap in ("face.shape", "body.shape"):
         return v_mesh(out, cap)
     pytest.skip(f"no generic validator for capability '{cap}' — ship a test in the providing module")
@@ -357,12 +368,18 @@ def _confident(out, t=0.5):
     return [b for b in out if float(b.get("conf", 1.0)) >= t]
 
 
+FIXTURE_HINT = ("\nIf every model fails this way, the fixture is the suspect: "
+                "tests/test_fixtures.py checks it.")
+
+
 @for_caps("detect.persons")
 def test_persons_counts(P):
     p, h = P
     _exempt(p)
     one = call(p, h, load_image("person_single.jpg"))
-    assert len(_confident(one)) == 1, f"person_single: {len(_confident(one))} confident persons"
+    assert len(_confident(one)) == 1, (
+        f"person_single: {len(_confident(one))} confident persons (want exactly 1)"
+        + FIXTURE_HINT)
     top = max(one, key=lambda b: b["w"] * b["h"])
     assert top["h"] > 0.4, f"person_single: tallest person box only {top['h']:.2f} of frame"
     assert len(_confident(call(p, h, load_image("person_multi.jpg")))) >= 2
@@ -406,7 +423,7 @@ def test_segment_person(P):
     p, h = P
     _exempt(p)
     out = call(p, h, load_image("person_single.jpg"))
-    assert out, "no masks on person_single"
+    assert out, "no masks on person_single" + FIXTURE_HINT
     if p.prompted:
         assert any(m.get("class_name") == PROMPT for m in out)
 
@@ -430,7 +447,7 @@ def test_pose_people(P):
     p, h = P
     _exempt(p)
     people = call(p, h, load_image("person_single.jpg"))
-    assert people, "no skeleton on person_single"
+    assert people, "no skeleton on person_single" + FIXTURE_HINT
     best = max(people, key=lambda q: sum(float(k["v"]) > 0.3 for k in q["keypoints"]))
     assert len(best["keypoints"]) >= 17
     seen = sum(float(k["v"]) > 0.3 for k in best["keypoints"][:17])
@@ -452,7 +469,7 @@ def test_depth_varies(P):
 def test_says_something(P):
     p, h = P
     out = call(p, h, load_image("person_single.jpg"))
-    assert out, f"{p.capability} returned nothing for person_single"
+    assert out, f"{p.capability} returned nothing for person_single" + FIXTURE_HINT
 
 
 @for_caps("ocr")
@@ -463,7 +480,8 @@ def test_ocr_reads(P):
     assert text, "no text read"
     want = expected("text_document.jpg")
     if want:
-        assert " ".join(want.split()).lower() in text, f"expected phrase not found in: {text[:200]}"
+        ok, detail = text_matches(want, text)
+        assert ok, f"text_document expectation not met ({detail}); read: {text[:300]}"
     empty = " ".join(((call(p, h, load_image("no_person.jpg")) or {}).get("text") or "").split())
     assert len(empty) < 20, f"read text on no_person: {empty!r}"
 
@@ -508,6 +526,12 @@ def test_iqa_prefers_sharp(P):
     p, h = P
     import cv2
     img = load_image("person_single.jpg")
-    sharp = float(call(p, h, img)["quality"])
-    blurred = float(call(p, h, cv2.GaussianBlur(img, (0, 0), 6))["quality"])
-    assert sharp > blurred, f"sharp {sharp:.3f} not rated above heavily blurred {blurred:.3f}"
+    sharp = call(p, h, img)["quality"]
+    blurred = call(p, h, cv2.GaussianBlur(img, (0, 0), 6))["quality"]
+    if sharp is None or blurred is None:
+        pytest.fail(f"{p.id} scored quality=None on a real photo "
+                    f"(sharp={sharp}, blurred={blurred})")
+    assert float(sharp) > float(blurred), (
+        f"{p.id} rates a heavily blurred copy ({float(blurred):.3f}) at or above the "
+        f"sharp original ({float(sharp):.3f}) — fine for an aesthetic metric, wrong for "
+        f"one used to pick the best shot")

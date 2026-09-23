@@ -1153,6 +1153,11 @@ def _decode_jxl_uncached(path: str) -> np.ndarray | None:
                 img = (img >> 8).astype(np.uint8)
             else:
                 img = img.astype(np.uint8)
+        elif img.size and int(img.max()) == 1:
+            # A 1-bit JXL (bilevel PNG source: QR codes, fax, line art) decodes
+            # as 0/1 in uint8. No 8-bit image peaks at 1/255 in practice, so
+            # this is the bit-depth case: stretch it back to 0/255.
+            img = img * np.uint8(255)
 
         if img.ndim == 3:
             c = img.shape[2]

@@ -1,6 +1,6 @@
 """OCR module: /api/ocr through the picked provider."""
 import pytest
-from cimtest import post_json, expected
+from cimtest import post_json, picked_model, expected, text_matches
 
 
 def test_api_ocr_with_fake(client, upload, fake_model):
@@ -34,17 +34,11 @@ def test_missing_file(client):
 
 
 def test_real_ocr_reads_document(client, upload, app):
-    from modules.model_broker import NoProviderError
-    try:
-        p = app.module_host.broker.provider_for("ocr")
-        app.module_host.broker.request("ocr")
-    except NoProviderError as e:
-        pytest.skip(f"no ocr model: {e}")
-    if p is not None and p.resource:
-        pytest.skip("picked OCR runs on an external endpoint")
+    picked_model(app, "ocr")
     fn = upload.media("text_document.jpg")
     j = post_json(client, "/api/ocr", {"filename": fn})
     assert j["success"] and j["text"].strip(), j
     want = expected("text_document.jpg")
     if want:
-        assert " ".join(want.split()).lower() in " ".join(j["text"].split()).lower()
+        ok, detail = text_matches(want, j["text"])
+        assert ok, f"{detail}; read: {' '.join(j['text'].split())[:300]}"

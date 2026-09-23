@@ -37,7 +37,11 @@ def test_epub_shows_in_gallery_as_book(client, epub):
 def test_cover_and_toc(client, epub):
     b = _book(client, epub)
     if b.get("has_cover"):
-        r = client.get(f"/api/books/cover/{epub}")
+        try:
+            r = client.get(f"/api/books/cover/{epub}")
+        except FileNotFoundError as e:
+            pytest.fail(f"the shelf says this book has a cover, but /api/books/cover "
+                        f"serves a cache file that was never written: {e}")
         assert r.status_code == 200 and r.content_type.startswith("image/")
     r = client.get(f"/api/books/toc/{epub}")
     assert r.status_code == 200 and r.get_json().get("success") is not False

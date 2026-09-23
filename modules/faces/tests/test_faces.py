@@ -12,20 +12,14 @@ def test_face_models_route(client):
 
 
 def _faces(app, img):
-    from modules.model_broker import NoProviderError
-    try:
-        return app.module_host.broker.request("detect.faces")(img) or []
-    except NoProviderError as e:
-        pytest.skip(f"no detect.faces model: {e}")
+    from cimtest import picked_model
+    return picked_model(app, "detect.faces")(img) or []
 
 
 def test_picked_models_separate_people(app):
     """Picked detect.faces + embed.faces: same person closer than another person."""
-    from modules.model_broker import NoProviderError
-    try:
-        emb = app.module_host.broker.request("embed.faces")
-    except NoProviderError as e:
-        pytest.skip(f"no embed.faces model: {e}")
+    from cimtest import picked_model
+    emb = picked_model(app, "embed.faces")
     vecs = []
     for n in ("same_person_a.jpg", "same_person_b.jpg", "other_person.jpg"):
         img = load_image(n)

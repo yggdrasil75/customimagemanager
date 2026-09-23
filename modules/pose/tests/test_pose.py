@@ -1,6 +1,6 @@
 """Pose module: /api/pose, /api/bulk_pose, /api/pose_remove, stored skeletons."""
 import pytest
-from cimtest import post_json, read_meta, write_meta, box
+from cimtest import post_json, picked_model, read_meta, write_meta, box
 
 
 def _skeleton(cx=.5):
@@ -65,13 +65,11 @@ def test_provider_failure_is_reported_not_raised(client, upload, fake_model):
 
 
 def test_real_pose_single_person(client, upload, app):
-    from modules.model_broker import NoProviderError
-    try:
-        app.module_host.broker.request("pose")
-    except NoProviderError as e:
-        pytest.skip(f"no pose model: {e}")
+    picked_model(app, "pose")
     fn = upload.media("person_single.jpg")
     j = post_json(client, "/api/pose", {"filename": fn})
     if j["pose"].get("note") and not j["pose"]["people"]:
         pytest.fail(f"picked pose model failed on person_single: {j['pose']['note']}")
-    assert len(j["pose"]["people"]) == 1
+    assert len(j["pose"]["people"]) == 1, (
+        "the picked pose model found no skeleton in person_single.jpg — "
+        "tests/test_fixtures.py says whether the photo or the model is at fault")
