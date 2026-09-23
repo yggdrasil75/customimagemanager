@@ -211,6 +211,10 @@ def P(prov, app, request):
                                                   strict=False))
     if extra.get("under"):                      # pin the model this provider runs
         ucap, upid = extra["under"]
+        uprov = b._providers.get(ucap, {}).get(upid)
+        if uprov is not None and uprov.resource and not cimtest.REMOTE:
+            pytest.skip(f"the model it would run, {ucap}:{upid}, is on {uprov.resource} "
+                        f"(pass --cim-remote)")
         uprev = b._selection.get(ucap)
         b._selection[ucap] = upid
         request.addfinalizer(lambda: (b._selection.__setitem__(ucap, uprev) if uprev
@@ -256,7 +260,23 @@ def _exempt(p):
 CENTER_BOX = {"class_name": "person", "cx": .5, "cy": .5, "w": .6, "h": .9}
 
 
+def _oom(e):
+    return "OutOfMemory" in type(e).__name__ or "out of memory" in str(e).lower()
+
+
 def call(p, h, img, **kw):
+    try:
+        return _call(p, h, img, **kw)
+    except Exception as e:
+        if not _oom(e):
+            raise
+        hh, ww = (img.shape[:2] if hasattr(img, "shape") else (0, 0))
+        pytest.fail(f"{p.capability}:{p.id} ran out of GPU memory on a {ww}x{hh} image. "
+                    f"Nothing downscales before the model here, so the same image would "
+                    f"do this in the app: {str(e).splitlines()[0]}")
+
+
+def _call(p, h, img, **kw):
     cap = p.capability
     if cap == "body.mesh":
         # A shape vector, not an image. Providers fit it to their own length
@@ -323,7 +343,7 @@ def v_masks(out, cap):
         for pt in pts:
             x, y = (pt["x"], pt["y"]) if isinstance(pt, dict) else pt
             _num01(x, "mask x"); _num01(y, "mask y")
-        if "conf" in m:
+        if m.get("conf") is not None:
             _num01(m["conf"], "conf")
 
 

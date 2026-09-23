@@ -87,7 +87,9 @@ def polys_from_result(res, W, H, labels=None):
             name = "object"
         conf = None
         if rboxes is not None and getattr(rboxes, "conf", None) is not None and i < len(rboxes.conf):
-            conf = float(rboxes.conf[i].item())
+            # SAM reports a predicted-IoU score that can land slightly above 1;
+            # the capability contract (and every consumer) wants 0..1.
+            conf = max(0.0, min(1.0, float(rboxes.conf[i].item())))
         out.append({"class_name": name,
                     "mask": [(float(x) / W, float(y) / H) for x, y in pts],
                     "conf": conf})
