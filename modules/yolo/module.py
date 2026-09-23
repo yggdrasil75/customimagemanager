@@ -105,11 +105,11 @@ def _run_yolo_path(model_path, feed, conf):
                 model_registry.unload(f"yolo:{_canon(model_path)}")
             except Exception:
                 pass
-            try:
-                return load()(feed, verbose=False, conf=conf)
-            except Exception:
-                return None
-        return None
+            return load()(feed, verbose=False, conf=conf)
+        # Anything else (weights that don't exist upstream, a failed download,
+        # a corrupt file) used to come back as None -> "no detections", which
+        # read as "the model found nothing" instead of "the model never ran".
+        raise RuntimeError(f"YOLO could not run {os.path.basename(str(model_path))}: {ex}") from ex
 
 
 # ── families: which heads each ultralytics generation ships ─────────────────

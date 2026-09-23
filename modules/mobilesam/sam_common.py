@@ -30,6 +30,20 @@ cv2, _HAVE_CV2 = optional_import("cv2")
 from modules.model_broker import NoProviderError
 
 
+MAX_SIDE = 2048
+
+
+def bounded(img, max_side=MAX_SIDE):
+    """img downscaled so its long side is <= max_side (never upscaled)."""
+    h, w = img.shape[:2]
+    s = max(h, w)
+    if s <= max_side:
+        return img
+    f = max_side / float(s)
+    return cv2.resize(img, (max(1, int(round(w * f))), max(1, int(round(h * f)))),
+                      interpolation=cv2.INTER_AREA)
+
+
 def to_bgr_u8(img):
     if img is None:
         return None
@@ -162,6 +176,7 @@ def register_sam(host, *, pid, label, family, build, weights, text_mode="vlm",
     def _seg_box(model):
         def run(img_bgr, boxes, *a, **k):
             img = to_bgr_u8(img_bgr)
+            img = bounded(img) if img is not None else None
             if img is None or not boxes:
                 return []
             H, W = img.shape[:2]
@@ -174,6 +189,7 @@ def register_sam(host, *, pid, label, family, build, weights, text_mode="vlm",
 
         def run(img_bgr, prompt="", *a, **k):
             img = to_bgr_u8(img_bgr)
+            img = bounded(img) if img is not None else None
             if img is None:
                 return []
             H, W = img.shape[:2]
@@ -197,6 +213,10 @@ def register_sam(host, *, pid, label, family, build, weights, text_mode="vlm",
     common = dict(label=label, family=family, sizes=sizes, types=types,
                   settings=settings, note=note, speed=speed, cost_mb=cost_mb,
                   gpu=model_registry.on_gpu(), transform=None,
+                  # SAM 3 is a grounding model: it wants a concept to segment. Called
+                  # with no text ("segment everything") ultralytics dies looking up
+                  # language features, so it is foreground/prompted only.
+                  prompted=(text_mode == "native"),
                   available=available or (lambda: True), reason=reason)
     host.provide_model("segment.box", pid, loader=lambda: _seg_box(_model("segment.box")), **common)
     host.provide_model("segment", pid, loader=lambda: _seg(_model("segment")), **common)
