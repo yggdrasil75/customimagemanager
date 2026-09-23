@@ -1080,7 +1080,7 @@ def register(host, ctx: dict):
                           (rel_path,)).fetchone()
         if not r or not r["cover"]:
             return jsonify({"success": False, "error": "no cover"}), 404
-        p = os.path.join(_cache_dir(), r["cover"])
+        p = os.path.abspath(os.path.join(_cache_dir(), r["cover"]))
         if not os.path.exists(p):
             return jsonify({"success": False, "error": "no cover"}), 404
         return send_file(p, mimetype="image/jpeg", conditional=True)
@@ -1284,7 +1284,7 @@ def register(host, ctx: dict):
         ap = _abs(rel_path)
         if not ap or not os.path.exists(ap):
             return jsonify({"success": False, "error": "not found"}), 404
-        return send_file(ap, as_attachment=True, conditional=True)
+        return send_file(os.path.abspath(ap), as_attachment=True, conditional=True)
 
     # ── reading position ─────────────────────────────────────────────────────
     @host.route("/api/books/progress", methods=["GET", "POST"], feature="tab.books")

@@ -44,37 +44,48 @@ def test_image_is_usable(name):
 
 
 def _count_people(app, name):
-    """People found in a fixture by EVERY installed person detector, one at a
-    time (freeing each before the next). Two suspects, one answer: if they all
-    see nothing the photo is wrong; if only your picked model sees nothing,
-    the pick is wrong for this kind of image."""
+    """People found in a fixture by EVERY installed detector, one at a time
+    (freeing each before the next). Both capabilities are swept: detect.persons
+    providers, and plain detect models counting their 'person' boxes — because
+    the usual detect.persons provider ('detect-class') is a thin wrapper that
+    reuses whichever detect model is picked, so a wrong pick THERE is what
+    shows up here. Two suspects, one answer: if nothing sees it, the photo is
+    wrong; if some detectors see it, the pick is wrong for this kind of image."""
     img = load_image(name)
     b = app.module_host.broker
     counts = {}
-    for pid, p in (b._providers.get("detect.persons") or {}).items():
-        if pid == cimtest.FAKE_ID or p.resource or not p.available():
-            continue
-        try:
-            boxes = b.request("detect.persons", provider=pid)(img) or []
-            counts[pid] = len([x for x in boxes if float(x.get("conf", 1)) >= 0.5])
-        except Exception as e:
-            counts[pid] = f"error: {type(e).__name__}"
-        free_models()
+    for cap in ("detect.persons", "detect"):
+        for pid, p in (b._providers.get(cap) or {}).items():
+            if pid == cimtest.FAKE_ID or p.resource or p.prompted or not p.available():
+                continue
+            try:
+                boxes = b.request(cap, provider=pid)(img) or []
+                counts[f"{cap}:{pid}"] = len(
+                    [x for x in boxes
+                     if float(x.get("conf", 1)) >= 0.5
+                     and (cap == "detect.persons" or "person" in str(x.get("class_name", "")).lower())])
+            except Exception as e:
+                counts[f"{cap}:{pid}"] = f"error: {type(e).__name__}"
+            free_models()
     if not counts:
-        pytest.skip("no installed detect.persons model to check the fixture with")
-    return counts, b.selected_id("detect.persons")
+        pytest.skip("no installed person/object detector to check the fixture with")
+    picked = f"detect.persons:{b.selected_id('detect.persons')}"
+    return counts, picked
 
 
-def _verdict(name, counts, picked, want, got):
-    ok = [f"{k}={v}" for k, v in counts.items() if v == want]
+def _verdict(name, counts, picked, want, got, ok_fn):
+    agree = [f"{k}={v}" for k, v in counts.items() if isinstance(v, int) and ok_fn(v)]
     return (f"{name}: your picked detector '{picked}' finds {got}, want {want}.\n"
-            f"  all installed detectors: {counts}\n"
-            + (f"  these agree with the fixture: {ok} — so the PICK is wrong for this kind of "
-               f"image (an anime/illustration model won't see people in photos, and vice "
-               f"versa); change it in Settings or pick a fixture that matches your library."
-               if ok else
-               "  no detector sees it that way, so the PHOTO is the problem: use a plain "
-               "shot of the subject your models are trained for."))
+            f"  every installed detector: {counts}\n"
+            + (f"  these agree with the fixture: {agree}\n"
+               f"  so the PICK is wrong for this kind of image, not the photo. Note that "
+               f"'detect.persons:detect-class' just reuses the Detection model, so if that "
+               f"one is an anime/illustration detector it will find nobody in photos "
+               f"(and a COCO model finds nobody in drawings). Change the pick in Settings, "
+               f"or use fixtures that match the library you actually run this on."
+               if agree else
+               "  nothing sees it that way, so the PHOTO is the problem: use a plain shot "
+               "of the subject your models are trained for."))
 
 
 def test_person_single_holds_exactly_one_person(app):
@@ -83,18 +94,18 @@ def test_person_single_holds_exactly_one_person(app):
     top-down pose and segmentation models are fed by this detector."""
     counts, picked = _count_people(app, "person_single.jpg")
     got = counts.get(picked)
-    assert got == 1, _verdict("person_single.jpg", counts, picked, 1, got)
+    assert got == 1, _verdict("person_single.jpg", counts, picked, 1, got, lambda v: v == 1)
 
 
 def test_person_multi_holds_several_people(app):
     counts, picked = _count_people(app, "person_multi.jpg")
     got = counts.get(picked)
-    assert isinstance(got, int) and got >= 2, _verdict("person_multi.jpg", counts, picked, ">=2", got)
+    assert isinstance(got, int) and got >= 2, _verdict("person_multi.jpg", counts, picked, ">=2", got, lambda v: v >= 2)
 
 
 def test_no_person_really_has_none(app):
     counts, picked = _count_people(app, "no_person.jpg")
-    assert counts.get(picked) == 0, _verdict("no_person.jpg", counts, picked, 0, counts.get(picked))
+    assert counts.get(picked) == 0, _verdict("no_person.jpg", counts, picked, 0, counts.get(picked), lambda v: v == 0)
 
 
 def test_face_fixtures_have_faces(app):

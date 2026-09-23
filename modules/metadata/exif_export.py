@@ -53,6 +53,74 @@ _EMPTY_XMP = (
     '<?xpacket end="w"?>\n'
 )
 
+_PROBE = "__cim_probe__"
+_EMPTY_PACKET = ('<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>'
+                 '<x:xmpmeta xmlns:x="adobe:ns:meta/">'
+                 '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+                 '<rdf:Description rdf:about=""/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>')
+_XMP_KEYS = {}          # 'Exif.Image.Artist' -> ['Xmp.dc.creator']
+
+
+def _xmp_keys_for(tag):
+    """Which XMP properties exiv2 stores an Exif tag as, in a sidecar.
+
+    Exiv2's XMP-sidecar backend maps Exif tags onto their XMP equivalents
+    (Exif.Image.Artist -> Xmp.dc.creator) and only accepts modify_exif for a
+    tag the sidecar does NOT already hold: a second write to the same tag, and
+    every deletion, is silently ignored. So sidecar edits have to go through
+    modify_xmp, which needs the mapped key. Exiv2 knows the table but pyexiv2
+    doesn't expose it, so we learn it once per tag by writing the tag into a
+    scratch sidecar and seeing which property appears. Cached per process.
+    """
+    if tag in _XMP_KEYS:
+        return _XMP_KEYS[tag]
+    keys = []
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            probe = os.path.join(d, "probe.xmp")
+            with open(probe, "w", encoding="utf-8") as fh:
+                fh.write(_EMPTY_PACKET)
+            with pyexiv2.Image(probe) as img:
+                img.modify_exif({tag: _PROBE})
+            with pyexiv2.Image(probe) as img:
+                for k, v in (img.read_xmp() or {}).items():
+                    if _PROBE in str(v):
+                        keys.append(k)
+    except Exception as e:
+        log.warning(f"could not map {tag} to XMP: {e}")
+    _XMP_KEYS[tag] = keys
+    return keys
+
+
+def _write_sidecar(target, to_set, to_del):
+    """Apply Exif sets/deletes to an XMP sidecar through the XMP properties the
+    tags map to. A tag the sidecar doesn't hold yet is written as Exif (which
+    creates the mapped property); everything else is set or cleared on the XMP
+    side, because modify_exif is a no-op there once the property exists."""
+    with pyexiv2.Image(target) as img:
+        have = img.read_xmp() or {}
+
+    exif_new, xmp_edit = {}, {}
+    for tag, value in to_set.items():
+        keys = [k for k in _xmp_keys_for(tag) if k in have]
+        if not keys:
+            exif_new[tag] = str(value)          # not in the sidecar yet
+            continue
+        for k in keys:
+            xmp_edit[k] = [str(value)] if isinstance(have.get(k), list) else str(value)
+    for tag in to_del:
+        for k in _xmp_keys_for(tag):
+            if k in have:
+                # "" clears the property; None is ignored by exiv2 here.
+                xmp_edit[k] = [] if isinstance(have.get(k), list) else ""
+
+    with pyexiv2.Image(target) as img:
+        if exif_new:
+            img.modify_exif(exif_new)
+        if xmp_edit:
+            img.modify_xmp(xmp_edit)
+
+
 def _writable_target(filepath):
     """Pick the path we should write EXIF to. For formats pyexiv2 can open in
     place we write the file directly; when only a sidecar exists we write that.
@@ -253,14 +321,33 @@ def write_exif(filepath, patch, allow_repackage=False):
         result["success"] = True   # nothing to do, but not an error
         return result
 
-    def _do_write():
-        with pyexiv2.Image(target) as img:
-            if to_set:
+    def _apply(path, sets, dels):
+        if path.lower().endswith((".xmp", ".exv")):
+            return _write_sidecar(path, sets, dels)
+        with pyexiv2.Image(path) as img:
+            if sets:
                 # pyexiv2 wants string values; stringify ints/rationals.
-                img.modify_exif({k: str(v) for k, v in to_set.items()})
-            if to_del:
+                img.modify_exif({k: str(v) for k, v in sets.items()})
+            if dels:
                 # Deletion is expressed as an empty-string modify in pyexiv2.
-                img.modify_exif({k: "" for k in to_del})
+                img.modify_exif({k: "" for k in dels})
+
+    def _do_write():
+        _apply(target, to_set, to_del)
+        if not to_del:
+            return
+        # A delete has to clear every copy of the tag, not just the one we
+        # write to: the reader merges the image and its sidecar, so a value
+        # left behind in the other one comes straight back (that's what made
+        # EXIF undo look like a no-op).
+        stem = os.path.splitext(filepath)[0]
+        for other in (filepath, stem + ".xmp", stem + ".exv"):
+            if other == target or not os.path.exists(other):
+                continue
+            try:
+                _apply(other, {}, to_del)
+            except Exception as e:
+                log.warning(f"could not clear {to_del} from {other}: {e}")
 
     try:
         _do_write()

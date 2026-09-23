@@ -291,7 +291,9 @@ def register(host):
         fp = host.safe_path(host.media_dir, filename)
         if not fp or not os.path.exists(fp):
             return jsonify({"success": False, "error": "not found"}), 404
-        return send_file(fp, conditional=True)
+        # abspath: send_file resolves relative paths against the app root,
+        # not the working directory.
+        return send_file(os.path.abspath(fp), conditional=True)
 
     def shuffle():
         d = request.json or {}

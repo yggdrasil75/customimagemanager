@@ -59,10 +59,18 @@ Keep images ≤ ~2000 px on the long side so model tests stay fast.
 Every model registered with the broker is tested automatically — adding one
 means no test edits:
 
-    ./run_tests.sh tests/test_providers.py              every model
+    ./run_tests.sh tests/test_providers.py              every model, once each
     ./run_tests.sh tests/test_providers.py -k "pose:"   one capability
     ./run_tests.sh tests/test_providers.py -k rtmw      one model
-    ./run_tests.sh --cim-all-variants                   every size/type each declares
+    ./run_tests.sh --cim-all-variants pose              every pose model exhaustively:
+                                                        every size and type it declares
+    ./run_tests.sh --cim-all-variants box,depth         the same, two capabilities
+    ./run_tests.sh --cim-all-variants all               every capability
+
+The question these ask is whether the program can USE a model: the image
+reaches it in the form it wants, it returns without raising, and what comes
+back fits the capability's contract so the consumer doesn't choke. They are
+not accuracy tests — a skeleton a few pixels off still passes.
 
 The run ends with a "model results" table: one line per model, `ok`, the first
 failure, or `--` when it never ran (not installed, weights missing, endpoint
@@ -72,6 +80,7 @@ A model that deviates from its capability's contract on purpose gets an entry
 in `tests/model_expectations.json` (`skip` / `exempt` / `xfail`, per model or
 per test) — data, not code.
 
-Model tests use your downloaded weights (models/ is linked, not copied).
+Model tests use your downloaded weights (models/ is linked, not copied), and
+only one model is held in memory at a time.
 Module tests live in `modules/<id>/tests/` (see `modules/example_hello/tests/`
 for a Python and a JS template).

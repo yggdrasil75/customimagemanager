@@ -426,13 +426,24 @@ def register(host):
     # Person detection: (a) the picked Detection model filtered to 'person'
     # (any family/size), (b) dedicated person weights (custom OBB/box .pt in
     # models/yolo/detectpersons/) — the old core "person model".
+
+    _PERSON_CLASSES = {"person", "persons", "people", "human", "humans",
+                       "body", "figure", "character", "char"}
+
     def _persons_from_detect():
         def run(img_bgr, *a, conf=0.25, **k):
             try:
                 det = host.request_model("detect")
             except Exception:
                 return []
-            return [b for b in (det(img_bgr, conf=conf) or []) if b.get("class_name") == "person"]
+            out = []
+            for b in (det(img_bgr, conf=conf) or []):
+                name = str(b.get("class_name") or "").strip().lower().replace("_", " ")
+                if name in _PERSON_CLASSES:
+                    b = dict(b)
+                    b["class_name"] = "person"   # detect.persons always reports 'person'
+                    out.append(b)
+            return out
         return run
 
     host.add_config_key("person_weights", default="")

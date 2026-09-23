@@ -42,15 +42,22 @@ def _read_raw_exif(filepath):
     if pyexiv2 is None:
         log.warning("pyexiv2 unavailable; cannot read EXIF")
         return {}, None
+    merged, src = {}, None
     for p in _candidate_paths(filepath):
         try:
             with pyexiv2.Image(p) as img:
                 raw = img.read_exif()
-            if raw:
-                return raw, p
         except Exception as e:
             log.warning(f"pyexiv2 read_exif failed on {p}: {e}")
-    return {}, None
+            continue
+        if not raw:
+            continue
+        # Candidates come image-first, sidecars after, and later ones win:
+        # the sidecar is where writes land for formats pyexiv2 can't edit in
+        # place (.jxl), so stopping at the image hid every write.
+        merged.update(raw)
+        src = p
+    return merged, src
 
 def _split_tag(tag_string):
     """'Exif.Image.ImageWidth' -> ('Image','ImageWidth').

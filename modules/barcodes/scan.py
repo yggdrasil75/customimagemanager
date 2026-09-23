@@ -216,16 +216,23 @@ def _decode_opencv(img: np.ndarray) -> list[dict]:
 def _decode_zxing(img: np.ndarray) -> list[dict] | None:
     """None when zxing-cpp isn't installed, so callers can tell "absent" from
     "found nothing"."""
-    try:
-        if "mod" in _zxing_cache:
-            zx = _zxing_cache["mod"]
-        else:
-            _zxing_cache["mod"] = zx
-    except Exception:
+    # NB: never rebind the module global here. `zx = _zxing_cache["mod"]` used
+    # to make zx a local, so the else-branch read it before assignment,
+    # UnboundLocalError on the very first call -> None -> has_zxing() False ->
+    # every scan silently fell back to OpenCV.
+    mod = _zxing_cache.get("mod") or zx
+    if mod is None:
         return None
+    _zxing_cache["mod"] = mod
     try:
-        results = zx.read_barcodes(img, try_rotate=True, try_invert=True,
-                                   try_downscale=True)
+        results = mod.read_barcodes(img, try_rotate=True, try_invert=True,
+                                    try_downscale=True)
+    except TypeError:            # older/newer zxing-cpp: fewer keyword options
+        try:
+            results = mod.read_barcodes(img)
+        except Exception as e:
+            log.warning("zxing decode failed: %s", e)
+            return []
     except Exception as e:
         log.warning("zxing decode failed: %s", e)
         return []

@@ -19,7 +19,8 @@ def test_status_routes(client, ungated):
 def test_generate_with_fake_model(client, upload, fake_model):
     rng = np.random.default_rng(0)
     fake_model("embed", lambda img, *a, **k: _unit(rng.normal(size=64)))
-    a, b = upload(seed=801), upload(seed=802)
+    a, b = upload("emb_a.png", seed=801), upload("emb_b.png", seed=802)
+    assert a != b, "distinct uploads must not share a stored name"
     j = post_json(client, "/api/embedding/generate", {"filenames": [a, b], "force": True})
     assert j["success"] and j["embedded_now"] == 2, j
     assert j["total_embeddings"] >= 2, (

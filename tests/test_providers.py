@@ -12,8 +12,16 @@ REGISTERS — no edit to this file, ever. Adding a model:
 Each run ends with a "model results" table: one line per model, ok or the
 first failure, so "yolo pose works, mediapipe holistic doesn't" is readable at
 a glance. Test one capability with -k "pose:", one model with -k "pose:rtmw".
-By default a provider is tested with the size/type in effect for it; pass
---cim-all-variants to sweep every size and type it declares.
+By default a model is tested once, with the size/type in effect for it.
+--cim-all-variants pose (or box,depth, or all) sweeps a capability
+exhaustively instead: every size, every type, every weights file a
+path-parameterized provider can run, and for a wrapper provider every
+underlying model it can run.
+
+These tests ask whether the program can USE a model — the input reaches it in
+the form it wants, it returns without raising, and what comes back fits the
+capability's contract so consumers don't choke. They are not accuracy tests: a
+skeleton a few pixels off, or a slightly different mask, passes.
 
   test_declaration   manifest-level sanity; runs even for unavailable providers
   test_contract      output matches the capability's canonical shape
@@ -65,16 +73,6 @@ def expectation(cap, pid, test_name=None):
                  else {"xfail": per_test[test_name]})
     return e
 
-# Capabilities the generic suite can't call without provider-specific input.
-NO_GENERIC_CALL = {
-    "box": "the 'box' capability binds to a weights file chosen per call, so there is "
-           "nothing generic to call here; the same detectors are covered under detect/*",
-    "body.mesh": "mesh(betas) takes a body-model shape vector whose length is specific to "
-                 "the model (SMPL-X uses 10-300, ANNY its own): the generic suite can't "
-                 "invent a valid one. Test it in the providing module's tests, where the "
-                 "right betas are known.",
-}
-
 SPEEDS = {"", "fast", "balanced", "accurate"}
 PROMPT = "person"
 
@@ -93,11 +91,45 @@ def _variants(p):
     """[(size, type)] to test for a provider: the variant in effect (None,
     None = leave the broker's resolution alone) or, with --cim-all-variants,
     every combination the provider declares."""
-    if not cimtest.ALL_VARIANTS:
+    if not cimtest.sweeping(p.get("capability") or p.get("cap") or ""):
         return [(None, None)]
     sizes = p["sizes"] or [None]
     types = [t["value"] for t in p["types"]] or [None]
     return [(s, t) for s in sizes for t in types]
+
+
+def _weights_for(prov_obj, cap="box"):
+    """Weights files under models/ that a path-parameterized provider ('box')
+    says it can run: one when testing normally, all of them when the capability
+    is being swept."""
+    import glob
+    try:
+        import model_registry
+        root = model_registry.MODELS_DIR
+    except Exception:
+        return []
+    handles = getattr(prov_obj, "handles", None)
+    found = []
+    for ext in ("*.pt", "*.pth", "*.onnx", "*.safetensors"):
+        found += glob.glob(os.path.join(root, "**", ext), recursive=True)
+    keep = [f for f in sorted(set(found)) if not callable(handles) or _safe_handles(handles, f)]
+    return keep if cimtest.sweeping(cap) else keep[:1]
+
+
+def _safe_handles(handles, path):
+    try:
+        return bool(handles(path))
+    except Exception:
+        return False
+
+
+def _delegate_of(cap, pid):
+    """A provider that runs whatever model another capability has picked (e.g.
+    detect.persons:detect-class runs the picked 'detect' model) declares that
+    capability as "delegates" in tests/model_expectations.json. Testing it once
+    only tests the current pick, so each underlying model becomes its own
+    parameter."""
+    return (expectation(cap, pid) or {}).get("delegates")
 
 
 def pytest_generate_tests(metafunc):
@@ -107,15 +139,36 @@ def pytest_generate_tests(metafunc):
     want = getattr(metafunc.function, "caps", None)
     items, ids = [], []
     for c in b.status():
-        if want is not None and c["id"] not in want:
+        cap = c["id"]
+        if want is not None and cap not in want:
             continue
         for p in c["providers"]:
-            if p["id"] == cimtest.FAKE_ID:
+            pid = p["id"]
+            if pid == cimtest.FAKE_ID:
                 continue
-            for size, typ in _variants(p):
-                items.append((c["id"], p["id"], size, typ))
-                tag = "/".join(x for x in (size, typ) if x)
-                ids.append(f"{c['id']}:{p['id']}" + (f"[{tag}]" if tag else ""))
+            obj = b._providers[cap][pid]
+            extras = [{}]
+            if cap == "box":                       # a weights file to run it with
+                paths = _weights_for(obj, cap)
+                extras = [{"path": q} for q in paths] or [{}]
+            under_cap = _delegate_of(cap, pid)
+            if under_cap:                          # one per underlying model
+                unders = [u for u, up in (b._providers.get(under_cap) or {}).items()
+                          if u != cimtest.FAKE_ID and up.available()]
+                if cimtest.sweeping(cap):
+                    extras = [{"under": (under_cap, u)} for u in unders] or extras
+                else:
+                    sel = b.selected_id(under_cap)
+                    extras = [{"under": (under_cap, sel)}] if sel else extras
+            for size, typ in _variants(dict(p, capability=cap)):
+                for extra in extras:
+                    items.append((cap, pid, size, typ, extra))
+                    tag = "/".join(str(x) for x in (size, typ) if x)
+                    if "path" in extra:
+                        tag = (tag + "/" if tag else "") + os.path.basename(extra["path"])
+                    if "under" in extra:
+                        tag = (tag + "/" if tag else "") + str(extra["under"][1])
+                    ids.append(f"{cap}:{pid}" + (f"[{tag}]" if tag else ""))
     metafunc.parametrize("prov", items, ids=ids)
 
 
@@ -127,7 +180,7 @@ def P(prov, app, request):
     """(provider, bound handle) for a callable provider, or skip/fail.
     Applies tests/model_expectations.json and, when sweeping, pins the size /
     type for the duration of the test."""
-    cap, pid, size, typ = prov
+    cap, pid, size, typ, extra = prov
     b = app.module_host.broker
     p = b._providers[cap][pid]
     exp = expectation(cap, pid, request.node.name.split("[")[0])
@@ -136,30 +189,38 @@ def P(prov, app, request):
     if exp.get("xfail"):
         request.node.add_marker(pytest.mark.xfail(reason=f"model_expectations.json: {exp['xfail']}",
                                                   strict=False))
+    if extra.get("under"):                      # pin the model this provider runs
+        ucap, upid = extra["under"]
+        uprev = b._selection.get(ucap)
+        b._selection[ucap] = upid
+        request.addfinalizer(lambda: (b._selection.__setitem__(ucap, uprev) if uprev
+                                      else b._selection.pop(ucap, None)))
     if size or typ:
         prev = dict(b._variant.get(cap, {}))
         forced = {**prev, **({"size": size} if size else {}), **({"type": typ} if typ else {})}
         b._variant[cap] = forced
         request.addfinalizer(lambda: b._variant.__setitem__(cap, prev))
-    if cap in NO_GENERIC_CALL:
-        pytest.skip(NO_GENERIC_CALL[cap])
+    if cap == "box" and not extra.get("path"):
+        pytest.skip("no weights file under models/ that this provider says it can run")
     if not p.available():
         pytest.skip(f"unavailable: {p.reason()}")
     if p.resource and not cimtest.REMOTE:
         pytest.skip(f"runs on external endpoint '{p.resource}' (pass --cim-remote)")
-    if prov in _LOAD_ERR:
+    load_key = (cap, pid, size, typ, str(sorted(extra.items())))
+    if load_key in _LOAD_ERR:
         pytest.skip(f"model does not load (reported by test_contract[{cap}:{pid}])")
     try:
         # Not cached: the loader is LRU-backed, and holding every handle would
         # pin every model in memory at once.
         h = b.request(cap, provider=pid)
     except Exception as e:
-        _LOAD_ERR[prov] = f"{type(e).__name__}: {e}"
+        _LOAD_ERR[load_key] = f"{type(e).__name__}: {e}"
         pytest.fail(f"{cap}:{pid} says available() is True, then fails to load: "
-                    f"{_LOAD_ERR[prov]}\n"
+                    f"{_LOAD_ERR[load_key]}\n"
                     f"Either available() should return False here (so the app hides "
                     f"the model instead of erroring at use time) or the weights/deps "
                     f"it needs are missing on this machine.")
+    p.test_extra = extra                        # call() needs the weights path
     return p, h
 
 
@@ -176,6 +237,13 @@ CENTER_BOX = {"class_name": "person", "cx": .5, "cy": .5, "w": .6, "h": .9}
 
 def call(p, h, img, **kw):
     cap = p.capability
+    if cap == "body.mesh":
+        # A shape vector, not an image. Providers fit it to their own length
+        # (SMPL-X pads/truncates to num_betas), so zeros are a valid input and
+        # the question is only whether a usable mesh comes back.
+        return h(np.zeros(10, np.float32))
+    if cap == "box":
+        return h(img, getattr(p, "test_extra", {}).get("path"), **kw)
     if cap in ("segment.box", "embed.faces", "embed.bodies"):
         return h(img, kw.pop("boxes", [CENTER_BOX]), **kw)
     if cap in ("face.shape", "body.shape"):
@@ -369,7 +437,7 @@ def validate(p, out, img, n_boxes=1, blank=False):
         return v_embed_boxes(out, cap, n_boxes)
     if cap == "iqa":
         return v_iqa(out, cap, blank=blank)
-    if cap in ("face.shape", "body.shape"):
+    if cap in ("face.shape", "body.shape", "body.mesh"):
         return v_mesh(out, cap)
     pytest.skip(f"no generic validator for capability '{cap}' — ship a test in the providing module")
 

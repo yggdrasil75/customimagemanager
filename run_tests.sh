@@ -6,6 +6,9 @@
 #   ./run_tests.sh modules/people      one module
 #   ./run_tests.sh tests/test_providers.py -k pose
 #   ./run_tests.sh --cim-fixtures ~/my_fixtures --cim-config ./app_config.json --cim-remote
+#   ./run_tests.sh --cim-all-variants pose        every pose model, every size/type
+#   ./run_tests.sh --cim-all-variants box,depth   the same for two capabilities
+#   ./run_tests.sh --cim-all-variants all         every model of every capability
 # Options: ./run_tests.sh --help (section "CIM test kit").
 cd "$(dirname "$0")" || exit 1
 # pytest reads a space-separated value of a plugin option as a test path before
@@ -13,7 +16,7 @@ cd "$(dirname "$0")" || exit 1
 args=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --cim-config|--cim-fixtures) args+=("$1=$2"); shift 2 ;;
+    --cim-config|--cim-fixtures|--cim-all-variants) args+=("$1=$2"); shift 2 ;;
     *) args+=("$1"); shift ;;
   esac
 done

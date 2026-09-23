@@ -3,6 +3,28 @@ import pytest
 from cimtest import read_meta
 
 
+def _where_is(fn, tag):
+    """Which copy of a file's metadata still holds a tag: the image, its XMP
+    sidecar, or both. A value that survives in either one comes back through
+    the merged read."""
+    import os
+    import pyexiv2
+    from cimtest import media_path
+    p = media_path(fn)
+    out = []
+    for cand in (p, os.path.splitext(p)[0] + ".xmp", os.path.splitext(p)[0] + ".exv"):
+        if not os.path.exists(cand):
+            continue
+        try:
+            with pyexiv2.Image(cand) as im:
+                hits = {k: v for k, v in (im.read_exif() or {}).items() if k.endswith("." + tag)}
+                xmp = {k: v for k, v in (im.read_xmp() or {}).items()}
+            out.append(f"{os.path.basename(cand)}: exif {hits or '-'} xmp {xmp or '-'}")
+        except Exception as e:
+            out.append(f"{os.path.basename(cand)}: unreadable ({e})")
+    return "\n  ".join(out)
+
+
 def _field(data, name):
     for g in data.get("groups", []):
         for f in g.get("fields", []):
@@ -41,8 +63,11 @@ def test_exif_write_then_undo_redo(client, upload):
                                     "readable back — the write is being dropped for this format")
     hist = client.post("/api/exif/history", json={"filename": fn}).get_json()
     assert hist["success"] and any("Artist" in h["field"] for h in hist["history"])
-    assert client.post("/api/exif/undo", json={"filename": fn}).get_json()["success"]
-    assert read() in (None, "")
+    undo = client.post("/api/exif/undo", json={"filename": fn}).get_json()
+    assert undo["success"], undo
+    assert read() in (None, ""), (
+        f"undo reported {undo} but the value is still readable.\n  "
+        + _where_is(fn, "Artist"))
     assert client.post("/api/exif/redo", json={"filename": fn}).get_json()["success"]
     assert read() == "CIM Tester"
 

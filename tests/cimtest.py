@@ -15,7 +15,8 @@ Command-line options (./run_tests.sh --help lists them under "cim")
                        LLM, OAI embeddings); off by default
   --cim-fixtures DIR   fixture media folder (default tests/fixtures)
   --cim-no-models      skip every test that loads a real model (fast run)
-  --cim-all-variants   sweep every size/type each provider declares
+  --cim-all-variants [CAPS]  exhaustive sweep for these capabilities ("all", or
+                       e.g. pose,box); every size/type/weights file per model
 
 Fixtures
   ungated      lift the machine-capability 503 gate for one test
@@ -65,9 +66,11 @@ def pytest_addoption(parser):
                 help="also test providers that call an external endpoint (LLM / OAI)")
     g.addoption("--cim-fixtures", metavar="DIR", default=None,
                 help="fixture media folder (default tests/fixtures)")
-    g.addoption("--cim-all-variants", action="store_true", default=False,
-                help="test every size/type a provider declares (pose 17 vs 133, yolo n/s/m/l/x), "
-                     "not just the variant in effect; slow but exhaustive")
+    g.addoption("--cim-all-variants", metavar="CAPS", nargs="?", const="all", default="",
+                help="exhaustively test the models of these capabilities: every size, type, "
+                     "weights file and (for wrapper providers) every underlying model. "
+                     "'all', or a comma list: --cim-all-variants pose  /  box,depth. "
+                     "Without it each model is tested once, with the variant in effect.")
     g.addoption("--cim-no-models", action="store_true", default=False,
                 help="skip everything that loads a real model (the provider suite "
                      "and each module's real-model test); the fake-model logic "
@@ -80,7 +83,8 @@ def pytest_configure(config):
         FIXTURES = os.path.abspath(config.getoption("--cim-fixtures"))
     REMOTE = bool(config.getoption("--cim-remote"))
     global ALL_VARIANTS
-    ALL_VARIANTS = bool(config.getoption("--cim-all-variants"))
+    raw = config.getoption("--cim-all-variants") or ""
+    ALL_VARIANTS = frozenset(x.strip() for x in raw.split(",") if x.strip())
     cfg = config.getoption("--cim-config")
     cfg = os.path.abspath(cfg) if cfg else None
     if ROOT not in sys.path:
@@ -286,7 +290,12 @@ def _module_gate(request):
         pytest.skip(f"module '{lm.id}' not registered: {lm.error}")
 
 
-ALL_VARIANTS = False                                     # --cim-all-variants
+ALL_VARIANTS = frozenset()       # capabilities to sweep exhaustively; {"all"} = every one
+
+
+def sweeping(cap):
+    """Is this capability being swept exhaustively (--cim-all-variants)?"""
+    return "all" in ALL_VARIANTS or cap in ALL_VARIANTS
 
 
 def pytest_collection_modifyitems(session, config, items):

@@ -1,44 +1,79 @@
 """Barcodes module: /api/barcodes decodes the fixture codes into regions."""
+import os
+
 import pytest
 from cimtest import expected, read_meta, write_meta
 
 
-def _decodable(name):
-    """Can the raw decoder read this fixture at all? If not, the fixture is too
-    hard (code too small in the frame, blurred, angled) and a module failure
-    would be about the photo, not the module."""
+def _zxing(img):
+    """What the bare decoder reads in an image: a list of payloads, or None
+    when zxing-cpp isn't installed (the app then falls back to OpenCV)."""
     try:
-        import cv2, zxingcpp
+        import zxingcpp
     except ImportError:
-        return True
-    from cimtest import fixture
-    img = cv2.imread(fixture(name), cv2.IMREAD_COLOR)
+        return None
     try:
-        return bool(zxingcpp.read_barcodes(img))
-    except Exception:
-        return True
+        return [r.text for r in zxingcpp.read_barcodes(img)]
+    except Exception as e:
+        return [f"error: {type(e).__name__}: {e}"]
+
+
+def _diagnose(app, name, stored):
+    """Where a code gets lost: in the file, in the JXL conversion, or in the
+    module's own scan. Each step is reported so the failure names the step."""
+    import cv2
+    from cimtest import fixture as fixture_path, media_path
+    from modules.barcodes import scan
+
+    lines = []
+    raw = cv2.imread(fixture_path(name), cv2.IMREAD_COLOR)
+    h, w = raw.shape[:2]
+    lines.append(f"fixture file: {w}x{h}, bare decoder reads {_zxing(raw)}")
+    img = app._to_bgr(app.read_jxl(media_path(stored)))
+    if img is None:
+        lines.append("stored .jxl: could not be decoded at all")
+    else:
+        sh, sw = img.shape[:2]
+        lines.append(f"stored .jxl: {sw}x{sh}, bare decoder reads {_zxing(img)}")
+        r = scan.scan(img, None, deep=True) or {}
+        lines.append(f"scan.scan(deep=True) on the stored image: "
+                     f"{len(r.get('codes') or [])} codes via {r.get('engine')} ({r.get('note')})")
+    return "\n  ".join(lines)
 
 
 @pytest.mark.parametrize("name", ["barcode_qr.png", "barcode_1d.png"])
-def test_decode_fixture(client, upload, name):
+def test_decode_fixture(client, upload, app, name):
     import cv2
     from cimtest import fixture as fixture_path
-    if not _decodable(name):
+    if _zxing(cv2.imread(fixture_path(name), cv2.IMREAD_COLOR)) == []:
         h, w = cv2.imread(fixture_path(name)).shape[:2]
-        pytest.skip(f"{name} ({w}x{h}): the raw zxing decoder can't read it either — "
-                    f"crop the fixture closer to the code")
+        pytest.skip(f"{name} ({w}x{h}): the bare zxing decoder can't read this file either, "
+                    f"so it's the fixture — crop it closer to the code")
     fn = upload.media(name)
     j = client.post("/api/barcodes", json={"filename": fn}).get_json()
     assert j["success"], j
-    assert j["regions"], f"{name}: nothing found ({j.get('note')})"
+    assert j["regions"], (f"{name}: /api/barcodes found nothing ({j.get('note')})\n  "
+                          + _diagnose(app, name, fn))
     r = j["regions"][0]
     assert r["class_name"] == "barcode"
     assert r["region_type"] == "BarCode", "MWG standard Type for codes"
     assert r["confirmed"] is False
     want = expected(name)
     if want:
-        assert any(x["barcode_value"] == want for x in j["regions"]), [x["barcode_value"] for x in j["regions"]]
-        assert want in j["summary"]
+        got = [x["barcode_value"] for x in j["regions"]]
+        # Case is not part of the payload for the alphanumeric symbologies
+        # (Code 39 is upper-case only, and hand scanners upper-case what they
+        # read), so compare case-insensitively.
+        if want.casefold() not in [g.casefold() for g in got]:
+            import cv2
+            from cimtest import fixture as fixture_path
+            bare = _zxing(cv2.imread(fixture_path(name), cv2.IMREAD_COLOR)) or []
+            if {g.casefold() for g in got} & {q.casefold() for q in bare}:
+                pytest.fail(f"the code in {name} reads {got}, but {os.path.splitext(name)[0]}.txt "
+                            f"says {want!r} — the module and the bare decoder agree, so the "
+                            f"expectation file is stale; update it.")
+            pytest.fail(f"{name}: decoded {got}, expected {want!r} (bare decoder reads {bare})")
+        assert want.casefold() in j["summary"].casefold()
     # a decoded code round-trips through the sidecar
     write_meta(client, fn, regions=j["regions"])
     back = read_meta(client, fn)["regions"]

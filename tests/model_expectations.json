@@ -12,12 +12,19 @@
     "  'exempt': reason   - run the contract tests but not the fixture-behaviour",
     "                       ones (the model legitimately finds nothing)",
     "  'xfail':  reason   - expect failure, report it as xfail instead of red",
+    "  'delegates': capability  - this provider runs whatever model that other",
+    "                       capability has picked; with --cim-all-variants every",
+    "                       one of those models becomes its own test parameter",
     "  'tests':  {test name: reason}  - narrow xfail/skip/exempt to one test,",
     "                       e.g. {'test_iqa_prefers_sharp': 'aesthetic metric'}",
     "                       (a bare string there means xfail)",
     "",
     "Delete an entry and the model is held to the full contract again."
   ],
+
+  "detect.persons:detect-class": {
+    "delegates": "detect"
+  },
 
   "detect.barcodes:builtin": {
     "exempt": "stub handle (always []); modules/barcodes/scan.py runs its own CV search, tested in modules/barcodes/tests"
