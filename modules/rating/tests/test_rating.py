@@ -1,7 +1,7 @@
 """Rating module: user stars, IQA scan through the picked iqa model, and the
 rating fields it enriches onto /api/metadata."""
 import pytest
-from cimtest import read_meta, post_json
+from cimtest import read_meta, post_json, load_image, picked_model, picked_name
 
 
 def test_user_stars_roundtrip(client, upload):
@@ -41,7 +41,6 @@ def test_models_route(client):
 def test_real_iqa_prefers_sharp(client, upload, app):
     """The picked iqa model rates the sharp fixture above a blurred copy."""
     import cv2, io
-    from cimtest import load_image, picked_model
     picked_model(app, "iqa")
     img = load_image("person_single.jpg")
     blur = cv2.GaussianBlur(img, (0, 0), 6)
@@ -53,6 +52,7 @@ def test_real_iqa_prefers_sharp(client, upload, app):
         names.append(j["filename"]); upload.made.append(j["filename"])
     post_json(client, "/api/iqa_scan", {"filenames": names, "force": True})
     sharp, blurred = (read_meta(client, n)["iqa_score"] for n in names)
+    who = picked_name(app, "iqa")
     assert sharp is not None and blurred is not None, \
-        f"picked iqa model scored nothing (sharp={sharp}, blurred={blurred})"
-    assert sharp >= blurred, f"sharp rated {sharp} stars, heavily blurred copy {blurred}"
+        f"{who} scored nothing (sharp={sharp}, blurred={blurred})"
+    assert sharp >= blurred, f"{who}: sharp rated {sharp} stars, heavily blurred copy {blurred}"

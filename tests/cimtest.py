@@ -16,7 +16,8 @@ Command-line options (./run_tests.sh --help lists them under "cim")
   --cim-fixtures DIR   fixture media folder (default tests/fixtures)
   --cim-no-models      skip every test that loads a real model (fast run)
   --cim-all-variants [CAPS]  exhaustive sweep for these capabilities ("all", or
-                       e.g. pose,box); every size/type/weights file per model
+                       e.g. pose,box): every size/type/weights file per model, and
+                       with named capabilities the run is narrowed to them
 
 Fixtures
   ungated      lift the machine-capability 503 gate for one test
@@ -32,6 +33,7 @@ Helpers
   free_models()  drop every loaded model (done automatically between models)
   fixture(name)  path to a fixture file (any equivalent extension), or skip
   picked_model(app, cap)  handle for the capability's picked provider, or skip
+  picked_name(app, cap)   "pose:rtmw", the pick's name for failure messages
   text_matches(want, got)  does the read text match the .txt expectation?
   expected(name) the optional <name>.txt expectation, or None
   png_bytes()    tiny synthetic PNG
@@ -70,7 +72,9 @@ def pytest_addoption(parser):
                 help="exhaustively test the models of these capabilities: every size, type, "
                      "weights file and (for wrapper providers) every underlying model. "
                      "'all', or a comma list: --cim-all-variants pose  /  box,depth. "
-                     "Without it each model is tested once, with the variant in effect.")
+                     "Naming capabilities also NARROWS the run to those models — nothing "
+                     "else is collected. Without this option each model is tested once, "
+                     "with the variant in effect, alongside the rest of the suite.")
     g.addoption("--cim-no-models", action="store_true", default=False,
                 help="skip everything that loads a real model (the provider suite "
                      "and each module's real-model test); the fake-model logic "
@@ -263,7 +267,7 @@ def _one_model_at_a_time(request):
     when the model changes, free the previous one before loading the next, so
     peak memory is one model rather than all of them."""
     cs = getattr(request.node, "callspec", None)
-    prov = cs.params.get("prov") if cs else None
+    prov = cs.params.get("prov") if cs is not None else None
     key = str(prov) if prov is not None else "<none>"
     if key != _LOADED_FOR["model"]:
         free_models()
@@ -307,11 +311,28 @@ def pytest_collection_modifyitems(session, config, items):
         for it in items:
             if "P" in getattr(it, "fixturenames", ()) or it.name.startswith("test_real_"):
                 it.add_marker(mark)
+    if ALL_VARIANTS and "all" not in ALL_VARIANTS:
+        # "--cim-all-variants box" means: these models, nothing else.
+        caps = ", ".join(sorted(ALL_VARIANTS))
+        keep, drop = [], []
+        for it in items:
+            cs = getattr(it, "callspec", None)
+            prov = cs.params.get("prov") if cs is not None else None
+            ok = isinstance(prov, (tuple, list)) and prov and prov[0] in ALL_VARIANTS
+            (keep if ok else drop).append(it)
+        if keep:
+            config.hook.pytest_deselected(items=drop)
+            items[:] = keep
+        else:
+            mark = pytest.mark.skip(reason=f"--cim-all-variants {caps}: no such capability "
+                                           f"has a registered model")
+            for it in items:
+                it.add_marker(mark)
     idx = {id(it): i for i, it in enumerate(items)}
 
     def key(it):
         cs = getattr(it, "callspec", None)
-        prov = cs.params.get("prov") if cs else None
+        prov = cs.params.get("prov") if cs is not None else None
         return (0, "", idx[id(it)]) if prov is None else (1, str(prov), idx[id(it)])
     items.sort(key=key)
 
@@ -526,6 +547,15 @@ def write_meta(client, fn, tags=None, desc="", regions=None):
                                            "regions": regions or []}).get_json()
     assert j and j.get("success"), j
     return j
+
+
+def picked_name(app, cap):
+    """'pose:rtmw' — the capability and the model currently picked for it, for
+    failure messages: a model test must say WHICH model failed."""
+    try:
+        return f"{cap}:{app.module_host.broker.selected_id(cap) or '<none>'}"
+    except Exception:
+        return f"{cap}:<unknown>"
 
 
 def picked_model(app, cap, why=""):

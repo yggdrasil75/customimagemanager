@@ -4,7 +4,7 @@ propagation from the Faces/Bodies tabs into the image's MWG regions.
 Model-free tests hand _face_detect_batch fake detectors; the last test uses
 the real picked detectors on tests/fixtures/person_single.jpg."""
 import pytest
-from cimtest import picked_model, read_meta, write_meta, box, media_path
+from cimtest import picked_model, picked_name, read_meta, write_meta, box, media_path
 
 from modules.people import people_core as pc
 
@@ -116,6 +116,7 @@ def test_real_detectors_on_single_person(client, upload, app):
     assert pc._face_detect_batch([fn], faces=True, bodies=True) == 0
     regs = read_meta(client, fn)["regions"]
     assert len(_by_class(regs, "person")) == 1, (
-        f"{len(_by_class(regs, 'person'))} person boxes from the picked detectors; "
+        f"{len(_by_class(regs, 'person'))} person boxes from "
+        f"{picked_name(app, 'detect.persons')} / {picked_name(app, 'detect')}; "
         f"tests/test_fixtures.py says whether person_single.jpg is the problem. Got: {regs}")
     assert all(r["region_type"] == r["class_name"] for r in regs)

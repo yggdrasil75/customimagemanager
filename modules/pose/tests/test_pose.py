@@ -1,6 +1,6 @@
 """Pose module: /api/pose, /api/bulk_pose, /api/pose_remove, stored skeletons."""
 import pytest
-from cimtest import post_json, picked_model, read_meta, write_meta, box
+from cimtest import post_json, picked_model, picked_name, read_meta, write_meta, box
 
 
 def _skeleton(cx=.5):
@@ -69,7 +69,8 @@ def test_real_pose_single_person(client, upload, app):
     fn = upload.media("person_single.jpg")
     j = post_json(client, "/api/pose", {"filename": fn})
     if j["pose"].get("note") and not j["pose"]["people"]:
-        pytest.fail(f"picked pose model failed on person_single: {j['pose']['note']}")
+        pytest.fail(f"{picked_name(app, 'pose')} failed on person_single: {j['pose']['note']}")
     assert len(j["pose"]["people"]) == 1, (
-        "the picked pose model found no skeleton in person_single.jpg — "
-        "tests/test_fixtures.py says whether the photo or the model is at fault")
+        f"{picked_name(app, 'pose')} found {len(j['pose']['people'])} skeletons in "
+        f"person_single.jpg, want 1 — tests/test_fixtures.py says whether the photo or "
+        f"the model is at fault")

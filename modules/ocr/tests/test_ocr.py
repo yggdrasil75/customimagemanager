@@ -1,6 +1,6 @@
 """OCR module: /api/ocr through the picked provider."""
 import pytest
-from cimtest import post_json, picked_model, expected, text_matches
+from cimtest import post_json, picked_model, picked_name, expected, text_matches
 
 
 def test_api_ocr_with_fake(client, upload, fake_model):
@@ -37,8 +37,9 @@ def test_real_ocr_reads_document(client, upload, app):
     picked_model(app, "ocr")
     fn = upload.media("text_document.jpg")
     j = post_json(client, "/api/ocr", {"filename": fn})
-    assert j["success"] and j["text"].strip(), j
+    assert j["success"] and j["text"].strip(), f"{picked_name(app, 'ocr')} read nothing: {j}"
     want = expected("text_document.jpg")
     if want:
         ok, detail = text_matches(want, j["text"])
-        assert ok, f"{detail}; read: {' '.join(j['text'].split())[:300]}"
+        assert ok, (f"{picked_name(app, 'ocr')}: {detail}; "
+                    f"read: {' '.join(j['text'].split())[:300]}")
