@@ -28,6 +28,7 @@ Fixtures
   host         app.module_host
 
 Helpers
+  free_models()  drop every loaded model (done automatically between models)
   fixture(name)  path to a fixture file (any equivalent extension), or skip
   picked_model(app, cap)  handle for the capability's picked provider, or skip
   text_matches(want, got)  does the read text match the .txt expectation?
@@ -101,6 +102,7 @@ def pytest_configure(config):
 
 
 def pytest_unconfigure(config):
+    free_models()
     os.chdir(ROOT)
     shutil.rmtree(_WORK, ignore_errors=True)
 
@@ -224,6 +226,45 @@ def _module_dir_of(path):
     if not p.startswith(MODULES + os.sep):
         return None
     return os.path.relpath(p, MODULES).split(os.sep)[0]
+
+
+# ── keep one model in memory at a time ─────────────────────────────────────
+_LOADED_FOR = {"model": "<none>"}
+
+
+def free_models():
+    """Drop every loaded model and hand the memory back. The registry only
+    evicts GPU entries over a VRAM budget, so a long parametrized run would
+    otherwise keep every CPU model it ever loaded."""
+    try:
+        import model_registry
+        model_registry.REGISTRY.clear()
+    except Exception:
+        pass
+    import gc
+    gc.collect()
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+        except Exception:
+            pass
+
+
+@pytest.fixture(autouse=True)
+def _one_model_at_a_time(request):
+    """Provider tests are ordered by model (see pytest_collection_modifyitems);
+    when the model changes, free the previous one before loading the next, so
+    peak memory is one model rather than all of them."""
+    cs = getattr(request.node, "callspec", None)
+    prov = cs.params.get("prov") if cs else None
+    key = str(prov) if prov is not None else "<none>"
+    if key != _LOADED_FOR["model"]:
+        free_models()
+        _LOADED_FOR["model"] = key
+    yield
 
 
 @pytest.fixture(autouse=True)
