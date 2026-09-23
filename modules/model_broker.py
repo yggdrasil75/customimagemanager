@@ -196,6 +196,12 @@ class Provider:
         consumer always receives the capability's canonical shape.
         """
         model = self._loader()
+        if model is None:
+            # Never let a missing model masquerade as an empty result: the
+            # transform would turn None into [] and the consumer would report
+            # "nothing found" for a model that never existed.
+            raise RuntimeError(f"{self.capability}:{self.id} has no model to run "
+                               f"(its loader returned None)")
         transform = self._transform
 
         def run(*args, **kwargs):
