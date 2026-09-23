@@ -64,7 +64,10 @@ def _build(kind, size):
     from mediapipe.tasks.python import vision
     if kind == "holistic":
         opts = vision.HolisticLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=_task(_HOLISTIC_URL)))
+            base_options=BaseOptions(model_asset_path=_task(_HOLISTIC_URL)),
+            running_mode=vision.RunningMode.IMAGE,
+            output_face_blendshapes=False,
+            output_segmentation_mask=False)
         lm = vision.HolisticLandmarker.create_from_options(opts)
 
         def run(crop):

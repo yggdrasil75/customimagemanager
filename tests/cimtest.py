@@ -15,6 +15,7 @@ Command-line options (./run_tests.sh --help lists them under "cim")
                        LLM, OAI embeddings); off by default
   --cim-fixtures DIR   fixture media folder (default tests/fixtures)
   --cim-no-models      skip every test that loads a real model (fast run)
+  --cim-timeout SECS   fail a model test that runs longer than this (600)
   --cim-all-variants [CAPS]  exhaustive sweep for these capabilities ("all", or
                        e.g. pose,box): every size/type/weights file per model, and
                        with named capabilities the run is narrowed to them
@@ -75,6 +76,9 @@ def pytest_addoption(parser):
                      "Naming capabilities also NARROWS the run to those models — nothing "
                      "else is collected. Without this option each model is tested once, "
                      "with the variant in effect, alongside the rest of the suite.")
+    g.addoption("--cim-timeout", metavar="SECONDS", type=int, default=600,
+                help="fail any single model test that runs longer than this (default 600); "
+                     "0 disables. A hung model then costs one red line, not the run.")
     g.addoption("--cim-no-models", action="store_true", default=False,
                 help="skip everything that loads a real model (the provider suite "
                      "and each module's real-model test); the fake-model logic "
@@ -86,7 +90,8 @@ def pytest_configure(config):
     if config.getoption("--cim-fixtures"):
         FIXTURES = os.path.abspath(config.getoption("--cim-fixtures"))
     REMOTE = bool(config.getoption("--cim-remote"))
-    global ALL_VARIANTS
+    global ALL_VARIANTS, TIMEOUT
+    TIMEOUT = int(config.getoption("--cim-timeout") or 0)
     raw = config.getoption("--cim-all-variants") or ""
     ALL_VARIANTS = frozenset(x.strip() for x in raw.split(",") if x.strip())
     cfg = config.getoption("--cim-config")
@@ -259,6 +264,31 @@ def free_models():
                 torch.cuda.ipc_collect()
         except Exception:
             pass
+
+
+TIMEOUT = 600
+
+
+@pytest.fixture(autouse=True)
+def _model_test_timeout(request):
+    """SIGALRM watchdog around each model test (provider suite + test_real_*):
+    a model that never returns fails with a timeout instead of freezing the
+    whole run. Linux/macOS main thread only; elsewhere it's a no-op."""
+    import signal
+    is_model = "P" in getattr(request, "fixturenames", ()) or request.node.name.startswith("test_real_")
+    if not is_model or TIMEOUT <= 0 or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def _fire(signum, frame):
+        raise TimeoutError(f"exceeded --cim-timeout {TIMEOUT}s")
+    old = signal.signal(signal.SIGALRM, _fire)
+    signal.alarm(TIMEOUT)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
 
 
 @pytest.fixture(autouse=True)

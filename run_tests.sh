@@ -16,7 +16,7 @@ cd "$(dirname "$0")" || exit 1
 args=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --cim-config|--cim-fixtures|--cim-all-variants) args+=("$1=$2"); shift 2 ;;
+    --cim-config|--cim-fixtures|--cim-all-variants|--cim-timeout) args+=("$1=$2"); shift 2 ;;
     *) args+=("$1"); shift ;;
   esac
 done

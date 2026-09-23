@@ -168,6 +168,10 @@ def person_crops(img_bgr, persons=None, pad: float = 0.15) -> list:
 def crop_keypoints(pts, x0, y0, w, h, W, H) -> list:
     """Map crop-local normalized [(x, y, v)] back to whole-image normalized
     {x,y,v} dicts (the broker 'pose' contract)."""
-    return [{"x": round(max(0.0, min(1.0, (x0 + x * w) / W)), 4),
-             "y": round(max(0.0, min(1.0, (y0 + y * h) / H)), 4),
-             "v": round(float(v), 3)} for x, y, v in pts]
+    # float(): callers feed numpy scalars, and round() keeps numpy's type, which
+    # jsonify then refuses (numpy.float32 is not JSON serialisable).
+    return [{"x": round(max(0.0, min(1.0, float(x0 + x * w) / W)), 4),
+             "y": round(max(0.0, min(1.0, float(y0 + y * h) / H)), 4),
+             # SimCC/heatmap peak scores (RTMPose, ViTPose) can exceed 1;
+             # the contract, and every consumer, treats v as 0..1.
+             "v": round(max(0.0, min(1.0, float(v))), 3)} for x, y, v in pts]

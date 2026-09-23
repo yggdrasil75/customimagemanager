@@ -176,6 +176,7 @@ def rtm_people(img_bgr, kind: str = "wholebody", size: str = "l", persons=None) 
             x = float(kpts[pi, ki, 0]) / max(1, W)
             y = float(kpts[pi, ki, 1]) / max(1, H)
             v = float(scores[pi, ki]) if scores is not None else 1.0
+            v = max(0.0, min(1.0, v))        # peak scores can exceed 1; contract is 0..1
             pts.append({"x": round(max(0.0, min(1.0, x)), 4),
                         "y": round(max(0.0, min(1.0, y)), 4), "v": round(v, 3)})
         people.append({"keypoints": pts, "conf": 1.0})
