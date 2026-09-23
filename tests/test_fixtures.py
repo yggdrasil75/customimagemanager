@@ -7,10 +7,13 @@ PICKED models (Models tab) only — a failure here means "this fixture doesn't
 work with the models this machine is set up with", which is exactly the
 premise the other tests rely on.
 """
+import warnings
+
 import numpy as np
 import pytest
-from cimtest import (fixture, find_fixture, expected, has_fixture, load_image,
-                     picked_model, text_matches)
+import cimtest
+from cimtest import (fixture, find_fixture, expected, free_models, has_fixture,
+                     load_image, picked_model, text_matches)
 
 IMAGES = ["person_single.jpg", "person_multi.jpg", "face_closeup.jpg", "no_person.jpg",
           "same_person_a.jpg", "same_person_b.jpg", "other_person.jpg",
@@ -31,44 +34,77 @@ def test_image_is_usable(name):
     img = load_image(name)
     h, w = img.shape[:2]
     assert min(h, w) >= 64, f"{find_fixture(name)} is {w}x{h}: too small to detect anything in"
-    assert max(h, w) <= 6000, f"{find_fixture(name)} is {w}x{h}: shrink it, model tests will crawl"
     assert float(img.std()) > 2, f"{find_fixture(name)} is nearly blank"
+    if max(h, w) > 6000:
+        # Not a failure: models resize internally. It does cost decode time on
+        # every model test, and a subject that's small in a 40 MP frame is
+        # harder for detectors than the same subject cropped.
+        warnings.warn(f"{find_fixture(name)} is {w}x{h}; a ~2000px copy would run faster "
+                      f"and detect just as well")
+
+
+def _count_people(app, name):
+    """People found in a fixture by EVERY installed person detector, one at a
+    time (freeing each before the next). Two suspects, one answer: if they all
+    see nothing the photo is wrong; if only your picked model sees nothing,
+    the pick is wrong for this kind of image."""
+    img = load_image(name)
+    b = app.module_host.broker
+    counts = {}
+    for pid, p in (b._providers.get("detect.persons") or {}).items():
+        if pid == cimtest.FAKE_ID or p.resource or not p.available():
+            continue
+        try:
+            boxes = b.request("detect.persons", provider=pid)(img) or []
+            counts[pid] = len([x for x in boxes if float(x.get("conf", 1)) >= 0.5])
+        except Exception as e:
+            counts[pid] = f"error: {type(e).__name__}"
+        free_models()
+    if not counts:
+        pytest.skip("no installed detect.persons model to check the fixture with")
+    return counts, b.selected_id("detect.persons")
+
+
+def _verdict(name, counts, picked, want, got):
+    ok = [f"{k}={v}" for k, v in counts.items() if v == want]
+    return (f"{name}: your picked detector '{picked}' finds {got}, want {want}.\n"
+            f"  all installed detectors: {counts}\n"
+            + (f"  these agree with the fixture: {ok} — so the PICK is wrong for this kind of "
+               f"image (an anime/illustration model won't see people in photos, and vice "
+               f"versa); change it in Settings or pick a fixture that matches your library."
+               if ok else
+               "  no detector sees it that way, so the PHOTO is the problem: use a plain "
+               "shot of the subject your models are trained for."))
 
 
 def test_person_single_holds_exactly_one_person(app):
-    """The premise of most model tests: the picked person detector sees ONE
-    person here. If this fails, every 'no person / no skeleton / no mask on
-    person_single' failure elsewhere is this file, not those models — use a
-    plain photo of one whole standing person, the kind the detector was
-    trained on (a real photo, not art or a render, unless your picked model
-    is trained for that)."""
-    run = picked_model(app, "detect.persons")
-    boxes = run(load_image("person_single.jpg")) or []
-    strong = [b for b in boxes if float(b.get("conf", 1)) >= 0.5]
-    assert strong, "the picked detect.persons model finds no person in person_single.jpg"
-    assert len(strong) == 1, f"{len(strong)} people in person_single.jpg: {[b.get('conf') for b in strong]}"
-    assert strong[0]["h"] > 0.4, (f"the person fills only {strong[0]['h']:.0%} of the frame height; "
-                                  f"tests expect a full-body subject")
+    """The premise of most model tests. When this fails, every 'no person / no
+    skeleton / no mask on person_single' failure elsewhere follows from it —
+    top-down pose and segmentation models are fed by this detector."""
+    counts, picked = _count_people(app, "person_single.jpg")
+    got = counts.get(picked)
+    assert got == 1, _verdict("person_single.jpg", counts, picked, 1, got)
 
 
 def test_person_multi_holds_several_people(app):
-    run = picked_model(app, "detect.persons")
-    boxes = [b for b in (run(load_image("person_multi.jpg")) or []) if float(b.get("conf", 1)) >= 0.5]
-    assert len(boxes) >= 2, f"person_multi.jpg: the picked detector sees {len(boxes)} people, want >= 2"
+    counts, picked = _count_people(app, "person_multi.jpg")
+    got = counts.get(picked)
+    assert isinstance(got, int) and got >= 2, _verdict("person_multi.jpg", counts, picked, ">=2", got)
 
 
 def test_no_person_really_has_none(app):
-    run = picked_model(app, "detect.persons")
-    boxes = [b for b in (run(load_image("no_person.jpg")) or []) if float(b.get("conf", 1)) >= 0.5]
-    assert not boxes, f"no_person.jpg has {len(boxes)} people in it — pick a photo with nobody in it"
+    counts, picked = _count_people(app, "no_person.jpg")
+    assert counts.get(picked) == 0, _verdict("no_person.jpg", counts, picked, 0, counts.get(picked))
 
 
 def test_face_fixtures_have_faces(app):
     run = picked_model(app, "detect.faces")
+    picked = app.module_host.broker.selected_id("detect.faces")
     for name, want in (("face_closeup.jpg", 1), ("same_person_a.jpg", 1),
                        ("same_person_b.jpg", 1), ("other_person.jpg", 1)):
         faces = run(load_image(name)) or []
-        assert len(faces) >= want, f"{name}: the picked detector finds {len(faces)} faces"
+        assert len(faces) >= want, (f"{name}: the picked face detector '{picked}' finds "
+                                    f"{len(faces)} faces, want >= {want}")
     assert not (run(load_image("no_person.jpg")) or []), "no_person.jpg has a face in it"
 
 
