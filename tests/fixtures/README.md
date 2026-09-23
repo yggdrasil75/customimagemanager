@@ -54,6 +54,24 @@ Keep images ≤ ~2000 px on the long side so model tests stay fast.
     ./run_tests.sh --cim-remote                     also call endpoint-backed models
                                                     (vision LLM, OAI embeddings)
 
+## Models
+
+Every model registered with the broker is tested automatically — adding one
+means no test edits:
+
+    ./run_tests.sh tests/test_providers.py              every model
+    ./run_tests.sh tests/test_providers.py -k "pose:"   one capability
+    ./run_tests.sh tests/test_providers.py -k rtmw      one model
+    ./run_tests.sh --cim-all-variants                   every size/type each declares
+
+The run ends with a "model results" table: one line per model, `ok`, the first
+failure, or `--` when it never ran (not installed, weights missing, endpoint
+model without `--cim-remote`).
+
+A model that deviates from its capability's contract on purpose gets an entry
+in `tests/model_expectations.json` (`skip` / `exempt` / `xfail`, per model or
+per test) — data, not code.
+
 Model tests use your downloaded weights (models/ is linked, not copied).
 Module tests live in `modules/<id>/tests/` (see `modules/example_hello/tests/`
 for a Python and a JS template).

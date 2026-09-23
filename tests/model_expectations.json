@@ -1,0 +1,25 @@
+{
+  "_how_to_use": [
+    "Deliberate deviations from a capability's contract, as data, so adding or",
+    "annotating a model never means editing tests/test_providers.py.",
+    "",
+    "Key:   '<capability>:<provider id>' exactly as the test ids show it",
+    "       (e.g. 'pose:rtmw'), or '<capability>:*' for every provider of one",
+    "       capability.",
+    "Value: any of",
+    "  'skip':   reason   - don't test this model at all (not installed here,",
+    "                       needs hardware you don't have, known broken upstream)",
+    "  'exempt': reason   - run the contract tests but not the fixture-behaviour",
+    "                       ones (the model legitimately finds nothing)",
+    "  'xfail':  reason   - expect failure, report it as xfail instead of red",
+    "  'tests':  {test name: reason}  - narrow xfail/skip/exempt to one test,",
+    "                       e.g. {'test_iqa_prefers_sharp': 'aesthetic metric'}",
+    "                       (a bare string there means xfail)",
+    "",
+    "Delete an entry and the model is held to the full contract again."
+  ],
+
+  "detect.barcodes:builtin": {
+    "exempt": "stub handle (always []); modules/barcodes/scan.py runs its own CV search, tested in modules/barcodes/tests"
+  }
+}

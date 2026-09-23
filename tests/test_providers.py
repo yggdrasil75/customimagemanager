@@ -1,8 +1,19 @@
 """Generic model-provider suite.
 
 Every provider registered with the broker (any module, any capability) is
-parametrized into these tests, so a new provider is covered the moment it
-registers — the providing module needs no tests of its own for the contract.
+parametrized into these tests, so a NEW MODEL IS COVERED THE MOMENT IT
+REGISTERS — no edit to this file, ever. Adding a model:
+
+    1. register it (host.provide_model(...)) as usual
+    2. ./run_tests.sh tests/test_providers.py -k "pose:mymodel"
+    3. if it deviates from the capability contract on purpose, say so in
+       tests/model_expectations.json — data, not code.
+
+Each run ends with a "model results" table: one line per model, ok or the
+first failure, so "yolo pose works, mediapipe holistic doesn't" is readable at
+a glance. Test one capability with -k "pose:", one model with -k "pose:rtmw".
+By default a provider is tested with the size/type in effect for it; pass
+--cim-all-variants to sweep every size and type it declares.
 
   test_declaration   manifest-level sanity; runs even for unavailable providers
   test_contract      output matches the capability's canonical shape
@@ -15,18 +26,44 @@ A provider is skipped when it reports itself unavailable (with its reason), or
 when it runs on an external endpoint and --cim-remote isn't given. A provider
 that reports available() but fails to load FAILS: available() is lying.
 """
+import json
+import os
+
 import numpy as np
 import pytest
 
 import cimtest
 from cimtest import load_app, load_image, has_fixture, expected, text_matches
 
-# Where a generic expectation doesn't apply to a specific provider. Keep the
-# reason honest: this table is the list of known contract deviations.
-EXEMPT = {
-    ("detect.barcodes", "builtin"):
-        "stub handle (always []); barcodes/scan.py runs its own CV search",
-}
+# Known, deliberate deviations live in tests/model_expectations.json so adding
+# or annotating a model never means editing this file. See that file's
+# "_how_to_use" key for the schema.
+_EXP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_expectations.json")
+
+
+def _load_expectations():
+    try:
+        with open(_EXP_PATH, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (ValueError, OSError) as e:
+        pytest.fail(f"{_EXP_PATH}: {e}")
+    return {k: v for k, v in raw.items() if not k.startswith("_")}
+
+
+EXPECTATIONS = _load_expectations()
+
+
+def expectation(cap, pid, test_name=None):
+    """The entry for this model ('cap:provider', or 'cap:*' for every provider
+    of a capability), narrowed to one test when test_name is given."""
+    e = dict(EXPECTATIONS.get(f"{cap}:{pid}") or EXPECTATIONS.get(f"{cap}:*") or {})
+    per_test = e.pop("tests", {}) or {}
+    if test_name and test_name in per_test:
+        e.update(per_test[test_name] if isinstance(per_test[test_name], dict)
+                 else {"xfail": per_test[test_name]})
+    return e
 
 # Capabilities the generic suite can't call without provider-specific input.
 NO_GENERIC_CALL = {
@@ -52,25 +89,58 @@ def for_caps(*caps):
     return deco
 
 
+def _variants(p):
+    """[(size, type)] to test for a provider: the variant in effect (None,
+    None = leave the broker's resolution alone) or, with --cim-all-variants,
+    every combination the provider declares."""
+    if not cimtest.ALL_VARIANTS:
+        return [(None, None)]
+    sizes = p["sizes"] or [None]
+    types = [t["value"] for t in p["types"]] or [None]
+    return [(s, t) for s in sizes for t in types]
+
+
 def pytest_generate_tests(metafunc):
     if "prov" not in metafunc.fixturenames:
         return
     b = load_app().module_host.broker
     want = getattr(metafunc.function, "caps", None)
-    items = [(c["id"], p["id"]) for c in b.status() for p in c["providers"]
-             if p["id"] != cimtest.FAKE_ID and (want is None or c["id"] in want)]
-    metafunc.parametrize("prov", items, ids=[f"{c}:{p}" for c, p in items])
+    items, ids = [], []
+    for c in b.status():
+        if want is not None and c["id"] not in want:
+            continue
+        for p in c["providers"]:
+            if p["id"] == cimtest.FAKE_ID:
+                continue
+            for size, typ in _variants(p):
+                items.append((c["id"], p["id"], size, typ))
+                tag = "/".join(x for x in (size, typ) if x)
+                ids.append(f"{c['id']}:{p['id']}" + (f"[{tag}]" if tag else ""))
+    metafunc.parametrize("prov", items, ids=ids)
 
 
 _LOAD_ERR = {}
 
 
 @pytest.fixture
-def P(prov, app):
-    """(provider, bound handle) for a callable provider, or skip/fail."""
-    cap, pid = prov
+def P(prov, app, request):
+    """(provider, bound handle) for a callable provider, or skip/fail.
+    Applies tests/model_expectations.json and, when sweeping, pins the size /
+    type for the duration of the test."""
+    cap, pid, size, typ = prov
     b = app.module_host.broker
     p = b._providers[cap][pid]
+    exp = expectation(cap, pid, request.node.name.split("[")[0])
+    if exp.get("skip"):
+        pytest.skip(f"model_expectations.json: {exp['skip']}")
+    if exp.get("xfail"):
+        request.node.add_marker(pytest.mark.xfail(reason=f"model_expectations.json: {exp['xfail']}",
+                                                  strict=False))
+    if size or typ:
+        prev = dict(b._variant.get(cap, {}))
+        forced = {**prev, **({"size": size} if size else {}), **({"type": typ} if typ else {})}
+        b._variant[cap] = forced
+        request.addfinalizer(lambda: b._variant.__setitem__(cap, prev))
     if cap in NO_GENERIC_CALL:
         pytest.skip(NO_GENERIC_CALL[cap])
     if not p.available():
@@ -78,7 +148,7 @@ def P(prov, app):
     if p.resource and not cimtest.REMOTE:
         pytest.skip(f"runs on external endpoint '{p.resource}' (pass --cim-remote)")
     if prov in _LOAD_ERR:
-        pytest.skip(f"provider does not load (reported by test_contract[{cap}:{pid}])")
+        pytest.skip(f"model does not load (reported by test_contract[{cap}:{pid}])")
     try:
         # Not cached: the loader is LRU-backed, and holding every handle would
         # pin every model in memory at once.
@@ -94,9 +164,10 @@ def P(prov, app):
 
 
 def _exempt(p):
-    r = EXEMPT.get((p.capability, p.id))
+    """Skip a behaviour test for a model that deliberately doesn't do this."""
+    r = expectation(p.capability, p.id).get("exempt")
     if r:
-        pytest.skip(f"exempt: {r}")
+        pytest.skip(f"model_expectations.json: {r}")
 
 
 # ── calling convention per capability ──────────────────────────────────────
@@ -314,7 +385,7 @@ def _cos(a, b):
 
 # ── every provider ─────────────────────────────────────────────────────────
 def test_declaration(prov, app):
-    cap, pid = prov
+    cap, pid = prov[0], prov[1]
     b = app.module_host.broker
     assert b.has_capability(cap)
     p = b._providers[cap][pid]

@@ -15,6 +15,7 @@ Command-line options (./run_tests.sh --help lists them under "cim")
                        LLM, OAI embeddings); off by default
   --cim-fixtures DIR   fixture media folder (default tests/fixtures)
   --cim-no-models      skip every test that loads a real model (fast run)
+  --cim-all-variants   sweep every size/type each provider declares
 
 Fixtures
   ungated      lift the machine-capability 503 gate for one test
@@ -63,6 +64,9 @@ def pytest_addoption(parser):
                 help="also test providers that call an external endpoint (LLM / OAI)")
     g.addoption("--cim-fixtures", metavar="DIR", default=None,
                 help="fixture media folder (default tests/fixtures)")
+    g.addoption("--cim-all-variants", action="store_true", default=False,
+                help="test every size/type a provider declares (pose 17 vs 133, yolo n/s/m/l/x), "
+                     "not just the variant in effect; slow but exhaustive")
     g.addoption("--cim-no-models", action="store_true", default=False,
                 help="skip everything that loads a real model (the provider suite "
                      "and each module's real-model test); the fake-model logic "
@@ -74,6 +78,8 @@ def pytest_configure(config):
     if config.getoption("--cim-fixtures"):
         FIXTURES = os.path.abspath(config.getoption("--cim-fixtures"))
     REMOTE = bool(config.getoption("--cim-remote"))
+    global ALL_VARIANTS
+    ALL_VARIANTS = bool(config.getoption("--cim-all-variants"))
     cfg = config.getoption("--cim-config")
     cfg = os.path.abspath(cfg) if cfg else None
     if ROOT not in sys.path:
@@ -239,6 +245,9 @@ def _module_gate(request):
         pytest.skip(f"module '{lm.id}' not registered: {lm.error}")
 
 
+ALL_VARIANTS = False                                     # --cim-all-variants
+
+
 def pytest_collection_modifyitems(session, config, items):
     """Run provider tests grouped by provider so each model loads once instead
     of being evicted and reloaded between test functions, and honour
@@ -272,7 +281,68 @@ def _module_source(d):
     return "\n".join(out)
 
 
+# ── per-model result matrix ────────────────────────────────────────────────
+_MODEL_RESULTS = {}          # "cap:provider[variant]" -> {"pass": n, "fail": [(test, why)], "skip": n}
+
+
+def _prov_of(nodeid):
+    """'tests/test_providers.py::test_contract[pose:yolo12]' -> 'pose:yolo12'."""
+    if "test_providers.py" not in nodeid or "[" not in nodeid:
+        return None
+    inside = nodeid[nodeid.index("[") + 1:nodeid.rindex("]")]
+    return inside if ":" in inside else None
+
+
+def pytest_runtest_logreport(report):
+    prov = _prov_of(report.nodeid)
+    if prov is None:
+        return
+    r = _MODEL_RESULTS.setdefault(prov, {"pass": 0, "fail": [], "skip": 0, "ran": 0,
+                                         "why": ""})
+    name = report.nodeid.split("::")[-1].split("[")[0]
+    if name != "test_declaration" and (report.failed or (report.passed and report.when == "call")):
+        r["ran"] += 1                      # the model was actually exercised
+    if report.skipped and not r["why"]:
+        why = str(getattr(report, "longrepr", "") or "")
+        if why.startswith("(") and why.endswith(")"):        # ('file.py', 12, 'Skipped: reason')
+            try:
+                why = eval(why)[2]                           # pytest's own tuple repr
+            except Exception:
+                pass
+        why = str(why).split("Skipped:")[-1].strip().strip("'\"()")
+        r["why"] = why[:110]
+    if report.failed:
+        why = str(getattr(report, "longrepr", "") or "").strip().splitlines()
+        why = next((l.strip(" E") for l in reversed(why) if l.strip(" E")), "failed")
+        r["fail"].append((name, why[:120]))
+    elif report.skipped and report.when == "setup":
+        r["skip"] += 1
+    elif report.passed and report.when == "call":
+        r["pass"] += 1
+
+
+def _model_matrix(tr):
+    if not _MODEL_RESULTS:
+        return
+    tr.write_sep("-", "model results")
+    tr.write_line("  one line per model: 'ok' it meets its capability's contract on the "
+                  "fixtures, 'FAIL' the first thing that broke, '--' it never ran")
+    width = max(len(k) for k in _MODEL_RESULTS)
+    for prov in sorted(_MODEL_RESULTS):
+        r = _MODEL_RESULTS[prov]
+        if r["fail"]:
+            first = r["fail"][0]
+            tr.write_line(f"  {prov:<{width}}  FAIL  {len(r['fail'])} of "
+                          f"{len(r['fail']) + r['pass']}: {first[0]}: {first[1]}")
+        elif r["ran"]:
+            tr.write_line(f"  {prov:<{width}}  ok    {r['pass']} passed"
+                          + (f", {r['skip']} skipped" if r["skip"] else ""))
+        else:
+            tr.write_line(f"  {prov:<{width}}  --    not run: {r['why'] or 'skipped'}")
+
+
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    _model_matrix(terminalreporter)
     if _APP is None:
         return
     have = set()
