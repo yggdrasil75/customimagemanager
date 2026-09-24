@@ -279,7 +279,15 @@ def _build_insight():
     name = _recog_model["v"]
     try:
         app = FaceAnalysis(name=name, root=INSIGHT_DIR, providers=_insight_providers())
-        _flatten_pack(name)
+        if "detection" not in app.models:
+            _flatten_pack(name)
+            app = FaceAnalysis(name=name, root=INSIGHT_DIR, providers=_insight_providers())
+        if "detection" not in app.models:
+            found = glob.glob(os.path.join(INSIGHT_DIR, "models", name, "**", "*.onnx"), recursive=True)
+            _face_model_error["v"] = (f"insightface pack '{name}': no detection model in "
+                                      f"{os.path.join(INSIGHT_DIR, 'models', name)} "
+                                      f"(onnx files found: {[os.path.relpath(f, INSIGHT_DIR) for f in found]})")
+            return None
         app.prepare(ctx_id=model_registry.onnx_device_id(), det_size=(640, 640))
         _face_model_error["v"] = ""
         return app

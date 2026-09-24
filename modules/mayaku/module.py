@@ -234,8 +234,19 @@ def register(host):
         """
         pred = _predictor(src, "pose")
         model = getattr(pred, "model", None)
-        if model is None or getattr(model, "keypoint_on", getattr(model, "keypoint_head", None)):
+        if model is None:
             return
+        # A keypoint head lives on the model (UniQuery: model.keypoint_head)
+        # or on its ROI heads (Keypoint R-CNN: model.roi_heads.keypoint_head);
+        # scanning the submodules covers both without caring which.
+        try:
+            has_kp = any("keypoint" in type(m).__name__.lower() for m in model.modules())
+        except Exception:
+            has_kp = True                                  # can't tell: don't block
+        if has_kp:
+            return
+        arch = type(model).__name__
+        heads = sorted({type(m).__name__ for m in model.modules() if "head" in type(m).__name__.lower()})
         offered = ""
         try:
             zoo = _list_models() if _list_models else {}
@@ -244,9 +255,14 @@ def register(host):
             offered = f" Keypoint models in the zoo: {kp or 'none'}."
         except Exception:
             pass
+        try:
+            local = _resolve(src, "pose")
+            where = f" Loaded from {local} ({os.path.getsize(local) >> 20} MB)."
+        except Exception:
+            where = ""
         raise RuntimeError(
-            f"mayaku pose: {src!r} loaded a model with no keypoint head (detect-only "
-            f"weights), so it can never return a skeleton.{offered} Point "
+            f"mayaku pose: {src!r} loaded a {arch} with heads {heads} and no keypoint head, "
+            f"so it can never return a skeleton.{where}{offered} Point "
             f"'{_weights_key('pose')}' at keypoint weights or drop the size.")
 
     def _loader(cap):
