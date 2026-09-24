@@ -258,17 +258,33 @@ def _insight_providers():
         return base
     return [p for p in base if p != "MIGraphXExecutionProvider"] or ["CPUExecutionProvider"]
 
+def _flatten_pack(name):
+    """insightface extracts antelopev2.zip into models/antelopev2/antelopev2/,
+    a nesting FaceAnalysis doesn't look into, so the pack downloads fine and
+    then loads nothing. Move the .onnx files up one level when that happened."""
+    top = os.path.join(INSIGHT_DIR, "models", name)
+    nested = os.path.join(top, name)
+    if not os.path.isdir(nested) or glob.glob(os.path.join(top, "*.onnx")):
+        return
+    for f in glob.glob(os.path.join(nested, "*.onnx")):
+        os.replace(f, os.path.join(top, os.path.basename(f)))
+
+
 def _build_insight():
-    """Construct insightface's FaceAnalysis app, or None on any failure."""
+    """Construct insightface's FaceAnalysis app, or None on any failure (the
+    reason lands in face_model_error() instead of being swallowed)."""
     if not _HAVE_INSIGHT_APP:
+        _face_model_error["v"] = "insightface not installed"
         return None
+    name = _recog_model["v"]
     try:
-        app = FaceAnalysis(name=_recog_model["v"],
-                           root=INSIGHT_DIR,
-                           providers=_insight_providers())
+        app = FaceAnalysis(name=name, root=INSIGHT_DIR, providers=_insight_providers())
+        _flatten_pack(name)
         app.prepare(ctx_id=model_registry.onnx_device_id(), det_size=(640, 640))
+        _face_model_error["v"] = ""
         return app
-    except Exception:
+    except Exception as e:
+        _face_model_error["v"] = f"insightface pack '{name}': {type(e).__name__}: {e}"
         return None
 
 # buffalo_l det+recog is ~1GB of ONNX weights on GPU.

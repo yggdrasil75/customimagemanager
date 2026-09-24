@@ -10,6 +10,7 @@ Families: DINOv2 (public, the default) and DINOv3 (gated on HF — accept the
 licence and log in with huggingface-cli). Sizes s/b/l/g; weights land under
 models/dino/embed/ via the HF cache_dir.
 """
+import os
 import threading
 
 import numpy as np
@@ -17,6 +18,8 @@ import numpy as np
 import model_registry
 import object_grouping as og
 from optional_deps import optional_import
+
+_hf_token, _ = optional_import("huggingface_hub", attr="get_token")
 
 cv2, _HAVE_CV2 = optional_import("cv2")
 torch, _HAVE_TORCH = optional_import("torch")
@@ -143,13 +146,30 @@ def register(host):
         model, proc = got
         return lambda img, *a, **k: (embed_crops(model, proc, [cv2.cvtColor(og.as_bgr(img), cv2.COLOR_BGR2RGB)]) or [None])[0]
 
-    for fam, label, note in (
-        ("dinov2", "DINOv2", "Public, ungated self-supervised ViT. The reliable default; 's' is enough for album re-id."),
-        ("dinov3", "DINOv3", "Newer backbone, gated on HuggingFace: accept the licence and log in (huggingface-cli) or loading fails."),
+    def _v3_ok():
+        """DINOv3 weights are gated: loading needs an HF token (accepted
+        licence) or an already-cached snapshot. Without either, say so
+        instead of failing at use time."""
+        if _hf_token is not None:
+            try:
+                if _hf_token():
+                    return True
+            except Exception:
+                pass
+        try:
+            return any(d.startswith("models--facebook--dinov3") for d in os.listdir(_CACHE))
+        except OSError:
+            return False
+
+    for fam, label, note, avail, why in (
+        ("dinov2", "DINOv2", "Public, ungated self-supervised ViT. The reliable default; 's' is enough for album re-id.",
+         lambda: True, ""),
+        ("dinov3", "DINOv3", "Newer backbone, gated on HuggingFace: accept the licence and log in (huggingface-cli) or loading fails.",
+         _v3_ok, "gated weights: accept the licence at huggingface.co/facebook/dinov3-* and run `huggingface-cli login`"),
     ):
         common = dict(label=label, family="DINO", sizes=_SIZES, note=note, speed="balanced",
-                      supports_conf=False, transform=None, available=lambda: True,
-                      reason="", cost_mb=1600, gpu=og.has_gpu())
+                      supports_conf=False, transform=None, available=avail,
+                      reason=why, cost_mb=1600, gpu=og.has_gpu())
         host.provide_model("embed.bodies", fam, loader=_bodies_loader, **common)
         host.provide_model("embed", fam, loader=_image_loader, **common)
     host.logger.info("dino module: registered embed / embed.bodies (v2, v3)")

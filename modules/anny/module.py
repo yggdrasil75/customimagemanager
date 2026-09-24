@@ -17,6 +17,7 @@ Adapter surface used here (kept small so a version bump is one edit):
     model.fit_landmarks(kpts_xy)             -> {betas, confidence}    [anny]
     model.forward(betas)                     -> (vertices, faces)
 """
+import os
 import model_registry
 from optional_deps import optional_import
 
@@ -38,6 +39,19 @@ MANIFEST = {
 }
 
 _DIR = model_registry.model_dir("anny", "body.shape")
+
+
+_REASON = f"pip install anny, then put the ANNY body-model files in {_DIR}"
+
+
+def _have_files():
+    """ANNY's body model is a manual download (licence); nothing fetches it.
+    Available only once the files are in place, so the app hides the model
+    instead of erroring when it is used."""
+    try:
+        return _HAVE_ANNY and any(os.scandir(_DIR))
+    except OSError:
+        return False
 
 
 def _model():
@@ -84,17 +98,17 @@ def register(host):
         note="Image -> ANNY parameters. Works from infants to adults, so it is the right "
              "default for a family album.",
         loader=lambda: _shape_loader("anny_fit"), transform=None,
-        available=lambda: True, reason="", cost_mb=600, gpu=model_registry.on_gpu())
+        available=_have_files, reason=_REASON, cost_mb=600, gpu=model_registry.on_gpu())
     host.provide_model(
         "body.shape", "anny", label="ANNY (landmark fit)", family="ANNY", speed="fast",
         supports_conf=False,
         note="Fits the ANNY model to pose keypoints (needs a pose model). Rougher than "
              "ANNY-Fit; no image encoder.",
         loader=lambda: _shape_loader("anny"), transform=None,
-        available=lambda: True, reason="", cost_mb=600)
+        available=_have_files, reason=_REASON, cost_mb=600)
     host.provide_model(
         "body.mesh", "anny", label="ANNY", family="ANNY", speed="fast", supports_conf=False,
         note="Parameters -> mesh with the age-generic ANNY model.",
         loader=lambda: (lambda m: (lambda betas, *a, **k: m.forward(betas)))(_model()),
-        transform=None, available=lambda: True, reason="", cost_mb=600)
+        transform=None, available=_have_files, reason=_REASON, cost_mb=600)
     host.logger.info("anny module: registered body.shape (anny_fit, anny) / body.mesh")

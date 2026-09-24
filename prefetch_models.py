@@ -84,9 +84,9 @@ def main():
             b.request(cap, provider=pid)            # binding is what downloads
             print(f"  {tag:<{width}}  ok  {time.time() - t0:5.1f}s", flush=True)
         except Exception as e:
-            msg = f"{type(e).__name__}: {e}".splitlines()[0][:160]
+            msg = " ".join(f"{type(e).__name__}: {e}".split())
             failed.append((tag, msg))
-            print(f"  {tag:<{width}}  FAIL {msg}", flush=True)
+            print(f"  {tag:<{width}}  FAIL {msg[:160]}", flush=True)
         finally:
             b._variant[cap] = prev
             try:
