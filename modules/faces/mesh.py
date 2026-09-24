@@ -136,7 +136,10 @@ def _build_insight3d():
                                           + (facelib.face_model_error() or "unknown"))
             return None
         # The morphable model basis: fetched to models/face3d on first use.
-        if not ensure_basis():
+        # NB: _fetch_bfm(), not ensure_basis() — that one goes back through
+        # the registry for the very key being built here and deadlocks on
+        # its load lock.
+        if not _fetch_bfm():
             _insight3d_state["reason"] = f"BFM.mat could not be fetched from {_BFM_URL} into {_BFM_DIR}"
             return None
         bfm = MorphabelModel(_BFM_PATH)
@@ -193,6 +196,26 @@ _BFM_URL = os.environ.get(
     "https://github.com/peterjiang4648/BFM_model/releases/download/1.0/BFM.mat")
 
 
+def _fetch_bfm() -> bool:
+    """Download BFM.mat into models/face3d if it isn't there. Registry-free, so
+    it is safe to call from inside a model build."""
+    if os.path.exists(_BFM_PATH):
+        return True
+    try:
+        os.makedirs(_BFM_DIR, exist_ok=True)
+        tmp = _BFM_PATH + ".part"
+        with _lock:
+            if not os.path.exists(_BFM_PATH):
+                urllib.request.urlretrieve(_BFM_URL, tmp)
+                if os.path.getsize(tmp) < 1024:      # sanity: not an error page
+                    os.remove(tmp)
+                    return False
+                os.replace(tmp, _BFM_PATH)
+        return True
+    except Exception:
+        return False
+
+
 def ensure_basis(timeout: int = 120) -> bool:
     """! @brief Provision the 3DMM basis (models/face3d/BFM.mat) if missing.
     @return True if a usable face estimator exists after the attempt. Downloads the
@@ -202,19 +225,8 @@ def ensure_basis(timeout: int = 120) -> bool:
     """
     if have_face_estimator():
         return True
-    if not os.path.exists(_BFM_PATH):
-        try:
-            os.makedirs(_BFM_DIR, exist_ok=True)
-            tmp = _BFM_PATH + ".part"
-            with _lock:
-                if not os.path.exists(_BFM_PATH):
-                    urllib.request.urlretrieve(_BFM_URL, tmp)
-                    if os.path.getsize(tmp) < 1024:      # sanity: not an error page
-                        os.remove(tmp)
-                        return False
-                    os.replace(tmp, _BFM_PATH)
-        except Exception:
-            return False
+    if not _fetch_bfm():
+        return False
     # The builder cached a None result while the basis was missing; drop it so the
     # next acquire rebuilds now that BFM.mat exists.
     try:
