@@ -143,6 +143,8 @@
       <button onclick="trValidate()"
         class="w-full bg-amber-700 hover:bg-amber-600 py-2 rounded font-bold text-sm">Run validation</button>
       <div id="tr_val_summary" class="text-xs text-gray-300"></div>
+      <label class="trck text-xs" title="Overlay the model's boxes from the last run on the open image. Blue = your boxes; dashed = model (green ok, amber off, purple extra, pink wrong class); thick red = missed.">
+        <input id="tr_val_show" type="checkbox" class="accent-amber-500" checked onchange="trRedraw()"> Show model boxes on image</label>
       <div id="tr_val_list" class="space-y-1 max-h-60 overflow-y-auto"></div>
       <button id="tr_val_retrain" onclick="trStartTraining()"
         class="hidden w-full bg-purple-700 hover:bg-purple-600 py-2 rounded font-bold text-sm">

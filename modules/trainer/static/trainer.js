@@ -378,15 +378,19 @@
       ` · mean IoU ${fmt(s.mean_iou)} · P ${fmt(s.precision)} / R ${fmt(s.recall)}</div>` +
       `<div class="text-gray-400 mt-0.5">` +
       chip('correct', c.correct) + chip('tightened', c.tightened) + chip('loosened', c.loosened) +
-      chip('shifted', c.shifted) + chip('dropped', c.dropped) + chip('added', c.added) + `</div>`;
+      chip('shifted', c.shifted) + chip('dropped', c.dropped) + chip('added', c.added) +
+      (s.added_wrong_class ? `<span class="tr-chip" style="background:#ec489922;color:#ec4899">wrong class ${s.added_wrong_class}</span>` : '') +
+      `</div>`;
     }
 
     vres = {};
     $('tr_val_list').innerHTML = (d.images || []).map((im, i) => {
       vres[im.rel_path] = im;
       const cc = im.counts;
+      const wc = (im.boxes || []).filter(b => b.confused_with).length;
       const tags = ['dropped', 'added', 'tightened', 'loosened', 'shifted']
-        .filter(k => cc[k]).map(k => chip(k, cc[k])).join('');
+        .filter(k => cc[k]).map(k => chip(k, cc[k])).join('') +
+        (wc ? `<span class="tr-chip" style="background:#ec489922;color:#ec4899">wrong class ${wc}</span>` : '');
       return `<div class="tr-vrow" id="tr_vrow_${i}" onclick="trPickByPath('${im.rel_path.replace(/'/g, "\\'")}')">
         <img class="tr-vthumb" src="${im.thumb}" loading="lazy">
         <div class="flex-1 min-w-0">
@@ -398,6 +402,7 @@
           title="Write the model's predicted boxes as this image's new label">Accept</button>
       </div>`;
     }).join('') || '<p class="text-gray-500 text-xs">No images validated.</p>';
+    trRedraw();
 
     const rt = $('tr_val_retrain');
     if (rt) rt.classList.toggle('hidden', !below);
@@ -418,6 +423,49 @@
   }
   function fmt(x) { return x == null ? '—' : Number(x).toFixed(2); }
 
+  // ── GT vs prediction overlay ────────────────────────────────────────────────
+  // Draws the model's boxes from the last validation run on top of the editor's
+  // own (blue, = your GT) boxes for the open image. Prediction boxes are dashed
+  // in their verdict colour; a missed GT box gets a thick red outline.
+  function trRedraw() {
+    if (typeof drawCanvas === 'function') drawCanvas();
+    if (typeof popoutOpen !== 'undefined' && popoutOpen && typeof drawPopout === 'function') drawPopout();
+  }
+  function drawValOverlay(c, dw, dh, scale) {
+    const t = $('tr_val_show');
+    const im = vres[window.currentFile];
+    if (!im || (t && !t.checked)) return;
+    const s = scale || 1;
+    c.save();
+    c.font = `${12 / s}px sans-serif`;
+    const rect = (b, col, dash, lw, label) => {
+      const x = (b.cx - b.w / 2) * dw, y = (b.cy - b.h / 2) * dh;
+      c.strokeStyle = col; c.lineWidth = lw / s; c.setLineDash(dash.map(v => v / s));
+      c.strokeRect(x, y, b.w * dw, b.h * dh); c.setLineDash([]);
+      if (!label) return;
+      const lh = 14 / s, tw = c.measureText(label).width + 6 / s;
+      const ly = y + b.h * dh;                       // label under the box: the editor labels the top
+      c.fillStyle = col; c.fillRect(x, ly, tw, lh);
+      c.fillStyle = '#000'; c.fillText(label, x + 3 / s, ly + lh - 3 / s);
+    };
+    im.boxes.forEach(b => {
+      if (b.verdict === 'dropped') { rect(b.gt, VERDICT_COLOR.dropped, [], 4, `MISSED ${b.class_name}`); return; }
+      if (!b.pred) return;
+      const conf = b.pred.conf != null ? ` ${Number(b.pred.conf).toFixed(2)}` : '';
+      let col = VERDICT_COLOR[b.verdict] || '#fff', label;
+      if (b.verdict === 'added' && b.confused_with) {
+        col = '#ec4899'; label = `${b.class_name}${conf} ≠ ${b.confused_with}`;
+      } else if (b.verdict === 'added') {
+        label = `+ ${b.class_name}${conf}`;
+      } else {
+        label = `${b.class_name}${conf} IoU ${fmt(b.iou)}`;
+      }
+      rect(b.pred, col, [6, 4], 2, label);
+    });
+    c.restore();
+  }
+  if (window.registerCanvasOverlay) registerCanvasOverlay(drawValOverlay);
+
   // Clicking a validation row opens that image in the editor for hand-correction.
   function trPickByPath(rel) {
     const i = items.findIndex(x => x.rel_path === rel);
@@ -436,7 +484,7 @@
     if (!im) return;
     const regions = [];
     im.boxes.forEach(b => {
-      if (b.pred) regions.push({ ...b.pred, confirmed: true });
+      if (b.pred) { const { conf, ...p } = b.pred; regions.push({ ...p, confirmed: true }); }
       else if (b.verdict === 'dropped' && b.gt) regions.push({ ...b.gt, confirmed: true });
     });
     const d = await jpost('/api/trainer/apply_prediction',

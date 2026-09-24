@@ -88,13 +88,26 @@ def diff_image(gt, pred, iou_ok=0.7, iou_min=0.3, area_tol=0.15):
             boxes.append({"verdict": "dropped", "class_name": gname, "iou": 0.0,
                           "gt": g, "pred": None})
 
-    # Any prediction not matched to a GT box is an addition.
+    # Any prediction not matched to a GT box is an addition. If it sits on a GT
+    # box of a DIFFERENT class it's a misclassification (the model saw the logo
+    # but named it wrong) rather than a detection on background - tag it.
     for j, p in enumerate(pred):
         if j in used_pred:
             continue
         counts["added"] += 1
-        boxes.append({"verdict": "added", "class_name": (p.get("class_name") or "").strip(),
-                      "iou": 0.0, "gt": None, "pred": p})
+        pname = (p.get("class_name") or "").strip()
+        best_g, best_iou = None, 0.0
+        for g in gt:
+            if (g.get("class_name") or "").strip() == pname:
+                continue
+            v = _iou(g, p)
+            if v > best_iou:
+                best_iou, best_g = v, g
+        row = {"verdict": "added", "class_name": pname, "iou": 0.0, "gt": None, "pred": p}
+        if best_g is not None and best_iou >= iou_min:
+            row["confused_with"] = (best_g.get("class_name") or "").strip()
+            row["iou"] = round(best_iou, 3)
+        boxes.append(row)
 
     mean_iou = sum(ious) / len(ious) if ious else (1.0 if not gt and not pred else 0.0)
     return {"boxes": boxes, "counts": counts, "mean_iou": round(mean_iou, 4)}
@@ -132,12 +145,15 @@ def aggregate(per_image, iou_ok=0.7):
     c = {"correct": 0, "tightened": 0, "loosened": 0, "shifted": 0,
          "dropped": 0, "added": 0}
     ious = []
+    wrong_class = 0
     for r in per_image:
         for k in c:
             c[k] += r["counts"].get(k, 0)
         for b in r["boxes"]:
             if b["pred"] is not None and b["gt"] is not None:
                 ious.append(b["iou"])
+            if b.get("confused_with"):
+                wrong_class += 1
 
     tp = c["correct"] + c["tightened"] + c["loosened"] + c["shifted"]  # detected
     fp = c["added"]
@@ -157,6 +173,7 @@ def aggregate(per_image, iou_ok=0.7):
         "f1": round(f1, 4),
         "strict_precision": round(strict_prec, 4),
         "loc_issues": loc_issues,
+        "added_wrong_class": wrong_class,   # subset of 'added' landing on another class's GT
         "n_gt": tp + fn,
         "n_pred": tp + fp,
     }

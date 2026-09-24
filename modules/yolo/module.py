@@ -319,7 +319,8 @@ def _parse_yolo_result(r, H, W, keep_classes, as_obb):
             if keep_classes and name not in keep_classes:
                 continue
             cx, cy, w, h = b.xywhn[0].tolist()
-            out.append({"class_name": name, "cx": cx, "cy": cy, "w": w, "h": h})
+            out.append({"class_name": name, "cx": cx, "cy": cy, "w": w, "h": h,
+                        "conf": float(b.conf[0]) if b.conf is not None else 0.0})
     return out
 
 
