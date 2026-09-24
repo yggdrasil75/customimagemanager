@@ -49,8 +49,11 @@ def model_file(gender="neutral"):
 
 def load(gender="neutral"):
     key = f"smplx:{gender}"
-    model_registry.register(key, (lambda g=gender: smplx.create(_DIR, model_type="smplx", gender=g,
-                                                                  use_pca=False, batch_size=1)),
+    # smplx.create(<dir>) looks for <dir>/smplx/SMPLX_<G>.npz, one level below
+    # where model_file() finds the file, so availability said yes and loading
+    # said "missing". Hand it the file itself.
+    model_registry.register(key, (lambda g=gender: smplx.create(model_file(g) or _DIR, model_type="smplx",
+                                                                  gender=g, use_pca=False, batch_size=1)),
                             cost_mb=200, gpu=False, model_path=model_file(gender) or None)
     return model_registry.acquire(key)
 

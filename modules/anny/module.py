@@ -22,6 +22,14 @@ import numpy as np
 import model_registry
 from optional_deps import optional_import
 
+# anny skins with NVIDIA Warp, which announces "CUDA driver not available" on
+# every non-NVIDIA box at import. Warp's CPU path is all anny needs here.
+_warp, _ = optional_import("warp")
+if _warp is not None:
+    try:
+        _warp.config.quiet = True
+    except Exception:
+        pass
 anny, _HAVE_ANNY = optional_import("anny")
 torch, _ = optional_import("torch")
 

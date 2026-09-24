@@ -140,8 +140,7 @@ def register(host):
         ("insight3d", "insightface 3D", lambda: mesh._load_insight3d() is not None,
          "Morphable-model fit via insightface's face3d; needs its cython mesh extension "
          "built and BFM.mat in models/face3d.",
-         "pip install insightface (its face3d 3DMM) and BFM.mat in models/face3d "
-         f"(fetched from {mesh._BFM_URL} on first use)"),
+         mesh.insight3d_reason),
         ("landmarks3d", "Landmarks (fast)", mesh._have_landmarks3d,
          "Similarity-aligned 3D landmarks only. Always available with a buffalo pack.",
          "needs a loadable insightface buffalo pack"),

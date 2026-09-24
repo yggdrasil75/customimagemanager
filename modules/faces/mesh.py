@@ -123,21 +123,38 @@ def _build_insight3d():
     falls back to deep3d or reports unavailable.
     """
     try:
+        if not _HAVE_FACE3D:
+            _insight3d_state["reason"] = ("insightface is installed but its face3d 3DMM "
+                                          "(insightface.thirdparty.face3d) did not import; "
+                                          "see the 'insightface face3d unavailable' log line")
+            return None
         # Reuse the SAME FaceAnalysis app identity embedding already loads, so we
         # don't stand up a second ~1GB model just for landmarks.
         app = facelib._load_insight()
         if app is None:
+            _insight3d_state["reason"] = ("the insightface landmark pack did not load: "
+                                          + (facelib.face_model_error() or "unknown"))
             return None
-        # The morphable model. insightface ships the fitting utilities under
-        # thirdparty.face3d; the BFM basis file is fetched to models/face3d on
-        # first use (small relative to buffalo_l).
-        bfm_path = os.path.join(MODELS_DIR, "face3d", "BFM.mat")
-        if not os.path.exists(bfm_path):
-            return None                     # basis not provisioned; caller falls back
-        bfm = MorphabelModel(bfm_path)
+        # The morphable model basis: fetched to models/face3d on first use.
+        if not ensure_basis():
+            _insight3d_state["reason"] = f"BFM.mat could not be fetched from {_BFM_URL} into {_BFM_DIR}"
+            return None
+        bfm = MorphabelModel(_BFM_PATH)
+        _insight3d_state["reason"] = ""
         return {"app": app, "bfm": bfm}
-    except Exception:
+    except Exception as e:
+        _insight3d_state["reason"] = f"{type(e).__name__}: {e}"
         return None
+
+
+_insight3d_state = {"reason": ""}
+
+
+def insight3d_reason():
+    """Why insight3d isn't available right now (empty when it is)."""
+    if not _insight3d_state["reason"]:
+        _load_insight3d()
+    return _insight3d_state["reason"]
 
 
 model_registry.register("faces:mesh3dmm", _build_insight3d,
