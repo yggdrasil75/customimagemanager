@@ -323,6 +323,7 @@ def parse_region_list(xmp, desc_from_json):
         mask_under = xmp.get(f'{p}/mwg-rs:Extensions/cim:MaskUnderscan', '') or ''
         mask_over = xmp.get(f'{p}/mwg-rs:Extensions/cim:MaskOverscan', '') or ''
         mask_center = xmp.get(f'{p}/mwg-rs:Extensions/cim:MaskCenterline', '') or ''
+        dbg = xmp.get(f'{p}/mwg-rs:Extensions/cim:Debug', '') or ''
         regions.append({
             "class_name": rclass or rtype or inst_name or 'object',
             "region_name": inst_name,
@@ -335,6 +336,7 @@ def parse_region_list(xmp, desc_from_json):
             "barcode_value": str(bc_val),
             "barcode_format": str(bc_fmt),
             "barcode_binary": str(bc_bin).strip().lower() in ('true', '1', 'yes'),
+            "debug": str(dbg).strip().lower() in ('true', '1', 'yes'),
             "mask_svg": {
                 "underscan": str(mask_under),
                 "overscan": str(mask_over),
@@ -375,6 +377,9 @@ def build_region_list_xml(regions, esc, desc_to_json, see_also_link, new_uuid):
         # Extensions is an open struct; we stash the app-specific confirmed flag
         # here (cim:Confirmed) now that Type carries the real region type.
         ext_parts = [f'<cim:Confirmed>{"true" if confirmed else "false"}</cim:Confirmed>']
+        # Model output stored by trainer validation: never ground truth.
+        if b.get("debug"):
+            ext_parts.append('<cim:Debug>true</cim:Debug>')
         bc_val = b.get("barcode_value")
         if bc_val:
             ext_parts.append(f'<cim:BarCodeValue>{esc(str(bc_val))}</cim:BarCodeValue>')

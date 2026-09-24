@@ -10,6 +10,10 @@ class by highest IoU, then label each box:
     shifted    matched, IoU in [iou_min, iou_ok), similar area (moved, not resized)
     dropped    a GT box with no prediction (model missed it)
     added      a prediction with no GT box (model invented it)
+    dup_gt     a GT box that duplicates an earlier GT box of the same class
+               (double-tagged). Not scored: the model isn't blamed for it.
+    dup_pred   an unmatched prediction sitting on another prediction of the
+               same class (the model boxed one object twice). Scored as FP.
 
 Accuracy is reported two ways so callers can pick a bound:
     mean_iou   average IoU over matched pairs (0..1)
@@ -40,19 +44,54 @@ def _area(b):
     return max(1e-9, b["w"] * b["h"])
 
 
+COUNT_KEYS = ("correct", "tightened", "loosened", "shifted", "dropped", "added",
+              "dup_gt", "dup_pred")
+
+# Two same-class boxes are "the same object" when they overlap this much, or when
+# the smaller one sits mostly inside the larger (a slightly bigger re-draw).
+DUP_IOU = 0.5
+DUP_CONTAIN = 0.85
+
+
+def _is_dup(a, b):
+    """Same-class boxes covering the same object: IoU >= DUP_IOU, or the smaller
+    box is >= DUP_CONTAIN inside the larger."""
+    if (a.get("class_name") or "").strip() != (b.get("class_name") or "").strip():
+        return False
+    v = _iou(a, b)
+    if v >= DUP_IOU:
+        return True
+    if v <= 0:
+        return False
+    inter = v * (_area(a) + _area(b)) / (1 + v)       # invert IoU -> intersection
+    return inter / min(_area(a), _area(b)) >= DUP_CONTAIN
+
+
+def split_dups(boxes):
+    """(kept, dups): the first box of each same-object cluster is kept, later
+    ones are dups. First = earliest drawn, which is usually the careful one."""
+    kept, dups = [], []
+    for b in boxes or []:
+        (dups if any(_is_dup(k, b) for k in kept) else kept).append(b)
+    return kept, dups
+
+
 def diff_image(gt, pred, iou_ok=0.7, iou_min=0.3, area_tol=0.15):
     """Compare one image's ground-truth vs predicted boxes.
 
     Returns {boxes:[...], counts:{...}, matched:[(iou)], mean_iou}. Each box entry
     carries enough to draw it and to explain the verdict.
     """
-    gt = list(gt or [])
+    gt, gt_dups = split_dups(gt)
     pred = list(pred or [])
     used_pred = set()
     boxes = []
-    counts = {"correct": 0, "tightened": 0, "loosened": 0, "shifted": 0,
-              "dropped": 0, "added": 0}
+    counts = dict.fromkeys(COUNT_KEYS, 0)
     ious = []
+    for g in gt_dups:
+        counts["dup_gt"] += 1
+        boxes.append({"verdict": "dup_gt", "class_name": (g.get("class_name") or "").strip(),
+                      "iou": 0.0, "gt": g, "pred": None})
 
     # Greedy: for each GT box, take the best-IoU unused prediction of same class.
     for gi, g in enumerate(gt):
@@ -91,11 +130,18 @@ def diff_image(gt, pred, iou_ok=0.7, iou_min=0.3, area_tol=0.15):
     # Any prediction not matched to a GT box is an addition. If it sits on a GT
     # box of a DIFFERENT class it's a misclassification (the model saw the logo
     # but named it wrong) rather than a detection on background - tag it.
+    matched = [pred[j] for j in used_pred]
     for j, p in enumerate(pred):
         if j in used_pred:
             continue
-        counts["added"] += 1
         pname = (p.get("class_name") or "").strip()
+        if any(_is_dup(m, p) for m in matched):
+            counts["dup_pred"] += 1
+            boxes.append({"verdict": "dup_pred", "class_name": pname, "iou": 0.0,
+                          "gt": None, "pred": p})
+            continue
+        matched.append(p)     # a later same-object pred is a dup of THIS one
+        counts["added"] += 1
         best_g, best_iou = None, 0.0
         for g in gt:
             if (g.get("class_name") or "").strip() == pname:
@@ -122,8 +168,7 @@ def propose_image(pred):
     aggregate().
     """
     pred = list(pred or [])
-    counts = {"correct": 0, "tightened": 0, "loosened": 0, "shifted": 0,
-              "dropped": 0, "added": 0}
+    counts = dict.fromkeys(COUNT_KEYS, 0)
     boxes = []
     for p in pred:
         # 'added' verdict + pred set is exactly what trAccept() writes as the new
@@ -142,8 +187,7 @@ def aggregate(per_image, iou_ok=0.7):
     localisation issue but still a detection (so it's a TP for F1, tracked
     separately as 'loc_issues'); FP = added; FN = dropped.
     """
-    c = {"correct": 0, "tightened": 0, "loosened": 0, "shifted": 0,
-         "dropped": 0, "added": 0}
+    c = dict.fromkeys(COUNT_KEYS, 0)
     ious = []
     wrong_class = 0
     for r in per_image:
@@ -156,7 +200,7 @@ def aggregate(per_image, iou_ok=0.7):
                 wrong_class += 1
 
     tp = c["correct"] + c["tightened"] + c["loosened"] + c["shifted"]  # detected
-    fp = c["added"]
+    fp = c["added"] + c["dup_pred"]
     fn = c["dropped"]
     strict_tp = c["correct"]  # detected AND well-localised
     prec = tp / (tp + fp) if (tp + fp) else 0.0

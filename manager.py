@@ -2747,7 +2747,7 @@ def _sync_yolo(filepath: str, regions: list) -> None:
         return (isinstance(name, str) and name != "" and
                 all(k in r for k in ('cx', 'cy', 'w', 'h')))
     confirmed = [r for r in regions
-                 if r.get('confirmed', True) and _usable(r)]
+                 if r.get('confirmed', True) and not r.get('debug') and _usable(r)]
     for r in confirmed:
         if r['class_name'] not in state["classes"]:
             state["classes"].append(r['class_name'])

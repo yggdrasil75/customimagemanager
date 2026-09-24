@@ -39,6 +39,7 @@
                : (sets.some(s => s.name === currentSet) ? currentSet : sets[0].name);
     sel.value = currentSet;
     await loadMembers();
+    trLoadRuns();
   }
 
   let gallerySafe = false;
@@ -98,7 +99,7 @@
     await loadSets(currentSet);
   }
 
-  function trOnSetChange() { currentSet = $('tr_set_select').value || null; trPage = 0; curIdx = -1; loadMembers(); }
+  function trOnSetChange() { currentSet = $('tr_set_select').value || null; trPage = 0; curIdx = -1; loadMembers(); trLoadRuns(); }
 
   function renderCounts() {
     $('tr_set_count').innerText = items.length;
@@ -301,7 +302,9 @@
       classes,
     });
     if (!d.success) { trStatus('Train failed: ' + (d.error || '?')); return; }
-    trStatus(`Training started (${d.train} train / ${d.val} val)`);
+    trStatus(`Training started: ${d.run || ''} (${d.train} train / ${d.val} val` +
+      (d.dup_skipped ? `, ${d.dup_skipped} duplicate box(es) skipped` : '') + ')');
+    trLoadRuns(d.run);
     startLogPoll();
   }
 
@@ -345,7 +348,38 @@
   const VERDICT_COLOR = {
     correct: '#22c55e', tightened: '#f59e0b', loosened: '#f59e0b',
     shifted: '#f59e0b', dropped: '#ef4444', added: '#a855f7',
+    dup_gt: '#38bdf8', dup_pred: '#e879f9',
   };
+  const VERDICT_LABEL = { dup_gt: 'your dup', dup_pred: 'model dup' };
+
+  // ── runs (progression) ──────────────────────────────────────────────────────
+  // Each Train makes set_<set>_train_<n>; nothing is overwritten. The dropdown
+  // picks which run Validate uses; the table compares their last scores.
+  async function trLoadRuns(prefer) {
+    const sel = $('tr_val_run'), tbl = $('tr_runs');
+    if (!sel || !currentSet) { if (sel) sel.innerHTML = ''; if (tbl) tbl.innerHTML = ''; return; }
+    let d;
+    try { d = await jget('/api/trainer/runs?set=' + enc(currentSet)); } catch (e) { return; }
+    const runs = (d && d.runs) || [];
+    const prev = prefer || sel.value;
+    sel.innerHTML = runs.length
+      ? runs.slice().reverse().map(r => `<option value="${r.run}">${r.run}${r.exists ? '' : ' (training…)'}</option>`).join('')
+      : '<option value="">— no runs yet —</option>';
+    if (runs.some(r => r.run === prev)) sel.value = prev;
+    if (!tbl) return;
+    if (!runs.length) { tbl.innerHTML = ''; return; }
+    const when = t => t ? new Date(t * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
+    tbl.innerHTML = `<table class="w-full text-[11px]"><thead class="text-gray-500"><tr>
+        <th class="text-left">Run</th><th>Trained</th><th>Imgs</th><th>F1</th><th>P</th><th>R</th><th>IoU</th><th title="added / wrong class / model dup / your dup">+ / ≠ / dup</th></tr></thead><tbody>` +
+      runs.slice().reverse().map(r => {
+        const v = (r.validation || {}).summary || {}, c = v.counts || {}, info = r.info || {};
+        return `<tr class="text-center ${r.run === sel.value ? 'text-amber-300' : 'text-gray-300'}">
+          <td class="text-left truncate" title="${r.run}">${r.n ? '#' + r.n : 'legacy'}</td>
+          <td>${when(info.created)}</td><td>${info.train ?? '—'}</td>
+          <td>${fmt(v.f1)}</td><td>${fmt(v.precision)}</td><td>${fmt(v.recall)}</td><td>${fmt(v.mean_iou)}</td>
+          <td>${v.counts ? `${c.added || 0} / ${v.added_wrong_class || 0} / ${c.dup_pred || 0} / ${c.dup_gt || 0}` : '—'}</td></tr>`;
+      }).join('') + '</tbody></table>';
+  }
 
   async function trValidate() {
     if (!currentSet) { alert('Select a set first.'); return; }
@@ -356,6 +390,8 @@
       iou_ok: num('tr_val_iouok'),
       conf: num('tr_val_conf'),
       classes: selectedClasses(),
+      run: $('tr_val_run') ? $('tr_val_run').value : '',
+      store_debug: !!($('tr_val_debug') && $('tr_val_debug').checked),
     };
     $('tr_val_summary').innerHTML = '<span class="text-gray-400">Running the model over the set…</span>';
     $('tr_val_list').innerHTML = '';
@@ -374,11 +410,13 @@
         `<div class="text-gray-400 mt-0.5">` + chip('added', c.added) + `</div>`;
     } else {
     $('tr_val_summary').innerHTML =
+      `<div class="text-gray-500">${d.run || ''}</div>` +
       `<div>Accuracy: <b class="${below ? 'text-red-400' : 'text-green-400'}">F1 ${fmt(s.f1)}</b>` +
       ` · mean IoU ${fmt(s.mean_iou)} · P ${fmt(s.precision)} / R ${fmt(s.recall)}</div>` +
       `<div class="text-gray-400 mt-0.5">` +
       chip('correct', c.correct) + chip('tightened', c.tightened) + chip('loosened', c.loosened) +
       chip('shifted', c.shifted) + chip('dropped', c.dropped) + chip('added', c.added) +
+      chip('dup_pred', c.dup_pred) + chip('dup_gt', c.dup_gt) +
       (s.added_wrong_class ? `<span class="tr-chip" style="background:#ec489922;color:#ec4899">wrong class ${s.added_wrong_class}</span>` : '') +
       `</div>`;
     }
@@ -388,7 +426,7 @@
       vres[im.rel_path] = im;
       const cc = im.counts;
       const wc = (im.boxes || []).filter(b => b.confused_with).length;
-      const tags = ['dropped', 'added', 'tightened', 'loosened', 'shifted']
+      const tags = ['dropped', 'added', 'dup_pred', 'dup_gt', 'tightened', 'loosened', 'shifted']
         .filter(k => cc[k]).map(k => chip(k, cc[k])).join('') +
         (wc ? `<span class="tr-chip" style="background:#ec489922;color:#ec4899">wrong class ${wc}</span>` : '');
       return `<div class="tr-vrow" id="tr_vrow_${i}" onclick="trPickByPath('${im.rel_path.replace(/'/g, "\\'")}')">
@@ -397,12 +435,16 @@
           <div class="truncate text-gray-300">${im.is_new ? '🆕 ' : ''}${im.rel_path}</div>
           <div>IoU ${fmt(im.mean_iou)} ${tags || '<span class=\"text-green-400 tr-chip\">clean</span>'}</div>
         </div>
+        ${im.is_new ? '' : `<button class="text-xs bg-sky-700 hover:bg-sky-600 px-2 py-1 rounded"
+          onclick="event.stopPropagation();trSnap('${im.rel_path.replace(/'/g, "\\'")}')"
+          title="Keep YOUR boxes, but move each to the model's box where they overlap ≥ Snap IoU, and drop your duplicate boxes. Model-only boxes are not added.">Snap</button>`}
         <button class="text-xs bg-emerald-700 hover:bg-emerald-600 px-2 py-1 rounded"
           onclick="event.stopPropagation();trAccept('${im.rel_path.replace(/'/g, "\\'")}')"
           title="Write the model's predicted boxes as this image's new label">Accept</button>
       </div>`;
     }).join('') || '<p class="text-gray-500 text-xs">No images validated.</p>';
     trRedraw();
+    trLoadRuns(d.run);
 
     const rt = $('tr_val_retrain');
     if (rt) rt.classList.toggle('hidden', !below);
@@ -419,7 +461,7 @@
 
   function chip(kind, n) {
     if (!n) return '';
-    return `<span class="tr-chip" style="background:${VERDICT_COLOR[kind]}22;color:${VERDICT_COLOR[kind]}">${kind} ${n}</span> `;
+    return `<span class="tr-chip" style="background:${VERDICT_COLOR[kind]}22;color:${VERDICT_COLOR[kind]}">${VERDICT_LABEL[kind] || kind} ${n}</span> `;
   }
   function fmt(x) { return x == null ? '—' : Number(x).toFixed(2); }
 
@@ -450,10 +492,13 @@
     };
     im.boxes.forEach(b => {
       if (b.verdict === 'dropped') { rect(b.gt, VERDICT_COLOR.dropped, [], 4, `MISSED ${b.class_name}`); return; }
+      if (b.verdict === 'dup_gt') { rect(b.gt, VERDICT_COLOR.dup_gt, [3, 3], 3, `YOUR DUP ${b.class_name}`); return; }
       if (!b.pred) return;
       const conf = b.pred.conf != null ? ` ${Number(b.pred.conf).toFixed(2)}` : '';
       let col = VERDICT_COLOR[b.verdict] || '#fff', label;
-      if (b.verdict === 'added' && b.confused_with) {
+      if (b.verdict === 'dup_pred') {
+        label = `DUP ${b.class_name}${conf}`;
+      } else if (b.verdict === 'added' && b.confused_with) {
         col = '#ec4899'; label = `${b.class_name}${conf} ≠ ${b.confused_with}`;
       } else if (b.verdict === 'added') {
         label = `+ ${b.class_name}${conf}`;
@@ -494,9 +539,58 @@
     if (it) it.with_data = regions.some(r => (r.class_name || '').trim());
     // Reload so the tile colour (blue/yellow) reflects the written boxes.
     loadMembers();
-    // mark the row done
+    markRowDone(rel, 'Accepted');
+  }
+
+  function markRowDone(rel, text) {
     const row = [...document.querySelectorAll('.tr-vrow')].find(r => r.getAttribute('onclick')?.includes(rel));
-    if (row) { row.style.opacity = .5; const btn = row.querySelector('button'); if (btn) { btn.textContent = 'Accepted'; btn.disabled = true; } }
+    if (!row) return;
+    row.style.opacity = .5;
+    row.querySelectorAll('button').forEach(b => { b.disabled = true; });
+    const last = row.querySelector('button:last-of-type'); if (last) last.textContent = text;
+  }
+
+  // Snap = keep the user's boxes (class, uuid, tags) but take the model's
+  // geometry where they agree (IoU >= snap), and drop double-tagged duplicates.
+  // The model's box is the average of every label it learned from, so snapping
+  // pulls lazy one-off boxes toward the consensus. Model-only boxes are ignored.
+  function snappedRegions(im, thr) {
+    const out = [];
+    let changed = false;
+    im.boxes.forEach(b => {
+      if (!b.gt) return;                                   // added / model dup
+      if (b.verdict === 'dup_gt') { changed = true; return; }
+      const { conf, debug, ...g } = b.gt;
+      if (b.pred && b.iou >= thr && b.iou < 1) {
+        out.push({ ...g, cx: b.pred.cx, cy: b.pred.cy, w: b.pred.w, h: b.pred.h, confirmed: true });
+        changed = true;
+      } else out.push(g);
+    });
+    return changed ? out : null;
+  }
+  const snapThr = () => { const v = num('tr_val_snap'); return v == null ? 0.5 : v; };
+
+  async function trSnap(rel, quiet) {
+    const im = vres[rel];
+    if (!im || im.is_new) return false;
+    const regions = snappedRegions(im, snapThr());
+    if (!regions) { if (!quiet) markRowDone(rel, 'No change'); return false; }
+    const d = await jpost('/api/trainer/apply_prediction',
+      { filename: rel, regions, classes: selectedClasses() });
+    if (!d.success) { if (!quiet) alert('Snap failed: ' + (d.error || '?')); return false; }
+    markRowDone(rel, 'Snapped');
+    if (!quiet) loadMembers();
+    return true;
+  }
+
+  async function trSnapAll() {
+    const rels = Object.keys(vres).filter(r => !vres[r].is_new && snappedRegions(vres[r], snapThr()));
+    if (!rels.length) { alert('Nothing to snap at this IoU.'); return; }
+    if (!confirm(`Snap boxes on ${rels.length} image(s) to the model (IoU ≥ ${snapThr()}) and remove your duplicate boxes?`)) return;
+    let n = 0;
+    for (const r of rels) { if (await trSnap(r, true)) n++; trStatus(`Snapped ${n} / ${rels.length}…`); }
+    trStatus(`Snapped ${n} image(s). Retrain to make a new run, then validate it to compare.`);
+    loadMembers();
   }
 
   // Populate the Device dropdown from the devices torch actually reports, so we
@@ -742,7 +836,8 @@
   // expose the handlers the pane markup calls
   Object.assign(window, {
     trInit, trOnSetChange, trBuildSet, trClearSet, trDeleteSet,
-    trOpen, trPick, trPickByPath, trStartTraining, trChangePage,
+    trOpen, trPick, trPickByPath, trStartTraining, trChangePage, trRedraw,
+    trSnap, trSnapAll, trLoadRuns,
     trValidate, trAccept, onBoxesSaved,
     trSetGallerySafe, trClassChanged,
     trPresetSelect, trPresetReload, trPresetOverwrite, trPresetNew, trPresetDelete,
