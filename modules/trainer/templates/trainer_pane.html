@@ -1,11 +1,20 @@
 <!-- Tab: Trainer. Builds workable, persistent numbered subsets ("Set 1", …) so
      you can curate a few hundred images instead of ten thousand, review each in
      the SAME editor pane the gallery uses (click a tile → selectFile → real
-     canvas box drawing, region_modal, autosave — no duplicate box UI here), and
+     canvas box drawing, region_modal, autosave - no duplicate box UI here), and
      train a YOLO box model on just that subset. This pane only owns what's new:
      set building, the media filter, and the train controls. -->
 <div id="trainer_pane" class="hidden flex-1 flex flex-col overflow-hidden">
 
+  <!-- Sub-tabs: Box (built in, below) + whatever other modules register via
+       registerTrainerSubtab (e.g. dedup_train adds "Dedup"). Hidden until a
+       second sub-tab registers, so a lone Box tab isn't shown. -->
+  <div id="tr_subtabs" class="hidden flex border-b border-gray-700 bg-gray-800 flex-shrink-0 text-xs">
+    <button data-trsub="box" onclick="trSubtab('box')" class="tr-subtab"
+      title="Build image sets, draw boxes, and train a YOLO / Mayaku box model.">Box</button>
+  </div>
+
+<div id="tr_sub_box" class="flex-1 flex flex-col overflow-hidden">
   <div class="p-3 border-b border-gray-700 bg-gray-800 flex-shrink-0 space-y-2">
     <!-- Set picker -->
     <div data-feature="ai.trainer">
@@ -20,13 +29,13 @@
         <span id="tr_withdata" class="text-blue-400">0</span> with data ·
         <span id="tr_checked" class="text-green-400">0</span> checked<span id="tr_acc"></span></p>
       <label class="flex items-center gap-2 text-xs text-gray-300 mt-1" data-feature="ai.trainer.keep"
-             title="Gallery-safe: this set only adds boxes, so nothing the gallery relies on is lost. Unsafe: boxes may be removed/replaced — edits stay in the set's isolated copy and are not mirrored back.">
+             title="Gallery-safe: this set only adds boxes, so nothing the gallery relies on is lost. Unsafe: boxes may be removed/replaced - edits stay in the set's isolated copy and are not mirrored back.">
         <input id="tr_gallery_safe" type="checkbox" class="accent-emerald-500" onchange="trSetGallerySafe()">
         <span id="tr_gsafe_label">Gallery-unsafe (isolated copy)</span>
       </label>
     </div>
 
-    <!-- Build a new set — collapses to a one-line summary once a set is active so
+    <!-- Build a new set - collapses to a one-line summary once a set is active so
          a short monitor isn't stuck showing a single grid row. Reopens on click. -->
     <details id="tr_build" class="border-t border-gray-700 pt-2" data-feature="ai.trainer.select">
       <summary class="text-xs font-bold text-gray-300 cursor-pointer select-none">Build a new set</summary>
@@ -88,4 +97,5 @@
     <button onclick="trChangePage(1)" id="tr_next"
       class="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-sm disabled:opacity-40">Next ›</button>
   </div>
+</div><!-- /tr_sub_box -->
 </div>

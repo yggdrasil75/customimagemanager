@@ -37,20 +37,31 @@ def register(host):
         return
 
     models_dir = os.path.abspath(os.path.join(host.media_dir, "..", "models"))
-    # Siamese dup-CNN channel multiplier (0.25..2.0); this module's own key.
-    host.add_config_key("dup_cnn_width", default=1.0,
-                        validate=lambda v: max(0.25, min(2.0, float(v))))
-    host.add_settings_field(key="dup_cnn_width", label="Dup-CNN width multiplier",
-                            kind="number", pane="general",
-                            help="0.25..2.0 - channel multiplier for the duplicate-detection CNN.")
-    width = host.config.get("dup_cnn_width", 1.0)
+    # Size table (editable) + which named size shapes a fresh model when no
+    # checkpoint exists. A checkpoint carries its own width/depth and loads regardless.
+    host.add_config_key("dup_cnn_sizes", default=_cnn_mod.sizes_text(), validate=lambda v: str(v or ""))
+    host.add_settings_field(key="dup_cnn_sizes", label="Dup-CNN size table",
+                            kind="textarea", pane="general",
+                            help="One size per line: name width depth. width scales the conv channels "
+                                 "[16,32,64,128]; depth is conv blocks per stage. Edit freely; Trainer > "
+                                 "Dedup trains and benchmarks these.")
+    sizes = lambda: _cnn_mod.parse_sizes(host.config.get("dup_cnn_sizes"))
+    host.add_config_key("dup_cnn_size", default="medium", validate=lambda v: str(v).lower())
+    host.add_settings_field(key="dup_cnn_size", label="Dup-CNN size",
+                            kind="select", pane="general",
+                            options=lambda: [{"value": k, "label": f"{k} ({_cnn_mod.count_params(v['width'], v['depth']):,} params)"}
+                                             for k, v in sizes().items()],
+                            help="Size of the duplicate-detection CNN when no trained checkpoint exists "
+                                 "(train one under Trainer > Dedup).")
+    spec = _cnn_mod.size_spec(host.config.get("dup_cnn_size", "medium"), sizes())
+    width = spec["width"]
     img_path = os.path.join(models_dir, "dup_cnn.pt")
     vid_path = os.path.join(models_dir, "dup_cnn_video.pt")
 
-    # No checkpoint of the user's yet → the shipped one (built with the
+    # No checkpoint of the user's yet -> the shipped one (built with the
     # dedup_train module from large public datasets), if present.
     shipped = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pretrained", "dup_cnn.pt")
-    img_cnn = _cnn_mod.DupCNN.load(img_path if os.path.exists(img_path) else shipped, width)
+    img_cnn = _cnn_mod.DupCNN.load(img_path if os.path.exists(img_path) else shipped, width, spec["depth"])
     vid_cnn = _vid_mod.DupVideoCNN.load(vid_path, width)
 
     def _available():
@@ -84,20 +95,37 @@ def register(host):
     def _retrain():
         ok = False
         try:
-            rows = host.db().execute("SELECT feat,label FROM dup_samples").fetchall()
-            samples = [(r[0], r[1]) for r in rows]
-            if img_cnn and img_cnn.available and img_cnn.fit(samples):
+            db = host.db()
+            # The CNNs train on the encoded pixel blobs, not the heuristic's
+            # 9-float feature rows (dup_samples).
+            img_rows = db.execute("SELECT blob,label FROM dup_cnn_samples").fetchall()
+            vid_rows = db.execute("SELECT blob,label FROM dup_cnn_video_samples").fetchall()
+            if img_cnn and img_cnn.available and img_cnn.fit([(r[0], r[1]) for r in img_rows]):
                 img_cnn.save(img_path); ok = True
-            if vid_cnn and vid_cnn.available and vid_cnn.fit(samples):
+            if vid_cnn and vid_cnn.available and vid_cnn.fit([(r[0], r[1]) for r in vid_rows]):
                 vid_cnn.save(vid_path); ok = True
         except Exception as e:
             host.logger.error(f"dedup_cnn retrain: {e}")
         return ok
 
+    def _reload():
+        """Re-read models/dup_cnn.pt into the live scorer (after dedup_train installs one)."""
+        if not os.path.exists(img_path):
+            return False
+        fresh = _cnn_mod.DupCNN.load(img_path, width, spec["depth"])
+        if not fresh.trained:
+            return False
+        img_cnn.net, img_cnn.trained = fresh.net, True
+        img_cnn.width_mult, img_cnn.depth, img_cnn.size = fresh.width_mult, fresh.depth, fresh.size
+        return True
+
     host.provide_service("dedup_cnn", {
-        "retrain": _retrain, "img": img_cnn, "video": vid_cnn,
+        "retrain": _retrain, "reload": _reload, "img": img_cnn, "video": vid_cnn,
         "status": lambda: {"available": bool(img_cnn and img_cnn.available),
-                           "trained": bool(img_cnn and img_cnn.trained)},
+                           "trained": bool(img_cnn and img_cnn.trained),
+                           "size": getattr(img_cnn, "size", "") or "",
+                           "params": getattr(img_cnn, "params", 0)},
+        "sizes": sizes,
         "clip_t": _vid_mod.CLIP_T,
         "encode_pair": _cnn_mod.encode_pair,
         "encode_clip_pair": _vid_mod.encode_pair,

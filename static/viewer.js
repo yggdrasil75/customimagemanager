@@ -101,8 +101,9 @@ function makeViewer(prefix, opts) {
         const x = (b.cx - b.w / 2) * dw, y = (b.cy - b.h / 2) * dh, w = b.w * dw, h = b.h * dh;
         let col, conf = (b.confirmed !== false), active = (idx === activeIdx());
         const pinned = isMain && _isHighlightBox(b);
+        const dbg = !!b.debug;   // model output stored by trainer validation
         if (isMain) {
-          col = pinned ? '#10B981' : (conf ? '#3B82F6' : '#F59E0B');
+          col = dbg ? '#9CA3AF' : pinned ? '#10B981' : (conf ? '#3B82F6' : '#F59E0B');
         } else {
           // review: colour by decision
           const dec = self.decisions[idx];
@@ -129,8 +130,9 @@ function makeViewer(prefix, opts) {
         }
         ctx.setLineDash(conf || !isMain ? (isMain ? [] : []) : [5, 4]);
         if (isMain && !conf) ctx.setLineDash([5, 4]);
+        if (dbg) ctx.setLineDash([2, 3]);
         ctx.strokeRect(x, y, w, h); ctx.setLineDash([]);
-        const num = isMain ? (String(idx + 1) + (conf ? '' : '?'))
+        const num = isMain ? (String(idx + 1) + (dbg ? 'D' : conf ? '' : '?'))
                            : `${idx + 1} ${b.class_name || ''}`.trim();
         const nbw = ctx.measureText(num).width + 6;
         ctx.fillStyle = col; ctx.fillRect(x, Math.max(0, y - (isMain ? 0 : 15)), nbw, 14);

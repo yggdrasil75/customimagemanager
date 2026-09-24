@@ -1,26 +1,32 @@
 """
-Build shippable pretrained duplicate detectors from dataset dumps on disk.
+Train the duplicate-detector CNN size series from this library (and/or
+dataset folders on disk).
 ======================================================================
-Not the user's library: point it at folders of images (AVA, booru exports,
-anything), it scans them, streams synthetic duplicate / non-duplicate
-pairs (synth.py) and fits both dedup scorers, then writes the files the
-scorer modules ship and fall back to:
+Images come from the app's own library and/or extra folders; the build
+streams synthetic duplicate / non-duplicate pairs (synth.py) out of them,
+mixes in the REAL pairs the user labelled in the Dedup panel (merge =
+duplicate, "not a duplicate" = not; the dup_cnn_samples table) and trains
+one siamese CNN per selected size (nano..xxl, see dup_cnn.SIZES) on the
+SAME stream, so one data pass serves every size. Each size is scored on a
+held-out image slice and on the user's own feedback pairs, then benchmarked
+(params, ms per pair at batch 1 for a CPU / Pi, batched on the GPU, and
+training memory), giving a speed-vs-parameters-vs-accuracy table to pick
+sizes from.
 
-    modules/dedup_heuristic/pretrained/dup_model.json     (logistic)
-    modules/dedup_cnn/pretrained/dup_cnn.pt               (siamese CNN)
+Outputs (install, default): models/dup_cnn_<size>.pt for every size, and
+models/dup_cnn.pt = the "active" size, which the running scorer reloads at
+once. "Ship" also writes modules/dedup_cnn/pretrained/dup_cnn_<size>.pt
+(+ dup_cnn.pt = active), ready to commit.
 
 Data path: every image is decoded ONCE into a uint8 cache
-(models/dedup_train/cache_<hash>.npy, [N, S, S, 3], S = cache side,
-squashed to a square exactly like the CNN's own preprocessing) by a
-process pool, so JXL decoding is paid once, in parallel, GIL-free. Epochs
-then read the cache — memory-mapped, or held in RAM when it fits — and
-regenerate synthetic pairs (fresh random augmentations = the
-augmentation) per chunk, with the next chunk's pairs prepared on a
-background thread while the GPU trains the current one. The logistic
-model only needs 9 floats per pair and is fitted once from a capped
-sample. A held-out slice of IMAGES (never seen in training) reports
-accuracy per pair kind for both models so a build can be judged before
-it is shipped. Runs on its own thread; stoppable; one build at a time.
+(models/dedup_train/cache_<hash>.npy, [N, S, S, 3]) by a process pool.
+Epochs read the cache (memory-mapped, or in RAM) and regenerate synthetic
+pairs per chunk (fresh random augmentations = the augmentation) with the
+next chunk prepared on a background thread. Runs on its own thread;
+stoppable; one build at a time.
+
+The 9-float logistic heuristic is no longer trained here; dedup_heuristic
+stays as the no-torch fallback with its shipped weights.
 """
 import hashlib
 import io
@@ -33,21 +39,18 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import numpy as np
 
 from . import synth
-from modules.dedup_heuristic import dup_heuristics as dh
 from modules.dedup_cnn import dup_cnn as dc
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".jxl", ".avif"}
-CACHE_SIDE = 256                # cached square side; the scorers work at ≤ 256 anyway
-HEUR_MAX_PAIRS = 400_000        # more than enough for 9 weights
+CACHE_SIDE = 256                # cached square side; the scorers work at <= 256 anyway
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-OUT_HEUR = os.path.abspath(os.path.join(_HERE, "..", "dedup_heuristic", "pretrained", "dup_model.json"))
-OUT_CNN = os.path.abspath(os.path.join(_HERE, "..", "dedup_cnn", "pretrained", "dup_cnn.pt"))
+OUT_DIR = os.path.abspath(os.path.join(_HERE, "..", "dedup_cnn", "pretrained"))
 
 _lock = threading.Lock()
 _stop = threading.Event()
 progress = {"running": False, "phase": "", "images_total": 0, "images_done": 0, "pairs": 0,
-            "epoch": 0, "epochs": 0, "loss": None, "started": 0.0, "last": None, "error": None}
+            "epoch": 0, "epochs": 0, "loss": {}, "started": 0.0, "last": None, "error": None}
 
 
 def _say(host, msg):
@@ -138,7 +141,7 @@ def build_cache(host, paths, side, workers, in_ram=False):
                 arr[j] = img; kept.append(paths[i]); j += 1
             if i % 500 == 0:
                 progress.update(images_done=i)
-                _say(host, f"decoding {i}/{n} into cache ({j} ok)…")
+                _say(host, f"decoding {i}/{n} into cache ({j} ok)...")
     arr.flush(); del arr
     if j < n:                       # drop failed slots: rewrite compact
         src = np.load(tmp, mmap_mode="r")
@@ -149,12 +152,6 @@ def build_cache(host, paths, side, workers, in_ram=False):
         os.replace(tmp, cp)
     open(meta, "w", encoding="utf-8").write("\n".join(kept))
     return np.load(cp, mmap_mode=None if in_ram else "r"), kept
-
-
-def _decode(core, path):
-    """Single-file decode (used only when no cache is wanted)."""
-    img = _decode_worker((path, CACHE_SIDE))
-    return img
 
 
 def _chunks(seq, n):
@@ -175,62 +172,103 @@ def _cnn_arrays(pairs):
     return np.stack(a_l), np.stack(b_l), np.asarray(y_l, np.float32)
 
 
-def _evaluate(core, heur, cnn, hold_imgs, rng, per_image, workers, device):
-    """Held-out accuracy per pair kind for each model (images never trained on)."""
+def _feedback_arrays(fb_cnn):
+    """(blob, label) rows from dup_cnn_samples -> (a, b, y) arrays, or None."""
+    a_l, b_l, y_l = [], [], []
+    for blob, lab in fb_cnn or ():
+        try:
+            d = np.load(io.BytesIO(blob))
+            a_l.append(d["a"]); b_l.append(d["b"]); y_l.append(float(lab))
+        except Exception:
+            continue
+    if not a_l:
+        return None
+    return np.stack(a_l), np.stack(b_l), np.asarray(y_l, np.float32)
+
+
+def _batches(arr, batch):
+    a, b, y = arr
+    return ((a[i:i + batch], b[i:i + batch], y[i:i + batch]) for i in range(0, len(y), int(batch)))
+
+
+def _acc(cnn, arr, device, kinds=None):
+    """Accuracy of one model on prepared (a, b, y) arrays; per kind when given."""
+    a, b, y = arr
+    p = np.concatenate([cnn.predict_batch(a[i:i + 64], b[i:i + 64], device) for i in range(0, len(y), 64)])
+    ok = (p >= 0.5) == (y >= 0.5)
+    if kinds is None:
+        return round(float(ok.mean()), 3)
+    kinds = np.asarray(kinds)
+    rep = {k: round(float(ok[kinds == k].mean()), 3) for k in sorted(set(kinds))}
+    rep["all"] = round(float(ok.mean()), 3)
+    return rep
+
+
+def _evaluate(models, hold_imgs, rng, per_image, device):
+    """Held-out accuracy per pair kind for every size (images never trained on)."""
     imgs = [np.ascontiguousarray(im) for im in hold_imgs]
     if len(imgs) < 4:
         return {}
     pairs = synth.synth_pairs(imgs, rng, per_image=per_image)
-    rep = {"pairs": len(pairs), "heuristic": {}, "cnn": {}}
-    kinds = sorted(set(k for *_, k in pairs))
-    if heur is not None:
-        ok = {k: [] for k in kinds}
-        for a, b, lab, k in pairs:
-            f = dh.extract_features(a, b)
-            if f is not None:
-                ok[k].append((heur.predict(f) >= 0.5) == bool(lab))
-        rep["heuristic"] = {k: round(float(np.mean(v)), 3) for k, v in ok.items() if v}
-        rep["heuristic"]["all"] = round(float(np.mean([x for v in ok.values() for x in v])), 3)
-    if cnn is not None and cnn.available and cnn.trained:
-        ok = {k: [] for k in kinds}
-        for chunk in _chunks(pairs, 64):
-            arr = _cnn_arrays(chunk)
-            if arr is None:
-                continue
-            p = cnn.predict_batch(arr[0], arr[1], device)
-            j = 0
-            for a, b, lab, k in chunk:
-                if dc._to_work_bgr(a) is None or dc._to_work_bgr(b) is None:
-                    continue
-                ok[k].append((p[j] >= 0.5) == bool(lab)); j += 1
-        rep["cnn"] = {k: round(float(np.mean(v)), 3) for k, v in ok.items() if v}
-        rep["cnn"]["all"] = round(float(np.mean([x for v in ok.values() for x in v])), 3)
-    return rep
+    arr = _cnn_arrays(pairs)
+    if arr is None:
+        return {}
+    kinds = [k for a, b, _l, k in pairs if dc._to_work_bgr(a) is not None and dc._to_work_bgr(b) is not None]
+    return {name: _acc(m, arr, device, kinds) for name, m in models.items() if m.trained}
 
 
-def build(host, folders, max_images=200_000, per_image=6, epochs=3, chunk=1024, batch=256,
-          width=1.0, lr=1e-3, workers=4, holdout=0.03, seed=0, targets=("heuristic", "cnn"),
-          out_heur=OUT_HEUR, out_cnn=OUT_CNN, install=False, cache_side=CACHE_SIDE, in_ram=False,
-          amp=True):
-    """Blocking build. Returns the summary (also progress['last'])."""
+def bench(sizes=None, batch=256):
+    """Untrained speed-vs-parameters table for a size table {name: {width, depth}}
+    (no data needed)."""
+    sizes = sizes or dc.SIZES
+    if not dc._HAVE_TORCH:
+        return {n: {"params": dc.count_params(v["width"], v["depth"]), "width": v["width"], "depth": v["depth"]}
+                for n, v in sizes.items()}
+    out = {}
+    for name in sizes:
+        m = dc.DupCNN.sized(name, sizes)
+        row = m.bench("cpu", batch=min(int(batch), 64))
+        if dc.torch.cuda.is_available():
+            g = m.bench("cuda", batch=int(batch))
+            row.update({"gpu_ms_per_pair_batch": g.get("ms_per_pair_batch"),
+                        "gpu_train_mem_mb": g.get("train_mem_mb")})
+        row["width"], row["depth"] = m.width_mult, m.depth
+        out[name] = row
+    return out
+
+
+def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_000,
+          per_image=6, epochs=3, chunk=1024, batch=256, lr=1e-3, workers=4, holdout=0.03,
+          seed=0, install=True, ship=False, cache_side=CACHE_SIDE, in_ram=False, amp=True,
+          on_installed=None):
+    """Blocking build. `paths`: image files to learn from (library + extra
+    folders, already scanned). `feedback`: {"cnn": [(blob, label)]} from the
+    Dedup panel's merge / not-a-duplicate decisions. `sizes`: {name: {width,
+    depth}} (default dc.SIZES), all trained on the same stream. `active`: which size becomes
+    models/dup_cnn.pt (default: the largest trained). Returns the summary
+    (also progress['last'])."""
     if not _lock.acquire(blocking=False):
         return {"ok": False, "error": "a build is already running"}
+    if not dc._HAVE_TORCH:
+        _lock.release()
+        return {"ok": False, "error": "torch is not installed"}
     _stop.clear()
     progress.update(running=True, phase="scanning", images_total=0, images_done=0, pairs=0,
-                    epoch=0, epochs=int(epochs), loss=None, started=time.time(), error=None)
-    summary = {"ok": False, "folders": list(folders), "images": 0, "pairs": 0,
-               "heuristic": None, "cnn": None, "held_out": {}}
-    core = host.core
+                    epoch=0, epochs=int(epochs), loss={}, started=time.time(), error=None)
+    sizes = dict(sizes or dc.SIZES)
+    active = active if active in sizes else list(sizes)[-1]
+    fb_arr = _feedback_arrays((feedback or {}).get("cnn"))
+    summary = {"ok": False, "images": 0, "pairs": 0, "sizes": {z: {} for z in sizes}, "active": active,
+               "feedback_pairs": 0 if fb_arr is None else int(len(fb_arr[2]))}
     try:
-        _say(host, "scanning folders…")
-        paths = scan(folders)
+        paths = list(paths)
         if not paths:
-            raise RuntimeError("no images found under " + ", ".join(map(str, folders)))
+            raise RuntimeError("no images to learn from (empty library and no dataset folders)")
         rnd = random.Random(seed)
         rnd.shuffle(paths)
         paths = paths[:int(max_images)]
         progress.update(images_total=len(paths), phase="decoding")
-        _say(host, f"decoding {len(paths)} images into the cache…")
+        _say(host, f"decoding {len(paths)} images into the cache...")
         cache, paths = build_cache(host, paths, int(cache_side), workers, in_ram=bool(in_ram))
         n_hold = max(8, int(len(paths) * holdout)) if len(paths) >= 40 else 0
         hold_idx, train_idx = list(range(n_hold)), list(range(n_hold, len(paths)))
@@ -238,23 +276,25 @@ def build(host, folders, max_images=200_000, per_image=6, epochs=3, chunk=1024, 
         progress.update(images_total=len(train_idx) * int(epochs), images_done=0, phase="training")
         rng = np.random.default_rng(seed)
 
-        heur = dh.DuplicateClassifier() if "heuristic" in targets else None
-        cnn = dc.DupCNN(width) if ("cnn" in targets and dc._HAVE_TORCH) else None
-        device = "cuda" if (cnn and dc.torch.cuda.is_available()) else "cpu"
+        models = {z: dc.DupCNN.sized(z, sizes) for z in sizes}
+        device = "cuda" if dc.torch.cuda.is_available() else "cpu"
         if device == "cuda":
             dc.torch.backends.cudnn.benchmark = True
-        opt_holder = {}
-        hX, hy = [], []
+        opts = {z: {} for z in sizes}
         done = 0
 
         def make_pairs(idx):
-            """Decode-free: pairs straight from the cache (sorted reads keep a
-            memmap sequential)."""
             imgs = [np.ascontiguousarray(cache[i]) for i in sorted(idx)]
             pairs = synth.synth_pairs(imgs, rng, per_image=int(per_image)) if len(imgs) >= 2 else []
             rng.shuffle(pairs)
-            arr = _cnn_arrays(pairs) if cnn is not None and pairs else None
-            return pairs, arr
+            return len(pairs), (_cnn_arrays(pairs) if pairs else None)
+
+        def train_all(arr):
+            for z, m in models.items():
+                loss = m.fit_batches(_batches(arr, batch), lr=lr, device=device,
+                                     _opt_holder=opts[z], amp=bool(amp))
+                if loss is not None:
+                    progress["loss"][z] = round(loss, 4)
 
         with ThreadPoolExecutor(1) as pre:          # prepares the NEXT chunk while the GPU trains this one
             for ep in range(int(epochs)):
@@ -266,74 +306,63 @@ def build(host, folders, max_images=200_000, per_image=6, epochs=3, chunk=1024, 
                 for ci, chunk_idx in enumerate(chunks):
                     if _stop.is_set():
                         raise RuntimeError("stopped")
-                    pairs, arr = fut.result()
+                    n_pairs, arr = fut.result()
                     fut = pre.submit(make_pairs, chunks[ci + 1]) if ci + 1 < len(chunks) else None
                     done += len(chunk_idx)
-                    progress.update(images_done=done, pairs=progress["pairs"] + len(pairs))
-                    summary["pairs"] += len(pairs)
-                    if heur is not None and ep == 0 and len(hX) < HEUR_MAX_PAIRS:
-                        for a, b, lab, _ in pairs:
-                            f = dh.extract_features(a, b)
-                            if f is not None:
-                                hX.append(np.asarray(f, np.float32)); hy.append(lab)
+                    progress.update(images_done=done, pairs=progress["pairs"] + n_pairs)
+                    summary["pairs"] += n_pairs
                     if arr is not None:
-                        a, b, y = arr
-                        loss = cnn.fit_batches(((a[i:i + batch], b[i:i + batch], y[i:i + batch])
-                                                for i in range(0, len(y), int(batch))),
-                                               lr=lr, device=device, _opt_holder=opt_holder, amp=bool(amp))
-                        progress["loss"] = None if loss is None else round(loss, 4)
+                        train_all(arr)
                     eta = ""
                     if done and progress["images_total"]:
                         rate = done / max(1e-6, time.time() - progress["started"])
                         eta = f", ~{int((progress['images_total'] - done) / max(rate, 1e-6) / 60)} min left"
+                    losses = " ".join(f"{z} {v}" for z, v in progress["loss"].items())
                     _say(host, f"epoch {ep + 1}/{epochs}, {done}/{progress['images_total']} images, "
-                               f"{summary['pairs']} pairs" + (f", loss {progress['loss']}" if progress["loss"] is not None else "") + eta)
-                if heur is not None and ep == 0 and hX:
-                    progress["phase"] = "fitting heuristic"
-                    ok = heur.pretrain(np.asarray(hX, np.float64), np.asarray(hy, np.float64))
-                    heur.source = "shipped"
-                    summary["heuristic"] = {"ok": bool(ok), "samples": len(hX)}
-                    progress["phase"] = "training"
-
-        if cnn is not None:
-            summary["cnn"] = {"ok": bool(cnn.trained), "width": width, "device": device,
-                              "final_loss": progress["loss"]}
+                               f"{summary['pairs']} pairs; loss {losses}{eta}")
+                if fb_arr is not None:
+                    # One pass over the user's real labelled pairs per epoch, after
+                    # the synthetic ones, so the library's own dupes get the last word.
+                    train_all(fb_arr)
 
         progress["phase"] = "evaluating"
-        _say(host, f"evaluating on {len(hold_idx)} held-out images…")
-        if hold_idx:
-            summary["held_out"] = _evaluate(core, heur, cnn, [cache[i] for i in hold_idx], rng,
-                                            int(per_image), int(workers), device)
+        _say(host, f"evaluating {len(sizes)} size(s) on {len(hold_idx)} held-out images...")
+        held = _evaluate(models, [cache[i] for i in hold_idx], rng, int(per_image), device) if hold_idx else {}
+        for z, m in models.items():
+            row = summary["sizes"][z]
+            row.update({"width": m.width_mult, "depth": m.depth, "params": m.params,
+                        "final_loss": progress["loss"].get(z), "held_out": held.get(z, {}),
+                        "feedback": _acc(m, fb_arr, device) if (fb_arr is not None and m.trained) else None})
+            progress["phase"] = f"benchmarking {z}"
+            row["bench_cpu"] = m.bench("cpu", batch=min(int(batch), 64))
+            if device == "cuda":
+                row["bench_gpu"] = m.bench("cuda", batch=int(batch))
 
         progress["phase"] = "writing"
         written = []
-        if heur is not None and (summary["heuristic"] or {}).get("ok"):
-            os.makedirs(os.path.dirname(out_heur), exist_ok=True)
-            if heur.save(out_heur):
-                written.append(out_heur)
-            if install:
-                os.makedirs(host.core.models_dir, exist_ok=True)
-                p = os.path.join(host.core.models_dir, "dup_model.json")
-                heur.source = "pretrained"
-                if heur.save(p):
+        for m in models.values():
+            m.net.to("cpu")
+        for do, base in ((install, host.core.models_dir), (ship, OUT_DIR)):
+            if not do:
+                continue
+            os.makedirs(base, exist_ok=True)
+            for z, m in models.items():
+                if not m.trained:
+                    continue
+                p = os.path.join(base, f"dup_cnn_{z}.pt")
+                if m.save(p):
                     written.append(p)
-        if cnn is not None and cnn.trained:
-            os.makedirs(os.path.dirname(out_cnn), exist_ok=True)
-            cnn.net.to("cpu")
-            if cnn.save(out_cnn):
-                written.append(out_cnn)
-            if install:
-                os.makedirs(host.core.models_dir, exist_ok=True)
-                p = os.path.join(host.core.models_dir, "dup_cnn.pt")
-                if cnn.save(p):
-                    written.append(p)
+                if z == active and m.save(os.path.join(base, "dup_cnn.pt")):
+                    written.append(os.path.join(base, "dup_cnn.pt"))
         summary["written"] = written
         summary["ok"] = bool(written)
+        summary["installed"] = bool(install and written and on_installed and on_installed(active))
         summary["seconds"] = round(time.time() - progress["started"])
-        ho = summary["held_out"]
-        _say(host, f"done in {summary['seconds']} s — {summary['pairs']} pairs from {summary['images']} images; "
-                   f"held-out heuristic {ho.get('heuristic', {}).get('all', '–')}, CNN {ho.get('cnn', {}).get('all', '–')}; "
-                   f"wrote {len(written)} file(s)" + (" (restart to load the installed copies)" if install else ""))
+        accs = " ".join(f"{z} {r['held_out'].get('all', '-')}/{r['feedback'] if r['feedback'] is not None else '-'}"
+                        for z, r in summary["sizes"].items())
+        _say(host, f"done in {summary['seconds']} s: {summary['pairs']} pairs from {summary['images']} images; "
+                   f"held-out/feedback accuracy {accs}; wrote {len(written)} file(s), active {active}"
+                   + (" (live scorer reloaded)" if summary["installed"] else ""))
         return summary
     except Exception as e:
         summary["error"] = str(e)

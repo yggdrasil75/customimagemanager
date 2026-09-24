@@ -72,11 +72,12 @@ function renderRegionsList(){
       onmouseenter="setActiveRegion(${i})" onmouseleave="setActiveRegion(-1)"
       onclick="selectRegion(${i})">
       <span class="w-5 text-right text-gray-500 flex-shrink-0">${i+1}</span>
-      <span class="inline-block w-2 h-2 rounded-full flex-shrink-0" style="background:${conf?'#3B82F6':'#F59E0B'}"></span>
+      <span class="inline-block w-2 h-2 rounded-full flex-shrink-0" style="background:${b.debug?'#9CA3AF':conf?'#3B82F6':'#F59E0B'}"></span>
       <input class="region-edit flex-1 min-w-0 bg-transparent text-white border-b border-transparent focus:border-gray-500 focus:outline-none"
         value="${_esc(b.class_name)}" onclick="event.stopPropagation()" onchange="renameRegion(${i}, this.value)">
       ${rtags?`<span class="text-[9px] text-gray-500 flex-shrink-0" title="${rtags} region tag(s)">${rtags}🏷</span>`:''}
-      ${conf?'<span class="text-[9px] text-blue-400 flex-shrink-0">ok</span>'
+      ${b.debug?`<span class="text-[9px] text-gray-400 flex-shrink-0" title="${_esc(b.region_description||'')}">debug</span>`
+       :conf?'<span class="text-[9px] text-blue-400 flex-shrink-0">ok</span>'
             :`<button class="region-confirm text-amber-400 px-1 flex-shrink-0" title="Confirm" onclick="event.stopPropagation();confirmRegion(${i})">✓</button>`}
       <button class="region-del text-red-400 px-1 flex-shrink-0" title="Delete" onclick="event.stopPropagation();deleteRegion(${i})">✕</button>
     </div>`;

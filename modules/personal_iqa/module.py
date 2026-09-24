@@ -6,9 +6,15 @@ Tokens per image (see net.py):
   tile      3x3 full-resolution tiles through the same encoder (detail survives)
   face      aligned 106-pt facial geometry + head pose, one token per face,
             read from face_regions.shape (written by the face scan)
-  pose17 / pose133   one token per person from the stored skeleton (follows
-            the user's pose setting; 17-pt body or 133-pt whole-body),
-            hip-centred, torso-normalised
+  face_raw  that face's box in the frame (cx, cy, w, h), un-normalised
+  pose17 / pose133 / *_raw / bones   per person, produced by the pose side
+            ("pose.tokens" service: routes to the provider's own conversion
+            for non-COCO skeletons, else the COCO default in pose/skeleton.py:
+            normalised, raw-in-frame, and segment lengths / torso).
+No hand-made judgements: every token is data the models produced, in a
+normalised and an un-normalised form, and the scorer learns what rates.
+An image is trained on when the required models RAN on it (face/pose
+"done"), whether or not they found anything, so non-human photos count.
   iqa       base no-reference IQA score (a different provider) on the full-res image
   tags      the file's tags, hashed
 
@@ -63,19 +69,32 @@ CREATE TABLE IF NOT EXISTS personal_iqa_cache (
 """
 _KEY = "iqa:personal"
 GRID, VAL_PCT, MIN_RATINGS = 3, 15, 50
+# Token types a sample MUST have to be trained on. The point of the personal
+# scorer is "idealised proportions + expression + a clear view", so an image
+# with no pose or no face teaches nothing about that and is skipped rather
+# than turning this into yet another blur detector. personal_iqa_required
+# (comma list of embed, iqa, face, pose, tags) overrides.
+REQUIRED_DEFAULT = "embed,iqa,face,pose"
+
+
+TOKEN_DIMS = {"face": 215, "face_raw": 4, "pose17": 34, "pose17_raw": 51, "pose133": 266,
+              "pose133_raw": 399, "bones": 18, "iqa": 1}   # pose dims mirror pose/skeleton.TOKEN_DIMS
+
+
+def missing_parts(feats, required):
+    """Which required parts were NOT produced. For face/pose this means the model
+    did not run on the image (a landscape with zero faces still counts as done),
+    so non-human photos train too; embed/iqa/tags must simply be present."""
+    proc = feats.get("_processed") or {}
+    have = {"embed": bool(feats.get("embed")), "iqa": bool(feats.get("iqa")),
+            "face": bool(proc.get("face")), "pose": bool(proc.get("pose")),
+            "tags": bool(proc.get("tags")) or any(feats.get("tags") or [])}
+    return [r for r in required if not have.get(r, True)]
 REPLAY_RATIO, EPOCHS, BATCH, LR = 4, 5, 64, 1e-3
 
 
 def _is_val(rel_path):
     return zlib.crc32(rel_path.encode()) % 100 < VAL_PCT
-
-
-def _norm_pose(kps):
-    """[{x,y,v}] -> hip-centred, torso-scaled flat [x,y,...]. Works for 17 and 133 (first 17 = COCO)."""
-    P = np.array([[k["x"], k["y"]] for k in kps], np.float32)
-    hip, sho = (P[11] + P[12]) / 2, (P[5] + P[6]) / 2
-    s = float(np.linalg.norm(sho - hip)) or 1.0
-    return ((P - hip) / s).ravel().tolist()
 
 
 def register(host):
@@ -87,6 +106,30 @@ def register(host):
     host.add_config_key("personal_iqa_base", default="nima")
     host.add_config_key("personal_iqa_encoder", default="")       # "" = the selected embed provider
     host.add_config_key("personal_iqa_grow", default=False)       # tier change: grow (Net2Net) vs rebuild
+    host.add_config_key("personal_iqa_required", default=REQUIRED_DEFAULT, validate=lambda v: str(v or ""))
+    host.add_settings_field(key="personal_iqa_required", label="Required data per training image",
+                            kind="text", pane="module",
+                            help="Comma list of embed, iqa, face, pose, tags. Images missing any of these are "
+                                 "left out of training (personal Retrain and Trainer > IQA alike).")
+    # personal_iqa_cache.extra: faces + pose for images OUTSIDE the library
+    # (iqa_train datasets), which have no face_regions rows or sidecar.
+    host.on_startup(lambda: _migrate())
+
+    def _migrate():
+        try:
+            host.db().execute("ALTER TABLE personal_iqa_cache ADD COLUMN extra TEXT")
+            host.db().commit()
+        except Exception:
+            pass
+
+    def required():
+        return [r.strip() for r in str(host.config.get("personal_iqa_required") or "").split(",") if r.strip()]
+    host.add_config_key("personal_iqa_sizes", default=net.sizes_text() if _HAVE_TORCH else "",
+                        validate=lambda v: str(v or ""))
+    host.add_settings_field(key="personal_iqa_sizes", label="Personal IQA size table", kind="textarea",
+                            pane="module", help="One size per line: name d depth (d = transformer width, "
+                                                "multiple of 8; depth = encoder blocks). Trainer > IQA "
+                                                "pretrains and benchmarks these from dataset folders.")
 
     ckpt_path = os.path.join(model_registry.model_dir("personal_iqa", "iqa"), "scorer.pt")
     state = {"busy": False, "text": "", "last": None, "metrics": None}
@@ -128,7 +171,10 @@ def register(host):
         return embed, tiles, base_q
 
     def _decode(rel_path):
-        return core.to_bgr(core.read_image(host.safe_path(host.media_dir, rel_path)))
+        # "ext:<abs path>" = an image outside the library (iqa_train datasets);
+        # it shares the feature cache (keyed on that string) but never joins ratings.
+        fp = rel_path[4:] if rel_path.startswith("ext:") else host.safe_path(host.media_dir, rel_path)
+        return core.to_bgr(core.read_image(fp))
 
     def _cached(db, rel_path, mtime):
         """Encoder/base outputs for one file; on miss decodes at FULL resolution, computes and stores."""
@@ -145,43 +191,74 @@ def register(host):
 
     # ── live parts (tags / faces / pose from where the app stores them) ──
     def _live(db, rel_path, img=None):
-        out = {"face": [], "pose17": [], "pose133": [], "tags": net.hash_tags([])}
-        fp = host.safe_path(host.media_dir, rel_path) if rel_path else None
+        out = {k: [] for k in TOKEN_DIMS if k != "iqa"}
+        out["tags"] = net.hash_tags([])
+        proc = {"face": False, "pose": False, "tags": False}     # did a model run for this part?
+        ext = bool(rel_path) and rel_path.startswith("ext:")
+        fp = host.safe_path(host.media_dir, rel_path) if rel_path and not ext else None
         pose = None
-        if rel_path:
-            r = db.execute("SELECT tags FROM files WHERE rel_path=?", (rel_path,)).fetchone()
+        if ext:
+            # dataset image: faces/pose live only in our cache, computed once below
+            r = db.execute("SELECT extra FROM personal_iqa_cache WHERE rel_path=?", (rel_path,)).fetchone()
+            if r and r["extra"]:
+                ex = json.loads(r["extra"])
+                out["face"], out["face_raw"], pose = ex.get("face") or [], ex.get("face_raw") or [], ex.get("pose")
+                proc["face"], proc["pose"] = bool(ex.get("face_done")), bool(ex.get("pose_done"))
+        elif rel_path:
+            r = db.execute("SELECT tags, COALESCE(face_done,0) fd, COALESCE(autotag_done,0) td "
+                           "FROM files WHERE rel_path=?", (rel_path,)).fetchone()
             if r and r["tags"]:
                 out["tags"] = net.hash_tags([common.tag_name(t) for t in json.loads(r["tags"])])
-            for r in db.execute("SELECT shape FROM face_regions WHERE rel_path=? AND shape IS NOT NULL "
+            proc["face"], proc["tags"] = bool(r and r["fd"]), bool(r and r["td"])
+            for r in db.execute("SELECT shape, cx, cy, w, h FROM face_regions WHERE rel_path=? AND shape IS NOT NULL "
                                 "AND COALESCE(not_face,0)=0", (rel_path,)):
                 out["face"].append(np.frombuffer(r["shape"], np.float32).tolist())
+                out["face_raw"].append([float(r["cx"] or 0), float(r["cy"] or 0), float(r["w"] or 0), float(r["h"] or 0)])
             try:
                 pose = core.read_metadata(fp).get("pose")
+                proc["pose"] = pose is not None            # a pose dict with no people is still "ran"
             except Exception:
                 pass
-        if img is None and rel_path and (not out["face"] or not pose):
+        need = not proc["face"] or not proc["pose"]
+        if img is None and rel_path and need:
             try:
-                img = _decode(rel_path)          # unscanned file: compute the missing parts on the fly
+                img = _decode(rel_path)          # unscanned file: run the missing models on the fly
             except Exception:
                 pass
-        if img is not None:
+        if img is not None and need:
             small = core.object_grouping.downscale_to_cap(img)
-            if not out["face"] and (fn := _cap("detect.faces")):        # no face scan yet: compute, don't store
+            if not proc["face"] and (fn := _cap("detect.faces")):        # no face scan yet: compute, don't store
                 try:
-                    if boxes := fn(small):
+                    boxes = fn(small) or []
+                    if boxes:
                         _, _, shapes = core.embed_faces(small, boxes, want_shape=True)
-                        out["face"] = [s.tolist() for s in shapes if s is not None]
+                        for b, sh in zip(boxes, shapes):
+                            if sh is not None:
+                                out["face"].append(sh.tolist())
+                                out["face_raw"].append([float(b.get(k, 0.0)) for k in ("cx", "cy", "w", "h")]
+                                                       if isinstance(b, dict) else [float(x) for x in list(b)[:4]])
+                    proc["face"] = True
                 except Exception:
                     pass
-            if not pose and (fn := _cap("pose")):                          # follows the user's pose pick
+            if not proc["pose"] and (fn := _cap("pose")):                  # follows the user's pose pick
                 try:
-                    pose = {"people": fn(small)}
+                    pose = {"people": fn(small) or [], "provider": host.broker.selected_id("pose") or ""}
+                    proc["pose"] = True
                 except Exception:
                     pass
-        for p in (pose or {}).get("people") or []:
-            kps = p.get("keypoints") or []
-            if len(kps) >= 17:
-                out["pose17" if len(kps) == 17 else "pose133"].append(_norm_pose(kps))
+            if ext:
+                db.execute("UPDATE personal_iqa_cache SET extra=? WHERE rel_path=?",
+                           (json.dumps({"face": out["face"], "face_raw": out["face_raw"], "pose": pose,
+                                        "face_done": proc["face"], "pose_done": proc["pose"]}), rel_path))
+        # Normalisation belongs to the pose side: pose.tokens dispatches to the
+        # provider that made the skeleton (or the COCO default), so a new pose
+        # model with an odd topology only has to ship its own tokens function.
+        tok = host.get_service("pose.tokens")
+        for t in (tok(pose) if tok and pose else []):
+            out[t["kind"]].append(t["norm"])
+            out[t["kind"] + "_raw"].append(t["raw"])
+            out["bones"].append(t["bones"])
+        out["_processed"] = proc
         return out
 
     def features(db, rel_path, mtime=None, img=None):
@@ -191,6 +268,7 @@ def register(host):
         s = _live(db, rel_path, img)
         s.update(embed=[embed] if embed else [], tile=tiles, iqa=[[float(base_q)]] if base_q is not None else [])
         s["_base"] = base_q
+        s["_missing"] = missing_parts(s, required())
         return s
 
     # ── checkpoint ───────────────────────────────────────────────────────
@@ -201,14 +279,15 @@ def register(host):
         ck = _ckpt()
         if not ck:
             return None
-        m = net.Scorer(ck["dims"], ck["d"], ck["depth"]); m.load_state_dict(ck["state"])
+        m = net.Scorer(ck["dims"], ck["d"], ck["depth"]); m.load_state_dict(ck["state"], strict=False)
         return m.eval().to(model_registry.device())
 
-    def _save(m, metrics):
+    def _save(m, metrics, path=None):
         torch.save({"dims": m.dims, "d": m.d, "depth": m.depth, "metrics": metrics,
-                    "state": m.cpu().state_dict()}, ckpt_path)
-        model_registry.unload(_KEY)
-        state["metrics"] = metrics
+                    "state": m.cpu().state_dict()}, path or ckpt_path)
+        if not path or path == ckpt_path:
+            model_registry.unload(_KEY)
+            state["metrics"] = metrics
 
     def _metrics():
         if state["metrics"] is None and _HAVE_TORCH:
@@ -243,28 +322,35 @@ def register(host):
             if len(rows) < MIN_RATINGS:
                 state["text"] = f"Personal IQA: need at least {MIN_RATINGS} rated images ({len(rows)} now)."; return
             key = _cache_key()
-            train, val = [], []
+            train, val, skipped = [], [], {}
             for i, r in enumerate(rows):
                 state["text"] = f"[Personal IQA] features {i+1}/{len(rows)}"
                 try:
                     fe = features(db, r["rel_path"], r["mtime"])
                 except Exception as e:
                     host.logger.warning(f"personal_iqa features {r['rel_path']}: {e}"); continue
+                if fe["_missing"]:
+                    for m in fe["_missing"]:
+                        skipped[m] = skipped.get(m, 0) + 1
+                    continue
                 fresh = bool(r["trained"]) and r["cm"] == r["mtime"] and r["key"] == key
                 s = {"rel": r["rel_path"], "feats": fe, "y": r["user_stars"] / 5.0, "seen": fresh}
                 (val if _is_val(r["rel_path"]) else train).append(s)
                 if i % 25 == 0: db.commit()
             db.commit()
             if not train or not val:
-                state["text"] = "Personal IQA: not enough data for a train/val split."; return
+                state["text"] = ("Personal IQA: not enough complete images for a train/val split "
+                                 f"(skipped for missing {skipped})."); return
 
             dev = model_registry.device()
             model = _load_model()
             d, depth = net.tier_for(len(rows))
             dims = {"embed": len(train[0]["feats"]["embed"][0]) if train[0]["feats"]["embed"] else 1}
             dims["tile"] = dims["embed"]
-            dims.update(face=215, pose17=34, pose133=266, iqa=1)
-            rebuild = model is None or (d, depth) != (model.d, model.depth) and not host.config.get("personal_iqa_grow")
+            dims.update(TOKEN_DIMS)
+            # Only rebuild when the tier is BIGGER than the checkpoint and growing is
+            # off; a pretrained (iqa_train) model larger than the tier is kept as is.
+            rebuild = model is None or (d, depth) > (model.d, model.depth) and not host.config.get("personal_iqa_grow")
             if rebuild:
                 model = net.Scorer(dims, d, depth).to(dev)
                 batch, epochs = list(train), EPOCHS * 2
@@ -289,7 +375,7 @@ def register(host):
                 state["text"] = f"[Personal IQA] epoch {ep+1}/{epochs} train mse={tot/len(batch):.4f}"
             metrics = _eval(model, val, dev)
             metrics.update(n_train=len(batch), n_ratings=len(rows), d=model.d, depth=model.depth,
-                           rebuilt=rebuild, trained_at=time.time())
+                           rebuilt=rebuild, trained_at=time.time(), skipped=skipped)
             _save(model, metrics)
             db.execute("UPDATE personal_iqa_cache SET trained=1 WHERE rel_path IN (%s)"
                        % ",".join("?" * len(batch)), [s["rel"] for s in batch])
@@ -304,6 +390,45 @@ def register(host):
             state["text"] = f"Personal IQA: training failed — {e}"
         finally:
             core.db_close(); state["busy"] = False
+
+    # ── service for iqa_train (pretraining from dataset folders) ────────
+    def _fit(train, val, d, depth, epochs=10, batch=BATCH, lr=LR, say=None, stop=None):
+        """Fresh Scorer(d, depth) fitted on samples [{feats, y}], evaluated on val.
+        Returns (model, metrics)."""
+        dev = model_registry.device()
+        dims = {"embed": len(train[0]["feats"]["embed"][0]) if train[0]["feats"]["embed"] else 1}
+        dims["tile"] = dims["embed"]
+        dims.update(TOKEN_DIMS)
+        model = net.Scorer(dims, d, depth).to(dev)
+        opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+        order = list(train)
+        for ep in range(int(epochs)):
+            model.train(); random.shuffle(order); tot = 0.0
+            for i in range(0, len(order), batch):
+                if stop is not None and stop.is_set():
+                    raise RuntimeError("stopped")
+                chunk = order[i:i + batch]
+                f, mk, t = net.batch([s["feats"] for s in chunk], model.dims, dev)
+                y = torch.tensor([s["y"] for s in chunk], device=dev)
+                loss = torch.nn.functional.mse_loss(torch.sigmoid(model(f, mk, t)), y)
+                opt.zero_grad(); loss.backward(); opt.step(); tot += loss.item() * len(chunk)
+            if say:
+                say(ep + 1, tot / max(1, len(order)))
+        metrics = _eval(model, val, dev) if val else {}
+        metrics.update(n_train=len(train), d=d, depth=depth, trained_at=time.time())
+        return model, metrics
+
+    host.provide_service("personal_iqa", {
+        "features": features, "fit": _fit, "save": _save, "ckpt_path": ckpt_path,
+        "ckpt_dir": os.path.dirname(ckpt_path), "metrics": _metrics,
+        "reload": lambda: (model_registry.unload(_KEY), state.update(metrics=None)) and True,
+        "sizes": lambda: net.parse_sizes(host.config.get("personal_iqa_sizes")),
+        "required": required, "token_dims": TOKEN_DIMS,
+        "detectors": lambda: {"embed": bool(_cap("embed", host.config.get("personal_iqa_encoder"))),
+                              "iqa": bool(_cap("iqa", host.config.get("personal_iqa_base") or None)),
+                              "face": bool(_cap("detect.faces")), "pose": bool(_cap("pose"))},
+        "count_params": net.count_params, "Scorer": net.Scorer, "batch": net.batch,
+    })
 
     # ── iqa provider ─────────────────────────────────────────────────────
     model_registry.register(_KEY, _load_model, cost_mb=400, gpu=model_registry.on_gpu())

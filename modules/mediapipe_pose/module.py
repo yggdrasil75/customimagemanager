@@ -113,6 +113,36 @@ def _load(kind, size):
     return model_registry.acquire(key)
 
 
+# ── MediaPipe -> COCO conversion (this provider's business, nobody else's) ──
+# BlazePose-33 index for each COCO-17 point.
+BLAZE_TO_COCO17 = [0, 2, 5, 7, 8, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]
+# COCO-WholeBody feet (l_big_toe, l_small_toe, l_heel, r_big_toe, r_small_toe,
+# r_heel) from foot_index / heel (BlazePose has no separate small toe).
+BLAZE_TO_WB_FEET = [31, 31, 29, 32, 32, 30]
+# 68 iBUG landmarks picked out of the 468-point face mesh
+# (jaw 17, brows 10, nose 9, eyes 12, mouth 20).
+MESH468_TO_68 = [162, 234, 93, 58, 172, 136, 149, 148, 152, 377, 378, 365, 397, 288, 323, 454, 389,
+                 71, 63, 105, 66, 107, 336, 296, 334, 293, 301,
+                 168, 197, 5, 4, 75, 97, 2, 326, 305,
+                 33, 160, 158, 133, 153, 144, 362, 385, 387, 263, 373, 380,
+                 61, 39, 37, 0, 267, 269, 291, 405, 314, 17, 84, 181,
+                 78, 82, 13, 312, 308, 317, 14, 87]
+_HOL_FACE, _HOL_LHAND, _HOL_RHAND = 33, 501, 522
+
+
+def to_coco(keypoints):
+    """33 (BlazePose) -> 17 COCO; 543 (Holistic) -> 133 COCO-WholeBody; other
+    counts (already converted, or empty) pass through. Same {x,y,v} dicts."""
+    n = len(keypoints)
+    if n == 33:
+        return [keypoints[i] for i in BLAZE_TO_COCO17]
+    if n == 543:
+        return ([keypoints[i] for i in BLAZE_TO_COCO17] + [keypoints[i] for i in BLAZE_TO_WB_FEET]
+                + [keypoints[_HOL_FACE + i] for i in MESH468_TO_68]
+                + keypoints[_HOL_LHAND:_HOL_LHAND + 21] + keypoints[_HOL_RHAND:_HOL_RHAND + 21])
+    return keypoints
+
+
 def _people(img_bgr, kind, size, persons):
     img = common.coerce_bgr(img_bgr)
     if img is None:
@@ -138,25 +168,44 @@ def register(host):
             return None
         return lambda img: det(img, conf=0.25)
 
+    # Downsample to the app's COCO topologies (33 -> 17, 543 -> 133) so every
+    # consumer (drawing, t-pose, learners) sees one skeleton family. Off = native
+    # skeletons are stored; learners still get COCO tokens through the
+    # pose.tokens.<id> services below, which convert then normalise.
+    host.add_config_key("mp_pose_coco", default=True, validate=lambda v: bool(v))
+    def _coco(raw, *a, **k):
+        if not host.config.get("mp_pose_coco", True):
+            return raw
+        return [dict(p, keypoints=to_coco(p.get("keypoints") or [])) for p in raw or []]
+    coco_setting = {"key": "mp_pose_coco", "label": "Downsample to COCO 17 / 133", "kind": "toggle"}
+
+    def _tokens(keypoints):
+        from modules.pose import skeleton
+        return skeleton.tokens(to_coco(keypoints))
+    host.provide_service("pose.tokens.mp_blazepose", _tokens)
+    host.provide_service("pose.tokens.mp_holistic", _tokens)
+
     host.provide_model(
         "pose", "mp_blazepose", label="BlazePose", family="MediaPipe",
         sizes=["lite", "full", "heavy"],
-        types=[{"value": "blazepose", "label": "BlazePose · 33 pts"}],
+        types=[{"value": "blazepose", "label": "BlazePose · 33 pts (17 when downsampled)"}],
         note="Google BlazePose landmarker: 33 body points incl. face outline, hands and feet. "
              "Runs on CPU; per-person crops when a person detector is picked.",
         speed="fast",
         loader=lambda: (lambda sz: (lambda img, *a, **k: _people(img, "pose", sz, _persons())))(
             host.model_variant("pose")["size"] or "full"),
-        transform=None, available=lambda: _HAVE_MP, reason="pip install mediapipe",
+        transform=_coco, settings=[coco_setting],
+        available=lambda: _HAVE_MP, reason="pip install mediapipe",
         cost_mb=60)
 
     host.provide_model(
         "pose", "mp_holistic", label="Holistic", family="MediaPipe", sizes=[],
-        types=[{"value": "holistic", "label": "Holistic · 543 (face mesh + hands)"}],
+        types=[{"value": "holistic", "label": "Holistic · 543 (133 whole-body when downsampled)"}],
         note="MediaPipe Holistic: BlazePose 33 + 468-point face mesh + two 21-point hands.",
         speed="balanced",
         loader=lambda: (lambda img, *a, **k: _people(img, "holistic", "", _persons())),
-        transform=None, available=lambda: _HAVE_MP, reason="pip install mediapipe",
+        transform=_coco, settings=[coco_setting],
+        available=lambda: _HAVE_MP, reason="pip install mediapipe",
         cost_mb=300)
 
     host.logger.info("mediapipe_pose module: registered mp_blazepose (33) and mp_holistic (543)")

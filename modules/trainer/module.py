@@ -70,6 +70,7 @@ def register(host):
     host.add_route("/api/trainer/remove", tc.trainer_remove, methods=["POST"], feature="ai.trainer.keep", level="write", action="trainer_remove", fields=("set",))
     host.add_route("/api/trainer/labels", tc.trainer_labels, feature="ai.trainer")
     host.add_route("/api/trainer/boxes", tc.trainer_boxes, methods=["POST"], feature="ai.trainer", level="write", action="trainer_boxes", fields=("filename",))
+    host.add_route("/api/trainer/runs", tc.trainer_runs, methods=["GET"], feature="ai.trainer")
     host.add_route("/api/trainer/validate", tc.trainer_validate, methods=["POST"], feature="ai.trainer.run", level="write", action="trainer_validate", fields=("set",))
     host.add_route("/api/trainer/apply_prediction", tc.trainer_apply_prediction, methods=["POST"], feature="ai.trainer.keep", level="write", action="trainer_apply_pred", fields=("filename",))
     host.add_route("/api/train", tc.train, methods=["POST"], feature="ai.trainer.run", level="write", action="trainer_train", fields=("set",))

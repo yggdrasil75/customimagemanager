@@ -1,8 +1,8 @@
-/* trainer.js — the Trainer tab.
+/* trainer.js - the Trainer tab.
  *
  * Owns only what's genuinely new: building persistent numbered subsets, the
  * media filter, and the training controls. Reviewing/boxing an image is NOT
- * reimplemented here — clicking a tile calls the app's own selectFile(), which
+ * reimplemented here - clicking a tile calls the app's own selectFile(), which
  * loads the image into the shared editor pane with its real canvas box drawing,
  * region_modal, renderRegionsList() and autosave. When the user saves boxes
  * there, _sync_yolo writes the YOLO .txt, so the set's images become trainable.
@@ -39,6 +39,7 @@
                : (sets.some(s => s.name === currentSet) ? currentSet : sets[0].name);
     sel.value = currentSet;
     await loadMembers();
+    trLoadRuns();
   }
 
   let gallerySafe = false;
@@ -98,7 +99,7 @@
     await loadSets(currentSet);
   }
 
-  function trOnSetChange() { currentSet = $('tr_set_select').value || null; trPage = 0; curIdx = -1; loadMembers(); }
+  function trOnSetChange() { currentSet = $('tr_set_select').value || null; trPage = 0; curIdx = -1; loadMembers(); trLoadRuns(); }
 
   function renderCounts() {
     $('tr_set_count').innerText = items.length;
@@ -121,7 +122,7 @@
   function renderGrid() {
     const grid = $('tr_grid');
     if (!grid) return;
-    $('tr_grid_title').innerText = currentSet ? `${currentSet} — ${items.length} images` : 'No set selected';
+    $('tr_grid_title').innerText = currentSet ? `${currentSet} - ${items.length} images` : 'No set selected';
     if (!items.length) {
       grid.innerHTML = `<p class="text-gray-600 text-sm p-3">`
         + (currentSet ? 'This set is empty.' : 'Build a set to get started.') + `</p>`;
@@ -169,7 +170,7 @@
   }
 
   // Select tile i: mark it current, scroll it into view, and open it in the
-  // shared editor (the SAME path the gallery uses — box drawing/naming/saving
+  // shared editor (the SAME path the gallery uses - box drawing/naming/saving
   // all happen there, not here).
   function trPick(i) {
     if (i < 0 || i >= items.length) return;
@@ -301,13 +302,15 @@
       classes,
     });
     if (!d.success) { trStatus('Train failed: ' + (d.error || '?')); return; }
-    trStatus(`Training started (${d.train} train / ${d.val} val)`);
+    trStatus(`Training started: ${d.run || ''} (${d.train} train / ${d.val} val` +
+      (d.dup_skipped ? `, ${d.dup_skipped} duplicate box(es) skipped` : '') + ')');
+    trLoadRuns(d.run);
     startLogPoll();
   }
 
   // ── box-class filter ───────────────────────────────────────────────────────
   // Checked classes scope training/validation to ONLY those box types; none
-  // checked = all classes. This never edits stored regions — it just filters
+  // checked = all classes. This never edits stored regions - it just filters
   // what the generated dataset/diff includes.
   async function loadClasses() {
     const box = $('tr_classes');
@@ -345,7 +348,38 @@
   const VERDICT_COLOR = {
     correct: '#22c55e', tightened: '#f59e0b', loosened: '#f59e0b',
     shifted: '#f59e0b', dropped: '#ef4444', added: '#a855f7',
+    dup_gt: '#38bdf8', dup_pred: '#e879f9',
   };
+  const VERDICT_LABEL = { dup_gt: 'your dup', dup_pred: 'model dup' };
+
+  // ── runs (progression) ──────────────────────────────────────────────────────
+  // Each Train makes set_<set>_train_<n>; nothing is overwritten. The dropdown
+  // picks which run Validate uses; the table compares their last scores.
+  async function trLoadRuns(prefer) {
+    const sel = $('tr_val_run'), tbl = $('tr_runs');
+    if (!sel || !currentSet) { if (sel) sel.innerHTML = ''; if (tbl) tbl.innerHTML = ''; return; }
+    let d;
+    try { d = await jget('/api/trainer/runs?set=' + enc(currentSet)); } catch (e) { return; }
+    const runs = (d && d.runs) || [];
+    const prev = prefer || sel.value;
+    sel.innerHTML = runs.length
+      ? runs.slice().reverse().map(r => `<option value="${r.run}">${r.run}${r.exists ? '' : ' (training…)'}</option>`).join('')
+      : '<option value="">— no runs yet —</option>';
+    if (runs.some(r => r.run === prev)) sel.value = prev;
+    if (!tbl) return;
+    if (!runs.length) { tbl.innerHTML = ''; return; }
+    const when = t => t ? new Date(t * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
+    tbl.innerHTML = `<table class="w-full text-[11px]"><thead class="text-gray-500"><tr>
+        <th class="text-left">Run</th><th>Trained</th><th>Imgs</th><th>F1</th><th>P</th><th>R</th><th>IoU</th><th title="added / wrong class / model dup / your dup">+ / ≠ / dup</th></tr></thead><tbody>` +
+      runs.slice().reverse().map(r => {
+        const v = (r.validation || {}).summary || {}, c = v.counts || {}, info = r.info || {};
+        return `<tr class="text-center ${r.run === sel.value ? 'text-amber-300' : 'text-gray-300'}">
+          <td class="text-left truncate" title="${r.run}">${r.n ? '#' + r.n : 'legacy'}</td>
+          <td>${when(info.created)}</td><td>${info.train ?? '—'}</td>
+          <td>${fmt(v.f1)}</td><td>${fmt(v.precision)}</td><td>${fmt(v.recall)}</td><td>${fmt(v.mean_iou)}</td>
+          <td>${v.counts ? `${c.added || 0} / ${v.added_wrong_class || 0} / ${c.dup_pred || 0} / ${c.dup_gt || 0}` : '—'}</td></tr>`;
+      }).join('') + '</tbody></table>';
+  }
 
   async function trValidate() {
     if (!currentSet) { alert('Select a set first.'); return; }
@@ -356,6 +390,8 @@
       iou_ok: num('tr_val_iouok'),
       conf: num('tr_val_conf'),
       classes: selectedClasses(),
+      run: $('tr_val_run') ? $('tr_val_run').value : '',
+      store_debug: !!($('tr_val_debug') && $('tr_val_debug').checked),
     };
     $('tr_val_summary').innerHTML = '<span class="text-gray-400">Running the model over the set…</span>';
     $('tr_val_list').innerHTML = '';
@@ -370,53 +406,110 @@
     if (!scored) {
       // New-only run: predictions were stored for review, nothing was scored.
       $('tr_val_summary').innerHTML =
-        `<div class="text-gray-300">Proposed boxes on ${(d.added_new || []).length} new image(s) — review and Accept below.</div>` +
+        `<div class="text-gray-300">Proposed boxes on ${(d.added_new || []).length} new image(s) - review and Accept below.</div>` +
         `<div class="text-gray-400 mt-0.5">` + chip('added', c.added) + `</div>`;
     } else {
     $('tr_val_summary').innerHTML =
+      `<div class="text-gray-500">${d.run || ''}</div>` +
       `<div>Accuracy: <b class="${below ? 'text-red-400' : 'text-green-400'}">F1 ${fmt(s.f1)}</b>` +
       ` · mean IoU ${fmt(s.mean_iou)} · P ${fmt(s.precision)} / R ${fmt(s.recall)}</div>` +
       `<div class="text-gray-400 mt-0.5">` +
       chip('correct', c.correct) + chip('tightened', c.tightened) + chip('loosened', c.loosened) +
-      chip('shifted', c.shifted) + chip('dropped', c.dropped) + chip('added', c.added) + `</div>`;
+      chip('shifted', c.shifted) + chip('dropped', c.dropped) + chip('added', c.added) +
+      chip('dup_pred', c.dup_pred) + chip('dup_gt', c.dup_gt) +
+      (s.added_wrong_class ? `<span class="tr-chip" style="background:#ec489922;color:#ec4899">wrong class ${s.added_wrong_class}</span>` : '') +
+      `</div>`;
     }
 
     vres = {};
     $('tr_val_list').innerHTML = (d.images || []).map((im, i) => {
       vres[im.rel_path] = im;
       const cc = im.counts;
-      const tags = ['dropped', 'added', 'tightened', 'loosened', 'shifted']
-        .filter(k => cc[k]).map(k => chip(k, cc[k])).join('');
+      const wc = (im.boxes || []).filter(b => b.confused_with).length;
+      const tags = ['dropped', 'added', 'dup_pred', 'dup_gt', 'tightened', 'loosened', 'shifted']
+        .filter(k => cc[k]).map(k => chip(k, cc[k])).join('') +
+        (wc ? `<span class="tr-chip" style="background:#ec489922;color:#ec4899">wrong class ${wc}</span>` : '');
       return `<div class="tr-vrow" id="tr_vrow_${i}" onclick="trPickByPath('${im.rel_path.replace(/'/g, "\\'")}')">
         <img class="tr-vthumb" src="${im.thumb}" loading="lazy">
         <div class="flex-1 min-w-0">
           <div class="truncate text-gray-300">${im.is_new ? '🆕 ' : ''}${im.rel_path}</div>
           <div>IoU ${fmt(im.mean_iou)} ${tags || '<span class=\"text-green-400 tr-chip\">clean</span>'}</div>
         </div>
+        ${im.is_new ? '' : `<button class="text-xs bg-sky-700 hover:bg-sky-600 px-2 py-1 rounded"
+          onclick="event.stopPropagation();trSnap('${im.rel_path.replace(/'/g, "\\'")}')"
+          title="Keep YOUR boxes, but move each to the model's box where they overlap ≥ Snap IoU, and drop your duplicate boxes. Model-only boxes are not added.">Snap</button>`}
         <button class="text-xs bg-emerald-700 hover:bg-emerald-600 px-2 py-1 rounded"
           onclick="event.stopPropagation();trAccept('${im.rel_path.replace(/'/g, "\\'")}')"
           title="Write the model's predicted boxes as this image's new label">Accept</button>
       </div>`;
     }).join('') || '<p class="text-gray-500 text-xs">No images validated.</p>';
+    trRedraw();
+    trLoadRuns(d.run);
 
     const rt = $('tr_val_retrain');
     if (rt) rt.classList.toggle('hidden', !below);
     const accEl = $('tr_acc');
     if (accEl && scored) accEl.innerHTML = ` · <span class="${below ? 'text-red-400' : 'text-green-400'}">F1 ${fmt(s.f1)}</span>`;
     if (!scored) {
-      trStatus(`Stored proposals for ${(d.added_new || []).length} new image(s) — review and Accept, then they become labelled training data.`);
+      trStatus(`Stored proposals for ${(d.added_new || []).length} new image(s) - review and Accept, then they become labelled training data.`);
     } else {
       trStatus(below
-        ? `F1 ${fmt(s.f1)} is below your bound ${fmt(bound)} — review, accept fixes, then retrain.`
+        ? `F1 ${fmt(s.f1)} is below your bound ${fmt(bound)} - review, accept fixes, then retrain.`
         : `F1 ${fmt(s.f1)} meets your bound ${fmt(bound)}.`);
     }
   }
 
   function chip(kind, n) {
     if (!n) return '';
-    return `<span class="tr-chip" style="background:${VERDICT_COLOR[kind]}22;color:${VERDICT_COLOR[kind]}">${kind} ${n}</span> `;
+    return `<span class="tr-chip" style="background:${VERDICT_COLOR[kind]}22;color:${VERDICT_COLOR[kind]}">${VERDICT_LABEL[kind] || kind} ${n}</span> `;
   }
   function fmt(x) { return x == null ? '—' : Number(x).toFixed(2); }
+
+  // ── GT vs prediction overlay ────────────────────────────────────────────────
+  // Draws the model's boxes from the last validation run on top of the editor's
+  // own (blue, = your GT) boxes for the open image. Prediction boxes are dashed
+  // in their verdict colour; a missed GT box gets a thick red outline.
+  function trRedraw() {
+    if (typeof drawCanvas === 'function') drawCanvas();
+    if (typeof popoutOpen !== 'undefined' && popoutOpen && typeof drawPopout === 'function') drawPopout();
+  }
+  function drawValOverlay(c, dw, dh, scale) {
+    const t = $('tr_val_show');
+    const im = vres[window.currentFile];
+    if (!im || (t && !t.checked)) return;
+    const s = scale || 1;
+    c.save();
+    c.font = `${12 / s}px sans-serif`;
+    const rect = (b, col, dash, lw, label) => {
+      const x = (b.cx - b.w / 2) * dw, y = (b.cy - b.h / 2) * dh;
+      c.strokeStyle = col; c.lineWidth = lw / s; c.setLineDash(dash.map(v => v / s));
+      c.strokeRect(x, y, b.w * dw, b.h * dh); c.setLineDash([]);
+      if (!label) return;
+      const lh = 14 / s, tw = c.measureText(label).width + 6 / s;
+      const ly = y + b.h * dh;                       // label under the box: the editor labels the top
+      c.fillStyle = col; c.fillRect(x, ly, tw, lh);
+      c.fillStyle = '#000'; c.fillText(label, x + 3 / s, ly + lh - 3 / s);
+    };
+    im.boxes.forEach(b => {
+      if (b.verdict === 'dropped') { rect(b.gt, VERDICT_COLOR.dropped, [], 4, `MISSED ${b.class_name}`); return; }
+      if (b.verdict === 'dup_gt') { rect(b.gt, VERDICT_COLOR.dup_gt, [3, 3], 3, `YOUR DUP ${b.class_name}`); return; }
+      if (!b.pred) return;
+      const conf = b.pred.conf != null ? ` ${Number(b.pred.conf).toFixed(2)}` : '';
+      let col = VERDICT_COLOR[b.verdict] || '#fff', label;
+      if (b.verdict === 'dup_pred') {
+        label = `DUP ${b.class_name}${conf}`;
+      } else if (b.verdict === 'added' && b.confused_with) {
+        col = '#ec4899'; label = `${b.class_name}${conf} ≠ ${b.confused_with}`;
+      } else if (b.verdict === 'added') {
+        label = `+ ${b.class_name}${conf}`;
+      } else {
+        label = `${b.class_name}${conf} IoU ${fmt(b.iou)}`;
+      }
+      rect(b.pred, col, [6, 4], 2, label);
+    });
+    c.restore();
+  }
+  if (window.registerCanvasOverlay) registerCanvasOverlay(drawValOverlay);
 
   // Clicking a validation row opens that image in the editor for hand-correction.
   function trPickByPath(rel) {
@@ -436,7 +529,7 @@
     if (!im) return;
     const regions = [];
     im.boxes.forEach(b => {
-      if (b.pred) regions.push({ ...b.pred, confirmed: true });
+      if (b.pred) { const { conf, ...p } = b.pred; regions.push({ ...p, confirmed: true }); }
       else if (b.verdict === 'dropped' && b.gt) regions.push({ ...b.gt, confirmed: true });
     });
     const d = await jpost('/api/trainer/apply_prediction',
@@ -446,9 +539,58 @@
     if (it) it.with_data = regions.some(r => (r.class_name || '').trim());
     // Reload so the tile colour (blue/yellow) reflects the written boxes.
     loadMembers();
-    // mark the row done
+    markRowDone(rel, 'Accepted');
+  }
+
+  function markRowDone(rel, text) {
     const row = [...document.querySelectorAll('.tr-vrow')].find(r => r.getAttribute('onclick')?.includes(rel));
-    if (row) { row.style.opacity = .5; const btn = row.querySelector('button'); if (btn) { btn.textContent = 'Accepted'; btn.disabled = true; } }
+    if (!row) return;
+    row.style.opacity = .5;
+    row.querySelectorAll('button').forEach(b => { b.disabled = true; });
+    const last = row.querySelector('button:last-of-type'); if (last) last.textContent = text;
+  }
+
+  // Snap = keep the user's boxes (class, uuid, tags) but take the model's
+  // geometry where they agree (IoU >= snap), and drop double-tagged duplicates.
+  // The model's box is the average of every label it learned from, so snapping
+  // pulls lazy one-off boxes toward the consensus. Model-only boxes are ignored.
+  function snappedRegions(im, thr) {
+    const out = [];
+    let changed = false;
+    im.boxes.forEach(b => {
+      if (!b.gt) return;                                   // added / model dup
+      if (b.verdict === 'dup_gt') { changed = true; return; }
+      const { conf, debug, ...g } = b.gt;
+      if (b.pred && b.iou >= thr && b.iou < 1) {
+        out.push({ ...g, cx: b.pred.cx, cy: b.pred.cy, w: b.pred.w, h: b.pred.h, confirmed: true });
+        changed = true;
+      } else out.push(g);
+    });
+    return changed ? out : null;
+  }
+  const snapThr = () => { const v = num('tr_val_snap'); return v == null ? 0.5 : v; };
+
+  async function trSnap(rel, quiet) {
+    const im = vres[rel];
+    if (!im || im.is_new) return false;
+    const regions = snappedRegions(im, snapThr());
+    if (!regions) { if (!quiet) markRowDone(rel, 'No change'); return false; }
+    const d = await jpost('/api/trainer/apply_prediction',
+      { filename: rel, regions, classes: selectedClasses() });
+    if (!d.success) { if (!quiet) alert('Snap failed: ' + (d.error || '?')); return false; }
+    markRowDone(rel, 'Snapped');
+    if (!quiet) loadMembers();
+    return true;
+  }
+
+  async function trSnapAll() {
+    const rels = Object.keys(vres).filter(r => !vres[r].is_new && snappedRegions(vres[r], snapThr()));
+    if (!rels.length) { alert('Nothing to snap at this IoU.'); return; }
+    if (!confirm(`Snap boxes on ${rels.length} image(s) to the model (IoU ≥ ${snapThr()}) and remove your duplicate boxes?`)) return;
+    let n = 0;
+    for (const r of rels) { if (await trSnap(r, true)) n++; trStatus(`Snapped ${n} / ${rels.length}…`); }
+    trStatus(`Snapped ${n} image(s). Retrain to make a new run, then validate it to compare.`);
+    loadMembers();
   }
 
   // Populate the Device dropdown from the devices torch actually reports, so we
@@ -471,7 +613,7 @@
   // field id -> value. Presets are stored SERVER-SIDE (library.db) via
   // /api/trainer/presets, so they survive restarts and are shared across
   // browsers. Selecting one applies its values; editing fields never mutates the
-  // stored preset — the user must Overwrite to save or Reload to discard edits.
+  // stored preset - the user must Overwrite to save or Reload to discard edits.
   // Only the last-selected preset NAME is cached in localStorage as a UI
   // convenience (not data we care about losing).
   const PRESET_SEL_KEY = 'trainer_preset_selected_v1';
@@ -648,18 +790,58 @@
     loadSets();      // always refresh on open (sets/boxes may have changed elsewhere)
     loadClasses();   // refresh the box-class filter list
     loadDevices();   // query torch for real devices, replacing the CPU placeholder
+    trSubtab(_trSub);              // re-show the active sub-tab (refreshes module sub-tabs)
   }
+
+  // -- sub-tabs ------------------------------------------------------------
+  // Box is built in (#tr_sub_box). Other modules call
+  // registerTrainerSubtab({id, label, feature, paneId, onShow, title}): their
+  // pane element is adopted into #trainer_pane and a button added to the bar.
+  window._trainerSubtabs = window._trainerSubtabs || {};
+  let _trSub = 'box';
+  function registerTrainerSubtab(spec) {
+    const bar = $('tr_subtabs'), pane = $(spec.paneId), host = $('trainer_pane');
+    if (!bar || !pane || !host || !spec.id) return false;
+    window._trainerSubtabs[spec.id] = spec;
+    host.appendChild(pane);
+    pane.classList.add('hidden');
+    const btn = document.createElement('button');
+    btn.dataset.trsub = spec.id; btn.textContent = spec.label || spec.id;
+    btn.className = 'tr-subtab';
+    if (spec.title) btn.title = spec.title;
+    if (spec.feature) btn.setAttribute('data-feature', spec.feature);
+    btn.addEventListener('click', () => trSubtab(spec.id));
+    bar.appendChild(btn);
+    bar.classList.remove('hidden');
+    if (window.applyFeatureVisibility) applyFeatureVisibility(bar);
+    trSubtab(_trSub);
+    return true;
+  }
+  function trSubtab(id) {
+    if (id !== 'box' && !window._trainerSubtabs[id]) id = 'box';
+    _trSub = id;
+    document.querySelectorAll('#tr_subtabs [data-trsub]').forEach(b =>
+      b.classList.toggle('active', b.dataset.trsub === id));
+    $('tr_sub_box')?.classList.toggle('hidden', id !== 'box');
+    for (const k in window._trainerSubtabs) {
+      const s = window._trainerSubtabs[k];
+      $(s.paneId)?.classList.toggle('hidden', k !== id);
+      if (k === id && s.onShow) { try { s.onShow(); } catch (e) { console.error('subtab ' + k, e); } }
+    }
+  }
+  window.registerTrainerSubtab = registerTrainerSubtab;
 
   document.addEventListener('keydown', trKeyNav);
 
   // expose the handlers the pane markup calls
   Object.assign(window, {
     trInit, trOnSetChange, trBuildSet, trClearSet, trDeleteSet,
-    trOpen, trPick, trPickByPath, trStartTraining, trChangePage,
+    trOpen, trPick, trPickByPath, trStartTraining, trChangePage, trRedraw,
+    trSnap, trSnapAll, trLoadRuns,
     trValidate, trAccept, onBoxesSaved,
     trSetGallerySafe, trClassChanged,
     trPresetSelect, trPresetReload, trPresetOverwrite, trPresetNew, trPresetDelete,
-    trBackendChange,
+    trBackendChange, trSubtab,
   });
 })();
 

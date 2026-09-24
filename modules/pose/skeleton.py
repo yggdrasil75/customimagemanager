@@ -76,6 +76,33 @@ def topology(n_kp: int):
     """(kind, names, edges) for a keypoint count; unknown counts draw as bare points."""
     return TOPOLOGIES.get(n_kp, ("body", [f"kp{i}" for i in range(n_kp)], []))
 
+
+# ── default tokens for learners (personal_iqa etc.) ─────────────────────────
+# COCO-17 segments whose lengths / torso length are the pose-independent
+# body proportions. First 17 points of wholebody-133 are the same COCO points.
+BONES = [(5, 7), (7, 9), (6, 8), (8, 10), (11, 13), (13, 15), (12, 14), (14, 16), (5, 6), (11, 12),
+         (5, 11), (6, 12), (0, 1), (0, 2), (1, 3), (2, 4), (0, 5), (0, 6)]
+TOKEN_DIMS = {"pose17": 34, "pose17_raw": 51, "pose133": 266, "pose133_raw": 399, "bones": len(BONES)}
+
+
+def tokens(keypoints: list) -> Optional[dict]:
+    """! @brief One COCO-17 / COCO-WholeBody-133 skeleton -> {kind, norm, raw, bones}: the
+    flat vectors a learner consumes. norm = pelvis-origin, torso-scaled (x,y); raw =
+    (x,y,v) as placed in the frame; bones = segment lengths / torso. Any other
+    keypoint count returns None: a provider with its own topology owns its
+    conversion and registers "pose.tokens.<provider id>" (see mediapipe_pose)."""
+    kps = keypoints
+    n = len(kps)
+    if n not in (17, 133):
+        return None
+    P = np.array([[float(k.get("x", 0.0) or 0.0), float(k.get("y", 0.0) or 0.0)] for k in kps], np.float32)
+    pelvis, neck = (P[11] + P[12]) / 2, (P[5] + P[6]) / 2
+    torso = float(np.linalg.norm(neck - pelvis)) or 1.0
+    return {"kind": f"pose{n}",
+            "norm": ((P - pelvis) / torso).ravel().tolist(),
+            "raw": [float(k.get(c, 0.0) or 0.0) for k in kps for c in ("x", "y", "v")],
+            "bones": [float(np.linalg.norm(P[a] - P[b])) / torso for a, b in BONES]}
+
 _WB_REGISTERED = set()
 
 # Official ONNX SDK checkpoints (mmpose release names). Sizes are the paper's

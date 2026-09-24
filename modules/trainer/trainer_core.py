@@ -185,6 +185,64 @@ def _set_safe(set_name):
     return "".join(c if (c.isalnum() or c in "-_") else "_" for c in set_name).strip("_") or "set"
 
 
+def _is_debug(r):
+    """Model output stored by validation (cim:Debug). Never ground truth."""
+    return bool(r.get("debug"))
+
+
+def _run_dirs():
+    base = os.path.join(os.path.abspath(MODELS_DIR), "runs")
+    return (("yolo", os.path.join(base, "detect")), ("mayaku", os.path.join(base, "mayaku")))
+
+
+def _list_runs(set_name):
+    """Every training run of this set, oldest first: the legacy unnumbered
+    set_<safe> run (n=0) and each set_<safe>_train_<n>. Each carries its
+    cim_run.json (what it was trained on) and validation.json (last score)."""
+    import re
+    safe = _set_safe(set_name)
+    pat = re.compile(r"^set_" + re.escape(safe) + r"(?:_train_(\d+))?$")
+    out = []
+    for backend, root in _run_dirs():
+        if not os.path.isdir(root):
+            continue
+        for nm in os.listdir(root):
+            m = pat.match(nm)
+            if not m:
+                continue
+            d = os.path.join(root, nm)
+            w = os.path.join(d, "weights", "best.pt") if backend == "yolo" else os.path.join(d, "best.pt")
+            row = {"run": nm, "n": int(m.group(1) or 0), "backend": backend, "dir": d,
+                   "weights": w, "exists": os.path.exists(w)}
+            for key, fn in (("info", "cim_run.json"), ("validation", "validation.json")):
+                try:
+                    with open(os.path.join(d, fn), encoding="utf-8") as f:
+                        row[key] = json.load(f)
+                except (OSError, ValueError):
+                    row[key] = None
+            out.append(row)
+    out.sort(key=lambda r: r["n"])
+    return out
+
+
+def _next_run_name(set_name):
+    runs = _list_runs(set_name)
+    n = max([r["n"] for r in runs] + [0]) + 1
+    return f"set_{_set_safe(set_name)}_train_{n}"
+
+
+def trainer_runs():
+    """GET ?set= -> this set's runs (progression), newest last."""
+    set_name = (request.args.get("set") or "").strip()
+    if not set_name:
+        return jsonify({"success": False, "error": "set name required"}), 400
+    runs = _list_runs(set_name)
+    for r in runs:
+        r.pop("dir", None)
+    return jsonify({"success": True, "runs": runs,
+                    "current": ts.get_meta(_db(), set_name).get("weights")})
+
+
 def _set_work_reldir(set_name):
     return f"{TRAIN_SETS_DIR}/{_set_safe(set_name)}/input"
 
@@ -231,8 +289,8 @@ def _member_entry_for_record(rec, want=None):
     regions = []
     if wabs and os.path.exists(wabs):
         regions = (read_metadata(wabs) or {}).get("regions", []) or []
-    scoped = [r for r in regions
-              if want is None or (r.get("class_name") or "").strip() in want]
+    scoped = [r for r in regions if not _is_debug(r)
+              and (want is None or (r.get("class_name") or "").strip() in want)]
     has_conf = any(r.get("confirmed", True) for r in scoped)
     has_unconf = any(not r.get("confirmed", True) for r in scoped)
     with_data = len(scoped) > 0
@@ -478,12 +536,16 @@ def trainer_boxes():
             cb = _clamp_box(r)
             if not cb:
                 continue
-            clean.append({
+            row = {
                 "class_name": (r.get("class_name") or "").strip(),
                 "cx": cb["cx"], "cy": cb["cy"], "w": cb["w"], "h": cb["h"],
                 # boxes drawn/edited in the trainer are user-authored -> confirmed
                 "confirmed": r.get("confirmed", True) is not False,
-            })
+            }
+            if _is_debug(r):
+                row["debug"] = True
+                row["region_description"] = r.get("region_description", "")
+            clean.append(row)
         ok = write_metadata(fp, meta.get("tags", []), meta.get("description", ""), clean)
         if not ok:
             return jsonify({"success": False, "error": "write failed"}), 500
@@ -493,18 +555,28 @@ def trainer_boxes():
 
 
 def trainer_validate():
-    """Run the set's trained model over its members, diff predictions against the
-    stored ground-truth boxes, and report per-image and aggregate accuracy."""
+    """Run one of the set's trained models over its members, diff predictions
+    against the stored ground-truth boxes, and report per-image and aggregate
+    accuracy. Optionally stores the predictions on each image as debug regions
+    (cim:Debug) and always saves the score beside that run's weights."""
     d = request.json or {}
     set_name = (d.get("set") or "").strip()
     if not set_name:
         return jsonify({"success": False, "error": "set name required"}), 400
 
-    weights = ts.get_meta(_db(), set_name).get("weights") \
-        or state.get("trainer_last_weights")
+    runs = _list_runs(set_name)
+    want_run = (d.get("run") or "").strip()
+    run = next((r for r in runs if r["run"] == want_run), None) if want_run else None
+    if want_run and not run:
+        return jsonify({"success": False, "error": f"unknown run {want_run!r}"}), 400
+    weights = run["weights"] if run else (ts.get_meta(_db(), set_name).get("weights")
+                                          or state.get("trainer_last_weights"))
     if not weights or not os.path.exists(weights):
         return jsonify({"success": False,
                         "error": "No trained model for this set yet — train first."}), 400
+    if not run:
+        run = next((r for r in runs if os.path.abspath(r["weights"]) == os.path.abspath(weights)), None)
+    run_name = run["run"] if run else os.path.basename(os.path.dirname(os.path.dirname(weights)))
 
     try:
         conf = float(d.get("conf", 0.25))
@@ -515,12 +587,15 @@ def trainer_validate():
     except (TypeError, ValueError):
         iou_ok = 0.7
     iou_min = 0.3
+    store_debug = bool(d.get("store_debug"))
 
     want = d.get("classes")
     want = [c for c in want if isinstance(c, str) and c.strip()] if isinstance(want, list) else None
     want_set = set(want) if want else None
 
     # Optionally pull fresh, never-seen images into the set for this validation.
+    # They get isolated work copies like any other member, so Accept/Snap edit
+    # the copy, never the gallery original.
     added_new = []
     if d.get("source") == "new":
         try:
@@ -528,15 +603,23 @@ def trainer_validate():
         except (TypeError, ValueError):
             k = 20
         if k:
-            added_new = ts.select(_db(), d.get("strategy", "random"), k, iter_emb=(HOST.get_service("embedding") or {}).get("iter_embeddings_ordered"),
-                                   exclude_all_sets=True, kinds={"image"})
-            if added_new:
-                ts.keep(_db(), set_name, added_new)
+            picks = ts.select(_db(), d.get("strategy", "random"), k, iter_emb=(HOST.get_service("embedding") or {}).get("iter_embeddings_ordered"),
+                              exclude_all_sets=True, kinds={"image"})
+            work_map = {}
+            for rp in picks:
+                wp = _copy_into_set(set_name, rp)
+                if wp:
+                    work_map[rp] = wp
+            if picks:
+                ts.keep(_db(), set_name, picks, work_paths_map=work_map)
+            added_new = [work_map.get(rp, rp) for rp in picks]
 
+    tag = f"set={set_name}; "
     per_image = []
     results = []
     new_set = set(added_new)
-    for rp in ts.members(_db(), set_name):
+    # Work copies: that's where the set's boxes are edited and what train() uses.
+    for rp in ts.work_paths(_db(), set_name):
         fp = get_safe_path(MEDIA_DIR, rp)
         if not fp or not os.path.exists(fp):
             continue
@@ -550,17 +633,41 @@ def trainer_validate():
         keep_classes = want_set if want_set else None
         pred = _detect_obb_or_box(bgr, weights, conf=conf, keep_classes=keep_classes)
         is_new = rp in new_set
+        meta = read_metadata(fp) or {}
+        regions = meta.get("regions", []) or []
         if is_new:
             # New image: no ground truth to compare against. Run the model and
             # store its predictions for human review — do NOT score it (an
             # empty-GT diff would read as all-false-positives and drag F1 to 0).
             diff = tv.propose_image(pred)
         else:
-            gt = (read_metadata(fp) or {}).get("regions", []) or []
+            gt = [r for r in regions if not _is_debug(r)]
             if want_set:
                 gt = [r for r in gt if (r.get("class_name") or "").strip() in want_set]
             diff = tv.diff_image(gt, pred, iou_ok=iou_ok, iou_min=iou_min)
             per_image.append(diff)
+        if store_debug:
+            # Replace this set's previous debug boxes; other sets' debug and all
+            # real boxes stay. Model version rides in the description.
+            dbg = []
+            for b in diff["boxes"]:
+                p = b.get("pred")
+                if not p:
+                    continue
+                note = b["verdict"]
+                if b.get("confused_with"):
+                    note += f" (GT {b['confused_with']})"
+                elif b["gt"] is not None:
+                    note += f" IoU {b['iou']:.2f}"
+                dbg.append({"class_name": b["class_name"],
+                            "cx": p["cx"], "cy": p["cy"], "w": p["w"], "h": p["h"],
+                            "confirmed": True, "debug": True,
+                            "region_description": f"debug; {tag}model={run_name}; "
+                                                  f"verdict={note}; conf={float(p.get('conf') or 0):.3f}"})
+            kept = [r for r in regions
+                    if not (_is_debug(r) and tag in (r.get("region_description") or ""))]
+            write_metadata(fp, meta.get("tags", []) or [], meta.get("description", "") or "", kept + dbg)
+            _meta_cache_drop(rp)
         results.append({
             "rel_path": rp, "thumb": f"/api/thumb/{rp}",
             "is_new": is_new,
@@ -580,12 +687,25 @@ def trainer_validate():
         summary["mean_iou"] = None
         summary["scored"] = False
     summary.setdefault("scored", bool(per_image))
+    summary["run"] = run_name
+    # Keep this run's score beside its weights so runs can be compared later.
+    if run and per_image:
+        try:
+            with open(os.path.join(run["dir"], "validation.json"), "w", encoding="utf-8") as f:
+                json.dump({"summary": summary, "iou_ok": iou_ok, "conf": conf,
+                           "classes": sorted(want_set) if want_set else None,
+                           "validated": time.time(),
+                           "images": [{"rel_path": r["rel_path"], "counts": r["counts"],
+                                       "mean_iou": r["mean_iou"]} for r in results]}, f)
+        except OSError as e:
+            training_logger.warning(f"validation.json for {run_name}: {e}")
     # Worst images first: most dropped/added, then lowest IoU — that's where the
     # user's confirm/deny attention is best spent. New rows have mean_iou None
     # (unscored); sort them after scored rows by treating None as worst.
-    results.sort(key=lambda r: (-(r["counts"]["dropped"] + r["counts"]["added"]),
+    results.sort(key=lambda r: (-(r["counts"]["dropped"] + r["counts"]["added"]
+                                  + r["counts"]["dup_gt"] + r["counts"]["dup_pred"]),
                                 r["mean_iou"] if r["mean_iou"] is not None else -1.0))
-    return jsonify({"success": True, "set": set_name, "summary": summary,
+    return jsonify({"success": True, "set": set_name, "run": run_name, "summary": summary,
                     "added_new": added_new, "images": results})
 
 
@@ -604,15 +724,33 @@ def trainer_apply_prediction():
 
     cur = read_metadata(fp) or {}
     existing = cur.get("regions", []) or []
-    # Keep every box whose class is NOT in scope; replace the in-scope ones.
+    # Keep every box whose class is NOT in scope (and all debug boxes);
+    # replace the in-scope ones.
     preserved = [r for r in existing
-                 if (r.get("class_name") or "").strip() not in scope_set]
+                 if _is_debug(r) or (r.get("class_name") or "").strip() not in scope_set]
+    accepted = [{k: v for k, v in r.items() if k not in ("conf", "debug")} for r in accepted]
     merged = preserved + accepted
     ok = write_metadata(fp, cur.get("tags", []) or [],
                         cur.get("description", "") or "", merged)
     _meta_cache_drop(fn)
     return jsonify({"success": bool(ok), "count": len(merged),
                     "preserved": len(preserved), "replaced_scope": sorted(scope_set)})
+
+
+def _write_run_info(run_dir, set_name, run_name, backend, base_model, n_train, n_val,
+                    names, cfg, n_dup_skipped, aug_made=0):
+    """cim_run.json beside the weights: what this run was trained on."""
+    try:
+        os.makedirs(run_dir, exist_ok=True)
+        with open(os.path.join(run_dir, "cim_run.json"), "w", encoding="utf-8") as f:
+            json.dump({"set": set_name, "run": run_name, "backend": backend,
+                       "base_model": base_model, "train": n_train, "val": n_val,
+                       "augmented": aug_made, "classes": list(names),
+                       "dup_boxes_skipped": n_dup_skipped, "created": time.time(),
+                       "cfg": {k: v for k, v in (cfg or {}).items() if not k.startswith("_")}},
+                      f, default=str)
+    except OSError as e:
+        training_logger.warning(f"cim_run.json for {run_name}: {e}")
 
 
 def train():
@@ -671,6 +809,7 @@ def train():
     # Gather, per still image, only the regions whose class we're training on.
     labelled = []            # (base, jpg_name, [regions])
     skipped_video = 0
+    n_dup_skipped = 0
     present_classes = set()
     for rp in ts.work_paths(_db(), set_name):
         abs_path = get_safe_path(MEDIA_DIR, rp)
@@ -684,7 +823,7 @@ def train():
         keep = []
         for r in regions:
             nm = (r.get("class_name") or "").strip()
-            if not nm or not r.get("confirmed", True):
+            if not nm or not r.get("confirmed", True) or _is_debug(r):
                 continue
             if not all(k in r for k in ("cx", "cy", "w", "h")):
                 continue
@@ -692,6 +831,8 @@ def train():
                 continue          # a box we're deliberately NOT training on
             keep.append(r)
             present_classes.add(nm)
+        keep, dups = tv.split_dups(keep)   # double-tagged object -> train on it once
+        n_dup_skipped += len(dups)
         if keep:
             labelled.append((base, os.path.basename(base), keep))
 
@@ -790,7 +931,10 @@ def train():
             _mayaku_training().write_coco_split(
                 va_dir, os.path.join(va_dir, "_annotations.coco.json"), va_pairs, cls_id)
 
-        run_name = "set_" + safe
+        run_name = _next_run_name(set_name)
+        _write_run_info(os.path.join(os.path.abspath(MODELS_DIR), "runs", "mayaku", run_name),
+                        set_name, run_name, "mayaku", base_model, len(tr_pairs), len(va_pairs),
+                        names, cfg, n_dup_skipped)
         # Mayaku hyperparameter keys differ from Ultralytics; forward only the
         # ones the worker understands. The rest of cfg is ignored for Mayaku.
         weights = os.path.join(os.path.abspath(MODELS_DIR), "runs", "mayaku",
@@ -802,7 +946,7 @@ def train():
             args=(dset_dir, base_model, cfg, run_name, MODELS_DIR,
                   state, training_logger, populate_model_selector)).start()
         return jsonify({"success": True, "set": set_name, "backend": "mayaku",
-                        "weights": weights,
+                        "weights": weights, "run": run_name,
                         "train": len(tr_pairs), "val": len(va_pairs)})
 
     # ── YOLO backend (default, unchanged) ─────────────────────────────────────
@@ -855,17 +999,20 @@ def train():
     # every-image affine + mosaic distortion this feature exists to avoid).
     if aug_on:
         cfg.update(ta.ULTRALYTICS_OFF)
-    cfg["_run_name"] = "set_" + safe
+    run_name = _next_run_name(set_name)
+    cfg["_run_name"] = run_name
     aug_note = f" +{aug_made} augmented" if aug_on else ""
     state["status_text"] = f"Training… ({len(tr_b)} train{aug_note} | {len(val_b)} val)"
     # Where best.pt will land (mirrors what the worker pins).
-    weights = os.path.join(os.path.abspath(MODELS_DIR), "runs", "detect",
-                           "set_" + safe, "weights", "best.pt")
+    run_dir = os.path.join(os.path.abspath(MODELS_DIR), "runs", "detect", run_name)
+    weights = os.path.join(run_dir, "weights", "best.pt")
+    _write_run_info(run_dir, set_name, run_name, "yolo", base_model, len(tr_b), len(val_b),
+                    names, cfg, n_dup_skipped, aug_made=aug_made)
     ts.set_meta(_db(), set_name, weights=weights)
     threading.Thread(target=yolo_train_worker_cfg, daemon=True,
                      args=(dset_dir, yaml_p, base_model, cfg)).start()
     return jsonify({"success": True, "set": set_name, "backend": "yolo",
-                    "weights": weights,
+                    "weights": weights, "run": run_name, "dup_skipped": n_dup_skipped,
                     "train": len(tr_b), "val": len(val_b)})
 
 def get_training_log():

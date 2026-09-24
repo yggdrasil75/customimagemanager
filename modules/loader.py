@@ -54,9 +54,18 @@ _BACKEND_PIP = {"torch", "torchvision", "onnxruntime", "onnxruntime-gpu",
                 "onnxruntime-rocm", "onnxruntime-migraphx"}
 
 
+def _split_dep(dep):
+    """'pkg' / 'pkg:import_name' / 'pkg @ git+https://...:import_name' ->
+    (pip spec, import name or ''). Splits on the last colon so URL specs work."""
+    pip_name, sep, import_name = dep.rpartition(":")
+    if not sep or "/" in import_name:
+        return dep, ""
+    return pip_name, import_name
+
+
 def _dep_installed(dep):
     """Is a manifest dep spec ('pkg' or 'pkg:import_name') importable?"""
-    pip_name, _, import_name = dep.partition(":")
+    pip_name, import_name = _split_dep(dep)
     mod = (import_name or pip_name.replace("-", "_")).split("[")[0].strip()
     try:
         return importlib.util.find_spec(mod) is not None
@@ -70,7 +79,7 @@ def _pip_install(deps, logger):
     Subprocess, not `import pip`: pip has no library API, and it must not run
     inside the interpreter it's installing into. Failure is not fatal — the
     module just keeps reporting its missing dep."""
-    want = [d.partition(":")[0].strip() for d in deps]
+    want = [_split_dep(d)[0].strip() for d in deps]
     skip = [p for p in want if p in _BACKEND_PIP]
     want = [p for p in want if p not in _BACKEND_PIP]
     if skip:
