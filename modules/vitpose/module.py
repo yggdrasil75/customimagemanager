@@ -67,17 +67,51 @@ def _build_body(size):
     return run
 
 
+def _resolve_external_data(path, url):
+    """Make an ONNX export's external weights loadable.
+
+    The h export stores its tensors outside the graph. Two things go wrong:
+    the referenced file isn't downloaded with the graph, and the export can
+    embed the exporter's own path (an absolute or ../ location), which
+    onnxruntime refuses outright ("External data path validation failed").
+    So: read the references, rewrite each to its bare file name beside the
+    graph, and fetch any that are missing from the same place as the graph.
+    """
+    try:
+        import onnx
+        from onnx.external_data_helper import ExternalDataInfo, uses_external_data
+    except ImportError:
+        return
+    try:
+        m = onnx.load(path, load_external_data=False)
+    except Exception:
+        return
+    d = os.path.dirname(path)
+    changed, need = False, set()
+    for t in m.graph.initializer:
+        if not uses_external_data(t):
+            continue
+        info = ExternalDataInfo(t)
+        base = os.path.basename(info.location.replace("\\\\", "/"))
+        if base != info.location:
+            for kv in t.external_data:
+                if kv.key == "location":
+                    kv.value = base
+            changed = True
+        need.add(base)
+    for base in sorted(need):
+        dest = os.path.join(d, base)
+        if not os.path.exists(dest):
+            common.fetch_file(url.rsplit("/", 1)[0] + "/" + base, dest)
+    if changed:
+        onnx.save(m, path)
+
+
 def _build_wholebody(size):
     path = common.fetch_file(_WB_URL.format(s=size),
                              os.path.join(model_registry.model_dir("vitpose", "pose"),
                                           f"vitpose-{size}-wholebody.onnx"))
-    # The big exports (h) keep their weights in ONNX external data next to the
-    # graph; onnxruntime fails with "External data path ..." without it.
-    for ext in (".data", "_data"):
-        try:
-            common.fetch_file(_WB_URL.format(s=size) + ext, path + ext)
-        except Exception:
-            pass                                  # smaller exports have none
+    _resolve_external_data(path, _WB_URL.format(s=size))
     sess = ort.InferenceSession(path, providers=[model_registry.onnx_provider()])
     inp = sess.get_inputs()[0]
     ih, iw = (int(inp.shape[2]), int(inp.shape[3])) if isinstance(inp.shape[2], int) else (256, 192)
@@ -118,7 +152,12 @@ def _people(img_bgr, kind, size, persons):
         return []
     run = _load(kind, size)
     if run is None:
-        raise RuntimeError(f"ViTPose {kind}-{size} failed to load")
+        why = ""
+        try:
+            why = model_registry.REGISTRY._entries[f"pose:vitpose:{kind}:{size}"].get("err") or ""
+        except Exception:
+            pass
+        raise RuntimeError(f"ViTPose {kind}-{size} failed to load" + (f": {why}" if why else ""))
     H, W = img.shape[:2]
     boxes = [[x0, y0, w, h] for _, x0, y0, w, h in common.person_crops(img, persons)]
     if not boxes:

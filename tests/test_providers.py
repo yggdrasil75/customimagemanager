@@ -580,6 +580,27 @@ def test_faces_counts(P):
     assert call(p, h, load_image("no_person.jpg")) == []
 
 
+def _raw_peek(h, img, n=400):
+    """What the provider's model returned BEFORE its transform, for a failure
+    message: when the contract shape is empty, this is what it came from."""
+    model = getattr(h, "model", None)
+    if model is None or not callable(model):
+        return "<no raw handle>"
+    try:
+        raw = model(img)
+    except Exception as e:
+        return f"<raising {type(e).__name__}: {e}>"
+    try:
+        if isinstance(raw, tuple) and raw and hasattr(raw[0], "has"):     # detectron2 Instances
+            inst = raw[0]
+            fields = list(inst.get_fields().keys()) if hasattr(inst, "get_fields") else "?"
+            scores = inst.scores.tolist() if inst.has("scores") else []
+            return f"{len(inst)} instances, fields={fields}, scores={[round(s, 3) for s in scores][:8]}"
+    except Exception:
+        pass
+    return repr(raw)[:n]
+
+
 def _default_type(p):
     return (p.types[0]["value"] if getattr(p, "types", None) else None)
 
@@ -661,7 +682,8 @@ def test_pose_people(P):
     p, h = P
     _exempt(p)
     people = call(p, h, load_image("person_single.jpg"))
-    assert people, "no skeleton on person_single" + FIXTURE_HINT
+    assert people, ("no skeleton on person_single" + FIXTURE_HINT
+                    + "\n  raw model output: " + _raw_peek(h, load_image("person_single.jpg")))
     best = max(people, key=lambda q: sum(float(k["v"]) > 0.3 for k in q["keypoints"]))
     assert len(best["keypoints"]) >= 17
     seen = sum(float(k["v"]) > 0.3 for k in best["keypoints"][:17])

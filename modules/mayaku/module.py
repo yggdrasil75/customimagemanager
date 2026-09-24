@@ -197,7 +197,7 @@ def _tf_pose(res, *a, conf=0.25, **k):
     if res is None:
         return []
     if not res[0].has("pred_keypoints"):
-        log.warning("mayaku pose: the loaded model returned no pred_keypoints "
+        log.error("mayaku pose: the loaded model returned no pred_keypoints "
                     "(%d instances) — are these pose weights, or detect weights "
                     "resolved into the pose slot?", len(res[0]))
         return []
@@ -205,7 +205,7 @@ def _tf_pose(res, *a, conf=0.25, **k):
     kps = _np(inst.pred_keypoints)
     keep, scores, _ = _rows(inst, conf)
     if len(inst) and not keep:
-        log.info("mayaku pose: %d instances, none above conf=%.2f (max score %.3f)",
+        log.error("mayaku pose: %d instances, none above conf=%.2f (max score %.3f)",
                  len(inst), conf, float(max(_np(inst.scores))) if inst.has("scores") else -1)
     return [{"keypoints": [{"x": float(x) / W, "y": float(y) / H, "v": float(v)}
                            for (x, y, v) in kps[i]],
