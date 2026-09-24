@@ -280,13 +280,21 @@ def _model_test_timeout(request):
         yield
         return
 
+    import faulthandler
+
     def _fire(signum, frame):
         raise TimeoutError(f"exceeded --cim-timeout {TIMEOUT}s")
     old = signal.signal(signal.SIGALRM, _fire)
     signal.alarm(TIMEOUT)
+    # The alarm only lands when Python regains control; a hang inside native
+    # code (a wedged mediapipe graph, a GPU sync) ignores it. faulthandler
+    # prints every thread's stack to stderr at the same deadline regardless,
+    # so a frozen run at least names what it is stuck in.
+    faulthandler.dump_traceback_later(TIMEOUT, repeat=False)
     try:
         yield
     finally:
+        faulthandler.cancel_dump_traceback_later()
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old)
 

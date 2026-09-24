@@ -71,6 +71,13 @@ def _build_wholebody(size):
     path = common.fetch_file(_WB_URL.format(s=size),
                              os.path.join(model_registry.model_dir("vitpose", "pose"),
                                           f"vitpose-{size}-wholebody.onnx"))
+    # The big exports (h) keep their weights in ONNX external data next to the
+    # graph; onnxruntime fails with "External data path ..." without it.
+    for ext in (".data", "_data"):
+        try:
+            common.fetch_file(_WB_URL.format(s=size) + ext, path + ext)
+        except Exception:
+            pass                                  # smaller exports have none
     sess = ort.InferenceSession(path, providers=[model_registry.onnx_provider()])
     inp = sess.get_inputs()[0]
     ih, iw = (int(inp.shape[2]), int(inp.shape[3])) if isinstance(inp.shape[2], int) else (256, 192)

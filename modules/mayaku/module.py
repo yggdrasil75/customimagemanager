@@ -30,6 +30,7 @@ Inference API used:
 import os
 from pathlib import Path
 
+import logging
 import numpy as np
 
 from optional_deps import optional_import
@@ -56,6 +57,9 @@ MANIFEST = {
 _SIZES = ["n", "s", "m", "l", "xl", "xxl"]
 _TASK = {"detect": "det", "segment": "seg", "pose": "key"}
 _ARTIFACT_EXT = (".pth", ".mayaku", ".onnx", ".engine", ".mlpackage", ".xml")
+
+
+log = logging.getLogger("mayaku")
 
 
 def _available():
@@ -190,11 +194,19 @@ def _tf_masks(res, *a, conf=0.25, **k):
 
 def _tf_pose(res, *a, conf=0.25, **k):
     """pred_keypoints (N,K,3) x,y,score px -> [{keypoints:[{x,y,v}], conf}]."""
-    if res is None or not res[0].has("pred_keypoints"):
+    if res is None:
+        return []
+    if not res[0].has("pred_keypoints"):
+        log.warning("mayaku pose: the loaded model returned no pred_keypoints "
+                    "(%d instances) — are these pose weights, or detect weights "
+                    "resolved into the pose slot?", len(res[0]))
         return []
     inst, names, W, H = res
     kps = _np(inst.pred_keypoints)
     keep, scores, _ = _rows(inst, conf)
+    if len(inst) and not keep:
+        log.info("mayaku pose: %d instances, none above conf=%.2f (max score %.3f)",
+                 len(inst), conf, float(max(_np(inst.scores))) if inst.has("scores") else -1)
     return [{"keypoints": [{"x": float(x) / W, "y": float(y) / H, "v": float(v)}
                            for (x, y, v) in kps[i]],
              "conf": float(scores[i]) if scores is not None else 1.0}
