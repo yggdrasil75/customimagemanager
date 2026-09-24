@@ -283,16 +283,22 @@ def _tf_tag(res, *a, **k):
 
 
 def _tf_depth(res, *a, **k):
-    # ponytail: ultralytics depth result attr name assumed; adjust when yolo26
-    # depth lands in the installed version.
+    """ultralytics Results.depth is a DepthMap (a result wrapper); the map
+    itself is its .data tensor. Wrapping the wrapper in np.asarray gave a
+    0-d object array, which read as "no depth"."""
     r = res[0] if isinstance(res, (list, tuple)) else res
     d = getattr(r, "depth", None)
     if d is None:
         return None
+    t = getattr(d, "data", d)
     try:
-        return np.asarray(d.cpu().numpy() if hasattr(d, "cpu") else d, dtype="float32")
+        arr = t.detach().cpu().numpy() if hasattr(t, "cpu") else np.asarray(t)
     except Exception:
         return None
+    arr = np.asarray(arr, dtype="float32")
+    while arr.ndim > 2 and arr.shape[0] == 1:        # (1, H, W) -> (H, W)
+        arr = arr[0]
+    return arr if arr.ndim == 2 else None
 
 
 def _parse_yolo_result(r, H, W, keep_classes, as_obb):

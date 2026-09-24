@@ -81,6 +81,7 @@ def _build(spec):
         if img_bgr is None:
             return None
         try:
+            img_bgr = _bounded(img_bgr)
             rgb = cv2.cvtColor(img_bgr[:, :, :3], cv2.COLOR_BGR2RGB) \
                 if _HAVE_CV2 else img_bgr[:, :, ::-1]
             t = torch.from_numpy(
@@ -90,6 +91,21 @@ def _build(spec):
         except Exception:
             return None
     return raw_score
+
+
+# Full-resolution transformer metrics scale with pixel count: TOPIQ asked for
+# 11 GB on a 50 MP frame and scored None. Quality judgements hold at 2048 px.
+MAX_SIDE = 2048
+
+
+def _bounded(img):
+    h, w = img.shape[:2]
+    s = max(h, w)
+    if s <= MAX_SIDE or not _HAVE_CV2:
+        return img
+    f = MAX_SIDE / float(s)
+    return cv2.resize(img, (max(1, int(round(w * f))), max(1, int(round(h * f)))),
+                      interpolation=cv2.INTER_AREA)
 
 
 def _scorer(spec):

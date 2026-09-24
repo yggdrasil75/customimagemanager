@@ -48,8 +48,7 @@ MANIFEST = {
     "assets":      [],
 }
 
-_PHENOTYPES = ("gender", "age", "muscle", "weight", "height", "proportions",
-               "cupsize", "firmness", "race")
+_PHENOTYPES = ("gender", "age", "muscle", "weight", "height", "proportions")
 _REASON_MESH = "pip install anny"
 _REASON_SHAPE = ("the anny package has no image or landmark fitter; body.shape needs a "
                  "separate estimator that regresses ANNY parameters")
