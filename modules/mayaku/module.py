@@ -38,6 +38,7 @@ from . import training
 
 _mayaku, _HAVE_MAYAKU = optional_import("mayaku")
 _download_model, _ = optional_import("mayaku.utils.download", attr="download_model")
+_list_models, _ = optional_import("mayaku.utils.download", attr="list_models")
 cv2, _HAVE_CV2 = optional_import("cv2")
 import model_registry
 
@@ -223,11 +224,41 @@ def register(host):
         size = host.model_variant(cap)["size"] or "n"
         return f"mayaku-{size}-{_TASK[cap]}"
 
+    def _pose_capable(src):
+        """Refuse to serve 'pose' from weights without a keypoint head.
+
+        The zoo name for a size is guessed as mayaku-<size>-key; if that
+        resolves to a detect-only checkpoint (or the custom-weights setting
+        points at one) the predictor returns boxes with no pred_keypoints and
+        pose silently reports nobody. Say so, and name what the zoo does offer.
+        """
+        pred = _predictor(src, "pose")
+        model = getattr(pred, "model", None)
+        if model is None or getattr(model, "keypoint_on", getattr(model, "keypoint_head", None)):
+            return
+        offered = ""
+        try:
+            zoo = _list_models() if _list_models else {}
+            kp = [n for task, names in zoo.items() for n in names
+                  if "key" in task.lower() or "pose" in task.lower()]
+            offered = f" Keypoint models in the zoo: {kp or 'none'}."
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"mayaku pose: {src!r} loaded a model with no keypoint head (detect-only "
+            f"weights), so it can never return a skeleton.{offered} Point "
+            f"'{_weights_key('pose')}' at keypoint weights or drop the size.")
+
     def _loader(cap):
         # The handle runs the model; the transform normalises. conf /
         # keep_classes ride through kwargs like the YOLO provider's.
         # resolve the pick at bind time (inside request()'s role context)
-        return lambda: (lambda src: (lambda img, *a, **k: _run(src, img, cap)))(_source(cap))
+        def bind():
+            src = _source(cap)
+            if cap == "pose":
+                _pose_capable(src)
+            return lambda img, *a, **k: _run(src, img, cap)
+        return bind
 
     def _weights_opts(cap):
         def opts():
