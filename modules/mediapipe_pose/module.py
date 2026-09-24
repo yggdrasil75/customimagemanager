@@ -68,10 +68,27 @@ def _build(kind, size):
             running_mode=vision.RunningMode.IMAGE,
             output_face_blendshapes=False,
             output_segmentation_mask=False)
-        lm = vision.HolisticLandmarker.create_from_options(opts)
+        # output_segmentation_mask=False does not stop this mediapipe build
+        # from running SegmentationSmoothingCalculator, which keeps the previous
+        # frame's mask and RET_CHECKs the next frame is the same size. Person
+        # crops differ in size, so a graph may only ever see one size: rebuild
+        # it whenever the crop size changes (cheap next to a detect).
+        state = {"lm": None, "shape": None}
+
+        def _lm_for(crop):
+            shape = tuple(crop.shape[:2])
+            if state["lm"] is None or state["shape"] != shape:
+                if state["lm"] is not None:
+                    try:
+                        state["lm"].close()
+                    except Exception:
+                        pass
+                state["lm"] = vision.HolisticLandmarker.create_from_options(opts)
+                state["shape"] = shape
+            return state["lm"]
 
         def run(crop):
-            r = lm.detect(_mp_image(crop))
+            r = _lm_for(crop).detect(_mp_image(crop))
             if not r.pose_landmarks:
                 return []
             return [_lm(r.pose_landmarks, 33) + _lm(r.face_landmarks, 468)

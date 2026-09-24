@@ -119,7 +119,7 @@ _NSMLX = ["n", "s", "m", "l", "x"]
 # 'tag' (its weights still live in models/yolo/classify/), not 'classify' —
 # that capability is the image's overarching category from a fixed set.
 _FULL = {"detect": "", "segment": "-seg", "tag": "-cls", "pose": "-pose"}
-_OBB_FAMILIES = {"yolov8", "yolo11", "yolo12", "yolo26"}   # ship -obb heads
+_OBB_FAMILIES = {"yolov8", "yolo11", "yolo26"}   # ship -obb heads (yolo12 does not)
 _FAMILIES = [
     # (id, label, prefix, sizes, {cap: suffix}, note)
     ("yolov8",  "YOLOv8",  "yolov8",  _NSMLX,                    _FULL,
@@ -130,14 +130,16 @@ _FAMILIES = [
      "NMS-free, lowest latency detector. Detect only."),
     ("yolo11",  "YOLO11",  "yolo11",  _NSMLX,                    _FULL,
      "Default pick: fewer params than v8 at higher accuracy, every head."),
-    ("yolo12",  "YOLO12",  "yolo12",  _NSMLX,                    _FULL,
-     "Attention-centric; slightly better accuracy than 11, slower on CPU."),
+    ("yolo12",  "YOLO12",  "yolo12",  _NSMLX,                    {"detect": ""},
+     "Attention-centric; slightly better accuracy than 11, slower on CPU. Detect only: "
+     "no -seg/-pose/-cls/-obb weights are published."),
     ("yolo26",  "YOLO26",  "yolo26",  _NSMLX,                    {**_FULL, "depth": "-depth"},
      "Newest; first generation with a depth head."),
 ]
 _SPEED = {"n": "fast", "t": "fast", "s": "fast", "m": "balanced", "b": "balanced",
           "c": "balanced", "l": "accurate", "e": "accurate", "x": "accurate"}
-# ponytail: yolov9 only ships c/e for -seg; a missing combo fails at download.
+# Sizes a head is published in when that differs from the family's list.
+_HEAD_SIZES = {("yolov9", "segment"): ["c", "e"]}
 
 
 def _weights_key(cap):
@@ -359,7 +361,7 @@ def register(host):
                 host.add_config_key(key, default="")
                 declared.add(key)
             host.provide_model(
-                cap, fid, label=flabel, family="YOLO", sizes=sizes,
+                cap, fid, label=flabel, family="YOLO", sizes=_HEAD_SIZES.get((fid, cap), sizes),
                 types=({"pose": [{"value": "body", "label": "Body · 17 pts"}],
                         "detect": box_types if fid in _OBB_FAMILIES else None}.get(cap)),
                 classes=_classes_for(cap, prefix, suffix) if cap in ("detect", "segment") else None,
