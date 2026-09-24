@@ -29,6 +29,7 @@ torch, _HAVE_TORCH = optional_import("torch")
 VitPoseForPoseEstimation, _HAVE_TF = optional_import("transformers", attr="VitPoseForPoseEstimation")
 AutoProcessor, _ = optional_import("transformers", attr="AutoProcessor")
 ort, _HAVE_ORT = optional_import("onnxruntime")
+onnx, _HAVE_ONNX = optional_import("onnx")
 
 MANIFEST = {
     "id":          "vitpose",
@@ -77,11 +78,9 @@ def _resolve_external_data(path, url):
     So: read the references, rewrite each to its bare file name beside the
     graph, and fetch any that are missing from the same place as the graph.
     """
-    try:
-        import onnx
-        from onnx.external_data_helper import ExternalDataInfo, uses_external_data
-    except ImportError:
+    if not _HAVE_ONNX:
         return
+    from_helper = onnx.external_data_helper
     try:
         m = onnx.load(path, load_external_data=False)
     except Exception:
@@ -89,9 +88,9 @@ def _resolve_external_data(path, url):
     d = os.path.dirname(path)
     changed, need = False, set()
     for t in m.graph.initializer:
-        if not uses_external_data(t):
+        if not from_helper.uses_external_data(t):
             continue
-        info = ExternalDataInfo(t)
+        info = from_helper.ExternalDataInfo(t)
         base = os.path.basename(info.location.replace("\\\\", "/"))
         if base != info.location:
             for kv in t.external_data:

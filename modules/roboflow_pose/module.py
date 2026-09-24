@@ -5,10 +5,11 @@ Two one-stage (no person detector needed) transformer pose providers:
 
   rfdetr     RFDETRKeypointPreview from the `rfdetr` package (torch). One
              size; weights download through the package on first use.
-  detrpose   DETRPose (github.com/SebastianJanampa/DETRPose) run from an
-             ONNX export dropped into models/detrpose/pose/ (their
-             tools/deployment/export_onnx.py). Sizes n/s/m/l/x match the
-             file you drop in; pick the file in the model settings.
+  detrpose   DETRPose (github.com/SebastianJanampa/DETRPose), torch, via the
+             `detrpose` package (repo's inference_only branch). Sizes
+             n/s/m/l/x; the official COCO .pth for the picked size is
+             fetched from the repo's releases into models/detrpose/pose/
+             on first use.
 
 Both output the broker 'pose' contract: [{keypoints:[{x,y,v}], conf}].
 """
@@ -23,7 +24,8 @@ import common
 
 cv2, _ = optional_import("cv2")
 RFDETRKeypointPreview, _HAVE_RF = optional_import("rfdetr", attr="RFDETRKeypointPreview")
-ort, _HAVE_ORT = optional_import("onnxruntime")
+torch, _HAVE_TORCH = optional_import("torch")
+DETR, _HAVE_DP = optional_import("detrpose", attr="DETR")
 
 MANIFEST = {
     "id":          "roboflow_pose",
@@ -33,12 +35,13 @@ MANIFEST = {
                    "multi-person pose, 17 COCO keypoints, no separate person detector.",
     "core":        False,
     "requires":    [],
-    "pip":         [],       # rfdetr / onnxruntime probed per provider
+    "pip":         ["detrpose @ git+https://github.com/SebastianJanampa/DETRPose.git@inference_only:detrpose"],
     "assets":      [],
 }
 
 _REGISTERED = set()
-_DETRPOSE_KEY = "detrpose_weights"
+_DP_SIZES = ["n", "s", "m", "l", "x"]
+_DP_URL = "https://github.com/SebastianJanampa/DETRPose/releases/download/model_weights/detrpose_hgnetv2_{}.pth"
 
 
 # ── RF-DETR ──────────────────────────────────────────────────────────────────
@@ -76,39 +79,37 @@ def _rf_people(img_bgr, conf=0.25):
              "conf": float(dc[i])} for i in range(len(xy))]
 
 
-# ── DETRPose (ONNX export) ───────────────────────────────────────────────────
-def _dp_build(path):
-    sess = ort.InferenceSession(path, providers=[model_registry.onnx_provider()])
-    names = [i.name for i in sess.get_inputs()]
-    px = 640
-    try:
-        px = int([d for d in sess.get_inputs()[0].shape if isinstance(d, int)][-1])
-    except Exception:
-        pass
+# ── DETRPose (torch, official release .pth) ──────────────────────────────────
+def _dp_weights(size):
+    """Official COCO checkpoint for `size`, downloaded once into models/detrpose/pose/."""
+    name = f"detrpose_hgnetv2_{size}"
+    return common.fetch_file(_DP_URL.format(size),
+                             os.path.join(model_registry.model_dir("detrpose", "pose"), name + ".pth"))
 
-    def run(img_bgr):
+
+def _dp_build(size):
+    dev = model_registry.device()
+    m = DETR(model=f"detrpose_hgnetv2_{size}", device=dev, resume=_dp_weights(size)).model
+
+    def run(img_bgr, px=640):
         H, W = img_bgr.shape[:2]
         x = cv2.resize(img_bgr[:, :, ::-1], (px, px)).astype(np.float32).transpose(2, 0, 1)[None] / 255.0
-        feed = {names[0]: x}
-        if len(names) > 1:                                     # orig_target_sizes
-            feed[names[1]] = np.array([[W, H]], dtype=np.int64)
-        outs = sess.run(None, feed)
-        kps = next(o for o in outs if o.ndim == 4)             # (1,N,17,2|3) px
-        scores = next(o for o in outs if o.ndim == 2 and o.dtype.kind == "f")
-        return kps[0], scores[0]
+        x = torch.from_numpy(np.ascontiguousarray(x)).to(dev)
+        with torch.no_grad():
+            out = m.postprocessor(m.model(x), torch.tensor([[W, H]], device=dev))
+        return out[-1][0].float().cpu().numpy(), out[0][0].float().cpu().numpy()   # (N,17,2) px, (N,)
     return run
 
 
-def _dp_people(img_bgr, path, conf=0.25):
+def _dp_people(img_bgr, size, conf=0.25):
     img = common.coerce_bgr(img_bgr)
     if img is None:
         return []
-    if not path:
-        raise RuntimeError("no DETRPose .onnx in models/detrpose/pose/ (export it from the DETRPose repo)")
-    key = f"pose:detrpose:{path}"
+    size = size if size in _DP_SIZES else "l"
+    key = f"pose:detrpose:{size}"
     if key not in _REGISTERED:
-        model_registry.register(key, lambda: _dp_build(path), cost_mb=300,
-                                gpu=model_registry.on_gpu(), model_path=path)
+        model_registry.register(key, lambda: _dp_build(size), cost_mb=300,
+                                gpu=model_registry.on_gpu())
         _REGISTERED.add(key)
     run = model_registry.acquire(key)
     if run is None:
@@ -122,10 +123,6 @@ def _dp_people(img_bgr, path, conf=0.25):
         pts = [(float(p[0]) / W, float(p[1]) / H, float(p[2]) if len(p) > 2 else float(s)) for p in k]
         out.append({"keypoints": common.crop_keypoints(pts, 0, 0, W, H, W, H), "conf": float(s)})
     return out
-
-
-def _dp_weights():
-    return model_registry.list_weights("detrpose", "pose", exts=(".onnx",))
 
 
 def register(host):
@@ -142,27 +139,16 @@ def register(host):
         transform=None, available=lambda: _HAVE_RF, reason="pip install rfdetr",
         cost_mb=600, gpu=model_registry.on_gpu())
 
-    host.add_config_key(_DETRPOSE_KEY, default="")
-
-    def _dp_path():
-        p = (host.config.get(_DETRPOSE_KEY) or "").strip()
-        return p if p else (_dp_weights() or [""])[0]
-
     host.provide_model(
-        "pose", "detrpose", label="DETRPose", family="Roboflow", sizes=[],
+        "pose", "detrpose", label="DETRPose", family="Roboflow", sizes=_DP_SIZES,
         types=types17, supports_conf=True,
-        settings=[{"key": _DETRPOSE_KEY, "label": "ONNX export", "kind": "select",
-                   "options": lambda: [{"value": "", "label": "First file in models/detrpose/pose/"}] +
-                                      [{"value": p, "label": os.path.basename(p)} for p in _dp_weights()],
-                   "help": "Export with DETRPose's tools/deployment/export_onnx.py and drop the "
-                           ".onnx (n/s/m/l/x) into models/detrpose/pose/."}],
-        note="DETRPose (Janampa & Sunkara): real-time end-to-end transformer multi-person pose, "
-             "run from its ONNX export. Drop the .onnx into models/detrpose/pose/.",
+        note="DETRPose (Janampa & Pattichis): real-time end-to-end transformer multi-person pose. "
+             "Official COCO weights for the picked size download on first use.",
         speed="balanced",
-        loader=lambda: (lambda p, c: (lambda img, *a, conf=c, **k: _dp_people(img, p, conf)))(
-            _dp_path(), host.model_variant("pose")["conf"]),
-        transform=None, available=lambda: _HAVE_ORT and bool(_dp_weights()),
-        reason="pip install onnxruntime + a DETRPose .onnx in models/detrpose/pose/",
+        loader=lambda: (lambda v: (lambda img, *a, conf=v["conf"], **k: _dp_people(img, v["size"], conf)))(
+            host.model_variant("pose")),
+        transform=None, available=lambda: _HAVE_TORCH and _HAVE_DP,
+        reason="pip install git+https://github.com/SebastianJanampa/DETRPose.git@inference_only",
         cost_mb=300, gpu=model_registry.on_gpu())
 
     host.logger.info("roboflow_pose module: registered rfdetr and detrpose (17)")
