@@ -56,12 +56,39 @@ def test_iqa_size_table_and_params():
     assert sum(p.numel() for p in m.parameters()) == net.count_params(dims, 64, 2)
 
 
-def test_missing_parts():
+def test_missing_parts_is_about_models_having_run():
     from modules.personal_iqa import module as piqa
-    full = {"embed": [[1]], "iqa": [[0.5]], "face": [[0]], "pose17": [], "pose133": [[0]], "tags": [3, 0]}
-    assert piqa.missing_parts(full, ["embed", "iqa", "face", "pose", "tags"]) == []
-    assert piqa.missing_parts({"embed": [[1]], "iqa": [], "face": [], "tags": [0]},
-                              ["embed", "iqa", "face", "pose", "tags"]) == ["iqa", "face", "pose", "tags"]
+    req = ["embed", "iqa", "face", "pose", "tags"]
+    landscape = {"embed": [[1]], "iqa": [[0.5]], "face": [], "pose17": [], "tags": [0],
+                 "_processed": {"face": True, "pose": True, "tags": True}}
+    assert piqa.missing_parts(landscape, req) == []                    # nothing found, but processed
+    unscanned = {"embed": [[1]], "iqa": [], "face": [[0]], "tags": [3], "_processed": {"face": False, "pose": False}}
+    assert piqa.missing_parts(unscanned, req) == ["iqa", "face", "pose"]
+
+
+def test_pose_tokens_default_is_coco_only():
+    from modules.pose import skeleton as sk
+    kps = [{"x": 0.5 + 0.01 * i, "y": 0.1 + 0.05 * i, "v": 1.0} for i in range(17)]
+    t = sk.tokens(kps)
+    assert t["kind"] == "pose17" and len(t["norm"]) == 34 and len(t["raw"]) == 51 and len(t["bones"]) == 18
+    big = sk.tokens([dict(k, x=k["x"] * 3, y=k["y"] * 3) for k in kps])
+    assert big["bones"] == pytest.approx(t["bones"], rel=1e-4)             # proportions are scale-free
+    assert big["norm"] == pytest.approx(t["norm"], rel=1e-4) and big["raw"] != t["raw"]
+    assert sk.tokens([{"x": 0, "y": 0, "v": 0}] * 133)["kind"] == "pose133"
+    assert sk.tokens([{"x": 0, "y": 0, "v": 0}] * 33) is None               # not COCO: the provider's job
+
+
+def test_mediapipe_provider_owns_its_conversion():
+    from modules.mediapipe_pose import module as mp
+    from modules.pose import skeleton as sk
+    blaze = [{"x": i / 33, "y": 0.5, "v": 1.0} for i in range(33)]
+    assert len(mp.to_coco(blaze)) == 17 and mp.to_coco(blaze)[5] is blaze[11]      # left shoulder
+    hol = [{"x": i / 543, "y": 0.5, "v": 1.0} for i in range(543)]
+    d = mp.to_coco(hol)
+    assert len(d) == 133 and d[91] is hol[501] and d[132] is hol[542] and d[19] is hol[29]
+    assert len(set(mp.MESH468_TO_68)) == 68 and max(mp.MESH468_TO_68) < 468
+    assert mp.to_coco(d) is d                                                     # already converted
+    assert sk.tokens(mp.to_coco(hol))["kind"] == "pose133"
 
 
 def _fake_service(tmp):
@@ -82,7 +109,7 @@ def _fake_service(tmp):
     return {"features": features, "fit": fit, "save": save, "ckpt_path": os.path.join(tmp, "scorer.pt"),
             "ckpt_dir": tmp, "count_params": lambda dims, d, depth: d * depth, "Scorer": None, "batch": None,
             "sizes": lambda: {"a": {"d": 8, "depth": 1}, "b": {"d": 16, "depth": 1}},
-            "required": lambda: ["embed", "iqa", "face", "pose"],
+            "required": lambda: ["embed", "iqa", "face", "pose"], "token_dims": {"face": 215, "iqa": 1},
             "detectors": lambda: {"embed": True, "iqa": True, "face": True, "pose": True}}, saved
 
 

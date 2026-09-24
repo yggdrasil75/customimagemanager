@@ -114,14 +114,14 @@ def _is_val(key):
 
 def bench(svc, sizes, embed_dim=512, batch=64):
     """Untrained speed-vs-parameters per size (params without torch; timings with)."""
-    dims = {"embed": embed_dim, "tile": embed_dim, "face": 215, "pose17": 34, "pose133": 266, "iqa": 1}
+    dims = {"embed": embed_dim, "tile": embed_dim, **svc["token_dims"]}
     out = {}
     for name, sp in sizes.items():
         row = {"d": sp["d"], "depth": sp["depth"], "params": svc["count_params"](dims, sp["d"], sp["depth"])}
         try:
             import torch, model_registry
-            sample = {"embed": [[0.1] * embed_dim], "tile": [[0.1] * embed_dim] * 9, "face": [[0.0] * 215],
-                      "pose17": [], "pose133": [], "iqa": [[0.5]], "tags": [1, 2, 3] + [0] * 29}
+            sample = {k: [[0.1] * n] for k, n in dims.items()}
+            sample.update(tile=[[0.1] * embed_dim] * 9, tags=[1, 2, 3] + [0] * 29)
             for dev, key in (("cpu", "ms_per_image_cpu"), (model_registry.device(), "ms_per_image_gpu")):
                 if dev == "cpu" and key == "ms_per_image_gpu":
                     continue

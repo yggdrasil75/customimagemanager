@@ -40,13 +40,13 @@
   </div>
 
   <div>
-    <label class="trlbl">Required per image <span class="text-gray-500">(missing any = skipped, counted in the report)</span></label>
+    <label class="trlbl">Required per image <span class="text-gray-500">(models that must have RUN on it; finding nothing is fine, so non-human photos train too)</span></label>
     <div id="iqt_required" class="tr-flow">
       <label class="trck" title="Encoder embedding of the whole image + 3x3 tiles (content)."><input type="checkbox" data-req="embed" checked class="accent-purple-500"> embed</label>
       <label class="trck" title="Base no-reference IQA score (blur, noise, splotches: the technical quality signal)."><input type="checkbox" data-req="iqa" checked class="accent-purple-500"> base IQA</label>
-      <label class="trck" title="At least one detected face with 106-pt geometry (expression, head pose)."><input type="checkbox" data-req="face" checked class="accent-purple-500"> face</label>
-      <label class="trck" title="At least one person skeleton (body proportions, e.g. heads-tall)."><input type="checkbox" data-req="pose" checked class="accent-purple-500"> pose</label>
-      <label class="trck" title="At least one tag on the file (library images only; datasets have none)."><input type="checkbox" data-req="tags" class="accent-purple-500"> tags</label>
+      <label class="trck" title="The face model ran on the image (aligned geometry + box per face found; zero faces is still processed)."><input type="checkbox" data-req="face" checked class="accent-purple-500"> face</label>
+      <label class="trck" title="The pose model ran on the image (normalised skeleton, raw skeleton and bone proportions per person found; zero people is still processed)."><input type="checkbox" data-req="pose" checked class="accent-purple-500"> pose</label>
+      <label class="trck" title="Auto-tagging ran on the file (library images only; datasets have no tags)."><input type="checkbox" data-req="tags" class="accent-purple-500"> tags</label>
     </div>
     <div id="iqt_detectors" class="text-[10px] text-gray-500"></div>
   </div>

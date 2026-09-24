@@ -65,6 +65,7 @@ def _estimate(host, img_bgr, detect=None):
     try:
         people = detect(img_bgr)          # canonical: [{keypoints:[{x,y,v}], conf}]
         base["people"] = [{"keypoints": p.get("keypoints", [])} for p in people]
+        base["provider"] = host.broker.selected_id("pose") or ""
         if base["people"]:
             kind, names, edges = _pose_core.topology(max(len(p["keypoints"]) for p in base["people"]))
             base.update(kind=kind, names=names, edges=edges)
@@ -86,6 +87,21 @@ def register(host):
 
     # RTMPose whole-body (133 pts) as its own pose provider. Size maps onto
     # rtmlib's mode; the picker's type select shows the single whole-body type.
+    # Learner tokens for a stored pose dict: [{kind, norm, raw, bones}] per person.
+    # Shim only: the conversion lives with whoever made the skeleton. A provider
+    # registers "pose.tokens.<provider id>" (fn(keypoints) -> that dict or None)
+    # and this routes to it by the dict's "provider"; COCO-17/133 output needs
+    # nothing and gets skeleton.tokens. Nothing here knows any other topology.
+    def _tokens(pose):
+        fn = host.get_service(f"pose.tokens.{(pose or {}).get('provider', '')}") or _pose_core.tokens
+        out = []
+        for p in (pose or {}).get("people") or []:
+            t = fn(p.get("keypoints") or [])
+            if t:
+                out.append(t)
+        return out
+    host.provide_service("pose.tokens", _tokens)
+
     # T-pose aggregation for core's person estimator (fn(skeletons) -> dict|None).
     host.provide_service("pose.tpose", lambda skeletons: _pose_core.aggregate_tpose(
         skeletons, _pose_core.COCO_KP_NAMES, _pose_core.COCO_SKELETON))
