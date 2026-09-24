@@ -26,6 +26,42 @@ def tier_for(n_ratings):
     return TIERS[-1][1:]
 
 
+# Named size table for pretraining (iqa_train). Editable via the
+# personal_iqa_sizes setting: one "name d depth" per line. d must be a
+# multiple of 8 (8 attention heads).
+SIZES = {"nano": {"d": 64, "depth": 1}, "small": {"d": 128, "depth": 2},
+         "medium": {"d": 256, "depth": 4}, "large": {"d": 384, "depth": 6},
+         "xl": {"d": 512, "depth": 8}, "xxl": {"d": 768, "depth": 12}}
+
+
+def parse_sizes(text):
+    """"name d depth" lines -> {name: {d, depth}}; empty/invalid -> SIZES."""
+    out = {}
+    for line in str(text or "").splitlines():
+        p = [x for x in line.replace(",", " ").replace(":", " ").split() if x]
+        if len(p) < 2 or p[0].startswith("#"):
+            continue
+        try:
+            d = max(8, int(p[1]) // 8 * 8)
+            depth = max(1, int(p[2])) if len(p) > 2 else 1
+        except ValueError:
+            continue
+        out[p[0].lower()] = {"d": d, "depth": depth}
+    return out or {k: dict(v) for k, v in SIZES.items()}
+
+
+def sizes_text(sizes=None):
+    return "\n".join(f"{k} {v['d']} {v['depth']}" for k, v in (sizes or SIZES).items())
+
+
+def count_params(dims, d, depth):
+    """Parameter count without building the net (tags + typed projections + blocks + head)."""
+    n = sum((v + 1) * d + d for v in dims.values())            # proj + type_emb per token type
+    n += (TAG_BUCKETS + 1) * d + d                              # tag_emb + cls
+    per_block = 4 * d * d + 4 * d + 2 * (4 * d * d) + 4 * d + d + 4 * d   # attn + ffn + 2 layernorms
+    return n + depth * per_block + 2 * d + d + 1
+
+
 class Scorer(nn.Module):
     def __init__(self, dims, d=128, depth=2):
         """dims: {token_type: input_dim}."""

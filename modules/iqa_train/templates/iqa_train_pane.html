@@ -1,0 +1,93 @@
+<!-- Trainer > IQA sub-tab (module "iqa_train", off by default). Pretrains the
+     Personal IQA scorer size series from labelled datasets on disk (AVA etc.)
+     through the personal_iqa feature pipeline. iqa_train.js adopts this element
+     into #trainer_pane. -->
+<div id="iqa_train_pane" class="hidden flex-1 overflow-y-auto p-3 space-y-3 text-sm">
+  <div>
+    <div class="flex justify-between items-center">
+      <span class="font-bold text-purple-300">Pretrain Personal IQA (scorer sizes)</span>
+      <span id="iqt_phase" class="text-xs text-gray-400">idle</span>
+    </div>
+    <p class="text-xs text-gray-500 mt-1">Each dataset image goes through the same feature pipeline the personal
+      scorer uses (encoder embed + tiles, faces, pose, base IQA, tags) and is cached, then every size you tick is
+      fitted on the same samples and scored on a hold-out against the base IQA. The active size becomes the
+      personal scorer; your own Retrain later fine-tunes it on your star ratings.</p>
+  </div>
+
+  <div id="iqt_live" class="text-xs bg-gray-900 border border-gray-800 rounded p-2 text-gray-300 whitespace-pre-wrap"></div>
+
+  <div>
+    <label class="trlbl">Size table <span class="text-gray-500">(one per line: name d depth)</span></label>
+    <textarea id="iqt_sizes_text" rows="4" class="trinp font-mono" onchange="iqtSizesChanged()"
+      title="Your own size series. d = transformer width (multiple of 8, 8 heads); depth = encoder blocks. Edit, then tick which to train. Saved with the build. Blank = the built-in defaults."></textarea>
+    <label class="trlbl mt-1">Sizes to train</label>
+    <div id="iqt_sizes" class="tr-flow bg-gray-900 border border-gray-700 rounded p-1"></div>
+    <div class="tr-flow items-end mt-1">
+      <div class="tr-field"><label class="trlbl">Active size after training</label>
+        <select id="iqt_active" class="trinp" title="Which trained size becomes scorer.pt, the model the Personal IQA provider uses. Every trained size is also kept as scorer_&lt;size&gt;.pt and can be activated later."></select></div>
+      <button onclick="iqtBench()" id="iqt_bench" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs"
+        title="Speed vs parameters without training: params and ms per image on CPU (batch 1) and on the GPU per size. Feature extraction cost is the same for every size and not included.">Benchmark sizes</button>
+    </div>
+  </div>
+
+  <div class="space-y-1">
+    <label class="trlbl">Datasets <span class="text-gray-500">(one per line: folder labels_file)</span></label>
+    <textarea id="iqt_datasets" rows="3" class="trinp font-mono"
+      title="A folder of images and its labels file. AVA.txt (id image_id votes1..10 ...) is read as the mean vote; anything else as name,score CSV/TSV (scores 1-10 or 0-1). Labels file may be omitted when the folder holds labels.csv or AVA.txt. Saved with the build."
+      placeholder="/data/AVA/images /data/AVA/AVA.txt&#10;/data/koniq /data/koniq/labels.csv"></textarea>
+    <div id="iqt_ds_status" class="text-[10px] text-gray-500"></div>
+    <label class="trck" title="Also include this library's star ratings (as score/5) in the training set. Same required-data rule applies."><input type="checkbox" id="iqt_use_ratings" class="accent-purple-500"> My star ratings (<span id="iqt_ratings_n">0</span>)</label>
+  </div>
+
+  <div>
+    <label class="trlbl">Required per image <span class="text-gray-500">(missing any = skipped, counted in the report)</span></label>
+    <div id="iqt_required" class="tr-flow">
+      <label class="trck" title="Encoder embedding of the whole image + 3x3 tiles (content)."><input type="checkbox" data-req="embed" checked class="accent-purple-500"> embed</label>
+      <label class="trck" title="Base no-reference IQA score (blur, noise, splotches: the technical quality signal)."><input type="checkbox" data-req="iqa" checked class="accent-purple-500"> base IQA</label>
+      <label class="trck" title="At least one detected face with 106-pt geometry (expression, head pose)."><input type="checkbox" data-req="face" checked class="accent-purple-500"> face</label>
+      <label class="trck" title="At least one person skeleton (body proportions, e.g. heads-tall)."><input type="checkbox" data-req="pose" checked class="accent-purple-500"> pose</label>
+      <label class="trck" title="At least one tag on the file (library images only; datasets have none)."><input type="checkbox" data-req="tags" class="accent-purple-500"> tags</label>
+    </div>
+    <div id="iqt_detectors" class="text-[10px] text-gray-500"></div>
+  </div>
+
+  <div class="tr-flow">
+    <div class="tr-field"><label class="trlbl">Max images</label><input id="iqt_max" type="number" value="100000" min="20" class="trinp" title="Cap on labelled images used (in label-file order). Feature extraction is the slow part; results are cached so a rerun only pays for new images."></div>
+    <div class="tr-field"><label class="trlbl">Epochs</label><input id="iqt_epochs" type="number" value="10" min="1" class="trinp" title="Full passes over the cached features, per size. Cheap compared with feature extraction."></div>
+    <div class="tr-field"><label class="trlbl">Batch</label><input id="iqt_batch" type="number" value="64" min="4" class="trinp" title="Samples per optimiser step."></div>
+    <div class="tr-field"><label class="trlbl">Learning rate</label><input id="iqt_lr" type="number" value="0.001" step="0.0001" min="0" class="trinp" title="AdamW learning rate."></div>
+    <div class="tr-field"><label class="trlbl">Hold-out %</label><input id="iqt_holdout" type="number" value="10" min="1" max="50" class="trinp" title="Percent of images held out by path hash to report MSE and Spearman against the base IQA."></div>
+  </div>
+
+  <div class="tr-flow">
+    <label class="trck" title="Write every trained size to models/personal_iqa/iqa/scorer_&lt;size&gt;.pt, copy the active one to scorer.pt and reload the Personal IQA provider right away."><input type="checkbox" id="iqt_install" checked class="accent-emerald-500"> Install for this app (live)</label>
+  </div>
+
+  <div class="flex gap-2">
+    <button onclick="iqtBuild()" id="iqt_build" class="flex-1 bg-purple-600 hover:bg-purple-700 py-2 rounded font-bold text-sm"
+      title="Extract/cache features for the datasets, then train the ticked sizes. Runs in the background; progress shows next to the title and in the status bar.">Pretrain IQA models</button>
+    <button onclick="iqtStop()" id="iqt_stop" class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded font-bold text-sm disabled:opacity-40" disabled
+      title="Stop the running build. Cached features are kept; nothing else is written.">Stop</button>
+  </div>
+
+  <div class="overflow-x-auto">
+    <table id="iqt_table" class="text-[10px] font-mono w-full hidden">
+      <thead class="text-gray-400"><tr>
+        <th class="text-left" title="Size name">size</th>
+        <th class="text-right" title="Trainable parameters">params</th>
+        <th class="text-right" title="Scorer ms per image, batch 1 on CPU (features excluded)">cpu ms</th>
+        <th class="text-right" title="Scorer ms per image, batched on the GPU (features excluded)">gpu ms</th>
+        <th class="text-right" title="Hold-out Spearman rank correlation with the labels (higher is better)">spearman</th>
+        <th class="text-right" title="Base IQA model's Spearman on the same hold-out; the personal provider only enables when beaten">base</th>
+        <th class="text-right" title="Hold-out mean squared error (scores 0..1)">mse</th>
+        <th class="text-right" title="Final training MSE">loss</th>
+        <th></th>
+      </tr></thead>
+      <tbody id="iqt_rows"></tbody>
+    </table>
+  </div>
+  <details class="text-xs">
+    <summary class="text-gray-400 cursor-pointer">Last build report</summary>
+    <pre id="iqt_report" class="mt-1 bg-gray-950 border border-gray-700 rounded p-2 text-gray-300 font-mono text-[10px] whitespace-pre-wrap min-h-[3rem]"></pre>
+  </details>
+</div>

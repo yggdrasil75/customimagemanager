@@ -1,8 +1,8 @@
-/* trainer.js — the Trainer tab.
+/* trainer.js - the Trainer tab.
  *
  * Owns only what's genuinely new: building persistent numbered subsets, the
  * media filter, and the training controls. Reviewing/boxing an image is NOT
- * reimplemented here — clicking a tile calls the app's own selectFile(), which
+ * reimplemented here - clicking a tile calls the app's own selectFile(), which
  * loads the image into the shared editor pane with its real canvas box drawing,
  * region_modal, renderRegionsList() and autosave. When the user saves boxes
  * there, _sync_yolo writes the YOLO .txt, so the set's images become trainable.
@@ -121,7 +121,7 @@
   function renderGrid() {
     const grid = $('tr_grid');
     if (!grid) return;
-    $('tr_grid_title').innerText = currentSet ? `${currentSet} — ${items.length} images` : 'No set selected';
+    $('tr_grid_title').innerText = currentSet ? `${currentSet} - ${items.length} images` : 'No set selected';
     if (!items.length) {
       grid.innerHTML = `<p class="text-gray-600 text-sm p-3">`
         + (currentSet ? 'This set is empty.' : 'Build a set to get started.') + `</p>`;
@@ -169,7 +169,7 @@
   }
 
   // Select tile i: mark it current, scroll it into view, and open it in the
-  // shared editor (the SAME path the gallery uses — box drawing/naming/saving
+  // shared editor (the SAME path the gallery uses - box drawing/naming/saving
   // all happen there, not here).
   function trPick(i) {
     if (i < 0 || i >= items.length) return;
@@ -307,7 +307,7 @@
 
   // ── box-class filter ───────────────────────────────────────────────────────
   // Checked classes scope training/validation to ONLY those box types; none
-  // checked = all classes. This never edits stored regions — it just filters
+  // checked = all classes. This never edits stored regions - it just filters
   // what the generated dataset/diff includes.
   async function loadClasses() {
     const box = $('tr_classes');
@@ -370,7 +370,7 @@
     if (!scored) {
       // New-only run: predictions were stored for review, nothing was scored.
       $('tr_val_summary').innerHTML =
-        `<div class="text-gray-300">Proposed boxes on ${(d.added_new || []).length} new image(s) — review and Accept below.</div>` +
+        `<div class="text-gray-300">Proposed boxes on ${(d.added_new || []).length} new image(s) - review and Accept below.</div>` +
         `<div class="text-gray-400 mt-0.5">` + chip('added', c.added) + `</div>`;
     } else {
     $('tr_val_summary').innerHTML =
@@ -404,10 +404,10 @@
     const accEl = $('tr_acc');
     if (accEl && scored) accEl.innerHTML = ` · <span class="${below ? 'text-red-400' : 'text-green-400'}">F1 ${fmt(s.f1)}</span>`;
     if (!scored) {
-      trStatus(`Stored proposals for ${(d.added_new || []).length} new image(s) — review and Accept, then they become labelled training data.`);
+      trStatus(`Stored proposals for ${(d.added_new || []).length} new image(s) - review and Accept, then they become labelled training data.`);
     } else {
       trStatus(below
-        ? `F1 ${fmt(s.f1)} is below your bound ${fmt(bound)} — review, accept fixes, then retrain.`
+        ? `F1 ${fmt(s.f1)} is below your bound ${fmt(bound)} - review, accept fixes, then retrain.`
         : `F1 ${fmt(s.f1)} meets your bound ${fmt(bound)}.`);
     }
   }
@@ -471,7 +471,7 @@
   // field id -> value. Presets are stored SERVER-SIDE (library.db) via
   // /api/trainer/presets, so they survive restarts and are shared across
   // browsers. Selecting one applies its values; editing fields never mutates the
-  // stored preset — the user must Overwrite to save or Reload to discard edits.
+  // stored preset - the user must Overwrite to save or Reload to discard edits.
   // Only the last-selected preset NAME is cached in localStorage as a UI
   // convenience (not data we care about losing).
   const PRESET_SEL_KEY = 'trainer_preset_selected_v1';
@@ -648,7 +648,46 @@
     loadSets();      // always refresh on open (sets/boxes may have changed elsewhere)
     loadClasses();   // refresh the box-class filter list
     loadDevices();   // query torch for real devices, replacing the CPU placeholder
+    trSubtab(_trSub);              // re-show the active sub-tab (refreshes module sub-tabs)
   }
+
+  // -- sub-tabs ------------------------------------------------------------
+  // Box is built in (#tr_sub_box). Other modules call
+  // registerTrainerSubtab({id, label, feature, paneId, onShow, title}): their
+  // pane element is adopted into #trainer_pane and a button added to the bar.
+  window._trainerSubtabs = window._trainerSubtabs || {};
+  let _trSub = 'box';
+  function registerTrainerSubtab(spec) {
+    const bar = $('tr_subtabs'), pane = $(spec.paneId), host = $('trainer_pane');
+    if (!bar || !pane || !host || !spec.id) return false;
+    window._trainerSubtabs[spec.id] = spec;
+    host.appendChild(pane);
+    pane.classList.add('hidden');
+    const btn = document.createElement('button');
+    btn.dataset.trsub = spec.id; btn.textContent = spec.label || spec.id;
+    btn.className = 'tr-subtab';
+    if (spec.title) btn.title = spec.title;
+    if (spec.feature) btn.setAttribute('data-feature', spec.feature);
+    btn.addEventListener('click', () => trSubtab(spec.id));
+    bar.appendChild(btn);
+    bar.classList.remove('hidden');
+    if (window.applyFeatureVisibility) applyFeatureVisibility(bar);
+    trSubtab(_trSub);
+    return true;
+  }
+  function trSubtab(id) {
+    if (id !== 'box' && !window._trainerSubtabs[id]) id = 'box';
+    _trSub = id;
+    document.querySelectorAll('#tr_subtabs [data-trsub]').forEach(b =>
+      b.classList.toggle('active', b.dataset.trsub === id));
+    $('tr_sub_box')?.classList.toggle('hidden', id !== 'box');
+    for (const k in window._trainerSubtabs) {
+      const s = window._trainerSubtabs[k];
+      $(s.paneId)?.classList.toggle('hidden', k !== id);
+      if (k === id && s.onShow) { try { s.onShow(); } catch (e) { console.error('subtab ' + k, e); } }
+    }
+  }
+  window.registerTrainerSubtab = registerTrainerSubtab;
 
   document.addEventListener('keydown', trKeyNav);
 
@@ -659,7 +698,7 @@
     trValidate, trAccept, onBoxesSaved,
     trSetGallerySafe, trClassChanged,
     trPresetSelect, trPresetReload, trPresetOverwrite, trPresetNew, trPresetDelete,
-    trBackendChange,
+    trBackendChange, trSubtab,
   });
 })();
 

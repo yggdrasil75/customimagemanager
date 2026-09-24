@@ -23,8 +23,61 @@ except Exception:
     _HAVE_TORCH = False
 
 WORK: int = 128
-WIDTH_MIN: float = 0.25
-WIDTH_MAX: float = 2.0
+WIDTH_MIN: float = 0.125
+WIDTH_MAX: float = 8.0
+
+# Named size series (nano..xxl). width scales the channel counts [16,32,64,128];
+# depth is conv blocks per stage (1 = the original 4-conv tower). Checkpoints
+# store their own width/depth, so any size loads regardless of the setting.
+SIZES: "dict[str, dict]" = {
+    "nano":   {"width": 0.25, "depth": 1},
+    "small":  {"width": 0.5,  "depth": 1},
+    "medium": {"width": 1.0,  "depth": 2},
+    "large":  {"width": 2.0,  "depth": 2},
+    "xl":     {"width": 3.0,  "depth": 3},
+    "xxl":    {"width": 4.0,  "depth": 3},
+}
+SIZE_ORDER = list(SIZES)
+
+
+def parse_sizes(text: str) -> "dict[str, dict]":
+    """!
+    @brief User size table from the dup_cnn_sizes setting: one "name width depth"
+           per line (separators: space, comma, colon). Empty/invalid -> the defaults.
+    """
+    out = {}
+    for line in str(text or "").splitlines():
+        parts = [x for x in line.replace(",", " ").replace(":", " ").split() if x]
+        if len(parts) < 2 or parts[0].startswith("#"):
+            continue
+        try:
+            w = min(WIDTH_MAX, max(WIDTH_MIN, float(parts[1])))
+            d = max(1, int(parts[2])) if len(parts) > 2 else 1
+        except ValueError:
+            continue
+        out[parts[0].lower()] = {"width": w, "depth": d}
+    return out or {k: dict(v) for k, v in SIZES.items()}
+
+
+def sizes_text(sizes: "dict[str, dict] | None" = None) -> str:
+    """! @brief The inverse of parse_sizes, for the settings textarea."""
+    return "\n".join(f"{k} {v['width']} {v['depth']}" for k, v in (sizes or SIZES).items())
+
+
+def size_spec(size: str, sizes: "dict | None" = None) -> "dict":
+    """! @brief {width, depth} for a size name in `sizes` (default table); unknown -> medium."""
+    tbl = sizes or SIZES
+    return dict(tbl.get(str(size).lower()) or tbl.get("medium") or next(iter(tbl.values())))
+
+
+def count_params(width_mult: float, depth: int = 1) -> int:
+    """! @brief Parameter count of a size without building it (no torch needed)."""
+    n, cin = 0, 3
+    for c in _channels(width_mult):
+        n += cin * c * 9 + c + 2 * c
+        n += (max(1, int(depth)) - 1) * (c * c * 9 + c + 2 * c)
+        cin = c
+    return n + 2 * cin * cin + cin + cin + 1
 
 def _to_work_bgr(img: "np.ndarray | None") -> "np.ndarray | None":
     """!
@@ -63,16 +116,17 @@ if _HAVE_TORCH:
     class _Encoder(nn.Module):
         """! @brief Shared conv tower mapping one WORKxWORK BGR image to an embedding."""
 
-        def __init__(self, width_mult: float) -> None:
+        def __init__(self, width_mult: float, depth: int = 1) -> None:
             super().__init__()
-            c1, c2, c3, c4 = _channels(width_mult)
-            self.net = nn.Sequential(
-                nn.Conv2d(3, c1, 3, 2, 1), nn.BatchNorm2d(c1), nn.ReLU(inplace=True),
-                nn.Conv2d(c1, c2, 3, 2, 1), nn.BatchNorm2d(c2), nn.ReLU(inplace=True),
-                nn.Conv2d(c2, c3, 3, 2, 1), nn.BatchNorm2d(c3), nn.ReLU(inplace=True),
-                nn.Conv2d(c3, c4, 3, 2, 1), nn.BatchNorm2d(c4), nn.ReLU(inplace=True),
-                nn.AdaptiveAvgPool2d(1), nn.Flatten())
-            self.embed_dim = c4
+            layers, cin = [], 3
+            for c in _channels(width_mult):
+                layers += [nn.Conv2d(cin, c, 3, 2, 1), nn.BatchNorm2d(c), nn.ReLU(inplace=True)]
+                for _ in range(max(1, int(depth)) - 1):
+                    layers += [nn.Conv2d(c, c, 3, 1, 1), nn.BatchNorm2d(c), nn.ReLU(inplace=True)]
+                cin = c
+            layers += [nn.AdaptiveAvgPool2d(1), nn.Flatten()]
+            self.net = nn.Sequential(*layers)
+            self.embed_dim = cin
 
         def forward(self, x: "torch.Tensor") -> "torch.Tensor":
             return self.net(x)
@@ -80,9 +134,9 @@ if _HAVE_TORCH:
     class _SiameseNet(nn.Module):
         """! @brief Encode both images with a shared tower, classify the pair from |a-b| and a*b."""
 
-        def __init__(self, width_mult: float) -> None:
+        def __init__(self, width_mult: float, depth: int = 1) -> None:
             super().__init__()
-            self.enc = _Encoder(width_mult)
+            self.enc = _Encoder(width_mult, depth)
             d = self.enc.embed_dim
             self.head = nn.Sequential(
                 nn.Linear(d * 2, d), nn.ReLU(inplace=True), nn.Linear(d, 1))
@@ -100,29 +154,46 @@ class DupCNN:
     callers can use this unconditionally and let the logistic model take over.
     """
 
-    def __init__(self, width_mult: float = 1.0) -> None:
+    def __init__(self, width_mult: float = 1.0, depth: int = 1, size: str = "") -> None:
         self.width_mult: float = min(WIDTH_MAX, max(WIDTH_MIN, float(width_mult)))
+        self.depth: int = max(1, int(depth))
+        self.size: str = size
         self.trained: bool = False
-        self.net = _SiameseNet(self.width_mult) if _HAVE_TORCH else None
+        self.net = _SiameseNet(self.width_mult, self.depth) if _HAVE_TORCH else None
+
+    @classmethod
+    def sized(cls, size: str, sizes: "dict | None" = None) -> "DupCNN":
+        """! @brief A fresh, untrained model of a named size from `sizes` (default table)."""
+        sp = size_spec(size, sizes)
+        return cls(sp["width"], sp["depth"], size=str(size).lower())
 
     @property
     def available(self) -> bool:
         """! @brief True when torch is importable and a model has been built."""
         return _HAVE_TORCH and self.net is not None
 
+    @property
+    def params(self) -> int:
+        """! @brief Trainable parameter count (0 without torch)."""
+        return sum(p.numel() for p in self.net.parameters()) if self.available else 0
+
     @classmethod
-    def load(cls, path: str, width_mult: float = 1.0) -> "DupCNN":
+    def load(cls, path: str, width_mult: float = 1.0, depth: int = 1) -> "DupCNN":
         """!
-        @brief Load a checkpoint if torch is present and the file exists.
+        @brief Load a checkpoint if torch is present and the file exists. The
+               checkpoint carries its own width/depth/size, so the arguments only
+               shape the untrained fallback.
         @return A DupCNN; untrained (fallback) when torch is missing or load fails.
         """
-        m = cls(width_mult)
+        m = cls(width_mult, depth)
         if not _HAVE_TORCH:
             return m
         try:
             ckpt = torch.load(path, map_location="cpu")
             m.width_mult = float(ckpt.get("width_mult", width_mult))
-            m.net = _SiameseNet(m.width_mult)
+            m.depth = int(ckpt.get("depth", 1))
+            m.size = str(ckpt.get("size", ""))
+            m.net = _SiameseNet(m.width_mult, m.depth)
             m.net.load_state_dict(ckpt["state_dict"])
             m.net.eval()
             m.trained = True
@@ -136,12 +207,48 @@ class DupCNN:
             return False
         try:
             tmp = path + ".tmp"
-            torch.save({"state_dict": self.net.state_dict(),
-                        "width_mult": self.width_mult}, tmp)
+            torch.save({"state_dict": self.net.state_dict(), "width_mult": self.width_mult,
+                        "depth": self.depth, "size": self.size}, tmp)
             os.replace(tmp, path)
             return True
         except Exception:
             return False
+
+    def bench(self, device: str = "cpu", batch: int = 256, reps: int = 5) -> "dict":
+        """!
+        @brief Speed vs parameters: params, inference ms per pair at batch 1 (the
+               Pi / CPU case) and at `batch` (the GPU case), and peak memory of one
+               training step at `batch` on a CUDA device.
+        """
+        if not self.available:
+            return {}
+        import time
+        dev = device if (device != "cuda" or torch.cuda.is_available()) else "cpu"
+        net = self.net.to(dev).eval()
+        out = {"params": self.params, "device": dev, "batch": batch}
+        with torch.no_grad():
+            for n, key in ((1, "ms_per_pair_b1"), (batch, "ms_per_pair_batch")):
+                a = torch.rand(n, 3, WORK, WORK, device=dev); b = torch.rand_like(a)
+                net(a, b)
+                if dev == "cuda":
+                    torch.cuda.synchronize()
+                t = time.perf_counter()
+                for _ in range(reps):
+                    net(a, b)
+                if dev == "cuda":
+                    torch.cuda.synchronize()
+                out[key] = round((time.perf_counter() - t) / reps / n * 1000, 3)
+        if dev == "cuda":
+            torch.cuda.reset_peak_memory_stats()
+            net.train()
+            a = torch.rand(batch, 3, WORK, WORK, device=dev); b = torch.rand_like(a)
+            y = torch.rand(batch, device=dev)
+            nn.BCEWithLogitsLoss()(net(a, b), y).backward()
+            net.zero_grad(set_to_none=True)
+            torch.cuda.synchronize()
+            out["train_mem_mb"] = round(torch.cuda.max_memory_allocated() / 2**20)
+            net.eval()
+        return out
 
     def predict(self, img_a: "np.ndarray", img_b: "np.ndarray") -> "float | None":
         """!

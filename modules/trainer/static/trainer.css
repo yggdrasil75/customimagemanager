@@ -31,3 +31,7 @@
 .tr-field { flex:1 1 7rem; min-width:6rem; max-width:12rem; }
 .tr-flow .trck { flex:0 0 auto; }
 #tr_classes.tr-flow .trck { flex:1 1 7rem; min-width:6rem; }
+/* Trainer sub-tab bar (Box / Dedup / …). */
+.tr-subtab { flex:1 1 auto; padding:.4rem .75rem; border-bottom:2px solid transparent; color:#9ca3af; }
+.tr-subtab:hover { color:#e5e7eb; background:#2d3748; }
+.tr-subtab.active { color:#60a5fa; border-bottom-color:#3b82f6; background:#2d3748; }
