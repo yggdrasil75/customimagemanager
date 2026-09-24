@@ -307,7 +307,9 @@ def register(host):
                        "help": "Blank = zoo model for the picked size."}],
             loader=_loader(cap), transform=tf,
             available=(lambda: _available() and not _pose_broken) if cap == "pose" else _available,
-            reason="pip install mayaku", cost_mb=cost, gpu=model_registry.on_gpu())
+            reason=(lambda: next(iter(_pose_broken.values()), "pip install mayaku"))
+                   if cap == "pose" else "pip install mayaku",
+            cost_mb=cost, gpu=model_registry.on_gpu())
 
     # Path-parameterised box detection for Mayaku model files.
     def _box_detect(img_bgr, model_path, keep_classes=None, conf=0.25, as_obb=False):

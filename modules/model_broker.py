@@ -161,7 +161,15 @@ class Provider:
             return False
 
     def reason(self):
-        return "" if self.available() else (self._reason or "unavailable")
+        if self.available():
+            return ""
+        r = self._reason
+        if callable(r):                      # computed: say what actually went wrong
+            try:
+                r = r()
+            except Exception:
+                r = ""
+        return r or "unavailable"
 
     @property
     def key(self):

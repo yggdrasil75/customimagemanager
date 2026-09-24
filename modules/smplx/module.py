@@ -13,6 +13,7 @@ import os
 
 import numpy as np
 
+import common
 import model_registry
 from optional_deps import optional_import
 
@@ -75,6 +76,38 @@ def register(host):
             raise RuntimeError(f"SMPL-X model files missing in {_DIR}")
         return lambda betas, *a, **k: mesh_from_betas(m, betas)
 
+    # The model files are mirrored on HuggingFace (camenduru/SMPLer-X). Fetch
+    # each gender's .npz from there on first use; a mirror path that has moved
+    # is reported, not guessed around.
+    _HF = "https://huggingface.co/camenduru/SMPLer-X/resolve/main/"
+    _MIRROR_DIRS = ("", "common/utils/human_model_files/smplx/", "smplx/")
+    _fetch_err = {}
+
+    def _fetch_mirror():
+        os.makedirs(_DIR, exist_ok=True)
+        for g in _GENDERS:
+            name = f"SMPLX_{g['value'].upper()}.npz"
+            dest = os.path.join(_DIR, name)
+            if os.path.exists(dest):
+                continue
+            last = None
+            for sub in _MIRROR_DIRS:
+                try:
+                    common.fetch_file(_HF + sub + name, dest)
+                    last = None
+                    break
+                except Exception as e:
+                    last = e
+            if last is not None:
+                _fetch_err[name] = f"{type(last).__name__}: {last}"
+
+    def _available():
+        if any(model_file(g["value"]) for g in _GENDERS):
+            return True
+        if not _fetch_err:                       # try once per process
+            _fetch_mirror()
+        return any(model_file(g["value"]) for g in _GENDERS)
+
     host.provide_model(
         "body.mesh", "smplx", label="SMPL-X", family="SMPL", types=_GENDERS,
         note="Meta/MPI parametric body. Needs the licensed SMPLX_<GENDER>.npz files in "
@@ -82,8 +115,11 @@ def register(host):
         speed="fast", supports_conf=False, loader=_loader, transform=None,
         # Any gender file counts: availability must not read the pick (that
         # would recurse: variant() -> selected_id() -> available()).
-        available=lambda: any(model_file(g["value"]) for g in _GENDERS),
-        reason=f"put SMPLX_NEUTRAL.npz in {_DIR}", cost_mb=200)
+        available=_available,
+        reason=lambda: (f"SMPL-X files could not be fetched from {_HF} ({_fetch_err}); "
+                        f"put SMPLX_NEUTRAL.npz in {_DIR}") if _fetch_err else
+                       f"put SMPLX_NEUTRAL.npz in {_DIR} (fetched from {_HF} on first use)",
+        cost_mb=200)
 
     # pose_neutral for estimator modules that regress SMPL-X betas.
     host.provide_service("smplx", {"mesh_from_betas": lambda betas, gender="neutral":

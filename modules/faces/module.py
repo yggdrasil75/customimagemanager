@@ -133,20 +133,24 @@ def register(host):
         transform=None, available=lambda: True, reason="", cost_mb=0)
 
     # ── face.shape: 3D estimators ─────────────────────────────────────────
-    for pid, label, avail, note in (
+    for pid, label, avail, note, why in (
         ("deep3d", "Deep3DFaceRecon", lambda: mesh._load_deep3d() is not None,
-         "Full 3DMM regression (BFM basis). Not implemented yet — " + mesh.DEEP3D_REASON + "."),
+         "Full 3DMM regression (BFM basis). Not implemented yet — " + mesh.DEEP3D_REASON + ".",
+         mesh.DEEP3D_REASON),
         ("insight3d", "insightface 3D", lambda: mesh._load_insight3d() is not None,
          "Morphable-model fit via insightface's face3d; needs its cython mesh extension "
-         "built and BFM.mat in models/face3d."),
+         "built and BFM.mat in models/face3d.",
+         "pip install insightface (its face3d 3DMM) and BFM.mat in models/face3d "
+         f"(fetched from {mesh._BFM_URL} on first use)"),
         ("landmarks3d", "Landmarks (fast)", mesh._have_landmarks3d,
-         "Similarity-aligned 3D landmarks only. Always available with a buffalo pack."),
+         "Similarity-aligned 3D landmarks only. Always available with a buffalo pack.",
+         "needs a loadable insightface buffalo pack"),
     ):
         host.provide_model(
             "face.shape", pid, label=label, family="Face 3D", note=note,
             speed="accurate" if pid == "deep3d" else "balanced", supports_conf=False,
             loader=(lambda p=pid: (lambda crops, *a, **k: mesh.estimate_shape(crops, prefer=p))),
-            transform=None, available=avail, reason="backend not installed", cost_mb=150)
+            transform=None, available=avail, reason=why, cost_mb=150)
 
     # ── service for the core's people machinery ───────────────────────────
     def embed_faces(img, boxes, want_shape=False):
