@@ -34,6 +34,7 @@ import model_registry
 from . import registry as facemodels
 import urllib.request
 from optional_deps import optional_import
+_ensure_available, _ = optional_import("insightface.utils.storage", attr="ensure_available")
 import sys as _sys
 
 FaceAnalysis, _HAVE_INSIGHT_APP = optional_import("insightface.app", attr="FaceAnalysis")
@@ -278,10 +279,15 @@ def _build_insight():
         return None
     name = _recog_model["v"]
     try:
+        # The constructor downloads the pack and scans models/<name>/ for
+        # .onnx files; a nested zip layout leaves that scan empty. Flatten
+        # after the download and scan again before prepare() asserts on it.
+        # FaceAnalysis.__init__ downloads the pack, scans it and asserts on
+        # the result in one go, so fetch and flatten BEFORE constructing.
+        if _ensure_available is not None:
+            _ensure_available("models", name, root=INSIGHT_DIR)
+        _flatten_pack(name)
         app = FaceAnalysis(name=name, root=INSIGHT_DIR, providers=_insight_providers())
-        if "detection" not in app.models:
-            _flatten_pack(name)
-            app = FaceAnalysis(name=name, root=INSIGHT_DIR, providers=_insight_providers())
         if "detection" not in app.models:
             found = glob.glob(os.path.join(INSIGHT_DIR, "models", name, "**", "*.onnx"), recursive=True)
             _face_model_error["v"] = (f"insightface pack '{name}': no detection model in "

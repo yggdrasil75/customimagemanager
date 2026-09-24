@@ -18,10 +18,12 @@ Adapter surface used here (kept small so a version bump is one edit):
     model.forward(betas)                     -> (vertices, faces)
 """
 import os
+import numpy as np
 import model_registry
 from optional_deps import optional_import
 
 anny, _HAVE_ANNY = optional_import("anny")
+torch, _ = optional_import("torch")
 
 AVAILABLE = bool(_HAVE_ANNY)
 UNAVAILABLE_REASON = "anny not installed (pip install git+https://github.com/naver/anny)"
@@ -38,77 +40,58 @@ MANIFEST = {
     "assets":      [],
 }
 
-_DIR = model_registry.model_dir("anny", "body.shape")
-
-
-_REASON = f"pip install anny, then put the ANNY body-model files in {_DIR}"
-
-
-def _have_files():
-    """ANNY's body model is a manual download (licence); nothing fetches it.
-    Available only once the files are in place, so the app hides the model
-    instead of erroring when it is used."""
-    try:
-        return _HAVE_ANNY and any(os.scandir(_DIR))
-    except OSError:
-        return False
+_PHENOTYPES = ("gender", "age", "muscle", "weight", "height", "proportions",
+               "cupsize", "firmness", "race")
+_REASON_MESH = "pip install anny"
+_REASON_SHAPE = ("the anny package has no image or landmark fitter; body.shape needs a "
+                 "separate estimator that regresses ANNY parameters")
 
 
 def _model():
     key = "anny:model"
-    model_registry.register(key, (lambda: anny.load(_DIR)), cost_mb=600,
+    model_registry.register(key, (lambda: anny.Anny()), cost_mb=600,
                             gpu=model_registry.on_gpu())
     m = model_registry.acquire(key)
     if m is None:
-        raise RuntimeError(f"ANNY model files missing in {_DIR}")
+        raise RuntimeError("anny.Anny() failed to build (see the model registry error)")
     return m
 
 
-def _xyxy(img, box):
-    H, W = img.shape[:2]
-    return [max(0, (box["cx"] - box["w"] / 2) * W), max(0, (box["cy"] - box["h"] / 2) * H),
-            min(W, (box["cx"] + box["w"] / 2) * W), min(H, (box["cy"] + box["h"] / 2) * H)]
+def _mesh(m, betas):
+    """betas -> (vertices, faces). Anny's shape space is a handful of named
+    phenotype sliders in 0..1, not a PCA vector, so the leading betas are
+    mapped onto those sliders in _PHENOTYPES order (sigmoid keeps any real
+    vector valid); the rest are ignored."""
+    b = np.asarray(betas, np.float32).ravel()
+    kw = {}
+    for i, name in enumerate(_PHENOTYPES):
+        if i < len(b):
+            kw[name] = float(1.0 / (1.0 + np.exp(-b[i])))
+    with torch.no_grad():
+        out = m(phenotype_kwargs=kw)
+    verts = out["vertices"] if isinstance(out, dict) else out
+    verts = verts.detach().cpu().numpy().reshape(-1, 3)
+    faces = m.faces.detach().cpu().numpy() if hasattr(m.faces, "detach") else np.asarray(m.faces)
+    return verts, faces.reshape(-1, faces.shape[-1])
 
 
 def register(host):
-    fuse = host.get_service("bodies")["fuse_shape"]
-
-    def _shape_loader(kind):
-        m = _model()
-
-        def infer(img_bgr, box):
-            rgb = img_bgr[:, :, ::-1]
-            if kind == "anny_fit":
-                out = m.fit_image(rgb, _xyxy(img_bgr, box))
-            else:
-                kp = None                                       # keypoint seed
-                try:
-                    kp = host.request_model("pose")(img_bgr)
-                except Exception:
-                    pass
-                out = m.fit_landmarks([[p["x"], p["y"]] for p in (kp[0]["keypoints"] if kp else [])])
-            verts, faces = m.forward(out["betas"])
-            return {"betas": out["betas"], "faces": faces, "confidence": float(out.get("confidence", 1.0))}
-
-        return lambda crops, *a, **k: fuse(crops, infer, lambda betas: m.forward(betas)[0])
-
     host.provide_model(
         "body.shape", "anny_fit", label="ANNY-Fit", family="ANNY", speed="balanced",
         supports_conf=False,
-        note="Image -> ANNY parameters. Works from infants to adults, so it is the right "
-             "default for a family album.",
-        loader=lambda: _shape_loader("anny_fit"), transform=None,
-        available=_have_files, reason=_REASON, cost_mb=600, gpu=model_registry.on_gpu())
+        note="Image -> ANNY parameters. Needs an estimator; the anny package alone "
+             "only turns parameters into a mesh.",
+        loader=lambda: (_ for _ in ()).throw(RuntimeError(_REASON_SHAPE)), transform=None,
+        available=lambda: False, reason=_REASON_SHAPE, cost_mb=600)
     host.provide_model(
         "body.shape", "anny", label="ANNY (landmark fit)", family="ANNY", speed="fast",
         supports_conf=False,
-        note="Fits the ANNY model to pose keypoints (needs a pose model). Rougher than "
-             "ANNY-Fit; no image encoder.",
-        loader=lambda: _shape_loader("anny"), transform=None,
-        available=_have_files, reason=_REASON, cost_mb=600)
+        note="Fit ANNY to pose keypoints. Needs a fitter the anny package doesn't ship.",
+        loader=lambda: (_ for _ in ()).throw(RuntimeError(_REASON_SHAPE)), transform=None,
+        available=lambda: False, reason=_REASON_SHAPE, cost_mb=600)
     host.provide_model(
         "body.mesh", "anny", label="ANNY", family="ANNY", speed="fast", supports_conf=False,
-        note="Parameters -> mesh with the age-generic ANNY model.",
-        loader=lambda: (lambda m: (lambda betas, *a, **k: m.forward(betas)))(_model()),
-        transform=None, available=_have_files, reason=_REASON, cost_mb=600)
-    host.logger.info("anny module: registered body.shape (anny_fit, anny) / body.mesh")
+        note="Parameters -> mesh with the age-generic ANNY model (data ships with the package).",
+        loader=lambda: (lambda m: (lambda betas, *a, **k: _mesh(m, betas)))(_model()),
+        transform=None, available=lambda: _HAVE_ANNY, reason=_REASON_MESH, cost_mb=600)
+    host.logger.info("anny module: registered body.mesh (anny); body.shape needs an estimator")

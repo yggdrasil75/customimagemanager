@@ -224,7 +224,11 @@ def register(host):
         size = host.model_variant(cap)["size"] or "n"
         return f"mayaku-{size}-{_TASK[cap]}"
 
+    _pose_broken = {}          # src -> reason, filled the first time it fails
+
     def _pose_capable(src):
+        if src in _pose_broken:
+            raise RuntimeError(_pose_broken[src])
         """Refuse to serve 'pose' from weights without a keypoint head.
 
         The zoo name for a size is guessed as mayaku-<size>-key; if that
@@ -260,10 +264,12 @@ def register(host):
             where = f" Loaded from {local} ({os.path.getsize(local) >> 20} MB)."
         except Exception:
             where = ""
-        raise RuntimeError(
-            f"mayaku pose: {src!r} loaded a {arch} with heads {heads} and no keypoint head, "
-            f"so it can never return a skeleton.{where}{offered} Point "
-            f"'{_weights_key('pose')}' at keypoint weights or drop the size.")
+        _pose_broken[src] = (
+            f"mayaku pose: {src!r} loaded a {arch} with heads {heads} and no keypoint head "
+            f"(its sidecar config has no uniquery_keypoint), so it can never return a "
+            f"skeleton.{where}{offered} The zoo's -key checkpoints are detect-only as "
+            f"published; this needs a checkpoint trained with a keypoint head.")
+        raise RuntimeError(_pose_broken[src])
 
     def _loader(cap):
         # The handle runs the model; the transform normalises. conf /
@@ -299,7 +305,8 @@ def register(host):
             settings=[{"key": key, "label": "Custom weights (.pth)", "kind": "select",
                        "options": _weights_opts(cap),
                        "help": "Blank = zoo model for the picked size."}],
-            loader=_loader(cap), transform=tf, available=_available,
+            loader=_loader(cap), transform=tf,
+            available=(lambda: _available() and not _pose_broken) if cap == "pose" else _available,
             reason="pip install mayaku", cost_mb=cost, gpu=model_registry.on_gpu())
 
     # Path-parameterised box detection for Mayaku model files.
