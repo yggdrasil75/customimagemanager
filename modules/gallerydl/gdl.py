@@ -37,6 +37,7 @@ import os
 import threading
 
 from optional_deps import optional_import
+from common import wait_for_space
 # gallery-dl is optional; without it the Fetch feature is hidden (capabilities.py)
 # and these stay None. Every entry point below guards on _HAVE_GDL.
 _gconfig, _HAVE_GDL = optional_import("gallery_dl.config")
@@ -245,9 +246,16 @@ def download(url, dest, opts=None, on_file=None):
     # or per-version hook APIs involved, just the filesystem it's producing.
     err_box = {}
 
+    class _PausableJob(DownloadJob):
+        # gallery-dl dispatches every file through handle_url; blocking here
+        # pauses the download (not the job) until the disk has room again.
+        def handle_url(self, url, kwdict):
+            wait_for_space(dest)
+            return super().handle_url(url, kwdict)
+
     def _run_job():
         try:
-            job = DownloadJob(url)
+            job = _PausableJob(url)
             job.run()
         except Exception as e:                        # surfaced after join
             err_box["err"] = e

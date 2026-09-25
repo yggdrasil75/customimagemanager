@@ -127,6 +127,50 @@ def rel_path(root: str, path: str) -> str:
     """Absolute path -> forward-slash path relative to `root`."""
     return os.path.relpath(path, root).replace(os.sep, "/")
 
+# ── storage guard (fetch queue / model downloads pause, never cancel) ────────
+def min_free_bytes(path: str) -> int:
+    """Free-space floor for the disk holding `path`: 10 GiB on >1 TiB disks,
+    1 GiB otherwise. CIM_MIN_FREE_GB overrides both."""
+    env = os.environ.get("CIM_MIN_FREE_GB")
+    if env:
+        try: return int(float(env) * (1 << 30))
+        except ValueError: pass
+    import shutil
+    total = shutil.disk_usage(path).total
+    return 10 << 30 if total > 1 << 40 else 1 << 30
+
+
+def disk_low(*paths: str) -> str | None:
+    """The first of `paths` whose disk is under its floor, or None. Missing
+    paths fall back to their nearest existing parent."""
+    import shutil
+    for p in paths:
+        q = p or "."
+        while not os.path.exists(q):
+            q = os.path.dirname(q) or "."
+        if shutil.disk_usage(q).free < min_free_bytes(q):
+            return p
+    return None
+
+
+def wait_for_space(*paths: str, stop=None, poll: float = 30.0) -> bool:
+    """Block while any of `paths` is low on disk. Returns False if `stop()`
+    turned true (caller canceled), True once space is available."""
+    import logging, time
+    log = logging.getLogger("cim.storage")
+    warned = None
+    while (low := disk_low(*paths)):
+        if stop and stop():
+            return False
+        if low != warned:
+            warned = low
+            log.warning("paused: %s has less than %d MB free; resuming when space frees up",
+                        low, min_free_bytes(low) >> 20)
+        time.sleep(poll)
+    if warned:
+        log.info("resumed: space freed on %s", warned)
+    return True
+
 # ── model-file / top-down pose helpers (shared by the pose provider modules) ──
 def fetch_file(url: str, dest: str, min_bytes: int = 1 << 16) -> str:
     """Download `url` to `dest` once (atomic via .part). A CDN 404 still writes
@@ -136,6 +180,7 @@ def fetch_file(url: str, dest: str, min_bytes: int = 1 << 16) -> str:
     import urllib.request
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     tmp = dest + ".part"
+    wait_for_space(dest)
     try:
         urllib.request.urlretrieve(url, tmp)
         if os.path.getsize(tmp) < min_bytes:

@@ -482,11 +482,11 @@ class ModelRegistry:
                 self._entries[key] = {
                     "model": None, "loaded": False, "loader": loader,
                     "unloader": unloader, "cost_mb": est, "gpu": gpu,
-                    "seq": 0, "err": ""}
+                    "model_path": model_path, "seq": 0, "err": ""}
             else:
                 new_cost = e["cost_mb"] if e.get("measured") else est
                 e.update(loader=loader, unloader=unloader,
-                         cost_mb=new_cost, gpu=gpu)
+                         cost_mb=new_cost, gpu=gpu, model_path=model_path)
             return key
 
     def acquire(self, key):
@@ -505,6 +505,10 @@ class ModelRegistry:
                         loaded = e["loaded"]
                         model = e["model"]
                     if not loaded:
+                        if _file_cost_mb(e.get("model_path")) <= 0:
+                            # first load may download weights: pause until disk has room
+                            from common import wait_for_space
+                            wait_for_space(MODELS_DIR)
                         print(f"REGBUILD key={key} entry_id={id(e)} entries_id={id(self._entries.get(key))} loaded={e['loaded']} nkeys={len(self._entries)}", file=sys.stderr, flush=True)
                         hook = getattr(self, "_mem_hook", None)
                         res = hook(e["cost_mb"], e["gpu"]) if hook else None

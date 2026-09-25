@@ -37,6 +37,7 @@ import requests
 from flask import jsonify
 
 import model_registry
+from common import wait_for_space
 
 MANIFEST = {
     "id":          "kobold",
@@ -84,6 +85,7 @@ def download(variant, cfg, save):
             done, last = 0, 0
             with open(tmp, "wb") as f:
                 for chunk in r.iter_content(1 << 20):
+                    wait_for_space(tmp)
                     f.write(chunk); done += len(chunk)
                     if total and done - last > total / 20:
                         last = done

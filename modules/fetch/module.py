@@ -34,6 +34,8 @@ import tempfile
 from flask import request, jsonify
 from werkzeug.utils import secure_filename
 
+from common import disk_low, wait_for_space
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS fetch_queue (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -196,6 +198,9 @@ def register(host):
                     for _mp, _meta in gen:
                         if _is_canceled(qid):
                             canceled = True; break
+                        if not wait_for_space(tmp, m.upload_spool_dir, m.media_dir,
+                                              stop=lambda: _is_canceled(qid)):
+                            canceled = True; break
                 finally:
                     try: gen.close()
                     except Exception: pass
@@ -224,6 +229,8 @@ def register(host):
     def _claim():
         """Peek pending rows; claim the first whose target_key bucket is free."""
         tm = host.thread_manager
+        if disk_low(tempfile.gettempdir(), m.upload_spool_dir, m.media_dir):
+            return None                       # queue paused: rows stay 'pending'
         try:
             rows = host.db().execute(
                 "SELECT * FROM fetch_queue WHERE status='pending' "
