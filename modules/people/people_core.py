@@ -546,18 +546,19 @@ def _recluster_table(table: str, default_mode: str, eps_for) -> int:
     if table == "face_regions":
         extra_where = " AND COALESCE(unknown,0)=0 AND COALESCE(not_face,0)=0"
     rows = _db().execute(
-        f"SELECT id,embedding,embed_mode,name,confirmed FROM {table} "
+        f"SELECT id,embedding,embed_mode,name,confirmed,cluster_id FROM {table} "
         f"WHERE embedding IS NOT NULL{extra_where}").fetchall()
     if not rows:
         return 0
     by_mode = {}
-    for rid, blob, m, _n, _c in rows:
+    for rid, blob, m, _n, _c, _o in rows:
         by_mode.setdefault(m or default_mode, []).append(
             (rid, np.frombuffer(blob, dtype=np.float32)))
 
-    name_by_id = {rid: (nm or "") for rid, _b, _m, nm, cf in rows if cf}
+    name_by_id = {rid: (nm or "") for rid, _b, _m, nm, cf, _o in rows if cf}
+    old_by_id = {rid: (o if o is not None else -1) for rid, _b, _m, _n, _c, o in rows}
     db = _db()
-    total, base = 0, 0
+    new_members, base = {}, 0            # new (mode-offset) label -> [row ids]
     for mode, items in by_mode.items():
         ids  = [i for i, _ in items]
         vecs = [v for _, v in items]
@@ -566,13 +567,29 @@ def _recluster_table(table: str, default_mode: str, eps_for) -> int:
             continue
         labels = fs["cluster"](vecs, mode=mode, eps=eps_for(mode))
         labels = _enforce_confirmed_names(ids, labels, name_by_id)
-        db.executemany(f"UPDATE {table} SET cluster_id=? WHERE id=?",
-                       [(int(lab) + base if int(lab) >= 0 else -1, i)
-                        for i, lab in zip(ids, labels)])
-        used = len({l for l in labels if l >= 0})
-        base += used
-        total += used
-    return total
+        for i, lab in zip(ids, labels):
+            if int(lab) >= 0:
+                new_members.setdefault(int(lab) + base, []).append(i)
+        base += len({l for l in labels if l >= 0})
+    # Keep cluster ids STABLE across reclusters: .person records and the persons
+    # cache are keyed by cluster_id, so renumbering from 0 every time silently
+    # re-pointed every person record at whatever cluster now had its old number.
+    # Each new cluster inherits the old id its members mostly came from (largest
+    # cluster claims first); the rest get ids above anything ever used.
+    next_id = max([max(old_by_id.values(), default=-1),
+                   db.execute(f"SELECT COALESCE(MAX(cluster_id),-1) FROM {table}").fetchone()[0]]) + 1
+    taken, assign = set(), {}
+    for lab, members in sorted(new_members.items(), key=lambda kv: -len(kv[1])):
+        olds = [old_by_id[i] for i in members if old_by_id[i] >= 0]
+        want = max(set(olds), key=olds.count) if olds else -1
+        if want < 0 or want in taken:
+            want, next_id = next_id, next_id + 1
+        taken.add(want); assign[lab] = want
+    updates = [(-1, i) for i in old_by_id]
+    for lab, members in new_members.items():
+        updates += [(assign[lab], i) for i in members]
+    db.executemany(f"UPDATE {table} SET cluster_id=? WHERE id=?", updates)
+    return len(new_members)
 
 def _enforce_confirmed_names(ids, labels, name_by_id):
     """Never let one cluster hold two different confirmed names.
