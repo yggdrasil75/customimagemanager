@@ -109,6 +109,16 @@
         </p>
       </div>
 
+      <div class="flex items-center gap-2 text-xs text-gray-400">
+        <input id="gdl_watch" type="checkbox" class="accent-emerald-600">
+        <label for="gdl_watch">Watch these URLs — re-check every</label>
+        <input id="gdl_watch_h" type="number" min="1" step="1" value="24"
+          class="w-16 p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white">
+        <span>hours</span>
+        <span class="text-gray-600">(manage in <a href="#" onclick="gdlOpenSettings('module_fetch_watch');return false"
+          class="text-teal-500 underline">Settings > Watched fetches</a>)</span>
+      </div>
+
       {# Field mapping — populated after "Check fields". Every field the site
          exposes gets its own row; route each to tags/description/regions or
          leave it ignored. Saved per-site and reused. #}

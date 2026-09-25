@@ -54,6 +54,16 @@ CREATE TABLE IF NOT EXISTS fetch_queue (
     updated     REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_fq_status ON fetch_queue(status, id);
+CREATE TABLE IF NOT EXISTS fetch_watch (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    fetcher     TEXT NOT NULL DEFAULT '',
+    target      TEXT NOT NULL,
+    folder      TEXT NOT NULL DEFAULT '',
+    every_h     REAL NOT NULL DEFAULT 24,       -- re-fetch at most this often
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    last_run    REAL NOT NULL DEFAULT 0,        -- when it was last queued
+    created     REAL NOT NULL
+);
 """
 
 MANIFEST = {
@@ -67,6 +77,7 @@ MANIFEST = {
     "pip":         [],
     "assets":      ["fetch.js"],
 }
+_WATCH_TICK = 60.0        # how often _claim looks for due watches
 
 
 _KEY_RE = re.compile(r"\{([\w.]+)\}")
@@ -159,6 +170,7 @@ def register(host):
     host.provide_service("fetch", registry)      # fetchers find it via get_service
     host.add_asset("fetch.js")
     host.add_table(_DDL)
+    host.add_settings_tab("fetch_watch", "Watched fetches", icon="\u23f0")
 
     # Feature: read = view the queue, write = enqueue/cancel/clear downloads.
     host.register_feature("fetch", "Fetch / downloads (read=view, write=queue)",
@@ -283,6 +295,10 @@ def register(host):
         if disk_low(tempfile.gettempdir(), m.upload_spool_dir, m.media_dir):
             return None                       # queue paused: rows stay 'pending'
         try:
+            _tick_watches()
+        except Exception as e:
+            host.logger.error(f"fetch watch tick failed: {e}")
+        try:
             rows = host.db().execute(
                 "SELECT * FROM fetch_queue WHERE status='pending' "
                 "ORDER BY id LIMIT 20").fetchall()
@@ -323,6 +339,50 @@ def register(host):
     def _key(job):
         return job["bucket"]
 
+    def _enqueue(targets, folder, fid_fixed=None):
+        added = 0; now = time.time()
+        for t in targets:
+            t = (t or "").strip()
+            if not t:
+                continue
+            f = registry.for_target(t)
+            fid = fid_fixed or (_attr(f, "id") if f else "")
+            host.db().execute(
+                "INSERT INTO fetch_queue(fetcher, target, folder, created, updated) "
+                "VALUES(?,?,?,?,?)", (fid or "", t, folder, now, now))
+            added += 1
+        host.db().commit()
+        if added:
+            # User-queued downloads start now, ahead of background sweeps; the
+            # promotion auto-clears once the queue drains.
+            host.thread_manager.set_foreground("fetch")
+        host.thread_manager.wake()
+        return added
+
+    _watch_next = {"at": 0.0}
+    def _tick_watches(force_ids=None):
+        """Queue every enabled watch whose interval has elapsed, unless a run
+        for that target is already pending/downloading. Runs from _claim (the
+        processor polls every second) but only does SQL once a minute."""
+        now = time.time()
+        if force_ids is None and now < _watch_next["at"]:
+            return
+        _watch_next["at"] = now + _WATCH_TICK
+        q = ("SELECT w.* FROM fetch_watch w WHERE NOT EXISTS ("
+             "  SELECT 1 FROM fetch_queue q WHERE q.target=w.target "
+             "  AND q.status IN ('pending','downloading'))")
+        if force_ids is not None:
+            q += " AND w.id IN (%s)" % ",".join("?" * len(force_ids))
+            rows = host.db().execute(q, list(force_ids)).fetchall()
+        else:
+            rows = host.db().execute(q + " AND w.enabled=1 AND w.last_run + w.every_h*3600 <= ?",
+                                     (now,)).fetchall()
+        for w in rows:
+            _enqueue([w["target"]], w["folder"], w["fetcher"] or None)
+            host.db().execute("UPDATE fetch_watch SET last_run=? WHERE id=?", (now, w["id"]))
+        if rows:
+            host.db().commit()
+
     def _start():
         # Requeue anything left mid-flight by a restart: 'downloading' rows had
         # a worker that never finished. The interrupted attempt isn't charged.
@@ -352,24 +412,7 @@ def register(host):
             if old is None:
                 return jsonify({"success": False, "error": "no such job"}), 404
             targets, folder, fid_fixed = [old["target"]], old["folder"], old["fetcher"]
-        added = 0; now = time.time()
-        for t in targets:
-            t = (t or "").strip()
-            if not t:
-                continue
-            f = registry.for_target(t)
-            fid = fid_fixed or (_attr(f, "id") if f else "")
-            host.db().execute(
-                "INSERT INTO fetch_queue(fetcher, target, folder, created, updated) "
-                "VALUES(?,?,?,?,?)", (fid or "", t, folder, now, now))
-            added += 1
-        host.db().commit()
-        if added:
-            # User-queued downloads start now, ahead of background sweeps; the
-            # promotion auto-clears once the queue drains.
-            host.thread_manager.set_foreground("fetch")
-        host.thread_manager.wake()
-        return jsonify({"success": True, "added": added})
+        return jsonify({"success": True, "added": _enqueue(targets, folder, fid_fixed)})
 
     def api_fetch_queue():
         rows = host.db().execute(
@@ -388,6 +431,62 @@ def register(host):
         host.db().execute("DELETE FROM fetch_queue WHERE status IN ('done','error','canceled')")
         host.db().commit()
         return jsonify({"success": True})
+
+    # ── watches (scheduled re-fetches) ────────────────────────────────────
+    def api_watch():
+        if request.method == "GET":
+            rows = host.db().execute("SELECT * FROM fetch_watch ORDER BY id").fetchall()
+            return jsonify({"success": True, "watches": [dict(r) for r in rows]})
+        d = request.get_json(force=True, silent=True) or {}
+        now = time.time(); db = host.db()
+        if d.get("id") is not None:            # edit
+            cols = {k: d[k] for k in ("folder", "every_h", "enabled") if k in d}
+            if "every_h" in cols:
+                cols["every_h"] = max(1.0, float(cols["every_h"] or 24))
+            if "enabled" in cols:
+                cols["enabled"] = 1 if cols["enabled"] else 0
+            if cols:
+                sets = ", ".join(f"{k}=?" for k in cols)
+                db.execute(f"UPDATE fetch_watch SET {sets} WHERE id=?",
+                           list(cols.values()) + [int(d["id"])])
+            db.commit()
+            return jsonify({"success": True})
+        targets = d.get("targets") or ([d["target"]] if d.get("target") else [])
+        folder = (d.get("folder") or "").strip()
+        every_h = max(1.0, float(d.get("every_h") or 24))
+        # queued_now=true: the caller just queued these, so the first re-check
+        # is one interval out instead of right away.
+        last = now if d.get("queued_now") else 0
+        added = 0
+        for t in targets:
+            t = (t or "").strip()
+            if not t or db.execute("SELECT 1 FROM fetch_watch WHERE target=?", (t,)).fetchone():
+                continue
+            f = registry.for_target(t)
+            db.execute("INSERT INTO fetch_watch(fetcher, target, folder, every_h, last_run, created) "
+                       "VALUES(?,?,?,?,?,?)",
+                       ((_attr(f, "id") if f else "") or "", t, folder, every_h, last, now))
+            added += 1
+        db.commit()
+        return jsonify({"success": True, "added": added})
+
+    def api_watch_delete():
+        d = request.get_json(force=True, silent=True) or {}
+        host.db().execute("DELETE FROM fetch_watch WHERE id=?", (int(d.get("id", -1)),))
+        host.db().commit()
+        return jsonify({"success": True})
+
+    def api_watch_run():
+        d = request.get_json(force=True, silent=True) or {}
+        _tick_watches(force_ids=[int(d.get("id", -1))])
+        return jsonify({"success": True})
+
+    host.add_route("/api/fetch/watch", api_watch, methods=["GET", "POST"], endpoint="fetch_watch",
+                   feature="fetch", level="write")
+    host.add_route("/api/fetch/watch/delete", api_watch_delete, methods=["POST"],
+                   endpoint="fetch_watch_delete", feature="fetch", level="write")
+    host.add_route("/api/fetch/watch/run", api_watch_run, methods=["POST"],
+                   endpoint="fetch_watch_run", feature="fetch", level="write")
 
     host.add_route("/api/fetch/add", api_fetch_add, methods=["POST"], endpoint="fetch_add",
                    feature="fetch", level="write")

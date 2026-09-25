@@ -66,12 +66,12 @@ async function gdlOpen() {
   gdlQueueStartPolling();
 }
 
-// Jump to Settings › Fetch sites (per-site mapping/login/options).
-async function gdlOpenSettings() {
+// Jump to a fetch settings tab (default: Fetch sites — per-site mapping/login/options).
+async function gdlOpenSettings(tab = 'module_gdl_sites') {
   document.getElementById('gdl_modal').classList.add('hidden');
-  await openSettings('module_gdl_sites');
+  await openSettings(tab);
   // the module tab button also fires the event that renders the pane
-  document.querySelector('[data-settings-tab="module_gdl_sites"]')?.click();
+  document.querySelector(`[data-settings-tab="${tab}"]`)?.click();
 }
 
 // Guess a sensible default target for a field the first time a site is seen.
@@ -333,7 +333,16 @@ async function gdlFetch() {
   btn.disabled = false; btn.classList.remove('opacity-50');
 
   if (!r || !r.success) { _gdlStatus(r?.error || 'Could not queue.', 'err'); return; }
-  _gdlStatus(`Added ${r.added} download${r.added === 1 ? '' : 's'} to the queue.`, 'ok');
+  let msg = `Added ${r.added} download${r.added === 1 ? '' : 's'} to the queue.`;
+  if (document.getElementById('gdl_watch').checked) {
+    const every_h = Math.max(1, parseFloat(document.getElementById('gdl_watch_h').value) || 24);
+    const w = await fetch('/api/fetch/watch', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targets: urls, folder, every_h, queued_now: true }) })
+      .then(r => r.json()).catch(() => null);
+    msg += w?.success ? ` Watching ${w.added} (every ${every_h}h).` : ' Watch failed.';
+  }
+  _gdlStatus(msg, 'ok');
   document.getElementById('gdl_urls').value = '';
   gdlQueueRefresh();
 }
@@ -419,3 +428,61 @@ async function gdlQueueClear() {
   await fetch('/api/fetch/clear', { method: 'POST' }).catch(() => {});
   gdlQueueRefresh();
 }
+
+// ── Settings › Watched fetches ──────────────────────────────────────────────
+// Pane element: #settings_pane_module_fetch_watch (created by static/modules.js).
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const post = (url, body) => fetch(url, { method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) })
+    .then(r => r.json()).catch(() => null);
+
+  function when(ts) {
+    if (!ts) return 'never';
+    const d = new Date(ts * 1000);
+    return d.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' });
+  }
+
+  async function render() {
+    const pane = $('settings_pane_module_fetch_watch');
+    if (!pane) return;
+    const r = await fetch('/api/fetch/watch').then(x => x.json()).catch(() => null);
+    const ws = (r && r.watches) || [];
+    pane.innerHTML = `
+<p class="text-xs text-gray-400 mb-2">Each watched URL is re-queued at most once per interval
+  (checked every minute; skipped while a run for it is still pending). Add watches from the
+  Fetch dialog.</p>
+${ws.length ? '' : '<p class="text-xs text-gray-600">No watched fetches.</p>'}
+<div class="space-y-1 text-xs">${ws.map(w => `
+<div class="flex items-center gap-2 bg-gray-900/40 rounded px-2 py-1" data-id="${w.id}">
+  <input type="checkbox" class="fw-on accent-emerald-600" ${w.enabled ? 'checked' : ''} title="enabled">
+  <div class="flex-1 min-w-0">
+    <div class="truncate text-gray-300" title="${_esc(w.target)}">${_esc(w.target)}</div>
+    <div class="text-[10px] text-gray-500 truncate">${w.folder ? '→ ' + _esc(w.folder) + ' · ' : ''}
+      last ${when(w.last_run)} · next ${w.enabled ? when(w.last_run + w.every_h * 3600) : '—'}</div>
+  </div>
+  <span class="text-gray-500">every</span>
+  <input type="number" min="1" step="1" value="${w.every_h}"
+    class="fw-h w-16 p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white">
+  <span class="text-gray-500">h</span>
+  <button class="fw-run text-[10px] text-gray-500 hover:text-sky-400">run now</button>
+  <button class="fw-del text-[10px] text-gray-500 hover:text-rose-400">delete</button>
+</div>`).join('')}</div>`;
+    pane.querySelectorAll('[data-id]').forEach(row => {
+      const id = +row.dataset.id;
+      row.querySelector('.fw-on').addEventListener('change', async e => {
+        await post('/api/fetch/watch', { id, enabled: e.target.checked }); render(); });
+      row.querySelector('.fw-h').addEventListener('change', async e => {
+        await post('/api/fetch/watch', { id, every_h: e.target.value }); render(); });
+      row.querySelector('.fw-run').addEventListener('click', async () => {
+        await post('/api/fetch/watch/run', { id }); render(); });
+      row.querySelector('.fw-del').addEventListener('click', async () => {
+        if (!window.confirm('Stop watching this URL?')) return;
+        await post('/api/fetch/watch/delete', { id }); render(); });
+    });
+  }
+
+  document.addEventListener('module-settings-tab', ev => {
+    if (ev.detail === 'fetch_watch') render();
+  });
+})();
