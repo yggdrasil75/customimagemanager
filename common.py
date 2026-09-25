@@ -128,13 +128,13 @@ def rel_path(root: str, path: str) -> str:
     return os.path.relpath(path, root).replace(os.sep, "/")
 
 # ── storage guard (fetch queue / model downloads pause, never cancel) ────────
+MIN_FREE_GB = 0.0   # settings key "min_free_gb"; 0 = automatic (see below)
+
 def min_free_bytes(path: str) -> int:
-    """Free-space floor for the disk holding `path`: 10 GiB on >1 TiB disks,
-    1 GiB otherwise. CIM_MIN_FREE_GB overrides both."""
-    env = os.environ.get("CIM_MIN_FREE_GB")
-    if env:
-        try: return int(float(env) * (1 << 30))
-        except ValueError: pass
+    """Free-space floor for the disk holding `path`: the "min_free_gb" setting
+    when set, else 10 GiB on >1 TiB disks and 1 GiB otherwise."""
+    if MIN_FREE_GB > 0:
+        return int(MIN_FREE_GB * (1 << 30))
     import shutil
     total = shutil.disk_usage(path).total
     return 10 << 30 if total > 1 << 40 else 1 << 30

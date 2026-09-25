@@ -34,6 +34,7 @@ import tempfile
 from flask import request, jsonify
 from werkzeug.utils import secure_filename
 
+import common
 from common import disk_low, wait_for_space
 
 _DDL = """
@@ -126,6 +127,18 @@ def register(host):
     host.register_feature("fetch", "Fetch / downloads (read=view, write=queue)",
                           section="fetch", section_label="Fetch",
                           default="write", role_defaults={"viewer": "read"})
+
+    # Storage guard: downloads pause (not cancel) while free space is under this.
+    def _set_min_free(new, old=None):
+        common.MIN_FREE_GB = float(new or 0)
+    host.add_config_key("min_free_gb", default=0,
+                        validate=lambda v: max(0.0, float(v or 0)),
+                        on_change=_set_min_free)
+    host.add_settings_field(key="min_free_gb", label="Pause downloads below (GB free)",
+                            kind="number", pane="general", tab="general",
+                            help="Fetch queue and model downloads pause until space frees up. "
+                                 "0 = automatic: 10 GB on drives over 1 TB, else 1 GB.")
+    host.on_startup(lambda: _set_min_free(host.config.get("min_free_gb")))
 
     # ── queue helpers (lazy manager import for core DB + upload ingest) ────
     m = host.core
