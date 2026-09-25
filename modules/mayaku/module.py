@@ -271,6 +271,29 @@ def register(host):
             f"published; this needs a checkpoint trained with a keypoint head.")
         raise RuntimeError(_pose_broken[src])
 
+    # The zoo's mayaku-*-key checkpoints are detection weights published under
+    # the keypoint name: no uniquery_keypoint in the sidecar, no keypoint
+    # tensors (mayaku-n-key is 49 MB = the 12.9M-param detector; the KRCNN
+    # keypoint head alone adds ~17M params). Pose therefore needs custom
+    # weights trained with a keypoint head (mayaku's configs/keypoints/*).
+    _ZOO_POSE_MSG = ("mayaku pose: the zoo's mayaku-*-key checkpoints ship without a "
+                     "keypoint head (detection weights only), so pose needs a .pth trained "
+                     "with one (mayaku's configs/keypoints/mayaku-*-key.yaml) set in "
+                     "Mayaku's 'Custom weights' for pose.")
+
+    def _pose_custom():
+        return (host.config.get(_weights_key("pose")) or "").strip()
+
+    def _pose_available():
+        src = _pose_custom()
+        return _available() and bool(src) and src not in _pose_broken
+
+    def _pose_reason():
+        if not _available():
+            return "pip install mayaku"
+        src = _pose_custom()
+        return _pose_broken.get(src) or ("" if src else _ZOO_POSE_MSG)
+
     def _loader(cap):
         # The handle runs the model; the transform normalises. conf /
         # keep_classes ride through kwargs like the YOLO provider's.
@@ -306,9 +329,8 @@ def register(host):
                        "options": _weights_opts(cap),
                        "help": "Blank = zoo model for the picked size."}],
             loader=_loader(cap), transform=tf,
-            available=(lambda: _available() and not _pose_broken) if cap == "pose" else _available,
-            reason=(lambda: next(iter(_pose_broken.values()), "pip install mayaku"))
-                   if cap == "pose" else "pip install mayaku",
+            available=_pose_available if cap == "pose" else _available,
+            reason=_pose_reason if cap == "pose" else "pip install mayaku",
             cost_mb=cost, gpu=model_registry.on_gpu())
 
     # Path-parameterised box detection for Mayaku model files.
