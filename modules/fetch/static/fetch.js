@@ -59,9 +59,19 @@ function _gdlStatus(msg, kind) {
 async function gdlOpen() {
   document.getElementById('gdl_modal').classList.remove('hidden');
   _gdlStatus('');
+  const f = document.getElementById('gdl_folder');
+  if (!f.value) { try { f.value = localStorage.getItem('gdl_folder') || ''; } catch (_) {} }
   const a = await fetch('/api/gdl/available').then(r => r.json()).catch(() => null);
   document.getElementById('gdl_missing').classList.toggle('hidden', !!a?.available);
   gdlQueueStartPolling();
+}
+
+// Jump to Settings › Fetch sites (per-site mapping/login/options).
+async function gdlOpenSettings() {
+  document.getElementById('gdl_modal').classList.add('hidden');
+  await openSettings('module_gdl_sites');
+  // the module tab button also fires the event that renders the pane
+  document.querySelector('[data-settings-tab="module_gdl_sites"]')?.click();
 }
 
 // Guess a sensible default target for a field the first time a site is seen.
@@ -309,6 +319,7 @@ async function gdlFetch() {
   const urls = multi.length ? multi : (single ? [single] : []);
   if (!urls.length) { _gdlStatus('Enter at least one URL.', 'err'); return; }
   const folder = document.getElementById('gdl_folder').value.trim();
+  try { localStorage.setItem('gdl_folder', folder); } catch (_) {}
   // If a mapping is on screen, persist it so this fetch uses the latest
   // choice. Without rows (URL pasted, Check fields skipped) there is nothing
   // to save — saving here used to wipe the site's stored mapping.
@@ -373,10 +384,11 @@ function _gdlQueueRow(it) {
   const stopabble = it.status === 'pending' || it.status === 'downloading';
   const rerunnable = it.status === 'done' || it.status === 'error' || it.status === 'canceled';
   const err = it.error ? `<div class="text-[10px] text-rose-400 truncate" title="${_esc(it.error)}">${_esc(it.error)}</div>` : '';
+  const where = it.folder ? `<div class="text-[10px] text-gray-500 truncate" title="${_esc(it.folder)}">→ ${_esc(it.folder)}</div>` : '';
   return `<div class="flex items-center gap-2 bg-gray-900/40 rounded px-2 py-1">
     <div class="flex-1 min-w-0">
       <div class="truncate text-gray-300" title="${_esc(it.target||it.url)}">${_esc(it.target||it.url)}</div>
-      ${err}
+      ${where}${err}
     </div>
     <span class="${color} whitespace-nowrap">${it.status}</span>
     <span class="text-gray-500 whitespace-nowrap w-16 text-right">${prog}</span>

@@ -26,6 +26,7 @@ provider modules find it via host.get_service("fetch").
 """
 
 import os
+import re
 import time
 import json
 import shutil
@@ -66,6 +67,42 @@ MANIFEST = {
     "pip":         [],
     "assets":      ["fetch.js"],
 }
+
+
+_KEY_RE = re.compile(r"\{([\w.]+)\}")
+_BAD_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def expand_path(template, meta, orig_name):
+    """Expand `{key}` placeholders in a folder template from the file's
+    metadata; returns (folder, filename).
+
+    Keys are the (flattened) fetcher metadata keys plus `original_name`
+    (stem) and `ext`. If the template's last segment holds a placeholder it
+    names the file (missing extension -> original's); otherwise the whole
+    template is the folder and the original filename is kept. Unknown keys
+    expand to '' and empty segments are dropped.
+    """
+    if not template or "{" not in template:
+        return template or "", orig_name
+    stem, ext = os.path.splitext(orig_name)
+    vals = dict(meta or {})
+    vals.update(original_name=stem, ext=ext.lstrip("."))
+    def _sub(m):
+        v = vals.get(m.group(1))
+        return _BAD_RE.sub("_", str(v)).strip() if v is not None else ""
+    parts = [p for p in template.replace("\\", "/").split("/") if p.strip()]
+    if not parts:
+        return "", orig_name
+    name_tpl = parts[-1] if "{" in parts[-1] else ""
+    dirs = parts[:-1] if name_tpl else parts
+    folder = "/".join(seg for seg in (_KEY_RE.sub(_sub, d) for d in dirs) if seg)
+    name = orig_name
+    if name_tpl:
+        name = _KEY_RE.sub(_sub, name_tpl) or stem
+        if not os.path.splitext(name)[1]:
+            name += ext
+    return folder, name
 
 
 class FetchRegistry:
@@ -185,6 +222,7 @@ def register(host):
                 site_seen["cat"] = (meta or {}).get("category", "")
             packet = map_meta(meta) if callable(map_meta) else dict(meta or {})
             orig = secure_filename(os.path.basename(media_path)) or "fetch.bin"
+            dest, orig = expand_path(folder, meta, orig)
             fd, spool = tempfile.mkstemp(dir=m.upload_spool_dir, prefix="up-",
                                          suffix="-" + orig)
             os.close(fd); shutil.copyfile(media_path, spool)
@@ -193,7 +231,7 @@ def register(host):
                 db = host.db()
                 db.execute("INSERT INTO upload_queue"
                            "(spool_path, orig_name, folder, metadata, status, created, updated) "
-                           "VALUES(?,?,?,?,'pending',?,?)", (sp, on, folder, mj, now, now))
+                           "VALUES(?,?,?,?,'pending',?,?)", (sp, on, dest, mj, now, now))
                 db.commit()
             try:
                 m.db_retry(_enq); downloaded += 1
@@ -286,6 +324,18 @@ def register(host):
         return job["bucket"]
 
     def _start():
+        # Requeue anything left mid-flight by a restart: 'downloading' rows had
+        # a worker that never finished. The interrupted attempt isn't charged.
+        def _requeue_stale():
+            db = host.db()
+            db.execute("UPDATE fetch_queue SET status='pending', "
+                       "attempts=MAX(attempts-1,0), updated=? WHERE status='downloading'",
+                       (time.time(),))
+            db.commit()
+        try:
+            m.db_retry(_requeue_stale)
+        except Exception as e:
+            host.logger.error(f"fetch queue boot requeue failed: {e}")
         host.thread_manager.register_source("fetch", _claim, _worker, key_of=_key)
     host.on_startup(_start)
 
@@ -295,13 +345,20 @@ def register(host):
         d = request.get_json(force=True, silent=True) or {}
         targets = d.get("targets") or ([d["target"]] if d.get("target") else [])
         folder = (d.get("folder") or "").strip()
+        fid_fixed = None
+        if d.get("retry_id") is not None:       # re-run a row with its own folder/fetcher
+            old = host.db().execute("SELECT * FROM fetch_queue WHERE id=?",
+                                    (int(d["retry_id"]),)).fetchone()
+            if old is None:
+                return jsonify({"success": False, "error": "no such job"}), 404
+            targets, folder, fid_fixed = [old["target"]], old["folder"], old["fetcher"]
         added = 0; now = time.time()
         for t in targets:
             t = (t or "").strip()
             if not t:
                 continue
             f = registry.for_target(t)
-            fid = _attr(f, "id") if f else ""
+            fid = fid_fixed or (_attr(f, "id") if f else "")
             host.db().execute(
                 "INSERT INTO fetch_queue(fetcher, target, folder, created, updated) "
                 "VALUES(?,?,?,?,?)", (fid or "", t, folder, now, now))
