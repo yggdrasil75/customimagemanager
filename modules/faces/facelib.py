@@ -476,7 +476,7 @@ def cluster(vectors, mode="arcface", min_cluster=2, eps=None):
     # (its PCA reduction only engages above 1000 points, and its DBSCAN branch is
     # gated to <=30 dims) — so for modest N do the exact cosine union-find here.
     # Above that, hand off to the scalable HNSW path.
-    if len(X) <= SMALL_N:
+    if len(X) <= SMALL_N or not getattr(og, "_HAVE_HNSW", False):
         labels = _cosine_union_find(X, eps, min_cluster)
     else:
         try:
