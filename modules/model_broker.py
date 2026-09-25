@@ -400,15 +400,17 @@ class ModelBroker:
                     return pid
             return next(iter(provs), None)
 
-    def variant(self, cap_id, role=None):
+    def variant(self, cap_id, role=None, provider=None):
         """{"size","type","background","classes"} in effect for a capability
         (role "bg" = the background sweep's own model when one is set): the
         user's choice when the selected provider declares it, else the
         provider's first option, else None. Providers read this in their
-        loaders; inside request() the role is implied."""
+        loaders; inside request() the role is implied. provider=<id> resolves
+        the choice against that provider instead of the selected one (its
+        available() asking about the size/type it would run)."""
         with self._lock:
             role = role or getattr(_ROLE, "value", None)
-            pid = self.selected_id(cap_id, role)
+            pid = provider or self.selected_id(cap_id, role)
             p = self._providers.get(cap_id, {}).get(pid)
             v = self._variant.get(cap_id, {})
             if role == "bg" and cap_id in self._bg:

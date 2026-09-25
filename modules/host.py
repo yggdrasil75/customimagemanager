@@ -528,11 +528,11 @@ class Host:
             resource=resource, concurrency=concurrency,
             module_id=self._current_module)
 
-    def model_variant(self, cap_id, role=None):
+    def model_variant(self, cap_id, role=None, provider=None):
         """{"size","type","background","classes"} the user picked for a
         capability (size/type default to the selected provider's first option).
         Providers call this inside their loader."""
-        return self.broker.variant(cap_id, role)
+        return self.broker.variant(cap_id, role, provider)
 
     def request_model(self, cap_id, role="fg", provider=None):
         """Get a ready handle for the user-selected provider of a capability.

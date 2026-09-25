@@ -16,7 +16,6 @@ Weights land in models/vitpose/pose/ (the HF cache is pinned there by
 model_registry).
 """
 
-import importlib
 import os
 
 import numpy as np
@@ -51,23 +50,10 @@ _WB_URL = "https://huggingface.co/JunkyByte/easy_ViTPose/resolve/main/onnx/whole
 # ViT-H is over protobuf's 2 GB cap, so its ONNX export spilled every tensor
 # into a separate external file, and only the graph was uploaded (the tensor
 # files 404). The torch checkpoint is published whole, so h runs from that
-# through easy_ViTPose's model code.
+# through _vitpose_net below (easy_ViTPose isn't on PyPI and its package import
+# drags in ultralytics/filterpy/matplotlib/ffmpeg for two nn.Modules).
 _WB_TORCH_URL = "https://huggingface.co/JunkyByte/easy_ViTPose/resolve/main/torch/wholebody/vitpose-{s}-wholebody.pth"
 _WB_TORCH_ONLY = {"h"}
-_EASY = {}
-
-
-def _easy_error():
-    """'' when easy_ViTPose's model code imports, else why not. Its package
-    __init__ pulls ultralytics / filterpy / matplotlib etc., so a present but
-    half-installed package must not count as available. Checked once."""
-    if "err" not in _EASY:
-        try:
-            importlib.import_module("easy_ViTPose.vit_models.model")
-            _EASY["err"] = ""
-        except Exception as e:
-            _EASY["err"] = f"{type(e).__name__}: {e}"
-    return _EASY["err"]
 _MEAN = np.array([0.485, 0.456, 0.406], np.float32)
 _STD = np.array([0.229, 0.224, 0.225], np.float32)
 _REGISTERED = set()
@@ -147,17 +133,94 @@ def _wholebody_onnx(size):
     return (lambda x: sess.run(None, {inp.name: x})[0][0]), ih, iw
 
 
+# easy_ViTPose's ViT + TopdownHeatmapSimpleHead at inference, with the same
+# module names so its checkpoints load strictly. (embed, depth, heads) per size.
+_VIT = {"s": (384, 12, 12), "b": (768, 12, 12), "l": (1024, 24, 16), "h": (1280, 32, 16)}
+
+
+def _vitpose_net(size, K=133):
+    nn = torch.nn
+    dim, depth, heads = _VIT[size]
+
+    class Attn(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.qkv, self.proj = nn.Linear(dim, dim * 3), nn.Linear(dim, dim)
+
+        def forward(self, x):
+            B, N, _ = x.shape
+            q, k, v = self.qkv(x).reshape(B, N, 3, heads, -1).permute(2, 0, 3, 1, 4)
+            x = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+            return self.proj(x.transpose(1, 2).reshape(B, N, dim))
+
+    class Mlp(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fc1, self.act, self.fc2 = nn.Linear(dim, dim * 4), nn.GELU(), nn.Linear(dim * 4, dim)
+
+        def forward(self, x):
+            return self.fc2(self.act(self.fc1(x)))
+
+    class Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm1, self.attn = nn.LayerNorm(dim, eps=1e-6), Attn()
+            self.norm2, self.mlp = nn.LayerNorm(dim, eps=1e-6), Mlp()
+
+        def forward(self, x):
+            x = x + self.attn(self.norm1(x))
+            return x + self.mlp(self.norm2(x))
+
+    class PatchEmbed(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = nn.Conv2d(3, dim, 16, 16, padding=2)
+
+    class ViT(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.patch_embed = PatchEmbed()
+            self.pos_embed = nn.Parameter(torch.zeros(1, 16 * 12 + 1, dim))
+            self.blocks = nn.ModuleList(Block() for _ in range(depth))
+            self.last_norm = nn.LayerNorm(dim, eps=1e-6)
+
+        def forward(self, x):
+            x = self.patch_embed.proj(x)
+            B, C, Hp, Wp = x.shape
+            x = x.flatten(2).transpose(1, 2) + self.pos_embed[:, 1:] + self.pos_embed[:, :1]
+            for b in self.blocks:
+                x = b(x)
+            return self.last_norm(x).transpose(1, 2).reshape(B, C, Hp, Wp)
+
+    class Head(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.deconv_layers = nn.Sequential(
+                nn.ConvTranspose2d(dim, 256, 4, 2, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
+                nn.ConvTranspose2d(256, 256, 4, 2, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU())
+            self.final_layer = nn.Conv2d(256, K, 1)
+
+        def forward(self, x):
+            return self.final_layer(self.deconv_layers(x))
+
+    class ViTPose(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.backbone, self.keypoint_head = ViT(), Head()
+
+        def forward(self, x):
+            return self.keypoint_head(self.backbone(x))
+    return ViTPose()
+
+
 def _wholebody_torch(size):
     """Same contract as _wholebody_onnx, from the published torch checkpoint."""
-    from easy_ViTPose.vit_models.model import ViTPose
-    cfg = getattr(importlib.import_module("easy_ViTPose.configs.ViTPose_wholebody"),
-                  "model_" + {"s": "small", "b": "base", "l": "large", "h": "huge"}[size])
     path = common.fetch_file(_WB_TORCH_URL.format(s=size),
                              os.path.join(model_registry.model_dir("vitpose", "pose"),
                                           f"vitpose-{size}-wholebody.pth"))
     ckpt = torch.load(path, map_location="cpu", weights_only=True)
     dev = model_registry.device()
-    model = ViTPose(cfg)
+    model = _vitpose_net(size)
     model.load_state_dict(ckpt.get("state_dict", ckpt))
     model = model.to(dev).eval()
 
@@ -230,20 +293,16 @@ def register(host):
             return None
         return lambda img: det(img, conf=0.25)
 
-    def _available():
-        v = host.model_variant("pose") or {}
-        if v.get("type") == "wholebody" and v.get("size") in _WB_TORCH_ONLY:
-            return bool(_HAVE_TORCH) and not _easy_error()
-        return bool((_HAVE_TORCH and _HAVE_TF) or _HAVE_ORT)
-
-    def _reason():
-        v = host.model_variant("pose") or {}
-        if v.get("type") == "wholebody" and v.get("size") in _WB_TORCH_ONLY:
-            why = "torch missing" if not _HAVE_TORCH else _easy_error()
-            return ("whole-body h runs from easy_ViTPose's torch checkpoint (its published ONNX "
-                    "is missing its external weights): pip install torch "
-                    f"git+https://github.com/JunkyByte/easy_ViTPose ({why})")
-        return "pip install transformers torch (body) / onnxruntime (whole-body)"
+    def _needs():
+        """(deps present, what to install) for the size/type vitpose would run."""
+        v = host.model_variant("pose", provider="vitpose") or {}
+        if v.get("type") != "wholebody":
+            return bool(_HAVE_TORCH and _HAVE_TF), "pip install transformers torch (body)"
+        if v.get("size") in _WB_TORCH_ONLY:
+            return bool(_HAVE_TORCH), ("pip install torch (whole-body h runs from easy_ViTPose's "
+                                       "torch checkpoint; its published ONNX is missing its "
+                                       "external weights)")
+        return bool(_HAVE_ORT), "pip install onnxruntime (whole-body)"
 
     host.provide_model(
         "pose", "vitpose", label="ViTPose++", family="ViTPose", sizes=_SIZES,
@@ -255,7 +314,7 @@ def register(host):
         loader=lambda: (lambda v: (lambda img, *a, **k: _people(img, v["type"], v["size"], _persons())))(
             host.model_variant("pose")),
         transform=None,
-        available=_available,
-        reason=_reason,
+        available=lambda: _needs()[0],
+        reason=lambda: _needs()[1],
         cost_mb=400, gpu=model_registry.on_gpu())
     host.logger.info("vitpose module: registered vitpose (17 / 133)")
