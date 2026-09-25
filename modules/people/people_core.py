@@ -254,6 +254,8 @@ def _cache_faces(rel: str, img, regions: list) -> None:
     _upsert_region_embeddings("face_regions", rel, fboxes, vecs, mode, extra=extra)
     _sync_names_from_metadata(rel)
 
+_NOT_A_NAME = {"face", "person", "object", "unknown", "unconfirmed", "confirmed"}
+
 def _sync_names_from_metadata(rel: str) -> int:
     """! @brief Copy region names from the file's metadata onto its face_regions rows.
     @return Rows named. Metadata is the source of truth; until now it was only ever
@@ -268,8 +270,13 @@ def _sync_names_from_metadata(rel: str) -> int:
         return 0
     db, n = _db(), 0
     for r in regions:
-        name = (r.get("region_name") or r.get("name") or "").strip()
-        if not name or r.get("class_name", "face") != "face":
+        name = (r.get("region_name") or "").strip()
+        # A class label in the Name slot ("face", "person", legacy writers) is
+        # not a person's name. Real names never equal the region's class/type.
+        if (not name or r.get("class_name", "face") != "face"
+                or name.lower() in _NOT_A_NAME
+                or name.lower() in {str(r.get(k, "")).lower()
+                                    for k in ("class_name", "region_type")}):
             continue
         n += db.execute(
             "UPDATE face_regions SET name=?, confirmed=1 WHERE rel_path=? "

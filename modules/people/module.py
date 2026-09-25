@@ -179,6 +179,9 @@ def register(host):
                 pass
         return out
     host.on("regions.cached", _regions_cached)
+    # Metadata is the source of truth: every (re)index pulls the file's region
+    # names back onto the cached rows, so a name is never "written once, read never".
+    host.on("file.indexed", lambda rel_path, abs_path=None: pc._sync_names_from_metadata(rel_path))
 
     def _labels_pool():
         try:
