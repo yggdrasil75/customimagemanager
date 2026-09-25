@@ -16,6 +16,7 @@ Weights land in models/vitpose/pose/ (the HF cache is pinned there by
 model_registry).
 """
 
+import importlib
 import os
 
 import numpy as np
@@ -47,6 +48,26 @@ _SIZES = ["s", "b", "l", "h"]
 _HF = {"s": "usyd-community/vitpose-plus-small", "b": "usyd-community/vitpose-plus-base",
        "l": "usyd-community/vitpose-plus-large", "h": "usyd-community/vitpose-plus-huge"}
 _WB_URL = "https://huggingface.co/JunkyByte/easy_ViTPose/resolve/main/onnx/wholebody/vitpose-{s}-wholebody.onnx"
+# ViT-H is over protobuf's 2 GB cap, so its ONNX export spilled every tensor
+# into a separate external file, and only the graph was uploaded (the tensor
+# files 404). The torch checkpoint is published whole, so h runs from that
+# through easy_ViTPose's model code.
+_WB_TORCH_URL = "https://huggingface.co/JunkyByte/easy_ViTPose/resolve/main/torch/wholebody/vitpose-{s}-wholebody.pth"
+_WB_TORCH_ONLY = {"h"}
+_EASY = {}
+
+
+def _easy_error():
+    """'' when easy_ViTPose's model code imports, else why not. Its package
+    __init__ pulls ultralytics / filterpy / matplotlib etc., so a present but
+    half-installed package must not count as available. Checked once."""
+    if "err" not in _EASY:
+        try:
+            importlib.import_module("easy_ViTPose.vit_models.model")
+            _EASY["err"] = ""
+        except Exception as e:
+            _EASY["err"] = f"{type(e).__name__}: {e}"
+    return _EASY["err"]
 _MEAN = np.array([0.485, 0.456, 0.406], np.float32)
 _STD = np.array([0.229, 0.224, 0.225], np.float32)
 _REGISTERED = set()
@@ -114,7 +135,8 @@ def _resolve_external_data(path, url):
         onnx.save(m, path)
 
 
-def _build_wholebody(size):
+def _wholebody_onnx(size):
+    """(heatmaps(x) -> (K,hh,hw), input h, input w) from easy_ViTPose's ONNX."""
     path = common.fetch_file(_WB_URL.format(s=size),
                              os.path.join(model_registry.model_dir("vitpose", "pose"),
                                           f"vitpose-{size}-wholebody.onnx"))
@@ -122,6 +144,31 @@ def _build_wholebody(size):
     sess = ort.InferenceSession(path, providers=[model_registry.onnx_provider()])
     inp = sess.get_inputs()[0]
     ih, iw = (int(inp.shape[2]), int(inp.shape[3])) if isinstance(inp.shape[2], int) else (256, 192)
+    return (lambda x: sess.run(None, {inp.name: x})[0][0]), ih, iw
+
+
+def _wholebody_torch(size):
+    """Same contract as _wholebody_onnx, from the published torch checkpoint."""
+    from easy_ViTPose.vit_models.model import ViTPose
+    cfg = getattr(importlib.import_module("easy_ViTPose.configs.ViTPose_wholebody"),
+                  "model_" + {"s": "small", "b": "base", "l": "large", "h": "huge"}[size])
+    path = common.fetch_file(_WB_TORCH_URL.format(s=size),
+                             os.path.join(model_registry.model_dir("vitpose", "pose"),
+                                          f"vitpose-{size}-wholebody.pth"))
+    ckpt = torch.load(path, map_location="cpu", weights_only=True)
+    dev = model_registry.device()
+    model = ViTPose(cfg)
+    model.load_state_dict(ckpt.get("state_dict", ckpt))
+    model = model.to(dev).eval()
+
+    def heatmaps(x):
+        with torch.no_grad():
+            return model(torch.from_numpy(x).to(dev))[0].float().cpu().numpy()
+    return heatmaps, 256, 192
+
+
+def _build_wholebody(size):
+    heatmaps, ih, iw = (_wholebody_torch if size in _WB_TORCH_ONLY else _wholebody_onnx)(size)
 
     def run(img_bgr, boxes_xywh):
         people = []
@@ -132,7 +179,7 @@ def _build_wholebody(size):
                 people.append([(0.0, 0.0, 0.0)] * 133); continue
             ch, cw = crop.shape[:2]
             t = (cv2.resize(crop[:, :, ::-1], (iw, ih)).astype(np.float32) / 255.0 - _MEAN) / _STD
-            hm = sess.run(None, {inp.name: t.transpose(2, 0, 1)[None]})[0][0]   # (K,hh,hw)
+            hm = heatmaps(np.ascontiguousarray(t.transpose(2, 0, 1)[None]))   # (K,hh,hw)
             K, hh, hw = hm.shape
             flat = hm.reshape(K, -1)
             idx = flat.argmax(1); conf = flat.max(1)
@@ -183,6 +230,21 @@ def register(host):
             return None
         return lambda img: det(img, conf=0.25)
 
+    def _available():
+        v = host.model_variant("pose") or {}
+        if v.get("type") == "wholebody" and v.get("size") in _WB_TORCH_ONLY:
+            return bool(_HAVE_TORCH) and not _easy_error()
+        return bool((_HAVE_TORCH and _HAVE_TF) or _HAVE_ORT)
+
+    def _reason():
+        v = host.model_variant("pose") or {}
+        if v.get("type") == "wholebody" and v.get("size") in _WB_TORCH_ONLY:
+            why = "torch missing" if not _HAVE_TORCH else _easy_error()
+            return ("whole-body h runs from easy_ViTPose's torch checkpoint (its published ONNX "
+                    "is missing its external weights): pip install torch "
+                    f"git+https://github.com/JunkyByte/easy_ViTPose ({why})")
+        return "pip install transformers torch (body) / onnxruntime (whole-body)"
+
     host.provide_model(
         "pose", "vitpose", label="ViTPose++", family="ViTPose", sizes=_SIZES,
         types=[{"value": "body", "label": "Body · 17 pts"},
@@ -193,7 +255,7 @@ def register(host):
         loader=lambda: (lambda v: (lambda img, *a, **k: _people(img, v["type"], v["size"], _persons())))(
             host.model_variant("pose")),
         transform=None,
-        available=lambda: (_HAVE_TORCH and _HAVE_TF) or _HAVE_ORT,
-        reason="pip install transformers torch (body) / onnxruntime (whole-body)",
+        available=_available,
+        reason=_reason,
         cost_mb=400, gpu=model_registry.on_gpu())
     host.logger.info("vitpose module: registered vitpose (17 / 133)")
