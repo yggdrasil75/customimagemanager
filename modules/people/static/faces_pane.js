@@ -590,6 +590,15 @@ async function reclusterFaces() {
   loadFaces();
 }
 
+async function recoverFaces() {
+  document.getElementById('faces_status').textContent = 'Recovering names from metadata…';
+  const r = await (await fetch('/api/faces/recover', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json();
+  document.getElementById('faces_status').textContent =
+    `Recovered: ${r.named} named faces, ${r.clusters} clusters, ${r.persons_relinked} people re-linked`;
+  loadFaces();
+}
+
 // Rescan is a BACKGROUND job -- firing it and stopping is why the status text
 // looked frozen. Poll /api/faces/progress until the queue drains, then reload.
 let _facePoll = null;

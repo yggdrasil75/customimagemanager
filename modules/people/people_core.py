@@ -252,6 +252,31 @@ def _cache_faces(rel: str, img, regions: list) -> None:
     extra = [{"shape": np.asarray(sh, np.float32).tobytes()} if sh is not None else None
              for sh in shapes]
     _upsert_region_embeddings("face_regions", rel, fboxes, vecs, mode, extra=extra)
+    _sync_names_from_metadata(rel)
+
+def _sync_names_from_metadata(rel: str) -> int:
+    """! @brief Copy region names from the file's metadata onto its face_regions rows.
+    @return Rows named. Metadata is the source of truth; until now it was only ever
+            WRITTEN (api_face_name) and never read back, so a lost/scrambled DB name
+            could not be recovered from the file."""
+    abs_p = get_safe_path(MEDIA_DIR, rel)
+    if not abs_p or not os.path.exists(abs_p):
+        return 0
+    try:
+        regions = read_metadata(abs_p).get("regions") or []
+    except Exception:
+        return 0
+    db, n = _db(), 0
+    for r in regions:
+        name = (r.get("region_name") or r.get("name") or "").strip()
+        if not name or r.get("class_name", "face") != "face":
+            continue
+        n += db.execute(
+            "UPDATE face_regions SET name=?, confirmed=1 WHERE rel_path=? "
+            "AND abs(cx-?)<1e-3 AND abs(cy-?)<1e-3",
+            (name, rel, float(r["cx"]), float(r["cy"]))).rowcount
+    db.commit()
+    return n
 
 def _cache_bodies(rel: str, img, regions: list) -> None:
     """! @brief Embed and cache person boxes, binding each to the face row it contains."""
@@ -1508,6 +1533,34 @@ def api_face_scan():
     n = _recluster()
     _face_dirty["v"] = False
     return jsonify({"success": True, "clusters": n})
+
+def api_face_recover():
+    """Rebuild names + person links after a broken recluster: pull every confirmed
+    name back out of file metadata, drop stale unconfirmed name suggestions,
+    recluster (confirmed names never share a cluster), then re-point each .person
+    record at the cluster(s) carrying its name."""
+    db = _db()
+    named = 0
+    for (rel,) in db.execute("SELECT DISTINCT rel_path FROM face_regions").fetchall():
+        named += _sync_names_from_metadata(rel)
+    db.execute("UPDATE face_regions SET name='' WHERE COALESCE(confirmed,0)=0")
+    db.commit()
+    clusters = _recluster()
+    relinked = 0
+    for desc in personlib.list_all(MEDIA_DIR):
+        name = (desc.get("name") or "").strip()
+        if not name:
+            continue
+        cids = [r[0] for r in db.execute(
+            "SELECT DISTINCT cluster_id FROM face_regions WHERE confirmed=1 "
+            "AND name=? AND cluster_id>=0", (name,)).fetchall()]
+        if cids and sorted(cids) != sorted(desc.get("clusters", {}).get("face", [])):
+            desc.setdefault("clusters", {})["face"] = cids
+            personlib.write(MEDIA_DIR, desc)
+            relinked += 1
+    rebuild_persons_cache()
+    return jsonify({"success": True, "named": named, "clusters": clusters,
+                    "persons_relinked": relinked})
 
 def api_face_progress():
     """Poll target for the Faces tab: how much of the library is still queued."""

@@ -129,6 +129,7 @@ def register(host):
     host.add_route("/api/persons/<int:cluster_id>/mesh_data/<appearance_id>", pc.api_person_mesh_data, feature="tab.faces")
     host.add_route("/api/persons/<int:cluster_id>/tpose_data/<appearance_id>", pc.api_person_tpose_data, feature="tab.faces")
     host.add_route("/api/faces/scan", pc.api_face_scan, methods=["POST"], feature="tab.faces", level="write")
+    host.add_route("/api/faces/recover", pc.api_face_recover, methods=["POST"], feature="tab.faces", level="write")
     host.add_route("/api/faces/progress", pc.api_face_progress, feature="tab.faces")
     host.add_route("/api/faces/name", pc.api_face_name, methods=["POST"], feature="tab.faces", level="write", action='face_name', fields=('cluster_id', 'name'))
     host.add_route("/api/faces/split", pc.api_face_split, methods=["POST"], feature="tab.faces", level="write", action='face_split', fields=('cluster_id',))
