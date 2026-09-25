@@ -1,11 +1,15 @@
 """
 Dataset download + normalisation (no app state; module.py wires it in).
 ======================================================================
-Targets (queued through the fetch module like any URL):
+Targets (queued through the fetch module like any URL). Closed zoos get a
+one-click entry in Settings > Datasets; open-ended hosts take a link:
 
+    dataset:pyiqa:<name>                   IQA benchmark sets pyiqa mirrors (PYIQA below), MOS labelled
+    dataset:ultralytics:<name>             any dataset YAML shipped with the installed ultralytics
+    dataset:hf:<owner>/<name>              Hugging Face dataset repo      (or its https://huggingface.co/datasets/… link)
+    dataset:kaggle:<owner>/<name>          Kaggle dataset                 (or its https://www.kaggle.com/datasets/… link)
+    dataset:zenodo:<record id>             Zenodo record, every file      (or its https://zenodo.org/records/… link)
     dataset:<url>                          zip / tar(.gz|.bz2|.xz) / 7z / parquet / csv / image
-    dataset:hf:<owner>/<name>              a Hugging Face dataset repo (every file)
-    dataset:https://huggingface.co/datasets/<owner>/<name>   same as hf:
 
 followed by optional space-separated key=value options:
 
@@ -19,22 +23,28 @@ Several targets with the same name= land in the same folder (e.g. an image
 zip and its scores zip). After download every archive is extracted, parquet
 image columns are written out as files, and any CSV/TSV with an image-name
 column + score column becomes <folder>/labels.csv ("name,score", 0..1),
-which is the shape modules/iqa_train reads.
+which is the shape modules/iqa_train reads. pyiqa sets use their own
+meta_info file and published MOS range instead of the guess.
 """
+import base64
 import csv
+import importlib.util
 import json
 import os
+import re
 import tarfile
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from pathlib import Path
 
 from optional_deps import optional_import
 
 pq, HAVE_PARQUET = optional_import("pyarrow.parquet", quiet=True)
 pa_types, _ = optional_import("pyarrow.types", quiet=True)
 py7zr, HAVE_7Z = optional_import("py7zr", quiet=True)
+yaml, HAVE_YAML = optional_import("yaml", quiet=True)
 
 PREFIX = "dataset:"
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".jxl", ".avif"}
@@ -46,34 +56,134 @@ CHUNK = 1 << 20
 _MAGIC = ((b"\xff\xd8", ".jpg"), (b"\x89PNG", ".png"), (b"GIF8", ".gif"), (b"BM", ".bmp"),
           (b"RIFF", ".webp"), (b"II*\x00", ".tif"), (b"MM\x00*", ".tif"))
 
+# pyiqa's dataset mirror (pyiqa/data/dataset_api.py + default_dataset_configs.yml):
+# name: (label, archive in PYIQA_REPO, meta csv in PYIQA_META_REPO, full-reference?,
+#        image root inside the archive, MOS range or None, lower_better)
+# FR meta rows are "ref,dist,mos", NR rows "name,mos". PieAPP / BAPPS are
+# pairwise preferences, not MOS, so they are left out.
+PYIQA_REPO = "chaofengc/IQA-PyTorch-Datasets"
+PYIQA_META_REPO = "chaofengc/IQA-PyTorch-Datasets-metainfo"
+PYIQA = {
+    "koniq10k": ("KonIQ-10k (in-the-wild, 10k)", "koniq10k.tgz", "meta_info_KonIQ10kDataset.csv", False, "koniq10k/512x384", (1, 100), False),
+    "spaq":     ("SPAQ (smartphone photos, 11k)", "spaq.tgz", "meta_info_SPAQDataset.csv", False, "SPAQ/TestImage", (1, 100), False),
+    "livec":    ("LIVE Challenge (in-the-wild, 1.2k)", "live_challenge.tgz", "meta_info_LIVEChallengeDataset.csv", False, "LIVEC", (1, 100), False),
+    "flive":    ("FLIVE / PaQ-2-PiQ (40k)", "flive.tgz", "meta_info_FLIVEDataset.csv", False, "FLIVE_Database/database", (0, 100), False),
+    "ava":      ("AVA (aesthetics, 255k)", "ava.tgz", "meta_info_AVADataset.csv", False, "AVA_dataset/ava_images", (1, 10), False),
+    "gfiqa":    ("GFIQA-20k (faces)", "gfiqa-20k.tgz", "meta_info_GFIQADataset.csv", False, "GFIQA-20k/image", None, False),
+    "cgfiqa":   ("CGFIQA (faces)", "CGFIQA.zip", "meta_info_CGFIQADataset.csv", False, "CGFIQA", None, False),
+    "kadid10k": ("KADID-10k (synthetic distortions)", "kadid10k.tgz", "meta_info_KADID10kDataset.csv", True, "kadid10k/images", (1, 5), False),
+    "pipal":    ("PIPAL (restoration outputs)", "pipal.tar", "meta_info_PIPALDataset.csv", True, "PIPAL/Dist_Imgs", (0, 1), False),
+    "tid2013":  ("TID2013 (synthetic distortions)", "tid2013.tgz", "meta_info_TID2013Dataset.csv", True, "tid2013/distorted_images", (0, 9), False),
+    "tid2008":  ("TID2008 (synthetic distortions)", "tid2008.tgz", "meta_info_TID2008Dataset.csv", True, "tid2008/distorted_images", (0, 9), False),
+    "csiq":     ("CSIQ (synthetic distortions)", "csiq.tgz", "meta_info_CSIQDataset.csv", True, "CSIQ/dst_imgs", (0, 1), True),
+    "live":     ("LIVE IQA r2 (synthetic distortions)", "live.tgz", "meta_info_LIVEIQADataset.csv", True, "LIVEIQA_release2", (1, 100), True),
+    "livem":    ("LIVE Multiply Distorted", "livem.tgz", "meta_info_LIVEMDDataset.csv", True, "LIVEmultidistortiondatabase", (1, 100), True),
+}
+
+_URL_FORMS = (
+    (r"https?://huggingface\.co/datasets/([^/]+/[^/?#]+)", "hf"),
+    (r"https?://(?:www\.)?kaggle\.com/datasets/([^/]+/[^/?#]+)", "kaggle"),
+    (r"https?://zenodo\.org/records?/(\d+)", "zenodo"),
+)
+
 
 class DatasetError(RuntimeError):
     pass
 
 
+# ── zoos ────────────────────────────────────────────────────────────────────
+
+def _ultra_dir():
+    try:
+        spec = importlib.util.find_spec("ultralytics")
+    except (ImportError, ValueError):
+        return None
+    d = spec and spec.submodule_search_locations and \
+        os.path.join(list(spec.submodule_search_locations)[0], "cfg", "datasets")
+    return d if d and os.path.isdir(d) else None
+
+
+def ultralytics_zoo():
+    """{name: {"label", "download", "data"}} for every YAML in the installed ultralytics
+    whose `download` is a URL or an inline python script (read, not imported)."""
+    d = _ultra_dir()
+    if not d or not HAVE_YAML:
+        return {}
+    out = {}
+    for fn in sorted(os.listdir(d), key=str.lower):
+        if not fn.endswith(".yaml"):
+            continue
+        try:
+            with open(os.path.join(d, fn), encoding="utf-8") as f:
+                text = f.read()
+            data = yaml.safe_load(text) or {}
+        except Exception:
+            continue
+        dl = data.get("download")
+        if not isinstance(dl, str) or not (dl.startswith("http") or "\n" in dl):
+            continue
+        desc = next((l.lstrip("# ").strip() for l in text.splitlines()
+                     if l.startswith("#") and len(l) > 3 and "License" not in l
+                     and not l.lstrip("# ").startswith(("Documentation", "Example"))), "")
+        out[fn[:-5]] = {"label": desc or fn[:-5], "download": dl, "data": data}
+    return out
+
+
+def zoo():
+    """What Settings > Datasets offers as one-click downloads."""
+    return [
+        {"id": "pyiqa", "label": "IQA benchmarks (pyiqa mirror on Hugging Face)", "labelled": True,
+         "items": [{"target": f"{PREFIX}pyiqa:{k}", "name": k, "label": v[0]} for k, v in PYIQA.items()]},
+        {"id": "ultralytics", "label": "Ultralytics datasets (installed package)", "labelled": False,
+         "items": [{"target": f"{PREFIX}ultralytics:{k}", "name": dest_name(v), "label": f"{k}: {v['label']}"}
+                   for k, v in ultralytics_zoo().items()]},
+    ]
+
+
+def dest_name(u):
+    """Folder an ultralytics dataset lands in: its YAML `path` (the name its zips/scripts use)."""
+    return os.path.basename(str(u["data"].get("path") or "").rstrip("/\\")) or "dataset"
+
+
 # ── target parsing ──────────────────────────────────────────────────────────
 
 def parse_target(t):
-    """'dataset:<src> k=v ...' -> {"kind": "hf"|"url", "src", "name", **opts}."""
+    """'dataset:<src> k=v ...' -> {"kind", "src", "name", **opts}."""
     body = (t or "").strip()
     if not body.lower().startswith(PREFIX):
         raise DatasetError("not a dataset target")
     parts = body[len(PREFIX):].split()
     if not parts:
-        raise DatasetError("dataset: needs a URL or hf:<owner>/<name>")
+        raise DatasetError("dataset: needs a link or <zoo>:<name>")
     src, opts = parts[0], {}
     for p in parts[1:]:
         k, eq, v = p.partition("=")
         if eq:
             opts[k.strip().lower()] = v.strip()
-    hf_url = "https://huggingface.co/datasets/"
-    if src.startswith(hf_url):
-        src = "hf:" + "/".join(src[len(hf_url):].split("/")[:2])
-    if src.startswith("hf:"):
-        repo = src[3:].strip("/")
-        if repo.count("/") != 1:
-            raise DatasetError("hf: needs <owner>/<name>")
-        out = {"kind": "hf", "src": repo, "name": repo.split("/")[1]}
+    for rx, kind in _URL_FORMS:
+        m = re.match(rx, src)
+        if m:
+            src = f"{kind}:{m.group(1)}"
+            break
+    kind, _, ref = src.partition(":")
+    if kind == "hf" or kind == "kaggle":
+        ref = ref.strip("/")
+        if ref.count("/") != 1:
+            raise DatasetError(f"{kind}: needs <owner>/<name>")
+        out = {"kind": kind, "src": ref, "name": ref.split("/")[1]}
+    elif kind == "zenodo":
+        if not ref.isdigit():
+            raise DatasetError("zenodo: needs a record id")
+        out = {"kind": kind, "src": ref, "name": f"zenodo-{ref}"}
+    elif kind == "pyiqa":
+        if ref not in PYIQA:
+            raise DatasetError(f"unknown pyiqa dataset '{ref}' (have: {', '.join(PYIQA)})")
+        out = {"kind": kind, "src": ref, "name": ref}
+    elif kind == "ultralytics":
+        u = ultralytics_zoo().get(ref)
+        if u is None:
+            raise DatasetError(f"ultralytics has no downloadable dataset '{ref}' (or is not installed)")
+        out = {"kind": kind, "src": ref, "name": dest_name(u)}
     elif src.startswith(("http://", "https://")):
         base = os.path.basename(urllib.parse.urlparse(src).path) or "dataset"
         stem = base
@@ -88,30 +198,63 @@ def parse_target(t):
 
 
 def host_of(spec):
-    return "huggingface.co" if spec["kind"] == "hf" else urllib.parse.urlparse(spec["src"]).netloc
+    """Concurrency bucket: the host the bytes come from."""
+    k = spec["kind"]
+    if k in ("hf", "pyiqa"):
+        return "huggingface.co"
+    if k == "kaggle":
+        return "kaggle.com"
+    if k == "zenodo":
+        return "zenodo.org"
+    if k == "ultralytics":
+        dl = ultralytics_zoo().get(spec["src"], {}).get("download", "")
+        return urllib.parse.urlparse(dl).netloc if dl.startswith("http") else "ultralytics"
+    return urllib.parse.urlparse(spec["src"]).netloc
 
 
 # ── downloading (generators: yield per chunk so the caller can cancel) ──────
 
-def _open(url, token=None):
+def _auth_header(url, creds):
+    creds = creds or {}
+    host = urllib.parse.urlparse(url).netloc
+    if host.endswith("huggingface.co") and creds.get("hf"):
+        return f"Bearer {creds['hf']}"
+    if host.endswith("kaggle.com") and creds.get("kaggle_user") and creds.get("kaggle_key"):
+        tok = base64.b64encode(f"{creds['kaggle_user']}:{creds['kaggle_key']}".encode()).decode()
+        return f"Basic {tok}"
+    return None
+
+
+def _open(url, creds=None):
     req = urllib.request.Request(url, headers={"User-Agent": "customimagemanager-datasets"})
-    if token and "huggingface.co" in url:
-        req.add_header("Authorization", f"Bearer {token}")
+    auth = _auth_header(url, creds)
+    if auth:
+        req.add_unredirected_header("Authorization", auth)   # never forwarded to the CDN a host redirects to
     try:
         return urllib.request.urlopen(req, timeout=60)
     except urllib.error.HTTPError as e:
-        hint = " (gated/private: set the Hugging Face token in the Datasets module settings)" \
-            if e.code in (401, 403) and "huggingface.co" in url else ""
+        hint = ""
+        if e.code in (401, 403):
+            host = urllib.parse.urlparse(url).netloc
+            if "huggingface.co" in host:
+                hint = " (gated/private: set the Hugging Face token in Settings > Datasets)"
+            elif "kaggle.com" in host:
+                hint = " (set the Kaggle username + API key in Settings > Datasets, and accept the dataset's rules on kaggle.com)"
         raise DatasetError(f"HTTP {e.code} for {url}{hint}") from e
 
 
-def download(url, path, token=None, size=None):
+def _json(url, creds=None):
+    with _open(url, creds) as r:
+        return json.load(r), r.headers
+
+
+def download(url, path, creds=None, size=None):
     """Stream url -> path (via .part). Skips when path exists with the expected size."""
     if os.path.exists(path) and (size is None or os.path.getsize(path) == size):
         return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".part"
-    with _open(url, token) as r, open(tmp, "wb") as f:
+    with _open(url, creds) as r, open(tmp, "wb") as f:
         while True:
             b = r.read(CHUNK)
             if not b:
@@ -121,15 +264,15 @@ def download(url, path, token=None, size=None):
     os.replace(tmp, path)
 
 
-def hf_files(repo, rev="main", token=None):
+def hf_files(repo, rev="main", creds=None):
     """[(path, size)] of every file in a HF dataset repo (follows the tree API's paging)."""
     url = (f"https://huggingface.co/api/datasets/{repo}/tree/{urllib.parse.quote(rev, safe='')}"
            "?recursive=true&expand=false")
     out = []
     while url:
-        with _open(url, token) as r:
-            out += [(e["path"], e.get("size")) for e in json.load(r) if e.get("type") == "file"]
-            nxt = r.headers.get("Link") or ""
+        rows, headers = _json(url, creds)
+        out += [(e["path"], e.get("size")) for e in rows if e.get("type") == "file"]
+        nxt = headers.get("Link") or ""
         url = nxt.split(";")[0].strip("<> ") if 'rel="next"' in nxt else None
     return out
 
@@ -137,6 +280,16 @@ def hf_files(repo, rev="main", token=None):
 def hf_url(repo, path, rev="main"):
     return (f"https://huggingface.co/datasets/{repo}/resolve/{urllib.parse.quote(rev, safe='')}/"
             + urllib.parse.quote(path))
+
+
+def zenodo_files(record, creds=None):
+    """[(name, url, size)] of a Zenodo record's files."""
+    rec, _ = _json(f"https://zenodo.org/api/records/{record}", creds)
+    files = rec.get("files") or []
+    if isinstance(files, dict):                          # some API versions nest {"entries": {...}}
+        files = list((files.get("entries") or {}).values())
+    return [(f["key"], (f.get("links") or {}).get("content") or f["links"]["self"], f.get("size"))
+            for f in files]
 
 
 # ── normalisation ───────────────────────────────────────────────────────────
@@ -344,25 +497,108 @@ def normalise(root, spec):
     return build_labels(root, spec.get("score")) or find_ava(root)
 
 
-def fetch(spec, root, token=None):
+
+def pyiqa_labels(root, name, meta_path):
+    """root/labels.csv from a pyiqa meta_info CSV: paths relative to root, MOS
+    mapped to 0..1 with the published range (flipped when lower is better).
+    Returns the labels path or None."""
+    _label, _arc, _meta, fr, img_root, rng, lower = PYIQA[name]
+    with open(meta_path, encoding="utf-8", errors="replace", newline="") as f:
+        rows = list(csv.reader(f))[1:]
+    ni = 1 if fr else 0
+    raw = {}
+    for r in rows:
+        if len(r) <= ni + 1:
+            continue
+        p = os.path.join(root, img_root, r[ni].strip())
+        try:
+            if os.path.isfile(p):
+                raw[os.path.relpath(p, root).replace(os.sep, "/")] = float(r[ni + 1])
+        except ValueError:
+            continue
+    if not raw:
+        return None
+    lo, hi = rng if rng else (min(raw.values()), max(raw.values()))
+    if min(raw.values()) < lo or max(raw.values()) > hi:  # meta not on the published scale: use what is there
+        lo, hi = min(raw.values()), max(raw.values())
+    span = (hi - lo) or 1.0
+    out = os.path.join(root, LABELS)
+    with open(out, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["name", "score"])
+        for n, s in sorted(raw.items()):
+            v = (s - lo) / span
+            w.writerow([n, round(1.0 - v if lower else v, 6)])
+    return out
+
+
+def _run_ultralytics_script(script, data, root):
+    """Run a YAML's inline download script exactly as ultralytics' check_det_dataset
+    does (exec with `yaml` = the parsed YAML, path = our folder). Its downloads
+    already unzip, so leftover archives it drops (in root or root's parent) are removed.
+    Generator (one yield at the end): the script itself can't be cancelled mid-way."""
+    parent = os.path.dirname(root)
+    before = set(os.listdir(parent))
+    exec(script, {"yaml": {**data, "path": Path(root)}})  # noqa: S102 - shipped with the installed ultralytics
+    for fn in set(os.listdir(parent)) - before:
+        if fn.lower().endswith(ARCHIVE_EXTS):
+            os.remove(os.path.join(parent, fn))
+    for dp, _dn, fns in os.walk(root):
+        for fn in fns:
+            if fn.lower().endswith(ARCHIVE_EXTS):
+                os.remove(os.path.join(dp, fn))
+    yield
+
+
+def _once(root, key, gen):
+    """Run a download generator unless the marker for key exists (archives are deleted
+    after extraction, so their absence can't mean 'not fetched')."""
+    mark = os.path.join(root, ".fetched_" + re.sub(r"[^\w.-]", "_", key) + ".done")
+    if os.path.exists(mark):
+        return
+    yield from gen
+    open(mark, "w").close()
+
+
+def fetch(spec, root, creds=None):
     """Download spec into root, then normalise. Generator; returns labels path|None."""
     os.makedirs(root, exist_ok=True)
-    if spec["kind"] == "hf":
+    kind, src = spec["kind"], spec["src"]
+    if kind == "pyiqa":
+        _l, arc, meta, *_ = PYIQA[src]
+        meta_path = os.path.join(root, "_pyiqa_meta_info.txt")   # not .csv: the generic label scan must skip it
+        yield from download(hf_url(PYIQA_META_REPO, meta), meta_path, creds)
+        yield from _once(root, arc, download(hf_url(PYIQA_REPO, arc), os.path.join(root, arc), creds))
+        yield from extract_all(root)
+        return pyiqa_labels(root, src, meta_path)
+    if kind == "ultralytics":
+        u = ultralytics_zoo()[src]
+        dl = u["download"]
+        if dl.startswith("http"):
+            base = os.path.basename(urllib.parse.urlparse(dl).path)
+            yield from _once(root, base, download(dl, os.path.join(root, base), creds))
+        else:
+            yield from _once(root, "script", _run_ultralytics_script(dl, u["data"], root))
+    elif kind == "hf":
         rev = spec.get("rev") or "main"
         split = spec.get("split")
-        files = [(p, s) for p, s in hf_files(spec["src"], rev, token)
+        files = [(p, s) for p, s in hf_files(src, rev, creds)
                  if not os.path.basename(p).startswith(".") and (not split or split in p)]
         if not files:
-            raise DatasetError(f"no files in hf:{spec['src']}" + (f" matching split={split}" if split else ""))
+            raise DatasetError(f"no files in hf:{src}" + (f" matching split={split}" if split else ""))
         for p, size in files:
             dst = os.path.join(root, p)
-            if not _inside(root, dst):
-                continue
-            yield from download(hf_url(spec["src"], p, rev), dst, token, size)
+            if _inside(root, dst):
+                yield from download(hf_url(src, p, rev), dst, creds, size)
+    elif kind == "zenodo":
+        for key, url, size in zenodo_files(src, creds):
+            dst = os.path.join(root, key)
+            if _inside(root, dst):
+                yield from _once(root, key, download(url, dst, creds, size))
+    elif kind == "kaggle":
+        url = f"https://www.kaggle.com/api/v1/datasets/download/{src}"
+        yield from _once(root, "kaggle", download(url, os.path.join(root, spec["name"] + ".zip"), creds))
     else:
-        base = os.path.basename(urllib.parse.urlparse(spec["src"]).path) or "download.bin"
-        mark = os.path.join(root, ".fetched_" + base + ".done")
-        if not os.path.exists(mark):                      # archives are deleted after extraction
-            yield from download(spec["src"], os.path.join(root, base))
-            open(mark, "w").close()
+        base = os.path.basename(urllib.parse.urlparse(src).path) or "download.bin"
+        yield from _once(root, base, download(src, os.path.join(root, base), creds))
     return (yield from normalise(root, spec))

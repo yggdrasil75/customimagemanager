@@ -102,7 +102,9 @@ def read_labels(folder, labels_path):
     div = 100.0 if mx > 10 else 10.0 if mx > 1 else 1.0    # ponytail: scale guessed from the max
     out = []
     for name, s in rows:
-        p = idx.get(name) or idx.get(os.path.basename(name)) or idx.get(os.path.splitext(os.path.basename(name))[0])
+        direct = os.path.join(folder, name)             # relative path first: LIVE etc. reuse basenames per subfolder
+        p = (direct if os.path.isfile(direct) else None) or idx.get(name) or idx.get(os.path.basename(name)) \
+            or idx.get(os.path.splitext(os.path.basename(name))[0])
         if p:
             out.append((p, min(1.0, max(0.0, s / div))))
     return out

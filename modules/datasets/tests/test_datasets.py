@@ -41,7 +41,13 @@ def test_parse_target():
     u = ds.parse_target("dataset:https://x.org/dl/koniq10k_1024x768.zip name=koniq")
     assert (u["kind"], u["name"], ds.host_of(u)) == ("url", "koniq", "x.org")
     assert ds.parse_target("dataset:https://x.org/a/imgs.tar.gz")["name"] == "imgs"
-    for bad in ("https://x.org/a.zip", "dataset:", "dataset:hf:onlyname", "dataset:ftp://x"):
+    assert ds.parse_target("dataset:https://www.kaggle.com/datasets/own/set?x=1")["src"] == "own/set"
+    z = ds.parse_target("dataset:https://zenodo.org/records/12345 name=zz")
+    assert (z["kind"], z["src"], z["name"], ds.host_of(z)) == ("zenodo", "12345", "zz", "zenodo.org")
+    p = ds.parse_target("dataset:pyiqa:koniq10k")
+    assert (p["name"], ds.host_of(p)) == ("koniq10k", "huggingface.co")
+    for bad in ("https://x.org/a.zip", "dataset:", "dataset:hf:onlyname", "dataset:ftp://x",
+                "dataset:pyiqa:nope", "dataset:zenodo:abc", "dataset:ultralytics:nope"):
         with pytest.raises(ds.DatasetError):
             ds.parse_target(bad)
 
@@ -106,7 +112,8 @@ def test_fetcher_end_to_end(tmp_path, monkeypatch):
             config={"dedup_train_folders": "/old"}, media_dir=str(media),
             logger=logging.getLogger("t"), save_config=lambda: None,
             get_service=lambda n: types.SimpleNamespace(register=lambda f: reg.update(f)),
-            add_config_key=lambda *a, **k: None, add_settings_field=lambda **k: None)
+            add_config_key=lambda *a, **k: None, add_settings_field=lambda **k: None,
+            add_settings_tab=lambda *a, **k: None, add_asset=lambda *a: None, add_route=lambda *a, **k: None)
         dsm.register(host)
         target = f"dataset:http://127.0.0.1:{srv.server_address[1]}/pack.zip name=my set"
         assert reg["handles"](target) and not reg["handles"]("https://x.org/a")
@@ -119,3 +126,80 @@ def test_fetcher_end_to_end(tmp_path, monkeypatch):
         assert host.config["dedup_train_folders"] == f"/old\n{dest}"
     finally:
         srv.shutdown()
+
+
+def test_auth_headers():
+    c = {"hf": "tok", "kaggle_user": "u", "kaggle_key": "k"}
+    assert ds._auth_header("https://huggingface.co/api/x", c) == "Bearer tok"
+    assert ds._auth_header("https://www.kaggle.com/api/v1/x", c) == "Basic dTpr"
+    assert ds._auth_header("https://zenodo.org/api/records/1", c) is None
+    assert ds._auth_header("https://www.kaggle.com/api/v1/x", {"hf": "tok"}) is None
+
+
+def test_zenodo_files(monkeypatch):
+    rec = {"files": [{"key": "a.zip", "size": 3, "links": {"self": "https://z/a.zip/content"}}]}
+    monkeypatch.setattr(ds, "_json", lambda url, creds=None: (rec, {}))
+    assert ds.zenodo_files("1") == [("a.zip", "https://z/a.zip/content", 3)]
+    rec = {"files": {"entries": {"b.csv": {"key": "b.csv", "links": {"content": "https://z/b"}}}}}
+    assert ds.zenodo_files("1") == [("b.csv", "https://z/b", None)]
+
+
+def test_pyiqa_labels_fr_lower_better(tmp_path):
+    root = tmp_path / "live"
+    for sub in ("jp2k", "wn"):
+        (root / "LIVEIQA_release2" / sub).mkdir(parents=True)
+        (root / "LIVEIQA_release2" / sub / "img1.bmp").write_bytes(JPG)   # same basename, two folders
+    meta = tmp_path / "meta.txt"
+    meta.write_text("ref_name,dist_name,dmos\nrefs/a.bmp,jp2k/img1.bmp,1\nrefs/a.bmp,wn/img1.bmp,100\n"
+                    "refs/a.bmp,wn/missing.bmp,50\n")
+    lab = _labels(ds.pyiqa_labels(str(root), "live", str(meta)))
+    assert lab == {"LIVEIQA_release2/jp2k/img1.bmp": 1.0, "LIVEIQA_release2/wn/img1.bmp": 0.0}
+
+
+def test_pyiqa_labels_out_of_range_falls_back(tmp_path):
+    (tmp_path / "PIPAL" / "Dist_Imgs").mkdir(parents=True)
+    for n in ("a.png", "b.png"):
+        (tmp_path / "PIPAL" / "Dist_Imgs" / n).write_bytes(PNG)
+    meta = tmp_path / "m.txt"
+    meta.write_text("ref,dist,elo\nr.png,a.png,1000\nr.png,b.png,1500\n")      # published range says 0..1
+    assert _labels(ds.pyiqa_labels(str(tmp_path), "pipal", str(meta))) == {
+        "PIPAL/Dist_Imgs/a.png": 0.0, "PIPAL/Dist_Imgs/b.png": 1.0}
+
+
+def test_iqa_train_reads_relative_label_paths(tmp_path):
+    bd = pytest.importorskip("modules.iqa_train.build")
+    for sub in ("jp2k", "wn"):
+        (tmp_path / sub).mkdir()
+        (tmp_path / sub / "img1.bmp").write_bytes(JPG)
+    lf = tmp_path / "labels.csv"
+    lf.write_text("name,score\njp2k/img1.bmp,0.2\nwn/img1.bmp,0.9\n")
+    got = dict(bd.read_labels(str(tmp_path), str(lf)))
+    assert got == {str(tmp_path / "jp2k" / "img1.bmp"): 0.2, str(tmp_path / "wn" / "img1.bmp"): 0.9}
+
+
+def test_ultralytics_zoo_and_script(tmp_path, monkeypatch):
+    pytest.importorskip("yaml")
+    cfgd = tmp_path / "cfg"
+    cfgd.mkdir()
+    (cfgd / "tiny8.yaml").write_text("# Ultralytics AGPL-3.0 License\n# Documentation: x\n# Tiny8 test set\npath: tiny8 # root\n"
+                                     "download: https://github.com/ultralytics/assets/releases/download/v0.0.0/tiny8.zip\n")
+    (cfgd / "scripted.yaml").write_text(
+        "path: scr\nnames: {0: a}\ndownload: |\n  import zipfile\n  d = yaml['path']\n"
+        "  (d / 'images').mkdir(parents=True, exist_ok=True)\n"
+        "  (d / 'images' / 'x.jpg').write_bytes(b'\\xff\\xd8')\n"
+        "  zipfile.ZipFile(d.parent / 'left.zip', 'w').close()\n  zipfile.ZipFile(d / 'in.zip', 'w').close()\n")
+    (cfgd / "bashy.yaml").write_text("path: b\ndownload: ultralytics/data/scripts/get_x.sh\n")
+    monkeypatch.setattr(ds, "_ultra_dir", lambda: str(cfgd))
+    z = ds.ultralytics_zoo()
+    assert sorted(z) == ["scripted", "tiny8"] and z["tiny8"]["label"] == "Tiny8 test set"
+    items = {it["target"]: it for it in next(q for q in ds.zoo() if q["id"] == "ultralytics")["items"]}
+    assert items["dataset:ultralytics:tiny8"]["name"] == "tiny8"
+    spec = ds.parse_target("dataset:ultralytics:scripted")
+    assert ds.host_of(spec) == "ultralytics" and spec["name"] == "scr"
+    dest = tmp_path / "ds" / "scr"
+    assert _drain(ds.fetch(spec, str(dest))) is None
+    assert (dest / "images" / "x.jpg").exists()
+    assert not (tmp_path / "ds" / "left.zip").exists() and not (dest / "in.zip").exists()
+    (dest / "images" / "x.jpg").unlink()
+    _drain(ds.fetch(spec, str(dest)))                      # marker: the script does not run twice
+    assert not (dest / "images" / "x.jpg").exists()
