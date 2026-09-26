@@ -175,7 +175,10 @@ def register(host):
     fetch.register({
         "id": "gallerydl", "label": "gallery-dl",
         "available": gdl.available,
-        "handles": lambda t: bool(t) and t.strip().startswith(("http://", "https://")),
+        # Only claim URLs an extractor actually matches, so hosts served by
+        # another fetcher (yt-dlp for YouTube) aren't swallowed here.
+        "handles": lambda t: bool(t) and t.strip().startswith(("http://", "https://"))
+                             and gdl._find_extractor(t.strip()) is not None,
         "target_key": _target_key,
         "fetch": _fetch,
         "map_meta": _map_meta,

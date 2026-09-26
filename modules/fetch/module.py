@@ -151,8 +151,12 @@ class FetchRegistry:
         return out
 
     def for_target(self, target):
-        """The first available fetcher that handles `target`, or None."""
-        for f in self._fetchers.values():
+        """The highest-priority available fetcher that handles `target`, or
+        None. `priority` (default 0) lets catch-all fetchers (page scraper)
+        sit behind specific ones regardless of module load order."""
+        ranked = sorted(self._fetchers.values(),
+                        key=lambda f: -(self._attr(f, "priority", 0) or 0))
+        for f in ranked:
             handles = self._attr(f, "handles")
             avail = self._attr(f, "available")
             try:
@@ -224,7 +228,9 @@ def register(host):
         fetch_fn = _attr(fetcher, "fetch")
         map_meta = _attr(fetcher, "map_meta")
         os.makedirs(m.upload_spool_dir, exist_ok=True)
-        tmp = tempfile.mkdtemp(prefix="fetch-")
+        # Download scratch lives on the spool disk: /tmp is often a small tmpfs
+        # that would trip the free-space floor and pause the queue forever.
+        tmp = tempfile.mkdtemp(prefix="fetch-", dir=m.upload_spool_dir)
         downloaded = 0; now = time.time(); canceled = False
         site_seen = {"cat": ""}
 
@@ -261,7 +267,7 @@ def register(host):
                     for _mp, _meta in gen:
                         if _is_canceled(qid):
                             canceled = True; break
-                        if not wait_for_space(tmp, m.upload_spool_dir, m.media_dir,
+                        if not wait_for_space(m.upload_spool_dir, m.media_dir,
                                               stop=lambda: _is_canceled(qid)):
                             canceled = True; break
                 finally:
@@ -289,10 +295,20 @@ def register(host):
             time.sleep(min(10.0, 1.0 * job["attempts"])); return
         _update(qid, status="done" if ok else "error", error=err[:500])
 
+    _paused = {"why": ""}
+    def _pause_reason():
+        low = disk_low(m.upload_spool_dir, m.media_dir)
+        why = (f"paused: {low} has under {common.min_free_bytes(low) >> 20} MB free "
+               "(Settings › General › Pause downloads below)") if low else ""
+        if why != _paused["why"]:
+            _paused["why"] = why
+            host.logger.warning(f"fetch queue {why or 'resumed'}")
+        return why
+
     def _claim():
         """Peek pending rows; claim the first whose target_key bucket is free."""
         tm = host.thread_manager
-        if disk_low(tempfile.gettempdir(), m.upload_spool_dir, m.media_dir):
+        if _pause_reason():
             return None                       # queue paused: rows stay 'pending'
         try:
             _tick_watches()
@@ -418,13 +434,28 @@ def register(host):
         rows = host.db().execute(
             "SELECT * FROM fetch_queue ORDER BY id DESC LIMIT 200").fetchall()
         return jsonify({"success": True, "queue": [dict(r) for r in rows],
-                        "fetchers": registry.available_fetchers()})
+                        "fetchers": registry.available_fetchers(),
+                        "paused": _paused["why"]})
 
     def api_fetch_cancel():
         d = request.get_json(force=True, silent=True) or {}
         qid = d.get("id")
-        if qid is not None:
-            _cancel.add(int(qid))
+        db = host.db()
+        if d.get("all"):
+            # Pending rows are canceled in the DB directly (nothing is running
+            # them yet — possibly because the queue is paused); running ones
+            # get the flag their worker polls.
+            db.execute("UPDATE fetch_queue SET status='canceled', updated=? WHERE status='pending'",
+                       (time.time(),))
+            for r in db.execute("SELECT id FROM fetch_queue WHERE status='downloading'"):
+                _cancel.add(r["id"])
+        elif qid is not None:
+            qid = int(qid)
+            n = db.execute("UPDATE fetch_queue SET status='canceled', updated=? "
+                           "WHERE id=? AND status='pending'", (time.time(), qid)).rowcount
+            if not n:
+                _cancel.add(qid)
+        db.commit()
         return jsonify({"success": True})
 
     def api_fetch_clear():
