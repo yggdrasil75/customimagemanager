@@ -48,3 +48,25 @@ test("selectFile reads metadata and populates tags/regions/description", async (
   assert.equal($("meta_desc").value, "hello");
   assert.equal(b.api.last("/api/metadata", "POST").body.filename, "pic.jxl");
 });
+
+test("selectAllMatching pulls the whole result set into the selection", async () => {
+  b.api.on("/api/list_all", { success: true, filenames: ["x1.jxl", "x2.jxl", "x3.jxl"] });
+  b.run(`selectedFiles.clear(); currentSearch="tag:cat"; currentFolder=""; totalFiles=3; selectAllMatching();`);
+  await b.tick(10);
+  assert.equal(b.api.last("/api/list_all").query.q, "tag:cat");
+  assert.equal(b.run("selectedFiles.size"), 3);
+  assert.equal($("btn_select_all").classList.contains("hidden"), true);
+  b.run(`selectedFiles.clear(); refreshSelectionUI();`);
+  assert.equal($("btn_select_all").classList.contains("hidden"), false);
+});
+
+test("bulk POSTs with many filenames are chunked and the replies merged", async () => {
+  b.api.on("POST /api/bulk_tag", c => ({ success: true, updated: c.body.filenames.length, errors: [] }));
+  b.run(`selectedFiles.clear(); for(let i=0;i<450;i++) selectedFiles.add("f"+i+".jxl");
+         document.getElementById('bulk_tag_input').value="zz"; applyBulkTag();`);
+  await b.tick(30);
+  const calls = b.api.find("/api/bulk_tag", "POST");
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls.map(c => c.body.filenames.length), [200, 200, 50]);
+  assert.equal(calls[0].body.tags[0], "zz");
+});

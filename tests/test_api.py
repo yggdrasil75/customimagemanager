@@ -185,3 +185,28 @@ def test_settings_and_models(client):
     assert client.post("/api/update_settings", json={}).status_code == 200
     assert client.get("/api/audit_log").status_code == 200
     assert client.get("/api/workers").status_code == 200
+
+
+def test_bulk_query_tag_untag_and_dims(client, upload):
+    a = upload("bulk_a.png", seed=21, folder="bulkq")
+    b = upload("bulk_b.png", seed=22, folder="bulkq")
+    _write(client, a, ["cat", "?dog"])
+    _write(client, b, ["dog"])
+    # tag: is an exact match on the bare name (sentinel-insensitive)
+    assert {f["filename"] for f in _lst(client, q="tag:dog", folder="bulkq")["files"]} == {a, b}
+    assert {f["filename"] for f in _lst(client, q="tag:cat", folder="bulkq")["files"]} == {a}
+    assert {f["filename"] for f in _lst(client, q="-tag:cat", folder="bulkq")["files"]} == {b}
+    assert _lst(client, q="tag:ca", folder="bulkq")["total"] == 0
+    # min/max = shorter/longer side (fixtures are 48x32); colon optional
+    assert _lst(client, q="min<40", folder="bulkq")["total"] == 2
+    assert _lst(client, q="min:<30", folder="bulkq")["total"] == 0
+    assert _lst(client, q="max>=48", folder="bulkq")["total"] == 2
+    # list_all is the unpaged id set for the same query
+    j = client.get("/api/list_all", query_string={"q": "tag:dog", "folder": "bulkq"}).get_json()
+    assert j["success"] and set(j["filenames"]) == {a, b}
+    assert client.get("/api/list_all", query_string={"q": "sem:x"}).get_json()["success"] is False
+    # bulk_untag strips by bare name, confirmed or not
+    j = client.post("/api/bulk_untag", json={"filenames": [a, b], "tags": ["dog"]}).get_json()
+    assert j["success"] and j["updated"] == 2
+    assert _read(client, a)["tags"] == ["cat"] and _read(client, b)["tags"] == []
+    assert _lst(client, q="tag:dog", folder="bulkq")["total"] == 0

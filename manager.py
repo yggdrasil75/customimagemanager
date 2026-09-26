@@ -902,7 +902,10 @@ def _purge_file_everywhere(rel_path):
 def _get_file_row(rel_path):
     return _db().execute("SELECT * FROM files WHERE rel_path=?", (rel_path,)).fetchone()
 
-_FILTER_RE = re.compile(r'(width|height)\s*(<=|>=|<|>|=)\s*(\d+)$', re.I)
+_FILTER_RE = re.compile(r'(width|height|min|max):?\s*(<=|>=|<|>|=)\s*(\d+)$', re.I)
+# min/max = shorter/longer side, so `min<512` is "below 512 in width OR height".
+_DIM_COLS = {"width": "width", "height": "height",
+             "min": "MIN(width,height)", "max": "MAX(width,height)"}
 
 # Date search tokens. Each maps to the set of bucket columns it queries; a match
 # is STRICT (the file must have at least one of those buckets populated). The
@@ -977,7 +980,7 @@ def _parse_search(search: str) -> tuple[str, list, list, list]:
         m = _FILTER_RE.match(tok)
         if m:
             col, opx, val = m.group(1).lower(), m.group(2), int(m.group(3))
-            where.append(f"{col} {opx} ?")
+            where.append(f"{_DIM_COLS[col]} {opx} ?")
             params.append(val)
             structured.append(("dim", col, opx, val))   # images-only
             continue
@@ -992,6 +995,17 @@ def _parse_search(search: str) -> tuple[str, list, list, list]:
                 structured.append(("date", token, dm.group(2), dm.group(3)))
             continue
         low = tok.lower()
+        if low.startswith('tag:') or low.startswith('-tag:'):
+            neg = low.startswith('-')
+            name = tok.split(':', 1)[1].strip()
+            if name:
+                # tags is a JSON list; unconfirmed tags carry a leading '?'.
+                where.append(("NOT " if neg else "") +
+                             "EXISTS (SELECT 1 FROM json_each(files.tags) "
+                             "WHERE lower(ltrim(json_each.value,'?'))=?)")
+                params.append(name.lower())
+                structured.append(("tag", name, neg))
+            continue
         if low == 'is:untagged':
             where.append("(tags IS NULL OR tags='' OR tags='[]')")
             structured.append(("is", "untagged"))
@@ -1022,28 +1036,13 @@ def _parse_search(search: str) -> tuple[str, list, list, list]:
             text.append(tok)
     return ' '.join(text).strip(), where, params, structured
 
-def _query_files(search: str, offset: int, limit: int,
-                 folder: str = '', album: str = '') -> tuple[list, int]:
+def _files_where(search: str, folder: str = '', album: str = ''):
     """!
-    @brief Page the flat gallery: comics/books first (one cover tile each), then images.
-    @param album If given, restrict to that album's members and suppress comics/books.
-    @return (entries, total) where entries are typed dicts (kind='comic'|'book'|'image').
+    @brief The image-rows WHERE for a gallery query (search tokens, module
+           gallery filters, album scope, folder scope, free text).
+    @return (where_sql, params, text, structured).
     """
     text, where, params, structured = _parse_search(search)
-
-    # Non-image search contributors (books, comics, …) come from modules via
-    # host.register_search_provider; core merges their entries in front of the
-    # image results. Skipped for an album (a flat image set). With no such
-    # module the app searches only images.
-    comic_entries = []
-    if not album and 'module_host' in globals():
-        for prov in getattr(module_host, "search_providers", []):
-            try:
-                comic_entries += prov(text, folder, structured) or []
-            except Exception as e:
-                access_logger.error(f"search provider failed: {e}")
-    nc = len(comic_entries)
-
     clauses, p = list(where), list(params)
     # Modules that group files into a container (comics: a folder of pages)
     # register a clause that hides members from the flat gallery.
@@ -1060,6 +1059,30 @@ def _query_files(search: str, offset: int, limit: int,
         clauses.append("(rel_path LIKE ? OR tags LIKE ? OR description LIKE ?)")
         p += [like, like, like]
     where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return where_sql, p, text, structured
+
+def _query_files(search: str, offset: int, limit: int,
+                 folder: str = '', album: str = '') -> tuple[list, int]:
+    """!
+    @brief Page the flat gallery: comics/books first (one cover tile each), then images.
+    @param album If given, restrict to that album's members and suppress comics/books.
+    @return (entries, total) where entries are typed dicts (kind='comic'|'book'|'image').
+    """
+    where_sql, p, text, structured = _files_where(search, folder, album)
+
+    # Non-image search contributors (books, comics, …) come from modules via
+    # host.register_search_provider; core merges their entries in front of the
+    # image results. Skipped for an album (a flat image set). With no such
+    # module the app searches only images.
+    comic_entries = []
+    if not album and 'module_host' in globals():
+        for prov in getattr(module_host, "search_providers", []):
+            try:
+                comic_entries += prov(text, folder, structured) or []
+            except Exception as e:
+                access_logger.error(f"search provider failed: {e}")
+    nc = len(comic_entries)
+
     total_files = _db().execute(
         f"SELECT COUNT(*) FROM files{where_sql}", p).fetchone()[0]
     total = nc + total_files
@@ -3448,10 +3471,10 @@ def _models_payload():
 # ── Settings → Info: what this install can do, from the core + every module ──
 _CORE_SEARCH_HELP = [
     ("free text", "words match description, tags and file names; quote for phrases"),
-    ("tag:<name>", "images carrying that tag"),
+    ("tag:<name> / -tag:<name>", "images carrying / not carrying that exact tag"),
     ("is:untagged / is:tagged", "no tags at all / at least one tag"),
     ("is:unconfirmed / is:tagunconfirmed", "has unconfirmed boxes / unconfirmed tags"),
-    ("width<N height>=N", "pixel size filters, any of < <= > >= ="),
+    ("width<N height>=N min<N max>N", "pixel size filters, any of < <= > >= =; min/max = shorter/longer side"),
     ("date:<YYYY[-MM[-DD]]>", "any date bucket; datetime:, dateoriginal:, datedigitized:, capture_date:, modified: pick one; ranges a..b and < <= > >= = work"),
     ("sem:<text>", "semantic search by image embedding (embedding module)"),
 ]
@@ -3629,6 +3652,20 @@ def api_list():
     entries, total = _query_files(search, page * state["page_size"], state["page_size"], folder, album)
     return jsonify({"success":True,"files":entries,"total":total,
                     "page":page,"page_size": state["page_size"]})
+
+@app.route("/api/list_all")
+@_auth.require_feature("tab.gallery")
+def api_list_all():
+    """Every image rel_path matching a gallery query, unpaged — the "select all
+    N results" set the bulk bar operates on. Images only (no books/comics,
+    no semantic mode)."""
+    search = request.args.get("q", "").strip()
+    if search.lower().startswith("sem:") or search.startswith("~"):
+        return jsonify({"success": False, "error": "Select-all is not available for semantic search."})
+    where_sql, p, _, _ = _files_where(search, request.args.get("folder", "").strip(),
+                                      request.args.get("album", "").strip())
+    rows = _db().execute(f"SELECT rel_path FROM files{where_sql} ORDER BY rel_path", p).fetchall()
+    return jsonify({"success": True, "filenames": [r["rel_path"] for r in rows]})
 
 @app.route("/api/dates/backfill", methods=["POST"])
 @_auth.require_feature("settings", level="write", action='dates_backfill', fields=())
@@ -5531,6 +5568,30 @@ def bulk_tag():
         except Exception as e:
             errors.append(fn)
             access_logger.error(f"bulk_tag {fn}: {e}")
+    return jsonify({"success": True, "updated": updated, "errors": errors})
+
+@app.route("/api/bulk_untag", methods=["POST"])
+@_auth.require_feature("annot.tags", level="write")
+def bulk_untag():
+    """Remove tags (by bare name, confirmed or not) from many files at once."""
+    filenames = request.json.get("filenames", [])
+    drop = {tag_name(t).lower() for t in request.json.get("tags", []) if t.strip()}
+    if not filenames or not drop:
+        return jsonify({"success": False, "error": "Need filenames and tags."})
+    updated, errors = 0, []
+    for fn in filenames:
+        fp = get_safe_path(MEDIA_DIR, fn)
+        if not fp or not os.path.exists(fp):
+            errors.append(fn); continue
+        try:
+            meta = read_metadata(fp)
+            kept = [t for t in meta["tags"] if tag_name(t).lower() not in drop]
+            if len(kept) != len(meta["tags"]):
+                write_metadata(fp, kept, meta["description"], meta["regions"])
+                updated += 1
+        except Exception as e:
+            errors.append(fn)
+            access_logger.error(f"bulk_untag {fn}: {e}")
     return jsonify({"success": True, "updated": updated, "errors": errors})
 
 @app.route("/api/bulk_delete", methods=["POST"])

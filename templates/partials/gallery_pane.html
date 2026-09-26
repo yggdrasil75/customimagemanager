@@ -23,7 +23,7 @@
             <div class="mt-2 pt-2 border-t border-gray-700 flex items-center justify-between">
               <button type="button" onclick="toggleDatePicker()"
                 class="text-xs bg-gray-700 hover:bg-gray-600 rounded px-2 py-1">📅 Date…</button>
-              <span class="text-[11px] text-gray-500">or type: height:&lt;512 · is:untagged · sem:…</span>
+              <span class="text-[11px] text-gray-500">or type: min:&lt;512 · tag:cat · person:3 · is:untagged · sem:…</span>
             </div>
             <!-- Date range popover, nested inside the quick-filter dropdown. -->
             <div id="date_picker_pop"
@@ -86,6 +86,11 @@
           onkeydown="if(event.key==='Enter') applyBulkTag()">
         <button onclick="applyBulkTag()" data-feature="annot.tags"
           class="text-xs bg-blue-600 hover:bg-blue-500 px-3 py-1.5 rounded font-bold">Tag</button>
+        <input id="bulk_untag_input" type="text" placeholder="Remove tag(s), comma-separated"
+          class="flex-1 min-w-[140px] bg-gray-700 text-xs px-2 py-1.5 rounded border border-gray-600 text-white focus:border-orange-400"
+          onkeydown="if(event.key==='Enter') applyBulkUntag()">
+        <button onclick="applyBulkUntag()" data-feature="annot.tags"
+          class="text-xs bg-orange-700 hover:bg-orange-600 px-3 py-1.5 rounded font-bold">Untag</button>
         <button onclick="addSelectedToAlbum()" title="Add every selected image to an album" data-feature="tab.albums.edit"
           class="text-xs bg-fuchsia-700 hover:bg-fuchsia-600 px-3 py-1.5 rounded font-bold">📁 Add to album</button>
         <button onclick="bulkDelete()" data-feature="data.delete" class="text-xs bg-red-700 hover:bg-red-600 px-3 py-1.5 rounded font-bold">🗑
@@ -121,6 +126,8 @@
         <span id="page_info">Page 1</span>
         <button id="btn_next" onclick="changePage(1)"
           class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded disabled:opacity-30">Next ▶</button>
+        <button id="btn_select_all" onclick="selectAllMatching()" title="Select every image matching the current search, across all pages"
+          class="hidden bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded">Select all</button>
         <span class="ml-auto" id="showing_info"></span>
       </div>
 

@@ -372,7 +372,26 @@ function refreshSelectionUI(){
   } else {
     bar.classList.add('hidden');
     document.getElementById('bulk_tag_input').value='';
+    document.getElementById('bulk_untag_input').value='';
   }
+  const sa=document.getElementById('btn_select_all');
+  if(sa){
+    sa.classList.toggle('hidden', !(totalFiles>0 && selectedFiles.size<totalFiles));
+    sa.innerText=`Select all ${totalFiles}`;
+  }
+}
+
+// Select every image matching the current search/folder/album, across all
+// pages, so any bulk button (core or module) runs over the whole result set.
+async function selectAllMatching(){
+  const params=new URLSearchParams({q:currentSearch,folder:currentFolder});
+  if(typeof galleryModalMode!=='undefined' && galleryModalMode==='album' && currentAlbum)
+    params.set('album', currentAlbum);
+  const d=await fetch('/api/list_all?'+params).then(r=>r.json());
+  if(!d.success){ showToast(d.error||'Select all failed.'); return; }
+  d.filenames.forEach(f=>selectedFiles.add(f));
+  refreshSelectionUI();
+  showToast(`Selected ${selectedFiles.size} image(s) across all pages.`);
 }
 
 // ── File select (single) ───────────────────────────────────────────────────
@@ -527,6 +546,47 @@ async function deleteCurrentFile(){
 }
 
 // ── Bulk operations ────────────────────────────────────────────────────────
+// Transparent chunking for every bulk endpoint (core and modules): a POST whose
+// JSON body has more than BULK_CHUNK filenames goes out as sequential chunk
+// requests and the replies are merged (numbers summed, arrays concatenated,
+// success ANDed). Modules keep calling fetch() with the full selection.
+const BULK_CHUNK=200;
+(function(){
+  const realFetch=window.fetch.bind(window);
+  function merge(acc,d){
+    if(!acc) return d;
+    for(const k in d){
+      const v=d[k], a=acc[k];
+      if(k==='success') acc[k]=!!a && !!v;
+      else if(Array.isArray(v)) acc[k]=(Array.isArray(a)?a:[]).concat(v);
+      // ponytail: "total*" fields are library-wide, not per-chunk — keep the last one.
+      else if(typeof v==='number' && typeof a==='number' && !k.startsWith('total')) acc[k]=a+v;
+      else acc[k]=v;
+    }
+    return acc;
+  }
+  window.fetch=async function(url,init){
+    let body;
+    if(init && init.method==='POST' && typeof init.body==='string'){
+      try{ body=JSON.parse(init.body); }catch(_){}
+    }
+    const names=body && Array.isArray(body.filenames) ? body.filenames : null;
+    if(!names || names.length<=BULK_CHUNK) return realFetch(url,init);
+    let acc=null, done=0;
+    for(let i=0;i<names.length;i+=BULK_CHUNK){
+      const part=names.slice(i,i+BULK_CHUNK);
+      const r=await realFetch(url,{...init, body:JSON.stringify({...body, filenames:part})});
+      let d; try{ d=await r.json(); }catch(_){ d={success:false,error:'HTTP '+r.status}; }
+      acc=merge(acc,d);
+      done+=part.length;
+      showToast(`${String(url).replace(/^.*\//,'')}: ${done}/${names.length}…`);
+      if(d.success===false && d.error) break;   // config/model errors repeat per chunk; stop
+    }
+    const text=JSON.stringify(acc);
+    return {ok:true,status:200,headers:{get:()=>'application/json'},
+            json:async()=>JSON.parse(text),text:async()=>text};
+  };
+})();
 async function applyBulkTag(){
   const raw = document.getElementById('bulk_tag_input').value.trim();
   if(!raw){ document.getElementById('bulk_tag_input').focus(); return; }
@@ -552,9 +612,27 @@ async function applyBulkTag(){
   }
 }
 
+async function applyBulkUntag(){
+  const inp=document.getElementById('bulk_untag_input');
+  const raw=inp.value.trim();
+  if(!raw){ inp.focus(); return; }
+  const tags=raw.split(',').map(s=>s.trim()).filter(Boolean);
+  const files=[...selectedFiles];
+  inp.value='';
+  const d=await fetch('/api/bulk_untag',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({filenames:files,tags})}).then(r=>r.json());
+  if(d.success){
+    showToast(`Removed ${tags.join(', ')} from ${d.updated} file(s)`);
+    if(window.currentFile && selectedFiles.has(window.currentFile)) selectFile(window.currentFile);
+    loadGallery();
+  } else alert('Bulk untag error: '+(d.error||'unknown'));
+}
+
 async function bulkDelete(){
   const files=[...selectedFiles];
   if(!files.length) return;
+  if(files.length>PAGE && !confirm(`Delete ${files.length} files? This cannot be undone.`)) return;
   const d=await fetch('/api/bulk_delete',{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({filenames:files})}).then(r=>r.json());
