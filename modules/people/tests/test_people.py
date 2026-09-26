@@ -120,3 +120,71 @@ def test_real_detectors_on_single_person(client, upload, app):
         f"{picked_name(app, 'detect.persons')} / {picked_name(app, 'detect')}; "
         f"tests/test_fixtures.py says whether person_single.jpg is the problem. Got: {regs}")
     assert all(r["region_type"] == r["class_name"] for r in regs)
+
+def _fake_face_rows(db, rel, cluster_id, n, drawn, seed):
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    base = rng.normal(size=512).astype(np.float32); base /= np.linalg.norm(base)
+    for i in range(n):
+        v = base + rng.normal(scale=0.02, size=512).astype(np.float32); v /= np.linalg.norm(v)
+        db.execute("INSERT INTO face_regions(rel_path,cx,cy,w,h,embedding,embed_mode,cluster_id,drawn) "
+                   "VALUES (?,?,?,?,?,?,?,?,?)",
+                   (rel, .1 + i * .05, .2, .1, .1, v.tobytes(), "arcface", cluster_id, drawn))
+    db.commit()
+    return base
+
+
+def test_skip_tags_and_ai_generated_skip_the_scan(client, upload, app):
+    fn = upload(seed=107)
+    write_meta(client, fn, tags=["anime"])
+    app.state["face_skip_tags"] = "anime, illustration"
+    try:
+        _detect(fn)
+    finally:
+        app.state["face_skip_tags"] = ""
+    db = app._db()
+    assert db.execute("SELECT face_done FROM files WHERE rel_path=?", (fn,)).fetchone()[0] == 1
+    assert _by_class(read_meta(client, fn)["regions"], "face") == []
+    assert pc._skip_scan_reason(fn) == ""
+    db.execute("UPDATE files SET ai_generated=1 WHERE rel_path=?", (fn,)); db.commit()
+    app.state["face_skip_ai_generated"] = True
+    try:
+        assert pc._skip_scan_reason(fn) == "ai_generated"
+    finally:
+        app.state["face_skip_ai_generated"] = False
+
+
+def test_drawn_clusters_fold_away_and_not_real_remembers_centroid(client, upload, app, ungated):
+    import numpy as np
+    a, b = upload("drawn_a.png", seed=108), upload("drawn_b.png", seed=109)
+    db = app._db()
+    db.execute("DELETE FROM face_regions WHERE cluster_id IN (9101, 9102)")
+    db.execute("DELETE FROM face_rejects")
+    photo = _fake_face_rows(db, a, 9101, 3, 0.10, seed=1)
+    drawn = _fake_face_rows(db, b, 9102, 3, 0.80, seed=2)
+    try:
+        app.state["face_hide_drawn"] = 0.55
+        j = client.get("/api/faces/clusters").get_json()
+        ids = {c["id"] for c in j["clusters"]}
+        assert 9101 in ids and 9102 not in ids and j["drawn_hidden"] >= 1
+        j = client.get("/api/faces/clusters?show_drawn=1").get_json()
+        by = {c["id"]: c for c in j["clusters"]}
+        assert 9102 in by and by[9102]["drawn"] == 0.8 and by[9101]["drawn"] == 0.1
+        app.state["face_hide_drawn"] = 1.0
+        assert 9102 in {c["id"] for c in client.get("/api/faces/clusters").get_json()["clusters"]}
+
+        j = client.post("/api/faces/not_real_cluster", json={"cluster_id": 9102}).get_json()
+        assert j["success"] and j["marked"] == 3 and j["remembered"]
+        assert db.execute("SELECT COUNT(*) FROM face_regions WHERE cluster_id=9102").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM face_regions WHERE rel_path=? AND not_face=1",
+                          (b,)).fetchone()[0] == 3
+        rejects = pc._reject_centroids("arcface")
+        assert rejects is not None and rejects.shape == (1, 512)
+        # a look-alike of the rejected character is auto-rejected; the photo person is not
+        assert pc._near_reject(drawn + np.random.default_rng(3).normal(scale=0.02, size=512).astype(np.float32), rejects)
+        assert not pc._near_reject(photo, rejects)
+        assert pc._reject_centroids("appearance") is None
+    finally:
+        app.state["face_hide_drawn"] = 0.55
+        db.execute("DELETE FROM face_regions WHERE cluster_id IN (9101, 9102) OR rel_path IN (?,?)", (a, b))
+        db.execute("DELETE FROM face_rejects"); db.commit()

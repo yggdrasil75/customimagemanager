@@ -49,6 +49,17 @@ CREATE TABLE IF NOT EXISTS face_regions (
 CREATE INDEX IF NOT EXISTS idx_face_cluster ON face_regions(cluster_id);
 CREATE INDEX IF NOT EXISTS idx_face_rel     ON face_regions(rel_path);
 
+-- Centroids of clusters the user declared "not a real person" (a drawn
+-- character, a statue, a doll). New faces within cluster radius of one are
+-- tombstoned at cache time, so the same character never resurfaces.
+CREATE TABLE IF NOT EXISTS face_rejects (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    centroid  BLOB NOT NULL,      -- float32 L2-normalised
+    mode      TEXT DEFAULT '',
+    n         INTEGER DEFAULT 0,
+    created   REAL
+);
+
 -- Body (person) re-id detections + embeddings. Same CACHE contract as
 -- face_regions: names/confirmations mirror MWG-rs 'person' regions in
 -- the image, so dropping this table costs only recompute. face_id links
@@ -88,7 +99,8 @@ def _migrate(db):
                  "ALTER TABLE files ADD COLUMN body_done INTEGER DEFAULT 0",
                  "ALTER TABLE face_regions ADD COLUMN unknown INTEGER DEFAULT 0",
                  "ALTER TABLE face_regions ADD COLUMN not_face INTEGER DEFAULT 0",
-                 "ALTER TABLE face_regions ADD COLUMN shape BLOB"):
+                 "ALTER TABLE face_regions ADD COLUMN shape BLOB",
+                 "ALTER TABLE face_regions ADD COLUMN drawn REAL"):
         try:
             db.execute(stmt)
         except Exception:
@@ -109,6 +121,21 @@ def register(host):
                                  "drift; lower = more, tighter eras.")
     host.add_settings_field(key="face_cluster_eps", label="Face cluster distance (0 = auto)",
                             kind="number", pane="module")
+    host.add_config_key("face_hide_drawn", default=0.55,
+                        validate=lambda v: max(0.0, min(1.0, float(v if v not in (None, "") else 0.55))))
+    host.add_settings_field(key="face_hide_drawn", label="Hide drawn-looking clusters above (0-1, 1 = never)",
+                            kind="number", pane="module",
+                            help="Clusters whose average drawn score is at or above this are folded "
+                                 "away in the People tab (a toggle shows them). Tune without rescanning.")
+    host.add_config_key("face_skip_ai_generated", default=False, validate=bool)
+    host.add_settings_field(key="face_skip_ai_generated", label="Skip face scan on AI-generated images",
+                            kind="toggle", pane="module",
+                            help="Images whose metadata marks them AI-generated get no face/body scan.")
+    host.add_config_key("face_skip_tags", default="",
+                        validate=lambda v: ", ".join(t.strip() for t in str(v or "").split(",") if t.strip()))
+    host.add_settings_field(key="face_skip_tags", label="Skip face scan on images tagged (comma list)",
+                            kind="text", pane="module",
+                            help="e.g. anime, illustration, drawing, cartoon, statue, doll, render")
     host.register_feature("tab.faces", "People tab (read=view, write=edit clusters)",
                           section="gallery_tabs", section_label="Gallery tabs", default="read")
 
@@ -136,6 +163,7 @@ def register(host):
     host.add_route("/api/faces/not_face", pc.api_face_not_face, methods=["POST"], feature="tab.faces", level="write", action='face_not_face', fields=('ids',))
     host.add_route("/api/faces/unknown", pc.api_face_unknown, methods=["POST"], feature="tab.faces", level="write", action='face_unknown', fields=('ids',))
     host.add_route("/api/faces/unknown_cluster", pc.api_face_unknown_cluster, methods=["POST"], feature="tab.faces", level="write", action='face_unknown_cluster', fields=('cluster_id',))
+    host.add_route("/api/faces/not_real_cluster", pc.api_face_not_real_cluster, methods=["POST"], feature="tab.faces", level="write", action='face_not_real_cluster', fields=('cluster_id',))
     host.add_route("/api/faces/unmark", pc.api_face_unmark, methods=["POST"], feature="tab.faces", level="write", action='face_unmark', fields=('ids',))
     host.add_route("/api/faces/merge", pc.api_face_merge, methods=["POST"], feature="tab.faces", level="write", action='face_merge', fields=('src', 'dst'))
     host.add_route("/api/bodies/split", pc.api_body_split, methods=["POST"], feature="tab.faces", level="write")

@@ -117,7 +117,8 @@ def _face_regions_for(img, rel: str) -> list:
     for b in _run_faces(img):
         out.append({"class_name": "face", "region_name": "",
                     "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
-                    "confirmed": False, "region_tags": [], "region_description": ""})
+                    "confirmed": False, "region_tags": [], "region_description": "",
+                    "_drawn": b.get("_drawn")})
     person_regions = []
     for b in _run_person(img):
         person_regions.append({"class_name": "person", "region_name": "",
@@ -159,7 +160,7 @@ def _face_regions_for_batch(imgs, rels, face_run=None, person_run=None,
             results[i].append({"class_name": "face", "region_name": "",
                                "cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"],
                                "confirmed": False, "region_tags": [],
-                               "region_description": ""})
+                               "region_description": "", "_drawn": b.get("_drawn")})
 
     # People — the picked 'detect.persons' provider, batched when it can.
     try:
@@ -249,10 +250,61 @@ def _cache_faces(rel: str, img, regions: list) -> None:
     if not fs:
         return
     vecs, mode, shapes = fs["embed_faces"](img, fboxes, want_shape=True)
-    extra = [{"shape": np.asarray(sh, np.float32).tobytes()} if sh is not None else None
-             for sh in shapes]
+    rejects = _reject_centroids(mode)
+    extra = []
+    for b, v, sh in zip(fboxes, vecs, shapes):
+        e = {"drawn": b["_drawn"] if b.get("_drawn") is not None
+             else float(fs["drawn_score"](img, b))}
+        if sh is not None:
+            e["shape"] = np.asarray(sh, np.float32).tobytes()
+        if v is not None and rejects is not None and _near_reject(v, rejects):
+            e.update({"not_face": 1, "cluster_id": -1})
+        extra.append(e)
     _upsert_region_embeddings("face_regions", rel, fboxes, vecs, mode, extra=extra)
     _sync_names_from_metadata(rel)
+
+def _reject_eps() -> float:
+    return float(state.get("face_cluster_eps") or (_faces() or {}).get("DEFAULT_EPS", 0.4))
+
+def _reject_centroids(mode: str):
+    """(N,d) float32 matrix of rejected-cluster centroids for this embedding
+    space, or None when there are none."""
+    rows = _db().execute("SELECT centroid FROM face_rejects WHERE mode=?", (mode or "",)).fetchall()
+    vecs = [np.frombuffer(r[0], np.float32) for r in rows]
+    if not vecs:
+        return None
+    d = max(set(len(v) for v in vecs), key=[len(v) for v in vecs].count)
+    vecs = [v for v in vecs if len(v) == d]
+    return np.stack(vecs) if vecs else None
+
+def _near_reject(v, rejects) -> bool:
+    v = np.asarray(v, np.float32)
+    if len(v) != rejects.shape[1]:
+        return False
+    v = v / (np.linalg.norm(v) or 1.0)
+    return bool((1.0 - rejects @ v).min() < _reject_eps())
+
+def _skip_scan_reason(rel: str) -> str:
+    """Why an image should get no face scan at all ('' = scan it): flagged
+    AI-generated, or carrying one of the user's skip tags."""
+    skip_ai = bool(state.get("face_skip_ai_generated"))
+    skip_tags = {t.strip().lower() for t in str(state.get("face_skip_tags") or "").split(",") if t.strip()}
+    if not skip_ai and not skip_tags:
+        return ""
+    row = _db().execute("SELECT ai_generated, tags FROM files WHERE rel_path=?", (rel,)).fetchone()
+    if not row:
+        return ""
+    if skip_ai and row[0]:
+        return "ai_generated"
+    if skip_tags:
+        try:
+            tags = {common.tag_name(t).lower() for t in json.loads(row[1] or "[]")}
+        except Exception:
+            tags = set()
+        hit = tags & skip_tags
+        if hit:
+            return "tag:" + sorted(hit)[0]
+    return ""
 
 _NOT_A_NAME = {"face", "person", "object", "unknown", "unconfirmed", "confirmed"}
 
@@ -420,6 +472,11 @@ def _face_detect_batch(rels: list, face_run=None, person_run=None,
     for rel in rels:
         abs_p = get_safe_path(MEDIA_DIR, rel)
         if not abs_p or not os.path.exists(abs_p):
+            _done(rel)
+            continue
+        why = _skip_scan_reason(rel)
+        if why:
+            _face_log("skip %s (%s)", rel, why)
             _done(rel)
             continue
         _t = time.time()
@@ -1132,12 +1189,21 @@ def api_face_clusters():
     the least-certain / most-distinct faces to the bottom of each group, making the
     one or two wrongly-merged faces easy to spot and deny."""
     clusters, singles = _cluster_summary(
-        "face_regions", "",
+        "face_regions", "AVG(COALESCE(drawn,0))",
         "id,rel_path,cx,cy,w,h,cluster_id", "faces",
         lambda r: {"id": r[0], "rel": r[1], "cx": r[2], "cy": r[3],
                    "w": r[4], "h": r[5]},
+        extra_to_fields=lambda row: {"drawn": round(float(row[5] or 0.0), 3)},
         flag_filter="COALESCE(unknown,0)=0 AND COALESCE(not_face,0)=0",
         sample_limit=60)
+    # Drawn-looking clusters are folded away (not deleted) so the threshold can
+    # be tuned after the fact; ?show_drawn=1 lists them too.
+    hide_at = float(state.get("face_hide_drawn") if state.get("face_hide_drawn") is not None else 0.55)
+    drawn_hidden = 0
+    if hide_at < 1.0 and request.args.get("show_drawn", "") not in ("1", "true"):
+        keep = [c for c in clusters if c["name"] or c["drawn"] < hide_at]
+        drawn_hidden = len(clusters) - len(keep)
+        clusters = keep
     dists = _cluster_outlier_dists([c["id"] for c in clusters])
     if dists:
         for c in clusters:
@@ -1159,7 +1225,7 @@ def api_face_clusters():
     unknown_n = _db().execute(
         "SELECT COUNT(*) FROM face_regions WHERE COALESCE(unknown,0)=1").fetchone()[0]
     return jsonify({"clusters": clusters, "unclustered": singles,
-                    "unknown": unknown_n,
+                    "unknown": unknown_n, "drawn_hidden": drawn_hidden,
                     "bodies": _body_on(),
                     "identity": bool(_faces() and _faces()["have_identity_embedder"]())})
 
@@ -1750,6 +1816,46 @@ def api_face_unknown_cluster():
         "name='', confirmed=0 WHERE cluster_id=?", (cluster_id,))
     db.commit()
     return jsonify({"success": True, "marked": cur.rowcount})
+
+def api_face_not_real_cluster():
+    """Declare a whole cluster NOT a real person (a drawn character, a statue,
+    a doll). Every face is tombstoned like not_face and its MWG region removed,
+    and the cluster centroid is remembered in face_rejects so any future face
+    within cluster radius of it is tombstoned at cache time — one click per
+    character instead of one per scan."""
+    d = request.json or {}
+    try:
+        cluster_id = int(d.get("cluster_id", -1))
+    except (TypeError, ValueError):
+        cluster_id = -1
+    if cluster_id < 0:
+        return jsonify({"success": False, "error": "cluster_id required"})
+    db = _db()
+    rows = db.execute(
+        "SELECT id, rel_path, cx, cy, embedding, embed_mode FROM face_regions WHERE cluster_id=?",
+        (cluster_id,)).fetchall()
+    if not rows:
+        return jsonify({"success": False, "error": "no such cluster"})
+    vecs = [np.frombuffer(r[4], np.float32) for r in rows if r[4]]
+    remembered = False
+    if vecs:
+        d_ = max(set(len(v) for v in vecs), key=[len(v) for v in vecs].count)
+        X = np.stack([v for v in vecs if len(v) == d_])
+        X = X / np.maximum(np.linalg.norm(X, axis=1, keepdims=True), 1e-6)
+        c = X.mean(axis=0); c = c / (np.linalg.norm(c) or 1.0)
+        db.execute("INSERT INTO face_rejects(centroid, mode, n, created) VALUES (?,?,?,?)",
+                   (c.astype(np.float32).tobytes(), rows[0][5] or "", len(X), time.time()))
+        remembered = True
+    for _id, rel, cx, cy, _e, _m in rows:
+        try:
+            _strip_mwg_region(rel, cx, cy)
+        except Exception as e:
+            access_logger.warning(f"not_real strip {rel}: {e}")
+    cur = db.execute(
+        "UPDATE face_regions SET not_face=1, unknown=0, cluster_id=-1, "
+        "name='', confirmed=0 WHERE cluster_id=?", (cluster_id,))
+    db.commit()
+    return jsonify({"success": True, "marked": cur.rowcount, "remembered": remembered})
 
 def api_face_unmark():
     """Clear an unknown / not_face flag, returning the face to the unclustered pool.

@@ -75,16 +75,25 @@ def register(host):
     def _detector_path():
         return facelib.ensure_face_detector(registry.resolve_detector_id(_detector_id()))
 
+    _FRAME = {"cx": 0.5, "cy": 0.5, "w": 1.0, "h": 1.0}
+
     def _filter(img_bgr, boxes):
-        """Drop sub-32px boxes and (optionally) drawn faces; label the rest."""
+        """Drop sub-32px boxes and (optionally) drawn faces; label the rest.
+        Every kept box carries `_drawn` = max(crop score, whole-frame score):
+        an illustration is far easier to recognise at frame level than inside
+        a small face crop, and the people module stores the score so the tab
+        can hide / retune without a rescan."""
         H, W = img_bgr.shape[:2]
         reject = bool(host.config.get("face_reject_drawn"))
         thresh = float(host.config.get("face_drawn_thresh") or facelib.DRAWN_THRESH)
-        out = []
+        out, frame = [], None
         for b in boxes:
             if b["w"] * W < 32 or b["h"] * H < 32:
                 continue
-            if reject and facelib.is_drawn(img_bgr, b, thresh):
+            if frame is None:
+                frame = facelib.drawn_score(img_bgr, _FRAME)
+            b["_drawn"] = max(facelib.drawn_score(img_bgr, b), frame)
+            if reject and thresh < 1.0 and b["_drawn"] >= thresh:
                 continue
             b["class_name"] = "face"
             out.append(b)
@@ -182,6 +191,7 @@ def register(host):
         "is_drawn": facelib.is_drawn,
         "drawn_score": facelib.drawn_score,
         "DRAWN_THRESH": facelib.DRAWN_THRESH,
+        "DEFAULT_EPS": facelib.DEFAULT_EPS,
         "cluster": facelib.cluster,
         "face_shape": facelib.face_shape,
         "list_models": facelib.list_models,

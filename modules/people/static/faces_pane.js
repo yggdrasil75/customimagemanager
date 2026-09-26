@@ -5,6 +5,7 @@
 // fills the chip — avoids a per-crop server round-trip.
 
 let _faceClusters = [];
+let _faceShowDrawn = false;   // list drawn-looking clusters the server folded away
 
 const _thumbObserver = ('IntersectionObserver' in window)
   ? new IntersectionObserver((entries, obs) => {
@@ -220,6 +221,8 @@ function _renderFaceCluster(c) {
                  class="flex-1 p-1.5 bg-gray-700 rounded border border-gray-600
                         text-sm text-white">
           <span class="text-[10px] text-gray-500">${c.count}</span>
+          ${c.drawn >= 0.3 ? `<span title="Average drawn/illustration score (0 photo … 1 drawing)"
+              class="text-[10px] ${c.drawn >= 0.55 ? 'text-orange-400' : 'text-gray-500'}">✏ ${c.drawn.toFixed(2)}</span>` : ''}
           <button onclick="nameCluster(${c.id})"
             class="text-xs bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded font-bold">
             Name all
@@ -236,6 +239,11 @@ function _renderFaceCluster(c) {
             title="Mark this whole person as unknown (a stranger / photobomber)"
             class="text-xs bg-amber-700 hover:bg-amber-600 px-2 py-1 rounded font-bold">
             Mark unknown
+          </button>
+          <button onclick="markClusterNotReal(${c.id})"
+            title="Not a real person (drawn character, statue, doll): drop every face and auto-reject look-alikes in future scans"
+            class="text-xs bg-rose-800 hover:bg-rose-700 px-2 py-1 rounded font-bold">
+            Not real
           </button>
         </div>
         <div class="flex gap-1.5 flex-wrap">
@@ -297,7 +305,7 @@ async function loadFaces() {
   if (!el) return;
   el.innerHTML = '<div class="text-xs text-gray-500 p-2">Loading…</div>';
   try {
-    const r = await fetch('/api/faces/clusters');
+    const r = await fetch('/api/faces/clusters' + (_faceShowDrawn ? '?show_drawn=1' : ''));
     const d = await r.json();
     _faceClusters = d.clusters || [];
 
@@ -315,6 +323,15 @@ async function loadFaces() {
     if (badge) badge.textContent = _faceClusters.length || '';
     document.getElementById('faces_status').textContent =
       `${_faceClusters.length} cluster(s) · ${d.unclustered} unclustered`;
+    const dbar = document.getElementById('faces_drawn_bar');
+    if (dbar) {
+      const n = d.drawn_hidden || 0;
+      dbar.classList.toggle('hidden', !n && !_faceShowDrawn);
+      dbar.innerHTML = _faceShowDrawn
+        ? `Showing drawn-looking clusters too. <a href="#" onclick="toggleDrawnClusters();return false" class="underline">Hide them</a>`
+        : `${n} drawn-looking cluster(s) hidden (score ≥ threshold in Settings → Modules → People). `
+          + `<a href="#" onclick="toggleDrawnClusters();return false" class="underline">Show</a>`;
+    }
 
     if (!_faceClusters.length) {
       // Distinguish "nothing scanned yet" from "scanned, found nothing" --
@@ -484,6 +501,35 @@ async function markClusterUnknown(cid) {
   document.getElementById('faces_status').textContent =
     `Marked ${d.marked} face(s) unknown.`;
   keepScroll('faces_list', loadFaces);   // cluster is gone; full reload
+}
+
+function toggleDrawnClusters() {
+  _faceShowDrawn = !_faceShowDrawn;
+  keepScroll('faces_list', loadFaces);
+}
+
+async function markClusterNotReal(cid) {
+  const c = _faceClusters.find(x => x.id === cid);
+  const label = c && c.name ? `"${c.name}"` : `this cluster (${c ? c.count : '?'} face(s))`;
+  if (!confirm(`Mark ${label} as not a real person? Every face is dropped and ` +
+               `future faces that look like it are rejected automatically.`)) return;
+  document.getElementById('faces_status').textContent = 'Marking not real…';
+  let d;
+  try {
+    d = await (await fetch('/api/faces/not_real_cluster', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cluster_id: cid })
+    })).json();
+  } catch (e) {
+    document.getElementById('faces_status').textContent = 'Failed.'; return;
+  }
+  if (!d || !d.success) {
+    document.getElementById('faces_status').textContent =
+      'Failed: ' + ((d && d.error) || 'unknown error'); return;
+  }
+  document.getElementById('faces_status').textContent =
+    `Dropped ${d.marked} face(s)${d.remembered ? '; look-alikes will be auto-rejected' : ''}.`;
+  keepScroll('faces_list', loadFaces);
 }
 
 async function mergeInto(dst) {
