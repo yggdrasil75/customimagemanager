@@ -523,6 +523,15 @@ def test_device_upload_lands_in_device_folder_and_is_shareable(client, app, phon
         client.post("/api/delete", json={"filename": fn})
 
 
+def test_device_test_button_reports_last_seen(client, app, phone):
+    r = client.post("/api/family_share/peers/test", json={"id": phone["id"]}).get_json()
+    assert r["device"] and not r["ok"] and "not reached" in r["error"]
+    assert client.get("/api/family_share/inbound/ping", headers=phone["headers"]).status_code == 200
+    r = client.post("/api/family_share/peers/test", json={"id": phone["id"]}).get_json()
+    assert r["ok"] and r["device"] and "last reached" in r["message"]
+    assert app._db().execute("SELECT last_ok FROM fs_peers WHERE id=?", (phone["id"],)).fetchone()["last_ok"] > 0
+
+
 def test_device_sealed_timeline_thumb_media(client, app, phone, upload):
     fn = upload(seed=911, folder="trips")
     r = client.get("/api/family_share/inbound/timeline?limit=50")

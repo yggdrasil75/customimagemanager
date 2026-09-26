@@ -490,6 +490,17 @@ def register(host):
             return None
         if not hmac.compare_digest(sent, str(r["key_in"]).encode("utf-8", "replace")):
             return None
+        # A successful inbound call is the only "test" a phone can pass, so
+        # stamp last-seen here (throttled to once a minute per peer).
+        if (r["last_ok"] or 0) < time.time() - 60:
+            def _seen():
+                d = host.db()
+                d.execute("UPDATE fs_peers SET last_ok=?, last_error='' WHERE id=?", (time.time(), r["id"]))
+                d.commit()
+            try:
+                _write(_seen)
+            except Exception:
+                pass
         return dict(r)
 
     def _denied():
@@ -923,6 +934,15 @@ def register(host):
         p = _peer(pid)
         if not p:
             return jsonify({"ok": False, "error": "no such peer"}), 404
+        if (p.get("kind") or "peer") == "device":
+            # A phone has nothing to ping; it calls us. Report when it last did.
+            if p.get("last_ok"):
+                ago = int(time.time() - p["last_ok"])
+                return jsonify({"ok": True, "device": True, "last_seen": p["last_ok"],
+                                "message": f"{p['name']} last reached this instance {ago // 60} min ago"
+                                           + (" — key pinned" if p.get("pub_key") else " — NO KEY PINNED: paste its pairing code")})
+            return jsonify({"ok": False, "device": True,
+                            "error": f"{p['name']} has not reached this instance yet: open the app, Settings → Test connection"})
         try:
             body = pc.ping(p, _my_name())
         except Exception as e:

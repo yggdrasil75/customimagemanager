@@ -166,7 +166,7 @@
         <td>${kindSel(p.kind)}</td>
         <td><input class="fs-p-name" value="${esc(p.name)}">
             <input class="fs-p-folder" value="${esc(p.folder || "")}" placeholder="uploads land in (phone/${esc(p.name)})" ${p.kind === "device" ? "" : "hidden"}></td>
-        <td><input class="fs-p-url" value="${esc(p.url)}" placeholder="https://their-box:5000"></td>
+        <td><input class="fs-p-url" value="${esc(p.url)}" placeholder="${p.kind === "device" ? "(phones call in; no URL)" : "https://their-box:5000"}" ${p.kind === "device" ? "disabled" : ""}></td>
         <td><input class="fs-p-key" placeholder="${p.has_key_out && p.pub_key ? "paired" : "paste their pairing code"}">
             ${p.pub_key ? `<div class="fs-fp" title="Their key fingerprint — compare with what they see">🔒 ${esc(p.fingerprint)}</div>`
                         : `<div class="fs-err">no key pinned — nothing will be sent</div>`}</td>
@@ -175,7 +175,7 @@
           : (p.last_ok ? `<span class="fs-ok" title="${when(p.last_ok)}">ok</span>` : "—")}</td>
         <td class="fs-actions">
           <button class="fs-btn fs-btn-sm fs-p-save">Save</button>
-          <button class="fs-btn fs-btn-sm fs-btn-ghost fs-p-test">Test</button>
+          <button class="fs-btn fs-btn-sm fs-btn-ghost fs-p-test">${p.kind === "device" ? "Last seen" : "Test"}</button>
           <button class="fs-btn fs-btn-sm fs-btn-ghost fs-p-showkey" title="One string they paste on their instance: my name, URL, public key and the secret they use to reach me">Pairing code for them</button>
           <button class="fs-btn fs-btn-sm fs-btn-ghost fs-p-rotate" title="Invalidate the key they hold">Rotate</button>
           <button class="fs-btn fs-btn-sm fs-btn-danger fs-p-del">Remove</button>
@@ -203,7 +203,8 @@
     el.querySelectorAll("tr").forEach((tr) => {
       const id = Number(tr.dataset.id || 0);
       const q = (c) => tr.querySelector(c);
-      const kind = q(".fs-p-kind"); if (kind) kind.addEventListener("change", () => { q(".fs-p-folder").hidden = kind.value !== "device"; });
+      const kind = q(".fs-p-kind"); if (kind) kind.addEventListener("change", () => {
+        q(".fs-p-folder").hidden = kind.value !== "device"; q(".fs-p-url").disabled = kind.value === "device"; });
       const save = q(".fs-p-save"); if (save) save.addEventListener("click", async () => {
         try {
           const raw = q(".fs-p-key").value.trim();
@@ -216,7 +217,8 @@
       });
       const test = q(".fs-p-test"); if (test) test.addEventListener("click", async () => {
         try { const d = await post("/peers/test", { id });
-          toast(`Reached ${d.peer.name} · fingerprint ${d.peer.fingerprint}${d.pinned ? " · matches pinned key" : " · NOT PINNED: paste their pairing code"}`);
+          toast(d.device ? d.message
+            : `Reached ${d.peer.name} · fingerprint ${d.peer.fingerprint}${d.pinned ? " · matches pinned key" : " · NOT PINNED: paste their pairing code"}`);
           await load(); }
         catch (e) { toast("Test failed: " + e.message); await load(); }
       });
