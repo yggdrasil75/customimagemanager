@@ -89,3 +89,49 @@ def test_multiple_models_coexist(app, client):
         assert st["total"] == 1 and len(st["stored_models"]) == 2 and st["stored_matches"]
     finally:
         db.execute("DELETE FROM image_embeddings"); db.commit()
+
+
+def test_semantic_list_ranks_by_score_cuts_tail_and_honours_negatives(app, monkeypatch):
+    """Regression: results were ordered by filename, so the best match could be
+    on page 5. Also: the relevance cutoff drops the tail; '-term' demotes."""
+    import numpy as np, time
+    db = app._db(); svc = app.module_host.get_service("embedding")
+    cur = svc["embed_tag"]()
+    # 3-d toy space: axis 0 = "man", axis 1 = "woman", axis 2 = "dog"
+    axes = {"man": [1, 0, 0], "woman": [0, 1, 0], "dog": [0, 0, 1]}
+    lib = {"a_woman.jxl": [0.1, 1, 0], "b_dog.jxl": [0, 0, 1], "c_man.jxl": [1, 0.1, 0],
+           "d_man_and_woman.jxl": [1, 0.9, 0], "e_manlike_dog.jxl": [0.8, 0, 0.6]}
+    db.execute("DELETE FROM image_embeddings"); now = time.time()
+    for n, v in lib.items():
+        v = np.asarray(v, np.float64); v = (v / np.linalg.norm(v)).astype(np.float32)
+        db.execute("INSERT INTO image_embeddings(rel_path,dim,vec,model,mtime,updated) VALUES (?,?,?,?,?,?)",
+                   (n, 3, v.tobytes(), cur, now, now))
+        db.execute("INSERT OR IGNORE INTO files(rel_path, tags, sha256, media_kind) VALUES (?, '[]', ?, 'image')", (n, n))
+    db.commit()
+    import modules.embedding as emb_mod
+    text = lambda t: np.asarray(axes[t.split()[0]], np.float32)
+    # patch the module-level resolver the list uses
+    monkeypatch.setitem(app.state, "semantic_relative_cutoff", 0.0)
+    orig = svc["semantic_list"].__globals__ if hasattr(svc["semantic_list"], "__globals__") else None
+    try:
+        closure_cells = {c.cell_contents.__name__: c for c in svc["semantic_list"].__closure__ if callable(getattr(c, "cell_contents", None)) and hasattr(c.cell_contents, "__name__")}
+        cell = closure_cells["_text_embedder"]; saved = cell.cell_contents
+        cell.cell_contents = lambda handle=None: text
+        files, total, err = svc["semantic_list"]("man", 0, 10)
+        assert err is None and files[0]["filename"] in ("c_man.jxl", "d_man_and_woman.jxl")
+        scores = [f["score"] for f in files]
+        assert scores == sorted(scores, reverse=True)                 # ranked, not alphabetical
+        assert files[-1]["filename"] in ("a_woman.jxl", "b_dog.jxl")
+        # negatives: the man+woman image drops below the pure man image
+        files, _, _ = svc["semantic_list"]("man -woman", 0, 10)
+        order = [f["filename"] for f in files]
+        assert order.index("c_man.jxl") < order.index("d_man_and_woman.jxl")
+        # cutoff keeps only the close hits
+        app.state["semantic_relative_cutoff"] = 0.75
+        files, total, _ = svc["semantic_list"]("man", 0, 10)
+        assert {f["filename"] for f in files} <= {"c_man.jxl", "d_man_and_woman.jxl", "e_manlike_dog.jxl"}
+        assert "a_woman.jxl" not in {f["filename"] for f in files} and total == len(files)
+    finally:
+        cell.cell_contents = saved
+        db.execute("DELETE FROM image_embeddings")
+        db.executemany("DELETE FROM files WHERE rel_path=?", [(n,) for n in lib]); db.commit()

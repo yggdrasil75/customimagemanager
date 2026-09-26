@@ -44,6 +44,22 @@ def register(host):
 
     # ── settings (shared OAI keys; the core AI pane renders them) ──────────
 
+    # ── semantic search tuning ─────────────────────────────────────────────
+    _clamp = lambda lo, hi, d: (lambda v: max(lo, min(hi, float(v if v not in (None, "") else d))))
+    host.add_config_key("semantic_relative_cutoff", default=0.75, validate=_clamp(0.0, 1.0, 0.75))
+    host.add_config_key("semantic_min_score", default=0.0, validate=_clamp(-1.0, 1.0, 0.0))
+    host.add_config_key("semantic_negative_weight", default=0.7, validate=_clamp(0.0, 2.0, 0.7))
+    host.add_settings_field(key="semantic_relative_cutoff", label="Semantic search: keep hits within this fraction of the best",
+                            kind="number", pane="module",
+                            help="0.75 keeps everything scoring at least 75% of the top hit. Lower = more, "
+                                 "looser results; 0 = no cutoff (ranked list of everything).")
+    host.add_settings_field(key="semantic_min_score", label="Semantic search: absolute minimum score",
+                            kind="number", pane="module",
+                            help="Extra floor on the raw cosine score. Model-specific; 0 = off.")
+    host.add_settings_field(key="semantic_negative_weight", label="Semantic search: weight of -negative terms",
+                            kind="number", pane="module",
+                            help="'sem:man -woman' subtracts this × the similarity to 'woman'.")
+
     # ── database tables ────────────────────────────────────────────────────
     # One row per (image, model): switching embedding models keeps every
     # model's vectors, so going to a bigger model and back later costs nothing
@@ -551,6 +567,18 @@ def register(host):
             return []
         return _search_by_vector(db, _normalise(np.asarray(v, np.float32)), top_k=top_k)
 
+    def _parse_semantic(query):
+        """'woman on a beach -child -dog' -> ('woman on a beach', ['child', 'dog']).
+        A leading '-' on a word makes it a negative term; everything else is
+        the positive query, kept together as one phrase."""
+        pos, neg = [], []
+        for w in query.split():
+            if w.startswith("-") and len(w) > 1:
+                neg.append(w[1:])
+            else:
+                pos.append(w)
+        return " ".join(pos).strip(), neg
+
     def _semantic_list(query, offset, limit, folder='', album=''):
         db = host.db()
         if _embedding_count(db) == 0:
@@ -562,51 +590,93 @@ def register(host):
         if embed_text is None:
             return [], 0, ("Text search needs an embedding model that embeds text too "
                            "(Settings → Models → Embeddings).")
-        qv = embed_text(query)
+        pos_text, neg_texts = _parse_semantic(query)
+        if not pos_text:
+            return [], 0, "Semantic search needs at least one positive term."
+        qv = embed_text(pos_text)
         if qv is None:
             return [], 0, "Failed to embed query."
-        hits = _search_by_vector(db, qv, top_k=2000)
-        names = [n for n, _ in hits]
-        if not names:
+        negs = [v for v in (embed_text(t) for t in neg_texts) if v is not None]
+
+        hits = _score_library(db, qv, negs)
+        if not hits:
             return [], 0, "No matches."
+        hits = _relevance_cut(hits)
 
-        # Build WHERE clause for folder/album scope
-        clauses = ["rel_path IN (" + ",".join("?" * len(names)) + ")"]
-        params = list(names)
-        if album:
-            clauses.append("rel_path IN (SELECT rel_path FROM album_members WHERE album=?)")
-            params.append(album)
-        # folder scope
-        if folder:
-            clauses.append("rel_path LIKE ?")
-            params.append(folder.rstrip("/") + "/%")
-        where_sql = " WHERE " + " AND ".join(clauses)
+        # Scope (folder / album) filters the ranked list; ranking order is kept.
+        if folder or album:
+            names = [n for n, _ in hits]
+            allowed = set()
+            for i in range(0, len(names), 500):
+                chunk = names[i:i + 500]
+                clauses = ["rel_path IN (" + ",".join("?" * len(chunk)) + ")"]
+                params = list(chunk)
+                if album:
+                    clauses.append("rel_path IN (SELECT rel_path FROM album_members WHERE album=?)")
+                    params.append(album)
+                if folder:
+                    clauses.append("rel_path LIKE ?")
+                    params.append(folder.rstrip("/") + "/%")
+                allowed.update(r[0] for r in db.execute(
+                    "SELECT rel_path FROM files WHERE " + " AND ".join(clauses), params))
+            hits = [h for h in hits if h[0] in allowed]
 
-        # Get total count
-        total = db.execute(
-            f"SELECT COUNT(*) FROM files{where_sql}", params).fetchone()[0]
-
-        # Get paginated results
-        rows = db.execute(
-            f"SELECT rel_path, tags, description, width, height "
-            f"FROM files{where_sql} "
-            f"ORDER BY rel_path LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
-
-        # Build score map
-        score_map = {n: s for n, s in hits}
-
+        total = len(hits)
+        page = hits[offset:offset + limit]
+        if not page:
+            return [], total, None
+        names = [n for n, _ in page]
+        rows = {r["rel_path"]: r for r in db.execute(
+            "SELECT rel_path, tags, description, width, height FROM files WHERE rel_path IN ("
+            + ",".join("?" * len(names)) + ")", names).fetchall()}
         entries = []
-        for r in rows:
-            entry = {"kind": "image", "filename": r["rel_path"],
-                     "tags": __import__("json").loads(r["tags"] or "[]"),
-                     "description": r["description"] or "",
-                     "width": r["width"] or 0, "height": r["height"] or 0,
-                     "score": round(score_map.get(r["rel_path"], 0), 4)}
-            entries.append(entry)
-
-        # Enrich with file enrichers
+        for n, sc in page:                       # score order, best first
+            r = rows.get(n)
+            if r is None:
+                continue                          # vector for a file no longer indexed
+            entries.append({"kind": "image", "filename": n,
+                            "tags": __import__("json").loads(r["tags"] or "[]"),
+                            "description": r["description"] or "",
+                            "width": r["width"] or 0, "height": r["height"] or 0,
+                            "score": round(sc, 4)})
         host.enrich_file_rows(db, entries)
         return entries, total, None
+
+    def _score_library(db, qv, negs=(), top_k=5000):
+        """[(rel_path, score)] best first. score = cos(query) - w * max cos(negatives):
+        an image that matches a negative term strongly is pushed down, one that
+        doesn't is left alone."""
+        q = _normalise(np.asarray(qv, np.float32).ravel())
+        dim = int(q.shape[0])
+        ns = [_normalise(np.asarray(v, np.float32).ravel()) for v in negs]
+        ns = [v for v in ns if v.shape[0] == dim]
+        w = float(host.config.get("semantic_negative_weight") or 0.7)
+        names, scores = [], []
+        for nm, mat in _iter_embeddings_ordered(db, dim):
+            s_ = mat @ q
+            if ns:
+                s_ = s_ - w * np.max(np.stack([mat @ v for v in ns]), axis=0)
+            names.extend(nm)
+            scores.append(s_)
+        if not names:
+            return []
+        sc = np.concatenate(scores)
+        order = np.argsort(-sc)[:top_k]
+        return [(names[i], float(sc[i])) for i in order]
+
+    def _relevance_cut(hits):
+        """Drop the long tail. Text->image cosine scores are low and compressed
+        (a clear match ~0.4, unrelated ~0.1 for most models), so an absolute
+        threshold doesn't carry between models; keep what scores within a
+        fraction of the best hit, plus an optional absolute floor."""
+        if not hits:
+            return hits
+        top = hits[0][1]
+        ratio = float(host.config.get("semantic_relative_cutoff") or 0)
+        floor = float(host.config.get("semantic_min_score") or 0)
+        cut = max(floor, top * ratio) if top > 0 else floor
+        kept = [h for h in hits if h[1] >= cut]
+        return kept or hits[:1]
 
     # ── API endpoints ──────────────────────────────────────────────────────
     @host.route("/api/embedding/status", feature="tab.review")
