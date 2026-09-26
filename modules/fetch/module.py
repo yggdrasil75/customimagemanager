@@ -267,7 +267,7 @@ def register(host):
                     for _mp, _meta in gen:
                         if _is_canceled(qid):
                             canceled = True; break
-                        if not wait_for_space(m.upload_spool_dir, m.media_dir,
+                        if not wait_for_space(m.upload_spool_dir, host.media_dir,
                                               stop=lambda: _is_canceled(qid)):
                             canceled = True; break
                 finally:
@@ -297,7 +297,7 @@ def register(host):
 
     _paused = {"why": ""}
     def _pause_reason():
-        low = disk_low(m.upload_spool_dir, m.media_dir)
+        low = disk_low(m.upload_spool_dir, host.media_dir)
         why = (f"paused: {low} has under {common.min_free_bytes(low) >> 20} MB free "
                "(Settings › General › Pause downloads below)") if low else ""
         if why != _paused["why"]:
