@@ -2885,23 +2885,34 @@ def serve_thumb(rel_path: str, abs_path: str, mtime: float | None = None):
             resp.last_modified = mtime
         return resp
 
+    got = thumb_bytes(rel_path, abs_path, mtime)
+    if got is None:
+        return "", 404
+    return _finish(*got)
+
+
+def thumb_bytes(rel_path: str, abs_path: str, mtime: float | None = None):
+    """(bytes, mimetype) for a file's thumbnail via LRU, BLOB cache, then
+    on-demand generation; the raw file when no thumbnail can be made; None
+    when the file is unreadable. serve_thumb wraps this in a response; modules
+    that ship thumbnails elsewhere (family_share to a phone) use it directly."""
+    if mtime is None:
+        mtime = _getmtime_loose(abs_path)
     data = _thumb_lru_get(rel_path, mtime)          # 1. in-process LRU
     if data is not None:
-        return _finish(data, 'image/jpeg')
-
+        return data, 'image/jpeg'
     data = _thumb_get(rel_path, mtime)              # 2. BLOB cache
     if data:
         _thumb_lru_put(rel_path, mtime, data)
-        return _finish(data, 'image/jpeg')
-
+        return data, 'image/jpeg'
     data = _make_thumb_bytes(abs_path)              # 3. generate
     if data is None:
         raw = _read_bytes_loose(abs_path)
-        if raw is None: return "", 404
-        return _finish(raw, 'image/jxl')
+        if raw is None: return None
+        return raw, 'image/jxl'
     _thumb_put(rel_path, data, mtime)
     _thumb_lru_put(rel_path, mtime, data)
-    return _finish(data, 'image/jpeg')
+    return data, 'image/jpeg'
 
 
 _yolo_registered = set()
@@ -6059,7 +6070,7 @@ _core_api = SimpleNamespace(
     object_grouping=og,
     ingest_inline=_process_spooled_inline, enqueue_spooled_upload=_enqueue_spooled_upload,
     file_albums=_file_albums, set_file_albums=_set_file_albums, delete_file=_delete_file,
-    get_file_row=_get_file_row,
+    get_file_row=_get_file_row, thumb_bytes=thumb_bytes,
 )
 
 module_host = modules.host.Host(

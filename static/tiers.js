@@ -181,6 +181,12 @@ async function saveAllSettings() {
   if (typeof persistAiSettings === 'function')    steps.push(persistAiSettings);
   if (typeof persistBranding === 'function')      steps.push(persistBranding);
   if (typeof persistTiersConfig === 'function')   steps.push(persistTiersConfig);
+  // Module panes that buffer their edits register a window.persist<Name>
+  // step (family_share does); each returns {ok, error} like the core ones.
+  for (const k of Object.keys(window)) {
+    if (/^persist[A-Z]/.test(k) && typeof window[k] === 'function' && !steps.includes(window[k])
+        && !['persistAiSettings', 'persistBranding', 'persistTiersConfig'].includes(k)) steps.push(window[k]);
+  }
   let failed = null;
   for (const step of steps) {
     let res;

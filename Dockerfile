@@ -1,3 +1,23 @@
+# ── optional stage: the Android app (BUILD_ANDROID=1) ─────────────────────────
+# Builds android/ into static/app/cim-family.apk with a JDK + the Android SDK
+# fetched by android/build.sh. Off by default because it pulls ~1.5 GB of SDK;
+# the runtime image copies whatever this stage produced (an empty dir when off).
+#   docker build --build-arg BUILD_ANDROID=1 -t cim .
+# Signing: commit-or-copy a keystore into android/keystore/ BEFORE building
+# (see android/README.md); without one the stage generates a fresh key every
+# build and phones refuse to update over an APK signed with a different key.
+FROM eclipse-temurin:17-jdk AS android
+ARG BUILD_ANDROID=0
+RUN apt-get update && apt-get install -y --no-install-recommends curl unzip && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY android/ ./android/
+RUN --mount=type=cache,target=/build/android/.sdk \
+    --mount=type=cache,target=/build/android/.gradle-dist \
+    --mount=type=cache,target=/root/.gradle \
+    mkdir -p /build/static/app && \
+    if [ "$BUILD_ANDROID" = "1" ]; then OUT=/build/static/app/cim-family.apk ./android/build.sh; \
+    else echo "BUILD_ANDROID=0: skipping the Android app"; fi
+
 FROM python:3.12
 ARG GPU_BACKEND=cpu
 
@@ -54,6 +74,8 @@ RUN if [ "${GPU_BACKEND}" = "rocm" ]; then \
     fi
 
 COPY . .
+# The app built (or skipped) by the android stage, served at /static/app/cim-family.apk.
+COPY --from=android /build/static/app/ ./static/app/
 
 RUN mkdir -p static && curl -fsSL https://cdn.tailwindcss.com/3.4.17 -o static/tailwindcss.js
 

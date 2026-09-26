@@ -28,11 +28,26 @@
     if (!r.ok || d.ok === false) throw new Error(d.error || ("HTTP " + r.status));
     return d;
   }
-  async function setOption(key, value) {
-    const r = await fetch("/api/update_settings", { method: "POST",
-      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ [key]: value }) });
-    if (!r.ok) throw new Error("settings save failed");
+  // Option edits are buffered here and written by the modal's Save button
+  // (persistFamilyShare below), like the core panes; closing without Save
+  // discards them. Peers and rules are records with their own Save/Add.
+  let pending = {};
+  function setOption(key, value) {
+    pending[key] = value;
+    if (state) state.options[key] = value;
   }
+  window.persistFamilyShare = async function () {
+    const keys = Object.keys(pending);
+    if (!keys.length) return { ok: true };
+    const body = Object.assign({}, pending);
+    try {
+      const r = await fetch("/api/update_settings", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (!r.ok) return { ok: false, error: "Family share settings failed to save" };
+    } catch (e) { return { ok: false, error: "Family share settings failed to save" }; }
+    pending = {};
+    return { ok: true };
+  };
 
   const pane = () => document.getElementById("settings_pane_module_" + ID);
 
@@ -62,7 +77,7 @@
 
   async function load() {
     const p = shell(); if (!p) return;
-    try { state = await get("/state"); }
+    try { state = await get("/state"); Object.assign(state.options, pending); }
     catch (e) { p.querySelector(".fs-root").innerHTML = `<p class="fs-err">${esc(e.message)}</p>`; return; }
     renderIdentity(); renderOptions(); renderPeers(); renderRules(); renderPreview();
     renderOutbox(); renderReceived();
@@ -91,14 +106,8 @@
         state.dirty ? " · re-plan pending" : ""}</span></div>
       <div class="fs-actions"><button id="fs_sync" class="fs-btn">Plan &amp; sync now</button>
         <button id="fs_reload" class="fs-btn fs-btn-ghost">Refresh</button></div>`;
-    el.querySelector("#fs_myurl").addEventListener("change", async (ev) => {
-      try { await setOption("family_share_my_url", ev.target.value.trim()); toast("URL saved"); }
-      catch (e) { toast(e.message); }
-    });
-    el.querySelector("#fs_name").addEventListener("change", async (ev) => {
-      try { await setOption("family_share_name", ev.target.value.trim()); toast("Name saved"); await load(); }
-      catch (e) { toast(e.message); }
-    });
+    el.querySelector("#fs_myurl").addEventListener("change", (ev) => setOption("family_share_my_url", ev.target.value.trim()));
+    el.querySelector("#fs_name").addEventListener("change", (ev) => setOption("family_share_name", ev.target.value.trim()));
     el.querySelector("#fs_sync").addEventListener("click", async () => {
       try { await post("/sync"); toast("Planning…"); setTimeout(load, 1500); } catch (e) { toast(e.message); }
     });
@@ -122,26 +131,29 @@
   ];
   function renderOptions() {
     const el = document.getElementById("fs_options");
-    el.innerHTML = `<h3>Options</h3>` + OPTS.map(([k, kind, label, help]) => {
+    el.innerHTML = `<h3>Options <small>applied when you click Save below</small></h3>` + OPTS.map(([k, kind, label, help]) => {
       const v = state.options[k];
       const ctl = kind === "toggle"
         ? `<input type="checkbox" data-opt="${k}" ${v ? "checked" : ""}>`
         : `<input type="${kind}" data-opt="${k}" value="${esc(v == null ? "" : v)}" ${kind === "number" ? 'min="1"' : ""}>`;
       return `<label class="fs-row" title="${esc(help)}"><span>${esc(label)}</span>${ctl}</label>`;
     }).join("");
-    el.querySelectorAll("[data-opt]").forEach((inp) => inp.addEventListener("change", async () => {
+    el.querySelectorAll("[data-opt]").forEach((inp) => inp.addEventListener("change", () => {
       const k = inp.dataset.opt;
-      const v = inp.type === "checkbox" ? inp.checked : (inp.type === "number" ? Number(inp.value) : inp.value);
-      try { await setOption(k, v); toast("Saved"); } catch (e) { toast(e.message); }
+      setOption(k, inp.type === "checkbox" ? inp.checked : (inp.type === "number" ? Number(inp.value) : inp.value));
     }));
   }
 
   // ── peers ─────────────────────────────────────────────────────────────
   function renderPeers() {
     const el = document.getElementById("fs_peers");
+    const kindSel = (k) => `<select class="fs-p-kind"><option value="peer" ${k !== "device" ? "selected" : ""}>family</option>
+        <option value="device" ${k === "device" ? "selected" : ""}>my phone</option></select>`;
     const rows = state.peers.map((p) => `
       <tr data-id="${p.id}">
-        <td><input class="fs-p-name" value="${esc(p.name)}"></td>
+        <td>${kindSel(p.kind)}</td>
+        <td><input class="fs-p-name" value="${esc(p.name)}">
+            <input class="fs-p-folder" value="${esc(p.folder || "")}" placeholder="uploads land in (phone/${esc(p.name)})" ${p.kind === "device" ? "" : "hidden"}></td>
         <td><input class="fs-p-url" value="${esc(p.url)}" placeholder="https://their-box:5000"></td>
         <td><input class="fs-p-key" placeholder="${p.has_key_out && p.pub_key ? "paired" : "paste their pairing code"}">
             ${p.pub_key ? `<div class="fs-fp" title="Their key fingerprint — compare with what they see">🔒 ${esc(p.fingerprint)}</div>`
@@ -157,14 +169,19 @@
           <button class="fs-btn fs-btn-sm fs-btn-danger fs-p-del">Remove</button>
         </td></tr>`).join("");
     el.innerHTML = `<h3>Peers <small>other instances; both sides must add each other</small></h3>
-      <table class="fs-table"><thead><tr><th>Name</th><th>URL</th><th>Their pairing code / key</th><th>On</th><th>Status</th><th></th></tr></thead>
+      <table class="fs-table"><thead><tr><th>Kind</th><th>Name</th><th>URL</th><th>Their pairing code / key</th><th>On</th><th>Status</th><th></th></tr></thead>
       <tbody>${rows}
-        <tr class="fs-new"><td><input class="fs-p-name" placeholder="mom"></td>
+        <tr class="fs-new"><td>${kindSel("peer")}</td>
+          <td><input class="fs-p-name" placeholder="mom / my-phone"><input class="fs-p-folder" placeholder="uploads land in" hidden></td>
           <td><input class="fs-p-url" placeholder="https://their-box:5000"></td>
           <td><input class="fs-p-key" placeholder="paste their pairing code (or add now, pair later)"></td>
           <td><input class="fs-p-en" type="checkbox" checked></td><td></td>
           <td class="fs-actions"><button class="fs-btn fs-btn-sm fs-p-save">Add</button></td></tr>
       </tbody></table>
+      <p class="fs-help"><b>My phone</b> peers are your own devices running the CIM Family app
+      (<a href="/static/app/cim-family.apk" download>download APK</a>, built with the docker image). Their uploads are your own
+      photos: they land in the folder above, get no "from:" tag and flow to family through the rules like anything else.
+      Pair the same way — the app shows its pairing code, and you paste this instance's code into the app.</p>
       <p class="fs-help">Set-up: add the peer here (name only is fine), click <b>Pairing code for them</b> and send them
       the string. They paste it in this box on their instance, which creates/pairs the peer entry for you, then they send
       you <i>their</i> pairing code, which you paste here. <b>Test</b> checks the connection and that the pinned key
@@ -174,10 +191,12 @@
     el.querySelectorAll("tr").forEach((tr) => {
       const id = Number(tr.dataset.id || 0);
       const q = (c) => tr.querySelector(c);
+      const kind = q(".fs-p-kind"); if (kind) kind.addEventListener("change", () => { q(".fs-p-folder").hidden = kind.value !== "device"; });
       const save = q(".fs-p-save"); if (save) save.addEventListener("click", async () => {
         try {
           const raw = q(".fs-p-key").value.trim();
-          const body = { id, name: q(".fs-p-name").value, url: q(".fs-p-url").value, enabled: q(".fs-p-en").checked };
+          const body = { id, name: q(".fs-p-name").value, url: q(".fs-p-url").value, enabled: q(".fs-p-en").checked,
+                         kind: q(".fs-p-kind").value, folder: q(".fs-p-folder").value };
           if (raw.startsWith("fs1.")) body.pairing_code = raw; else if (raw) body.key_out = raw;
           await post("/peers/save", body);
           toast(id ? "Peer saved" : "Peer added"); await load();
@@ -210,7 +229,8 @@
       const rot = q(".fs-p-rotate"); if (rot) rot.addEventListener("click", async () => {
         if (!confirm("Rotate the key this peer uses to reach me? They will need the new one.")) return;
         try { await post("/peers/save", { id, name: q(".fs-p-name").value, url: q(".fs-p-url").value,
-          enabled: q(".fs-p-en").checked, rotate_key_in: true }); toast("Rotated"); await load(); }
+          enabled: q(".fs-p-en").checked, kind: q(".fs-p-kind").value, folder: q(".fs-p-folder").value,
+          rotate_key_in: true }); toast("Rotated"); await load(); }
         catch (e) { toast(e.message); }
       });
       const del = q(".fs-p-del"); if (del) del.addEventListener("click", async () => {
@@ -355,6 +375,9 @@
   }
 
   document.addEventListener("module-settings-tab", (ev) => { if (ev.detail === ID) load(); });
+  // A fresh open of the settings modal starts from what the server has.
+  const _origOpen = window.refreshModuleSettings;
+  if (typeof _origOpen === "function") window.refreshModuleSettings = async function () { pending = {}; return _origOpen.apply(this, arguments); };
 
   // ── viewer badge: who sees the current photo ──────────────────────────
   if (window.registerControlButton) {

@@ -40,7 +40,11 @@ CREATE TABLE IF NOT EXISTS fs_peers (
     enabled     INTEGER NOT NULL DEFAULT 1,
     last_ok     REAL,
     last_error  TEXT DEFAULT '',
-    created     REAL
+    created     REAL,
+    pub_key     TEXT DEFAULT '',                    -- pinned X25519 public key
+    instance_id TEXT DEFAULT '',
+    kind        TEXT DEFAULT 'peer',                -- peer (family instance) | device (my phone)
+    folder      TEXT DEFAULT ''                     -- device: library folder its uploads land in
 );
 CREATE TABLE IF NOT EXISTS fs_rules (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -284,8 +288,12 @@ def _like(s):
 
 
 def received_paths(db):
+    """Files that came from another FAMILY instance (kind='peer'). Uploads from
+    the user's own devices (kind='device') are the user's own photos and are
+    governed by the rules like anything else."""
     return {r["rel_path"] for r in db.execute(
-        "SELECT rel_path FROM fs_received WHERE rel_path<>''").fetchall()}
+        "SELECT f.rel_path FROM fs_received f JOIN fs_peers p ON p.id=f.peer_id "
+        "WHERE f.rel_path<>'' AND COALESCE(p.kind,'peer')<>'device'").fetchall()}
 
 
 def iter_candidates(db, rules):
@@ -305,7 +313,8 @@ def facts_for(db, rel_path):
                      "WHERE rel_path=?", (rel_path,)).fetchone()
     if row is None:
         return None
-    got = db.execute("SELECT 1 FROM fs_received WHERE rel_path=?", (rel_path,)).fetchone()
+    got = db.execute("SELECT 1 FROM fs_received f JOIN fs_peers p ON p.id=f.peer_id "
+                     "WHERE f.rel_path=? AND COALESCE(p.kind,'peer')<>'device'", (rel_path,)).fetchone()
     return FileFacts.from_row(row, received=got is not None)
 
 

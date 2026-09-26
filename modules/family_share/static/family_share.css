@@ -48,3 +48,5 @@
 .fs-badge { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: rgba(128,128,128,.25); cursor: help; white-space: nowrap; }
 .fs-badge-on { background: rgba(22,163,74,.35); }
 .fs-fp { font-family: monospace; font-size: 10px; opacity: .75; margin-top: 2px; white-space: nowrap; }
+.fs-p-folder { margin-top: 3px; }
+.fs-help a { color: #818cf8; }

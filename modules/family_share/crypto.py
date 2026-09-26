@@ -30,6 +30,7 @@ already keeps (LDAP bind password, session keys). Rotating it means re-pairing.
 """
 
 import base64
+import io
 import json
 import os
 import struct
@@ -123,21 +124,47 @@ class Sealer:
 
     def seal_file(self, src_path, dst_path):
         """Write the framed ciphertext stream of src_path to dst_path."""
-        aes = AESGCM(self._k_file)
-        size = os.path.getsize(src_path)
-        done = 0; i = 0
         with open(src_path, "rb") as fin, open(dst_path, "wb") as fout:
+            self.seal_stream(fin, os.path.getsize(src_path), fout)
+        return dst_path
+
+    def seal_stream(self, fin, size, fout):
+        """Frame `size` bytes read from fin into fout (see module docstring)."""
+        aes = AESGCM(self._k_file)
+        done = 0; i = 0
+        while True:
+            data = fin.read(CHUNK)
+            done += len(data)
+            last = done >= size
+            nonce = struct.pack(">Q", i) + b"\0\0\0\0"
+            ct = aes.encrypt(nonce, data, _file_aad(i, last))
+            fout.write(struct.pack(">I", len(ct)) + ct)
+            i += 1
+            if last:
+                break
+
+    def iter_frames(self, path, size):
+        """Generator of sealed frames for a streamed response, made as they are
+        sent so a video never sits in RAM."""
+        aes = AESGCM(self._k_file)
+        done = 0; i = 0
+        with open(path, "rb") as fin:
             while True:
                 data = fin.read(CHUNK)
                 done += len(data)
                 last = done >= size
                 nonce = struct.pack(">Q", i) + b"\0\0\0\0"
                 ct = aes.encrypt(nonce, data, _file_aad(i, last))
-                fout.write(struct.pack(">I", len(ct)) + ct)
+                yield struct.pack(">I", len(ct)) + ct
                 i += 1
                 if last:
-                    break
-        return dst_path
+                    return
+
+    def seal_bytes(self, data):
+        """Framed ciphertext of an in-memory blob (a thumbnail, a listing)."""
+        out = io.BytesIO()
+        self.seal_stream(io.BytesIO(data), len(data), out)
+        return out.getvalue()
 
 
 def _file_aad(i, last):
@@ -179,9 +206,19 @@ class Opener:
 
     def open_file(self, stream, dst_path):
         """Decrypt a framed stream (a file-like with .read) into dst_path."""
+        with open(dst_path, "wb") as fout:
+            self.open_stream(stream, fout)
+        return dst_path
+
+    def open_bytes(self, data):
+        out = io.BytesIO()
+        self.open_stream(io.BytesIO(data), out)
+        return out.getvalue()
+
+    def open_stream(self, stream, fout):
         aes = AESGCM(self._k_file)
         i = 0; last = False
-        with open(dst_path, "wb") as fout:
+        if True:
             while not last:
                 hdr = _read_exact(stream, 4)
                 if hdr is None:
@@ -205,7 +242,6 @@ class Opener:
                 i += 1
             if stream.read(1):
                 raise CryptoError("data after the final chunk")
-        return dst_path
 
 
 def _read_exact(stream, n):

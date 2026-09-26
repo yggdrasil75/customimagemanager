@@ -131,14 +131,24 @@
     return wrap;
   }
 
-  async function saveSetting(key, value) {
+  // Edits are buffered and written by the settings modal's Save button
+  // (saveAllSettings picks up window.persist* functions); closing the modal
+  // without saving discards them, same as the core panes.
+  let _pendingFields = {};
+  function saveSetting(key, value) { _pendingFields[key] = value; }
+  window.persistModuleFields = async function () {
+    const keys = Object.keys(_pendingFields);
+    if (!keys.length) return { ok: true };
     try {
-      await fetch("/api/update_settings", {
+      const r = await fetch("/api/update_settings", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [key]: value }),
+        body: JSON.stringify(_pendingFields),
       });
-    } catch (e) { /* non-fatal */ }
-  }
+      if (!r.ok) return { ok: false, error: "Module settings failed to save" };
+    } catch (e) { return { ok: false, error: "Module settings failed to save" }; }
+    _pendingFields = {};
+    return { ok: true };
+  };
 
   // ── model selection tab ───────────────────────────────────────────────────
   // One row per broker capability: family (provider) / size / type selects,
@@ -387,6 +397,7 @@ const SPEED_BADGE = { fast: "⚡", balanced: "⚖", accurate: "🎯" };
   // Settings open → refetch, so module fields show what the server has now
   // rather than the values captured at page load (tiers.js openSettings).
   window.refreshModuleSettings = async function () {
+    _pendingFields = {};               // a fresh open starts from what the server has
     await buildSettingsTabs();
     await buildModelPicker();
   };

@@ -20,3 +20,4 @@ tests/js/node_modules/
 tests/js/_app.html
 tests/js/_api_snapshot.json
 tests/js/_module_assets.json
+android/keystore/

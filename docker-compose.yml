@@ -46,6 +46,8 @@ services:
       context: .
       args:
         GPU_BACKEND: cpu
+        # 1 = also build the Android app into static/app/cim-family.apk
+        BUILD_ANDROID: ${BUILD_ANDROID:-0}
 
   # ── NVIDIA CUDA ────────────────────────────────────────────────────────────
   # Requires the NVIDIA Container Toolkit on the host.

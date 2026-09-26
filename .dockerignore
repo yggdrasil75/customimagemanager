@@ -3,3 +3,8 @@ __pycache__
 *.pyc
 media
 .thumbs
+android/.sdk
+android/.gradle-dist
+android/.gradle
+android/build
+android/app/build

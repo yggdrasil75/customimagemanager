@@ -125,21 +125,28 @@
       c.appendChild(d);
     });
   }
-  // Saved on every edit, exactly like the module fields the core renders
-  // (they post to /api/update_settings on change too).
-  let _saveTimer = null;
-  function saveSoon() { clearTimeout(_saveTimer); _saveTimer = setTimeout(save, 400); }
-  async function save() {
+  // Edits are buffered; the settings modal's Save button writes them through
+  // window.persistVlmActions (saveAllSettings collects window.persist*), so
+  // this pane saves/discards together with every other pane.
+  let _dirty = false;
+  function saveSoon() {
     const c = document.getElementById('actions_container'); if (!c) return;
     actions = [...c.querySelectorAll('.action-row')].map(r => ({
       id: r.dataset.id, name: r.querySelector('.act-name').value.trim() || 'Action',
       prompt: r.querySelector('.act-prompt').value.trim(), target: r.querySelector('.act-target').value }));
-    try {
-      await fetch('/api/update_settings', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ oai_actions: actions }) });
-    } catch (e) { /* non-fatal */ }
+    _dirty = true;
     fillSelects();
   }
+  window.persistVlmActions = async function () {
+    if (!_dirty) return { ok: true };
+    try {
+      const r = await fetch('/api/update_settings', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ oai_actions: actions }) });
+      if (!r.ok) return { ok: false, error: 'AI actions failed to save' };
+    } catch (e) { return { ok: false, error: 'AI actions failed to save' }; }
+    _dirty = false;
+    return { ok: true };
+  };
 
   // ── wiring ───────────────────────────────────────────────────────────────
   function init() {

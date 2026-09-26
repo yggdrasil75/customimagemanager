@@ -1,0 +1,7 @@
+.sdk/
+.gradle-dist/
+.gradle/
+build/
+app/build/
+keystore/
+local.properties

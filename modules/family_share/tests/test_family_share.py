@@ -451,3 +451,73 @@ def test_delete_revokes(client, app, peer, upload, monkeypatch):
     assert job and job["kind"] == "revoke"; src["handle"](job)
     assert calls == [sha]
     _j(client, "/api/family_share/rules/delete", {"id": rid})
+
+
+# ── phone (device peer): sealed reads + own-photo semantics ───────────────
+@pytest.fixture
+def phone(client, app):
+    priv = fc.generate_private_key()
+    pid = _j(client, "/api/family_share/peers/save", {"name": "pixel", "kind": "device", "folder": "phone/pixel",
+                                                       "pub_key": fc.public_key(priv), "key_out": "x"})["id"]
+    me = fc.parse_pairing_code(_j(client, "/api/family_share/peers/key", {"id": pid})["pairing_code"])
+    yield {"id": pid, "name": "pixel", "priv": priv, "my_pub": me["pub_key"], "my_id": me["instance_id"],
+           "headers": {pc.HEADER_PEER: "pixel", pc.HEADER_KEY: me["key_out"]}}
+    client.post("/api/family_share/peers/delete", json={"id": pid})
+    db = app._db(); db.execute("DELETE FROM fs_rules"); db.execute("DELETE FROM fs_outbox"); db.execute("DELETE FROM fs_received"); db.commit()
+
+
+def _open_resp(phone, r):
+    assert r.status_code == 200, r.get_data(as_text=True)[:200]
+    opener = fc.Opener(phone["priv"], phone["my_pub"], json.loads(r.headers["X-Family-Env"]))
+    return opener.open_bytes(r.get_data()), r.headers.get("X-Family-Mime")
+
+
+def test_device_upload_lands_in_device_folder_and_is_shareable(client, app, phone, peer, tmp_path):
+    inner = {"origin_sha": "ph1", "origin_id": "pixel-id", "folder": "DCIM/Camera", "orig_name": "IMG_1.png",
+             "metadata": {"tags": ["family"]}}
+    r = client.post("/api/family_share/inbound/push", headers=phone["headers"], content_type="multipart/form-data",
+                    data=_sealed(phone, inner, png_bytes(seed=910), tmp_path))
+    fn = r.get_json()["filename"]
+    assert fn.startswith("phone/pixel/DCIM/Camera/")
+    try:
+        assert "from:pixel" not in read_meta(client, fn)["tags"]          # my own photo, not "received"
+        rid = _j(client, "/api/family_share/rules/save", {"mode": "share", "kind": "tag", "value": "family", "peers": [peer["id"]]})["id"]
+        pv = client.get(f"/api/family_share/preview?peer_id={peer['id']}").get_json()
+        assert fn in [f["rel_path"] for f in pv["files"]]                 # phone uploads DO flow to family
+        # the phone never appears as a share target
+        assert client.post("/api/family_share/rules/save", json={"mode": "share", "kind": "tag", "value": "family", "peers": [phone["id"]]}).status_code == 200
+        pv = client.get(f"/api/family_share/preview?peer_id={phone['id']}").get_json()
+        svc = app.module_host.get_service("family_share"); svc["plan"]()
+        job = svc["claim"]()
+        while job and job["kind"] == "plan":
+            svc["handle"](job); job = svc["claim"]()
+        assert not job or job["peer_id"] != phone["id"]
+        _j(client, "/api/family_share/rules/delete", {"id": rid})
+        # /have knows it
+        sealer = fc.Sealer(phone["priv"], phone["my_pub"])
+        r = client.post("/api/family_share/inbound/have", headers=phone["headers"],
+                        json={"env": sealer.header, "meta": sealer.seal_meta({"shas": ["ph1", "nope"], "ts": time.time(), "to": phone["my_id"]})})
+        body, _ = _open_resp(phone, r)
+        assert json.loads(body)["have"] == ["ph1"]
+    finally:
+        client.post("/api/delete", json={"filename": fn})
+
+
+def test_device_sealed_timeline_thumb_media(client, app, phone, upload):
+    fn = upload(seed=911, folder="trips")
+    r = client.get("/api/family_share/inbound/timeline?limit=50")
+    assert r.status_code == 401
+    body, mime = _open_resp(phone, client.get("/api/family_share/inbound/timeline?limit=50", headers=phone["headers"]))
+    tl = json.loads(body)
+    assert mime == "application/json" and tl["ok"] and any(f["p"] == fn for f in tl["files"])
+    ent = next(f for f in tl["files"] if f["p"] == fn)
+    assert ent["w"] == 48 and ent["h"] == 32 and ent["v"] is False
+    thumb, mime = _open_resp(phone, client.get(f"/api/family_share/inbound/thumb?p={fn}", headers=phone["headers"]))
+    assert mime.startswith("image/") and len(thumb) > 100
+    media, mime = _open_resp(phone, client.get(f"/api/family_share/inbound/media?p={fn}", headers=phone["headers"]))
+    with open(os.path.join(app.MEDIA_DIR, fn), "rb") as f:
+        assert media == f.read()
+    # raw wire bodies are not the plaintext
+    raw = client.get(f"/api/family_share/inbound/thumb?p={fn}", headers=phone["headers"]).get_data()
+    assert thumb[:64] not in raw and b"JFIF" not in raw
+    assert client.get("/api/family_share/inbound/thumb?p=../etc/passwd", headers=phone["headers"]).status_code == 404

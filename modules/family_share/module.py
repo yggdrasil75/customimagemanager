@@ -86,6 +86,10 @@ def register(host):
             db.execute("ALTER TABLE fs_peers ADD COLUMN pub_key TEXT DEFAULT ''")
         if "instance_id" not in cols:
             db.execute("ALTER TABLE fs_peers ADD COLUMN instance_id TEXT DEFAULT ''")
+        if "kind" not in cols:
+            db.execute("ALTER TABLE fs_peers ADD COLUMN kind TEXT DEFAULT 'peer'")
+        if "folder" not in cols:
+            db.execute("ALTER TABLE fs_peers ADD COLUMN folder TEXT DEFAULT ''")
         db.commit()
     host.add_table(sc.DDL, check=_migrate)
 
@@ -295,7 +299,7 @@ def register(host):
             rows = host.db().execute(
                 "SELECT o.rel_path, o.peer_id, o.status, o.sig, o.sha, o.attempts, o.updated "
                 "FROM fs_outbox o JOIN fs_peers p ON p.id=o.peer_id "
-                "WHERE o.status IN ('pending','revoke') AND p.enabled=1 "
+                "WHERE o.status IN ('pending','revoke') AND p.enabled=1 AND COALESCE(p.kind,'peer')<>'device' "
                 "ORDER BY o.updated LIMIT 100").fetchall()
         except Exception:
             return None
@@ -540,7 +544,8 @@ def register(host):
             return jsonify({"ok": True, "skipped": "own"})
         albums = [str(a) for a in (meta.get("albums") or []) if str(a).strip()]
         tags = [str(t) for t in (meta.get("tags") or [])]
-        rtag = _received_tag(peer)
+        is_device = (peer.get("kind") or "peer") == "device"
+        rtag = "" if is_device else _received_tag(peer)
         if rtag and rtag not in tags:
             tags.append(rtag)
         ingest_meta = {"tags": tags, "description": str(meta.get("description") or ""),
@@ -575,8 +580,12 @@ def register(host):
         if "file" not in request.files:
             return jsonify({"ok": True, "need_file": True})
 
-        dest = "/".join(p for p in (_cfg().get("family_share_incoming_folder") or "family",
-                                    peer["name"], folder) if p)
+        if is_device:
+            root = sc.norm_folder(peer.get("folder")) or f"phone/{peer['name']}"
+            dest = "/".join(p for p in (root, folder) if p)
+        else:
+            dest = "/".join(p for p in (_cfg().get("family_share_incoming_folder") or "family",
+                                        peer["name"], folder) if p)
         if not host.safe_path(host.media_dir, dest):
             return jsonify({"ok": False, "error": "bad folder"}), 400
         os.makedirs(core.upload_spool_dir, exist_ok=True)
@@ -661,6 +670,119 @@ def register(host):
         return jsonify({"ok": True, "removed": removed})
     host.add_route(INBOUND_PREFIX + "revoke", inbound_revoke, methods=["POST"])
 
+    # ── sealed reads: a paired phone browses the library ───────────────────
+    # The phone authenticates like any peer; every response body is sealed to
+    # its pinned key with this instance as the sender (X-Family-Env carries
+    # the envelope header), so thumbnails and listings are as private on the
+    # wire as uploads are.
+    def _sealer_for(peer):
+        if not peer.get("pub_key"):
+            return None
+        return crypto.Sealer(_my_priv(), peer["pub_key"])
+
+    def _sealed_response(peer, data, mime="application/octet-stream"):
+        sealer = _sealer_for(peer)
+        if sealer is None:
+            return jsonify({"ok": False, "error": "no public key pinned for this peer"}), 400
+        resp = host.app.response_class(sealer.seal_bytes(data), mimetype="application/octet-stream")
+        resp.headers["X-Family-Env"] = json.dumps(sealer.header)
+        resp.headers["X-Family-Mime"] = mime
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    def _sealed_request(peer):
+        """A sealed JSON request body (env + meta) -> inner dict, or raises."""
+        data = request.get_json(silent=True) or {}
+        if not data.get("env") or not data.get("meta"):
+            raise crypto.CryptoError("plaintext requests are not accepted")
+        _opener, inner = _open_envelope(peer, data.get("env"), data.get("meta"))
+        return inner
+
+    def inbound_timeline():
+        peer = _auth_peer()
+        if not peer:
+            return _denied()
+        try:
+            offset = max(0, int(request.args.get("offset") or 0))
+            limit = max(1, min(2000, int(request.args.get("limit") or 500)))
+            since = float(request.args.get("since") or 0)
+        except ValueError:
+            return jsonify({"ok": False, "error": "bad paging"}), 400
+        db = host.db()
+        filters = list(host.gallery_filters)
+        where = "WHERE sha256 IS NOT NULL AND sha256<>''" + (" AND " + " AND ".join(filters) if filters else "")
+        params = []
+        if since:
+            where += " AND mtime>?"; params.append(since)
+        total = db.execute(f"SELECT COUNT(*) c FROM files {where}", params).fetchone()["c"]
+        rows = db.execute(f"SELECT rel_path, width, height, mtime, tags FROM files {where} "
+                          f"ORDER BY mtime DESC, rel_path LIMIT ? OFFSET ?", params + [limit, offset]).fetchall()
+        out = []
+        for r in rows:
+            out.append({"p": r["rel_path"], "w": r["width"] or 0, "h": r["height"] or 0,
+                        "t": r["mtime"] or 0, "v": bool(host.media.is_video(r["rel_path"])),
+                        "n": len(sc._loads(r["tags"], []))})
+        body = json.dumps({"ok": True, "total": total, "offset": offset, "files": out,
+                           "server_time": time.time()}).encode()
+        return _sealed_response(peer, body, "application/json")
+    host.add_route(INBOUND_PREFIX + "timeline", inbound_timeline, methods=["GET"])
+
+    def inbound_thumb():
+        peer = _auth_peer()
+        if not peer:
+            return _denied()
+        rel = request.args.get("p") or ""
+        fp = host.safe_path(host.media_dir, rel)
+        if not fp or not os.path.exists(fp):
+            return jsonify({"ok": False, "error": "no such file"}), 404
+        got = core.thumb_bytes(rel, fp)
+        if got is None:
+            return jsonify({"ok": False, "error": "unreadable"}), 404
+        return _sealed_response(peer, got[0], got[1])
+    host.add_route(INBOUND_PREFIX + "thumb", inbound_thumb, methods=["GET"])
+
+    def inbound_media():
+        peer = _auth_peer()
+        if not peer:
+            return _denied()
+        rel = request.args.get("p") or ""
+        fp = host.safe_path(host.media_dir, rel)
+        if not fp or not os.path.exists(fp):
+            return jsonify({"ok": False, "error": "no such file"}), 404
+        sealer = _sealer_for(peer)
+        if sealer is None:
+            return jsonify({"ok": False, "error": "no public key pinned for this peer"}), 400
+        size = os.path.getsize(fp)
+        resp = host.app.response_class(sealer.iter_frames(fp, size), mimetype="application/octet-stream")
+        resp.headers["X-Family-Env"] = json.dumps(sealer.header)
+        resp.headers["X-Family-Mime"] = host.media.mime_for(rel) or "application/octet-stream"
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    host.add_route(INBOUND_PREFIX + "media", inbound_media, methods=["GET"])
+
+    def inbound_have():
+        """Sealed {shas:[...]} -> sealed {have:[...]}: which of the phone's
+        originals this instance already holds, so a first sync of thousands of
+        photos doesn't need one round-trip each."""
+        peer = _auth_peer()
+        if not peer:
+            return _denied()
+        try:
+            inner = _sealed_request(peer)
+        except crypto.CryptoError as e:
+            return _rejected(peer, e)
+        shas = [str(x)[:128] for x in (inner.get("shas") or [])][:5000]
+        have = set()
+        db = host.db()
+        for i in range(0, len(shas), 500):
+            chunk = shas[i:i + 500]
+            qm = ",".join("?" * len(chunk))
+            for r in db.execute(f"SELECT origin_sha FROM fs_received WHERE peer_id=? AND origin_sha IN ({qm})",
+                                [peer["id"]] + chunk):
+                have.add(r["origin_sha"])
+        return _sealed_response(peer, json.dumps({"ok": True, "have": sorted(have)}).encode(), "application/json")
+    host.add_route(INBOUND_PREFIX + "have", inbound_have, methods=["POST"])
+
     # ── admin API (browser session, admin feature) ─────────────────────────
     def _peer_public(p):
         d = dict(p)
@@ -708,6 +830,8 @@ def register(host):
         url = str(d.get("url") or "").strip()[:512]
         pub_key = str(d.get("pub_key") or "").strip()
         instance_id = str(d.get("instance_id") or "").strip()[:64]
+        kind = "device" if str(d.get("kind") or "peer") == "device" else "peer"
+        folder = sc.norm_folder(d.get("folder"))[:256]
         if pub_key:
             try:
                 crypto.fingerprint(pub_key); crypto._pub(pub_key)
@@ -725,7 +849,8 @@ def register(host):
         def _do():
             db = host.db()
             if pid:
-                db.execute("UPDATE fs_peers SET name=?, url=?, enabled=? WHERE id=?", (name, url, enabled, pid))
+                db.execute("UPDATE fs_peers SET name=?, url=?, enabled=?, kind=?, folder=? WHERE id=?",
+                           (name, url, enabled, kind, folder, pid))
                 if key_out is not None and str(key_out) != "":
                     db.execute("UPDATE fs_peers SET key_out=? WHERE id=?", (str(key_out).strip(), pid))
                 if pub_key:
@@ -736,10 +861,10 @@ def register(host):
                     db.execute("UPDATE fs_peers SET key_in=? WHERE id=?", (secrets.token_urlsafe(32), pid))
                 pid_new = pid
             else:
-                cur = db.execute("INSERT INTO fs_peers(name, url, key_out, key_in, enabled, created, pub_key, instance_id) "
-                                 "VALUES (?,?,?,?,?,?,?,?)",
+                cur = db.execute("INSERT INTO fs_peers(name, url, key_out, key_in, enabled, created, pub_key, "
+                                 "instance_id, kind, folder) VALUES (?,?,?,?,?,?,?,?,?,?)",
                                  (name, url, str(key_out or "").strip(), secrets.token_urlsafe(32),
-                                  enabled, time.time(), pub_key, instance_id))
+                                  enabled, time.time(), pub_key, instance_id, kind, folder))
                 pid_new = cur.lastrowid
             db.commit()
             return pid_new
