@@ -121,12 +121,12 @@ fun SetupScreen(prefs: Prefs, onPaired: () -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("CIM Family", fontSize = 26.sp, fontWeight = FontWeight.Bold)
         Text("End-to-end encrypted backup of this phone's photos to your own image manager, and a gallery of everything on it.", color = Color.Gray)
-        OutlinedTextField(name, { name = it.lowercase().replace(Regex("[^a-z0-9._-]"), "-") }, label = { Text("This phone's name (as the server will know it)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        Text("1. On the server: Settings → Family share → add a peer of kind \"my phone\" with this name, then click \"Pairing code for them\" and paste it here.", color = Color.LightGray)
+        OutlinedTextField(name, { name = it.lowercase().replace(Regex("[^a-z0-9._-]"), "-") }, label = { Text("This phone's name (the server's pairing code overrides it)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        Text("1. On the server: Settings → Family share → add a peer of kind \"my phone\", then click \"Pairing code for them\" and paste it here. The code carries the name the server gave this phone.", color = Color.LightGray)
         OutlinedTextField(code, { code = it }, label = { Text("Server pairing code (fs1.…)") }, modifier = Modifier.fillMaxWidth(), minLines = 3)
         if (err.isNotEmpty()) Text(err, color = MaterialTheme.colorScheme.error)
         Button({
-            try { prefs.deviceName = name; prefs.applyPairing(code); mine = prefs.myPairingCode(); err = "" }
+            try { prefs.deviceName = name; prefs.applyPairing(code); name = prefs.deviceName; mine = prefs.myPairingCode(); err = "" }
             catch (e: Exception) { err = e.message ?: "bad code" }
         }, enabled = name.isNotEmpty() && code.isNotEmpty()) { Text("Pair with server") }
         mine?.let { m ->
@@ -305,7 +305,7 @@ fun SettingsScreen(prefs: Prefs, db: Db, onUnpair: () -> Unit) {
     }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Server", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-        Text("${prefs.serverName} · ${prefs.serverUrl}", color = Color.LightGray)
+        Text("${prefs.serverName} · ${prefs.serverUrl}\nThis phone is peer \"${prefs.deviceName}\" there", color = Color.LightGray)
         Text("Server key ${Crypto.fingerprint(prefs.serverPub ?: ByteArray(32))}\nThis phone ${Crypto.fingerprint(prefs.publicKey)}", fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Color.Gray)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton({ scope.launch { pingMsg = withContext(Dispatchers.IO) { runCatching {

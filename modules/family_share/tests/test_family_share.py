@@ -180,10 +180,10 @@ def test_tamper_wrong_key_replay_rejected(tmp_path):
 
 def test_pairing_code_roundtrip():
     priv = fc.generate_private_key()
-    code = fc.make_pairing_code("mom", "https://mom:8000", fc.public_key(priv), "secret", "iid")
+    code = fc.make_pairing_code("mom", "https://mom:8000", fc.public_key(priv), "secret", "iid", peer_name="kiddo")
     d = fc.parse_pairing_code(code)
     assert d == {"name": "mom", "url": "https://mom:8000", "pub_key": fc.public_key(priv),
-                 "key_out": "secret", "instance_id": "iid"}
+                 "key_out": "secret", "instance_id": "iid", "my_name": "kiddo"}
     with pytest.raises(ValueError):
         fc.parse_pairing_code("nope")
 
@@ -247,6 +247,26 @@ def test_state_and_rule_api(client, peer, upload):
     assert who["peers"][0]["shared"] is False and any("block" in r for r in who["peers"][0]["reasons"])
     _j(client, "/api/family_share/rules/delete", {"id": bid})
     _j(client, "/api/family_share/rules/delete", {"id": rid})
+
+
+def test_pairing_code_carries_row_name_and_outbound_uses_it(client, app, peer, monkeypatch):
+    """Sister's row here is 'sister'; her instance has ME under 'kiddo'. Her pairing
+    code says so, and every request to her must present 'kiddo', not my global name."""
+    her_code = fc.make_pairing_code("sister", "http://sister.test:5000", fc.public_key(peer["priv"]), "sisters-secret",
+                                    "sis-id", peer_name="kiddo")
+    _j(client, "/api/family_share/peers/save", {"id": peer["id"], "pairing_code": her_code})
+    row = app._db().execute("SELECT name, my_name FROM fs_peers WHERE id=?", (peer["id"],)).fetchone()
+    assert row["name"] == "sister" and row["my_name"] == "kiddo"          # pasting a code never renames the row
+    seen = {}
+    class R:
+        status_code = 200; text = ""
+        def json(self): return {"ok": True, "name": "sister"}
+    monkeypatch.setattr(pc.requests, "get", lambda url, headers=None, timeout=None: (seen.update(headers), R())[1])
+    assert client.post("/api/family_share/peers/test", json={"id": peer["id"]}).get_json()["ok"]
+    assert seen[pc.HEADER_PEER] == "kiddo"
+    # and my own code for her tells her she is 'sister' here
+    mine = fc.parse_pairing_code(_j(client, "/api/family_share/peers/key", {"id": peer["id"]})["pairing_code"])
+    assert mine["my_name"] == "sister"
 
 
 def test_inbound_requires_key(client, peer):

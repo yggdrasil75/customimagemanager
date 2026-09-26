@@ -65,6 +65,8 @@ class Prefs(ctx: Context) {
         val d = Crypto.parsePairingCode(code)
         if (d.pub.contentEquals(publicKey)) throw IllegalArgumentException("that is this phone's own pairing code")
         serverName = d.name; serverUrl = d.url; serverPub = d.pub; serverKey = d.key; serverId = d.id
+        // The server authenticates us by the name ITS peer row carries; adopt it.
+        if (d.peerName.isNotEmpty()) deviceName = d.peerName
     }
 
     fun myPairingCode(): String = Crypto.makePairingCode(deviceName, "", publicKey, keyIn, deviceId)
@@ -151,7 +153,7 @@ class Api(private val prefs: Prefs) {
         .put("ts", System.currentTimeMillis() / 1000.0).put("to", prefs.serverId).put("from", prefs.deviceId)
 
     private fun check(r: okhttp3.Response): okhttp3.Response {
-        if (r.code == 401) throw ApiException("server rejected our key — re-pair")
+        if (r.code == 401) throw ApiException("server rejected us as '${prefs.deviceName}': that name must match the peer row on the server and the key must be from the server's current pairing code — re-paste it")
         if (r.code == 404) throw ApiException("server has no family_share endpoint (module off?)")
         if (r.code >= 400) {
             val body = try { JSONObject(r.body?.string() ?: "").optString("error") } catch (e: Exception) { "" }

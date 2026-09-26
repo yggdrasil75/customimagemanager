@@ -35,9 +35,11 @@ def _base(peer):
 
 
 def _headers(peer, my_name):
+    """The peer knows us by the name ITS peer row carries (my_name, learned
+    from its pairing code); our global name is only the fallback."""
     if not peer.get("key_out"):
         raise PeerError("no outbound key set for this peer (paste their pairing code)")
-    return {HEADER_PEER: my_name, HEADER_KEY: peer["key_out"]}
+    return {HEADER_PEER: peer.get("my_name") or my_name, HEADER_KEY: peer["key_out"]}
 
 
 def _sealer(peer, my_priv):
@@ -57,7 +59,8 @@ def _check(resp):
     except ValueError:
         body = {}
     if resp.status_code == 401:
-        raise PeerError("peer rejected our key (401)")
+        raise PeerError("peer rejected us (401): the name we present must match the peer row on "
+                        "their side and the key must be theirs — re-paste their pairing code")
     if resp.status_code == 404:
         raise PeerError("peer has no family_share endpoint (404) — module off there?")
     if resp.status_code >= 400:

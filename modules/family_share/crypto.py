@@ -264,11 +264,12 @@ def check_freshness(meta, my_id):
 
 
 # ── pairing code ────────────────────────────────────────────────────────────
-def make_pairing_code(name, url, pub_b64, key_in, instance_id=""):
+def make_pairing_code(name, url, pub_b64, key_in, instance_id="", peer_name=""):
     """One string to hand the other side: who I am, where I am, my public key,
-    the secret they must send me."""
+    the secret they must send me, and the name I have them under (they must
+    present exactly that name, so it travels with the code)."""
     body = json.dumps({"v": VERSION, "name": name, "url": url, "pub": pub_b64, "key": key_in,
-                       "id": instance_id}, separators=(",", ":")).encode()
+                       "id": instance_id, "peer_name": peer_name}, separators=(",", ":")).encode()
     return "fs1." + b64e(body)
 
 
@@ -285,4 +286,5 @@ def parse_pairing_code(code):
     _pub(d["pub"])       # validates
     return {"name": str(d["name"])[:64], "url": str(d.get("url") or "")[:512],
             "pub_key": str(d["pub"]), "key_out": str(d["key"]),
-            "instance_id": str(d.get("id") or "")[:64]}
+            "instance_id": str(d.get("id") or "")[:64],
+            "my_name": str(d.get("peer_name") or "")[:64]}

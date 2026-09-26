@@ -213,8 +213,9 @@
           const d = await post("/peers/key", { id });
           const box = document.createElement("div"); box.className = "fs-keybox";
           box.innerHTML = `<div>Send this to <b>${esc(q(".fs-p-name").value)}</b>; they paste it into the pairing box
-            on their instance. It names me <b>${esc(d.name)}</b>, carries my URL, my public key
-            (fingerprint <code>${esc(d.fingerprint)}</code>) and the secret they use to reach me.</div>
+            on their instance (or the app). It names me <b>${esc(d.name)}</b>, tells them I know them as
+            <b>${esc(d.peer_name)}</b>, carries my URL, my public key (fingerprint <code>${esc(d.fingerprint)}</code>)
+            and the secret they use to reach me.</div>
             <input readonly value="${esc(d.pairing_code)}"><button class="fs-btn fs-btn-sm">Copy</button>
             <button class="fs-btn fs-btn-sm fs-btn-ghost">Close</button>`;
           d.key_in = d.pairing_code;

@@ -180,7 +180,7 @@ object Crypto {
     }
 
     // ── pairing codes ────────────────────────────────────────────────────
-    data class Pairing(val name: String, val url: String, val pub: ByteArray, val key: String, val id: String)
+    data class Pairing(val name: String, val url: String, val pub: ByteArray, val key: String, val id: String, val peerName: String)
 
     fun makePairingCode(name: String, url: String, pub: ByteArray, keyIn: String, id: String): String {
         val body = JSONObject().put("v", VERSION).put("name", name).put("url", url).put("pub", b64e(pub)).put("key", keyIn).put("id", id)
@@ -193,6 +193,6 @@ object Crypto {
         val d = try { JSONObject(String(b64d(c.substring(4)))) } catch (e: Exception) { throw IllegalArgumentException("pairing code is corrupt") }
         val name = d.optString("name"); val pub = d.optString("pub"); val key = d.optString("key")
         if (name.isEmpty() || pub.isEmpty() || key.isEmpty()) throw IllegalArgumentException("pairing code is missing fields")
-        return Pairing(name, d.optString("url"), checkPub(b64d(pub)), key, d.optString("id"))
+        return Pairing(name, d.optString("url"), checkPub(b64d(pub)), key, d.optString("id"), d.optString("peer_name"))
     }
 }

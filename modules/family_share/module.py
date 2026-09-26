@@ -90,6 +90,8 @@ def register(host):
             db.execute("ALTER TABLE fs_peers ADD COLUMN kind TEXT DEFAULT 'peer'")
         if "folder" not in cols:
             db.execute("ALTER TABLE fs_peers ADD COLUMN folder TEXT DEFAULT ''")
+        if "my_name" not in cols:
+            db.execute("ALTER TABLE fs_peers ADD COLUMN my_name TEXT DEFAULT ''")
         db.commit()
     host.add_table(sc.DDL, check=_migrate)
 
@@ -491,7 +493,13 @@ def register(host):
         return dict(r)
 
     def _denied():
-        return jsonify({"ok": False, "error": "unknown peer or bad key"}), 401
+        name = request.headers.get(pc.HEADER_PEER, "").strip()
+        known = host.db().execute("SELECT 1 FROM fs_peers WHERE name=? AND enabled=1", (name,)).fetchone() if name else None
+        log.warning(f"family_share: rejected inbound request presenting peer name {name!r} "
+                    f"({'name known, key wrong' if known else 'no enabled peer with that name'})")
+        return jsonify({"ok": False, "error": "unknown peer or bad key",
+                        "hint": "the X-Family-Peer name must equal this instance's peer row name; "
+                                "the key must be the one in this instance's pairing code"}), 401
 
     def inbound_ping():
         peer = _auth_peer()
@@ -825,13 +833,15 @@ def register(host):
             if pc_["pub_key"] == _my_pub():
                 return jsonify({"ok": False, "error": "that is this instance's own pairing code"}), 400
             d = {**d, "name": d.get("name") or pc_["name"], "url": d.get("url") or pc_["url"],
-                 "key_out": pc_["key_out"], "pub_key": pc_["pub_key"], "instance_id": pc_["instance_id"]}
+                 "key_out": pc_["key_out"], "pub_key": pc_["pub_key"], "instance_id": pc_["instance_id"],
+                 "my_name": pc_["my_name"]}
         name = str(d.get("name") or "").strip()[:64]
         url = str(d.get("url") or "").strip()[:512]
         pub_key = str(d.get("pub_key") or "").strip()
         instance_id = str(d.get("instance_id") or "").strip()[:64]
         kind = "device" if str(d.get("kind") or "peer") == "device" else "peer"
         folder = sc.norm_folder(d.get("folder"))[:256]
+        my_name = str(d.get("my_name") or "").strip()[:64]
         if pub_key:
             try:
                 crypto.fingerprint(pub_key); crypto._pub(pub_key)
@@ -857,14 +867,16 @@ def register(host):
                     db.execute("UPDATE fs_peers SET pub_key=? WHERE id=?", (pub_key, pid))
                 if instance_id:
                     db.execute("UPDATE fs_peers SET instance_id=? WHERE id=?", (instance_id, pid))
+                if my_name:
+                    db.execute("UPDATE fs_peers SET my_name=? WHERE id=?", (my_name, pid))
                 if d.get("rotate_key_in"):
                     db.execute("UPDATE fs_peers SET key_in=? WHERE id=?", (secrets.token_urlsafe(32), pid))
                 pid_new = pid
             else:
                 cur = db.execute("INSERT INTO fs_peers(name, url, key_out, key_in, enabled, created, pub_key, "
-                                 "instance_id, kind, folder) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                                 "instance_id, kind, folder, my_name) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                                  (name, url, str(key_out or "").strip(), secrets.token_urlsafe(32),
-                                  enabled, time.time(), pub_key, instance_id, kind, folder))
+                                  enabled, time.time(), pub_key, instance_id, kind, folder, my_name))
                 pid_new = cur.lastrowid
             db.commit()
             return pid_new
@@ -887,9 +899,9 @@ def register(host):
         if not p:
             return jsonify({"ok": False, "error": "no such peer"}), 404
         my_url = str(d.get("my_url") or host.config.get("family_share_my_url") or "").strip()
-        code = crypto.make_pairing_code(_my_name(), my_url, _my_pub(), p["key_in"], _my_id())
+        code = crypto.make_pairing_code(_my_name(), my_url, _my_pub(), p["key_in"], _my_id(), peer_name=p["name"])
         return jsonify({"ok": True, "key_in": p["key_in"], "name": _my_name(), "pairing_code": code,
-                        "fingerprint": crypto.fingerprint(_my_pub())})
+                        "peer_name": p["name"], "fingerprint": crypto.fingerprint(_my_pub())})
     host.add_route("/api/family_share/peers/key", api_peer_key, methods=["POST"],
                    feature=FEATURE, level="write")
 
