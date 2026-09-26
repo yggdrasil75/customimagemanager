@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Bundle
 import android.util.LruCache
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.IntentSenderRequest
@@ -94,6 +95,8 @@ fun App(prefs: Prefs) {
     var viewing by remember { mutableStateOf<Api.Item?>(null) }
     LaunchedEffect(Unit) { UploadWorker.schedule(ctx, prefs) }
     viewing?.let { ViewerScreen(api, it) { viewing = null }; return }
+    // Android convention: back from a secondary tab returns to the home tab; back from home exits.
+    BackHandler(enabled = tab != 0) { tab = 0 }
     Scaffold(bottomBar = {
         NavigationBar {
             NavigationBarItem(tab == 0, { tab = 0 }, { Icon(Icons.Default.PhotoLibrary, null) }, label = { Text("Library") })
@@ -130,6 +133,7 @@ fun SetupScreen(prefs: Prefs, onPaired: () -> Unit) {
             catch (e: Exception) { err = e.message ?: "bad code" }
         }, enabled = name.isNotEmpty() && code.isNotEmpty()) { Text("Pair with server") }
         mine?.let { m ->
+            BackHandler { mine = null }
             Divider()
             Text("2. Paste THIS phone's pairing code into that peer's row on the server (the pairing box), then tap Done.", color = Color.LightGray)
             Text("Fingerprint ${Crypto.fingerprint(prefs.publicKey)} — the server shows the same after pasting.", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
@@ -209,6 +213,7 @@ fun Tile(api: Api, item: Api.Item, onClick: () -> Unit) {
 @Composable
 fun ViewerScreen(api: Api, item: Api.Item, onBack: () -> Unit) {
     val ctx = LocalContext.current
+    BackHandler { onBack() }                       // system back = close the viewer, not the app
     var bmp by remember { mutableStateOf<Bitmap?>(null) }
     var err by remember { mutableStateOf("") }
     LaunchedEffect(item.path) {

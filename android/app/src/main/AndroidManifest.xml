@@ -16,6 +16,7 @@
         android:icon="@android:drawable/ic_menu_gallery"
         android:allowBackup="false"
         android:usesCleartextTraffic="true"
+        android:enableOnBackInvokedCallback="true"
         android:theme="@style/Theme.CimFamily">
 
         <activity
