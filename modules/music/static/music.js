@@ -236,7 +236,8 @@ function openMusicEditor(i) {
   d.innerHTML = `
     <div class="flex justify-between items-center mb-2">
       <div class="font-bold text-blue-300">Edit metadata</div>
-      <button onclick="closeMusicEditor()" class="text-gray-400 hover:text-white">✕</button>
+      <span data-ext-area="music_tools" class="ml-auto flex items-center gap-1"></span>
+      <button onclick="closeMusicEditor()" class="text-gray-400 hover:text-white ml-2">✕</button>
     </div>
     <div class="text-[11px] text-gray-500 break-all mb-1">${escHtml(s.rel_path)}</div>
     <input type="hidden" data-mk="rel_path" value="${escAttr(s.rel_path)}">
@@ -259,6 +260,8 @@ function openMusicEditor(i) {
       ${Math.round((s.bitrate || 0) / 1000)} kbps · ${s.has_emb ? 'embedded' : 'no embedding'}</div>
     <button onclick="saveMusicMeta(${i})"
       class="mt-3 w-full bg-blue-600 hover:bg-blue-500 font-bold rounded py-1.5 text-sm">Save</button>`;
+
+  if (window.refreshControlButtons) refreshControlButtons();   // module buttons (metasrc lookup)
 }
 function closeMusicEditor() { document.getElementById('music_detail').classList.add('hidden'); }
 

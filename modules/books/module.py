@@ -104,6 +104,8 @@ def register(host):
     })
 
     # Archive / PDF page access for the comics module (cbz/cbr/cb7 pages).
+    # Metadata writes for other modules (metasrc applies lookups through it).
+    host.provide_service("books", {"update_meta": book_routes.update_meta})
     host.provide_service("book_archive", {"comic_page_bytes": bi.comic_page_bytes,
                                           "comic_page_names": bi.comic_page_names,
                                           "render_pdf_page": bi.render_pdf_page})

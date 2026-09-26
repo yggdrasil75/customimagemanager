@@ -153,6 +153,9 @@ def register(host):
     # Raw EXIF read/write for modules that mirror a field (rating -> Rating).
     host.provide_service("exif", {"read": exif_import.read_exif,
                                   "write": exif_export.write_exif})
+    # Raw XMP token writes (dc:creator, dc:source, …) for modules that fill
+    # fields write_metadata doesn't carry (metasrc lookups).
+    host.provide_service("xmp", {"write": xmp_export.write_xmp})
     # Field schemas per standard, for modules that map external fields onto
     # them (gallery-dl targets).
     host.provide_service("metadata_schema", {"exif": exif_fields.schema_dict,

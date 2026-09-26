@@ -269,12 +269,12 @@ def register(host):
         return jsonify({"success": True, "total": total, "page": page, "page_size": per,
                         "songs": [row_dict(r) for r in rows]})
 
-    def meta():
-        d = request.json or {}
-        rp = d.get("rel_path", "")
+    def write_meta(rp, d):
+        """Write tag fields to the file and mirror them into the index.
+        Returns file_written (bool) or None when the track is unknown."""
         ap = host.safe_path(host.media_dir, rp)
         if not ap or not os.path.exists(ap):
-            return jsonify({"success": False, "error": "file not found"}), 404
+            return None
         fields = {k: d[k] for k in ("title", "artist", "album", "albumartist", "track", "disc",
                                     "year", "genre", "composer", "comment") if k in d}
         wrote = ml.write_audio_metadata(ap, fields)
@@ -285,6 +285,13 @@ def register(host):
             db().execute(f"UPDATE music SET {','.join(sets)} WHERE rel_path=?", (*params, rp))
             db().commit()
         host.core.audit("music_meta", f"file={rp!r} fields={sorted(fields)}")
+        return wrote
+
+    def meta():
+        d = request.json or {}
+        wrote = write_meta(d.get("rel_path", ""), d)
+        if wrote is None:
+            return jsonify({"success": False, "error": "file not found"}), 404
         return jsonify({"success": True, "file_written": wrote})
 
     def stream(filename):
@@ -325,5 +332,6 @@ def register(host):
     ):
         host.add_route(rule, fn, methods=methods, feature="tab.music", level=level)
 
-    host.provide_service("music", {"index_all": index_all, "upsert": upsert, "state": state})
+    host.provide_service("music", {"index_all": index_all, "upsert": upsert, "state": state,
+                                   "write_meta": lambda rp, d: write_meta(rp, d) is not None})
     log.info("music module: audio kind, tables, /api/music/*, Music tab registered")

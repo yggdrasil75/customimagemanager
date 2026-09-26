@@ -873,6 +873,48 @@ def query_books(text: str, folder: str, structured: list | None = None) -> list:
 
 
 
+def update_meta(rp: str, d: dict) -> bool:
+    """Apply editable metadata fields from `d` to the book row. False if unknown."""
+    if not _db().execute("SELECT 1 FROM books WHERE rel_path=?", (rp,)).fetchone():
+        return False
+    sets, params = [], []
+    for k in ("title", "series", "publisher", "published", "language",
+              "isbn", "description", "source"):
+        if k in d:
+            sets.append(f"{k}=?")
+            params.append(d[k] or "")
+    if "title" in d:
+        sets.append("sort_title=?")
+        params.append(bi.sort_title(d["title"] or ""))
+    if "series_index" in d:
+        sets.append("series_index=?")
+        try:
+            params.append(float(d["series_index"]))
+        except (TypeError, ValueError):
+            params.append(None)
+    if "rating" in d:
+        sets.append("rating=?")
+        params.append(int(d["rating"] or 0))
+    for k in ("tags", "subjects", "identifiers"):
+        if k in d:
+            sets.append(f"{k}=?")
+            params.append(json.dumps(d[k]))
+    db = _db()
+    if "authors" in d:
+        authors = [a.strip() for a in (d["authors"] or []) if a.strip()]
+        sets.append("authors=?")
+        params.append(json.dumps(authors))
+        db.execute("DELETE FROM book_authors WHERE rel_path=?", (rp,))
+        for a in authors:
+            db.execute("INSERT OR IGNORE INTO book_authors(rel_path,author) "
+                       "VALUES(?,?)", (rp, a))
+    if sets:
+        params.append(rp)
+        db.execute(f"UPDATE books SET {','.join(sets)} WHERE rel_path=?", params)
+    db.commit()
+    return True
+
+
 def register(host, ctx: dict):
     # Every books endpoint sits behind tab.books: read = browse/read/annotate
     # your own progress, write = anything that changes the shelf or runs a job.
@@ -1033,44 +1075,8 @@ def register(host, ctx: dict):
     @host.route("/api/books/meta", methods=["POST"], feature="tab.books", level="write")
     def books_meta():
         d = request.json or {}
-        rp = d.get("rel_path", "")
-        if not _db().execute("SELECT 1 FROM books WHERE rel_path=?", (rp,)).fetchone():
+        if not update_meta(d.get("rel_path", ""), d):
             return jsonify({"success": False, "error": "not found"}), 404
-        sets, params = [], []
-        for k in ("title", "series", "publisher", "published", "language",
-                  "isbn", "description", "source"):
-            if k in d:
-                sets.append(f"{k}=?")
-                params.append(d[k] or "")
-        if "title" in d:
-            sets.append("sort_title=?")
-            params.append(bi.sort_title(d["title"] or ""))
-        if "series_index" in d:
-            sets.append("series_index=?")
-            try:
-                params.append(float(d["series_index"]))
-            except (TypeError, ValueError):
-                params.append(None)
-        if "rating" in d:
-            sets.append("rating=?")
-            params.append(int(d["rating"] or 0))
-        for k in ("tags", "subjects", "identifiers"):
-            if k in d:
-                sets.append(f"{k}=?")
-                params.append(json.dumps(d[k]))
-        db = _db()
-        if "authors" in d:
-            authors = [a.strip() for a in (d["authors"] or []) if a.strip()]
-            sets.append("authors=?")
-            params.append(json.dumps(authors))
-            db.execute("DELETE FROM book_authors WHERE rel_path=?", (rp,))
-            for a in authors:
-                db.execute("INSERT OR IGNORE INTO book_authors(rel_path,author) "
-                           "VALUES(?,?)", (rp, a))
-        if sets:
-            params.append(rp)
-            db.execute(f"UPDATE books SET {','.join(sets)} WHERE rel_path=?", params)
-        db.commit()
         return jsonify({"success": True})
 
     # ── assets ───────────────────────────────────────────────────────────────

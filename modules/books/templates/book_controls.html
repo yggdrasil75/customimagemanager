@@ -71,7 +71,10 @@
 
     <!-- bibliographic metadata -->
     <div class="border-t border-gray-800 pt-2 flex flex-col gap-2">
-      <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Title</label>
+      <div class="flex items-center gap-1">
+        <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Title</label>
+        <span data-ext-area="book_tools" class="ml-auto flex items-center gap-1"></span>
+      </div>
       <input id="book_title" type="text" oninput="booksAutosave()"
         class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
 
