@@ -82,7 +82,19 @@ _PUBLIC_PATHS = {
     "/favicon.ico",
     "/tailwind",          # the login page loads it
 }
-_PUBLIC_PREFIXES = ("/static/",)
+_PUBLIC_PREFIXES = ["/static/"]
+
+
+def add_public_prefix(prefix):
+    """Let a module open a URL prefix to the login gate (host.add_public_prefix).
+    The module MUST authenticate those requests itself (an API key, a peer
+    secret); the core only stops redirecting them to /login. Prefixes must be
+    absolute ("/api/x/inbound/") so a module can't open more than its own routes."""
+    prefix = str(prefix or "")
+    if not prefix.startswith("/api/") or not prefix.endswith("/"):
+        raise ValueError("public prefix must look like '/api/<module>/…/'")
+    if prefix not in _PUBLIC_PREFIXES:
+        _PUBLIC_PREFIXES.append(prefix)
 
 _DEFAULT_LDAP = {
     "server": "",

@@ -670,6 +670,12 @@ class Host:
         """Add extensions/mimes to a kind another module owns (comics -> book)."""
         return self.media.extend_media_type(kind, **spec)
 
+    def add_public_prefix(self, prefix):
+        """Open a URL prefix ("/api/<module>/inbound/") to the login gate so
+        another machine can call it without a browser session. Routes under
+        it MUST verify their own credential (a peer key) on every request."""
+        return self.core.auth.add_public_prefix(prefix)
+
     def current_user(self):
         """Username of the request's authenticated user ('' if none)."""
         from_g = getattr(self.core, "current_user", None)

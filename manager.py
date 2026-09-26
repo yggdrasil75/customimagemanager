@@ -5460,19 +5460,29 @@ def api_tiers_cancel():
 @_auth.require_feature("data.delete", level="write")
 def api_delete():
     fn = request.json.get("filename","")
-    fp = get_safe_path(MEDIA_DIR, fn)
-    if fp:
-        existed = os.path.exists(fp)
-        base = os.path.splitext(fp)[0]
-        for ext in mt.related_exts(fp):
-            member = base + ext
-            if os.path.exists(member): tiering.safe_remove(member)
-        _thumb_drop(fn)
-        _purge_file_everywhere(fn)
-        audit("delete_file", f"file={fn!r} existed={existed}")
-    else:
+    existed = _delete_file(fn)
+    if existed is None:
         audit("delete_file_rejected", f"file={fn!r} (unsafe path)")
+    else:
+        audit("delete_file", f"file={fn!r} existed={existed}")
     return jsonify({"success":True})
+
+def _delete_file(rel_path):
+    """Remove a library file from disk (plus its sidecars, thumbs) and from
+    every DB table. Returns whether the file existed, or None for an unsafe
+    path. Shared by the delete route and modules that remove files they own
+    (family_share honouring a revoke)."""
+    fp = get_safe_path(MEDIA_DIR, rel_path)
+    if not fp:
+        return None
+    existed = os.path.exists(fp)
+    base = os.path.splitext(fp)[0]
+    for ext in mt.related_exts(fp):
+        member = base + ext
+        if os.path.exists(member): tiering.safe_remove(member)
+    _thumb_drop(rel_path)
+    _purge_file_everywhere(rel_path)
+    return existed
 
 @app.route("/api/reconcile", methods=["POST"])
 @_auth.require_feature("library.reconcile", level="write")
@@ -6047,6 +6057,9 @@ _core_api = SimpleNamespace(
     last_activity=lambda: _last_activity,
     current_user=lambda: (getattr(g, "user", None) or {}).get("username", ""),
     object_grouping=og,
+    ingest_inline=_process_spooled_inline, enqueue_spooled_upload=_enqueue_spooled_upload,
+    file_albums=_file_albums, set_file_albums=_set_file_albums, delete_file=_delete_file,
+    get_file_row=_get_file_row,
 )
 
 module_host = modules.host.Host(
