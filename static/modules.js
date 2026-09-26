@@ -149,6 +149,8 @@
     _pendingFields = {};
     return { ok: true };
   };
+  if (window.registerSettingsPersist) window.registerSettingsPersist(window.persistModuleFields);
+  else (window._settingsPersistSteps = window._settingsPersistSteps || []).push(window.persistModuleFields);
 
   // ── model selection tab ───────────────────────────────────────────────────
   // One row per broker capability: family (provider) / size / type selects,

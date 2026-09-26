@@ -174,6 +174,12 @@ function closeSettings() {
 // The single Save: persist every pane, then close. Any pane failing aborts the
 // close and surfaces the error, so nothing is silently lost. Panes that weren't
 // touched/loaded no-op inside their persist* helper.
+// Module panes call this once at load: their fn runs on every Save click.
+window._settingsPersistSteps = window._settingsPersistSteps || [];
+window.registerSettingsPersist = function (fn) {
+  if (typeof fn === 'function' && !window._settingsPersistSteps.includes(fn)) window._settingsPersistSteps.push(fn);
+};
+
 async function saveAllSettings() {
   const btn = document.getElementById('settings_save_btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
@@ -181,12 +187,9 @@ async function saveAllSettings() {
   if (typeof persistAiSettings === 'function')    steps.push(persistAiSettings);
   if (typeof persistBranding === 'function')      steps.push(persistBranding);
   if (typeof persistTiersConfig === 'function')   steps.push(persistTiersConfig);
-  // Module panes that buffer their edits register a window.persist<Name>
-  // step (family_share does); each returns {ok, error} like the core ones.
-  for (const k of Object.keys(window)) {
-    if (/^persist[A-Z]/.test(k) && typeof window[k] === 'function' && !steps.includes(window[k])
-        && !['persistAiSettings', 'persistBranding', 'persistTiersConfig'].includes(k)) steps.push(window[k]);
-  }
+  // Module panes that buffer their edits register a step with
+  // registerSettingsPersist(fn); each returns {ok, error} like the core ones.
+  for (const fn of (window._settingsPersistSteps || [])) if (!steps.includes(fn)) steps.push(fn);
   let failed = null;
   for (const step of steps) {
     let res;

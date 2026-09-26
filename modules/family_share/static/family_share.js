@@ -35,6 +35,13 @@
   function setOption(key, value) {
     pending[key] = value;
     if (state) state.options[key] = value;
+    markUnsaved();
+  }
+  function markUnsaved() {
+    const b = document.getElementById("fs_unsaved"); if (!b) return;
+    const n = Object.keys(pending).length;
+    b.hidden = !n;
+    b.textContent = n ? `${n} unsaved change${n === 1 ? "" : "s"} — click Save below` : "";
   }
   window.persistFamilyShare = async function () {
     const keys = Object.keys(pending);
@@ -46,8 +53,12 @@
       if (!r.ok) return { ok: false, error: "Family share settings failed to save" };
     } catch (e) { return { ok: false, error: "Family share settings failed to save" }; }
     pending = {};
+    markUnsaved();
+    if (window.showToast) showToast(`Family share: ${keys.length} setting${keys.length === 1 ? "" : "s"} saved`);
     return { ok: true };
   };
+  if (window.registerSettingsPersist) window.registerSettingsPersist(window.persistFamilyShare);
+  else (window._settingsPersistSteps = window._settingsPersistSteps || []).push(window.persistFamilyShare);
 
   const pane = () => document.getElementById("settings_pane_module_" + ID);
 
@@ -57,6 +68,7 @@
     if (!p.querySelector(".fs-root")) {
       p.innerHTML = `
       <div class="fs-root">
+        <p class="fs-err" id="fs_unsaved" hidden></p>
         <p class="fs-help">Photos leave this instance only when a <b>share</b> rule for a peer matches
         them and no <b>block</b> rule vetoes it. Use <b>Preview</b> to see exactly what a peer would
         get before trusting a rule set. Received photos land under the incoming folder and are
@@ -80,7 +92,7 @@
     try { state = await get("/state"); Object.assign(state.options, pending); }
     catch (e) { p.querySelector(".fs-root").innerHTML = `<p class="fs-err">${esc(e.message)}</p>`; return; }
     renderIdentity(); renderOptions(); renderPeers(); renderRules(); renderPreview();
-    renderOutbox(); renderReceived();
+    renderOutbox(); renderReceived(); markUnsaved();
   }
 
   // ── identity ──────────────────────────────────────────────────────────

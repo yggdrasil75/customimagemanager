@@ -147,6 +147,8 @@
     _dirty = false;
     return { ok: true };
   };
+  if (window.registerSettingsPersist) window.registerSettingsPersist(window.persistVlmActions);
+  else (window._settingsPersistSteps = window._settingsPersistSteps || []).push(window.persistVlmActions);
 
   // ── wiring ───────────────────────────────────────────────────────────────
   function init() {

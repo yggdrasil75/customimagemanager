@@ -6117,6 +6117,13 @@ modules.threading.register(module_host)
 module_host._current_module = None
 module_registry.register_all(module_host)
 
+@app.after_request
+def _asset_cache_headers(resp):
+    p = request.path
+    if p.startswith("/static/") or (p.startswith("/modules/") and "/static/" in p):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
 @app.context_processor
 def _inject_module_ui():
     """Expose module-contributed UI to templates. controls panes are filtered
