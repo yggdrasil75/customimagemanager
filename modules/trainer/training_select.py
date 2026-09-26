@@ -347,16 +347,20 @@ def select_diverse(db, n, exclude, kinds=None, iter_emb=None):
                 embeddings; the caller passes the embedding module's service
                 function. None (module off) degrades to random.
     """
-    dim_row = None
+    dim = None
     if iter_emb:
         try:
-            dim_row = db.execute("SELECT dim FROM image_embeddings LIMIT 1").fetchone()
+            # the picked model's most common vector size (other models' rows are kept alongside)
+            tag = getattr(iter_emb, "current_tag", None)
+            row = db.execute(
+                "SELECT dim, COUNT(*) c FROM image_embeddings WHERE model=? GROUP BY dim ORDER BY c DESC LIMIT 1",
+                (tag() if callable(tag) else tag,)).fetchone() if tag else None
+            dim = row["dim"] if row else None
         except Exception:
-            dim_row = None
-    if not dim_row:
+            dim = None
+    if not dim:
         # no embeddings computed — nothing to be diverse over
         return select_random(db, n, exclude, kinds)
-    dim = dim_row["dim"]
     allowed = None
     if kinds:
         where, params = _kind_clause(kinds)

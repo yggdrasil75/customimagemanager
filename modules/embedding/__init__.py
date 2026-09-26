@@ -45,15 +45,37 @@ def register(host):
     # ── settings (shared OAI keys; the core AI pane renders them) ──────────
 
     # ── database tables ────────────────────────────────────────────────────
+    # One row per (image, model): switching embedding models keeps every
+    # model's vectors, so going to a bigger model and back later costs nothing
+    # for images already embedded in that space.
+    def _migrate_embeddings(db):
+        pk = [r["name"] for r in db.execute("PRAGMA table_info(image_embeddings)").fetchall() if r["pk"]]
+        if pk == ["rel_path"]:
+            db.executescript("""
+                ALTER TABLE image_embeddings RENAME TO image_embeddings_v1;
+                CREATE TABLE image_embeddings(
+                    rel_path TEXT NOT NULL, dim INTEGER NOT NULL, vec BLOB NOT NULL,
+                    model TEXT NOT NULL DEFAULT '', mtime REAL, updated REAL,
+                    PRIMARY KEY (rel_path, model));
+                INSERT OR IGNORE INTO image_embeddings(rel_path, dim, vec, model, mtime, updated)
+                    SELECT rel_path, dim, vec, COALESCE(model, ''), mtime, updated FROM image_embeddings_v1;
+                DROP TABLE image_embeddings_v1;
+                CREATE INDEX IF NOT EXISTS idx_emb_model ON image_embeddings(model, dim);
+            """)
+            db.commit()
+        else:
+            db.execute("CREATE INDEX IF NOT EXISTS idx_emb_model ON image_embeddings(model, dim)")
+            db.commit()
     host.add_table("""
         CREATE TABLE IF NOT EXISTS image_embeddings(
-            rel_path TEXT PRIMARY KEY,
+            rel_path TEXT NOT NULL,
             dim      INTEGER NOT NULL,
             vec      BLOB    NOT NULL,
-            model    TEXT,
+            model    TEXT    NOT NULL DEFAULT '',
             mtime    REAL,
-            updated  REAL)
-    """)
+            updated  REAL,
+            PRIMARY KEY (rel_path, model))
+    """, check=_migrate_embeddings)
     host.add_table("""
         CREATE TABLE IF NOT EXISTS image_clusters(
             rel_path TEXT PRIMARY KEY,
@@ -139,13 +161,11 @@ def register(host):
 
     def _have_embedding(db, rel_path, model, mtime):
         row = db.execute(
-            "SELECT mtime, model FROM image_embeddings WHERE rel_path=?",
-            (rel_path,)).fetchone()
+            "SELECT mtime FROM image_embeddings WHERE rel_path=? AND model=?",
+            (rel_path, model or "")).fetchone()
         if not row:
             return False
-        same_model = (row["model"] or "") == (model or "")
-        same_mtime = (mtime is None) or (row["mtime"] == mtime)
-        return same_model and same_mtime
+        return (mtime is None) or (row["mtime"] == mtime)
 
     def _flush_embeddings(db, rows):
         db.executemany(
@@ -153,18 +173,26 @@ def register(host):
             "(rel_path,dim,vec,model,mtime,updated) VALUES (?,?,?,?,?,?)", rows)
         db.commit()
 
-    def _iter_embeddings_ordered(db, dim, batch=4096):
+    def _iter_embeddings_ordered(db, dim, batch=4096, model=None):
+        """Rows of one model (the picked one by default) and of the requested
+        dimension only: the library keeps every model's vectors side by side,
+        and unpacking a 512-float blob as 768 floats raises."""
         offset = 0
+        need = int(dim) * 4
+        model = _embed_tag() if model is None else model
         while True:
             rows = db.execute(
-                "SELECT rel_path, vec FROM image_embeddings "
-                "ORDER BY rel_path LIMIT ? OFFSET ?", (batch, offset)).fetchall()
+                "SELECT rel_path, vec FROM image_embeddings WHERE model=? AND dim=? "
+                "ORDER BY rel_path LIMIT ? OFFSET ?", (model, dim, batch, offset)).fetchall()
             if not rows:
                 break
-            names = [r["rel_path"] for r in rows]
-            mat = np.stack([_unpack(r["vec"], dim) for r in rows])
-            yield names, mat
             offset += len(rows)
+            good = [r for r in rows if r["vec"] is not None and len(r["vec"]) == need]
+            if len(good) != len(rows):
+                host.logger.warning(f"embedding: skipping {len(rows) - len(good)} malformed vector blob(s)")
+            if not good:
+                continue
+            yield [r["rel_path"] for r in good], np.stack([_unpack(r["vec"], dim) for r in good])
 
     def _embed_image(img_bgr, cnn_model=None):
         """One whole-image embedding using local CNN."""
@@ -294,24 +322,32 @@ def register(host):
             (tag, n)).fetchall()]
 
     def _bg_run(rel, fp, handle):
+        db = host.db()
+        tag = _embed_tag(handle, role="bg")
+        if _have_embedding(db, rel, tag, _img_mtime(rel)):
+            return                        # another worker got there first: nothing to do
         img = _img_loader(rel)
         if img is None:
             raise RuntimeError("decode failed")
-        n = _stage_embeddings_with(host.db(), [rel], lambda _r: img, handle,
-                                   _embed_tag(handle, role="bg"), mtime_of=_img_mtime)
+        n = _stage_embeddings_with(db, [rel], lambda _r: img, handle, tag, mtime_of=_img_mtime)
         if not n:
-            raise RuntimeError("embedder returned nothing for a decoded image "
-                               "(endpoint rejected it, or an existing row already covers it)")
+            raise RuntimeError("embedder returned nothing for a decoded image (endpoint rejected it)")
     host.add_background_sweep("embed", _bg_pending, _bg_run)
 
-    def _embedding_model_tag(db):
-        row = db.execute(
-            "SELECT model FROM image_embeddings WHERE model IS NOT NULL LIMIT 1"
-        ).fetchone()
-        return row["model"] if row else None
+    def _stored_models(db):
+        """[{model, count, dim}] for every embedding space the library holds."""
+        return [{"model": r["model"], "count": r["c"], "dim": r["dim"]} for r in db.execute(
+            "SELECT model, COUNT(*) c, MAX(dim) dim FROM image_embeddings GROUP BY model ORDER BY c DESC").fetchall()]
 
-    def _embedding_count(db):
-        return db.execute("SELECT COUNT(*) FROM image_embeddings").fetchone()[0]
+    def _embedding_count(db, model=None):
+        model = _embed_tag() if model is None else model
+        return db.execute("SELECT COUNT(*) FROM image_embeddings WHERE model=?", (model,)).fetchone()[0]
+
+    def _current_dim(db, model=None):
+        model = _embed_tag() if model is None else model
+        r = db.execute("SELECT dim, COUNT(*) c FROM image_embeddings WHERE model=? GROUP BY dim "
+                       "ORDER BY c DESC LIMIT 1", (model,)).fetchone()
+        return (r["dim"], r["c"]) if r else (None, 0)
 
     def _cluster_count(db):
         row = db.execute(
@@ -319,12 +355,11 @@ def register(host):
         return row[0] if row else 0
 
     def _stage_cluster_images(db, eps=0.16, min_cluster=2, progress=None):
-        dim_row = db.execute(
-            "SELECT dim FROM image_embeddings LIMIT 1").fetchone()
-        if not dim_row:
+        # Cluster the dominant vector size; rows from another model's dimension
+        # are ignored (the label stream must line up with the iterator's rows).
+        dim, total = _current_dim(db)
+        if not dim:
             return 0
-        dim = dim_row["dim"]
-        total = _embedding_count(db)
         if total < min_cluster:
             db.execute("DELETE FROM image_clusters")
             db.commit()
@@ -408,10 +443,10 @@ def register(host):
         return np.array([keep.get(int(r), -1) for r in roots], dtype=int)
 
     def _stage_build_heuristics(db, tag_of=None, margin=2.0, progress=None):
-        dim_row = db.execute("SELECT dim FROM image_embeddings LIMIT 1").fetchone()
-        if not dim_row:
+        dim, _n = _current_dim(db)
+        if not dim:
             return []
-        dim = dim_row["dim"]
+        model = _embed_tag()
 
         labels = [r[0] for r in db.execute(
             "SELECT DISTINCT label FROM image_clusters WHERE label>=0 ORDER BY label")]
@@ -423,8 +458,9 @@ def register(host):
         for idx, lab in enumerate(labels):
             members = db.execute(
                 "SELECT ic.rel_path, ie.vec FROM image_clusters ic "
-                "JOIN image_embeddings ie ON ie.rel_path=ic.rel_path "
-                "WHERE ic.label=?", (lab,)).fetchall()
+                "JOIN image_embeddings ie ON ie.rel_path=ic.rel_path AND ie.model=? "
+                "WHERE ic.label=?", (model, lab)).fetchall()
+            members = [m for m in members if len(m["vec"]) == dim * 4]
             if not members:
                 continue
             mat = np.stack([_normalise(_unpack(m["vec"], dim)) for m in members])
@@ -491,11 +527,13 @@ def register(host):
                 "residual": d - r, "belongs": bool(d <= r + margin * s)}
 
     def _search_by_vector(db, query_vec, top_k=60):
-        dim_row = db.execute("SELECT dim FROM image_embeddings LIMIT 1").fetchone()
-        if not dim_row:
+        # Compare against vectors of the QUERY's size; anything embedded by a
+        # model with another dimension is simply not searchable until re-embedded.
+        q = _normalise(np.asarray(query_vec, np.float32).ravel())
+        dim = int(q.shape[0])
+        if not db.execute("SELECT 1 FROM image_embeddings WHERE model=? AND dim=? LIMIT 1",
+                          (_embed_tag(), dim)).fetchone():
             return []
-        dim = dim_row["dim"]
-        q = _normalise(np.asarray(query_vec, np.float32))
         best_names, best_scores = [], np.empty(0, np.float32)
         for names, mat in _iter_embeddings_ordered(db, dim):
             sims = mat @ q
@@ -516,15 +554,14 @@ def register(host):
     def _semantic_list(query, offset, limit, folder='', album=''):
         db = host.db()
         if _embedding_count(db) == 0:
-            return [], 0, "No embeddings yet — generate library embeddings first."
+            others = [m["model"] for m in _stored_models(db)]
+            return [], 0, (f"No embeddings for the current model '{_embed_tag()}' — generate them "
+                           "(Settings → Models → Embeddings)."
+                           + (f" Stored spaces: {', '.join(others)}." if others else ""))
         embed_text = _text_embedder()
         if embed_text is None:
             return [], 0, ("Text search needs an embedding model that embeds text too "
                            "(Settings → Models → Embeddings).")
-        stored_tag = _embedding_model_tag(db)
-        if stored_tag != _embed_tag():
-            return [], 0, (f"Stored embeddings use '{stored_tag}', not the current model. "
-                           "Regenerate to search.")
         qv = embed_text(query)
         if qv is None:
             return [], 0, "Failed to embed query."
@@ -575,15 +612,17 @@ def register(host):
     @host.route("/api/embedding/status", feature="tab.review")
     def embedding_status():
         db = host.db()
-        stored_tag = _embedding_model_tag(db)
+        models = _stored_models(db)
+        cur = _embedding_count(db)
         return jsonify({
             "provider": _embed_provider(),
             "space": _embed_tag(),
             "text_search": _text_search_enabled(),
             "note": _why_no_text(),
-            "stored_model": stored_tag,
-            "stored_matches": bool(stored_tag) and stored_tag == _embed_tag(),
-            "total": _embedding_count(db),
+            "stored_model": _embed_tag() if cur else (models[0]["model"] if models else None),
+            "stored_models": models,               # every space kept; switch back any time
+            "stored_matches": cur > 0,
+            "total": cur,
             "images": db.execute("SELECT COUNT(*) FROM files WHERE media_kind='image'").fetchone()[0],
             "background": "embed" in host.broker.background_capabilities(),
         })
@@ -593,15 +632,17 @@ def register(host):
     def embed_status():
         """Status probe for the Review-tab button."""
         db = host.db()
-        stored_tag = _embedding_model_tag(db)
+        models = _stored_models(db)
+        cur = _embedding_count(db)
         return jsonify({
             "provider": _embed_provider(),
             "space": _embed_tag(),
             "text_search": _text_search_enabled(),
             "note": _why_no_text(),
-            "stored_model": stored_tag,
-            "stored_matches": bool(stored_tag) and stored_tag == _embed_tag(),
-            "total": _embedding_count(db),
+            "stored_model": _embed_tag() if cur else (models[0]["model"] if models else None),
+            "stored_models": models,               # every space kept; switch back any time
+            "stored_matches": cur > 0,
+            "total": cur,
             "images": db.execute("SELECT COUNT(*) FROM files WHERE media_kind='image'").fetchone()[0],
             "background": "embed" in host.broker.background_capabilities(),
         })
@@ -764,6 +805,7 @@ def register(host):
 
     # ── services ───────────────────────────────────────────────────────────
     # Provide embedding functions for other modules
+    _iter_embeddings_ordered.current_tag = _embed_tag       # trainer: which space to sample from
     host.provide_service("embedding", {
         "embed_image": lambda img: _handle()(img),      # whatever Models → Embeddings picked
         "search_by_vector": _search_by_vector,
@@ -776,7 +818,8 @@ def register(host):
         "classify_vector": _classify_vector,
         "embedding_count": _embedding_count,
         "cluster_count": _cluster_count,
-        "embedding_model_tag": _embedding_model_tag,
+        "stored_models": _stored_models,
+        "embedding_model_tag": lambda db: _embed_tag() if _embedding_count(db) else None,
         "embed_tag": _embed_tag,
         "text_embed_enabled": _text_search_enabled,
         "embed_text": lambda text: (lambda f: f(text) if f else None)(_text_embedder()),
