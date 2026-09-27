@@ -28,6 +28,18 @@ data class Bucket(val id: String, val name: String, val count: Int, val uploaded
 
 /** Reads the phone's photo library through MediaStore (no raw file paths needed). */
 object Scanner {
+    /** The ORIGINAL bytes. Without ACCESS_MEDIA_LOCATION + setRequireOriginal,
+     *  Android serves a copy with location metadata zeroed in place, which
+     *  strips GPS from backups and corrupts raw files (Samsung DNG). */
+    fun hasOriginalAccess(ctx: Context): Boolean = Build.VERSION.SDK_INT < 29 ||
+        androidx.core.content.ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.ACCESS_MEDIA_LOCATION) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+
+    fun openOriginal(ctx: Context, uri: Uri): java.io.InputStream {
+        val u = if (Build.VERSION.SDK_INT >= 29) MediaStore.setRequireOriginal(uri) else uri
+        return ctx.contentResolver.openInputStream(u) ?: throw ApiException("cannot open $uri")
+    }
+
     // DATE_TAKEN / BUCKET_* on the Files table are API 29+; older phones get DATE_ADDED twice.
     private val PROJ = arrayOf(MediaStore.Files.FileColumns._ID, MediaStore.Files.FileColumns.DISPLAY_NAME,
         if (Build.VERSION.SDK_INT >= 29) MediaStore.Files.FileColumns.BUCKET_ID else MediaStore.Images.ImageColumns.BUCKET_ID,
@@ -78,7 +90,13 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
         val db = Db(ctx)
         try {
             if (!prefs.paired || prefs.paused) return Result.success()
+            if (!Scanner.hasOriginalAccess(ctx)) {
+                // Uploading the redacted copy would lose GPS and corrupt raws: don't.
+                prefs.lastError = "Backup paused: allow \"Photos and videos → location\" access (Backup tab) so originals can be read"
+                return Result.success()
+            }
             val api = Api(prefs)
+            reverify(ctx, db, api, prefs)
             val policies = db.policies().filterValues { it != "off" }
             if (policies.isEmpty()) return Result.success()
             val items = Scanner.items(ctx, prefs.uploadVideos, policies.keys)
@@ -90,7 +108,7 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
             for (it in items) {
                 if (isStopped) return Result.retry()
                 try {
-                    val sha = ctx.contentResolver.openInputStream(it.uri)?.use { s -> Crypto.sha256Hex(s) } ?: continue
+                    val sha = Scanner.openOriginal(ctx, it.uri).use { s -> Crypto.sha256Hex(s) }
                     hashed.add(it to sha)
                 } catch (e: Exception) { db.markFailed(it.id, "unreadable: ${e.message}") }
             }
@@ -103,9 +121,8 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
                 try {
                     val meta = JSONObject().put("tags", JSONArray()).put("description", "")
                         .put("albums", JSONArray()).put("date_taken", item.dateTaken / 1000.0).put("mime", item.mime)
-                    var r = api.push(sha, item.bucket, item.name, meta, null, item.size)
-                    if (r.needFile) r = api.push(sha, item.bucket, item.name, meta,
-                        { ctx.contentResolver.openInputStream(item.uri) ?: throw ApiException("cannot open ${item.name}") }, item.size)
+                    var r = api.push(sha, item.bucket, item.name, meta, null)
+                    if (r.needFile) r = api.push(sha, item.bucket, item.name, meta, { Scanner.openOriginal(ctx, item.uri) })
                     if (r.declined) { db.markUploaded(item.id, sha, item.bucketId, item.name, item.size, ""); continue }
                     db.markUploaded(item.id, sha, item.bucketId, item.name, item.size, r.filename)
                     sent++
@@ -123,6 +140,30 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
         } finally {
             db.close()
             schedule(ctx, prefs)          // re-arm the content trigger (one-shot by nature)
+        }
+    }
+
+    /** Uploads made by earlier versions read Android's redacted copy. Hash the
+     *  original; if it differs, send it with replaces=[old sha] so the server
+     *  swaps the damaged copy for it (keeping tags/albums set on the server). */
+    private fun reverify(ctx: Context, db: Db, api: Api, prefs: Prefs) {
+        val byId = Scanner.items(ctx, true).associateBy { it.id }
+        for ((id, oldSha) in db.unverified()) {
+            if (isStopped) return
+            val item = byId[id]
+            if (item == null) { db.markVerified(id); continue }          // gone from the phone
+            try {
+                val sha = Scanner.openOriginal(ctx, item.uri).use { Crypto.sha256Hex(it) }
+                if (sha != oldSha) {
+                    val meta = JSONObject().put("tags", JSONArray()).put("description", "")
+                        .put("albums", JSONArray()).put("date_taken", item.dateTaken / 1000.0).put("mime", item.mime)
+                    val r = api.push(sha, item.bucket, item.name, meta, { Scanner.openOriginal(ctx, item.uri) }, listOf(oldSha))
+                    db.markUploaded(item.id, sha, item.bucketId, item.name, item.size, r.filename)
+                } else db.markVerified(id)
+            } catch (e: Exception) {
+                prefs.lastError = "re-checking ${item.name}: ${e.message}"
+                return                                                     // try again next run
+            }
         }
     }
 

@@ -75,16 +75,20 @@ class Prefs(ctx: Context) {
 }
 
 /** Local bookkeeping: which MediaStore items are uploaded, and per-bucket policy. */
-class Db(ctx: Context) : SQLiteOpenHelper(ctx, "cim_family.db", null, 1) {
+class Db(ctx: Context) : SQLiteOpenHelper(ctx, "cim_family.db", null, 2) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""CREATE TABLE uploaded (
             media_id INTEGER PRIMARY KEY, sha TEXT, bucket TEXT, name TEXT, size INTEGER,
-            rel_path TEXT DEFAULT '', uploaded_at INTEGER, purged INTEGER DEFAULT 0)""")
+            rel_path TEXT DEFAULT '', uploaded_at INTEGER, purged INTEGER DEFAULT 0, orig INTEGER DEFAULT 1)""")
         db.execSQL("CREATE INDEX idx_up_sha ON uploaded(sha)")
         db.execSQL("CREATE TABLE folders (bucket TEXT PRIMARY KEY, policy TEXT NOT NULL DEFAULT 'off', display TEXT)")
         db.execSQL("CREATE TABLE failures (media_id INTEGER PRIMARY KEY, attempts INTEGER, error TEXT, at INTEGER)")
     }
-    override fun onUpgrade(db: SQLiteDatabase, o: Int, n: Int) {}
+    override fun onUpgrade(db: SQLiteDatabase, o: Int, n: Int) {
+        // v2: uploads before this version may be Android's location-redacted copy
+        // (orig=0); the worker re-checks them against the original.
+        if (o < 2) db.execSQL("ALTER TABLE uploaded ADD COLUMN orig INTEGER DEFAULT 0")
+    }
 
     fun policy(bucket: String): String = readableDatabase.rawQuery("SELECT policy FROM folders WHERE bucket=?", arrayOf(bucket)).use {
         if (it.moveToFirst()) it.getString(0) else "off"
@@ -99,7 +103,7 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "cim_family.db", null, 1) {
     fun markUploaded(mediaId: Long, sha: String, bucket: String, name: String, size: Long, relPath: String) {
         val v = ContentValues().apply {
             put("media_id", mediaId); put("sha", sha); put("bucket", bucket); put("name", name); put("size", size)
-            put("rel_path", relPath); put("uploaded_at", System.currentTimeMillis())
+            put("rel_path", relPath); put("uploaded_at", System.currentTimeMillis()); put("orig", 1)
         }
         writableDatabase.insertWithOnConflict("uploaded", null, v, SQLiteDatabase.CONFLICT_REPLACE)
         writableDatabase.delete("failures", "media_id=?", arrayOf(mediaId.toString()))
@@ -115,6 +119,14 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "cim_family.db", null, 1) {
             System.currentTimeMillis() - it.getLong(1) > wait
         }
     }
+    /** Uploads made before originals were read (maybe redacted), still on the phone. */
+    fun unverified(limit: Int = 200): List<Pair<Long, String>> = readableDatabase.rawQuery(
+        "SELECT media_id, sha FROM uploaded WHERE orig=0 AND purged=0 LIMIT $limit", null).use { c ->
+        val out = ArrayList<Pair<Long, String>>(); while (c.moveToNext()) out.add(c.getLong(0) to c.getString(1)); out
+    }
+    fun markVerified(mediaId: Long) { writableDatabase.execSQL("UPDATE uploaded SET orig=1 WHERE media_id=?", arrayOf(mediaId)) }
+    fun unverifiedCount(): Int = readableDatabase.rawQuery("SELECT COUNT(*) FROM uploaded WHERE orig=0 AND purged=0", null).use { it.moveToFirst(); it.getInt(0) }
+
     /** Uploaded items in "upload & purge" buckets still on the phone. */
     fun purgeCandidates(): List<Long> = readableDatabase.rawQuery(
         "SELECT u.media_id FROM uploaded u JOIN folders f ON f.bucket=u.bucket WHERE f.policy='purge' AND u.purged=0", null).use { c ->
@@ -176,18 +188,24 @@ class Api(private val prefs: Prefs) {
     data class PushResult(val stored: Boolean, val updated: Boolean, val duplicate: Boolean, val declined: Boolean,
                           val queued: Boolean, val needFile: Boolean, val filename: String)
 
-    /** file == null: metadata only (the server answers need_file if it lacks the bytes). */
-    fun push(sha: String, bucket: String, name: String, metadata: JSONObject, file: (() -> InputStream)?, size: Long): PushResult {
+    /** file == null: metadata only (the server answers need_file if it lacks the bytes).
+     *  sha is the SHA-256 of the original bytes; the server re-hashes what it
+     *  decrypted and rejects a mismatch. replaces: shas of earlier (damaged)
+     *  uploads of the same photo that this one supersedes. */
+    fun push(sha: String, bucket: String, name: String, metadata: JSONObject, file: (() -> InputStream)?,
+             replaces: List<String> = emptyList()): PushResult {
         val s = sealer()
         val meta = inner(JSONObject().put("origin_sha", sha).put("origin_id", prefs.deviceId)
             .put("folder", bucket).put("orig_name", name).put("metadata", metadata))
+        if (file != null) meta.put("content_sha", sha)
+        if (replaces.isNotEmpty()) meta.put("replaces", JSONArray(replaces))
         val mp = MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("env", s.header.toString())
             .addFormDataPart("meta", s.sealMeta(meta))
         if (file != null) {
             val body = object : RequestBody() {
                 override fun contentType() = "application/octet-stream".toMediaType()
-                override fun writeTo(sink: BufferedSink) { file().use { s.sealStream(it, size, sink.outputStream()) } }
+                override fun writeTo(sink: BufferedSink) { file().use { s.sealStream(it, sink.outputStream()) } }
             }
             mp.addFormDataPart("file", "payload.bin", body)
         }

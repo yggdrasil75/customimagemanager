@@ -293,9 +293,11 @@ Assets are served at `/modules/<id>/static/<file>` and injected on page load.
   every time the viewer loads a file — keep your state in your own module
   (the pose overlay does this) rather than in core globals.
 - **Settings tab**: fields render automatically; for custom UI listen for the
-  `module-settings-tab` event with `ev.detail === "<id>"`; save on change
-  by posting your key to `/api/update_settings`, the same way the rendered
-  fields do (the vlm module's AI-actions editor does this).
+  `module-settings-tab` event with `ev.detail === "<id>"`. Buffer edits and
+  expose `window.persist<Name>()` returning `{ok, error}`: the modal's Save
+  button calls every such function, so your pane saves/discards with the rest
+  (family_share does this). Posting straight to `/api/update_settings` on
+  change also works but bypasses Save/Cancel.
 - **Ext areas** for injected controls: `ai_tools`, `viewer_toggles`,
   `gallery_bulk`, `gallery_tools`, `description_tools`, `comic_tools`,
   `ai_tooling_links`, `controls_tabs`.

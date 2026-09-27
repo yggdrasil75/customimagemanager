@@ -44,7 +44,10 @@ CREATE TABLE IF NOT EXISTS fs_peers (
     pub_key     TEXT DEFAULT '',                    -- pinned X25519 public key
     instance_id TEXT DEFAULT '',
     kind        TEXT DEFAULT 'peer',                -- peer (family instance) | device (my phone)
-    folder      TEXT DEFAULT ''                     -- device: library folder its uploads land in
+    folder      TEXT DEFAULT '',                    -- device: library folder its uploads land in
+    my_name     TEXT DEFAULT '',                    -- the name THEY have us under
+    route       TEXT DEFAULT '',                    -- '' / direct | mailbox (they poll me) | via (through via_peer)
+    via_peer    INTEGER DEFAULT 0                   -- route=via: the hub both of us poll
 );
 CREATE TABLE IF NOT EXISTS fs_rules (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,9 +80,27 @@ CREATE TABLE IF NOT EXISTS fs_received (
     queue_id    INTEGER DEFAULT 0,               -- upload_queue row while deferred
     albums      TEXT DEFAULT '[]',               -- albums still to apply once ingested
     received    REAL,
+    duplicate   INTEGER DEFAULT 0,
+    replaces    TEXT DEFAULT '[]',               -- device re-upload: older copies to retire once ingested
     PRIMARY KEY (origin_sha, peer_id)
 );
 CREATE INDEX IF NOT EXISTS idx_fs_received_path ON fs_received(rel_path);
+CREATE TABLE IF NOT EXISTS fs_mailbox (              -- sealed items waiting for a peer to poll
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    to_peer     INTEGER NOT NULL,                    -- fs_peers.id of the recipient
+    from_pub    TEXT NOT NULL,                       -- sender's public key (recipient picks its peer row by it)
+    kind        TEXT NOT NULL,                       -- push | revoke
+    env         TEXT NOT NULL,                       -- envelope header, sealed to the recipient
+    meta        TEXT NOT NULL,                       -- sealed metadata
+    blob        TEXT DEFAULT '',                     -- sealed file on disk (ciphertext), '' = none
+    size        INTEGER DEFAULT 0,
+    created     REAL
+);
+CREATE INDEX IF NOT EXISTS idx_fs_mailbox_to ON fs_mailbox(to_peer, id);
+CREATE TABLE IF NOT EXISTS fs_seen (                 -- envelopes already processed (mailbox replay guard)
+    salt        TEXT PRIMARY KEY,
+    seen        REAL
+);
 """
 
 RULE_KINDS = ("folder", "album", "tag")

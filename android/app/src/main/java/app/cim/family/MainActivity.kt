@@ -252,7 +252,8 @@ fun FoldersScreen(prefs: Prefs, db: Db) {
     LaunchedEffect(granted) { if (granted) buckets = withContext(Dispatchers.IO) { Scanner.buckets(ctx, db, prefs.uploadVideos) } }
     if (!granted) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("The app needs to read your photos to back them up.")
+            Text("The app needs to read your photos, including their location data, to back up the originals. " +
+                 "Without location access Android only hands out altered copies: GPS is stripped and raw (DNG) files break.")
             Button({ ask.launch(mediaPermissions()) }) { Text("Allow photo access") }
         }
         return
@@ -283,8 +284,12 @@ fun FoldersScreen(prefs: Prefs, db: Db) {
     }
 }
 
-fun mediaPermissions(): Array<String> = if (Build.VERSION.SDK_INT >= 33) arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO)
-    else arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+fun mediaPermissions(): Array<String> = when {
+    Build.VERSION.SDK_INT >= 33 -> arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO,
+                                           Manifest.permission.ACCESS_MEDIA_LOCATION)
+    Build.VERSION.SDK_INT >= 29 -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.ACCESS_MEDIA_LOCATION)
+    else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+}
 
 fun hasMediaPermission(ctx: android.content.Context): Boolean = mediaPermissions().all {
     androidx.core.content.ContextCompat.checkSelfPermission(ctx, it) == android.content.pm.PackageManager.PERMISSION_GRANTED
@@ -325,6 +330,10 @@ fun SettingsScreen(prefs: Prefs, db: Db, onUnpair: () -> Unit) {
 
         Divider()
         Text("Backup", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        val reverify = remember(tick) { db.unverifiedCount() }
+        if (reverify > 0) Text("$reverify earlier upload(s) queued to be re-checked against the original " +
+            "(older versions of this app could upload an altered copy; mismatches are re-sent and replace the server's copy).",
+            color = Color(0xFFE0B060), fontSize = 12.sp)
         Text("${counts.first} uploaded · ${counts.second} failing · last run ${if (prefs.lastRun > 0) SimpleDateFormat("d MMM HH:mm", Locale.getDefault()).format(Date(prefs.lastRun)) else "never"}", color = Color.LightGray, fontSize = 13.sp)
         if (prefs.lastError.isNotEmpty()) Text(prefs.lastError, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
         ToggleRow("Only on Wi-Fi", wifi) { wifi = it; prefs.wifiOnly = it; UploadWorker.schedule(ctx, prefs) }

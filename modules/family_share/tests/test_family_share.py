@@ -189,6 +189,12 @@ def test_pairing_code_roundtrip():
 
 
 # ── app integration ───────────────────────────────────────────────────────
+@pytest.fixture(autouse=True)
+def _no_network_polls(monkeypatch):
+    """The worker polls every peer with a URL for mailbox items; tests have no
+    network, so by default every mailbox is empty."""
+    monkeypatch.setattr(pc, "mailbox_list", lambda *a, **k: [])
+
 def _j(client, url, body=None, **kw):
     r = client.post(url, json=body or {}, **kw) if body is not None or kw.get("data") is None else client.post(url, **kw)
     j = r.get_json()
@@ -360,7 +366,7 @@ def test_outbound_refuses_unpinned_peer(client, app, peer, upload, monkeypatch):
     rid = _j(client, "/api/family_share/rules/save", {"mode": "share", "kind": "tag", "value": "family", "peers": [pid]})["id"]
     svc = app.module_host.get_service("family_share"); svc["plan"]()
     job = svc["claim"]()
-    while job and job["kind"] == "plan":
+    while job and job["kind"] in ("plan", "poll"):
         svc["handle"](job); job = svc["claim"]()
     assert job and job["peer_id"] == pid; svc["handle"](job)
     row = app._db().execute("SELECT status, error FROM fs_outbox WHERE rel_path=? AND peer_id=?", (fn, pid)).fetchone()
@@ -385,7 +391,7 @@ def test_outbound_wire_is_ciphertext(client, app, peer, upload, monkeypatch, tmp
     rid = _j(client, "/api/family_share/rules/save", {"mode": "share", "kind": "tag", "value": "family", "peers": [peer["id"]]})["id"]
     svc = app.module_host.get_service("family_share"); svc["plan"]()
     job = svc["claim"]()
-    while job and job["kind"] == "plan":
+    while job and job["kind"] in ("plan", "poll"):
         svc["handle"](job); job = svc["claim"]()
     assert job and job["kind"] == "pending"; svc["handle"](job)
     assert app._db().execute("SELECT status FROM fs_outbox WHERE rel_path=?", (fn,)).fetchone()["status"] == "sent"
@@ -429,7 +435,7 @@ def test_outbound_worker_push_and_revoke(client, app, peer, upload, monkeypatch)
             job = src["claim"]()
             if not job:
                 break
-            if job["kind"] == "plan":
+            if job["kind"] in ("plan", "poll"):
                 src["handle"](job); continue
             src["handle"](job)
     drain()
@@ -460,13 +466,13 @@ def test_delete_revokes(client, app, peer, upload, monkeypatch):
     svc = app.module_host.get_service("family_share"); src = svc
     svc["plan"]()
     job = src["claim"]()
-    while job and job["kind"] == "plan":
+    while job and job["kind"] in ("plan", "poll"):
         src["handle"](job); job = src["claim"]()
     assert job and job["kind"] == "pending"; src["handle"](job)
     sha = app._db().execute("SELECT sha FROM fs_outbox WHERE rel_path=?", (fn,)).fetchone()["sha"]
     client.post("/api/delete", json={"filename": fn})
     job = src["claim"]()
-    while job and job["kind"] == "plan":
+    while job and job["kind"] in ("plan", "poll"):
         src["handle"](job); job = src["claim"]()
     assert job and job["kind"] == "revoke"; src["handle"](job)
     assert calls == [sha]
@@ -509,7 +515,7 @@ def test_device_upload_lands_in_device_folder_and_is_shareable(client, app, phon
         pv = client.get(f"/api/family_share/preview?peer_id={phone['id']}").get_json()
         svc = app.module_host.get_service("family_share"); svc["plan"]()
         job = svc["claim"]()
-        while job and job["kind"] == "plan":
+        while job and job["kind"] in ("plan", "poll"):
             svc["handle"](job); job = svc["claim"]()
         assert not job or job["peer_id"] != phone["id"]
         _j(client, "/api/family_share/rules/delete", {"id": rid})
@@ -550,3 +556,192 @@ def test_device_sealed_timeline_thumb_media(client, app, phone, upload):
     raw = client.get(f"/api/family_share/inbound/thumb?p={fn}", headers=phone["headers"]).get_data()
     assert thumb[:64] not in raw and b"JFIF" not in raw
     assert client.get("/api/family_share/inbound/thumb?p=../etc/passwd", headers=phone["headers"]).status_code == 404
+
+
+# ── gateway: relay through a hub, mailbox pickup ──────────────────────────
+def _keypeer(client, name, url="", **extra):
+    """A peer row on THIS instance backed by a real key pair the test holds."""
+    priv = fc.generate_private_key()
+    pid = _j(client, "/api/family_share/peers/save", {"name": name, "url": url, "pub_key": fc.public_key(priv),
+                                                       "key_out": name + "-secret", **extra})["id"]
+    me = fc.parse_pairing_code(_j(client, "/api/family_share/peers/key", {"id": pid})["pairing_code"])
+    return {"id": pid, "name": name, "priv": priv, "pub": fc.public_key(priv), "instance_id": name + "-iid",
+            "my_pub": me["pub_key"], "my_id": me["instance_id"],
+            "headers": {pc.HEADER_PEER: name, pc.HEADER_KEY: me["key_out"]}}
+
+
+@pytest.fixture
+def hub_pair(client, app):
+    """This app acts as the hub; 'sis' and 'cuz' are two peers with no URL."""
+    app.state["family_share_relay"] = True
+    a = _keypeer(client, "sis", route="mailbox")
+    b = _keypeer(client, "cuz", route="mailbox")
+    yield a, b
+    app.state["family_share_relay"] = False
+    for p in (a, b):
+        client.post("/api/family_share/peers/delete", json={"id": p["id"]})
+    db = app._db()
+    for t in ("fs_rules", "fs_outbox", "fs_received", "fs_mailbox", "fs_seen"):
+        db.execute(f"DELETE FROM {t}")
+    db.commit()
+
+
+def test_hub_relays_ciphertext_it_cannot_open(client, app, hub_pair, tmp_path):
+    sis, cuz = hub_pair
+    src = tmp_path / "beach.png"; src.write_bytes(png_bytes(seed=920))
+    # sis seals an item to cuz (hub never has cuz's private key) ...
+    cuz_row = {"pub_key": cuz["pub"], "instance_id": cuz["instance_id"]}
+    header, meta, enc = pc.seal_item(cuz_row, "sis-iid", sis["priv"],
+                                     {"origin_sha": "rel1", "origin_id": "sis-iid", "folder": "trips",
+                                      "orig_name": "beach.png", "metadata": {"tags": ["family"]}},
+                                     str(src), str(tmp_path))
+    # ... plus an outer ticket sealed to the hub
+    hub_row = {"pub_key": sis["my_pub"], "instance_id": sis["my_id"]}
+    th, tm, _ = pc.seal_item(hub_row, "sis-iid", sis["priv"], {"relay_to": cuz["pub"], "kind": "push"})
+    with open(enc, "rb") as f:
+        r = client.post("/api/family_share/inbound/relay", headers=sis["headers"], content_type="multipart/form-data",
+                        data={"env": json.dumps(th), "meta": tm, "item_env": json.dumps(header), "item_meta": meta,
+                              "file": (io.BytesIO(f.read()), "payload.bin")})
+    assert r.status_code == 200 and r.get_json()["queued"], r.get_json()
+    # the hub stored exactly the ciphertext, with nothing ingested on its side
+    row = app._db().execute("SELECT * FROM fs_mailbox").fetchone()
+    assert row["to_peer"] == cuz["id"] and row["from_pub"] == sis["pub"]
+    stored = open(row["blob"], "rb").read()
+    assert stored == open(enc, "rb").read() and png_bytes(seed=920)[:64] not in stored
+    assert app._db().execute("SELECT COUNT(*) FROM fs_received").fetchone()[0] == 0
+    # sis can't see cuz's mailbox; cuz lists it (listing sealed to cuz), fetches, and opens it
+    r = client.get("/api/family_share/inbound/mailbox", headers=sis["headers"])
+    assert json.loads(fc.Opener(sis["priv"], sis["my_pub"], json.loads(r.headers["X-Family-Env"]))
+                      .open_bytes(r.get_data()))["items"] == []
+    r = client.get("/api/family_share/inbound/mailbox", headers=cuz["headers"])
+    items = json.loads(fc.Opener(cuz["priv"], cuz["my_pub"], json.loads(r.headers["X-Family-Env"]))
+                       .open_bytes(r.get_data()))["items"]
+    assert len(items) == 1 and items[0]["from_pub"] == sis["pub"] and items[0]["has_file"]
+    blob = client.get(f"/api/family_share/inbound/mailbox/blob?id={items[0]['id']}", headers=cuz["headers"]).get_data()
+    assert client.get(f"/api/family_share/inbound/mailbox/blob?id={items[0]['id']}", headers=sis["headers"]).status_code == 404
+    op = fc.Opener(cuz["priv"], sis["pub"], items[0]["env"])
+    assert op.open_meta(items[0]["meta"])["origin_sha"] == "rel1"
+    assert op.open_bytes(blob) == png_bytes(seed=920)
+    # ack (sealed) removes it and its blob
+    s_ = fc.Sealer(cuz["priv"], cuz["my_pub"])
+    r = client.post("/api/family_share/inbound/mailbox/ack", headers=cuz["headers"],
+                    json={"env": s_.header, "meta": s_.seal_meta({"ack": [items[0]["id"]], "ts": time.time(), "to": cuz["my_id"]})})
+    assert r.get_json()["acked"] == 1
+    assert app._db().execute("SELECT COUNT(*) FROM fs_mailbox").fetchone()[0] == 0 and not os.path.exists(row["blob"])
+    os.remove(enc)
+
+
+def test_relay_refused_when_off_or_unknown_recipient(client, app, hub_pair):
+    sis, cuz = hub_pair
+    hub_row = {"pub_key": sis["my_pub"], "instance_id": sis["my_id"]}
+    th, tm, _ = pc.seal_item(hub_row, "sis-iid", sis["priv"], {"relay_to": fc.public_key(fc.generate_private_key()), "kind": "push"})
+    form = {"env": json.dumps(th), "meta": tm, "item_env": "{}", "item_meta": "x"}
+    assert client.post("/api/family_share/inbound/relay", headers=sis["headers"], data=form).status_code == 404
+    app.state["family_share_relay"] = False
+    assert client.post("/api/family_share/inbound/relay", headers=sis["headers"], data=form).status_code == 403
+
+
+def test_outbound_mailbox_route_for_peer_without_url(client, app, hub_pair, upload):
+    """This instance has the URL; 'cuz' doesn't: pushes wait in our mailbox for cuz to poll."""
+    sis, cuz = hub_pair
+    fn = upload(seed=921); write_meta(client, fn, tags=["family"], desc="for cuz")
+    rid = _j(client, "/api/family_share/rules/save", {"mode": "share", "kind": "tag", "value": "family", "peers": [cuz["id"]]})["id"]
+    db = app._db(); db.execute("UPDATE fs_peers SET instance_id=? WHERE id=?", (cuz["instance_id"], cuz["id"])); db.commit()
+    svc = app.module_host.get_service("family_share"); svc["plan"]()
+    job = svc["claim"]()
+    while job and job["kind"] in ("plan", "poll"):
+        svc["handle"](job); job = svc["claim"]()
+    assert job and job["peer_id"] == cuz["id"]; svc["handle"](job)
+    assert db.execute("SELECT status FROM fs_outbox WHERE rel_path=?", (fn,)).fetchone()["status"] == "sent"
+    row = db.execute("SELECT * FROM fs_mailbox WHERE to_peer=?", (cuz["id"],)).fetchone()
+    op = fc.Opener(cuz["priv"], cuz["my_pub"], json.loads(row["env"]))
+    inner = op.open_meta(row["meta"])
+    assert inner["metadata"]["description"] == "for cuz" and inner["to"] == cuz["instance_id"]
+    with open(os.path.join(app.MEDIA_DIR, fn), "rb") as f:
+        assert op.open_bytes(open(row["blob"], "rb").read()) == f.read()
+    _j(client, "/api/family_share/rules/delete", {"id": rid})
+
+
+def test_poller_applies_relayed_item_once(client, app, hub_pair, peer, tmp_path, monkeypatch):
+    """This instance polls 'sister' (a hub with a URL) and finds an item that
+    'cuz' sealed to us. It is ingested once; a replay and a stale item are not."""
+    sis, cuz = hub_pair
+    me = {"pub_key": cuz["my_pub"], "instance_id": cuz["my_id"]}          # this instance, as cuz sees it
+    def item(i, origin_sha, ts=None, seed=922):
+        src = tmp_path / f"s{i}.png"; src.write_bytes(png_bytes(seed=seed))
+        h, m, enc = pc.seal_item(me, "cuz-iid", cuz["priv"],
+                                 {"origin_sha": origin_sha, "origin_id": "cuz-iid", "folder": "", "orig_name": f"s{i}.png",
+                                  "metadata": {"tags": []}}, str(src), str(tmp_path))
+        if ts is not None:          # re-seal with a forced timestamp
+            s_ = fc.Sealer(cuz["priv"], cuz["my_pub"]); h = s_.header
+            m = s_.seal_meta({"origin_sha": origin_sha, "origin_id": "cuz-iid", "folder": "", "orig_name": f"s{i}.png",
+                              "metadata": {"tags": []}, "ts": ts, "to": cuz["my_id"]})
+            enc_path = tmp_path / f"e{i}.bin"; s_.seal_file(str(src), str(enc_path)); enc = str(enc_path)
+        return {"id": i, "from_pub": cuz["pub"], "kind": "push", "env": h, "meta": m, "has_file": True, "enc": enc}
+    good = item(1, "c1"); replay = dict(good, id=2); stale = item(3, "c3", ts=time.time() - 400 * 86400, seed=923)
+    listing = [good, replay, stale]
+    acked = []
+    monkeypatch.setattr(pc, "mailbox_list", lambda hub, *a, **k: listing if hub["name"] == "sister" else [])
+    monkeypatch.setattr(pc, "mailbox_fetch", lambda hub, n, iid, dst, **k: open(dst, "wb").write(
+        open(next(x["enc"] for x in listing if x["id"] == iid), "rb").read()))
+    monkeypatch.setattr(pc, "mailbox_ack", lambda hub, n, i, k, ids, **kw: acked.extend(ids))
+    svc = app.module_host.get_service("family_share")
+    svc["handle"]({"kind": "poll", "peer_id": peer["id"], "key": f"family_share:poll:{peer['id']}"})
+    rows = app._db().execute("SELECT origin_sha, rel_path FROM fs_received WHERE peer_id=?", (cuz["id"],)).fetchall()
+    assert [r["origin_sha"] for r in rows] == ["c1"]                      # once; stale rejected
+    assert rows[0]["rel_path"].startswith(f"{app.state.get('family_share_incoming_folder') or 'family'}/cuz/")
+    assert sorted(acked) == [1, 2, 3]                                      # all finished with
+    client.post("/api/delete", json={"filename": rows[0]["rel_path"]})
+
+
+def test_same_name_different_photo_is_not_a_duplicate(client, app, phone, tmp_path):
+    """Two different photos with the same filename must both land."""
+    got = []
+    for seed, sha in ((927, "n1"), (928, "n2")):
+        r = client.post("/api/family_share/inbound/push", headers=phone["headers"], content_type="multipart/form-data",
+                        data=_sealed(phone, {"origin_sha": sha, "origin_id": "px", "folder": "Cam", "orig_name": "IMG.png",
+                                             "metadata": {"tags": []}}, png_bytes(seed=seed), tmp_path))
+        j = r.get_json(); got.append(j["filename"])
+        assert j["stored"] and not j["duplicate"], j
+    try:
+        assert got[0] != got[1]
+    finally:
+        for fn in got:
+            client.post("/api/delete", json={"filename": fn})
+
+
+def test_content_hash_mismatch_rejected(client, app, peer, tmp_path):
+    inner = {"origin_sha": "h1", "origin_id": "o", "folder": "", "orig_name": "x.png", "metadata": {"tags": []},
+             "content_sha": "0" * 64}
+    r = client.post("/api/family_share/inbound/push", headers=peer["headers"], content_type="multipart/form-data",
+                    data=_sealed(peer, inner, png_bytes(seed=924), tmp_path))
+    assert r.status_code == 422 and "hash mismatch" in r.get_json()["error"]
+    assert app._db().execute("SELECT COUNT(*) FROM fs_received WHERE origin_sha='h1'").fetchone()[0] == 0
+
+
+def test_device_reupload_replaces_redacted_copy(client, app, phone, tmp_path):
+    """The app re-sends an original it had uploaded redacted: the new copy
+    takes over the old one's tags/albums, and the old copy is removed."""
+    import hashlib
+    old_bytes, new_bytes = png_bytes(seed=925), png_bytes(seed=926)
+    old_sha = hashlib.sha256(old_bytes).hexdigest(); new_sha = hashlib.sha256(new_bytes).hexdigest()
+    r = client.post("/api/family_share/inbound/push", headers=phone["headers"], content_type="multipart/form-data",
+                    data=_sealed(phone, {"origin_sha": old_sha, "origin_id": "px", "folder": "DCIM", "orig_name": "a.png",
+                                         "metadata": {"tags": []}, "content_sha": old_sha}, old_bytes, tmp_path))
+    old_fn = r.get_json()["filename"]
+    write_meta(client, old_fn, tags=["grandma"], desc="kept caption")
+    client.post("/api/albums/add", json={"album": "Summer", "files": [old_fn]})
+    r = client.post("/api/family_share/inbound/push", headers=phone["headers"], content_type="multipart/form-data",
+                    data=_sealed(phone, {"origin_sha": new_sha, "origin_id": "px", "folder": "DCIM", "orig_name": "a.png",
+                                         "metadata": {"tags": []}, "content_sha": new_sha, "replaces": [old_sha]},
+                                 new_bytes, tmp_path))
+    new_fn = r.get_json()["filename"]
+    try:
+        assert new_fn != old_fn and not os.path.exists(os.path.join(app.MEDIA_DIR, old_fn))
+        assert os.path.basename(new_fn).startswith("a_" + new_sha[:8])      # same name was taken
+        m = read_meta(client, new_fn)
+        assert "grandma" in m["tags"] and m["description"] == "kept caption"
+        assert "Summer" in app._file_albums(new_fn)
+        assert app._db().execute("SELECT COUNT(*) FROM fs_received WHERE origin_sha=?", (old_sha,)).fetchone()[0] == 0
+    finally:
+        client.post("/api/delete", json={"filename": new_fn})

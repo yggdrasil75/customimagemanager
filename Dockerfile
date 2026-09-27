@@ -93,4 +93,6 @@ RUN mkdir -p static/vendor && \
 
 EXPOSE 8000
 
-CMD ["python", "manager.py"]
+# entrypoint.sh copies the APK (when built) into the data/ volume, then runs the app.
+RUN chmod +x entrypoint.sh
+CMD ["./entrypoint.sh"]

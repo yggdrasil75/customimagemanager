@@ -254,10 +254,13 @@ def _read_exact(stream, n):
     return buf
 
 
-def check_freshness(meta, my_id):
-    """The decrypted metadata must be recent and addressed to us."""
+def check_freshness(meta, my_id, max_age=MAX_SKEW):
+    """The decrypted metadata must be recent and addressed to us. max_age is
+    MAX_SKEW for direct delivery; mailbox items may legitimately wait days,
+    and are protected from replay by the seen-envelope table instead."""
     ts = float(meta.get("ts") or 0)
-    if abs(time.time() - ts) > MAX_SKEW:
+    now = time.time()
+    if ts > now + MAX_SKEW or now - ts > max_age:
         raise CryptoError("envelope is stale (clock skew over 15 minutes, or a replay)")
     if meta.get("to") and meta["to"] != my_id:
         raise CryptoError("envelope is addressed to another instance")

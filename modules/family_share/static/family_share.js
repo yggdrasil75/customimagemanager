@@ -140,6 +140,10 @@
     ["share_all_albums", "toggle", "Send all album names", "OFF: only the album a share rule names is sent along."],
     ["share_regions", "toggle", "Send regions (people boxes / names)", ""],
     ["family_share_interval_min", "number", "Full re-plan every (minutes)", "Edits plan immediately; this catches anything missed."],
+    ["family_share_relay", "toggle", "Act as a gateway for my peers", "Peers without their own domain hand items for each other to this instance. They are sealed to the recipient: this instance stores ciphertext it cannot open."],
+    ["family_share_poll_sec", "number", "Check hubs for waiting items every (seconds)", "How often this instance asks each peer with a URL for items left for it."],
+    ["family_share_mailbox_gb", "number", "Mailbox limit per peer (GB)", "Items waiting for a peer that polls. Over the limit, senders back off and retry."],
+    ["family_share_mailbox_days", "number", "Drop unfetched items after (days)", "A peer offline longer than this misses them."],
   ];
   function renderOptions() {
     const el = document.getElementById("fs_options");
@@ -157,6 +161,21 @@
   }
 
   // ── peers ─────────────────────────────────────────────────────────────
+  // How a family peer is reached. "auto" = their URL if they have one, else they poll me.
+  function routeSel(p) {
+    const cur = p.route === "via" ? `via:${p.via_peer}` : (p.route || "");
+    const hubs = state.peers.filter((h) => h.id !== p.id && h.kind !== "device" && h.url && h.route !== "via");
+    const opt = (v, label) => `<option value="${v}" ${cur === v ? "selected" : ""}>${esc(label)}</option>`;
+    return `<select class="fs-p-route" title="How items reach them" ${p.kind === "device" ? "hidden" : ""}>
+      ${opt("", "auto: their URL, else they poll me")}${opt("direct", "direct to their URL")}
+      ${opt("mailbox", "they poll me (no domain)")}
+      ${hubs.map((h) => opt(`via:${h.id}`, `through ${h.name} (both of us poll it)`)).join("")}</select>`;
+  }
+  function routeOf(sel) {
+    const v = sel ? sel.value : "";
+    return v.startsWith("via:") ? { route: "via", via_peer: Number(v.slice(4)) } : { route: v };
+  }
+
   function renderPeers() {
     const el = document.getElementById("fs_peers");
     const kindSel = (k) => `<select class="fs-p-kind"><option value="peer" ${k !== "device" ? "selected" : ""}>family</option>
@@ -166,7 +185,9 @@
         <td>${kindSel(p.kind)}</td>
         <td><input class="fs-p-name" value="${esc(p.name)}">
             <input class="fs-p-folder" value="${esc(p.folder || "")}" placeholder="uploads land in (phone/${esc(p.name)})" ${p.kind === "device" ? "" : "hidden"}></td>
-        <td><input class="fs-p-url" value="${esc(p.url)}" placeholder="${p.kind === "device" ? "(phones call in; no URL)" : "https://their-box:5000"}" ${p.kind === "device" ? "disabled" : ""}></td>
+        <td><input class="fs-p-url" value="${esc(p.url)}" placeholder="${p.kind === "device" ? "(phones call in; no URL)" : "https://their-box:5000 (empty = no domain)"}" ${p.kind === "device" ? "disabled" : ""}>
+            ${routeSel(p)}
+            ${p.mailbox_items ? `<div class="fs-why">${p.mailbox_items} item(s), ${(p.mailbox_bytes / 1048576).toFixed(1)} MB waiting for them</div>` : ""}</td>
         <td><input class="fs-p-key" placeholder="${p.has_key_out && p.pub_key ? "paired" : "paste their pairing code"}">
             ${p.pub_key ? `<div class="fs-fp" title="Their key fingerprint — compare with what they see">🔒 ${esc(p.fingerprint)}</div>`
                         : `<div class="fs-err">no key pinned — nothing will be sent</div>`}</td>
@@ -185,7 +206,7 @@
       <tbody>${rows}
         <tr class="fs-new"><td>${kindSel("peer")}</td>
           <td><input class="fs-p-name" placeholder="mom / my-phone"><input class="fs-p-folder" placeholder="uploads land in" hidden></td>
-          <td><input class="fs-p-url" placeholder="https://their-box:5000"></td>
+          <td><input class="fs-p-url" placeholder="https://their-box:5000 (empty = no domain)">${routeSel({ kind: "peer", route: "", id: 0 })}</td>
           <td><input class="fs-p-key" placeholder="paste their pairing code (or add now, pair later)"></td>
           <td><input class="fs-p-en" type="checkbox" checked></td><td></td>
           <td class="fs-actions"><button class="fs-btn fs-btn-sm fs-p-save">Add</button></td></tr>
@@ -194,6 +215,10 @@
       (<a href="/static/app/cim-family.apk" download>download APK</a>, built with the docker image). Their uploads are your own
       photos: they land in the folder above, get no "from:" tag and flow to family through the rules like anything else.
       Pair the same way — the app shows its pairing code, and you paste this instance's code into the app.</p>
+      <p class="fs-help"><b>No domain?</b> Only one instance needs a public URL. Turn on <i>Act as a gateway</i> there;
+      everyone else leaves their URL empty and pairs with it. Instances without a URL poll the gateway for waiting items.
+      Two of them can still share with each other: pair them directly (exchange pairing codes) and set the route to
+      "through &lt;gateway&gt;" — items are sealed to the recipient, so the gateway only ever holds ciphertext.</p>
       <p class="fs-help">Set-up: add the peer here (name only is fine), click <b>Pairing code for them</b> and send them
       the string. They paste it in this box on their instance, which creates/pairs the peer entry for you, then they send
       you <i>their</i> pairing code, which you paste here. <b>Test</b> checks the connection and that the pinned key
@@ -204,12 +229,13 @@
       const id = Number(tr.dataset.id || 0);
       const q = (c) => tr.querySelector(c);
       const kind = q(".fs-p-kind"); if (kind) kind.addEventListener("change", () => {
-        q(".fs-p-folder").hidden = kind.value !== "device"; q(".fs-p-url").disabled = kind.value === "device"; });
+        q(".fs-p-folder").hidden = kind.value !== "device"; q(".fs-p-url").disabled = kind.value === "device";
+        q(".fs-p-route").hidden = kind.value === "device"; });
       const save = q(".fs-p-save"); if (save) save.addEventListener("click", async () => {
         try {
           const raw = q(".fs-p-key").value.trim();
           const body = { id, name: q(".fs-p-name").value, url: q(".fs-p-url").value, enabled: q(".fs-p-en").checked,
-                         kind: q(".fs-p-kind").value, folder: q(".fs-p-folder").value };
+                         kind: q(".fs-p-kind").value, folder: q(".fs-p-folder").value, ...routeOf(q(".fs-p-route")) };
           if (raw.startsWith("fs1.")) body.pairing_code = raw; else if (raw) body.key_out = raw;
           await post("/peers/save", body);
           toast(id ? "Peer saved" : "Peer added"); await load();
@@ -245,6 +271,7 @@
         if (!confirm("Rotate the key this peer uses to reach me? They will need the new one.")) return;
         try { await post("/peers/save", { id, name: q(".fs-p-name").value, url: q(".fs-p-url").value,
           enabled: q(".fs-p-en").checked, kind: q(".fs-p-kind").value, folder: q(".fs-p-folder").value,
+          ...routeOf(q(".fs-p-route")),
           rotate_key_in: true }); toast("Rotated"); await load(); }
         catch (e) { toast(e.message); }
       });

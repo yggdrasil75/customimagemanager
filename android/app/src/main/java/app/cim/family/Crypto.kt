@@ -99,17 +99,20 @@ object Crypto {
             return b64e(nonce + ct)
         }
 
-        fun sealStream(input: InputStream, size: Long, out: OutputStream) {
-            var done = 0L; var i = 0L
-            val buf = ByteArray(CHUNK)
+        /** Frames the stream until EOF. The last frame is found by reading one
+         *  chunk ahead, never from a reported size: MediaStore's SIZE can be
+         *  stale, and trusting it truncated (or never finished) uploads. */
+        fun sealStream(input: InputStream, out: OutputStream) {
+            var cur = ByteArray(CHUNK); var n = readFull(input, cur)
+            var i = 0L
             while (true) {
-                val n = readFull(input, buf)
-                done += n
-                val last = done >= size
-                val ct = gcm(Cipher.ENCRYPT_MODE, kFile, fileNonce(i), fileAad(i, last), buf.copyOf(n))
+                val next = ByteArray(CHUNK)
+                val m = if (n == CHUNK) readFull(input, next) else 0
+                val last = m == 0
+                val ct = gcm(Cipher.ENCRYPT_MODE, kFile, fileNonce(i), fileAad(i, last), cur.copyOf(n))
                 out.write(ByteBuffer.allocate(4).putInt(ct.size).array()); out.write(ct)
-                i++
                 if (last) break
+                cur = next; n = m; i++
             }
         }
     }
