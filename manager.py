@@ -636,6 +636,27 @@ def _merge_meta(cur, inc):
                or regions != (cur.get("regions") or []))
     return tags, desc, regions, changed
 
+def _free_store_path(store_path: str) -> str:
+    """! @brief First free '<base>_<n><ext>' beside an occupied store path
+    (sidecars count as occupying the name)."""
+    base, ext = os.path.splitext(store_path)
+    for n in range(1, 100000):
+        cand = f"{base}_{n}{ext}"
+        if not os.path.exists(cand) and not os.path.exists(f"{base}_{n}.xmp"):
+            return cand
+    return f"{base}_{uuid.uuid4().hex[:12]}{ext}"
+
+def _merge_albums(rel_path, albums):
+    """! @brief Add albums (from upload metadata) to a library file; never removes."""
+    albums = [str(a).strip() for a in (albums or []) if str(a).strip()]
+    if not albums:
+        return False
+    cur = _file_albums(rel_path)
+    new = cur + [a for a in albums if a not in cur]
+    if new == cur:
+        return False
+    return _set_file_albums(rel_path, new)
+
 def _merge_into_existing(rel_path, meta):
     """! @brief Apply an upload's metadata to the file that already holds those bytes.
     @return True if the file's metadata actually changed.
@@ -672,6 +693,11 @@ def _merge_into_existing(rel_path, meta):
             changed = True
         except Exception as e:
             access_logger.error(f"dup merge: {what} patch failed for {rel_path}: {e}")
+    try:
+        if _merge_albums(rel_path, meta.get("albums")):
+            changed = True
+    except Exception as e:
+        access_logger.error(f"dup merge: albums failed for {rel_path}: {e}")
     return changed
 
 def _form_metadata(rel_path=""):
@@ -1277,8 +1303,20 @@ def _index_file(rel_path: str, force: bool = False,
         img = read_jxl(abs_path)
 
         if img is None:
-            # Undecodable — write stub so we don't retry every run
-            _upsert_file(rel_path, mtime, 0, 0, sha, None, None, [], '')
+            # Undecodable — write stub so we don't retry every run. Its sidecar
+            # (tags, description, albums) still counts: a file we can't draw is
+            # still one the user tagged and filed.
+            try:
+                _smeta = read_metadata(abs_path) or {}
+            except Exception:
+                _smeta = {}
+            _upsert_file(rel_path, mtime, 0, 0, sha, None, None,
+                         _smeta.get('tags') or [], _smeta.get('description') or '')
+            try:
+                _sync_album_cache(rel_path, _smeta.get('albums') or [])
+                _db().commit()
+            except Exception as e:
+                access_logger.warning(f"album cache (stub) {rel_path}: {e}")
             try:
                 _store_dates(rel_path, _resolve_dates(abs_path, mtime))
             except Exception as e:
@@ -2588,6 +2626,56 @@ def _album_list() -> list:
                     "cover": cover, "count": r["n"], "created": r["created"]})
     return out
 
+# Properties write_metadata owns and rebuilds on every write. Everything else
+# in a sidecar (a capture date or GPS from an import, gallery-dl's XMP mapping,
+# another tool's fields) is carried across the rewrite as XML, verbatim, in the
+# same single write — so editing tags or albums never erases it.
+_XMP_DC_NS = "http://purl.org/dc/elements/1.1/"
+_XMP_RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+def _xmp_owned(ns: str, local: str) -> bool:
+    return (ns in (_MWG_RS_NS, _MWG_COLL_NS) or ns == _MM_NS
+            or (ns == _XMP_DC_NS and local in ("subject", "description"))
+            or (ns == _PRISM_NS and local == "PageCount"))
+
+def _foreign_xmp_xml(xmp_path: str) -> str:
+    """! @brief Serialised XML of the properties in an existing sidecar that
+    write_metadata doesn't own (attribute-form properties become elements)."""
+    if not os.path.exists(xmp_path):
+        return ""
+    import xml.etree.ElementTree as ET
+    from xml.sax.saxutils import escape
+    try:
+        prefixes = {}
+        for _ev, (pfx, uri) in ET.iterparse(xmp_path, events=("start-ns",)):
+            if pfx and uri not in prefixes.values():
+                prefixes[pfx] = uri
+        for pfx, uri in prefixes.items():
+            try:
+                ET.register_namespace(pfx, uri)
+            except ValueError:
+                pass
+        root = ET.parse(xmp_path).getroot()
+    except Exception as e:
+        access_logger.warning(f"sidecar rewrite: can't read {xmp_path} to carry its other fields: {e}")
+        return ""
+    def split(tag):
+        return tag[1:].split("}", 1) if tag.startswith("{") else ("", tag)
+    by_uri = {u: p for p, u in prefixes.items()}
+    out = []
+    for desc in root.iter(f"{{{_XMP_RDF_NS}}}Description"):
+        for k, v in desc.attrib.items():
+            ns, local = split(k)
+            if ns in ("", _XMP_RDF_NS) or _xmp_owned(ns, local):
+                continue
+            pfx = by_uri.get(ns) or "ns" + str(abs(hash(ns)) % 10000)
+            out.append(f'<{pfx}:{local} xmlns:{pfx}="{escape(ns)}">{escape(v)}</{pfx}:{local}>')
+        for child in list(desc):
+            ns, local = split(child.tag)
+            if _xmp_owned(ns, local):
+                continue
+            out.append(ET.tostring(child, encoding="unicode"))
+    return "".join(out)
+
 def write_metadata(filepath: str, tags: list, description: str, regions: list,
                    analysis: dict | None = None, flag: dict | None = None,
                    pose: dict | None = None, page_count: int | None = None,
@@ -2647,12 +2735,13 @@ def write_metadata(filepath: str, tags: list, description: str, regions: list,
                 prism_x = ""
         prism_ns = f' xmlns:prism="{_PRISM_NS}"' if prism_x else ''
         coll_x, coll_ns = _build_mwg_collections_xml(albums)
+        carried = _foreign_xmp_xml(xmp_path)
         xmp = (f'<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>'
                f'<x:xmpmeta xmlns:x="adobe:ns:meta/">'
                f'<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
                f'<rdf:Description rdf:about="" '
                f'xmlns:dc="http://purl.org/dc/elements/1.1/"{reg_ns}{mm_ns}{prism_ns}{coll_ns}>'
-               f'{subj}{desc_x}{reg_x}{mm_x}{prism_x}{coll_x}'
+               f'{subj}{desc_x}{reg_x}{mm_x}{prism_x}{coll_x}{carried}'
                f'</rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>')
         _xmp_dir = os.path.dirname(xmp_path) or "."
         _fd, _tmp_xmp = tempfile.mkstemp(suffix=".xmp.tmp", dir=_xmp_dir)
@@ -4157,16 +4246,20 @@ def _run_upload():
         out        = os.path.join(tmp, "out" + store_ext)
 
         if os.path.exists(store_path):
-            return jsonify({"success": False, "error_code": "filename_exists",
-                            "error": f"A file named '{rel_path}' already exists.",
-                            "existing_file": rel_path}), 409
+            # Same NAME is not same PHOTO (two phones both shoot
+            # 20240720_092345.jpg). Take a free name; identical content is
+            # still caught below by the content-hash duplicate check.
+            store_path = _free_store_path(store_path)
+            store_name = os.path.basename(store_path)
+            rel_path   = _rel(store_path)
 
         is_raw_src = mt.is_raw(fname)
+        is_heif_src = mt.is_heif(fname)
         # Capture per-frame animation timing from the SOURCE now, while it still
         # exists — cjxl collapses it. Meaningful for animated GIF/APNG/WebP and,
         # separately, animated JXL sources. Still images/videos yield None.
         anim_delays = None
-        if not is_raw_src and not mt.is_video(fname):
+        if not is_raw_src and not is_heif_src and not mt.is_video(fname):
             if in_ext in ('.gif', '.apng', '.png', '.webp'):
                 anim_delays = _extract_anim_delays(orig)
             elif in_ext == '.jxl':
@@ -4199,9 +4292,9 @@ def _run_upload():
             rel_path   = _rel(store_path)
             out        = os.path.join(tmp, "out" + store_ext)
             if os.path.exists(store_path):
-                return jsonify({"success": False, "error_code": "filename_exists",
-                                "error": f"A file named '{rel_path}' already exists.",
-                                "existing_file": rel_path}), 409
+                store_path = _free_store_path(store_path)
+                store_name = os.path.basename(store_path)
+                rel_path   = _rel(store_path)
 
         try:
             if transcode_to_video:
@@ -4246,13 +4339,23 @@ def _run_upload():
                             "detail": f"Could not develop '{fname}' with rawpy."
                         }), 422
                     cjxl_src = dev_png
+                elif is_heif_src:
+                    dev_png = os.path.join(tmp, "decoded.png")
+                    if not mt.develop_heif(orig, dev_png):
+                        return jsonify({
+                            "success": False, "error_code": "conversion_failed",
+                            "error": "HEIC/HEIF decoding failed.",
+                            "detail": f"Could not decode '{fname}' (needs pillow-heif: "
+                                      f"pip install pillow-heif)."
+                        }), 422
+                    cjxl_src = dev_png
 
                 # cjxl handles still images and animated GIF/APNG, producing a
                 # .jxl. --lossless_jpeg only makes sense for a real JPEG
                 # bitstream (never for a developed raw / png).
                 cjxl_cmd = ['cjxl', cjxl_src, out, '-d', '0',
                             f'--num_threads={state["cjxl_threads"]}']
-                if not is_raw_src and in_ext in ('.jpg', '.jpeg'):
+                if not is_raw_src and not is_heif_src and in_ext in ('.jpg', '.jpeg'):
                     cjxl_cmd.append('--lossless_jpeg=1')   # bit-exact JPEG transcode
                 else:
                     cjxl_cmd.append('--container=0')       # bare codestream, not BMFF
@@ -4279,8 +4382,8 @@ def _run_upload():
                 # Same bytes, different source. Downloading one artist's gallery
                 # off three boorus yields identical files carrying different
                 # tags/descriptions, so fold the new metadata into the copy we
-                # already have rather than discarding it. Only a real path
-                # collision (filename_exists, above) still blocks an ingest.
+                # already have rather than discarding it. (A name collision
+                # with different content took a free name above.)
                 existing = dup["rel_path"]
                 merged = _merge_into_existing(existing, _form_metadata(existing))
                 return jsonify({
@@ -4324,7 +4427,8 @@ def _run_upload():
             try:
                 write_metadata(store_path, meta.get("tags", []),
                                meta.get("description", ""), meta.get("regions", []),
-                               anim_delays=anim_delays)
+                               anim_delays=anim_delays,
+                               albums=[str(a) for a in (meta.get("albums") or []) if str(a).strip()] or None)
             except Exception as e:
                 # A single malformed region shouldn't sink the whole file. Log it,
                 # write the image with no sidecar metadata, and let ingest proceed.
@@ -4337,6 +4441,17 @@ def _run_upload():
                     access_logger.error(
                         f"upload: metadata write failed even when empty for "
                         f"{rel_path}: {e2}")
+            # A developed raw / decoded HEIF loses the original's EXIF, so carry
+            # its capture date and GPS into the sidecar. Runs before the
+            # caller's own XMP patch, which may override it.
+            if is_raw_src or is_heif_src:
+                try:
+                    carry = mt.capture_xmp(orig)
+                    if carry:
+                        xmp_export.write_xmp(store_path, carry)
+                except Exception as e:
+                    access_logger.warning(f"upload: carrying capture metadata for {rel_path}: {e}")
+
             exif_patch = meta.get("exif")
             if exif_patch:
                 try:

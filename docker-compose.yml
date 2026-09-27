@@ -23,6 +23,7 @@ x-common: &common
     - ./data:/app/data
     - ./logs:/app/logs
     - ./models:/app/models
+    - ./imports:/app/imports
     - ./app_config.json:/app/app_config.json
   restart: unless-stopped
 

@@ -738,7 +738,7 @@ def test_device_reupload_replaces_redacted_copy(client, app, phone, tmp_path):
     new_fn = r.get_json()["filename"]
     try:
         assert new_fn != old_fn and not os.path.exists(os.path.join(app.MEDIA_DIR, old_fn))
-        assert os.path.basename(new_fn).startswith("a_" + new_sha[:8])      # same name was taken
+        assert os.path.basename(new_fn) == "a_1.jxl"                         # same name was taken
         m = read_meta(client, new_fn)
         assert "grandma" in m["tags"] and m["description"] == "kept caption"
         assert "Summer" in app._file_albums(new_fn)

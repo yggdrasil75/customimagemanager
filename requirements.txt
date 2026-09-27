@@ -33,3 +33,6 @@ smplx
 trimesh
 psutil
 opencv-python-headless
+pillow-heif
+pyicloud
+rich

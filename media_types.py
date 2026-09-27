@@ -25,6 +25,7 @@ they just call `read_jxl()`, which now returns a poster frame for video inputs.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -58,6 +59,15 @@ RAW_INPUT_EXTS = {
 
 def is_raw(path: str) -> bool:
     return _ext(path) in RAW_INPUT_EXTS
+
+# HEIF/HEIC stills (iPhone default, many Android cameras). Decoded with
+# pillow-heif into a 16-bit PNG that keeps the colour profile, then the normal
+# cjxl step stores them as .jxl, like a developed raw.
+HEIF_INPUT_EXTS = {'.heic', '.heif', '.hif'}
+HEIF_BRANDS = {b'heic', b'heix', b'hevc', b'hevx', b'heim', b'heis', b'hevm', b'hevs', b'mif1', b'msf1'}
+
+def is_heif(path: str) -> bool:
+    return _ext(path) in HEIF_INPUT_EXTS
 
 # Videos are stored with their ORIGINAL extension (no transcode possible).
 VIDEO_EXTS = {'.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v', '.mpg',
@@ -159,7 +169,7 @@ def is_uploadable_book(path: str) -> bool:
 def UPLOAD_EXTS_now():
     """Extensions accepted from an uploader / bulk walk — image/video/audio/raw
     natively, plus whatever media types modules registered as uploadable."""
-    return (JXL_INPUT_EXTS | VIDEO_EXTS | RAW_INPUT_EXTS
+    return (JXL_INPUT_EXTS | VIDEO_EXTS | RAW_INPUT_EXTS | HEIF_INPUT_EXTS
             | registered_exts("uploadable_exts"))
 
 
@@ -434,6 +444,9 @@ def sniff_ext(path: str) -> str | None:
     if head[:4] == b'RIFF' and head[8:12] == b'WEBP':    return '.webp'
     if head[:2] == b'\xff\x0a' or head[:12] == \
        b'\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a':          return '.jxl'
+    # HEIF stills share the ISO-BMFF 'ftyp' container with MP4: tell them apart
+    # by the major brand, or every iPhone photo would be "corrected" to .mp4.
+    if head[4:8] == b'ftyp' and head[8:12] in HEIF_BRANDS: return '.heic'
     # Video / container
     if head[4:8] == b'ftyp':                             return '.mp4'
     if head[:4] == b'\x1a\x45\xdf\xa3':                  return '.mkv'  # also .webm
@@ -460,6 +473,7 @@ _EXT_ALIASES = [
     {'.mp4', '.m4v', '.mov'},          # all ISOBMFF ('ftyp')
     {'.ogg', '.oga', '.opus', '.ogv'}, # all Ogg ('OggS')
     {'.png', '.apng'},                 # APNG is a PNG with extra chunks
+    {'.heic', '.heif', '.hif'},        # all HEIF
 ]
 
 def ext_matches(declared: str, sniffed: str) -> bool:
@@ -649,6 +663,132 @@ def develop_raw(raw_path: str, out_png_path: str) -> bool:
         return bool(cv2.imwrite(out_png_path, bgr))
     except Exception:
         return False
+
+def _png_insert_chunks(png_path: str, chunks) -> None:
+    """Insert ancillary chunks (type, data) right after IHDR of a PNG file."""
+    import struct, zlib
+    with open(png_path, 'rb') as f:
+        data = f.read()
+    if data[:8] != b'\x89PNG\r\n\x1a\n' or data[12:16] != b'IHDR':
+        return
+    ihdr_end = 8 + 8 + struct.unpack('>I', data[8:12])[0] + 4
+    extra = b''.join(struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+                     for t, d in chunks)
+    with open(png_path, 'wb') as f:
+        f.write(data[:ihdr_end] + extra + data[ihdr_end:])
+
+def develop_heif(heif_path: str, out_png_path: str) -> bool:
+    """Decode a HEIF/HEIC still into a PNG at out_png_path: 16-bit when the
+    source is HDR (10/12-bit), with its ICC profile (iPhones shoot Display P3)
+    so cjxl keeps the colours. Metadata (date, GPS) is carried separately by
+    capture_xmp. Returns False (never raises) when pillow-heif is missing or
+    the file can't be decoded."""
+    try:
+        import pillow_heif
+        import numpy as np
+    except Exception:
+        return False
+    if cv2 is None:
+        return False
+    try:
+        hf = pillow_heif.open_heif(heif_path, convert_hdr_to_8bit=False)
+        arr = np.asarray(hf)
+        if arr.ndim == 3 and arr.shape[2] == 4:
+            bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGRA)
+        elif arr.ndim == 3:
+            bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        else:
+            bgr = arr
+        if not cv2.imwrite(out_png_path, bgr):
+            return False
+        icc = (hf.info or {}).get("icc_profile")
+        if icc:
+            import zlib
+            _png_insert_chunks(out_png_path, [(b'iCCP', b'ICC profile\x00\x00' + zlib.compress(icc))])
+        return True
+    except Exception:
+        return False
+
+def _exif_decimal(v, ref):
+    """'37/1 46/1 1629/100' (+ 'N'/'S'/'E'/'W') -> signed decimal degrees."""
+    try:
+        parts = [p for p in str(v).split() if p]
+        vals = []
+        for p in parts[:3]:
+            n, _, d = p.partition('/')
+            vals.append(float(n) / (float(d) if d else 1.0))
+        while len(vals) < 3:
+            vals.append(0.0)
+        dec = vals[0] + vals[1] / 60 + vals[2] / 3600
+        return -dec if str(ref).strip().upper()[:1] in ('S', 'W') else dec
+    except Exception:
+        return None
+
+def xmp_date(dt) -> str | None:
+    """Aware datetime -> XMP date with its offset ('...Z' for UTC)."""
+    if dt is None:
+        return None
+    from datetime import timezone
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    if not dt.utcoffset():
+        return dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    return dt.isoformat(timespec='seconds')
+
+def xmp_gps(value: float, pos: str, neg: str) -> str:
+    """Signed decimal degrees -> XMP GPSCoordinate 'DDD,MM.mmmmmmR'."""
+    ref = pos if value >= 0 else neg
+    v = abs(float(value)); d = int(v)
+    return f'{d},{(v - d) * 60:.6f}{ref}'
+
+def gps_xmp(lat, lon, alt=None) -> dict:
+    """XMP tokens for a position, or {} when it is missing / (0, 0)."""
+    try:
+        lat, lon = float(lat), float(lon)
+    except (TypeError, ValueError):
+        return {}
+    if (abs(lat) < 1e-9 and abs(lon) < 1e-9) or abs(lat) > 90 or abs(lon) > 180:
+        return {}
+    out = {'exif:GPSLatitude': xmp_gps(lat, 'N', 'S'), 'exif:GPSLongitude': xmp_gps(lon, 'E', 'W')}
+    try:
+        if alt not in (None, ''):
+            out['exif:GPSAltitude'] = float(alt)
+    except (TypeError, ValueError):
+        pass
+    return out
+
+def capture_xmp(path: str) -> dict:
+    """XMP tokens {exif:DateTimeOriginal, exif:GPSLatitude, …} from a source
+    file's OWN EXIF. Ingest writes these into the stored image's sidecar when
+    the conversion can't keep the EXIF (developed raws, decoded HEIF), so a
+    phone photo keeps when and where it was taken. {} when nothing is found."""
+    exif = {}
+    try:
+        import pyexiv2
+        if hasattr(pyexiv2, 'enableBMFF'):
+            try: pyexiv2.enableBMFF(True)
+            except Exception: pass
+        with pyexiv2.Image(path) as img:
+            exif = img.read_exif() or {}
+    except Exception:
+        exif = {}
+    out = {}
+    dto = exif.get('Exif.Photo.DateTimeOriginal') or exif.get('Exif.Image.DateTimeOriginal')
+    if dto:
+        m = re.match(r'(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})', str(dto).strip())
+        if m and m.group(1) != '0000':
+            iso = '{}-{}-{}T{}:{}:{}'.format(*m.groups())
+            off = str(exif.get('Exif.Photo.OffsetTimeOriginal') or '').strip()
+            if re.fullmatch(r'[+-]\d{2}:\d{2}', off):
+                iso += off
+            out['exif:DateTimeOriginal'] = iso
+    lat = _exif_decimal(exif.get('Exif.GPSInfo.GPSLatitude'), exif.get('Exif.GPSInfo.GPSLatitudeRef', 'N')) \
+        if exif.get('Exif.GPSInfo.GPSLatitude') else None
+    lon = _exif_decimal(exif.get('Exif.GPSInfo.GPSLongitude'), exif.get('Exif.GPSInfo.GPSLongitudeRef', 'E')) \
+        if exif.get('Exif.GPSInfo.GPSLongitude') else None
+    if lat is not None and lon is not None:
+        out.update(gps_xmp(lat, lon))
+    return out
 
 def video_duration(path: str) -> float | None:
     """Duration in seconds via ffprobe, or None if unavailable."""

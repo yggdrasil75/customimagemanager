@@ -51,8 +51,6 @@ import hmac
 
 from flask import jsonify, request, send_file
 
-import media_types as mt
-
 from . import share_core as sc
 from . import peer_client as pc
 from . import crypto
@@ -709,24 +707,6 @@ def register(host):
             d.commit()
         _write(_do)
 
-    def _free_name(dest, name, tag):
-        """The core ingest treats an existing file NAME as a duplicate even
-        when the content differs, which would silently drop the second of two
-        different photos called 20240720_092345.jpg. Pick a free name first;
-        identical content is still caught by the core's content-hash check."""
-        def taken(n):
-            p = host.safe_path(host.media_dir, "/".join(x for x in (dest, mt.stored_name(n)) if x))
-            return bool(p) and os.path.exists(p)
-        if not taken(name):
-            return name
-        base, ext = os.path.splitext(name)
-        tag = (tag or uuid.uuid4().hex)[:8]
-        for i in range(100):
-            cand = f"{base}_{tag}{'' if i == 0 else f'_{i}'}{ext}"
-            if not taken(cand):
-                return cand
-        return f"{base}_{uuid.uuid4().hex[:12]}{ext}"
-
     def _receive_push(peer, opener, inner, file_stream):
         """Apply one opened push. -> (json body, http code). file_stream is a
         readable of the sealed file, or None for a metadata-only push."""
@@ -789,7 +769,6 @@ def register(host):
                                         peer["name"], folder) if p)
         if not host.safe_path(host.media_dir, dest):
             return {"ok": False, "error": "bad folder"}, 400
-        orig_name = _free_name(dest, orig_name, content_sha or origin_sha)
         os.makedirs(core.upload_spool_dir, exist_ok=True)
         fd, spool = tempfile.mkstemp(dir=core.upload_spool_dir, prefix="up-", suffix="-" + orig_name)
         os.close(fd)
