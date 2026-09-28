@@ -24,6 +24,7 @@ from . import dedup_core as core
 import common
 
 # Bound from manager in register(); declared so the function bodies resolve.
+_HOST = None
 app = None
 _auth = None
 _db, state, MEDIA_DIR, get_safe_path, read_jxl, _to_bgr, mt, thread_manager, _index_file, _enumerate_library, _getmtime_loose, tiering, _thumb_drop, _delete_file_row, _purge_file_everywhere, audit, access_logger, _db_release_pool = (None,) * 18
@@ -544,8 +545,10 @@ def dedup():
 
             keep_idx    = [group_row_indices[0]]
             keep_scores = [1.0]   # reference is 100% similar to itself
-            _scorers = (_HOST.get_service("dedup_scorers")
-                        if 'module_host' in globals() else None)
+            # `_bind` puts the host here as _HOST; the old 'module_host' guard
+            # never matched, so every phash candidate was accepted at 1.0 and
+            # the CNN / heuristic scorers were never consulted.
+            _scorers = _HOST.get_service("dedup_scorers") if _HOST else None
             for i in group_row_indices[1:]:
                 other_path = get_safe_path(MEDIA_DIR, rows[i]["rel_path"])
                 other_is_video = other_path is not None and mt.is_video(other_path)
