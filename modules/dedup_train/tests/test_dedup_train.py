@@ -57,7 +57,10 @@ def test_synth_pairs_balanced():
     rng = np.random.default_rng(0)
     imgs = [rng.integers(0, 256, (100, 120, 3), np.uint8) for _ in range(4)]
     ps = synth.synth_pairs(imgs, rng, per_image=6)
-    assert len(ps) == 24 and sum(l for *_, l, _ in ps) == 12
+    assert len(ps) == 24 and sum(l == 1.0 for *_, l, _ in ps) == 12
+    assert all(0.0 <= l <= 1.0 for *_, l, _ in ps)
+    assert all(0.5 <= l < 1.0 for *_, l, k in ps if k == "localedit")
+    assert any(k == "localedit" for *_, k in ps)
 
 
 @needs_torch

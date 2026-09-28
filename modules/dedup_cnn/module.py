@@ -41,14 +41,14 @@ def register(host):
     # checkpoint exists. A checkpoint carries its own width/depth and loads regardless.
     host.add_config_key("dup_cnn_sizes", default=_cnn_mod.sizes_text(), validate=lambda v: str(v or ""))
     host.add_settings_field(key="dup_cnn_sizes", label="Dup-CNN size table",
-                            kind="textarea", pane="general",
+                            kind="textarea", pane="models",
                             help="One size per line: name width depth. width scales the conv channels "
                                  "[16,32,64,128]; depth is conv blocks per stage. Edit freely; Trainer > "
                                  "Dedup trains and benchmarks these.")
     sizes = lambda: _cnn_mod.parse_sizes(host.config.get("dup_cnn_sizes"))
     host.add_config_key("dup_cnn_size", default="medium", validate=lambda v: str(v).lower())
     host.add_settings_field(key="dup_cnn_size", label="Dup-CNN size",
-                            kind="select", pane="general",
+                            kind="select", pane="models",
                             options=lambda: [{"value": k, "label": f"{k} ({_cnn_mod.count_params(v['width'], v['depth']):,} params)"}
                                              for k, v in sizes().items()],
                             help="Size of the duplicate-detection CNN when no trained checkpoint exists "

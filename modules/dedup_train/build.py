@@ -7,7 +7,9 @@ streams synthetic duplicate / non-duplicate pairs (synth.py) out of them,
 mixes in the REAL pairs the user labelled in the Dedup panel (merge =
 duplicate, "not a duplicate" = not; the dup_cnn_samples table) and trains
 one siamese CNN per selected size (nano..xxl, see dup_cnn.SIZES) on the
-SAME stream, so one data pass serves every size. Each size is scored on a
+SAME stream, so one data pass serves every size. Labels are graded 0..1: a
+local edit is labelled by its untouched fraction, so the score means "how
+much of the image is the same", not just dup / not. Each size is scored on a
 held-out image slice and on the user's own feedback pairs, then benchmarked
 (params, ms per pair at batch 1 for a CPU / Pi, batched on the GPU, and
 training memory), giving a speed-vs-parameters-vs-accuracy table to pick
@@ -200,7 +202,9 @@ def _batches(arr, batch):
 
 
 def _acc(cnn, arr, device, kinds=None):
-    """Accuracy of one model on prepared (a, b, y) arrays; per kind when given."""
+    """Accuracy (score>=0.5 vs label>=0.5) of one model on prepared (a, b, y)
+    arrays; per kind when given, plus "mae" = mean |score - label|, which is
+    what matters for the graded (localedit) labels."""
     a, b, y = arr
     p = np.concatenate([cnn.predict_batch(a[i:i + 64], b[i:i + 64], device) for i in range(0, len(y), 64)])
     ok = (p >= 0.5) == (y >= 0.5)
@@ -209,6 +213,7 @@ def _acc(cnn, arr, device, kinds=None):
     kinds = np.asarray(kinds)
     rep = {k: round(float(ok[kinds == k].mean()), 3) for k in sorted(set(kinds))}
     rep["all"] = round(float(ok.mean()), 3)
+    rep["mae"] = round(float(np.abs(p - y).mean()), 3)
     return rep
 
 

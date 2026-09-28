@@ -275,7 +275,7 @@ class DupCNN:
         """!
         @brief One pass of minibatch training over an iterable of (a, b, y)
                numpy batches (a, b: [n,3,WORK,WORK] float32 as encode_pair stores
-               them; y: [n] in {0,1}). For datasets that don't fit in memory
+               them; y: [n] in 0..1, soft labels allowed). For datasets that don't fit in memory
                (dedup_train streams millions of synthetic pairs through this).
         @param _opt_holder dict kept by the caller across calls so the optimizer
                state (Adam moments) survives between passes.

@@ -8,10 +8,13 @@ Given a chunk of decoded BGR images, make labelled pairs (a, b, label, kind):
     resize    downscaled (and sometimes back up), so the two differ in size
     nudge     shifted a few pixels + slight brightness/contrast change
     crop      a small (≤ 8 %) border trimmed off
-  not duplicates (label 0)
-    boxed     a solid box (censor bar / watermark / caption) covers a region
-    hardcrop  a big crop (≤ 60 % of the frame): different picture, same source
-    unrelated two different images from the chunk
+  not / partly duplicates (label 0..1)
+    localedit one region changed (solid box, a patch of another picture, or the
+              same region warped - the "slightly different smile"); label =
+              fraction of pixels left alone (0.5..0.99), so the net learns a
+              similarity degree instead of all-or-nothing
+    hardcrop  a big crop (≤ 60 % of the frame): different picture, same source (0)
+    unrelated two different images from the chunk (0)
 
 Every call draws fresh random parameters, so regenerating pairs each epoch is
 the augmentation. Pure numpy + cv2; build.py also reaches `synth.cv2` for its
@@ -21,7 +24,7 @@ import cv2
 import numpy as np
 
 DUP_KINDS = ("reencode", "resize", "nudge", "crop")
-NON_KINDS = ("boxed", "hardcrop", "unrelated")
+NON_KINDS = ("localedit", "hardcrop", "unrelated")
 
 
 def _reencode(img, rng):
@@ -64,17 +67,26 @@ def _crop(img, rng, lo, hi):
     return img[y0:y0 + ch, x0:x0 + cw].copy()
 
 
-def _boxed(img, rng):
+def _localedit(img, others, rng):
+    """Same image with ONE region changed; label = fraction of pixels untouched.
+    Area is log-uniform in 1..50 %, so small edits (a smile, a watermark) are common."""
     h, w = img.shape[:2]
+    f = float(np.exp(rng.uniform(np.log(0.01), np.log(0.5))))
+    bw = int(np.clip(np.sqrt(f * w * h * float(rng.uniform(0.5, 2.0))), 8, w))
+    bh = int(np.clip(f * w * h / bw, 8, h))
+    x0, y0 = int(rng.integers(0, w - bw + 1)), int(rng.integers(0, h - bh + 1))
     out = img.copy()
-    bw, bh = int(w * rng.uniform(0.15, 0.5)), int(h * rng.uniform(0.08, 0.4))
-    x0 = int(rng.integers(0, max(1, w - bw)))
-    y0 = int(rng.integers(0, max(1, h - bh)))
+    reg = out[y0:y0 + bh, x0:x0 + bw]
     r = rng.random()
-    color = [int(c) for c in rng.integers(0, 256, 3)] if r < 0.5 else \
-        [0, 0, 0] if r < 0.75 else [255, 255, 255]
-    cv2.rectangle(out, (x0, y0), (x0 + bw, y0 + bh), color, thickness=-1)
-    return out
+    if r < 0.3:                                  # censor bar / caption / watermark
+        reg[:] = rng.integers(0, 256, 3)
+    elif r < 0.6 and others:                     # a patch of another picture pasted in
+        o = others[int(rng.integers(len(others)))]
+        reg[:] = cv2.resize(_crop(o, rng, 0.2, 0.6), (bw, bh), interpolation=cv2.INTER_AREA)
+    else:                                        # the same region, slightly warped
+        m = cv2.getRotationMatrix2D((bw / 2, bh / 2), float(rng.uniform(-15, 15)), float(rng.uniform(0.8, 1.25)))
+        reg[:] = cv2.warpAffine(reg, m, (bw, bh), borderMode=cv2.BORDER_REFLECT)
+    return out, 1.0 - bw * bh / (w * h), "localedit"
 
 
 def _dup(img, rng):
@@ -93,19 +105,21 @@ def _dup(img, rng):
 
 
 def _non(img, others, rng):
+    """-> (b, label, kind); label is 0 for a different picture, 0.5..0.99 for a local edit."""
     kind = NON_KINDS[int(rng.integers(len(NON_KINDS)))]
     if kind == "unrelated" and not others:
-        kind = "boxed"
-    if kind == "boxed":
-        return _boxed(img, rng), kind
+        kind = "localedit"
+    if kind == "localedit":
+        return _localedit(img, others, rng)
     if kind == "hardcrop":
-        return _crop(img, rng, 0.25, 0.6), kind
-    return others[int(rng.integers(len(others)))], kind
+        return _crop(img, rng, 0.25, 0.6), 0.0, kind
+    return others[int(rng.integers(len(others)))], 0.0, kind
 
 
 def synth_pairs(imgs, rng, per_image=6):
     """imgs: list of BGR uint8 arrays -> list of (a, b, label, kind).
-    Half of each image's pairs are duplicates, half are not."""
+    Half of each image's pairs are exact duplicates (1.0); the other half are
+    unrelated (0.0) or partly edited (0.5..0.99 = untouched fraction)."""
     pairs = []
     n = len(imgs)
     for i, img in enumerate(imgs):
@@ -115,10 +129,10 @@ def synth_pairs(imgs, rng, per_image=6):
         for j in range(int(per_image)):
             if j % 2 == 0:
                 b, kind = _dup(img, rng)
-                pairs.append((img, b, 1, kind))
+                pairs.append((img, b, 1.0, kind))
             else:
-                b, kind = _non(img, others, rng)
-                pairs.append((img, b, 0, kind))
+                b, lab, kind = _non(img, others, rng)
+                pairs.append((img, b, lab, kind))
     return pairs
 
 
@@ -127,7 +141,8 @@ if __name__ == "__main__":
     imgs = [rng.integers(0, 256, (200 + 20 * k, 300, 3), np.uint8) for k in range(4)]
     ps = synth_pairs(imgs, rng, per_image=6)
     assert len(ps) == 24, len(ps)
-    assert sum(l for *_, l, _ in ps) == 12
+    assert sum(l == 1.0 for *_, l, _ in ps) == 12 and all(0.0 <= l <= 1.0 for *_, l, _ in ps)
+    assert all(0.5 <= l < 1.0 for *_, l, k in ps if k == "localedit")
     assert {k for *_, k in ps} <= set(DUP_KINDS + NON_KINDS)
     assert all(a.dtype == np.uint8 and b.dtype == np.uint8 and b.ndim == 3 for a, b, *_ in ps)
     print("synth self-check OK")
