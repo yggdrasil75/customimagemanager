@@ -392,6 +392,7 @@ def register(host):
             else:
                 orig = secure_filename(os.path.basename(media_path)) or "fetch.bin"
             dest, orig = expand_path(folder, meta, orig)
+            meta_json = json.dumps(packet, default=str)     # before the spool exists: a bad packet must not orphan a file
             fd, spool = tempfile.mkstemp(dir=m.upload_spool_dir, prefix="up-",
                                          suffix="-" + orig)
             os.close(fd)
@@ -399,7 +400,6 @@ def register(host):
                 shutil.move(media_path, spool)
             else:
                 shutil.copyfile(media_path, spool)
-            meta_json = json.dumps(packet)
             def _enq(sp=spool, on=orig, mj=meta_json):
                 db = host.db()
                 cur = db.execute("INSERT INTO upload_queue"

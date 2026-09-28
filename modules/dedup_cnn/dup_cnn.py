@@ -95,6 +95,19 @@ def _to_work_bgr(img: "np.ndarray | None") -> "np.ndarray | None":
     except Exception:
         return None
 
+def _to_work_u8(img: "np.ndarray | None") -> "np.ndarray | None":
+    """! @brief Resize to WORKxWORKx3 uint8 HWC (4x smaller than _to_work_bgr; the
+    tensors are made float on the GPU by _tensor). None if unusable."""
+    if img is None:
+        return None
+    try:
+        if img.ndim == 2:
+            img = np.repeat(img[:, :, None], 3, axis=2)
+        return cv2.resize(img[:, :, :3], (WORK, WORK), interpolation=cv2.INTER_AREA)
+    except Exception:
+        return None
+
+
 def encode_pair(img_a: "np.ndarray", img_b: "np.ndarray") -> "bytes | None":
     """!
     @brief Serialize an image pair to the stored training sample (two CHW tensors).
@@ -113,6 +126,17 @@ def _channels(width_mult: float) -> "list[int]":
     return [max(4, int(round(c * width_mult))) for c in base]
 
 if _HAVE_TORCH:
+    def _tensor(x, device: str) -> "torch.Tensor":
+        """[n,3,W,W] float32 CHW or [n,W,W,3] uint8 HWC numpy -> float 0..1 tensor on
+        device in channels_last layout. Host copy is pinned so non_blocking is real."""
+        t = torch.from_numpy(np.ascontiguousarray(x))
+        if device != "cpu":
+            t = t.pin_memory()
+        t = t.to(device, non_blocking=True)
+        if t.dtype == torch.uint8:
+            t = t.permute(0, 3, 1, 2).float().div_(255.0)       # already channels_last strides
+        return t.contiguous(memory_format=torch.channels_last)
+
     class _Encoder(nn.Module):
         """! @brief Shared conv tower mapping one WORKxWORK BGR image to an embedding."""
 
@@ -201,13 +225,24 @@ class DupCNN:
             pass
         return m
 
+    def compile(self) -> bool:
+        """! @brief Wrap the net in torch.compile (ROCm >= 6.4 / CUDA); False if unsupported."""
+        if not self.available:
+            return False
+        try:
+            self.net = torch.compile(self.net)
+            return True
+        except Exception:
+            return False
+
     def save(self, path: str) -> bool:
         """! @brief Write the checkpoint as a torch .pt file; return success."""
         if not self.available:
             return False
         try:
             tmp = path + ".tmp"
-            torch.save({"state_dict": self.net.state_dict(), "width_mult": self.width_mult,
+            net = getattr(self.net, "_orig_mod", self.net)          # unwrap torch.compile
+            torch.save({"state_dict": net.state_dict(), "width_mult": self.width_mult,
                         "depth": self.depth, "size": self.size}, tmp)
             os.replace(tmp, path)
             return True
@@ -218,35 +253,35 @@ class DupCNN:
         """!
         @brief Speed vs parameters: params, inference ms per pair at batch 1 (the
                Pi / CPU case) and at `batch` (the GPU case), and peak memory of one
-               training step at `batch` on a CUDA device.
+               training step at `batch` on a CUDA device ("cuda" or "cuda:N").
         """
         if not self.available:
             return {}
         import time
-        dev = device if (device != "cuda" or torch.cuda.is_available()) else "cpu"
+        gpu = device != "cpu" and torch.cuda.is_available()
+        dev = device if gpu else "cpu"
+        sync = (lambda: torch.cuda.synchronize(dev)) if gpu else (lambda: None)
         net = self.net.to(dev).eval()
         out = {"params": self.params, "device": dev, "batch": batch}
         with torch.no_grad():
             for n, key in ((1, "ms_per_pair_b1"), (batch, "ms_per_pair_batch")):
                 a = torch.rand(n, 3, WORK, WORK, device=dev); b = torch.rand_like(a)
                 net(a, b)
-                if dev == "cuda":
-                    torch.cuda.synchronize()
+                sync()
                 t = time.perf_counter()
                 for _ in range(reps):
                     net(a, b)
-                if dev == "cuda":
-                    torch.cuda.synchronize()
+                sync()
                 out[key] = round((time.perf_counter() - t) / reps / n * 1000, 3)
-        if dev == "cuda":
-            torch.cuda.reset_peak_memory_stats()
+        if gpu:
+            torch.cuda.reset_peak_memory_stats(dev)
             net.train()
             a = torch.rand(batch, 3, WORK, WORK, device=dev); b = torch.rand_like(a)
             y = torch.rand(batch, device=dev)
             nn.BCEWithLogitsLoss()(net(a, b), y).backward()
             net.zero_grad(set_to_none=True)
-            torch.cuda.synchronize()
-            out["train_mem_mb"] = round(torch.cuda.max_memory_allocated() / 2**20)
+            sync()
+            out["train_mem_mb"] = round(torch.cuda.max_memory_allocated(dev) / 2**20)
             net.eval()
         return out
 
@@ -271,19 +306,23 @@ class DupCNN:
             return None
 
     def fit_batches(self, batches, lr: float = 1e-3, device: str = "cpu",
-                    _opt_holder: dict = None, amp: bool = False) -> "float | None":
+                    _opt_holder: dict = None, amp: "str | bool" = "") -> "float | None":
         """!
         @brief One pass of minibatch training over an iterable of (a, b, y)
                numpy batches (a, b: [n,3,WORK,WORK] float32 as encode_pair stores
-               them; y: [n] in 0..1, soft labels allowed). For datasets that don't fit in memory
+               them, or [n,WORK,WORK,3] uint8 from _to_work_u8; y: [n] in 0..1,
+               soft labels allowed). For datasets that don't fit in memory
                (dedup_train streams millions of synthetic pairs through this).
         @param _opt_holder dict kept by the caller across calls so the optimizer
-               state (Adam moments) survives between passes.
+               state (Adam moments, fp16 grad scaler) survives between passes.
+        @param amp "bf16" (no scaler needed; fast on NVIDIA and RDNA3/4 WMMA),
+               "fp16" (GradScaler; the fast path on most AMD and Intel), or ""/False
+               for full float32. True = "bf16" for old callers.
         @return Mean loss of the pass, or None when torch is missing.
         """
         if not self.available:
             return None
-        self.net.to(device).train()
+        self.net.to(device, memory_format=torch.channels_last).train()
         holder = _opt_holder if _opt_holder is not None else {}
         opt = holder.get("opt")
         if opt is None or holder.get("lr") != lr:
@@ -291,32 +330,41 @@ class DupCNN:
             holder["opt"], holder["lr"] = opt, lr
         loss_fn = nn.BCEWithLogitsLoss()
         total, n = 0.0, 0
-        # bf16 autocast on a GPU (CUDA or ROCm): ~2x throughput for the same
-        # result on a net this small; no grad scaler needed with bf16.
-        use_amp = bool(amp) and device != "cpu"
+        mode = "bf16" if amp is True else ("" if not amp else str(amp).lower())
+        use_amp = mode in ("bf16", "fp16") and device != "cpu"
+        scaler = None
+        if use_amp and mode == "fp16":                     # fp16 needs loss scaling; bf16 does not
+            scaler = holder.get("scaler")
+            if scaler is None:
+                try:
+                    scaler = torch.amp.GradScaler("cuda")
+                except Exception:
+                    scaler = torch.cuda.amp.GradScaler()
+                holder["scaler"] = scaler
         for a, b, y in batches:
-            ta = torch.from_numpy(np.ascontiguousarray(a)).to(device, non_blocking=True)
-            tb = torch.from_numpy(np.ascontiguousarray(b)).to(device, non_blocking=True)
+            ta, tb = _tensor(a, device), _tensor(b, device)
             ty = torch.as_tensor(np.asarray(y, np.float32)).to(device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+            with torch.autocast(device_type="cuda", dtype=torch.float16 if mode == "fp16" else torch.bfloat16,
+                                enabled=use_amp):
                 logit = self.net(ta, tb)
             loss = loss_fn(logit.float(), ty)
-            loss.backward()
-            opt.step()
+            if scaler is not None:
+                scaler.scale(loss).backward(); scaler.step(opt); scaler.update()
+            else:
+                loss.backward(); opt.step()
             total += float(loss.item()) * len(ty); n += len(ty)
         self.net.eval()
         self.trained = self.trained or n > 0
         return total / n if n else None
 
     def predict_batch(self, a, b, device: str = "cpu"):
-        """! @brief Probabilities for prepared [n,3,WORK,WORK] float32 batches."""
+        """! @brief Probabilities for prepared float32 CHW or uint8 HWC batches."""
         if not self.available:
             return None
-        self.net.to(device).eval()
+        self.net.to(device, memory_format=torch.channels_last).eval()
         with torch.no_grad():
-            z = self.net(torch.from_numpy(np.ascontiguousarray(a)).to(device),
-                         torch.from_numpy(np.ascontiguousarray(b)).to(device))
+            z = self.net(_tensor(a, device), _tensor(b, device))
             return torch.sigmoid(z).cpu().numpy()
 
     def fit(self, samples: "list[tuple[bytes, int]]", epochs: int = 30,

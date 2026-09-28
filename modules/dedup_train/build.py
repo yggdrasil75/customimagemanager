@@ -23,8 +23,10 @@ once. "Ship" also writes modules/dedup_cnn/pretrained/dup_cnn_<size>.pt
 Data path: every image is decoded ONCE into a uint8 cache
 (models/dedup_train/cache_<hash>.npy, [N, S, S, 3]) by a process pool.
 Epochs read the cache (memory-mapped, or in RAM) and regenerate synthetic
-pairs per chunk (fresh random augmentations = the augmentation) with the
-next chunk prepared on a background thread. Runs on its own thread;
+pairs per chunk (fresh random augmentations = the augmentation) on a
+process pool (`workers` procs, each mmaps the cache), the next chunk
+prepared while the GPU trains the current one. Pairs travel as uint8 and
+become float on the device. Runs on its own thread;
 stoppable; one build at a time.
 
 The 9-float logistic heuristic is no longer trained here; dedup_heuristic
@@ -170,16 +172,42 @@ def _chunks(seq, n):
 
 
 def _cnn_arrays(pairs):
-    """pairs -> (a, b, y) float32 arrays in the CNN's stored-sample layout."""
-    a_l, b_l, y_l = [], [], []
-    for a, b, lab, _ in pairs:
-        wa, wb = dc._to_work_bgr(a), dc._to_work_bgr(b)
+    """pairs -> (a, b, y, kinds): a, b uint8 [n,WORK,WORK,3] (dc._tensor makes
+    them float on the device), y float32 in 0..1."""
+    a_l, b_l, y_l, k_l = [], [], [], []
+    for a, b, lab, kind in pairs:
+        wa, wb = dc._to_work_u8(a), dc._to_work_u8(b)
         if wa is None or wb is None:
             continue
-        a_l.append(wa); b_l.append(wb); y_l.append(float(lab))
+        a_l.append(wa); b_l.append(wb); y_l.append(float(lab)); k_l.append(kind)
     if not a_l:
         return None
-    return np.stack(a_l), np.stack(b_l), np.asarray(y_l, np.float32)
+    return np.stack(a_l), np.stack(b_l), np.asarray(y_l, np.float32), k_l
+
+
+_WCACHE = {}    # pair-gen worker: cache path -> mmap'd array (one per process)
+
+
+def _pairs_worker(args):
+    """Process-pool worker: synthetic pairs for a slice of cache indices.
+    Standalone (mmaps the cache itself), so it works under fork or spawn."""
+    cache_file, idx, per_image, seed = args
+    arr = _WCACHE.get(cache_file)
+    if arr is None:
+        arr = _WCACHE[cache_file] = np.load(cache_file, mmap_mode="r")
+    imgs = [np.ascontiguousarray(arr[i]) for i in idx]
+    rng = np.random.default_rng(seed)
+    pairs = synth.synth_pairs(imgs, rng, per_image=int(per_image)) if len(imgs) >= 2 else []
+    rng.shuffle(pairs)
+    return _cnn_arrays(pairs) if pairs else None
+
+
+def _cat(parts):
+    parts = [p for p in parts if p is not None]
+    if not parts:
+        return None
+    return (np.concatenate([p[0] for p in parts]), np.concatenate([p[1] for p in parts]),
+            np.concatenate([p[2] for p in parts]), sum((p[3] for p in parts), []))
 
 
 def _feedback_arrays(fb_cnn):
@@ -197,7 +225,7 @@ def _feedback_arrays(fb_cnn):
 
 
 def _batches(arr, batch):
-    a, b, y = arr
+    a, b, y = arr[:3]
     return ((a[i:i + batch], b[i:i + batch], y[i:i + batch]) for i in range(0, len(y), int(batch)))
 
 
@@ -205,7 +233,7 @@ def _acc(cnn, arr, device, kinds=None):
     """Accuracy (score>=0.5 vs label>=0.5) of one model on prepared (a, b, y)
     arrays; per kind when given, plus "mae" = mean |score - label|, which is
     what matters for the graded (localedit) labels."""
-    a, b, y = arr
+    a, b, y = arr[:3]
     p = np.concatenate([cnn.predict_batch(a[i:i + 64], b[i:i + 64], device) for i in range(0, len(y), 64)])
     ok = (p >= 0.5) == (y >= 0.5)
     if kinds is None:
@@ -217,17 +245,35 @@ def _acc(cnn, arr, device, kinds=None):
     return rep
 
 
-def _evaluate(models, hold_imgs, rng, per_image, device):
+def _evaluate(models, hold_imgs, rng, per_image, devs):
     """Held-out accuracy per pair kind for every size (images never trained on)."""
     imgs = [np.ascontiguousarray(im) for im in hold_imgs]
     if len(imgs) < 4:
         return {}
-    pairs = synth.synth_pairs(imgs, rng, per_image=per_image)
-    arr = _cnn_arrays(pairs)
+    arr = _cnn_arrays(synth.synth_pairs(imgs, rng, per_image=per_image))
     if arr is None:
         return {}
-    kinds = [k for a, b, _l, k in pairs if dc._to_work_bgr(a) is not None and dc._to_work_bgr(b) is not None]
-    return {name: _acc(m, arr, device, kinds) for name, m in models.items() if m.trained}
+    return {name: _acc(m, arr, devs[name], arr[3]) for name, m in models.items() if m.trained}
+
+
+def devices(spec, sizes):
+    """Size -> device. `spec`: "" (auto: first GPU or CPU), "cuda:1" (all sizes),
+    "cuda:0,cuda:1" (sizes spread over the list, biggest first on the first
+    device), or "xl=cuda:0,nano=cuda:1" (explicit; unmapped sizes use the plain
+    devices / auto). Sizes on different devices train concurrently."""
+    items = [x.strip() for x in str(spec or "").replace(";", ",").split(",") if x.strip()]
+    explicit = {k.strip().lower(): v.strip() for k, v in (x.split("=", 1) for x in items if "=" in x)}
+    plain = [x for x in items if "=" not in x] or [("cuda" if dc._HAVE_TORCH and dc.torch.cuda.is_available() else "cpu")]
+    order = sorted(sizes, key=lambda z: -dc.count_params(sizes[z]["width"], sizes[z]["depth"]))
+    return {z: explicit.get(z, plain[i % len(plain)]) for i, z in enumerate(order)}
+
+
+def gpus():
+    """[{value: "cuda:N", label: name}] for the device picker (empty = CPU only)."""
+    if not (dc._HAVE_TORCH and dc.torch.cuda.is_available()):
+        return []
+    return [{"value": f"cuda:{i}", "label": f"cuda:{i} {dc.torch.cuda.get_device_name(i)}"}
+            for i in range(dc.torch.cuda.device_count())]
 
 
 def bench(sizes=None, batch=256):
@@ -252,14 +298,16 @@ def bench(sizes=None, batch=256):
 
 def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_000,
           per_image=6, epochs=3, chunk=1024, batch=256, lr=1e-3, workers=4, holdout=0.03,
-          seed=0, install=True, ship=False, cache_side=CACHE_SIDE, in_ram=False, amp=True,
-          on_installed=None):
+          seed=0, install=True, ship=False, cache_side=CACHE_SIDE, in_ram=False, amp="bf16",
+          device="", compile=False, on_installed=None):
     """Blocking build. `paths`: image files to learn from (library + extra
     folders, already scanned). `feedback`: {"cnn": [(blob, label)]} from the
     Dedup panel's merge / not-a-duplicate decisions. `sizes`: {name: {width,
     depth}} (default dc.SIZES), all trained on the same stream. `active`: which size becomes
-    models/dup_cnn.pt (default: the largest trained). Returns the summary
-    (also progress['last'])."""
+    models/dup_cnn.pt (default: the largest trained). `device`: see devices()
+    (one GPU, several to spread the sizes over, or size=device). `amp`: "bf16",
+    "fp16" or "". `compile`: torch.compile the nets. Returns the summary (also
+    progress['last'])."""
     if not _lock.acquire(blocking=False):
         return {"ok": False, "error": "a build is already running"}
     if not dc._HAVE_TORCH:
@@ -274,6 +322,7 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
     fb_arr = _feedback_arrays((feedback or {}).get("cnn"))
     summary = {"ok": False, "images": 0, "pairs": 0, "sizes": {z: {} for z in sizes}, "active": active,
                "feedback_pairs": 0 if fb_arr is None else int(len(fb_arr[2]))}
+    pool = None
     try:
         paths = list(paths)
         if not paths:
@@ -283,6 +332,7 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
         paths = paths[:int(max_images)]
         progress.update(images_total=len(paths), phase="decoding")
         _say(host, f"decoding {len(paths)} images into the cache...")
+        paths_all = paths
         cache, paths = build_cache(host, paths, int(cache_side), workers, in_ram=bool(in_ram))
         n_hold = max(8, int(len(paths) * holdout)) if len(paths) >= 40 else 0
         hold_idx, train_idx = list(range(n_hold)), list(range(n_hold, len(paths)))
@@ -290,25 +340,43 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
         progress.update(images_total=len(train_idx) * int(epochs), images_done=0, phase="training")
         rng = np.random.default_rng(seed)
 
+        # Pair-gen pool (forked before this build's GPU work; workers never
+        # touch torch, each mmaps the cache file, so a fork is safe).
+        pool = ProcessPoolExecutor(max(1, int(workers)))
+        cache_file = cache_path(host, paths_all, int(cache_side))
         models = {z: dc.DupCNN.sized(z, sizes) for z in sizes}
-        device = "cuda" if dc.torch.cuda.is_available() else "cpu"
-        if device == "cuda":
+        devs = devices(device, sizes)
+        groups = {}                                   # device -> sizes; one training thread per device
+        for z, d in devs.items():
+            groups.setdefault(d, []).append(z)
+        _say(host, "devices: " + ", ".join(f"{z} on {d}" for z, d in devs.items()) + f"; amp {amp or 'off'}")
+        if any(d != "cpu" for d in groups):
             dc.torch.backends.cudnn.benchmark = True
+            if compile:
+                _say(host, "compiling nets: " + ", ".join(z for z, m in models.items() if devs[z] != "cpu" and m.compile()))
         opts = {z: {} for z in sizes}
         done = 0
 
         def make_pairs(idx):
-            imgs = [np.ascontiguousarray(cache[i]) for i in sorted(idx)]
-            pairs = synth.synth_pairs(imgs, rng, per_image=int(per_image)) if len(imgs) >= 2 else []
-            rng.shuffle(pairs)
-            return len(pairs), (_cnn_arrays(pairs) if pairs else None)
+            idx = sorted(idx)
+            n = max(1, min(int(workers), len(idx) // 8))          # >= 8 images per shard for "unrelated"
+            shards = [idx[i::n] for i in range(n)]
+            arr = _cat(pool.map(_pairs_worker, [(cache_file, sh, int(per_image), int(rng.integers(2**31)))
+                                                for sh in shards if len(sh) >= 2]))
+            return (0 if arr is None else len(arr[2])), arr
 
         def train_all(arr):
-            for z, m in models.items():
-                loss = m.fit_batches(_batches(arr, batch), lr=lr, device=device,
-                                     _opt_holder=opts[z], amp=bool(amp))
-                if loss is not None:
-                    _note_loss(z, loss)
+            def run(zs):
+                for z in zs:
+                    loss = models[z].fit_batches(_batches(arr, batch), lr=lr, device=devs[z],
+                                                 _opt_holder=opts[z], amp=amp)
+                    if loss is not None:
+                        _note_loss(z, loss)
+            if len(groups) == 1:
+                run(next(iter(groups.values())))
+            else:                                     # each device trains its sizes at the same time
+                with ThreadPoolExecutor(len(groups)) as ex:
+                    list(ex.map(run, groups.values()))
 
         with ThreadPoolExecutor(1) as pre:          # prepares the NEXT chunk while the GPU trains this one
             for ep in range(int(epochs)):
@@ -341,17 +409,17 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
 
         progress["phase"] = "evaluating"
         _say(host, f"evaluating {len(sizes)} size(s) on {len(hold_idx)} held-out images...")
-        held = _evaluate(models, [cache[i] for i in hold_idx], rng, int(per_image), device) if hold_idx else {}
+        held = _evaluate(models, [cache[i] for i in hold_idx], rng, int(per_image), devs) if hold_idx else {}
         for z, m in models.items():
             row = summary["sizes"][z]
-            row.update({"width": m.width_mult, "depth": m.depth, "params": m.params,
+            row.update({"width": m.width_mult, "depth": m.depth, "params": m.params, "device": devs[z],
                         "final_loss": progress["loss"].get(z), "held_out": held.get(z, {}),
-                        "feedback": _acc(m, fb_arr, device) if (fb_arr is not None and m.trained) else None})
+                        "feedback": _acc(m, fb_arr, devs[z]) if (fb_arr is not None and m.trained) else None})
             progress["phase"] = f"benchmarking {z}"
             _say(host, f"benchmarking {z}...")
             row["bench_cpu"] = m.bench("cpu", batch=min(int(batch), 64))
-            if device == "cuda":
-                row["bench_gpu"] = m.bench("cuda", batch=int(batch))
+            if devs[z] != "cpu":
+                row["bench_gpu"] = m.bench(devs[z], batch=int(batch))
 
         progress["phase"] = "writing"
         _say(host, "writing models...")
@@ -388,6 +456,8 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
             host.logger.error(f"dedup_train: {e}")
         return summary
     finally:
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
         progress.update(running=False, phase="idle", last=summary)
         _lock.release()
 

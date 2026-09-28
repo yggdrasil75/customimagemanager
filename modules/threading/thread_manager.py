@@ -396,6 +396,13 @@ class ThreadManager:
             return
         self._rr_cursor = names[(i + 1) % len(names)]
 
+    def inflight(self, name=None):
+        """Jobs running under the processor, for one source or all of them."""
+        with self._lock:
+            self._inflight = {f for f in self._inflight if not f.done()}
+            return sum(1 for f in self._inflight
+                       if name is None or getattr(f, "_src_name", None) == name)
+
     def _source_idle(self, name):
         """True when `name` has no jobs in flight. Mirrors _foreground_idle but for
         any source, so drain-one-at-a-time can tell 'claim dried up but a batch is

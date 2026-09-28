@@ -4532,8 +4532,9 @@ def _claim_upload_job():
             return None
         costed = [(r, _spool_cost_mb(r["spool_path"], r["orig_name"])) for r in rows]
         target, cost = None, 0.0
+        ours = thread_manager.inflight("upload")
         for r, c in costed:
-            if thread_manager.can_afford(c):
+            if thread_manager.can_afford(c, inflight_hint=ours):
                 target, cost = r["id"], c
                 break
         if target is None:

@@ -98,7 +98,8 @@
     const c = s.scorer, fb = s.feedback || {};
     return [
       `live CNN: ${c ? (c.available ? (c.trained ? `trained, size ${c.size || '?'} (${fmtN(c.params)} params)` : 'untrained, falls back to heuristic') : 'torch missing') : 'module off'}`,
-      `installed sizes: ${_installed.length ? _installed.join(', ') : 'none'}${s.cuda ? '' : '  (no CUDA: training runs on CPU)'}`,
+      `installed sizes: ${_installed.length ? _installed.join(', ') : 'none'}`,
+      `GPUs: ${(s.gpus || []).length ? s.gpus.map(g => g.label).join(', ') : 'none (training runs on CPU)'}`,
       `library: ${s.library_images} images; your decisions: ${fb.dup || 0} duplicate, ${fb.not_dup || 0} not`,
       `installs to: ${s.models_dir}`,
     ].join('\n');
@@ -126,6 +127,7 @@
     _installed = s.installed_sizes || [];
     if (!$('ddt_sizes_text').value) { $('ddt_sizes_text').value = s.sizes_text || ''; _sizes = s.sizes || {}; }
     if (!$('ddt_folders').value && s.folders) $('ddt_folders').value = s.folders;
+    $('ddt_gpus').innerHTML = (s.gpus || []).map(g => `<option value="${g.value}">${g.label}</option>`).join('');
     $('ddt_fb_n').textContent = s.feedback?.cnn || 0;
     $('ddt_live').textContent = fmtLive(s);
     renderSizes(s);
@@ -165,7 +167,8 @@
       batch: +$('ddt_batch').value, lr: +$('ddt_lr').value,
       workers: +$('ddt_workers').value, seed: +$('ddt_seed').value,
       install: $('ddt_install').checked, ship: $('ddt_ship').checked,
-      cache_side: +$('ddt_cache_side').value, in_ram: $('ddt_in_ram').checked, amp: $('ddt_amp').checked,
+      cache_side: +$('ddt_cache_side').value, in_ram: $('ddt_in_ram').checked, amp: $('ddt_amp').value,
+      device: $('ddt_device').value, compile: $('ddt_compile').checked,
     };
     const r = await fetch('/api/dedup_train/build', { method: 'POST', headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify(body) }).then(r => r.json()).catch(() => null);
