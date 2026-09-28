@@ -104,6 +104,26 @@ def _pixel_similarity_score(diff_mean: float, threshold: float = 15.0) -> float:
 
 # ── Dedup ──────────────────────────────────────────────────────────────────────
 
+def _quality(rel_path):
+    """What the stored file was made from, which is what a dedup decision
+    needs (every library file is itself a lossless JXL, so that label said
+    nothing). A JPEG transcode keeps a 'jbrd' reconstruction box in the
+    container header; anything else came from a lossless source (PNG, RAW,
+    developed HEIF). Returns ("JPEG"|"Lossless", size_bytes)."""
+    path = get_safe_path(MEDIA_DIR, rel_path)
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            head = f.read(65536)
+    except Exception:
+        return "?", 0
+    return ("JPEG" if b"jbrd" in head else "Lossless"), size
+
+
+def _fmt_size(n):
+    return f"{n / 1048576:.1f} MB" if n >= 1048576 else f"{n / 1024:.0f} KB"
+
+
 def _dedup_format_groups(cached_groups, rows_by_path):
     """Turn stored group dicts into the detail format the frontend expects."""
     out = []
@@ -113,9 +133,10 @@ def _dedup_format_groups(cached_groups, rows_by_path):
             r = rows_by_path.get(path)
             if r:
                 w, h = r["width"] or 0, r["height"] or 0
+                q, size = _quality(path)
                 detail.append({"filename": path, "format": "JXL",
                                 "resolution": f"{w}x{h}" if w else "N/A",
-                                "quality": "Lossless"})
+                                "quality": q, "size": size, "size_h": _fmt_size(size)})
         if len(detail) > 1:
             detail.sort(key=lambda x: -(int(x["resolution"].split("x")[0]) *
                                          int(x["resolution"].split("x")[1]))
@@ -361,9 +382,10 @@ def dedup_groups_page():
             w, h = r["width"] or 0, r["height"] or 0
             desc = (r["description"] or "").strip()
             tag_count = len([t for t in (r["tags"] or "").split(",") if t.strip()])
+            q, size = _quality(path)
             detail.append({"filename": path, "format": "JXL",
                             "resolution": f"{w}x{h}" if w else "N/A",
-                            "quality": "Lossless",
+                            "quality": q, "size": size, "size_h": _fmt_size(size),
                             "score": score_map.get(path),
                             "db_id": row["id"],
                             "pixels": w * h,

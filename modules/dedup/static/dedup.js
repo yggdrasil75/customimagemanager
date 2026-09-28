@@ -163,7 +163,8 @@ function renderDedupGroup(group){
         class="w-full h-28 object-cover rounded mb-1 bg-black">
       <p class="text-[10px] truncate text-blue-300 font-mono mb-1" title="${f}">${f.split('/').pop()}</p>
       <p class="text-[10px] text-gray-400 mb-1">${item.resolution}
-        <span class="${item.quality==='Lossless'?'text-green-400':'text-yellow-400'}">${item.quality}</span></p>
+        <span class="${item.quality==='Lossless'?'text-green-400':'text-yellow-400'}" title="Source the stored JXL was made from: JPEG = lossy origin (bit-exact transcode); Lossless = PNG/RAW/HEIF source">${item.quality}</span>
+        ${item.size_h ? `<span class="text-gray-500">${item.size_h}</span>` : ''}</p>
       ${scoreBadge ? `<p class="mb-1">${scoreBadge}</p>` : ''}
       <button class="w-full bg-green-700 hover:bg-green-600 text-xs font-bold py-1 rounded mb-1"
         onclick="keepAndMerge(this)">Keep &amp; Merge</button>
