@@ -333,8 +333,11 @@ def _db_release_pool(ex, n_workers):
     except Exception:
         pass
 
+_exiting = threading.Event()   # set once process teardown starts; bg loops stop
+
 @atexit.register
 def _db_close_all():
+    _exiting.set()
     with _all_conns_lock:
         conns = list(_all_conns.values())
         _all_conns.clear()
@@ -4858,10 +4861,12 @@ def _janitor_sweep():
     return summary
 
 def _janitor_loop():
-    while True:
+    while not _exiting.is_set():
         try:
             _janitor_sweep()
         except Exception as e:
+            if _exiting.is_set():
+                return             # db closed under us mid-sweep: normal at exit
             access_logger.error(f"spool janitor sweep failed: {e}", exc_info=True)
         _janitor_wake.wait(timeout=_JANITOR_INTERVAL_SECS)
         _janitor_wake.clear()

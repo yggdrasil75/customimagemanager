@@ -291,14 +291,21 @@ class ThreadManager:
                     self.release_key(k)
                 self.wake()
         with self._lock:
-            fut = self._ex.submit(_run)
+            try:
+                fut = self._ex.submit(_run)
+            except RuntimeError:           # executor torn down: interpreter exiting
+                self._exiting = True
+                self._uncommit_mem(cost)
+                if key:
+                    self.release_key(key)
+                return False
             fut._src_name = src_name          # so _foreground_idle can tell whose
             self._inflight.add(fut)           # jobs are still running
         return True
 
     def _process_loop(self):
         POLL = 1.0
-        while True:
+        while not getattr(self, "_exiting", False):
             try:
                 self._process_once(POLL)
             except Exception:
