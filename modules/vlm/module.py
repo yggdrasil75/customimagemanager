@@ -142,6 +142,30 @@ def register(host):
         transform=None, available=client.embed_configured,
         reason="set the OAI endpoint and an embedding model", cost_mb=0, **_shared)
 
+    # embed.text: the same /v1/embeddings, as a text-only pick (books / passages)
+    # when the endpoint serves a text embedding model. Separate config key so
+    # the image pick and the text pick can name different models.
+    host.add_config_key("oai_text_embed_model", default="", validate=lambda v: str(v or ""))
+
+    def _text_model():
+        return (host.config.get("oai_text_embed_model") or host.config.get("oai_embed_model") or "").strip()
+
+    def _text_embed_handle():
+        model = _text_model()
+        fn = lambda text, *a, **k: client.embed_text(text, model=model)
+        fn.embed_query = fn
+        fn.space = f"oai:{model}"
+        return fn
+    host.provide_model("embed.text", "oai", label="OpenAI-compatible embeddings", family="LLM",
+        speed="balanced", supports_conf=False,
+        settings=[{"key": "oai_text_embed_model", "label": "Text embedding model", "kind": "text",
+                   "help": "Model name at the endpoint's /v1/embeddings for passages "
+                           "(e.g. a Qwen3-Embedding or bge served by vLLM / Ollama). "
+                           "Empty = the image embedding model."}],
+        loader=_text_embed_handle,
+        transform=None, available=lambda: bool((host.config.get("oai_endpoint") or "").strip() and _text_model()),
+        reason="set the OAI endpoint and a text embedding model", cost_mb=0, **_shared)
+
     def _configured():
         return bool((host.config.get("oai_endpoint") or "").strip()
                     and (host.config.get("oai_model") or "").strip())

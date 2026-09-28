@@ -51,6 +51,32 @@
   }
   window.bulkEmbed = bulkEmbed;
 
+  // The editor's "Similar" button: rank the library against the current file.
+  // The backend dispatches on media kind (image/video → image space, audio →
+  // the music module's audio space); the grid shows what comes back.
+  async function findSimilarToCurrent(topK) {
+    const fn = window.currentFile;
+    if (!fn) { showToast('Select a file first.'); return; }
+    let d;
+    try {
+      d = await fetch('/api/embedding/similar', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: fn, top_k: topK || 60 })
+      }).then(r => r.json());
+    } catch (e) { showToast('Network error.'); return; }
+    if (!d.success) { showToast(d.error || 'Similar search failed.'); return; }
+    if (d.kind === 'audio' && typeof window.musicShowSimilar === 'function') {
+      window.musicShowSimilar(fn, d.files || []);
+      return;
+    }
+    const files = d.files || [];
+    if (typeof totalFiles !== 'undefined') totalFiles = files.length;
+    renderGallery(files);
+    if (typeof updatePager === 'function') updatePager();
+    showToast(files.length ? `${files.length} similar item(s) — best first.` : 'No similar items.');
+  }
+  window.findSimilarToCurrent = findSimilarToCurrent;
+
   // Export for use by review.js
   window.EmbeddingUI = { refreshEmbedStatus };
 

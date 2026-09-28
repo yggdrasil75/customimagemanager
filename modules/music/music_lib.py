@@ -205,28 +205,56 @@ def compute_embedding(abs_path: str, max_seconds: float = 90.0) -> np.ndarray | 
     except Exception:
         return None
 
-def normalize_matrix(M: np.ndarray) -> np.ndarray:
-    """Z-score per column then L2-normalise rows -> cosine == dot product."""
+def normalize_matrix(M: np.ndarray, zscore: bool = True) -> np.ndarray:
+    """Rows L2-normalised -> cosine == dot product. zscore=True first z-scores
+    each column: right for the hand-crafted librosa fingerprint (features on
+    wildly different scales), wrong for a model space (CLAP, MuQ) where text
+    queries must stay comparable to the stored vectors."""
     M = np.asarray(M, dtype=np.float32)
-    mu = M.mean(axis=0, keepdims=True)
-    sd = M.std(axis=0, keepdims=True) + 1e-6
-    Z = (M - mu) / sd
-    n = np.linalg.norm(Z, axis=1, keepdims=True) + 1e-9
-    return Z / n
+    if zscore:
+        mu = M.mean(axis=0, keepdims=True)
+        sd = M.std(axis=0, keepdims=True) + 1e-6
+        M = (M - mu) / sd
+    n = np.linalg.norm(M, axis=1, keepdims=True) + 1e-9
+    return M / n
+
+def is_fingerprint_space(space) -> bool:
+    return str(space or "") == EMB_SIG
 
 # ── clustering ──────────────────────────────────────────────────────────────────
-def cluster_embeddings(paths, embs, k=None):
+def _kmeans_np(X, k, iters=25, seed=0):
+    """Plain numpy k-means (cosine rows): the no-sklearn fallback."""
+    rng = np.random.default_rng(seed)
+    C = X[rng.choice(len(X), size=k, replace=False)].copy()
+    labels = np.zeros(len(X), dtype=int)
+    for _ in range(iters):
+        new = np.argmax(X @ C.T, axis=1)
+        if np.array_equal(new, labels) and _:
+            break
+        labels = new
+        for c in range(k):
+            m = labels == c
+            if m.any():
+                v = X[m].mean(axis=0); C[c] = v / (np.linalg.norm(v) + 1e-9)
+    return labels
+
+def kmeans_labels(X, k, seed=0):
+    if HAVE_SKLEARN:
+        return KMeans(n_clusters=k, n_init=4, random_state=seed).fit(X).labels_
+    return _kmeans_np(X, k, seed=seed)
+
+def cluster_embeddings(paths, embs, k=None, zscore=True):
     """KMeans over a list of embeddings. Returns {rel_path: cluster_id} and k."""
-    X = normalize_matrix(np.vstack(embs))
+    X = normalize_matrix(np.vstack(embs), zscore=zscore)
     n = len(paths)
     if k is None:
         k = max(2, min(40, int(round(np.sqrt(n / 2)))))
     k = min(k, n)
-    km = KMeans(n_clusters=k, n_init=4, random_state=0).fit(X)
-    return {p: int(c) for p, c in zip(paths, km.labels_)}, k
+    labels = kmeans_labels(X, k)
+    return {p: int(c) for p, c in zip(paths, labels)}, k
 
 # ── similarity / shuffle ────────────────────────────────────────────────────────
-def shuffle_by(seed_vecs, all_paths, all_embs, temperature=0.25, limit=500):
+def shuffle_by(seed_vecs, all_paths, all_embs, temperature=0.25, limit=500, zscore=True):
     """Order tracks by similarity to the seed centroid, with controlled noise.
 
     seed_vecs : list of embeddings defining the seed (one song, or every song by
@@ -236,8 +264,8 @@ def shuffle_by(seed_vecs, all_paths, all_embs, temperature=0.25, limit=500):
     """
     if not all_embs:
         return []
-    M = normalize_matrix(np.vstack(all_embs))
-    centroid = normalize_matrix(np.vstack(seed_vecs)).mean(axis=0)
+    M = normalize_matrix(np.vstack(all_embs), zscore=zscore)
+    centroid = normalize_matrix(np.vstack(seed_vecs), zscore=zscore).mean(axis=0)
     centroid = centroid / (np.linalg.norm(centroid) + 1e-9)
     sims = M @ centroid                      # cosine, already row-normalised
     # add gaussian jitter scaled by temperature so the order is a playlist
@@ -245,3 +273,79 @@ def shuffle_by(seed_vecs, all_paths, all_embs, temperature=0.25, limit=500):
     score = sims + noise
     order = np.argsort(-score)
     return [all_paths[i] for i in order[:limit]]
+# ── radio: one route through the whole library ─────────────────────────────────
+def _nn_tour(X, start=0):
+    """Greedy nearest-unvisited tour over rows of X (cosine). O(n²) time, O(n)
+    memory. Returns index order."""
+    n = len(X)
+    visited = np.zeros(n, dtype=bool)
+    order = [start]; visited[start] = True
+    cur = start
+    for _ in range(n - 1):
+        sims = X @ X[cur]
+        sims[visited] = -np.inf
+        cur = int(np.argmax(sims)); visited[cur] = True
+        order.append(cur)
+    return order
+
+def _two_opt(X, order, rounds=3):
+    """Cheap 2-opt on a short tour (cluster centroids): uncross edges."""
+    D = 1.0 - X @ X.T
+    o = list(order); n = len(o)
+    if n < 4:
+        return o
+    for _ in range(rounds):
+        improved = False
+        for i in range(1, n - 2):
+            for j in range(i + 1, n - 1):
+                a, b, c, d = o[i - 1], o[i], o[j], o[j + 1]
+                if D[a, c] + D[b, d] < D[a, b] + D[c, d] - 1e-9:
+                    o[i:j + 1] = o[i:j + 1][::-1]; improved = True
+        if not improved:
+            break
+    return o
+
+def route_playlist(paths, embs, start_vec=None, zscore=True, seed=None):
+    """Every track once, ordered as one smooth walk through embedding space:
+    rock → blues → jazz → classical, each step to a near neighbour.
+
+    Cluster (k ≈ √(n/2)), tour the centroids (greedy + 2-opt), then walk each
+    cluster greedily from the member nearest the previous cluster's last
+    track. `start_vec` picks the first track (the one nearest it), so a new
+    round can begin where the previous one ended; otherwise a random track.
+    """
+    n = len(paths)
+    if n == 0:
+        return []
+    if n <= 3:
+        return list(paths)
+    X = normalize_matrix(np.vstack(embs), zscore=zscore)
+    rng = np.random.default_rng(seed)
+    if start_vec is not None and np.asarray(start_vec).size == X.shape[1]:
+        q = np.asarray(start_vec, np.float32); q = q / (np.linalg.norm(q) + 1e-9)
+        first = int(np.argmax(X @ q))
+    else:
+        first = int(rng.integers(n))
+    k = max(2, min(60, int(round(np.sqrt(n / 2)))))
+    labels = kmeans_labels(X, min(k, n), seed=int(rng.integers(1 << 30)))
+    members = {c: np.flatnonzero(labels == c) for c in np.unique(labels)}
+    cids = sorted(members)
+    C = np.vstack([X[members[c]].mean(axis=0) for c in cids])
+    C = C / (np.linalg.norm(C, axis=1, keepdims=True) + 1e-9)
+    c_start = cids.index(int(labels[first]))
+    c_order = _two_opt(C, _nn_tour(C, start=c_start))
+    # rotate so the tour starts at the cluster holding `first`
+    c_order = c_order[c_order.index(c_start):] + c_order[:c_order.index(c_start)]
+    out = []
+    prev = X[first]; entry = first
+    for ci in c_order:
+        idx = members[cids[ci]]
+        Xi = X[idx]
+        if entry is not None and entry in set(idx.tolist()):
+            s0 = int(np.flatnonzero(idx == entry)[0])
+        else:
+            s0 = int(np.argmax(Xi @ prev))
+        local = _nn_tour(Xi, start=s0) if len(idx) > 1 else [0]
+        out.extend(int(idx[i]) for i in local)
+        prev = X[out[-1]]; entry = None
+    return [paths[i] for i in out]

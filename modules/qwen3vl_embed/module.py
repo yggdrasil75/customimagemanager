@@ -123,6 +123,14 @@ class _Embedder:
         v = self._run(QUERY_INSTRUCTION, [{"type": "text", "text": text}])
         return _normalise(v, dims)
 
+    def embed_doc_text(self, text, dims):
+        """A passage (document side): the reference's document instruction."""
+        text = (text or "").strip()
+        if not text:
+            return None
+        v = self._run(DOC_INSTRUCTION, [{"type": "text", "text": text}])
+        return _normalise(v, dims)
+
 
 def registry_key(model_id):
     return f"qwen3vl:{model_id}"
@@ -176,4 +184,30 @@ def register(host):
              "help": "0 = native (2048 for 2B, 4096 for 8B). Smaller vectors stay comparable "
                      "and keep the table small; changing it means regenerating."},
         ])
-    host.logger.info("qwen3vl_embed module: registered embed (2b, 8b)")
+    # embed.text: the same model as a text-only pick. Useful when one model
+    # should serve everything; a dedicated text model (text_embed module) is
+    # the better pick for long passages.
+    def _text_loader():
+        size = host.model_variant("embed.text", provider="qwen3vl")["size"] or "2b"
+        mid = MODELS.get(size, MODELS["2b"])
+        emb = load(mid, size)
+        if not emb:
+            raise RuntimeError(f"Qwen3-VL-Embedding {mid} failed to load")
+        dims = int(host.config.get("qwen3vl_embed_dims") or 0)
+
+        def run(text, *a, **k):
+            return emb.embed_doc_text(text, dims)
+        run.embed_query = lambda text: emb.embed_text(text, dims)
+        run.space = f"qwen3vl-embed:{size}" + (f":{dims}" if dims else "")
+        run.registry_key = registry_key(mid)
+        return run
+
+    host.provide_model("embed.text", "qwen3vl", label="Qwen3-VL-Embedding", family="Qwen3-VL",
+        sizes=_SIZES, loader=_text_loader, transform=None,
+        available=lambda: AVAILABLE, reason=UNAVAILABLE_REASON,
+        cost_mb=_COST_MB["2b"], gpu=og.has_gpu(), speed="accurate", supports_conf=False,
+        note="One model for images and text. Caption-length training: a dedicated "
+             "text model handles long book passages better.",
+        settings=[{"key": "qwen3vl_embed_dims", "label": "Vector dims (MRL)", "kind": "number",
+                   "help": "Shared with the image pick."}])
+    host.logger.info("qwen3vl_embed module: registered embed + embed.text (2b, 8b)")

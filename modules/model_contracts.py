@@ -144,6 +144,26 @@ CORE_CAPABILITIES = {
         "input": _IMG,
         "output": "1-D float32 ndarray, L2-normalised; None on failure",
     },
+    "embed.text": {
+        "label": "Text embedding",
+        "summary": "Text-to-text embedding for passages and queries (books, notes, "
+                   "descriptions). A separate space from image embeddings: a dedicated "
+                   "text model handles long passages and query/document asymmetry.",
+        "input": "embed(text) — a document/passage; the handle also exposes "
+                 ".embed_query(text) for a search query (falls back to embed) and "
+                 ".space (vector-space tag)",
+        "output": "1-D float32 ndarray, L2-normalised; None on failure",
+    },
+    "embed.audio": {
+        "label": "Audio embedding",
+        "background": True,   # non-region: served by the music module's sweep
+        "summary": "Whole-track audio embedding for similarity, clustering and "
+                   "shuffle-by. A model with a joint text space (CLAP, MuQ-MuLan) "
+                   "also exposes .embed_text so 'sem:christmas' works on music.",
+        "input": "embed(abs_path) — path to an audio file; handle may expose "
+                 ".embed_text(text) (query into the same space) and .space",
+        "output": "1-D float32 ndarray, L2-normalised; None on failure",
+    },
     "iqa": {
         "label": "Image quality",
         "background": True,   # non-region: served by the module's background sweep

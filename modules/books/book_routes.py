@@ -636,7 +636,7 @@ def _embed_background(force=False):
     if book_state["embedding"]:
         return
     if not CTX["embed_enabled"]():
-        book_state["last_error"] = ("No OAI embedding model configured — set one "
+        book_state["last_error"] = ("No text embedding model picked — set one "
                                     "in Settings to enable passage search.")
         return
     book_state["embedding"] = True
@@ -973,7 +973,8 @@ def register(host, ctx: dict):
         force = bool((request.json or {}).get("force"))
         if not ctx["embed_enabled"]():
             return jsonify({"success": False,
-                            "error": "Set an OAI embedding model in Settings first."})
+                            "error": "Pick a text embedding model first "
+                                     "(Settings → Models → Text embedding)."})
         threading.Thread(target=_embed_background, args=(force,), daemon=True).start()
         return jsonify({"success": True})
 
@@ -1351,8 +1352,8 @@ def register(host, ctx: dict):
             return jsonify({"success": False, "error": "empty query"})
         if not ctx["embed_enabled"]():
             return jsonify({"success": False,
-                            "error": "Semantic search needs an OAI embedding "
-                                     "model (set it in Settings)."})
+                            "error": "Semantic search needs a text embedding model "
+                                     "(Settings → Models → Text embedding)."})
         sig = bi.emb_sig(ctx["embed_tag"]())
         db = _db()
         n = db.execute("SELECT COUNT(*) n FROM book_chunks WHERE emb_sig=? "
@@ -1367,7 +1368,7 @@ def register(host, ctx: dict):
                                          f"model. Re-embed to search."})
             return jsonify({"success": False,
                             "error": "No passage embeddings yet — run Embed."})
-        qv = ctx["embed_text"](q)
+        qv = (ctx.get("embed_query") or ctx["embed_text"])(q)
         if qv is None:
             return jsonify({"success": False, "error": "failed to embed the query"})
 

@@ -25,6 +25,8 @@ from collections import Counter
 import numpy as np
 from flask import request, jsonify
 
+import media_types
+
 import object_grouping as og
 from modules.model_broker import NoProviderError
 from optional_deps import optional_import
@@ -159,6 +161,52 @@ def register(host):
 
     def _text_search_enabled():
         return _text_embedder() is not None
+
+    # ── the text and audio picks (Models → Text embedding / Audio embedding) ─
+    # Same pattern as the image pick: this module never names a model. The
+    # text pick embeds passages (books, notes) in its own space; the audio pick
+    # embeds tracks (music module) and, when the model has a joint text space
+    # (CLAP, MuQ-MuLan), exposes .embed_text for "sem:" over music.
+    def _cap_handle(cap):
+        try:
+            return host.request_model(cap)
+        except NoProviderError as e:
+            raise RuntimeError(str(e))
+
+    def _try_cap(cap):
+        try:
+            return _cap_handle(cap)
+        except RuntimeError:
+            return None
+
+    def _cap_space(cap, handle=None):
+        handle = handle or _try_cap(cap)
+        space = getattr(getattr(handle, "model", None), "space", None)
+        if space:
+            return str(space)
+        pid = host.broker.selected_id(cap)
+        return f"{pid}:{host.model_variant(cap).get('size') or ''}" if pid else ""
+
+    def _text_doc_embedder():
+        """embed(text) -> vector of the picked TEXT provider, or None."""
+        h = _try_cap("embed.text")
+        return h if h is not None else None
+
+    def _text_query_embedder():
+        h = _try_cap("embed.text")
+        if h is None:
+            return None
+        fn = getattr(getattr(h, "model", None), "embed_query", None)
+        return fn if callable(fn) else h
+
+    def _audio_embedder():
+        """embed(abs_path) -> vector of the picked AUDIO provider, or None."""
+        return _try_cap("embed.audio")
+
+    def _audio_text_embedder():
+        h = _try_cap("embed.audio")
+        fn = getattr(getattr(h, "model", None), "embed_text", None)
+        return fn if callable(fn) else None
 
     def _why_no_text():
         return "" if _text_search_enabled() else \
@@ -625,12 +673,18 @@ def register(host):
         page = hits[offset:offset + limit]
         if not page:
             return [], total, None
-        names = [n for n, _ in page]
+        return _entries_for(db, page), total, None
+
+    def _entries_for(db, hits):
+        """Gallery entries (score order, best first) for [(rel_path, score)]."""
+        names = [n for n, _ in hits]
+        if not names:
+            return []
         rows = {r["rel_path"]: r for r in db.execute(
             "SELECT rel_path, tags, description, width, height FROM files WHERE rel_path IN ("
             + ",".join("?" * len(names)) + ")", names).fetchall()}
         entries = []
-        for n, sc in page:                       # score order, best first
+        for n, sc in hits:
             r = rows.get(n)
             if r is None:
                 continue                          # vector for a file no longer indexed
@@ -640,7 +694,7 @@ def register(host):
                             "width": r["width"] or 0, "height": r["height"] or 0,
                             "score": round(sc, 4)})
         host.enrich_file_rows(db, entries)
-        return entries, total, None
+        return entries
 
     def _score_library(db, qv, negs=(), top_k=5000):
         """[(rel_path, score)] best first. score = cos(query) - w * max cos(negatives):
@@ -695,6 +749,13 @@ def register(host):
             "total": cur,
             "images": db.execute("SELECT COUNT(*) FROM files WHERE media_kind='image'").fetchone()[0],
             "background": "embed" in host.broker.background_capabilities(),
+            "text_provider": host.broker.selected_id("embed.text"),
+            "text_space": _cap_space("embed.text"),
+            "text_ready": _text_doc_embedder() is not None,
+            "audio_provider": host.broker.selected_id("embed.audio"),
+            "audio_space": _cap_space("embed.audio"),
+            "audio_ready": _audio_embedder() is not None,
+            "audio_text_search": _audio_text_embedder() is not None,
         })
 
     # Backward-compatible endpoints (matching original manager.py API)
@@ -715,6 +776,13 @@ def register(host):
             "total": cur,
             "images": db.execute("SELECT COUNT(*) FROM files WHERE media_kind='image'").fetchone()[0],
             "background": "embed" in host.broker.background_capabilities(),
+            "text_provider": host.broker.selected_id("embed.text"),
+            "text_space": _cap_space("embed.text"),
+            "text_ready": _text_doc_embedder() is not None,
+            "audio_provider": host.broker.selected_id("embed.audio"),
+            "audio_space": _cap_space("embed.audio"),
+            "audio_ready": _audio_embedder() is not None,
+            "audio_text_search": _audio_text_embedder() is not None,
         })
 
     @host.route("/api/library_embed", methods=["POST"], feature="tab.review", level="write")
@@ -862,6 +930,50 @@ def register(host):
             {"filename": n, "score": round(s, 4)} for n, s in hits
         ]})
 
+    # kind -> fn(rel_path, top_k) -> (hits [(name, score)], entries, error). The
+    # music module registers "audio"; images/videos are served here.
+    _similar_finders = {}
+
+    def register_similar_finder(kind, fn):
+        _similar_finders[kind] = fn
+
+    def _similar_images(filename, top_k):
+        img = _img_loader(filename)
+        if img is None:
+            return [], [], "could not read image"
+        db = host.db()
+        try:
+            hits = _search_by_image(db, img, top_k=top_k)
+        except RuntimeError as e:
+            return [], [], str(e)
+        hits = [h for h in hits if h[0] != filename]
+        return hits, _entries_for(db, hits), None
+
+    @host.route("/api/embedding/similar", methods=["POST"], feature="tab.review")
+    def embedding_similar():
+        """Similar items to one file, whatever it is: the editor's Similar
+        button. Images/videos rank the image space; other media kinds go to
+        the module that owns them (audio → music)."""
+        body = request.json or {}
+        filename = body.get("filename", "")
+        top_k = min(200, int(body.get("top_k", 60)))
+        if not filename:
+            return jsonify({"success": False, "error": "filename required"})
+        fp, err = host.core.resolve_media(filename)
+        if err:
+            return err
+        kind = media_types.kind(filename)
+        finder = _similar_finders.get(kind) if kind not in ("image", "video") else None
+        if finder is not None:
+            hits, entries, err = finder(filename, top_k)
+        else:
+            hits, entries, err = _similar_images(filename, top_k)
+        if err:
+            return jsonify({"success": False, "error": err, "kind": kind})
+        return jsonify({"success": True, "kind": kind,
+                        "results": [{"filename": n, "score": round(s, 4)} for n, s in hits],
+                        "files": entries})
+
     def _file_deleted(rel_path):
         db = host.db()
         for tbl in ("image_embeddings", "image_clusters"):
@@ -894,4 +1006,18 @@ def register(host):
         "text_embed_enabled": _text_search_enabled,
         "embed_text": lambda text: (lambda f: f(text) if f else None)(_text_embedder()),
         "semantic_list": _semantic_list,
+        "entries_for": _entries_for,
+        "register_similar_finder": register_similar_finder,
+        # text pick (embed.text capability): passages / queries, own space
+        "text_doc_enabled": lambda: _text_doc_embedder() is not None,
+        "text_space": lambda: _cap_space("embed.text"),
+        "embed_doc": lambda text: (lambda f: f(text) if f else None)(_text_doc_embedder()),
+        "embed_query": lambda text: (lambda f: f(text) if f else None)(_text_query_embedder()),
+        # audio pick (embed.audio capability): tracks, and text into that space
+        "audio_enabled": lambda: _audio_embedder() is not None,
+        "audio_space": lambda: _cap_space("embed.audio"),
+        "audio_text_enabled": lambda: _audio_text_embedder() is not None,
+        "embed_audio": lambda abs_path: (lambda f: f(abs_path) if f else None)(_audio_embedder()),
+        "embed_audio_text": lambda text: (lambda f: f(text) if f else None)(_audio_text_embedder()),
+        "audio_handle": _audio_embedder,
     })

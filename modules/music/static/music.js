@@ -6,6 +6,10 @@ let musicCtx = { artist: '', album: '', cluster: '' };   // active drill-down fi
 let musicQueue = [];      // current playlist (array of song dicts)
 let musicQueueIdx = -1;
 let _musicSearchTimer = null;
+let musicRadio = false;         // radio mode: play the library as one route through embedding space, round after round
+let musicRadioInfo = null;
+let musicAutoSimilar = false;   // when a track ends, pick the next by embedding similarity
+let musicSimilarSeed = '';      // rel_path the current list is "similar to" ('' = not a similar list)
 
 function musicActive() {
   return typeof currentPane !== 'undefined' && currentPane === 'music';
@@ -28,9 +32,14 @@ async function musicRefreshStatus() {
     if (s.indexing)   extra = ` · indexing ${s.indexed}/${s.total}`;
     if (s.embedding)  extra = ` · embedding ${s.emb_done}/${s.emb_total}`;
     if (s.clustering) extra = ` · clustering…`;
+    const model = d.space ? ` · ${d.space}${d.text_search ? ' (sem: on)' : ''}` : ' · no audio model';
     document.getElementById('music_stat').textContent =
       `${d.tracks} tracks · ${d.artists} artists · ${d.albums} albums · ` +
-      `${d.embedded} embedded · ${d.clusters} clusters${extra}`;
+      `${d.embedded} embedded · ${d.clusters} clusters${model}${extra}`;
+    const inp = document.getElementById('music_search');
+    if (inp) inp.placeholder = d.text_search
+      ? 'Search title / artist / album / tag…  or sem:christmas -metal'
+      : 'Search title / artist / album / genre / tag…';
     // keep polling while a background job runs
     if (s.indexing || s.embedding || s.clustering) {
       setTimeout(musicRefreshStatus, 1500);
@@ -118,16 +127,17 @@ async function loadSongs() {
   const q = document.getElementById('music_search').value.trim();
   if (q) p.set('q', q);
   const d = await fetch('/api/music/songs?' + p.toString()).then(r => r.json());
-  if (!d.success) { el.innerHTML = '<div class="text-red-400">Failed.</div>'; return; }
-  musicQueue = d.songs; musicQueueIdx = -1;
-  renderSongTable(el, d.songs, d.total);
+  if (!d.success) { el.innerHTML = `<div class="text-red-400">${escHtml(d.error || 'Failed.')}</div>`; return; }
+  musicQueue = d.songs; musicQueueIdx = -1; musicSimilarSeed = '';
+  renderSongTable(el, d.songs, d.total, d.mode === 'semantic' ? `sem: ${q.replace(/^(sem:|~)/i, '').trim()}` : '');
 }
 
-function renderSongTable(el, songs, total) {
+function renderSongTable(el, songs, total, label) {
   if (!songs.length) { el.innerHTML = emptyMsg(); return; }
   let crumb = '';
-  if (musicCtx.artist || musicCtx.album || musicCtx.cluster !== '') {
+  if (label || musicCtx.artist || musicCtx.album || musicCtx.cluster !== '') {
     const bits = [];
+    if (label) bits.push('<b class="text-white">' + escHtml(label) + '</b>');
     if (musicCtx.artist) bits.push('Artist: <b class="text-white">' + escHtml(musicCtx.artist) + '</b>');
     if (musicCtx.album)  bits.push('Album: <b class="text-white">' + escHtml(musicCtx.album) + '</b>');
     if (musicCtx.cluster !== '') bits.push('Cluster: <b class="text-white">' + musicCtx.cluster + '</b>');
@@ -143,15 +153,17 @@ function renderSongTable(el, songs, total) {
       <td class="px-2 py-1 text-gray-400 truncate max-w-[180px]">${escHtml(s.artist)}</td>
       <td class="px-2 py-1 text-gray-400 truncate max-w-[180px]">${escHtml(s.album)}</td>
       <td class="px-2 py-1 text-gray-500 w-14">${fmtDur(s.duration)}</td>
-      <td class="px-2 py-1 w-10 text-right">
-        <button onclick="event.stopPropagation();openMusicEditor(${i})"
+      <td class="px-2 py-1 text-gray-500 w-12 text-right">${s.score !== undefined ? s.score.toFixed(2) : ''}</td>
+      <td class="px-2 py-1 w-24 text-right whitespace-nowrap">
+        <button onclick="event.stopPropagation();musicSimilarTo(${esc(s.rel_path)})" title="Tracks that sound like this"
+          class="text-xs text-purple-400 hover:underline mr-2">similar</button><button onclick="event.stopPropagation();openMusicEditor(${i})"
           class="text-xs text-blue-400 hover:underline">edit</button></td>
     </tr>`).join('');
   el.innerHTML = crumb +
     `<div class="text-xs text-gray-500 mb-1">${total} track(s)</div>
      <table class="w-full text-sm"><thead class="text-gray-500 text-xs">
        <tr><th></th><th class="text-left px-2">Title</th><th class="text-left px-2">Artist</th>
-       <th class="text-left px-2">Album</th><th class="text-left px-2">Time</th><th></th></tr>
+       <th class="text-left px-2">Album</th><th class="text-left px-2">Time</th><th></th><th></th></tr>
      </thead><tbody>${rows}</tbody></table>`;
 }
 
@@ -203,8 +215,106 @@ function playFromQueue(i) {
     [s.artist, s.album].filter(Boolean).join(' — ') || '—';
   document.getElementById('music_player_bar').classList.remove('hidden');
   a.onended = () => playNext();
+  if (musicRadio) {
+    fetch('/api/music/radio/played', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rel_path: s.rel_path }) }).catch(() => {});
+    const row = document.getElementById('music_radio_pos');
+    if (row) row.textContent = `${i + 1}/${musicQueue.length}`;
+  }
 }
-function playNext() { if (musicQueueIdx + 1 < musicQueue.length) playFromQueue(musicQueueIdx + 1); }
+function playNext() {
+  if (musicAutoSimilar) { playNextSimilar(); return; }
+  if (musicQueueIdx + 1 < musicQueue.length) { playFromQueue(musicQueueIdx + 1); return; }
+  if (musicRadio) radioNextRound(true);          // end of the round: walk again from here
+}
+
+// ── radio: the whole library as one walk through embedding space ─────
+async function radioNextRound(autoplay) {
+  const d = await fetch('/api/music/radio/next', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+  }).then(r => r.json()).catch(() => ({ success: false, error: 'network error' }));
+  if (!d.success) { showToastM(d.error || 'Radio failed.'); musicRadio = false; _radioButton(); return; }
+  musicRadio = true; musicAutoSimilar = false; musicRadioInfo = d.info;
+  musicQueue = d.songs; musicQueueIdx = -1; musicSimilarSeed = '';
+  musicCurrentView = 'songs'; _setTab('songs');
+  const inf = d.info;
+  renderSongTable(document.getElementById('music_list'), d.songs, d.songs.length,
+    `Radio round ${inf.round} · ${inf.tracks} tracks · ${inf.hours} h` +
+    (inf.repeats ? ` · ${inf.repeats} repeats` : '') +
+    (inf.seasonal_skipped ? ` · ${inf.seasonal_skipped} seasonal out` : '') +
+    (inf.rating_skipped ? ` · ${inf.rating_skipped} sat out` : ''));
+  _radioButton();
+  showToastM(`Radio round ${inf.round}: ${inf.tracks} tracks, ~${inf.hours} h.`);
+  if (autoplay !== false) playFromQueue(0);
+}
+function toggleRadio() {
+  if (musicRadio) {
+    musicRadio = false; musicRadioInfo = null; _radioButton();
+    showToastM('Radio off — the current list keeps playing to its end.');
+    return;
+  }
+  radioNextRound(true);
+}
+function _radioButton() {
+  const b = document.getElementById('radio_btn');
+  if (!b) return;
+  b.classList.toggle('bg-rose-600', musicRadio); b.classList.toggle('bg-gray-700', !musicRadio);
+  b.textContent = musicRadio ? 'Radio ●' : 'Radio';
+  const pos = document.getElementById('music_radio_pos');
+  if (pos && !musicRadio) pos.textContent = '';
+}
+
+// ── similarity: next track / similar list ───────────────────────
+const _musicPlayed = new Set();   // rel_paths played under auto-similar, so it doesn't loop
+
+function toggleAutoSimilar() {
+  musicAutoSimilar = !musicAutoSimilar;
+  _musicPlayed.clear();
+  const b = document.getElementById('auto_similar_btn');
+  if (b) { b.classList.toggle('bg-purple-600', musicAutoSimilar); b.classList.toggle('bg-gray-700', !musicAutoSimilar); }
+  showToastM(musicAutoSimilar ? 'Next track picked by similarity to the one playing.' : 'Auto-similar off.');
+}
+
+async function fetchSimilar(rel, topK) {
+  const d = await fetch('/api/music/similar', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rel_path: rel, top_k: topK || 60 })
+  }).then(r => r.json());
+  if (!d.success) { showToastM(d.error || 'Similar search failed.'); return null; }
+  return d.songs;
+}
+
+async function playNextSimilar() {
+  const s = musicQueue[musicQueueIdx];
+  if (!s) return;
+  _musicPlayed.add(s.rel_path);
+  const songs = await fetchSimilar(s.rel_path, 30);
+  if (!songs) return;
+  const next = songs.find(x => !_musicPlayed.has(x.rel_path)) || songs[0];
+  if (!next) return;
+  musicQueue = [s, next]; musicQueueIdx = 0;
+  playFromQueue(1);
+}
+
+// Show the tracks nearest to `rel` as the list (and the queue).
+function musicShowSimilar(rel, songs) {
+  musicQueue = songs; musicQueueIdx = -1; musicSimilarSeed = rel;
+  musicCurrentView = 'songs'; _setTab('songs');
+  renderSongTable(document.getElementById('music_list'), songs, songs.length,
+                  'Similar to ' + rel.split('/').pop());
+  showToastM(`${songs.length} similar track(s).`);
+}
+window.musicShowSimilar = musicShowSimilar;
+
+async function musicSimilarTo(rel) {
+  const songs = await fetchSimilar(rel);
+  if (songs) musicShowSimilar(rel, songs);
+}
+function similarToCurrent() {
+  const s = musicQueue[musicQueueIdx];
+  if (!s) { showToastM('Play a track first.'); return; }
+  musicSimilarTo(s.rel_path);
+}
 function playPrev() { if (musicQueueIdx > 0) playFromQueue(musicQueueIdx - 1); }
 
 async function shuffleByCurrent(kind) {
@@ -216,10 +326,11 @@ async function shuffleByCurrent(kind) {
     body: JSON.stringify({ seed_type: kind, seed: seed })
   }).then(r => r.json());
   if (!d.success) { showToastM(d.error || 'Shuffle failed.'); return; }
-  musicQueue = d.playlist; musicQueueIdx = -1;
+  const list = d.songs || d.playlist || [];
+  musicQueue = list; musicQueueIdx = -1; musicSimilarSeed = '';
   musicCurrentView = 'songs'; _setTab('songs');
-  renderSongTable(document.getElementById('music_list'), d.playlist, d.playlist.length);
-  showToastM(`Shuffled ${d.playlist.length} tracks by ${kind}.`);
+  renderSongTable(document.getElementById('music_list'), list, list.length, `Shuffled by ${kind}`);
+  showToastM(`Shuffled ${list.length} tracks by ${kind}.`);
   playFromQueue(0);
 }
 
@@ -291,7 +402,8 @@ async function musicReindex() {
   showToastM('Reindexing music…'); musicRefreshStatus();
 }
 async function musicEmbed() {
-  await fetch('/api/music/embed', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  const d = await fetch('/api/music/embed', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.json());
+  if (!d.success) { showToastM(d.error || 'Embed failed.'); return; }
   showToastM('Generating audio embeddings (runs in background)…'); musicRefreshStatus();
 }
 async function musicCluster() {

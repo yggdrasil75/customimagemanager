@@ -252,8 +252,8 @@ def _normalise(v):
     return v / n if n > 0 else v
 
 
-def embed_request(inputs, timeout=120):
-    endpoint, model = embed_url(), embed_model()
+def embed_request(inputs, timeout=120, model=None):
+    endpoint, model = embed_url(), (model or embed_model())
     if not endpoint or not model:
         raise RuntimeError("OAI embeddings not configured")
     key = (_cfg().get("oai_key") or "").strip()
@@ -276,11 +276,15 @@ def embed_image(img_bgr, timeout=120):
     return _normalise(vecs[0]) if vecs else None
 
 
-def embed_text(text, timeout=60):
+def embed_text(text, timeout=60, model=None):
     """Text -> vector in the same space as embed_image (what semantic search
-    needs); None on failure."""
+    needs); None on failure. `model` overrides the configured embedding model
+    (the text-only pick for passages)."""
+    text = (text or "").strip()
+    if not text:
+        return None
     try:
-        vecs = embed_request([text], timeout=timeout)
+        vecs = embed_request([text], timeout=timeout, model=model)
         return _normalise(vecs[0]) if vecs else None
     except Exception:
         return None

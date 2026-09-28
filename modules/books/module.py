@@ -95,9 +95,10 @@ def register(host):
         "folder_scope_clause": core.folder_scope_clause,
         "table_exists":  common.table_exists,
         "norm_date_literal": common.norm_date_literal,
-        "embed_text":    lambda text: _emb("embed_text", lambda t: None)(text),
-        "embed_enabled": lambda: bool(_emb("text_embed_enabled", lambda: False)()),
-        "embed_tag":     lambda: _emb("embed_tag", lambda: "")(),
+        "embed_text":    lambda text: _emb("embed_doc", lambda t: None)(text),
+        "embed_query":   lambda text: _emb("embed_query", lambda t: None)(text),
+        "embed_enabled": lambda: bool(_emb("text_doc_enabled", lambda: False)()),
+        "embed_tag":     lambda: _emb("text_space", lambda: "")(),
         "llm_request":   lambda *a, **k: (host.get_service("llm") or {}).get("request", _no_llm)(*a, **k),
         "comic_pages":   lambda: host.get_service("comic_pages"),   # comics module, or None
         "current_user":  host.current_user,
