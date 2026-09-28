@@ -9,6 +9,38 @@
   let _installed = [];
   const pickedSizes = () => [...document.querySelectorAll('#ddt_sizes [data-size]:checked')].map(e => e.dataset.size);
 
+
+  // Inline SVG loss chart: one polyline per size, x = step, y = loss. No deps.
+  function drawLoss(svgId, hist, label) {
+    const svg = $(svgId); if (!svg) return;
+    if (!hist || hist.length < 2) { svg.innerHTML = ''; svg.style.display = 'none'; return; }
+    svg.style.display = '';
+    const W = 600, H = 160, L = 44, B = 18, T = 6, R = 6;
+    const by = {}; for (const [x, z, y] of hist) (by[z] = by[z] || []).push([x, y]);
+    const xs = hist.map(h => h[0]), ys = hist.map(h => h[2]);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+    const sx = x => L + (x - x0) / Math.max(1e-9, x1 - x0) * (W - L - R);
+    const sy = y => T + (1 - (y - y0) / Math.max(1e-9, y1 - y0)) * (H - T - B);
+    const cols = ['#60a5fa', '#f472b6', '#34d399', '#fbbf24', '#a78bfa', '#f87171'];
+    let i = 0, out = [];
+    out.push(`<line x1="${L}" y1="${T}" x2="${L}" y2="${H - B}" stroke="#4b5563"/><line x1="${L}" y1="${H - B}" x2="${W - R}" y2="${H - B}" stroke="#4b5563"/>`);
+    out.push(`<text x="${L - 4}" y="${T + 8}" fill="#9ca3af" font-size="9" text-anchor="end">${y1.toPrecision(3)}</text>`);
+    out.push(`<text x="${L - 4}" y="${H - B}" fill="#9ca3af" font-size="9" text-anchor="end">${y0.toPrecision(3)}</text>`);
+    out.push(`<text x="${W - R}" y="${H - 4}" fill="#9ca3af" font-size="9" text-anchor="end">${label} ${x1}</text>`);
+    for (const [z, pts] of Object.entries(by)) {
+      const c = cols[i++ % cols.length];
+      out.push(`<polyline fill="none" stroke="${c}" stroke-width="1.5" points="${pts.map(([x, y]) => sx(x).toFixed(1) + ',' + sy(y).toFixed(1)).join(' ')}"/>`);
+      out.push(`<text x="${L + 6}" y="${T + 10 + 11 * (i - 1)}" fill="${c}" font-size="9">${z} ${pts[pts.length - 1][1]}</text>`);
+    }
+    svg.innerHTML = out.join('');
+  }
+  function fillLog(preId, lines) {
+    const p = $(preId); if (!p) return;
+    const atEnd = p.scrollTop + p.clientHeight >= p.scrollHeight - 4;
+    p.textContent = (lines || []).join('\n');
+    if (atEnd) p.scrollTop = p.scrollHeight;
+  }
+
   const fmtN = n => n == null ? '-' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n);
 
   let _sizesKey = '';
@@ -105,6 +137,8 @@
       : (s.error ? `stopped: ${s.error}` : 'idle');
     $('ddt_build').disabled = !!s.running; $('ddt_stop').disabled = !s.running;
     $('ddt_report').textContent = fmtReport(s);
+    drawLoss('ddt_chart', s.history, 'chunk');
+    fillLog('ddt_log', s.log);
     clearTimeout(_timer);
     if (s.running) _timer = setTimeout(ddtStatus, 2000);
   }

@@ -31,11 +31,14 @@ VAL_PCT = 10
 _lock = threading.Lock()
 _stop = threading.Event()
 progress = {"running": False, "phase": "", "images_total": 0, "images_done": 0, "epoch": 0, "epochs": 0,
-            "loss": {}, "started": 0.0, "last": None, "error": None}
+            "loss": {}, "started": 0.0, "last": None, "error": None,
+            "log": [], "history": []}   # log: last 200 status lines; history: [[step, size, loss]...]
 
 
 def _say(host, msg):
     host.config["status_text"] = "IQA train: " + msg
+    host.logger.info("iqa_train: " + msg)
+    progress["log"] = (progress["log"] + [f"{time.strftime('%H:%M:%S')} {msg}"])[-200:]
 
 
 def parse_dataset_lines(text):
@@ -159,7 +162,7 @@ def build(host, datasets, sizes, active=None, use_ratings=False, max_images=100_
     global VAL_PCT
     VAL_PCT = int(holdout)
     progress.update(running=True, phase="reading labels", images_total=0, images_done=0, epoch=0,
-                    epochs=int(epochs), loss={}, started=time.time(), error=None)
+                    epochs=int(epochs), loss={}, started=time.time(), error=None, log=[], history=[])
     sizes = dict(sizes)
     active = active if active in sizes else list(sizes)[-1]
     summary = {"ok": False, "images": 0, "sizes": {z: {} for z in sizes}, "active": active, "datasets": {},
@@ -217,6 +220,7 @@ def build(host, datasets, sizes, active=None, use_ratings=False, max_images=100_
             progress["loss"][z] = None
             def say(ep, loss, z=z):
                 progress["epoch"] = ep; progress["loss"][z] = round(loss, 4)
+                progress["history"] = (progress["history"] + [[ep, z, round(loss, 5)]])[-5000:]
                 _say(host, f"{z} epoch {ep}/{epochs} train mse {loss:.4f}")
             m, metrics = svc["fit"](train, val, sp["d"], sp["depth"], epochs=int(epochs), batch=int(batch),
                                     lr=float(lr), say=say, stop=_stop)
@@ -227,11 +231,13 @@ def build(host, datasets, sizes, active=None, use_ratings=False, max_images=100_
             row["final_loss"] = progress["loss"][z]
 
         progress["phase"] = "benchmarking"
+        _say(host, "benchmarking...")
         embed_dim = len(train[0]["feats"]["embed"][0]) if train[0]["feats"]["embed"] else 1
         for z, b in bench(svc, sizes, embed_dim, batch=int(batch)).items():
             summary["sizes"][z].update({k: v for k, v in b.items() if k.startswith("ms_")})
 
         progress["phase"] = "writing"
+        _say(host, "writing models...")
         written = []
         if install:
             for z, m in models.items():

@@ -50,11 +50,19 @@ OUT_DIR = os.path.abspath(os.path.join(_HERE, "..", "dedup_cnn", "pretrained"))
 _lock = threading.Lock()
 _stop = threading.Event()
 progress = {"running": False, "phase": "", "images_total": 0, "images_done": 0, "pairs": 0,
-            "epoch": 0, "epochs": 0, "loss": {}, "started": 0.0, "last": None, "error": None}
+            "epoch": 0, "epochs": 0, "loss": {}, "started": 0.0, "last": None, "error": None,
+            "log": [], "history": []}   # log: last 200 status lines; history: [[step, size, loss]...]
 
 
 def _say(host, msg):
     host.config["status_text"] = "Dedup train: " + msg
+    host.logger.info("dedup_train: " + msg)
+    progress["log"] = (progress["log"] + [f"{time.strftime('%H:%M:%S')} {msg}"])[-200:]
+
+
+def _note_loss(z, loss):
+    progress["loss"][z] = round(loss, 4)
+    progress["history"] = (progress["history"] + [[len(progress["history"]), z, round(loss, 5)]])[-5000:]
 
 
 def scan(folders, exts=IMG_EXTS):
@@ -254,7 +262,8 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
         return {"ok": False, "error": "torch is not installed"}
     _stop.clear()
     progress.update(running=True, phase="scanning", images_total=0, images_done=0, pairs=0,
-                    epoch=0, epochs=int(epochs), loss={}, started=time.time(), error=None)
+                    epoch=0, epochs=int(epochs), loss={}, started=time.time(), error=None,
+                    log=[], history=[])
     sizes = dict(sizes or dc.SIZES)
     active = active if active in sizes else list(sizes)[-1]
     fb_arr = _feedback_arrays((feedback or {}).get("cnn"))
@@ -294,7 +303,7 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
                 loss = m.fit_batches(_batches(arr, batch), lr=lr, device=device,
                                      _opt_holder=opts[z], amp=bool(amp))
                 if loss is not None:
-                    progress["loss"][z] = round(loss, 4)
+                    _note_loss(z, loss)
 
         with ThreadPoolExecutor(1) as pre:          # prepares the NEXT chunk while the GPU trains this one
             for ep in range(int(epochs)):
@@ -334,11 +343,13 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
                         "final_loss": progress["loss"].get(z), "held_out": held.get(z, {}),
                         "feedback": _acc(m, fb_arr, device) if (fb_arr is not None and m.trained) else None})
             progress["phase"] = f"benchmarking {z}"
+            _say(host, f"benchmarking {z}...")
             row["bench_cpu"] = m.bench("cpu", batch=min(int(batch), 64))
             if device == "cuda":
                 row["bench_gpu"] = m.bench("cuda", batch=int(batch))
 
         progress["phase"] = "writing"
+        _say(host, "writing models...")
         written = []
         for m in models.values():
             m.net.to("cpu")
