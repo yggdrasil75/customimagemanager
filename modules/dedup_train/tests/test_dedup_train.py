@@ -57,9 +57,9 @@ def test_synth_pairs_balanced():
     rng = np.random.default_rng(0)
     imgs = [rng.integers(0, 256, (100, 120, 3), np.uint8) for _ in range(4)]
     ps = synth.synth_pairs(imgs, rng, per_image=6)
-    assert len(ps) == 24 and sum(l == 1.0 for *_, l, _ in ps) == 12
-    assert all(0.0 <= l <= 1.0 for *_, l, _ in ps)
-    assert all(0.5 <= l < 1.0 for *_, l, k in ps if k == "localedit")
+    assert len(ps) == 24 and sum(m.max() == 0 for *_, m, _ in ps) == 12
+    assert all(a.shape == b.shape and m.shape == a.shape[:2] for a, b, m, _ in ps)
+    assert all(0.0 < m.mean() <= 0.6 for *_, m, k in ps if k == "localedit")
     assert any(k == "localedit" for *_, k in ps)
 
 
@@ -67,12 +67,30 @@ def test_synth_pairs_balanced():
 def test_params_grow_with_size_and_checkpoint_roundtrip(tmp_path):
     params = [dc.DupCNN.sized(z).params for z in dc.SIZES]
     assert params == sorted(params) and params[0] < params[-1] / 20
-    assert params[-1] == dc.count_params(4.0, 3)         # formula matches the real net
+    assert params[-1] == dc.count_params(4.0, 8)         # formula matches the real net
     m = dc.DupCNN.sized("small")
     p = str(tmp_path / "m.pt")
     assert m.save(p)
     back = dc.DupCNN.load(p)          # no size hint: the checkpoint carries it
-    assert back.trained and back.size == "small" and back.depth == 1 and back.params == m.params
+    assert back.trained and back.size == "small" and back.depth == 2 and back.params == m.params
+
+
+@needs_torch
+def test_change_net_scores_group_at_native_resolution():
+    import cv2
+    rng = np.random.default_rng(0)
+    a = np.full((700, 900, 3), 40, np.uint8)
+    for _ in range(200):
+        x, y = int(rng.integers(0, 850)), int(rng.integers(0, 650))
+        cv2.rectangle(a, (x, y), (x + 30, y + 20), tuple(int(v) for v in rng.integers(0, 256, 3)), -1)
+    m = dc.DupCNN.sized("nano")
+    m.trained = True                                     # untrained weights: only shapes/plumbing are checked
+    S, maps = m.score_group([a, a[100:600, 150:800], cv2.flip(a, 1), rng.integers(0, 256, (300, 900, 3), np.uint8)],
+                            "cpu", want_maps=True)
+    assert S.shape == (4, 4) and np.allclose(np.diag(S), 1) and np.allclose(S, S.T)
+    assert maps[(0, 1)].shape == (88, 113)               # one cell per 8x8 block of the reference (700x900 padded)
+    fa = m.encode(a, "cpu"); fb = m.encode(a, "cpu", max_pixels=200_000)
+    assert fa.shape == fb.shape and float((fa - fb).abs().max()) < 1e-3   # strips == single pass
 
 
 @needs_torch

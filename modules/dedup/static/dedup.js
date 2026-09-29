@@ -295,6 +295,22 @@ async function highlightDiff(gid){
   document.getElementById('diff_label_a').innerText=fa.split('/').pop();
   document.getElementById('diff_label_b').innerText=fb.split('/').pop();
   document.getElementById('dedup_diff_modal').classList.remove('hidden');
+  // HEURDU's own view first: b aligned onto a at native resolution, the
+  // per-cell change map as heat. Falls back to the plain pixel diff when
+  // there is no model or the pair does not align.
+  try{
+    const r=await fetch('/api/dedup_change_map',{method:'POST',headers:{'Content-Type':'application/json'},
+                        body:JSON.stringify({a:fa,b:fb})});
+    const d=r.ok?await r.json():null;
+    if(d&&d.success&&d.aligned){
+      const [ia,ib,ih]=await Promise.all([d.a,d.b,d.heat].map(x=>_loadImage('data:image/png;base64,'+x)));
+      _diffImgA=ia; _diffImgB=ib; _diffHeat=ih;
+      document.getElementById('diff_label_b').innerText=fb.split('/').pop()+
+        `  —  HEURDU ${(d.score*100).toFixed(1)}% similar, ${(d.changed*100).toFixed(1)}% of cells changed, ${(d.overlap*100).toFixed(0)}% overlap`;
+      renderDiffOverlay(); return;
+    }
+  }catch(e){ /* fall through to the pixel diff */ }
+  _diffHeat=null;
   const results=await Promise.allSettled([
     _loadImage(`/api/file/${encodeURIComponent(fa)}`),
     _loadImage(`/api/file/${encodeURIComponent(fb)}`)]);
@@ -314,8 +330,21 @@ async function highlightDiff(gid){
   renderDiffOverlay();
 }
 
+let _diffHeat=null;   // HEURDU change-map heat image for the current pair (null = plain pixel diff)
 function renderDiffOverlay(){
   if(!_diffImgA||!_diffImgB) return;
+  if(_diffHeat){
+    const W=_diffImgA.naturalWidth,H=_diffImgA.naturalHeight;
+    const ca=document.getElementById('diff_canvas_a'),cb=document.getElementById('diff_canvas_b'),cd=document.getElementById('diff_canvas_d');
+    for(const c of [ca,cb,cd]){ c.width=W; c.height=H; }
+    ca.getContext('2d').drawImage(_diffImgA,0,0,W,H);
+    cb.getContext('2d').drawImage(_diffImgB,0,0,W,H);
+    const xd=cd.getContext('2d');
+    if(document.getElementById('diff_overlay_toggle').checked){
+      xd.drawImage(_diffImgA,0,0,W,H); xd.globalAlpha=0.55; xd.drawImage(_diffHeat,0,0,W,H); xd.globalAlpha=1;
+    } else { xd.drawImage(_diffHeat,0,0,W,H); }
+    return;
+  }
   const W=Math.min(_diffImgA.naturalWidth,_diffImgB.naturalWidth,512);
   const H=Math.min(_diffImgA.naturalHeight,_diffImgB.naturalHeight,512);
   const ca=document.getElementById('diff_canvas_a');

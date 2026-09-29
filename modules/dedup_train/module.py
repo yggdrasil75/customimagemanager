@@ -139,6 +139,7 @@ def register(host):
                            in_ram=bool(d.get("in_ram")),
                            amp="bf16" if d.get("amp", "bf16") is True else str(d.get("amp") or ""),
                            device=str(d.get("device") or ""), compile=bool(d.get("compile")),
+                           micro=int(d.get("micro") or 0), resume=bool(d.get("resume", True)),
                            lr=float(d.get("lr") or 1e-3),
                            workers=int(d.get("workers") or 4),
                            holdout=float(d.get("holdout") or 0.03),

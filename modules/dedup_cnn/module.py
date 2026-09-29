@@ -61,12 +61,11 @@ def register(host):
     host.add_settings_field(key="dup_cnn_hf", label="HEURDU weights (owner/repo/path, {size})", kind="text",
                             pane="models", help="Where each size is downloaded from on HuggingFace. "
                                                 "{size} becomes nano/small/medium/... Default: " + HF_DEFAULT)
-    host.add_config_key("dup_cnn_tiles", default=256, validate=lambda v: max(0, int(v or 0)))
-    host.add_settings_field(key="dup_cnn_tiles", label="Dup-CNN native tiles per pair", kind="number",
-                            pane="models", help="Besides the 128-px global view, each pair is compared on up to this "
-                                                "many 128x128 tiles cut at NATIVE resolution, evenly spaced (a burst "
-                                                "frame or a retouched face is caught here). 0 = global view only. "
-                                                "More tiles = more coverage of big images, slower on CPU.")
+    host.add_config_key("dup_cnn_max_mp", default=16, validate=lambda v: max(1, int(v or 16)))
+    host.add_settings_field(key="dup_cnn_max_mp", label="HEURDU strip size (megapixels)", kind="number",
+                            pane="models", help="Images are compared at NATIVE resolution; bigger ones are encoded in "
+                                                "overlapping strips of about this many megapixels, purely to bound "
+                                                "GPU/CPU memory (~1.5 GB per 16 MP at medium). Result is identical.")
 
     def _path_for(size):
         local = os.path.join(models_dir, f"dup_cnn_{size}.pt")
@@ -85,7 +84,7 @@ def register(host):
             m = loaded[size] = _cnn_mod.DupCNN.load(_path_for(size))
             if not m.trained:
                 raise RuntimeError(f"HEURDU {size}: checkpoint did not load")
-        return lambda a, b: m.predict(a, b, _device(), int(host.config.get("dup_cnn_tiles", 256)))
+        return lambda a, b: m.predict(a, b, _device())
 
     def _device():
         return "cuda" if _cnn_mod.torch.cuda.is_available() else "cpu"
@@ -116,15 +115,22 @@ def register(host):
             return None
         return loaded.get(host.model_variant("dedup.pair")["size"])
 
+    def _max_px():
+        return int(host.config.get("dup_cnn_max_mp", 16)) * 1_000_000
+
+    def _score_group(imgs):
+        """NxN matrix for a group of BGR images: encode once, compare many, native resolution."""
+        m = _img_model()
+        if m is None:
+            return None
+        return m.score_group(imgs, _device(), _max_px())[0]
+
     def _score_batch(ctxs):
-        """Every image pair of a group in one go: global view + native tiles
-        for all pairs are stacked into a few big forward passes (GPU when
-        there is one), then folded back per pair with dup_cnn.combine.
-        Video pairs go one by one through the clip model."""
+        """Pairwise contract: image pairs one at a time (align + encode +
+        compare); video pairs through the clip model. Groups should use
+        score_group instead, this is the fallback."""
         out = [None] * len(ctxs)
         m = _img_model()
-        budget = int(host.config.get("dup_cnn_tiles", 256))
-        A, B, spans = [], [], []                       # spans: (ctx index, global row, tile rows slice)
         for i, c in enumerate(ctxs):
             if c.get("is_video"):
                 rf, of = c.get("ref_frames"), c.get("other_frames")
@@ -135,28 +141,30 @@ def register(host):
                         pass
                 continue
             a, b = c.get("ref_bgr"), c.get("other_bgr")
-            if m is None or a is None or b is None:
-                continue
-            ga, gb = _cnn_mod._to_work_u8(a), _cnn_mod._to_work_u8(b)
-            if ga is None or gb is None:
-                continue
-            g = len(A); A.append(ga); B.append(gb)
-            tp = _cnn_mod.tile_pairs(a, b, budget) if budget else None
-            t0 = len(A)
-            if tp is not None:
-                A.extend(tp[0]); B.extend(tp[1])
-            spans.append((i, g, slice(t0, len(A))))
-        if spans:
-            import numpy as np
-            probs = np.concatenate([m.predict_batch(np.stack(A[j:j + 512]), np.stack(B[j:j + 512]), _device())
-                                    for j in range(0, len(A), 512)])
-            for i, g, ts in spans:
-                out[i] = _cnn_mod.combine(float(probs[g]), probs[ts])
+            if m is not None and a is not None and b is not None:
+                try:
+                    out[i] = float(m.score_group([a, b], _device(), _max_px())[0][0, 1])
+                except Exception:
+                    pass
         return out
+
+    def _change_map(a, b):
+        """For the UI: (score, change map [H/8,W/8] 0..1 in a's frame, b warped
+        onto a, overlap mask) or None when there is no model / no alignment."""
+        m = _img_model()
+        if m is None:
+            return None
+        r = _cnn_mod.align(a, b)
+        if r is None:
+            return None
+        warped, ov = r
+        fa, fb = m.encode(a, _device(), _max_px()), m.encode(warped, _device(), _max_px())
+        cm = m.compare(fa, fb)
+        return _cnn_mod.pair_score(cm, ov), cm, warped, ov
 
     scorers.register({
         "id": "cnn", "label": "Advanced CNN", "available": _available,
-        "priority": 20, "score": _score, "score_batch": _score_batch,
+        "priority": 20, "score": _score, "score_batch": _score_batch, "score_group": _score_group,
         "tag": lambda: "cnn:" + str(host.model_variant("dedup.pair")["size"] or ""),
         "clip_t": _vid_mod.CLIP_T,
     })
@@ -178,6 +186,7 @@ def register(host):
         "sizes": lambda: _cnn_mod.parse_sizes(host.config.get("dup_cnn_sizes")),
         "clip_t": _vid_mod.CLIP_T,
         "encode_pair": _cnn_mod.encode_pair,
+        "change_map": _change_map,
         "encode_clip_pair": _vid_mod.encode_pair,
     })
     host.logger.info("dedup_cnn: registered CNN scorer; HEURDU provides dedup.pair")

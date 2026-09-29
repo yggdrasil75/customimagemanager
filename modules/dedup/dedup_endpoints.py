@@ -229,6 +229,44 @@ def dedup_exclude():
         _db().commit()
         return jsonify({"success": True, "group_remains": False})
 
+def dedup_change_map():
+    """HEURDU's view of two images: b aligned onto a at native resolution,
+    the per-cell change map, the score. Returns display-sized PNGs (base64)
+    of a, aligned b, and the heat overlay; the map itself is full-cell
+    resolution (one value per 8x8 block of a)."""
+    d = request.json or {}
+    fa, fb = d.get("a", ""), d.get("b", "")
+    pa, pb = get_safe_path(MEDIA_DIR, fa), get_safe_path(MEDIA_DIR, fb)
+    if not pa or not pb or not os.path.exists(pa) or not os.path.exists(pb):
+        return jsonify({"success": False, "error": "not found"}), 404
+    svc = _HOST.get_service("dedup_cnn") if _HOST else None
+    fn = svc.get("change_map") if svc else None
+    if not fn:
+        return jsonify({"success": False, "error": "no change model"}), 503
+    a, b = read_jxl(pa), read_jxl(pb)
+    if a is None or b is None:
+        return jsonify({"success": False, "error": "decode failed"}), 500
+    r = fn(_to_bgr(a), _to_bgr(b))
+    if r is None:
+        return jsonify({"success": True, "aligned": False, "score": 0.0})
+    score, cm, warped, ov = r
+    a_bgr = _to_bgr(a)
+    H, W = a_bgr.shape[:2]
+    disp = 1024.0 / max(H, W)
+    dw, dh = (int(W * disp), int(H * disp)) if disp < 1 else (W, H)
+    heat = cv2.resize((cm * 255).astype(np.uint8), (dw, dh), interpolation=cv2.INTER_LINEAR)
+    heat = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
+    heat[~cv2.resize(ov.astype(np.uint8), (dw, dh), interpolation=cv2.INTER_NEAREST).astype(bool)] = 0
+
+    def png(x):
+        ok, buf = cv2.imencode(".png", cv2.resize(x, (dw, dh), interpolation=cv2.INTER_AREA) if x.shape[:2] != (dh, dw) else x)
+        return base64.b64encode(buf.tobytes()).decode() if ok else ""
+    return jsonify({"success": True, "aligned": True, "score": round(float(score), 4),
+                    "overlap": round(float(ov.mean()), 4), "changed": round(float(cm.mean()), 4),
+                    "cells": [int(cm.shape[1]), int(cm.shape[0])],
+                    "a": png(a_bgr), "b": png(warped), "heat": png(heat)})
+
+
 def dedup_compare_video():
     """Compare two videos frame-by-frame at matched timestamps.
 
@@ -574,42 +612,60 @@ def dedup():
                     mem.append((i, _to_bgr(img), False))
             if len(mem) < 2:
                 return []
-            pairs, ctxs, keys, probs = [], [], [], {}
-            for p in range(len(mem)):
-                for q in range(p + 1, len(mem)):
-                    (ri, wa, va), (rj, wb, vb) = mem[p], mem[q]
-                    if va != vb:
-                        continue                      # a video and a still are never the same asset
-                    if core.excl_key(rows[ri]["rel_path"], rows[rj]["rel_path"]) in exclusions:
-                        continue
-                    k = core.verdict_key(rows[ri]["sha256"] or rows[ri]["rel_path"],
-                                         rows[rj]["sha256"] or rows[rj]["rel_path"])
-                    pairs.append((p, q, k))
-            cached = core.verdicts_get(model_tag, {k for *_, k in pairs}) if pairs else {}
-            for p, q, k in pairs:
-                if k in cached:
-                    probs[(p, q)] = cached[k]
-                    continue
-                (ri, wa, va), (rj, wb, vb) = mem[p], mem[q]
-                if va:
-                    ctxs.append({"is_video": True, "ref_frames": wa, "other_frames": wb})
-                else:
-                    ctxs.append({"is_video": False, "ref_bgr": wa, "other_bgr": wb})
-                keys.append((p, q, k))
-            if ctxs:
-                scored = (_scorers.score_pairs(ctxs, naive_score=1.0) if _scorers
-                          else [(1.0, "naive")] * len(ctxs))
-                fresh = []
-                for (p, q, k), (prob, sid) in zip(keys, scored):
-                    prob = 1.0 if prob is None else float(prob)
-                    probs[(p, q)] = prob
-                    if sid != "naive":
-                        fresh.append((k, prob))
-                if fresh:
-                    try:
-                        core.verdicts_put(model_tag, fresh)
-                    except Exception as e:
-                        access_logger.warning(f"dedup verdict cache: {e}")
+            probs = {}
+            imgs = [p for p in range(len(mem)) if not mem[p][2]]
+            vids = [p for p in range(len(mem)) if mem[p][2]]
+
+            def _key(p, q):
+                ri, rj = mem[p][0], mem[q][0]
+                return core.verdict_key(rows[ri]["sha256"] or rows[ri]["rel_path"],
+                                        rows[rj]["sha256"] or rows[rj]["rel_path"])
+
+            def _excluded(p, q):
+                return core.excl_key(rows[mem[p][0]]["rel_path"], rows[mem[q][0]]["rel_path"]) in exclusions
+
+            # Images: one group call (encode once, compare many, native
+            # resolution). All-or-nothing verdict cache per group: the matrix
+            # is cheaper than the decodes, so partial reuse buys nothing.
+            if len(imgs) >= 2:
+                ipairs = [(p, q) for a_, p in enumerate(imgs) for q in imgs[a_ + 1:] if not _excluded(p, q)]
+                cached = core.verdicts_get(model_tag, {_key(p, q) for p, q in ipairs}) if ipairs else {}
+                if ipairs and all(_key(p, q) in cached for p, q in ipairs):
+                    for p, q in ipairs:
+                        probs[(p, q)] = cached[_key(p, q)]
+                elif ipairs:
+                    mat = (_scorers.score_group([mem[p][1] for p in imgs], naive_score=1.0) if _scorers
+                           else np.ones((len(imgs), len(imgs)), np.float32))
+                    pos = {p: k for k, p in enumerate(imgs)}
+                    for p, q in ipairs:
+                        probs[(p, q)] = float(mat[pos[p], pos[q]])
+                    if model_tag != "naive":
+                        try:
+                            core.verdicts_put(model_tag, [(_key(p, q), probs[(p, q)]) for p, q in ipairs])
+                        except Exception as e:
+                            access_logger.warning(f"dedup verdict cache: {e}")
+            # Videos: pairwise through the clip model.
+            if len(vids) >= 2:
+                vpairs = [(p, q) for a_, p in enumerate(vids) for q in vids[a_ + 1:] if not _excluded(p, q)]
+                cached = core.verdicts_get(model_tag, {_key(p, q) for p, q in vpairs}) if vpairs else {}
+                todo = [(p, q) for p, q in vpairs if _key(p, q) not in cached]
+                for p, q in vpairs:
+                    if _key(p, q) in cached:
+                        probs[(p, q)] = cached[_key(p, q)]
+                if todo:
+                    ctxs = [{"is_video": True, "ref_frames": mem[p][1], "other_frames": mem[q][1]} for p, q in todo]
+                    scored = (_scorers.score_pairs(ctxs, naive_score=1.0) if _scorers
+                              else [(1.0, "naive")] * len(ctxs))
+                    fresh = []
+                    for (p, q), (prob, sid) in zip(todo, scored):
+                        probs[(p, q)] = 1.0 if prob is None else float(prob)
+                        if sid != "naive":
+                            fresh.append((_key(p, q), probs[(p, q)]))
+                    if fresh:
+                        try:
+                            core.verdicts_put(model_tag, fresh)
+                        except Exception as e:
+                            access_logger.warning(f"dedup verdict cache: {e}")
             # components at the confirm threshold
             adj = {p: set() for p in range(len(mem))}
             for (p, q), pr in probs.items():
@@ -731,6 +787,7 @@ def register(host):
     host.add_route('/api/dedup_clear_group', dedup_clear_group, methods=['POST'], endpoint='dedup_ep_dedup_clear_group', feature="dedup", level="write")
     host.add_route('/api/dedup_exclude', dedup_exclude, methods=['POST'], endpoint='dedup_ep_dedup_exclude', feature="dedup", level="write")
     host.add_route('/api/dedup_compare_video', dedup_compare_video, methods=['POST'], endpoint='dedup_ep_dedup_compare_video', feature="dedup", level="write")
+    host.add_route('/api/dedup_change_map', dedup_change_map, methods=['POST'], endpoint='dedup_ep_dedup_change_map', feature="dedup", level="read")
     host.add_route('/api/dedup_groups', dedup_groups_page, methods=['GET'], endpoint='dedup_ep_dedup_groups_page', feature="dedup")
     host.add_route('/api/dedup', dedup, methods=['POST'], endpoint='dedup_ep_dedup', feature="dedup", level="write")
     host.add_route('/api/dedup_merge', dedup_merge, methods=['POST'], endpoint='dedup_ep_dedup_merge', feature="dedup", level="write", action='dedup_merge', fields=('keep', 'remove'))

@@ -85,13 +85,11 @@ def scan(folders, exts=IMG_EXTS):
 
 
 def _decode_worker(args):
-    """Process-pool worker: decode one file to TWO side x side uint8 BGR
-    views: [0] the whole image squashed (what the global 128-px view sees)
-    and [1] a native-resolution crop from a random position (what the
-    inference tiles see: real pixel detail, noise and sharpness). Both go
-    into the pair pool so the one net learns both regimes. None when
-    unusable. Standalone on purpose: no app state crosses the process
-    boundary."""
+    """Process-pool worker: decode one file to a side x side uint8 BGR crop
+    at NATIVE resolution from a random position (real pixel detail, noise
+    and sharpness — what the change net sees at scan time). Images smaller
+    than a crop are used whole, upscaled. None when unusable. Standalone on
+    purpose: no app state crosses the process boundary."""
     path, side = args
     import cv2
     import numpy as np
@@ -118,30 +116,55 @@ def _decode_worker(args):
         if img is None or img.ndim != 3 or min(img.shape[:2]) < 32:
             return None
         h, w = img.shape[:2]
-        rng = np.random.default_rng(abs(hash(path)) % (2**32))
+        rng = np.random.default_rng(int(hashlib.sha1(path.encode()).hexdigest()[:8], 16))
         if min(h, w) >= side:
             y, x = int(rng.integers(0, h - side + 1)), int(rng.integers(0, w - side + 1))
-            native = img[y:y + side, x:x + side]
-        else:                                    # smaller than a tile: it is its own native view
-            native = cv2.resize(img, (side, side), interpolation=cv2.INTER_LINEAR)
-        return np.stack([cv2.resize(img, (side, side), interpolation=cv2.INTER_AREA), native])
+            return np.ascontiguousarray(img[y:y + side, x:x + side])
+        return cv2.resize(img, (side, side), interpolation=cv2.INTER_LINEAR)
     except Exception:
         return None
 
 
 def cache_path(host, paths, side):
-    key = hashlib.sha1(("\n".join(paths) + f"|{side}|v2").encode()).hexdigest()[:16]
+    key = hashlib.sha1(("\n".join(paths) + f"|{side}|v3").encode()).hexdigest()[:16]
     d = os.path.join(host.core.models_dir, "dedup_train")
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, f"cache_{key}.npy")
 
 
+def _train_dir(host):
+    d = os.path.join(host.core.models_dir, "dedup_train")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def clean_train_dir(host, keep=()):
+    """Remove everything in models/dedup_train except `keep` (full paths):
+    stale caches from other file lists / sides, half-written .part files,
+    checkpoints of other builds. Returns bytes freed."""
+    d, freed = _train_dir(host), 0
+    keep = {os.path.abspath(k) for k in keep}
+    for name in os.listdir(d):
+        p = os.path.join(d, name)
+        if os.path.abspath(p) in keep or not os.path.isfile(p):
+            continue
+        try:
+            freed += os.path.getsize(p); os.remove(p)
+        except OSError:
+            pass
+    return freed
+
+
+def ckpt_path(host, cache_file):
+    return cache_file[:-4] + ".ckpt.pt"
+
+
 def build_cache(host, paths, side, workers, in_ram=False):
-    """Decode every path once into a [N, 2, side, side, 3] uint8 .npy
-    (squashed view + native crop, skipping files that fail) and return
-    (array, kept_paths). Reused on later builds with the same file list and
-    side. in_ram loads the whole array instead of memory-mapping it
-    (2·side²·3 bytes per image: 393 KB at 256 → 25 GB for 65k images)."""
+    """Decode every path once into a [N, side, side, 3] uint8 .npy of
+    native-resolution crops (skipping files that fail) and return (array,
+    kept_paths). Reused on later builds with the same file list and side.
+    in_ram loads the whole array instead of memory-mapping it (side²·3 bytes
+    per image: 196 KB at 256 → 12.8 GB for 65k images)."""
     cp = cache_path(host, paths, side)
     meta = cp + ".paths"
     if os.path.exists(cp) and os.path.exists(meta):
@@ -151,7 +174,7 @@ def build_cache(host, paths, side, workers, in_ram=False):
             return arr, kept
     tmp = cp + ".part"
     n = len(paths)
-    arr = np.lib.format.open_memmap(tmp, mode="w+", dtype=np.uint8, shape=(n, 2, side, side, 3))
+    arr = np.lib.format.open_memmap(tmp, mode="w+", dtype=np.uint8, shape=(n, side, side, 3))
     kept = []
     j = 0
     with ProcessPoolExecutor(max(1, int(workers))) as ex:
@@ -167,7 +190,7 @@ def build_cache(host, paths, side, workers, in_ram=False):
     arr.flush(); del arr
     if j < n:                       # drop failed slots: rewrite compact
         src = np.load(tmp, mmap_mode="r")
-        out = np.lib.format.open_memmap(cp, mode="w+", dtype=np.uint8, shape=(j, 2, side, side, 3))
+        out = np.lib.format.open_memmap(cp, mode="w+", dtype=np.uint8, shape=(j, side, side, 3))
         out[:] = src[:j]; out.flush(); del out, src
         os.remove(tmp)
     else:
@@ -182,17 +205,16 @@ def _chunks(seq, n):
 
 
 def _cnn_arrays(pairs):
-    """pairs -> (a, b, y, kinds): a, b uint8 [n,WORK,WORK,3] (dc._tensor makes
-    them float on the device), y float32 in 0..1."""
-    a_l, b_l, y_l, k_l = [], [], [], []
-    for a, b, lab, kind in pairs:
-        wa, wb = dc._to_work_u8(a), dc._to_work_u8(b)
-        if wa is None or wb is None:
+    """pairs -> (a, b, m, kinds): a, b uint8 [n,S,S,3] aligned pairs, m float32
+    [n,S/8,S/8] per-cell change target (mean of the per-pixel mask)."""
+    a_l, b_l, m_l, k_l = [], [], [], []
+    for a, b, m, kind in pairs:
+        if a is None or b is None or a.shape != b.shape:
             continue
-        a_l.append(wa); b_l.append(wb); y_l.append(float(lab)); k_l.append(kind)
+        a_l.append(a); b_l.append(b); m_l.append(dc.cell_mask(m)); k_l.append(kind)
     if not a_l:
         return None
-    return np.stack(a_l), np.stack(b_l), np.asarray(y_l, np.float32), k_l
+    return np.stack(a_l), np.stack(b_l), np.stack(m_l).astype(np.float32), k_l
 
 
 _WCACHE = {}    # pair-gen worker: cache path -> mmap'd array (one per process)
@@ -205,7 +227,7 @@ def _pairs_worker(args):
     arr = _WCACHE.get(cache_file)
     if arr is None:
         arr = _WCACHE[cache_file] = np.load(cache_file, mmap_mode="r")
-    imgs = [np.ascontiguousarray(arr[i, v]) for i in idx for v in (0, 1)]   # squashed view + native crop
+    imgs = [np.ascontiguousarray(arr[i]) for i in idx]
     rng = np.random.default_rng(seed)
     pairs = synth.synth_pairs(imgs, rng, per_image=int(per_image)) if len(imgs) >= 2 else []
     rng.shuffle(pairs)
@@ -221,17 +243,29 @@ def _cat(parts):
 
 
 def _feedback_arrays(fb_cnn):
-    """(blob, label) rows from dup_cnn_samples -> (a, b, y) arrays, or None."""
-    a_l, b_l, y_l = [], [], []
+    """(blob, label) rows from dup_cnn_samples -> (a, b, m) arrays, or None.
+    label 1 (merged) -> all-zero change target, 0 -> all-one. Old float CHW
+    samples are converted to WORK-side uint8."""
+    a_l, b_l, m_l = [], [], []
+    cells = dc.WORK // dc.STRIDE
+
+    def _u8(x):
+        if x.dtype != np.uint8:                       # old [3,h,w] float 0..1
+            x = (np.clip(x, 0, 1) * 255).astype(np.uint8).transpose(1, 2, 0)
+        return dc._to_work_u8(x)
     for blob, lab in fb_cnn or ():
         try:
             d = np.load(io.BytesIO(blob))
-            a_l.append(d["a"]); b_l.append(d["b"]); y_l.append(float(lab))
+            a, b = _u8(d["a"]), _u8(d["b"])
+            if a is None or b is None:
+                continue
+            a_l.append(a); b_l.append(b)
+            m_l.append(np.full((cells, cells), 0.0 if float(lab) >= 0.5 else 1.0, np.float32))
         except Exception:
             continue
     if not a_l:
         return None
-    return np.stack(a_l), np.stack(b_l), np.asarray(y_l, np.float32)
+    return np.stack(a_l), np.stack(b_l), np.stack(m_l)
 
 
 def _batches(arr, batch):
@@ -240,10 +274,11 @@ def _batches(arr, batch):
 
 
 def _acc(cnn, arr, device, kinds=None):
-    """Accuracy (score>=0.5 vs label>=0.5) of one model on prepared (a, b, y)
-    arrays; per kind when given, plus "mae" = mean |score - label|, which is
-    what matters for the graded (localedit) labels."""
-    a, b, y = arr[:3]
+    """Accuracy (score>=0.5 vs unchanged-fraction>=0.5) of one model on
+    prepared (a, b, m) arrays; per kind when given, plus "mae" = mean
+    |score - unchanged fraction|, which is what matters for graded edits."""
+    a, b, m = arr[:3]
+    y = 1.0 - m.mean(axis=(1, 2))
     p = np.concatenate([cnn.predict_batch(a[i:i + 64], b[i:i + 64], device) for i in range(0, len(y), 64)])
     ok = (p >= 0.5) == (y >= 0.5)
     if kinds is None:
@@ -309,14 +344,18 @@ def bench(sizes=None, batch=256):
 def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_000,
           per_image=6, epochs=3, chunk=1024, batch=256, lr=1e-3, workers=4, holdout=0.03,
           seed=0, install=True, ship=False, cache_side=CACHE_SIDE, in_ram=False, amp="bf16",
-          device="", compile=False, on_installed=None):
+          device="", compile=False, micro=0, resume=True, on_installed=None):
     """Blocking build. `paths`: image files to learn from (library + extra
     folders, already scanned). `feedback`: {"cnn": [(blob, label)]} from the
     Dedup panel's merge / not-a-duplicate decisions. `sizes`: {name: {width,
     depth}} (default dc.SIZES), all trained on the same stream. `active`: which size becomes
     models/dup_cnn.pt (default: the largest trained). `device`: see devices()
     (one GPU, several to spread the sizes over, or size=device). `amp`: "bf16",
-    "fp16" or "". `compile`: torch.compile the nets. Returns the summary (also
+    "fp16" or "". `compile`: torch.compile the nets. `micro`: GPU micro-batch
+    (gradient accumulation up to `batch`; 0 = whole batch). `resume`: continue
+    from the checkpoint of an interrupted build with the same cache and sizes
+    (a checkpoint is written after every chunk, at most once a minute, and
+    removed when the build finishes). Returns the summary (also
     progress['last'])."""
     if not _lock.acquire(blocking=False):
         return {"ok": False, "error": "a build is already running"}
@@ -343,6 +382,10 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
         progress.update(images_total=len(paths), phase="decoding")
         _say(host, f"decoding {len(paths)} images into the cache...")
         paths_all = paths
+        cache_file = cache_path(host, paths_all, int(cache_side))
+        freed = clean_train_dir(host, keep=(cache_file, cache_file + ".paths", ckpt_path(host, cache_file)))
+        if freed:
+            _say(host, f"cleaned models/dedup_train: {freed / 2**30:.1f} GB of stale caches removed")
         cache, paths = build_cache(host, paths, int(cache_side), workers, in_ram=bool(in_ram))
         n_hold = max(8, int(len(paths) * holdout)) if len(paths) >= 40 else 0
         hold_idx, train_idx = list(range(n_hold)), list(range(n_hold, len(paths)))
@@ -353,7 +396,6 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
         # Pair-gen pool (forked before this build's GPU work; workers never
         # touch torch, each mmaps the cache file, so a fork is safe).
         pool = ProcessPoolExecutor(max(1, int(workers)))
-        cache_file = cache_path(host, paths_all, int(cache_side))
         models = {z: dc.DupCNN.sized(z, sizes) for z in sizes}
         devs = devices(device, sizes)
         groups = {}                                   # device -> sizes; one training thread per device
@@ -367,9 +409,40 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
         opts = {z: {} for z in sizes}
         done = 0
 
+        # ── checkpoint / resume ───────────────────────────────────────────
+        ck = ckpt_path(host, cache_file)
+        start_ep, start_ci, last_ck = 0, 0, [0.0]
+        if resume and os.path.exists(ck):
+            try:
+                st = dc.torch.load(ck, map_location="cpu", weights_only=False)
+                if set(st["models"]) == set(models) and st.get("seed") == seed and st.get("chunk") == int(chunk):
+                    for z, m in models.items():
+                        getattr(m.net, "_orig_mod", m.net).load_state_dict(st["models"][z]["model"])
+                        m.trained = True
+                        opts[z]["opt_state"] = st["models"][z].get("opt")
+                    start_ep, start_ci = int(st["epoch"]), int(st["chunk_index"]) + 1
+                    done, summary["pairs"] = int(st["done"]), int(st["pairs"])
+                    progress.update(images_done=done, pairs=summary["pairs"])
+                    _say(host, f"resuming from checkpoint: epoch {start_ep + 1}, chunk {start_ci}, {done} images done")
+                else:
+                    _say(host, "checkpoint is for different sizes/seed/chunk; starting over")
+            except Exception as e:
+                _say(host, f"checkpoint unreadable ({e}); starting over")
+
+        def save_ckpt(ep, ci, force=False):
+            if not force and time.time() - last_ck[0] < 60:
+                return
+            st = {"models": {z: {"model": getattr(m.net, "_orig_mod", m.net).state_dict(),
+                                 "opt": opts[z]["opt"].state_dict() if opts[z].get("opt") else None}
+                             for z, m in models.items()},
+                  "epoch": ep, "chunk_index": ci, "done": done, "pairs": summary["pairs"],
+                  "seed": seed, "chunk": int(chunk)}
+            dc.torch.save(st, ck + ".tmp"); os.replace(ck + ".tmp", ck)
+            last_ck[0] = time.time()
+
         def make_pairs(idx):
             idx = sorted(idx)
-            n = max(1, min(int(workers), len(idx) // 4))          # >= 8 views per shard for "unrelated"
+            n = max(1, min(int(workers), len(idx) // 8))          # >= 8 images per shard for "unrelated"
             shards = [idx[i::n] for i in range(n)]
             arr = _cat(pool.map(_pairs_worker, [(cache_file, sh, int(per_image), int(rng.integers(2**31)))
                                                 for sh in shards if len(sh) >= 2]))
@@ -379,7 +452,7 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
             def run(zs):
                 for z in zs:
                     loss = models[z].fit_batches(_batches(arr, batch), lr=lr, device=devs[z],
-                                                 _opt_holder=opts[z], amp=amp)
+                                                 _opt_holder=opts[z], amp=amp, micro=int(micro or 0))
                     if loss is not None:
                         _note_loss(z, loss)
             if len(groups) == 1:
@@ -392,11 +465,16 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
             for ep in range(int(epochs)):
                 progress["epoch"] = ep + 1
                 order = list(train_idx)
-                rnd.shuffle(order)
+                rnd.shuffle(order)                    # same sequence every run for one seed: resumable
+                if ep < start_ep:
+                    continue
                 chunks = list(_chunks(order, int(chunk)))
-                fut = pre.submit(make_pairs, chunks[0]) if chunks else None
-                for ci, chunk_idx in enumerate(chunks):
+                first = start_ci if ep == start_ep else 0
+                fut = pre.submit(make_pairs, chunks[first]) if first < len(chunks) else None
+                for ci in range(first, len(chunks)):
+                    chunk_idx = chunks[ci]
                     if _stop.is_set():
+                        save_ckpt(ep, ci - 1, force=True)
                         raise RuntimeError("stopped")
                     n_pairs, arr = fut.result()
                     fut = pre.submit(make_pairs, chunks[ci + 1]) if ci + 1 < len(chunks) else None
@@ -405,6 +483,7 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
                     summary["pairs"] += n_pairs
                     if arr is not None:
                         train_all(arr)
+                    save_ckpt(ep, ci)
                     eta = ""
                     if done and progress["images_total"]:
                         rate = done / max(1e-6, time.time() - progress["started"])
@@ -416,11 +495,11 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
                     # One pass over the user's real labelled pairs per epoch, after
                     # the synthetic ones, so the library's own dupes get the last word.
                     train_all(fb_arr)
+                save_ckpt(ep, len(chunks) - 1, force=True)
 
         progress["phase"] = "evaluating"
         _say(host, f"evaluating {len(sizes)} size(s) on {len(hold_idx)} held-out images...")
-        held = _evaluate(models, [cache[i, v] for i in hold_idx for v in (0, 1)], rng, int(per_image), devs) \
-            if hold_idx else {}
+        held = _evaluate(models, [cache[i] for i in hold_idx], rng, int(per_image), devs) if hold_idx else {}
         for z, m in models.items():
             row = summary["sizes"][z]
             row.update({"width": m.width_mult, "depth": m.depth, "params": m.params, "device": devs[z],
@@ -451,6 +530,8 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
                     written.append(os.path.join(base, "dup_cnn.pt"))
         summary["written"] = written
         summary["ok"] = bool(written)
+        if written and os.path.exists(ck):
+            os.remove(ck)                                 # finished: the checkpoint has done its job
         summary["installed"] = bool(install and written and on_installed and on_installed(active))
         summary["seconds"] = round(time.time() - progress["started"])
         accs = " ".join(f"{z} {r['held_out'].get('all', '-')}/{r['feedback'] if r['feedback'] is not None else '-'}"

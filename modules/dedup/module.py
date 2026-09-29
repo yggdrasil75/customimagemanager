@@ -84,6 +84,33 @@ class ScorerRegistry:
                 return str(self._attr(s, "id"))
         return "naive"
 
+    def score_group(self, imgs, naive_score=1.0):
+        """NxN matrix of pair scores for a group of decoded BGR images. The
+        first available scorer offering score_group(imgs) -> matrix answers;
+        otherwise every pair goes through score_pairs. Diagonal = 1."""
+        n = len(imgs)
+        for s in self._scorers:
+            fg = self._attr(s, "score_group")
+            av = self._attr(s, "available")
+            if not callable(fg):
+                continue
+            try:
+                if callable(av) and not av():
+                    continue
+                m = fg(imgs)
+                if m is not None:
+                    return m
+            except Exception:
+                continue
+        import numpy as np
+        m = np.eye(n, dtype=np.float32)
+        pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+        res = self.score_pairs([{"is_video": False, "ref_bgr": imgs[i], "other_bgr": imgs[j]} for i, j in pairs],
+                               naive_score=naive_score)
+        for (i, j), (p, _) in zip(pairs, res):
+            m[i, j] = m[j, i] = naive_score if p is None else float(p)
+        return m
+
     def score_pairs(self, ctxs, naive_score=None):
         """Batched score_pair: scorers offering score_batch(ctxs) -> [prob|None]
         take the whole list at once; the rest are asked one by one. Returns

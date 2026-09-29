@@ -148,7 +148,7 @@
   async function ddtBench() {
     $('ddt_bench').disabled = true;
     const r = await fetch('/api/dedup_train/bench', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ sizes: Object.keys(_sizes), sizes_text: $('ddt_sizes_text').value, batch: +$('ddt_batch').value }) })
+                          body: JSON.stringify({ sizes: Object.keys(_sizes), sizes_text: $('ddt_sizes_text').value, batch: +($('ddt_micro').value || $('ddt_batch').value) }) })
       .then(r => r.json()).catch(() => null);
     $('ddt_bench').disabled = false;
     if (!r || !r.success) { showToast('Dedup train: ' + (r?.error || 'benchmark failed')); return; }
@@ -169,6 +169,7 @@
       install: $('ddt_install').checked, ship: $('ddt_ship').checked,
       cache_side: +$('ddt_cache_side').value, in_ram: $('ddt_in_ram').checked, amp: $('ddt_amp').value,
       device: $('ddt_device').value, compile: $('ddt_compile').checked,
+      micro: +$('ddt_micro').value, resume: $('ddt_resume').checked,
     };
     const r = await fetch('/api/dedup_train/build', { method: 'POST', headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify(body) }).then(r => r.json()).catch(() => null);
