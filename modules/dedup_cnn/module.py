@@ -35,7 +35,8 @@ MANIFEST = {
 
 
 HF_REPO = "yggdrasil75/HEURDU"
-HF_DEFAULT = HF_REPO + "/dup_cnn_{size}.pt"        # owner/repo/path-in-repo, {size} substituted
+HF_DEFAULT = HF_REPO + "/HEURDU_{size}.pt"         # owner/repo/path-in-repo, {size} substituted
+HF_SIZES = ["nano", "small", "medium", "large"]     # what the repo ships
 
 
 def register(host):
@@ -78,7 +79,7 @@ def register(host):
         return common.fetch_file(url, os.path.join(models_dir, "heurdu", f"dup_cnn_{size}.pt"), min_bytes=1024)
 
     def _loader(cap="dedup.pair"):
-        size = host.model_variant(cap)["size"] or _cnn_mod.SIZE_ORDER[0]
+        size = host.model_variant(cap)["size"] or "medium"
         m = loaded.get(size)
         if m is None:
             m = loaded[size] = _cnn_mod.DupCNN.load(_path_for(size))
@@ -90,7 +91,7 @@ def register(host):
         return "cuda" if _cnn_mod.torch.cuda.is_available() else "cpu"
 
     host.provide_model("dedup.pair", "heurdu", label="HEURDU", family="HEURDU",
-                       sizes=list(_cnn_mod.SIZE_ORDER), loader=_loader,
+                       sizes=HF_SIZES, loader=_loader,
                        available=lambda: bool(_cnn_mod._HAVE_TORCH),
                        reason="needs torch", cost_mb=64, gpu=False, supports_conf=False,
                        note="Siamese CNN duplicate scorer, trained on public photo sets. nano/small for a Pi, "
