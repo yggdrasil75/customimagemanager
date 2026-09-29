@@ -49,7 +49,7 @@ def register(host):
     host.register_feature("tab.trainer", "Trainer tab", section="gallery_tabs",
                           section_label="Gallery tabs", default="write",
                           role_defaults={"viewer": "block"})
-    for key, label in (("ai.quicktrain", "Quick Train"), ("ai.trainer", "Trainer portal link"),
+    for key, label in (("ai.trainer", "Trainer portal link"),
                        ("ai.trainer.select", "Trainer — build/select image sets"),
                        ("ai.trainer.keep", "Trainer — modify persistent sets"),
                        ("ai.trainer.run", "Trainer — start a training run")):

@@ -69,7 +69,10 @@ improve:
 pose uses wholebody, which is good for limited occlusion. need to use crowdpose for heavy occlusion. and an automatic switch.  
 switch from coco-2017 based yolo to objects365 based. or openimages v7 based.
 
-
+![Dedup Comparison](gitpics/dedup_comparison.png)
+![Dedup Full](gitpics/dedup_full.png)
+![Full Menu](gitpics/full_menu.png)
+![Common Photo](gitpics/Pose_seg_box.png)
 
 storage tiering:
 allow you to set nvme storage for thumbnails, hdd for videos, potentially slower hdds for low bitrate videos

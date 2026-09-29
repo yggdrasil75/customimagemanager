@@ -857,15 +857,8 @@
       registerControlButton("ai_tooling_links",
         '<button type="button" onclick="setPane(\'trainer\')" data-feature="tab.trainer" ' +
         'class="text-xs text-purple-300 bg-gray-700 px-2 py-1 rounded hover:bg-gray-600 border border-purple-800">Trainer</button>');
-      registerControlButton("ai_tools",
-        '<button onclick="quickTrain()" data-feature="ai.quicktrain" title="Start a training run with the current settings" ' +
-        'class="w-full bg-orange-700 hover:bg-orange-600 py-1.5 rounded font-bold text-sm">🏋 Quick Train</button>');
     }
   }
-  window.quickTrain = function () {
-    fetch('/api/train', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
-    showToast('Training started!');
-  };
   if (document.readyState === "loading") window.addEventListener("DOMContentLoaded", init);
   else init();
 })();

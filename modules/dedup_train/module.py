@@ -37,6 +37,9 @@ def register(host):
                           section="ai_tooling", section_label="AI Tooling", default="write",
                           role_defaults={"viewer": "block"})
     host.add_config_key("dedup_train_folders", default="", validate=lambda v: str(v or ""))
+    # The size table lives here now: dedup_cnn serves the shipped HEURDU sizes
+    # from the model picker; this is what Trainer > Dedup trains.
+    host.add_config_key("dup_cnn_sizes", default=bd.dc.sizes_text(), validate=lambda v: str(v or ""))
     host.add_settings_field(key="dedup_train_folders", label="Extra dataset folders (one per line)",
                             kind="textarea", pane="module",
                             help="Optional folders of images to train the duplicate detectors from, "
@@ -66,8 +69,6 @@ def register(host):
         return {"cnn": [(r[0], int(r[1])) for r in rows]}
 
     def _reload_live(active):
-        host.config["dup_cnn_size"] = active
-        host.save_config()
         svc = host.get_service("dedup_cnn")
         try:
             return bool(svc and svc.get("reload") and svc["reload"]())
@@ -92,7 +93,7 @@ def register(host):
                         "cuda": bool(bd.dc._HAVE_TORCH and bd.dc.torch.cuda.is_available()),
                         "gpus": bd.gpus(),
                         "folders": host.config.get("dedup_train_folders", ""),
-                        "active_size": host.config.get("dup_cnn_size", "medium"),
+                        "active_size": (host.model_variant("dedup.pair") or {}).get("size") or "medium",
                         "library_images": _count("SELECT COUNT(*) FROM files WHERE COALESCE(media_kind,'image')='image'"),
                         "feedback": {"cnn": _count("SELECT COUNT(*) FROM dup_cnn_samples"),
                                      "dup": _count("SELECT COUNT(*) FROM dup_cnn_samples WHERE label=1"),
