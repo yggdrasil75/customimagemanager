@@ -35,7 +35,7 @@ MANIFEST = {
 
 
 HF_REPO = "yggdrasil75/HEURDU"
-HF_FILE = "https://huggingface.co/" + HF_REPO + "/resolve/main/dup_cnn_{size}.pt"
+HF_DEFAULT = HF_REPO + "/dup_cnn_{size}.pt"        # owner/repo/path-in-repo, {size} substituted
 
 
 def register(host):
@@ -55,15 +55,27 @@ def register(host):
     host.declare_capability("dedup.pair", label="Duplicate pair scorer",
                             summary="Probability that two images are the same asset (0..1).",
                             input="two BGR images", output="float 0..1")
-    loaded = {}
+    loaded, failed = {}, {}
+    host.add_config_key("dup_cnn_hf", default=HF_DEFAULT, validate=lambda v: str(v or HF_DEFAULT))
+    host.add_settings_field(key="dup_cnn_hf", label="HEURDU weights (owner/repo/path, {size})", kind="text",
+                            pane="models", help="Where each size is downloaded from on HuggingFace. "
+                                                "{size} becomes nano/small/medium/... Default: " + HF_DEFAULT)
+    host.add_config_key("dup_cnn_tiles", default=256, validate=lambda v: max(0, int(v or 0)))
+    host.add_settings_field(key="dup_cnn_tiles", label="Dup-CNN native tiles per pair", kind="number",
+                            pane="models", help="Besides the 128-px global view, each pair is compared on up to this "
+                                                "many 128x128 tiles cut at NATIVE resolution, evenly spaced (a burst "
+                                                "frame or a retouched face is caught here). 0 = global view only. "
+                                                "More tiles = more coverage of big images, slower on CPU.")
 
     def _path_for(size):
         local = os.path.join(models_dir, f"dup_cnn_{size}.pt")
         if os.path.exists(local):
             return local
         import common
-        return common.fetch_file(HF_FILE.format(size=size),
-                                 os.path.join(models_dir, "heurdu", f"dup_cnn_{size}.pt"), min_bytes=1024)
+        spec = str(host.config.get("dup_cnn_hf") or HF_DEFAULT).format(size=size).strip("/")
+        owner, repo, *rest = spec.split("/")
+        url = f"https://huggingface.co/{owner}/{repo}/resolve/main/{'/'.join(rest)}"
+        return common.fetch_file(url, os.path.join(models_dir, "heurdu", f"dup_cnn_{size}.pt"), min_bytes=1024)
 
     def _loader(cap="dedup.pair"):
         size = host.model_variant(cap)["size"] or _cnn_mod.SIZE_ORDER[0]
@@ -72,7 +84,10 @@ def register(host):
             m = loaded[size] = _cnn_mod.DupCNN.load(_path_for(size))
             if not m.trained:
                 raise RuntimeError(f"HEURDU {size}: checkpoint did not load")
-        return lambda a, b: m.predict(a, b)
+        return lambda a, b: m.predict(a, b, _device(), int(host.config.get("dup_cnn_tiles", 256)))
+
+    def _device():
+        return "cuda" if _cnn_mod.torch.cuda.is_available() else "cpu"
 
     host.provide_model("dedup.pair", "heurdu", label="HEURDU", family="HEURDU",
                        sizes=list(_cnn_mod.SIZE_ORDER), loader=_loader,
@@ -83,36 +98,66 @@ def register(host):
                             "huggingface.co/" + HF_REPO + " on first use.")
 
     def _img_handle():
+        size = host.model_variant("dedup.pair")["size"]
+        if failed.get(size, 0) > _cnn_mod.time.time():
+            return None                               # said so already; retry in a while, not per pair
         try:
             return host.request_model("dedup.pair")
         except Exception as e:
-            host.logger.warning(f"dedup_cnn: no image model: {e}")
+            failed[size] = _cnn_mod.time.time() + 600
+            host.logger.warning(f"dedup_cnn: no image model for size {size}: {e} "
+                                f"(check Settings > Models > HEURDU weights; retrying in 10 min)")
             return None
 
-    def _available():
-        return bool(_cnn_mod._HAVE_TORCH)
-
-    def _score(ctx):
-        try:
-            if ctx.get("is_video"):
-                rf, of = ctx.get("ref_frames"), ctx.get("other_frames")
-                if not (rf and of):
-                    return None
-                if vid_cnn and vid_cnn.available and vid_cnn.trained:
-                    return vid_cnn.predict(rf, of)
-                return None
-            a, b = ctx.get("ref_bgr"), ctx.get("other_bgr")
-            if a is None or b is None:
-                return None
-            h = _img_handle()
-            return h(a, b) if h else None
-        except Exception:
+    def _img_model():
+        """The DupCNN behind the handle (loads it through the broker first)."""
+        if _img_handle() is None:
             return None
-        return None
+        return loaded.get(host.model_variant("dedup.pair")["size"])
+
+    def _score_batch(ctxs):
+        """Every image pair of a group in one go: global view + native tiles
+        for all pairs are stacked into a few big forward passes (GPU when
+        there is one), then folded back per pair with dup_cnn.combine.
+        Video pairs go one by one through the clip model."""
+        out = [None] * len(ctxs)
+        m = _img_model()
+        budget = int(host.config.get("dup_cnn_tiles", 256))
+        A, B, spans = [], [], []                       # spans: (ctx index, global row, tile rows slice)
+        for i, c in enumerate(ctxs):
+            if c.get("is_video"):
+                rf, of = c.get("ref_frames"), c.get("other_frames")
+                if rf and of and vid_cnn and vid_cnn.available and vid_cnn.trained:
+                    try:
+                        out[i] = vid_cnn.predict(rf, of)
+                    except Exception:
+                        pass
+                continue
+            a, b = c.get("ref_bgr"), c.get("other_bgr")
+            if m is None or a is None or b is None:
+                continue
+            ga, gb = _cnn_mod._to_work_u8(a), _cnn_mod._to_work_u8(b)
+            if ga is None or gb is None:
+                continue
+            g = len(A); A.append(ga); B.append(gb)
+            tp = _cnn_mod.tile_pairs(a, b, budget) if budget else None
+            t0 = len(A)
+            if tp is not None:
+                A.extend(tp[0]); B.extend(tp[1])
+            spans.append((i, g, slice(t0, len(A))))
+        if spans:
+            import numpy as np
+            probs = np.concatenate([m.predict_batch(np.stack(A[j:j + 512]), np.stack(B[j:j + 512]), _device())
+                                    for j in range(0, len(A), 512)])
+            for i, g, ts in spans:
+                out[i] = _cnn_mod.combine(float(probs[g]), probs[ts])
+        return out
 
     scorers.register({
         "id": "cnn", "label": "Advanced CNN", "available": _available,
-        "priority": 20, "score": _score, "clip_t": _vid_mod.CLIP_T,
+        "priority": 20, "score": _score, "score_batch": _score_batch,
+        "tag": lambda: "cnn:" + str(host.model_variant("dedup.pair")["size"] or ""),
+        "clip_t": _vid_mod.CLIP_T,
     })
 
     def _reload():

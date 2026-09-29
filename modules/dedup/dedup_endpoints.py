@@ -417,6 +417,8 @@ def _CLIP_T():
 def dedup():
     force = request.json.get("force", False) if request.is_json else False
     try:
+        if force:
+            core.verdicts_clear()       # re-judge every pair; exclusions ("not a duplicate") persist
         # ── 0. Count files on disk ────────────────────────────────────────
         state["status_text"] = "Dedup: Counting files…"
         # Union of loose + packed, so packed files are deduped too rather than
@@ -547,74 +549,97 @@ def dedup():
         # ── 5. Pixel verify sim groups ────────────────────────────────────
         state["status_text"] = f"Dedup: Pixel-verifying {len(sim_groups_raw)} groups…"
 
+        _scorers = _HOST.get_service("dedup_scorers") if _HOST else None
+        model_tag = _scorers.tag() if _scorers else "naive"
+        exclusions = core.load_exclusion_set()
+
         def verify(group_row_indices):
             group_row_indices.sort(
                 key=lambda i: -(rows[i]["width"] or 0) * (rows[i]["height"] or 0))
-            ref_rel = rows[group_row_indices[0]]["rel_path"]
-            ref_path = get_safe_path(MEDIA_DIR, ref_rel)
-            ref_is_video = ref_path is not None and mt.is_video(ref_path)
-
-            # Stills decode once up front; videos decode lazily to frame lists.
-            ref_bgr = None
-            ref_frames = None
-            if ref_is_video:
-                ref_frames = mt.video_sample_frames(ref_path, n=_CLIP_T())
-                if not ref_frames: return None
-            else:
-                ref_img = read_jxl(ref_path)
-                if ref_img is None: return None
-                ref_bgr = _to_bgr(ref_img)
-
-            keep_idx    = [group_row_indices[0]]
-            keep_scores = [1.0]   # reference is 100% similar to itself
-            # `_bind` puts the host here as _HOST; the old 'module_host' guard
-            # never matched, so every phash candidate was accepted at 1.0 and
-            # the CNN / heuristic scorers were never consulted.
-            _scorers = _HOST.get_service("dedup_scorers") if _HOST else None
-            for i in group_row_indices[1:]:
-                other_path = get_safe_path(MEDIA_DIR, rows[i]["rel_path"])
-                other_is_video = other_path is not None and mt.is_video(other_path)
-
-                # Naive base score from phash proximity is implicit (these are
-                # already candidate pairs); scorers refine, else we accept the
-                # pair. Build the per-pair context the registered scorers use.
-                other_bgr = None
-                other_frames = None
-                if ref_is_video or other_is_video:
-                    if not (ref_is_video and other_is_video):
-                        continue   # a video and a still are never the same asset
-                    other_frames = mt.video_sample_frames(other_path, n=_CLIP_T())
-                    if not other_frames:
-                        continue
+            mem = []                                  # (row_idx, work_or_frames, is_video)
+            for i in group_row_indices:
+                path = get_safe_path(MEDIA_DIR, rows[i]["rel_path"])
+                if path is None:
+                    continue
+                if mt.is_video(path):
+                    fr = mt.video_sample_frames(path, n=_CLIP_T())
+                    if fr:
+                        mem.append((i, fr, True))
                 else:
-                    img = read_jxl(other_path)
+                    # Full decode, one member at a time; only the scorer's
+                    # 128-px input is kept (a 16k image stays out of RAM).
+                    img = read_jxl(path)
                     if img is None:
                         continue
-                    other_bgr = _to_bgr(img)
-
-                ctx = {"ref_bgr": ref_bgr, "other_bgr": other_bgr,
-                       "is_video": bool(ref_is_video and other_is_video),
-                       "ref_frames": ref_frames, "other_frames": other_frames}
-                # naive_score: candidate pairs are near-dupes by phash, so the
-                # naive fallback when no scorer answers is "accept" (1.0).
-                prob, _sid = (_scorers.score_pair(ctx, naive_score=1.0)
-                              if _scorers else (1.0, "naive"))
-                if prob is None:
-                    prob = 1.0
-                # Final confirm gate: only pairs at/above the confirm threshold
-                # are kept as duplicates (the "bitwise" high-confidence stage).
-                is_dup = prob >= 0.5
-                if is_dup:
-                    keep_idx.append(i)
-                    keep_scores.append(prob)
-            return (keep_idx, keep_scores) if len(keep_idx) > 1 else None
+                    mem.append((i, _to_bgr(img), False))
+            if len(mem) < 2:
+                return []
+            pairs, ctxs, keys, probs = [], [], [], {}
+            for p in range(len(mem)):
+                for q in range(p + 1, len(mem)):
+                    (ri, wa, va), (rj, wb, vb) = mem[p], mem[q]
+                    if va != vb:
+                        continue                      # a video and a still are never the same asset
+                    if core.excl_key(rows[ri]["rel_path"], rows[rj]["rel_path"]) in exclusions:
+                        continue
+                    k = core.verdict_key(rows[ri]["sha256"] or rows[ri]["rel_path"],
+                                         rows[rj]["sha256"] or rows[rj]["rel_path"])
+                    pairs.append((p, q, k))
+            cached = core.verdicts_get(model_tag, {k for *_, k in pairs}) if pairs else {}
+            for p, q, k in pairs:
+                if k in cached:
+                    probs[(p, q)] = cached[k]
+                    continue
+                (ri, wa, va), (rj, wb, vb) = mem[p], mem[q]
+                if va:
+                    ctxs.append({"is_video": True, "ref_frames": wa, "other_frames": wb})
+                else:
+                    ctxs.append({"is_video": False, "ref_bgr": wa, "other_bgr": wb})
+                keys.append((p, q, k))
+            if ctxs:
+                scored = (_scorers.score_pairs(ctxs, naive_score=1.0) if _scorers
+                          else [(1.0, "naive")] * len(ctxs))
+                fresh = []
+                for (p, q, k), (prob, sid) in zip(keys, scored):
+                    prob = 1.0 if prob is None else float(prob)
+                    probs[(p, q)] = prob
+                    if sid != "naive":
+                        fresh.append((k, prob))
+                if fresh:
+                    try:
+                        core.verdicts_put(model_tag, fresh)
+                    except Exception as e:
+                        access_logger.warning(f"dedup verdict cache: {e}")
+            # components at the confirm threshold
+            adj = {p: set() for p in range(len(mem))}
+            for (p, q), pr in probs.items():
+                if pr >= 0.5:
+                    adj[p].add(q); adj[q].add(p)
+            out, seen = [], set()
+            for start in range(len(mem)):
+                if start in seen or not adj[start]:
+                    continue
+                comp, stack = [], [start]
+                while stack:
+                    x = stack.pop()
+                    if x in seen:
+                        continue
+                    seen.add(x); comp.append(x)
+                    stack.extend(adj[x] - seen)
+                def _sc(a, b):
+                    return probs.get((a, b) if a < b else (b, a), 0.0)
+                pix = lambda x: (rows[mem[x][0]]["width"] or 0) * (rows[mem[x][0]]["height"] or 0)
+                ref = max(comp, key=lambda x: (sum(_sc(x, y) for y in comp if y != x), pix(x)))
+                rest = sorted((y for y in comp if y != ref), key=lambda y: (-_sc(ref, y), -pix(y)))
+                out.append(([mem[ref][0]] + [mem[y][0] for y in rest],
+                            [1.0] + [_sc(ref, y) for y in rest]))
+            return out
 
         verified_members = []
         verified_scores  = []
         with thread_manager.pool(want=4, name="dedup-verify") as ex:
             for result in ex.map(verify, sim_groups_raw):
-                if result:
-                    idxs, scores = result
+                for idxs, scores in (result or []):
                     verified_members.append([rows[i]["rel_path"] for i in idxs])
                     verified_scores.append(scores)
             _db_release_pool(ex, 4)

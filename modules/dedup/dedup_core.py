@@ -135,6 +135,39 @@ def load_exclusion_set():
     return {(r["a"], r["b"]) for r in rows}
 
 
+# ── verdict cache ────────────────────────────────────────────────────────────
+def verdict_key(sha_a, sha_b):
+    return (sha_a, sha_b) if sha_a <= sha_b else (sha_b, sha_a)
+
+
+def verdicts_get(model, keys):
+    """{(a,b): prob} for the given normalised sha pairs the cache knows."""
+    out = {}
+    keys = list(keys)
+    db = HOST.db()
+    for i in range(0, len(keys), 400):
+        chunk = keys[i:i + 400]
+        ph = " OR ".join("(a=? AND b=?)" for _ in chunk)
+        args = [model] + [x for k in chunk for x in k]
+        for r in db.execute(f"SELECT a, b, prob FROM dedup_verdicts WHERE model=? AND ({ph})", args):
+            out[(r["a"], r["b"])] = float(r["prob"])
+    return out
+
+
+def verdicts_put(model, items):
+    """items: iterable of ((a, b), prob)."""
+    db = HOST.db()
+    db.executemany("INSERT OR REPLACE INTO dedup_verdicts(model, a, b, prob) VALUES (?,?,?,?)",
+                   [(model, k[0], k[1], float(p)) for k, p in items])
+    db.commit()
+
+
+def verdicts_clear():
+    db = HOST.db()
+    db.execute("DELETE FROM dedup_verdicts")
+    db.commit()
+
+
 # ── feedback samples (routed to the scorer modules' sample tables) ───────────
 def record_sample(img_a, img_b, label):
     host = HOST

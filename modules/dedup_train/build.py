@@ -85,10 +85,13 @@ def scan(folders, exts=IMG_EXTS):
 
 
 def _decode_worker(args):
-    """Process-pool worker: decode one file to a CACHE_SIDE square uint8 BGR
-    array (squashed, not letterboxed — dup_cnn._to_work_bgr squashes at
-    inference, so training sees the same geometry). None when unusable.
-    Standalone on purpose: no app state crosses the process boundary."""
+    """Process-pool worker: decode one file to TWO side x side uint8 BGR
+    views: [0] the whole image squashed (what the global 128-px view sees)
+    and [1] a native-resolution crop from a random position (what the
+    inference tiles see: real pixel detail, noise and sharpness). Both go
+    into the pair pool so the one net learns both regimes. None when
+    unusable. Standalone on purpose: no app state crosses the process
+    boundary."""
     path, side = args
     import cv2
     import numpy as np
@@ -114,24 +117,31 @@ def _decode_worker(args):
             img = cv2.imread(path, cv2.IMREAD_COLOR)
         if img is None or img.ndim != 3 or min(img.shape[:2]) < 32:
             return None
-        return cv2.resize(img, (side, side), interpolation=cv2.INTER_AREA)
+        h, w = img.shape[:2]
+        rng = np.random.default_rng(abs(hash(path)) % (2**32))
+        if min(h, w) >= side:
+            y, x = int(rng.integers(0, h - side + 1)), int(rng.integers(0, w - side + 1))
+            native = img[y:y + side, x:x + side]
+        else:                                    # smaller than a tile: it is its own native view
+            native = cv2.resize(img, (side, side), interpolation=cv2.INTER_LINEAR)
+        return np.stack([cv2.resize(img, (side, side), interpolation=cv2.INTER_AREA), native])
     except Exception:
         return None
 
 
 def cache_path(host, paths, side):
-    key = hashlib.sha1(("\n".join(paths) + f"|{side}").encode()).hexdigest()[:16]
+    key = hashlib.sha1(("\n".join(paths) + f"|{side}|v2").encode()).hexdigest()[:16]
     d = os.path.join(host.core.models_dir, "dedup_train")
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, f"cache_{key}.npy")
 
 
 def build_cache(host, paths, side, workers, in_ram=False):
-    """Decode every path once into a [N, side, side, 3] uint8 .npy (skipping
-    files that fail) and return (array, kept_paths). Reused on later builds
-    with the same file list and side. in_ram loads the whole array instead of
-    memory-mapping it (~side²·3 bytes per image: 196 KB at 256 → 12.8 GB for
-    65k images)."""
+    """Decode every path once into a [N, 2, side, side, 3] uint8 .npy
+    (squashed view + native crop, skipping files that fail) and return
+    (array, kept_paths). Reused on later builds with the same file list and
+    side. in_ram loads the whole array instead of memory-mapping it
+    (2·side²·3 bytes per image: 393 KB at 256 → 25 GB for 65k images)."""
     cp = cache_path(host, paths, side)
     meta = cp + ".paths"
     if os.path.exists(cp) and os.path.exists(meta):
@@ -141,7 +151,7 @@ def build_cache(host, paths, side, workers, in_ram=False):
             return arr, kept
     tmp = cp + ".part"
     n = len(paths)
-    arr = np.lib.format.open_memmap(tmp, mode="w+", dtype=np.uint8, shape=(n, side, side, 3))
+    arr = np.lib.format.open_memmap(tmp, mode="w+", dtype=np.uint8, shape=(n, 2, side, side, 3))
     kept = []
     j = 0
     with ProcessPoolExecutor(max(1, int(workers))) as ex:
@@ -157,7 +167,7 @@ def build_cache(host, paths, side, workers, in_ram=False):
     arr.flush(); del arr
     if j < n:                       # drop failed slots: rewrite compact
         src = np.load(tmp, mmap_mode="r")
-        out = np.lib.format.open_memmap(cp, mode="w+", dtype=np.uint8, shape=(j, side, side, 3))
+        out = np.lib.format.open_memmap(cp, mode="w+", dtype=np.uint8, shape=(j, 2, side, side, 3))
         out[:] = src[:j]; out.flush(); del out, src
         os.remove(tmp)
     else:
@@ -195,7 +205,7 @@ def _pairs_worker(args):
     arr = _WCACHE.get(cache_file)
     if arr is None:
         arr = _WCACHE[cache_file] = np.load(cache_file, mmap_mode="r")
-    imgs = [np.ascontiguousarray(arr[i]) for i in idx]
+    imgs = [np.ascontiguousarray(arr[i, v]) for i in idx for v in (0, 1)]   # squashed view + native crop
     rng = np.random.default_rng(seed)
     pairs = synth.synth_pairs(imgs, rng, per_image=int(per_image)) if len(imgs) >= 2 else []
     rng.shuffle(pairs)
@@ -359,7 +369,7 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
 
         def make_pairs(idx):
             idx = sorted(idx)
-            n = max(1, min(int(workers), len(idx) // 8))          # >= 8 images per shard for "unrelated"
+            n = max(1, min(int(workers), len(idx) // 4))          # >= 8 views per shard for "unrelated"
             shards = [idx[i::n] for i in range(n)]
             arr = _cat(pool.map(_pairs_worker, [(cache_file, sh, int(per_image), int(rng.integers(2**31)))
                                                 for sh in shards if len(sh) >= 2]))
@@ -409,7 +419,8 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
 
         progress["phase"] = "evaluating"
         _say(host, f"evaluating {len(sizes)} size(s) on {len(hold_idx)} held-out images...")
-        held = _evaluate(models, [cache[i] for i in hold_idx], rng, int(per_image), devs) if hold_idx else {}
+        held = _evaluate(models, [cache[i, v] for i in hold_idx for v in (0, 1)], rng, int(per_image), devs) \
+            if hold_idx else {}
         for z, m in models.items():
             row = summary["sizes"][z]
             row.update({"width": m.width_mult, "depth": m.depth, "params": m.params, "device": devs[z],

@@ -67,6 +67,58 @@ class ScorerRegistry:
                 continue
         return False
 
+    def tag(self):
+        """Identity of the scorer that would answer now ("cnn:medium"), the
+        key the verdict cache is stored under."""
+        for s in self._scorers:
+            av = self._attr(s, "available")
+            try:
+                if callable(av) and not av():
+                    continue
+            except Exception:
+                continue
+            t = self._attr(s, "tag")
+            try:
+                return str(t() if callable(t) else (t or self._attr(s, "id")))
+            except Exception:
+                return str(self._attr(s, "id"))
+        return "naive"
+
+    def score_pairs(self, ctxs, naive_score=None):
+        """Batched score_pair: scorers offering score_batch(ctxs) -> [prob|None]
+        take the whole list at once; the rest are asked one by one. Returns
+        [(prob, scorer_id)] aligned with ctxs."""
+        out, who = [None] * len(ctxs), [None] * len(ctxs)
+        for s in self._scorers:
+            todo = [i for i, p in enumerate(out) if p is None]
+            if not todo:
+                break
+            av = self._attr(s, "available")
+            try:
+                if callable(av) and not av():
+                    continue
+            except Exception:
+                continue
+            sid = self._attr(s, "id")
+            fb, fn = self._attr(s, "score_batch"), self._attr(s, "score")
+            res = None
+            if callable(fb):
+                try:
+                    res = fb([ctxs[i] for i in todo])
+                except Exception:
+                    res = None
+            if res is None and callable(fn):
+                res = []
+                for i in todo:
+                    try:
+                        res.append(fn(ctxs[i]))
+                    except Exception:
+                        res.append(None)
+            for i, p in zip(todo, res or []):
+                if p is not None:
+                    out[i], who[i] = float(p), sid
+        return [(p if p is not None else naive_score, w or "naive") for p, w in zip(out, who)]
+
     def score_pair(self, ctx, naive_score=None):
         """Run scorers in priority order; first non-None prob wins. Falls back
         to naive_score when no scorer answers. Returns (prob, scorer_id)."""
@@ -126,6 +178,16 @@ CREATE TABLE IF NOT EXISTS dedup_checkpoint (
     created       REAL
 );
 
+
+-- Pair verdicts of the current scorer, keyed on content hashes so a rescan
+-- only scores pairs it has not judged yet. Cleared by a forced rescan.
+CREATE TABLE IF NOT EXISTS dedup_verdicts (
+    model  TEXT NOT NULL,
+    a      TEXT NOT NULL,
+    b      TEXT NOT NULL,
+    prob   REAL NOT NULL,
+    PRIMARY KEY (model, a, b)
+);
 
 -- Persistent "never group these two together" pairs.
 -- Stored with a < b so lookups are a single normalised query.

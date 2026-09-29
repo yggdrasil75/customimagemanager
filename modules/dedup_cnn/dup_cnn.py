@@ -11,6 +11,7 @@ cannot share dup_heuristics' dup_samples table.
 import io
 import numpy as np
 import os
+import time
 
 from optional_deps import optional_import
 cv2, _HAVE_CV2 = optional_import("cv2")
@@ -106,6 +107,41 @@ def _to_work_u8(img: "np.ndarray | None") -> "np.ndarray | None":
         return cv2.resize(img[:, :, :3], (WORK, WORK), interpolation=cv2.INTER_AREA)
     except Exception:
         return None
+
+
+def tile_pairs(a: "np.ndarray", b: "np.ndarray", budget: int = 256):
+    """! @brief Aligned NATIVE-resolution WORKxWORK tiles from two BGR images,
+    evenly spaced, at most `budget` tiles (the grid is coarsened, never the
+    pixels). b is resized to a's size, so a lower-resolution copy shows up as
+    a softer tile — training's 'resize' kind labels that a duplicate — while
+    a burst frame, a retouched face or a re-crop shows up as a tile that
+    differs. Returns (A, B) uint8 [k,WORK,WORK,3], or None when the framing
+    differs (aspect off by >2%, tiles cannot align) or the image has no
+    detail beyond the global view (shorter side < 2*WORK)."""
+    ha, wa = a.shape[:2]; hb, wb = b.shape[:2]
+    if min(ha, wa) < 2 * WORK or abs(wa / ha - wb / hb) > 0.02 * (wa / ha):
+        return None
+    if (hb, wb) != (ha, wa):
+        b = cv2.resize(b, (wa, ha), interpolation=cv2.INTER_AREA if hb * wb > ha * wa else cv2.INTER_LINEAR)
+    ny, nx = ha // WORK, wa // WORK
+    if ny * nx > budget:                       # coarsen the grid to the budget, keep the aspect
+        f = (budget / (ny * nx)) ** 0.5
+        ny, nx = max(1, int(ny * f)), max(1, int(nx * f))
+    ys = np.linspace(0, ha - WORK, ny).astype(int)
+    xs = np.linspace(0, wa - WORK, nx).astype(int)
+    A = np.stack([a[y:y + WORK, x:x + WORK, :3] for y in ys for x in xs])
+    B = np.stack([b[y:y + WORK, x:x + WORK, :3] for y in ys for x in xs])
+    return np.ascontiguousarray(A), np.ascontiguousarray(B)
+
+
+def combine(global_p: float, tile_p) -> float:
+    """! @brief One probability for a pair: the global view says whether it is
+    the same picture at all; the tiles say what fraction of it is unchanged at
+    native detail (a changed smile costs the tiles it covers). min() so a
+    different picture can't be rescued by matching background tiles."""
+    if tile_p is None or len(tile_p) == 0:
+        return float(global_p)
+    return float(min(global_p, float(np.mean(tile_p))))
 
 
 def encode_pair(img_a: "np.ndarray", img_b: "np.ndarray") -> "bytes | None":
@@ -285,23 +321,25 @@ class DupCNN:
             net.eval()
         return out
 
-    def predict(self, img_a: "np.ndarray", img_b: "np.ndarray") -> "float | None":
+    def predict(self, img_a: "np.ndarray", img_b: "np.ndarray", device: str = "cpu",
+                tiles: int = 256) -> "float | None":
         """!
-        @brief Probability the pair is a true duplicate.
+        @brief Probability the pair is a true duplicate: global 128-px view AND
+               native-resolution tiles (see tile_pairs / combine). tiles=0 for
+               the global view alone.
         @return 0..1 probability, or None to signal the caller to fall back.
         """
         if not (self.available and self.trained):
             return None
-        a = _to_work_bgr(img_a)
-        b = _to_work_bgr(img_b)
+        a, b = _to_work_u8(img_a), _to_work_u8(img_b)
         if a is None or b is None:
             return None
         try:
-            with torch.no_grad():
-                ta = torch.from_numpy(a[None])
-                tb = torch.from_numpy(b[None])
-                logit = self.net(ta, tb)
-                return float(torch.sigmoid(logit)[0])
+            g = float(self.predict_batch(a[None], b[None], device)[0])
+            tp = tile_pairs(img_a, img_b, tiles) if tiles else None
+            if tp is None:
+                return g
+            return combine(g, self.predict_batch(tp[0], tp[1], device))
         except Exception:
             return None
 
