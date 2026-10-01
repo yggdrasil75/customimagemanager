@@ -12,7 +12,6 @@ whenever they recognise the target.
 """
 
 import os
-import re
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse, unquote
 
@@ -98,7 +97,7 @@ def register(host):
     cfg = host.config
     host.add_config_key("scrape_min_kb", default=20)
     host.add_settings_field(key="scrape_min_kb", label="Page scraper: ignore files under (KB)",
-                            kind="number", pane="general", tab="general",
+                            kind="number", pane="module",
                             help="Skips icons, spacers and thumbnails when scraping a page "
                                  "that no site-specific fetcher handles.")
 

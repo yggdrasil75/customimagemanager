@@ -37,13 +37,17 @@ plugins. Converting one of them to load through register(host) is the
 next section's job; the seam is now here for it.
 """
 
+import json
 import logging
 import os
+import re
 import importlib
 import importlib.util
 import subprocess
 import sys
 import traceback
+
+import optional_deps
 
 _log = logging.getLogger("modules.loader")
 
@@ -63,14 +67,38 @@ def _split_dep(dep):
     return pip_name, import_name
 
 
-def _dep_installed(dep):
-    """Is a manifest dep spec ('pkg' or 'pkg:import_name') importable?"""
+def _dep_label(dep):
+    """Display name of a dep spec: 'pkg>=1.2' stays, 'pkg @ git+https://...' -> 'pkg'."""
+    return _split_dep(dep)[0].split("@")[0].strip()
+
+
+def _import_name(dep):
+    """Top-level import name of a dep spec: explicit ':import_name', else the
+    pip name stripped of extras / version / URL, '-' -> '_'."""
     pip_name, import_name = _split_dep(dep)
-    mod = (import_name or pip_name.replace("-", "_")).split("[")[0].strip()
+    if import_name:
+        return import_name.strip()
+    return re.split(r"[\s<>=!~;\[@]", pip_name.strip(), maxsplit=1)[0].replace("-", "_")
+
+
+def _dep_installed(dep):
+    """Is a manifest dep spec present on disk (not necessarily importable)?"""
     try:
-        return importlib.util.find_spec(mod) is not None
+        return importlib.util.find_spec(_import_name(dep)) is not None
     except (ImportError, ValueError):
         return False
+
+
+def _dep_problem(dep):
+    """None when the dep imports; otherwise why not (missing vs. broken)."""
+    mod = _import_name(dep)
+    if not _dep_installed(dep):
+        return f"pip dependency '{_dep_label(dep)}' not installed"
+    try:
+        importlib.import_module(mod)
+        return None
+    except Exception as e:
+        return f"'{mod}' is installed but failed to import: {type(e).__name__}: {e}"
 
 
 def _pip_install(deps, logger):
@@ -264,7 +292,6 @@ class ModuleRegistry:
         interpreter on purpose: optional_import decides at import time, so a
         dep installed after the app imported the module wouldn't be seen
         until the next start anyway. Returns {module_id: [installed pkgs]}."""
-        import json
         log = logger or _log
         persisted = {}
         try:
@@ -374,15 +401,17 @@ class ModuleRegistry:
     def _unavailable_reason(lm):
         """Why a plugin can't load whole: an AVAILABLE=False probe at import
         time, or a manifest 'pip' dep that doesn't import. None = fine."""
-        if getattr(lm.py_module, "AVAILABLE", True) is False:
-            return getattr(lm.py_module, "UNAVAILABLE_REASON", None) or "unavailable"
         for dep in lm.manifest.get("pip", []):
-            pip_name, _, import_name = dep.partition(":")
-            mod = import_name or pip_name.replace("-", "_")
-            try:
-                importlib.import_module(mod)
-            except Exception:
-                return f"pip dependency '{pip_name.strip()}' not installed"
+            why = _dep_problem(dep)
+            if why:
+                return why
+        if getattr(lm.py_module, "AVAILABLE", True) is False:
+            reason = getattr(lm.py_module, "UNAVAILABLE_REASON", None) or "unavailable"
+            failed = optional_deps.BY_CALLER.get(getattr(lm.py_module, "__name__", ""), [])
+            if failed:
+                reason += " — " + "; ".join(f"import {n} failed: {optional_deps.ERRORS.get(n, '?')}"
+                                            for n in dict.fromkeys(failed))
+            return reason
         return None
 
     def status(self):
@@ -418,7 +447,7 @@ class ModuleRegistry:
         """
         missing = {}
         for pid, lm in self._plugins.items():
-            miss = [dep.partition(":")[0].strip()
+            miss = [_dep_label(dep)
                     for dep in lm.manifest.get("pip", [])
                     if not _dep_installed(dep)]
             if miss:

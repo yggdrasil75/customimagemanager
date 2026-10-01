@@ -31,6 +31,7 @@ Usage
 
 import importlib
 import logging
+import sys
 
 _log = logging.getLogger("optional_deps")
 
@@ -41,6 +42,8 @@ _reported = set()
 # Populated as a side effect of every optional_import call, so other modules
 # (capabilities.py, an admin/debug endpoint) can see what actually loaded.
 LOADED = {}     # module_name -> True/False
+ERRORS = {}     # module_name -> "ExcType: message" of the failed import
+BY_CALLER = {}  # importing module's __name__ -> [names it failed to import]
 
 
 def optional_import(name, attr=None, quiet=False):
@@ -62,6 +65,12 @@ def optional_import(name, attr=None, quiet=False):
         return obj, True
     except Exception as e:                     # ImportError, and anything a
         LOADED[name] = False                   # broken native wheel throws.
+        ERRORS[name] = f"{e.__class__.__name__}: {e}"
+        try:
+            caller = sys._getframe(1).f_globals.get("__name__", "")
+            BY_CALLER.setdefault(caller, []).append(name)
+        except Exception:
+            pass
         if not quiet and name not in _reported:
             _reported.add(name)
             # A ModuleNotFoundError deep inside a package (e.g. an unbuilt
@@ -69,8 +78,8 @@ def optional_import(name, attr=None, quiet=False):
             culprit = e.name if isinstance(e, ModuleNotFoundError) else None
             detail = (f"missing module {culprit!r}" if culprit and culprit != name
                       else e.__class__.__name__)
-            _log.warning("optional dependency %r unavailable (%s); "
-                         "related features disabled", name, detail)
+            _log.warning("optional dependency %r unavailable (%s: %s); "
+                         "related features disabled", name, detail, e)
         return None, False
 
 

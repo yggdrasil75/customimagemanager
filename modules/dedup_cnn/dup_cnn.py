@@ -31,12 +31,8 @@ import time
 from optional_deps import optional_import
 cv2, _HAVE_CV2 = optional_import("cv2")
 
-try:
-    import torch
-    from torch import nn
-    _HAVE_TORCH = True
-except Exception:
-    _HAVE_TORCH = False
+torch, _HAVE_TORCH = optional_import("torch")
+nn = torch.nn if _HAVE_TORCH else None
 
 STRIDE: int = 8            # pixels per cell (PixelUnshuffle factor); lossless
 WORK: int = 256            # side of a stored feedback sample / training crop

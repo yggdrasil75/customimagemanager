@@ -37,7 +37,7 @@ MANIFEST = {
                    "nomic-embed-text) for passage search over books and notes.",
     "core":        False,
     "requires":    [],
-    "pip":         ["torch", "sentence_transformers"],
+    "pip":         ["torch", "sentence-transformers:sentence_transformers"],
     "assets":      [],
 }
 

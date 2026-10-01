@@ -18,6 +18,8 @@ naive) handles the pair.
 
 import os
 
+import common
+
 from . import dup_cnn as _cnn_mod
 from . import dup_cnn_video as _vid_mod
 
@@ -57,22 +59,13 @@ def register(host):
                             summary="Probability that two images are the same asset (0..1).",
                             input="two BGR images", output="float 0..1")
     loaded, failed = {}, {}
-    host.add_config_key("dup_cnn_hf", default=HF_DEFAULT, validate=lambda v: str(v or HF_DEFAULT))
-    host.add_settings_field(key="dup_cnn_hf", label="HEURDU weights (owner/repo/path, {size})", kind="text",
-                            pane="models", help="Where each size is downloaded from on HuggingFace. "
-                                                "{size} becomes nano/small/medium/... Default: " + HF_DEFAULT)
     host.add_config_key("dup_cnn_max_mp", default=16, validate=lambda v: max(1, int(v or 16)))
-    host.add_settings_field(key="dup_cnn_max_mp", label="HEURDU strip size (megapixels)", kind="number",
-                            pane="models", help="Images are compared at NATIVE resolution; bigger ones are encoded in "
-                                                "overlapping strips of about this many megapixels, purely to bound "
-                                                "GPU/CPU memory (~1.5 GB per 16 MP at medium). Result is identical.")
 
     def _path_for(size):
         local = os.path.join(models_dir, f"dup_cnn_{size}.pt")
         if os.path.exists(local):
             return local
-        import common
-        spec = str(host.config.get("dup_cnn_hf") or HF_DEFAULT).format(size=size).strip("/")
+        spec = HF_DEFAULT.format(size=size).strip("/")
         owner, repo, *rest = spec.split("/")
         url = f"https://huggingface.co/{owner}/{repo}/resolve/main/{'/'.join(rest)}"
         return common.fetch_file(url, os.path.join(models_dir, "heurdu", f"dup_cnn_{size}.pt"), min_bytes=1024)
@@ -96,6 +89,10 @@ def register(host):
                        sizes=HF_SIZES, loader=_loader,
                        available=lambda: bool(_cnn_mod._HAVE_TORCH),
                        reason="needs torch", cost_mb=64, gpu=False, supports_conf=False,
+                       settings=[{"key": "dup_cnn_max_mp", "label": "Strip size (megapixels)", "kind": "number",
+                                  "help": "Images are compared at native resolution; larger ones are encoded in "
+                                          "overlapping strips of about this many megapixels to bound memory "
+                                          "(~1.5 GB per 16 MP at medium). Result is identical."}],
                        note="Siamese CNN duplicate scorer, trained on public photo sets. nano/small for a Pi, "
                             "medium for most, large+ if you have the GPU. Sizes download from "
                             "huggingface.co/" + HF_REPO + " on first use.")

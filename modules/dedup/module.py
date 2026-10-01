@@ -30,6 +30,9 @@ heuristic (modules/dedup_heuristic) and CNN (modules/dedup_cnn) modules
 find it via host.get_service.
 """
 
+import numpy as np
+
+
 CONFIRM_THRESHOLD = 0.99
 
 
@@ -105,7 +108,6 @@ class ScorerRegistry:
                     return m, self._attr(s, "id")
             except Exception:
                 continue
-        import numpy as np
         m = np.eye(n, dtype=np.float32)
         pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
         res = self.score_pairs([{"is_video": False, "ref_bgr": imgs[i], "other_bgr": imgs[j]} for i, j in pairs],

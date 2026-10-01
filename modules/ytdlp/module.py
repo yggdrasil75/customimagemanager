@@ -76,15 +76,15 @@ def register(host):
     host.add_config_key("ytdlp_format", default=_DEFAULT_FORMAT)
     host.add_config_key("ytdlp_archive", default=True)
     host.add_settings_field(key="ytdlp_hosts", label="yt-dlp hosts", kind="text",
-                            pane="general", tab="general",
+                            pane="module",
                             help="Comma-separated hostnames fetched with yt-dlp instead of "
                                  "gallery-dl (subdomains included).")
     host.add_settings_field(key="ytdlp_format", label="yt-dlp format", kind="text",
-                            pane="general", tab="general",
+                            pane="module",
                             help="yt-dlp -f selector. Default caps at 1080p; use "
                                  "'bv*+ba/b' for best available.")
     host.add_settings_field(key="ytdlp_archive", label="yt-dlp: skip already-fetched videos",
-                            kind="toggle", pane="general", tab="general",
+                            kind="toggle", pane="module",
                             help="Keeps a download archive so watched channels only pull "
                                  "new uploads each run.")
     _ARCHIVE = os.path.join(os.path.dirname(host.media_dir), "ytdlp_archive.txt")
