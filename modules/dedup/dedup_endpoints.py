@@ -47,46 +47,99 @@ def _bind(host):
     })
 
 
-# ── Dedup - numpy matrix hamming ───────────────────────────────────────────────
-def _find_similar_pairs(blobs: list[bytes], threshold: int) -> list[tuple[int,int]]:
+# ── Dedup - hamming search ─────────────────────────────────────────────────────
+# Bit-count per byte value; np.bitwise_count (numpy>=2) when present.
+_POP8 = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).sum(1).astype(np.uint8)
+
+
+def _popcount_rows(x: np.ndarray) -> np.ndarray:
+    """Hamming weight along the last axis of a uint8 array."""
+    if hasattr(np, "bitwise_count"):
+        return np.bitwise_count(x).sum(axis=-1, dtype=np.int32)
+    return _POP8[x].sum(axis=-1, dtype=np.int32)
+
+
+def _hash_matrix(blobs: list[bytes]) -> np.ndarray:
+    n = len(blobs)
+    return np.frombuffer(b''.join(blobs), dtype=np.uint8).reshape(n, len(blobs[0]))
+
+
+def _find_similar_pairs(blobs: list[bytes], threshold: int) -> np.ndarray:
     """!
-    @brief Find all index pairs whose hash blobs are within a Hamming threshold.
-    @param threshold Maximum Hamming distance for a pair to count as similar.
-    @return List of (i, j) with i < j and hamming(blobs[i], blobs[j]) <= threshold.
+    @brief All index pairs whose hash blobs are within a Hamming threshold.
+           Multi-index hashing: the hash is cut into threshold+1 bit-chunks;
+           by pigeonhole two hashes within `threshold` bits agree exactly on
+           at least one chunk. Each chunk buckets the hashes (sort), and only
+           hashes sharing a bucket are compared. Near-linear for spread-out
+           hashes instead of the full O(n^2) matrix.
+    @return int64 array [k, 2] of (i, j), i < j, hamming <= threshold.
     """
     n = len(blobs)
-    if n == 0:
-        return []
-    L = len(blobs[0])
-    bits = np.unpackbits(
-        np.frombuffer(b''.join(blobs), dtype=np.uint8).reshape(n, L),
-        axis=1
-    ).astype(np.uint8)
+    if n < 2:
+        return np.empty((0, 2), np.int64)
+    H = _hash_matrix(blobs)
+    bits = np.unpackbits(H, axis=1)
+    B = bits.shape[1]
+    m = max(1, min(B, threshold + 1))
+    edges = np.linspace(0, B, m + 1).astype(int)
+    found = []
+    budget = 64 * 1024 * 1024
+    for c in range(m):
+        chunk = np.packbits(bits[:, edges[c]:edges[c + 1]], axis=1)
+        _, inv = np.unique(chunk, axis=0, return_inverse=True)
+        inv = inv.ravel()
+        order = np.argsort(inv, kind="stable")
+        sinv = inv[order]
+        cuts = np.flatnonzero(np.diff(sinv)) + 1
+        starts = np.concatenate(([0], cuts))
+        ends = np.concatenate((cuts, [n]))
+        for a, b in zip(starts[ends - starts > 1].tolist(), ends[ends - starts > 1].tolist()):
+            idx = order[a:b]
+            run = H[idx]
+            r = len(idx)
+            blk = max(1, min(r, budget // max(1, r * H.shape[1])))
+            for r0 in range(0, r, blk):
+                d = _popcount_rows(run[r0:r0 + blk, None, :] ^ run[None, :, :])
+                li, lj = np.nonzero(d <= threshold)
+                keep = lj > li + r0
+                if keep.any():
+                    gi, gj = idx[li[keep] + r0], idx[lj[keep]]
+                    found.append(np.minimum(gi, gj).astype(np.int64) * n + np.maximum(gi, gj))
+    if not found:
+        return np.empty((0, 2), np.int64)
+    u = np.unique(np.concatenate(found))
+    return np.stack((u // n, u % n), axis=1)
 
-    bits_per_row  = L * 8
-    target_bytes  = 64 * 1024 * 1024
-    CHUNK = max(1, min(256, target_bytes // max(1, n * bits_per_row)))
 
-    pairs: list[tuple[int, int]] = []
+def _pair_hamming(blobs: list[bytes], pairs: np.ndarray) -> np.ndarray:
+    """Hamming distance of each (i, j) in pairs; O(pairs), chunked."""
+    H = _hash_matrix(blobs)
+    out = np.empty(len(pairs), np.int32)
+    step = max(1, (64 * 1024 * 1024) // max(1, H.shape[1]))
+    for s in range(0, len(pairs), step):
+        p = pairs[s:s + step]
+        out[s:s + step] = _popcount_rows(H[p[:, 0]] ^ H[p[:, 1]])
+    return out
 
-    for i0 in range(0, n, CHUNK):
-        i1  = min(i0 + CHUNK, n)
-        seg = bits[i0:i1]                    # (c, L*8)
-        rest  = bits[i0 + 1:]                # upper triangle: rows after i0
-        if rest.shape[0] == 0:
-            break
-        xor  = seg[:, None, :] ^ rest[None, :, :]
-        dist = xor.sum(axis=2)               # (c, n-i0-1)
 
-        c = i1 - i0
-        for local_k in range(c):
-            global_i = i0 + local_k
-            row = dist[local_k, local_k:]    # distances to global_i+1 .. n-1
-            hits = np.where(row <= threshold)[0]
-            for h in hits.tolist():
-                pairs.append((global_i, global_i + 1 + h))
+def _components(n: int, pairs) -> list[list[int]]:
+    """Connected components (size > 1) of an undirected edge list; union-find."""
+    parent = list(range(n))
 
-    return pairs
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for a, b in pairs:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+    comps: dict[int, list[int]] = {}
+    for x in range(n):
+        comps.setdefault(find(x), []).append(x)
+    return [c for c in comps.values() if len(c) > 1]
+
 
 def _pixel_similarity_score(diff_mean: float, threshold: float = 15.0) -> float:
     """!
@@ -100,6 +153,95 @@ def _pixel_similarity_score(diff_mean: float, threshold: float = 15.0) -> float:
     if diff_mean >= threshold:
         return 0.0
     return 1.0 - math.log(1.0 + diff_mean) / math.log(1.0 + threshold)
+
+
+# Naive fallback: native-resolution per-cell change map, no CNN.
+# The pair is compared at the SMALLER image's native resolution (the larger is
+# brought down to it, never further), aligned, then judged per 8x8 cell, so a
+# small subject on a flat background is not averaged away and a smaller copy
+# is not punished for upscale blur. Processed in horizontal strips to bound
+# the temporaries; the decodes themselves stay full-res.
+CELL = 8
+CELL_TOL = 12.0           # per-cell mean |a-b| (0..255, worst channel) above which the cell changed
+FLAT_TOL = 4.0            # per-cell std below which a cell is flat background (no content)
+STRIP_PX = 4_000_000      # pixels per strip
+
+try:
+    from modules.dedup_cnn.dup_cnn import align as _align     # ORB + RANSAC, torch not needed
+except Exception:
+    _align = None
+
+
+def _bgr3(img: np.ndarray) -> np.ndarray:
+    if img.ndim == 2:
+        img = np.repeat(img[:, :, None], 3, axis=2)
+    return np.ascontiguousarray(img[:, :, :3])
+
+
+def _naive_image_score(a: np.ndarray, b: np.ndarray) -> float:
+    """Bytewise-equal pixels -> 1.0. Otherwise: align, then the unchanged
+    fraction of CONTENT cells (flat background on both sides doesn't count,
+    a changed cell always does) x the overlap's share of the larger frame."""
+    if a.shape == b.shape and np.array_equal(a, b):
+        return 1.0
+    a, b = _bgr3(a), _bgr3(b)
+    if a.shape[0] * a.shape[1] > b.shape[0] * b.shape[1]:
+        a, b = b, a                                   # a = smaller = reference frame
+    H, W = a.shape[:2]
+    h, w = b.shape[:2]
+    sc = math.sqrt((H * W) / float(h * w))
+    if sc < 1.0:
+        b = cv2.resize(b, (max(1, round(w * sc)), max(1, round(h * sc))), interpolation=cv2.INTER_AREA)
+    big_area = max(H * W, b.shape[0] * b.shape[1])
+    if _align is not None:
+        r = _align(a, b)
+        if r is None:
+            return 0.0
+        b, ov = r
+    else:
+        if abs(W / H - b.shape[1] / b.shape[0]) > 0.02 * (W / H):
+            return 0.0
+        if b.shape[:2] != (H, W):
+            b = cv2.resize(b, (W, H), interpolation=cv2.INTER_AREA)
+        ov = None
+    Hc, Wc = H // CELL, W // CELL
+    if Hc == 0 or Wc == 0:
+        return _pixel_similarity_score(float(np.abs(a.astype(np.int16) - b.astype(np.int16)).mean()))
+    changed = content = covered = 0
+    rows = max(CELL, (STRIP_PX // W) // CELL * CELL)
+    for y in range(0, Hc * CELL, rows):
+        y1 = min(y + rows, Hc * CELL)
+        ch = (y1 - y) // CELL
+        ra = a[y:y1, :Wc * CELL].astype(np.float32).reshape(ch, CELL, Wc, CELL, 3)
+        rb = b[y:y1, :Wc * CELL].astype(np.float32).reshape(ch, CELL, Wc, CELL, 3)
+        chg = np.abs(ra - rb).mean(axis=(1, 3)).max(axis=-1) > CELL_TOL
+        cont = chg | (ra.std(axis=(1, 3)).max(axis=-1) > FLAT_TOL) | (rb.std(axis=(1, 3)).max(axis=-1) > FLAT_TOL)
+        if ov is not None:
+            o = ov[y:y1, :Wc * CELL].reshape(ch, CELL, Wc, CELL).mean(axis=(1, 3)) >= 0.5
+            chg, cont = chg & o, cont & o
+            covered += int(o.sum())
+        else:
+            covered += ch * Wc
+        changed += int(chg.sum()); content += int(cont.sum())
+        del ra, rb
+    if covered == 0:
+        return 0.0
+    share = min(1.0, covered * CELL * CELL / float(big_area))
+    if content == 0:
+        return float(share)                           # both flat and equal where they overlap
+    return float((1.0 - changed / content) * share)
+
+
+def _naive_ctx_scorer():
+    """Scorer-registry naive fallback: ctx -> prob (images or video frames)."""
+
+    def score(ctx):
+        if ctx.get("is_video"):
+            fa, fb = ctx.get("ref_frames") or [], ctx.get("other_frames") or []
+            s = [_naive_image_score(x, y) for x, y in zip(fa, fb) if x is not None and y is not None]
+            return float(np.mean(s)) if s else 0.0
+        return _naive_image_score(ctx["ref_bgr"], ctx["other_bgr"])
+    return score
 
 
 # ── Dedup ──────────────────────────────────────────────────────────────────────
@@ -518,63 +660,45 @@ def dedup():
                 sha_map.setdefault(r["sha256"], []).append(i)
         exact_row_groups = [idxs for idxs in sha_map.values() if len(idxs) > 1]
         exact_set        = {i for g in exact_row_groups for i in g}
-        remaining_idx    = [i for i in range(len(rows)) if i not in exact_set]
+        # One representative per exact group stays in the perceptual pass, so
+        # a near-dup of a file that also has byte-identical copies is still found.
+        remaining_idx    = [i for i in range(len(rows)) if i not in exact_set] + \
+                           [g[0] for g in exact_row_groups]
 
         # Checkpoint after exact stage — save what we have so far
         exact_members = [[rows[i]["rel_path"] for i in g] for g in exact_row_groups]
         core.save_groups([("exact", m, [1.0] * len(m)) for m in exact_members])
         core.checkpoint_set(disk_count, hashed_count, "exact")
 
-        # ── 4. Perceptual similarity (streaming pair-finder, O(1) peak memory) ──
-        state["status_text"] = f"Dedup 4/4: Perceptual scan ({len(remaining_idx)} images)…"
+        # ── 4. Perceptual similarity ──────────────────────────────────────
         sim_groups_raw = []
         if remaining_idx:
             blobs8  = [bytes(rows[i]["phash8"])  for i in remaining_idx]
-            blobs32 = [bytes(rows[i]["phash32"]) for i in remaining_idx]
             THRESH8, THRESH32 = 5, 60
             n = len(remaining_idx)
 
-            # Stage A: cheap 8-bit guard — yields only candidate pairs
+            # Stage A: 64-bit guard via multi-index hashing (bucketed, not n^2)
             state["status_text"] = f"Dedup 4/4: 8-bit guard pass ({n} images)…"
             candidate_pairs = _find_similar_pairs(blobs8, THRESH8)
 
-            # Stage B: verify candidates against 32-bit hash
-            # Only load the 32-bit blobs for files that appear in at least one pair
-            if candidate_pairs:
+            # Stage B: 1024-bit verify, per candidate pair only
+            if len(candidate_pairs):
                 state["status_text"] = f"Dedup 4/4: 32-bit verify ({len(candidate_pairs)} candidates)…"
-                involved_local = sorted({i for p in candidate_pairs for i in p})
-                inv_map   = {v: k for k, v in enumerate(involved_local)}
-                blobs32_s = [blobs32[i] for i in involved_local]
-                pairs32   = _find_similar_pairs(blobs32_s, THRESH32)
-                pairs32_global = {(involved_local[a], involved_local[b])
-                                  for a, b in pairs32}
+                blobs32 = [bytes(rows[i]["phash32"]) for i in remaining_idx]
+                d32 = _pair_hamming(blobs32, candidate_pairs)
+                kept = candidate_pairs[d32 <= THRESH32]
 
-                # Load exclusions once — O(1) set lookup per pair
                 exclusions = core.load_exclusion_set()
-
-                adj: dict[int, set] = {i: set() for i in range(n)}
-                for a, b_ in candidate_pairs:
-                    if (a, b_) not in pairs32_global:
-                        continue
-                    # Check persistent exclusion between the two file paths
+                edges = []
+                for a, b_ in kept.tolist():
                     path_a = rows[remaining_idx[a]]["rel_path"]
                     path_b = rows[remaining_idx[b_]]["rel_path"]
-                    ea, eb = core.excl_key(path_a, path_b)
-                    if (ea, eb) in exclusions:
+                    if core.excl_key(path_a, path_b) in exclusions:
                         continue
-                    adj[a].add(b_); adj[b_].add(a)
+                    edges.append((a, b_))
 
-                visited: set[int] = set()
-                for start in range(n):
-                    if start not in visited and adj[start]:
-                        comp, q = [], [start]; visited.add(start)
-                        while q:
-                            cur = q.pop(0); comp.append(cur)
-                            for nb in adj[cur]:
-                                if nb not in visited:
-                                    visited.add(nb); q.append(nb)
-                        if len(comp) > 1:
-                            sim_groups_raw.append([remaining_idx[c] for c in comp])
+                for comp in _components(n, edges):
+                    sim_groups_raw.append([remaining_idx[c] for c in comp])
 
         # Checkpoint after perceptual — save perceptual candidates (unverified, no scores yet)
         perceptual_members = [[rows[i]["rel_path"] for i in g] for g in sim_groups_raw]
@@ -592,6 +716,7 @@ def dedup():
         model_id = model_tag.split(":")[0]
         fallbacks = set()                         # scorer ids that answered instead of model_id
         exclusions = core.load_exclusion_set()
+        from .module import CONFIRM_THRESHOLD
 
         def verify(group_row_indices):
             group_row_indices.sort(
@@ -636,11 +761,15 @@ def dedup():
                     for p, q in ipairs:
                         probs[(p, q)] = cached[_key(p, q)]
                 elif ipairs:
-                    mat, who = (_scorers.score_group([mem[p][1] for p in imgs], naive_score=1.0) if _scorers
-                                else (np.ones((len(imgs), len(imgs)), np.float32), "naive"))
+                    naive = _naive_ctx_scorer()
+                    if _scorers:
+                        mat, who = _scorers.score_group([mem[p][1] for p in imgs], naive_score=naive)
+                    else:
+                        mat, who = None, "naive"
                     pos = {p: k for k, p in enumerate(imgs)}
                     for p, q in ipairs:
-                        probs[(p, q)] = float(mat[pos[p], pos[q]])
+                        probs[(p, q)] = (float(mat[pos[p], pos[q]]) if mat is not None else
+                                         naive({"is_video": False, "ref_bgr": mem[p][1], "other_bgr": mem[q][1]}))
                     if who != model_id:
                         fallbacks.add(who)
                     elif model_tag != "naive":
@@ -658,11 +787,12 @@ def dedup():
                         probs[(p, q)] = cached[_key(p, q)]
                 if todo:
                     ctxs = [{"is_video": True, "ref_frames": mem[p][1], "other_frames": mem[q][1]} for p, q in todo]
-                    scored = (_scorers.score_pairs(ctxs, naive_score=1.0) if _scorers
-                              else [(1.0, "naive")] * len(ctxs))
+                    naive = _naive_ctx_scorer()
+                    scored = (_scorers.score_pairs(ctxs, naive_score=naive) if _scorers
+                              else [(naive(c), "naive") for c in ctxs])
                     fresh = []
                     for (p, q), (prob, sid) in zip(todo, scored):
-                        probs[(p, q)] = 1.0 if prob is None else float(prob)
+                        probs[(p, q)] = 0.0 if prob is None else float(prob)
                         if sid != model_id:
                             fallbacks.add(sid)
                         elif sid != "naive":
@@ -672,6 +802,14 @@ def dedup():
                             core.verdicts_put(model_tag, fresh)
                         except Exception as e:
                             access_logger.warning(f"dedup verdict cache: {e}")
+            # Bytewise confirm: pairs rated >= CONFIRM_THRESHOLD whose decoded
+            # pixels are identical are pinned to 1.0 (images only; cheap next
+            # to the decode that already happened).
+            for (p, q), pr in list(probs.items()):
+                if pr >= CONFIRM_THRESHOLD and not mem[p][2] and not mem[q][2]:
+                    a_, b_ = mem[p][1], mem[q][1]
+                    if a_.shape == b_.shape and np.array_equal(a_, b_):
+                        probs[(p, q)] = 1.0
             # components at the confirm threshold
             adj = {p: set() for p in range(len(mem))}
             for (p, q), pr in probs.items():
@@ -718,7 +856,7 @@ def dedup():
         warning = None
         if fallbacks:
             warning = (f"Selected scorer '{model_tag}' did not answer; pairs were scored by "
-                       f"{', '.join(sorted(fallbacks))} instead (naive = 100%). Check the server log "
+                       f"{', '.join(sorted(fallbacks))} instead (naive = pixel compare). Check the server log "
                        f"and Settings > Models > HEURDU.")
             access_logger.warning(f"dedup: {warning}")
         return jsonify({"success": True, "total_groups": total_groups,

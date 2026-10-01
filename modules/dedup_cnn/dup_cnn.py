@@ -412,6 +412,19 @@ class DupCNN:
         with torch.no_grad():
             return torch.sigmoid(self._raw().head(fa[None], fb[None]))[0].float().cpu().numpy()
 
+    def compare_many(self, fas: "list", fbs: "list", per_pass: int = 1) -> "np.ndarray":
+        """! @brief Change maps [n, H/8, W/8] for same-shaped feature-grid pairs,
+               `per_pass` pairs per head call (batched; BN is in eval so the
+               result equals one-at-a-time)."""
+        head = self._raw().head
+        out = []
+        with torch.no_grad():
+            for s in range(0, len(fas), max(1, per_pass)):
+                a = torch.stack(fas[s:s + per_pass]); b = torch.stack(fbs[s:s + per_pass])
+                out.append(torch.sigmoid(head(a, b)).float().cpu().numpy())
+                del a, b
+        return np.concatenate(out, axis=0) if out else np.empty((0,), np.float32)
+
     def predict_maps(self, a, b, device: str = "cpu") -> "np.ndarray":
         """! @brief Change maps [n,S/8,S/8] for prepared aligned batches (training eval)."""
         self.net.to(device, memory_format=torch.channels_last).eval()
@@ -456,10 +469,16 @@ class DupCNN:
                     aligned[i] = r
             feats = {i: self.encode(a, device, max_pixels) for i, (a, _) in aligned.items()}
             keys = list(aligned)
-            for p in range(len(keys)):
-                for q in range(p + 1, len(keys)):
-                    i, j = keys[p], keys[q]
-                    cm = self.compare(feats[i], feats[j])
+            pairs = [(keys[p], keys[q]) for p in range(len(keys)) for q in range(p + 1, len(keys))]
+            # Every member is warped into the reference frame, so all grids
+            # share a shape: batch the head over as many pairs as fit in the
+            # same pixel budget that bounds the encoder.
+            H8, W8 = feats[ref].shape[-2:]
+            per_pass = max(1, max_pixels // max(1, H8 * W8 * STRIDE * STRIDE))
+            for s0 in range(0, len(pairs), per_pass):
+                chunk = pairs[s0:s0 + per_pass]
+                cms = self.compare_many([feats[i] for i, _ in chunk], [feats[j] for _, j in chunk], per_pass)
+                for (i, j), cm in zip(chunk, cms):
                     ov = aligned[i][1] if aligned[j][1] is None else (
                         aligned[j][1] if aligned[i][1] is None else aligned[i][1] & aligned[j][1])
                     S[i, j] = S[j, i] = pair_score(cm, ov)

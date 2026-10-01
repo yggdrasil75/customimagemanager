@@ -11,8 +11,9 @@ Pipeline (as designed):
      exact grouping, then phash 8-bit guard -> 32-bit verify -> candidate
      pairs grouped into "similar" groups.
   2. each candidate PAIR is offered to the registered pair-scorers; the
-     first that returns a probability wins (priority order). If none is
-     registered, the naive phash-derived score stands.
+     first that returns a probability wins (priority order). Pairs no scorer
+     answers fall to the naive pixel compare (bytewise equal -> 1.0, else
+     log-scaled mean abs diff of area-downsampled copies).
   3. the final pixel/bitwise confirm runs only for pairs the scorer (or
      naive) rated >0.99.
 
@@ -34,6 +35,16 @@ import numpy as np
 
 
 CONFIRM_THRESHOLD = 0.99
+
+
+def _naive(naive_score, ctx):
+    """naive_score is a constant or a callable(ctx) -> prob (pixel compare)."""
+    if callable(naive_score):
+        try:
+            return float(naive_score(ctx))
+        except Exception:
+            return None
+    return naive_score
 
 
 class ScorerRegistry:
@@ -113,7 +124,7 @@ class ScorerRegistry:
         res = self.score_pairs([{"is_video": False, "ref_bgr": imgs[i], "other_bgr": imgs[j]} for i, j in pairs],
                                naive_score=naive_score)
         for (i, j), (p, _) in zip(pairs, res):
-            m[i, j] = m[j, i] = naive_score if p is None else float(p)
+            m[i, j] = m[j, i] = 0.0 if p is None else float(p)
         ids = {w for _, w in res}
         who = "naive" if "naive" in ids else (ids.pop() if len(ids) == 1 else "mixed")
         return m, who
@@ -121,7 +132,8 @@ class ScorerRegistry:
     def score_pairs(self, ctxs, naive_score=None):
         """Batched score_pair: scorers offering score_batch(ctxs) -> [prob|None]
         take the whole list at once; the rest are asked one by one. Returns
-        [(prob, scorer_id)] aligned with ctxs."""
+        [(prob, scorer_id)] aligned with ctxs. naive_score is a float or a
+        callable(ctx) -> prob used for pairs no scorer answered."""
         out, who = [None] * len(ctxs), [None] * len(ctxs)
         for s in self._scorers:
             todo = [i for i, p in enumerate(out) if p is None]
@@ -151,7 +163,8 @@ class ScorerRegistry:
             for i, p in zip(todo, res or []):
                 if p is not None:
                     out[i], who[i] = float(p), sid
-        return [(p if p is not None else naive_score, w or "naive") for p, w in zip(out, who)]
+        return [(p, w) if p is not None else (_naive(naive_score, c), "naive")
+                for p, w, c in zip(out, who, ctxs)]
 
     def score_pair(self, ctx, naive_score=None):
         """Run scorers in priority order; first non-None prob wins. Falls back
@@ -172,7 +185,7 @@ class ScorerRegistry:
                 p = None
             if p is not None:
                 return float(p), self._attr(s, "id")
-        return naive_score, "naive"
+        return _naive(naive_score, ctx), "naive"
 
 
 from . import dedup_core as core
