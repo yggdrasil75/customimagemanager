@@ -1218,6 +1218,7 @@ def register(host):
     host.add_route('/api/dedup_clear_group', dedup_clear_group, methods=['POST'], endpoint='dedup_ep_dedup_clear_group', feature="dedup", level="write")
     host.add_route('/api/dedup_exclude', dedup_exclude, methods=['POST'], endpoint='dedup_ep_dedup_exclude', feature="dedup", level="write")
     host.add_route('/api/dedup_compare_video', dedup_compare_video, methods=['POST'], endpoint='dedup_ep_dedup_compare_video', feature="dedup", level="write")
+    host.add_route('/api/dedup_compare_meta', dedup_compare_meta, methods=['POST'], endpoint='dedup_ep_dedup_compare_meta', feature="dedup", level="read")
     host.add_route('/api/dedup_change_map', dedup_change_map, methods=['POST'], endpoint='dedup_ep_dedup_change_map', feature="dedup", level="read")
     host.add_route('/api/dedup_groups', dedup_groups_page, methods=['GET'], endpoint='dedup_ep_dedup_groups_page', feature="dedup")
     host.add_route('/api/dedup_progress', dedup_progress, methods=['GET'], endpoint='dedup_ep_dedup_progress', feature="dedup")
