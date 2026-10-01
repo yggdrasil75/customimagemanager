@@ -126,3 +126,41 @@ def test_build_trains_sizes_installs_and_reloads(tmp_path):
 def test_build_without_images_fails_cleanly(tmp_path):
     s = bd.build(_host(str(tmp_path)), [], sizes={"nano": dc.SIZES["nano"]})
     assert not s["ok"] and s["error"]
+
+def test_cell_mask_pads_sizes_not_divisible_by_8():
+    m = np.zeros((101, 77), bool)
+    m[:50] = True
+    cm = dc.cell_mask(m)
+    assert cm.shape == (13, 10)
+    assert cm[0, 0] == 1.0 and cm[-1, -1] == 0.0
+    s = dc.pair_score(np.zeros((13, 10), np.float32), m)
+    assert 0.3 < s < 0.6                                   # unchanged x overlap share
+
+
+@needs_torch
+def test_compare_many_matches_one_at_a_time():
+    rng = np.random.default_rng(3)
+    m = dc.DupCNN.sized("nano")
+    m.trained = True
+    imgs = [rng.integers(0, 256, (203, 157, 3), np.uint8) for _ in range(4)]
+    feats = [m.encode(x, "cpu") for x in imgs]
+    pairs = [(0, 1), (0, 2), (1, 3), (2, 3)]
+    one = np.stack([m.compare(feats[i], feats[j]) for i, j in pairs])
+    for per in (1, 3, 8):
+        many = m.compare_many([feats[i] for i, _ in pairs], [feats[j] for _, j in pairs], per)
+        assert many.shape == one.shape and np.abs(many - one).max() < 1e-4
+
+
+@needs_torch
+def test_score_group_handles_odd_sizes_with_overlap():
+    """Regression: aligned members of a non-multiple-of-8 reference crashed
+    cell_mask, which turned every group into a naive fallback."""
+    rng = np.random.default_rng(4)
+    a = np.full((701, 903, 3), 40, np.uint8)
+    for _ in range(200):
+        x, y = int(rng.integers(0, 850)), int(rng.integers(0, 650))
+        cv2.rectangle(a, (x, y), (x + 30, y + 20), tuple(int(v) for v in rng.integers(0, 256, 3)), -1)
+    m = dc.DupCNN.sized("nano")
+    m.trained = True
+    S, _ = m.score_group([a, a[100:600, 150:800]], "cpu")
+    assert S.shape == (2, 2) and np.isfinite(S).all()

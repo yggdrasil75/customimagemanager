@@ -65,5 +65,24 @@
           <canvas id="diff_canvas_b" class="max-w-full border border-gray-700 rounded"></canvas>
         </div>
       </div>
+      <div class="flex-shrink-0 border-t border-gray-700 max-h-[40%] flex flex-col">
+        <div class="flex items-center gap-3 px-4 py-2 text-xs flex-shrink-0">
+          <span class="font-bold text-indigo-300">Metadata</span>
+          <span id="diff_meta_summary" class="text-gray-400"></span>
+          <label class="ml-auto text-gray-400 flex items-center gap-1">
+            <input id="diff_meta_only" type="checkbox" checked onchange="renderMetaDiff()"> only differences</label>
+        </div>
+        <div id="diff_meta_tags" class="px-4 pb-2 text-[11px] flex-shrink-0"></div>
+        <div class="overflow-auto px-4 pb-3">
+          <table class="w-full text-[11px] font-mono border-collapse">
+            <thead class="sticky top-0 bg-gray-800 text-gray-400">
+              <tr><th class="text-left py-1 pr-3 w-1/4">field</th>
+                  <th id="diff_meta_ha" class="text-left py-1 pr-3 text-blue-300">A</th>
+                  <th id="diff_meta_hb" class="text-left py-1 text-blue-300">B</th></tr>
+            </thead>
+            <tbody id="diff_meta_body"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
   </div>

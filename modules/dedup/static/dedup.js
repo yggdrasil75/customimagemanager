@@ -368,6 +368,65 @@ async function _loadImage(src){
   }
 }
 
+let _metaDiff=null;   // last /api/dedup_compare_meta result for the open pair
+
+function _escHtml(x){
+  return String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+async function loadMetaDiff(fa,fb){
+  _metaDiff=null;
+  document.getElementById('diff_meta_summary').innerText='loading…';
+  document.getElementById('diff_meta_tags').innerHTML='';
+  document.getElementById('diff_meta_body').innerHTML='';
+  document.getElementById('diff_meta_ha').innerText='A · '+fa.split('/').pop();
+  document.getElementById('diff_meta_hb').innerText='B · '+fb.split('/').pop();
+  const sum=document.getElementById('diff_meta_summary');
+  let r;
+  try{
+    r=await fetch('/api/dedup_compare_meta',{method:'POST',headers:{'Content-Type':'application/json'},
+                  body:JSON.stringify({a:fa,b:fb})});
+  }catch(e){ sum.innerText='unavailable — network error: '+e.message; return; }
+  let d=null;
+  try{ d=await r.json(); }catch(e){}
+  if(!d){
+    sum.innerText=`unavailable — HTTP ${r.status} from /api/dedup_compare_meta`;
+    return;
+  }
+  if(!d.success){ sum.innerText=`unavailable — ${d.error||('HTTP '+r.status)}`; return; }
+  _metaDiff=d; renderMetaDiff();
+}
+
+function renderMetaDiff(){
+  const d=_metaDiff; if(!d) return;
+  const only=document.getElementById('diff_meta_only').checked;
+  document.getElementById('diff_meta_summary').innerText=`${d.differ} of ${d.total} fields differ`+
+    ((d.errors&&d.errors.length)?`  ·  ⚠ ${d.errors.join('; ')}`:'');
+  const chip=(t,cls)=>`<span class="inline-block px-1.5 py-0.5 rounded mr-1 mb-1 ${cls}">${_escHtml(t)}</span>`;
+  const tg=d.tags; let th='';
+  if(tg.only_a.length) th+=`<div><span class="text-gray-500 mr-1">tags only in A:</span>${tg.only_a.map(t=>chip(t,'bg-blue-900 text-blue-200')).join('')}</div>`;
+  if(tg.only_b.length) th+=`<div><span class="text-gray-500 mr-1">tags only in B:</span>${tg.only_b.map(t=>chip(t,'bg-amber-900 text-amber-200')).join('')}</div>`;
+  if(!only&&tg.common.length) th+=`<div><span class="text-gray-500 mr-1">shared tags:</span>${tg.common.map(t=>chip(t,'bg-gray-700 text-gray-300')).join('')}</div>`;
+  document.getElementById('diff_meta_tags').innerHTML=th;
+  let html='', sect='';
+  for(const r of d.rows){
+    if(only&&r.same) continue;
+    if(r.section!==sect){
+      sect=r.section;
+      html+=`<tr><td colspan="3" class="pt-2 pb-1 text-indigo-300 font-bold">${_escHtml(sect)}</td></tr>`;
+    }
+    const miss='<span class="text-gray-600">—</span>';
+    const cls=r.same?'text-gray-400':'text-yellow-200';
+    const fld=r.field.includes(' ▸ ')?r.field.split(' ▸ ').slice(1).join(' ▸ '):r.field;
+    html+=`<tr class="border-t border-gray-700/50 align-top ${r.same?'':'bg-yellow-900/10'}">
+      <td class="py-0.5 pr-3 text-gray-400" title="${_escHtml(r.field)}">${_escHtml(fld)}</td>
+      <td class="py-0.5 pr-3 break-all ${cls}">${r.a==null?miss:_escHtml(r.a)}</td>
+      <td class="py-0.5 break-all ${cls}">${r.b==null?miss:_escHtml(r.b)}</td></tr>`;
+  }
+  document.getElementById('diff_meta_body').innerHTML=html||
+    '<tr><td colspan="3" class="py-2 text-gray-500">No differing fields.</td></tr>';
+}
+
 async function highlightDiff(gid){
   let picks=[...document.querySelectorAll(`#dg_${gid} .dg-pick:checked`)];
   if(picks.length!==2){
@@ -379,6 +438,7 @@ async function highlightDiff(gid){
   }
   const [fa,fb]=picks.map(p=>p.dataset.file);
   const VIDEO_RE=/\.(mp4|m4v|mkv|webm|mov|avi|wmv|flv|mpg|mpeg|ts|m2ts|ogv|3gp)$/i;
+  loadMetaDiff(fa,fb);
   if(VIDEO_RE.test(fa)||VIDEO_RE.test(fb)){ return highlightDiffVideo(gid,fa,fb); }
   document.getElementById('diff_video_bar').classList.add('hidden'); _vdiff=null;
   document.getElementById('diff_label_a').innerText=fa.split('/').pop();
