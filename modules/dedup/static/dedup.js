@@ -46,6 +46,7 @@ async function runDedup(force=false){
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({force})}).then(r=>r.json());
     if(d.success){
+      if(d.warning) alert('Warning: '+d.warning);
       if(!d.total_groups){ alert('No duplicates found!'); }
       else{
         dedupTotalGroups=d.total_groups; dedupPage=0;

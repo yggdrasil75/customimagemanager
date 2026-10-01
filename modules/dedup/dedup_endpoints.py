@@ -589,6 +589,8 @@ def dedup():
 
         _scorers = _HOST.get_service("dedup_scorers") if _HOST else None
         model_tag = _scorers.tag() if _scorers else "naive"
+        model_id = model_tag.split(":")[0]
+        fallbacks = set()                         # scorer ids that answered instead of model_id
         exclusions = core.load_exclusion_set()
 
         def verify(group_row_indices):
@@ -634,12 +636,14 @@ def dedup():
                     for p, q in ipairs:
                         probs[(p, q)] = cached[_key(p, q)]
                 elif ipairs:
-                    mat = (_scorers.score_group([mem[p][1] for p in imgs], naive_score=1.0) if _scorers
-                           else np.ones((len(imgs), len(imgs)), np.float32))
+                    mat, who = (_scorers.score_group([mem[p][1] for p in imgs], naive_score=1.0) if _scorers
+                                else (np.ones((len(imgs), len(imgs)), np.float32), "naive"))
                     pos = {p: k for k, p in enumerate(imgs)}
                     for p, q in ipairs:
                         probs[(p, q)] = float(mat[pos[p], pos[q]])
-                    if model_tag != "naive":
+                    if who != model_id:
+                        fallbacks.add(who)
+                    elif model_tag != "naive":
                         try:
                             core.verdicts_put(model_tag, [(_key(p, q), probs[(p, q)]) for p, q in ipairs])
                         except Exception as e:
@@ -659,7 +663,9 @@ def dedup():
                     fresh = []
                     for (p, q), (prob, sid) in zip(todo, scored):
                         probs[(p, q)] = 1.0 if prob is None else float(prob)
-                        if sid != "naive":
+                        if sid != model_id:
+                            fallbacks.add(sid)
+                        elif sid != "naive":
                             fresh.append((_key(p, q), probs[(p, q)]))
                     if fresh:
                         try:
@@ -709,8 +715,14 @@ def dedup():
 
         # ── 6. Format and return — count only, client fetches pages ─────────
         total_groups = (len(exact_members) + len(verified_members))
+        warning = None
+        if fallbacks:
+            warning = (f"Selected scorer '{model_tag}' did not answer; pairs were scored by "
+                       f"{', '.join(sorted(fallbacks))} instead (naive = 100%). Check the server log "
+                       f"and Settings > Models > HEURDU.")
+            access_logger.warning(f"dedup: {warning}")
         return jsonify({"success": True, "total_groups": total_groups,
-                        "from_cache": False})
+                        "from_cache": False, "scorer": model_tag, "warning": warning})
 
     except Exception as e:
         access_logger.error(f"dedup: {e}", exc_info=True)

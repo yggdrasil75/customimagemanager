@@ -81,9 +81,12 @@ def register(host):
         size = host.model_variant(cap)["size"] or "medium"
         m = loaded.get(size)
         if m is None:
-            m = loaded[size] = _cnn_mod.DupCNN.load(_path_for(size))
+            path = _path_for(size)
+            m = _cnn_mod.DupCNN.load(path)
             if not m.trained:
-                raise RuntimeError(f"HEURDU {size}: checkpoint did not load")
+                raise RuntimeError(f"HEURDU {size}: checkpoint {path} did not load: {m.error or 'unknown error'}")
+            loaded[size] = m
+            host.logger.info(f"dedup_cnn: loaded HEURDU {size} from {path}")
         return lambda a, b: m.predict(a, b, _device())
 
     def _device():
@@ -114,6 +117,25 @@ def register(host):
         if _img_handle() is None:
             return None
         return loaded.get(host.model_variant("dedup.pair")["size"])
+
+    def _available():
+        return bool(_cnn_mod._HAVE_TORCH)
+
+    def _score(ctx):
+        return _score_batch([ctx])[0]
+
+    def _ckpt_stamp(size):
+        """mtime of the checkpoint a size loads from, so the verdict cache key
+        changes when the weights are retrained (same size, new file)."""
+        for p in (os.path.join(models_dir, f"dup_cnn_{size}.pt"),
+                  os.path.join(models_dir, "heurdu", f"dup_cnn_{size}.pt")):
+            if os.path.exists(p):
+                return str(int(os.path.getmtime(p)))
+        return "0"
+
+    def _tag():
+        size = str(host.model_variant("dedup.pair")["size"] or "")
+        return f"cnn:{size}:{_ckpt_stamp(size)}"
 
     def _max_px():
         return int(host.config.get("dup_cnn_max_mp", 16)) * 1_000_000
@@ -165,7 +187,7 @@ def register(host):
     scorers.register({
         "id": "cnn", "label": "Advanced CNN", "available": _available,
         "priority": 20, "score": _score, "score_batch": _score_batch, "score_group": _score_group,
-        "tag": lambda: "cnn:" + str(host.model_variant("dedup.pair")["size"] or ""),
+        "tag": _tag,
         "clip_t": _vid_mod.CLIP_T,
     })
 
@@ -173,6 +195,7 @@ def register(host):
         """Forget loaded checkpoints so the next pair picks up a size the
         user just trained (Trainer > Dedup) or re-picked in Settings."""
         loaded.clear()
+        failed.clear()
         return True
 
     def _status():

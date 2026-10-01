@@ -365,7 +365,7 @@ class ModuleRegistry:
                 host.logger.info(f"module '{lm.id}' registered")
             except Exception as e:
                 lm.error = f"register() failed: {e}"
-                host.logger.error(f"module '{lm.id}' register() failed: {e}")
+                host.logger.error(f"module '{lm.id}' register() failed: {type(e).__name__}: {e}", exc_info=True)
             finally:
                 host._current_module = None
 

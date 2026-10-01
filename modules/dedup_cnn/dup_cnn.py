@@ -266,6 +266,7 @@ class DupCNN:
         self.depth: int = max(1, int(depth))
         self.size: str = size
         self.trained: bool = False
+        self.error: str = ""
         self.net = _ChangeNet(self.width_mult, self.depth) if _HAVE_TORCH else None
 
     @classmethod
@@ -301,8 +302,9 @@ class DupCNN:
             m.net.load_state_dict(ckpt["state_dict"])
             m.net.eval()
             m.trained = True
-        except Exception:
+        except Exception as e:
             m.trained = False
+            m.error = f"{type(e).__name__}: {e}"
         return m
 
     def compile(self) -> bool:

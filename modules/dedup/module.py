@@ -87,7 +87,10 @@ class ScorerRegistry:
     def score_group(self, imgs, naive_score=1.0):
         """NxN matrix of pair scores for a group of decoded BGR images. The
         first available scorer offering score_group(imgs) -> matrix answers;
-        otherwise every pair goes through score_pairs. Diagonal = 1."""
+        otherwise every pair goes through score_pairs. Diagonal = 1.
+        Returns (matrix, who): who is the id of the scorer that produced
+        every pair, "naive" if any pair fell through to naive_score, or
+        "mixed" when several scorers shared the pairs."""
         n = len(imgs)
         for s in self._scorers:
             fg = self._attr(s, "score_group")
@@ -99,7 +102,7 @@ class ScorerRegistry:
                     continue
                 m = fg(imgs)
                 if m is not None:
-                    return m
+                    return m, self._attr(s, "id")
             except Exception:
                 continue
         import numpy as np
@@ -109,7 +112,9 @@ class ScorerRegistry:
                                naive_score=naive_score)
         for (i, j), (p, _) in zip(pairs, res):
             m[i, j] = m[j, i] = naive_score if p is None else float(p)
-        return m
+        ids = {w for _, w in res}
+        who = "naive" if "naive" in ids else (ids.pop() if len(ids) == 1 else "mixed")
+        return m, who
 
     def score_pairs(self, ctxs, naive_score=None):
         """Batched score_pair: scorers offering score_batch(ctxs) -> [prob|None]
