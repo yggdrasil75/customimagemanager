@@ -36,6 +36,7 @@ MANIFEST = {
 }
 
 
+PRETRAINED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pretrained")   # trainer "Ship"
 HF_REPO = "yggdrasil75/HEURDU"
 HF_DEFAULT = HF_REPO + "/HEURDU_{size}.pt"         # owner/repo/path-in-repo, {size} substituted
 HF_SIZES = ["nano", "small", "medium", "large"]     # what the repo ships
@@ -61,17 +62,48 @@ def register(host):
     loaded, failed = {}, {}
     host.add_config_key("dup_cnn_max_mp", default=16, validate=lambda v: max(1, int(v or 16)))
 
+    def _local_paths(size):
+        """Where a trained checkpoint for `size` can live, in priority order:
+        Trainer > Dedup install (models/), then its "Ship" output (pretrained/),
+        then a previous HEURDU download."""
+        return [os.path.join(models_dir, f"dup_cnn_{size}.pt"),
+                os.path.join(PRETRAINED_DIR, f"dup_cnn_{size}.pt"),
+                os.path.join(models_dir, "heurdu", f"dup_cnn_{size}.pt")]
+
+    def _local_sizes():
+        out = []
+        for d in (models_dir, PRETRAINED_DIR):
+            try:
+                for f in sorted(os.listdir(d)):
+                    if f.startswith("dup_cnn_") and f.endswith(".pt") and not f.endswith(".ckpt.pt"):
+                        out.append(f[8:-3])
+            except OSError:
+                pass
+        return out
+
+    def _all_sizes():
+        """HEURDU sizes + the trainer's size table + anything trained on disk,
+        so a size trained here (xl, xxl, a custom name) is selectable."""
+        table = list(_cnn_mod.parse_sizes(host.config.get("dup_cnn_sizes")))
+        return list(dict.fromkeys(HF_SIZES + table + _local_sizes()))
+
     def _path_for(size):
-        local = os.path.join(models_dir, f"dup_cnn_{size}.pt")
-        if os.path.exists(local):
-            return local
+        for p in _local_paths(size):
+            if os.path.exists(p):
+                return p
+        if size not in HF_SIZES:
+            raise RuntimeError(f"no trained checkpoint for size '{size}' (looked in "
+                               + ", ".join(_local_paths(size)[:2]) + "); train it in Trainer > Dedup")
         spec = HF_DEFAULT.format(size=size).strip("/")
         owner, repo, *rest = spec.split("/")
         url = f"https://huggingface.co/{owner}/{repo}/resolve/main/{'/'.join(rest)}"
         return common.fetch_file(url, os.path.join(models_dir, "heurdu", f"dup_cnn_{size}.pt"), min_bytes=1024)
 
+    def _size():
+        return str(host.model_variant("dedup.pair")["size"] or "medium")
+
     def _loader(cap="dedup.pair"):
-        size = host.model_variant(cap)["size"] or "medium"
+        size = _size()
         m = loaded.get(size)
         if m is None:
             path = _path_for(size)
@@ -79,14 +111,15 @@ def register(host):
             if not m.trained:
                 raise RuntimeError(f"HEURDU {size}: checkpoint {path} did not load: {m.error or 'unknown error'}")
             loaded[size] = m
-            host.logger.info(f"dedup_cnn: loaded HEURDU {size} from {path}")
+            host.logger.info(f"dedup_cnn: loaded {size} from {path} "
+                             f"(width {m.width_mult}, depth {m.depth}, {m.params} params)")
         return lambda a, b: m.predict(a, b, _device())
 
     def _device():
         return "cuda" if _cnn_mod.torch.cuda.is_available() else "cpu"
 
     host.provide_model("dedup.pair", "heurdu", label="HEURDU", family="HEURDU",
-                       sizes=HF_SIZES, loader=_loader,
+                       sizes=_all_sizes(), loader=_loader,
                        available=lambda: bool(_cnn_mod._HAVE_TORCH),
                        reason="needs torch", cost_mb=64, gpu=False, supports_conf=False,
                        settings=[{"key": "dup_cnn_max_mp", "label": "Strip size (megapixels)", "kind": "number",
@@ -97,23 +130,27 @@ def register(host):
                             "medium for most, large+ if you have the GPU. Sizes download from "
                             "huggingface.co/" + HF_REPO + " on first use.")
 
-    def _img_handle():
-        size = host.model_variant("dedup.pair")["size"]
-        if failed.get(size, 0) > _cnn_mod.time.time():
-            return None                               # said so already; retry in a while, not per pair
-        try:
-            return host.request_model("dedup.pair")
-        except Exception as e:
-            failed[size] = _cnn_mod.time.time() + 600
-            host.logger.warning(f"dedup_cnn: no image model for size {size}: {e} "
-                                f"(check Settings > Models > HEURDU weights; retrying in 10 min)")
-            return None
-
     def _img_model():
-        """The DupCNN behind the handle (loads it through the broker first)."""
-        if _img_handle() is None:
-            return None
-        return loaded.get(host.model_variant("dedup.pair")["size"])
+        """The DupCNN for the selected size (loaded through the broker).
+        Raises with the reason when there is none, so dedup can say why."""
+        size = _size()
+        until, why = failed.get(size, (0, ""))
+        if until > _cnn_mod.time.time():
+            raise RuntimeError(why)                   # said so already; retry in a while, not per pair
+        m = loaded.get(size)
+        if m is not None:
+            return m
+        try:
+            host.request_model("dedup.pair")
+        except Exception as e:
+            why = f"no image model for size '{size}': {type(e).__name__}: {e}"
+            failed[size] = (_cnn_mod.time.time() + 600, why)
+            host.logger.warning(f"dedup_cnn: {why} (check Settings > Models > HEURDU; retrying in 10 min)")
+            raise RuntimeError(why)
+        m = loaded.get(size)
+        if m is None:
+            raise RuntimeError(f"model for size '{size}' was requested but not registered as loaded")
+        return m
 
     def _available():
         return bool(_cnn_mod._HAVE_TORCH)
@@ -124,14 +161,13 @@ def register(host):
     def _ckpt_stamp(size):
         """mtime of the checkpoint a size loads from, so the verdict cache key
         changes when the weights are retrained (same size, new file)."""
-        for p in (os.path.join(models_dir, f"dup_cnn_{size}.pt"),
-                  os.path.join(models_dir, "heurdu", f"dup_cnn_{size}.pt")):
+        for p in _local_paths(size):
             if os.path.exists(p):
                 return str(int(os.path.getmtime(p)))
         return "0"
 
     def _tag():
-        size = str(host.model_variant("dedup.pair")["size"] or "")
+        size = _size()
         return f"cnn:{size}:{_ckpt_stamp(size)}"
 
     def _max_px():
@@ -139,39 +175,49 @@ def register(host):
 
     def _score_group(imgs):
         """NxN matrix for a group of BGR images: encode once, compare many, native resolution."""
-        m = _img_model()
-        if m is None:
-            return None
-        return m.score_group(imgs, _device(), _max_px())[0]
+        return _img_model().score_group(imgs, _device(), _max_px())[0]
 
     def _score_batch(ctxs):
         """Pairwise contract: image pairs one at a time (align + encode +
         compare); video pairs through the clip model. Groups should use
         score_group instead, this is the fallback."""
         out = [None] * len(ctxs)
-        m = _img_model()
+        m, m_err = None, None
+        if any(not c.get("is_video") for c in ctxs):
+            try:
+                m = _img_model()
+            except Exception as e:
+                m_err = e
+        errs = []
         for i, c in enumerate(ctxs):
             if c.get("is_video"):
                 rf, of = c.get("ref_frames"), c.get("other_frames")
                 if rf and of and vid_cnn and vid_cnn.available and vid_cnn.trained:
                     try:
                         out[i] = vid_cnn.predict(rf, of)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        errs.append(e)
                 continue
             a, b = c.get("ref_bgr"), c.get("other_bgr")
             if m is not None and a is not None and b is not None:
                 try:
                     out[i] = float(m.score_group([a, b], _device(), _max_px())[0][0, 1])
-                except Exception:
-                    pass
+                except Exception as e:
+                    errs.append(e)
+        if all(p is None for p in out):
+            e = m_err or (errs[0] if errs else None)
+            if e is not None:
+                raise e                               # nothing answered: let the registry record why
+        elif errs:
+            host.logger.warning(f"dedup_cnn: {len(errs)} pair(s) failed: {type(errs[0]).__name__}: {errs[0]}")
         return out
 
     def _change_map(a, b):
         """For the UI: (score, change map [H/8,W/8] 0..1 in a's frame, b warped
         onto a, overlap mask) or None when there is no model / no alignment."""
-        m = _img_model()
-        if m is None:
+        try:
+            m = _img_model()
+        except Exception:
             return None
         r = _cnn_mod.align(a, b)
         if r is None:
@@ -188,17 +234,37 @@ def register(host):
         "clip_t": _vid_mod.CLIP_T,
     })
 
-    def _reload():
+    def _reload(active=None):
         """Forget loaded checkpoints so the next pair picks up a size the
-        user just trained (Trainer > Dedup) or re-picked in Settings."""
+        user just trained (Trainer > Dedup) or re-picked in Settings. Newly
+        trained sizes become selectable; `active` (the trainer's active size)
+        becomes the live pick and is persisted."""
         loaded.clear()
         failed.clear()
+        try:
+            prov = host.broker._providers.get("dedup.pair", {}).get("heurdu")
+            if prov is not None:
+                prov.sizes = _all_sizes()
+        except Exception as e:
+            host.logger.warning(f"dedup_cnn: refresh sizes: {e}")
+        if active:
+            ok, err = host.broker.select("dedup.pair", "heurdu", str(active))
+            if ok:
+                host.config["model_selection"] = host.broker.current_selection()
+                try:
+                    host.save_config()
+                except Exception as e:
+                    host.logger.warning(f"dedup_cnn: save selection: {e}")
+                host.logger.info(f"dedup_cnn: live size is now '{active}'")
+            else:
+                host.logger.warning(f"dedup_cnn: could not select size '{active}': {err}")
         return True
 
     def _status():
         size = host.model_variant("dedup.pair")["size"]
         m = loaded.get(size)
         return {"available": bool(_cnn_mod._HAVE_TORCH), "trained": bool(m and m.trained),
+                "error": (failed.get(size) or (0, ""))[1],
                 "size": size or "", "params": getattr(m, "params", 0) if m else 0}
 
     host.provide_service("dedup_cnn", {

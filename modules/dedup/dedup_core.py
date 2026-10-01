@@ -30,15 +30,17 @@ def checkpoint_get():
     return HOST.db().execute("SELECT * FROM dedup_checkpoint WHERE id=1").fetchone()
 
 
-def checkpoint_set(file_count, hashed_count, stage):
+def checkpoint_set(file_count, hashed_count, stage, scorer=None):
+    """scorer: tag of the model whose verdicts the stored groups carry
+    ("cnn:medium:<mtime>"), or "fallback:<tag>" when it did not answer."""
     db = HOST.db()
     db.execute("""
-        INSERT INTO dedup_checkpoint(id,file_count,hashed_count,stage,created)
-        VALUES(1,?,?,?,?)
+        INSERT INTO dedup_checkpoint(id,file_count,hashed_count,stage,created,scorer)
+        VALUES(1,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             file_count=excluded.file_count, hashed_count=excluded.hashed_count,
-            stage=excluded.stage, created=excluded.created
-    """, (file_count, hashed_count, stage, time.time()))
+            stage=excluded.stage, created=excluded.created, scorer=excluded.scorer
+    """, (file_count, hashed_count, stage, time.time(), scorer))
     db.commit()
 
 
@@ -77,9 +79,27 @@ def save_groups(groups_by_kind):
     db.commit()
 
 
+def append_groups(groups_by_kind):
+    """Add groups without clearing (streamed results during a scan)."""
+    db = HOST.db()
+    now = time.time()
+    db.executemany(
+        "INSERT INTO dedup_groups(kind,members,scores,created) VALUES(?,?,?,?)",
+        [(kind, json.dumps(members), json.dumps(scores), now)
+         for kind, members, scores in groups_by_kind])
+    db.commit()
+
+
+def drop_pending():
+    """Remove the unverified perceptual candidates once scoring is done."""
+    db = HOST.db()
+    db.execute("DELETE FROM dedup_groups WHERE kind='pending'")
+    db.commit()
+
+
 def load_groups():
     db = HOST.db()
-    rows = db.execute("SELECT kind, members, scores FROM dedup_groups ORDER BY id").fetchall()
+    rows = db.execute("SELECT kind, members, scores FROM dedup_groups WHERE kind != 'pending' ORDER BY id").fetchall()
     live = {r[0] for r in db.execute("SELECT rel_path FROM files").fetchall()}
     out = []
     for row in rows:

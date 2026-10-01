@@ -37,30 +37,113 @@ async function fetchDedupStatus(){
 let dedupTotalGroups=0, dedupPage=0, dedupSort='resolution';
 const DEDUP_PAGE_SIZE=30;
 
-async function runDedup(force=false){
+let dedupRunning=false, _dedupPoll=null, _dedupSeenGroups=0, _dedupBtnLabel=null;
+
+function _fmtDur(s){
+  if(s==null) return '';
+  s=Math.round(s); const h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=s%60;
+  return h?`${h}h ${m}m`:(m?`${m}m ${x}s`:`${x}s`);
+}
+
+function renderDedupProgress(p){
+  const box=document.getElementById('dedup_progress');
+  const pct=p.total?Math.min(100,100*p.done/p.total):null;
   const btn=document.getElementById('btn_dedup');
-  const label=btn.innerHTML;  // preserve the button's original wording
-  btn.innerHTML='⏳ Scanning…'; btn.disabled=true;
+  if(btn&&p.running) btn.innerHTML=`⏳ ${p.stage||0}/${p.stages||7}`+(pct!=null?` · ${Math.floor(pct)}%`:'');
+  if(!box) return;
+  box.classList.toggle('hidden',!p.running);
+  const bar=document.getElementById('dedup_prog_bar');
+  bar.style.width=(pct==null?100:pct)+'%';
+  bar.classList.toggle('animate-pulse',pct==null);
+  document.getElementById('dedup_prog_label').innerText=`Stage ${p.stage||0}/${p.stages||7} · ${p.label||''}`;
+  document.getElementById('dedup_prog_eta').innerText=
+    `${_fmtDur(p.elapsed_s)} elapsed`+(p.eta_s!=null?` · ~${_fmtDur(p.eta_s)} left in stage`:'');
+  let counts=p.total?`${p.done.toLocaleString()} / ${p.total.toLocaleString()} (${pct.toFixed(1)}%)`:'';
+  if(p.stage===7&&p.groups_total)
+    counts=`${p.groups_done.toLocaleString()} / ${p.groups_total.toLocaleString()} candidate groups · `+
+           `${p.done.toLocaleString()} / ${p.total.toLocaleString()} images (${pct.toFixed(1)}%)`;
+  document.getElementById('dedup_prog_counts').innerText=counts;
+  document.getElementById('dedup_prog_found').innerText=`${(p.groups||0).toLocaleString()} groups found`;
+}
+
+function startDedupPoll(){
+  if(_dedupPoll) return;
+  dedupRunning=true;
+  const btn=document.getElementById('btn_dedup');
+  if(_dedupBtnLabel===null) _dedupBtnLabel=btn.innerHTML;
+  btn.title='Scan running — click to view progress and groups found so far';
+  _dedupPoll=setInterval(pollDedup,1000);
+  pollDedup();
+}
+
+function stopDedupPoll(){
+  clearInterval(_dedupPoll); _dedupPoll=null; dedupRunning=false;
+  const btn=document.getElementById('btn_dedup');
+  if(_dedupBtnLabel!==null) btn.innerHTML=_dedupBtnLabel;
+  btn.title='';
+  document.getElementById('dedup_progress')?.classList.add('hidden');
+}
+
+let _dedupPolling=false;
+async function pollDedup(){
+  if(_dedupPolling) return;
+  _dedupPolling=true;
+  try{
+    const p=await fetch('/api/dedup_progress').then(r=>r.json());
+    renderDedupProgress(p);
+    const modalOpen=!document.getElementById('dedup_modal').classList.contains('hidden');
+    if(p.running&&modalOpen&&(p.groups||0)>_dedupSeenGroups){
+      _dedupSeenGroups=p.groups||0;
+      // Fill the current page while it has room; otherwise only bump the count
+      // so a page the user is working through is not re-rendered under them.
+      const shown=document.getElementById('dedup_content').querySelectorAll('[id^="dg_"]').length;
+      if(shown<DEDUP_PAGE_SIZE) await loadDedupPage(dedupPage);
+      else updateDedupPager(dedupPage,p.groups);
+    }
+    if(!p.running){ stopDedupPoll(); await finishDedup(p.result); }
+  }catch(e){}
+  _dedupPolling=false;
+}
+
+async function finishDedup(d){
+  if(!d) return;
+  if(!d.success){ alert('Error: '+(d.error||'unknown')); return; }
+  if(d.warning) alert('Warning: '+d.warning);
+  const modal=document.getElementById('dedup_modal');
+  if(!d.total_groups){
+    modal.classList.add('hidden');
+    alert('No duplicates found!');
+  } else {
+    dedupTotalGroups=d.total_groups;
+    document.getElementById('dedup_cache_info').innerText=(d.from_cache
+      ?'Cached results — click ↺ Rescan to recompute.'
+      :`Fresh scan — ${d.total_groups} group(s) found.`)+(d.scorer?` Scored by ${d.scorer}.`:'');
+    if(modal.classList.contains('hidden')) showToast(`Dedup finished — ${d.total_groups} group(s).`);
+    else await loadDedupPage(dedupPage);
+  }
+  fetchDedupStatus();
+}
+
+async function runDedup(force=false){
+  const modal=document.getElementById('dedup_modal');
+  if(dedupRunning){                      // already scanning: just show it
+    modal.classList.remove('hidden');
+    _dedupSeenGroups=0;                  // next poll refills the page with what's found so far
+    await loadDedupPage(dedupPage);
+    pollDedup();
+    return;
+  }
+  _dedupSeenGroups=0; dedupPage=0;
+  document.getElementById('dedup_cache_info').innerText='Scanning — groups appear below as they are verified.';
+  document.getElementById('dedup_content').innerHTML='';
+  modal.classList.remove('hidden');
   try{
     const d=await fetch('/api/dedup',{method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({force})}).then(r=>r.json());
-    if(d.success){
-      if(d.warning) alert('Warning: '+d.warning);
-      if(!d.total_groups){ alert('No duplicates found!'); }
-      else{
-        dedupTotalGroups=d.total_groups; dedupPage=0;
-        const info=document.getElementById('dedup_cache_info');
-        info.innerText=d.from_cache
-          ?'Cached results — click ↺ Rescan to recompute.'
-          :`Fresh scan — ${d.total_groups} group(s) found.`;
-        document.getElementById('dedup_modal').classList.remove('hidden');
-        await loadDedupPage(0);
-      }
-      fetchDedupStatus();
-    } else alert('Error: '+(d.error||'unknown'));
+      body:JSON.stringify({force,background:true})}).then(r=>r.json());
+    if(!d.success){ alert('Error: '+(d.error||'unknown')); return; }
+    startDedupPoll();
   }catch(e){ alert('Network error during dedup.'); }
-  btn.innerHTML=label; btn.disabled=false;
 }
 
 async function closeDedup(){
@@ -79,6 +162,11 @@ async function loadDedupPage(page){
   dedupTotalGroups=d.total;
   c.innerHTML='';
   if(!d.groups.length){
+    if(dedupRunning){
+      c.innerHTML='<p class="text-gray-400 text-sm animate-pulse p-4">Scanning… groups appear here as they are verified.</p>';
+      updateDedupPager(page,d.total);
+      return;
+    }
     if(dedupTotalGroups===0){
       document.getElementById('dedup_modal').classList.add('hidden');
       showToast('All duplicates resolved!');
@@ -471,3 +559,5 @@ async function bulkResolveAll() {
 }
 
 fetchDedupStatus();   // initial badge, once this script is in
+// A scan started before a page reload keeps running server-side: re-attach.
+fetch('/api/dedup_progress').then(r=>r.json()).then(p=>{ if(p.running) startDedupPoll(); }).catch(()=>{});

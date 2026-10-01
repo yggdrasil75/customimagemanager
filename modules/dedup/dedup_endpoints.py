@@ -13,6 +13,9 @@ import os
 import json
 import base64
 import math
+import threading
+import time
+from concurrent.futures import as_completed
 
 import numpy as np
 from flask import request, jsonify
@@ -64,7 +67,7 @@ def _hash_matrix(blobs: list[bytes]) -> np.ndarray:
     return np.frombuffer(b''.join(blobs), dtype=np.uint8).reshape(n, len(blobs[0]))
 
 
-def _find_similar_pairs(blobs: list[bytes], threshold: int) -> np.ndarray:
+def _find_similar_pairs(blobs: list[bytes], threshold: int, progress=None) -> np.ndarray:
     """!
     @brief All index pairs whose hash blobs are within a Hamming threshold.
            Multi-index hashing: the hash is cut into threshold+1 bit-chunks;
@@ -105,13 +108,15 @@ def _find_similar_pairs(blobs: list[bytes], threshold: int) -> np.ndarray:
                 if keep.any():
                     gi, gj = idx[li[keep] + r0], idx[lj[keep]]
                     found.append(np.minimum(gi, gj).astype(np.int64) * n + np.maximum(gi, gj))
+        if progress:
+            progress(c + 1, m)
     if not found:
         return np.empty((0, 2), np.int64)
     u = np.unique(np.concatenate(found))
     return np.stack((u // n, u % n), axis=1)
 
 
-def _pair_hamming(blobs: list[bytes], pairs: np.ndarray) -> np.ndarray:
+def _pair_hamming(blobs: list[bytes], pairs: np.ndarray, progress=None) -> np.ndarray:
     """Hamming distance of each (i, j) in pairs; O(pairs), chunked."""
     H = _hash_matrix(blobs)
     out = np.empty(len(pairs), np.int32)
@@ -119,6 +124,8 @@ def _pair_hamming(blobs: list[bytes], pairs: np.ndarray) -> np.ndarray:
     for s in range(0, len(pairs), step):
         p = pairs[s:s + step]
         out[s:s + step] = _popcount_rows(H[p[:, 0]] ^ H[p[:, 1]])
+        if progress:
+            progress(min(s + step, len(pairs)), len(pairs))
     return out
 
 
@@ -246,6 +253,37 @@ def _naive_ctx_scorer():
 
 # ── Dedup ──────────────────────────────────────────────────────────────────────
 
+# ── Progress ───────────────────────────────────────────────────────────────────
+# One scan at a time; its live state is polled by /api/dedup_progress.
+DEDUP_STAGES = 7
+_PROG_LOCK = threading.Lock()
+_PROGRESS: dict = {"running": False}
+
+
+def _prog(stage, label, done=0, total=0, **extra):
+    """Publish where the scan is. Per-stage done/total drives the bar + ETA."""
+    now = time.time()
+    with _PROG_LOCK:
+        if _PROGRESS.get("stage") != stage:
+            _PROGRESS["stage_started"] = now
+        _PROGRESS.update(stage=stage, label=label, done=int(done), total=int(total), updated=now, **extra)
+    state["status_text"] = (f"Dedup {stage}/{DEDUP_STAGES}: {label}"
+                            + (f" {int(done)}/{int(total)}" if total else "…"))
+
+
+def dedup_progress():
+    with _PROG_LOCK:
+        p = dict(_PROGRESS)
+    now = time.time()
+    p["stages"] = DEDUP_STAGES
+    p["elapsed_s"] = round(now - p["started"], 1) if p.get("started") else 0
+    done, total = p.get("done") or 0, p.get("total") or 0
+    st = p.get("stage_started")
+    p["eta_s"] = (round((now - st) / done * (total - done), 1)
+                  if p.get("running") and st and total and 0 < done < total else None)
+    return jsonify(p)
+
+
 def _quality(rel_path):
     """What the stored file was made from, which is what a dedup decision
     needs (every library file is itself a lossless JXL, so that label said
@@ -289,7 +327,7 @@ def _dedup_format_groups(cached_groups, rows_by_path):
 def dedup_status():
     """Returns what stage the cached scan reached and how many groups are stored."""
     cp = core.checkpoint_get()
-    group_count = _db().execute("SELECT COUNT(*) FROM dedup_groups").fetchone()[0]
+    group_count = _db().execute("SELECT COUNT(*) FROM dedup_groups WHERE kind != 'pending'").fetchone()[0]
     if cp:
         return jsonify({"has_cache": True, "stage": cp["stage"],
                         "file_count": cp["file_count"],
@@ -529,11 +567,11 @@ def dedup_groups_page():
     offset    = page * page_size
 
     rows = _db().execute(
-        "SELECT id, kind, members, scores FROM dedup_groups ORDER BY id LIMIT ? OFFSET ?",
+        "SELECT id, kind, members, scores FROM dedup_groups WHERE kind != 'pending' ORDER BY id LIMIT ? OFFSET ?",
         (page_size, offset)
     ).fetchall()
 
-    total = _db().execute("SELECT COUNT(*) FROM dedup_groups").fetchone()[0]
+    total = _db().execute("SELECT COUNT(*) FROM dedup_groups WHERE kind != 'pending'").fetchone()[0]
 
     # Resolve file details for members
     all_paths = [p for r in rows for p in json.loads(r["members"])]
@@ -595,33 +633,73 @@ def _CLIP_T():
     return 16
 
 def dedup():
-    force = request.json.get("force", False) if request.is_json else False
+    """Run a scan. {"background": true} starts it on a thread and returns at
+    once (poll /api/dedup_progress; the result lands in its "result"); without
+    it the call blocks and returns the result, as before."""
+    d = request.json if request.is_json else {}
+    force = bool((d or {}).get("force", False))
+    background = bool((d or {}).get("background", False))
+    with _PROG_LOCK:
+        if _PROGRESS.get("running"):
+            return jsonify({"success": True, "running": True, "started": False})
+        _PROGRESS.clear()
+        _PROGRESS.update(running=True, started=time.time(), stage=0, label="Starting",
+                         done=0, total=0, groups=0, result=None, force=force)
+    if not background:
+        return jsonify(_dedup_finish(_dedup_run(force)))
+
+    def _bg():
+        try:
+            _dedup_finish(_dedup_run(force))
+        finally:
+            try:
+                _HOST.core.db_close()
+            except Exception:
+                pass
+    threading.Thread(target=_bg, daemon=True, name="dedup-scan").start()
+    return jsonify({"success": True, "running": True, "started": True})
+
+
+def _dedup_finish(res):
+    with _PROG_LOCK:
+        _PROGRESS.update(running=False, result=res, finished=time.time())
+    return res
+
+
+def _dedup_run(force):
     try:
         if force:
             core.verdicts_clear()       # re-judge every pair; exclusions ("not a duplicate") persist
         # ── 0. Count files on disk ────────────────────────────────────────
-        state["status_text"] = "Dedup: Counting files…"
+        _prog(1, "Counting files")
         # Union of loose + packed, so packed files are deduped too rather than
         # disappearing from the candidate set.
         files_on_disk = list(_enumerate_library())
         disk_count = len(files_on_disk)
 
         # ── 0b. Return cached result if still valid ───────────────────────
+        _scorers = _HOST.get_service("dedup_scorers") if _HOST else None
+        model_tag = _scorers.tag() if _scorers else "naive"
         if not force and not core.is_stale(disk_count):
             cp = core.checkpoint_get()
-            if cp and cp["stage"] == "verified":
-                total_groups = _db().execute("SELECT COUNT(*) FROM dedup_groups").fetchone()[0]
+            cp_scorer = cp["scorer"] if cp and "scorer" in cp.keys() else None
+            # Results from another model (retrained, re-picked, or a run where
+            # the model did not answer) are re-scored, not served from cache.
+            if cp and cp["stage"] == "verified" and cp_scorer == model_tag:
+                total_groups = _db().execute("SELECT COUNT(*) FROM dedup_groups WHERE kind != 'pending'").fetchone()[0]
                 if total_groups > 0:
-                    state["status_text"] = "Ready."
-                    return jsonify({"success": True, "total_groups": total_groups,
-                                    "from_cache": True, "cache_stage": cp["stage"]})
+                    _PROGRESS["groups"] = total_groups
+                    return ({"success": True, "total_groups": total_groups,
+                                    "from_cache": True, "cache_stage": cp["stage"], "scorer": model_tag})
 
         # ── 1. Index stale/new files ──────────────────────────────────────
-        state["status_text"] = "Dedup 1/4: Checking index…"
+        _prog(2, "Checking index", 0, disk_count)
         db_mtimes = {r[0]: r[1] for r in
                      _db().execute("SELECT rel_path, mtime FROM files").fetchall()}
         stale = []
-        for f in files_on_disk:
+        for k, f in enumerate(files_on_disk):
+            if k % 5000 == 0:
+                _prog(2, "Checking index", k, disk_count)
             abs_p = get_safe_path(MEDIA_DIR, f)
             if abs_p:
                 try:
@@ -631,9 +709,20 @@ def dedup():
                 except OSError:
                     pass
         if stale:
-            state["status_text"] = f"Dedup 1/4: Indexing {len(stale)} new/changed files…"
+            _prog(2, "Indexing new/changed files", 0, len(stale))
+            cnt, lk = [0], threading.Lock()
+
+            def _idx(f):
+                try:
+                    return _index_file(f)
+                finally:
+                    with lk:
+                        cnt[0] += 1
+                        c = cnt[0]
+                    if c % 25 == 0 or c == len(stale):
+                        _prog(2, "Indexing new/changed files", c, len(stale))
             with thread_manager.pool(want=8, name="dedup-index") as ex:
-                list(ex.map(_index_file, stale))
+                list(ex.map(_idx, stale))
                 _db_release_pool(ex, ex._max_workers)
 
         hashed_count = _db().execute(
@@ -641,19 +730,19 @@ def dedup():
         core.checkpoint_set(disk_count, hashed_count, "indexed")
 
         # ── 2. Load hashes ────────────────────────────────────────────────
-        state["status_text"] = "Dedup 2/4: Loading hashes…"
+        _prog(3, "Loading hashes")
         rows = _db().execute(
             "SELECT rel_path,sha256,phash8,phash32,width,height FROM files "
             "WHERE phash8 IS NOT NULL").fetchall()
         if not rows:
-            core.checkpoint_set(disk_count, 0, "verified")
+            core.checkpoint_set(disk_count, 0, "verified", scorer=model_tag)
             core.save_groups([])
-            return jsonify({"success": True, "total_groups": 0})
+            return ({"success": True, "total_groups": 0})
 
         rows_by_path = {r["rel_path"]: r for r in rows}
 
         # ── 3. Exact duplicates via SHA-256 ───────────────────────────────
-        state["status_text"] = "Dedup 3/4: Exact duplicates…"
+        _prog(4, "Exact duplicates (sha256)")
         sha_map: dict[str, list] = {}
         for i, r in enumerate(rows):
             if r["sha256"]:
@@ -669,6 +758,7 @@ def dedup():
         exact_members = [[rows[i]["rel_path"] for i in g] for g in exact_row_groups]
         core.save_groups([("exact", m, [1.0] * len(m)) for m in exact_members])
         core.checkpoint_set(disk_count, hashed_count, "exact")
+        _PROGRESS["groups"] = len(exact_members)
 
         # ── 4. Perceptual similarity ──────────────────────────────────────
         sim_groups_raw = []
@@ -678,14 +768,16 @@ def dedup():
             n = len(remaining_idx)
 
             # Stage A: 64-bit guard via multi-index hashing (bucketed, not n^2)
-            state["status_text"] = f"Dedup 4/4: 8-bit guard pass ({n} images)…"
-            candidate_pairs = _find_similar_pairs(blobs8, THRESH8)
+            _prog(5, f"64-bit hash guard ({n} images)", 0, THRESH8 + 1)
+            candidate_pairs = _find_similar_pairs(
+                blobs8, THRESH8, progress=lambda d_, t_: _prog(5, f"64-bit hash guard ({n} images)", d_, t_))
 
             # Stage B: 1024-bit verify, per candidate pair only
             if len(candidate_pairs):
-                state["status_text"] = f"Dedup 4/4: 32-bit verify ({len(candidate_pairs)} candidates)…"
+                _prog(6, "1024-bit hash verify (pairs)", 0, len(candidate_pairs))
                 blobs32 = [bytes(rows[i]["phash32"]) for i in remaining_idx]
-                d32 = _pair_hamming(blobs32, candidate_pairs)
+                d32 = _pair_hamming(blobs32, candidate_pairs,
+                                    progress=lambda d_, t_: _prog(6, "1024-bit hash verify (pairs)", d_, t_))
                 kept = candidate_pairs[d32 <= THRESH32]
 
                 exclusions = core.load_exclusion_set()
@@ -700,20 +792,23 @@ def dedup():
                 for comp in _components(n, edges):
                     sim_groups_raw.append([remaining_idx[c] for c in comp])
 
-        # Checkpoint after perceptual — save perceptual candidates (unverified, no scores yet)
+        # Checkpoint after perceptual — candidates stored as 'pending' (hidden
+        # from the UI); verified groups are appended as they finish.
         perceptual_members = [[rows[i]["rel_path"] for i in g] for g in sim_groups_raw]
         core.save_groups(
             [("exact",   m, [1.0] * len(m)) for m in exact_members] +
-            [("similar", m, [])             for m in perceptual_members]
+            [("pending", m, [])             for m in perceptual_members]
         )
         core.checkpoint_set(disk_count, hashed_count, "perceptual")
 
-        # ── 5. Pixel verify sim groups ────────────────────────────────────
-        state["status_text"] = f"Dedup: Pixel-verifying {len(sim_groups_raw)} groups…"
+        # ── 5. Score candidate groups (full-res decode + scorer) ──────────
+        img_total = sum(len(g) for g in sim_groups_raw)
+        _prog(7, "Scoring candidate groups", 0, img_total,
+              groups_done=0, groups_total=len(sim_groups_raw))
 
-        _scorers = _HOST.get_service("dedup_scorers") if _HOST else None
-        model_tag = _scorers.tag() if _scorers else "naive"
         model_id = model_tag.split(":")[0]
+        if _scorers and hasattr(_scorers, "clear_errors"):
+            _scorers.clear_errors()
         fallbacks = set()                         # scorer ids that answered instead of model_id
         exclusions = core.load_exclusion_set()
         from .module import CONFIRM_THRESHOLD
@@ -835,36 +930,62 @@ def dedup():
                             [1.0] + [_sc(ref, y) for y in rest]))
             return out
 
-        verified_members = []
-        verified_scores  = []
+        # Results stream into dedup_groups as they finish (flushed ~1/s) so the
+        # UI can page through them while the rest are still being scored.
+        verified_count = 0
+        buf, last_flush = [], time.time()
+        img_done = grp_done = 0
+
+        def _flush():
+            nonlocal buf, verified_count, last_flush
+            if buf:
+                core.append_groups(buf)
+                verified_count += len(buf)
+                with _PROG_LOCK:
+                    _PROGRESS["groups"] = len(exact_members) + verified_count
+                buf = []
+            last_flush = time.time()
+
         with thread_manager.pool(want=4, name="dedup-verify") as ex:
-            for result in ex.map(verify, sim_groups_raw):
+            futs = {ex.submit(verify, g): len(g) for g in sim_groups_raw}
+            for fut in as_completed(futs):
+                try:
+                    result = fut.result()
+                except Exception as e:
+                    access_logger.warning(f"dedup verify group: {e}")
+                    result = []
                 for idxs, scores in (result or []):
-                    verified_members.append([rows[i]["rel_path"] for i in idxs])
-                    verified_scores.append(scores)
+                    buf.append(("similar", [rows[i]["rel_path"] for i in idxs], scores))
+                img_done += futs[fut]; grp_done += 1
+                if time.time() - last_flush >= 1.0:
+                    _flush()
+                _prog(7, "Scoring candidate groups", img_done, img_total,
+                      groups_done=grp_done, groups_total=len(sim_groups_raw))
+            _flush()
             _db_release_pool(ex, 4)
 
-        # Final checkpoint — verified groups with scores
-        core.save_groups(
-            [("exact",   m, [1.0] * len(m)) for m in exact_members] +
-            [("similar", m, s) for m, s in zip(verified_members, verified_scores)]
-        )
-        core.checkpoint_set(disk_count, hashed_count, "verified")
+        # Final checkpoint — candidates are now all judged
+        core.drop_pending()
+        core.checkpoint_set(disk_count, hashed_count, "verified",
+                            scorer=(f"fallback:{model_tag}" if fallbacks else model_tag))
 
         # ── 6. Format and return — count only, client fetches pages ─────────
-        total_groups = (len(exact_members) + len(verified_members))
+        total_groups = len(exact_members) + verified_count
         warning = None
         if fallbacks:
+            errs = _scorers.errors() if _scorers and hasattr(_scorers, "errors") else {}
+            why = "; ".join(f"{k}: {v}" for k, v in errs.items())
             warning = (f"Selected scorer '{model_tag}' did not answer; pairs were scored by "
-                       f"{', '.join(sorted(fallbacks))} instead (naive = pixel compare). Check the server log "
-                       f"and Settings > Models > HEURDU.")
+                       f"{', '.join(sorted(fallbacks))} instead (naive = pixel compare). "
+                       + (f"Reason — {why}. " if why else "")
+                       + "Check Settings > Models > HEURDU.")
             access_logger.warning(f"dedup: {warning}")
-        return jsonify({"success": True, "total_groups": total_groups,
+        return ({"success": True, "total_groups": total_groups,
                         "from_cache": False, "scorer": model_tag, "warning": warning})
 
     except Exception as e:
         access_logger.error(f"dedup: {e}", exc_info=True)
-        return jsonify({"success": False, "error": str(e)})
+        return ({"success": False, "error": str(e)})
     finally:
         state["status_text"] = "Ready."
 
@@ -939,6 +1060,7 @@ def register(host):
     host.add_route('/api/dedup_compare_video', dedup_compare_video, methods=['POST'], endpoint='dedup_ep_dedup_compare_video', feature="dedup", level="write")
     host.add_route('/api/dedup_change_map', dedup_change_map, methods=['POST'], endpoint='dedup_ep_dedup_change_map', feature="dedup", level="read")
     host.add_route('/api/dedup_groups', dedup_groups_page, methods=['GET'], endpoint='dedup_ep_dedup_groups_page', feature="dedup")
+    host.add_route('/api/dedup_progress', dedup_progress, methods=['GET'], endpoint='dedup_ep_dedup_progress', feature="dedup")
     host.add_route('/api/dedup', dedup, methods=['POST'], endpoint='dedup_ep_dedup', feature="dedup", level="write")
     host.add_route('/api/dedup_merge', dedup_merge, methods=['POST'], endpoint='dedup_ep_dedup_merge', feature="dedup", level="write", action='dedup_merge', fields=('keep', 'remove'))
     host.logger.info("dedup: pipeline endpoints registered")

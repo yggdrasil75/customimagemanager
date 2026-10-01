@@ -71,7 +71,7 @@ def register(host):
     def _reload_live(active):
         svc = host.get_service("dedup_cnn")
         try:
-            return bool(svc and svc.get("reload") and svc["reload"]())
+            return bool(svc and svc.get("reload") and svc["reload"](active))
         except Exception as e:
             host.logger.warning(f"dedup_train: reload dedup_cnn: {e}")
             return False

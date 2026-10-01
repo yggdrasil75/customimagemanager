@@ -50,6 +50,23 @@ def _naive(naive_score, ctx):
 class ScorerRegistry:
     def __init__(self):
         self._scorers = []
+        self._errors = {}                 # scorer id -> last "Type: message" it raised
+        self.logger = None
+
+    def _fail(self, s, e):
+        """A scorer raised: remember why (dedup reports it) and log each new reason once."""
+        sid = self._attr(s, "id")
+        msg = f"{type(e).__name__}: {e}"
+        if self._errors.get(sid) != msg and self.logger is not None:
+            self.logger.warning(f"dedup scorer '{sid}' failed: {msg}", exc_info=e)
+        self._errors[sid] = msg
+
+    def errors(self):
+        """{scorer id: last failure reason} since clear_errors()."""
+        return dict(self._errors)
+
+    def clear_errors(self):
+        self._errors.clear()
 
     def register(self, scorer):
         self._scorers.append(scorer)
@@ -117,7 +134,8 @@ class ScorerRegistry:
                 m = fg(imgs)
                 if m is not None:
                     return m, self._attr(s, "id")
-            except Exception:
+            except Exception as e:
+                self._fail(s, e)
                 continue
         m = np.eye(n, dtype=np.float32)
         pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
@@ -151,14 +169,16 @@ class ScorerRegistry:
             if callable(fb):
                 try:
                     res = fb([ctxs[i] for i in todo])
-                except Exception:
-                    res = None
+                except Exception as e:
+                    self._fail(s, e)
+                    continue                  # same failure would repeat per pair
             if res is None and callable(fn):
                 res = []
                 for i in todo:
                     try:
                         res.append(fn(ctxs[i]))
-                    except Exception:
+                    except Exception as e:
+                        self._fail(s, e)
                         res.append(None)
             for i, p in zip(todo, res or []):
                 if p is not None:
@@ -181,7 +201,8 @@ class ScorerRegistry:
                 continue
             try:
                 p = fn(ctx)
-            except Exception:
+            except Exception as e:
+                self._fail(s, e)
                 p = None
             if p is not None:
                 return float(p), self._attr(s, "id")
@@ -222,7 +243,8 @@ CREATE TABLE IF NOT EXISTS dedup_checkpoint (
     file_count    INTEGER,
     hashed_count  INTEGER,
     stage         TEXT,
-    created       REAL
+    created       REAL,
+    scorer        TEXT
 );
 
 
@@ -283,11 +305,19 @@ def _migrate_scores(db):
         db.commit()
     except Exception:
         pass
+    # Which scorer produced the stored groups, so a retrained / newly picked
+    # model re-scores instead of serving results from the previous one.
+    try:
+        db.execute("ALTER TABLE dedup_checkpoint ADD COLUMN scorer TEXT")
+        db.commit()
+    except Exception:
+        pass
 
 
 def register(host):
     core.HOST = host
     registry = ScorerRegistry()
+    registry.logger = host.logger
     host.provide_service("dedup_scorers", registry)
     host.add_table(_DDL, check=_migrate_scores)
     # Core tells us when a file is gone; groups that referenced it shrink.

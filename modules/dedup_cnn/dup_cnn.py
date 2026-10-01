@@ -126,7 +126,10 @@ def _pad8(img: "np.ndarray") -> "np.ndarray":
 
 def cell_mask(px_mask: "np.ndarray") -> "np.ndarray":
     """! @brief Per-pixel change mask [H,W] (0..1) -> per-cell mean [H/8,W/8] float32."""
-    m = _pad8(px_mask.astype(np.float32)[:, :, None])[:, :, 0]
+    m = px_mask.astype(np.float32)
+    ph, pw = (-m.shape[0]) % STRIDE, (-m.shape[1]) % STRIDE
+    if ph or pw:                       # cv2.copyMakeBorder drops a singleton channel, so pad in numpy
+        m = np.pad(m, ((0, ph), (0, pw)), mode="edge")
     h, w = m.shape
     return m.reshape(h // STRIDE, STRIDE, w // STRIDE, STRIDE).mean(axis=(1, 3))
 
