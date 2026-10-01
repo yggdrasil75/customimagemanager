@@ -27,7 +27,7 @@ Qwen3VLPreTrainedModel, _ = optional_import(_q3vl, attr="Qwen3VLPreTrainedModel"
 Qwen3VLConfig, _ = optional_import(_q3vl, attr="Qwen3VLConfig")
 
 AVAILABLE = bool(_HAVE_TORCH and _HAVE_PIL and _HAVE_Q3VL)
-UNAVAILABLE_REASON = "pip install torch pillow 'transformers>=4.57' (Qwen3-VL support)"
+UNAVAILABLE_REASON = "pip install torch pillow transformers>=4.57 torchaudio"
 
 MANIFEST = {
     "id":          "qwen3vl_embed",

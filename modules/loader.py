@@ -54,7 +54,7 @@ _log = logging.getLogger("modules.loader")
 # Wheels that must come from requirements-<backend>.txt (right wheel index),
 # never from a module's manifest at runtime — auto-installing these would drag
 # a 2 GB CUDA torch onto a CPU box.
-_BACKEND_PIP = {"torch", "torchvision", "onnxruntime", "onnxruntime-gpu",
+_BACKEND_PIP = {"torch", "torchvision", "torchaudio", "onnxruntime", "onnxruntime-gpu",
                 "onnxruntime-rocm", "onnxruntime-migraphx"}
 
 
