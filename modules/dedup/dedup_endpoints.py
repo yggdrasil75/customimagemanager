@@ -409,6 +409,166 @@ def dedup_exclude():
         _db().commit()
         return jsonify({"success": True, "group_remains": False})
 
+def _meta_str(v, limit=300):
+    """Display form of a metadata value; bytes summarized, long text clipped."""
+    if v is None:
+        return None
+    if isinstance(v, (bytes, bytearray)):
+        return f"<{len(v)} bytes>"
+    if isinstance(v, (list, tuple)):
+        v = ", ".join(str(_meta_str(x, limit)) for x in v)
+    elif isinstance(v, dict):
+        try:
+            v = json.dumps(v, default=str, sort_keys=True)
+        except Exception:                      # mixed key types can't be sorted
+            v = json.dumps({str(k): x for k, x in v.items()}, default=str, sort_keys=True)
+    try:
+        v = str(v)
+    except Exception as e:
+        v = f"<unprintable {type(v).__name__}: {e}>"
+    return v if len(v) <= limit else v[:limit] + f"… (+{len(v) - limit} chars)"
+
+
+def _blank(v):
+    """None / empty string / empty container — without `in`/`==`, which
+    raise on array-like EXIF values."""
+    if v is None:
+        return True
+    if isinstance(v, (str, bytes, bytearray, list, tuple, dict)):
+        return len(v) == 0
+    return False
+
+
+def _embedded_fields(path):
+    """{"EXIF ▸ Group ▸ Field": value} for every field present on the file
+    across EXIF / IPTC / XMP (schema-mapped and unknown alike). Readers come
+    from the metadata module; missing ones are skipped."""
+    out = {}
+    for label, mod_name, fn_name, coll_key in (("EXIF", "exif_import", "read_exif", "groups"),
+                                               ("IPTC", "iptc_import", "read_iptc", "records"),
+                                               ("XMP",  "xmp_import",  "read_xmp",  "namespaces")):
+        try:
+            mod = __import__(mod_name)
+            data = getattr(mod, fn_name)(path) or {}
+        except Exception:
+            continue
+        for coll in data.get(coll_key, []) or []:
+            grp = coll.get("title") or coll.get("name") or coll.get("ns") or ""
+            for f in coll.get("fields", []) or []:
+                if not f.get("present"):
+                    continue
+                val = f.get("display")
+                if _blank(val):
+                    val = f.get("raw")
+                if not _blank(val):
+                    out[f"{label} ▸ {grp} ▸ {f.get('name')}"] = _meta_str(val)
+            for u in coll.get("unknown", []) or []:
+                if not _blank(u.get("raw")):
+                    out[f"{label} ▸ {grp} ▸ {u.get('name')}"] = _meta_str(u.get("raw"))
+    return out
+
+
+def _file_facts(rel, path):
+    """File-level facts: what the stored file is, how big, when, which hash."""
+    row = _db().execute("SELECT width,height,sha256,mtime FROM files WHERE rel_path=?", (rel,)).fetchone()
+    src, size = _quality(rel) if os.path.exists(path) else ("packed", 0)
+    w, h = (row["width"], row["height"]) if row else (None, None)
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = row["mtime"] if row else None
+    facts = {
+        "Folder":        os.path.dirname(rel) or "/",
+        "Filename":      os.path.basename(rel),
+        "Extension":     os.path.splitext(rel)[1].lower() or "—",
+        "Source format": src,
+        "File size":     f"{_fmt_size(size)} ({size:,} B)" if size else None,
+        "Resolution":    f"{w}×{h}" if w and h else None,
+        "Megapixels":    f"{w * h / 1e6:.2f} MP" if w and h else None,
+        "Aspect":        f"{w / h:.4f}" if w and h else None,
+        "Bytes / pixel": f"{size / (w * h):.3f}" if w and h and size else None,
+        "Modified":      time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime)) if mtime else None,
+        "SHA-256":       (row["sha256"] or None) if row else None,
+    }
+    return facts
+
+
+def dedup_compare_meta():
+    """Side-by-side metadata of two library files for the compare view:
+    file facts, library metadata (tags, description, rating, people …) and
+    every embedded EXIF / IPTC / XMP field present on either file. Each row
+    carries `same` so the UI can show only what differs. A section that
+    fails is reported in `errors` (and logged) instead of failing the call."""
+    d = request.json or {}
+    fa, fb = d.get("a", ""), d.get("b", "")
+    pa, pb = get_safe_path(MEDIA_DIR, fa), get_safe_path(MEDIA_DIR, fb)
+    if not pa or not pb:
+        return jsonify({"success": False, "error": "path rejected"}), 400
+    known = {r[0] for r in _db().execute(
+        "SELECT rel_path FROM files WHERE rel_path IN (?,?)", (fa, fb)).fetchall()}
+    for rel, p in ((fa, pa), (fb, pb)):
+        if not os.path.exists(p) and rel not in known:
+            return jsonify({"success": False, "error": f"not found: {rel}"}), 404
+    rows, errors = [], []
+    tags = {"common": [], "only_a": [], "only_b": []}
+
+    def add(section, field, va, vb):
+        va, vb = _meta_str(va), _meta_str(vb)
+        if va is None and vb is None:
+            return
+        rows.append({"section": section, "field": field, "a": va, "b": vb, "same": va == vb})
+
+    def section(name, fn):
+        try:
+            fn()
+        except Exception as e:
+            access_logger.warning(f"dedup_compare_meta {name} ({fa} | {fb}): {type(e).__name__}: {e}",
+                                  exc_info=True)
+            errors.append(f"{name}: {type(e).__name__}: {e}")
+
+    def _file():
+        ffa, ffb = _file_facts(fa, pa), _file_facts(fb, pb)
+        for k in ffa:
+            add("File", k, ffa[k], ffb.get(k))
+
+    def _library():
+        ma, mb = (read_metadata(pa) or {}), (read_metadata(pb) or {})
+        ta = sorted({str(t) for t in (ma.get("tags") or [])})
+        tb = sorted({str(t) for t in (mb.get("tags") or [])})
+        tags.update(common=sorted(set(ta) & set(tb)),
+                    only_a=sorted(set(ta) - set(tb)),
+                    only_b=sorted(set(tb) - set(ta)))
+        add("Library", "Tag count", len(ta), len(tb))
+        labels = {"description": "Description", "rating": "Rating", "artist": "Artist",
+                  "language": "Language", "event": "Event", "catalog_sets": "Catalog sets",
+                  "persons": "People", "genre": "Genre", "albums": "Albums",
+                  "ai_generated": "AI generated", "model_age": "Model age", "alt_of": "Alt of",
+                  "page_count": "Page count", "flag": "Flag"}
+        for k, lab in labels.items():
+            va, vb = ma.get(k), mb.get(k)
+            if (_blank(va) or va is False) and (_blank(vb) or vb is False):
+                continue
+            add("Library", lab, va, vb)
+        ra, rb = ma.get("regions") or [], mb.get("regions") or []
+        if ra or rb:
+            def names(rs):
+                return ", ".join(sorted(str((r.get("name") or r.get("label") or "?") if isinstance(r, dict) else r)
+                                        for r in rs))
+            add("Library", "Regions", f"{len(ra)}: {names(ra)}" if ra else "0",
+                f"{len(rb)}: {names(rb)}" if rb else "0")
+
+    def _embedded():
+        ea, eb = _embedded_fields(pa), _embedded_fields(pb)
+        for k in sorted(set(ea) | set(eb)):
+            add("Embedded", k, ea.get(k), eb.get(k))
+
+    section("file", _file)
+    section("library", _library)
+    section("embedded", _embedded)
+    return jsonify({"success": True, "rows": rows, "tags": tags, "errors": errors,
+                    "differ": sum(1 for r in rows if not r["same"]), "total": len(rows)})
+
+
 def dedup_change_map():
     """HEURDU's view of two images: b aligned onto a at native resolution,
     the per-cell change map, the score. Returns display-sized PNGs (base64)
@@ -1058,6 +1218,7 @@ def register(host):
     host.add_route('/api/dedup_clear_group', dedup_clear_group, methods=['POST'], endpoint='dedup_ep_dedup_clear_group', feature="dedup", level="write")
     host.add_route('/api/dedup_exclude', dedup_exclude, methods=['POST'], endpoint='dedup_ep_dedup_exclude', feature="dedup", level="write")
     host.add_route('/api/dedup_compare_video', dedup_compare_video, methods=['POST'], endpoint='dedup_ep_dedup_compare_video', feature="dedup", level="write")
+    host.add_route('/api/dedup_compare_meta', dedup_compare_meta, methods=['POST'], endpoint='dedup_ep_dedup_compare_meta', feature="dedup", level="read")
     host.add_route('/api/dedup_change_map', dedup_change_map, methods=['POST'], endpoint='dedup_ep_dedup_change_map', feature="dedup", level="read")
     host.add_route('/api/dedup_groups', dedup_groups_page, methods=['GET'], endpoint='dedup_ep_dedup_groups_page', feature="dedup")
     host.add_route('/api/dedup_progress', dedup_progress, methods=['GET'], endpoint='dedup_ep_dedup_progress', feature="dedup")
