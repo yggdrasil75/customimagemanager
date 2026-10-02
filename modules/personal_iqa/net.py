@@ -97,9 +97,10 @@ class Scorer(nn.Module):
         return self.head(self.norm(x[:, 0])).squeeze(-1)
 
     # ── Net2Net ──────────────────────────────────────────────────────────
-    def grow(self, d, depth):
-        """New Scorer(d, depth) initialised from self (d, depth >= current)."""
-        new = Scorer(self.dims, d, depth)
+    def grow(self, d, depth, dims=None):
+        """New Scorer(d, depth) initialised from self (d, depth >= current).
+        dims: a superset of self.dims; token types new to the checkpoint start fresh."""
+        new = Scorer({**self.dims, **(dims or {})}, d, depth)
         with torch.no_grad():
             _copy_slice(new, self)                              # Net2WiderNet (warm start)
             for i in range(self.depth, depth):                 # Net2DeeperNet (exact identity)
@@ -126,6 +127,24 @@ def _copy_slice(dst, src):
                 dc[tuple(slice(0, n) for n in sc.shape)] = sc
             continue
         t[tuple(slice(0, n) for n in s.shape)] = s
+
+
+VAR_DIMS = {"embed": "embed", "tile": "embed", "object": "embed", "region": "embed", "tag_text": "tag_text"}
+
+
+def infer_dims(samples, fixed):
+    """{token_type: dim} for Scorer: fixed dims plus the encoder-sized types
+    (embed/tile/object/region share the image encoder's width, tag_text the
+    text encoder's), read from the first sample that has each; 1 if none."""
+    found = {}
+    for s in samples:
+        fe = s.get("feats", s)
+        for k, src in VAR_DIMS.items():
+            if src not in found and fe.get(k):
+                found[src] = len(fe[k][0])
+        if len(found) == len(set(VAR_DIMS.values())):
+            break
+    return {**{k: found.get(src, 1) for k, src in VAR_DIMS.items()}, **fixed}
 
 
 def hash_tags(tag_names, max_len=32):
@@ -167,6 +186,10 @@ if __name__ == "__main__":   # self-check: padding + exact deeper growth + tier 
     assert f["tile"].shape == (2, 4, 16) and mk["tile"].sum().item() == 6
     g = m.grow(32, 3).eval()
     assert torch.allclose(m(f, mk, t), g(f, mk, t), atol=1e-5), "deeper grow broke identity"
+    g2 = g.grow(32, 3, dims={"style": 20}).eval()           # new token type, absent in samples: unchanged
+    assert torch.allclose(m(f, mk, t), g2(*batch(samples, g2.dims, "cpu")), atol=1e-5)
+    assert infer_dims([{"feats": s} for s in samples], {"iqa": 1}) == \
+        {"embed": 16, "tile": 16, "object": 16, "region": 16, "tag_text": 1, "iqa": 1}
     assert g.grow(64, 4)(f, mk, t).shape == (2,)
     assert tier_for(100) == (128, 2) and tier_for(60000) == (768, 12)
     assert abs(spearman([1, 2, 3, 4], [10, 20, 30, 40]) - 1.0) < 1e-9
