@@ -595,26 +595,32 @@ async function bulkResolveAll() {
   const thresholdPct=parseFloat(document.getElementById('autoresolve_threshold')?.value ?? 100);
   const threshold=thresholdPct/100;
   let resolved=0, skipped=0;
+  const PAGE=50;
+  const seen=new Set();
+  let page=0;
   while(true){
-    const d=await fetch(`/api/dedup_groups?page=0&page_size=50`).then(r=>r.json());
+    const d=await fetch(`/api/dedup_groups?page=${page}&page_size=${PAGE}`).then(r=>r.json());
     if(!d.groups.length) break;
     let anyMerged=false;
     for(const group of d.groups){
+      if(seen.has(group.db_id)) continue;
       const nonRef=group.items.slice(1);
       const allQualify=nonRef.every(item=>
         item.score===null||item.score===undefined||item.score>=threshold);
-      if(!allQualify){ skipped++; continue; }
+      if(!allQualify){ seen.add(group.db_id); skipped++; continue; }
       const target=group.items[0].filename;
       const others=nonRef.map(x=>x.filename);
       if(others.length){
-        await fetch('/api/dedup_merge',{method:'POST',
+        const r=await fetch('/api/dedup_merge',{method:'POST',
           headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({target,others,db_id:group.db_id,skip_retrain:true})});
-        resolved++;
-        anyMerged=true;
-      }
+          body:JSON.stringify({target,others,db_id:group.db_id,skip_retrain:true})}).then(r=>r.json()).catch(()=>null);
+        if(r&&r.success){ resolved++; anyMerged=true; }
+        else seen.add(group.db_id);
+      } else seen.add(group.db_id);
     }
-    if(!anyMerged||d.total===0) break;
+    if(!anyMerged) page++;
+    if(page*PAGE>=d.total) break;
+    showToast(`Auto-resolve: page ${page+1}/${Math.ceil(d.total/PAGE)} · ${resolved} merged, ${skipped} skipped…`);
   }
   if(resolved>0) await fetch('/api/dedup_retrain',{method:'POST'});
   const msg=skipped>0
