@@ -4,7 +4,7 @@ Pretrain the Personal IQA scorer size series from labelled datasets on disk.
 Datasets are folders of images plus a labels file (AVA.txt vote histograms,
 or any CSV/TSV of "filename,score"). Each image goes through the same
 feature pipeline the personal scorer uses live (encoder embed + tiles,
-faces, pose, base IQA, tags), cached in personal_iqa_cache under
+objects, regions/depth, faces, pose, style/EXIF, base IQA, tags), cached in personal_iqa_cache under
 "ext:<path>" so a rerun only pays for new images. Images missing any
 REQUIRED part (personal_iqa_required, default embed+iqa+face+pose) are
 skipped and counted per reason: the scorer is meant to learn proportions,
@@ -119,7 +119,8 @@ def _is_val(key):
 
 def bench(svc, sizes, embed_dim=512, batch=64):
     """Untrained speed-vs-parameters per size (params without torch; timings with)."""
-    dims = {"embed": embed_dim, "tile": embed_dim, **svc["token_dims"]}
+    dims = {"embed": embed_dim, "tile": embed_dim, "object": embed_dim, "region": embed_dim,
+            "tag_text": embed_dim, **svc["token_dims"]}
     out = {}
     for name, sp in sizes.items():
         row = {"d": sp["d"], "depth": sp["depth"], "params": svc["count_params"](dims, sp["d"], sp["depth"])}

@@ -17,6 +17,18 @@ An image is trained on when the required models RAN on it (face/pose
 "done"), whether or not they found anything, so non-human photos count.
   iqa       base no-reference IQA score (a different provider) on the full-res image
   tags      the file's tags, hashed
+  tag_text  one token per tag / object class / camera / caption through the
+            embed.text provider, so unseen tags land near related ones
+  object / object_raw   one per background-detector box: crop embedding +
+            [cx, cy, w, h, conf, log_area, aspect, sharpness]
+  region / region_raw   one per segment mask and per depth band (near/mid/far):
+            masked-crop embedding + geometry, mean/std depth, sharpness, kind
+  tile_raw  tile position + sharpness;  style  hue histogram + tone stats;
+  depth     depth histogram, foreground fraction, DoF proxy, subject/background gap;
+  comp      thirds offset, subject size, box count, horizon angle;
+  exif      focal / aperture / ISO / exposure / megapixels / aspect / bits-per-pixel.
+All of these are derived from passes that already ran (detector, segmenter,
+depth, the encoder) or from file metadata — see extra.py.
 
 Source of truth stays where the app keeps it: tags in files/XMP, pose in the
 sidecar, faces in face_regions — all read live at train and score time. The
@@ -40,6 +52,8 @@ AVAILABLE = _HAVE_TORCH
 UNAVAILABLE_REASON = "torch not installed"
 if _HAVE_TORCH:
     from . import net
+from . import extra as ex
+import functools
 import numpy as np
 import model_registry
 import common
@@ -48,8 +62,9 @@ MANIFEST = {
     "id":          "personal_iqa",
     "name":        "Personal IQA (learned taste)",
     "version":     "1.0.0",
-    "description": "Transformer scorer trained on YOUR star ratings from image/tile "
-                   "embeddings, facial geometry, pose, base IQA and tags. Needs torch.",
+    "description": "Transformer scorer trained on YOUR star ratings from image/tile/object/"
+                   "region embeddings, facial geometry, pose, depth, style, EXIF, base IQA "
+                   "and text-embedded tags. Needs torch.",
     "core":        False,
     "requires":    ["rating"],
     "pip":         ["torch"],
@@ -78,7 +93,10 @@ REQUIRED_DEFAULT = "embed,iqa,face,pose"
 
 
 TOKEN_DIMS = {"face": 215, "face_raw": 4, "pose17": 34, "pose17_raw": 51, "pose133": 266,
-              "pose133_raw": 399, "bones": 18, "iqa": 1}   # pose dims mirror pose/skeleton.TOKEN_DIMS
+              "pose133_raw": 399, "bones": 18, "iqa": 1,   # pose dims mirror pose/skeleton.TOKEN_DIMS
+              "tile_raw": ex.TILE_RAW_DIM, "object_raw": ex.OBJ_RAW_DIM, "region_raw": ex.REGION_RAW_DIM,
+              "style": ex.STYLE_DIM, "depth": ex.DEPTH_DIM, "comp": ex.COMP_DIM, "exif": ex.EXIF_DIM}
+# encoder-sized token types (dims read from the data): embed, tile, object, region, tag_text
 
 
 def missing_parts(feats, required):
@@ -88,7 +106,9 @@ def missing_parts(feats, required):
     proc = feats.get("_processed") or {}
     have = {"embed": bool(feats.get("embed")), "iqa": bool(feats.get("iqa")),
             "face": bool(proc.get("face")), "pose": bool(proc.get("pose")),
-            "tags": bool(proc.get("tags")) or any(feats.get("tags") or [])}
+            "tags": bool(proc.get("tags")) or any(feats.get("tags") or []),
+            "detect": bool(proc.get("detect")), "segment": bool(proc.get("segment")),
+            "depth": bool(proc.get("depth"))}
     return [r for r in required if not have.get(r, True)]
 REPLAY_RATIO, EPOCHS, BATCH, LR = 4, 5, 64, 1e-3
 
@@ -109,18 +129,19 @@ def register(host):
     host.add_config_key("personal_iqa_required", default=REQUIRED_DEFAULT, validate=lambda v: str(v or ""))
     host.add_settings_field(key="personal_iqa_required", label="Required data per training image",
                             kind="text", pane="module",
-                            help="Comma list of embed, iqa, face, pose, tags. Images missing any of these are "
+                            help="Comma list of embed, iqa, face, pose, tags, detect, segment, depth. Images missing any of these are "
                                  "left out of training (personal Retrain and Trainer > IQA alike).")
     # personal_iqa_cache.extra: faces + pose for images OUTSIDE the library
     # (iqa_train datasets), which have no face_regions rows or sidecar.
     host.on_startup(lambda: _migrate())
 
     def _migrate():
-        try:
-            host.db().execute("ALTER TABLE personal_iqa_cache ADD COLUMN extra TEXT")
-            host.db().commit()
-        except Exception:
-            pass
+        for col in ("extra", "more"):      # more: objects/regions/depth/style/comp/exif/tile_raw json
+            try:
+                host.db().execute(f"ALTER TABLE personal_iqa_cache ADD COLUMN {col} TEXT")
+                host.db().commit()
+            except Exception:
+                pass
 
     def required():
         return [r.strip() for r in str(host.config.get("personal_iqa_required") or "").split(",") if r.strip()]
@@ -142,25 +163,115 @@ def register(host):
 
     def _cache_key():
         return f"{host.config.get('personal_iqa_encoder') or host.broker.selected_id('embed')}|" \
-               f"{host.config.get('personal_iqa_base')}|{GRID}"
+               f"{host.config.get('personal_iqa_base')}|{GRID}|" \
+               + "|".join(str(host.broker.selected_id(c) or "") for c in ("detect", "segment", "depth"))
+
+    @functools.lru_cache(maxsize=20000)
+    def _text_vec(text, _provider):
+        """embed.text of one tag, memoised per provider (tags repeat across the library)."""
+        fn = _cap("embed.text")
+        try:
+            v = fn(text) if fn else None
+            return tuple(float(x) for x in v) if v is not None else None
+        except Exception:
+            return None
+
+    def _tag_text(names):
+        pid = host.broker.selected_id("embed.text") or ""
+        if not pid:
+            return []
+        vs = [_text_vec(n, pid) for n in names[:32]]
+        return [list(v) for v in vs if v]
 
     # ── expensive, image-only parts (cached on mtime+key) ────────────────
-    def _encode(img):
+    def _encode(img, fp=None):
+        """Every image-only part: whole/tile/object/region embeddings, base IQA,
+        depth/style/comp/exif vectors. Returns a dict; all lists are token rows."""
         enc = _cap("embed", host.config.get("personal_iqa_encoder"))
-        embed, tiles = [], []
-        if enc:
+        cap = core.object_grouping.downscale_to_cap
+        small = cap(img)
+        H, W = img.shape[:2]
+        o = {"embed": [], "tile": [], "tile_raw": [], "object": [], "object_raw": [], "region": [],
+             "region_raw": [], "depth": [], "style": [], "comp": [], "exif": [], "names": [], "proc": {}}
+        def emb(x):
             try:
-                v = enc(core.object_grouping.downscale_to_cap(img))
-                embed = [float(x) for x in v] if v is not None else []
-                H, W = img.shape[:2]
-                for gy in range(GRID):
-                    for gx in range(GRID):
-                        t = img[gy * H // GRID:(gy + 1) * H // GRID, gx * W // GRID:(gx + 1) * W // GRID]
-                        v = enc(core.object_grouping.downscale_to_cap(t))
-                        if v is not None:
-                            tiles.append([float(x) for x in v])
+                v = enc(cap(x)) if enc is not None and x is not None and x.size else None
+                return [float(a) for a in v] if v is not None else None
             except Exception as e:
-                host.logger.error(f"personal_iqa encode: {e}")
+                host.logger.error(f"personal_iqa encode: {e}"); return None
+        if v := emb(img):
+            o["embed"] = [v]
+        for gy in range(GRID):
+            for gx in range(GRID):
+                t = img[gy * H // GRID:(gy + 1) * H // GRID, gx * W // GRID:(gx + 1) * W // GRID]
+                if v := emb(t):
+                    o["tile"].append(v); o["tile_raw"].append(ex.tile_raw(gx, gy, GRID, t))
+        # boxes from the background detector; top MAX_OBJECTS by area, crops at native res
+        boxes = []
+        if fn := _cap("detect"):
+            try:
+                boxes = [b for b in (fn(small) or []) if isinstance(b, dict)]
+                o["proc"]["detect"] = True
+            except Exception as e:
+                host.logger.warning(f"personal_iqa detect: {e}")
+        boxes.sort(key=lambda b: -float(b.get("w", 0)) * float(b.get("h", 0)))
+        for b in boxes[:ex.MAX_OBJECTS]:
+            c = ex.crop(img, b)
+            if v := emb(c):
+                o["object"].append(v); o["object_raw"].append(ex.object_raw(b, c))
+                if b.get("class_name"):
+                    o["names"].append(str(b["class_name"]))
+        # depth on the downscaled frame, bands + scalars
+        d01 = None
+        if fn := _cap("depth"):
+            try:
+                dm = fn(small)
+                if dm is not None:
+                    d01 = ex.norm_depth(dm, small.shape); o["proc"]["depth"] = True
+                    o["depth"] = [ex.depth_vec(d01, small, boxes)]
+            except Exception as e:
+                host.logger.warning(f"personal_iqa depth: {e}")
+        masks = [(m, 0) for m in ex.band_masks(d01)] if d01 is not None else []
+        if fn := _cap("segment"):
+            try:
+                segs = [m for m in (fn(small) or []) if isinstance(m, dict) and m.get("mask")]
+                o["proc"]["segment"] = True
+                pm = [(ex.polygon_mask(m["mask"], small.shape), 1, m.get("class_name")) for m in segs]
+                pm.sort(key=lambda x: -x[0].sum())
+                for m, k, name in pm[:ex.MAX_REGIONS]:
+                    masks.append((m, k))
+                    if name:
+                        o["names"].append(str(name))
+            except Exception as e:
+                host.logger.warning(f"personal_iqa segment: {e}")
+        for m, kind in masks:
+            c, bb = ex.masked_crop(small, m)
+            if c is not None and (v := emb(c)):
+                o["region"].append(v); o["region_raw"].append(ex.region_raw(m, bb, d01, c, kind))
+        if fn := _cap("classify"):
+            try:
+                cl = fn(small) or []
+                if cl and cl[0].get("class_name"):
+                    o["names"].append("type:" + str(cl[0]["class_name"]))
+            except Exception:
+                pass
+        try:
+            o["style"] = [ex.style(small)]
+            o["comp"] = [ex.composition(boxes, small)]
+        except Exception as e:
+            host.logger.warning(f"personal_iqa style/comp: {e}")
+        raw = {}
+        if fp:
+            try:
+                from modules.metadata.exif_import import _read_raw_exif
+                raw = _read_raw_exif(fp)[0] or {}
+            except Exception:
+                pass
+            try:
+                o["exif"] = [ex.exif_vec(raw, W, H, os.path.getsize(fp))]
+            except Exception:
+                pass
+            o["names"] += ex.exif_tags(raw)
         base_q = None
         base = host.config.get("personal_iqa_base") or ""
         if base and base != "personal" and (fn := _cap("iqa", base)):
@@ -168,32 +279,45 @@ def register(host):
                 base_q = (fn(img) or {}).get("quality")
             except Exception:
                 pass
-        return embed, tiles, base_q
+        o["base_iqa"] = base_q
+        return o
 
-    def _decode(rel_path):
+    def _path(rel_path):
         # "ext:<abs path>" = an image outside the library (iqa_train datasets);
         # it shares the feature cache (keyed on that string) but never joins ratings.
-        fp = rel_path[4:] if rel_path.startswith("ext:") else host.safe_path(host.media_dir, rel_path)
-        return core.to_bgr(core.read_image(fp))
+        return rel_path[4:] if rel_path.startswith("ext:") else host.safe_path(host.media_dir, rel_path)
+
+    def _decode(rel_path):
+        return core.to_bgr(core.read_image(_path(rel_path)))
+
+    _MORE = ("tile_raw", "object", "object_raw", "region", "region_raw", "depth", "style", "comp", "exif",
+             "names", "proc")
 
     def _cached(db, rel_path, mtime):
-        """Encoder/base outputs for one file; on miss decodes at FULL resolution, computes and stores."""
+        """Encoder/detector/depth/base outputs for one file; on miss decodes at FULL
+        resolution, computes and stores. Returns the _encode dict."""
         key = _cache_key()
         row = db.execute("SELECT * FROM personal_iqa_cache WHERE rel_path=?", (rel_path,)).fetchone()
-        if row and row["mtime"] == mtime and row["key"] == key:
-            return json.loads(row["embed"]), json.loads(row["tiles"]), row["base_iqa"]
-        embed, tiles, base_q = _encode(_decode(rel_path))
-        db.execute("INSERT INTO personal_iqa_cache(rel_path,mtime,key,embed,tiles,base_iqa,trained) "
-                   "VALUES(?,?,?,?,?,?,0) ON CONFLICT(rel_path) DO UPDATE SET mtime=excluded.mtime, "
-                   "key=excluded.key, embed=excluded.embed, tiles=excluded.tiles, base_iqa=excluded.base_iqa",
-                   (rel_path, mtime, key, json.dumps(embed), json.dumps(tiles), base_q))
-        return embed, tiles, base_q
+        if row and row["mtime"] == mtime and row["key"] == key and row["more"]:
+            o = json.loads(row["more"])
+            o.update(embed=[json.loads(row["embed"])] if row["embed"] != "[]" else [],
+                     tile=json.loads(row["tiles"]), base_iqa=row["base_iqa"])
+            return o
+        o = _encode(_decode(rel_path), _path(rel_path))
+        db.execute("INSERT INTO personal_iqa_cache(rel_path,mtime,key,embed,tiles,base_iqa,more,trained) "
+                   "VALUES(?,?,?,?,?,?,?,0) ON CONFLICT(rel_path) DO UPDATE SET mtime=excluded.mtime, "
+                   "key=excluded.key, embed=excluded.embed, tiles=excluded.tiles, base_iqa=excluded.base_iqa, "
+                   "more=excluded.more",
+                   (rel_path, mtime, key, json.dumps(o["embed"][0] if o["embed"] else []), json.dumps(o["tile"]),
+                    o["base_iqa"], json.dumps({k: o[k] for k in _MORE})))
+        return o
 
     # ── live parts (tags / faces / pose from where the app stores them) ──
     def _live(db, rel_path, img=None):
         out = {k: [] for k in TOKEN_DIMS if k != "iqa"}
         out["tags"] = net.hash_tags([])
         proc = {"face": False, "pose": False, "tags": False}     # did a model run for this part?
+        names = []                                               # tag strings for tag_text
         ext = bool(rel_path) and rel_path.startswith("ext:")
         fp = host.safe_path(host.media_dir, rel_path) if rel_path and not ext else None
         pose = None
@@ -208,15 +332,19 @@ def register(host):
             r = db.execute("SELECT tags, COALESCE(face_done,0) fd, COALESCE(autotag_done,0) td "
                            "FROM files WHERE rel_path=?", (rel_path,)).fetchone()
             if r and r["tags"]:
-                out["tags"] = net.hash_tags([common.tag_name(t) for t in json.loads(r["tags"])])
+                names = [common.tag_name(t) for t in json.loads(r["tags"])]
+                out["tags"] = net.hash_tags(names)
             proc["face"], proc["tags"] = bool(r and r["fd"]), bool(r and r["td"])
             for r in db.execute("SELECT shape, cx, cy, w, h FROM face_regions WHERE rel_path=? AND shape IS NOT NULL "
                                 "AND COALESCE(not_face,0)=0", (rel_path,)):
                 out["face"].append(np.frombuffer(r["shape"], np.float32).tolist())
                 out["face_raw"].append([float(r["cx"] or 0), float(r["cy"] or 0), float(r["w"] or 0), float(r["h"] or 0)])
             try:
-                pose = core.read_metadata(fp).get("pose")
+                md = core.read_metadata(fp)
+                pose = md.get("pose")
                 proc["pose"] = pose is not None            # a pose dict with no people is still "ran"
+                if md.get("description"):
+                    names.append(str(md["description"])[:500])
             except Exception:
                 pass
         need = not proc["face"] or not proc["pose"]
@@ -259,14 +387,21 @@ def register(host):
             out[t["kind"] + "_raw"].append(t["raw"])
             out["bones"].append(t["bones"])
         out["_processed"] = proc
+        out["_names"] = names
         return out
 
     def features(db, rel_path, mtime=None, img=None):
         """All tokens for one image. With rel_path: stored tags/faces/pose + cached encoder output;
         img (may be downscaled) only serves as a fallback for missing faces/pose."""
-        embed, tiles, base_q = _cached(db, rel_path, mtime) if rel_path else _encode(img)
+        o = _cached(db, rel_path, mtime) if rel_path else _encode(img)
+        base_q = o["base_iqa"]
         s = _live(db, rel_path, img)
-        s.update(embed=[embed] if embed else [], tile=tiles, iqa=[[float(base_q)]] if base_q is not None else [])
+        s["_processed"].update(o.get("proc") or {})
+        names = s.pop("_names") + (o.get("names") or [])
+        s.update({k: o[k] for k in o if k not in ("base_iqa", "names", "proc")})
+        s.update(iqa=[[float(base_q)]] if base_q is not None else [], tag_text=_tag_text(names))
+        if names and not any(s["tags"]):
+            s["tags"] = net.hash_tags(names)
         s["_base"] = base_q
         s["_missing"] = missing_parts(s, required())
         return s
@@ -345,12 +480,13 @@ def register(host):
             dev = model_registry.device()
             model = _load_model()
             d, depth = net.tier_for(len(rows))
-            dims = {"embed": len(train[0]["feats"]["embed"][0]) if train[0]["feats"]["embed"] else 1}
-            dims["tile"] = dims["embed"]
-            dims.update(TOKEN_DIMS)
+            dims = net.infer_dims(train, TOKEN_DIMS)
             # Only rebuild when the tier is BIGGER than the checkpoint and growing is
             # off; a pretrained (iqa_train) model larger than the tier is kept as is.
             rebuild = model is None or (d, depth) > (model.d, model.depth) and not host.config.get("personal_iqa_grow")
+            if not rebuild and set(dims) - set(model.dims):      # new token types since the checkpoint
+                state["text"] = "[Personal IQA] new token types — adding projections"
+                model = model.grow(model.d, model.depth, dims=dims).to(dev)
             if rebuild:
                 model = net.Scorer(dims, d, depth).to(dev)
                 batch, epochs = list(train), EPOCHS * 2
@@ -396,10 +532,7 @@ def register(host):
         """Fresh Scorer(d, depth) fitted on samples [{feats, y}], evaluated on val.
         Returns (model, metrics)."""
         dev = model_registry.device()
-        dims = {"embed": len(train[0]["feats"]["embed"][0]) if train[0]["feats"]["embed"] else 1}
-        dims["tile"] = dims["embed"]
-        dims.update(TOKEN_DIMS)
-        model = net.Scorer(dims, d, depth).to(dev)
+        model = net.Scorer(net.infer_dims(train, TOKEN_DIMS), d, depth).to(dev)
         opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
         order = list(train)
         for ep in range(int(epochs)):
@@ -423,10 +556,12 @@ def register(host):
         "ckpt_dir": os.path.dirname(ckpt_path), "metrics": _metrics,
         "reload": lambda: (model_registry.unload(_KEY), state.update(metrics=None)) and True,
         "sizes": lambda: net.parse_sizes(host.config.get("personal_iqa_sizes")),
-        "required": required, "token_dims": TOKEN_DIMS,
+        "required": required, "token_dims": TOKEN_DIMS, "infer_dims": net.infer_dims,
         "detectors": lambda: {"embed": bool(_cap("embed", host.config.get("personal_iqa_encoder"))),
                               "iqa": bool(_cap("iqa", host.config.get("personal_iqa_base") or None)),
-                              "face": bool(_cap("detect.faces")), "pose": bool(_cap("pose"))},
+                              "face": bool(_cap("detect.faces")), "pose": bool(_cap("pose")),
+                              "detect": bool(_cap("detect")), "segment": bool(_cap("segment")),
+                              "depth": bool(_cap("depth")), "tags": True},
         "count_params": net.count_params, "Scorer": net.Scorer, "batch": net.batch,
     })
 
