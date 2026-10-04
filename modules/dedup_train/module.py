@@ -17,6 +17,7 @@ import os
 from flask import request, jsonify
 
 from . import build as bd
+from . import build_seq as bs
 
 MANIFEST = {
     "id":          "dedup_train",
@@ -161,6 +162,98 @@ def register(host):
 
     def api_stop():
         return jsonify({"success": True, "was_running": bd.stop()})
+
+    # ── timeline models: HEURDUV (video), HEARDU (audio), HEURDU 1.0 (anim) ──
+    host.add_config_key("dedup_train_video_folders", default="", validate=lambda v: str(v or ""))
+    host.add_config_key("dedup_train_audio_folders", default="", validate=lambda v: str(v or ""))
+
+    def _seq_library(kind):
+        out = []
+        if kind == "audio":
+            try:
+                rows = host.db().execute("SELECT rel_path FROM music").fetchall()
+            except Exception:
+                rows = []
+        else:
+            rows = host.db().execute("SELECT rel_path FROM files WHERE media_kind='video'").fetchall()
+            try:
+                rows += host.db().execute("SELECT rel_path FROM dedup_media_sig WHERE kind IN ('anim','video')").fetchall()
+            except Exception:
+                pass
+        for r in rows:
+            p = host.safe_path(host.media_dir, r[0])
+            if p and os.path.exists(p):
+                out.append(p)
+        return sorted(set(out))
+
+    def _seq_reload(kind, active):
+        svc = host.get_service("dedup_cnn" if kind == "anim" else f"dedup_{kind}_model")
+        try:
+            if kind == "anim":
+                host.config["heurdu_release"] = "1.0"
+                host.save_config()
+            return bool(svc and svc.get("reload") and svc["reload"](active))
+        except Exception as e:
+            host.logger.warning(f"dedup_train: reload {kind}: {e}")
+            return False
+
+    def _seq_installed(kind):
+        pre = bs.KINDS[kind]["prefix"] + "_"
+        d = host.core.models_dir
+        return sorted(f[len(pre):-3] for f in os.listdir(d) if f.startswith(pre) and f.endswith(".pt")) \
+            if os.path.isdir(d) else []
+
+    def api_seq_status():
+        out = {"success": True, **{k: v for k, v in bs.progress.items()}, "kinds": {}}
+        for kind, fam in bs.KINDS.items():
+            svc = host.get_service(f"dedup_{kind}_model") if kind != "anim" else host.get_service("dedup_cnn")
+            sizes = (svc["sizes"]() if svc and svc.get("sizes") else None) or bs.default_sizes(kind)
+            out["kinds"][kind] = {
+                "family": fam["family"], "sizes": sizes, "installed": _seq_installed(kind),
+                "library": len(_seq_library(kind)),
+                "folders": host.config.get(f"dedup_train_{'audio' if kind == 'audio' else 'video'}_folders", ""),
+                "feedback": _count(f"SELECT COUNT(*) FROM {svc['sample_table']}") if (svc and svc.get("sample_table")) else 0,
+                "scorer": svc["status"]() if svc and svc.get("status") else None,
+                "ship_dir": bs.ship_dir(kind)}
+        return jsonify(out)
+
+    def api_seq_build():
+        d = request.get_json(force=True, silent=True) or {}
+        kind = str(d.get("kind") or "video")
+        if kind not in bs.KINDS:
+            return jsonify({"success": False, "error": f"unknown kind {kind!r}"})
+        fkey = f"dedup_train_{'audio' if kind == 'audio' else 'video'}_folders"
+        folders = [f for f in str(d.get("folders") or "").splitlines() if f.strip()]
+        if d.get("folders") is not None:
+            host.config[fkey] = "\n".join(folders)
+            host.save_config()
+        paths = (_seq_library(kind) if d.get("use_library", True) else []) + \
+            (bs.audio_dataset.scan(folders) if kind == "audio" else bs.video_dataset.scan(folders))
+        if not paths:
+            return jsonify({"success": False, "error": f"nothing to train on: no {kind} files in the library and no folders"})
+        tbl = bs.default_sizes(kind)
+        if d.get("sizes_text"):
+            tbl = bd.dc.parse_sizes(d["sizes_text"]) if kind == "anim" else bs.seq_models.parse_sizes(d["sizes_text"])
+        sizes = {z: tbl[z] for z in (d.get("sizes") or list(tbl)) if z in tbl}
+        if not sizes:
+            return jsonify({"success": False, "error": "pick at least one size"})
+        started = bs.start(host, kind=kind, paths=paths, sizes=sizes, active=d.get("active"),
+                           max_items=int(d.get("max_items") or 20_000), per_item=int(d.get("per_item") or 4),
+                           epochs=int(d.get("epochs") or 3), chunk=int(d.get("chunk") or 64),
+                           batch=int(d.get("batch") or 8), lr=float(d.get("lr") or (1e-4 if kind == "anim" else 1e-3)),
+                           workers=int(d.get("workers") or 4), holdout=float(d.get("holdout") or 0.05),
+                           seed=int(d.get("seed") or 0), install=bool(d.get("install", True)),
+                           ship=bool(d.get("ship")), device=str(d.get("device") or ""),
+                           steps=int(d.get("steps") or (8 if kind == "anim" else 32)),
+                           use_feedback=bool(d.get("use_feedback", True)), on_installed=_seq_reload)
+        return jsonify({"success": started, "error": None if started else "a build is already running"})
+
+    def api_seq_stop():
+        return jsonify({"success": True, "was_running": bs.stop()})
+
+    host.add_route("/api/dedup_train/seq/status", api_seq_status, feature="tab.dedup_train")
+    host.add_route("/api/dedup_train/seq/build", api_seq_build, methods=["POST"], feature="tab.dedup_train")
+    host.add_route("/api/dedup_train/seq/stop", api_seq_stop, methods=["POST"], feature="tab.dedup_train")
 
     host.add_route("/api/dedup_train/status", api_status, feature="tab.dedup_train")
     host.add_route("/api/dedup_train/bench", api_bench, methods=["POST"], feature="tab.dedup_train")

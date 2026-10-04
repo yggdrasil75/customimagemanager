@@ -21,6 +21,17 @@ a memory bound only, never a resolution cut.
 Trained on native-resolution crops with a per-pixel change mask target
 (modules/dedup_train). Sizes scale width (cells' channels) and depth (body
 blocks); checkpoints carry their own width/depth.
+
+HEURDU 1.0 (animation, <= ANIM_MAX_FRAMES frames): the same encoder and
+head, plus a temporal block — a residual Conv3d (3,1,1) over each clip's
+stacked feature grids, zero-initialised so a 0.9 checkpoint upgraded to 1.0
+scores exactly as before until it is trained. A clip pair is aligned once
+(one transform, every frame warped the same), every frame of each clip is
+encoded once, the head fills a frame x frame score matrix and closed-end DTW
+(modules/dedup/seq_align) turns it into one score: dropped / duplicated
+frames cost nothing, a trimmed animation scores its shared fraction. 0.9
+checkpoints ("changenet") run the same path without the temporal block, so
+the released model keeps working on animations until 1.0 is trained.
 """
 
 import io
@@ -49,6 +60,8 @@ SIZES: "dict[str, dict]" = {
     "xxl":    {"width": 4.0,  "depth": 8},
 }
 SIZE_ORDER = list(SIZES)
+ANIM_MAX_FRAMES: int = 30          # HEURDU's animation limit; longer clips are HEURDUV's (dedup_cnn_video)
+ARCH_V09, ARCH_V10 = "changenet", "changenet-t"
 
 
 def parse_sizes(text: str) -> "dict[str, dict]":
@@ -84,13 +97,13 @@ def _dilations(depth: int) -> "list[int]":
     return [(1, 2, 4)[i % 3] for i in range(max(1, int(depth)))]
 
 
-def count_params(width_mult: float, depth: int = 1) -> int:
+def count_params(width_mult: float, depth: int = 1, temporal: bool = False) -> int:
     """! @brief Parameter count of a size without building it (no torch needed)."""
     C, d = _ch(width_mult), max(1, int(depth))
     stem = 3 * STRIDE * STRIDE * C + C + 2 * C
     body = d * (9 * C * C + C + 2 * C)
     head = 2 * C * C * 9 + C + 2 * C + C + 1
-    return stem + body + head
+    return stem + body + head + ((3 * C * C + C) if temporal else 0)
 
 
 def margin_px(depth: int) -> int:
@@ -154,14 +167,12 @@ def _similarity(rs, is_, s_ref, s_img, min_inliers):
         return None, 0
 
 
-def align(ref: "np.ndarray", img: "np.ndarray", min_inliers: int = 12):
+def align_params(ref: "np.ndarray", img: "np.ndarray", min_inliers: int = 12):
     """!
-    @brief Warp `img` onto `ref`'s frame with a similarity transform (ORB +
-           RANSAC on a <=1024-px working copy, transform scaled back so the
-           warp itself is full resolution). A mirrored copy is tried too and
-           wins when it aligns better. Same framing (aspect within 2%) with
-           too few features falls back to a plain resize.
-    @return (warped uint8 [H,W,3], overlap bool [H,W]) or None: not the same picture.
+    @brief The transform align() applies, without applying it: lets a clip
+           compute it once (on one frame pair) and warp every frame the same.
+    @return None (not the same picture) or (M | None, flipped, (W, H), overlap bool [H,W]);
+            M None = same framing, plain resize.
     """
     ref, img = _bgr3(ref), _bgr3(img)
     H, W = ref.shape[:2]; h, w = img.shape[:2]
@@ -173,18 +184,45 @@ def align(ref: "np.ndarray", img: "np.ndarray", min_inliers: int = 12):
     rs, s_ref = small(ref); is_, s_img = small(img)
     M, n = _similarity(rs, is_, s_ref, s_img, min_inliers)
     Mf, nf = _similarity(rs, is_[:, ::-1], s_ref, s_img, min_inliers)
+    flip = False
     if Mf is not None and nf > n:
-        M, img = Mf, np.ascontiguousarray(img[:, ::-1])
+        M, flip = Mf, True
     if M is None:
         if not same_frame:
             return None
-        warped = img if (h, w) == (H, W) else cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA if h * w > H * W else cv2.INTER_LINEAR)
-        return warped, np.ones((H, W), bool)
-    warped = cv2.warpAffine(img, M, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+        return None, False, (W, H), np.ones((H, W), bool)
     ov = cv2.warpAffine(np.full((h, w), 255, np.uint8), M, (W, H), flags=cv2.INTER_NEAREST) > 0
     if ov.mean() < 0.05:
         return None
-    return warped, ov
+    return M, flip, (W, H), ov
+
+
+def apply_align(img: "np.ndarray", params) -> "np.ndarray":
+    """! @brief Warp `img` (any frame of the clip align_params saw) into the reference frame."""
+    M, flip, (W, H), _ov = params
+    img = _bgr3(img)
+    if flip:
+        img = np.ascontiguousarray(img[:, ::-1])
+    h, w = img.shape[:2]
+    if M is None:
+        return img if (h, w) == (H, W) else cv2.resize(
+            img, (W, H), interpolation=cv2.INTER_AREA if h * w > H * W else cv2.INTER_LINEAR)
+    return cv2.warpAffine(img, M, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+
+
+def align(ref: "np.ndarray", img: "np.ndarray", min_inliers: int = 12):
+    """!
+    @brief Warp `img` onto `ref`'s frame with a similarity transform (ORB +
+           RANSAC on a <=1024-px working copy, transform scaled back so the
+           warp itself is full resolution). A mirrored copy is tried too and
+           wins when it aligns better. Same framing (aspect within 2%) with
+           too few features falls back to a plain resize.
+    @return (warped uint8 [H,W,3], overlap bool [H,W]) or None: not the same picture.
+    """
+    p = align_params(ref, img, min_inliers)
+    if p is None:
+        return None
+    return apply_align(img, p), p[3]
 
 
 def pair_score(change_map: "np.ndarray", overlap: "np.ndarray | None") -> float:
@@ -219,6 +257,11 @@ if _HAVE_TORCH:
             t = t.permute(0, 3, 1, 2).float().div_(255.0)
         return t.contiguous(memory_format=torch.channels_last)
 
+    def _clip_tensor(x, device: str) -> "torch.Tensor":
+        """[n,T,H,W,3] uint8 numpy -> float 0..1 [n,T,3,H,W] tensor."""
+        t = torch.from_numpy(np.ascontiguousarray(x)).to(device, non_blocking=True)
+        return t.permute(0, 1, 4, 2, 3).float().div_(255.0).contiguous()
+
     class _Encoder(nn.Module):
         """One image -> per-cell feature grid [C, H/8, W/8]. Lossless stem."""
 
@@ -247,31 +290,77 @@ if _HAVE_TORCH:
         def forward(self, fa, fb):
             return self.net(torch.cat([(fa - fb).abs(), fa * fb], dim=1)).squeeze(1)
 
+    class _Temporal(nn.Module):
+        """HEURDU 1.0: residual Conv3d (3,1,1) across a clip's frames, per cell.
+        Zero-initialised: identity until trained, so 0.9 weights upgrade losslessly."""
+
+        def __init__(self, C: int) -> None:
+            super().__init__()
+            self.conv = nn.Conv3d(C, C, (3, 1, 1), padding=(1, 0, 0))
+            nn.init.zeros_(self.conv.weight)
+            nn.init.zeros_(self.conv.bias)
+
+        def forward(self, f):
+            """f [N, T, C, h, w] -> same shape."""
+            x = f.permute(0, 2, 1, 3, 4).contiguous()
+            return f + self.conv(x).permute(0, 2, 1, 3, 4)
+
     class _ChangeNet(nn.Module):
-        def __init__(self, width_mult: float, depth: int) -> None:
+        def __init__(self, width_mult: float, depth: int, temporal: bool = False) -> None:
             super().__init__()
             self.enc = _Encoder(width_mult, depth)
             self.head = _Head(self.enc.dim)
+            if temporal:
+                self.temporal = _Temporal(self.enc.dim)
 
         def forward(self, a, b):
             return self.head(self.enc(a), self.enc(b))
+
+        def forward_clips(self, a, b):
+            """a, b [N, T, 3, S, S] frame-aligned clips -> change logits [N, T, S/8, S/8]."""
+            N, T = a.shape[:2]
+            fa = self.enc(a.flatten(0, 1).contiguous(memory_format=torch.channels_last))
+            fb = self.enc(b.flatten(0, 1).contiguous(memory_format=torch.channels_last))
+            fa, fb = fa.view(N, T, *fa.shape[1:]), fb.view(N, T, *fb.shape[1:])
+            if hasattr(self, "temporal"):
+                fa, fb = self.temporal(fa), self.temporal(fb)
+            out = self.head(fa.flatten(0, 1), fb.flatten(0, 1))
+            return out.view(N, T, *out.shape[1:])
 
 
 class DupCNN:
     """! @brief Change-net wrapper with a size knob and safe fallbacks (no torch -> neutral no-ops)."""
 
-    def __init__(self, width_mult: float = 1.0, depth: int = 1, size: str = "") -> None:
+    def __init__(self, width_mult: float = 1.0, depth: int = 1, size: str = "", temporal: bool = False) -> None:
         self.width_mult: float = min(WIDTH_MAX, max(WIDTH_MIN, float(width_mult)))
         self.depth: int = max(1, int(depth))
         self.size: str = size
         self.trained: bool = False
         self.error: str = ""
-        self.net = _ChangeNet(self.width_mult, self.depth) if _HAVE_TORCH else None
+        self.net = _ChangeNet(self.width_mult, self.depth, temporal) if _HAVE_TORCH else None
+
+    @property
+    def temporal(self) -> bool:
+        """True for a HEURDU 1.0 net (has the temporal block)."""
+        return bool(self.available and hasattr(self._raw(), "temporal"))
+
+    @property
+    def version(self) -> str:
+        return "1.0" if self.temporal else "0.9"
+
+    def upgrade(self) -> "DupCNN":
+        """! @brief 0.9 -> 1.0 in place: add the zero-initialised temporal block
+               (scores are unchanged until it is trained). No-op on 1.0."""
+        if self.available and not self.temporal:
+            raw = self._raw()
+            raw.temporal = _Temporal(raw.enc.dim).to(next(raw.parameters()).device)
+            self.net = raw
+        return self
 
     @classmethod
-    def sized(cls, size: str, sizes: "dict | None" = None) -> "DupCNN":
+    def sized(cls, size: str, sizes: "dict | None" = None, temporal: bool = False) -> "DupCNN":
         sp = size_spec(size, sizes)
-        return cls(sp["width"], sp["depth"], size=str(size).lower())
+        return cls(sp["width"], sp["depth"], size=str(size).lower(), temporal=temporal)
 
     @property
     def available(self) -> bool:
@@ -284,6 +373,14 @@ class DupCNN:
     def _raw(self):
         return getattr(self.net, "_orig_mod", self.net)
 
+    def _place(self, device: str):
+        """Move to device; 2D convs channels_last (a 1.0 net's Conv3d can't be)."""
+        net = self.net.to(device)
+        for mod in net.modules():
+            if isinstance(mod, nn.Conv2d):
+                mod.to(memory_format=torch.channels_last)
+        return net
+
     @classmethod
     def load(cls, path: str, width_mult: float = 1.0, depth: int = 1) -> "DupCNN":
         """! @brief Load a checkpoint (carries width/depth/size); untrained fallback on failure."""
@@ -292,12 +389,12 @@ class DupCNN:
             return m
         try:
             ckpt = torch.load(path, map_location="cpu")
-            if ckpt.get("arch") != "changenet":
+            if ckpt.get("arch") not in (ARCH_V09, ARCH_V10):
                 raise ValueError("not a change-net checkpoint (old siamese weights?)")
             m.width_mult = float(ckpt.get("width_mult", width_mult))
             m.depth = int(ckpt.get("depth", 1))
             m.size = str(ckpt.get("size", ""))
-            m.net = _ChangeNet(m.width_mult, m.depth)
+            m.net = _ChangeNet(m.width_mult, m.depth, ckpt.get("arch") == ARCH_V10)
             m.net.load_state_dict(ckpt["state_dict"])
             m.net.eval()
             m.trained = True
@@ -320,7 +417,8 @@ class DupCNN:
             return False
         try:
             tmp = path + ".tmp"
-            torch.save({"arch": "changenet", "state_dict": self._raw().state_dict(),
+            torch.save({"arch": ARCH_V10 if self.temporal else ARCH_V09, "heurdu": self.version,
+                        "state_dict": self._raw().state_dict(),
                         "width_mult": self.width_mult, "depth": self.depth, "size": self.size,
                         "stride": STRIDE, "saved": time.time()}, tmp)
             os.replace(tmp, path)
@@ -334,13 +432,15 @@ class DupCNN:
         @brief One pass over (a, b, m) numpy batches: a, b uint8 [n,S,S,3]
                aligned pairs, m float32 [n,S/8,S/8] target change per cell
                (0 = identical, 1 = different, in between for partial edits).
+               Clips (HEURDU 1.0): a, b uint8 [n,T,S,S,3] frame-aligned,
+               m [n,T,S/8,S/8]; the temporal block trains with the rest.
                Per-cell BCE. `micro`: GPU micro-batch with gradient
                accumulation (same maths as the full batch, memory of the slice).
         @return Mean loss of the pass, or None when torch is missing.
         """
         if not self.available:
             return None
-        self.net.to(device, memory_format=torch.channels_last).train()
+        self._place(device).train()
         holder = _opt_holder if _opt_holder is not None else {}
         opt = holder.get("opt")
         if opt is None or holder.get("lr") != lr:
@@ -369,11 +469,13 @@ class DupCNN:
             step = int(micro) if micro and int(micro) < bs else bs
             opt.zero_grad(set_to_none=True)
             for j in range(0, bs, step):
-                ta, tb = _tensor(a[j:j + step], device), _tensor(b[j:j + step], device)
+                clip = np.ndim(a) == 5
+                ta, tb = (_clip_tensor if clip else _tensor)(a[j:j + step], device), \
+                    (_clip_tensor if clip else _tensor)(b[j:j + step], device)
                 tm = torch.as_tensor(np.asarray(m[j:j + step], np.float32)).to(device, non_blocking=True)
                 with torch.autocast(device_type="cuda", dtype=torch.float16 if mode == "fp16" else torch.bfloat16,
                                     enabled=use_amp):
-                    logit = self.net(ta, tb)
+                    logit = self._raw().forward_clips(ta, tb) if clip else self.net(ta, tb)
                 loss = loss_fn(logit.float(), tm) * (len(tm) / bs)
                 (scaler.scale(loss) if scaler is not None else loss).backward()
                 total += float(loss.item()) * bs; n += len(tm)
@@ -393,7 +495,7 @@ class DupCNN:
                margin_px(depth) of overlap, margins cropped off — the features
                are identical to a single pass, only memory is bounded.
         """
-        self.net.to(device, memory_format=torch.channels_last).eval()
+        self._place(device).eval()
         img = _pad8(_bgr3(img))
         H, W = img.shape[:2]
         enc = self._raw().enc
@@ -430,7 +532,7 @@ class DupCNN:
 
     def predict_maps(self, a, b, device: str = "cpu") -> "np.ndarray":
         """! @brief Change maps [n,S/8,S/8] for prepared aligned batches (training eval)."""
-        self.net.to(device, memory_format=torch.channels_last).eval()
+        self._place(device).eval()
         with torch.no_grad():
             return torch.sigmoid(self.net(_tensor(a, device), _tensor(b, device))).float().cpu().numpy()
 
@@ -493,6 +595,71 @@ class DupCNN:
         rec(list(range(N)))
         return S, maps
 
+    def encode_clip(self, frames: "list", device: str = "cpu", max_pixels: int = 16_000_000) -> "list":
+        """! @brief Feature grids of every frame of one clip (same size frames);
+               the temporal block (1.0) mixes neighbouring frames per cell."""
+        feats = [self.encode(f, device, max_pixels) for f in frames]
+        if self.temporal and len(feats) > 1:
+            with torch.no_grad():
+                st = self._raw().temporal(torch.stack(feats)[None])[0]
+            feats = list(st.unbind(0))
+        return feats
+
+    def score_animation(self, frames_a: "list", frames_b: "list", device: str = "cpu",
+                        max_pixels: int = 16_000_000, clip_pixels: int = 64_000_000,
+                        want_matrix: bool = False):
+        """!
+        @brief HEURDU animation score for two clips of <= ANIM_MAX_FRAMES BGR frames.
+               The clip with the larger frames is the reference; one similarity
+               transform (from the middle frames, else the first) warps every
+               frame of the other; every frame is encoded once; the head fills
+               the frame x frame pair_score matrix; DTW turns it into the shared
+               fraction of the longer clip. Unalignable -> 0.0.
+               clip_pixels bounds T x H x W per clip (frames are scaled down past
+               it — a memory bound for long native-resolution animations).
+        @return score (float), or (score, matrix [Ta, Tb]) when want_matrix; None untrained.
+        """
+        from modules.dedup.seq_align import dtw_score, resample_idx
+        if not (self.available and self.trained):
+            return None
+        fa = [_bgr3(f) for f in frames_a if f is not None]
+        fb = [_bgr3(f) for f in frames_b if f is not None]
+        if not fa or not fb:
+            return None
+        fa = [fa[i] for i in resample_idx(len(fa), ANIM_MAX_FRAMES)]
+        fb = [fb[i] for i in resample_idx(len(fb), ANIM_MAX_FRAMES)]
+        swap = fb[0].shape[0] * fb[0].shape[1] > fa[0].shape[0] * fa[0].shape[1]
+        if swap:
+            fa, fb = fb, fa
+
+        def bound(fr):
+            h, w = fr[0].shape[:2]
+            s = (clip_pixels / float(len(fr) * h * w)) ** 0.5
+            if s >= 1:
+                return fr
+            size = (max(STRIDE, int(w * s)), max(STRIDE, int(h * s)))
+            return [cv2.resize(x, size, interpolation=cv2.INTER_AREA) for x in fr]
+        fa, fb = bound(fa), bound(fb)
+        prm = align_params(fa[len(fa) // 2], fb[len(fb) // 2]) or align_params(fa[0], fb[0])
+        if prm is None:
+            return (0.0, np.zeros((len(fa), len(fb)), np.float32)) if want_matrix else 0.0
+        ov = prm[3]
+        wb = [apply_align(x, prm) for x in fb]
+        ea, eb = self.encode_clip(fa, device, max_pixels), self.encode_clip(wb, device, max_pixels)
+        pairs = [(i, j) for i in range(len(ea)) for j in range(len(eb))]
+        H8, W8 = ea[0].shape[-2:]
+        per = max(1, max_pixels // max(1, H8 * W8 * STRIDE * STRIDE))
+        S = np.zeros((len(ea), len(eb)), np.float32)
+        for s0 in range(0, len(pairs), per):
+            ch = pairs[s0:s0 + per]
+            cms = self.compare_many([ea[i] for i, _ in ch], [eb[j] for _, j in ch], per)
+            for (i, j), cm in zip(ch, cms):
+                S[i, j] = pair_score(cm, ov)
+        sc = dtw_score(1.0 - S)
+        if swap:
+            S = S.T
+        return (sc, S) if want_matrix else sc
+
     def predict(self, img_a: "np.ndarray", img_b: "np.ndarray", device: str = "cpu") -> "float | None":
         """! @brief Score one pair (align + encode + compare); None when untrained."""
         if not (self.available and self.trained):
@@ -509,7 +676,7 @@ class DupCNN:
         gpu = device != "cpu" and torch.cuda.is_available()
         dev = device if gpu else "cpu"
         sync = (lambda: torch.cuda.synchronize(dev)) if gpu else (lambda: None)
-        net = self.net.to(dev, memory_format=torch.channels_last).eval()
+        net = self._place(dev).eval()
         out = {"params": self.params, "device": dev, "batch": batch, "side": WORK}
         with torch.no_grad():
             for n, key in ((1, "ms_per_pair_b1"), (batch, "ms_per_pair_batch")):

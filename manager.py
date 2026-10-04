@@ -1035,6 +1035,22 @@ def _parse_search(search: str) -> tuple[str, list, list, list]:
                 params.append(name.lower())
                 structured.append(("tag", name, neg))
             continue
+        if low.startswith('sort:'):
+            # Ordering, not filtering: resolved against module-registered sort
+            # keys (host.register_sort_key). Unknown keys are dropped.
+            key, desc = low[5:], False
+            if key.startswith('-'):
+                key, desc = key[1:], True
+            elif key.endswith(':desc'):
+                key, desc = key[:-5], True
+            elif key.endswith(':asc'):
+                key = key[:-4]
+            expr = getattr(module_host, "sort_keys", {}).get(key) if 'module_host' in globals() else None
+            if callable(expr):
+                expr = expr()
+            if expr:
+                structured.append(("sort", expr, desc))
+            continue
         if low == 'is:untagged':
             where.append("(tags IS NULL OR tags='' OR tags='[]')")
             structured.append(("is", "untagged"))
@@ -1103,11 +1119,15 @@ def _query_files(search: str, offset: int, limit: int,
     # host.register_search_provider; core merges their entries in front of the
     # image results. Skipped for an album (a flat image set). With no such
     # module the app searches only images.
+    # sort tokens order the image rows; they don't filter, so providers never see them
+    filters = [s for s in structured if s[0] != "sort"]
+    order = ", ".join(f"{s[1]} {'DESC' if s[2] else 'ASC'}" for s in structured if s[0] == "sort")
+    order_sql = f"{order}, rel_path" if order else "rel_path"
     comic_entries = []
     if not album and 'module_host' in globals():
         for prov in getattr(module_host, "search_providers", []):
             try:
-                comic_entries += prov(text, folder, structured) or []
+                comic_entries += prov(text, folder, filters) or []
             except Exception as e:
                 access_logger.error(f"search provider failed: {e}")
     nc = len(comic_entries)
@@ -1125,7 +1145,7 @@ def _query_files(search: str, offset: int, limit: int,
         rows = _db().execute(
             f"SELECT rel_path, tags, description, width, height "
             f"FROM files{where_sql} "
-            f"ORDER BY rel_path LIMIT ? OFFSET ?", (*p, need, file_offset)).fetchall()
+            f"ORDER BY {order_sql} LIMIT ? OFFSET ?", (*p, need, file_offset)).fetchall()
         batch = []
         for r in rows:
             batch.append({"kind": "image", "filename": r["rel_path"],

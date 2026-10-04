@@ -251,11 +251,298 @@ def _naive_ctx_scorer():
     return score
 
 
+# ── Temporal (animation / video) and audio dedup ─────────────────────────────
+# Stills keep stages 3-7 above. Videos and animated JXLs (kind anim/video) and
+# audio tracks get per-step signatures (media_sig) during stage 2, are taken
+# out of the still-image hash stages, and are grouped in stage 8 (temporal)
+# and stage 9 (audio): sha256 exact groups, phash candidate search + verify,
+# then the scorer registry per kind (anim: HEURDU, video: HEURDUV -> legacy
+# clip CNN, audio: HEARDU) with the naive temporal / audio score as the
+# fallback. A video whose signature cannot be computed (no ffmpeg) stays on
+# the old poster-frame image path.
+from . import media_sig, seq_align
+
+
+class LazyCtx(dict):
+    """Scorer ctx whose keys decode on first get() (and are cached), so a
+    scorer that answers from the path never pays for a decode it doesn't use."""
+
+    def __init__(self, base, loaders):
+        super().__init__(base)
+        self._loaders = loaders
+
+    def get(self, k, default=None):
+        if not dict.__contains__(self, k) and k in self._loaders:
+            try:
+                dict.__setitem__(self, k, self._loaders[k]())
+            except Exception as e:
+                access_logger.warning(f"dedup ctx {k}: {e}")
+                dict.__setitem__(self, k, None)
+        return dict.get(self, k, default)
+
+    def __getitem__(self, k):
+        v = self.get(k, KeyError)
+        if v is KeyError:
+            raise KeyError(k)
+        return v
+
+
+def _rgb2bgr(frames):
+    return [cv2.cvtColor(f, cv2.COLOR_RGB2BGR) for f in frames] if frames is not None else None
+
+
+class _Decodes:
+    """Per-group decode cache: each member is decoded once per mode."""
+
+    def __init__(self):
+        self.c, self.lk = {}, threading.Lock()
+
+    def get(self, path, mode):
+        key = (path, mode)
+        with self.lk:
+            if key in self.c:
+                return self.c[key]
+        if mode == "anim":                         # native-res frames (HEURDU), BGR
+            r = media_sig.decode_frames(path, native=True)
+            v = _rgb2bgr(list(r[0])) if r else None
+        elif mode == "small":                      # naive / signature timeline, RGB
+            r = media_sig.decode_frames(path, fit=media_sig.SMALL_SIDE)
+            v = r[0] if r else None
+        elif mode == "legacy":                     # legacy 3D clip CNN: CLIP_T frames, RGB
+            v = (mt.video_sample_frames(path, n=_CLIP_T()) if mt.is_video(path)
+                 else [r for r in (media_sig.decode_frames(path, fit=256) or [[]])[0]])
+        elif mode == "pcm":
+            v = media_sig.decode_audio(path, media_sig.NAIVE_AUDIO_SR)
+        else:
+            v = None
+        with self.lk:
+            self.c[key] = v
+        return v
+
+
+def _classify_and_sign(files_on_disk, progress):
+    """Stage 2 tail: kind of every JXL / video / audio file (memoised per
+    mtime in dedup_media_sig) and per-step signatures for anim / video /
+    audio. Returns {rel_path: (kind, sig dict | None, row)} for temporal and
+    audio files whose signature exists."""
+    cand = [f for f in files_on_disk
+            if f.lower().endswith(".jxl") or mt.is_video(f) or mt.is_audio(f)]
+    have = core.sigs_get()
+    todo = []
+    for rel in cand:
+        ap = get_safe_path(MEDIA_DIR, rel)
+        if not ap:
+            continue
+        try:
+            mtime = _getmtime_loose(ap)
+        except OSError:
+            continue
+        r = have.get(rel)
+        if r is None or abs((r["mtime"] or 0) - mtime) > 0.01:
+            todo.append((rel, ap, mtime))
+    if todo:
+        done, lk, out = [0], threading.Lock(), []
+
+        def work(item):
+            rel, ap, mtime = item
+            kind = media_sig.media_kind(ap)
+            sig, sha = None, None
+            try:
+                if kind in ("anim", "video"):
+                    sig = media_sig.compute_seq_sig(ap)
+                elif kind == "audio":
+                    sig = media_sig.compute_audio_sig(ap)
+                    sha = media_sig.sha256_file(ap)
+            except Exception as e:
+                access_logger.warning(f"dedup signature {rel}: {e}")
+            if sig is not None and kind in ("anim", "video"):
+                kind = sig["kind"]                 # a 20-frame mp4 is an animation
+            row = (rel, mtime, kind, int(sig["n_src"]) if sig else 0,
+                   float(sig.get("duration") or 0) if sig else 0.0, sha,
+                   media_sig.pack_sig(sig) if sig else None)
+            with lk:
+                done[0] += 1
+                if done[0] % 10 == 0 or done[0] == len(todo):
+                    progress(done[0], len(todo))
+            return row
+        with thread_manager.pool(want=4, name="dedup-sig") as ex:
+            rows = list(ex.map(work, todo))
+            _db_release_pool(ex, ex._max_workers)
+        for i in range(0, len(rows), 200):
+            core.sigs_put(rows[i:i + 200])
+        have = core.sigs_get()
+    out = {}
+    for rel in cand:
+        r = have.get(rel)
+        if r is None or r["kind"] == "still" or r["sig"] is None:
+            continue
+        sig = media_sig.unpack_sig(r["sig"])
+        if sig is not None:
+            out[rel] = (r["kind"], sig, r)
+    return out
+
+
+def _prob_components(n, probs, size_of):
+    """[(member indices ordered reference first, scores)] at prob >= 0.5 —
+    the same grouping rule the image verify uses."""
+    adj = {p: set() for p in range(n)}
+    for (p, q), pr in probs.items():
+        if pr >= 0.5:
+            adj[p].add(q); adj[q].add(p)
+    out, seen = [], set()
+    for start in range(n):
+        if start in seen or not adj[start]:
+            continue
+        comp, stack = [], [start]
+        while stack:
+            x = stack.pop()
+            if x in seen:
+                continue
+            seen.add(x); comp.append(x)
+            stack.extend(adj[x] - seen)
+
+        def sc(a, b):
+            return probs.get((a, b) if a < b else (b, a), 0.0)
+        ref = max(comp, key=lambda x: (sum(sc(x, y) for y in comp if y != x), size_of(x)))
+        rest = sorted((y for y in comp if y != ref), key=lambda y: (-sc(ref, y), -size_of(y)))
+        out.append(([ref] + rest, [1.0] + [sc(ref, y) for y in rest]))
+    return out
+
+
+def _seq_group_stage(stage, label, items, sha_of, exclusions, scorers, candidates, verify_score,
+                     make_ctx, naive, kind_of, size_of):
+    """One temporal / audio stage. items: [(rel, kind, sig)]. Returns
+    [(group kind, [rel...], [score...])]."""
+    n = len(items)
+    groups = []
+    if n == 0:
+        return groups
+    _prog(stage, label + ": exact", 0, n)
+    by_sha = {}
+    for k, (rel, _, _) in enumerate(items):
+        sh = sha_of(rel)
+        if sh:
+            by_sha.setdefault(sh, []).append(k)
+    exact = [g for g in by_sha.values() if len(g) > 1]
+    in_exact = {k for g in exact for k in g}
+    for g in exact:
+        groups.append(("exact", [items[k][0] for k in g], [1.0] * len(g)))
+    keep = [k for k in range(n) if k not in in_exact] + [g[0] for g in exact]
+    _prog(stage, label + ": candidates", 0, len(keep))
+    pairs = candidates([items[k][2] for k in keep])
+    edges, pre = [], {}
+    for t, (a, b) in enumerate(pairs):
+        ka, kb = keep[a], keep[b]
+        if core.excl_key(items[ka][0], items[kb][0]) in exclusions:
+            continue
+        v = verify_score(items[ka][2], items[kb][2])
+        if v >= media_sig.SEQ_KEEP:
+            edges.append((a, b)); pre[(a, b)] = v
+        if t % 50 == 0:
+            _prog(stage, label + ": verify", t, len(pairs))
+    comps = _components(len(keep), edges)
+    total = sum(len(c) for c in comps)
+    done = 0
+    for comp in comps:
+        mem = [keep[c] for c in comp]
+        dec = _Decodes()
+        probs = {}
+        plist = [(p, q) for p in range(len(mem)) for q in range(p + 1, len(mem))
+                 if core.excl_key(items[mem[p]][0], items[mem[q]][0]) not in exclusions]
+        by_kind = {}
+        for p, q in plist:
+            by_kind.setdefault(kind_of(items[mem[p]], items[mem[q]]), []).append((p, q))
+        for kind, kp in by_kind.items():
+            tag = scorers.tag_for(kind) if scorers else "naive"
+            tag_id = tag.split(":")[0]
+            keys = {(p, q): core.verdict_key(sha_of(items[mem[p]][0]) or items[mem[p]][0],
+                                             sha_of(items[mem[q]][0]) or items[mem[q]][0]) for p, q in kp}
+            cached = core.verdicts_get(tag, set(keys.values())) if tag != "naive" else {}
+            todo = []
+            for pq in kp:
+                if keys[pq] in cached:
+                    probs[pq] = cached[keys[pq]]
+                else:
+                    todo.append(pq)
+            if not todo:
+                continue
+            ctxs = [make_ctx(kind, items[mem[p]], items[mem[q]], dec) for p, q in todo]
+            res = (scorers.score_pairs(ctxs, naive_score=naive) if scorers
+                   else [(naive(c), "naive") for c in ctxs])
+            fresh = []
+            for pq, (pr, sid) in zip(todo, res):
+                probs[pq] = 0.0 if pr is None else float(pr)
+                if sid == tag_id and tag != "naive":
+                    fresh.append((keys[pq], probs[pq]))
+            if fresh:
+                try:
+                    core.verdicts_put(tag, fresh)
+                except Exception as e:
+                    access_logger.warning(f"dedup verdict cache: {e}")
+        for idx, scores in _prob_components(len(mem), probs, lambda x: size_of(items[mem[x]])):
+            groups.append(("similar", [items[mem[i]][0] for i in idx], scores))
+        done += len(comp)
+        _prog(stage, label + ": scoring", done, total)
+    return groups
+
+
+def _temporal_groups(sigs, sha_by_path, exclusions, scorers):
+    """Stage 8: animations + videos."""
+    items = [(rel, k, sig) for rel, (k, sig, _r) in sorted(sigs.items()) if k in ("anim", "video")]
+
+    def make_ctx(kind, a, b, dec):
+        pa, pb = get_safe_path(MEDIA_DIR, a[0]), get_safe_path(MEDIA_DIR, b[0])
+        return LazyCtx({"is_video": True, "kind": kind, "ref_path": pa, "other_path": pb,
+                        "ref_sig": a[2], "other_sig": b[2]},
+                       {"ref_anim": lambda: dec.get(pa, "anim"), "other_anim": lambda: dec.get(pb, "anim"),
+                        "ref_frames": lambda: dec.get(pa, "legacy"), "other_frames": lambda: dec.get(pb, "legacy"),
+                        "ref_seq": lambda: dec.get(pa, "small"), "other_seq": lambda: dec.get(pb, "small")})
+
+    def naive(ctx):
+        fa, fb = ctx.get("ref_seq"), ctx.get("other_seq")
+        if fa is None or fb is None:
+            return media_sig.seq_phash_score(ctx["ref_sig"], ctx["other_sig"])
+        return media_sig.naive_seq_score(fa, fb, ctx["ref_sig"]["h1024"], ctx["other_sig"]["h1024"],
+                                         _naive_image_score)
+
+    def kind_of(a, b):
+        return "anim" if a[1] == "anim" and b[1] == "anim" else "video"
+
+    return _seq_group_stage(
+        8, "Video & animation", items, sha_by_path.get, exclusions, scorers,
+        lambda sg: media_sig.seq_candidates(sg, _find_similar_pairs), media_sig.seq_phash_score,
+        make_ctx, naive, kind_of, lambda it: int(it[2].get("n_src") or 0))
+
+
+def _audio_groups(sigs, exclusions, scorers):
+    """Stage 9: audio tracks."""
+    items = [(rel, k, sig) for rel, (k, sig, _r) in sorted(sigs.items()) if k == "audio"]
+    sha = {rel: r["sha256"] for rel, (k, _s, r) in sigs.items() if k == "audio"}
+
+    def make_ctx(kind, a, b, dec):
+        pa, pb = get_safe_path(MEDIA_DIR, a[0]), get_safe_path(MEDIA_DIR, b[0])
+        return LazyCtx({"kind": "audio", "ref_path": pa, "other_path": pb, "ref_sig": a[2], "other_sig": b[2]},
+                       {"ref_pcm": lambda: dec.get(pa, "pcm"), "other_pcm": lambda: dec.get(pb, "pcm")})
+
+    def naive(ctx):
+        sc, off = media_sig.audio_phash_score(ctx["ref_sig"], ctx["other_sig"])
+        pa, pb = ctx.get("ref_pcm"), ctx.get("other_pcm")
+        if pa is None or pb is None or off is None:
+            return sc
+        return media_sig.naive_audio_score(pa, pb, off * media_sig.AUDIO_HOP / float(media_sig.AUDIO_SR))
+
+    return _seq_group_stage(
+        9, "Audio", items, sha.get, exclusions, scorers,
+        lambda sg: media_sig.audio_candidates([x["fp"] for x in sg]),
+        lambda x, y: media_sig.audio_phash_score(x, y)[0],
+        make_ctx, naive, lambda a, b: "audio", lambda it: float(it[2].get("duration") or 0))
+
+
 # ── Dedup ──────────────────────────────────────────────────────────────────────
 
 # ── Progress ───────────────────────────────────────────────────────────────────
 # One scan at a time; its live state is polled by /api/dedup_progress.
-DEDUP_STAGES = 7
+DEDUP_STAGES = 9
 _PROG_LOCK = threading.Lock()
 _PROGRESS: dict = {"running": False}
 
@@ -377,7 +664,10 @@ def dedup_exclude():
 
     # Teach the heuristic: this file is NOT a duplicate of the others.
     try:
-        fa = read_jxl(get_safe_path(MEDIA_DIR, file))
+        _pf = get_safe_path(MEDIA_DIR, file)
+        fa = None if (_pf and mt.is_audio(_pf)) else read_jxl(_pf)
+        for o in others:
+            core.record_seq_sample(file, o, 0)        # HEURDUV / HEARDU (video or audio pairs only)
         if fa is not None:
             for o in others:
                 ob = read_jxl(get_safe_path(MEDIA_DIR, o))
@@ -745,24 +1035,61 @@ def dedup_groups_page():
         info = {r["rel_path"]: r for r in file_rows}
     else:
         info = {}
+    # Audio tracks live in the music module's table, not `files`; their
+    # signature rows (and the music row, when present) describe them.
+    extra = [p for p in all_paths if p not in info]
+    sig_rows = core.sigs_get(all_paths) if all_paths else {}
+    music = {}
+    if extra:
+        try:
+            ph = ",".join("?" * len(extra))
+            music = {r["rel_path"]: r for r in _db().execute(
+                f"SELECT rel_path, duration, bitrate, samplerate, title, artist, tags FROM music "
+                f"WHERE rel_path IN ({ph})", extra).fetchall()}
+        except Exception:
+            music = {}
 
     groups = []
     for row in rows:
         members = json.loads(row["members"])
         scores  = json.loads(row["scores"] or "[]")
         score_map = dict(zip(members, scores)) if len(scores) == len(members) else {}
-        live    = [m for m in members if m in info]
+        live    = [m for m in members if m in info or m in sig_rows]
         if len(live) < 2:
             continue
         detail = []
         for path in live:
+            if path not in info:                       # audio track
+                sr, mr = sig_rows[path], music.get(path)
+                dur = float((mr["duration"] if mr else None) or sr["duration"] or 0)
+                br = int((mr["bitrate"] if mr else 0) or 0)
+                ap = get_safe_path(MEDIA_DIR, path)
+                size = os.path.getsize(ap) if ap and os.path.exists(ap) else 0
+                desc = f"{mr['artist']} - {mr['title']}" if mr and (mr["title"] or mr["artist"]) else ""
+                detail.append({"filename": path, "format": os.path.splitext(path)[1].lstrip(".").upper(),
+                               "kind": "audio",
+                               "resolution": f"{int(dur // 60)}:{int(dur % 60):02d}"
+                                             + (f" · {br // 1000} kbps" if br else ""),
+                               "quality": media_sig.audio_quality(path), "size": size,
+                               "size_h": _fmt_size(size), "score": score_map.get(path), "db_id": row["id"],
+                               "pixels": int(dur * max(br, 1)), "path_len": len(path),
+                               "descriptiveness": len(desc)})
+                continue
             r = info[path]
             w, h = r["width"] or 0, r["height"] or 0
             desc = (r["description"] or "").strip()
             tag_count = len([t for t in (r["tags"] or "").split(",") if t.strip()])
             q, size = _quality(path)
-            detail.append({"filename": path, "format": "JXL",
-                            "resolution": f"{w}x{h}" if w else "N/A",
+            sr = sig_rows.get(path)
+            kind = (sr["kind"] if sr is not None and sr["kind"] in ("anim", "video")
+                    else ("video" if mt.is_video(path) else "image"))
+            detail.append({"filename": path, "format": "JXL" if path.lower().endswith(".jxl")
+                                                       else os.path.splitext(path)[1].lstrip(".").upper(),
+                            "kind": kind,
+                            "resolution": (f"{w}x{h}" if w else "N/A")
+                                          + (f" · {sr['n_src']}f" if sr is not None and kind == "anim" else "")
+                                          + (f" · {sr['duration']:.0f}s" if sr is not None and kind == "video"
+                                             and sr["duration"] else ""),
                             "quality": q, "size": size, "size_h": _fmt_size(size),
                             "score": score_map.get(path),
                             "db_id": row["id"],
@@ -840,17 +1167,21 @@ def _dedup_run(force):
         # ── 0b. Return cached result if still valid ───────────────────────
         _scorers = _HOST.get_service("dedup_scorers") if _HOST else None
         model_tag = _scorers.tag() if _scorers else "naive"
+        # The stored groups carry verdicts of the image, video and audio scorers.
+        full_tag = model_tag + (f"|{_scorers.tag_for('anim')}|{_scorers.tag_for('video')}|"
+                                f"{_scorers.tag_for('audio')}" if _scorers and hasattr(_scorers, "tag_for")
+                                else "|naive|naive|naive")
         if not force and not core.is_stale(disk_count):
             cp = core.checkpoint_get()
             cp_scorer = cp["scorer"] if cp and "scorer" in cp.keys() else None
             # Results from another model (retrained, re-picked, or a run where
             # the model did not answer) are re-scored, not served from cache.
-            if cp and cp["stage"] == "verified" and cp_scorer == model_tag:
+            if cp and cp["stage"] == "verified" and cp_scorer == full_tag:
                 total_groups = _db().execute("SELECT COUNT(*) FROM dedup_groups WHERE kind != 'pending'").fetchone()[0]
                 if total_groups > 0:
                     _PROGRESS["groups"] = total_groups
                     return ({"success": True, "total_groups": total_groups,
-                                    "from_cache": True, "cache_stage": cp["stage"], "scorer": model_tag})
+                                    "from_cache": True, "cache_stage": cp["stage"], "scorer": full_tag})
 
         # ── 1. Index stale/new files ──────────────────────────────────────
         _prog(2, "Checking index", 0, disk_count)
@@ -889,15 +1220,43 @@ def _dedup_run(force):
             "SELECT COUNT(*) FROM files WHERE phash8 IS NOT NULL").fetchone()[0]
         core.checkpoint_set(disk_count, hashed_count, "indexed")
 
+        # ── 1b. Video / animation / audio signatures ──────────────────────
+        _prog(2, "Video/audio signatures")
+        try:
+            sigs = _classify_and_sign(files_on_disk, lambda d_, t_: _prog(2, "Video/audio signatures", d_, t_))
+        except Exception as e:
+            access_logger.warning(f"dedup signatures: {e}", exc_info=True)
+            sigs = {}
+        temporal_paths = {rel for rel, (k, _s, _r) in sigs.items() if k in ("anim", "video")}
+
+        def _extra():
+            """Stages 8-9: temporal + audio groups, appended after the stills."""
+            if not sigs:
+                return 0
+            excl = core.load_exclusion_set()
+            sha_by_path = {r[0]: r[1] for r in _db().execute("SELECT rel_path, sha256 FROM files").fetchall()}
+            g = []
+            for fn, args in ((_temporal_groups, (sigs, sha_by_path, excl, _scorers)),
+                             (_audio_groups, (sigs, excl, _scorers))):
+                try:
+                    g += fn(*args)
+                except Exception as e:
+                    access_logger.warning(f"dedup {fn.__name__}: {e}", exc_info=True)
+            if g:
+                core.append_groups(g)
+            return len(g)
+
         # ── 2. Load hashes ────────────────────────────────────────────────
         _prog(3, "Loading hashes")
         rows = _db().execute(
             "SELECT rel_path,sha256,phash8,phash32,width,height FROM files "
             "WHERE phash8 IS NOT NULL").fetchall()
+        rows = [r for r in rows if r["rel_path"] not in temporal_paths]   # stage 8 owns those
         if not rows:
-            core.checkpoint_set(disk_count, 0, "verified", scorer=model_tag)
             core.save_groups([])
-            return ({"success": True, "total_groups": 0})
+            n_extra = _extra()
+            core.checkpoint_set(disk_count, 0, "verified", scorer=full_tag)
+            return ({"success": True, "total_groups": n_extra})
 
         rows_by_path = {r["rel_path"]: r for r in rows}
 
@@ -1126,11 +1485,14 @@ def _dedup_run(force):
 
         # Final checkpoint — candidates are now all judged
         core.drop_pending()
+
+        # ── 5b. Video & animation, audio ──────────────────────────────────
+        n_extra = _extra()
         core.checkpoint_set(disk_count, hashed_count, "verified",
-                            scorer=(f"fallback:{model_tag}" if fallbacks else model_tag))
+                            scorer=(f"fallback:{full_tag}" if fallbacks else full_tag))
 
         # ── 6. Format and return — count only, client fetches pages ─────────
-        total_groups = len(exact_members) + verified_count
+        total_groups = len(exact_members) + verified_count + n_extra
         warning = None
         if fallbacks:
             errs = _scorers.errors() if _scorers and hasattr(_scorers, "errors") else {}
@@ -1158,6 +1520,8 @@ def dedup_merge():
     tp     = get_safe_path(MEDIA_DIR, target)
     if not tp or not os.path.exists(tp):
         return jsonify({"success":False,"error":"Target not found"})
+    if mt.is_audio(tp):
+        return _dedup_merge_audio(target, tp, others, db_id)
     try:
         bm = read_metadata(tp)
         _target_img = read_jxl(tp)   # capture before any file is deleted
@@ -1172,6 +1536,7 @@ def dedup_merge():
                         core.record_sample(_target_img, oi, 1)
                 # Video clip-pair positive sample (fires only for video/video).
                 core.record_video_sample(target, other, 1)
+                core.record_seq_sample(target, other, 1)
             except Exception:
                 pass
             om = read_metadata(op)
@@ -1210,6 +1575,68 @@ def dedup_merge():
         return jsonify({"success":False,"error":str(e)})
 
 
+def _dedup_merge_audio(target, tp, others, db_id):
+    """Merge for tracks: tags live inside the audio file (music module), so
+    nothing is merged into the target; the others are recorded as positive
+    HEARDU samples and removed everywhere (music row, groups, signatures)."""
+    try:
+        for other in others:
+            op = get_safe_path(MEDIA_DIR, other)
+            if not op or not os.path.exists(op):
+                continue
+            core.record_seq_sample(target, other, 1)
+            base = os.path.splitext(op)[0]
+            for ext in mt.related_exts(op):
+                if os.path.exists(base + ext):
+                    tiering.safe_remove(base + ext)
+            _purge_file_everywhere(other)
+            core.remove_file(other)
+        if db_id:
+            _db().execute("DELETE FROM dedup_groups WHERE id=?", (db_id,))
+            _db().commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+def dedup_compare_audio():
+    """Two tracks side by side: phash score + offset, a per-block bit error
+    profile (an edit shows as a run of bad blocks), the naive score, the
+    learned score when HEARDU answers, and both tracks' metadata."""
+    d = request.json or {}
+    fa, fb = d.get("a", ""), d.get("b", "")
+    pa, pb = get_safe_path(MEDIA_DIR, fa), get_safe_path(MEDIA_DIR, fb)
+    if not pa or not pb or not os.path.exists(pa) or not os.path.exists(pb):
+        return jsonify({"success": False, "error": "not found"}), 404
+    sa, sb = media_sig.compute_audio_sig(pa), media_sig.compute_audio_sig(pb)
+    if sa is None or sb is None:
+        return jsonify({"success": False, "error": "could not decode one or both tracks (ffmpeg missing?)"}), 500
+    score, off = media_sig.audio_phash_score(sa, sb)
+    step_s = media_sig.AUDIO_HOP / float(media_sig.AUDIO_SR)
+    prof = [{"t": round(s0 * step_s, 2), "len": round(n * step_s, 2), "ber": round(ber, 3)}
+            for s0, n, ber in (media_sig.audio_block_profile(sa["fp"], sb["fp"], off) if off is not None else [])]
+    naive = None
+    if off is not None:
+        ra = media_sig.decode_audio(pa, media_sig.NAIVE_AUDIO_SR)
+        rb = media_sig.decode_audio(pb, media_sig.NAIVE_AUDIO_SR)
+        if ra is not None and rb is not None:
+            naive = round(media_sig.naive_audio_score(ra, rb, off * step_s), 4)
+    learned, who = None, None
+    sc = _HOST.get_service("dedup_scorers") if _HOST else None
+    if sc:
+        p, who = sc.score_pair({"kind": "audio", "ref_path": pa, "other_path": pb,
+                                "ref_sig": sa, "other_sig": sb}, naive_score=None)
+        learned = None if p is None else round(float(p), 4)
+    verdict = ("same recording" if score >= 0.9 else
+               "partly the same (a cut, an excerpt or an edit)" if score >= media_sig.SEQ_KEEP else
+               "different audio")
+    return jsonify({"success": True, "phash": round(score, 4),
+                    "offset_s": None if off is None else round(off * step_s, 3),
+                    "naive": naive, "learned": learned, "scorer": who, "verdict": verdict, "profile": prof,
+                    "meta": {"a": {"name": fa, "duration": round(sa["duration"], 2), "quality": media_sig.audio_quality(fa)},
+                             "b": {"name": fb, "duration": round(sb["duration"], 2), "quality": media_sig.audio_quality(fb)}}})
+
+
 def register(host):
     _bind(host)
     host.add_route('/api/dedup_status', dedup_status, methods=['GET'], endpoint='dedup_ep_dedup_status', feature="dedup")
@@ -1219,6 +1646,7 @@ def register(host):
     host.add_route('/api/dedup_exclude', dedup_exclude, methods=['POST'], endpoint='dedup_ep_dedup_exclude', feature="dedup", level="write")
     host.add_route('/api/dedup_compare_video', dedup_compare_video, methods=['POST'], endpoint='dedup_ep_dedup_compare_video', feature="dedup", level="write")
     host.add_route('/api/dedup_compare_meta', dedup_compare_meta, methods=['POST'], endpoint='dedup_ep_dedup_compare_meta', feature="dedup", level="read")
+    host.add_route('/api/dedup_compare_audio', dedup_compare_audio, methods=['POST'], endpoint='dedup_ep_dedup_compare_audio', feature="dedup", level="read")
     host.add_route('/api/dedup_change_map', dedup_change_map, methods=['POST'], endpoint='dedup_ep_dedup_change_map', feature="dedup", level="read")
     host.add_route('/api/dedup_groups', dedup_groups_page, methods=['GET'], endpoint='dedup_ep_dedup_groups_page', feature="dedup")
     host.add_route('/api/dedup_progress', dedup_progress, methods=['GET'], endpoint='dedup_ep_dedup_progress', feature="dedup")

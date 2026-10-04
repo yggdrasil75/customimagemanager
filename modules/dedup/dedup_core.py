@@ -116,6 +116,10 @@ def remove_file(rel_path):
     """Prune a deleted/merged file from every stored group. Core's delete path
     calls this via the dedup service."""
     db = HOST.db()
+    try:
+        db.execute("DELETE FROM dedup_media_sig WHERE rel_path=?", (rel_path,))
+    except Exception:
+        pass                                  # table predates this DB: nothing to prune
     rows = db.execute("SELECT id, members, scores FROM dedup_groups").fetchall()
     for row in rows:
         members = json.loads(row["members"])
@@ -243,3 +247,50 @@ def retrain(min_samples=8):
     except Exception as e:
         HOST.logger.error(f"dedup retrain: {e}")
     return ok_h
+
+# ── temporal / audio signatures (dedup_media_sig) ────────────────────────────
+def sigs_get(paths=None):
+    """{rel_path: row} of stored signatures (all, or just `paths`)."""
+    db = HOST.db()
+    if paths is None:
+        return {r["rel_path"]: r for r in db.execute("SELECT * FROM dedup_media_sig").fetchall()}
+    out, paths = {}, list(paths)
+    for i in range(0, len(paths), 500):
+        ch = paths[i:i + 500]
+        for r in db.execute(f"SELECT * FROM dedup_media_sig WHERE rel_path IN ({','.join('?' * len(ch))})", ch):
+            out[r["rel_path"]] = r
+    return out
+
+
+def sigs_put(rows):
+    """rows: iterable of (rel_path, mtime, kind, n_src, duration, sha256, sig_blob)."""
+    db = HOST.db()
+    db.executemany("INSERT OR REPLACE INTO dedup_media_sig(rel_path,mtime,kind,n_src,duration,sha256,sig) "
+                   "VALUES(?,?,?,?,?,?,?)", list(rows))
+    db.commit()
+
+
+def sigs_drop(rel_path):
+    db = HOST.db()
+    db.execute("DELETE FROM dedup_media_sig WHERE rel_path=?", (rel_path,))
+    db.commit()
+
+
+def record_seq_sample(rel_a, rel_b, label):
+    """Merge / not-a-duplicate on two videos or two tracks -> the HEURDUV /
+    HEARDU module's sample table (whichever handles the pair's kind)."""
+    host = HOST
+    try:
+        from . import media_sig
+        pa = host.safe_path(host.media_dir, rel_a)
+        pb = host.safe_path(host.media_dir, rel_b)
+        if not pa or not pb:
+            return
+        ka, kb = media_sig.media_kind(pa), media_sig.media_kind(pb)
+        if ka != kb or ka not in ("video", "audio"):
+            return
+        svc = host.get_service(f"dedup_{ka}_model")
+        if svc and svc.get("record"):
+            svc["record"](pa, pb, int(label))
+    except Exception as e:
+        host.logger.warning(f"dedup record_seq_sample: {e}")

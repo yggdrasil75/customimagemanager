@@ -207,3 +207,50 @@
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();
+
+// ── timeline models (HEURDUV / HEARDU / HEURDU 1.0) ──────────────────────────
+let _ddtsStatus=null, _ddtsTimer=null;
+async function ddtsRefresh(){
+  const s=await fetch('/api/dedup_train/seq/status').then(r=>r.json()).catch(()=>null);
+  if(!s||!s.success) return;
+  _ddtsStatus=s;
+  const kind=document.getElementById('ddts_kind').value, k=s.kinds[kind]||{};
+  const fol=document.getElementById('ddts_folders');
+  if(document.activeElement!==fol) fol.value=k.folders||'';
+  document.getElementById('ddts_info').innerText=
+    `${k.family}: ${k.library} in library, ${k.feedback} feedback pair(s), installed: ${(k.installed||[]).join(', ')||'none'}`+
+    (k.scorer?`; live: ${k.scorer.size||'-'}${k.scorer.trained?' (loaded)':''}${k.scorer.error?' — '+k.scorer.error:''}`:'');
+  const sz=document.getElementById('ddts_sizes');
+  if(sz.dataset.kind!==kind){
+    sz.dataset.kind=kind;
+    sz.innerHTML=Object.keys(k.sizes||{}).map(z=>`<label class="trck"><input type="checkbox" class="ddts-size accent-purple-500" value="${z}" ${z==='medium'||z==='nano'?'checked':''}> ${z}</label>`).join('');
+    document.getElementById('ddts_steps').value=kind==='anim'?8:(kind==='audio'?40:32);
+  }
+  document.getElementById('ddts_build').disabled=!!s.running;
+  document.getElementById('ddts_stop').disabled=!s.running;
+  document.getElementById('ddts_log').innerText=(s.log||[]).slice(-40).join('\n');
+  if(s.running){
+    document.getElementById('ddts_report').innerText=`${s.kind}: ${s.phase}, epoch ${s.epoch}/${s.epochs}, ${s.items_done}/${s.items_total} items, ${s.pairs} pairs, loss ${JSON.stringify(s.loss)}`;
+    clearTimeout(_ddtsTimer); _ddtsTimer=setTimeout(ddtsRefresh,2000);
+  } else if(s.last){
+    const L=s.last;
+    document.getElementById('ddts_report').innerText=L.error?`${L.kind}: ${L.error}`:
+      `${L.kind}: ${L.pairs} pairs from ${L.items} items in ${L.seconds}s; active ${L.active}${L.installed?' (live)':''}\n`+
+      Object.entries(L.sizes||{}).map(([z,r])=>`${z}: params ${r.params}, loss ${r.final_loss}, held-out ${JSON.stringify(r.held_out)}${r.feedback!=null?', feedback '+r.feedback:''}${r.from?', from '+r.from:''}`).join('\n')+
+      `\nwrote: ${(L.written||[]).join(', ')}`;
+  }
+}
+async function ddtsBuild(){
+  const kind=document.getElementById('ddts_kind').value;
+  const sizes=[...document.querySelectorAll('.ddts-size:checked')].map(e=>e.value);
+  const r=await fetch('/api/dedup_train/seq/build',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({kind,sizes,folders:document.getElementById('ddts_folders').value,
+      use_library:document.getElementById('ddts_lib').checked,use_feedback:document.getElementById('ddts_fb').checked,
+      epochs:parseInt(document.getElementById('ddts_epochs').value)||3,steps:parseInt(document.getElementById('ddts_steps').value)||32,
+      max_items:parseInt(document.getElementById('ddts_max').value)||20000,
+      install:document.getElementById('ddts_install').checked,ship:document.getElementById('ddts_ship').checked})}).then(r=>r.json()).catch(()=>null);
+  if(!r||!r.success) showToast('Could not start: '+((r&&r.error)||'network error'));
+  ddtsRefresh();
+}
+async function ddtsStop(){ await fetch('/api/dedup_train/seq/stop',{method:'POST'}).catch(()=>null); ddtsRefresh(); }
+document.addEventListener('DOMContentLoaded',()=>{ if(document.getElementById('ddts_kind')) setTimeout(ddtsRefresh,800); });

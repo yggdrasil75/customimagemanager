@@ -245,11 +245,17 @@ function renderDedupGroup(group){
     }
     inner+=`<div class="flex-shrink-0 w-40 bg-gray-900 p-2 rounded border border-gray-700"
         data-file="${f.replace(/"/g,'&quot;')}" data-gid="${group.db_id}"
-        data-score="${item.score ?? ''}">
+        data-kind="${item.kind||'image'}" data-score="${item.score ?? ''}">
       <label class="flex items-center gap-1 text-[10px] text-gray-400 mb-1 cursor-pointer">
         <input type="checkbox" class="dg-pick" data-file="${f.replace(/"/g,'&quot;')}"> compare</label>
-      <img src="/api/thumb/${encodeURIComponent(f)}"
-        class="w-full h-28 object-cover rounded mb-1 bg-black">
+      ${item.kind==='audio'
+        ? `<div class="w-full h-28 rounded mb-1 bg-black flex flex-col items-center justify-center gap-2">
+             <span class="text-3xl">🎵</span>
+             <audio controls preload="none" class="w-full h-7" src="/api/file/${encodeURIComponent(f)}"></audio></div>`
+        : `<img src="/api/thumb/${encodeURIComponent(f)}"
+        class="w-full h-28 object-cover rounded mb-1 bg-black">`}
+      ${item.kind==='anim'||item.kind==='video'
+        ? `<span class="text-[9px] bg-purple-900 text-purple-300 px-1 rounded">${item.kind==='anim'?'ANIM':'VIDEO'}</span>` : ''}
       <p class="text-[10px] truncate text-blue-300 font-mono mb-1" title="${f}">${f.split('/').pop()}</p>
       <p class="text-[10px] text-gray-400 mb-1">${item.resolution}
         <span class="${item.quality==='Lossless'?'text-green-400':'text-yellow-400'}" title="Source the stored JXL was made from: JPEG = lossy origin (bit-exact transcode); Lossless = PNG/RAW/HEIF source">${item.quality}</span>
@@ -437,6 +443,7 @@ async function highlightDiff(gid){
     else{ showToast('Pick exactly 2 items to compare.'); return; }
   }
   const [fa,fb]=picks.map(p=>p.dataset.file);
+  if(picks.some(p=>p.closest('[data-kind]')?.dataset.kind==='audio')){ return highlightDiffAudio(gid,fa,fb); }
   const VIDEO_RE=/\.(mp4|m4v|mkv|webm|mov|avi|wmv|flv|mpg|mpeg|ts|m2ts|ogv|3gp)$/i;
   loadMetaDiff(fa,fb);
   if(VIDEO_RE.test(fa)||VIDEO_RE.test(fb)){ return highlightDiffVideo(gid,fa,fb); }
@@ -621,3 +628,41 @@ async function bulkResolveAll() {
 fetchDedupStatus();   // initial badge, once this script is in
 // A scan started before a page reload keeps running server-side: re-attach.
 fetch('/api/dedup_progress').then(r=>r.json()).then(p=>{ if(p.running) startDedupPoll(); }).catch(()=>{});
+
+// Audio pair: fingerprint offset + per-block bit-error profile (a cut or an
+// edit shows as a run of red blocks), naive and learned (HEARDU) scores.
+async function highlightDiffAudio(gid,fa,fb){
+  document.getElementById('diff_label_a').innerText=fa.split('/').pop();
+  document.getElementById('diff_label_b').innerText=fb.split('/').pop();
+  document.getElementById('diff_video_bar').classList.remove('hidden'); _vdiff=null;
+  document.getElementById('diff_video_verdict').innerText='Comparing tracks…';
+  document.getElementById('diff_video_meta').innerText='';
+  document.getElementById('dedup_diff_modal').classList.remove('hidden');
+  let d;
+  try{
+    d=await fetch('/api/dedup_compare_audio',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({a:fa,b:fb})}).then(r=>r.json());
+  }catch(e){
+    logClientError('dedup_compare_audio network error','dedup');
+    document.getElementById('diff_video_verdict').innerText='Network error comparing tracks.'; return;
+  }
+  if(!d||!d.success){ document.getElementById('diff_video_verdict').innerText='Could not compare: '+((d&&d.error)||'unknown error'); return; }
+  const pct=x=>x==null?'–':(x*100).toFixed(1)+'%';
+  document.getElementById('diff_video_verdict').innerText=
+    `${d.verdict}   ·   phash ${pct(d.phash)}, naive ${pct(d.naive)}`+(d.learned!=null?`, ${d.scorer} ${pct(d.learned)}`:'')+
+    (d.offset_s!=null?`   ·   B is offset ${d.offset_s.toFixed(2)}s`:'');
+  const m=d.meta;
+  document.getElementById('diff_video_meta').innerText=
+    `A  ${m.a.duration.toFixed(1)}s  ${m.a.quality}\nB  ${m.b.duration.toFixed(1)}s  ${m.b.quality}`;
+  const W=800,H=120,dur=Math.max(m.a.duration,0.1);
+  const ca=document.getElementById('diff_canvas_a'),cb=document.getElementById('diff_canvas_b'),cd=document.getElementById('diff_canvas_d');
+  for(const c of [ca,cb]){ c.width=1; c.height=1; c.getContext('2d').clearRect(0,0,1,1); }
+  cd.width=W; cd.height=H;
+  const x=cd.getContext('2d'); x.fillStyle='#111'; x.fillRect(0,0,W,H);
+  (d.profile||[]).forEach(p=>{
+    const ok=p.ber<0.35, h=Math.max(4,(1-Math.min(p.ber/0.5,1))*(H-20));
+    x.fillStyle=ok?'#22c55e':'#ef4444';
+    x.fillRect(p.t/dur*W,H-h,Math.max(1,p.len/dur*W-1),h);
+  });
+  x.fillStyle='#aaa'; x.font='11px monospace'; x.fillText('match per ~3 s block along A (green = same, red = differs, gap = not in B)',6,12);
+}

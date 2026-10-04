@@ -130,6 +130,9 @@ class Host:
         # Search type handlers: token_prefix -> fn(token, value) -> (sql_clause, params).
         # Modules register handlers for custom search tokens (e.g. "exif:Make").
         self.search_types = {}
+        # Sort keys: name -> SQL ORDER BY expression (or a callable returning one,
+        # or None to skip). `sort:<name>` / `sort:-<name>` in the search box.
+        self.sort_keys = {}
         # Named services (registry points): a module publishes a service other
         # modules consume if present. {name: {"obj","module_id"}}. Consumers use
         # get_service(name) and must shim a None result (missing/disabled
@@ -330,6 +333,23 @@ class Host:
         """
         self.search_types[prefix] = handler
         self.search_help[prefix] = {"help": help or "", "module_id": self._current_module}
+
+    def register_sort_key(self, name, expr, *, help=None):
+        """Register a gallery sort key for the `sort:` search token.
+
+        name -- key after `sort:` (lowercase), e.g. "width".
+        expr -- SQL expression over `files` used in ORDER BY, or a callable
+                returning one (evaluated per query; None skips the key).
+                Must take no parameters.
+        `sort:<name>` ascending, `sort:-<name>` or `sort:<name>:desc`
+        descending; several sort tokens chain in order; rel_path breaks ties.
+        """
+        self.sort_keys[name.lower()] = expr
+        names = ", ".join(sorted(self.sort_keys))
+        self.search_help["sort:"] = {
+            "help": f"sort:<key> or sort:-<key> (descending); keys: {names}"
+                    + (f" — {help}" if help else ""),
+            "module_id": self._current_module}
 
     def register_left_pane(self, template):
         """Contribute a left-column pane partial (e.g. a shelf), server-rendered

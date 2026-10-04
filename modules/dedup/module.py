@@ -25,6 +25,13 @@ A pair-scorer registers:
     score(ctx)    -> float 0..1 | None
       ctx: {ref_bgr, other_bgr, is_video, ref_frames, other_frames}
       return None to defer to the next scorer.
+    kinds         optional tuple of media kinds it judges, from "image",
+                  "anim" (<= 30 frames, HEURDU), "video" (HEURDUV), "audio"
+                  (HEARDU). Default ("image", "anim", "video") = what a
+                  scorer saw before kinds existed. Temporal / audio ctx add
+                  {kind, ref_path, other_path, ref_sig, other_sig, ref_anim,
+                  other_anim, ref_seq, other_seq, ref_pcm, other_pcm}, all
+                  decoded lazily on first get().
 
 The registry is published as the "dedup_scorers" service so the
 heuristic (modules/dedup_heuristic) and CNN (modules/dedup_cnn) modules
@@ -45,6 +52,14 @@ def _naive(naive_score, ctx):
         except Exception:
             return None
     return naive_score
+
+
+_DEFAULT_KINDS = ("image", "anim", "video")
+
+
+def ctx_kind(ctx):
+    k = ctx.get("kind")
+    return k if k else ("video" if ctx.get("is_video") else "image")
 
 
 class ScorerRegistry:
@@ -98,10 +113,14 @@ class ScorerRegistry:
                 continue
         return False
 
-    def tag(self):
-        """Identity of the scorer that would answer now ("cnn:medium"), the
-        key the verdict cache is stored under."""
+    def _kinds(self, s):
+        return tuple(self._attr(s, "kinds") or _DEFAULT_KINDS)
+
+    def tag_for(self, kind):
+        """tag() restricted to scorers that judge `kind` ("naive" when none)."""
         for s in self._scorers:
+            if kind not in self._kinds(s):
+                continue
             av = self._attr(s, "available")
             try:
                 if callable(av) and not av():
@@ -115,6 +134,12 @@ class ScorerRegistry:
                 return str(self._attr(s, "id"))
         return "naive"
 
+    def tag(self):
+        """Identity of the scorer that would answer an IMAGE pair now
+        ("cnn:medium"), the key the image verdict cache is stored under.
+        Scorers for other kinds only (HEURDUV, HEARDU) never count here."""
+        return self.tag_for("image")
+
     def score_group(self, imgs, naive_score=1.0):
         """NxN matrix of pair scores for a group of decoded BGR images. The
         first available scorer offering score_group(imgs) -> matrix answers;
@@ -126,7 +151,7 @@ class ScorerRegistry:
         for s in self._scorers:
             fg = self._attr(s, "score_group")
             av = self._attr(s, "available")
-            if not callable(fg):
+            if not callable(fg) or "image" not in self._kinds(s):
                 continue
             try:
                 if callable(av) and not av():
@@ -154,9 +179,10 @@ class ScorerRegistry:
         callable(ctx) -> prob used for pairs no scorer answered."""
         out, who = [None] * len(ctxs), [None] * len(ctxs)
         for s in self._scorers:
-            todo = [i for i, p in enumerate(out) if p is None]
+            kinds = self._kinds(s)
+            todo = [i for i, p in enumerate(out) if p is None and ctx_kind(ctxs[i]) in kinds]
             if not todo:
-                break
+                continue
             av = self._attr(s, "available")
             try:
                 if callable(av) and not av():
@@ -190,6 +216,8 @@ class ScorerRegistry:
         """Run scorers in priority order; first non-None prob wins. Falls back
         to naive_score when no scorer answers. Returns (prob, scorer_id)."""
         for s in self._scorers:
+            if ctx_kind(ctx) not in self._kinds(s):
+                continue
             av = self._attr(s, "available")
             try:
                 if callable(av) and not av():
@@ -294,6 +322,21 @@ CREATE TABLE IF NOT EXISTS dup_cnn_video_samples (
     blob    BLOB NOT NULL,
     label   INTEGER NOT NULL,
     created REAL NOT NULL
+);
+
+-- Temporal / audio dedup signatures (media_sig), one row per library file
+-- the scan has classified. kind: still | anim | video | audio. sig is the
+-- packed per-step hashes (NULL for stills, or when decoding failed: such a
+-- video falls back to the poster-frame image path). Keyed on mtime so a
+-- rescan only decodes changed files.
+CREATE TABLE IF NOT EXISTS dedup_media_sig (
+    rel_path  TEXT PRIMARY KEY,
+    mtime     REAL,
+    kind      TEXT NOT NULL,
+    n_src     INTEGER,
+    duration  REAL,
+    sha256    TEXT,
+    sig       BLOB
 );
 """
 
