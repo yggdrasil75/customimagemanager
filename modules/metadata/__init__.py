@@ -17,7 +17,7 @@ import threading
 from flask import request, jsonify
 
 from . import (exif_fields, iptc_fields, xmp_fields,
-               exif_import, iptc_import, xmp_import, exif_export)
+               exif_import, iptc_import, xmp_import, exif_export, xmp_export)
 
 
 def register(host):

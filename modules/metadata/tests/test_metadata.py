@@ -80,3 +80,20 @@ def test_write_rejects_bad_input(client, upload):
     assert client.post("/api/metadata/write", json={"kind": "iptc", "filename": fn,
                                                     "patch": {}}).status_code == 400
 
+
+
+def test_xmp_sidecar_overwrites_exif_namespace(client, host, upload):
+    """Exiv2's sidecar backend copies its Exif conversion back over Xmp.exif.*
+    on write; a second write to the same key must still land."""
+    import os
+    import pyexiv2
+    from cimtest import media_path
+    fn = upload(seed=921, name="regps.png")
+    write = host.get_service("xmp")["write"]
+    assert write(media_path(fn), {"exif:GPSLatitude": "10,0.0N", "exif:ExposureTime": "1/2"})["success"]
+    r = write(media_path(fn), {"exif:GPSLatitude": "20,0.0N", "exif:ExposureTime": "1/8", "dc:source": "x"})
+    assert r["success"] and r["target"].endswith(".xmp")
+    with pyexiv2.Image(os.path.splitext(media_path(fn))[0] + ".xmp") as img:
+        x = img.read_xmp()
+    assert x["Xmp.exif.GPSLatitude"].startswith("20,") and x["Xmp.exif.ExposureTime"] == "1/8"
+    assert x["Xmp.dc.source"] == "x"

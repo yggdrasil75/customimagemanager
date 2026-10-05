@@ -118,6 +118,7 @@ def _write_sidecar(target, to_set, to_del):
         if exif_new:
             img.modify_exif(exif_new)
         if xmp_edit:
+            img.clear_exif()
             img.modify_xmp(xmp_edit)
 
 

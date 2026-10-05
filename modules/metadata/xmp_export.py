@@ -119,6 +119,8 @@ def write_xmp(filepath, patch):
 
     try:
         with pyexiv2.Image(target) as img:
+            if target == sidecar:
+                img.clear_exif()
             img.modify_xmp(to_set)
         result["written"] = list(to_set.keys())
         result["success"] = True
