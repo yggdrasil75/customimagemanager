@@ -41,14 +41,22 @@ import atexit
 from datetime import datetime
 from collections import OrderedDict
 import thread_manager
-from werkzeug.utils import secure_filename
 from flask import Flask, render_template, request, jsonify, send_file, Response, g
 YOLO, _HAVE_YOLO = optional_import("ultralytics", attr="YOLO")
 imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
+Image, _HAVE_PIL = optional_import("PIL.Image")
+ImageOps, _ = optional_import("PIL.ImageOps")
 import object_grouping as og
 import model_registry
 import common
 import media_types as mt
+# Settings → Media: storage format per kind + filename cleanup (see media_types).
+modules.config.declare("media_storage", default=mt.media_prefs(), owner="core",
+                       validate=mt.clean_media_prefs,
+                       on_change=lambda new, old: mt.set_media_prefs(new))
+modules.config.declare("filename_cleanup", default=dict(mt.DEFAULT_FILENAME_PREFS),
+                       owner="core", validate=mt.clean_filename_prefs,
+                       on_change=lambda new, old: mt.set_filename_prefs(new))
 import video_tracks as vt
 import tiering
 
@@ -1207,12 +1215,20 @@ def _decode_jxl_uncached(path: str) -> np.ndarray | None:
         # JXL magic: bare codestream FF 0A; ISOBMFF container 00 00 00 0C 'JXL '
         is_bare      = data[:2] == b'\xff\x0a'
         is_container = data[4:8] == b'JXL '
-        if not (is_bare or is_container):
-            access_logger.warning(
-                f"read_jxl: not a JXL file (magic={data[:8].hex()}): {path}")
-            return None
-
-        img = imagecodecs.jpegxl_decode(data)
+        if is_bare or is_container:
+            img = imagecodecs.jpegxl_decode(data)
+        else:
+            # Natively stored image (Settings → Media): png/webp/jpg/gif/avif/heic.
+            try:
+                with Image.open(io.BytesIO(data)) as im:
+                    im = ImageOps.exif_transpose(im)
+                    if im.mode not in ("L", "RGB", "RGBA", "I;16"):
+                        im = im.convert("RGBA" if ("A" in im.mode or "transparency" in im.info) else "RGB")
+                    img = np.asarray(im)
+            except Exception:
+                access_logger.warning(
+                    f"read_jxl: not a decodable image (magic={data[:8].hex()}): {path}")
+                return None
 
         while img.ndim > 3:
             img = img[0]
@@ -1517,7 +1533,8 @@ def _enumerate_library():
     """
     seen = set()
     for root, dirs, filenames in os.walk(MEDIA_DIR):
-        dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'runs']
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'runs'
+                   and not (root == MEDIA_DIR and d == 'branding')]
         for f in filenames:
             if f.startswith('.'):
                 continue
@@ -1685,9 +1702,7 @@ def _extract_anim_delays(src_path):
     Returns {"delays_ms":[...],"duration_ms":total,"n_frames":n} or None for a
     non-animated / unreadable source. Called at upload BEFORE cjxl runs, since
     cjxl collapses the timing we want to keep. Best-effort: never raises."""
-    try:
-        from PIL import Image
-    except Exception:
+    if not _HAVE_PIL:
         return None
     try:
         im = Image.open(src_path)
@@ -3021,7 +3036,7 @@ def thumb_bytes(rel_path: str, abs_path: str, mtime: float | None = None):
     if data is None:
         raw = _read_bytes_loose(abs_path)
         if raw is None: return None
-        return raw, 'image/jxl'
+        return raw, mt.mime_for(abs_path) or 'application/octet-stream'
     _thumb_put(rel_path, data, mtime)
     _thumb_lru_put(rel_path, mtime, data)
     return data, 'image/jpeg'
@@ -3503,9 +3518,12 @@ def api_state():
     # state.get(), not state[k]: this endpoint is the whole UI's bootstrap, so a
     # single missing/renamed setting should degrade one control, not 500 the
     # entire front-end.
-    return jsonify({k: state.get(k) for k in
+    out = {k: state.get(k) for k in
         ("classes","available_models","status_text","remote_ip",
-         "model_groups","iqa_model","brand_name","brand_logo","search_quick_filters")})
+         "model_groups","iqa_model","brand_name","brand_logo","search_quick_filters",
+         "media_storage","filename_cleanup")}
+    out["media_targets"] = mt.MEDIA_TARGETS
+    return jsonify(out)
 
 @app.route("/api/workers")
 def api_workers():
@@ -4129,7 +4147,7 @@ def api_upload():
         return jsonify({"success": False, "error_code": "bad_folder",
                         "error": "Folder path is outside media directory."}), 400
 
-    orig_name = secure_filename(file.filename) or "upload.bin"
+    orig_name = mt.clean_filename(file.filename) or "upload.bin"
     metadata  = request.form.get("metadata", "{}") or "{}"
     pred      = _predicted_rel(tdir, orig_name)
 
@@ -4201,7 +4219,7 @@ def _run_upload():
                         "error": f"Folder path is outside media directory."}), 400
     os.makedirs(tdir, exist_ok=True)
 
-    fname    = secure_filename(file.filename)
+    fname    = mt.clean_filename(file.filename)
     in_ext   = os.path.splitext(fname)[1].lower()
     unknown_type = in_ext not in mt.UPLOAD_EXTS
     # Set to the original (wrong) extension if content-sniffing had to correct
@@ -4230,8 +4248,8 @@ def _run_upload():
             # Nothing to fall back on: reject cleanly.
             return jsonify({"success": False, "error_code": "conversion_failed",
                             "error": f"Unsupported file type '{in_ext}'.",
-                            "detail": "Accepted: images, gifs (→ animated jxl), "
-                                      "camera raws (→ developed to jxl), "
+                            "detail": "Accepted: images, gifs, "
+                                      "camera raws (→ developed), "
                                       "video, and audio files. Content did "
                                       "not match any known type either."}), 422
 
@@ -4261,7 +4279,8 @@ def _run_upload():
                 os.rename(orig, new_orig)
                 orig = new_orig
 
-        # Images/gifs land on disk as <base>.jxl; video/audio keep their ext.
+        # Stored name/format follows Settings → Media (default: images → .jxl,
+        # video/audio/books kept as uploaded).
         store_name = mt.stored_name(fname)
         store_ext  = os.path.splitext(store_name)[1].lower()
         store_path = os.path.join(tdir, store_name)
@@ -4309,8 +4328,8 @@ def _run_upload():
 
         if transcode_to_video:
             base = os.path.splitext(store_name)[0]
-            store_name = base + mt.ANIM_VIDEO_EXT
-            store_ext  = mt.ANIM_VIDEO_EXT
+            store_ext  = mt.anim_video_ext()
+            store_name = base + store_ext
             store_path = os.path.join(tdir, store_name)
             rel_path   = _rel(store_path)
             out        = os.path.join(tmp, "out" + store_ext)
@@ -4340,12 +4359,21 @@ def _run_upload():
                 # Timing now lives in the video itself; no XMP delays needed.
                 anim_delays = None
             elif mt.is_video(fname) or mt.is_audio(fname) or mt.is_uploadable_book(fname):
-                # Video, audio and books can't be transcoded to JXL — store the
-                # original bytes. Audio is organised + tagged in place by the
-                # music indexer (music_index.py) and books by the book indexer
-                # (book_routes); neither ever enters the image DB.
-                shutil.copy(orig, out)
-            elif in_ext == '.jxl':
+                # Video, audio and books: stored as uploaded, or converted to the
+                # Settings → Media target. Audio is organised + tagged in place by
+                # the music indexer and books by the book indexer; neither ever
+                # enters the image DB.
+                if in_ext == store_ext:
+                    shutil.copy(orig, out)
+                else:
+                    err = (mt.convert_book(orig, out) if mt.is_uploadable_book(fname)
+                           else mt.convert_av(orig, out))
+                    if err:
+                        return jsonify({
+                            "success": False, "error_code": "conversion_failed",
+                            "error": f"Conversion to {store_ext} failed.",
+                            "detail": err}), 422
+            elif in_ext == store_ext:
                 shutil.copy(orig, out)
             else:
                 # For camera raws, develop with rawpy (libraw) into an
@@ -4373,22 +4401,38 @@ def _run_upload():
                         }), 422
                     cjxl_src = dev_png
 
-                # cjxl handles still images and animated GIF/APNG, producing a
-                # .jxl. --lossless_jpeg only makes sense for a real JPEG
-                # bitstream (never for a developed raw / png).
-                cjxl_cmd = ['cjxl', cjxl_src, out, '-d', '0',
-                            f'--num_threads={state["cjxl_threads"]}']
-                if not is_raw_src and not is_heif_src and in_ext in ('.jpg', '.jpeg'):
-                    cjxl_cmd.append('--lossless_jpeg=1')   # bit-exact JPEG transcode
+                if store_ext != '.jxl':
+                    # Non-JXL target (webp/avif/png/jpg) via Pillow. A developed
+                    # 16-bit PNG headed for .png is already the answer.
+                    if cjxl_src != orig and store_ext == '.png':
+                        shutil.copy(cjxl_src, out)
+                        err = None
+                    else:
+                        err = mt.convert_image(
+                            cjxl_src, out,
+                            delays_ms=(anim_delays or {}).get("delays_ms"))
+                    if err:
+                        return jsonify({
+                            "success": False, "error_code": "conversion_failed",
+                            "error": f"Conversion to {store_ext} failed.",
+                            "detail": err}), 422
                 else:
-                    cjxl_cmd.append('--container=0')       # bare codestream, not BMFF
-                result = subprocess.run(cjxl_cmd, capture_output=True, text=True)
-                if result.returncode != 0:
-                    return jsonify({
-                        "success": False, "error_code": "conversion_failed",
-                        "error": "cjxl conversion failed.",
-                        "detail": result.stderr.strip()
-                    }), 422
+                    # cjxl handles still images and animated GIF/APNG, producing a
+                    # .jxl. --lossless_jpeg only makes sense for a real JPEG
+                    # bitstream (never for a developed raw / png).
+                    cjxl_cmd = ['cjxl', cjxl_src, out, '-d', '0',
+                                f'--num_threads={state["cjxl_threads"]}']
+                    if not is_raw_src and not is_heif_src and in_ext in ('.jpg', '.jpeg'):
+                        cjxl_cmd.append('--lossless_jpeg=1')   # bit-exact JPEG transcode
+                    else:
+                        cjxl_cmd.append('--container=0')       # bare codestream, not BMFF
+                    result = subprocess.run(cjxl_cmd, capture_output=True, text=True)
+                    if result.returncode != 0:
+                        return jsonify({
+                            "success": False, "error_code": "conversion_failed",
+                            "error": "cjxl conversion failed.",
+                            "detail": result.stderr.strip()
+                        }), 422
 
             sha = _sha256(out)
             # Modules that keep their own library (books) get first say on
@@ -5071,8 +5115,11 @@ def api_file(filename):
         access_logger.error("api_file: rejected path %r", filename)
         return "rejected path", 400
     if os.path.exists(fp):
-        if (mt.is_jxl(fp) and not mt.is_video(fp)
-                and not _client_supports_jxl()
+        # Browser-unsafe stills (jxl for non-JXL browsers, natively stored
+        # heic) are served as a JPEG rendition.
+        _ext = os.path.splitext(fp)[1].lower()
+        if (mt.kind(fp) == 'image' and _ext not in mt.SAFE_EXTS['image']
+                and not (_ext == '.jxl' and _client_supports_jxl())
                 and 'Range' not in request.headers):
             mtime = _getmtime_loose(fp)
             data = _fulljpg_lru_get(filename, mtime)
@@ -5157,7 +5204,7 @@ def api_jxl_frames(filename):
     mt.jxl_keyframe_indices (step-4, capped at 30). Times are derived from the
     per-frame delays in XMP when available, else evenly spaced by frame index."""
     fp = get_safe_path(MEDIA_DIR, filename)
-    if not fp or not os.path.exists(fp) or not mt.is_jxl(fp):
+    if not fp or not os.path.exists(fp) or mt.kind(fp) != 'image':
         return jsonify({"success": False, "error": "not found"}), 404
     info = mt.jxl_anim_info(fp)
     if not info.get("animated"):
@@ -5202,7 +5249,7 @@ def api_jxl_track(filename):
     detect+greedy-IoU approach of api_video_detect. Nothing is persisted here —
     the client saves via the normal region-save path."""
     fp = get_safe_path(MEDIA_DIR, filename)
-    if not fp or not os.path.exists(fp) or not mt.is_jxl(fp):
+    if not fp or not os.path.exists(fp) or mt.kind(fp) != 'image':
         return jsonify({"success": False, "error": "not found"}), 404
     info = mt.jxl_anim_info(fp)
     if not info.get("animated"):
@@ -6287,6 +6334,13 @@ def _inject_module_ui():
 # Seed defaults for any config keys modules declared (e.g. rating's iqa_model)
 # that aren't already in state from the loaded config.
 modules.config.seed_defaults(state, saved=_SAVED_CONFIG)
+try:
+    mt.set_media_prefs(state.get("media_storage"))
+    mt.set_filename_prefs(state.get("filename_cleanup"))
+except Exception as e:
+    access_logger.error(f"media settings: {e}; using defaults")
+state["media_storage"] = mt.media_prefs()
+state["filename_cleanup"] = dict(mt._FILENAME_PREFS)
 
 state["model_selection"] = modules.broker.init_selection(state.get("model_selection"))
 # Migrate the legacy single iqa_model setting into the broker's per-capability

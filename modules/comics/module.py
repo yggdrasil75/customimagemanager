@@ -59,7 +59,7 @@ def register(host):
     cc._bind(host)
     cp.BOOKS = host.get_service("book_archive")
     host.add_table(_DDL, check=_migrate)
-    host.extend_media_type("book", exts=_ARCHIVE_EXTS, mime_map=_MIME)
+    host.extend_media_type("book", exts=_ARCHIVE_EXTS, mime_map=_MIME, group="comic")
     for key, label in (("comics.make", "Make / create comic"), ("comics.edit", "Edit comic pages"),
                        ("comics.delete", "Delete comic")):
         host.register_feature(key, label, section="comics", section_label="Comics", default="write",

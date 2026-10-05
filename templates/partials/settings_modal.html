@@ -13,6 +13,8 @@
           class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">🧩 Models</button>
         <button data-settings-tab="storage" onclick="settingsTab('storage')"
           class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">🗄 Storage</button>
+        <button data-settings-tab="media" onclick="settingsTab('media')"
+          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">🎞 Media</button>
         <button data-settings-tab="users" onclick="settingsTab('users')"
           class="settings-tab hidden px-3 py-1.5 rounded text-sm font-bold text-left" data-admin-only>👤 Users</button>
         <button data-settings-tab="modules" onclick="settingsTab('modules')"
@@ -109,6 +111,31 @@
             files and GB on disk, whether or not a rebalance is running.</p>
           <div id="tiers_status" class="text-xs text-gray-300"></div>
         </div>
+    </div>
+
+    <div data-settings-pane="media" class="hidden overflow-y-auto flex-1 pr-1">
+      <h3 class="font-bold text-amber-300 mb-1">Storage formats</h3>
+      <p class="text-[11px] text-gray-500 mb-2">Applied to new uploads. <b>Unsafe</b> = formats most
+        browsers can't show (jxl, heic, mkv, avi, wma, aiff, epub, mobi, cbr…).
+        Camera raws are always converted.</p>
+      <div id="media_storage_rows" class="space-y-2 mb-4"></div>
+      <div class="border-t border-gray-700 pt-3">
+        <h3 class="font-bold text-amber-300 mb-1">Filename cleanup</h3>
+        <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+          <input type="checkbox" id="fn_clean_bad" class="accent-amber-500"> Remove bad characters
+          <span class="text-[10px] text-gray-500">(control / invisible chars, extra whitespace)</span></label>
+        <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+          <input type="checkbox" id="fn_clean_web" class="accent-amber-500"> Replace web-unsafe characters
+          <span class="text-[10px] text-gray-500">(space # % &amp; + ? etc. → _)</span></label>
+        <div class="flex items-center gap-2 text-sm text-gray-300 mt-1">
+          <span>File-storage safe for</span>
+          <select id="fn_clean_storage" class="p-1 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+            <option value="windows">Windows</option>
+            <option value="linux">Linux</option>
+            <option value="off">Off</option>
+          </select>
+        </div>
+      </div>
     </div>
 
     <div data-settings-pane="users" data-admin-only class="hidden overflow-y-auto flex-1 pr-1">

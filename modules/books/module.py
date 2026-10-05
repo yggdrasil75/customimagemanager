@@ -40,6 +40,7 @@ def _no_llm(*a, **k):
 
 
 def register(host):
+    bi.bind_media(host.media)
     # Teach core what a "book" is. Without this the app is a pure image gallery
     # that never sees an epub/cbz. The ext lists + mime map live with the module.
     _BOOK_MIME = {

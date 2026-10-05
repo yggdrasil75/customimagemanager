@@ -52,3 +52,54 @@ def test_jxl_keyframe_indices_monotone():
     idx = mt.jxl_keyframe_indices(100)
     assert idx == sorted(set(idx)) and idx[0] == 0 and idx[-1] <= 99
     assert mt.jxl_keyframe_indices(1) == [0]
+
+
+def test_media_prefs_target_ext():
+    try:
+        assert mt.target_ext("a.png") == ".jxl"                 # default: always jxl
+        assert mt.target_ext("a.mkv") == ".mkv"                 # default: video as-is
+        mt.set_media_prefs({"image": {"target": ".webp", "mode": "unsafe"},
+                            "video": {"target": ".mp4", "mode": "unsafe"}})
+        assert mt.target_ext("a.png") == ".png"                 # safe: kept
+        assert mt.target_ext("a.heic") == ".webp"               # unsafe: converted
+        assert mt.target_ext("a.jxl") == ".webp"
+        assert mt.target_ext("a.cr2") == ".webp"                # raws always convert
+        assert mt.target_ext("a.mkv") == ".mp4" and mt.target_ext("a.webm") == ".webm"
+        assert mt.is_library_file("x.png") and mt.is_library_file("x.jxl")
+        mt.set_media_prefs({"image": {"target": ".jpg", "mode": "all"}})
+        assert mt.target_ext("a.jpeg") == ".jpeg" and mt.stored_name("a.gif") == "a.jpg"
+        assert mt.clean_media_prefs({"image": {"target": "exe", "mode": "x"}})["image"] == \
+            mt.DEFAULT_MEDIA_PREFS["image"]
+        mt.register_media_type("book", exts=[".epub"])
+        mt.extend_media_type("book", exts=[".cbr", ".cbz"], group="comic")
+        mt.set_media_prefs({"book": {"target": ".cbz", "mode": "all"}})
+        assert mt.target_ext("a.cbr") == ".cbz" and mt.target_ext("a.epub") == ".epub"
+    finally:
+        mt.set_media_prefs(mt.DEFAULT_MEDIA_PREFS)
+        mt.unregister_media_type("book")
+
+
+def test_clean_filename():
+    c = mt.clean_filename
+    assert c("../../etc/passwd") == "passwd"
+    assert c("a\x07b\u200b c.png") == "ab_c.png"
+    assert c("CON.txt", {"storage": "windows"}) == "_CON.txt"
+    assert c('a<b>:c?.png', {"storage": "windows"}) == "a_b__c_.png"
+    assert c("my file#1.jpg", {"web": True}) == "my_file_1.jpg"
+    assert c("ünï cödé.png", {"bad": True, "storage": "linux"}) == "ünï cödé.png"
+    assert c("..hidden.png", {}) == "hidden.png"
+    long = c("x" * 300 + ".png", {"storage": "linux"})
+    assert long.endswith(".png") and len(long) == 255
+
+
+def test_convert_image_roundtrip(tmp_path):
+    from PIL import Image
+    src = tmp_path / "a.gif"
+    frames = [Image.new("RGB", (8, 8), c) for c in ("red", "blue")]
+    frames[0].save(src, save_all=True, append_images=frames[1:], duration=[50, 70], loop=0)
+    out = tmp_path / "a.webp"
+    assert mt.convert_image(str(src), str(out)) is None
+    assert Image.open(out).n_frames == 2
+    assert mt.jxl_anim_info(str(out))["animated"] is False   # .webp not a library ext by default
+    png = tmp_path / "b.png"
+    assert mt.convert_image(str(src), str(png)) is None and Image.open(png).n_frames == 2

@@ -29,6 +29,7 @@ function settingsTab(name) {
   if (name === 'users') window.openUserAdmin && window.openUserAdmin();
   if (name === 'modules') loadModulesTab();
   if (name === 'info') loadInfoTab();
+  if (name === 'media' && window.loadMediaSettings) loadMediaSettings();
 }
 
 /* ── Modules tab ───────────────────────────────────────────────────────────
@@ -149,6 +150,7 @@ async function openSettings(tab = 'general') {
   // the saved server state, never from a half-finished previous edit.
   _tiersLoaded = false;
   _brandClearLogo = false;
+  window._mediaLoaded = false;
   // Take one fresh snapshot from the server, THEN freeze: while the modal is open
   // the background poll won't touch the working copy, so nothing refreshes out
   // from under the user — even if someone else saves settings meanwhile.

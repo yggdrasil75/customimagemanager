@@ -137,22 +137,27 @@ BOOK_EXTS = UNAMBIGUOUS_BOOK_EXTS | AMBIGUOUS_BOOK_EXTS
 # extensions are deliberately excluded — see above.
 UPLOADABLE_BOOK_EXTS = UNAMBIGUOUS_BOOK_EXTS | KIND_AMBIGUOUS_BOOK_EXTS
 
-# Extensions this app already writes as sidecars next to library assets. A .txt
-# whose basename matches one of these assets is a tag sidecar, never a book.
-_ASSET_EXTS_FOR_SIDECAR = {
-    '.jxl', '.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4v', '.mpg', '.mpeg',
-    '.wmv', '.flv', '.ts', '.ogv', '.mp3', '.flac', '.aac', '.ogg', '.oga',
-    '.opus', '.wav', '.wma', '.aiff', '.aif',
-}
+# The core's shared media-type registry (host.media), bound in register(). It
+# answers "is this a library asset" (a .txt sharing its basename is a tag
+# sidecar, never a book) and "is this a page image", so stored formats chosen
+# in Settings → Media are recognised here without a second extension list.
+_media = None
+
+def bind_media(media):
+    global _media
+    _media = media
+
+def _is_sidecar_owner(name: str) -> bool:
+    return _media.is_library_file(name) and _media.kind(name) != 'book'
+
+def _is_page_image(name: str) -> bool:
+    return _media.is_image(name)
 
 # Filenames that mark the directory we're standing in as the *insides* of an
 # unpacked book. Any candidate found alongside these is a component, not a book.
 _UNPACKED_BOOK_MARKERS = {
     'mimetype', 'container.xml', 'toc.ncx', 'content.opf', 'package.opf',
 }
-
-# Page-image extensions inside a comic archive.
-_PAGE_IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.jxl', '.avif'}
 
 # Which reader a format uses.
 PAGED_FORMATS = {'pdf', 'cbz', 'cbr', 'cb7', 'cbt', 'cba'}
@@ -271,7 +276,7 @@ def sniff(path: str) -> str | None:
                 if any(n.lower().endswith('.opf') for n in names):
                     return 'epub'            # epub missing its mimetype entry
                 imgs = sum(1 for n in names
-                           if _ext(n) in _PAGE_IMAGE_EXTS and not n.endswith('/'))
+                           if _is_page_image(n) and not n.endswith('/'))
                 real = sum(1 for n in names if not n.endswith('/'))
                 if real and imgs / real >= 0.8 and imgs >= 3:
                     return 'cbz'
@@ -365,9 +370,9 @@ def _context_from_listing(files: set, dirs: set) -> dict:
         'lower_dirs': {d.lower() for d in dirs},
         # basenames of real library assets, for the .txt sidecar test
         'asset_stems': {os.path.splitext(f)[0]
-                        for f in files if _ext(f) in _ASSET_EXTS_FOR_SIDECAR},
+                        for f in files if _is_sidecar_owner(f)},
         'unpacked_marker': bool(lower_files & _UNPACKED_BOOK_MARKERS),
-        'page_images': sum(1 for f in files if _ext(f) in _PAGE_IMAGE_EXTS),
+        'page_images': sum(1 for f in files if _is_page_image(f)),
     }
 
 def classify(abs_path: str, ctx: dict | None = None) -> Verdict:
@@ -1149,7 +1154,7 @@ def comic_page_names(abs_path: str, fmt: str) -> list[str]:
     except Exception:
         return []
     names = [n for n in names
-             if _ext(n) in _PAGE_IMAGE_EXTS and not os.path.basename(n).startswith('.')]
+             if _is_page_image(n) and not os.path.basename(n).startswith('.')]
     return sorted(names, key=_natural_key)
 
 def _natural_key(s: str):
