@@ -131,7 +131,7 @@
     $('iqt_phase').textContent = s.running
       ? `${s.phase}, ${s.images_done}/${s.images_total} images, epoch ${s.epoch}/${s.epochs}` + (losses ? `, mse ${losses}` : '')
       : (s.error ? `stopped: ${s.error}` : 'idle');
-    $('iqt_build').disabled = !!s.running || !s.available; $('iqt_stop').disabled = !s.running;
+    $('iqt_build').disabled = !!s.running || !s.available; $('iqt_pack').disabled = !!s.running || !s.available; $('iqt_stop').disabled = !s.running;
     $('iqt_report').textContent = fmtReport(s);
     drawLoss('iqt_chart', s.history, 'epoch');
     fillLog('iqt_log', s.log);
@@ -164,6 +164,18 @@
     iqtStatus();
   }
 
+  async function iqtPack() {
+    const name = prompt('Pack name', 'pack');
+    if (name === null) return;
+    const r = await post('/api/iqa_train/pack', {
+      name, datasets_text: $('iqt_datasets').value, use_ratings: $('iqt_use_ratings').checked,
+      max_images: +$('iqt_max').value, holdout: +$('iqt_holdout').value,
+      required: [...document.querySelectorAll('#iqt_required [data-req]:checked')].map(e => e.dataset.req).join(','),
+    });
+    if (!r || !r.success) showToast('IQA train: ' + (r?.error || 'could not start'));
+    iqtStatus();
+  }
+
   async function iqtActivate(size) {
     const r = await post('/api/iqa_train/activate', { size });
     showToast(r && r.success ? `Personal IQA: ${size} is now live` : 'IQA train: ' + (r?.error || 'activate failed'));
@@ -172,7 +184,7 @@
 
   async function iqtStop() { await fetch('/api/iqa_train/stop', { method: 'POST' }).catch(() => null); iqtStatus(); }
 
-  Object.assign(window, { iqtBuild, iqtStop, iqtStatus, iqtBench, iqtActivate, iqtSizesChanged });
+  Object.assign(window, { iqtBuild, iqtPack, iqtStop, iqtStatus, iqtBench, iqtActivate, iqtSizesChanged });
 
   let tries = 0;
   function init() {

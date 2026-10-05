@@ -192,7 +192,11 @@ def register(host):
         small = cap(img)
         H, W = img.shape[:2]
         o = {"embed": [], "tile": [], "tile_raw": [], "object": [], "object_raw": [], "region": [],
-             "region_raw": [], "depth": [], "style": [], "comp": [], "exif": [], "names": [], "proc": {}}
+             "region_raw": [], "depth": [], "style": [], "comp": [], "exif": [], "names": [], "proc": {},
+             "_ms": {}}                     # per-stage wall ms, for the efficiency profile (not cached)
+        _t = [time.perf_counter()]
+        def lap(stage):
+            now = time.perf_counter(); o["_ms"][stage] = round((now - _t[0]) * 1000, 2); _t[0] = now
         def emb(x):
             try:
                 v = enc(cap(x)) if enc is not None and x is not None and x.size else None
@@ -201,11 +205,13 @@ def register(host):
                 host.logger.error(f"personal_iqa encode: {e}"); return None
         if v := emb(img):
             o["embed"] = [v]
+        lap("embed")
         for gy in range(GRID):
             for gx in range(GRID):
                 t = img[gy * H // GRID:(gy + 1) * H // GRID, gx * W // GRID:(gx + 1) * W // GRID]
                 if v := emb(t):
                     o["tile"].append(v); o["tile_raw"].append(ex.tile_raw(gx, gy, GRID, t))
+        lap("tiles")
         # boxes from the background detector; top MAX_OBJECTS by area, crops at native res
         boxes = []
         if fn := _cap("detect"):
@@ -221,6 +227,7 @@ def register(host):
                 o["object"].append(v); o["object_raw"].append(ex.object_raw(b, c))
                 if b.get("class_name"):
                     o["names"].append(str(b["class_name"]))
+        lap("objects")
         # depth on the downscaled frame, bands + scalars
         d01 = None
         if fn := _cap("depth"):
@@ -231,6 +238,7 @@ def register(host):
                     o["depth"] = [ex.depth_vec(d01, small, boxes)]
             except Exception as e:
                 host.logger.warning(f"personal_iqa depth: {e}")
+        lap("depth")
         masks = [(m, 0) for m in ex.band_masks(d01)] if d01 is not None else []
         if fn := _cap("segment"):
             try:
@@ -248,6 +256,7 @@ def register(host):
             c, bb = ex.masked_crop(small, m)
             if c is not None and (v := emb(c)):
                 o["region"].append(v); o["region_raw"].append(ex.region_raw(m, bb, d01, c, kind))
+        lap("regions")
         if fn := _cap("classify"):
             try:
                 cl = fn(small) or []
@@ -272,6 +281,7 @@ def register(host):
             except Exception:
                 pass
             o["names"] += ex.exif_tags(raw)
+        lap("style_comp_exif")
         base_q = None
         base = host.config.get("personal_iqa_base") or ""
         if base and base != "personal" and (fn := _cap("iqa", base)):
@@ -280,6 +290,7 @@ def register(host):
             except Exception:
                 pass
         o["base_iqa"] = base_q
+        lap("base_iqa")
         return o
 
     def _path(rel_path):
@@ -399,7 +410,10 @@ def register(host):
         s["_processed"].update(o.get("proc") or {})
         names = s.pop("_names") + (o.get("names") or [])
         s.update({k: o[k] for k in o if k not in ("base_iqa", "names", "proc")})
+        t0 = time.perf_counter()
         s.update(iqa=[[float(base_q)]] if base_q is not None else [], tag_text=_tag_text(names))
+        if "_ms" in s:
+            s["_ms"]["tag_text"] = round((time.perf_counter() - t0) * 1000, 2)
         if names and not any(s["tags"]):
             s["tags"] = net.hash_tags(names)
         s["_base"] = base_q

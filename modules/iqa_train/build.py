@@ -16,6 +16,11 @@ hash-split hold-out (MSE + Spearman, against the base IQA) and benchmarked
 scorer_<size>.pt per size and scorer.pt = the active size, which the
 personal provider reloads at once; the personal Retrain then fine-tunes
 from it (it never shrinks a larger pretrained model).
+
+pack(): the same feature pass, but instead of training it writes one
+self-contained .pt (samples + labels + token dims + the per-stage ms
+profile) that train_pack.py can train anywhere torch runs — a rented GPU
+box needs the pack and net.py, not the library, the models or the app.
 """
 import csv
 import os
@@ -150,6 +155,117 @@ def bench(svc, sizes, embed_dim=512, batch=64):
     return out
 
 
+def collect(host, db, svc, datasets, use_ratings, max_images, summary):
+    """Labels -> features for every labelled image (cache-first). Fills
+    summary[datasets/skipped/images/profile] and returns (train, val) sample
+    lists [{key, feats, y}]. profile: per-stage ms over images computed this
+    run (cache hits carry no timing), so the slow stage is visible."""
+    labelled = []
+    for folder, labels in datasets:
+        rows = read_labels(folder, labels)
+        summary["datasets"][folder] = len(rows)
+        labelled += [("ext:" + p, y) for p, y in rows]
+    if use_ratings:
+        for r in db.execute("SELECT rel_path, user_stars FROM ratings WHERE user_stars IS NOT NULL").fetchall():
+            labelled.append((r["rel_path"], r["user_stars"] / 5.0))
+    if not labelled:
+        raise RuntimeError("no labelled images (check the dataset lines and labels files)")
+    labelled = labelled[:int(max_images)]
+    progress.update(images_total=len(labelled), phase="features")
+    train, val = [], []
+    prof = summary.setdefault("profile", {"images_computed": 0, "images_cached": 0, "ms": {}})
+    t_all = time.perf_counter()
+    for i, (key, y) in enumerate(labelled):
+        if _stop.is_set():
+            raise RuntimeError("stopped")
+        try:
+            if key.startswith("ext:"):
+                mtime = os.stat(key[4:]).st_mtime
+            else:
+                r = db.execute("SELECT mtime FROM files WHERE rel_path=?", (key,)).fetchone()
+                mtime = r["mtime"] if r else None
+            fe = svc["features"](db, key, mtime)
+        except Exception as e:
+            host.logger.warning(f"iqa_train features {key}: {e}"); continue
+        ms = fe.pop("_ms", None)
+        if ms:
+            prof["images_computed"] += 1
+            for k, v in ms.items():
+                prof["ms"][k] = prof["ms"].get(k, 0.0) + v
+        else:
+            prof["images_cached"] += 1
+        if fe.get("_missing"):
+            for m in fe["_missing"]:
+                summary["skipped"][m] = summary["skipped"].get(m, 0) + 1
+            continue
+        (val if _is_val(key) else train).append({"key": key, "feats": fe, "y": y})
+        if i % 25 == 0:
+            db.commit(); progress["images_done"] = i
+            _say(host, f"features {i}/{len(labelled)}")
+    db.commit()
+    progress["images_done"] = len(labelled)
+    summary["images"] = len(train)
+    prof["wall_s"] = round(time.perf_counter() - t_all, 1)
+    n = max(1, prof["images_computed"])
+    prof["ms_per_image"] = {k: round(v / n, 2) for k, v in prof["ms"].items()}
+    prof["ms"] = round(sum(prof["ms"].values()) / n, 2)
+    return train, val
+
+
+def pack(host, datasets, use_ratings=False, max_images=100_000, holdout=VAL_PCT, name="pack"):
+    """Blocking. Feature pass only; writes <ckpt_dir>/packs/<name>.pt for train_pack.py.
+    Samples keep every token list and y; dims are inferred so the pack is self-describing."""
+    if not _lock.acquire(blocking=False):
+        return {"ok": False, "error": "a build is already running"}
+    svc = host.get_service("personal_iqa")
+    if not svc:
+        _lock.release()
+        return {"ok": False, "error": "personal_iqa module (and torch) required"}
+    _stop.clear()
+    global VAL_PCT
+    VAL_PCT = int(holdout)
+    progress.update(running=True, phase="reading labels", images_total=0, images_done=0, epoch=0, epochs=0,
+                    loss={}, started=time.time(), error=None, log=[], history=[])
+    summary = {"ok": False, "images": 0, "datasets": {}, "skipped": {}, "required": list(svc["required"]()),
+               "sizes": {}}
+    db = host.db()
+    try:
+        import torch
+        train, val = collect(host, db, svc, datasets, use_ratings, max_images, summary)
+        if not train:
+            raise RuntimeError(f"no complete images; skipped for missing {summary['skipped']}")
+        progress["phase"] = "writing"
+        strip = lambda fe: {k: v for k, v in fe.items() if not k.startswith("_")} | {"base": fe.get("_base")}
+        out = {"version": 1, "created": time.time(), "val_pct": VAL_PCT, "token_dims": dict(svc["token_dims"]),
+               "dims": svc["infer_dims"](train, svc["token_dims"]), "profile": summary["profile"],
+               "required": summary["required"], "detectors": svc["detectors"](),
+               "train": [{"key": s["key"], "y": s["y"], "feats": strip(s["feats"])} for s in train],
+               "val": [{"key": s["key"], "y": s["y"], "feats": strip(s["feats"])} for s in val]}
+        d = os.path.join(svc["ckpt_dir"], "packs"); os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, f"{name}.pt")
+        torch.save(out, path)
+        summary.update(ok=True, path=path, n_train=len(train), n_val=len(val), dims=out["dims"],
+                       bytes=os.path.getsize(path), seconds=round(time.time() - progress["started"]))
+        p = summary["profile"]
+        _say(host, f"pack written: {path} ({len(train)}+{len(val)} images, {summary['bytes'] // 2**20} MB); "
+                   f"features {p['ms']} ms/image over {p['images_computed']} computed "
+                   f"({p['images_cached']} cached): {p['ms_per_image']}")
+        return summary
+    except Exception as e:
+        summary["error"] = str(e); progress["error"] = str(e)
+        _say(host, "stopped" if str(e) == "stopped" else f"failed: {e}")
+        if str(e) != "stopped":
+            host.logger.error(f"iqa_train pack: {e}")
+        return summary
+    finally:
+        try:
+            host.core.db_close()
+        except Exception:
+            pass
+        progress.update(running=False, phase="idle", last=summary)
+        _lock.release()
+
+
 def build(host, datasets, sizes, active=None, use_ratings=False, max_images=100_000, epochs=10,
           batch=64, lr=1e-3, holdout=VAL_PCT, install=True, on_installed=None):
     """Blocking. datasets: [(folder, labels_path)]; sizes: {name: {d, depth}}."""
@@ -176,42 +292,7 @@ def build(host, datasets, sizes, active=None, use_ratings=False, max_images=100_
                                       "(enable a face / pose / embed / IQA model first)"}
     db = host.db()
     try:
-        labelled = []
-        for folder, labels in datasets:
-            rows = read_labels(folder, labels)
-            summary["datasets"][folder] = len(rows)
-            labelled += [("ext:" + p, y) for p, y in rows]
-        if use_ratings:
-            for r in db.execute("SELECT rel_path, user_stars FROM ratings WHERE user_stars IS NOT NULL").fetchall():
-                labelled.append((r["rel_path"], r["user_stars"] / 5.0))
-        if not labelled:
-            raise RuntimeError("no labelled images (check the dataset lines and labels files)")
-        labelled = labelled[:int(max_images)]
-        progress.update(images_total=len(labelled), phase="features")
-        train, val = [], []
-        for i, (key, y) in enumerate(labelled):
-            if _stop.is_set():
-                raise RuntimeError("stopped")
-            try:
-                if key.startswith("ext:"):
-                    mtime = os.stat(key[4:]).st_mtime
-                else:
-                    r = db.execute("SELECT mtime FROM files WHERE rel_path=?", (key,)).fetchone()
-                    mtime = r["mtime"] if r else None
-                fe = svc["features"](db, key, mtime)
-            except Exception as e:
-                host.logger.warning(f"iqa_train features {key}: {e}"); continue
-            if fe.get("_missing"):
-                for m in fe["_missing"]:
-                    summary["skipped"][m] = summary["skipped"].get(m, 0) + 1
-                continue
-            (val if _is_val(key) else train).append({"feats": fe, "y": y})
-            if i % 25 == 0:
-                db.commit(); progress["images_done"] = i
-                _say(host, f"features {i}/{len(labelled)}")
-        db.commit()
-        progress["images_done"] = len(labelled)
-        summary["images"] = len(train)
+        train, val = collect(host, db, svc, datasets, use_ratings, max_images, summary)
         if not train:
             raise RuntimeError(f"no complete images; skipped for missing {summary['skipped']}")
 
@@ -251,6 +332,8 @@ def build(host, datasets, sizes, active=None, use_ratings=False, max_images=100_
         summary["installed"] = bool(install and written and on_installed and on_installed(active))
         summary["seconds"] = round(time.time() - progress["started"])
         accs = " ".join(f"{z} {r.get('val_spearman', 0):.3f}" for z, r in summary["sizes"].items())
+        p = summary["profile"]
+        _say(host, f"features {p['ms']} ms/image over {p['images_computed']} computed: {p['ms_per_image']}")
         _say(host, f"done in {summary['seconds']} s: {summary['images']} images (skipped {summary['skipped']}); "
                    f"val spearman {accs}"
                    f" (base {next(iter(summary['sizes'].values())).get('base_spearman', 0):.3f}); active {active}")
@@ -271,10 +354,10 @@ def build(host, datasets, sizes, active=None, use_ratings=False, max_images=100_
         _lock.release()
 
 
-def start(host, **kw):
+def start(host, target=None, **kw):
     if progress["running"]:
         return False
-    threading.Thread(target=build, args=(host,), kwargs=kw, daemon=True, name="iqa-train").start()
+    threading.Thread(target=target or build, args=(host,), kwargs=kw, daemon=True, name="iqa-train").start()
     return True
 
 

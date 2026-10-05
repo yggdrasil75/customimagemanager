@@ -66,6 +66,8 @@
   <div class="flex gap-2">
     <button onclick="iqtBuild()" id="iqt_build" class="flex-1 bg-purple-600 hover:bg-purple-700 py-2 rounded font-bold text-sm"
       title="Extract/cache features for the datasets, then train the ticked sizes. Runs in the background; progress shows next to the title and in the status bar.">Pretrain IQA models</button>
+    <button onclick="iqtPack()" id="iqt_pack" class="bg-sky-700 hover:bg-sky-600 px-3 py-2 rounded font-bold text-sm"
+      title="Extract/cache features only and write a self-contained pack (models/personal_iqa/iqa/packs/<name>.pt) with the per-stage timing profile. Train it anywhere with modules/iqa_train/train_pack.py (rented GPU box: needs torch + net.py, not the app).">Pack features</button>
     <button onclick="iqtStop()" id="iqt_stop" class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded font-bold text-sm disabled:opacity-40" disabled
       title="Stop the running build. Cached features are kept; nothing else is written.">Stop</button>
   </div>

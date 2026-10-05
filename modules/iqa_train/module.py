@@ -119,6 +119,23 @@ def register(host):
                            install=bool(d.get("install", True)), on_installed=_reload_live)
         return jsonify({"success": started, "error": None if started else "a build is already running"})
 
+    def api_pack():
+        d = request.get_json(force=True, silent=True) or {}
+        if not svc():
+            return jsonify({"success": False, "error": "personal_iqa module (and torch) required"})
+        for key, cfg in (("datasets_text", "iqa_train_datasets"), ("required", "personal_iqa_required")):
+            if d.get(key) is not None:
+                host.config[cfg] = str(d[key])
+        host.save_config()
+        datasets = bd.parse_dataset_lines(host.config.get("iqa_train_datasets", ""))
+        if not datasets and not d.get("use_ratings"):
+            return jsonify({"success": False, "error": "no datasets given"})
+        name = "".join(c for c in str(d.get("name") or "pack") if c.isalnum() or c in "-_") or "pack"
+        started = bd.start(host, target=bd.pack, datasets=datasets, use_ratings=bool(d.get("use_ratings")),
+                           max_images=int(d.get("max_images") or 100_000), holdout=int(d.get("holdout") or 10),
+                           name=name)
+        return jsonify({"success": started, "error": None if started else "a build is already running"})
+
     def api_activate():
         d = request.get_json(force=True, silent=True) or {}
         s = svc()
@@ -135,6 +152,7 @@ def register(host):
     host.add_route("/api/iqa_train/status", api_status, feature="tab.iqa_train")
     host.add_route("/api/iqa_train/bench", api_bench, methods=["POST"], feature="tab.iqa_train")
     host.add_route("/api/iqa_train/build", api_build, methods=["POST"], feature="tab.iqa_train")
+    host.add_route("/api/iqa_train/pack", api_pack, methods=["POST"], feature="tab.iqa_train")
     host.add_route("/api/iqa_train/activate", api_activate, methods=["POST"], feature="tab.iqa_train")
     host.add_route("/api/iqa_train/stop", api_stop, methods=["POST"], feature="tab.iqa_train")
     host.add_asset("iqa_train.js")
