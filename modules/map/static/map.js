@@ -151,6 +151,10 @@
     L.tileLayer(d.tiles.url, {
       maxZoom: d.tiles.max_zoom || 19,
       attribution: d.tiles.attribution || "",
+      // The app sends Referrer-Policy: same-origin (modules/auth), so tile
+      // requests to another host would carry no Referer, and OSM's tile usage
+      // policy blocks those. Send the origin only, never the page path.
+      referrerPolicy: "strict-origin-when-cross-origin",
     }).addTo(S.map);
     S.cluster = L.markerClusterGroup({
       chunkedLoading: true,
