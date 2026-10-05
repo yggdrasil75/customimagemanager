@@ -14,7 +14,11 @@ beside it and Activate in Trainer > IQA). --ablate SIZE refits that size
 once per token type with the type dropped: the Spearman delta per type is
 what each feature is worth, so the extraction pipeline can be trimmed.
 --limit N trains on the first N samples (local validation of the run before
-renting the big box). Only this file and modules/personal_iqa/net.py are
+renting the big box). Sizes map to rating-count tiers (net.TIERS): the
+personal Retrain picks scorer_<size>.pt for the current tier and fine-tunes
+it from scratch on the local ratings, so train every size you may reach.
+Training shows a share of vigorous samples in simple mode (net.simplify) so
+the mode gate learns both. Only this file and modules/personal_iqa/net.py are
 needed on the training machine, plus torch and numpy.
 """
 import argparse
@@ -62,6 +66,13 @@ def evaluate(model, samples, dev, batch):
             "base_spearman": net.spearman([b[0] for b in base], [b[1] for b in base]) if base else 0.0}
 
 
+MODE_AUG_P = 0.3
+
+
+def _aug(feats):
+    return net.simplify(feats) if (feats.get("mode") or [[0, 0]])[0][1] and random.random() < MODE_AUG_P else feats
+
+
 def fit(train, val, dims, d, depth, epochs, batch, lr, dev, say=print):
     model = net.Scorer(dims, d, depth).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
@@ -71,7 +82,7 @@ def fit(train, val, dims, d, depth, epochs, batch, lr, dev, say=print):
         model.train(); random.shuffle(order); tot = 0.0
         for i in range(0, len(order), batch):
             chunk = order[i:i + batch]
-            f, mk, t = net.batch([s["feats"] for s in chunk], dims, dev)
+            f, mk, t = net.batch([_aug(s["feats"]) for s in chunk], dims, dev)
             y = torch.tensor([s["y"] for s in chunk], device=dev)
             loss = torch.nn.functional.mse_loss(torch.sigmoid(model(f, mk, t)), y)
             opt.zero_grad(); loss.backward(); opt.step(); sched.step(); tot += loss.item() * len(chunk)
@@ -132,6 +143,10 @@ def main(argv=None):
         print(f"[{z}] d={sp['d']} depth={sp['depth']}")
         model, metrics = fit(train, val, dims, sp["d"], sp["depth"], a.epochs, a.batch, a.lr, a.device)
         metrics["ms_per_image"] = bench_ms(model, val, a.device, a.batch) if val else None
+        metrics["size"] = z
+        if val:   # both modes on the same val set: how much the gate changes the ranking
+            metrics["val_spearman_simple"] = evaluate(model, [{"y": s["y"], "feats": net.simplify(s["feats"])} for s in val],
+                                                      a.device, a.batch)["val_spearman"]
         report["sizes"][z] = metrics
         torch.save({"dims": model.dims, "d": model.d, "depth": model.depth, "metrics": metrics,
                     "state": model.cpu().state_dict()}, os.path.join(a.out, f"scorer_{z}.pt"))
@@ -144,7 +159,7 @@ def main(argv=None):
                   "region": ["region", "region_raw"], "face": ["face", "face_raw"],
                   "pose": ["pose17", "pose17_raw", "pose133", "pose133_raw", "bones"], "iqa": ["iqa"],
                   "tags": ["tags"], "tag_text": ["tag_text"], "style": ["style"], "depth": ["depth"],
-                  "comp": ["comp"], "exif": ["exif"]}
+                  "comp": ["comp"], "exif": ["exif"], "mode": ["mode"], "box_tag": ["box_tag"]}
         present = {g: ks for g, ks in groups.items() if any(s["feats"].get(k) for s in train[:500] for k in ks)}
         for g, ks in present.items():
             print(f"[ablate {a.ablate}] without {g}")

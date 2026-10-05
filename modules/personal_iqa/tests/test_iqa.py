@@ -42,7 +42,13 @@ def test_features_fit_grow(tmp_path, monkeypatch):
     db.execute("INSERT INTO files VALUES('a.jpg', 1.0, ?, 1, 1)", (json.dumps(["cat", "sunset"]),))
     core = types.SimpleNamespace(object_grouping=types.SimpleNamespace(downscale_to_cap=lambda x, **k: x),
                                  read_image=cv2.imread, to_bgr=lambda x: x, db_close=lambda: None,
-                                 read_metadata=lambda fp: {"pose": {"people": []}, "description": "a boat at dusk"},
+                                 read_metadata=lambda fp: {"pose": {"people": []}, "description": "a boat at dusk",
+                                                           "regions": [{"class_name": "person", "cx": .3, "cy": .5, "w": .2, "h": .6,
+                                                                        "confirmed": True, "region_tags": [{"tag": "black hair"}],
+                                                                        "region_description": ""},
+                                                                       {"class_name": "person", "cx": .7, "cy": .5, "w": .2, "h": .6,
+                                                                        "region_tags": ["blonde hair"], "region_description": "smiling"}]
+                                                           if fp.endswith("a.jpg") else {"pose": {"people": []}}},
                                  embed_faces=lambda *a, **k: ([], [], []))
     class Broker:
         def selected_id(self, c, role=None): return c if c in caps else None
@@ -59,10 +65,13 @@ def test_features_fit_grow(tmp_path, monkeypatch):
     fe = svc["features"](db, "a.jpg", 1.0)
     db.commit()
     for k in ("embed", "tile", "tile_raw", "object", "object_raw", "region", "region_raw", "depth", "style", "comp",
-              "exif", "tag_text", "iqa"):
+              "exif", "tag_text", "iqa", "mode"):
         assert fe[k], k
+    assert len(fe["mode"][0]) == 2 and len(fe["tile"]) in (4, 25)      # grid follows the mode
+    assert len(fe["box_tag"]) == 2 and len(fe["box_tag"][0]) == 8 + 5 and fe["box_tag"][0][-1] == 1.0
+    assert len(fe["object"]) == 2 and fe["object_raw"][1][4] == 0.7     # sidecar regions are the boxes
     assert fe["_missing"] == [] and fe["_processed"]["depth"] and fe["_processed"]["segment"]
-    assert len(fe["object"]) == 2 and len(fe["region"]) == 4 and len(fe["tag_text"]) == 7  # 2 tags+caption+2 obj+1 seg+type
+    assert len(fe["region"]) == 4 and len(fe["tag_text"]) == 7  # 2 tags+caption+2 person+1 seg+type
     # cache hit path returns the same structure
     fe2 = svc["features"](db, "a.jpg", 1.0)
     assert {k: len(v) for k, v in fe.items() if isinstance(v, list)} == {k: len(v) for k, v in fe2.items() if isinstance(v, list)}
@@ -75,3 +84,18 @@ def test_features_fit_grow(tmp_path, monkeypatch):
     g = old.grow(16, 1, dims=svc["infer_dims"](samples, piqa.TOKEN_DIMS))
     f, mk, t = net.batch([fe], g.dims, "cpu")
     assert g(f, mk, t).shape == (1,)
+
+    # ── tier switch: a pretrained scorer_<size>.pt for the tier wins over growing ──
+    import sqlite3
+    ckdir = svc["ckpt_dir"]; os.makedirs(ckdir, exist_ok=True)
+    for i in range(60):                                   # 60 ratings -> tier "nano"
+        cv2.imwrite(f"{d}/media/r{i}.jpg", np.random.randint(0, 255, (48, 64, 3), np.uint8))
+        db.execute("INSERT INTO files VALUES(?, 1.0, '[]', 1, 1)", (f"r{i}.jpg",))
+        db.execute("INSERT INTO ratings VALUES(?, ?)", (f"r{i}.jpg", 1 + i % 5))
+    pre = net.Scorer(svc["infer_dims"]([{"feats": fe}], piqa.TOKEN_DIMS), 64, 1)
+    svc["save"](pre, {"size": "nano", "val_spearman": 0.0}, os.path.join(ckdir, "scorer_nano.pt"))
+    svc["save"](net.Scorer({"embed": E, "iqa": 1}, 16, 1), {"size": "small"})   # live model of another size
+    host.config["personal_iqa_sizes"] = ""
+    svc["train"]()
+    m = svc["metrics"]()
+    assert m["size"] == "nano" and m["rebuilt"] == "pretrained:nano" and m["d"] == 64, m

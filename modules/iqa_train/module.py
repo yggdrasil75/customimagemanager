@@ -70,8 +70,9 @@ def register(host):
         sizes = _sizes()
         try:
             n = int(host.db().execute("SELECT COUNT(*) FROM ratings WHERE user_stars IS NOT NULL").fetchone()[0])
+            n_scored = int(host.db().execute("SELECT COUNT(*) FROM files WHERE tags LIKE '%score_up%'").fetchone()[0])
         except Exception:
-            n = 0
+            n = n_scored = 0
         from modules.personal_iqa import net as _net
         return jsonify({"success": True, **{k: v for k, v in bd.progress.items()},
                         "available": bool(s), "sizes": sizes,
@@ -80,7 +81,7 @@ def register(host):
                                      for f, l in datasets],
                         "datasets_text": host.config.get("iqa_train_datasets", ""),
                         "installed_sizes": _installed(), "active_size": host.config.get("iqa_train_active", ""),
-                        "ckpt_dir": s["ckpt_dir"] if s else "", "ratings": n,
+                        "ckpt_dir": s["ckpt_dir"] if s else "", "ratings": n, "scored": n_scored,
                         "required": s["required"]() if s else [], "detectors": s["detectors"]() if s else {},
                         "metrics": s["metrics"]() if s else None})
 
@@ -112,7 +113,7 @@ def register(host):
         if not datasets and not d.get("use_ratings"):
             return jsonify({"success": False, "error": "no datasets given"})
         started = bd.start(host, datasets=datasets, sizes=sizes, active=d.get("active"),
-                           use_ratings=bool(d.get("use_ratings")),
+                           use_ratings=bool(d.get("use_ratings")), use_scores=bool(d.get("use_scores")),
                            max_images=int(d.get("max_images") or 100_000),
                            epochs=int(d.get("epochs") or 10), batch=int(d.get("batch") or 64),
                            lr=float(d.get("lr") or 1e-3), holdout=int(d.get("holdout") or 10),
@@ -128,10 +129,11 @@ def register(host):
                 host.config[cfg] = str(d[key])
         host.save_config()
         datasets = bd.parse_dataset_lines(host.config.get("iqa_train_datasets", ""))
-        if not datasets and not d.get("use_ratings"):
+        if not datasets and not d.get("use_ratings") and not d.get("use_scores"):
             return jsonify({"success": False, "error": "no datasets given"})
         name = "".join(c for c in str(d.get("name") or "pack") if c.isalnum() or c in "-_") or "pack"
         started = bd.start(host, target=bd.pack, datasets=datasets, use_ratings=bool(d.get("use_ratings")),
+                           use_scores=bool(d.get("use_scores")),
                            max_images=int(d.get("max_images") or 100_000), holdout=int(d.get("holdout") or 10),
                            name=name)
         return jsonify({"success": started, "error": None if started else "a build is already running"})

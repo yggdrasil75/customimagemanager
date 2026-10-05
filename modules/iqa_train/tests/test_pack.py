@@ -73,3 +73,30 @@ def test_pack_then_train(tmp_path, monkeypatch):
     assert set(ck) == {"dims", "d", "depth", "metrics", "state"} and ck["dims"]["tag_text"] == 8
     res2 = bd.pack(host, ds, name="t2", holdout=25)          # second pass: everything served from the cache
     assert res2["ok"] and res2["profile"]["images_cached"] == 12 and res2["profile"]["images_computed"] == 0
+
+
+def test_engagement_labels(tmp_path, monkeypatch):
+    import os, json, numpy as np, cv2
+    from modules.iqa_train import build as bd
+    d = str(tmp_path)
+    host = _fake_host(d, monkeypatch)
+    os.makedirs(f"{d}/ds")
+    for i in range(4):
+        cv2.imwrite(f"{d}/ds/{i}.jpg", np.random.randint(0, 255, (32, 32, 3), np.uint8))
+    with open(f"{d}/ds/labels.csv", "w") as f:        # engagement CSV, header-detected
+        f.write("name,score_up,score_down,views,source\n0.jpg,50,1,900,e621\n1.jpg,2,8,900,e621\n"
+                "2.jpg,9,,300,safebooru\n3.jpg,4,,,\n")           # 3: no down, no views -> dropped
+    rows = dict(bd.read_labels(f"{d}/ds", f"{d}/ds/labels.csv"))
+    assert set(os.path.basename(k) for k in rows) == {"0.jpg", "1.jpg", "2.jpg"}
+    assert rows[f"{d}/ds/0.jpg"] > rows[f"{d}/ds/1.jpg"]
+    db = host.db()                                     # library: tags carry the counts, rated files excluded
+    os.makedirs(f"{d}/media", exist_ok=True)
+    for i, tags in enumerate((["score_up: 30", "score_down: 2", "source: e6"], ["score_up: 1", "views: 5000", "source: e6"],
+                              ["score_up: 7", "score_down: 0"])):
+        cv2.imwrite(f"{d}/media/s{i}.jpg", np.random.randint(0, 255, (32, 32, 3), np.uint8))
+        db.execute("INSERT INTO files VALUES(?, 1.0, ?, 1, 1)", (f"s{i}.jpg", json.dumps(tags)))
+    db.execute("INSERT INTO ratings VALUES('s2.jpg', 4)")
+    got = dict(bd.scored_from_tags(db))
+    assert set(got) == {"s0.jpg", "s1.jpg"} and got["s0.jpg"] > got["s1.jpg"]
+    res = bd.pack(host, [], use_scores=True, name="e", holdout=1)
+    assert res["ok"] and res["datasets"]["library score_up/views tags"] == 2 and res["n_train"] + res["n_val"] == 2

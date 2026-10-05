@@ -19,6 +19,11 @@ An image is trained on when the required models RAN on it (face/pose
   tags      the file's tags, hashed
   tag_text  one token per tag / object class / camera / caption through the
             embed.text provider, so unseen tags land near related ones
+  box_tag   one token per stored region (sidecar mwg-rs) that carries tags or a
+            description: embed.text of "class: tags; description" concatenated
+            with [cx, cy, w, h, confirmed], so "black hair" stays attached to
+            the box it was written on. Stored regions also replace the live
+            detector pass as the object boxes when the sidecar has them.
   object / object_raw   one per background-detector box: crop embedding +
             [cx, cy, w, h, conf, log_area, aspect, sharpness]
   region / region_raw   one per segment mask and per depth band (near/mid/far):
@@ -27,6 +32,11 @@ An image is trained on when the required models RAN on it (face/pose
   depth     depth histogram, foreground fraction, DoF proxy, subject/background gap;
   comp      thirds offset, subject size, box count, horizon angle;
   exif      focal / aperture / ISO / exposure / megapixels / aspect / bits-per-pixel.
+  mode      [detail level 0..1, vigorous flag]. Mode decides how much is extracted
+            (vigorous: 5x5 tiles, 16 objects, 10 regions; simple: 2x2, 3, 3) and
+            gates every token type inside the scorer, so a simple image is scored
+            on its foreground and a detailed one on the small stuff too.
+            personal_iqa_mode = auto (by detail level) | simple | vigorous.
 All of these are derived from passes that already ran (detector, segmenter,
 depth, the encoder) or from file metadata — see extra.py.
 
@@ -83,7 +93,9 @@ CREATE TABLE IF NOT EXISTS personal_iqa_cache (
 );
 """
 _KEY = "iqa:personal"
-GRID, VAL_PCT, MIN_RATINGS = 3, 15, 50
+VAL_PCT, MIN_RATINGS = 15, 50
+MODE_AUG_P = 0.3            # share of vigorous training samples also shown in simple mode
+TAG_CAP = 2048              # safety only: every tag becomes a token (one cached text embed each, order irrelevant)
 # Token types a sample MUST have to be trained on. The point of the personal
 # scorer is "idealised proportions + expression + a clear view", so an image
 # with no pose or no face teaches nothing about that and is skipped rather
@@ -95,7 +107,10 @@ REQUIRED_DEFAULT = "embed,iqa,face,pose"
 TOKEN_DIMS = {"face": 215, "face_raw": 4, "pose17": 34, "pose17_raw": 51, "pose133": 266,
               "pose133_raw": 399, "bones": 18, "iqa": 1,   # pose dims mirror pose/skeleton.TOKEN_DIMS
               "tile_raw": ex.TILE_RAW_DIM, "object_raw": ex.OBJ_RAW_DIM, "region_raw": ex.REGION_RAW_DIM,
-              "style": ex.STYLE_DIM, "depth": ex.DEPTH_DIM, "comp": ex.COMP_DIM, "exif": ex.EXIF_DIM}
+              "style": ex.STYLE_DIM, "depth": ex.DEPTH_DIM, "comp": ex.COMP_DIM, "exif": ex.EXIF_DIM,
+              "mode": 2}
+MODES = {"simple": {"grid": 2, "objects": 3, "regions": 3}, "vigorous": {"grid": 5, "objects": 16, "regions": 10}}
+DETAIL_SPLIT = 0.5          # auto mode: detail level at or above this = vigorous
 # encoder-sized token types (dims read from the data): embed, tile, object, region, tag_text
 
 
@@ -126,6 +141,7 @@ def register(host):
     host.add_config_key("personal_iqa_base", default="nima")
     host.add_config_key("personal_iqa_encoder", default="")       # "" = the selected embed provider
     host.add_config_key("personal_iqa_grow", default=False)       # tier change: grow (Net2Net) vs rebuild
+    host.add_config_key("personal_iqa_mode", default="auto", validate=lambda v: v if v in ("auto", "simple", "vigorous") else "auto")
     host.add_config_key("personal_iqa_required", default=REQUIRED_DEFAULT, validate=lambda v: str(v or ""))
     host.add_settings_field(key="personal_iqa_required", label="Required data per training image",
                             kind="text", pane="module",
@@ -163,7 +179,7 @@ def register(host):
 
     def _cache_key():
         return f"{host.config.get('personal_iqa_encoder') or host.broker.selected_id('embed')}|" \
-               f"{host.config.get('personal_iqa_base')}|{GRID}|" \
+               f"{host.config.get('personal_iqa_base')}|{host.config.get('personal_iqa_mode') or 'auto'}|" \
                + "|".join(str(host.broker.selected_id(c) or "") for c in ("detect", "segment", "depth"))
 
     @functools.lru_cache(maxsize=20000)
@@ -180,8 +196,18 @@ def register(host):
         pid = host.broker.selected_id("embed.text") or ""
         if not pid:
             return []
-        vs = [_text_vec(n, pid) for n in names[:32]]
+        vs = [_text_vec(n, pid) for n in names[:TAG_CAP]]
         return [list(v) for v in vs if v]
+
+    def _box_tags(box_texts):
+        """[(text, cx, cy, w, h, confirmed)] -> box_tag rows: text embed ++ geometry."""
+        pid = host.broker.selected_id("embed.text") or ""
+        out = []
+        for text, *geo in (box_texts or [])[:TAG_CAP]:
+            v = _text_vec(text, pid) if pid else None
+            if v:
+                out.append(list(v) + [float(x) for x in geo])
+        return out
 
     # ── expensive, image-only parts (cached on mtime+key) ────────────────
     def _encode(img, fp=None):
@@ -192,11 +218,18 @@ def register(host):
         small = cap(img)
         H, W = img.shape[:2]
         o = {"embed": [], "tile": [], "tile_raw": [], "object": [], "object_raw": [], "region": [],
-             "region_raw": [], "depth": [], "style": [], "comp": [], "exif": [], "names": [], "proc": {},
+             "region_raw": [], "depth": [], "style": [], "comp": [], "exif": [], "mode": [], "names": [], "proc": {},
              "_ms": {}}                     # per-stage wall ms, for the efficiency profile (not cached)
         _t = [time.perf_counter()]
         def lap(stage):
             now = time.perf_counter(); o["_ms"][stage] = round((now - _t[0]) * 1000, 2); _t[0] = now
+        detail = ex.detail_level(small, W, H)
+        want = host.config.get("personal_iqa_mode") or "auto"
+        vig = detail >= DETAIL_SPLIT if want == "auto" else want == "vigorous"
+        o["mode"] = [[detail, 1.0 if vig else 0.0]]
+        M = MODES["vigorous" if vig else "simple"]
+        GRID = M["grid"]
+        lap("detail")
         def emb(x):
             try:
                 v = enc(cap(x)) if enc is not None and x is not None and x.size else None
@@ -213,15 +246,33 @@ def register(host):
                     o["tile"].append(v); o["tile_raw"].append(ex.tile_raw(gx, gy, GRID, t))
         lap("tiles")
         # boxes from the background detector; top MAX_OBJECTS by area, crops at native res
-        boxes = []
-        if fn := _cap("detect"):
+        boxes, o["box_texts"] = [], []
+        if fp:                       # sidecar regions first: boxes already found, with their own tags
+            try:
+                for r in core.read_metadata(fp).get("regions") or []:
+                    if not all(k in r for k in ("cx", "cy", "w", "h")):
+                        continue
+                    conf = 1.0 if r.get("confirmed") else 0.7
+                    boxes.append({"class_name": r.get("class_name"), "cx": r["cx"], "cy": r["cy"], "w": r["w"],
+                                  "h": r["h"], "conf": conf})
+                    tags = [t["tag"] if isinstance(t, dict) else str(t) for t in r.get("region_tags") or []]
+                    tags = [t for t in tags if t]
+                    desc = str(r.get("region_description") or "").strip()
+                    if tags or desc:
+                        text = f"{r.get('class_name') or 'object'}: {', '.join(tags)}" + (f"; {desc}" if desc else "")
+                        o["box_texts"].append((text[:500], r["cx"], r["cy"], r["w"], r["h"], conf))
+                if boxes:
+                    o["proc"]["detect"] = True
+            except Exception as e:
+                host.logger.warning(f"personal_iqa regions {fp}: {e}")
+        if not boxes and (fn := _cap("detect")):
             try:
                 boxes = [b for b in (fn(small) or []) if isinstance(b, dict)]
                 o["proc"]["detect"] = True
             except Exception as e:
                 host.logger.warning(f"personal_iqa detect: {e}")
         boxes.sort(key=lambda b: -float(b.get("w", 0)) * float(b.get("h", 0)))
-        for b in boxes[:ex.MAX_OBJECTS]:
+        for b in boxes[:M["objects"]]:
             c = ex.crop(img, b)
             if v := emb(c):
                 o["object"].append(v); o["object_raw"].append(ex.object_raw(b, c))
@@ -246,7 +297,7 @@ def register(host):
                 o["proc"]["segment"] = True
                 pm = [(ex.polygon_mask(m["mask"], small.shape), 1, m.get("class_name")) for m in segs]
                 pm.sort(key=lambda x: -x[0].sum())
-                for m, k, name in pm[:ex.MAX_REGIONS]:
+                for m, k, name in pm[:M["regions"]]:
                     masks.append((m, k))
                     if name:
                         o["names"].append(str(name))
@@ -302,7 +353,7 @@ def register(host):
         return core.to_bgr(core.read_image(_path(rel_path)))
 
     _MORE = ("tile_raw", "object", "object_raw", "region", "region_raw", "depth", "style", "comp", "exif",
-             "names", "proc")
+             "mode", "names", "proc", "box_texts")
 
     def _cached(db, rel_path, mtime):
         """Encoder/detector/depth/base outputs for one file; on miss decodes at FULL
@@ -409,9 +460,10 @@ def register(host):
         s = _live(db, rel_path, img)
         s["_processed"].update(o.get("proc") or {})
         names = s.pop("_names") + (o.get("names") or [])
-        s.update({k: o[k] for k in o if k not in ("base_iqa", "names", "proc")})
+        s.update({k: o[k] for k in o if k not in ("base_iqa", "names", "proc", "box_texts")})
         t0 = time.perf_counter()
-        s.update(iqa=[[float(base_q)]] if base_q is not None else [], tag_text=_tag_text(names))
+        s.update(iqa=[[float(base_q)]] if base_q is not None else [], tag_text=_tag_text(names),
+                 box_tag=_box_tags(o.get("box_texts")))
         if "_ms" in s:
             s["_ms"]["tag_text"] = round((time.perf_counter() - t0) * 1000, 2)
         if names and not any(s["tags"]):
@@ -448,6 +500,11 @@ def register(host):
         return bool(mt) and mt.get("val_spearman", 0) > mt.get("base_spearman", 0)
 
     # ── training pass (background thread) ────────────────────────────────
+    def _mode_aug(feats, p=MODE_AUG_P):
+        """Every vigorous sample is also shown as its simple-mode view some of the
+        time, so the gate learns both modes from one extraction."""
+        return net.simplify(feats) if (feats.get("mode") or [[0, 0]])[0][1] and random.random() < p else feats
+
     def _eval(model, samples, dev):
         model.eval(); pred = []
         with torch.no_grad():
@@ -493,18 +550,32 @@ def register(host):
 
             dev = model_registry.device()
             model = _load_model()
-            d, depth = net.tier_for(len(rows))
+            size, d, depth = net.tier_for(len(rows), net.parse_sizes(host.config.get("personal_iqa_sizes")))
             dims = net.infer_dims(train, TOKEN_DIMS)
-            # Only rebuild when the tier is BIGGER than the checkpoint and growing is
-            # off; a pretrained (iqa_train) model larger than the tier is kept as is.
-            rebuild = model is None or (d, depth) > (model.d, model.depth) and not host.config.get("personal_iqa_grow")
-            if not rebuild and set(dims) - set(model.dims):      # new token types since the checkpoint
-                state["text"] = "[Personal IQA] new token types — adding projections"
-                model = model.grow(model.d, model.depth, dims=dims).to(dev)
-            if rebuild:
+            pre = os.path.join(os.path.dirname(ckpt_path), f"scorer_{size}.pt")
+            cur_size = (_metrics() or {}).get("size")
+            if os.path.exists(pre) and (model is None or cur_size != size):
+                # Tier changed and a pretrained model of the new size exists (Trainer > IQA /
+                # train_pack): start from THAT, fresh, and refit on everything local rather
+                # than growing the old one.
+                state["text"] = f"[Personal IQA] switching to pretrained size '{size}' (D={d} depth={depth})"
+                ck = torch.load(pre, map_location="cpu", weights_only=False)
+                model = net.Scorer(ck["dims"], ck["d"], ck["depth"]); model.load_state_dict(ck["state"], strict=False)
+                if set(dims) - set(model.dims):
+                    model = model.grow(model.d, model.depth, dims=dims)
+                model = model.to(dev)
+                batch, epochs, rebuild = list(train), EPOCHS * 2, "pretrained:" + size
+            else:
+                # Only rebuild when the tier is BIGGER than the checkpoint and growing is
+                # off; a pretrained (iqa_train) model larger than the tier is kept as is.
+                rebuild = model is None or (d, depth) > (model.d, model.depth) and not host.config.get("personal_iqa_grow")
+                if not rebuild and set(dims) - set(model.dims):      # new token types since the checkpoint
+                    state["text"] = "[Personal IQA] new token types — adding projections"
+                    model = model.grow(model.d, model.depth, dims=dims).to(dev)
+            if rebuild is True:
                 model = net.Scorer(dims, d, depth).to(dev)
                 batch, epochs = list(train), EPOCHS * 2
-            else:
+            elif not rebuild:
                 if (d, depth) != (model.d, model.depth):
                     state["text"] = f"[Personal IQA] growing to D={d} depth={depth}"
                     model = model.grow(max(d, model.d), max(depth, model.depth)).to(dev)
@@ -518,13 +589,13 @@ def register(host):
                 model.train(); random.shuffle(batch); tot = 0.0
                 for i in range(0, len(batch), BATCH):
                     chunk = batch[i:i + BATCH]
-                    f, mk, t = net.batch([s["feats"] for s in chunk], model.dims, dev)
+                    f, mk, t = net.batch([_mode_aug(s["feats"]) for s in chunk], model.dims, dev)
                     y = torch.tensor([s["y"] for s in chunk], device=dev)
                     loss = torch.nn.functional.mse_loss(torch.sigmoid(model(f, mk, t)), y)
                     opt.zero_grad(); loss.backward(); opt.step(); tot += loss.item() * len(chunk)
                 state["text"] = f"[Personal IQA] epoch {ep+1}/{epochs} train mse={tot/len(batch):.4f}"
             metrics = _eval(model, val, dev)
-            metrics.update(n_train=len(batch), n_ratings=len(rows), d=model.d, depth=model.depth,
+            metrics.update(n_train=len(batch), n_ratings=len(rows), d=model.d, depth=model.depth, size=size,
                            rebuilt=rebuild, trained_at=time.time(), skipped=skipped)
             _save(model, metrics)
             db.execute("UPDATE personal_iqa_cache SET trained=1 WHERE rel_path IN (%s)"
@@ -542,7 +613,7 @@ def register(host):
             core.db_close(); state["busy"] = False
 
     # ── service for iqa_train (pretraining from dataset folders) ────────
-    def _fit(train, val, d, depth, epochs=10, batch=BATCH, lr=LR, say=None, stop=None):
+    def _fit(train, val, d, depth, epochs=10, batch=BATCH, lr=LR, say=None, stop=None, size=None):
         """Fresh Scorer(d, depth) fitted on samples [{feats, y}], evaluated on val.
         Returns (model, metrics)."""
         dev = model_registry.device()
@@ -555,18 +626,18 @@ def register(host):
                 if stop is not None and stop.is_set():
                     raise RuntimeError("stopped")
                 chunk = order[i:i + batch]
-                f, mk, t = net.batch([s["feats"] for s in chunk], model.dims, dev)
+                f, mk, t = net.batch([_mode_aug(s["feats"]) for s in chunk], model.dims, dev)
                 y = torch.tensor([s["y"] for s in chunk], device=dev)
                 loss = torch.nn.functional.mse_loss(torch.sigmoid(model(f, mk, t)), y)
                 opt.zero_grad(); loss.backward(); opt.step(); tot += loss.item() * len(chunk)
             if say:
                 say(ep + 1, tot / max(1, len(order)))
         metrics = _eval(model, val, dev) if val else {}
-        metrics.update(n_train=len(train), d=d, depth=depth, trained_at=time.time())
+        metrics.update(n_train=len(train), d=d, depth=depth, size=size, trained_at=time.time())
         return model, metrics
 
     host.provide_service("personal_iqa", {
-        "features": features, "fit": _fit, "save": _save, "ckpt_path": ckpt_path,
+        "features": features, "fit": _fit, "train": _train, "save": _save, "ckpt_path": ckpt_path,
         "ckpt_dir": os.path.dirname(ckpt_path), "metrics": _metrics,
         "reload": lambda: (model_registry.unload(_KEY), state.update(metrics=None)) and True,
         "sizes": lambda: net.parse_sizes(host.config.get("personal_iqa_sizes")),
@@ -616,7 +687,11 @@ def register(host):
         reason="not trained yet, or not better than the base IQA on validation — see Settings ▸ Personal IQA",
         settings=[{"key": "personal_iqa_base", "label": "Base IQA model (feature)", "kind": "select", "options": _iqa_options},
                   {"key": "personal_iqa_encoder", "label": "Encoder for image/tiles", "kind": "select", "options": _enc_options},
-                  {"key": "personal_iqa_grow", "label": "Grow (Net2Net) instead of rebuild on tier change", "kind": "toggle"}],
+                  {"key": "personal_iqa_grow", "label": "Grow (Net2Net) instead of rebuild on tier change (only when no pretrained size exists)", "kind": "toggle"},
+                  {"key": "personal_iqa_mode", "label": "Detail mode", "kind": "select",
+                   "options": lambda: [{"value": "auto", "label": "Auto (by detail level)"},
+                                       {"value": "simple", "label": "Simple: foreground, 2x2 tiles, 3 objects"},
+                                       {"value": "vigorous", "label": "Vigorous: 5x5 tiles, 16 objects, 10 regions"}]}],
         cost_mb=400, gpu=model_registry.on_gpu())
 
     # ── endpoints ────────────────────────────────────────────────────────
@@ -632,9 +707,11 @@ def register(host):
     def api_status():
         db = host.db()
         n = db.execute("SELECT COUNT(*) c FROM ratings WHERE user_stars IS NOT NULL").fetchone()["c"]
-        d, depth = net.tier_for(n)
+        size, d, depth = net.tier_for(n, net.parse_sizes(host.config.get("personal_iqa_sizes")))
         metrics = _metrics() or None
-        return jsonify({"success": True, "ratings": n, "min_ratings": MIN_RATINGS, "tier": {"d": d, "depth": depth},
+        return jsonify({"success": True, "ratings": n, "min_ratings": MIN_RATINGS,
+                        "tier": {"size": size, "d": d, "depth": depth,
+                                 "pretrained": os.path.exists(os.path.join(os.path.dirname(ckpt_path), f"scorer_{size}.pt"))},
                         "metrics": metrics, "available": _available(), "busy": state["busy"],
                         "text": state["text"], "torch": _HAVE_TORCH})
 

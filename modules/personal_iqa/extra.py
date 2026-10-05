@@ -69,6 +69,21 @@ def style(img):
                    float((g > 0.98).mean()), float((g < 0.02).mean()), edges]
 
 
+def detail_level(img, W, H):
+    """0..1 'how much is there to look at': log megapixels (1 MP -> 0, 256 MP -> 1)
+    + edge density + how unevenly sharpness is spread over a 4x4 grid (small
+    sharp things in a soft frame score high). ponytail: fixed weights, no model;
+    the mode gate inside the scorer learns what to do with it."""
+    mp = max(0.0, min(1.0, math.log2(max(1.0, W * H / 1e6)) / 8))
+    small = img if max(img.shape[:2]) <= 512 else cv2.resize(img, (512, max(1, 512 * img.shape[0] // img.shape[1])))
+    g = gray(small)
+    edges = float((cv2.Canny(g, 50, 150) > 0).mean())
+    h, w = g.shape
+    sh = [sharpness(g[gy * h // 4:(gy + 1) * h // 4, gx * w // 4:(gx + 1) * w // 4]) for gy in range(4) for gx in range(4)]
+    spread = float(np.std(sh)) / 3.0
+    return float(max(0.0, min(1.0, 0.4 * mp + 0.4 * min(1.0, edges * 8) + 0.2 * min(1.0, spread))))
+
+
 def norm_depth(depth, shape):
     """Provider depth (larger = farther) -> float32 0..1 at the frame's shape."""
     d = np.asarray(depth, np.float32)
@@ -213,4 +228,6 @@ if __name__ == "__main__":   # self-check: dims are what TOKEN_DIMS promises
     c, bb = masked_crop(img, bm[0]); assert c is not None and len(region_raw(bm[0], bb, d, c, 0)) == REGION_RAW_DIM
     pm = polygon_mask([(0.1, 0.1), (0.9, 0.1), (0.9, 0.9)], img.shape); assert pm.any()
     assert len(tile_raw(0, 0, 3, img)) == TILE_RAW_DIM
+    flat = np.full((64, 64, 3), 128, np.uint8)
+    assert detail_level(flat, 1000, 800) < detail_level(img, 16000, 12000) <= 1.0
     print("ok")

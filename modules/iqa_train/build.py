@@ -30,6 +30,8 @@ import zlib
 
 import numpy as np
 
+from . import scores as sc
+
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".jxl", ".avif"}
 VAL_PCT = 10
 
@@ -78,8 +80,10 @@ def _index_images(folder):
 
 def read_labels(folder, labels_path):
     """(path, score 0..1) pairs. AVA.txt rows are "idx image_id v1..v10 ..." (mean of
-    the 1..10 histogram / 10); anything else is "name,score" CSV/TSV with an
-    optional header. Scores > 1 are taken as 1..10 (/10), > 10 as /100."""
+    the 1..10 histogram / 10); a CSV whose header has score_up/score_down/views
+    (and optionally source) is engagement data -> scores.estimate; anything
+    else is "name,score" CSV/TSV with an optional header. Scores > 1 are taken
+    as 1..10 (/10), > 10 as /100."""
     if not labels_path or not os.path.exists(labels_path):
         return []
     idx = _index_images(folder)
@@ -87,7 +91,16 @@ def read_labels(folder, labels_path):
     with open(labels_path, encoding="utf-8", errors="replace") as f:
         sample = f.read(4096); f.seek(0)
         ava = all(len(l.split()) >= 12 and l.split()[2].isdigit() for l in sample.splitlines()[:5] if l.strip())
-        if ava:
+        head = [h.strip().lower() for h in sample.splitlines()[0].replace("\t", ",").split(",")] if sample else []
+        if "score_up" in head:
+            ers = []
+            for p in csv.DictReader(f, delimiter="\t" if "\t" in sample else ","):
+                p = {k.strip().lower(): v for k, v in p.items() if k}
+                r = sc.parse_tags(f"{k}: {v}" for k, v in p.items() if v and k in sc._KEYS)
+                if sc.usable(r):
+                    ers.append({"key": p.get("name") or p.get("file") or p.get("image") or next(iter(p.values())), **r})
+            rows = list(sc.estimate(ers).items())
+        elif ava:
             for l in f:
                 p = l.split()
                 if len(p) < 12:
@@ -155,7 +168,26 @@ def bench(svc, sizes, embed_dim=512, batch=64):
     return out
 
 
-def collect(host, db, svc, datasets, use_ratings, max_images, summary):
+def scored_from_tags(db):
+    """Library files whose tags carry score_up / score_down / views (/ source)
+    -> [(rel_path, rating)] via scores.estimate. Rated files are left to the
+    ratings table."""
+    import json
+    import common
+    ers = []
+    for r in db.execute("SELECT f.rel_path, f.tags FROM files f LEFT JOIN ratings r USING(rel_path) "
+                        "WHERE f.tags LIKE '%score_up%' AND r.user_stars IS NULL").fetchall():
+        try:
+            names = [common.tag_name(t) for t in json.loads(r["tags"] or "[]")]
+        except Exception:
+            continue
+        e = sc.parse_tags(names)
+        if sc.usable(e):
+            ers.append({"key": r["rel_path"], **e})
+    return list(sc.estimate(ers).items())
+
+
+def collect(host, db, svc, datasets, use_ratings, max_images, summary, use_scores=False):
     """Labels -> features for every labelled image (cache-first). Fills
     summary[datasets/skipped/images/profile] and returns (train, val) sample
     lists [{key, feats, y}]. profile: per-stage ms over images computed this
@@ -168,6 +200,10 @@ def collect(host, db, svc, datasets, use_ratings, max_images, summary):
     if use_ratings:
         for r in db.execute("SELECT rel_path, user_stars FROM ratings WHERE user_stars IS NOT NULL").fetchall():
             labelled.append((r["rel_path"], r["user_stars"] / 5.0))
+    if use_scores:
+        scored = scored_from_tags(db)
+        summary["datasets"]["library score_up/views tags"] = len(scored)
+        labelled += scored
     if not labelled:
         raise RuntimeError("no labelled images (check the dataset lines and labels files)")
     labelled = labelled[:int(max_images)]
@@ -212,7 +248,7 @@ def collect(host, db, svc, datasets, use_ratings, max_images, summary):
     return train, val
 
 
-def pack(host, datasets, use_ratings=False, max_images=100_000, holdout=VAL_PCT, name="pack"):
+def pack(host, datasets, use_ratings=False, max_images=100_000, holdout=VAL_PCT, name="pack", use_scores=False):
     """Blocking. Feature pass only; writes <ckpt_dir>/packs/<name>.pt for train_pack.py.
     Samples keep every token list and y; dims are inferred so the pack is self-describing."""
     if not _lock.acquire(blocking=False):
@@ -231,7 +267,7 @@ def pack(host, datasets, use_ratings=False, max_images=100_000, holdout=VAL_PCT,
     db = host.db()
     try:
         import torch
-        train, val = collect(host, db, svc, datasets, use_ratings, max_images, summary)
+        train, val = collect(host, db, svc, datasets, use_ratings, max_images, summary, use_scores)
         if not train:
             raise RuntimeError(f"no complete images; skipped for missing {summary['skipped']}")
         progress["phase"] = "writing"
@@ -267,7 +303,7 @@ def pack(host, datasets, use_ratings=False, max_images=100_000, holdout=VAL_PCT,
 
 
 def build(host, datasets, sizes, active=None, use_ratings=False, max_images=100_000, epochs=10,
-          batch=64, lr=1e-3, holdout=VAL_PCT, install=True, on_installed=None):
+          batch=64, lr=1e-3, holdout=VAL_PCT, install=True, on_installed=None, use_scores=False):
     """Blocking. datasets: [(folder, labels_path)]; sizes: {name: {d, depth}}."""
     if not _lock.acquire(blocking=False):
         return {"ok": False, "error": "a build is already running"}
@@ -292,7 +328,7 @@ def build(host, datasets, sizes, active=None, use_ratings=False, max_images=100_
                                       "(enable a face / pose / embed / IQA model first)"}
     db = host.db()
     try:
-        train, val = collect(host, db, svc, datasets, use_ratings, max_images, summary)
+        train, val = collect(host, db, svc, datasets, use_ratings, max_images, summary, use_scores)
         if not train:
             raise RuntimeError(f"no complete images; skipped for missing {summary['skipped']}")
 
@@ -305,7 +341,7 @@ def build(host, datasets, sizes, active=None, use_ratings=False, max_images=100_
                 progress["history"] = (progress["history"] + [[ep, z, round(loss, 5)]])[-5000:]
                 _say(host, f"{z} epoch {ep}/{epochs} train mse {loss:.4f}")
             m, metrics = svc["fit"](train, val, sp["d"], sp["depth"], epochs=int(epochs), batch=int(batch),
-                                    lr=float(lr), say=say, stop=_stop)
+                                    lr=float(lr), say=say, stop=_stop, size=z)
             models[z] = m
             row = summary["sizes"][z]
             row.update(metrics)

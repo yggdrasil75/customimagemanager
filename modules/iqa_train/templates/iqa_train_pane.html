@@ -37,6 +37,7 @@
       placeholder="/data/AVA/images /data/AVA/AVA.txt&#10;/data/koniq /data/koniq/labels.csv"></textarea>
     <div id="iqt_ds_status" class="text-[10px] text-gray-500"></div>
     <label class="trck" title="Also include this library's star ratings (as score/5) in the training set. Same required-data rule applies."><input type="checkbox" id="iqt_use_ratings" class="accent-purple-500"> My star ratings (<span id="iqt_ratings_n">0</span>)</label>
+    <label class="trck" title="Unrated library images tagged score_up: N / score_down: N / views: N (/ source: site) get a rating from those counts: percentile rank within their source of the vote ratio (Wilson) and the up-per-view rate, averaged. Needs score_down or views."><input type="checkbox" id="iqt_use_scores" class="accent-purple-500"> Booru scores / views in tags (<span id="iqt_scored_n">0</span>)</label>
   </div>
 
   <div>

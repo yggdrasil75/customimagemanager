@@ -115,7 +115,7 @@
     if (!$('iqt_sizes_text').value) { $('iqt_sizes_text').value = s.sizes_text || ''; _sizes = s.sizes || {}; }
     if (!$('iqt_datasets').value && s.datasets_text) $('iqt_datasets').value = s.datasets_text;
     $('iqt_ds_status').textContent = (s.datasets || []).map(d => `${d.ok ? 'ok' : 'MISSING'}: ${d.folder} ${d.labels || '(no labels file)'}`).join('\n');
-    $('iqt_ratings_n').textContent = s.ratings || 0;
+    $('iqt_ratings_n').textContent = s.ratings || 0; $('iqt_scored_n').textContent = s.scored || 0;
     if (!_reqInit && s.required) {
       _reqInit = true;
       document.querySelectorAll('#iqt_required [data-req]').forEach(e => { e.checked = s.required.includes(e.dataset.req); });
@@ -155,7 +155,7 @@
     if (!sizes.length) { showToast('IQA train: tick at least one size'); return; }
     const r = await post('/api/iqa_train/build', {
       sizes, sizes_text: $('iqt_sizes_text').value, active: $('iqt_active').value,
-      datasets_text: $('iqt_datasets').value, use_ratings: $('iqt_use_ratings').checked,
+      datasets_text: $('iqt_datasets').value, use_ratings: $('iqt_use_ratings').checked, use_scores: $('iqt_use_scores').checked,
       max_images: +$('iqt_max').value, epochs: +$('iqt_epochs').value, batch: +$('iqt_batch').value,
       lr: +$('iqt_lr').value, holdout: +$('iqt_holdout').value, install: $('iqt_install').checked,
       required: [...document.querySelectorAll('#iqt_required [data-req]:checked')].map(e => e.dataset.req).join(','),
@@ -168,7 +168,7 @@
     const name = prompt('Pack name', 'pack');
     if (name === null) return;
     const r = await post('/api/iqa_train/pack', {
-      name, datasets_text: $('iqt_datasets').value, use_ratings: $('iqt_use_ratings').checked,
+      name, datasets_text: $('iqt_datasets').value, use_ratings: $('iqt_use_ratings').checked, use_scores: $('iqt_use_scores').checked,
       max_images: +$('iqt_max').value, holdout: +$('iqt_holdout').value,
       required: [...document.querySelectorAll('#iqt_required [data-req]:checked')].map(e => e.dataset.req).join(','),
     });

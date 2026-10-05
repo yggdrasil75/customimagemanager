@@ -99,7 +99,7 @@ def _fake_service(tmp):
         nface = [] if key.endswith(("0.jpg", "3.jpg", "6.jpg", "9.jpg")) else [[0.0] * 215]
         return {"embed": [[0.5] * 4], "tile": [], "face": nface, "pose17": [[0.0] * 34], "pose133": [],
                 "iqa": [[0.4]], "tags": [0] * 32, "_base": 0.4, "_missing": [] if nface else ["face"]}
-    def fit(train, val, d, depth, epochs, batch, lr, say, stop):
+    def fit(train, val, d, depth, epochs, batch, lr, say, stop, size=None):
         say(epochs, 0.01)
         m = types.SimpleNamespace(parameters=lambda: [np.zeros(d * depth)])
         m.parameters = lambda: [types.SimpleNamespace(numel=lambda: d * depth)]
