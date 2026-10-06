@@ -251,15 +251,24 @@ function openPopout(){
   pZoom=1; pPanX=0; pPanY=0;
   document.getElementById('popout_filename').innerText=window.currentFile;
   document.getElementById('popout_modal').classList.remove('hidden');
-  // Sync regions checkbox
-  document.getElementById('popout_toggle_regions').checked =
-    document.getElementById('toggle_regions').checked;
+  // Regions start OFF in the popout; drawing a box turns them back on.
+  document.getElementById('popout_toggle_regions').checked=false;
+  // The fixed user badge sits over the popout header; hide it while open.
+  const badge=document.getElementById('cim-user-badge'); if(badge) badge.style.display='none';
+  if(window.CIMFeatures) CIMFeatures.apply(document.getElementById('popout_modal'));
+  document.getElementById('popout_hint').classList.toggle('hidden',!popoutBoxesEditable());
   popoutImg.src = imgObj.src;
 }
 
 function closePopout(){
   popoutOpen=false;
   document.getElementById('popout_modal').classList.add('hidden');
+  const badge=document.getElementById('cim-user-badge'); if(badge) badge.style.display='';
+}
+
+// Box edits in the popout need WRITE on annot.boxes, same as the main canvas.
+function popoutBoxesEditable(){
+  return !window.CIMFeatures || CIMFeatures.canWrite('annot.boxes');
 }
 
 popoutImg.onload = ()=>{
@@ -349,6 +358,7 @@ pc.addEventListener('mousedown',e=>{
     pc.style.cursor='grabbing';
     return;
   }
+  if(!popoutBoxesEditable()) return;
   if(e.button===0){
     const [ix,iy]=pcToImg(e.offsetX,e.offsetY);
     pSX=ix; pSY=iy; pDrawing=true;
@@ -410,6 +420,7 @@ pc.addEventListener('mouseup',e=>{
 
 pc.addEventListener('contextmenu',e=>{
   e.preventDefault();
+  if(!popoutBoxesEditable()) return;
   if(!document.getElementById('popout_toggle_regions').checked) return;
   const iw=popoutImg.naturalWidth, ih=popoutImg.naturalHeight;
   const [ix,iy]=pcToImg(e.offsetX,e.offsetY);

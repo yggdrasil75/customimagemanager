@@ -1,7 +1,7 @@
   <div id="popout_modal" class="hidden absolute inset-0 bg-black/90 flex flex-col z-50">
     <div class="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 flex-shrink-0">
       <span id="popout_filename" class="text-xs font-mono text-blue-400 truncate flex-1"></span>
-      <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
+      <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer" data-feature="annot.boxes">
         <input type="checkbox" id="popout_toggle_regions" checked onchange="drawPopout()" class="accent-blue-500">
         Regions
       </label>
@@ -10,7 +10,7 @@
         <input type="checkbox" id="popout_toggle_masks" checked onchange="drawPopout()" class="accent-fuchsia-500">
         Masks
       </label>
-      <span class="text-[10px] text-gray-500 hidden sm:inline">Drag:Add · Mid:Rename · Right:Delete · Scroll:Zoom ·
+      <span class="text-[10px] text-gray-500 hidden sm:inline" id="popout_hint">Drag:Add · Mid:Rename · Right:Delete · Scroll:Zoom ·
         Click+drag canvas:Pan</span>
       <button onclick="closePopout()" class="text-gray-400 hover:text-white text-lg leading-none ml-2">✕</button>
     </div>
