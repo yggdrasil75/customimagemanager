@@ -39,6 +39,21 @@ A hysteresis margin (default 5% of a tier's budget) suppresses churn: a file
 already sitting in an acceptable tier is not moved just to fix a small
 imbalance.
 
+Where did this object come from?
+--------------------------------
+Every library file has an XMP identity, xmpMM:DocumentID in its .xmp sidecar
+(the sidecar is the app's source of truth and stays at the file's rel_path
+when the bytes are tiered). A tier object is named by that id:
+<tier>/cim-objects/<aa>/<DocumentID><ext>. The symlink is the live pointer,
+the sidecar the durable one: when symlinks are lost (a media dir rebuilt, a
+volume remounted, a DB dropped and the store walked by a scan)
+restore_orphans() walks the sidecars whose media is missing, finds the object
+carrying their DocumentID and relinks it at its original rel_path — so the
+indexer sees the file where it always lived, never as
+cim-objects/<aa>/<uuid>. adopt_ids() gives objects moved before this a
+DocumentID (the uuid they were already stored under) so they are covered too.
+The host injects the two sidecar helpers (read / ensure the id) via start().
+
 Execution
 ---------
 A daemon thread wakes every `interval_sec`, builds a plan, then executes it
@@ -365,12 +380,152 @@ def _media_usage(cfg):
     return count, total
 
 # ── executor ──────────────────────────────────────────────────────────────────
+def _key(doc_id):
+    """Filesystem / comparison form of an XMP DocumentID ("xmp.did:AB-12" and
+    "ab12" agree): alphanumerics only, lower-case."""
+    return "".join(ch for ch in str(doc_id or "") if ch.isalnum()).lower()
+
 def _dest_object_path(tier_path, rel):
+    """Object path for a library file: named by its sidecar's DocumentID so
+    the object can always be traced back to its sidecar (and so to its path)."""
     ext = os.path.splitext(rel)[1].lower()
-    name = uuid.uuid4().hex
+    ensure = _state.get("ensure_document_id")
+    name = _key(ensure(os.path.join(_state["media_dir"], rel))) if ensure else ""
+    name = name or uuid.uuid4().hex
     d = os.path.join(_object_root(tier_path), name[:2])
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, name + ext)
+
+def is_object_path(rel):
+    """Is this library rel_path actually inside an object store (the symptom
+    of a tier dir living under MEDIA_DIR, or a store walked by a scan)?"""
+    return str(rel or "").replace("\\", "/").lstrip("/").startswith(OBJECT_DIR + "/")
+
+def _store_objects(cfg):
+    """Every object file (not temp files) in every tier store."""
+    for t in cfg["tiers"]:
+        root = _object_root(t["path"])
+        for dirpath, _, names in os.walk(root):
+            for n in names:
+                if n.endswith(".part") or n.startswith("."):
+                    continue
+                yield os.path.join(dirpath, n)
+
+def _referenced_objects(media_dir):
+    """{realpath(object): rel_path} for every symlink in the library."""
+    out = {}
+    for dirpath, dirs, names in os.walk(media_dir):
+        dirs[:] = [d for d in dirs if d != OBJECT_DIR and not d.startswith(".")]
+        for n in names:
+            p = os.path.join(dirpath, n)
+            if os.path.islink(p):
+                out[os.path.realpath(p)] = os.path.relpath(p, media_dir).replace("\\", "/")
+    return out
+
+def _homeless_sidecars(media_dir):
+    """{DocumentID key: sidecar stem rel} for every sidecar whose media is gone."""
+    read_id = _state.get("read_document_id")
+    if not read_id:
+        return {}
+    out = {}
+    for stem in homeless_media(media_dir):
+        k = _key(read_id(os.path.join(media_dir, stem + ".xmp")))
+        if k:
+            out[k] = stem
+    return out
+
+def adopt_ids(cfg=None):
+    """Objects moved before DocumentIDs: give the sidecar the uuid the object
+    is already stored under (when it has no id), or rename the object to the
+    sidecar's id (when it has one). Either way object name == DocumentID
+    afterwards. Returns how many were fixed."""
+    cfg = cfg or _state["cfg"] or load_cfg()
+    read_id, ensure = _state.get("read_document_id"), _state.get("ensure_document_id")
+    if not (read_id and ensure):
+        return 0
+    media_dir = _state["media_dir"]
+    n = 0
+    for obj, rel in _referenced_objects(media_dir).items():
+        if not any(obj.startswith(_object_root(r) + os.sep) for r in _tier_roots(cfg)):
+            continue
+        stem, ext = os.path.splitext(os.path.basename(obj))
+        link = os.path.join(media_dir, rel)
+        have = _key(read_id(link))
+        try:
+            if not have:
+                ensure(link, stem)                      # adopt the object's name as the id
+                n += 1
+            elif have != stem:
+                new = os.path.join(os.path.dirname(os.path.dirname(obj)), have[:2], have + ext)
+                os.makedirs(os.path.dirname(new), exist_ok=True)
+                os.rename(obj, new)
+                ltmp = link + f".tierswap-{uuid.uuid4().hex[:8]}"
+                os.symlink(new, ltmp); os.replace(ltmp, link)
+                n += 1
+        except OSError as e:
+            log.error(f"adopt id for {rel}: {e}")
+    if n:
+        log.info(f"adopt: aligned {n} tier objects with their sidecar DocumentID")
+    return n
+
+def unidentified_objects(cfg=None):
+    """Objects no symlink references and no sidecar claims by DocumentID:
+    the files lost before ids existed. [(obj_path, ext)]"""
+    cfg = cfg or _state["cfg"] or load_cfg()
+    media_dir = _state["media_dir"]
+    referenced = _referenced_objects(media_dir)
+    homes = _homeless_sidecars(media_dir)
+    return [p for p in _store_objects(cfg)
+            if os.path.realpath(p) not in referenced
+            and _key(os.path.splitext(os.path.basename(p))[0]) not in homes]
+
+def homeless_media(media_dir=None):
+    """rel_paths (stem + the original extension is unknown, so just the stem)
+    of sidecars whose media file is gone — where lost objects belong."""
+    media_dir = media_dir or _state["media_dir"]
+    out = []
+    for dirpath, dirs, names in os.walk(media_dir):
+        dirs[:] = [d for d in dirs if d != OBJECT_DIR and not d.startswith(".")]
+        for n in names:
+            if n.lower().endswith(".xmp") and not any(
+                    os.path.exists(os.path.join(dirpath, m)) for m in names
+                    if m != n and os.path.splitext(m)[0] == n[:-4]):
+                out.append(os.path.relpath(os.path.join(dirpath, n[:-4]), media_dir).replace("\\", "/"))
+    return out
+
+def restore_orphans(cfg=None):
+    """Relink every object no symlink references at the rel_path of the
+    sidecar carrying its DocumentID. Returns the restored rel_paths."""
+    cfg = cfg or _state["cfg"] or load_cfg()
+    media_dir = _state["media_dir"]
+    referenced = _referenced_objects(media_dir)
+    homes = None
+    restored = []
+    for obj in _store_objects(cfg):
+        if os.path.realpath(obj) in referenced:
+            continue
+        if homes is None:
+            homes = _homeless_sidecars(media_dir)
+        stem, ext = os.path.splitext(os.path.basename(obj))
+        rel_stem = homes.get(_key(stem))
+        if not rel_stem:
+            continue
+        rel = rel_stem + ext
+        link = os.path.join(media_dir, rel)
+        if os.path.lexists(link):
+            if os.path.islink(link) and not os.path.exists(link):
+                os.remove(link)                         # a dangling link from an older move
+            else:
+                continue
+        try:
+            os.symlink(obj, link)
+            referenced[os.path.realpath(obj)] = rel
+            restored.append(rel)
+        except OSError as e:
+            log.error(f"restore {rel} -> {obj}: {e}")
+    if restored:
+        log.info(f"restore: relinked {len(restored)} tier objects at their library paths")
+    return restored
 
 def _throttled_copy(src, dst, mbps):
     chunk = 4 * 1024 * 1024
@@ -422,24 +577,21 @@ def gc_orphans():
     """Delete tier objects that no library symlink references (age > 1h)."""
     cfg = _state["cfg"] or load_cfg()
     media_dir = _state["media_dir"]
-    referenced = set()
-    for dirpath, dirs, names in os.walk(media_dir):
-        for n in names:
-            p = os.path.join(dirpath, n)
-            if os.path.islink(p):
-                referenced.add(os.path.realpath(p))
+    referenced = _referenced_objects(media_dir)
+    homes = _homeless_sidecars(media_dir)
     removed = 0
     cutoff = time.time() - 3600
-    for t in cfg["tiers"]:
-        root = _object_root(t["path"])
-        for dirpath, _, names in os.walk(root):
-            for n in names:
-                p = os.path.join(dirpath, n)
-                try:
-                    if os.path.realpath(p) not in referenced and os.stat(p).st_mtime < cutoff:
-                        os.remove(p); removed += 1
-                except OSError:
-                    pass
+    for p in _store_objects(cfg):
+        try:
+            if os.path.realpath(p) in referenced or os.stat(p).st_mtime >= cutoff:
+                continue
+            # An object whose sidecar still exists is never garbage: the file
+            # was lost from the library, not deleted. restore_orphans relinks it.
+            if _key(os.path.splitext(os.path.basename(p))[0]) in homes:
+                continue
+            os.remove(p); removed += 1
+        except OSError:
+            pass
     if removed:
         log.info(f"gc: removed {removed} orphaned tier objects")
     return removed
@@ -463,6 +615,13 @@ def rebalance(block=False, aggressive=False):
                        moved_bytes=0, errors=0, cancel=False)
         try:
             cfg = load_cfg()
+            if cfg["tiers"]:
+                # Objects first: relink anything that lost its library symlink
+                # and make sure every object knows its home. Runs even with
+                # tiering switched off — the objects still exist.
+                run["phase"] = "restore"
+                adopt_ids(cfg)
+                restore_orphans(cfg)
             if not cfg["enabled"] or not cfg["tiers"]:
                 run["phase"] = "disabled"; return
             for t in cfg["tiers"]:
@@ -513,7 +672,13 @@ def _loop():
             rebalance(block=True)
 
 def start(media_dir, db_factory, get_last_activity,
-          load_stored_cfg=None, store_cfg=None):
+          load_stored_cfg=None, store_cfg=None,
+          read_document_id=None, ensure_document_id=None):
+    """read_document_id(path) -> the file's xmpMM:DocumentID (path: media or sidecar) or None;
+    ensure_document_id(abs_media_path, id=None) -> the file's DocumentID,
+    creating the sidecar / id (optionally the given one) when missing."""
+    _state["read_document_id"] = read_document_id
+    _state["ensure_document_id"] = ensure_document_id
     _state["media_dir"] = os.path.abspath(media_dir)
     _state["db_factory"] = db_factory
     _state["get_last_activity"] = get_last_activity

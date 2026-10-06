@@ -41,7 +41,7 @@ import atexit
 from datetime import datetime
 from collections import OrderedDict
 import thread_manager
-from flask import Flask, render_template, request, jsonify, send_file, Response, g
+from flask import Flask, render_template, request, jsonify, send_file, Response, g, has_request_context
 YOLO, _HAVE_YOLO = optional_import("ultralytics", attr="YOLO")
 imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
 Image, _HAVE_PIL = optional_import("PIL.Image")
@@ -920,15 +920,16 @@ def _delete_file_row(rel_path):
     _db().commit()
 
 def _purge_file_everywhere(rel_path):
-    """Remove EVERY DB trace of a file: the core rows (`files`, `file_history`)
-    here, and every module's rel_path-keyed rows through the `file.deleted`
+    """Remove EVERY DB trace of a file: the core rows (`files`, `file_history`,
+    `album_members`) here, and every module's rel_path-keyed rows through the `file.deleted`
     event (books, people, dedup, music, ratings, embeddings, training sets…).
     The delete routes and the reconcile scan all go through this, so a file
     that vanished on disk is forgotten everywhere, not just in the gallery.
     """
     db = _db()
-    for sql in ("DELETE FROM files        WHERE rel_path=?",
-                "DELETE FROM file_history WHERE rel_path=?"):
+    for sql in ("DELETE FROM files         WHERE rel_path=?",
+                "DELETE FROM file_history  WHERE rel_path=?",
+                "DELETE FROM album_members WHERE rel_path=?"):
         try:
             db.execute(sql, (rel_path,))
         except Exception as e:
@@ -1100,6 +1101,9 @@ def _files_where(search: str, folder: str = '', album: str = ''):
     # Modules that group files into a container (comics: a folder of pages)
     # register a clause that hides members from the flat gallery.
     clauses.extend(module_host.gallery_filters)
+    vclauses, vp = module_host.files_clause("rel_path")   # access policies (ownership)
+    clauses += vclauses
+    p += vp
     if album:
         clauses.append(
             "rel_path IN (SELECT rel_path FROM album_members WHERE album=?)")
@@ -1167,6 +1171,8 @@ def _query_files(search: str, offset: int, limit: int,
     return entries, total
 
 # ── Path safety ────────────────────────────────────────────────────────────────
+_MEDIA_ABS = os.path.abspath(MEDIA_DIR)
+
 def get_safe_path(base_dir: str, user_path: str) -> str | None:
     """!
     @brief Resolve user_path under base_dir, rejecting directory traversal.
@@ -1174,7 +1180,17 @@ def get_safe_path(base_dir: str, user_path: str) -> str | None:
     """
     abs_base   = os.path.abspath(base_dir)
     abs_target = os.path.abspath(os.path.join(base_dir, user_path.lstrip('\\/')))
-    return abs_target if os.path.commonpath([abs_base, abs_target]) == abs_base else None
+    if os.path.commonpath([abs_base, abs_target]) != abs_base:
+        return None
+    # Access policies: a request may only resolve media it is allowed to see
+    # (or, on a write endpoint, change) — a hidden file is "not found" by name
+    # too. No-op outside a request (workers) and with no policy registered.
+    if abs_base == _MEDIA_ABS and 'module_host' in globals() and module_host.access_policies \
+            and has_request_context():
+        rel = os.path.relpath(abs_target, abs_base).replace('\\', '/')
+        if rel != '.' and not module_host.check_path(rel, bool(g.get("cim_write"))):
+            return None
+    return abs_target
 
 # ── JXL decode ─────────────────────────────────────────────────────────────────
 def read_jxl(path: str) -> np.ndarray | None:
@@ -1534,6 +1550,7 @@ def _enumerate_library():
     seen = set()
     for root, dirs, filenames in os.walk(MEDIA_DIR):
         dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'runs'
+                   and d != tiering.OBJECT_DIR            # a tier store under MEDIA_DIR is bytes, not library
                    and not (root == MEDIA_DIR and d == 'branding')]
         for f in filenames:
             if f.startswith('.'):
@@ -1560,7 +1577,10 @@ def _reconcile_deleted():
     removed = 0
     for (rel_path,) in rows:
         abs_path = get_safe_path(MEDIA_DIR, rel_path)
-        if not abs_path or not os.path.exists(abs_path):
+        # Rows indexed from inside a tier object store (cim-objects/<aa>/<id>)
+        # are the tiering bug of old: the sidecar carrying that DocumentID puts
+        # the object back at its real rel_path (tiering.restore_orphans).
+        if tiering.is_object_path(rel_path) or not abs_path or not os.path.exists(abs_path):
             _purge_file_everywhere(rel_path)
             removed += 1
     return removed
@@ -1671,6 +1691,28 @@ def _read_mm_tag(xmp_path, tag):
     except Exception as e:
         access_logger.warning(f"_read_mm_tag({tag}) {xmp_path}: {e}")
         return None
+
+def _document_id(path):
+    """A file's xmpMM:DocumentID (its identity across tiering), or None. `path`
+    may be the media file or its sidecar; the metadata module picks the source."""
+    return xmp_import.resolve_xmp(path)[0].get("Xmp.xmpMM.DocumentID") or None
+
+def _ensure_document_id(filepath, doc_id=None):
+    """The file's DocumentID, minting one (or adopting `doc_id`) through the
+    metadata module when it has none. A file without a sidecar gets one first,
+    from its current metadata, so the id lands in the sidecar even for JXL."""
+    cur = _document_id(filepath)
+    if cur:
+        return cur
+    if not os.path.exists(os.path.splitext(filepath)[0] + '.xmp'):
+        meta = read_metadata(filepath)
+        write_metadata(filepath, meta.get("tags", []), meta.get("description", ""),
+                       meta.get("regions", []))
+    doc_id = doc_id or uuid.uuid4().hex
+    res = xmp_export.write_xmp(filepath, {"Xmp.xmpMM.DocumentID": doc_id})
+    if not res["success"]:
+        raise ValueError(f"DocumentID for {filepath}: {res['skipped']}")
+    return doc_id
 
 def _read_analysis_from_xmp(xmp_path):
     """Pull the structured analysis dict back out of a sidecar, or None."""
@@ -2560,8 +2602,9 @@ def _sync_album_cache(rel_path: str, albums: list) -> None:
     db.execute("DELETE FROM album_members WHERE rel_path=?", (rel_path,))
     now = time.time()
     for n in names:
-        db.execute("INSERT OR IGNORE INTO albums(name, description, cover, created) "
-                   "VALUES (?,'','',?)", (n, now))
+        if db.execute("INSERT OR IGNORE INTO albums(name, description, cover, created) "
+                      "VALUES (?,'','',?)", (n, now)).rowcount and 'module_host' in globals():
+            module_host.album_event("created", name=n, rel_path=rel_path)
         db.execute("INSERT OR IGNORE INTO album_members(album, rel_path, added) "
                    "VALUES (?,?,?)", (n, rel_path, now))
 
@@ -2617,9 +2660,11 @@ def _album_add(rel_paths: list, album: str) -> int:
     if not album:
         return 0
     n = _album_apply(rel_paths, lambda cur: cur if album in cur else cur + [album])
-    _db().execute("INSERT OR IGNORE INTO albums(name, description, cover, created) "
-                  "VALUES (?,'','',?)", (album, time.time()))
+    cur = _db().execute("INSERT OR IGNORE INTO albums(name, description, cover, created) "
+                        "VALUES (?,'','',?)", (album, time.time()))
     _db().commit()
+    if cur.rowcount:
+        module_host.album_event("created", name=album)
     return n
 
 def _album_remove(rel_paths: list, album: str) -> int:
@@ -2638,14 +2683,17 @@ def _album_list() -> list:
     @return Album dicts (name, description, cover, count, created); cover falls
             back to the first member when unset or stale.
     """
-    rows = _db().execute("""
+    vclauses, vp = module_host.albums_clause("a")
+    where = (" WHERE " + " AND ".join(vclauses)) if vclauses else ""
+    rows = _db().execute(f"""
         SELECT a.name, a.description, a.cover, a.created,
                COUNT(m.rel_path) AS n
         FROM albums a
         LEFT JOIN album_members m ON m.album = a.name
+        {where}
         GROUP BY a.name
         ORDER BY a.name COLLATE NOCASE
-    """).fetchall()
+    """, vp).fetchall()
     out = []
     for r in rows:
         cover = r["cover"] or ""
@@ -2661,7 +2709,8 @@ def _album_list() -> list:
                 "ORDER BY rel_path LIMIT 1", (r["name"],)).fetchone()
             cover = first["rel_path"] if first else ""
         out.append({"name": r["name"], "description": r["description"] or "",
-                    "cover": cover, "count": r["n"], "created": r["created"]})
+                    "cover": cover, "count": r["n"], "created": r["created"],
+                    **module_host.album_info(r["name"])})
     return out
 
 # Properties write_metadata owns and rebuilds on every write. Everything else
@@ -3885,8 +3934,10 @@ def branding_logo():
 @app.route("/api/folders")
 @_auth.require_feature("tab.gallery")
 def api_folders():
-    where = (" WHERE " + " AND ".join(module_host.gallery_filters)) if module_host.gallery_filters else ""
-    rows = _db().execute(f"SELECT rel_path FROM files{where}").fetchall()
+    clauses, p = module_host.files_clause("rel_path")
+    clauses = list(module_host.gallery_filters) + clauses
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = _db().execute(f"SELECT rel_path FROM files{where}", p).fetchall()
     counts = {}
     for (rp,) in rows:
         folder = rp.rsplit('/', 1)[0] if '/' in rp else '/'
@@ -4015,6 +4066,7 @@ def api_album_create():
     _db().execute("INSERT INTO albums(name, description, cover, created) VALUES (?,?,?,?)",
                   (name, str(d.get("description", "")), "", time.time()))
     _db().commit()
+    module_host.album_event("created", name=name)
     files = d.get("files") or []
     added = _album_add(files, name) if files else 0
     return jsonify({"success": True, "name": name, "added": added})
@@ -4028,12 +4080,15 @@ def api_album_delete():
     name = str(d.get("name", "")).strip()
     if not name:
         return jsonify({"success": False, "error": "Album name required."}), 400
+    if module_host.album_level(name) != "owner":
+        return jsonify({"success": False, "error": "Only the album owner can delete it."}), 403
     members = [r["rel_path"] for r in _db().execute(
         "SELECT rel_path FROM album_members WHERE album=?", (name,)).fetchall()]
     _album_remove(members, name)
     _db().execute("DELETE FROM album_members WHERE album=?", (name,))
     _db().execute("DELETE FROM albums WHERE name=?", (name,))
     _db().commit()
+    module_host.album_event("deleted", name=name)
     return jsonify({"success": True, "removed": len(members)})
 
 @app.route("/api/albums/rename", methods=["POST"])
@@ -4047,6 +4102,8 @@ def api_album_rename():
         return jsonify({"success": False, "error": "Both names are required."}), 400
     if old == new:
         return jsonify({"success": True, "changed": 0})
+    if module_host.album_level(old) != "owner":
+        return jsonify({"success": False, "error": "Only the album owner can rename it."}), 403
     if _db().execute("SELECT 1 FROM albums WHERE name=?", (new,)).fetchone():
         return jsonify({"success": False, "error": "An album with that name already exists."}), 409
     members = [r["rel_path"] for r in _db().execute(
@@ -4067,6 +4124,7 @@ def api_album_rename():
     _db().execute("DELETE FROM albums WHERE name=?", (old,))
     _db().execute("DELETE FROM album_members WHERE album=?", (old,))
     _db().commit()
+    module_host.album_event("renamed", old=old, new=new)
     return jsonify({"success": True, "changed": changed})
 
 @app.route("/api/albums/add", methods=["POST"])
@@ -4078,6 +4136,8 @@ def api_album_add():
     files = d.get("files") or []
     if not name or not files:
         return jsonify({"success": False, "error": "Album and files are required."}), 400
+    if module_host.album_level(name) not in ("owner", "write"):
+        return jsonify({"success": False, "error": "You cannot add to this album."}), 403
     return jsonify({"success": True, "added": _album_add(files, name)})
 
 @app.route("/api/albums/remove", methods=["POST"])
@@ -4089,6 +4149,8 @@ def api_album_remove():
     files = d.get("files") or []
     if not name or not files:
         return jsonify({"success": False, "error": "Album and files are required."}), 400
+    if module_host.album_level(name) not in ("owner", "write"):
+        return jsonify({"success": False, "error": "You cannot remove from this album."}), 403
     return jsonify({"success": True, "removed": _album_remove(files, name)})
 
 @app.route("/api/albums/set_cover", methods=["POST"])
@@ -4100,6 +4162,8 @@ def api_album_set_cover():
     cover = str(d.get("cover", "")).strip()
     if not name:
         return jsonify({"success": False, "error": "Album name required."}), 400
+    if module_host.album_level(name) not in ("owner", "write"):
+        return jsonify({"success": False, "error": "You cannot edit this album."}), 403
     _db().execute("UPDATE albums SET cover=? WHERE name=?", (cover, name))
     _db().commit()
     return jsonify({"success": True})
@@ -4110,8 +4174,10 @@ def api_albums_of():
     """Which albums is this file in? Powers the per-image album chips."""
     d = request.json or {}
     fn = str(d.get("filename", "")).strip()
-    return jsonify({"success": True, "albums": _file_albums(fn),
-                    "all": [a["name"] for a in _album_list()]})
+    visible = _album_list()
+    names = {a["name"] for a in visible}
+    return jsonify({"success": True, "albums": [a for a in _file_albums(fn) if a in names],
+                    "all": [a["name"] for a in visible]})
 
 def _predicted_rel(tdir, orig_name):
     """Best-guess stored rel_path for an upload, for duplicate short-circuits and
@@ -4272,7 +4338,10 @@ def api_upload():
         return jsonify({"success": False, "error_code": "no_file",
                         "error": "No file part in request."}), 400
     file   = request.files['file']
-    folder = request.form.get("folder", "").strip()
+    # Access policies may redirect the target (ownership: scope=personal
+    # lands under the uploader's own folder). Applied once, here; the queue
+    # and inline pipeline receive the resolved folder.
+    folder = module_host.upload_folder(request.form.get("folder", "").strip(), request.form)
     tdir   = get_safe_path(MEDIA_DIR, folder) if folder else MEDIA_DIR
     if not tdir:
         return jsonify({"success": False, "error_code": "bad_folder",
@@ -5755,6 +5824,69 @@ def api_metadata():
         return jsonify({"success":ok})
 
 # ── Tiered storage ───────────────────────────────────────────────────────────
+def _recover_lost_tier_objects(apply=False):
+    """Give a home back to tier objects orphaned before DocumentIDs existed
+    (cim-objects/<aa>/<random>.<ext> with no symlink). Candidates are the
+    sidecars whose media is gone; a sidecar is matched to an object when the
+    thumbnail cache entry for that rel_path has the media's mtime (copystat
+    kept it on the object) or its thumbnail aHash is within 6 bits of the
+    object's. A unique match writes the object's name into the sidecar as its
+    DocumentID (through the metadata module), after which the normal
+    tiering.restore_orphans() relinks it. Returns the report; apply=False only
+    plans."""
+    def ahash(img):
+        return int.from_bytes(_ahash_bytes(_to_gray(img), 8), "big") if img is not None else None
+    def bits(a, b):
+        return bin(a ^ b).count("1") if a is not None and b is not None else 99
+
+    homes = tiering.homeless_media()
+    report = {"matched": [], "ambiguous": [], "unmatched": []}
+    for obj in tiering.unidentified_objects():
+        ext = os.path.splitext(obj)[1].lower()
+        row = _get_file_row(_rel(obj)) if os.path.commonpath(
+            [_MEDIA_ABS, os.path.abspath(obj)]) == _MEDIA_ABS else None
+        mtime = os.stat(obj).st_mtime
+        h_obj = None
+        hits = []
+        for stem in homes:
+            rel = stem + ext
+            trow = _thumbdb().execute("SELECT mtime, data FROM thumbs WHERE rel_path=?", (rel,)).fetchone()
+            if trow is None:
+                continue
+            if abs(trow[0] - mtime) < 1.0:
+                hits.append((rel, "mtime")); continue
+            if h_obj is None:
+                h_obj = ahash(read_jxl(obj)) if row is None or row["phash8"] is None \
+                    else int.from_bytes(row["phash8"], "big")
+            thumb = cv2.imdecode(np.frombuffer(trow[1], np.uint8), cv2.IMREAD_COLOR) if _HAVE_CV2 else None
+            if bits(h_obj, ahash(thumb)) <= 6:
+                hits.append((rel, "thumbnail"))
+        entry = {"object": obj, "candidates": hits}
+        if len(hits) != 1:
+            report["ambiguous" if hits else "unmatched"].append(entry)
+            continue
+        rel, how = hits[0]
+        entry.update(rel_path=rel, how=how)
+        report["matched"].append(entry)
+        if apply:
+            _ensure_document_id(os.path.join(MEDIA_DIR, rel),
+                                os.path.splitext(os.path.basename(obj))[0])
+            homes.remove(rel[:-len(ext)])
+    if apply:
+        report["relinked"] = tiering.restore_orphans()
+        for e in report["matched"]:                      # forget the cim-objects/… rows
+            if _rel(e["object"]) and tiering.is_object_path(_rel(e["object"])):
+                _purge_file_everywhere(_rel(e["object"]))
+    return report
+
+@app.route("/api/tiers/recover", methods=["POST"])
+@_auth.require_feature("settings.storage", level="write", action="tiers_recover", fields=("apply",))
+def api_tiers_recover():
+    """Plan (default) or apply the recovery of lost tier objects; see
+    _recover_lost_tier_objects."""
+    apply = bool((request.get_json(silent=True) or {}).get("apply"))
+    return jsonify({"success": True, "applied": apply, **_recover_lost_tier_objects(apply)})
+
 @app.route("/api/tiers", methods=["GET"])
 @_auth.require_feature("settings.storage")
 def api_tiers_get():
@@ -5996,20 +6128,22 @@ def review_list():
     #   • tag queue    — tags JSON carries a '?'-sentinel (unconfirmed) tag
     # The tag test mirrors the `is:tagunconfirmed` search filter.
     tag_pred = "tags LIKE '%\"?%'"
-    where = (f"WHERE flagged_delete=1 OR COALESCE(unconfirmed_count,0)>0 OR {tag_pred}")
-    total = db.execute(f"SELECT COUNT(*) FROM files {where}").fetchone()[0]
+    vclauses, vp = module_host.files_clause("rel_path")
+    vis = (" AND " + " AND ".join(vclauses)) if vclauses else ""
+    where = (f"WHERE (flagged_delete=1 OR COALESCE(unconfirmed_count,0)>0 OR {tag_pred}){vis}")
+    total = db.execute(f"SELECT COUNT(*) FROM files {where}", vp).fetchone()[0]
 
     # Per-queue totals so the pane can label its groups without walking the
     # whole (possibly huge) queue on the client. These overlap: one file may be
     # counted in more than one bucket.
     counts = {
         "delete": db.execute(
-            "SELECT COUNT(*) FROM files WHERE flagged_delete=1").fetchone()[0],
+            f"SELECT COUNT(*) FROM files WHERE flagged_delete=1{vis}", vp).fetchone()[0],
         "box": db.execute(
-            "SELECT COUNT(*) FROM files WHERE COALESCE(unconfirmed_count,0)>0"
+            f"SELECT COUNT(*) FROM files WHERE COALESCE(unconfirmed_count,0)>0{vis}", vp
         ).fetchone()[0],
         "tag": db.execute(
-            f"SELECT COUNT(*) FROM files WHERE {tag_pred}").fetchone()[0],
+            f"SELECT COUNT(*) FROM files WHERE {tag_pred}{vis}", vp).fetchone()[0],
     }
 
     try:
@@ -6026,19 +6160,19 @@ def review_list():
     # through one group at a time.
     queue = (request.args.get("queue", "") or "").lower()
     q_where = {
-        "delete": "WHERE flagged_delete=1",
-        "box": "WHERE COALESCE(unconfirmed_count,0)>0",
-        "tag": f"WHERE {tag_pred}",
+        "delete": f"WHERE flagged_delete=1{vis}",
+        "box": f"WHERE COALESCE(unconfirmed_count,0)>0{vis}",
+        "tag": f"WHERE {tag_pred}{vis}",
     }.get(queue)
     if q_where:
         where = q_where
-        total = db.execute(f"SELECT COUNT(*) FROM files {where}").fetchone()[0]
+        total = db.execute(f"SELECT COUNT(*) FROM files {where}", vp).fetchone()[0]
 
     rows = db.execute(
         "SELECT rel_path, width, height, flagged_delete, flag_reason, tags, "
         "COALESCE(unconfirmed_count,0) AS uc FROM files "
         f"{where} ORDER BY flagged_delete DESC, rel_path LIMIT ? OFFSET ?",
-        (limit, offset)).fetchall()
+        (*vp, limit, offset)).fetchall()
 
     def _tag_uc(raw):
         try:
@@ -6607,7 +6741,8 @@ if __name__=='__main__':
         state["tiers"] = cfg
         save_config()
     tiering.start(MEDIA_DIR, _db, lambda: _last_activity,
-                  load_stored_cfg=_load_tiers_cfg, store_cfg=_store_tiers_cfg)
+                  load_stored_cfg=_load_tiers_cfg, store_cfg=_store_tiers_cfg,
+                  read_document_id=_document_id, ensure_document_id=_ensure_document_id)
 
     # Tiering is priority #1 at boot: an aggressive (no hysteresis, no idle
     # wait, unthrottled) rebalance runs to completion BEFORE the indexer and the

@@ -128,6 +128,10 @@ class Host:
         self.action_targets = {}      # AI-action target -> fn(fp, bgr, meta, action)
         self.ai_action_groups = []    # the editor's AI action picker: see register_ai_actions
         self.gallery_filters = []     # SQL clauses hiding container members from the flat gallery
+        # Access policies (see register_access_policy): per-request visibility
+        # and write rules for files and albums. Core consults them at its
+        # choke points; the ownership module is the first implementation.
+        self.access_policies = []
         # Left-pane content partials a module contributes (e.g. the books shelf),
         # server-rendered into the left column alongside the built-in panes.
         self.left_panes = []
@@ -628,7 +632,82 @@ class Host:
         """
         return self.broker.request(cap_id, role, provider)
 
-    # ── pipeline stages ──────────────────────────────────────────────────
+    def register_access_policy(self, policy):
+        """Add an object deciding, per request, what the current user may see
+        and change. Every method is optional (duck-typed):
+
+          files_clause(column) -> (clauses, params)   SQL on the files table
+                                                       limiting rows to the viewer
+          check_path(rel_path, write) -> bool          may this request resolve
+                                                       (write: modify) a media path
+          albums_clause(alias) -> (clauses, params)   SQL limiting album rows
+          album_level(name) -> 'owner'|'write'|'read'|None
+          album_info(name) -> dict                     merged into each album's
+                                                       /api/albums entry
+          album_event(event, **kw)                     created(name) / deleted(name)
+                                                       / renamed(old, new)
+          upload_folder(folder, form) -> folder        rewrite an upload's target
+        Core applies every registered policy (the most restrictive answer wins).
+        A request outside a Flask context, or with no policy, is unrestricted."""
+        self.access_policies.append(policy)
+
+    def files_clause(self, column="rel_path"):
+        clauses, params = [], []
+        for pol in self.access_policies:
+            fn = getattr(pol, "files_clause", None)
+            if fn:
+                c, p = fn(column)
+                clauses += c; params += p
+        return clauses, params
+
+    def albums_clause(self, alias="a"):
+        clauses, params = [], []
+        for pol in self.access_policies:
+            fn = getattr(pol, "albums_clause", None)
+            if fn:
+                c, p = fn(alias)
+                clauses += c; params += p
+        return clauses, params
+
+    def check_path(self, rel_path, write=False):
+        return all(fn(rel_path, write) for fn in
+                   (getattr(pol, "check_path", None) for pol in self.access_policies) if fn)
+
+    _LEVEL_RANK = {None: 0, "read": 1, "write": 2, "owner": 3}
+
+    def album_level(self, name):
+        """The viewer's level on an album: the lowest any policy grants
+        ('owner' when no policy has an opinion)."""
+        level = "owner"
+        for pol in self.access_policies:
+            fn = getattr(pol, "album_level", None)
+            if fn:
+                lv = fn(name)
+                if self._LEVEL_RANK[lv] < self._LEVEL_RANK[level]:
+                    level = lv
+        return level
+
+    def album_info(self, name):
+        out = {}
+        for pol in self.access_policies:
+            fn = getattr(pol, "album_info", None)
+            if fn:
+                out.update(fn(name) or {})
+        return out
+
+    def album_event(self, event, **kw):
+        for pol in self.access_policies:
+            fn = getattr(pol, "album_event", None)
+            if fn:
+                fn(event, **kw)
+
+    def upload_folder(self, folder, form):
+        for pol in self.access_policies:
+            fn = getattr(pol, "upload_folder", None)
+            if fn:
+                folder = fn(folder, form)
+        return folder
+
     def register_gallery_filter(self, clause):
         """Hide rows from the flat gallery/folders listing: `clause` is a SQL
         condition on the files table (no params), e.g. a comics module hiding
@@ -682,7 +761,6 @@ class Host:
             "editor": editor or {}, "module_id": self._current_module}
         return name
 
-    # ── database tables ──────────────────────────────────────────────────
     def add_table(self, ddl, *, check=None):
         """Declare a DB table this module owns.
 
@@ -734,7 +812,6 @@ class Host:
                     r.update(add)
         return rows
 
-    # ── startup hooks ────────────────────────────────────────────────────
     def on_startup(self, fn):
         """Queue fn() to run once, after the server is set up (in __main__).
 
@@ -744,7 +821,6 @@ class Host:
         """
         self.startup_hooks.append(fn)
 
-    # ── media types ──────────────────────────────────────────────────────
     def register_media_type(self, kind, **spec):
         """Declare a new file kind (extensions, mime, flags) with the core
         media registry. The core then routes uploads / listings / kind()
@@ -766,7 +842,6 @@ class Host:
         from_g = getattr(self.core, "current_user", None)
         return from_g() if from_g else ""
 
-    # ── core events ──────────────────────────────────────────────────────
     def on(self, event, fn):
         """Subscribe fn(**kw) to a core event. Core emits, modules react, and
         the core never has to know which module cares. Current events:

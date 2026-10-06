@@ -50,6 +50,7 @@ def require_feature(feature_key, action=None, fields=(), level="read"):
             u = g.get("user")
             if not u:
                 return jsonify({"error": "authentication required"}), 401
+            g.cim_write = (level == "write")   # is this a mutating endpoint? (access policies)
             if capabilities.capability_denials().get(feature_key) is False:
                 return jsonify({"error": "feature unavailable on this server"}), 503
             if not u.get("is_admin"):

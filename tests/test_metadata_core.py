@@ -98,6 +98,7 @@ def test_write_flag_pose_albums_persist(app):
         assert not m["pose"] and not (m["flag"] or {}).get("delete")
     finally:
         app._purge_file_everywhere("core_flag.jxl")
+        app._db().execute("DELETE FROM albums WHERE name='Trip'"); app._db().commit()   # test_api creates it
         for e in (".jxl", ".xmp"):
             try: os.remove(os.path.splitext(p)[0] + e)
             except OSError: pass

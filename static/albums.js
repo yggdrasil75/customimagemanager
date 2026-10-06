@@ -102,6 +102,8 @@ function albumRow(a) {
 
   acts.append(ren, del);
   d.append(cov, txt, acts);
+  // Modules (ownership: owner badge, share button) decorate the row here.
+  document.dispatchEvent(new CustomEvent('cim:album-row', { detail: { row: d, text: txt, actions: acts, album: a } }));
   return d;
 }
 

@@ -451,6 +451,22 @@ async function tiersRebalance() {
   await fetch('/api/tiers/rebalance', { method: 'POST' });
   refreshTiersStatus();
 }
+async function tiersRecover() {
+  // Plan first, show it, then apply on confirmation.
+  const plan = await fetch('/api/tiers/recover', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                           body: '{}' }).then(r => r.json());
+  if (!plan.success) { alert(plan.error || 'Recovery failed.'); return; }
+  const n = plan.matched.length, amb = plan.ambiguous.length, un = plan.unmatched.length;
+  if (!n) { alert(`Nothing to recover.${amb ? ` ${amb} object(s) match several paths.` : ''}${un ? ` ${un} object(s) match nothing.` : ''}`); return; }
+  const lines = plan.matched.slice(0, 20).map(m => `  ${m.rel_path}  (${m.how})`).join('\n');
+  if (!confirm(`Relink ${n} lost object(s) at their original paths?\n\n${lines}${n > 20 ? '\n  …' : ''}` +
+               `${amb ? `\n\n${amb} ambiguous and ` : '\n\n'}${un} unmatched object(s) stay where they are.`)) return;
+  const done = await fetch('/api/tiers/recover', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                           body: JSON.stringify({ apply: true }) }).then(r => r.json());
+  alert(done.success ? `Relinked ${(done.relinked || []).length} file(s). They will be re-indexed at their original paths.`
+                     : (done.error || 'Recovery failed.'));
+  refreshTiersStatus();
+}
 async function tiersCancel() {
   await fetch('/api/tiers/cancel', { method: 'POST' });
   refreshTiersStatus();

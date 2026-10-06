@@ -651,22 +651,17 @@ def register(host):
             return [], 0, "No matches."
         hits = _relevance_cut(hits)
 
-        # Scope (folder / album) filters the ranked list; ranking order is kept.
-        if folder or album:
+        # Scope (folder / album) and the requester's visibility filter the
+        # ranked list — the same WHERE the grid uses; ranking order is kept.
+        where_sql, vparams, _t, _s = host.core.files_where("", folder, album)
+        if where_sql:
             names = [n for n, _ in hits]
             allowed = set()
             for i in range(0, len(names), 500):
                 chunk = names[i:i + 500]
-                clauses = ["rel_path IN (" + ",".join("?" * len(chunk)) + ")"]
-                params = list(chunk)
-                if album:
-                    clauses.append("rel_path IN (SELECT rel_path FROM album_members WHERE album=?)")
-                    params.append(album)
-                if folder:
-                    clauses.append("rel_path LIKE ?")
-                    params.append(folder.rstrip("/") + "/%")
                 allowed.update(r[0] for r in db.execute(
-                    "SELECT rel_path FROM files WHERE " + " AND ".join(clauses), params))
+                    f"SELECT rel_path FROM files{where_sql} AND rel_path IN ("
+                    + ",".join("?" * len(chunk)) + ")", [*vparams, *chunk]))
             hits = [h for h in hits if h[0] in allowed]
 
         total = len(hits)

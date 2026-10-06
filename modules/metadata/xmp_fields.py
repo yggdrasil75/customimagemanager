@@ -1223,7 +1223,27 @@ MWG_RS_FIELDS   = mwg_fields.build_mwg_rs_fields(XMPField, _IPTC_TYPE_MAP)
 MWG_COLL_FIELDS = mwg_fields.build_mwg_coll_fields(XMPField, _IPTC_TYPE_MAP)
 MWG_KW_FIELDS   = mwg_fields.build_mwg_kw_fields(XMPField, _IPTC_TYPE_MAP)
 
+# ── xmpMM namespace (XMP Media Management) ───────────────────────────────────
+# Identity of the resource across copies / renditions. The app writes
+# DocumentID: a tier object is stored under it so it can always be traced back
+# to the sidecar (and so to its library path) — see tiering.py.
+XMPMM_FIELDS = [
+    XMPField("DocumentID",         TYPE_STRING, writable=True,
+             note="Stable identity of this resource; names its tier object."),
+    XMPField("InstanceID",         TYPE_STRING),
+    XMPField("OriginalDocumentID", TYPE_STRING),
+    XMPField("PreservedFileName",  TYPE_STRING),
+    XMPField("RenditionClass",     TYPE_STRING),
+]
+
 XMP_NAMESPACES = [
+    XMPNamespace(
+        "xmpMM", "XMP Media Management",
+        "Resource identity (document / instance ids) and derivation. "
+        "DocumentID is written by the app and names a file's tier object.",
+        uri="http://ns.adobe.com/xap/1.0/mm/",
+        fields=XMPMM_FIELDS, mapped=True,
+    ),
     XMPNamespace(
         "acdsee", "ACDSee",
         "ACD Systems catalog metadata. Retrieval-only in this project; "

@@ -77,6 +77,8 @@
             class="bg-amber-600 hover:bg-amber-500 px-3 py-1.5 rounded text-sm font-bold">Rebalance now</button>
           <button onclick="tiersCancel()" class="bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded text-sm">Cancel
             run</button>
+          <button onclick="tiersRecover()" title="Relink tier objects that lost their library path (cim-objects/…), matched through the thumbnail cache"
+            class="bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded text-sm">Recover lost objects</button>
         </div>
         <div class="flex gap-2">
           <button onclick="document.getElementById('tiers_modal').classList.add('hidden'); stopTiersPoll()"
