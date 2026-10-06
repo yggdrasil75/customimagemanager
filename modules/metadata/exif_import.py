@@ -21,9 +21,37 @@ try:
 except Exception:                      # pragma: no cover - env without pyexiv2
     pyexiv2 = None
 
+from optional_deps import optional_import
 from . import exif_fields as efields
+imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
 
 log = logging.getLogger("exif_import")
+
+def _jxl_exif_blob(path):
+    """The TIFF payload of a container JXL's Exif box (plain `Exif`, or
+    brotli-packed inside a `brob` box, which is how cjxl stores it), or None.
+    Used when Exiv2's own BMFF reader refuses the file ("invalid memory
+    allocation request" on some jbrd-carrying JPEG transcodes)."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if data[4:8] != b"JXL ":
+        return None
+    pos = 0
+    while pos + 8 <= len(data):
+        size = int.from_bytes(data[pos:pos + 4], "big")
+        typ = data[pos + 4:pos + 8]
+        hdr = 8
+        if size == 1:
+            size = int.from_bytes(data[pos + 8:pos + 16], "big"); hdr = 16
+        elif size == 0:
+            size = len(data) - pos
+        body = data[pos + hdr:pos + size]
+        if typ == b"brob" and body[:4] == b"Exif" and _HAVE_IMAGECODECS:
+            body, typ = imagecodecs.brotli_decode(body[4:]), b"Exif"
+        if typ == b"Exif":
+            return body[4 + int.from_bytes(body[:4], "big"):]   # skip the TIFF-offset field
+        pos += max(size, hdr)
+    return None
 
 def _candidate_paths(filepath):
     """Yield the paths worth trying for EXIF data, most-specific first.
@@ -48,8 +76,17 @@ def _read_raw_exif(filepath):
             with pyexiv2.Image(p) as img:
                 raw = img.read_exif()
         except Exception as e:
-            log.warning(f"pyexiv2 read_exif failed on {p}: {e}")
-            continue
+            # Exiv2 can't open this one; a container JXL still carries its Exif
+            # in a box we can hand to Exiv2 as a bare TIFF.
+            try:
+                blob = _jxl_exif_blob(p) if p.lower().endswith(".jxl") else None
+                raw = pyexiv2.ImageData(blob).read_exif() if blob else None
+            except Exception as e2:
+                blob, raw = None, None
+                log.debug(f"jxl Exif box fallback failed on {p}: {e2}")
+            if not raw:
+                log.warning(f"pyexiv2 read_exif failed on {p}: {e}")
+                continue
         if not raw:
             continue
         # Candidates come image-first, sidecars after, and later ones win:

@@ -97,3 +97,28 @@ def test_xmp_sidecar_overwrites_exif_namespace(client, host, upload):
         x = img.read_xmp()
     assert x["Xmp.exif.GPSLatitude"].startswith("20,") and x["Xmp.exif.ExposureTime"] == "1/8"
     assert x["Xmp.dc.source"] == "x"
+
+def test_jxl_exif_box_fallback(tmp_path, monkeypatch):
+    """A container JXL whose Exif Exiv2 refuses to parse still yields its
+    Exif through the box reader (brotli-packed `brob` box, as cjxl writes)."""
+    import shutil, subprocess
+    import numpy as np, cv2, pyexiv2
+    from modules.metadata import exif_import
+    if shutil.which("cjxl") is None:
+        pytest.skip("cjxl not installed")
+    jpg, jxl = str(tmp_path / "e.jpg"), str(tmp_path / "e.jxl")
+    cv2.imwrite(jpg, np.zeros((16, 16, 3), np.uint8))
+    with pyexiv2.Image(jpg) as im:
+        im.modify_exif({"Exif.Image.Make": "LineCam", "Exif.Photo.DateTimeOriginal": "2026:08:13 06:15:08"})
+    subprocess.run(["cjxl", jpg, jxl, "--lossless_jpeg=1"], check=True, capture_output=True)
+    assert exif_import._jxl_exif_blob(jxl)[:2] in (b"II", b"MM")
+    real = pyexiv2.Image
+    class Refuse(real):
+        def __init__(self, path, *a, **k):
+            if path.endswith(".jxl"):
+                raise RuntimeError("invalid memory allocation request")
+            super().__init__(path, *a, **k)
+    monkeypatch.setattr(exif_import.pyexiv2, "Image", Refuse)
+    raw, src = exif_import._read_raw_exif(jxl)
+    assert src == jxl and raw["Exif.Image.Make"] == "LineCam"
+    assert raw["Exif.Photo.DateTimeOriginal"] == "2026:08:13 06:15:08"
