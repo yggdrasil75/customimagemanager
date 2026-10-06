@@ -26,7 +26,7 @@
 (function () {
   "use strict";
 
-  const S = { owner: null, metaMode: "simple", albumsStrip: false, panes: ["gallery"],
+  const S = { owner: null, metaMode: "simple", albumsStrip: false, panes: ["gallery"], peopleCount: 0,
               metaOpen: false, albums: [], albumsGen: 0, built: false };
   const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -64,7 +64,7 @@
     aside.id = "sv_side";
     aside.className = "sv-side w-80 flex-shrink-0 flex-col bg-gray-900 border-l border-gray-700 overflow-hidden";
     aside.innerHTML = `
-      <div class="px-3 py-2 border-b border-gray-800 flex-shrink-0" data-feature="annot.boxes">
+      <div id="sv_people_section" class="px-3 py-2 border-b border-gray-800 flex-shrink-0" data-feature="annot.boxes">
         <div class="text-xs uppercase tracking-wider font-bold text-gray-400 mb-1">People in photo</div>
         <div id="sv_people" class="flex flex-wrap gap-1.5 text-sm"></div>
       </div>
@@ -125,6 +125,7 @@
     $("sv_albums_strip")?.classList.add("hidden");
     if (popoutIsOpen() && typeof closePopout === "function") closePopout();
     refreshMedia();
+    syncSide();
   }
 
   function wantTimeline() {
@@ -214,6 +215,17 @@
     $("sv_meta_host")?.classList.toggle("hidden", !(S.metaOpen && S.metaMode === "controls"));
     if (S.metaOpen && S.metaMode === "controls" && popoutIsOpen() && active()) moveControlsPaneIn();
     else restoreControlsPane();
+    syncSide();
+  }
+  // The side panel only takes room when it has something to show: Meta is on,
+  // or the photo has people (and the user may see them). Otherwise the
+  // picture gets the full width; the canvas refits on its own (ResizeObserver
+  // on #popout_canvas_wrap).
+  function syncSide() {
+    const sec = $("sv_people_section");
+    const hasPeople = !!sec && S.peopleCount > 0 && !sec.classList.contains("cim-feature-hidden");
+    if (sec) sec.classList.toggle("hidden", !hasPeople);
+    $("sv_side")?.classList.toggle("sv-side-on", active() && (S.metaOpen || hasPeople));
   }
   function toggleMeta() {
     if (!active()) return;
@@ -258,6 +270,7 @@
     const people = $("sv_people");
     if (people) {
       const list = peopleOf(regions);
+      S.peopleCount = list.length;
       people.innerHTML = list.length
         ? list.map(p => `<span class="sv-person${p.name ? "" : " unknown"}" data-ridx="${p.idx}">${p.name ? esc(p.name) : "Unknown person"}</span>`).join("")
         : `<span class="text-gray-500 text-xs">No one tagged</span>`;
@@ -284,6 +297,7 @@
       if (al) al.innerHTML = names.length ? names.map(n => `<span class="sv-tag">${esc(n)}</span>`).join("") : `<span class="text-gray-500 text-xs">Not in an album</span>`;
     }
     const f = features(); if (f) f($("sv_side"));
+    syncSide();
   }
 
   let _hl = null;

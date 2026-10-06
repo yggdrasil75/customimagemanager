@@ -4,7 +4,8 @@
    gating (.cim-feature-hidden) always wins. */
 .sv-nav, .sv-side, .sv-arrow { display: none; }
 #popout_modal.sv-active .sv-nav { display: flex; }
-#popout_modal.sv-active .sv-side { display: flex; }
+/* only when it has content: Meta open, or people in the photo (simple_viewer.js syncSide) */
+#popout_modal.sv-active .sv-side.sv-side-on { display: flex; }
 #popout_modal.sv-active .sv-arrow { display: block; }
 #popout_modal.sv-active #popout_hint { display: none !important; }
 .sv-btn { padding: 6px 14px; font-size: 14px; }

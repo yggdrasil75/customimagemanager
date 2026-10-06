@@ -113,3 +113,33 @@ test("switching simple -> advanced closes the viewer and restores", { skip }, as
   assert.ok(b.document.getElementById("popout_modal").classList.contains("hidden"));
   assert.equal(b.document.body.dataset.layout, "advanced");
 });
+test("side panel shows only with people or Meta open", { skip }, async () => {
+  const b = await boot("simple");
+  const side = () => b.document.getElementById("sv_side").classList.contains("sv-side-on");
+  // a photo with people: panel on, people section shown
+  b.run(`galleryFiles=[{filename:"a.jxl"},{filename:"b.jxl"}]`);
+  await b.run(`selectFile("a.jxl")`);
+  await b.tick(10);
+  assert.ok(side());
+  assert.ok(!b.document.getElementById("sv_people_section").classList.contains("hidden"));
+  // no people: panel off until Meta is opened
+  b.api.on("POST /api/metadata", c => c.body.action === "read"
+    ? { success: true, metadata: { tags: [], description: "", regions: [], albums: [] } } : { success: true });
+  await b.run(`selectFile("b.jxl")`);
+  await b.tick(10);
+  assert.ok(!side());
+  b.run(`CIMSimpleViewer.toggleMeta()`);
+  assert.ok(side());
+  assert.ok(b.document.getElementById("sv_people_section").classList.contains("hidden"));
+  b.run(`CIMSimpleViewer.toggleMeta()`);
+  assert.ok(!side());
+});
+
+test("people hidden by permission don't keep the panel open", { skip }, async () => {
+  const b = await boot("simple");
+  b.run(`CIMAuth.user.features = Object.assign({}, CIMAuth.user.features, {"annot.boxes": 0});`);
+  b.run(`galleryFiles=[{filename:"a.jxl"}]`);
+  await b.run(`selectFile("a.jxl")`);
+  await b.tick(10);
+  assert.ok(!b.document.getElementById("sv_side").classList.contains("sv-side-on"));
+});
