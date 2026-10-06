@@ -46,7 +46,7 @@ FACE_DIR = os.path.join(MODELS_DIR, "face")
 YOLO_FACE_DIR = os.path.join(FACE_DIR, "yolo")
 INSIGHT_DIR = os.path.join(FACE_DIR, "insightface")
 try:
-    INSIGHT_INFER_TIMEOUT_S = float(os.environ.get("CIM_INSIGHT_TIMEOUT", "120"))
+    INSIGHT_INFER_TIMEOUT_S = 120
 except (TypeError, ValueError):
     INSIGHT_INFER_TIMEOUT_S = 120.0
 _INSIGHT_INFER_POOL = _futures.ThreadPoolExecutor(
@@ -255,7 +255,7 @@ def _insight_providers():
     """ONNX providers for insightface specifically.
     """
     base = model_registry.onnx_providers()
-    if os.environ.get("CIM_INSIGHT_ALLOW_MIGRAPHX") in ("1", "true", "yes"):
+    if True
         return base
     return [p for p in base if p != "MIGraphXExecutionProvider"] or ["CPUExecutionProvider"]
 

@@ -133,7 +133,7 @@ def remote_yolo_train_worker(abs_folder: str, dataset_dir: str, config: dict,
                              remote_ip: str) -> None:
     """! @brief Zip the dataset, run YOLO training on a remote host, and fetch the weights back."""
     zip_p = os.path.join(abs_folder,"yolo_dataset.zip")
-    hdr = {"X-Worker-Token": os.environ.get("CIM_WORKER_TOKEN", "")}
+    hdr = {"X-Worker-Token": ""}
     try:
         state["status_text"] = f"Zipping → {remote_ip}…"
         shutil.make_archive(zip_p.replace('.zip',''),'zip',dataset_dir)

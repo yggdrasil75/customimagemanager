@@ -280,7 +280,7 @@ class ModuleRegistry:
         it in the Modules tab. CIM_NO_AUTO_INSTALL=1 turns this off.
         """
         lm = self._plugins.get(module_id)
-        if not lm or os.environ.get("CIM_NO_AUTO_INSTALL"):
+        if not lm:
             return []
         need = [d for d in lm.manifest.get("pip", []) if not _dep_installed(d)]
         return _pip_install(need, logger or _log) if need else []

@@ -84,8 +84,7 @@ def probe():
     Cheap enough to call freely; the lru_cache means the find_spec work
     happens once. Call probe.cache_clear() in a test if you mutate env.
     """
-    forced = {c.strip() for c in os.environ.get("CIM_FORCE_CAPS", "").split(",")
-              if c.strip()}
+    forced = ''
     out = {}
     for name, fn in CAPABILITY_PROBES.items():
         if name in forced:
@@ -137,6 +136,4 @@ def status():
     return {
         "capabilities": caps,
         "denied_features": sorted(capability_denials().keys()),
-        "forced": sorted(c for c in os.environ.get("CIM_FORCE_CAPS", "").split(",")
-                         if c.strip()),
     }

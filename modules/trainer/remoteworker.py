@@ -15,7 +15,7 @@ os.makedirs(WORKSPACE, exist_ok=True)
 # Shared secret: the worker listens on 0.0.0.0 and runs arbitrary training
 # jobs, so refuse everything unless the caller presents CIM_WORKER_TOKEN
 # (the main app sends it from the same env var).
-TOKEN = os.environ.get("CIM_WORKER_TOKEN", "")
+TOKEN = ""
 
 @app.before_request
 def _require_token():

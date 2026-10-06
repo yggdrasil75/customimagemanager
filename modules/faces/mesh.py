@@ -191,9 +191,7 @@ def _load_deep3d():
 
 _BFM_DIR = os.path.join(MODELS_DIR, "face3d")
 _BFM_PATH = os.path.join(_BFM_DIR, "BFM.mat")
-_BFM_URL = os.environ.get(
-    "CIM_BFM_URL",
-    "https://github.com/peterjiang4648/BFM_model/releases/download/1.0/BFM.mat")
+_BFM_URL = "https://github.com/peterjiang4648/BFM_model/releases/download/1.0/BFM.mat"
 
 
 def _fetch_bfm() -> bool:

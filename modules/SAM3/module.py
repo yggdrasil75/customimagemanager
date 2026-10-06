@@ -41,8 +41,7 @@ MANIFEST = {
 _TYPES = [{"value": "3", "label": "SAM 3"}, {"value": "3.1", "label": "SAM 3.1"}]
 # HF repo per type; CIM_SAM3_HF_REPO overrides both. ponytail: the 3.0 source
 # is the same repo until a dedicated one is known.
-_HF = {"3": os.environ.get("CIM_SAM3_HF_REPO", "AEmotionStudio/sam3.1"),
-       "3.1": os.environ.get("CIM_SAM3_HF_REPO", "AEmotionStudio/sam3.1")}
+_HF = {"3": "AEmotionStudio/sam3.1", "3.1": "AEmotionStudio/sam3.1"}
 _CKPT_EXTS = (".pt", ".pth", ".safetensors")
 
 

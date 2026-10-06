@@ -52,8 +52,7 @@ except Exception:
 # (models/<backend>/<chore>/) and every library cache it can redirect (below).
 # CIM_MODELS_DIR moves the whole tree, e.g. onto the big model drive: nothing
 # is supposed to land in a hidden ~/.cache on the OS disk.
-MODELS_DIR = (os.environ.get("CIM_MODELS_DIR") or "").strip() or \
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
 def model_dir(backend, chore):
     """models/<backend>/<chore>/ — where every backend keeps its weights for a
@@ -129,9 +128,6 @@ def _torch_hip_version():
 
 
 def _detect_backend():
-    override = (os.environ.get("CIM_DEVICE") or "").strip().lower()
-    if override in ("cpu",):
-        return "cpu"
     if torch is not None:
         try:
             if torch.cuda.is_available():
@@ -147,9 +143,6 @@ def backend_reason():
     """One-line explanation of why backend() decided what it did, for logs and
     the UI. Every CPU fallback in _detect_backend is silent and they look
     identical from outside, so name the branch that actually fired."""
-    override = (os.environ.get("CIM_DEVICE") or "").strip().lower()
-    if override in ("cpu",):
-        return "CPU: forced by CIM_DEVICE=cpu"
     if torch is None:
         return f"CPU: torch did not import ({_TORCH_IMPORT_ERROR or 'unknown'})"
     try:
@@ -184,7 +177,7 @@ def log_backend(log):
     emit = log.error if cpu else log.info
     emit("gpu: %s (%s)", "running on CPU" if cpu else f"backend={backend()}",
          backend_reason())
-    for k in ("CIM_DEVICE", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
+    for k in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
               "HSA_OVERRIDE_GFX_VERSION", "CUDA_VISIBLE_DEVICES"):
         v = os.environ.get(k)
         if v:
