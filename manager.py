@@ -6222,6 +6222,56 @@ def get_tailwind():
     if not os.path.exists('static/tailwindcss.js'):
         return jsonify({"error":"not found"}),404
     return open('static/tailwindcss.js').read(),200,{'Content-Type':'application/javascript'}
+
+# ── Precompiled Tailwind ─────────────────────────────────────────────────────
+# The Play-CDN script (/tailwind) is a JIT compiler that scans the DOM in the
+# browser on EVERY page load, which is why the panes/tabs pop in late after a
+# reload. If the Tailwind standalone CLI is available (tools/tailwindcss[.exe]
+# or on PATH; no node needed) we compile the stylesheet once at startup over
+# every template + script, and app.html links the static CSS instead. Without
+# the CLI, or if it fails, the page falls back to the JIT script as before.
+_TAILWIND_CSS = os.path.join("static", "tailwind.css")
+_TAILWIND_CLI = next((p for p in ("tools/tailwindcss.exe", "tools/tailwindcss",
+                 shutil.which("tailwindcss") or "") if p and os.path.exists(p)), None)
+
+def _build_tailwind():
+    if not _TAILWIND_CLI:
+        access_logger.info("tailwind: no standalone CLI found (tools/tailwindcss); "
+                           "using in-browser JIT")
+        return False
+    here = os.path.dirname(os.path.abspath(__file__))
+    content = ",".join(os.path.join(here, g) for g in (
+        "templates/**/*.html", "static/*.js", "modules/*/templates/*.html",
+        "modules/*/static/*.js"))
+    with tempfile.NamedTemporaryFile("w", suffix=".css", delete=False) as f:
+        f.write("@tailwind base;\n@tailwind components;\n@tailwind utilities;\n")
+        src = f.name
+    t0 = time.time()
+    try:
+        r = subprocess.run([_TAILWIND_CLI, "-i", src, "-o", _TAILWIND_CSS + ".tmp",
+                            "--content", content, "--minify"],
+                           capture_output=True, text=True, cwd=here, timeout=300)
+        if r.returncode != 0 or not os.path.getsize(_TAILWIND_CSS + ".tmp"):
+            access_logger.warning(f"tailwind: build failed, using JIT: {r.stderr.strip()[-400:]}")
+            return False
+        os.replace(_TAILWIND_CSS + ".tmp", _TAILWIND_CSS)
+        access_logger.info(f"tailwind: compiled {_TAILWIND_CSS} in {time.time()-t0:.1f}s")
+        return True
+    except Exception as e:
+        access_logger.warning(f"tailwind: build error, using JIT: {e}")
+        return False
+    finally:
+        os.unlink(src)
+        try: os.unlink(_TAILWIND_CSS + ".tmp")
+        except OSError: pass
+
+@app.context_processor
+def _inject_tailwind():
+    # Version stamp = mtime so a rebuild busts the browser cache.
+    try:
+        return {"tailwind_css": int(os.path.getmtime(_TAILWIND_CSS))}
+    except OSError:
+        return {"tailwind_css": None}
 # ── Pluggable module system ───────────────────────────────────────────────--
 # Everything above this line is the application core. Below, third-party
 # modules discovered in modules/ get their register(host) called so they can
@@ -6390,11 +6440,8 @@ if __name__=='__main__':
     model_registry.log_backend(access_logger)
     model_registry.standardize_onnx(access_logger)   # every ORT session (rtmlib, insightface, ultralytics .onnx…) → onnx_providers()
 
-    access_logger.info("Starting background indexer…")
-    threading.Thread(target=_build_index_background, daemon=True).start()
-
-    access_logger.info("Registering background sources (autotag, face, upload)…")
-    _start_upload_workers()
+    access_logger.info("Compiling Tailwind stylesheet…")
+    _build_tailwind()
     access_logger.info("Starting storage tiering worker…")
     # Persist tier config inside the shared app_config.json (state["tiers"]) via
     # save_config, same as every other setting — not a standalone tiers_config.json.
@@ -6405,6 +6452,23 @@ if __name__=='__main__':
         save_config()
     tiering.start(MEDIA_DIR, _db, lambda: _last_activity,
                   load_stored_cfg=_load_tiers_cfg, store_cfg=_store_tiers_cfg)
+
+    # Tiering is priority #1 at boot: an aggressive (no hysteresis, no idle
+    # wait, unthrottled) rebalance runs to completion BEFORE the indexer and the
+    # upload workers start, so nothing new lands while files are still on the
+    # wrong tier. The HTTP server comes up meanwhile; uploads just queue.
+    def _boot_tiering_then_workers():
+        access_logger.info("Boot rebalance: placing library on the right tiers…")
+        try:
+            tiering.rebalance(block=True, aggressive=True)
+        except Exception as e:
+            access_logger.error(f"boot rebalance failed: {e}")
+        access_logger.info(f"Boot rebalance done: {tiering._state['run']['phase']}")
+        access_logger.info("Starting background indexer…")
+        threading.Thread(target=_build_index_background, daemon=True).start()
+        access_logger.info("Registering background sources (autotag, face, upload)…")
+        _start_upload_workers()
+    threading.Thread(target=_boot_tiering_then_workers, daemon=True).start()
     access_logger.info("Starting background book indexer…")
     # Fire module startup hooks now that the server and thread manager are up.
     access_logger.info("Running module startup hooks…")

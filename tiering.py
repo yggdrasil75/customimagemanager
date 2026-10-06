@@ -242,8 +242,9 @@ def _video_floor_tier(bitrate_mbps, cfg):
             return i
     return 0
 
-def plan(db=None):
-    """Return (moves, tier_stats). moves = [{rel, from, to, size}]."""
+def plan(db=None, aggressive=False):
+    """Return (moves, tier_stats). moves = [{rel, from, to, size}].
+    aggressive=True ignores hysteresis: every file not on its target tier moves."""
     cfg = _state["cfg"] or load_cfg()
     tiers = cfg["tiers"]
     if not cfg["enabled"] or not tiers:
@@ -303,7 +304,7 @@ def plan(db=None):
         # untiered files (cur None) always get placed; tiered files only move
         # if the correction is worth it (their tier is meaningfully off-budget
         # or a video sits on a tier too slow for it)
-        if cur is not None:
+        if cur is not None and not aggressive:
             too_slow = (f["kind"] == "video" and cur > _video_floor_tier(f["bitrate"], cfg))
             actual_used = _tier_usage_bytes(cur, cfg)
             off_budget = actual_used > budget[cur] * (1 + hyst)
@@ -373,7 +374,7 @@ def _dest_object_path(tier_path, rel):
 
 def _throttled_copy(src, dst, mbps):
     chunk = 4 * 1024 * 1024
-    budget_per_sec = max(1.0, mbps) * 1e6
+    budget_per_sec = max(1.0, mbps) * 1e6 if mbps else float("inf")
     with open(src, "rb") as fi, open(dst, "wb") as fo:
         t0, sent = time.time(), 0
         while True:
@@ -389,7 +390,7 @@ def _throttled_copy(src, dst, mbps):
         fo.flush(); os.fsync(fo.fileno())
     shutil.copystat(src, dst, follow_symlinks=True)
 
-def _execute_move(mv, cfg):
+def _execute_move(mv, cfg, mbps=None):
     media_dir = _state["media_dir"]
     link_path = os.path.join(media_dir, mv["rel"])
     if not os.path.exists(link_path):
@@ -398,7 +399,7 @@ def _execute_move(mv, cfg):
     dst = _dest_object_path(cfg["tiers"][mv["to"]]["path"], mv["rel"])
     tmp = dst + ".part"
     try:
-        _throttled_copy(src_real, tmp, cfg["throttle_mbps"])
+        _throttled_copy(src_real, tmp, cfg["throttle_mbps"] if mbps is None else mbps)
         if os.stat(tmp).st_size != os.stat(src_real).st_size:
             raise IOError("size mismatch after copy")
         os.replace(tmp, dst)
@@ -449,8 +450,10 @@ def _idle():
     ga = _state["get_last_activity"]
     return (time.time() - ga()) >= cfg.get("idle_sec", 120) if ga else True
 
-def rebalance(block=False):
-    """Kick a rebalance. Returns immediately unless block=True."""
+def rebalance(block=False, aggressive=False):
+    """Kick a rebalance. Returns immediately unless block=True.
+    aggressive=True: no hysteresis, no idle wait, no bandwidth throttle —
+    used at boot so the library is on the right tiers before anything else runs."""
     def work():
         run = _state["run"]
         with _state["lock"]:
@@ -471,15 +474,17 @@ def rebalance(block=False):
                 os.symlink(__file__, probe); os.remove(probe)
             except OSError as e:
                 run["phase"] = f"error: symlinks unavailable ({e})"; return
-            moves, _ = plan()
+            moves, _ = plan(aggressive=aggressive)
             run["planned"] = len(moves)
             run["phase"] = "moving"
+            if aggressive:
+                log.info(f"boot rebalance: {len(moves)} moves, unthrottled")
             for mv in moves:
                 if run["cancel"]:
                     run["phase"] = "cancelled"; break
-                while not _idle() and not run["cancel"]:
+                while not aggressive and not _idle() and not run["cancel"]:
                     time.sleep(5)
-                if _execute_move(mv, cfg):
+                if _execute_move(mv, cfg, mbps=0 if aggressive else None):
                     run["done"] += 1
                     run["moved_bytes"] += mv["size"]
                 else:

@@ -73,6 +73,14 @@ get() { [ -s "$2" ] && return 0; mkdir -p "$(dirname "$2")"; t=$(mktemp)
     curl -fsSL "$1" -o "$t" 2>/dev/null && [ -s "$t" ] && mv "$t" "$2" \
         || { rm -f "$t"; echo "warn: download failed: $1" >&2; }; }
 get https://cdn.tailwindcss.com/3.4.17 static/tailwindcss.js
+# Tailwind standalone CLI (no node): lets manager.py precompile the stylesheet
+# at startup instead of JIT-compiling it in the browser on every page load.
+case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64)  TW=tailwindcss-linux-x64 ;;   Linux-aarch64) TW=tailwindcss-linux-arm64 ;;
+    Darwin-x86_64) TW=tailwindcss-macos-x64 ;;   Darwin-arm64)  TW=tailwindcss-macos-arm64 ;;
+    *) TW= ;;
+esac
+[ -n "$TW" ] && { get "https://github.com/tailwindlabs/tailwindcss/releases/download/v3.4.17/$TW" tools/tailwindcss; chmod +x tools/tailwindcss 2>/dev/null; }
 for f in build/three.min.js examples/js/loaders/OBJLoader.js examples/js/controls/OrbitControls.js; do
     get "https://unpkg.com/three@0.137.5/$f" "static/vendor/$(basename "$f")"
 done

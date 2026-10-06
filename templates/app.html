@@ -4,7 +4,8 @@
 <head>
   <meta charset="UTF-8">
   <title>Media Library</title>
-  <script src="/tailwind"></script>
+  {% if tailwind_css %}<link rel="stylesheet" href="/static/tailwind.css?v={{ tailwind_css }}">
+  {% else %}<script src="/tailwind"></script>{% endif %}
   <link rel="stylesheet" href="/static/app.css">
 </head>
 

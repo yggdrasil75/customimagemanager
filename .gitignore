@@ -22,3 +22,5 @@ tests/js/_api_snapshot.json
 tests/js/_module_assets.json
 android/keystore/
 imports/
+static/tailwind.css
+tools/
