@@ -403,3 +403,20 @@ canvas {
   line-height: 1.2
 }
 .iqa-stars-manual { color: #fbbf24; }   /* a rating you set: amber */
+
+/* A gallery view other than the grid is showing: the grid's own chrome
+   (dropzone, pager, scroll) steps aside. Separate from .hidden so features.js
+   and the album banner keep owning that class. */
+.view-hidden {
+  display: none !important
+}
+
+.gview-btn {
+  padding-top: 2px;
+  padding-bottom: 2px;
+  border-left: 1px solid #4b5563
+}
+
+.gview-btn:first-child {
+  border-left: 0
+}

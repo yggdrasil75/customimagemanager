@@ -106,7 +106,8 @@ module registers: `read_image`,
 `thumb_drop`, `delete_file_row`, `purge_file_everywhere`, `audit`, `tiering`,
 `detect_boxes`, `merge_regions`, `folder_scope_clause`, `save_classes`,
 `upload_spool_dir`, `upload_workers_wake`, `api_upload`, `auth`, `features`,
-`object_grouping`. Pure helpers live in `common` (import it); an LLM call is
+`object_grouping`, `files_where` (the gallery's WHERE for a `q` / folder /
+album: `(where_sql, params, text, structured)`, so a view lists what the grid would). Pure helpers live in `common` (import it); an LLM call is
 the `llm` service, person detection the `people` service's `run_person`.
 
 `host.media` — the media-type registry (`kind(path)`, `is_video`, …) plus
@@ -288,6 +289,16 @@ Assets are served at `/modules/<id>/static/<file>` and injected on page load.
   pairs with `host.register_left_pane`; a module that takes over the centre
   (a reader, a person's mesh) pairs `host.register_centre_pane` with
   `registerMediaMode({id, centreId, controlsTab})` and calls `setMediaMode(id)`.
+- **Gallery views**: `registerGalleryView({id, label, title, feature, mount(host, ctx),
+  refresh(ctx), unmount()})` adds a button to the gallery's view switcher next
+  to the search box (Grid is built in). While a view is active the grid's
+  dropzone, pager and scroll are hidden and the view owns `#gallery_view_host`;
+  `ctx` is `galleryQuery()` → `{q, folder, album}`, and a search / folder /
+  album change calls `refresh(ctx)` instead of reloading the grid. Tiles with
+  class `gallery-item` + `data-filename` that call `handleGalleryClick(e, f)`
+  share the grid's selection, bulk bar and current-file ring; set
+  `galleryFiles` to what's on screen for shift-range. `?view=<id>` restores it
+  on load. See `timeline/`.
 - **Canvas overlays**: `registerCanvasOverlay(fn)`.
 - **Per-file state**: `registerFileMetaHook((meta, filename) => …)` runs
   every time the viewer loads a file — keep your state in your own module

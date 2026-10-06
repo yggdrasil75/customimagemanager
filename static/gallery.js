@@ -1,4 +1,3 @@
-
 async function loadFolders(){
   try{
     const d=await fetch('/api/folders').then(r=>r.json());
@@ -182,9 +181,81 @@ document.addEventListener('click',e=>{
   }
 });
 
+// ── Gallery views ──────────────────────────────────────────────────────────
+// The grid is one view of the gallery's result set; modules add others
+// (timeline, …) with registerGalleryView({id, label, title, feature, mount,
+// refresh, unmount}):
+//   mount(host, ctx)   build the view inside `host` (#gallery_view_host)
+//   refresh(ctx)       the search / folder / album changed (loadGallery)
+//   unmount()          leaving the view; host is emptied by the core
+// ctx = galleryQuery() → {q, folder, album}. Tiles that carry class
+// "gallery-item" + data-filename get the grid's selection/current-file styling
+// from refreshSelectionUI; handleGalleryClick gives them ctrl/shift select.
+// A view that sets galleryFiles to what it shows gets shift-range for free.
+window._galleryViews = window._galleryViews || {};
+let galleryView = 'grid';
+let _wantedGalleryView = new URLSearchParams(location.search).get('view') || 'grid';
+
+function galleryQuery(){
+  const album = (typeof galleryModalMode!=='undefined' && galleryModalMode==='album' && currentAlbum) ? currentAlbum : '';
+  return {q: currentSearch, folder: currentFolder, album};
+}
+
+function _renderGalleryViewSwitch(){
+  const sw=document.getElementById('gallery_view_switch');
+  if(!sw) return;
+  for(const id in window._galleryViews){
+    if(sw.querySelector(`[data-gview="${id}"]`)) continue;
+    const v=window._galleryViews[id];
+    const b=document.createElement('button');
+    b.type='button'; b.dataset.gview=id; b.className='gview-btn px-2';
+    b.title=v.title||v.label||id; b.textContent=v.label||id;
+    if(v.feature) b.setAttribute('data-feature', v.feature);
+    b.addEventListener('click',()=>setGalleryView(id));
+    sw.appendChild(b);
+  }
+  sw.classList.toggle('hidden', Object.keys(window._galleryViews).length===0);
+  sw.querySelectorAll('[data-gview]').forEach(b=>{
+    const on=b.dataset.gview===galleryView;
+    b.classList.toggle('bg-blue-600', on); b.classList.toggle('text-white', on);
+    b.classList.toggle('bg-gray-700', !on); b.classList.toggle('text-gray-300', !on);
+  });
+  if(window.applyFeatureVisibility) applyFeatureVisibility(sw);
+}
+
+function registerGalleryView(spec){
+  if(!spec || !spec.id || spec.id==='grid') return;
+  window._galleryViews[spec.id]=spec;
+  _renderGalleryViewSwitch();
+  if(_wantedGalleryView===spec.id && galleryView!==spec.id) setGalleryView(spec.id);
+}
+window.registerGalleryView=registerGalleryView;
+
+function setGalleryView(id){
+  if(id!=='grid' && !window._galleryViews[id]) id='grid';
+  _wantedGalleryView=id;
+  if(id===galleryView){ _renderGalleryViewSwitch(); return; }
+  const host=document.getElementById('gallery_view_host');
+  const prev=window._galleryViews[galleryView];
+  if(prev && prev.unmount){ try{ prev.unmount(); }catch(e){ console.error(e); } }
+  if(host) host.innerHTML='';
+  galleryView=id;
+  const grid=(id==='grid');
+  ['gallery_pager_bar','gallery_scroll','dropzone'].forEach(eid=>
+    document.getElementById(eid)?.classList.toggle('view-hidden', !grid));
+  host?.classList.toggle('hidden', grid);
+  _renderGalleryViewSwitch();
+  if(grid){ loadGallery(); return; }
+  syncUrl();
+  const v=window._galleryViews[id];
+  try{ v.mount(host, galleryQuery()); }catch(e){ console.error(id+' mount', e); }
+}
+window.setGalleryView=setGalleryView;
+
 function syncUrl(){
   const p=new URLSearchParams();
   if(currentPage) p.set('page',currentPage);
+  if(typeof galleryView!=='undefined' && galleryView!=='grid') p.set('view',galleryView);
   if(currentSearch) p.set('q',currentSearch);
   if(currentFolder) p.set('folder',currentFolder);
   // Preserve ?tab= — this rebuild used to drop it, so a refresh always came
@@ -198,6 +269,12 @@ function syncUrl(){
 
 async function loadGallery(){
   syncUrl();
+  if(galleryView!=='grid'){
+    // A module view owns the result set: hand it the new scope instead.
+    const v=window._galleryViews[galleryView];
+    if(v && v.refresh){ try{ v.refresh(galleryQuery()); }catch(e){ console.error(e); } }
+    return;
+  }
   const params=new URLSearchParams({page:currentPage,q:currentSearch,folder:currentFolder});
   // When the gallery modal was opened from an album, scope the listing to that
   // album's members. The server ANDs this with the normal search/folder terms,

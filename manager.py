@@ -6259,6 +6259,7 @@ _core_api = SimpleNamespace(
     ingest_inline=_process_spooled_inline, enqueue_spooled_upload=_enqueue_spooled_upload,
     file_albums=_file_albums, set_file_albums=_set_file_albums, delete_file=_delete_file,
     get_file_row=_get_file_row, thumb_bytes=thumb_bytes,
+    files_where=_files_where,
 )
 
 module_host = modules.host.Host(

@@ -60,6 +60,13 @@
           </div>
         </div>
         <span data-ext-area="gallery_tools" class="contents"></span>
+        <!-- View switcher: Grid is built in; modules add views with
+             registerGalleryView (timeline, …). Hidden while only Grid exists. -->
+        <div id="gallery_view_switch"
+          class="hidden flex rounded border border-gray-600 overflow-hidden flex-shrink-0 text-sm">
+          <button type="button" data-gview="grid" onclick="setGalleryView('grid')" title="Grid"
+            class="gview-btn px-2">▦</button>
+        </div>
       </div>
 
       <!-- album-mode banner: shown when the Albums tab scoped the grid to one album -->
@@ -120,7 +127,7 @@
       </div>
 
       <!-- Pagination bar -->
-      <div class="flex items-center gap-2 px-4 py-2 flex-shrink-0 text-xs text-gray-400">
+      <div id="gallery_pager_bar" class="flex items-center gap-2 px-4 py-2 flex-shrink-0 text-xs text-gray-400">
         <button id="btn_prev" onclick="changePage(-1)"
           class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded disabled:opacity-30">◀ Prev</button>
         <span id="page_info">Page 1</span>
@@ -135,4 +142,9 @@
       <div class="flex-1 overflow-y-auto px-4 pb-2" id="gallery_scroll">
         <div id="gallery_grid" class="masonry"></div>
       </div>
+
+      <!-- Non-grid gallery views mount here; the grid's dropzone, pager and
+           scroll are hidden while one is active. Same search / folder / album
+           scope, same selection set and bulk bar. -->
+      <div id="gallery_view_host" class="hidden flex-1 min-h-0 flex flex-col overflow-hidden"></div>
     </div>
