@@ -313,6 +313,74 @@ Assets are served at `/modules/<id>/static/<file>` and injected on page load.
   `gallery_bulk`, `gallery_tools`, `description_tools`, `comic_tools`,
   `ai_tooling_links`, `controls_tabs`.
 
+## Themes
+
+Theming is core (`modules/theming`, always on); every theme is a module. There are two kinds, and exactly one of each is active at a time:
+
+- **functional** — what the interface shows and how it is laid out: which panes exist, how a picture opens, how big things are.
+- **colorings** — what colour it is: a palette, nothing else.
+
+Users pick their own pair in the header / Settings → General (saved to their account; it needs the `theme.choose` permission at write level, otherwise they get the admin defaults from Settings → General → "Default interface" / "Default colours"). The core sets `body[data-functional="<id>"]` and `body[data-colorings="<id>"]`, re-applies feature visibility, and fires `cim:theme` on `window`. A theme module keys its CSS and JS off those.
+
+### Registering a theme
+
+Depend on `theming`, register with its service, and ship your assets as usual:
+
+```python
+MANIFEST = {"id": "theme_kiosk", "name": "Interface: Kiosk", "requires": ["theming"],
+            "assets": ["theme_kiosk.css", "theme_kiosk.js"], ...}
+
+def register(host):
+    theming = host.get_service("theming")
+    if theming is None:
+        return
+    theming.register("functional", "kiosk", "Kiosk",
+                     description="One picture at a time, no chrome.", default=False)
+    host.add_asset("theme_kiosk.css", kind="css")
+    host.add_asset("theme_kiosk.js")
+```
+
+`register(kind, id, label, description="", default=False)`: `kind` is `"functional"` or `"colorings"`, `id` is the body-attribute value (lowercase letters, digits, `_`, `-`) and `default=True` offers the theme as the fallback when the admin set none (the first registered wins otherwise). The service also has `themes(kind)`, `has(kind, id)` and `fallback(kind)`.
+
+### A colorings theme
+
+A palette only: set the accent variables under your attribute. `modules/theming/static/theming.css` maps every accent utility class the app uses (Tailwind `blue` / `indigo` / `sky`: backgrounds, text, borders, rings, `accent-color`, with their `hover:` / `focus:` variants) onto these variables whenever any colorings theme is active, so a palette recolours the whole app without touching markup.
+
+```css
+body[data-colorings="forest"] {
+  --cim-accent-200: …; --cim-accent-300: …; … --cim-accent-900: …;    /* main accent (stock: blue) */
+  --cim-accent2-200: …; … --cim-accent2-800: …;                       /* secondary (stock: indigo) */
+  --cim-accent3-300: …; … --cim-accent3-800: …;                       /* tertiary (stock: sky) */
+}
+```
+
+Module CSS that needs an accent colour should use the variables with a fallback (`var(--cim-accent-600, #2563eb)`) rather than a bare hex, so every palette reaches it.
+
+### A functional theme
+
+Scope everything to `body[data-functional="<id>"]`. CSS does the layout; JS reacts to `cim:theme` (and runs once at load if `CIMTheme.loaded` is already true) and should undo itself when another functional theme becomes active:
+
+```javascript
+function sync() {
+  if (window.CIMTheme.functional === "kiosk") enterKiosk(); else leaveKiosk();
+}
+window.addEventListener("cim:theme", sync);
+if (window.CIMTheme && window.CIMTheme.loaded) sync();
+```
+
+`window.CIMTheme` gives `functional`, `colorings`, `themes`, `canChoose`, `loaded`, `set(kind, id)` and `ready` (a promise). A functional theme may reuse another theme's machinery by listing it in `requires` — the full-screen viewer in `theme_simple` (`window.CIMSimpleViewer.activate(owner, {metaMode, albumsStrip, panes})` / `release(owner)`) is built for that.
+
+### Themes and permissions
+
+A theme is presentation. It may hide controls a user is allowed to use; it must never show one they are not, and it never changes what a request may do — `features.js` hides gated elements with `.cim-feature-hidden { display:none !important }` and every route is gated server-side regardless of theme, so the rules for a theme are:
+
+- hide with `display: none` (`!important` is fine), but never force an element visible with `!important`, so the gate's rule still wins;
+- anything you render yourself that shows gated data carries the matching `data-feature="<key>"` and you call `CIMFeatures.apply(yourRoot)` after rendering it (the viewer does this for people / description / tags / albums);
+- moving an existing element (the Intermediate theme moves `#controls_pane` into the viewer) is fine — its gates travel with it; cloning HTML strips the live gating and is not;
+- never call an endpoint on the user's behalf that the visible UI would not have offered.
+
+The core re-runs `CIMFeatures.apply(document)` after every theme switch, so a theme cannot leave something un-hidden by accident; picking a theme itself requires `theme.choose`, and `/api/theme` rejects ids that no module registered.
+
 ## Enable / disable
 
 Non-core modules show a toggle in **Settings → Modules**; enabling/disabling

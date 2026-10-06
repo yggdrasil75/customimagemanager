@@ -1,0 +1,24 @@
+/* colors_blue: the "blue" colorings theme — a palette only. See modules/theming/static/theming.css for the variables. */
+body[data-colorings="blue"] {
+  --cim-accent-200: #bfdbfe;
+  --cim-accent-300: #93c5fd;
+  --cim-accent-400: #60a5fa;
+  --cim-accent-500: #3b82f6;
+  --cim-accent-600: #2563eb;
+  --cim-accent-700: #1d4ed8;
+  --cim-accent-800: #1e40af;
+  --cim-accent-900: #1e3a8a;
+  --cim-accent2-200: #c7d2fe;
+  --cim-accent2-300: #a5b4fc;
+  --cim-accent2-400: #818cf8;
+  --cim-accent2-500: #6366f1;
+  --cim-accent2-600: #4f46e5;
+  --cim-accent2-700: #4338ca;
+  --cim-accent2-800: #3730a3;
+  --cim-accent3-300: #7dd3fc;
+  --cim-accent3-400: #38bdf8;
+  --cim-accent3-500: #0ea5e9;
+  --cim-accent3-600: #0284c7;
+  --cim-accent3-700: #0369a1;
+  --cim-accent3-800: #075985;
+}

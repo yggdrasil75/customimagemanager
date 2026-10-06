@@ -1,0 +1,30 @@
+/* theme_simple.css — the "simple" functional theme. One screen = the timeline
+   (albums on top). Everything here is keyed on body[data-functional="simple"];
+   it hides and enlarges, and never un-hides a gated element with !important. */
+body[data-functional="simple"] #editor_region,
+body[data-functional="simple"] #left_splitter { display: none !important; }
+body[data-functional="simple"] #left_pane {
+  width: 100% !important; max-width: 100vw !important; border-right: 0; padding-bottom: 0 !important;
+}
+body[data-functional="simple"] #left_tabs_bar,
+body[data-functional="simple"] #gallery_pane > div:first-child,     /* folder / search / view switch */
+body[data-functional="simple"] #gallery_pane #dropzone,
+body[data-functional="simple"] #gallery_pane #bulk_bar,
+body[data-functional="simple"] #gallery_pane #gallery_pager_bar,
+body[data-functional="simple"] #gallery_album_bar button:not([onclick="exitAlbumView()"]),
+body[data-functional="simple"] #btn_dedup, body[data-functional="simple"] #dedup_cache_badge,
+body[data-functional="simple"] #btn_gdl, body[data-functional="simple"] #file_count,
+body[data-functional="simple"] .tl-levels, body[data-functional="simple"] .tl-zoom,
+body[data-functional="simple"] .tl-daysel { display: none !important; }
+/* the viewer is for looking: no region / mask toggles */
+body[data-functional="simple"] #popout_modal label[data-feature="annot.boxes"],
+body[data-functional="simple"] #popout_modal label[title^="Show fine segmentation"] { display: none !important; }
+body[data-functional="simple"] .sv-btn { padding: 10px 20px; font-size: 18px; }
+body[data-functional="simple"] #left_pane > :first-child { padding: 10px 16px; }
+body[data-functional="simple"] #brand_name_h1 { font-size: 1.5rem; }
+body[data-functional="simple"] .tl-bar { font-size: 15px; padding: 10px 16px; }
+body[data-functional="simple"] .tl-h { font-size: 20px; }
+body[data-functional="simple"] .tl-day-h { font-size: 15px; }
+body[data-functional="simple"] .tl-years { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+body[data-functional="simple"] .tl-months { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+body[data-functional="simple"] .tl-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }

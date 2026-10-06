@@ -1,0 +1,24 @@
+/* colors_orange: the "orange" colorings theme — a palette only. See modules/theming/static/theming.css for the variables. */
+body[data-colorings="orange"] {
+  --cim-accent-200: #fed7aa;
+  --cim-accent-300: #fdba74;
+  --cim-accent-400: #fb923c;
+  --cim-accent-500: #f97316;
+  --cim-accent-600: #ea580c;
+  --cim-accent-700: #c2410c;
+  --cim-accent-800: #9a3412;
+  --cim-accent-900: #7c2d12;
+  --cim-accent2-200: #fde68a;
+  --cim-accent2-300: #fcd34d;
+  --cim-accent2-400: #fbbf24;
+  --cim-accent2-500: #f59e0b;
+  --cim-accent2-600: #d97706;
+  --cim-accent2-700: #b45309;
+  --cim-accent2-800: #92400e;
+  --cim-accent3-300: #fda4af;
+  --cim-accent3-400: #fb7185;
+  --cim-accent3-500: #f43f5e;
+  --cim-accent3-600: #e11d48;
+  --cim-accent3-700: #be123c;
+  --cim-accent3-800: #9f1239;
+}

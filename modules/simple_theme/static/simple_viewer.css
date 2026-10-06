@@ -1,0 +1,41 @@
+/* simple_viewer.css — the shared full-screen viewer (CIMSimpleViewer). Its
+   chrome only appears while #popout_modal has .sv-active. Rules here hide and
+   lay out; they never force an element visible with !important, so feature
+   gating (.cim-feature-hidden) always wins. */
+.sv-nav, .sv-side, .sv-arrow { display: none; }
+#popout_modal.sv-active .sv-nav { display: flex; }
+#popout_modal.sv-active .sv-side { display: flex; }
+#popout_modal.sv-active .sv-arrow { display: block; }
+#popout_modal.sv-active #popout_hint { display: none !important; }
+.sv-btn { padding: 6px 14px; font-size: 14px; }
+.sv-arrow {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 56px; height: 96px; border-radius: 10px; font-size: 56px; line-height: 1;
+  background: rgba(17,24,39,.55); color: #fff; z-index: 3; opacity: .6;
+}
+.sv-arrow:hover { opacity: 1; background: color-mix(in srgb, var(--cim-accent-600, #2563eb) 75%, transparent); }
+.sv-arrow:disabled { opacity: .15; cursor: default; }
+#sv_meta_host #controls_pane { width: 100% !important; height: 100% !important; max-height: none !important; }
+.sv-person {
+  padding: 4px 10px; border-radius: 999px; background: #1f2937; border: 1px solid #374151;
+  color: #e5e7eb; cursor: default;
+}
+.sv-person:hover { border-color: var(--cim-accent-400, #60a5fa); background: var(--cim-accent-900, #1e3a8a); }
+.sv-person.unknown { color: #9ca3af; font-style: italic; }
+.sv-tag { padding: 2px 8px; border-radius: 4px; background: #1f2937; border: 1px solid #374151; font-size: 12px; }
+
+/* albums strip above the timeline */
+.sv-strip { padding: 8px 16px 4px; }
+.sv-strip-title { font-size: 15px; font-weight: 700; color: #f3f4f6; margin-bottom: 6px; display: flex; align-items: baseline; gap: 8px; }
+.sv-strip-title i, .sv-label i { font-style: normal; font-weight: 400; color: #9ca3af; font-size: 11px; }
+.sv-cards { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 6px; }
+.sv-card {
+  flex: 0 0 150px; border-radius: 8px; overflow: hidden; background: #1f2937;
+  border: 2px solid transparent; text-align: left; transition: border-color .1s;
+}
+.sv-card:hover { border-color: var(--cim-accent-400, #60a5fa); }
+.sv-card.on { border-color: var(--cim-accent2-500, #a855f7); }
+.sv-cover { width: 100%; aspect-ratio: 1; background: #111827; display: block; object-fit: cover; }
+.sv-nocover { width: 100%; aspect-ratio: 1; background: #111827; display: grid; place-items: center; color: #4b5563; font-size: 32px; }
+.sv-label { display: block; padding: 6px 8px; font-size: 13px; color: #f3f4f6; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sv-label i { margin-left: 4px; }
