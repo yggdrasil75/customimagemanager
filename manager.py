@@ -3505,7 +3505,7 @@ def api_raw_open(uid):
                      download_name=row["orig_name"] or os.path.basename(abs_path))
 
 @app.route("/api/raw/keep", methods=["POST"])
-@_auth.require_feature("settings", level="write", action="raw_keep", fields=("enabled",))
+@_auth.require_feature("settings.media", level="write", action="raw_keep", fields=("enabled",))
 def api_raw_keep():
     """Get or set the keep_raws option (store uploaded camera raws hidden)."""
     if request.method == "POST" and request.json is not None and "enabled" in (request.json or {}):
@@ -3520,9 +3520,11 @@ def api_state():
     # entire front-end.
     out = {k: state.get(k) for k in
         ("classes","available_models","status_text","remote_ip",
-         "model_groups","iqa_model","brand_name","brand_logo","search_quick_filters",
+         "model_groups","iqa_model","brand_name","brand_logo",
          "media_storage","filename_cleanup")}
     out["media_targets"] = mt.MEDIA_TARGETS
+    # The search chips are per user: their own list, else the admin's default.
+    out["search_quick_filters"] = _user_setting("search_quick_filters") or []
     return jsonify(out)
 
 @app.route("/api/workers")
@@ -3561,6 +3563,7 @@ def api_modules():
         fields.append({"key": f["key"], "label": f["label"], "kind": f["kind"],
                        "pane": f["pane"], "tab": f["tab"], "options": opts,
                        "help": f["help"], "admin_only": f["admin_only"],
+                       "section": f.get("section"), "columns": f.get("columns"),
                        "module_id": f["module_id"], "value": state.get(f["key"])})
     return jsonify({"modules": module_registry.status(),
                     "settings_tabs": tabs,
@@ -3569,7 +3572,7 @@ def api_modules():
                     "missing_pip": module_registry.missing_pip()})
 
 @app.route("/api/modules/toggle", methods=["POST"])
-@_auth.require_feature("settings", level="write", action='toggle_module', fields=())
+@_auth.require_feature("settings.modules", level="write", action='toggle_module', fields=())
 def api_modules_toggle():
     """Enable/disable a non-core module. Admin-gated via the settings feature.
 
@@ -3641,7 +3644,7 @@ def api_models():
     return jsonify({"capabilities": _models_payload()})
 
 @app.route("/api/models/classes")
-@_auth.require_feature("settings")
+@_auth.require_feature("settings.models")
 def api_models_classes():
     """Class names the selected provider for ?capability= emits (may load the
     weights on first call), for the background-run whitelist."""
@@ -3649,7 +3652,7 @@ def api_models_classes():
     return jsonify({"capability": cap, "classes": modules.broker.provider_classes(cap)})
 
 @app.route("/api/models/select", methods=["POST"])
-@_auth.require_feature("settings", level="write", action='select_model', fields=())
+@_auth.require_feature("settings.models", level="write", action='select_model', fields=())
 def api_models_select():
     """Choose which provider (+ size/type) serves a capability. Admin-gated.
 
@@ -3671,35 +3674,167 @@ def api_models_select():
     thread_manager.wake()                    # a background switch just flipped: start sweeping now
     return jsonify({"success": True, "capabilities": _models_payload()})
 
+# ── Settings permissions: which tab owns a key ───────────────────────────────
+# Every Settings tab has a permission, settings.<tab> (features.py registers the
+# core ones, host.add_settings_tab the module ones): read shows the tab, write
+# lets its settings be saved. update_settings checks each incoming key against
+# the tab that owns it, so a user may save the tabs they can write and nothing
+# else. A key no tab owns is admin-only.
+_CORE_KEY_TABS = {"search_quick_filters": "general", "media_storage": "media",
+                  "filename_cleanup": "media", "keep_raws": "media"}
+
+def _settings_tab_for_key(key):
+    if key in _CORE_KEY_TABS:
+        return _CORE_KEY_TABS[key]
+    if key in module_host.config_tabs:
+        return module_host.config_tabs[key]
+    for f in module_host.settings_fields:
+        if f["key"] == key:
+            pane = f.get("pane") or "general"
+            return "modules" if pane == "module" else (f.get("tab") or pane)
+    for c in modules.broker.status():                     # a model provider's widget
+        for p in c.get("providers", []):
+            if any(w.get("key") == key for w in p.get("settings", [])):
+                return "models"
+    owner = modules.config.owner(key)
+    if owner and owner != "core":
+        tabs = [t["id"] for t in module_host.settings_tabs if t["module_id"] == owner]
+        return tabs[0] if tabs else "modules"
+    return None
+
+def _settings_denied(keys, level="write"):
+    """Keys of an update the current user may not save (empty for admins)."""
+    u = g.get("user") or {}
+    if u.get("is_admin"):
+        return []
+    feats = u.get("features") or {}
+    out = []
+    for k in keys:
+        tab = _settings_tab_for_key(k)
+        if not tab or not features.has_level(feats, features.settings_tab_feature(tab), level):
+            out.append(k)
+    return out
+
+def _clean_quick_filters(v):
+    """Search quick-filters: [{id,label,query}], malformed rows dropped, so a
+    bad save can't break the search UI."""
+    clean = []
+    for i, it in enumerate(v or []):
+        if not isinstance(it, dict):
+            continue
+        label = str(it.get("label", "")).strip()[:40]
+        query = str(it.get("query", "")).strip()[:200]
+        if label and query:
+            clean.append({"id": str(it.get("id") or (i + 1)), "label": label, "query": query})
+    return clean
+
 @app.route("/api/update_settings", methods=["POST"])
-@_auth.require_feature("settings", level="write", action='update_settings', fields=())
 def update_settings():
-    d = request.json
+    d = request.json or {}
+    if not isinstance(d, dict):
+        return jsonify({"error": "expected an object"}), 400
+    denied = _settings_denied(d.keys())
+    if denied:
+        audit("update_settings_denied", f"user={(g.get('user') or {}).get('username')!r} keys={denied}")
+        return jsonify({"error": "not permitted to change: " + ", ".join(sorted(denied)),
+                        "denied": sorted(denied)}), 403
     # Registry-owned settings (core or module-declared) are validated, stored,
-    # and their change handlers fired here — no per-key branch needed below. A
-    # key not declared in the registry falls through to the legacy handling that
-    # follows. This is what lets a module own a setting (e.g. rating owns
-    # iqa_model) without manager knowing it exists.
+    # and their change handlers fired here — no per-key branch needed. A key
+    # not declared in the registry falls through to the legacy handling below.
     _reg_errors = {}
     for _k in list(d.keys()):
         handled, err = modules.config.apply(_k, d[_k], state)
         if handled and err:
             _reg_errors[_k] = err
-    # Search quick-filters: validate shape so a malformed save can't break the
-    # search UI. Each entry must be {id,label,query}; drop anything else.
-    if "search_quick_filters" in d:
-        clean = []
-        for i, it in enumerate(d.get("search_quick_filters") or []):
-            if not isinstance(it, dict):
-                continue
-            label = str(it.get("label", "")).strip()[:40]
-            query = str(it.get("query", "")).strip()[:200]
-            if not label or not query:
-                continue
-            clean.append({"id": str(it.get("id") or (i + 1)),
-                          "label": label, "query": query})
-        state["search_quick_filters"] = clean
-    save_config(); return jsonify({"success": True})
+    audit("update_settings", f"user={(g.get('user') or {}).get('username')!r} keys={sorted(d.keys())}")
+    save_config()
+    return jsonify({"success": True, "errors": _reg_errors})
+
+# ── Per-user settings (Settings → User settings) ─────────────────────────────
+# Declared with host.add_user_setting; stored per account in user_prefs; saved
+# by the user themselves (login is all it needs, plus a declared feature at
+# write for settings that carry one).
+def _user_name():
+    return (g.get("user") or {}).get("username", "") or ""
+
+def _user_setting(key, username=None):
+    spec = module_host.user_settings.get(key)
+    if spec is None:
+        return None
+    username = _user_name() if username is None else username
+    try:
+        r = _db().execute("SELECT value FROM user_prefs WHERE username=? AND key=?",
+                          (username, key)).fetchone()
+        if r is not None:
+            return json.loads(r["value"])
+    except Exception:
+        pass
+    dflt = spec["default"]
+    return dflt(g.get("user") or {}) if callable(dflt) else dflt
+
+def _user_setting_is_set(key):
+    r = _db().execute("SELECT 1 FROM user_prefs WHERE username=? AND key=?",
+                      (_user_name(), key)).fetchone()
+    return r is not None
+
+def _user_can_write_setting(spec):
+    feat = spec.get("feature")
+    u = g.get("user") or {}
+    return (not feat or u.get("is_admin")
+            or features.has_level(u.get("features") or {}, feat, "write"))
+
+def _user_settings_payload():
+    out = []
+    for spec in sorted(module_host.user_settings.values(), key=lambda x: (x["order"], x["key"])):
+        if spec["module_id"] and not module_registry.is_enabled(spec["module_id"]):
+            continue
+        opts = spec.get("options")
+        if callable(opts):
+            try:
+                opts = opts()
+            except Exception:
+                opts = []
+        out.append({"key": spec["key"], "label": spec["label"], "kind": spec["kind"],
+                    "options": opts, "columns": spec.get("columns"), "help": spec.get("help"),
+                    "module_id": spec["module_id"], "value": _user_setting(spec["key"]),
+                    "is_set": _user_setting_is_set(spec["key"]),
+                    "editable": _user_can_write_setting(spec)})
+    return out
+
+@app.route("/api/user/settings", methods=["GET"])
+def api_user_settings():
+    return jsonify({"success": True, "fields": _user_settings_payload()})
+
+@app.route("/api/user/settings", methods=["POST"])
+def api_user_settings_save():
+    """Body {key: value}; value null resets the key to its default. All or
+    nothing: an unknown key, a failed validation or a missing feature rejects
+    the whole save."""
+    d = request.json or {}
+    if not isinstance(d, dict):
+        return jsonify({"success": False, "error": "expected an object"}), 400
+    clean = {}
+    for k, v in d.items():
+        spec = module_host.user_settings.get(k)
+        if spec is None or (spec["module_id"] and not module_registry.is_enabled(spec["module_id"])):
+            return jsonify({"success": False, "error": f"unknown setting {k!r}"}), 400
+        if not _user_can_write_setting(spec):
+            return jsonify({"success": False, "error": f"not permitted to change {k!r}"}), 403
+        if v is not None and spec.get("validate"):
+            try:
+                v = spec["validate"](v)
+            except (ValueError, TypeError) as e:
+                return jsonify({"success": False, "error": f"{k}: {e}"}), 400
+        clean[k] = v
+    db = _db()
+    for k, v in clean.items():
+        if v is None:
+            db.execute("DELETE FROM user_prefs WHERE username=? AND key=?", (_user_name(), k))
+        else:
+            db.execute("INSERT OR REPLACE INTO user_prefs(username, key, value) VALUES (?, ?, ?)",
+                       (_user_name(), k, json.dumps(v)))
+    db.commit()
+    return jsonify({"success": True, "fields": _user_settings_payload()})
 
 @app.route("/api/branding", methods=["POST"])
 @_auth.require_feature("branding", level="write", action='update_branding', fields=())
@@ -3708,10 +3843,6 @@ def update_branding():
     # require_feature already lets admins through and denies anyone whose
     # role sets branding=False; this extra check makes the default deny for
     # non-admins whose role hasn't been granted it.
-    u = g.get("user") or {}
-    feats = u.get("features") or {}
-    if not u.get("is_admin") and feats.get("branding") is not True:
-        return jsonify({"error": "admin required"}), 403
 
     name = (request.form.get("brand_name") or "").strip()
     if name:
@@ -3809,7 +3940,7 @@ def api_list_all():
     return jsonify({"success": True, "filenames": [r["rel_path"] for r in rows]})
 
 @app.route("/api/dates/backfill", methods=["POST"])
-@_auth.require_feature("settings", level="write", action='dates_backfill', fields=())
+@_auth.require_feature("settings.general", level="write", action='dates_backfill', fields=())
 def api_dates_backfill():
     """Populate the five date buckets for rows that don't have them yet, without a
     full re-index (no re-hash / re-thumbnail). Idempotent and resumable: only
@@ -5625,12 +5756,12 @@ def api_metadata():
 
 # ── Tiered storage ───────────────────────────────────────────────────────────
 @app.route("/api/tiers", methods=["GET"])
-@_auth.require_feature("settings.tiers")
+@_auth.require_feature("settings.storage")
 def api_tiers_get():
     return jsonify({"success": True, "config": tiering.load_cfg()})
 
 @app.route("/api/tiers", methods=["POST"])
-@_auth.require_feature("settings.tiers", level="write", action='update_tiers', fields=())
+@_auth.require_feature("settings.storage", level="write", action='update_tiers', fields=())
 def api_tiers_set():
     try:
         cfg = tiering.save_cfg(request.json or {})
@@ -5639,18 +5770,18 @@ def api_tiers_set():
         return jsonify({"success": False, "error": str(e)}), 400
 
 @app.route("/api/tiers/status")
-@_auth.require_feature("settings.tiers")
+@_auth.require_feature("settings.storage")
 def api_tiers_status():
     return jsonify({"success": True, **tiering.status()})
 
 @app.route("/api/tiers/rebalance", methods=["POST"])
-@_auth.require_feature("settings.tiers", level="write", action="tiers_rebalance")
+@_auth.require_feature("settings.storage", level="write", action="tiers_rebalance")
 def api_tiers_rebalance():
     tiering.rebalance(block=False)
     return jsonify({"success": True})
 
 @app.route("/api/tiers/cancel", methods=["POST"])
-@_auth.require_feature("settings.tiers", level="write", action="tiers_cancel")
+@_auth.require_feature("settings.storage", level="write", action="tiers_cancel")
 def api_tiers_cancel():
     tiering._state["run"]["cancel"] = True
     return jsonify({"success": True})
@@ -6310,6 +6441,7 @@ _core_api = SimpleNamespace(
     file_albums=_file_albums, set_file_albums=_set_file_albums, delete_file=_delete_file,
     get_file_row=_get_file_row, thumb_bytes=thumb_bytes,
     files_where=_files_where,
+    user_setting=lambda key, username=None: _user_setting(key, username),
 )
 
 module_host = modules.host.Host(
@@ -6330,8 +6462,11 @@ module_host = modules.host.Host(
 # Serve each module's static/ assets at /modules/<id>/static/<file>.
 @app.route("/modules/<module_id>/static/<path:filename>")
 def module_static(module_id, filename):
-    base = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "modules", module_id, "static")
+    # The module's own folder (its id need not match the folder name).
+    lm = module_registry._plugins.get(module_id)
+    folder = lm.path if lm is not None and lm.path else os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "modules", module_id)
+    base = os.path.join(folder, "static")
     fp = get_safe_path(base, filename)
     if not fp or not os.path.isfile(fp):
         return ("not found", 404)
@@ -6354,6 +6489,25 @@ modules.metadata.register(module_host)
 module_host._current_module = "threading"
 modules.threading.register(module_host)
 module_host._current_module = None
+# Core-owned settings: the per-user settings store, and the search quick-filters
+# (an admin default in General, each user's own list in User settings).
+module_host.add_table("""CREATE TABLE IF NOT EXISTS user_prefs (
+    username TEXT NOT NULL, key TEXT NOT NULL, value TEXT,
+    PRIMARY KEY (username, key))""")
+modules.config.declare("search_quick_filters", default=state["search_quick_filters"],
+                       validate=_clean_quick_filters, owner="core")
+_QF_COLUMNS = [{"key": "label", "label": "Label", "placeholder": "Untagged"},
+               {"key": "query", "label": "Query", "placeholder": "is:untagged"}]
+module_host.add_settings_field(
+    key="search_quick_filters", label="Search quick-filters (default for users who haven't set their own)",
+    kind="rows", columns=_QF_COLUMNS, section="defaults",
+    help="Chips shown when the search box is focused. Query is any search expression "
+         "(line:failure, is:untagged, date:2026).")
+module_host.add_user_setting(
+    "search_quick_filters", label="Search quick-filters", kind="rows", columns=_QF_COLUMNS,
+    default=lambda _u: state.get("search_quick_filters") or [], validate=_clean_quick_filters,
+    help="Chips shown when the search box is focused. Reset to go back to the default list.",
+    order=50)
 module_registry.register_all(module_host)
 
 @app.after_request

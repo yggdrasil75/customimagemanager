@@ -1,5 +1,5 @@
-/* colors_orange: the "orange" colorings theme — a palette only. See modules/theming/static/theming.css for the variables. */
-body[data-colorings="orange"] {
+/* colors_orange: the "orange" palette. Variables: modules/theming/static/theming.css. */
+body[data-palette="orange"] {
   --cim-accent-200: #fed7aa;
   --cim-accent-300: #fdba74;
   --cim-accent-400: #fb923c;

@@ -55,7 +55,7 @@ function renderQuickFilters(){
   const filters=(typeof quick_filters_cache!=='undefined' && quick_filters_cache) || [];
   list.innerHTML='';
   if(!filters.length){
-    list.innerHTML='<span class="text-xs text-gray-500 px-1 py-1">No quick filters set — add some in Settings.</span>';
+    list.innerHTML='<span class="text-xs text-gray-500 px-1 py-1">No quick filters set — add some in Settings → User settings.</span>';
     return;
   }
   filters.forEach(f=>{
@@ -86,53 +86,6 @@ function applyQuickFilter(query){
   si.value=query;
   hideQuickFilters();
   si.dispatchEvent(new Event('input',{bubbles:true}));
-}
-
-// ── Quick-filter settings editor (in the Settings modal) ─────────────────────
-function renderQuickFilterEditor(){
-  const c=document.getElementById('quick_filters_rows');
-  if(!c) return;
-  const filters=(typeof quick_filters_cache!=='undefined' && quick_filters_cache) || [];
-  c.innerHTML='';
-  filters.forEach(f=>{
-    const row=document.createElement('div');
-    row.className='grid grid-cols-[1fr_2fr_28px] gap-2 items-center qf-row';
-    row.dataset.id=f.id||String(Date.now()+Math.random());
-    const label=document.createElement('input');
-    label.className='qf-label bg-gray-900 text-white text-xs p-1 rounded border border-gray-600';
-    label.value=f.label||''; label.placeholder='Label';
-    const query=document.createElement('input');
-    query.className='qf-query bg-gray-900 text-white text-xs p-1 rounded border border-gray-600';
-    query.value=f.query||''; query.placeholder='Query (e.g. line:failure)';
-    const del=document.createElement('button');
-    del.type='button'; del.textContent='✕';
-    del.className='text-red-500 hover:text-red-400 text-xs';
-    del.onclick=()=>row.remove();
-    row.append(label,query,del);
-    c.appendChild(row);
-  });
-}
-
-function addQuickFilter(){
-  if(typeof quick_filters_cache==='undefined' || !quick_filters_cache) quick_filters_cache=[];
-
-  quick_filters_cache=_collectQuickFilterRows(false);
-  quick_filters_cache.push({id:String(Date.now()),label:'',query:''});
-  renderQuickFilterEditor();
-}
-
-function _collectQuickFilterRows(dropEmpty){
-  const rows=[...document.querySelectorAll('.qf-row')].map(r=>({
-    id:r.dataset.id,
-    label:(r.querySelector('.qf-label').value||'').trim(),
-    query:(r.querySelector('.qf-query').value||'').trim(),
-  }));
-  return dropEmpty ? rows.filter(f=>f.label && f.query) : rows;
-}
-
-// Backwards-compatible name used by the save path: returns save-ready rows.
-function collectQuickFilters(){
-  return _collectQuickFilterRows(true);
 }
 
 function toggleDatePicker(){

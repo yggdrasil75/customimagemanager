@@ -143,11 +143,14 @@
     const d = await r.json();
     _catalog = d.catalog || _catalog;
     _groups = d.groups || [];
+    _accountFields = d.account_fields || _accountFields;
+    syncAddRows();
     const ngRole = document.getElementById('cim-ng-role');
     if (ngRole && !ngRole.options.length) ngRole.innerHTML = roleOptions('custom');
     const t = document.getElementById('cim-grp-table');
     if (!t) return;
-    t.innerHTML = '<tr style="text-align:left;color:#9ca3af"><th>Group</th><th>Role</th><th></th></tr>';
+    t.innerHTML = '<tr style="text-align:left;color:#9ca3af"><th>Group</th><th>Role</th>' +
+      xfFor('group').map(f => '<th>' + esc(f.label) + '</th>').join('') + '<th></th></tr>';
     _groups.forEach(g => {
       const tr = document.createElement('tr');
       tr.style.borderTop = '1px solid #374151';
@@ -155,6 +158,7 @@
         '<td style="padding:5px 0">' + esc(g.name) + '</td>' +
         '<td><select data-grole="' + g.id + '" style="background:#111827;color:#e5e7eb;' +
         'border:1px solid #374151;border-radius:5px;padding:2px">' + roleOptions(g.role) + '</select></td>' +
+        xfFor('group').map(f => '<td>' + xfSelect(f, (g.extra || {})[f.key], 'data-gxf="' + f.key + '" data-gid="' + g.id + '"') + '</td>').join('') +
         '<td style="text-align:right;white-space:nowrap">' +
         '<button data-gfeat="' + g.id + '" style="background:#3730a3;color:#e0e7ff;border:0;' +
         'border-radius:5px;padding:3px 8px;cursor:pointer;margin-right:4px">features</button>' +
@@ -166,6 +170,11 @@
       const r2 = await post('/api/auth/groups/update', { id: +s.dataset.grole, role: s.value });
       if (!r2.ok) err((await r2.json()).error || 'Update failed');
       refreshGroups(); refreshUsers();
+    });
+    t.querySelectorAll('[data-gxf]').forEach(s => s.onchange = async () => {
+      const r2 = await post('/api/auth/groups/update', { id: +s.dataset.gid, extra: { [s.dataset.gxf]: s.value } });
+      if (!r2.ok) err((await r2.json()).error || 'Update failed');
+      refreshGroups();
     });
     t.querySelectorAll('[data-gfeat]').forEach(b => b.onclick = () => {
       const g = b.closest('tr')._grp;
@@ -182,7 +191,7 @@
   async function addGroup() {
     const name = document.getElementById('cim-ng').value;
     const role = document.getElementById('cim-ng-role').value;
-    const r = await post('/api/auth/groups/create', { name, role });
+    const r = await post('/api/auth/groups/create', { name, role, extra: collectAdd('cim-ng-xf-', 'group') });
     if (!r.ok) { err((await r.json()).error || 'Create failed'); return; }
     document.getElementById('cim-ng').value = '';
     refreshGroups();
@@ -201,12 +210,48 @@
       esc(g.name) + '</option>').join('');
   }
 
+  // Account fields modules registered (host.add_account_field, e.g. layout):
+  // one select per field in the user table, the group table and both "add" rows.
+  let _accountFields = [];
+  function xfFor(scope) { return _accountFields.filter(f => (f.scopes || []).includes(scope)); }
+  function xfOptions(f, sel) {
+    const opts = (f.options || []).slice();
+    if (!opts.some(o => o.value === '')) opts.unshift({ value: '', label: '—' });
+    return opts.map(o => '<option value="' + esc(o.value) + '"' + ((o.value || '') === (sel || '') ? ' selected' : '') +
+      '>' + esc(o.label) + '</option>').join('');
+  }
+  function xfSelect(f, sel, attrs) {
+    return '<select ' + attrs + ' title="' + esc(f.help || f.label) + '" style="background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:5px;padding:2px">' +
+      xfOptions(f, sel) + '</select>';
+  }
+  // The "add" rows get their selects once the field list is known.
+  function syncAddRows() {
+    for (const [scope, rowId, prefix] of [['user', 'cim-add', 'cim-na-xf-'], ['group', 'cim-grp-add', 'cim-ng-xf-']]) {
+      const btn = document.getElementById(rowId);
+      if (!btn) continue;
+      for (const f of xfFor(scope)) {
+        if (document.getElementById(prefix + f.key)) continue;
+        btn.insertAdjacentHTML('beforebegin', xfSelect(f, '', 'id="' + prefix + f.key + '"'));
+      }
+    }
+  }
+  function collectAdd(prefix, scope) {
+    const out = {};
+    for (const f of xfFor(scope)) {
+      const el = document.getElementById(prefix + f.key);
+      if (el && el.value) out[f.key] = el.value;
+    }
+    return out;
+  }
+
   async function refreshUsers() {
     err('');
     const r = await window.fetch('/api/auth/users');
     if (!r.ok) { err('Failed to load users'); return; }
     const d = await r.json();
     _groups = d.groups || [];
+    _accountFields = d.account_fields || _accountFields;
+    syncAddRows();
     if (!_catalog) {
       const cr = await window.fetch('/api/auth/features');
       if (cr.ok) _catalog = await cr.json();
@@ -221,6 +266,7 @@
     const t = document.getElementById('cim-um-table');
     t.innerHTML = '<tr style="text-align:left;color:#9ca3af">' +
       '<th>User</th><th>Source</th><th>Admin</th><th>Role</th><th>Group</th>' +
+      xfFor('user').map(f => '<th>' + esc(f.label) + '</th>').join('') +
       '<th>Disabled</th><th></th></tr>';
     d.users.forEach(u => {
       const tr = document.createElement('tr');
@@ -236,6 +282,7 @@
         '<td><select data-grp="' + u.id + '"' + (u.is_admin ? ' disabled' : '') +
         ' style="background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:5px;padding:2px">' +
         groupOptions(u.group_id) + '</select></td>' +
+        xfFor('user').map(f => '<td>' + xfSelect(f, (u.extra || {})[f.key], 'data-uxf="' + f.key + '" data-uid="' + u.id + '"') + '</td>').join('') +
         '<td><input type="checkbox" ' + (u.disabled ? 'checked' : '') + ' data-d="' + u.id + '"></td>' +
         '<td style="text-align:right;white-space:nowrap">' +
         (u.is_admin ? '' : '<button data-feat="' + u.id + '" ' +
@@ -253,6 +300,8 @@
       update({ id: +s.dataset.role, role: s.value }));
     t.querySelectorAll('[data-grp]').forEach(s => s.onchange = () =>
       update({ id: +s.dataset.grp, group_id: s.value ? +s.value : null }));
+    t.querySelectorAll('[data-uxf]').forEach(s => s.onchange = () =>
+      update({ id: +s.dataset.uid, extra: { [s.dataset.uxf]: s.value } }));
     t.querySelectorAll('[data-del]').forEach(b => b.onclick = () => del(+b.dataset.del));
     t.querySelectorAll('[data-feat]').forEach(b => b.onclick = () => {
       const u = b.closest('tr')._user;
@@ -344,7 +393,8 @@
       password: document.getElementById('cim-np').value,
       is_admin: document.getElementById('cim-na').checked,
       role: document.getElementById('cim-na-role').value,
-      group_id: grpVal ? +grpVal : null });
+      group_id: grpVal ? +grpVal : null,
+      extra: collectAdd('cim-na-xf-', 'user') });
     if (!r.ok) { err((await r.json()).error || 'Create failed'); return; }
     document.getElementById('cim-nu').value = '';
     document.getElementById('cim-np').value = '';

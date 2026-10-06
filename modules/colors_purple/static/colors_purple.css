@@ -1,5 +1,5 @@
-/* colors_purple: the "purple" colorings theme — a palette only. See modules/theming/static/theming.css for the variables. */
-body[data-colorings="purple"] {
+/* colors_purple: the "purple" palette. Variables: modules/theming/static/theming.css. */
+body[data-palette="purple"] {
   --cim-accent-200: #ddd6fe;
   --cim-accent-300: #c4b5fd;
   --cim-accent-400: #a78bfa;

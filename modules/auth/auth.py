@@ -96,6 +96,58 @@ def add_public_prefix(prefix):
     if prefix not in _PUBLIC_PREFIXES:
         _PUBLIC_PREFIXES.append(prefix)
 
+# Per-account fields modules add to the user / group editors (a default
+# layout, …): key -> {label, options (list or callable -> [{value,label}]),
+# scopes ("user","group"), help}. Values live in the `extra` JSON column of
+# auth_users / auth_groups; a user's value wins over their group's.
+_ACCOUNT_FIELDS = {}
+
+
+def register_account_field(key, label, *, options=None, scopes=("user", "group"), help=None):
+    """Add a field to the account (user / group) editor (host.add_account_field)."""
+    key = str(key or "").strip()
+    if not key or not key.replace("_", "").isalnum():
+        raise ValueError("account field key: letters, digits and _ only")
+    _ACCOUNT_FIELDS[key] = {"key": key, "label": label or key, "options": options,
+                            "scopes": tuple(s for s in scopes if s in ("user", "group")),
+                            "help": help or ""}
+    return key
+
+
+def account_fields():
+    """Registered account fields with option lists resolved (JSON-safe)."""
+    out = []
+    for f in _ACCOUNT_FIELDS.values():
+        opts = f["options"]
+        if callable(opts):
+            try:
+                opts = opts()
+            except Exception:
+                opts = []
+        out.append({"key": f["key"], "label": f["label"], "options": opts or [],
+                    "scopes": list(f["scopes"]), "help": f["help"]})
+    return out
+
+
+def _clean_extra(raw, scope):
+    """Validate an `extra` dict from the account editor: registered keys for
+    this scope only; with an option list the value must be one of them; ""
+    clears the key."""
+    if not isinstance(raw, dict):
+        return {}
+    allowed = {f["key"]: f for f in account_fields() if scope in f["scopes"]}
+    out = {}
+    for k, v in raw.items():
+        f = allowed.get(k)
+        if f is None:
+            raise ValueError(f"unknown account field {k!r}")
+        v = "" if v is None else str(v)
+        if v and f["options"] and v not in {str(o.get("value")) for o in f["options"]}:
+            raise ValueError(f"invalid value for {k!r}")
+        out[k] = v
+    return out
+
+
 _DEFAULT_LDAP = {
     "server": "",
     "use_ssl": False,
@@ -180,9 +232,13 @@ class Auth:
         have = {row[1] for row in db.execute("PRAGMA table_info(auth_users)")}
         for col, ddl in (("role", "TEXT NOT NULL DEFAULT 'custom'"),
                          ("perms", "TEXT"),
-                         ("group_id", "INTEGER")):
+                         ("group_id", "INTEGER"),
+                         ("extra", "TEXT")):
             if col not in have:
                 db.execute(f"ALTER TABLE auth_users ADD COLUMN {col} {ddl}")
+        have_g = {row[1] for row in db.execute("PRAGMA table_info(auth_groups)")}
+        if "extra" not in have_g:
+            db.execute("ALTER TABLE auth_groups ADD COLUMN extra TEXT")
         db.commit()
 
     def _load_perms(self, raw):
@@ -204,7 +260,9 @@ class Auth:
         rows = self._db().execute(
             "SELECT * FROM auth_groups ORDER BY name").fetchall()
         return [{"id": r["id"], "name": r["name"], "role": r["role"],
-                 "perms": self._load_perms(r["perms"])} for r in rows]
+                 "perms": self._load_perms(r["perms"]),
+                 "extra": self._load_perms(r["extra"] if "extra" in r.keys() else None)}
+                for r in rows]
 
     def effective_perms_for(self, user_row):
         """@brief Resolve effective feature map: group role/perms, then user's own on top."""
@@ -245,8 +303,18 @@ class Auth:
             "role": (r["role"] if "role" in keys else "custom") or "custom",
             "group_id": r["group_id"] if "group_id" in keys else None,
             "perms": self._load_perms(r["perms"] if "perms" in keys else None),
+            "extra": self._load_perms(r["extra"] if "extra" in keys else None),
         }
         u["features"] = self.effective_perms_for(r)
+        # Resolved account fields (user value, else the group's) and the role
+        # the permissions were resolved with — what modules read off g.user.
+        grp = self.get_group(u["group_id"])
+        gextra = self._load_perms(grp["extra"] if grp is not None and "extra" in grp.keys() else None)
+        u["account"] = {k: v for k, v in {**gextra, **u["extra"]}.items() if v}
+        role = u["role"]
+        if grp is not None and (not role or role == "custom"):
+            role = grp["role"] or role
+        u["effective_role"] = "admin" if u["is_admin"] else (role or "custom")
         return u
 
     def get_user(self, username):
@@ -265,7 +333,7 @@ class Auth:
 
     def create_local_user(self, username, password, is_admin=False,
                           display_name=None, email=None, role=None,
-                          group_id=None, perms=None):
+                          group_id=None, perms=None, extra=None):
         username = (username or "").strip()
         if not _USERNAME_RE.match(username):
             raise ValueError("invalid username")
@@ -276,12 +344,13 @@ class Auth:
         db = self._db()
         db.execute(
             "INSERT INTO auth_users(username,source,password_hash,display_name,"
-            "email,is_admin,role,perms,group_id,created_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "email,is_admin,role,perms,group_id,created_at,extra) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (username, "local", generate_password_hash(password),
              display_name or username, email, 1 if is_admin else 0,
              role, json.dumps(perms or {}), group_id,
-             datetime.utcnow().isoformat()))
+             datetime.utcnow().isoformat(),
+             json.dumps({k: v for k, v in _clean_extra(extra or {}, "user").items() if v})))
         db.commit()
         return self._row_to_user(self.get_user(username))
 
@@ -311,7 +380,7 @@ class Auth:
 
     def update_user(self, user_id, is_admin=None, disabled=None,
                     display_name=None, email=None, role=None, perms=None,
-                    group_id=_UNSET):
+                    group_id=_UNSET, extra=None):
         sets, vals = [], []
         for col, val in (("is_admin", is_admin), ("disabled", disabled)):
             if val is not None:
@@ -324,6 +393,11 @@ class Auth:
             sets.append("perms=?"); vals.append(json.dumps(perms))
         if group_id is not _UNSET:            # allow clearing to NULL
             sets.append("group_id=?"); vals.append(group_id)
+        if extra is not None:
+            r = self._db().execute("SELECT extra FROM auth_users WHERE id=?", (user_id,)).fetchone()
+            cur = self._load_perms(r["extra"] if r is not None else None)
+            cur.update(_clean_extra(extra, "user"))
+            sets.append("extra=?"); vals.append(json.dumps({k: v for k, v in cur.items() if v}))
         if not sets:
             return
         vals.append(user_id)
@@ -332,22 +406,28 @@ class Auth:
         self._db().commit()
 
     # -- group CRUD ----------------------------------------------------------
-    def create_group(self, name, role="custom", perms=None):
+    def create_group(self, name, role="custom", perms=None, extra=None):
         name = (name or "").strip()
         if not name:
             raise ValueError("group name required")
         db = self._db()
         db.execute(
-            "INSERT INTO auth_groups(name,role,perms,created_at) VALUES(?,?,?,?)",
+            "INSERT INTO auth_groups(name,role,perms,created_at,extra) VALUES(?,?,?,?,?)",
             (name, role or "custom", json.dumps(perms or {}),
-             datetime.utcnow().isoformat()))
+             datetime.utcnow().isoformat(),
+             json.dumps({k: v for k, v in _clean_extra(extra or {}, "group").items() if v})))
         db.commit()
         r = db.execute("SELECT * FROM auth_groups WHERE name=?", (name,)).fetchone()
         return {"id": r["id"], "name": r["name"], "role": r["role"],
-                "perms": self._load_perms(r["perms"])}
+                "perms": self._load_perms(r["perms"]), "extra": self._load_perms(r["extra"])}
 
-    def update_group(self, group_id, name=None, role=None, perms=None):
+    def update_group(self, group_id, name=None, role=None, perms=None, extra=None):
         sets, vals = [], []
+        if extra is not None:
+            r = self._db().execute("SELECT extra FROM auth_groups WHERE id=?", (group_id,)).fetchone()
+            cur = self._load_perms(r["extra"] if r is not None else None)
+            cur.update(_clean_extra(extra, "group"))
+            sets.append("extra=?"); vals.append(json.dumps({k: v for k, v in cur.items() if v}))
         if name is not None:
             sets.append("name=?"); vals.append(name)
         if role is not None:
@@ -710,20 +790,43 @@ class Auth:
             self._db().commit()
             return jsonify({"ok": True})
 
-        def require_admin(fn):
-            @functools.wraps(fn)
-            def wrap(*a, **k):
-                if not g.get("user") or not g.user.get("is_admin"):
-                    return jsonify({"error": "admin required"}), 403
-                return fn(*a, **k)
-            wrap._cim_gate = ("admin", "write")
-            return wrap
+        def require_admin(fn=None, *, level="write"):
+            """Account management: admins, or a user granted the Users settings
+            tab (settings.users) at `level`. Non-admin managers are further
+            limited inside the views (no admin flag, no admin accounts)."""
+            def deco(fn):
+                @functools.wraps(fn)
+                def wrap(*a, **k):
+                    u = g.get("user")
+                    if not u:
+                        return jsonify({"error": "authentication required"}), 401
+                    if not u.get("is_admin") and not features.has_level(
+                            u.get("features") or {}, features.settings_tab_feature("users"), level):
+                        return jsonify({"error": "admin required"}), 403
+                    return fn(*a, **k)
+                wrap._cim_gate = ("settings.users", level)
+                return wrap
+            return deco(fn) if fn else deco
+
+        def _manager_limit(target_id=None, d=None):
+            """For a non-admin account manager: refuse touching admin accounts or
+            the admin flag. Returns an error response, or None when allowed."""
+            if g.user.get("is_admin"):
+                return None
+            if d is not None and d.get("is_admin"):
+                return jsonify({"error": "only an admin can grant admin"}), 403
+            if target_id is not None:
+                r = self._db().execute("SELECT is_admin FROM auth_users WHERE id=?", (target_id,)).fetchone()
+                if r is not None and r["is_admin"]:
+                    return jsonify({"error": "only an admin can change an admin account"}), 403
+            return None
 
         @app.route("/api/auth/users")
-        @require_admin
+        @require_admin(level="read")
         def _list_users():
             return jsonify({"users": self.list_users(),
                             "groups": self.list_groups(),
+                            "account_fields": account_fields(),
                             "mode": self.cfg().get("mode")})
 
         @app.route("/api/auth/users/create", methods=["POST"])
@@ -732,6 +835,11 @@ class Auth:
             d = request.get_json(silent=True) or {}
             if d.get("role") is not None and d["role"] not in features.ROLE_DEFAULT_LEVEL:
                 return jsonify({"error": "unknown role"}), 400
+            if d.get("role") == "admin" and not g.user.get("is_admin"):
+                return jsonify({"error": "only an admin can grant admin"}), 403
+            lim = _manager_limit(None, d)
+            if lim:
+                return lim
             try:
                 u = self.create_local_user(
                     d.get("username"), d.get("password"),
@@ -740,7 +848,8 @@ class Auth:
                     email=d.get("email"),
                     role=d.get("role"),
                     group_id=d.get("group_id"),
-                    perms=d.get("perms"))
+                    perms=d.get("perms"),
+                    extra=d.get("extra"))
             except Exception as e:
                 return jsonify({"error": str(e)}), 400
             return jsonify({"ok": True, "user": u})
@@ -752,6 +861,11 @@ class Auth:
             uid = d.get("id")
             if not uid:
                 return jsonify({"error": "id required"}), 400
+            lim = _manager_limit(uid, d)
+            if lim:
+                return lim
+            if d.get("role") == "admin" and not g.user.get("is_admin"):
+                return jsonify({"error": "only an admin can grant admin"}), 403
             if d.get("is_admin") is False or d.get("disabled") is True:
                 admins = [u for u in self.list_users()
                           if u["is_admin"] and not u["disabled"]]
@@ -765,7 +879,12 @@ class Auth:
                       role=d.get("role"), perms=d.get("perms"))
             if "group_id" in d:
                 kw["group_id"] = d.get("group_id")
-            self.update_user(uid, **kw)
+            if "extra" in d:
+                kw["extra"] = d.get("extra")
+            try:
+                self.update_user(uid, **kw)
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
             # Any permission change invalidates cached sessions' assumptions only
             # loosely (perms are re-read per request), but disabling or demoting
             # must kick the user out now.
@@ -774,14 +893,15 @@ class Auth:
             return jsonify({"ok": True})
 
         @app.route("/api/auth/features")
-        @require_admin
+        @require_admin(level="read")
         def _features():
             return jsonify(features.catalog())
 
         @app.route("/api/auth/groups")
-        @require_admin
+        @require_admin(level="read")
         def _list_groups():
             return jsonify({"groups": self.list_groups(),
+                            "account_fields": account_fields(),
                             "catalog": features.catalog()})
 
         @app.route("/api/auth/groups/create", methods=["POST"])
@@ -789,9 +909,11 @@ class Auth:
         def _create_group():
             d = request.get_json(silent=True) or {}
             try:
+                if d.get("role") == "admin" and not g.user.get("is_admin"):
+                    return jsonify({"error": "only an admin can grant admin"}), 403
                 grp = self.create_group(
                     d.get("name"), role=d.get("role") or "custom",
-                    perms=d.get("perms") or {})
+                    perms=d.get("perms") or {}, extra=d.get("extra"))
             except Exception as e:
                 return jsonify({"error": str(e)}), 400
             return jsonify({"ok": True, "group": grp})
@@ -803,8 +925,13 @@ class Auth:
             gid = d.get("id")
             if not gid:
                 return jsonify({"error": "id required"}), 400
-            self.update_group(gid, name=d.get("name"), role=d.get("role"),
-                              perms=d.get("perms"))
+            if d.get("role") == "admin" and not g.user.get("is_admin"):
+                return jsonify({"error": "only an admin can grant admin"}), 403
+            try:
+                self.update_group(gid, name=d.get("name"), role=d.get("role"),
+                                  perms=d.get("perms"), extra=d.get("extra"))
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
             return jsonify({"ok": True})
 
         @app.route("/api/auth/groups/delete", methods=["POST"])
@@ -824,6 +951,9 @@ class Auth:
             uid, pw = d.get("id"), d.get("password")
             if not uid or not pw:
                 return jsonify({"error": "id and password required"}), 400
+            lim = _manager_limit(uid)
+            if lim:
+                return lim
             self.set_password(uid, pw)
             self.revoke_user_sessions(uid)
             return jsonify({"ok": True})
@@ -837,6 +967,9 @@ class Auth:
                 return jsonify({"error": "id required"}), 400
             if g.user["id"] == uid:
                 return jsonify({"error": "cannot delete yourself"}), 400
+            lim = _manager_limit(uid)
+            if lim:
+                return lim
             self.delete_user(uid)
             return jsonify({"ok": True})
 

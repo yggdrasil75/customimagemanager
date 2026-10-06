@@ -304,7 +304,6 @@ function populateSettingsForm(s){
           if(p===cur) o.selected=true; el.appendChild(o);
         });
       };
-      if(typeof renderQuickFilterEditor==='function') renderQuickFilterEditor();
       const bn=document.getElementById('cfg_brand_name');
       if(bn) bn.value=s.brand_name||'';
       const bp=document.getElementById('cfg_brand_logo_preview');

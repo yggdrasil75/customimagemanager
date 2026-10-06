@@ -108,6 +108,13 @@ class Host:
         # default pane): list of field descriptors read by /api/modules and
         # rendered by the settings modal.
         self.settings_fields = []
+        # Settings key -> settings tab id that owns it, for keys saved from a
+        # module's own pane without a settings field (add_config_key(tab=)).
+        # update_settings uses it to check settings.<tab> per key.
+        self.config_tabs = {}
+        # Per-user settings (User settings tab): key -> descriptor, see
+        # add_user_setting. Stored per account, saved by the user themselves.
+        self.user_settings = {}
         # Controls-pane partials a module contributes: {tab_id: template_name}.
         # The template lives in the module's own templates/ dir and is rendered
         # SERVER-SIDE by the controls pane — a module ships pane HTML without any
@@ -196,33 +203,47 @@ class Host:
         return f"/modules/{module_id}/static/{filename}"
 
     # ── settings tab ─────────────────────────────────────────────────────
-    def add_settings_tab(self, tab_id, label, icon="", admin_only=False):
+    def add_settings_tab(self, tab_id, label, icon="", admin_only=False, group="modules"):
         """Declare a settings-modal tab this module owns.
 
         manager.py exposes the declared tabs via /api/modules so the front
         end can render the tab button and an empty pane; the module's own
         JS (added via add_asset) fills the pane and does the wiring. This
         keeps the host framework-agnostic about the module's UI.
+
+        The tab gets a permission, settings.<tab_id> (read = shown, write =
+        saveable; admin_only blocks it for every non-admin role by default),
+        and sits in the rail group `group` ("you", "server", "admin" or
+        "modules", the default).
         """
+        feature = self.core.features.register_settings_tab(tab_id, label, admin_only=admin_only)
         self.settings_tabs.append({
             "id": tab_id, "label": label, "icon": icon,
-            "admin_only": bool(admin_only),
+            "admin_only": bool(admin_only), "group": group or "modules",
+            "feature": feature,
             "module_id": self._current_module,
         })
 
     # ── settings ─────────────────────────────────────────────────────────
     def add_config_key(self, key, *, default=None, save=True,
-                       validate=None, on_change=None):
+                       validate=None, on_change=None, tab=None):
         """Declare a config setting this module owns.
 
         The registry seeds its default into state, includes it in the save
         allowlist (unless save=False), validates incoming values, and runs
         on_change(new, old) when update_settings changes it. This is how a
         module stops needing core to know its setting exists.
+
+        tab    -- the settings tab whose permission (settings.<tab>) guards
+                  writes to this key. Only needed when the key has no settings
+                  field and the module has more than one tab (otherwise it is
+                  derived: field pane, else the module's tab, else Modules).
         """
         self.config_registry.declare(
             key, default=default, save=save, validate=validate,
             on_change=on_change, owner=self._current_module)
+        if tab:
+            self.config_tabs[key] = tab
 
     def on_setting_change(self, key, fn):
         """Attach a change handler to an already-declared setting.
@@ -235,7 +256,8 @@ class Host:
             d["on_change"] = fn
 
     def add_settings_field(self, *, key, label, kind="text", pane="general",
-                           tab=None, options=None, help=None, admin_only=False):
+                           tab=None, options=None, help=None, admin_only=False,
+                           section=None, columns=None):
         """Contribute one settings-UI field bound to a config key.
 
         kind    -- "text" | "number" | "toggle" | "select".
@@ -245,13 +267,56 @@ class Host:
         options -- for "select": list of {value,label} or a callable returning
                    that (evaluated server-side at render, so a module can list
                    e.g. its model providers).
+        section -- a named spot inside the pane: renders into
+                   #module_settings_fields_<pane>_<section> when the pane has
+                   one (General has "defaults" near the top and "system", a
+                   compact one-line strip at the bottom), else the pane's
+                   main list.
+        columns -- for kind="rows" (an editable list of small records):
+                   [{key, label, placeholder?}], one input per column.
         The field renders in the settings modal and reads/writes its config key
-        through the normal settings save path.
+        through the normal settings save path; saving it needs write on the
+        pane's tab permission (settings.<tab>).
         """
         self.settings_fields.append({
             "key": key, "label": label, "kind": kind, "pane": pane,
             "tab": tab, "options": options, "help": help,
-            "admin_only": bool(admin_only), "module_id": self._current_module})
+            "admin_only": bool(admin_only), "section": section, "columns": columns,
+            "module_id": self._current_module})
+
+    # ── per-user settings / account fields ───────────────────────────────
+    def add_user_setting(self, key, *, label, kind="text", default=None, validate=None,
+                         options=None, columns=None, feature=None, help=None, order=100):
+        """Declare a per-user setting, shown in Settings → User settings and
+        saved by each user for themselves (no settings.* permission needed).
+
+        kind     -- like add_settings_field: text | number | toggle | select | rows.
+        default  -- the value a user who never set it gets; a callable
+                    default(user) is evaluated per request (an admin default).
+        validate -- fn(value) -> cleaned value; raise ValueError to reject.
+        options  -- for select: [{value,label}] or a callable returning it.
+        feature  -- a permission the user needs at WRITE to change it (they
+                    still see it, read-only, with READ).
+        Read the effective value with host.user_setting(key).
+        """
+        self.user_settings[key] = {
+            "key": key, "label": label, "kind": kind, "default": default,
+            "validate": validate, "options": options, "columns": columns,
+            "feature": feature, "help": help, "order": order,
+            "module_id": self._current_module}
+
+    def user_setting(self, key, username=None):
+        """The current (or named) user's value for a per-user setting: their
+        own if set, else the declared default."""
+        return self.core.user_setting(key, username)
+
+    def add_account_field(self, key, label, *, options=None, scopes=("user", "group"), help=None):
+        """Add a field an admin sets per account and / or per group in
+        Settings → Users (a user's value wins over their group's). Read the
+        resolved value off the request's user: g.user["account"].get(key).
+        options: [{value,label}] or a callable returning it ("" = unset)."""
+        return self.core.auth.register_account_field(key, label, options=options,
+                                                      scopes=scopes, help=help)
 
     # ── registry points / services ───────────────────────────────────────
     def provide_service(self, name, obj, priority=0):

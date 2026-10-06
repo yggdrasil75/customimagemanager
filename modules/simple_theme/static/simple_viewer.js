@@ -1,5 +1,5 @@
 /* simple_viewer.js — the full-screen picture viewer shared by the Simple and
- * Intermediate functional themes (window.CIMSimpleViewer).
+ * Intermediate layouts (window.CIMSimpleViewer).
  *
  * While active:
  *   - a plain click on a gallery / timeline tile opens the picture in the

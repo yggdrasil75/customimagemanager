@@ -69,20 +69,28 @@
     scope.querySelectorAll('.tag-edit').forEach(el => { el.readOnly = tagsDenied; });
     const boxesDenied = !canWrite(feats, 'annot.boxes');
     scope.querySelectorAll('.region-edit').forEach(el => { el.readOnly = boxesDenied; });
-    // Annotation edit gates: elements marked data-annot-edit="<key>" become
-    // read-only when that key is denied. Inputs/textareas are disabled in place
-    // (so the value stays visible); buttons are hidden. Applied to both the
-    // controls pane and any dynamically-rendered annotation UI.
-    scope.querySelectorAll('[data-annot-edit]').forEach(container => {
-      const key = container.getAttribute('data-annot-edit');
+    // Write gates: a container marked data-write-gate="<key>" (or the older
+    // data-annot-edit="<key>") becomes read-only when the user lacks WRITE on
+    // that key: text inputs / textareas go readOnly (the value stays visible),
+    // selects, checkboxes, radios and file inputs are disabled, and buttons are
+    // hidden — except ones marked data-gate-keep (navigation such as a
+    // collapsible header). Re-run apply(root) after rendering into a gated
+    // container; settings panes do this on every render.
+    scope.querySelectorAll('[data-write-gate], [data-annot-edit]').forEach(container => {
+      const key = container.getAttribute('data-write-gate') || container.getAttribute('data-annot-edit');
       const denied = !canWrite(feats, key);   // editing => write level
+      container.classList.toggle('cim-read-only', denied);
       const gate = el => {
-        if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+        if (el.hasAttribute('data-gate-keep')) return;
+        if (el.tagName === 'BUTTON') { el.classList.toggle(HIDDEN_CLASS, denied); return; }
+        const t = (el.type || '').toLowerCase();
+        if (el.tagName === 'SELECT' || t === 'checkbox' || t === 'radio' || t === 'file' || t === 'range' || t === 'color') {
+          // Remember an element that was disabled for its own reasons, so
+          // lifting the gate doesn't enable it.
+          if (denied) { if (!el.disabled) el.dataset.gateDisabled = '1'; el.disabled = true; }
+          else if (el.dataset.gateDisabled) { el.disabled = false; delete el.dataset.gateDisabled; }
+        } else {
           el.readOnly = denied;
-        } else if (el.tagName === 'SELECT') {
-          el.disabled = denied;
-        } else if (el.tagName === 'BUTTON') {
-          el.classList.toggle(HIDDEN_CLASS, denied);
         }
       };
       if (container.matches('input, textarea, select, button')) gate(container);

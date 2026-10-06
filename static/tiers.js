@@ -16,7 +16,100 @@ function addTierRow(t) {
   document.getElementById('tiers_rows').insertAdjacentHTML('beforeend', tierRowHtml(t));
 }
 
+// ── Settings tabs: permissions, grouping, switching ───────────────────────
+// Every tab button carries data-settings-tab and (except User settings)
+// data-feature="settings.<tab>"; every pane data-settings-pane plus the same
+// data-feature and data-write-gate. features.js hides a tab the user can't
+// read and makes a pane read-only when they can't write it, so this file only
+// needs to know which tabs are usable.
+function settingsTabFeature(name) {
+  const b = document.querySelector(`.settings-tab[data-settings-tab="${name}"]`);
+  return b ? b.getAttribute('data-feature') : null;
+}
+function settingsCanRead(name) {
+  const f = settingsTabFeature(name);
+  return !f || !window.CIMFeatures || CIMFeatures.canRead(f);
+}
+function settingsCanWrite(name) {
+  const f = settingsTabFeature(name);
+  return !f || !window.CIMFeatures || CIMFeatures.canWrite(f);
+}
+window.settingsCanRead = settingsCanRead;
+window.settingsCanWrite = settingsCanWrite;
+
+function _visibleTabs() {
+  return [...document.querySelectorAll('#settings_tab_rail .settings-tab[data-settings-tab]')]
+    .filter(b => settingsCanRead(b.dataset.settingsTab) && !b.classList.contains('hidden'));
+}
+
+// Re-apply the permission gates to the whole modal (after any render).
+function applySettingsGates() {
+  const m = document.getElementById('settings_modal');
+  if (m && window.CIMFeatures) CIMFeatures.apply(m);
+  organizeSettingsRail();
+}
+window.applySettingsGates = applySettingsGates;
+
+// Rail groups: buttons are folded into collapsible groups by their
+// data-settings-group. Collapsed state persists per browser; the group holding
+// the active tab is always open; a group with no visible tab is hidden.
+const SETTINGS_GROUPS = [['you', 'You'], ['server', 'Server'], ['admin', 'Admin'], ['modules', 'Modules']];
+const _SG_KEY = 'cim.settings.collapsed';
+function _sgCollapsed() {
+  try { return new Set(JSON.parse(localStorage.getItem(_SG_KEY) || '[]')); } catch (e) { return new Set(); }
+}
+function _sgSave(set) { try { localStorage.setItem(_SG_KEY, JSON.stringify([...set])); } catch (e) { /* ignore */ } }
+
+function organizeSettingsRail() {
+  const rail = document.getElementById('settings_tab_rail');
+  if (!rail) return;
+  const known = new Map(SETTINGS_GROUPS);
+  rail.querySelectorAll('.settings-tab[data-settings-tab]').forEach(b => {
+    const gid = b.dataset.settingsGroup || 'modules';
+    if (!known.has(gid)) known.set(gid, gid.charAt(0).toUpperCase() + gid.slice(1));
+  });
+  const collapsed = _sgCollapsed();
+  const anchor = document.getElementById('module_settings_tabs');
+  for (const [gid, label] of known) {
+    let grp = rail.querySelector(`.settings-group[data-group="${gid}"]`);
+    if (!grp) {
+      grp = document.createElement('div');
+      grp.className = 'settings-group';
+      grp.dataset.group = gid;
+      grp.innerHTML = `<button type="button" data-gate-keep class="settings-group-head w-full flex items-center gap-1 px-1 pt-2 pb-1 text-[10px] uppercase tracking-wide text-gray-500 hover:text-gray-300">
+          <span class="settings-group-caret">▾</span><span>${escapeHtml(label)}</span></button>
+        <div class="settings-group-body flex flex-col gap-1"></div>`;
+      grp.querySelector('.settings-group-head').addEventListener('click', () => {
+        const c = _sgCollapsed();
+        if (c.has(gid)) c.delete(gid); else c.add(gid);
+        _sgSave(c);
+        organizeSettingsRail();
+      });
+      rail.insertBefore(grp, anchor || null);
+    }
+    const body = grp.querySelector('.settings-group-body');
+    rail.querySelectorAll(`.settings-tab[data-settings-tab]`).forEach(b => {
+      if ((b.dataset.settingsGroup || 'modules') === gid && b.parentElement !== body) body.appendChild(b);
+    });
+    const tabs = [...body.querySelectorAll('.settings-tab')];
+    const visible = tabs.filter(b => settingsCanRead(b.dataset.settingsTab) && !b.classList.contains('hidden'));
+    const hasActive = tabs.some(b => b.dataset.settingsTab === window._settingsActiveTab);
+    const isCollapsed = collapsed.has(gid) && !hasActive;
+    grp.classList.toggle('hidden', !visible.length);
+    body.classList.toggle('hidden', isCollapsed);
+    grp.querySelector('.settings-group-caret').textContent = isCollapsed ? '▸' : '▾';
+  }
+}
+window.organizeSettingsRail = organizeSettingsRail;
+
 function settingsTab(name) {
+  // A tab the user can't read (or that doesn't exist) falls back to the first
+  // one they can — User settings is always there.
+  if (!settingsCanRead(name) || !document.querySelector(`[data-settings-pane="${name}"]`)) {
+    const first = _visibleTabs()[0];
+    name = first ? first.dataset.settingsTab : 'user';
+  }
+  window._settingsActiveTab = name;
   document.querySelectorAll('[data-settings-pane]').forEach(el => {
     el.classList.toggle('hidden', el.dataset.settingsPane !== name);
   });
@@ -30,7 +123,21 @@ function settingsTab(name) {
   if (name === 'modules') loadModulesTab();
   if (name === 'info') loadInfoTab();
   if (name === 'media' && window.loadMediaSettings) loadMediaSettings();
+  if (name === 'user' && window.loadUserSettings) loadUserSettings();
+  applySettingsGates();
 }
+
+// Panes render asynchronously (models, users, module panes); re-gate whatever
+// lands in a gated pane so a read-only tab stays read-only.
+(function watchSettingsPanes() {
+  const m = document.getElementById('settings_modal');
+  if (!m || typeof MutationObserver === 'undefined') return;
+  let t = null;
+  new MutationObserver(() => {
+    if (t) return;
+    t = setTimeout(() => { t = null; if (window.CIMFeatures) CIMFeatures.apply(m); }, 0);
+  }).observe(m, { childList: true, subtree: true });
+})();
 
 /* ── Modules tab ───────────────────────────────────────────────────────────
    Lists every declared module from /api/modules and renders an on/off toggle.
@@ -140,29 +247,24 @@ function escapeHtml(s) {
 
 async function openSettings(tab = 'general') {
   // Refetch module tabs / fields / model picks first (they're rebuilt from the
-  // server), THEN apply the admin-only visibility to whatever now exists.
+  // server), THEN apply the permission gates to whatever now exists.
   if (window.refreshModuleSettings) { try { await refreshModuleSettings(); } catch (e) { /* keep last */ } }
-  const admin = !!(window.CIMAuth && window.CIMAuth.user && window.CIMAuth.user.is_admin);
-  document.querySelectorAll('#settings_modal [data-admin-only]').forEach(el => {
-    el.classList.toggle('hidden', !admin);
-  });
   // Fresh edit session: reset per-open flags so a Close→Open cycle starts from
   // the saved server state, never from a half-finished previous edit.
   _tiersLoaded = false;
   _brandClearLogo = false;
   window._mediaLoaded = false;
+  window._userSettingsLoaded = false;
   // Take one fresh snapshot from the server, THEN freeze: while the modal is open
   // the background poll won't touch the working copy, so nothing refreshes out
   // from under the user — even if someone else saves settings meanwhile.
   try {
     const s = await fetch('/api/state').then(r => r.json());
-    quick_filters_cache = s.search_quick_filters || [];
     if (typeof populateSettingsForm === 'function') populateSettingsForm(s);
-  } catch (e) { /* keep whatever cache we have */ }
+  } catch (e) { /* keep whatever we have */ }
   window._settingsOpen = true;
   document.getElementById('settings_modal').classList.remove('hidden');
   window.pipelineEditorRefresh && window.pipelineEditorRefresh();
-  if (typeof renderQuickFilterEditor === 'function') renderQuickFilterEditor();
   settingsTab(tab);
 }
 
@@ -177,25 +279,28 @@ function closeSettings() {
 // close and surfaces the error, so nothing is silently lost. Panes that weren't
 // touched/loaded no-op inside their persist* helper.
 // Module panes call this once at load: their fn runs on every Save click.
+// Each step is {fn, tab}: a step bound to a tab only runs when the user may
+// write that tab (the server would refuse it anyway); a step with no tab
+// (a module pane buffering its own edits) always runs and no-ops if untouched.
 window._settingsPersistSteps = window._settingsPersistSteps || [];
-window.registerSettingsPersist = function (fn) {
-  if (typeof fn === 'function' && !window._settingsPersistSteps.includes(fn)) window._settingsPersistSteps.push(fn);
+window.registerSettingsPersist = function (fn, tab) {
+  if (typeof fn !== 'function') return;
+  if (window._settingsPersistSteps.some(s => (s.fn || s) === fn)) return;
+  window._settingsPersistSteps.push({ fn, tab: tab || null });
 };
 
 async function saveAllSettings() {
   const btn = document.getElementById('settings_save_btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
   const steps = [];
-  if (typeof persistAiSettings === 'function')    steps.push(persistAiSettings);
-  if (typeof persistBranding === 'function')      steps.push(persistBranding);
-  if (typeof persistTiersConfig === 'function')   steps.push(persistTiersConfig);
-  // Module panes that buffer their edits register a step with
-  // registerSettingsPersist(fn); each returns {ok, error} like the core ones.
-  for (const fn of (window._settingsPersistSteps || [])) if (!steps.includes(fn)) steps.push(fn);
+  if (typeof persistBranding === 'function')      steps.push({ fn: persistBranding, tab: null });   // gates itself on the branding feature
+  if (typeof persistTiersConfig === 'function')   steps.push({ fn: persistTiersConfig, tab: 'storage' });
+  for (const s of (window._settingsPersistSteps || [])) steps.push(s.fn ? s : { fn: s, tab: null });
   let failed = null;
   for (const step of steps) {
+    if (step.tab && !settingsCanWrite(step.tab)) continue;
     let res;
-    try { res = await step(); } catch (e) { res = { ok: false, error: 'Save failed' }; }
+    try { res = await step.fn(); } catch (e) { res = { ok: false, error: 'Save failed' }; }
     if (res && res.ok === false) { failed = res.error || 'Save failed'; break; }
   }
   if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
@@ -205,7 +310,7 @@ async function saveAllSettings() {
   }
   // Success: unfreeze, refresh the chips from what we just saved, and close.
   window._settingsOpen = false;
-  if (typeof renderQuickFilters === 'function') renderQuickFilters();
+  if (typeof fetchState === 'function') fetchState();
   if (window.showToast) showToast('Settings saved.');
   document.getElementById('settings_modal').classList.add('hidden');
   stopTiersPoll();

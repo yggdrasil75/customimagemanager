@@ -119,10 +119,12 @@ touching `media_types.py`.
 |---|---|
 | `host.add_route(rule, view, **opts)` | register a Flask route (endpoint auto-namespaced) |
 | `host.add_asset(filename, kind=None)` | inject a JS/CSS file from your `static/` |
-| `host.add_config_key(key, default=, save=, validate=, on_change=)` | own a persisted setting |
+| `host.add_config_key(key, default=, save=, validate=, on_change=, tab=)` | own a persisted setting |
 | `host.on_setting_change(key, fn)` | side effect when a setting changes |
-| `host.add_settings_field(key=, label=, kind=, pane=, options=, help=)` | a settings-UI widget bound to a key |
-| `host.add_settings_tab(id, label, icon, admin_only)` | your own Settings tab (fields with `pane=<id>` render in it) |
+| `host.add_settings_field(key=, label=, kind=, pane=, section=, options=, columns=, help=)` | a settings-UI widget bound to a key |
+| `host.add_settings_tab(id, label, icon, admin_only, group=)` | your own Settings tab (fields with `pane=<id>` render in it; gets the permission `settings.<id>`) |
+| `host.add_user_setting(key, label=, kind=, default=, validate=, options=, feature=)` / `host.user_setting(key)` | a per-user setting in Settings → User settings / its value for the current user |
+| `host.add_account_field(key, label, options=, scopes=)` | a field an admin sets per account / group in Settings → Users (`g.user["account"][key]`) |
 | `host.register_feature(key, label, section=, default=, role_defaults=)` | an auth permission; gate routes with `host.require_feature` / `core.auth.require_feature` |
 | `host.add_table(ddl, check=)` | own DB tables (created after all modules load; `check(db)` runs once) |
 | `host.register_file_enricher(fn)` | attach per-file fields to gallery/list/detail rows |
@@ -139,20 +141,31 @@ touching `media_types.py`.
 
 ### Settings
 
-A module owns its settings: declare the key (default, validation, change
-hook) and, if the user should see it, a widget. Widgets render in the General
-pane by default, in your own tab with `pane=<tab id>`, in the Models tab with
-`pane="models"` (only for things that genuinely belong next to a model pick),
-or — for module-specific knobs that aren't global settings — with
-`pane="module"`, which puts a ⚙ Settings button on the module's row in the
-Modules tab that unfolds them. Model *selection* is never a settings field —
-see capabilities.
+A module owns its settings: declare the key (default, validation, change hook) and, if the user should see it, a widget. Widgets render in the General pane by default, in your own tab with `pane=<tab id>`, in the Models tab with `pane="models"` (only for things that genuinely belong next to a model pick), or — for module-specific knobs that aren't global settings — with `pane="module"`, which puts a ⚙ Settings button on the module's row in the Modules tab that unfolds them. Model *selection* is never a settings field — see capabilities.
 
 ```python
 host.add_config_key("dup_cnn_width", default=1.0,
                     validate=lambda v: max(0.25, min(2.0, float(v))))
 host.add_settings_field(key="dup_cnn_width", label="Dup-CNN width", kind="number")
 ```
+
+Field kinds are `text`, `number`, `toggle`, `select` (`options=[{value, label}]` or a callable returning that), `combo` (free text with suggestions), `textarea` and `rows` — an editable list of small records, one input per entry in `columns=[{key, label, placeholder}]` (the search quick-filters use it). `section=` places a field inside its pane: General has `"defaults"` (what users get until they choose for themselves) near the top and `"system"`, a compact one-line strip of small server knobs at the bottom; any pane can offer more with a `#module_settings_fields_<pane>_<section>` mount. Without a section the field goes in the pane's main list.
+
+#### Who may see and save settings
+
+Every Settings tab has a permission, `settings.<tab id>`: read shows the tab, write lets its settings be saved, block hides it. The core tabs are `settings.general`, `.media`, `.storage`, `.models`, `.info`, `.users` and `.modules`; `host.add_settings_tab` registers `settings.<your tab>` for you (`admin_only=True` blocks it for every non-admin role until an admin grants it). Admins set them per user or group like any other feature.
+
+`/api/update_settings` checks every key it receives against the tab that owns it and refuses the whole save, listing the keys, if any is not writable — so a user saves exactly the tabs they may write. Ownership is worked out for you: a key with a settings field belongs to the field's pane (`pane="module"` → Modules), a key without one belongs to `add_config_key(tab=)`, else to your module's settings tab, else to Modules. A key nobody owns is admin-only, so a module that saves extra keys from its own pane should own them with `add_config_key`. Routes behind a tab gate on its feature: `host.add_route(..., feature="settings.<tab>", level="write")`.
+
+In the browser a read-only tab is handled generically: tab buttons and panes carry `data-feature="settings.<tab>"` and the pane `data-write-gate="settings.<tab>"`, which turns every input in it read-only (selects, checkboxes and files disabled) and hides its buttons, also for content rendered later. Your own pane gets both attributes; use `data-write-gate="<key>"` on any other container that should follow a permission, and `data-gate-keep` on a button that only navigates. A pane that buffers edits registers its save with `registerSettingsPersist(fn, tab)`; with a tab it only runs when that tab is writable.
+
+Settings tabs sit in collapsible groups in the rail — You, Server, Admin, Modules; pass `group=` to `add_settings_tab` to choose (default `"modules"`).
+
+#### Per-user settings and account fields
+
+`host.add_user_setting(key, label=, kind=, default=, validate=, options=, columns=, feature=, help=)` adds a setting each user saves for themselves in Settings → User settings, with no `settings.*` permission involved. `default` may be a callable `default(user)` (an admin's default, a role's); `validate(value)` raises `ValueError` to reject; `feature` names a permission the user needs at write to change it (they see it read-only otherwise, and the server refuses it). `host.user_setting(key)` returns the current user's value, theirs if set, else the default. Saving fires `cim:user-settings` on `window` with `{keys}`.
+
+`host.add_account_field(key, label, options=, scopes=("user", "group"))` adds a select to the user and group rows in Settings → Users, for things an admin decides per account (the layout a new account starts on). A user's value wins over their group's; read it as `g.user["account"].get(key)`.
 
 ### Core events
 
@@ -317,37 +330,36 @@ Assets are served at `/modules/<id>/static/<file>` and injected on page load.
 
 Theming is core (`modules/theming`, always on); every theme is a module. There are two kinds, and exactly one of each is active at a time:
 
-- **functional** — what the interface shows and how it is laid out: which panes exist, how a picture opens, how big things are.
-- **colorings** — what colour it is: a palette, nothing else.
+- **layout** — what the interface shows and how it is laid out: which panes exist, how a picture opens, how big things are.
+- **palette** — what colour it is, nothing else.
 
-Users pick their own pair in the header / Settings → General (saved to their account; it needs the `theme.choose` permission at write level, otherwise they get the admin defaults from Settings → General → "Default interface" / "Default colours"). The core sets `body[data-functional="<id>"]` and `body[data-colorings="<id>"]`, re-applies feature visibility, and fires `cim:theme` on `window`. A theme module keys its CSS and JS off those.
+The core sets `body[data-layout="<id>"]` and `body[data-palette="<id>"]`, re-applies feature visibility and fires `cim:theme` on `window` (detail `{layout, palette}`) whenever either changes. Users pick their own in Settings → User settings (the `layout` and `palette` user settings, which need the `theme.choose` permission at write). Otherwise a palette comes from the admin's "Default palette" in General, and a layout from the account, then the group (an account field in Settings → Users), then the layout registered for the account's role, then the one registered with `default=True`.
 
 ### Registering a theme
 
 Depend on `theming`, register with its service, and ship your assets as usual:
 
 ```python
-MANIFEST = {"id": "theme_kiosk", "name": "Interface: Kiosk", "requires": ["theming"],
-            "assets": ["theme_kiosk.css", "theme_kiosk.js"], ...}
+MANIFEST = {"id": "kiosk_theme", "name": "Layout: Kiosk", "requires": ["theming"],
+            "assets": ["kiosk.css", "kiosk.js"], ...}
 
 def register(host):
     theming = host.get_service("theming")
     if theming is None:
         return
-    theming.register("functional", "kiosk", "Kiosk",
-                     description="One picture at a time, no chrome.", default=False)
-    host.add_asset("theme_kiosk.css", kind="css")
-    host.add_asset("theme_kiosk.js")
+    theming.register("layout", "kiosk", "Kiosk", description="One picture at a time, no chrome.", roles=["viewer"])
+    host.add_asset("kiosk.css", kind="css")
+    host.add_asset("kiosk.js")
 ```
 
-`register(kind, id, label, description="", default=False)`: `kind` is `"functional"` or `"colorings"`, `id` is the body-attribute value (lowercase letters, digits, `_`, `-`) and `default=True` offers the theme as the fallback when the admin set none (the first registered wins otherwise). The service also has `themes(kind)`, `has(kind, id)` and `fallback(kind)`.
+`register(kind, id, label, description="", default=False, roles=())`: `kind` is `"layout"` or `"palette"`, `id` is the body-attribute value (lowercase letters, digits, `_`, `-`), `default=True` makes it the last-resort fallback, and `roles` makes it the default for accounts with those roles (`"admin"` means admins). The service also has `themes(kind)`, `has(kind, id)`, `for_role(kind, role)`, `fallback(kind)` and `options(kind)`.
 
-### A colorings theme
+### A palette
 
-A palette only: set the accent variables under your attribute. `modules/theming/static/theming.css` maps every accent utility class the app uses (Tailwind `blue` / `indigo` / `sky`: backgrounds, text, borders, rings, `accent-color`, with their `hover:` / `focus:` variants) onto these variables whenever any colorings theme is active, so a palette recolours the whole app without touching markup.
+Set the accent variables under your attribute and nothing else. `modules/theming/static/theming.css` maps every accent utility class the app uses (Tailwind `blue` / `indigo` / `sky`: backgrounds, text, borders, rings and `accent-color`, with their `hover:` / `focus:` variants) onto these variables whenever a palette is active, with the stock colour as each fallback, so a palette recolours the whole app without touching markup and a shade it leaves out stays stock blue rather than turning transparent.
 
 ```css
-body[data-colorings="forest"] {
+body[data-palette="forest"] {
   --cim-accent-200: …; --cim-accent-300: …; … --cim-accent-900: …;    /* main accent (stock: blue) */
   --cim-accent2-200: …; … --cim-accent2-800: …;                       /* secondary (stock: indigo) */
   --cim-accent3-300: …; … --cim-accent3-800: …;                       /* tertiary (stock: sky) */
@@ -356,30 +368,30 @@ body[data-colorings="forest"] {
 
 Module CSS that needs an accent colour should use the variables with a fallback (`var(--cim-accent-600, #2563eb)`) rather than a bare hex, so every palette reaches it.
 
-### A functional theme
+### A layout
 
-Scope everything to `body[data-functional="<id>"]`. CSS does the layout; JS reacts to `cim:theme` (and runs once at load if `CIMTheme.loaded` is already true) and should undo itself when another functional theme becomes active:
+Scope everything to `body[data-layout="<id>"]`. CSS does the arranging; JS reacts to `cim:theme` (and runs once at load if `CIMTheme.loaded` is already true) and undoes itself when another layout becomes active:
 
 ```javascript
 function sync() {
-  if (window.CIMTheme.functional === "kiosk") enterKiosk(); else leaveKiosk();
+  if (window.CIMTheme.layout === "kiosk") enterKiosk(); else leaveKiosk();
 }
 window.addEventListener("cim:theme", sync);
 if (window.CIMTheme && window.CIMTheme.loaded) sync();
 ```
 
-`window.CIMTheme` gives `functional`, `colorings`, `themes`, `canChoose`, `loaded`, `set(kind, id)` and `ready` (a promise). A functional theme may reuse another theme's machinery by listing it in `requires` — the full-screen viewer in `theme_simple` (`window.CIMSimpleViewer.activate(owner, {metaMode, albumsStrip, panes})` / `release(owner)`) is built for that.
+`window.CIMTheme` gives `layout`, `palette`, `themes`, `canChoose`, `loaded`, `set(kind, id)` and `ready` (a promise). A layout may reuse another's machinery by listing it in `requires` — the full-screen viewer in `simple_theme` (`window.CIMSimpleViewer.activate(owner, {metaMode, albumsStrip, panes})` / `release(owner)`) is built for that.
 
 ### Themes and permissions
 
 A theme is presentation. It may hide controls a user is allowed to use; it must never show one they are not, and it never changes what a request may do — `features.js` hides gated elements with `.cim-feature-hidden { display:none !important }` and every route is gated server-side regardless of theme, so the rules for a theme are:
 
 - hide with `display: none` (`!important` is fine), but never force an element visible with `!important`, so the gate's rule still wins;
-- anything you render yourself that shows gated data carries the matching `data-feature="<key>"` and you call `CIMFeatures.apply(yourRoot)` after rendering it (the viewer does this for people / description / tags / albums);
-- moving an existing element (the Intermediate theme moves `#controls_pane` into the viewer) is fine — its gates travel with it; cloning HTML strips the live gating and is not;
+- anything you render yourself that shows gated data carries the matching `data-feature="<key>"`, and you call `CIMFeatures.apply(yourRoot)` after rendering it;
+- moving an existing element (the Intermediate layout moves `#controls_pane` into the viewer) is fine — its gates travel with it; cloning HTML strips the live gating and is not;
 - never call an endpoint on the user's behalf that the visible UI would not have offered.
 
-The core re-runs `CIMFeatures.apply(document)` after every theme switch, so a theme cannot leave something un-hidden by accident; picking a theme itself requires `theme.choose`, and `/api/theme` rejects ids that no module registered.
+The core re-runs `CIMFeatures.apply(document)` after every theme switch, picking a theme requires `theme.choose`, and an id no module registered is refused.
 
 ## Enable / disable
 

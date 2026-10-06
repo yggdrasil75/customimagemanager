@@ -35,7 +35,7 @@ function applyBranding(s){
 
 function _isBrandAdmin(){
   const u=(window.CIMAuth&&window.CIMAuth.user)||{};
-  return !!(u.is_admin || (u.features&&u.features.branding===true));
+  return !!(u.is_admin || (window.CIMFeatures && CIMFeatures.canWrite('branding')));
 }
 
 function gateBrandingSection(){

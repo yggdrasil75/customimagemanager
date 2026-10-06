@@ -51,4 +51,4 @@ async function persistMediaSettings() {
   } catch (e) { return { ok: false, error: 'Media settings save failed' }; }
   return { ok: true };
 }
-if (window.registerSettingsPersist) window.registerSettingsPersist(persistMediaSettings);
+if (window.registerSettingsPersist) window.registerSettingsPersist(persistMediaSettings, 'media');

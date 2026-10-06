@@ -327,8 +327,8 @@ def register(host):
     host.add_config_key("min_free_gb", default=0,
                         validate=lambda v: max(0.0, float(v or 0)),
                         on_change=_set_min_free)
-    host.add_settings_field(key="min_free_gb", label="Pause downloads below (GB free)",
-                            kind="number", pane="general", tab="general",
+    host.add_settings_field(key="min_free_gb", label="Storage limit remaining (GB)",
+                            kind="number", pane="general", tab="general", section="system",
                             help="Fetch queue and model downloads pause until space frees up. "
                                  "0 = automatic: 10 GB on drives over 1 TB, else 1 GB.")
     host.on_startup(lambda: _set_min_free(host.config.get("min_free_gb")))

@@ -1,6 +1,6 @@
-// Simple / Intermediate functional themes on top of the core theming + viewer.
+// Simple / Intermediate layouts on top of the core theming + viewer.
 const { page, test, assert, skipUnless, hasModule } = require("cim");
-const skip = skipUnless("theme_simple");
+const skip = skipUnless("simple_theme");
 
 const META = { success: true, metadata: { tags: ["beach", "?sunset"], description: "Grandma at the beach",
   regions: [
@@ -10,16 +10,18 @@ const META = { success: true, metadata: { tags: ["beach", "?sunset"], descriptio
     { class_name: "Jill", region_name: "Jill", region_type: "person", cx: .5, cy: .6, w: .3, h: .6, confirmed: true },
   ], albums: [] } };
 
-function themes(functional) {
-  return { success: true, can_choose: true, chosen: {}, defaults: { functional: "advanced", colorings: "blue" },
-    themes: { functional: [{ id: "advanced", label: "A" }, { id: "simple", label: "S" }, { id: "intermediate", label: "I" }], colorings: [] },
-    selected: { functional, colorings: "" } };
+function themes(layout) {
+  return { success: true, can_choose: true, defaults: { layout: "advanced", palette: "blue" },
+    themes: { layout: [{ id: "advanced", label: "A" }, { id: "simple", label: "S" }, { id: "intermediate", label: "I" }], palette: [] },
+    selected: { layout, palette: "" } };
 }
-const MODS = ["theming", "timeline", "theme_simple", "theme_intermediate", "theme_advanced"].filter(hasModule);
+const MODS = ["theming", "timeline", "simple_theme", "intermediate_theme", "advanced_theme"].filter(hasModule);
 
-async function boot(functional) {
+async function boot(layout) {
   const b = page({ modules: MODS });
-  b.api.on("/api/theme", c => c.method === "POST" ? Object.assign(themes(c.body.functional), { chosen: c.body }) : themes(functional));
+  let cur = layout;
+  b.api.on("/api/theme", () => themes(cur));
+  b.api.on("POST /api/user/settings", c => { if (c.body.layout) cur = c.body.layout; return { success: true, fields: [] }; });
   b.api.on("POST /api/metadata", c => c.body.action === "read" ? META : { success: true });
   b.api.on("POST /api/albums/of", { success: true, albums: ["Holiday"], all: ["Holiday"] });
   b.api.on("/api/albums", { success: true, albums: [{ name: "Holiday", count: 3, cover: "h.jxl" }, { name: "Pets", count: 0, cover: "" }] });
@@ -30,7 +32,7 @@ async function boot(functional) {
 test("simple: body attribute set, viewer active, timeline forced, albums strip", { skip }, async () => {
   const b = await boot("simple");
   assert.deepEqual(b.errors, []);
-  assert.equal(b.document.body.dataset.functional, "simple");
+  assert.equal(b.document.body.dataset.layout, "simple");
   assert.equal(b.run("CIMSimpleViewer.active"), "simple");
   if (hasModule("timeline")) assert.equal(b.run("galleryView"), "timeline");
   const cards = b.document.querySelectorAll("#sv_albums_strip .sv-card");
@@ -75,7 +77,7 @@ test("simple: panels respect feature gates (tags denied -> hidden)", { skip }, a
   assert.ok(!b.document.querySelector('#sv_meta_simple [data-feature="annot.description"]').classList.contains("cim-feature-hidden"));
 });
 
-test("intermediate: Meta moves the controls pane in and back; off-limits tabs bounce", { skip: skip || skipUnless("theme_intermediate") }, async () => {
+test("intermediate: Meta moves the controls pane in and back; off-limits tabs bounce", { skip: skip || skipUnless("intermediate_theme") }, async () => {
   const b = await boot("intermediate");
   assert.equal(b.run("CIMSimpleViewer.active"), "intermediate");
   b.run(`galleryFiles=[{filename:"a.jxl"}]`);
@@ -88,7 +90,7 @@ test("intermediate: Meta moves the controls pane in and back; off-limits tabs bo
   b.run(`closePopout()`);
   assert.equal(b.document.getElementById("controls_pane").parentElement.id, "editor_region");
   b.run(`setPane('review')`);
-  await b.run(`CIMTheme.set("functional", "intermediate")`);
+  await b.run(`CIMTheme.set("layout", "intermediate")`);
   assert.equal(b.run("currentPane"), "gallery");
 });
 
@@ -106,8 +108,8 @@ test("switching simple -> advanced closes the viewer and restores", { skip }, as
   await b.run(`selectFile("a.jxl")`);
   await b.tick(10);
   assert.ok(!b.document.getElementById("popout_modal").classList.contains("hidden"));
-  await b.run(`CIMTheme.set("functional", "advanced")`);
+  await b.run(`CIMTheme.set("layout", "advanced")`);
   assert.equal(b.run("CIMSimpleViewer.active"), null);
   assert.ok(b.document.getElementById("popout_modal").classList.contains("hidden"));
-  assert.equal(b.document.body.dataset.functional, "advanced");
+  assert.equal(b.document.body.dataset.layout, "advanced");
 });

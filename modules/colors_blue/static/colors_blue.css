@@ -1,5 +1,5 @@
-/* colors_blue: the "blue" colorings theme — a palette only. See modules/theming/static/theming.css for the variables. */
-body[data-colorings="blue"] {
+/* colors_blue: the "blue" palette. Variables: modules/theming/static/theming.css. */
+body[data-palette="blue"] {
   --cim-accent-200: #bfdbfe;
   --cim-accent-300: #93c5fd;
   --cim-accent-400: #60a5fa;

@@ -58,7 +58,7 @@ def register(host):
         stages = {n: s["label"] for n, s in host.pipeline_stages.items()}
         return jsonify({"success": True, "pipeline_tree": t, "catalog": graph_engine.catalog(stages),
                         "is_graph": graph_engine.is_graph(host.config.get("pipeline_tree") or DEFAULT_PIPELINE)})
-    host.add_route("/api/pipeline_tree", _tree, feature="settings")
+    host.add_route("/api/pipeline_tree", _tree, feature="settings.pipeline")
 
     def _meta_fields():
         """EXIF field names the metadata module knows (for meta_get/meta_set pickers)."""
@@ -71,7 +71,7 @@ def register(host):
             except Exception:
                 pass
         return jsonify({"success": True, "fields": sorted(set(names), key=str.lower)})
-    host.add_route("/api/pipeline_meta_fields", _meta_fields, feature="settings")
+    host.add_route("/api/pipeline_meta_fields", _meta_fields, feature="settings.pipeline")
     host.add_route("/api/run_pipeline", pc.run_pipeline_route, methods=["POST"], feature="ai.smarttag", level="write")
     host.add_route("/api/bulk_pipeline", pc.bulk_pipeline, methods=["POST"], feature="ai.smarttag", level="write")
     host.add_route("/api/autotag_toggle", pc.autotag_toggle, methods=["POST"], feature="ai.smarttag", level="write", action="autotag_toggle", fields=("enabled",))

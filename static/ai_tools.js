@@ -1,23 +1,3 @@
-// ── AI actions ─────────────────────────────────────────────────────────────
-async function persistAiSettings(){
-  // Safe field readers: a single missing element must never throw and abort the
-  // whole unified Save (that's the bug that made Save silently do nothing).
-  const _v=(id,d='')=>{ const e=document.getElementById(id); return e?e.value:d; };
-  const _c=(id)=>{ const e=document.getElementById(id); return !!(e&&e.checked); };
-  const body={
-      };
-  // Fold in the General pane's search quick-filters so the single settings POST
-  // carries them too (same /api/update_settings endpoint).
-  if(typeof collectQuickFilters==='function'){
-    body.search_quick_filters=collectQuickFilters();
-  }
-  try{
-    const r=await fetch('/api/update_settings',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(body)});
-    if(!r.ok) return {ok:false, error:'Settings save failed ('+r.status+')'};
-  }catch(e){ return {ok:false, error:'Settings save failed'}; }
-  return {ok:true};
-}
 // ── AI picker: class → action → run (classes come from /api/ai/actions) ─────
 let _aiGroups=[];
 async function loadAiActions(){

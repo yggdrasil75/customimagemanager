@@ -46,8 +46,7 @@ FEATURE_SECTIONS = {
         "features": [("library.reconcile", "Sync with disk", "write")],
     },
     "settings": {"label": "Settings",
-                 "features": [("branding", "Branding (name / logo)", "write"),
-                              ("settings.tiers", "Storage tiers", "write")]},
+                 "features": [("branding", "Branding (name / logo)", "write")]},
     "gallery_tabs": {
         "label": "Gallery tabs",
         "features": [
@@ -75,7 +74,8 @@ FEATURE_SECTIONS = {
 # features handle their own; only the core album tab is left here). Old keys
 # such as ai.tiers / ai.reconcile are renamed on migration too.
 COLLAPSED = {"tab.albums.edit": "tab.albums"}
-RENAMED = {"ai.tiers": "settings.tiers", "ai.reconcile": "library.reconcile"}
+RENAMED = {"ai.tiers": "settings.storage", "settings.tiers": "settings.storage",
+           "ai.reconcile": "library.reconcile"}
 
 
 def _rebuild():
@@ -120,6 +120,31 @@ def register_feature(key, label, *, section="modules", section_label="Modules",
         if rd is not None:
             bundle[key] = level_of(rd, dflt)
     return key
+
+
+def settings_tab_feature(tab_id):
+    """The permission key for a Settings-modal tab: settings.<tab id>."""
+    return "settings." + str(tab_id)
+
+
+# Non-admin role levels for a settings tab, by kind. An admin-only tab is
+# blocked for every other role until an admin grants it; a normal tab is
+# viewable (read) by custom accounts and hidden from viewers / uploaders.
+_TAB_ROLE_DEFAULTS = {
+    "admin_only": {"viewer": "block", "uploader": "block", "custom": "block"},
+    "normal":     {"viewer": "block", "uploader": "block"},
+    "public":     {"viewer": "read", "uploader": "read"},
+}
+
+
+def register_settings_tab(tab_id, label, *, admin_only=False, public=False, default="read"):
+    """Register the permission for one Settings tab (core or module): read =
+    the tab is shown, write = its settings can be saved. Called for the core
+    tabs below and by host.add_settings_tab for module tabs."""
+    kind = "admin_only" if admin_only else ("public" if public else "normal")
+    return register_feature(settings_tab_feature(tab_id), f"Settings: {label} tab",
+                            section="settings", section_label="Settings",
+                            default=default, role_defaults=_TAB_ROLE_DEFAULTS[kind])
 
 
 def registered_keys():
@@ -219,3 +244,13 @@ def catalog():
         ],
         "roles": list(ROLE_DEFAULT_LEVEL.keys()),
     }
+
+
+# Core Settings tabs. "user" (per-account settings) has no permission: every
+# signed-in user may read and save their own.
+for _tid, _lbl, _kw in (("general", "General", {}), ("media", "Media", {}),
+                        ("storage", "Storage", {}), ("models", "Models", {}),
+                        ("info", "Info", {"public": True}),
+                        ("users", "Users", {"admin_only": True}),
+                        ("modules", "Modules", {"admin_only": True})):
+    register_settings_tab(_tid, _lbl, **_kw)

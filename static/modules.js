@@ -42,34 +42,52 @@
   // Fields with pane="module" belong to a per-module Settings popover in the
   // Modules tab (tiers.js renders the button); they are not global settings.
   window._moduleFields = {};
+  // Mount for a field: #module_settings_fields_<pane>_<section> when the pane
+  // has that section, else the pane's main list.
+  function fieldMount(f) {
+    const pane = f.pane || "general";
+    return (f.section && document.getElementById(`module_settings_fields_${pane}_${f.section}`))
+        || document.getElementById("module_settings_fields_" + pane);
+  }
   function buildSettingsFields(fields) {
-    const byPane = {};
     window._moduleFields = {};
+    document.querySelectorAll('[id^="module_settings_fields_"]').forEach(m => { m.innerHTML = ""; });
     for (const f of fields) {
       if ((f.pane || "general") === "module") {
         (window._moduleFields[f.module_id] ||= []).push(f);
         continue;
       }
-      (byPane[f.pane || "general"] ||= []).push(f);
+      const mount = fieldMount(f);
+      if (mount) mount.appendChild(fieldEl(f, saveSetting, mount.hasAttribute("data-compact")));
     }
     if (window.renderModuleSettingsButtons) renderModuleSettingsButtons();
-    for (const pane in byPane) {
-      const mount = document.getElementById("module_settings_fields_" + pane);
-      if (!mount) continue;
-      mount.innerHTML = "";
-      for (const f of byPane[pane]) mount.appendChild(fieldEl(f));
-    }
     if (window.applyFeatureVisibility) applyFeatureVisibility();
   }
 
-  function fieldEl(f) {
-    const wrap = document.createElement("label");
-    wrap.className = "block text-xs text-gray-300";
-    if (f.admin_only) wrap.setAttribute("data-admin-only", "");
-    const title = document.createElement("div");
-    title.className = "font-bold mb-1";
+  // One settings widget. save(key, value) receives every change (module
+  // settings and User settings both buffer it for the modal's Save).
+  // compact = inline label + small input on one line, help as a tooltip.
+  // Kinds: text | number | toggle | select | combo | textarea | rows.
+  function fieldEl(f, save, compact) {
+    save = save || saveSetting;
+    const wrap = document.createElement(compact ? "label" : (f.kind === "rows" ? "div" : "label"));
+    wrap.className = compact ? "settings-compact-field" : "block text-xs text-gray-300";
+    // Admin-only fields stay hidden for everyone else.
+    if (f.admin_only && !(window.CIMAuth && CIMAuth.user && CIMAuth.user.is_admin)) wrap.classList.add("hidden");
+    if (compact && f.help) wrap.title = f.help;
+    const title = document.createElement(compact ? "span" : "div");
+    title.className = compact ? "" : "font-bold mb-1";
     title.textContent = f.label;
     wrap.appendChild(title);
+    if (f.kind === "rows") {
+      wrap.appendChild(rowsEditor(f, save));
+      if (f.help) {
+        const h = document.createElement("div");
+        h.className = "text-[10px] text-gray-500 mt-1"; h.textContent = f.help;
+        wrap.appendChild(h);
+      }
+      return wrap;
+    }
     let input;
     if (f.kind === "select") {
       input = document.createElement("select");
@@ -108,7 +126,7 @@
         const reset = document.createElement("button");
         reset.type = "button"; reset.textContent = "reset to default";
         reset.className = "text-[10px] text-cyan-400 hover:text-cyan-300 ml-2";
-        reset.addEventListener("click", () => { input.value = f.default; saveSetting(f.key, f.default); });
+        reset.addEventListener("click", () => { input.value = f.default; save(f.key, f.default); });
         wrap.querySelector("div")?.appendChild(reset);
       }
     } else {
@@ -120,16 +138,69 @@
     input.addEventListener("change", () => {
       const v = f.kind === "toggle" ? input.checked
         : f.kind === "number" ? parseFloat(input.value) : input.value;
-      saveSetting(f.key, v);
+      save(f.key, v);
     });
+    if (compact) input.classList.add("settings-compact-input");
     wrap.appendChild(input);
-    if (f.help) {
+    if (f.help && !compact) {
       const h = document.createElement("div");
       h.className = "text-[10px] text-gray-500 mt-1"; h.textContent = f.help;
       wrap.appendChild(h);
     }
     return wrap;
   }
+
+  // An editable list of small records ({col: value}): one input per column,
+  // a ✕ per row and "+ Add". Every edit hands the whole list to save().
+  function rowsEditor(f, save) {
+    const cols = f.columns || [{ key: "value", label: "Value" }];
+    const box = document.createElement("div");
+    box.className = "settings-rows";
+    const grid = `grid-template-columns: repeat(${cols.length}, minmax(0, 1fr)) 28px`;
+    const rows = (Array.isArray(f.value) ? f.value : []).map(r => Object.assign({}, r));
+    const emit = () => save(f.key, rows.filter(r => cols.every(c => String(r[c.key] ?? "").trim())));
+    function render() {
+      box.innerHTML = "";
+      const head = document.createElement("div");
+      head.className = "grid gap-2 text-[10px] text-gray-500 mb-1 px-1"; head.style.cssText = grid;
+      head.innerHTML = cols.map(c => `<span>${escHtml(c.label || c.key)}</span>`).join("") + "<span></span>";
+      box.appendChild(head);
+      rows.forEach((r, i) => {
+        const row = document.createElement("div");
+        row.className = "grid gap-2 items-center mb-1.5 settings-row"; row.style.cssText = grid;
+        for (const c of cols) {
+          const inp = document.createElement("input");
+          inp.className = "bg-gray-900 text-white text-xs p-1 rounded border border-gray-600";
+          inp.value = r[c.key] ?? ""; inp.placeholder = c.placeholder || "";
+          inp.dataset.col = c.key;
+          inp.addEventListener("input", () => { r[c.key] = inp.value; emit(); });
+          row.appendChild(inp);
+        }
+        const del = document.createElement("button");
+        del.type = "button"; del.textContent = "✕"; del.title = "Remove";
+        del.className = "text-red-500 hover:text-red-400 text-xs";
+        del.addEventListener("click", () => { rows.splice(i, 1); emit(); render(); });
+        row.appendChild(del);
+        box.appendChild(row);
+      });
+      const add = document.createElement("button");
+      add.type = "button"; add.textContent = "+ Add";
+      add.className = "text-xs bg-indigo-600 hover:bg-indigo-500 px-2 py-0.5 rounded font-bold mt-1";
+      add.addEventListener("click", () => {
+        const r = { id: String(Date.now()) }; cols.forEach(c => { r[c.key] = ""; });
+        rows.push(r); render();
+        const ins = box.querySelectorAll(".settings-row input"); if (ins.length) ins[ins.length - cols.length].focus();
+      });
+      box.appendChild(add);
+      // Re-gate: a read-only pane must not get live inputs from a re-render.
+      const gated = box.closest("[data-write-gate]");
+      if (gated && window.applyFeatureVisibility) applyFeatureVisibility(gated);
+    }
+    render();
+    return box;
+  }
+  const escHtml = s => String(s ?? "").replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
   // Edits are buffered and written by the settings modal's Save button
   // (saveAllSettings picks up window.persist* functions); closing the modal
@@ -352,38 +423,31 @@ const SPEED_BADGE = { fast: "⚡", balanced: "⚖", accurate: "🎯" };
       return;
     }
     tabBar.innerHTML = "";
-    if (tabs.length) {   // divider between the core rail and the module tabs
-      const hd = document.createElement("div");
-      hd.className = "text-[10px] uppercase tracking-wide text-gray-500 mt-3 mb-1 px-3";
-      hd.textContent = "Modules";
-      tabBar.appendChild(hd);
-    }
     // Keep panes that already exist (module JS may have rendered into them);
-    // only add missing ones.
+    // only add missing ones. Each tab carries its permission (settings.<id>)
+    // and rail group; tiers.js groups and gates them.
     for (const t of tabs) {
       const tabKey = "module_" + t.id;
+      // Drop a button from a previous build (it may sit inside a rail group).
+      document.querySelectorAll(`.settings-tab[data-settings-tab="${tabKey}"]`).forEach(b => b.remove());
       const btn = document.createElement("button");
       btn.dataset.settingsTab = tabKey;
-      btn.className =
-        "settings-tab px-3 py-1.5 rounded text-sm font-bold text-left truncate" +
-        (t.admin_only ? " hidden" : "");
-      if (t.admin_only) btn.setAttribute("data-admin-only", "");
+      btn.dataset.settingsGroup = t.group || "modules";
+      if (t.feature) btn.setAttribute("data-feature", t.feature);
+      btn.className = "settings-tab px-3 py-1.5 rounded text-sm font-bold text-left truncate";
       btn.textContent = (t.icon ? t.icon + " " : "") + t.label;
       btn.addEventListener("click", () => {
-        // reuse the core settingsTab() switcher if present
         if (window.settingsTab) window.settingsTab(tabKey);
-        document.dispatchEvent(
-          new CustomEvent("module-settings-tab", { detail: t.id })
-        );
+        document.dispatchEvent(new CustomEvent("module-settings-tab", { detail: t.id }));
       });
       tabBar.appendChild(btn);
 
-      if (!document.getElementById("settings_pane_" + tabKey)) {
-        const pane = document.createElement("div");
+      let pane = document.getElementById("settings_pane_" + tabKey);
+      if (!pane) {
+        pane = document.createElement("div");
         pane.id = "settings_pane_" + tabKey;
         pane.dataset.settingsPane = tabKey;
         pane.className = "hidden overflow-y-auto flex-1 pr-1";
-        if (t.admin_only) pane.setAttribute("data-admin-only", "");
         // Fields with pane=<tab id> render here (same mount id scheme as core panes).
         const mount = document.createElement("div");
         mount.id = "module_settings_fields_" + t.id;
@@ -391,9 +455,11 @@ const SPEED_BADGE = { fast: "⚡", balanced: "⚖", accurate: "🎯" };
         pane.appendChild(mount);
         paneWrap.appendChild(pane);
       }
+      if (t.feature) { pane.setAttribute("data-feature", t.feature); pane.setAttribute("data-write-gate", t.feature); }
     }
     // Panes exist now, so every field has a mount to land in.
     buildSettingsFields(fields);
+    if (window.organizeSettingsRail) organizeSettingsRail();
   }
 
   // Settings open → refetch, so module fields show what the server has now

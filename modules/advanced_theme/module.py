@@ -1,12 +1,12 @@
-"""Functional theme: Advanced — the full side-by-side layout (gallery beside
-the editor and controls pane). It is the stock layout, so it ships no CSS or
-JS: registering it simply makes "Advanced" a pickable interface and the
-fallback when the admin set no default."""
+"""Layout: Advanced — the full side-by-side layout (gallery beside the editor
+and controls pane). It is the stock layout, so it ships no CSS or JS:
+registering it makes "Advanced" a pickable layout, the default for admins and
+the fallback when nothing else applies."""
 
 MANIFEST = {
-    "id":          "theme_advanced",
-    "name":        "Interface: Advanced",
-    "version":     "1.0.0",
+    "id":          "advanced_theme",
+    "name":        "Layout: Advanced",
+    "version":     "1.1.0",
     "description": "Everything, side by side: gallery, viewer, editor and metadata tabs.",
     "core":        False,
     "requires":    ["theming"],
@@ -19,6 +19,6 @@ def register(host):
     theming = host.get_service("theming")
     if theming is None:
         return
-    theming.register("functional", "advanced", "Advanced",
+    theming.register("layout", "advanced", "Advanced",
                      description="Everything, side by side: gallery, viewer, editor and metadata tabs.",
-                     default=True)
+                     default=True, roles=["admin"])

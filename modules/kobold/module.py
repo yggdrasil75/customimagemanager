@@ -266,12 +266,12 @@ def register(host):
         threading.Thread(target=download, args=(variant, cfg, host.save_config), daemon=True).start()
         return jsonify({"success": True, **_status()})
 
-    host.add_route("/api/kobold/download", api_download, methods=["POST"], feature="settings",
+    host.add_route("/api/kobold/download", api_download, methods=["POST"], feature="settings.kobold",
                    level="write", action="kobold_download", fields=("variant",))
-    host.add_route("/api/kobold/status", api_status, feature="settings")
-    host.add_route("/api/kobold/start", api_start, methods=["POST"], feature="settings",
+    host.add_route("/api/kobold/status", api_status, feature="settings.kobold")
+    host.add_route("/api/kobold/start", api_start, methods=["POST"], feature="settings.kobold",
                    level="write", action="kobold_start")
-    host.add_route("/api/kobold/stop", api_stop, methods=["POST"], feature="settings",
+    host.add_route("/api/kobold/stop", api_stop, methods=["POST"], feature="settings.kobold",
                    level="write", action="kobold_stop")
     host.add_settings_tab("kobold", "Kobold", icon="🐲", admin_only=True)
     host.add_asset("kobold.js")

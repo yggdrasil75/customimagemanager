@@ -420,3 +420,14 @@ canvas {
 .gview-btn:first-child {
   border-left: 0
 }
+/* Settings: a compact one-line strip of small fields (section="system"). */
+.settings-compact { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; font-size: 11px; color: #9ca3af; }
+.settings-compact-field { display: inline-flex; align-items: center; gap: 6px; cursor: default; }
+.settings-compact-input { width: 7rem !important; padding: 2px 6px !important; font-size: 11px; }
+.settings-compact-field input[type="text"].settings-compact-input { width: 14rem !important; }
+
+/* Settings: a pane the user may read but not save. */
+.cim-read-only[data-settings-pane]::before {
+  content: "Read only — you can view these settings but not change them.";
+  display: block; margin-bottom: 8px; font-size: 11px; color: #fbbf24;
+}

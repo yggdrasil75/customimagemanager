@@ -1,36 +1,47 @@
-{# Unified settings modal. Two tabs — "AI / Vision" (LLM, models, faces, actions)
-   and "Storage" (tiers + small-file packing). Tab bodies are the two former
-   modals verbatim, so all field IDs and their JS handlers are unchanged. #}
+{# Unified settings modal: a tab rail (grouped, collapsible) and one pane per
+   tab. Core tabs are here; module tabs are added by static/modules.js. #}
 <div id="settings_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
   <div class="bg-gray-800 p-6 rounded-lg border border-gray-600 max-w-[110vw] flex flex-col max-h-[90vh]">
     <div class="flex flex-1 min-h-0 gap-4">
       {# Vertical tab rail: core tabs, then the module-contributed ones under a
          divider. It scrolls on its own, so any number of modules fits. #}
-      <nav id="settings_tab_rail" class="w-44 flex-shrink-0 overflow-y-auto flex flex-col gap-1 pr-2 border-r border-gray-700">
-        <button data-settings-tab="general" onclick="settingsTab('general')"
+      {# Vertical tab rail. Buttons carry a data-settings-group; tiers.js
+         (organizeSettingsRail) folds them into collapsible groups — You, Server,
+         Admin, Modules — so long lists can be collapsed. Each tab carries its
+         permission (settings.<tab>): read shows it, write makes it saveable. #}
+      <nav id="settings_tab_rail" class="w-48 flex-shrink-0 overflow-y-auto flex flex-col gap-1 pr-2 border-r border-gray-700">
+        <button data-settings-tab="user" data-settings-group="you" onclick="settingsTab('user')"
+          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">🙂 User settings</button>
+        <button data-settings-tab="general" data-settings-group="server" data-feature="settings.general" onclick="settingsTab('general')"
           class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">⚙ General</button>
-        <button data-settings-tab="models" onclick="settingsTab('models')"
-          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">🧩 Models</button>
-        <button data-settings-tab="storage" onclick="settingsTab('storage')"
-          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">🗄 Storage</button>
-        <button data-settings-tab="media" onclick="settingsTab('media')"
+        <button data-settings-tab="media" data-settings-group="server" data-feature="settings.media" onclick="settingsTab('media')"
           class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">🎞 Media</button>
-        <button data-settings-tab="users" onclick="settingsTab('users')"
-          class="settings-tab hidden px-3 py-1.5 rounded text-sm font-bold text-left" data-admin-only>👤 Users</button>
-        <button data-settings-tab="modules" onclick="settingsTab('modules')"
-          class="settings-tab hidden px-3 py-1.5 rounded text-sm font-bold text-left" data-admin-only>🧩 Modules</button>
-        <button data-settings-tab="info" onclick="settingsTab('info')"
-          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left text-gray-400 hover:text-white">ℹ Info</button>
+        <button data-settings-tab="storage" data-settings-group="server" data-feature="settings.storage" onclick="settingsTab('storage')"
+          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">🗄 Storage</button>
+        <button data-settings-tab="models" data-settings-group="server" data-feature="settings.models" onclick="settingsTab('models')"
+          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">🧩 Models</button>
+        <button data-settings-tab="info" data-settings-group="server" data-feature="settings.info" onclick="settingsTab('info')"
+          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">ℹ Info</button>
+        <button data-settings-tab="users" data-settings-group="admin" data-feature="settings.users" onclick="settingsTab('users')"
+          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">👤 Users</button>
+        <button data-settings-tab="modules" data-settings-group="admin" data-feature="settings.modules" onclick="settingsTab('modules')"
+          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">🧩 Modules</button>
         <!-- Pluggable modules inject their own tab buttons here (static/modules.js). -->
         <div id="module_settings_tabs" class="contents"></div>
       </nav>
       <div class="flex-1 min-w-0 flex flex-col min-h-0">
-    <div data-settings-pane="general" class="overflow-y-auto flex-1 pr-1">
-      <!-- Module-contributed settings fields (pane="general") render here. -->
-      <div id="module_settings_fields_general" class="space-y-3 mb-3"></div>
-      <div id="branding_section" class="hidden">
-        <label class="text-xs text-amber-300 font-bold block mb-2">Branding
-          <span class="text-gray-600">(admin only)</span></label>
+    <div data-settings-pane="user" class="overflow-y-auto flex-1 pr-1">
+      <!-- Per-account settings (static/user_settings.js): every signed-in user
+           saves their own, no settings.* permission needed. -->
+      <p class="text-[11px] text-gray-500 mb-3">Your own preferences, saved to your account.</p>
+      <div id="user_settings_fields" class="space-y-4"></div>
+      <p id="user_settings_dirty" class="text-[11px] text-amber-300 mt-3"></p>
+    </div>
+
+    <div data-settings-pane="general" data-feature="settings.general" data-write-gate="settings.general"
+      class="hidden overflow-y-auto flex-1 pr-1 flex flex-col">
+      <div id="branding_section" class="hidden mb-4" data-feature="branding" data-write-gate="branding">
+        <label class="text-xs text-amber-300 font-bold block mb-2">Branding</label>
         <div class="grid grid-cols-2 gap-3 items-start">
           <div>
             <label class="text-xs text-gray-400 block mb-1">App name</label>
@@ -53,23 +64,20 @@
         </div>
         <p id="cfg_brand_status" class="text-[10px] text-gray-500 mt-1"></p>
       </div>
-      <div class="border-t border-gray-600 pt-3 col-span-2">
-        <div class="flex justify-between items-center mb-1">
-          <label class="text-xs font-bold text-gray-400">Search quick-filters</label>
-          <button type="button" onclick="addQuickFilter()"
-            class="text-xs bg-indigo-600 hover:bg-indigo-500 px-2 py-0.5 rounded font-bold">+ Add</button>
-        </div>
-        <p class="text-[10px] text-gray-500 mb-2">Chips shown when the search box is focused. Label is
-          what you see; query is any search expression (e.g. <code>line:failure</code>,
-          <code>is:untagged</code>, <code>date:2026</code>).</p>
-        <div class="grid grid-cols-[1fr_2fr_28px] gap-2 text-[10px] text-gray-500 mb-1 px-1">
-          <span>Label</span><span>Query</span><span></span>
-        </div>
-        <div id="quick_filters_rows" class="space-y-1.5"></div>
+      <!-- Defaults for users: fields with section="defaults" (default palette,
+           search quick-filters, …). -->
+      <div class="mb-4">
+        <label class="text-xs text-amber-300 font-bold block mb-2">Defaults for users</label>
+        <div id="module_settings_fields_general_defaults" class="space-y-3"></div>
       </div>
+      <!-- Everything else a module put on General. -->
+      <div id="module_settings_fields_general" class="space-y-3 mb-4"></div>
+      <!-- Small server knobs, one compact line at the bottom (section="system"). -->
+      <div id="module_settings_fields_general_system" data-compact
+        class="settings-compact mt-auto pt-2 border-t border-gray-700"></div>
     </div>
 
-    <div data-settings-pane="models" class="hidden overflow-y-auto flex-1 pr-1">
+    <div data-settings-pane="models" data-feature="settings.models" data-write-gate="settings.models" class="hidden overflow-y-auto flex-1 pr-1">
       <!-- Model selection. Rendered from /api/models by static/modules.js: one
            row per capability the broker knows, with family / size / type
            selects (greyed out when a provider offers a single choice) and any
@@ -81,7 +89,7 @@
       <div id="module_settings_fields_models" class="grid grid-cols-3 gap-x-4 gap-y-2 mt-3"></div>
     </div>
 
-    <div data-settings-pane="storage" class="hidden overflow-y-auto flex-1 pr-1">
+    <div data-settings-pane="storage" data-feature="settings.storage" data-write-gate="settings.storage" class="hidden overflow-y-auto flex-1 pr-1">
         <label class="flex items-center gap-2 text-sm text-gray-300 mb-3 cursor-pointer">
           <input type="checkbox" id="tiers_enabled" class="accent-amber-500"> Enable automatic tiering
         </label>
@@ -113,7 +121,7 @@
         </div>
     </div>
 
-    <div data-settings-pane="media" class="hidden overflow-y-auto flex-1 pr-1">
+    <div data-settings-pane="media" data-feature="settings.media" data-write-gate="settings.media" class="hidden overflow-y-auto flex-1 pr-1">
       <h3 class="font-bold text-amber-300 mb-1">Storage formats</h3>
       <p class="text-[11px] text-gray-500 mb-2">Applied to new uploads. <b>Unsafe</b> = formats most
         browsers can't show (jxl, heic, mkv, avi, wma, aiff, epub, mobi, cbr…).
@@ -138,17 +146,17 @@
       </div>
     </div>
 
-    <div data-settings-pane="users" data-admin-only class="hidden overflow-y-auto flex-1 pr-1">
+    <div data-settings-pane="users" data-feature="settings.users" data-write-gate="settings.users" class="hidden overflow-y-auto flex-1 pr-1">
       <div id="settings_users_mount"></div>
     </div>
 
-    <div data-settings-pane="info" class="hidden overflow-y-auto flex-1 pr-1">
+    <div data-settings-pane="info" data-feature="settings.info" class="hidden overflow-y-auto flex-1 pr-1">
       <!-- Filled by static/info.js from /api/info: what this install can do,
            gathered from the core and every enabled module. -->
       <div id="info_sections" class="space-y-4 text-sm"></div>
     </div>
 
-    <div data-settings-pane="modules" data-admin-only class="hidden overflow-y-auto flex-1 pr-1">
+    <div data-settings-pane="modules" data-feature="settings.modules" data-write-gate="settings.modules" class="hidden overflow-y-auto flex-1 pr-1">
       <p class="text-[11px] text-gray-500 mb-3">Turn optional modules on or off for this install.
         <span class="text-amber-300">Core modules</span> back the whole runtime and can't be disabled.
         Changes take effect immediately and persist across restarts.</p>
@@ -163,7 +171,7 @@
     </div>
 
     <div class="flex justify-between items-center pt-3 border-t border-gray-700 mt-3 flex-shrink-0">
-      <div class="flex gap-2" data-settings-pane="storage">
+      <div class="flex gap-2" data-settings-pane="storage" data-write-gate="settings.storage">
         <button onclick="tiersRebalance()"
           class="bg-amber-600 hover:bg-amber-500 px-3 py-1.5 rounded text-sm font-bold">Rebalance now</button>
         <button onclick="tiersCancel()" class="bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded text-sm">Cancel run</button>

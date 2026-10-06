@@ -471,8 +471,8 @@ def _register_shared(host):
                           role_defaults={"viewer": "block", "uploader": "block", "custom": "block"})
     host.add_config_key("import_root", default="imports",
                         validate=lambda v: str(v or "imports").strip() or "imports")
-    host.add_settings_field(key="import_root", label="Import: folder holding export archives", kind="text",
-                            pane="general", tab="general",
+    host.add_settings_field(key="import_root", label="Import folder", kind="text",
+                            pane="general", tab="general", section="system",
                             help="Takeout / Apple export zips or folders go here (relative to the app, or "
                                  "absolute). In Docker, ./imports is mounted there.")
 
