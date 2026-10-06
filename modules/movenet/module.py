@@ -30,7 +30,7 @@ for _mod in ("ai_edge_litert.interpreter", "tflite_runtime.interpreter", "tensor
     if ok:
         break
 AVAILABLE = Interpreter is not None
-UNAVAILABLE_REASON = "pip install ai-edge-litert (or tflite-runtime)"
+UNAVAILABLE_REASON = "no TFLite interpreter (ai-edge-litert, tflite-runtime or tensorflow) imports"
 
 MANIFEST = {
     "id":          "movenet",
@@ -40,7 +40,7 @@ MANIFEST = {
                    "body pose, 17 COCO keypoints. Tiny and CPU-fast.",
     "core":        False,
     "requires":    [],
-    "pip":         [],       # interpreter probed above (three possible packages)
+    "pip":         ["ai-edge-litert:ai_edge_litert|tflite-runtime:tflite_runtime|tensorflow"],  # any one TFLite interpreter
     "assets":      [],
 }
 

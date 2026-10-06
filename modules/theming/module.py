@@ -35,17 +35,10 @@ The user's picks are the per-user settings "layout" / "palette"
 
 from flask import g, jsonify
 
-MANIFEST = {
-    "id":          "theming",
-    "name":        "Theming",
-    "version":     "1.0.0",
-    "description": "Theme registry (layout + palette) and per-user theme choice. "
-                   "Themes are separate modules.",
-    "core":        True,
-    "requires":    [],
-    "pip":         [],
-    "assets":      ["theming.js", "theming.css"],
-}
+# Built-in core module: not discovered by the loader (modules/loader.py lists
+# it in _CORE and _RESERVED_DIRS); manager.py calls register(host) right after
+# metadata and threading, before any plugin, so theme modules find the
+# `theming` service when they register.
 
 KINDS = ("layout", "palette")
 _ID_OK = set("abcdefghijklmnopqrstuvwxyz0123456789_-")

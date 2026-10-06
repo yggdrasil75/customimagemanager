@@ -37,6 +37,7 @@ plugins. Converting one of them to load through register(host) is the
 next section's job; the seam is now here for it.
 """
 
+import ast
 import json
 import logging
 import os
@@ -58,6 +59,13 @@ _BACKEND_PIP = {"torch", "torchvision", "torchaudio", "onnxruntime", "onnxruntim
                 "onnxruntime-rocm", "onnxruntime-migraphx"}
 
 
+def _alternatives(dep):
+    """A dep spec may list interchangeable packages, first = preferred:
+    'ai-edge-litert:ai_edge_litert|tflite-runtime:tflite_runtime|tensorflow'.
+    Any one of them satisfies it; auto-install picks the first."""
+    return [a.strip() for a in str(dep).split("|") if a.strip()]
+
+
 def _split_dep(dep):
     """'pkg' / 'pkg:import_name' / 'pkg @ git+https://...:import_name' ->
     (pip spec, import name or ''). Splits on the last colon so URL specs work."""
@@ -67,9 +75,15 @@ def _split_dep(dep):
     return pip_name, import_name
 
 
-def _dep_label(dep):
-    """Display name of a dep spec: 'pkg>=1.2' stays, 'pkg @ git+https://...' -> 'pkg'."""
+def _one_label(dep):
     return _split_dep(dep)[0].split("@")[0].strip()
+
+
+def _dep_label(dep):
+    """Display name of a dep spec: 'pkg>=1.2' stays, 'pkg @ git+https://...' -> 'pkg',
+    alternatives -> 'first (or second / third)'."""
+    alts = [_one_label(a) for a in _alternatives(dep)]
+    return alts[0] + (f" (or {' / '.join(alts[1:])})" if len(alts) > 1 else "")
 
 
 def _import_name(dep):
@@ -81,24 +95,65 @@ def _import_name(dep):
     return re.split(r"[\s<>=!~;\[@]", pip_name.strip(), maxsplit=1)[0].replace("-", "_")
 
 
-def _dep_installed(dep):
-    """Is a manifest dep spec present on disk (not necessarily importable)?"""
+def _one_installed(dep):
     try:
         return importlib.util.find_spec(_import_name(dep)) is not None
     except (ImportError, ValueError):
         return False
 
 
+def _dep_installed(dep):
+    """Is a manifest dep spec (or one of its alternatives) present on disk
+    (not necessarily importable)?"""
+    return any(_one_installed(a) for a in _alternatives(dep))
+
+
 def _dep_problem(dep):
-    """None when the dep imports; otherwise why not (missing vs. broken)."""
-    mod = _import_name(dep)
-    if not _dep_installed(dep):
+    """None when the dep (or one of its alternatives) imports; otherwise why
+    not (missing vs. broken)."""
+    alts = [a for a in _alternatives(dep) if _one_installed(a)]
+    if not alts:
         return f"pip dependency '{_dep_label(dep)}' not installed"
+    errors = []
+    for a in alts:
+        mod = _import_name(a)
+        try:
+            importlib.import_module(mod)
+            return None
+        except Exception as e:
+            errors.append(f"'{mod}' is installed but failed to import: {type(e).__name__}: {e}")
+    return "; ".join(errors)
+
+
+def _manifest_from_source(folder, entry_file):
+    """The MANIFEST dict literal of a module that failed to import, read
+    without running it (so its id, name and pip deps are still known), or None."""
     try:
-        importlib.import_module(mod)
+        with open(os.path.join(folder, entry_file), encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+    except (OSError, SyntaxError, ValueError):
         return None
-    except Exception as e:
-        return f"'{mod}' is installed but failed to import: {type(e).__name__}: {e}"
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "MANIFEST" for t in node.targets):
+            try:
+                m = ast.literal_eval(node.value)
+            except ValueError:
+                return None
+            return m if isinstance(m, dict) else None
+    return None
+
+
+def _import_failure(manifest, exc):
+    """A readable reason for a module whose import raised: a missing package
+    that the manifest declares (or any missing package) is reported like an
+    uninstalled pip dep, so the Modules tab shows it and enabling installs it."""
+    if isinstance(exc, ModuleNotFoundError) and exc.name:
+        top = exc.name.split(".")[0]
+        for dep in (manifest or {}).get("pip", []):
+            if any(_import_name(a).split(".")[0] == top for a in _alternatives(dep)):
+                return f"pip dependency '{_dep_label(dep)}' not installed"
+        return f"python package '{top}' not installed (and not declared in the manifest's pip list)"
+    return None
 
 
 def _pip_install(deps, logger):
@@ -107,7 +162,7 @@ def _pip_install(deps, logger):
     Subprocess, not `import pip`: pip has no library API, and it must not run
     inside the interpreter it's installing into. Failure is not fatal — the
     module just keeps reporting its missing dep."""
-    want = [_split_dep(d)[0].strip() for d in deps]
+    want = [_split_dep(_alternatives(d)[0])[0].strip() for d in deps]
     skip = [p for p in want if p in _BACKEND_PIP]
     want = [p for p in want if p not in _BACKEND_PIP]
     if skip:
@@ -142,12 +197,16 @@ _CORE = [
     {"id": "threading", "name": "Thread Manager", "version": "builtin", "core": True,
      "requires": [], "pip": [], "assets": [],
      "description": "Background worker pool and model-memory scheduler."},
+    {"id": "theming", "name": "Theming", "version": "builtin", "core": True,
+     "requires": [], "pip": [], "assets": [],
+     "description": "Theme registry (layout + palette) and per-user theme choice. "
+                    "The themes themselves are modules."},
 ]
 
 # folder names that are the core building blocks / infrastructure, NOT plugins.
 # The loader skips these during disk discovery so it doesn't try to import
 # auth/ as a plugin manifest.
-_RESERVED_DIRS = {"auth", "capabilities", "metadata", "threading",
+_RESERVED_DIRS = {"auth", "capabilities", "metadata", "threading", "theming",
                   "__pycache__"}
 
 _MODULES_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -190,11 +249,11 @@ class ModuleRegistry:
             folder = os.path.join(_MODULES_DIR, name)
             if not os.path.isdir(folder):
                 continue
-            entry = None
+            entry = entry_file = None
             if os.path.exists(os.path.join(folder, "module.py")):
-                entry = f"modules.{name}.module"
+                entry, entry_file = f"modules.{name}.module", "module.py"
             elif os.path.exists(os.path.join(folder, "__init__.py")):
-                entry = f"modules.{name}"
+                entry, entry_file = f"modules.{name}", "__init__.py"
             if not entry:
                 continue
             try:
@@ -211,15 +270,19 @@ class ModuleRegistry:
                 manifest.setdefault("pip", [])
                 manifest.setdefault("assets", [])
                 self._plugins[manifest["id"]] = LoadedModule(manifest, py, folder)
-            except Exception:
-                # Record the failure against a stub so the UI can show it.
-                stub = LoadedModule(
-                    {"id": name, "name": name, "version": "?",
-                     "description": "failed to import", "core": False,
-                     "requires": [], "pip": [], "assets": []},
-                    None, folder)
-                stub.error = traceback.format_exc(limit=3)
-                self._plugins[name] = stub
+            except Exception as e:
+                # Record the failure against a stub so the UI can show it. The
+                # manifest is read from source when possible, so the stub keeps
+                # its real id and pip list (missing deps get reported and
+                # installed like any other module's).
+                src = _manifest_from_source(folder, entry_file) or {}
+                man = {"id": name, "name": name, "version": "?", "description": "failed to import",
+                       "core": False, "requires": [], "pip": [], "assets": []}
+                man.update({k: v for k, v in src.items() if k in man or k == "default_enabled"})
+                man["core"] = False
+                stub = LoadedModule(man, None, folder)
+                stub.error = _import_failure(man, e) or traceback.format_exc(limit=3)
+                self._plugins[man["id"]] = stub
 
     # ── enable-state ─────────────────────────────────────────────────────
     def init_state(self, persisted):

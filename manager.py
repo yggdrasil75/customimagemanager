@@ -6488,6 +6488,8 @@ module_host._current_module = "metadata"
 modules.metadata.register(module_host)
 module_host._current_module = "threading"
 modules.threading.register(module_host)
+module_host._current_module = "theming"
+modules.theming.register(module_host)
 module_host._current_module = None
 # Core-owned settings: the per-user settings store, and the search quick-filters
 # (an admin default in General, each user's own list in User settings).

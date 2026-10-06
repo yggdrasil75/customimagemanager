@@ -10,7 +10,11 @@ body[data-layout="intermediate"] #left_pane {
   grid-template-columns: 9rem minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
 }
-body[data-layout="intermediate"] #left_pane > :first-child { grid-column: 1 / -1; grid-row: 1; }
+body[data-layout="intermediate"] #left_pane > :first-child {
+  grid-column: 1 / -1; grid-row: 1;
+  /* the header now runs under the floating user badge: leave room for it */
+  padding-right: calc(var(--cim-user-badge-w, 0px) + 24px);
+}
 body[data-layout="intermediate"] #left_tabs_bar {
   grid-column: 1; grid-row: 2; flex-direction: column; border-bottom: 0;
   border-right: 1px solid #374151; align-items: stretch; padding-top: 8px;

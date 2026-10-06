@@ -44,6 +44,8 @@ Either everything you declare works, or the module is off with a reason:
 
 - every entry in `pip` must import (`pip_name:import_name` when they differ,
   e.g. `"opencv-contrib-python:cv2"`), or the loader disables the module;
+- an entry may list interchangeable packages separated by `|`, first = preferred: `"ai-edge-litert:ai_edge_litert|tflite-runtime:tflite_runtime|tensorflow"` is satisfied by any one of them, and enabling the module installs the first;
+- declare every package your files import at top level, even ones you probe: if `module.py` itself fails to import on a missing package, the loader reads `MANIFEST` from source and reports "pip dependency 'x' not installed" (and installs it when the module is enabled) only when `x` is in `pip`;
 - a module may probe something more specific at import time and declare
   `AVAILABLE = False` / `UNAVAILABLE_REASON = "..."` (SAM3 checks that the
   installed ultralytics ships `SAM3SemanticPredictor`);
@@ -328,7 +330,7 @@ Assets are served at `/modules/<id>/static/<file>` and injected on page load.
 
 ## Themes
 
-Theming is core (`modules/theming`, always on); every theme is a module. There are two kinds, and exactly one of each is active at a time:
+Theming is a built-in core module (`modules/theming`, always on, registered by `manager.py` before any plugin like metadata and threading); every theme is a module. There are two kinds, and exactly one of each is active at a time:
 
 - **layout** — what the interface shows and how it is laid out: which panes exist, how a picture opens, how big things are.
 - **palette** — what colour it is, nothing else.
@@ -379,6 +381,8 @@ function sync() {
 window.addEventListener("cim:theme", sync);
 if (window.CIMTheme && window.CIMTheme.loaded) sync();
 ```
+
+In the stock layouts the header sits beside the editor, clear of the signed-in user badge that floats in the top-right corner. A layout whose header spans the full width leaves room for it with `padding-right: calc(var(--cim-user-badge-w, 0px) + 24px)`; the core keeps that variable at the badge's width.
 
 `window.CIMTheme` gives `layout`, `palette`, `themes`, `canChoose`, `loaded`, `set(kind, id)` and `ready` (a promise). A layout may reuse another's machinery by listing it in `requires` — the full-screen viewer in `simple_theme` (`window.CIMSimpleViewer.activate(owner, {metaMode, albumsStrip, panes})` / `release(owner)`) is built for that.
 

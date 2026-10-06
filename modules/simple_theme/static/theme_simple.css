@@ -20,7 +20,8 @@ body[data-layout="simple"] .tl-daysel { display: none !important; }
 body[data-layout="simple"] #popout_modal label[data-feature="annot.boxes"],
 body[data-layout="simple"] #popout_modal label[title^="Show fine segmentation"] { display: none !important; }
 body[data-layout="simple"] .sv-btn { padding: 10px 20px; font-size: 18px; }
-body[data-layout="simple"] #left_pane > :first-child { padding: 10px 16px; }
+/* the header now runs under the floating user badge: leave room for it */
+body[data-layout="simple"] #left_pane > :first-child { padding: 10px calc(var(--cim-user-badge-w, 0px) + 24px) 10px 16px; }
 body[data-layout="simple"] #brand_name_h1 { font-size: 1.5rem; }
 body[data-layout="simple"] .tl-bar { font-size: 15px; padding: 10px 16px; }
 body[data-layout="simple"] .tl-h { font-size: 20px; }

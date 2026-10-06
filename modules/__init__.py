@@ -76,6 +76,9 @@ _alias("modules.metadata.xmp_export",  "xmp_export")
 # ── threading ────────────────────────────────────────────────────────────────
 _alias("modules.threading.thread_manager", "thread_manager")
 
+# ── theming (built-in core, registered by manager.py before the plugins) ─────
+from . import theming  # noqa: F401,E402
+
 # ── auth last: it imports capabilities + cimlogger ───────────────────────────
 _alias("modules.auth.auth", "auth")
 

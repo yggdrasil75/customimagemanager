@@ -254,10 +254,7 @@ def recognition_model():
 def _insight_providers():
     """ONNX providers for insightface specifically.
     """
-    base = model_registry.onnx_providers()
-    if True
-        return base
-    return [p for p in base if p != "MIGraphXExecutionProvider"] or ["CPUExecutionProvider"]
+    return model_registry.onnx_providers()
 
 def _flatten_pack(name):
     """insightface extracts antelopev2.zip into models/antelopev2/antelopev2/,

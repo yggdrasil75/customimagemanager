@@ -66,6 +66,13 @@
       'border:0;border-radius:6px;padding:3px 8px;cursor:pointer">Logout</button>';
     document.body.appendChild(b);
     document.getElementById('cim-logout-btn').onclick = state.logout;
+    // The badge floats over the top-right corner. Publish its width so a
+    // layout whose header runs under that corner can leave room for it:
+    // padding-right: calc(var(--cim-user-badge-w, 0px) + 16px).
+    const publish = () => document.documentElement.style.setProperty(
+      '--cim-user-badge-w', Math.ceil(b.getBoundingClientRect().width) + 'px');
+    publish();
+    if (typeof ResizeObserver !== 'undefined') new ResizeObserver(publish).observe(b);
   }
 
   // --- admin user-management panel ----------------------------------------
