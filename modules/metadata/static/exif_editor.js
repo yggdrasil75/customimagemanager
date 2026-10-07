@@ -1,18 +1,8 @@
-/* EXIF editor.
- *
- * Sibling of iptc_editor.js. Fetches the merged schema+values structure from
- * /api/exif/read and renders each group's fields. Enumerated fields become
- * <select> dropdowns showing the human label; scalar numeric fields become
- * number inputs; short strings become text inputs; multiline strings become
- * textareas; undef/binary fields render read-only. Fields the file didn't carry
- * are dimmed and hidden unless "Show empty fields" is on. Tags present on the
- * file but absent from the schema are listed under each group so nothing is
- * silently dropped.
- *
- * Unlike the IPTC editor's first pass, editing IS wired: changed fields are
- * tracked and POSTed to /api/exif/write as a {tag_name: value} patch. Read-only
- * fields are shown disabled and never included in the patch. Exposes
- * window.exifEditor.
+/** @file exif_editor.js
+ *  @brief The EXIF editor (window.exifEditor): renders /api/exif/read by group
+ *  (enums as selects, numbers, text, textareas; binary read-only), hides absent
+ *  fields unless "Show empty fields" is on, lists tags not in the schema, and
+ *  saves changed writable fields as a {tag: value} patch.
  */
 (function () {
   "use strict";
@@ -33,11 +23,10 @@
       .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
-  // -- State ----------------------------------------------------------------
-  let current = null;        // last-loaded data structure
+  let current = null;  // last loaded data
   let showEmpty = false;
   let showUnmapped = false;
-  const dirty = new Map();   // tag_name -> new value (writable, changed fields)
+  const dirty = new Map();  // tag -> new value
 
   const NUMERIC = new Set(["int8u", "int16u", "int32u"]);
 
@@ -52,14 +41,11 @@
     else if (s && s.textContent.indexOf("unsaved") !== -1) setStatus("");
   }
 
-  // -- Render helpers ---------------------------------------------------------
   function renderFieldInput(f) {
     const wrap = document.createElement("div");
     wrap.className = "exif-field-input";
     const original = f.present && f.raw != null ? f.raw : "";
-    // Generated fields (e.g. ImageHistory, CompressedBitsPerPixel, SubjectDistance)
-    // are written by the app, not hand-edited: show their value but don't let the
-    // user change it here. The backend still accepts programmatic writes.
+    // app-generated fields (ImageHistory, CompressedBitsPerPixel, ...) are shown, not edited
     const editable = f.writable && !f.generated;
 
     if (f.dtype === "binary" || f.dtype === "undef") {
@@ -73,8 +59,7 @@
     }
 
     if (f.values) {
-      // Enumerated -> dropdown. Options are the raw->label map; we also inject
-      // the current raw value if it isn't in the map (unexpected data on file).
+      // enum -> select; a raw value missing from the map is added
       const sel = document.createElement("select");
       sel.disabled = !editable;
       const blank = document.createElement("option");
@@ -103,7 +88,6 @@
       return wrap;
     }
 
-    // Multiline string -> textarea.
     if (f.multiline) {
       const ta = document.createElement("textarea");
       ta.rows = 2;
@@ -115,7 +99,6 @@
       return wrap;
     }
 
-    // Scalar number / short-string input.
     const inp = document.createElement("input");
     const numeric = NUMERIC.has(f.dtype);
     inp.type = numeric ? "number" : "text";
@@ -186,7 +169,7 @@
     badge.textContent = grp.mapped ? "mapped" : "unmapped";
     badge.classList.add(grp.mapped ? "mapped" : "unmapped");
 
-    // Collapse/expand on header click.
+    // collapse / expand
     $(".exif-group-head", node).addEventListener("click", () => {
       node.classList.toggle("collapsed");
     });
@@ -222,7 +205,6 @@
       grps.forEach((g) => grpEl.appendChild(renderGroup(g)));
     }
 
-    // Summary line.
     const present = current.groups.reduce(
       (n, g) => n + (g.fields || []).filter((f) => f.present).length, 0);
     const unknown = current.groups.reduce((n, g) => n + (g.unknown ? g.unknown.length : 0), 0);
@@ -233,7 +215,6 @@
     if (src) src.textContent = current.source ? `← ${current.source}` : "(no EXIF found)";
   }
 
-  // -- Load -------------------------------------------------------------------
   async function load(filename) {
     if (!filename) { setStatus("no file", "err"); return; }
     root().dataset.filename = filename;
@@ -261,7 +242,6 @@
     }
   }
 
-  // -- Save -------------------------------------------------------------------
   async function save() {
     const filename = root().dataset.filename;
     if (!filename || dirty.size === 0) return;
@@ -288,14 +268,13 @@
       if (ns) msg += `, ${ns} skipped`;
       setStatus(msg, nr ? "err" : "ok");
       dirty.clear();
-      await load(filename);   // reload to reflect what actually stuck
+      await load(filename);  // reload to show what was stored
     } catch (e) {
       setStatus("save error: " + e.message, "err");
       if (btn) btn.disabled = false;
     }
   }
 
-  // -- Wiring ------------------------------------------------------------------
   function init() {
     if (!root()) return;
     const se = $("#exif-show-empty");
@@ -317,6 +296,5 @@
     init();
   }
 
-  // Public API for the host page / future index embedding.
   window.exifEditor = { load, save, refresh: render };
 })();

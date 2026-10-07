@@ -1,16 +1,8 @@
-/* IPTC editor.
- *
- * Fetches the merged schema+values structure from /api/iptc/read and renders
- * each record's fields. Enumerated fields become <select> dropdowns showing the
- * human label; scalar fields become text/number inputs; binary fields are shown
- * read-only. Fields the file didn't carry are dimmed and hidden unless "Show
- * empty fields" is on. Tags present on the file but absent from the schema are
- * listed under each record so nothing is silently dropped.
- *
- * Standalone for now (exposes window.iptcEditor); ready to be embedded in the
- * main index. Editing/writeback is intentionally not wired yet - this first pass
- * is import + display. Inputs are left enabled so the write path can hook in
- * later without a markup change.
+/** @file iptc_editor.js
+ *  @brief The IPTC viewer (window.iptcEditor): renders /api/iptc/read by record
+ *  (enums as selects; binary read-only), hides absent fields unless "Show empty
+ *  fields" is on, and lists tags not in the schema. Read-only: there is no IPTC
+ *  writer.
  */
 (function () {
   "use strict";
@@ -31,12 +23,10 @@
       .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
-  // -- State ----------------------------------------------------------------
-  let current = null;        // last-loaded data structure
+  let current = null;  // last loaded data
   let showEmpty = false;
   let showUnmapped = false;
 
-  // -- Render helpers ---------------------------------------------------------
   function renderFieldInput(f) {
     const wrap = document.createElement("div");
     wrap.className = "iptc-field-input";
@@ -50,8 +40,7 @@
     }
 
     if (f.values) {
-      // Enumerated -> dropdown. Options are the raw->label map; we also inject
-      // the current raw value if it isn't in the map (unexpected data on file).
+      // enum -> select; a raw value missing from the map is added
       const sel = document.createElement("select");
       sel.disabled = !f.writable;
       const blank = document.createElement("option");
@@ -77,7 +66,6 @@
       return wrap;
     }
 
-    // Scalar text / number input.
     const inp = document.createElement("input");
     const numeric = f.dtype === "int8u" || f.dtype === "int16u" || f.dtype === "int32u";
     inp.type = numeric ? "number" : "text";
@@ -142,7 +130,7 @@
     badge.textContent = rec.mapped ? "mapped" : "unmapped";
     badge.classList.add(rec.mapped ? "mapped" : "unmapped");
 
-    // Collapse/expand on header click.
+    // collapse / expand
     $(".iptc-record-head", node).addEventListener("click", () => {
       node.classList.toggle("collapsed");
     });
@@ -178,7 +166,6 @@
       recs.forEach((r) => recEl.appendChild(renderRecord(r)));
     }
 
-    // Summary line.
     const present = current.records.reduce(
       (n, r) => n + (r.fields || []).filter((f) => f.present).length, 0);
     const unknown = current.records.reduce((n, r) => n + (r.unknown ? r.unknown.length : 0), 0);
@@ -189,7 +176,6 @@
     if (src) src.textContent = current.source ? `← ${current.source}` : "(no IPTC found)";
   }
 
-  // -- Load -------------------------------------------------------------------
   async function load(filename) {
     if (!filename) { setStatus("no file", "err"); return; }
     root().dataset.filename = filename;
@@ -214,7 +200,6 @@
     }
   }
 
-  // -- Wiring ------------------------------------------------------------------
   function init() {
     if (!root()) return;
     const se = $("#iptc-show-empty");
@@ -234,6 +219,5 @@
     init();
   }
 
-  // Public API for the host page / future index embedding.
   window.iptcEditor = { load, refresh: render };
 })();

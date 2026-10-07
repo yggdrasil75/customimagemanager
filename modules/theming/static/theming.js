@@ -1,20 +1,8 @@
-/* theming.js - core theme state (modules/theming).
- *
- * Loads /api/theme, sets body[data-layout] / body[data-palette], and exposes
- * window.CIMTheme for theme modules:
- *   CIMTheme.layout / .palette    active ids ('' = none)
- *   CIMTheme.themes               {layout: [...], palette: [...]}
- *   CIMTheme.canChoose            may this user pick their own (theme.choose)
- *   CIMTheme.set(kind, id)        pick a theme (saved as the user setting)
- *   CIMTheme.ready                promise, resolves after the first load
- *   event "cim:theme" on window    after every change, detail {layout, palette}
- *
- * The pickers live in Settings -> User settings (the "layout" / "palette" user
- * settings); saving them fires "cim:user-settings", which reloads the theme.
- *
- * Permissions are not the theme's business: after every switch this re-runs
- * CIMFeatures.apply(document), so anything a layout un-hid that the user may
- * not see goes back to hidden, and the server gates every route regardless.
+/** @file theming.js
+ *  @brief Core theme state: loads /api/theme, sets body[data-layout] / [data-palette]
+ *  and exposes window.CIMTheme {layout, palette, themes, canChoose, set(kind, id),
+ *  ready}. Fires "cim:theme" on window after each change. Re-applies the feature
+ *  gates after a switch: a layout never grants access.
  */
 (function () {
   "use strict";
@@ -31,7 +19,7 @@
     const b = document.body;
     if (S.layout) b.dataset.layout = S.layout; else delete b.dataset.layout;
     if (S.palette) b.dataset.palette = S.palette; else delete b.dataset.palette;
-    // A layout hides and rearranges; it never grants. Re-assert the gates.
+    // a layout never grants: re-apply the gates
     if (window.CIMFeatures && window.CIMFeatures.apply) { try { window.CIMFeatures.apply(document); } catch (e) { /* ignore */ } }
     window.dispatchEvent(new CustomEvent("cim:theme", { detail: { layout: S.layout, palette: S.palette } }));
     if (prev !== S.layout + "|" + S.palette) window.dispatchEvent(new Event("resize"));
@@ -68,7 +56,7 @@
     } catch (e) { return { ok: false, error: String(e) }; }
   }
 
-  // User settings saved elsewhere (the Settings modal) may include a theme pick.
+  // a theme pick saved in Settings
   window.addEventListener("cim:user-settings", e => {
     const keys = (e.detail && e.detail.keys) || [];
     if (!keys.length || keys.includes("layout") || keys.includes("palette")) load();

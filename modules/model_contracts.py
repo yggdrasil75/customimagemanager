@@ -1,24 +1,15 @@
 """! @file
-@brief Core capability contracts.
-======================================================================
-The initial set of capability contracts the core declares at startup -
-the ones YOLO already does. A module may declare NEW capabilities beyond
-these; the first declarer owns the contract. These four are owned by
-'core' so providers (YOLO now, others later) have a fixed shape to
-conform to.
-
-Each contract's `output` text is the canonical shape a provider's
-transform must return. Boxes are normalized (0..1, center-form) so they're
-resolution-independent, matching what the existing manager code already
-passes around.
+@brief The capability contracts the core declares at startup.
+A contract's `output` is the canonical shape every provider's transform
+returns; boxes are normalised centre-form (0..1).
 """
 
-# cap_id -> contract kwargs for broker.declare()
+# cap_id -> broker.declare() arguments
 _IMG = "image as HxWx3 uint8 BGR ndarray"
 CORE_CAPABILITIES = {
     "box": {
         "label": "Detector (by model path)",
-        "hidden": True,   # internal dispatch seam, not a user-facing pick
+        "hidden": True,  # internal dispatch, not a user pick
         "summary": "Run an object/keypoint detector by model path and return "
                    "normalized boxes. Path-parameterized: providers declare "
                    "which model files they can run (YOLO .pt, Mayaku, ...).",
@@ -42,7 +33,7 @@ CORE_CAPABILITIES = {
     },
     "detect.persons": {
         "label": "Person detection",
-        "background": True,   # the body sweep (people module): boxes + body identity per image
+        "background": True,  # body boxes and identity per image (people module)
         "summary": "People/characters as boxes: the picked Detection model's person "
                    "class, or dedicated (often oriented-box) person weights.",
         "input": _IMG,
@@ -79,7 +70,7 @@ CORE_CAPABILITIES = {
     },
     "segment.box": {
         "label": "Box-prompted masks",
-        "hidden": True,   # served by whichever segmenter is picked; not a separate pick
+        "hidden": True,  # served by the picked segmenter
         "summary": "Refine given boxes into masks (SAM-style box prompt).",
         "input": "segment(img_bgr, boxes) - HxWx3 uint8 BGR + normalized boxes",
         "output": "list of {class_name, mask, conf?} where mask is a list of "
@@ -94,7 +85,7 @@ CORE_CAPABILITIES = {
     },
     "pose": {
         "label": "Pose / keypoints",
-        "background": True,   # non-region: served by the module's background sweep
+        "background": True,  # non-region: the module's background sweep
         "summary": "Human pose estimation: per-person keypoints.",
         "input": _IMG,
         "output": "list of {keypoints, conf} where keypoints is a list of "
@@ -108,7 +99,7 @@ CORE_CAPABILITIES = {
     },
     "classify": {
         "label": "Classification",
-        "background": True,   # non-region: served by the module's background sweep
+        "background": True,  # non-region: the module's background sweep
         "summary": "One overarching category for the whole image from a small fixed "
                    "set (photo / illustration / screenshot... / explicit) - the image's "
                    "type, as the pipeline's classify node means it. Not tags: a "
@@ -139,7 +130,7 @@ CORE_CAPABILITIES = {
     },
     "embed": {
         "label": "Image embedding",
-        "background": True,   # non-region: served by the module's background sweep
+        "background": True,  # non-region: the module's background sweep
         "summary": "Whole-image embedding vector for similarity search / clustering.",
         "input": _IMG,
         "output": "1-D float32 ndarray, L2-normalised; None on failure",
@@ -156,7 +147,7 @@ CORE_CAPABILITIES = {
     },
     "embed.audio": {
         "label": "Audio embedding",
-        "background": True,   # non-region: served by the music module's sweep
+        "background": True,  # non-region: the music module's sweep
         "summary": "Whole-track audio embedding for similarity, clustering and "
                    "shuffle-by. A model with a joint text space (CLAP, MuQ-MuLan) "
                    "also exposes .embed_text so 'sem:christmas' works on music.",
@@ -166,7 +157,7 @@ CORE_CAPABILITIES = {
     },
     "iqa": {
         "label": "Image quality",
-        "background": True,   # non-region: served by the module's background sweep
+        "background": True,  # non-region: the module's background sweep
         "summary": "No-reference image quality assessment: a normalized score.",
         "input": "score(img_bgr, rel_path=None) - HxWx3 uint8 BGR; rel_path (library-"
                  "relative) is passed when known so a provider can use the file's "
@@ -178,6 +169,6 @@ CORE_CAPABILITIES = {
 
 
 def declare_core_capabilities(broker):
-    """! @brief Declare every core capability on the given broker. Idempotent."""
+    """! @brief Declare every core capability on `broker` (idempotent)."""
     for cap_id, c in CORE_CAPABILITIES.items():
         broker.declare(cap_id, owner="core", **c)

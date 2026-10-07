@@ -1,16 +1,8 @@
-/* XMP editor (read-only for the acdsee namespace).
- *
- * Fetches the merged schema+values structure from /api/xmp/read and renders each
- * namespace's fields. Because the acdsee set is retrieval-only in this project,
- * every input is rendered read-only - this is an inspector, not a writer. Lang-alt
- * blocks (DPP/RPP) and bag/seq lists (Keywords/Snapshots) get formatted display.
- * Fields the file didn't carry are dimmed and hidden unless "Show empty fields" is
- * on. Fields that fold into our own description/tags/rating are badged so it's
- * clear where the value ends up. Tags present on the file but absent from the
- * schema are listed under each namespace so nothing is silently dropped.
- *
- * Mirrors static/iptc_editor.js in structure; standalone for now (exposes
- * window.xmpEditor), ready to be embedded in the main index.
+/** @file xmp_editor.js
+ *  @brief The XMP viewer (window.xmpEditor): renders /api/xmp/read by namespace,
+ *  read-only, with lang-alt and lists formatted. Fields that fold into the app's
+ *  description / tags / rating are badged; absent fields are hidden unless "Show
+ *  empty fields" is on; properties not in the schema are listed.
  */
 (function () {
   "use strict";
@@ -31,20 +23,15 @@
       .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
-  // -- State ----------------------------------------------------------------
-  let current = null;        // last-loaded data structure
+  let current = null;  // last loaded data
   let showEmpty = false;
   let showUnmapped = false;
 
-  // -- Value formatting -------------------------------------------------------
-  /** @brief XMP lang-alt comes back from pyexiv2 as either a plain string or a dict of
-   *  {lang: text} (e.g. {"x-default": "..."}); lists come back as arrays.
-   */
+  /** @brief Display text of a value: lang-alt {lang: text} (x-default first), lists, scalars. */
   function fmtRaw(v) {
     if (v == null) return "";
     if (Array.isArray(v)) return v.join(", ");
     if (typeof v === "object") {
-      // lang-alt or struct: show "lang: text" lines, prefer x-default first.
       const keys = Object.keys(v);
       keys.sort((a, b) => (a === "x-default" ? -1 : b === "x-default" ? 1 : 0));
       return keys.map((k) => `${k}: ${v[k]}`).join("\n");
@@ -52,15 +39,13 @@
     return String(v);
   }
 
-  // -- Render helpers ---------------------------------------------------------
   function renderFieldInput(f) {
     const wrap = document.createElement("div");
     wrap.className = "xmp-field-input";
 
     const shown = f.present ? fmtRaw(f.display != null ? f.display : f.raw) : "";
 
-    // lang-alt and long list values render as a read-only textarea so the XML
-    // raw-processing blobs (DPP/RPP) and multi-line lang-alt are legible.
+    // lang-alt and long lists (DPP / RPP XML) render as read-only textareas
     const multiline =
       f.dtype === "lang-alt" ||
       (f.present && typeof shown === "string" && shown.indexOf("\n") !== -1) ||
@@ -68,7 +53,7 @@
 
     if (multiline) {
       const ta = document.createElement("textarea");
-      ta.readOnly = true;                 // acdsee is retrieval-only
+      ta.readOnly = true;
       ta.rows = Math.min(8, Math.max(2, String(shown).split("\n").length));
       ta.value = shown;
       ta.placeholder = f.present ? "" : "(empty)";
@@ -78,7 +63,7 @@
 
     const inp = document.createElement("input");
     inp.type = "text";
-    inp.readOnly = true;                  // acdsee is retrieval-only
+    inp.readOnly = true;
     inp.value = shown;
     inp.placeholder = f.present ? "" : "(empty)";
     wrap.appendChild(inp);
@@ -142,7 +127,7 @@
     badge.textContent = ns.mapped ? "mapped" : "unmapped";
     badge.classList.add(ns.mapped ? "mapped" : "unmapped");
 
-    // Collapse/expand on header click.
+    // collapse / expand
     $(".xmp-namespace-head", node).addEventListener("click", () => {
       node.classList.toggle("collapsed");
     });
@@ -181,7 +166,6 @@
       nss.forEach((n) => nsEl.appendChild(renderNamespace(n)));
     }
 
-    // Summary line.
     const present = current.namespaces.reduce(
       (n, ns) => n + (ns.fields || []).filter((f) => f.present).length, 0);
     const unknown = current.namespaces.reduce(
@@ -193,7 +177,6 @@
     if (src) src.textContent = current.source ? `← ${current.source}` : "(no XMP found)";
   }
 
-  // -- Load -------------------------------------------------------------------
   async function load(filename) {
     if (!filename) { setStatus("no file", "err"); return; }
     root().dataset.filename = filename;
@@ -218,7 +201,6 @@
     }
   }
 
-  // -- Wiring ------------------------------------------------------------------
   function init() {
     if (!root()) return;
     const se = $("#xmp-show-empty");
@@ -238,6 +220,5 @@
     init();
   }
 
-  // Public API for the host page / future index embedding.
   window.xmpEditor = { load, refresh: render };
 })();

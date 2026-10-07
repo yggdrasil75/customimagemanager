@@ -1,66 +1,42 @@
 """! @file
-@brief iptc_fields.py
-==============
-
-Schema definitions for the IPTC IIM (Information Interchange Model) tags,
-organized by record. This is the reference table the importer/editor uses to
-know each tag's ID, human name, data type, whether it's writable, and (for
-enumerated fields) the mapping from raw value -> human label.
-
-The long-term goal is to cover *every* IPTC/XMP/EXIF/tEXt/etc. field the project
-can read, so this file is deliberately data-driven: adding a record or tag is a
-matter of adding entries to IPTC_RECORDS, not writing new code.
-
-Value ranges below are transcribed from the public IPTC IIM standard as
-published in the ExifTool tag reference (factual field definitions).
-
-Record numbers (the IIM "record:dataset" scheme):
-    1  = EnvelopeRecord    (transmission envelope - mostly for wirephoto/letters)
-    2  = ApplicationRecord (the common descriptive fields: caption, keywords, ...)
-    3  = NewsPhoto         (technical image-description fields)
-    7  = PreObjectData
-    8  = ObjectData
-    9  = PostObjectData
-
-pyexiv2 exposes IIM tags as 'Iptc.<RecordName>.<TagName>', e.g.
-'Iptc.NewsPhoto.ColorRepresentation'. We key our schema by that same
-(record_name, tag_name) so lookups from a read are direct.
+@brief The IPTC IIM tag schema by record (pyexiv2 'Iptc.<Record>.<Tag>' naming),
+plus the IPTC Core / Extension XMP field tables and struct shapes that
+xmp_fields.py builds on. Ranges follow the ExifTool tag reference. Records:
+1 Envelope, 2 Application, 3 NewsPhoto, 7-9 Pre / Object / PostObjectData.
 """
 
 from dataclasses import dataclass, field
 from typing import Optional
 
-# -- Data types --------------------------------------------------------------
-# Kept as short strings so the frontend can pick an input widget per type.
+# -- data types (the editor picks an input widget per type) --
 TYPE_INT8   = "int8u"
 TYPE_INT16  = "int16u"
 TYPE_INT32  = "int32u"
 TYPE_STRING = "string"
 TYPE_DATE   = "date"
 TYPE_TIME   = "time"
-TYPE_BINARY = "binary"     # not directly editable (ICC profile, palette, etc.)
+TYPE_BINARY = "binary"  # not editable (ICC profile, palette)
 
 @dataclass
 class IPTCField:
-    """! @brief One IPTC tag definition."""
-    tag_id: int                       # dataset number within the record
-    name: str                         # ExifTool/pyexiv2 tag name
-    dtype: str                        # one of the TYPE_* constants
+    """! @brief One IPTC tag."""
+    tag_id: int  # dataset number in the record
+    name: str  # ExifTool / pyexiv2 name
+    dtype: str  # TYPE_*
     writable: bool = True
-    length: Optional[int] = None      # fixed string length, if any
-    values: Optional[dict] = None     # enum: {raw_value: "human label"}
-    note: str = ""                    # free-text hint shown in the editor
+    length: Optional[int] = None  # fixed string length
+    values: Optional[dict] = None  # enum {raw: label}
+    note: str = ""  # hint shown in the editor
 
     @property
     def key(self) -> str:
         return f"{self.tag_id}:{self.name}"
 
     def label_for(self, raw):
-        """! @brief Return the human label for an enumerated raw value, or the raw value
-        itself when there's no mapping / no match."""
+        """! @brief The label of an enum value, else the value itself."""
         if self.values is None:
             return raw
-        # Enum keys may be ints or hex; try a few coercions.
+        # enum keys may be ints or hex
         for k in (raw, _try_int(raw)):
             if k in self.values:
                 return self.values[k]
@@ -76,7 +52,7 @@ class IPTCField:
             "note": self.note,
         }
         if self.values is not None:
-            # JSON keys must be strings; keep insertion order for stable UI.
+            # JSON keys must be strings
             d["values"] = {str(k): v for k, v in self.values.items()}
         return d
 
@@ -88,10 +64,7 @@ def _try_int(v):
     except (TypeError, ValueError):
         return v
 
-# -- NewsPhoto record (record 3) ---------------------------------------------
-# "Where we start getting info that is actually usable" - technical description
-# of the image. Several fields (Pixel/Image width/height) duplicate what we can
-# derive from the pixels, but we still surface them read-only for inspection.
+# -- NewsPhoto (record 3): technical description; pixel sizes read-only --
 NEWSPHOTO_FIELDS = [
     IPTCField(0,  "NewsPhotoVersion",       TYPE_INT16),
     IPTCField(10, "IPTCPictureNumber",      TYPE_STRING, length=16,
@@ -183,19 +156,15 @@ NEWSPHOTO_FIELDS = [
     IPTCField(145, "GammaCompensatedValue", TYPE_INT16),
 ]
 
-# -- Record registry ---------------------------------------------------------
-## @brief Each record: display name, pyexiv2 record name, ordered field list, and a
-# short description. EnvelopeRecord/ApplicationRecord are declared as
-# placeholders so the UI can show them as "not yet mapped" sections and we can
-# fill them in incrementally.
+## @brief One IPTC record; mapped=False records are listed but not detailed yet.
 @dataclass
 class IPTCRecord:
     number: int
-    name: str                 # pyexiv2 record name (Iptc.<name>.<tag>)
-    title: str                # human display title
+    name: str  # Iptc.<name>.<tag>
+    title: str
     description: str
     fields: list = field(default_factory=list)
-    mapped: bool = True       # False => known record we haven't detailed yet
+    mapped: bool = True  # listed, not detailed yet
 
 IPTC_RECORDS = [
     IPTCRecord(
@@ -218,12 +187,11 @@ IPTC_RECORDS = [
     ),
 ]
 
-# Fast lookups.
 RECORD_BY_NAME = {r.name: r for r in IPTC_RECORDS}
 RECORD_BY_NUMBER = {r.number: r for r in IPTC_RECORDS}
 
 def field_lookup(record_name, tag_name):
-    """! @brief Return the IPTCField for a given (record, tag) or None."""
+    """! @brief The field for (record, tag), or None."""
     rec = RECORD_BY_NAME.get(record_name)
     if not rec:
         return None
@@ -233,7 +201,7 @@ def field_lookup(record_name, tag_name):
     return None
 
 def schema_dict():
-    """! @brief Full schema as JSON-serializable dict, for the editor frontend."""
+    """! @brief The schema as JSON for the editor."""
     return {
         "records": [
             {
@@ -258,15 +226,13 @@ IPTCCORE_DESCRIPTION = (
     "CreatorContactInfo is a struct flattened into CreatorContactInfoCi* leaves."
 )
 
-# (name, kind, is_list, note)
-#   kind: "string" | "langalt" | "seq"  - mapped to xmp_fields TYPE_* by builder.
-#   The CreatorContactInfoCi* leaves are the flattened ContactInfo struct.
+# (name, kind: string | langalt | seq, is_list, note); CreatorContactInfoCi* are
+# the flattened ContactInfo struct
 _IPTCCORE_FIELDS = [
     ("AltTextAccessibility", "langalt", False,
      "Alt text (accessibility) for the image, as a lang-alt block."),
     ("CountryCode", "string", False,
      "ISO 3166 country code of the location shown."),
-    # CreatorContactInfo struct root + flattened leaves.
     ("CreatorContactInfo", "string", False,
      "Struct root (Iptc4xmpCore:CreatorContactInfo -> ContactInfo). "
      "Flattened by pyexiv2 into the CreatorContactInfoCi* leaves below."),
@@ -298,18 +264,11 @@ _IPTCCORE_FIELDS = [
      "IPTC subject code(s) (string+). rdf:Seq of controlled-vocabulary codes."),
 ]
 
-# The ContactInfo struct member names are recorded in the IPTC_STRUCTS registry
-# near the end of this module (along with every other IPTC XMP struct), and
-# CONTACTINFO_STRUCT_FIELDS is derived from it there.
 
 def build_iptc_core_fields(XMPField, type_map):
-    """! @brief Build the IPTC Core XMP field list.
-
-    xmp_fields.py owns the XMPField dataclass and its TYPE_* constants, so it
-    passes them in here (XMPField class + a {kind: TYPE_*} map). This keeps the
-    IPTC definitions in one place without an import cycle.
-
-    `type_map` must supply keys: 'string', 'langalt', 'seq'.
+    """! @brief The IPTC Core XMP fields.
+    @param XMPField  xmp_fields' field class (passed in to avoid an import cycle).
+    @param type_map  {"string", "langalt", "seq"} -> TYPE_*.
     """
     out = []
     for name, kind, is_list, note in _IPTCCORE_FIELDS:
@@ -319,35 +278,12 @@ def build_iptc_core_fields(XMPField, type_map):
         ))
     return out
 
-# -- iptcExt namespace (IPTC Extension) --------------------------------------
-# IPTC Extension schema (Iptc4xmpExt; ExifTool shortens to 'XMP-iptcExt'). This
-# is a large schema; we cover it a section at a time. This first slice:
-#   * AboutCvTerm (controlled-vocabulary terms) - not useful to this catalog,
-#     surfaced read-only, wired to nothing.
-#   * The AI-generation fields (AIPromptInformation / AIPromptWriterName /
-#     AISystemUsed / AISystemVersionUsed and the DigitalSourceType marker) -
-#     read-only, but their PRESENCE feeds a simple boolean `ai_generated` flag
-#     in the DB (feeds="ai_generated"). We don't store the prompt/system detail,
-#     just the true/false.
-#   * ArtworkOrObject (digital scans of historical artwork) - mostly irrelevant
-#     to a cosplay catalog, surfaced read-only, EXCEPT ArtworkCreator, which
-#     feeds our existing artist column (feeds="artist").
-#   * Audio* - meaningless for images but retained for a future music side;
-#     read-only, wired to nothing.
-#   * Container/Contributor/Creator (Entity / EntityWithRole structs). Creator
-#     and CreatorName feed our artist column (feeds="artist").
-#   * DataOnScreen / DataOnScreenRegion (TextRegion + Area structs) - on-screen
-#     text regions. Their geometry folds into our MWG-RS region store to keep a
-#     single region model (feeds="regions"); handled by a dedicated parser in
-#     xmp_import, not the generic feed_map.
-#
-# Struct handling follows the flattened-leaf convention pyexiv2 uses (ExifTool's
-# "string_"/"lang-alt_" flagged types are flattened struct members). We list the
-# struct root plus each flattened leaf. The '+' cardinality (struct+/string_+)
-# means the property repeats - is_list=True.
-#
-# Values below are transcribed from the public IPTC Extension 1.7 / Video
-# Metadata 1.3 spec as published in the ExifTool XMP-iptcExt tag reference.
+# -- iptcExt (IPTC Extension 1.7) --
+# Structs are listed as their root plus pyexiv2's flattened leaves; '+'
+# cardinality means is_list. Most fields are read-only reference. What feeds the
+# app: AI provenance -> ai_generated, ArtworkCreator / Creator -> artist,
+# DataOnScreen / ImageRegion -> regions, ModelAge -> model_age, PersonInImage ->
+# persons. Audio fields are kept for the music side.
 
 IPTCEXT_NS = "iptcExt"
 IPTCEXT_URI = "http://iptc.org/std/Iptc4xmpExt/2008-02-29/"
@@ -362,11 +298,10 @@ IPTCEXT_DESCRIPTION = (
     "Covered a section at a time - later slices extend this list."
 )
 
-# (name, kind, is_list, feeds, note)
-#   kind: string | langalt | seq | integer | date | real
-#   feeds: None | "artist" | "ai_generated" | "regions"
+# (name, kind, is_list, feeds, note); feeds: None | artist | ai_generated |
+# regions | model_age | persons
 _IPTCEXT_FIELDS = [
-    # -- AboutCvTerm (CVTermDetails struct+) - not useful here, read-only --
+    # -- AboutCvTerm --
     ("AboutCvTerm", "string", True, None,
      "Struct root (CVTermDetails+). Controlled-vocabulary term; not used here."),
     ("AboutCvTermCvId", "string", True, None, "CVTermDetails.CvId."),
@@ -375,7 +310,7 @@ _IPTCEXT_FIELDS = [
     ("AboutCvTermRefinedAbout", "string", True, None,
      "CVTermDetails.CvTermRefinedAbout."),
 
-    # -- AI-generation provenance - read-only; presence feeds ai_generated --
+    # -- AI provenance: presence sets ai_generated --
     ("AdditionalModelInformation", "string", False, None,
      "Free-text info about the model(s) (tag ID 'AddlModelInfo')."),
     ("AIPromptInformation", "string", False, "ai_generated",
@@ -387,9 +322,7 @@ _IPTCEXT_FIELDS = [
     ("AISystemVersionUsed", "string", False, "ai_generated",
      "AI system version. Presence marks the file ai_generated=True."),
 
-    # -- ArtworkOrObject (ArtworkOrObjectDetails struct+) --
-    # Primarily digital scans of historical artwork - mostly irrelevant to a
-    # cosplay catalog, so read-only EXCEPT ArtworkCreator, which feeds artist.
+    # -- ArtworkOrObject (ArtworkCreator feeds artist) --
     ("ArtworkOrObject", "string", True, None,
      "Struct root (ArtworkOrObjectDetails+). Historical-artwork description."),
     ("ArtworkCircaDateCreated", "string", True, None, "AO.AOCircaDateCreated."),
@@ -414,7 +347,7 @@ _IPTCEXT_FIELDS = [
     ("ArtworkStylePeriod", "string", True, None, "AO.AOStylePeriod."),
     ("ArtworkTitle", "langalt", True, None, "AO.AOTitle."),
 
-    # -- Audio (video-metadata hub) - meaningless for images; kept for music --
+    # -- Audio --
     ("AudioBitrate", "integer", False, None,
      "Audio bitrate. Not meaningful for images; relevant if music support lands."),
     ("AudioBitrateMode", "string", False, None,
@@ -424,13 +357,13 @@ _IPTCEXT_FIELDS = [
 
     ("CircaDateCreated", "string", False, None, "Approximate creation date."),
 
-    # -- ContainerFormat (Entity struct) --
+    # -- ContainerFormat --
     ("ContainerFormat", "string", False, None,
      "Struct root (Entity). Media container format."),
     ("ContainerFormatIdentifier", "string", True, None, "Entity.Identifier."),
     ("ContainerFormatName", "langalt", False, None, "Entity.Name."),
 
-    # -- Contributor (EntityWithRole struct+) --
+    # -- Contributor --
     ("Contributor", "string", True, None,
      "Struct root (EntityWithRole+). A contributor entity."),
     ("ContributorIdentifier", "string", True, None, "EntityWithRole.Identifier."),
@@ -439,7 +372,7 @@ _IPTCEXT_FIELDS = [
 
     ("CopyrightYear", "integer", False, None, "Copyright year."),
 
-    # -- Creator (EntityWithRole struct+) - feeds artist --
+    # -- Creator (feeds artist) --
     ("Creator", "string", True, None,
      "Struct root (EntityWithRole+). A creator entity; Name feeds artist."),
     ("CreatorIdentifier", "string", True, None, "EntityWithRole.Identifier."),
@@ -450,9 +383,7 @@ _IPTCEXT_FIELDS = [
     ("ControlledVocabularyTerm", "string", True, None,
      "tag ID 'CVterm'; deprecated by version 1.2."),
 
-    # -- DataOnScreen (TextRegion struct+) / DataOnScreenRegion (Area) --
-    # On-screen text regions. Geometry folds into our MWG-RS region store so we
-    # keep one region model; handled by a dedicated parser in xmp_import.
+    # -- DataOnScreen text regions (parsed into regions by xmp_import) --
     ("DataOnScreen", "string", True, "regions",
      "Struct root (TextRegion+). On-screen text region; folds into MWG-RS."),
     ("DataOnScreenRegion", "string", True, "regions",
@@ -480,7 +411,7 @@ _IPTCEXT_FIELDS = [
     ("DopesheetLinkLinkQualifier", "string", True, None,
      "QualifiedLink.LinkQualifier."),
 
-    # -- EmbdEncRightsExpr (EEREDetails struct+) - rights, read-only --
+    # -- EmbdEncRightsExpr --
     ("EmbdEncRightsExpr", "string", True, None,
      "Struct root (EEREDetails+). Embedded encoded rights expression."),
     ("EmbeddedEncodedRightsExpr", "string", True, None,
@@ -490,7 +421,7 @@ _IPTCEXT_FIELDS = [
     ("EmbeddedEncodedRightsExprLangID", "string", True, None,
      "EEREDetails.RightsExprLangId."),
 
-    # -- Episode / Event (video) - read-only --
+    # -- Episode / Event --
     ("Episode", "string", False, None,
      "Struct root (EpisodeOrSeason). Episode info."),
     ("EpisodeIdentifier", "string", False, None, "EpisodeOrSeason.Identifier."),
@@ -508,7 +439,7 @@ _IPTCEXT_FIELDS = [
     ("ExternalMetadataLink", "string", True, None, "Link(s) to external metadata."),
     ("FeedIdentifier", "string", False, None, "Feed identifier."),
 
-    # -- Genre (CVTermDetails struct+) - read-only --
+    # -- Genre --
     ("Genre", "string", True, None,
      "Struct root (CVTermDetails+). Content genre; not used here."),
     ("GenreCvId", "string", True, None, "CVTermDetails.CvId."),
@@ -519,12 +450,7 @@ _IPTCEXT_FIELDS = [
 
     ("Headline", "langalt", False, None, "A brief synopsis/headline of the content."),
 
-    # -- ImageRegion (ImageRegion struct+) - folds into MWG-RS --
-    # IPTC's proper region struct (v1.5+): a RegionBoundary (rectangle/circle/
-    # polygon, pixel or relative units) plus Name / role / content-type. We fold
-    # the RECTANGLE boundaries into our MWG-RS region store; non-rectangle shapes
-    # (circle/polygon) have no place in the center+w/h box model and are skipped
-    # by the parser. feeds="regions"; handled by _parse_iptc_image_regions.
+    # -- ImageRegion: rectangles fold into regions; circles / polygons skipped --
     ("ImageRegion", "string", True, "regions",
      "Struct root (ImageRegion+). IPTC image region; rectangles fold into MWG-RS."),
     ("ImageRegionName", "langalt", True, "regions",
@@ -560,7 +486,7 @@ _IPTCEXT_FIELDS = [
 
     ("IPTCLastEdited", "date", False, None, "When the IPTC metadata was last edited."),
 
-    # -- LinkedEncRightsExpr (LEREDetails struct+) - rights, read-only --
+    # -- LinkedEncRightsExpr --
     ("LinkedEncRightsExpr", "string", True, None,
      "Struct root (LEREDetails+). Linked encoded rights expression."),
     ("LinkedEncodedRightsExpr", "string", True, None,
@@ -570,8 +496,7 @@ _IPTCEXT_FIELDS = [
     ("LinkedEncodedRightsExprLangID", "string", True, None,
      "LEREDetails.RightsExprLangId."),
 
-    # -- LocationCreated / LocationShown (LocationDetails struct+) - read-only --
-    # GPS elements are in the exif namespace per the spec. All surfaced read-only.
+    # -- LocationCreated / LocationShown (GPS lives in the exif namespace) --
     ("LocationCreated", "string", True, None,
      "Struct root (LocationDetails+). Where the content was created."),
     ("LocationCreatedCity", "string", True, None, "LocationDetails.City."),
@@ -608,7 +533,7 @@ _IPTCEXT_FIELDS = [
     ("MaxAvailHeight", "integer", False, None, "Max available height of the image."),
     ("MaxAvailWidth", "integer", False, None, "Max available width of the image."),
 
-    # -- Metadata authority / editor (Entity structs) - read-only --
+    # -- metadata authority / editor --
     ("MetadataAuthority", "string", False, None,
      "Struct root (Entity). Authority responsible for the metadata."),
     ("MetadataAuthorityIdentifier", "string", True, None, "Entity.Identifier."),
@@ -619,12 +544,12 @@ _IPTCEXT_FIELDS = [
     ("MetadataLastEditorIdentifier", "string", True, None, "Entity.Identifier."),
     ("MetadataLastEditorName", "langalt", False, None, "Entity.Name."),
 
-    # -- ModelAge - mildly useful; stored in its own column --
+    # -- ModelAge (own column) --
     ("ModelAge", "integer", True, "model_age",
      "Age(s) of the model(s) shown. Folded into our model_age column on ingest "
      "(minimum when several are given)."),
 
-    # -- Organisation / Person / Product in image --
+    # -- organisation / person / product in image --
     ("OrganisationInImageCode", "string", True, None,
      "Code(s) for organisation(s) shown in the image."),
     ("OrganisationInImageName", "string", True, None,
@@ -634,10 +559,10 @@ _IPTCEXT_FIELDS = [
      "Struct root (Entity+). Person heard (audio); not folded (no audio here)."),
     ("PersonHeardIdentifier", "string", True, None, "Entity.Identifier."),
     ("PersonHeardName", "langalt", True, None, "Entity.Name."),
-    # PersonInImage: the useful one. Flat person names -> persons column + tags.
+    # names -> persons column and tags
     ("PersonInImage", "string", True, "persons",
      "Names of people shown. Folded into our persons column and tags on ingest."),
-    # PersonInImageWDetails: richer struct; its Name leaf also feeds persons.
+    # its Name leaf also feeds persons
     ("PersonInImageWDetails", "string", True, None,
      "Struct root (PersonDetails+). Detailed person info; Name leaf feeds persons."),
     ("PersonInImageCharacteristic", "string", True, None,
@@ -666,7 +591,7 @@ _IPTCEXT_FIELDS = [
     ("ProductInImageProductId", "string", True, None, "ProductDetails.ProductId."),
     ("ProductInImageName", "langalt", True, None, "ProductDetails.ProductName."),
 
-    # -- PublicationEvent (struct+) - read-only --
+    # -- PublicationEvent --
     ("PublicationEvent", "string", True, None,
      "Struct root (PublicationEvent+). When/where the content was published."),
     ("PublicationEventDate", "date", True, None, "PublicationEvent.Date."),
@@ -674,10 +599,7 @@ _IPTCEXT_FIELDS = [
      "PublicationEvent.Identifier."),
     ("PublicationEventName", "string", True, None, "PublicationEvent.Name."),
 
-    # -- Rating (content/maturity rating, NOT our star rating) - read-only --
-    # This is the IPTC content-rating struct (age/maturity rating with regions
-    # and scales). Deliberately NOT folded into our numeric `rating` column,
-    # which is a 0..5 star quality rating from a different source.
+    # -- Rating: a content / maturity rating, not the star rating --
     ("Rating", "string", True, None,
      "Struct root (Rating+). IPTC content/maturity rating - NOT a star rating; "
      "read-only, kept separate from our rating column."),
@@ -703,7 +625,7 @@ _IPTCEXT_FIELDS = [
     ("RatingValue", "string", True, None, "Rating.RatingValue."),
     ("RatingValueLogoLink", "string", True, None, "Rating.RatingValueLogoLink."),
 
-    # -- RecDevice (Device struct) - read-only --
+    # -- RecDevice --
     ("RecDevice", "string", False, None,
      "Struct root (Device). Recording device."),
     ("RecDeviceAttLensDescription", "string", False, None,
@@ -713,7 +635,7 @@ _IPTCEXT_FIELDS = [
     ("RecDeviceOwnersDeviceId", "string", False, None, "Device.OwnersDeviceId."),
     ("RecDeviceSerialNumber", "string", False, None, "Device.SerialNumber."),
 
-    # -- RegistryID (RegistryEntryDetails struct+) - read-only --
+    # -- RegistryID --
     ("RegistryID", "string", True, None,
      "Struct root (RegistryEntryDetails+). External registry entry."),
     ("RegistryEntryRole", "string", True, None,
@@ -724,7 +646,7 @@ _IPTCEXT_FIELDS = [
 
     ("ReleaseReady", "bool", False, None, "Whether the content is release-ready."),
 
-    # -- Season / Series (video) - read-only --
+    # -- Season / Series --
     ("Season", "string", False, None, "Struct root (EpisodeOrSeason). Season."),
     ("SeasonIdentifier", "string", False, None, "EpisodeOrSeason.Identifier."),
     ("SeasonName", "string", False, None, "EpisodeOrSeason.Name."),
@@ -733,7 +655,7 @@ _IPTCEXT_FIELDS = [
     ("SeriesIdentifier", "string", False, None, "Series.Identifier."),
     ("SeriesName", "string", False, None, "Series.Name."),
 
-    # -- Snapshot (LinkedImage struct+) - read-only --
+    # -- Snapshot --
     ("Snapshot", "string", True, None,
      "Struct root (LinkedImage+; tag ID 'SnapshotLink'). Linked snapshot image."),
     ("SnapshotFormat", "string", True, None, "LinkedImage.Format."),
@@ -756,13 +678,13 @@ _IPTCEXT_FIELDS = [
      "'false' = False, 'true' = True, 'unknown' = Unknown."),
     ("StylePeriod", "string", False, None, "Style period of the content."),
 
-    # -- SupplyChainSource (Entity struct+) - read-only --
+    # -- SupplyChainSource --
     ("SupplyChainSource", "string", True, None,
      "Struct root (Entity+). Supply-chain source."),
     ("SupplyChainSourceIdentifier", "string", True, None, "Entity.Identifier."),
     ("SupplyChainSourceName", "langalt", True, None, "Entity.Name."),
 
-    # -- TemporalCoverage (struct) - read-only --
+    # -- TemporalCoverage --
     ("TemporalCoverage", "string", False, None,
      "Struct root (TemporalCoverage). Time span the content covers."),
     ("TemporalCoverageFrom", "date", False, None, "TemporalCoverage.TempCoverageFrom."),
@@ -775,7 +697,7 @@ _IPTCEXT_FIELDS = [
     ("TranscriptLinkLinkQualifier", "string", True, None,
      "QualifiedLink.LinkQualifier."),
 
-    # -- Video technical (video-metadata hub) - read-only --
+    # -- video technical --
     ("VideoBitrate", "integer", False, None, "Video bitrate."),
     ("VideoBitrateMode", "string", False, None,
      "'fixed' = Fixed, 'variable' = Variable."),
@@ -789,7 +711,7 @@ _IPTCEXT_FIELDS = [
     ("VisualColor", "string", False, None,
      "tag ID 'VisualColour'. 'bw-monochrome' = Monochrome, 'colour' = Color."),
 
-    # -- WorkflowTag (CVTermDetails struct) - read-only --
+    # -- WorkflowTag --
     ("WorkflowTag", "string", False, None,
      "Struct root (CVTermDetails). Workflow tag; not used here."),
     ("WorkflowTagCvId", "string", False, None, "CVTermDetails.CvId."),
@@ -799,21 +721,16 @@ _IPTCEXT_FIELDS = [
      "CVTermDetails.CvTermRefinedAbout."),
 ]
 
-# DigitalSourceType IRI substrings that indicate an AI/synthetic origin. Only
-# these flip ai_generated; a plain scan/original does not. Matched case-
-# insensitively as substrings so both full IPTC IRIs and short forms work.
+# DigitalSourceType substrings that mean AI / synthetic (case-insensitive)
 AI_DIGITAL_SOURCE_MARKERS = (
-    "trainedalgorithmicmedia",     # AI model output
-    "compositesynthetic",          # synthetic composite
-    "algorithmicmedia",            # pure algorithmic generation
+    "trainedalgorithmicmedia",
+    "compositesynthetic",
+    "algorithmicmedia",
 )
 
 def build_iptc_ext_fields(XMPField, type_map):
-    """! @brief Build the IPTC Extension XMP field list. See build_iptc_core_fields for
-    why the XMPField class + type map are passed in.
-
-    `type_map` must supply keys: 'string', 'langalt', 'seq', 'integer',
-    'date', 'real', 'bool'.
+    """! @brief The IPTC Extension XMP fields (XMPField passed in, as for IPTC Core).
+    @param type_map  {"string", "langalt", "seq", "integer", "date", "real", "bool"} -> TYPE_*.
     """
     out = []
     for name, kind, is_list, feeds, note in _IPTCEXT_FIELDS:
@@ -823,22 +740,11 @@ def build_iptc_ext_fields(XMPField, type_map):
         ))
     return out
 
-# -- IPTC XMP struct definitions (reference) ---------------------------------
-# pyexiv2 flattens XMP structs into leaf properties, so the fields the editor
-# actually reads/writes are the flattened leaves already listed in the *_FIELDS
-# tables above (e.g. 'PersonInImageName', 'RecDeviceModelName'). This registry
-# records the struct MEMBER names as published in the IPTC/ExifTool spec - the
-# un-flattened shape - for any consumer that needs to know a struct's own field
-# layout (writing a struct wholesale, validating, documentation) rather than the
-# flattened leaf spelling. It is pure reference data: nothing in the ingest path
-# depends on it, and adding/removing entries changes no behavior.
-#
-# Each struct maps to a list of (member_name, kind, is_list, note). `kind`
-# uses the same tokens as the field tables; a struct-valued member names the
-# referenced struct in `kind` as 'struct:<StructName>' so the nesting is
-# traceable (e.g. Rating.RatingRegion -> 'struct:LocationDetails').
+# -- IPTC XMP struct shapes (reference only; the editor uses the flattened leaves) --
+# struct -> [(member, kind, is_list, note)]; a nested struct's kind is
+# 'struct:<Name>'.
 IPTC_STRUCTS = {
-    # From iptcCore (kept here so all IPTC struct shapes live in one place).
+    # from iptcCore
     "ContactInfo": [
         ("CiAdrCity",    "string", False, ""),
         ("CiAdrCtry",    "string", False, ""),
@@ -849,7 +755,7 @@ IPTC_STRUCTS = {
         ("CiTelWork",    "string", False, ""),
         ("CiUrlWork",    "string", False, ""),
     ],
-    # iptcExt structs.
+    # iptcExt
     "PersonDetails": [
         ("PersonCharacteristic", "struct:CVTermDetails", True, ""),
         ("PersonDescription",    "langalt", False, ""),
@@ -868,7 +774,7 @@ IPTC_STRUCTS = {
         ("Name",       "string", False, ""),
     ],
     "Rating": [
-        # IPTC content/maturity rating - NOT a star rating (see the iptcExt note).
+        # content rating, not stars
         ("RatingRegion",        "struct:LocationDetails", True,  ""),
         ("RatingScaleMaxValue", "string", False, ""),
         ("RatingScaleMinValue", "string", False, ""),
@@ -914,8 +820,7 @@ IPTC_STRUCTS = {
         ("TempCoverageFrom", "date", False, ""),
         ("TempCoverageTo",   "date", False, ""),
     ],
-    # Structs referenced by the tables above whose member shape is trivial
-    # (Identifier/Name[/Role]) - recorded for completeness.
+    # trivial Identifier / Name[ / Role] structs
     "Entity": [
         ("Identifier", "string",  True,  ""),
         ("Name",       "langalt", False, ""),
@@ -944,7 +849,7 @@ IPTC_STRUCTS = {
         ("City",           "string",  False, ""),
         ("CountryCode",    "string",  False, ""),
         ("CountryName",    "string",  False, ""),
-        # GPS elements are in the exif namespace per the spec.
+        # GPS lives in the exif namespace
         ("GPSAltitude",    "real",    False, "In the exif namespace."),
         ("GPSAltitudeRef", "integer", False,
          "In the exif namespace. 0 = Above Sea Level, 1 = Below Sea Level."),
@@ -1022,11 +927,9 @@ IPTC_STRUCTS = {
     ],
 }
 
-# Back-compat alias: the flat ContactInfo member-name list some code may still
-# reference. Derived from the registry so the two never drift.
+# flat ContactInfo member names, derived from the registry
 CONTACTINFO_STRUCT_FIELDS = [m[0] for m in IPTC_STRUCTS["ContactInfo"]]
 
 def struct_fields(struct_name):
-    """! @brief Return the member (name, kind, is_list, note) tuples for a named IPTC
-    XMP struct, or [] if unknown. Reference helper - see IPTC_STRUCTS."""
+    """! @brief The member tuples of an IPTC struct, or []."""
     return IPTC_STRUCTS.get(struct_name, [])

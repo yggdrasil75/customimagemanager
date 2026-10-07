@@ -1,9 +1,7 @@
-/* Metadata module: register the EXIF / IPTC / XMP controls tabs.
- *
- * The tab BUTTONS are registered here; the PANES are server-rendered partials
- * the module contributes via host.register_controls_pane (so no client fetch).
- * onShow wires each tab to its editor object's .load(filename). The module owns
- * the tabs, panes, and editors - core just places them. */
+/** @file metadata_tabs.js
+ *  @brief Registers the EXIF / IPTC / XMP controls tabs; their panes are rendered
+ *  server-side, and showing a tab loads its editor for the current file.
+ */
 (function () {
   function reg() {
     if (!window.registerControlsTab) { setTimeout(reg, 100); return; }
@@ -15,7 +13,6 @@
     for (const t of tabs) {
       registerControlsTab({
         id: t.id, label: t.label, feature: t.feature,
-        // pane is already in the DOM (server-rendered); no paneUrl/paneHtml.
         onShow: (fn) => {
           const ed = t.editor();
           if (ed && typeof ed.load === "function") {

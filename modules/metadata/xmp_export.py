@@ -1,29 +1,8 @@
 """! @file
-@brief Write arbitrary XMP properties to a file (or its .xmp sidecar).
-
-The app has always *read* the full XMP schema (xmp_fields.py: dc, xmp, iptcCore,
-prism, cc, ...) but only ever *wrote* the handful of properties baked into
-manager.write_metadata's hand-built packet (dc:subject, dc:description, MWG
-regions/collections). This module adds a general writer, mirroring
-exif_export.write_exif: give it a {token: value} patch and it validates each
-token against the schema, coerces by declared type, and writes via pyexiv2 -
-MERGING into whatever XMP already exists rather than replacing it.
-
-Merging matters: manager.write_metadata rewrites the entire sidecar from
-scratch, so this must run AFTER it. pyexiv2's modify_xmp merges, so a
-dc:creator written here survives alongside the dc:subject write_metadata just
-emitted. (Verified: dc:subject is preserved when we add dc:creator/dc:rights.)
-
-Tokens are the pyexiv2 form 'Xmp.<ns>.<Property>' (e.g. 'Xmp.dc.creator'). A
-bare 'dc.creator' or 'ns.name' is accepted and prefixed with 'Xmp.'. Unknown
-tokens (not in the schema) are skipped, never written, so a bad mapping can't
-inject garbage.
-
-Note on the schema's `writable` flag: it was set for the metadata *editor*
-(which is conservative about what a user edits by hand) and marks most editorial
-fields non-writable even though pyexiv2 can write them. Ingest is a different
-context - we're populating a fresh file from a trusted source - so this writer
-does NOT gate on that flag; it gates on the token existing in the schema at all.
+@brief Write XMP properties to a file's sidecar (or the file itself), merging into
+what is there. Tokens are 'Xmp.ns.Prop' (or 'ns.Prop', 'ns:Prop'); tokens not
+in the schema are skipped. The schema's `writable` flag (an editor rule) is not
+applied here. Run after write_metadata, which rewrites the whole sidecar.
 """
 import os
 
@@ -31,16 +10,14 @@ from . import xmp_fields as xfields
 
 try:
     import pyexiv2
-except Exception:                        # pragma: no cover - env without pyexiv2
+except Exception:  # pragma: no cover
     pyexiv2 = None
 
-# {full_token: (dtype, is_list)} built once from the schema, e.g.
-# {"Xmp.dc.creator": ("seq", True), "Xmp.dc.rights": ("lang-alt", False), ...}
+# token -> (dtype, is_list), e.g. "Xmp.dc.creator": ("seq", True)
 _SCHEMA = None
 
 def _register_namespaces(namespaces):
-    """! @brief Teach exiv2 every namespace the schema knows, so a write to a
-    prefix exiv2 has no built-in table for (prism, mwg-coll, ...) works."""
+    """! @brief Register every schema namespace with exiv2 (prism, mwg-coll, ... have no built-in table)."""
     if pyexiv2 is None:
         return
     for ns in namespaces:
@@ -48,7 +25,7 @@ def _register_namespaces(namespaces):
             try:
                 pyexiv2.registerNs(ns["uri"], ns["ns"])
             except Exception:
-                pass                            # already known to exiv2
+                pass  # already known
 
 
 def _schema():
@@ -63,12 +40,11 @@ def _schema():
     return _SCHEMA
 
 def known_tokens():
-    """! @brief All XMP tokens the schema defines (for the UI's target picker)."""
+    """! @brief Every XMP token the schema defines."""
     return sorted(_schema().keys())
 
 def _normalize_token(tok):
-    """! @brief Accept 'Xmp.dc.creator', 'dc.creator', or 'dc:creator' -> the pyexiv2
-    'Xmp.ns.Name' form, or None if it doesn't resolve to a known token."""
+    """! @brief A token in pyexiv2 form 'Xmp.ns.Name', or None when not in the schema."""
     if not tok:
         return None
     t = tok.replace(":", ".").strip()
@@ -77,32 +53,23 @@ def _normalize_token(tok):
     return t if t in _schema() else None
 
 def _coerce(value, dtype, is_list):
-    """! @brief Shape a raw value for pyexiv2's modify_xmp.
-
-    pyexiv2 wants a list for bag/seq properties and a scalar (string) for the
-    rest; it handles the lang-alt wrapping itself. We keep this deliberately
-    forgiving - a booru field is usually already a string or a list of strings -
-    and stringify anything exotic rather than reject it."""
+    """! @brief A value shaped for modify_xmp: a list for bag / seq, else a string."""
     if is_list or dtype in ("bag", "seq"):
         if isinstance(value, (list, tuple)):
             items = value
         elif isinstance(value, str):
-            # split a delimited string into list items (booru tag strings)
+            # a delimited string becomes list items
             items = [p for p in value.replace(",", " ").split() if p]
         else:
             items = [value]
         return [str(v) for v in items]
-    # scalar
     if isinstance(value, (list, tuple)):
         return " ".join(str(v) for v in value)
     return str(value)
 
 def write_xmp(filepath, patch):
-    """! @brief Apply a {token: value} XMP patch to `filepath`, writing to its .xmp
-    sidecar when one exists (the app's source of truth) else to the file itself.
-
-    Returns {"success", "written": [...], "skipped": [{token, reason}], "target"}.
-    Never raises for a bad token - it's collected in `skipped`.
+    """! @brief Apply a {token: value} patch, to the sidecar when there is one, else the file.
+    @return {"success", "written", "skipped": [{token, reason}], "target"}.
     """
     result = {"success": False, "written": [], "skipped": [], "target": None}
     if pyexiv2 is None:
@@ -121,15 +88,13 @@ def write_xmp(filepath, patch):
             continue
         to_set[full] = _coerce(value, dtype, is_list)
 
-    # Write into the sidecar the app maintains; fall back to the file itself for
-    # formats that carry an embedded packet and have no sidecar.
     stem = os.path.splitext(filepath)[0]
     sidecar = stem + ".xmp"
     target = sidecar if os.path.exists(sidecar) else filepath
     result["target"] = target
 
     if not to_set:
-        result["success"] = True     # nothing to do, but not an error
+        result["success"] = True  # nothing to do
         return result
 
     try:
@@ -144,14 +109,13 @@ def write_xmp(filepath, patch):
     return result
 
 if __name__ == "__main__":
-    # Offline self-check: token normalization + coercion (no file writes).
+    # offline self-check
     assert _normalize_token("Xmp.dc.creator") == "Xmp.dc.creator"
     assert _normalize_token("dc.creator") == "Xmp.dc.creator"
     assert _normalize_token("dc:creator") == "Xmp.dc.creator"
     assert _normalize_token("dc.not_a_real_field") is None
     assert _normalize_token("") is None
 
-    # seq/bag -> list of strings; scalar -> string; delimited scalar -> list
     assert _coerce(["a", "b"], "seq", True) == ["a", "b"]
     assert _coerce("a, b c", "bag", True) == ["a", "b", "c"]
     assert _coerce(["x", "y"], "lang-alt", False) == "x y"

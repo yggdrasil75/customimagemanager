@@ -1,27 +1,10 @@
 """! @file
-@brief Machine capability probe.
-======================================================================
-Sibling to features.py. features.py answers "is this user ALLOWED?".
-This module answers "can this MACHINE actually DO it?" - i.e. are the
-optional Python deps / weights present. The two are intersected when
-building a user's effective feature map (see auth.effective_perms_for),
-so a feature shows in the UI only when it is BOTH permitted AND runnable.
+@brief What this machine can run: features whose optional dependency is missing
+are hidden, on top of user permissions (features.py).
 
-Result: on a box with only Pillow, the People tab, 3D viewer, segment,
-etc. hide themselves with no per-install config. Drop the dep in and it
-comes back on next process start.
-
-Design notes
-------------
-* A capability maps to one or more feature keys from features.ALL_KEYS.
-  If the capability is absent, every mapped key is forced False.
-* Probes are import-only and cached - they must be cheap and must NOT
-  download weights or spin up models. Presence of the *library* is the
-  signal; first real use still lazy-loads as before.
-* Unknown//untested keys stay True (fail-open), matching features.js,
-  so adding a feature key without a probe never accidentally hides it.
-* CIM_FORCE_CAPS env var (comma list of cap names) forces caps present,
-  for testing the UI on a box that lacks the dep.
+Probes check that a package is installed (no import, no weights) and are
+cached for the process. Features no capability covers stay visible.
+CIM_FORCE_CAPS=a,b forces capabilities on, for UI testing.
 """
 
 import importlib.util
@@ -30,44 +13,38 @@ import functools
 
 
 def _installed(module_name):
-    """! @brief True if `module_name` is importable, without importing it."""
+    """! @brief True when the package is installed (not imported)."""
     try:
         return importlib.util.find_spec(module_name) is not None
     except (ImportError, ValueError, ModuleNotFoundError):
         return False
 
 
-# -- capability probes -------------------------------------------------------
-# name -> callable() -> bool. Keep these to spec checks; no heavy imports.
+# capability -> fn() -> bool
 CAPABILITY_PROBES = {
-    # face detection + identity embedding (People/Faces)
+    # face detection and identity
     "insightface":  lambda: _installed("insightface"),
-    # generic deep-learning stack (segment, pose, IQA, dup-CNN, smart-tag)
+    # deep-learning stack
     "torch":        lambda: _installed("torch"),
     "onnxruntime":  lambda: _installed("onnxruntime")
                             or _installed("onnxruntime_gpu"),
-    "ultralytics":  lambda: _installed("ultralytics"),      # YOLO autotag/segment/pose
-    "rtmlib":       lambda: _installed("rtmlib")            # optional whole-body pose
+    "ultralytics":  lambda: _installed("ultralytics"),
+    "rtmlib":       lambda: _installed("rtmlib")  # whole-body pose
                             and (_installed("onnxruntime")
                                  or _installed("onnxruntime_gpu")),
-    "mediapipe":    lambda: _installed("mediapipe"),        # (legacy; not used by pose)
-    # 3D viewer / mesh fitting
+    "mediapipe":    lambda: _installed("mediapipe"),  # legacy
+    # 3D viewer, mesh fitting
     "trimesh":      lambda: _installed("trimesh"),
-    # OCR
     "ocr":          lambda: _installed("pytesseract") or _installed("easyocr"),
-    # barcode scanning
     "barcodes":     lambda: _installed("pyzbar") or _installed("zxingcpp"),
     "gallery_dl":   lambda: _installed("gallery_dl"),
-    # LLM preprocess actions
     "llm":          lambda: _installed("requests"),
 }
 
-# -- capability -> feature keys it enables ------------------------------------
-# A missing capability forces every key here to False. Keys not listed under
-# ANY capability are never touched by the machine layer (fail-open).
+# capability -> the feature keys it gates (a missing capability blocks them)
 CAPABILITY_FEATURES = {
     "insightface": ["tab.faces"],
-    "trimesh":     ["view.3d"],          # new leaf; see features.py patch
+    "trimesh":     ["view.3d"],
     "ultralytics": ["ai.autotag", "ai.segment", "ai.pose"],
     "torch":       ["ai.smarttag", "ai.iqa", "dedup"],
     "ocr":         ["ai.ocr"],
@@ -79,11 +56,7 @@ CAPABILITY_FEATURES = {
 
 @functools.lru_cache(maxsize=1)
 def probe():
-    """! @brief Return {capability_name: bool}. Cached for process lifetime.
-
-    Cheap enough to call freely; the lru_cache means the find_spec work
-    happens once. Call probe.cache_clear() in a test if you mutate env.
-    """
+    """! @brief {capability: available}, cached (probe.cache_clear() in tests)."""
     forced = ''
     out = {}
     for name, fn in CAPABILITY_PROBES.items():
@@ -99,11 +72,7 @@ def probe():
 
 @functools.lru_cache(maxsize=1)
 def capability_denials():
-    """! @brief Return {feature_key: False} for every key an ABSENT capability gates.
-
-    This is the machine-layer overlay to intersect with user permissions:
-    any key present here should be forced False regardless of role.
-    """
+    """! @brief {feature_key: False} for every feature a missing capability gates."""
     caps = probe()
     denied = {}
     for cap, keys in CAPABILITY_FEATURES.items():
@@ -114,11 +83,9 @@ def capability_denials():
 
 
 def apply_machine_limits(perms):
-    """! @brief Intersect a resolved user-permission map with machine capabilities.
-
-    perms -- {feature_key: bool} from features.effective_permissions()
-    Returns a NEW dict; never mutates the input. A key is True only if the
-    user allows it AND no absent capability gates it.
+    """! @brief A permission map with machine limits applied.
+    @param perms  {feature_key: bool}.
+    @return a new map; a key is True only when allowed and runnable.
     """
     denied = capability_denials()
     out = dict(perms)
@@ -126,12 +93,12 @@ def apply_machine_limits(perms):
         if k in out:
             out[k] = False
         else:
-            out[k] = False   # carry through keys the perm map didn't list
+            out[k] = False
     return out
 
 
 def status():
-    """! @brief Human/JSON-friendly snapshot for an admin/debug endpoint."""
+    """! @brief Snapshot for the admin / debug endpoint."""
     caps = probe()
     return {
         "capabilities": caps,

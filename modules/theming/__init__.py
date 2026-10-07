@@ -1,4 +1,4 @@
 """! @file
-@brief Theming - built-in core module (see module.py). manager.py calls
-modules.theming.register(host) before the plugins load."""
+@brief Theming (core): palettes and layouts. manager.py registers it before the plugins.
+"""
 from .module import register  # noqa: F401

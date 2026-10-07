@@ -1,16 +1,6 @@
 """! @file
-@brief exif_import.py
-==============
-
-Reads EXIF/TIFF metadata from an image (or its sidecar) and returns it merged
-with the field schema in exif_fields.py, so the editor can render every known
-field alongside its current value, type, and enumerated-value labels.
-
-Sibling of iptc_import.py: identical read strategy and output contract, just
-keyed by EXIF group instead of IPTC record. Prefer a sidecar when the primary
-file is one pyexiv2 can't safely open (e.g. JXL), else read the file directly.
-All pyexiv2 access is wrapped so a bad file degrades to "no EXIF" rather than
-raising.
+@brief Read EXIF from an image and its sidecar, merged with the exif_fields.py
+schema for the editor. Never raises: an unreadable file has no EXIF.
 """
 
 import os
@@ -18,7 +8,7 @@ import logging
 
 try:
     import pyexiv2
-except Exception:                      # pragma: no cover - env without pyexiv2
+except Exception:  # pragma: no cover
     pyexiv2 = None
 
 from optional_deps import optional_import
@@ -28,10 +18,9 @@ imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
 log = logging.getLogger("exif_import")
 
 def _jxl_exif_blob(path):
-    """! @brief The TIFF payload of a container JXL's Exif box (plain `Exif`, or
-    brotli-packed inside a `brob` box, which is how cjxl stores it), or None.
-    Used when Exiv2's own BMFF reader refuses the file ("invalid memory
-    allocation request" on some jbrd-carrying JPEG transcodes)."""
+    """! @brief The TIFF payload of a container JXL's Exif box (plain or brotli `brob`), or None.
+    For files Exiv2's BMFF reader refuses.
+    """
     with open(path, "rb") as fh:
         data = fh.read()
     if data[4:8] != b"JXL ":
@@ -49,13 +38,12 @@ def _jxl_exif_blob(path):
         if typ == b"brob" and body[:4] == b"Exif" and _HAVE_IMAGECODECS:
             body, typ = imagecodecs.brotli_decode(body[4:]), b"Exif"
         if typ == b"Exif":
-            return body[4 + int.from_bytes(body[:4], "big"):]   # skip the TIFF-offset field
+            return body[4 + int.from_bytes(body[:4], "big"):]  # skip the TIFF offset field
         pos += max(size, hdr)
     return None
 
 def _candidate_paths(filepath):
-    """! @brief Yield the paths worth trying for EXIF data, most-specific first.
-    A sidecar with the same stem takes priority for formats pyexiv2 chokes on."""
+    """! @brief Paths to read EXIF from: the image, then its sidecar."""
     stem = os.path.splitext(filepath)[0]
     seen = []
     for p in (filepath, stem + ".xmp", stem + ".exv"):
@@ -64,9 +52,9 @@ def _candidate_paths(filepath):
             yield p
 
 def _read_raw_exif(filepath):
-    """! @brief Return the raw {tag_string: value} EXIF dict from the first readable
-    candidate path, or ({}, None) if none. tag_string looks like
-    'Exif.Image.ImageWidth'."""
+    """! @brief Raw EXIF {'Exif.Group.Tag': value} merged over the candidate paths.
+    @return (values, source path or None).
+    """
     if pyexiv2 is None:
         log.warning("pyexiv2 unavailable; cannot read EXIF")
         return {}, None
@@ -76,8 +64,7 @@ def _read_raw_exif(filepath):
             with pyexiv2.Image(p) as img:
                 raw = img.read_exif()
         except Exception as e:
-            # Exiv2 can't open this one; a container JXL still carries its Exif
-            # in a box we can hand to Exiv2 as a bare TIFF.
+            # Exiv2 refused it: hand the container's Exif box over as bare TIFF
             try:
                 blob = _jxl_exif_blob(p) if p.lower().endswith(".jxl") else None
                 raw = pyexiv2.ImageData(blob).read_exif() if blob else None
@@ -89,17 +76,13 @@ def _read_raw_exif(filepath):
                 continue
         if not raw:
             continue
-        # Candidates come image-first, sidecars after, and later ones win:
-        # the sidecar is where writes land for formats pyexiv2 can't edit in
-        # place (.jxl), so stopping at the image hid every write.
+        # later candidates win: writes to a JXL land in its sidecar
         merged.update(raw)
         src = p
     return merged, src
 
 def _split_tag(tag_string):
-    """! @brief 'Exif.Image.ImageWidth' -> ('Image','ImageWidth').
-    Applies exiv2->schema group aliases. Returns (None, None) for anything that
-    doesn't fit the pattern."""
+    """! @brief 'Exif.Image.ImageWidth' -> ('Image', 'ImageWidth') with group aliases; (None, None) otherwise."""
     parts = tag_string.split(".")
     if len(parts) >= 3 and parts[0] == "Exif":
         grp = efields.EXIV2_GROUP_ALIASES.get(parts[1], parts[1])
@@ -107,33 +90,13 @@ def _split_tag(tag_string):
     return None, None
 
 def read_exif(filepath):
-    """! @brief Read EXIF and return a structure organized by group:
-
-    {
-      "source": "/path/that/had/the/exif" | None,
-      "groups": [
-        {
-          "name": "Image", "title": "...", "ifd": "IFD0", "mapped": True,
-          "fields": [
-            {
-              "tag_id": 256, "tag_hex": "0x0100", "name": "ImageWidth",
-              "dtype": "int32u", "writable": False, "note": "...",
-              "values": {...}, "raw": 4032, "display": 4032, "present": True
-            }, ...
-          ],
-          "unknown": [ {"name": "...", "raw": ...}, ... ]  # present-but-unmapped
-        }, ...
-      ]
-    }
-
-    Every schema field is included (present or not) so the editor shows the full
-    template; `present` flags whether the file actually carried a value. Any EXIF
-    tag found on the file that isn't in the schema is surfaced under the group's
-    `unknown` list so nothing is silently dropped.
+    """! @brief EXIF by group, every schema field included:
+    {"source", "groups": [{name, title, ifd, mapped, fields: [{tag_id, tag_hex,
+    name, dtype, writable, note, values, raw, display, present}], unknown: [{name,
+    raw}]}]}. Tags not in the schema are listed under `unknown`.
     """
     raw, source = _read_raw_exif(filepath)
 
-    # Index raw values by (group, tag).
     by_group = {}
     for tag_string, value in raw.items():
         grp_name, tag_name = _split_tag(tag_string)
@@ -160,7 +123,7 @@ def read_exif(filepath):
             d["display"] = f.label_for(rawval) if present else None
             fields_out.append(d)
 
-        # Whatever's left was on the file but not in our schema.
+        # on the file, not in the schema
         unknown = [{"name": k, "raw": v} for k, v in raw_for_grp.items()]
 
         groups_out.append({
@@ -173,7 +136,7 @@ def read_exif(filepath):
             "unknown": unknown,
         })
 
-    # Groups present on the file but entirely absent from our registry.
+    # groups the schema doesn't know at all
     known_names = {g.name for g in efields.EXIF_GROUPS}
     for grp_name, vals in by_group.items():
         if grp_name in known_names:
@@ -191,8 +154,7 @@ def read_exif(filepath):
     return {"source": source, "groups": groups_out}
 
 def summarize(filepath):
-    """! @brief Compact counts for logging / list views: how many known fields carry a
-    value, and how many unknown tags were seen."""
+    """! @brief Counts of present known fields and unknown tags."""
     data = read_exif(filepath)
     present = sum(1 for g in data["groups"] for f in g["fields"] if f.get("present"))
     unknown = sum(len(g["unknown"]) for g in data["groups"])

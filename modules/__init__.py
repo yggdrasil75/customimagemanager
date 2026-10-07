@@ -1,57 +1,30 @@
 """! @file
-@brief modules package - the module system + the app's core building blocks.
-======================================================================
+@brief The module system (loader, host, broker, config registry) and the core
+building blocks (auth, capabilities, metadata, threading, theming, encoding).
 
-This package does TWO distinct things, kept deliberately separate:
-
-1. A REAL PLUGIN SYSTEM (loader.py + host.py). Third-party modules are
-   folders under modules/ that ship a manifest and a register(host)
-   function. At startup the loader discovers them, orders them by their
-   declared dependencies, and calls register(host) on the enabled ones so
-   they wire themselves into the app through the Host surface. Publish a
-   folder, drop it in modules/, restart - it integrates. See
-   modules/example_hello/ for a working, self-contained example, and
-   modules/README.md for the authoring contract.
-
-2. HOUSING THE CORE BUILDING BLOCKS. auth, capabilities, metadata, and
-   threading were moved here into subfolders as plain filesystem tidying.
-   These are NOT yet loaded through the plugin system - manager.py still
-   imports them directly. To avoid rewriting hundreds of call sites in the
-   same commit as the move, importing this package aliases each moved file
-   back to its old flat name in sys.modules, so `import auth` /
-   `import exif_import` keep resolving. This aliasing is a migration
-   convenience for the core files ONLY; it is not how plugins load.
-   Converting a core building block to load via register(host) is a later
-   section - the seam for it now exists.
-
-cimlogger.py never moved (many non-core files import it, no optional deps);
-it is aliased in place and listed as a core module in the UI.
+Core files are also registered under their old flat names (`import auth`,
+`import exif_import`) so existing imports keep working. Plugins are discovered
+here and registered later by manager.py (see loader.py, README.md).
 """
 
 import sys
 import importlib
 
-from .loader import registry  # noqa: F401  the ModuleRegistry singleton
-from . import host  # noqa: F401  Host class, for manager.py to construct
-from .model_broker import broker  # noqa: F401  the ModelBroker singleton
-from .config_registry import config  # noqa: F401  the ConfigRegistry singleton
+from .loader import registry  # noqa: F401
+from . import host  # noqa: F401
+from .model_broker import broker  # noqa: F401
+from .config_registry import config  # noqa: F401
 from .model_contracts import declare_core_capabilities
 
-# The core owns the initial capability contracts (detect, detect.faces,
-# segment, pose). Declare them before any module registers providers.
+# core capability contracts, before any provider registers
 declare_core_capabilities(broker)
 
 
 def _alias(dotted, legacy):
-    """! @brief Import `dotted` and also register it under the flat `legacy` name.
-
-    After this, both `import modules.metadata.exif_import` and the legacy
-    `import exif_import` return the same module object.
-    """
+    """! @brief Import `dotted` and register the same module object under `legacy`."""
     mod = importlib.import_module(dotted)
     sys.modules.setdefault(legacy, mod)
-    # setdefault: if something already imported the legacy name first (e.g. a
-    # test), don't clobber it - the first bound object wins and stays identical.
+    # keep a module already imported under the legacy name
     return mod
 
 
@@ -60,7 +33,7 @@ _alias("modules.capabilities.capabilities", "capabilities")
 _alias("modules.metadata.exif_fields", "exif_fields")
 _alias("modules.metadata.iptc_fields", "iptc_fields")
 _alias("modules.metadata.mwg_fields",  "mwg_fields")
-_alias("modules.metadata.xmp_fields",  "xmp_fields")   # imports iptc_fields, mwg_fields
+_alias("modules.metadata.xmp_fields",  "xmp_fields")  # imports iptc_fields, mwg_fields
 _alias("modules.metadata.exif_import", "exif_import")
 _alias("modules.metadata.exif_export", "exif_export")
 _alias("modules.metadata.iptc_import", "iptc_import")
@@ -71,8 +44,5 @@ _alias("modules.threading.thread_manager", "thread_manager")
 from . import theming  # noqa: F401,E402
 _alias("modules.auth.auth", "auth")
 
-# This imports each plugin folder's manifest (module.py / __init__.py) but does
-# NOT call register() yet - manager.py does that after it has built the Host.
-# Import failures are recorded per-module, never raised, so one broken plugin
-# can't stop the app. See modules/loader.py.
+# Read every plugin's manifest; register() runs later. A broken plugin is recorded, not raised.
 registry.discover()

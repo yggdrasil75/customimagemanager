@@ -1,83 +1,44 @@
 """! @file
-@brief exif_fields.py
-==============
-
-Schema definitions for the EXIF/TIFF tags, organized by IFD group. This is the
-reference table the EXIF importer/exporter/editor uses to know each tag's ID,
-human name, data type, whether it's writable, and (for enumerated fields) the
-mapping from raw value -> human label.
-
-Directly parallels iptc_fields.py: same data-driven design, same widget-hinting
-data types, same to_dict()/label_for() contract so the frontend can treat EXIF
-and IPTC uniformly. Adding a tag is a matter of adding entries to a group's
-field list, not writing new code. The eventual goal is coverage of all ~500
-EXIF tags; this first pass details the image-structure tags in IFD0/InteropIFD
-that describe the image itself and should match the pixels' own metadata.
-
-Value ranges below are transcribed from the public EXIF/TIFF specifications as
-published in the ExifTool tag reference (factual field definitions).
-
-Group names follow ExifTool/pyexiv2 conventions. pyexiv2 exposes EXIF tags as
-'Exif.<Group>.<TagName>', e.g. 'Exif.Image.ImageWidth' (IFD0 tags live under the
-'Image' group) and 'Exif.Iop.InteroperabilityIndex' (InteropIFD). We key our
-schema by (group_name, tag_name) so lookups from a read are direct.
+@brief The EXIF / TIFF tag schema by group (pyexiv2 'Exif.<Group>.<Tag>' naming):
+id, name, type, writability, enum labels and DB mirroring. Ranges follow the
+ExifTool tag reference. Same contract as iptc_fields.py (to_dict, label_for).
 """
 
 from dataclasses import dataclass, field
 from typing import Optional
 
-# -- Data types --------------------------------------------------------------
-# Kept as short strings so the frontend can pick an input widget per type.
-# Mirrors iptc_fields TYPE_* plus a couple of EXIF-specific numeric types.
+# -- data types (the editor picks an input widget per type) --
 TYPE_INT8   = "int8u"
 TYPE_INT16  = "int16u"
 TYPE_INT32  = "int32u"
-TYPE_RATIONAL = "rational"     # EXIF unsigned rational (num/den)
+TYPE_RATIONAL = "rational"  # num/den
 TYPE_STRING = "string"
-TYPE_UNDEF  = "undef"          # raw byte blob exposed as a string (e.g. version)
+TYPE_UNDEF  = "undef"  # raw bytes shown as text
 TYPE_DATE   = "date"
 TYPE_TIME   = "time"
-TYPE_BINARY = "binary"         # not directly editable (thumbnails, etc.)
+TYPE_BINARY = "binary"  # not editable (thumbnails, tables)
 
-# The subset of types that render as plain <number> inputs on the frontend.
+# rendered as number inputs
 NUMERIC_TYPES = {TYPE_INT8, TYPE_INT16, TYPE_INT32}
 
 @dataclass
 class EXIFField:
-    """! @brief One EXIF tag definition."""
-    tag_id: int                       # numeric tag id within the IFD/group
-    name: str                         # ExifTool/pyexiv2 tag name
-    dtype: str                        # one of the TYPE_* constants
+    """! @brief One EXIF tag."""
+    tag_id: int  # id within the group
+    name: str  # ExifTool / pyexiv2 name
+    dtype: str  # TYPE_*
     writable: bool = True
-    length: Optional[int] = None      # fixed string length, if any
-    count: Optional[int] = None       # array count (n) for int16u[n] etc.; None = scalar
-    values: Optional[dict] = None     # enum: {raw_value: "human label"}
-    multiline: bool = False           # render a textarea instead of a text input
-    db_field: Optional[str] = None    # name of a `files` DB column this tag
-                                      # mirrors into (e.g. ImageDescription ->
-                                      # "description"); None = EXIF-only
-    db_transform: Optional[str] = None  # named converter applied to the coerced
-                                      # value before it hits db_field (e.g.
-                                      # "rating_halfstar", "rating_percent");
-                                      # None = store the value as-is
-    generated: bool = False           # value the app computes/generates itself
-                                      # (e.g. CompressedBitsPerPixel on recompress,
-                                      # SubjectDistance via depth estimation)
-                                      # rather than reading from the camera;
-                                      # implies writable
-    note: str = ""                    # free-text hint shown in the editor
-    aliases: tuple = ()               # other tag names the same tag id is known
-                                      # by in different backends. The schema uses
-                                      # ExifTool names, but the pyexiv2/exiv2
-                                      # backend emits EXIF-standard names for some
-                                      # tags (e.g. exiftool 'CreateDate' vs exiv2
-                                      # 'DateTimeDigitized', 'ModifyDate' vs
-                                      # 'DateTime'). Listing the alias here lets
-                                      # the reader map the value onto this field
-                                      # instead of dropping it into 'unknown'.
+    length: Optional[int] = None  # fixed string length
+    count: Optional[int] = None  # array length; None = scalar
+    values: Optional[dict] = None  # enum {raw: label}
+    multiline: bool = False  # textarea
+    db_field: Optional[str] = None  # files column this tag mirrors into (ImageDescription -> description)
+    db_transform: Optional[str] = None  # converter before the DB mirror (rating_halfstar, rating_percent)
+    generated: bool = False  # computed by the app (implies writable)
+    note: str = ""  # hint shown in the editor
+    aliases: tuple = ()  # other names of this tag id (exiv2 'DateTimeDigitized' = ExifTool 'CreateDate')
 
     def __post_init__(self):
-        # A generated field is one we produce, so it must be writable.
         if self.generated:
             self.writable = True
 
@@ -86,8 +47,7 @@ class EXIFField:
         return f"0x{self.tag_id:04x}:{self.name}"
 
     def label_for(self, raw):
-        """! @brief Return the human label for an enumerated raw value, or the raw value
-        itself when there's no mapping / no match."""
+        """! @brief The label of an enum value, else the value itself."""
         if self.values is None:
             return raw
         for k in (raw, _try_int(raw)):
@@ -111,7 +71,7 @@ class EXIFField:
             "note": self.note,
         }
         if self.values is not None:
-            # JSON keys must be strings; keep insertion order for stable UI.
+            # JSON keys must be strings
             d["values"] = {str(k): v for k, v in self.values.items()}
         return d
 
@@ -123,9 +83,7 @@ def _try_int(v):
     except (TypeError, ValueError):
         return v
 
-# -- Interoperability IFD (Exif.Iop) -----------------------------------------
-# Small IFD describing DCF interoperability. InteropIndex is a short enumerated
-# string; InteropVersion is a raw version blob we surface read-only.
+# -- InteropIFD (Exif.Iop) --
 INTEROP_FIELDS = [
     EXIFField(0x0001, "InteroperabilityIndex", TYPE_STRING, length=3, values={
         "R03": "R03 - DCF option file (Adobe RGB)",
@@ -143,11 +101,7 @@ INTEROP_FIELDS = [
                    "read-only"),
 ]
 
-# -- IFD0 image-structure tags (Exif.Image) ----------------------------------
-# "These are all mostly about the image and should match the image's own
-# metadata." Several duplicate what we can derive from the pixels; we surface
-# them (writable where the spec allows, read-only for the version/geometry tags
-# that must track the actual pixels) so the editor shows the full picture.
+# -- IFD0 (Exif.Image); geometry and version tags track the pixels: read-only --
 IMAGE_FIELDS = [
     EXIFField(0x000b, "ProcessingSoftware", TYPE_STRING,
               note="Used by ACD Systems Digital Imaging"),
@@ -280,24 +234,18 @@ IMAGE_FIELDS = [
               note="Generally matches the file name; may differ if the file "
                    "was renamed"),
 
-    # ImageDescription is a first-class descriptive field: on read it should be
-    # stored, and it maps onto the project's existing `description` DB column
-    # (see db_field). The editor renders it multiline; the write path mirrors it
-    # into both the file's EXIF and the database.
+    # mirrors the description column
     EXIFField(0x010e, "ImageDescription", TYPE_STRING, multiline=True,
               db_field="description",
               note="Free-text image description; mirrored to the database"),
 
-    # -- Camera identity - present but user shouldn't normally edit ----------
+    # -- camera identity --
     EXIFField(0x010f, "Make",  TYPE_STRING, writable=False,
               note="Camera manufacturer; not normally user-edited"),
     EXIFField(0x0110, "Model", TYPE_STRING, writable=False,
               note="Camera model; not normally user-edited"),
 
-    # -- Strip/offset & preview pointers - structural, never user-editable --
-    # 0x0111 is StripOffsets in most files but PreviewImageStart / JpgFromRawStart
-    # in CR2/DNG; 0x0117 is the matching length. These are byte offsets into the
-    # file and must never be hand-edited, so they're read-only and shown as-is.
+    # -- strip / preview pointers: byte offsets, read-only --
     EXIFField(0x0111, "StripOffsets", TYPE_INT32, count=0, writable=False,
               note="Strip/preview byte offsets (PreviewImageStart / "
                    "JpgFromRawStart in CR2/DNG); structural, read-only"),
@@ -340,8 +288,6 @@ IMAGE_FIELDS = [
     EXIFField(0x011f, "YPosition", TYPE_RATIONAL,
               note="Image Y position on the page"),
 
-    # FreeOffsets / FreeByteCounts (0x0120/0x0121): unused free-space pointers,
-    # never written by tools - surfaced read-only for inspection only.
     EXIFField(0x0120, "FreeOffsets",    TYPE_INT32, count=0, writable=False,
               note="Unused free-space offsets; read-only"),
     EXIFField(0x0121, "FreeByteCounts", TYPE_INT32, count=0, writable=False,
@@ -354,7 +300,6 @@ IMAGE_FIELDS = [
         4: "1e-05",
         5: "1e-06",
     }),
-    # GrayResponseCurve (0x0123): large per-level table, not hand-editable.
     EXIFField(0x0123, "GrayResponseCurve", TYPE_BINARY, writable=False,
               note="Gray-response table; read-only"),
 
@@ -371,12 +316,11 @@ IMAGE_FIELDS = [
         3: "cm",
     }, note="Unit for X/YResolution (value 1 is not standard EXIF)"),
 
-    # PageNumber is a 2-value array [page, total]. We repurpose it for comics:
-    # the editor can store which page of a comic folder this image is. Editable.
+    # PageNumber [page, total]: used for a comic page's position
     EXIFField(0x0129, "PageNumber", TYPE_INT16, count=2,
               note="[page, total] - repurposed for comic page numbering"),
 
-    # -- Structural / rarely-useful IFD0 tags: read-only, hidden when absent --
+    # -- structural, rarely useful: read-only, hidden when absent --
     EXIFField(0x012c, "ColorResponseUnit", TYPE_BINARY, writable=False,
               note="Unused; read-only"),
     EXIFField(0x012d, "TransferFunction", TYPE_INT16, count=768, writable=False,
@@ -388,9 +332,7 @@ IMAGE_FIELDS = [
               aliases=("DateTime",),
               note="Called DateTime by the EXIF spec; read-only"),
 
-    # Artist: primary artist or a list of all artists. Becomes a list-type tag
-    # under the MWG module. Editable; useful for comics. Rendered multiline so a
-    # newline- or semicolon-separated list can be entered.
+    # one artist or a list (newline / semicolon separated)
     EXIFField(0x013b, "Artist", TYPE_STRING, multiline=True,
               note="Primary artist, or a list of artists (one per line); "
                    "becomes list-type under MWG. Useful for comics"),
@@ -503,7 +445,7 @@ IMAGE_FIELDS = [
                    "Huffman, 2=Modified Read, 3=Modified MR, 4=JBIG, 5=Baseline "
                    "JPEG, 6=JBIG color); read-only"),
 
-    # -- TIFF-FX / JPEG structural block: read-only, hidden when absent ------
+    # -- TIFF-FX / JPEG structure: read-only --
     EXIFField(0x0194, "VersionYear",       TYPE_BINARY, writable=False,
               note="TIFF-FX version year; read-only"),
     EXIFField(0x0195, "ModeNumber",        TYPE_BINARY, writable=False,
@@ -521,9 +463,7 @@ IMAGE_FIELDS = [
         14: "Lossless",
     }, note="JPEG process; read-only"),
 
-    # Thumbnail/preview pointers - structural byte offsets, never editable.
-    # 0x0201 is ThumbnailOffset / PreviewImageStart / JpgFromRawStart /
-    # OtherImageStart depending on the file/IFD; 0x0202 is the matching length.
+    # thumbnail / preview pointers: read-only
     EXIFField(0x0201, "ThumbnailOffset", TYPE_INT32, writable=False,
               note="Thumbnail/preview byte offset (JPEGInterchangeFormat; "
                    "PreviewImageStart/JpgFromRawStart/OtherImageStart per "
@@ -578,12 +518,8 @@ IMAGE_FIELDS = [
     EXIFField(0x03e7, "USPTOMiscellaneous", TYPE_BINARY, writable=False,
               note="USPTO-specific; read-only"),
 
-    # -- Rating tags: mapped onto the project's 0-5 star rating (db-backed) --
-    # Rating (0x4746) is Windows-style. Per the spec note: when 0-10 it encodes
-    # half-stars (1 = half star, 2 = one star), so stars = value / 2; values >10
-    # or <0 are a "total likes" style rating that doesn't map cleanly to stars,
-    # so we leave those as raw. RatingPercent (0x4749) is 0-100 and always maps
-    # to stars = round(percent / 20). Both mirror to the DB `rating` column.
+    # -- ratings, mirrored to the 0..5 rating column: Rating 0..10 is half stars
+    # (other values are 'likes', not mirrored); RatingPercent / 20 --
     EXIFField(0x4746, "Rating", TYPE_INT16, db_field="rating",
               db_transform="rating_halfstar",
               note="0-5 star rating (stored as 0-10 half-star units; 1=½★, "
@@ -597,7 +533,7 @@ IMAGE_FIELDS = [
               note="0-100 rating; always maps to a 0-5 star rating "
                    "(stars = round(percent / 20))"),
 
-    # -- Microsoft obscure tags 0x5001-0x5011: read-only, hidden when absent -
+    # -- Microsoft 0x5001-0x5011: read-only --
     EXIFField(0x5001, "ResolutionXUnit",           TYPE_BINARY, writable=False,
               note="Microsoft; read-only"),
     EXIFField(0x5002, "ResolutionYUnit",           TYPE_BINARY, writable=False,
@@ -633,7 +569,7 @@ IMAGE_FIELDS = [
     EXIFField(0x5011, "GridSize",                  TYPE_BINARY, writable=False,
               note="Microsoft; read-only"),
 
-    # -- Microsoft palette/animation & Sony/technical SubIFD tags: read-only -
+    # -- Microsoft palette / animation, Sony SubIFD: read-only --
     EXIFField(0x5090, "LuminanceTable",   TYPE_BINARY, writable=False, note="Microsoft; read-only"),
     EXIFField(0x5091, "ChrominanceTable", TYPE_BINARY, writable=False, note="Microsoft; read-only"),
     EXIFField(0x5100, "FrameDelay",       TYPE_BINARY, writable=False, note="Microsoft GIF; read-only"),
@@ -714,15 +650,12 @@ IMAGE_FIELDS = [
     EXIFField(0x8290, "KodakIFD",     TYPE_BINARY, writable=False,
               note="Pointer to the Kodak IFD; structural, read-only"),
 
-    # Copyright (0x8298): photographer/editor notices separated by newline.
-    # Left read-only here - copyright is edited via the dedicated rights fields
-    # in the IPTC/XMP editors, not the raw EXIF tag.
+    # edited through the IPTC / XMP rights fields
     EXIFField(0x8298, "Copyright", TYPE_STRING, writable=False, multiline=True,
               note="Copyright notice (photographer/editor, newline-separated); "
                    "edit via the IPTC/XMP rights fields, read-only here"),
 
-    # ExposureTime (0x829a) / FNumber (0x829d) belong to the ExifIFD (Photo
-    # group), not IFD0 - they'll be added there.
+    # ExposureTime / FNumber are in the Photo group
 
     EXIFField(0x82a5, "MDFileTag",    TYPE_BINARY, writable=False, note="Molecular Dynamics GEL; read-only"),
     EXIFField(0x82a6, "MDScalePixel", TYPE_BINARY, writable=False, note="Molecular Dynamics GEL; read-only"),
@@ -757,7 +690,7 @@ IMAGE_FIELDS = [
         10: "Long Sector",
     }, note="IT8; read-only"),
 
-    # -- IT8 / TIFF-FX / vendor block tail: read-only, hidden when absent ----
+    # -- IT8 / TIFF-FX / vendor: read-only --
     EXIFField(0x84e4, "BitsPerRunLength",         TYPE_BINARY, writable=False, note="IT8; read-only"),
     EXIFField(0x84e5, "BitsPerExtendedRunLength", TYPE_BINARY, writable=False, note="IT8; read-only"),
     EXIFField(0x84e6, "ColorTable",               TYPE_BINARY, writable=False, note="IT8; read-only"),
@@ -827,11 +760,8 @@ IMAGE_FIELDS = [
     EXIFField(0xa481, "GDALNoData",   TYPE_STRING, writable=False,
               note="GDAL nodata value (geospatial); read-only"),
 
-    # -- Windows Explorer XP tags (IFD0, UCS-2 stored as int8u byte arrays) --
-    # XPTitle: editable title. XPComment / XPSubject: folded into the file's
-    # description JSON on ingest (tracked with an 'original field' provenance
-    # marker so a rebuild never double-imports them). XPKeywords: split into
-    # tags. See manager._ingest_xp_fields for the routing.
+    # -- Windows XP tags (UCS-2 bytes): XPTitle editable; XPComment / XPSubject fold
+    # into the description, XPKeywords into tags (manager._ingest_xp) --
     EXIFField(0x9c9b, "XPTitle", TYPE_STRING, multiline=False,
               note="Windows Explorer title (ignored by Explorer when "
                    "ImageDescription exists); editable"),
@@ -849,9 +779,7 @@ IMAGE_FIELDS = [
                    "at scan time (provenance-tracked; may drive auto box naming "
                    "later), read-only here"),
 
-    # -- Kodak Expand / Hasselblad / HD Photo / Oce / DNG block: read-only ---
-    # Read for completeness; none are user-editable. MakerNote sub-tags on
-    # 0xc634 are intentionally skipped (handled elsewhere, not here).
+    # -- Kodak / Hasselblad / HD Photo / Oce / DNG: read-only (MakerNotes skipped) --
     EXIFField(0xafc0, "ExpandSoftware",   TYPE_BINARY, writable=False, note="Kodak; read-only"),
     EXIFField(0xafc1, "ExpandLens",       TYPE_BINARY, writable=False, note="Kodak; read-only"),
     EXIFField(0xafc2, "ExpandFilm",       TYPE_BINARY, writable=False, note="Kodak; read-only"),
@@ -860,8 +788,7 @@ IMAGE_FIELDS = [
     EXIFField(0xafc5, "ExpandFlashLamp",  TYPE_BINARY, writable=False, note="Kodak; read-only"),
     EXIFField(0xb4c3, "HasselbladRawImage", TYPE_BINARY, writable=False, note="Hasselblad; read-only"),
 
-    # HD Photo (HDP/WDP). PixelFormat values are the trailing byte of a 16-byte
-    # GUID (leading 15 bytes stripped, per the reference).
+    # PixelFormat: the last byte of a 16-byte GUID
     EXIFField(0xbc01, "PixelFormat", TYPE_BINARY, writable=False, values={
         0x5:  "Black & White",
         0x8:  "8-bit Gray",
@@ -979,7 +906,7 @@ IMAGE_FIELDS = [
         4: "[Green,Red][Blue,Green] (1 0 2 1)",
     }, note="Canon CR2 CFA pattern; read-only"),
 
-    # -- DNG spec tags (0xc612-) - read-only --------------------------------
+    # -- DNG: read-only --
     EXIFField(0xc612, "DNGVersion",         TYPE_INT8, count=4, writable=False,
               note="DNG version; read-only"),
     EXIFField(0xc613, "DNGBackwardVersion", TYPE_INT8, count=4, writable=False,
@@ -1028,8 +955,7 @@ IMAGE_FIELDS = [
     EXIFField(0xc631, "ChromaBlurRadius",    TYPE_RATIONAL, writable=False, note="DNG SubIFD; read-only"),
     EXIFField(0xc632, "AntiAliasStrength",   TYPE_RATIONAL, writable=False, note="DNG SubIFD; read-only"),
     EXIFField(0xc633, "ShadowScale",         TYPE_RATIONAL, writable=False, note="DNG; read-only"),
-    # 0xc634 is DNGPrivateData / various MakerNote pointers - intentionally
-    # skipped (MakerNotes handled elsewhere).
+    # 0xc634 (DNGPrivateData / MakerNote pointers) skipped
     EXIFField(0xc635, "MakerNoteSafety", TYPE_INT16, writable=False, values={
         0: "Unsafe",
         1: "Safe",
@@ -1078,9 +1004,7 @@ IMAGE_FIELDS = [
     EXIFField(0xc65c, "BestQualityScale", TYPE_RATIONAL, writable=False,
               note="DNG SubIFD; read-only"),
 
-    # RawDataUniqueID (0xc65d): a 16-byte unique ID for the raw data. We use it as
-    # the key linking a derived image back to its stored (hidden) raw file - see
-    # the `raws` table and the raw-open endpoint. App-managed.
+    # links a derived image to its stored raw (`raws` table); app-managed
     EXIFField(0xc65d, "RawDataUniqueID", TYPE_STRING, generated=True,
               note="16-byte raw data unique ID. Used as the key to look up a "
                    "stored (hidden) original raw; app-managed"),
@@ -1088,22 +1012,15 @@ IMAGE_FIELDS = [
     EXIFField(0xc660, "AliasLayerMetadata", TYPE_BINARY, writable=False,
               note="Alias Sketchbook Pro; read-only"),
 
-    # OriginalRawFileName (0xc68b): the name of the raw this image was derived
-    # from. We set it on raw->image conversion, but ONLY if it isn't already
-    # present (never overwrite one an earlier tool wrote - even a mistaken
-    # convert-and-convert-back). App-generated.
+    # set on raw -> image conversion only when absent
     EXIFField(0xc68b, "OriginalRawFileName", TYPE_STRING, generated=True,
               note="Filename of the source raw. Set on conversion only if not "
                    "already defined (never overwritten); app-generated"),
     EXIFField(0xc68c, "OriginalRawFileData", TYPE_UNDEF, writable=False,
               note="DNG OriginalRaw block (mostly MakerNote data); read-only"),
 
-    # -- DNG raw-sensor geometry, ICC profiles, color matrices, profile look
-    #    tables, preview info, opcode lists (0xc68d-0xc74e) - read-only ------
-    # ActiveArea / MaskedAreas describe RAW SENSOR geometry (the real-pixel
-    # rectangle vs. the optically-black calibration border), NOT image content -
-    # not usable for subject masks; primary-subject masks belong in the region
-    # system, not here.
+    # -- DNG sensor geometry, profiles, matrices, previews, opcodes: read-only.
+    # ActiveArea / MaskedAreas describe the sensor, not image content. --
     EXIFField(0xc68d, "ActiveArea",  TYPE_INT32, count=4, writable=False,
               note="DNG SubIFD active sensor area [top,left,bottom,right]; "
                    "raw-sensor geometry, read-only"),
@@ -1175,7 +1092,7 @@ IMAGE_FIELDS = [
     EXIFField(0xc74e, "OpcodeList3", TYPE_BINARY, writable=False,
               note="DNG SubIFD opcode list 3; read-only"),
 
-    # -- DNG 1.2-1.7 profile/depth/sequence tags (0xc761-0xcd4b) - read-only -
+    # -- DNG 1.2-1.7: read-only --
     EXIFField(0xc761, "NoiseProfile", TYPE_BINARY, writable=False, note="DNG SubIFD; read-only"),
     EXIFField(0xc763, "TimeCodes", TYPE_BINARY, writable=False, note="DNG; read-only"),
     EXIFField(0xc764, "FrameRate", TYPE_RATIONAL, writable=False, note="DNG; read-only"),
@@ -1200,8 +1117,7 @@ IMAGE_FIELDS = [
     }, note="DNG; read-only"),
     EXIFField(0xc7a7, "NewRawImageDigest", TYPE_BINARY, writable=False, note="DNG; read-only"),
     EXIFField(0xc7a8, "RawToPreviewGain",  TYPE_BINARY, writable=False, note="DNG; read-only"),
-    # CacheVersion: a raw processor's own preview/cache pyramid version, DNG-only
-    # and camera-set. NOT a signal for our DB dirty state - read-only.
+    # a raw processor's cache version; read-only
     EXIFField(0xc7aa, "CacheVersion", TYPE_INT32, writable=False,
               note="DNG SubIFD2 processor cache version; read-only"),
     EXIFField(0xc7b5, "DefaultUserCrop", TYPE_RATIONAL, count=4, writable=False, note="DNG SubIFD; read-only"),
@@ -1259,9 +1175,7 @@ IMAGE_FIELDS = [
     EXIFField(0xcd3f, "RGBTables", TYPE_UNDEF, writable=False, note="DNG; read-only"),
     EXIFField(0xcd40, "ProfileGainTableMap2", TYPE_UNDEF, writable=False, note="DNG; read-only"),
     EXIFField(0xcd43, "ColumnInterleaveFactor", TYPE_INT32, writable=False, note="DNG SubIFD; read-only"),
-    # ImageSequenceInfo: DNG burst/sequence structure (per-file, camera-set).
-    # Comic page order lives in comics.page_order (folder-level, editable) - this
-    # is only read-only reference, not the ordering source of truth.
+    # camera burst info; comic page order lives in comics.page_order
     EXIFField(0xcd44, "ImageSequenceInfo", TYPE_UNDEF, writable=False,
               note="DNG burst/sequence info; read-only (comic order lives in "
                    "comics.page_order, not here)"),
@@ -1269,24 +1183,16 @@ IMAGE_FIELDS = [
     EXIFField(0xcd47, "ProfileDynamicRange", TYPE_UNDEF, writable=False, note="DNG; read-only"),
     EXIFField(0xcd48, "ProfileGroupName", TYPE_STRING, writable=False, note="DNG; read-only"),
 
-    # DNG 1.7 JXL params - read-only reference (our own JXL encode params are set
-    # by cjxl at upload, not driven by these).
+    # DNG JXL parameters (ours come from cjxl at upload)
     EXIFField(0xcd49, "JXLDistance",    TYPE_BINARY, writable=False, note="DNG JXL distance; read-only"),
     EXIFField(0xcd4a, "JXLEffort",      TYPE_INT32, writable=False, note="DNG JXL effort (1=low..9=high); read-only"),
     EXIFField(0xcd4b, "JXLDecodeSpeed", TYPE_INT32, writable=False, note="DNG JXL decode speed (1=slow..4=fast); read-only"),
     EXIFField(0xcea1, "SEAL", TYPE_STRING, writable=False, note="SEAL signature block; read-only"),
 ]
 
-# -- Exif SubIFD (Exif.Photo) -------------------------------------------------
-# The main EXIF sub-IFD: exposure, camera settings, timestamps. Most of these
-# are written by the camera at capture and are surfaced read-only (there's no
-# value in hand-editing the shutter speed the sensor recorded). Two are special:
-#   * CompressedBitsPerPixel - we can compute and set this ourselves, especially
-#     when recompressing JPEG -> JXL, so it's writable.
-#   * SubjectDistance - we intend to generate this (depth estimation) in future,
-#     so it's writable and flagged as a generated field via `generated`.
-# Timestamps/offsets are left read-only here; date editing belongs in a dedicated
-# date workflow, not the raw EXIF editor.
+# -- Exif SubIFD (Exif.Photo): camera-recorded, read-only, except
+# CompressedBitsPerPixel (set on recompression) and SubjectDistance (to be
+# generated from depth). Dates are edited elsewhere. --
 PHOTO_FIELDS = [
     EXIFField(0x8822, "ExposureProgram", TYPE_INT16, writable=False, values={
         0: "Not Defined",
@@ -1344,7 +1250,6 @@ PHOTO_FIELDS = [
     EXIFField(0x9101, "ComponentsConfiguration", TYPE_UNDEF, count=4, writable=False,
               note="Component ordering (Y/Cb/Cr/R/G/B); read-only"),
 
-    # Computable by us - set when recompressing (e.g. JPEG -> JXL), so writable.
     EXIFField(0x9102, "CompressedBitsPerPixel", TYPE_RATIONAL, generated=True,
               note="Average bits per pixel of the compressed image. We can "
                    "compute and set this, especially when recompressing "
@@ -1360,7 +1265,6 @@ PHOTO_FIELDS = [
     EXIFField(0x9205, "MaxApertureValue", TYPE_RATIONAL, writable=False,
               note="APEX max aperture (shown as F number); read-only"),
 
-    # Generated by us in future (depth estimation), so writable + flagged.
     EXIFField(0x9206, "SubjectDistance", TYPE_RATIONAL, generated=True,
               note="Distance to the subject, in metres. We plan to generate "
                    "this via depth estimation; exposed here as a generated field"),
@@ -1453,9 +1357,7 @@ PHOTO_FIELDS = [
         "U": "Unclassified",
     }, note="Security classification; read-only"),
 
-    # ImageHistory: app-managed. We write a rendered changelog here (backing
-    # undo / ctrl+z), so it's writable but the app owns it - see the file_history
-    # table and _history_* helpers in manager.py.
+    # the app writes its changelog here (undo); app-managed
     EXIFField(0x9213, "ImageHistory", TYPE_STRING, multiline=True, generated=True,
               note="App-managed edit history (changelog view; backs undo). "
                    "Written from the file_history changelog"),
@@ -1481,8 +1383,7 @@ PHOTO_FIELDS = [
     EXIFField(0x923c, "CIP3Side",     TYPE_BINARY, writable=False, note="read-only"),
     EXIFField(0x923f, "StoNits",      TYPE_BINARY, writable=False, note="read-only"),
 
-    # UserComment: free-text comment (charset-prefixed undef). Surfaced but left
-    # read-only here; description editing has its own field.
+    # read-only; the description has its own field
     EXIFField(0x9286, "UserComment", TYPE_UNDEF, writable=False, multiline=True,
               note="Free-text user comment; read-only here"),
     EXIFField(0x9287, "LearningOptOutIn", TYPE_UNDEF, count=0, writable=False,
@@ -1498,7 +1399,7 @@ PHOTO_FIELDS = [
     EXIFField(0x9330, "MSPropertySetStorage",   TYPE_BINARY, writable=False, note="Microsoft; read-only"),
     EXIFField(0x9331, "MSDocumentTextPosition", TYPE_BINARY, writable=False, note="Microsoft; read-only"),
 
-    # Environmental sensor tags - camera-recorded, read-only.
+    # environment sensors: read-only
     EXIFField(0x9400, "AmbientTemperature", TYPE_RATIONAL, writable=False,
               note="Ambient temperature (deg C); read-only"),
     EXIFField(0x9401, "Humidity",   TYPE_RATIONAL, writable=False,
@@ -1685,14 +1586,12 @@ PHOTO_FIELDS = [
     EXIFField(0xa500, "Gamma", TYPE_RATIONAL, writable=False,
               note="Gamma value; read-only"),
 
-    # -- Padding / Microsoft / Photoshop Camera RAW ExifIFD tags - read-only -
+    # -- padding / Microsoft / Photoshop Camera Raw: read-only --
     EXIFField(0xea1c, "Padding", TYPE_UNDEF, writable=False,
               note="Microsoft padding block; read-only"),
     EXIFField(0xea1d, "OffsetSchema", TYPE_BINARY, writable=False,
               note="Microsoft maker-note offset schema; read-only"),
-    # Photoshop Camera RAW tags (0xfde8-0xfdea, 0xfe4c-0xfe58). Several names
-    # duplicate standard EXIF tags, so they're namespaced with a PS prefix to
-    # keep the schema unambiguous. All read-only.
+    # Photoshop Camera Raw tags, PS-prefixed where names clash; read-only
     EXIFField(0xfde8, "PSOwnerName",    TYPE_STRING, writable=False, note="Photoshop CameraRaw; read-only"),
     EXIFField(0xfde9, "PSSerialNumber", TYPE_STRING, writable=False, note="Photoshop CameraRaw; read-only"),
     EXIFField(0xfdea, "PSLens",         TYPE_STRING, writable=False, note="Photoshop CameraRaw; read-only"),
@@ -1709,19 +1608,15 @@ PHOTO_FIELDS = [
     EXIFField(0xfe58, "PSMoireFilter",  TYPE_STRING, writable=False, note="Photoshop CameraRaw; read-only"),
 ]
 
-# -- Group registry ----------------------------------------------------------
-## @brief Each group: pyexiv2 group name, human display title, ordered field list, short
-# description, and a `mapped` flag. Groups declared as placeholders (mapped=
-# False) let the UI show "not yet detailed" sections we fill in incrementally,
-# exactly like the IPTC record registry.
+## @brief One EXIF group; mapped=False groups are listed but not detailed yet.
 @dataclass
 class EXIFGroup:
-    name: str                 # pyexiv2 group name (Exif.<name>.<tag>)
-    title: str                # human display title
+    name: str  # Exif.<name>.<tag>
+    title: str
     description: str
-    ifd: str                  # ExifTool IFD label (IFD0, InteropIFD, ...)
+    ifd: str  # ExifTool IFD label
     fields: list = field(default_factory=list)
-    mapped: bool = True       # False => known group we haven't detailed yet
+    mapped: bool = True  # listed, not detailed yet
 
 EXIF_GROUPS = [
     EXIFGroup(
@@ -1751,12 +1646,9 @@ EXIF_GROUPS = [
     ),
 ]
 
-# Fast lookups.
 GROUP_BY_NAME = {g.name: g for g in EXIF_GROUPS}
 
-# exiv2/pyexiv2 sometimes reports IFD0 tags under 'Image' but a few tools use
-# alternate group spellings; map them onto our schema group names so a read
-# resolves. Extend as needed when new importers surface other spellings.
+# alternate group spellings -> schema group names
 EXIV2_GROUP_ALIASES = {
     "Image":         "Image",
     "Iop":           "Iop",
@@ -1766,7 +1658,7 @@ EXIV2_GROUP_ALIASES = {
 }
 
 def field_lookup(group_name, tag_name):
-    """! @brief Return the EXIFField for a given (group, tag) or None."""
+    """! @brief The field for (group, tag), or None."""
     grp = GROUP_BY_NAME.get(group_name)
     if not grp:
         return None
@@ -1776,16 +1668,10 @@ def field_lookup(group_name, tag_name):
     return None
 
 def field_by_tagname(tag_name):
-    """! @brief Find a field by bare tag name across all groups.
-
-    A few tag NAMES legitimately appear in more than one group with different
-    tag IDs (e.g. DistortionCorrection: the Sony SubIFD version 0x7036 in Image
-    vs. the EXIF-standard yes/no version 0xa40f in Photo). To keep the write path
-    unambiguous, prefer a writable match - the editor only ever writes writable
-    fields, so a writable field is the intended target. Falls back to the first
-    match (all read-only) otherwise.
-
-    Returns (group_name, EXIFField) or (None, None)."""
+    """! @brief A field by tag name across groups; when a name exists in several groups
+    the writable one wins (the editor only writes writable fields).
+    @return (group_name, field) or (None, None).
+    """
     first = None
     for g in EXIF_GROUPS:
         for f in g.fields:
@@ -1797,7 +1683,7 @@ def field_by_tagname(tag_name):
     return first if first is not None else (None, None)
 
 def schema_dict():
-    """! @brief Full schema as JSON-serializable dict, for the editor frontend."""
+    """! @brief The schema as JSON for the editor."""
     return {
         "groups": [
             {

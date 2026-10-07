@@ -1,27 +1,19 @@
 """! @file
-@brief Thread Manager module - registration side of modules/threading.
-======================================================================
-The core still constructs the ThreadManager itself (manager.py imports it
-first, before any plugin loads); this register(host) is where the module
-declares what it OWNS: its settings and its wiring to the model broker.
-Called by manager.py right after the host exists, like modules.metadata.
+@brief Thread manager registration: its settings and its link to the model broker.
+manager.py builds the ThreadManager first and calls this right after the host exists.
 """
 
 
 def register(host):
     tm = host.thread_manager
-    # The broker signs every provider up here (what it runs on, what it
-    # costs); jobs are admitted against the device budget (try_acquire_model).
+    # the broker signs each provider up for job admission
     host.broker.thread_manager = tm
-    for cap_id, provs in getattr(host.broker, "_providers", {}).items():   # providers registered before wiring
+    for cap_id, provs in getattr(host.broker, "_providers", {}).items():  # providers registered before this
         for p in provs.values():
             tm.register_model(p.key, gpu=p.gpu, resource=p.resource,
                               concurrency=p.concurrency, cost_mb=p.cost_mb)
 
-    # Optional ceiling on concurrent background GPU jobs. Admission is by
-    # memory (each job reserves a working set sized from its model against
-    # the device budget), so this is for taming a card that thrashes, not
-    # the normal control: 0 = memory alone.
+    # Ceiling on concurrent background GPU jobs (0 = admit by memory alone).
     host.add_config_key("gpu_max_jobs", default=0,
                         validate=lambda v: max(0, min(256, int(v or 0))))
     host.add_settings_field(key="gpu_max_jobs", label="GPU jobs (0 = auto)",

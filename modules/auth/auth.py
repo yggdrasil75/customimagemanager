@@ -1,9 +1,8 @@
 """! @file
-@brief Authentication: local (SQLite + werkzeug pbkdf2) and/or LDAP/AD backends,
-server-side cookie sessions, CSRF, and per-feature permission gates.
-
-Configuration lives in app_config.json under "auth": enabled, mode
-("local"|"ldap"|"both"), session_days, and an ldap sub-object.
+@brief Authentication: local (SQLite, pbkdf2) and/or LDAP / AD accounts,
+server-side cookie sessions, CSRF and per-feature permission gates.
+Configured under "auth" in app_config.json (enabled, mode local | ldap | both,
+session_days, ldap).
 """
 
 import json
@@ -29,20 +28,17 @@ if not log.handlers:
 log.setLevel(logging.INFO)
 
 COOKIE_NAME = "cim_session"
-# Usernames reach LDAP DN templates and search filters via .format(); a strict
-# allowlist is the whole injection defence (and what local names look like).
+# Usernames reach LDAP DN templates and filters: this allowlist is the injection defence.
 _USERNAME_RE = re.compile(r"^[\w.@+-]{1,128}$")
-# Login brute-force throttle: (ip, username) -> [fail_count, first_fail_ts]
+# (ip, username) -> [failures, first failure time]
 _LOGIN_FAILS = {}
 _LOGIN_MAX, _LOGIN_WINDOW = 10, 900
 _UNSET = object()
 
 def require_feature(feature_key, action=None, fields=(), level="read"):
-    """! @brief @brief Decorator: 403 unless g.user has >= `level` on feature_key.
-
-    level defaults to "read" (may see/open). Write-guarded endpoints pass
-    level="write". @param action optional audit action; fields are body keys
-    to log.
+    """! @brief Decorator: 403 unless the current user has `level` on `feature_key`.
+    @param level   "read" to view, "write" to change.
+    @param action  audit action name; `fields` are body keys to log.
     """
     def deco(fn):
         @functools.wraps(fn)
@@ -50,7 +46,7 @@ def require_feature(feature_key, action=None, fields=(), level="read"):
             u = g.get("user")
             if not u:
                 return jsonify({"error": "authentication required"}), 401
-            g.cim_write = (level == "write")   # is this a mutating endpoint? (access policies)
+            g.cim_write = (level == "write")  # mutating endpoint (access policies read this)
             if capabilities.capability_denials().get(feature_key) is False:
                 return jsonify({"error": "feature unavailable on this server"}), 503
             if not u.get("is_admin"):
@@ -78,34 +74,32 @@ def require_feature(feature_key, action=None, fields=(), level="read"):
 
 _PUBLIC_PATHS = {
     "/api/auth/login",
-    "/api/auth/config",   # exposes only which modes are enabled (no secrets)
+    "/api/auth/config",  # says which modes are on, no secrets
     "/login",
     "/favicon.ico",
-    "/tailwind",          # the login page loads it
+    "/tailwind",  # the login page loads it
 }
 _PUBLIC_PREFIXES = ["/static/"]
 
 
 def add_public_prefix(prefix):
-    """! @brief Let a module open a URL prefix to the login gate (host.add_public_prefix).
-    The module MUST authenticate those requests itself (an API key, a peer
-    secret); the core only stops redirecting them to /login. Prefixes must be
-    absolute ("/api/x/inbound/") so a module can't open more than its own routes."""
+    """! @brief Let a URL prefix through the login gate (host.add_public_prefix).
+    The module authenticates those requests itself; prefixes must be absolute.
+    """
     prefix = str(prefix or "")
     if not prefix.startswith("/api/") or not prefix.endswith("/"):
         raise ValueError("public prefix must look like '/api/<module>/.../'")
     if prefix not in _PUBLIC_PREFIXES:
         _PUBLIC_PREFIXES.append(prefix)
 
-# Per-account fields modules add to the user / group editors (a default
-# layout, ...): key -> {label, options (list or callable -> [{value,label}]),
-# scopes ("user","group"), help}. Values live in the `extra` JSON column of
-# auth_users / auth_groups; a user's value wins over their group's.
+# Per-account fields modules add (host.add_account_field):
+# key -> {label, options, scopes, help}. Stored in the `extra` JSON of
+# auth_users / auth_groups; a user's value beats the group's.
 _ACCOUNT_FIELDS = {}
 
 
 def register_account_field(key, label, *, options=None, scopes=("user", "group"), help=None):
-    """! @brief Add a field to the account (user / group) editor (host.add_account_field)."""
+    """! @brief Add a field to the user / group editor."""
     key = str(key or "").strip()
     if not key or not key.replace("_", "").isalnum():
         raise ValueError("account field key: letters, digits and _ only")
@@ -116,7 +110,7 @@ def register_account_field(key, label, *, options=None, scopes=("user", "group")
 
 
 def account_fields():
-    """! @brief Registered account fields with option lists resolved (JSON-safe)."""
+    """! @brief Account fields with their options resolved."""
     out = []
     for f in _ACCOUNT_FIELDS.values():
         opts = f["options"]
@@ -131,9 +125,9 @@ def account_fields():
 
 
 def _clean_extra(raw, scope):
-    """! @brief Validate an `extra` dict from the account editor: registered keys for
-    this scope only; with an option list the value must be one of them; ""
-    clears the key."""
+    """! @brief Validate an account-editor `extra` dict: registered keys for this scope,
+    values from the option list, "" clears.
+    """
     if not isinstance(raw, dict):
         return {}
     allowed = {f["key"]: f for f in account_fields() if scope in f["scopes"]}
@@ -167,13 +161,13 @@ _DEFAULT_LDAP = {
 
 _DEFAULT_CFG = {
     "enabled": True,
-    "mode": "local",          # local | ldap | both
+    "mode": "local",  # local | ldap | both
     "session_days": 14,
     "ldap": dict(_DEFAULT_LDAP),
 }
 
 class Auth:
-    """! @brief @brief Wires authentication into an existing Flask app."""
+    """! @brief Authentication wired into the Flask app."""
 
     def __init__(self, app, db_factory, get_cfg, save_cfg=None):
         self.app = app
@@ -181,9 +175,7 @@ class Auth:
         self._get_cfg = get_cfg
         self._save_cfg = save_cfg
         self._init_db()
-        # Request authenticators registered by modules (host.register_authenticator):
-        # each is called before the cookie and returns None (not mine), False
-        # (mine, but refused: the request stays anonymous) or (user, info).
+        # module authenticators (host.register_authenticator), tried before the cookie
         self.authenticators = []
 
     def cfg(self):
@@ -270,21 +262,20 @@ class Auth:
                 for r in rows]
 
     def effective_perms_for(self, user_row):
-        """! @brief @brief Resolve effective feature map: group role/perms, then user's own on top."""
+        """! @brief A user's effective permission levels: role defaults, group overrides, then the user's own."""
         perms = self._resolve_perms(user_row)
         return capabilities.apply_machine_limits(perms)
 
     def _resolve_perms(self, user_row):
         if user_row is None:
-            # Not logged in: everything blocked (the block default).
+            # anonymous: everything blocked
             return {k: features.BLOCK for k in features.ALL_KEYS}
         if user_row["is_admin"]:
             return features.effective_permissions("admin", {})
 
         role = (user_row["role"] if "role" in user_row.keys()
                 else None) or "custom"
-        # Migrate legacy bool perms (and fold old .edit keys) to levels. Kept
-        # separate for user vs group so "inherit"/"default" resolve correctly.
+        # legacy boolean overrides become levels, user and group kept apart
         overrides = features.migrate_perms(self._load_perms(
             user_row["perms"] if "perms" in user_row.keys() else None))
 
@@ -311,8 +302,7 @@ class Auth:
             "extra": self._load_perms(r["extra"] if "extra" in keys else None),
         }
         u["features"] = self.effective_perms_for(r)
-        # Resolved account fields (user value, else the group's) and the role
-        # the permissions were resolved with - what modules read off g.user.
+        # what modules read off g.user: resolved account fields and role
         grp = self.get_group(u["group_id"])
         gextra = self._load_perms(grp["extra"] if grp is not None and "extra" in grp.keys() else None)
         u["account"] = {k: v for k, v in {**gextra, **u["extra"]}.items() if v}
@@ -396,7 +386,7 @@ class Auth:
                 sets.append(f"{col}=?"); vals.append(val)
         if perms is not None:
             sets.append("perms=?"); vals.append(json.dumps(perms))
-        if group_id is not _UNSET:            # allow clearing to NULL
+        if group_id is not _UNSET:  # None clears the group
             sets.append("group_id=?"); vals.append(group_id)
         if extra is not None:
             r = self._db().execute("SELECT extra FROM auth_users WHERE id=?", (user_id,)).fetchone()
@@ -410,7 +400,6 @@ class Auth:
             f"UPDATE auth_users SET {','.join(sets)} WHERE id=?", vals)
         self._db().commit()
 
-    # -- group CRUD ----------------------------------------------------------
     def create_group(self, name, role="custom", perms=None, extra=None):
         name = (name or "").strip()
         if not name:
@@ -460,7 +449,9 @@ class Auth:
         db.commit()
 
     def authenticate(self, username, password):
-        """! @brief @brief Return a user Row on success, else None. Honors the configured mode."""
+        """! @brief Check credentials against the configured mode.
+        @return the user row, or None.
+        """
         mode = self.cfg().get("mode", "local")
         username = (username or "").strip()
         if not _USERNAME_RE.match(username) or password is None:
@@ -472,7 +463,7 @@ class Auth:
                 return u
             if mode == "ldap":
                 return None
-        # local (or fallthrough from "both")
+        # local, or the fallback of "both"
         return self._auth_local(username, password)
 
     def _auth_local(self, username, password):
@@ -650,13 +641,13 @@ class Auth:
         self._db().commit()
 
     def _load_current(self):
-        """! @brief @brief Populate g.user / g.session from the request cookie."""
+        """! @brief Set g.user / g.session from an authenticator or the session cookie."""
         g.user = None
         g.session = None
         g.api_key = None
         for authn in self.authenticators:
             hit = authn()
-            if hit is not None:                     # that authenticator decides
+            if hit is not None:  # that authenticator decides
                 if hit:
                     g.user, g.api_key = hit
                 return
@@ -678,7 +669,7 @@ class Auth:
         return any(path.startswith(p) for p in _PUBLIC_PREFIXES)
 
     def _gate(self):
-        """! @brief @brief before_request hook: enforce login + CSRF on protected paths."""
+        """! @brief before_request: require login and CSRF on protected paths."""
         if not self.enabled():
             g.user = {"username": "anonymous", "is_admin": True,
                       "id": 0, "source": "disabled", "role": "admin",
@@ -796,16 +787,16 @@ class Auth:
             if not new:
                 return jsonify({"error": "new password required"}), 400
             self.set_password(g.user["id"], new)
-            # Drop every other session for this user; keep the current one.
+            # end the user's other sessions
             self._db().execute("DELETE FROM auth_sessions WHERE user_id=? AND token<>?",
                                (g.user["id"], g.session["token"]))
             self._db().commit()
             return jsonify({"ok": True})
 
         def require_admin(fn=None, *, level="write"):
-            """! @brief Account management: admins, or a user granted the Users settings
-            tab (settings.users) at `level`. Non-admin managers are further
-            limited inside the views (no admin flag, no admin accounts)."""
+            """! @brief Decorator for account management: admins, or users with `level` on
+            settings.users (who may not touch admin accounts or the admin flag).
+            """
             def deco(fn):
                 @functools.wraps(fn)
                 def wrap(*a, **k):
@@ -821,8 +812,7 @@ class Auth:
             return deco(fn) if fn else deco
 
         def _manager_limit(target_id=None, d=None):
-            """! @brief For a non-admin account manager: refuse touching admin accounts or
-            the admin flag. Returns an error response, or None when allowed."""
+            """! @brief For a non-admin manager: an error response when touching admins, else None."""
             if g.user.get("is_admin"):
                 return None
             if d is not None and d.get("is_admin"):
@@ -897,9 +887,7 @@ class Auth:
                 self.update_user(uid, **kw)
             except ValueError as e:
                 return jsonify({"error": str(e)}), 400
-            # Any permission change invalidates cached sessions' assumptions only
-            # loosely (perms are re-read per request), but disabling or demoting
-            # must kick the user out now.
+            # disabling or demoting signs the user out now
             if d.get("disabled") is True or d.get("is_admin") is False:
                 self.revoke_user_sessions(uid)
             return jsonify({"ok": True})

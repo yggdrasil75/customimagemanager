@@ -1,16 +1,7 @@
 """! @file
-@brief metadata module - EXIF / IPTC / XMP read/write, editors, controls tabs, and
-its own auth features + read/schema endpoints.
-
-Owns the metadata surface: read/write Python (exif_/iptc_/xmp_ files here),
-editor JS+CSS (static/, as assets), editor HTML panes (templates/, server-
-rendered partials), the three controls tabs, the meta.* AUTH FEATURES (registered
-into the auth catalog, not hard-coded in core features.py), and the schema/read
-API endpoints (registered via the host, not defined in manager.py).
-
-Writes go through the core's update_file() (host.core.update_file), the one
-path that writes the file, mirrors DB columns, logs history and raises
-file.metadata_changed; the writers below are what it calls.
+@brief The metadata module (core): EXIF / IPTC / XMP readers and writers, the
+editors and their controls tabs, the meta.* permissions, the schema / read
+endpoints and the metadata search index. Writes go through core update_file.
 """
 
 import threading
@@ -22,14 +13,10 @@ from . import (exif_fields, iptc_fields, xmp_fields,
 
 
 def register(host):
-    # -- auth features (were hard-coded in core features.py) --------------
-    # Registered here so metadata OWNS them: they show in the admin permission
-    # tree and gate the tabs/endpoints, with no core catalog edit.
     host.register_feature("metadata_tabs", "Metadata editors",
                           section="metadata_tabs", section_label="Metadata editors",
                           default="read")
-    # One feature per format: read = see the tab, write = edit. No separate
-    # .edit keys - the level covers both. Viewer default is read.
+    # one permission per format: read = see the tab, write = edit
     for key, label in (("meta.exif", "EXIF (read=view, write=edit)"),
                        ("meta.iptc", "IPTC (read=view, write=edit)"),
                        ("meta.xmp",  "XMP (read=view, write=edit)")):
@@ -38,7 +25,6 @@ def register(host):
                               default="read",
                               role_defaults={"viewer": "read", "uploader": "block"})
 
-    # -- editor assets + server-rendered panes ----------------------------
     for name in ("exif_editor", "iptc_editor", "xmp_editor"):
         host.add_asset(f"{name}.css", kind="css", module_id="metadata")
         host.add_asset(f"{name}.js", kind="js", module_id="metadata")
@@ -47,7 +33,6 @@ def register(host):
     host.register_controls_pane("iptc", "iptc_editor.html", feature="meta.iptc")
     host.register_controls_pane("xmp",  "xmp_editor.html",  feature="meta.xmp")
 
-    # -- schema/read endpoints (self-contained; write stays core for now) --
     m = host.core
 
     def _schema(fields_mod):
@@ -76,10 +61,8 @@ def register(host):
     host.add_route("/api/xmp/read", _reader(xmp_import.read_xmp, "xmp"),
                    methods=["POST"], endpoint="meta_xmp_read", feature="meta.xmp")
 
-    # -- one unified write endpoint ---------------------------------------
-    ## @brief POST /api/metadata/write {kind:"exif"|"iptc"|"xmp", filename, patch}.
-    # Replaces the per-format /api/exif/write. manager keeps only a thin shim
-    # that gates + forwards here; the write itself is core.update_file.
+    ## @brief POST /api/metadata/write {kind: "exif" | "xmp", filename, patch},
+    # forwarded here by manager; the write is core update_file.
     def metadata_write(kind, filename, patch):
         fp, err = m.resolve_media(filename or "")
         if err:
@@ -87,13 +70,10 @@ def register(host):
         if not isinstance(patch, dict):
             return jsonify({"success": False, "error": "patch must be an object"}), 400
         if kind not in ("exif", "xmp"):
-            # No IPTC writer exists (that editor is read-only); keep the
-            # unified endpoint stable and say so explicitly.
+            # IPTC is read-only
             return jsonify({"success": False,
                             "error": f"{kind} write not supported"}), 400
         try:
-            # The core's one write path: the format write, DB mirror, changelog,
-            # ImageHistory and the reindex event all happen there.
             result = m.update_file(fp, **{kind: patch})
             res = result.get(kind) or {"success": False, "error": result.get("error")}
             return jsonify({"success": res.get("success", False), "result": res})
@@ -101,12 +81,10 @@ def register(host):
             host.logger.error(f"metadata_write {filename}: {e}")
             return jsonify({"success": False, "error": str(e)}), 500
 
-    # Expose the writer as a service so the manager shim (and anyone else) can
-    # call it without importing this module by name.
+    # service: the writer, for the manager shim and other modules
     host.provide_service("metadata_write", metadata_write)
-    ## @brief EXIF read / write for modules that mirror a field (rating -> Rating).
-    # "write" goes through core.update_file like every other write and
-    # returns the EXIF writer's result.
+    ## @brief Raw EXIF / XMP writers for modules (rating -> EXIF Rating, metasrc -> dc:*),
+    # through core update_file.
     def _patch_writer(kind):
         def write(fp, patch, history=True):
             out = m.update_file(fp, history=history, **{kind: patch})
@@ -114,29 +92,20 @@ def register(host):
         return write
     host.provide_service("exif", {"read": exif_import.read_exif,
                                   "write": _patch_writer("exif")})
-    # Raw XMP token writes (dc:creator, dc:source, ...) for modules that fill
-    # fields the sidecar packet doesn't carry (metasrc lookups).
     host.provide_service("xmp", {"write": _patch_writer("xmp")})
-    # Field schemas per standard, for modules that map external fields onto
-    # them (gallery-dl targets).
+    # field schemas, for modules mapping external fields (gallery-dl)
     host.provide_service("metadata_schema", {"exif": exif_fields.schema_dict,
                                              "iptc": iptc_fields.schema_dict,
                                              "xmp": xmp_fields.schema_dict})
 
-    # -- search type handlers for metadata fields ----------------------------
-    # Allow searching by metadata field values: exif:Make, iptc:Keywords, xmp:dc:creator
-    # These handlers generate SQL clauses that search the files table for fields
-    # that are mirrored from metadata (description, rating, artist, etc.) or
-    # return empty clauses for fields not yet indexed. A future improvement would
-    # add a dedicated metadata index table for full field search.
 
-    # -- metadata index: every present EXIF / IPTC / XMP field of every image,
-    #    flattened to (ns, tag, value), so search can filter on any of them:
-    #      meta:<tag>:<value>   any namespace   (meta:Make:Canon, meta:dc:creator:Ann)
-    #      exif:<tag>:<value>   one namespace   (exif:Model:R5, xmp:Rating:5)
-    #      meta:<tag>           the tag is present at all
-    #    Rebuilt per file after the core indexes it (file.indexed) and after a
-    #    metadata write; a full backfill is POST /api/metadata/reindex.
+    # Metadata search index: every EXIF / IPTC / XMP field of every image as
+    # (ns, tag, value):
+    #   meta:<tag>:<value>   any namespace
+    #   exif:<tag>:<value>   one namespace (also iptc:, xmp:)
+    #   meta:<tag>           the tag is present
+    # Rebuilt per file after indexing and after a metadata write; backfill with
+    # POST /api/metadata/reindex.
     host.add_table("""
         CREATE TABLE IF NOT EXISTS metadata_index (
             rel_path TEXT NOT NULL,
@@ -179,7 +148,6 @@ def register(host):
         if not fp:
             return 0
         rows = _flatten(fp)
-        # A derived search index: DB only, through the core write path.
         m.update_file(rel_path, table="metadata_index", remove=True, dont_write=True, commit=False)
         for ns, tag, val in rows:
             m.update_file(rel_path, table="metadata_index", key={"ns": ns, "tag": tag},
@@ -224,8 +192,7 @@ def register(host):
 
     def _meta_search(ns):
         def handler(token, value):
-            # value is what follows the prefix: "<tag>" or "<tag>:<value>"; the
-            # value is the LAST segment so xmp tags like dc:creator survive.
+            # "<tag>" or "<tag>:<value>"; the value is the last segment so dc:creator survives
             parts = value.split(":")
             if len(parts) >= 2 and parts[-1] != "":
                 tag, val = ":".join(parts[:-1]), parts[-1]

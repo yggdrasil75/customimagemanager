@@ -1,25 +1,8 @@
 """! @file
-@brief exif_export.py
-==============
-
-Writes edited EXIF/TIFF values back to an image (or its sidecar), validated
-against the schema in exif_fields.py. This is the write counterpart the IPTC
-side doesn't have yet; the editor posts a flat {tag_name: value} patch and this
-module coerces each value to its declared type, drops read-only tags, and hands
-the result to pyexiv2's modify_exif().
-
-Contract mirrors the importer: all pyexiv2 access is wrapped; a bad file or an
-invalid value degrades to a reported error rather than a raised exception, and
-the response lists exactly which tags were written, skipped, or rejected so the
-frontend can surface it.
-
-Safety rules:
-  * Only tags in the schema are considered; unknown tags are ignored (never
-    blindly written).
-  * writable=False tags (geometry/version tags that must track the pixels,
-    binary blobs) are skipped with a reason.
-  * Enumerated values must be one of the declared raw keys.
-  * An empty/None value deletes the tag.
+@brief Write EXIF values to an image or its sidecar, validated against exif_fields.py.
+Only schema tags are written; read-only tags are skipped, enumerated values
+must be declared ones, and an empty value deletes the tag. Never raises: the
+result lists what was written, deleted, skipped and rejected.
 """
 
 import os
@@ -27,7 +10,7 @@ import logging
 
 try:
     import pyexiv2
-except Exception:                      # pragma: no cover - env without pyexiv2
+except Exception:  # pragma: no cover
     pyexiv2 = None
 
 from . import exif_fields as efields
@@ -38,11 +21,10 @@ import tempfile
 log = logging.getLogger("exif_export")
 
 _JXL_REPACKAGE_EXTS = {".jxl"}
-# Substring that identifies the specific Exiv2 error worth repackaging for.
+# marks the Exiv2 error a repackage can fix
 _BMFF_WRITE_ERR = "BMFF"
 
-# Minimal valid XMP packet, used to seed a sidecar for formats we refuse to
-# write Exif into directly (JXL). Exiv2 will populate it on the first write.
+# empty XMP packet to seed a sidecar (Exif is never written into a JXL directly)
 _EMPTY_XMP = (
     '<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>\n'
     '<x:xmpmeta xmlns:x="adobe:ns:meta/">\n'
@@ -58,19 +40,15 @@ _EMPTY_PACKET = ('<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>'
                  '<x:xmpmeta xmlns:x="adobe:ns:meta/">'
                  '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
                  '<rdf:Description rdf:about=""/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>')
-_XMP_KEYS = {}          # 'Exif.Image.Artist' -> ['Xmp.dc.creator']
+_XMP_KEYS = {}  # 'Exif.Image.Artist' -> ['Xmp.dc.creator']
 
 
 def _xmp_keys_for(tag):
-    """! @brief Which XMP properties exiv2 stores an Exif tag as, in a sidecar.
-
-    Exiv2's XMP-sidecar backend maps Exif tags onto their XMP equivalents
-    (Exif.Image.Artist -> Xmp.dc.creator) and only accepts modify_exif for a
-    tag the sidecar does NOT already hold: a second write to the same tag, and
-    every deletion, is silently ignored. So sidecar edits have to go through
-    modify_xmp, which needs the mapped key. Exiv2 knows the table but pyexiv2
-    doesn't expose it, so we learn it once per tag by writing the tag into a
-    scratch sidecar and seeing which property appears. Cached per process.
+    """! @brief The XMP properties exiv2 stores an Exif tag as in a sidecar.
+    In a sidecar modify_exif only works for a tag not stored yet (later writes and
+    deletes are ignored), so edits go through modify_xmp on the mapped key. pyexiv2
+    doesn't expose exiv2's mapping table, so each tag is learned once from a
+    scratch sidecar.
     """
     if tag in _XMP_KEYS:
         return _XMP_KEYS[tag]
@@ -93,10 +71,9 @@ def _xmp_keys_for(tag):
 
 
 def _write_sidecar(target, to_set, to_del):
-    """! @brief Apply Exif sets/deletes to an XMP sidecar through the XMP properties the
-    tags map to. A tag the sidecar doesn't hold yet is written as Exif (which
-    creates the mapped property); everything else is set or cleared on the XMP
-    side, because modify_exif is a no-op there once the property exists."""
+    """! @brief Apply Exif sets / deletes to an XMP sidecar: a new tag as Exif (creates
+    the mapped property), everything else on the mapped XMP property.
+    """
     with pyexiv2.Image(target) as img:
         have = img.read_xmp() or {}
 
@@ -104,14 +81,14 @@ def _write_sidecar(target, to_set, to_del):
     for tag, value in to_set.items():
         keys = [k for k in _xmp_keys_for(tag) if k in have]
         if not keys:
-            exif_new[tag] = str(value)          # not in the sidecar yet
+            exif_new[tag] = str(value)  # not in the sidecar yet
             continue
         for k in keys:
             xmp_edit[k] = [str(value)] if isinstance(have.get(k), list) else str(value)
     for tag in to_del:
         for k in _xmp_keys_for(tag):
             if k in have:
-                # "" clears the property; None is ignored by exiv2 here.
+                # "" clears the property; exiv2 ignores None
                 xmp_edit[k] = [] if isinstance(have.get(k), list) else ""
 
     with pyexiv2.Image(target) as img:
@@ -123,22 +100,16 @@ def _write_sidecar(target, to_set, to_del):
 
 
 def _writable_target(filepath):
-    """! @brief Pick the path we should write EXIF to. For formats pyexiv2 can open in
-    place we write the file directly; when only a sidecar exists we write that.
-    Falls back to the primary path. (No sidecar is created here - that policy
-    lives in manager.write_metadata; this keeps EXIF writes on whatever already
-    holds the metadata.)"""
+    """! @brief Where EXIF is written: the file itself when pyexiv2 can edit it, else its
+    sidecar (created empty when missing).
+    """
     stem = os.path.splitext(filepath)[0]
     ext = os.path.splitext(filepath)[1].lower()
     if ext == ".jxl":
         for p in (stem + ".xmp", stem + ".exv"):
             if os.path.exists(p):
                 return p
-        # No sidecar yet: make an empty one rather than mangling the image.
-        # An XMP packet with no properties is valid and is what write_metadata
-        # would have produced a moment later anyway. Only for loose files - a
-        # packed image's sidecar belongs in the pack, so leave that to the
-        # normal path rather than scattering a loose .xmp beside it.
+        # no sidecar yet: create an empty one rather than touch the image
         if not os.path.exists(filepath):
             return filepath
         try:
@@ -156,9 +127,9 @@ def _writable_target(filepath):
     return filepath
 
 def _coerce(field, value):
-    """! @brief Coerce an incoming JSON value to the field's declared type.
-    Returns (coerced_value, error|None). A None/empty value signals deletion and
-    passes straight through as None."""
+    """! @brief Coerce a JSON value to a field's type.
+    @return (value, error or None); an empty value is None (delete).
+    """
     if value is None or (isinstance(value, str) and value.strip() == ""):
         return None, None
 
@@ -173,7 +144,7 @@ def _coerce(field, value):
         return iv, None
 
     if dt == efields.TYPE_RATIONAL:
-        # Accept "num/den" or a plain number.
+        # "num/den" or a plain number
         try:
             if isinstance(value, str) and "/" in value:
                 num, den = value.split("/", 1)
@@ -184,7 +155,7 @@ def _coerce(field, value):
         except (ValueError, TypeError):
             return None, f"expected rational, got {value!r}"
 
-    # string / undef -> keep as text, honoring enum + length constraints.
+    # text: enum and length rules apply
     sv = str(value)
     if field.values is not None and sv not in field.values:
         return None, f"{sv!r} is not a valid value for {field.name}"
@@ -212,24 +183,19 @@ def _enum_int_keys(field):
             pass
     return keys
 
-# -- db_transform converters --------------------------------------------------
-# Map a coerced EXIF value to the value stored in its db_field column. Each
-# returns the column value, or None to skip the DB mirror (leave the column
-# untouched) when the EXIF value doesn't map cleanly.
+# DB mirror converters: EXIF value -> column value, None to leave the column alone.
 def _rating_halfstar(v):
-    """! @brief Rating (0x4746): 0-10 half-star units -> 0-5 stars (value / 2). Values
-    outside 0-10 are a raw 'likes' count that doesn't map to stars -> skip."""
+    """! @brief Rating 0..10 half-stars -> 0..5 stars (out of range: None, a 'likes' count)."""
     try:
         iv = int(v)
     except (ValueError, TypeError):
         return None
     if 0 <= iv <= 10:
         return round(iv / 2)
-    return None            # out-of-range 'likes' rating: don't touch stars
+    return None
 
 def _rating_percent(v):
-    """! @brief RatingPercent (0x4749): 0-100 -> 0-5 stars (round(percent / 20)),
-    clamped to the 0-5 range."""
+    """! @brief RatingPercent 0..100 -> 0..5 stars."""
     try:
         iv = int(v)
     except (ValueError, TypeError):
@@ -242,11 +208,11 @@ _DB_TRANSFORMS = {
 }
 
 def _apply_db_transform(field, coerced):
-    """! @brief Return the value to store in field.db_field for a coerced EXIF value.
-    Applies field.db_transform if set; otherwise stores the coerced value as-is.
-    Returns (value, skip): skip=True means don't write the DB column."""
+    """! @brief The DB column value for a coerced EXIF value (through db_transform).
+    @return (value, skip); skip means leave the column alone.
+    """
     if coerced is None:
-        return None, False                 # deletion -> clear column
+        return None, False  # delete -> clear
     name = getattr(field, "db_transform", None)
     if not name:
         return coerced, False
@@ -255,27 +221,15 @@ def _apply_db_transform(field, coerced):
         return coerced, False
     out = fn(coerced)
     if out is None:
-        return None, True                  # doesn't map -> leave column alone
+        return None, True  # doesn't map
     return out, False
 
 def write_exif(filepath, patch, allow_repackage=False):
-    """! @brief Apply a {tag_name: value} patch to the file's EXIF.
-
-    Returns:
-      {
-        "success": bool,
-        "written": [{"tag": "Exif.Image.Compression", "value": 7}, ...],
-        "deleted": ["Exif.Image.CellWidth", ...],
-        "skipped": [{"tag": "ImageWidth", "reason": "read-only"}, ...],
-        "rejected": [{"tag": "Compression", "reason": "42 is not a valid ..."}],
-        "db": {"description": "..."},   # db_field-backed values the caller
-                                        # should persist (e.g. ImageDescription
-                                        # -> files.description); None = delete
-        "target": "/path/written",
-      }
-
-    The `db` map lets the caller mirror DB-backed tags (ImageDescription) into
-    the project database without this module importing the app/DB layer.
+    """! @brief Apply a {tag_name: value} patch to a file's EXIF.
+    @param allow_repackage  rewrite a container JXL as bare once if Exiv2 refuses it.
+    @return {"success", "written": [{tag, value}], "deleted": [tag],
+            "skipped": [{tag, reason}], "rejected": [{tag, reason}],
+            "db": {column: value} for the caller to mirror, "target": path}.
     """
     result = {"success": False, "written": [], "deleted": [],
               "skipped": [], "rejected": [], "db": {}, "target": None}
@@ -284,8 +238,8 @@ def write_exif(filepath, patch, allow_repackage=False):
         result["error"] = "pyexiv2 unavailable; cannot write EXIF"
         return result
 
-    to_set = {}      # full 'Exif.Group.Tag' -> coerced value
-    to_del = []      # full 'Exif.Group.Tag'
+    to_set = {}  # 'Exif.Group.Tag' -> value
+    to_del = []
 
     for tag_name, value in (patch or {}).items():
         grp_name, fld = efields.field_by_tagname(tag_name)
@@ -301,9 +255,7 @@ def write_exif(filepath, patch, allow_repackage=False):
             result["rejected"].append({"tag": tag_name, "reason": err})
             continue
 
-        # DB-backed fields (ImageDescription, Rating, RatingPercent) report a
-        # value for the caller to persist. Rating tags run through a transform
-        # (EXIF units -> 0-5 stars); if the value doesn't map, skip the mirror.
+        # DB-backed tags report the column value (ratings converted to stars)
         if fld.db_field:
             db_val, skip = _apply_db_transform(fld, coerced)
             if not skip:
@@ -319,7 +271,7 @@ def write_exif(filepath, patch, allow_repackage=False):
     result["target"] = target
 
     if not to_set and not to_del:
-        result["success"] = True   # nothing to do, but not an error
+        result["success"] = True  # nothing to do
         return result
 
     def _apply(path, sets, dels):
@@ -327,20 +279,17 @@ def write_exif(filepath, patch, allow_repackage=False):
             return _write_sidecar(path, sets, dels)
         with pyexiv2.Image(path) as img:
             if sets:
-                # pyexiv2 wants string values; stringify ints/rationals.
+                # pyexiv2 wants strings
                 img.modify_exif({k: str(v) for k, v in sets.items()})
             if dels:
-                # Deletion is expressed as an empty-string modify in pyexiv2.
+                # pyexiv2 deletes with an empty string
                 img.modify_exif({k: "" for k in dels})
 
     def _do_write():
         _apply(target, to_set, to_del)
         if not to_del:
             return
-        # A delete has to clear every copy of the tag, not just the one we
-        # write to: the reader merges the image and its sidecar, so a value
-        # left behind in the other one comes straight back (that's what made
-        # EXIF undo look like a no-op).
+        # The reader merges image and sidecar: delete the tag from both, or it comes back.
         stem = os.path.splitext(filepath)[0]
         for other in (filepath, stem + ".xmp", stem + ".exv"):
             if other == target or not os.path.exists(other):
@@ -356,9 +305,7 @@ def write_exif(filepath, patch, allow_repackage=False):
         result["deleted"] = list(to_del)
         result["success"] = True
     except Exception as e:
-        # A container-form (ISOBMFF) JXL can't take an Exif write. New uploads
-        # are bare, but legacy files may still be containered - repackage this
-        # one to a bare codestream in place, then retry the write once.
+        # a container JXL can't take an Exif write: repackage it bare once and retry
         if (allow_repackage
                 and _BMFF_WRITE_ERR in str(e)
                 and os.path.splitext(target)[1].lower() in _JXL_REPACKAGE_EXTS
@@ -372,22 +319,16 @@ def write_exif(filepath, patch, allow_repackage=False):
                 log.info(f"repackaged container JXL to bare and wrote Exif: {target}")
                 return result
             except Exception as e2:
-                e = e2   # report the retry's failure below
+                e = e2
         log.warning(f"write_exif failed on {target}: {e}")
         result["error"] = str(e)
 
     return result
 
 def _repackage_jxl_bare(path):
-    """! @brief Rewrite a container (ISOBMFF) JXL in place as a bare codestream so Exiv2
-    can write Exif into it. Transcodes to a temp file with cjxl --container=0,
-    then atomically replaces the original. Lossless (-d 0). Returns True on
-    success, False (leaving the original untouched) on any failure.
-
-    Note: this drops any metadata that lived only in the container's boxes. For
-    this app that's acceptable - the whole point is that the app is about to
-    (re)write the Exif it cares about - and it only ever runs as a last-resort
-    fallback for legacy containered files.
+    """! @brief Rewrite a container JXL in place as a bare codestream (cjxl, lossless) so
+    Exiv2 can write Exif into it. Drops metadata that lived only in container boxes.
+    @return True on success; the original is untouched otherwise.
     """
     if shutil.which("cjxl") is None:
         log.warning("cannot repackage JXL: cjxl not found on PATH")
@@ -401,7 +342,7 @@ def _repackage_jxl_bare(path):
         if r.returncode != 0 or not os.path.getsize(tmp):
             log.warning(f"cjxl repackage failed for {path}: {r.stderr.strip()}")
             return False
-        os.replace(tmp, path)   # atomic within the same directory
+        os.replace(tmp, path)
         tmp = None
         return True
     except Exception as e:

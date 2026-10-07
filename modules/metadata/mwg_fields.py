@@ -1,49 +1,20 @@
 """! @file
-@brief mwg_fields.py
-=============
-
-Metadata Working Group (MWG) 2.0 support, consolidated in one place.
-
-The MWG doesn't define a big new vocabulary the way IPTC does; it defines
-(a) *reconciliation* rules for overlapping EXIF/IPTC/XMP tags - the "Composite"
-tags - and (b) three small XMP namespaces of its own:
-
-    mwg-rs    Regions      image region metadata (faces / focus / pets / barcodes)
-    mwg-coll  Collections  named collections a file belongs to
-    mwg-kw    Keywords     hierarchical (tree-structured) keywords
-
-This module owns all of that:
-
-  * MWG_RS_FIELDS / MWG_COLL_FIELDS / MWG_KW_FIELDS - the flattened field tables,
-    built via factories that take xmp_fields' XMPField class + TYPE_* map (same
-    no-import-cycle arrangement iptc_fields uses; this module never imports
-    xmp_fields).
-  * MWG_COMPOSITE - the reconciliation reference: for each MWG Composite tag,
-    the ordered list of EXIF/IPTC/XMP tags it is Derived From when reading and
-    written to when writing. Reference data; the app decides how much to honour.
-  * The pure mwg-rs Regions XML *shape* helpers (parse_region_list /
-    build_region_list_xml) that used to live inline in manager.py. They are
-    schema-level: they know the mwg-rs RDF layout but nothing about the app's
-    region dicts beyond a small, documented contract, and they take callbacks
-    for the app-specific bits (per-region Description JSON, SeeAlso link, uuid).
-
-Namespace URIs. ExifTool/pyexiv2 report these under the family-1 groups
-'mwg-rs', 'mwg-coll', 'mwg-kw'. Note the region/type struct namespaces use the
-'.com' host (metadataworkinggroup.com) as historically written by our own
-sidecars and most tooling; the schema/collections/keywords namespaces use the
-canonical MWG URIs.
+@brief MWG 2.0: the mwg-rs (regions), mwg-coll (collections) and mwg-kw
+(hierarchical keywords) field tables, the Composite reconciliation reference,
+and the mwg-rs Regions XML read / write helpers. Field tables are built with
+xmp_fields' XMPField passed in (no import cycle). Region / type structs use the
+metadataworkinggroup.com host, as existing sidecars do.
 """
 
-# -- Namespace URIs ----------------------------------------------------------
 MWG_RS_NS   = "mwg-rs"
 MWG_COLL_NS = "mwg-coll"
 MWG_KW_NS   = "mwg-kw"
 
 MWG_RS_URI   = "http://www.metadataworkinggroup.com/schemas/regions/"
-MWG_ST_URI   = "http://www.metadataworkinggroup.com/schemas/regions/type/"  # stArea/stDim
+MWG_ST_URI   = "http://www.metadataworkinggroup.com/schemas/regions/type/"  # stArea / stDim
 MWG_COLL_URI = "http://www.metadataworkinggroup.com/schemas/collections/"
 MWG_KW_URI   = "http://www.metadataworkinggroup.com/schemas/keywords/"
-# App-owned namespace for our mwg-rs:Extensions leaves (currently: Confirmed).
+# the app's own mwg-rs:Extensions leaves (Confirmed, masks)
 CIM_EXT_URI  = "https://github.com/yggdrasil75/customimagemanager/ns/regions/"
 
 MWG_RS_TITLE   = "MWG Regions"
@@ -70,24 +41,10 @@ MWG_KW_DESCRIPTION = (
     "surfaced read-only."
 )
 
-# ============================================================================
-# Composite reconciliation reference (MWG 2.0 Composite tags)
-# ============================================================================
-# Each MWG Composite tag reconciles a set of overlapping EXIF/IPTC/XMP tags:
-# when READING, its value is derived from the first present source in priority
-# order (after checking IPTCDigest to decide whether XMP is in sync with IPTC);
-# when WRITING, MWG writes all the associated locations that already exist.
-#
-# This is a REFERENCE table. Our sidecars are XMP-only and we already read the
-# canonical XMP locations directly, so we don't run the full Composite
-# derivation - but recording the map here means the reconciliation rules live
-# with the rest of MWG, and any consumer that wants to honour a Composite tag
-# (e.g. read EXIF:Artist as a fallback for Creator) has the ordered source list.
-#
-# Structure: {CompositeTag: {"writable": bool, "list": bool, "sources": [...],
-#             "note": str}}. `sources` is the Derived-From order from the spec
-# (the trailing CurrentIPTCDigest/IPTCDigest entries are the sync check, kept
-# for completeness). ExifTool group prefixes are preserved as written.
+# MWG Composite tags: when reading, the first present source in this order
+# (after the IPTCDigest sync check); when writing, every existing location.
+# Reference only: sidecars are XMP and read directly.
+# {CompositeTag: {"writable", "list", "sources", "note"}}
 MWG_COMPOSITE = {
     "City": {"writable": True, "list": False, "sources": [
         "IPTC:City", "XMP-photoshop:City", "XMP-iptcExt:LocationShownCity",
@@ -140,18 +97,13 @@ MWG_COMPOSITE = {
         "CurrentIPTCDigest", "IPTCDigest"], "note": ""},
 }
 
-# ============================================================================
-# Field tables (flattened leaves) - built via xmp_fields' XMPField + type map
-# ============================================================================
-# Region FocusUsage / Type enums, reused in field notes and the builder.
+# region FocusUsage values
 _RS_FOCUSUSAGE = {
     "EvaluatedNotUsed": "Evaluated, Not Used",
     "EvaluatedUsed": "Evaluated, Used",
     "NotEvaluatedNotUsed": "Not Evaluated, Not Used",
 }
-# The 4 MWG-spec predefined Type values, plus app-added defaults. Type is a
-# free string in the spec, so these are just the dropdown seeds - users can add
-# their own (e.g. "Full body", "Background object") and any string round-trips.
+# MWG's four Type values plus app defaults; Type is free text, any string round-trips
 _RS_TYPE = {"BarCode": "BarCode", "Face": "Face", "Focus": "Focus", "Pet": "Pet",
             "Full body": "Full body", "Background object": "Background object",
             "Body Part": "Body Part"}
@@ -219,15 +171,14 @@ _MWG_COLL_FIELDS = [
      "CollectionInfo.CollectionURI."),
 ]
 
-# Keywords: ExifTool unrolls the tree to depth 6. Leaves feed tags.
+# keywords, unrolled to depth 6 as ExifTool does; leaves feed tags
 _MWG_KW_FIELDS = [
     ("KeywordInfo", "string", False, None, None,
      "Struct root (KeywordInfo; tag ID 'Keywords'). The keyword tree."),
     ("HierarchicalKeywords", "string", True, None, None,
      "Top-level KeywordStruct list (KeywordsHierarchy)."),
 ]
-# Generate the depth-1..6 Applied/Children/leaf rows programmatically - the
-# spec's names are mechanical and error-prone to hand-type.
+# depth 1..6 rows generated (the names are mechanical)
 for _d in range(1, 7):
     _MWG_KW_FIELDS.append(
         (f"HierarchicalKeywords{_d}Applied", "bool", True, None, None,
@@ -236,8 +187,7 @@ for _d in range(1, 7):
         _MWG_KW_FIELDS.append(
             (f"HierarchicalKeywords{_d}Children", "string", True, None, None,
              f"Children of the depth-{_d} keyword (KeywordStruct+)."))
-# Leaf keyword strings, depth 6..1 (order as ExifTool lists them). Depth-6..1
-# leaves all fold into tags.
+# leaf keywords, depth 6..1, fold into tags
 for _d in range(6, 0, -1):
     _MWG_KW_FIELDS.append(
         (f"HierarchicalKeywords{_d}", "string", True, "tags", None,
@@ -253,31 +203,27 @@ def _build(fields, XMPField, type_map, force_writable=None):
     return out
 
 def build_mwg_rs_fields(XMPField, type_map):
-    """! @brief MWG Regions fields. Writable - mwg-rs is our region store, the one MWG
-    namespace we write back (via build_region_list_xml)."""
+    """! @brief mwg-rs fields (writable: the app's region store)."""
     return _build(_MWG_RS_FIELDS, XMPField, type_map, force_writable=True)
 
 def build_mwg_coll_fields(XMPField, type_map):
-    """! @brief MWG Collections fields - read-only (folded into catalog_sets on ingest)."""
+    """! @brief mwg-coll fields (read; folded into catalog_sets)."""
     return _build(_MWG_COLL_FIELDS, XMPField, type_map, force_writable=False)
 
 def build_mwg_kw_fields(XMPField, type_map):
-    """! @brief MWG hierarchical Keywords fields - read-only (leaves fold into tags)."""
+    """! @brief mwg-kw fields (read; leaves fold into tags)."""
     return _build(_MWG_KW_FIELDS, XMPField, type_map, force_writable=False)
 
-# ============================================================================
-# mwg-rs Regions - pure XML shape (moved out of manager.py)
-# ============================================================================
-# These know the mwg-rs RDF layout but stay app-agnostic. The app's region dict
-# uses: class_name, cx, cy, w, h, confirmed, uuid, region_description,
-# region_tags. The two app-specific concerns - how a region's Description JSON
-# is (de)serialized, and how the SeeAlso filter link is built - are injected as
-# callbacks so this module needs nothing from manager.py.
+# -- mwg-rs Regions XML --
+# Region dicts use class_name, cx, cy, w, h, confirmed, uuid,
+# region_description, region_tags. The Description JSON and the SeeAlso link
+# are app callbacks.
 import re as _re
 
 def parse_region_list(xmp, desc_from_json):
-    """! @brief Read Xmp.mwg-rs.Regions into a list of app region dicts. `desc_from_json`
-    is a callable(raw_json) -> (description_str, tags_list). Returns []."""
+    """! @brief Xmp.mwg-rs.Regions as region dicts ([] when none).
+    @param desc_from_json  fn(raw) -> (description, tags).
+    """
     regions = []
     base = "Xmp.mwg-rs.Regions/mwg-rs:RegionList"
     indices = sorted({int(m.group(1)) for k in xmp.keys()
@@ -296,30 +242,23 @@ def parse_region_list(xmp, desc_from_json):
             continue
         rtype = xmp.get(f'{p}/mwg-rs:Type', '') or ''
         rdesc, rtags, rclass = desc_from_json(xmp.get(f'{p}/mwg-rs:Description', ''))
-        # Confirmed now lives in the Extensions open-struct (cim:Confirmed).
-        # Legacy files stored it as Type == 'unconfirmed'; fall back to that so
-        # sidecars written before this change still import correctly (and their
-        # Type isn't mistaken for a real region type).
+        # confirmed is cim:Confirmed; older sidecars used Type == 'unconfirmed'
         conf_raw = xmp.get(f'{p}/mwg-rs:Extensions/cim:Confirmed', None)
         if conf_raw is not None:
             confirmed = str(conf_raw).strip().lower() not in ('false', '0', 'no', '')
         else:
             confirmed = str(rtype).strip().lower() != 'unconfirmed'
         if str(rtype).strip().lower() in ('confirmed', 'unconfirmed'):
-            rtype = ''            # legacy overload value, not a real type
-        # Instance name lives in mwg-rs:Name ("jill"); the class ("girl") rides
-        # in the Description JSON. Fall back to Name for class on legacy files.
+            rtype = ''  # legacy value, not a type
+        # Name is the instance ("jill"), the class rides in the Description JSON
         inst_name = xmp.get(f'{p}/mwg-rs:Name', '') or ''
         if inst_name and not rclass and not rtype:
-            # Legacy writer put the class in Name when no instance name was
-            # set (an instance name always came with a JSON class). Lift it
-            # back to class so Name starts blank and Type gets the class.
+            # legacy: the class was in Name; move it to Type
             rtype, inst_name = inst_name, ''
         bc_val = xmp.get(f'{p}/mwg-rs:Extensions/cim:BarCodeValue', '') or ''
         bc_fmt = xmp.get(f'{p}/mwg-rs:Extensions/cim:BarCodeFormat', '') or ''
         bc_bin = xmp.get(f'{p}/mwg-rs:Extensions/cim:BarCodeBinary', '') or ''
-        # SAM mask outlines, normalized SVG paths, one per scan method. Absent
-        # on non-SAM regions; empty string when a method produced no path.
+        # mask outlines (normalised SVG path per scan method)
         mask_under = xmp.get(f'{p}/mwg-rs:Extensions/cim:MaskUnderscan', '') or ''
         mask_over = xmp.get(f'{p}/mwg-rs:Extensions/cim:MaskOverscan', '') or ''
         mask_center = xmp.get(f'{p}/mwg-rs:Extensions/cim:MaskCenterline', '') or ''
@@ -346,27 +285,21 @@ def parse_region_list(xmp, desc_from_json):
     return regions
 
 def build_region_list_xml(regions, esc, desc_to_json, see_also_link, new_uuid):
-    """! @brief Emit the <mwg-rs:Regions> block + namespace attrs, or ('', '') if empty.
-
-    Callbacks (all app-supplied so this stays schema-only):
-      esc(str)            -> XML-escape
-      desc_to_json(region)-> the Description JSON blob for a region
-      see_also_link(name) -> the SeeAlso filter link for a region name
-      new_uuid()          -> a fresh UUID string when a region lacks one
-    As a side effect each region dict gets its 'uuid' filled in (persisted back
-    so the frontend keeps a stable id) - matching the previous behaviour.
+    """! @brief The <mwg-rs:Regions> block, filling in each region's uuid and type.
+    @param esc            fn(str) -> XML-escaped.
+    @param desc_to_json   fn(region) -> Description JSON.
+    @param see_also_link  fn(name) -> SeeAlso link.
+    @param new_uuid       fn() -> UUID string.
+    @return (xml, namespace attributes), or ('', '') without regions.
     """
     if not regions:
         return "", ""
     items = []
     for b in regions:
         confirmed = b.get('confirmed', True)
-        # mwg-rs:Name = the individual/instance name ("jill"). Starts blank;
-        # the class no longer leaks into Name.
+        # Name = the instance name (blank by default)
         name = esc(b.get("region_name") or "")
-        # mwg-rs:Type = the class ("person", "face", "girl"). Always the class
-        # unless the user set an explicit type; persisted back on the dict so
-        # in-memory regions carry it too (same as uuid).
+        # Type = the class unless the user set a type
         rtype = (b.get("region_type") or b.get("class_name") or "object").strip()
         b["region_type"] = rtype
         type_el = f'<mwg-rs:Type>{esc(rtype)}</mwg-rs:Type>'
@@ -374,10 +307,9 @@ def build_region_list_xml(regions, esc, desc_to_json, see_also_link, new_uuid):
         b["uuid"] = uid
         desc_json = esc(desc_to_json(b))
         see_also = esc(see_also_link(b.get("class_name")))
-        # Extensions is an open struct; we stash the app-specific confirmed flag
-        # here (cim:Confirmed) now that Type carries the real region type.
+        # Extensions carries the confirmed flag
         ext_parts = [f'<cim:Confirmed>{"true" if confirmed else "false"}</cim:Confirmed>']
-        # Model output stored by trainer validation: never ground truth.
+        # trainer validation output: never ground truth
         if b.get("debug"):
             ext_parts.append('<cim:Debug>true</cim:Debug>')
         bc_val = b.get("barcode_value")
@@ -388,8 +320,7 @@ def build_region_list_xml(regions, esc, desc_to_json, see_also_link, new_uuid):
         bc_fmt = b.get("barcode_format")
         if bc_fmt:
             ext_parts.append(f'<cim:BarCodeFormat>{esc(str(bc_fmt))}</cim:BarCodeFormat>')
-        # SAM mask outlines: one normalized SVG path per scan method. Only
-        # non-empty paths are written, so ordinary (non-mask) regions add nothing.
+        # only non-empty mask paths are written
         mask_svg = b.get("mask_svg") or {}
         for _meth, _tag in (("underscan", "MaskUnderscan"),
                             ("overscan", "MaskOverscan"),
@@ -423,10 +354,8 @@ def build_region_list_xml(regions, esc, desc_to_json, see_also_link, new_uuid):
           f' xmlns:cim="{CIM_EXT_URI}"')
     return block, ns
 
-# -- mwg-coll / mwg-kw readers (fold sources) --------------------------------
 def parse_collections(xmp):
-    """! @brief Return the CollectionName strings from Xmp.mwg-coll.Collections. Folds
-    into catalog_sets. De-duped, order-preserving. []"""
+    """! @brief CollectionName values, de-duplicated (fold into catalog_sets)."""
     out, seen = [], set()
     for k, v in xmp.items():
         if not k.startswith("Xmp.mwg-coll.Collections"):
@@ -438,10 +367,7 @@ def parse_collections(xmp):
     return out
 
 def parse_keyword_leaves(xmp):
-    """! @brief Return the leaf keyword strings from the Xmp.mwg-kw hierarchy. ExifTool
-    unrolls to HierarchicalKeywords1..6; we collect every level's Keyword text
-    (the tree's applied leaves) for folding into tags. De-duped, order-preserving.
-    Works off the flattened '.../mwg-kw:Keyword' leaves regardless of depth."""
+    """! @brief Leaf keywords of the mwg-kw tree at any depth, de-duplicated (fold into tags)."""
     out, seen = [], set()
     for k, v in xmp.items():
         if not k.startswith("Xmp.mwg-kw."):

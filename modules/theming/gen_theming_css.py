@@ -1,29 +1,18 @@
 """! @file
-@brief Generate modules/theming/static/theming.css - the palette contract.
-
+@brief Generates static/theming.css, the palette contract. Run:
     python3 modules/theming/gen_theming_css.py
 
-The app's markup uses exactly six colour families besides gray:
-
-    role      Tailwind family   variables                    who sets them
-    accent    blue              --cim-accent-50  .. 950      palette modules
-    accent2   indigo            --cim-accent2-50 .. 950      palette modules
-    accent3   sky               --cim-accent3-50 .. 950      palette modules
-    danger    red               --cim-danger-50  .. 950      optional (stock red)
-    ok        green             --cim-ok-50      .. 950      optional (stock green)
-    warn      amber             --cim-warn-50    .. 950      optional (stock amber)
-
-Every utility class of those families (bg / text / border / ring / accent,
-their hover / focus /
-group-hover variants, and the usual opacity steps: bg /10 .. /80, text and
-border /40 /60 /80)
-is mapped onto its variable whenever a palette is active, with the stock hex
-as the fallback. A palette module only sets variables; no markup, module CSS
-or JS ever needs a palette-specific branch. Other Tailwind hues (purple, teal,
-emerald, rose, ...) are not used: pick the role, not a colour.
-
-The cim-btn classes are the core button: `cimButton()` in static/globals.js
-emits them, so every module button follows the palette the same way.
+Markup uses six colour families besides gray, one per role:
+    accent  blue    --cim-accent-50..950    set by palettes
+    accent2 indigo  --cim-accent2-50..950   set by palettes
+    accent3 sky     --cim-accent3-50..950   set by palettes
+    danger  red     --cim-danger-50..950    optional
+    ok      green   --cim-ok-50..950        optional
+    warn    amber   --cim-warn-50..950      optional
+While a palette is active every bg / text / border / ring / accent class of
+those families (hover, focus, group-hover, common opacity steps) maps to its
+variable, stock colour as fallback. The cim-btn classes (cimButton() in
+static/globals.js) use the same variables.
 """
 import os
 
@@ -38,8 +27,8 @@ STOCK = {
 SHADES = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950]
 ROLES = {"blue": "accent", "indigo": "accent2", "sky": "accent3",
          "red": "danger", "green": "ok", "amber": "warn"}
-BG_ALPHAS = [10, 20, 30, 40, 50, 60, 80]          # translucent fills: shades 400..950
-LINE_ALPHAS = [40, 60, 80]                         # translucent text / borders: 200..900
+BG_ALPHAS = [10, 20, 30, 40, 50, 60, 80]  # translucent fills: shades 400..950
+LINE_ALPHAS = [40, 60, 80]  # translucent text / borders: shades 200..900
 P = "body[data-palette]"
 
 

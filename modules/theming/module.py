@@ -1,61 +1,42 @@
 """! @file
-@brief Theming - the core theme registry and per-user theme selection.
+@brief The theme registry and each user's theme.
 
-A theme is one of two kinds:
+A layout decides what the interface shows and how; a palette its colours. One
+of each is active; theming.js sets body[data-layout] / body[data-palette] and
+themes key off those. Themes are modules registering with the `theming` service.
 
-  layout    WHAT the interface shows and how it is laid out (which panes, how
-            a picture opens, how big things are). Exactly one is active.
-  palette   WHAT COLOUR it is. Exactly one is active.
+Palette: the user's pick > the admin default > the default palette.
+Layout: the user's pick > their account's > their group's > the layout for
+their role > the default layout. Picking needs theme.choose at write.
+A layout may hide controls, never grant them: permissions are checked
+regardless of theme.
 
-This module owns the mechanism only; the themes themselves are modules that
-register with the `theming` service (see modules/README.md, "Themes"). The
-front end (theming.js) sets body[data-layout="<id>"] and
-body[data-palette="<id>"]; a theme's CSS/JS keys off those attributes.
-
-Which theme a user gets
-  palette  their own pick (User settings) > the admin default (Settings ->
-           General) > the palette registered with default=True.
-  layout   their own pick > what an admin set on their account > on their
-           group (Settings -> Users) > the layout registered for their role
-           (roles=[...]) > the layout registered with default=True.
-Picking one's own needs the theme.choose permission at write.
-
-Permissions. A layout is presentation: it may hide controls a user is
-allowed to use, never show ones they are not. The permission layer
-(features.js on the client, require_feature on every route) is unaffected by
-which theme is active, and theming.js re-applies feature visibility after
-every switch.
-
-Routes
-  GET /api/theme  -> {themes: {layout: [...], palette: [...]},
-                      selected: {layout, palette}, defaults: {...}, can_choose}
-The user's picks are the per-user settings "layout" / "palette"
-(POST /api/user/settings).
+GET /api/theme -> {themes, selected, defaults, can_choose}; the picks are the
+user settings "layout" / "palette".
 """
 
 from flask import g, jsonify
 
-# Built-in core module: not discovered by the loader (modules/loader.py lists
-# it in _CORE and _RESERVED_DIRS); manager.py calls register(host) right after
-# metadata and threading, before any plugin, so theme modules find the
-# `theming` service when they register.
+# Registered by manager.py before any plugin, so theme modules find the service.
 
 KINDS = ("layout", "palette")
 _ID_OK = set("abcdefghijklmnopqrstuvwxyz0123456789_-")
 
 
 class ThemeRegistry:
-    """! @brief What theme modules register into; published as the `theming` service."""
+    """! @brief The `theming` service theme modules register into."""
 
     def __init__(self, host):
         self._host = host
-        self._themes = {k: {} for k in KINDS}     # kind -> id -> spec
+        self._themes = {k: {} for k in KINDS}  # kind -> id -> spec
 
     def register(self, kind, theme_id, label, *, description="", default=False, roles=()):
-        """! @brief Declare a theme. kind is "layout" or "palette"; theme_id is the value
-        the body attribute takes (lowercase letters, digits, _ -). default=True
-        makes it the last-resort fallback; roles=("viewer", ...) makes it the
-        default for accounts with those roles (layouts; "admin" = admins)."""
+        """! @brief Register a theme.
+        @param kind      "layout" or "palette".
+        @param theme_id  the body attribute value (lowercase letters, digits, _ -).
+        @param default   the last-resort fallback.
+        @param roles     roles this layout is the default for ("admin" = admins).
+        """
         if kind not in KINDS:
             raise ValueError(f"theme kind must be one of {KINDS}")
         theme_id = str(theme_id or "").strip().lower()
@@ -83,8 +64,7 @@ class ThemeRegistry:
         return ""
 
     def fallback(self, kind):
-        """! @brief The flagged default, else the first registered, else '' (no theme ->
-        the body attribute is left unset)."""
+        """! @brief The default theme of a kind, else the first registered, else ''."""
         ts = list(self._themes[kind].values())
         for t in ts:
             if t["default"]:
@@ -112,8 +92,7 @@ def register(host):
             return v
         return check
 
-    # Admin: one default palette for everyone (General), a default layout per
-    # account / group (Users). Role defaults come from the layout modules.
+    # admin defaults: one palette (General), a layout per account / group (Users)
     host.add_config_key("theme_default_palette", default="", validate=_valid("palette"), tab="general")
     host.add_settings_field(key="theme_default_palette", label="Default palette", kind="select",
                             section="defaults",
