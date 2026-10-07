@@ -232,7 +232,7 @@
   function eraLabel(era) {
     if (era.label) return era.label;
     const s = era.date_span || {};
-    if (s.min || s.max) return (s.min || "?") + " – " + (s.max || "?");
+    if (s.min || s.max) return (s.min || "?") + " - " + (s.max || "?");
     return era.id;
   }
 

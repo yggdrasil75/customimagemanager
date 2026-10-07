@@ -7,7 +7,7 @@
     const out = pane.querySelector("#piqa_status");
     if (!s || !s.success) { out.textContent = "status unavailable"; return; }
     const m = s.metrics;
-    const f = x => (x == null ? "–" : (+x).toFixed(3));
+    const f = x => (x == null ? "-" : (+x).toFixed(3));
     out.textContent =
       `user ratings: ${s.ratings} (min ${s.min_ratings})   tier: ${s.tier.size} (D=${s.tier.d} depth=${s.tier.depth}${s.tier.pretrained ? ", pretrained ready" : ", no pretrained scorer_" + s.tier.size + ".pt"})\n` +
       (m ? `model: D=${m.d} depth=${m.depth}   last train: ${new Date(m.trained_at * 1000).toLocaleString()}\n` +

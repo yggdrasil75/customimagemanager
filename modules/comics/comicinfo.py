@@ -53,7 +53,7 @@ GROUPS = [
                 _f("PageCount", "int", writable=False, generated=True, note="From the archive"),
                 _f("LanguageISO", note="ISO 639 code, e.g. en, ja"),
                 _f("BlackAndWhite", "enum", values=YES_NO), _f("Manga", "enum", values=MANGA),
-                _f("AgeRating", "enum", values=AGE), _f("CommunityRating", "float", note="0–5"),
+                _f("AgeRating", "enum", values=AGE), _f("CommunityRating", "float", note="0-5"),
                 _f("GTIN", note="ISBN / UPC / EAN")]},
     {"name": "credits", "title": "Credits", "description": "Comma-separated names.",
      "fields": [_f("Writer"), _f("Penciller"), _f("Inker"), _f("Colorist"), _f("Letterer"),

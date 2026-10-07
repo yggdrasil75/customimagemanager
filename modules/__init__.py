@@ -55,14 +55,8 @@ def _alias(dotted, legacy):
     return mod
 
 
-# ── logging first: everyone depends on it, it has no heavy deps ──────────────
-# cimlogger.py stays at repo root; alias is a no-op that just confirms presence.
 _alias("cimlogger", "cimlogger")
-
-# ── capabilities: auth imports it ────────────────────────────────────────────
 _alias("modules.capabilities.capabilities", "capabilities")
-
-# ── metadata: fields before the importers/exporters that reference them ──────
 _alias("modules.metadata.exif_fields", "exif_fields")
 _alias("modules.metadata.iptc_fields", "iptc_fields")
 _alias("modules.metadata.mwg_fields",  "mwg_fields")
@@ -71,18 +65,12 @@ _alias("modules.metadata.exif_import", "exif_import")
 _alias("modules.metadata.exif_export", "exif_export")
 _alias("modules.metadata.iptc_import", "iptc_import")
 _alias("modules.metadata.xmp_import",  "xmp_import")
+importlib.import_module("modules.encoding")
 _alias("modules.metadata.xmp_export",  "xmp_export")
-
-# ── threading ────────────────────────────────────────────────────────────────
 _alias("modules.threading.thread_manager", "thread_manager")
-
-# ── theming (built-in core, registered by manager.py before the plugins) ─────
 from . import theming  # noqa: F401,E402
-
-# ── auth last: it imports capabilities + cimlogger ───────────────────────────
 _alias("modules.auth.auth", "auth")
 
-# ── discover pluggable modules on disk ───────────────────────────────────────
 # This imports each plugin folder's manifest (module.py / __init__.py) but does
 # NOT call register() yet — manager.py does that after it has built the Host.
 # Import failures are recorded per-module, never raised, so one broken plugin

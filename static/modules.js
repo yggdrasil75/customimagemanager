@@ -46,8 +46,19 @@
   // has that section, else the pane's main list.
   function fieldMount(f) {
     const pane = f.pane || "general";
-    return (f.section && document.getElementById(`module_settings_fields_${pane}_${f.section}`))
+    let mount = (f.section && document.getElementById(`module_settings_fields_${pane}_${f.section}`))
         || document.getElementById("module_settings_fields_" + pane);
+    if (!mount) {
+      // A core pane with no mount in its template gets the standard one at
+      // its end, the same mount a module tab's pane is built with.
+      const paneEl = document.querySelector(`[data-settings-pane="${pane}"]`);
+      if (!paneEl) return null;
+      mount = document.createElement("div");
+      mount.id = "module_settings_fields_" + pane;
+      mount.className = "space-y-3 mb-3";
+      paneEl.appendChild(mount);
+    }
+    return mount;
   }
   function buildSettingsFields(fields) {
     window._moduleFields = {};

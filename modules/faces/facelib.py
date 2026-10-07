@@ -523,7 +523,7 @@ def _cosine_union_find(X, eps, min_cluster):
             continue
         for j in js:
             j = int(j)
-            if is_core[j]:                 # core–core edge: safe to merge
+            if is_core[j]:                 # core-core edge: safe to merge
                 union(i, j)
     # Attach non-core faces to a neighbouring core (border points) so tight
     # clusters keep their edge members without ever bridging two cores.

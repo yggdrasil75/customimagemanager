@@ -4620,12 +4620,10 @@ def _run_upload():
                     # cjxl handles still images and animated GIF/APNG, producing a
                     # .jxl. --lossless_jpeg only makes sense for a real JPEG
                     # bitstream (never for a developed raw / png).
-                    cjxl_cmd = ['cjxl', cjxl_src, out, '-d', '0',
-                                f'--num_threads={state["cjxl_threads"]}']
-                    if not is_raw_src and not is_heif_src and in_ext in ('.jpg', '.jpeg'):
-                        cjxl_cmd.append('--lossless_jpeg=1')   # bit-exact JPEG transcode
-                    else:
-                        cjxl_cmd.append('--container=0')       # bare codestream, not BMFF
+                    # Codec arguments (lossless/lossy, effort, bit-exact JPEG)
+                    # come from the encoding module via media_types.
+                    jpeg_source = not is_raw_src and not is_heif_src and in_ext in ('.jpg', '.jpeg')
+                    cjxl_cmd = mt.cjxl_cmd(cjxl_src, out, jpeg_source, state["cjxl_threads"])
                     result = subprocess.run(cjxl_cmd, capture_output=True, text=True)
                     if result.returncode != 0:
                         return jsonify({
@@ -6620,6 +6618,8 @@ module_host.register_ai_actions(
     _detect_action, feature="ai.autotag")
 module_host._current_module = "metadata"
 modules.metadata.register(module_host)
+module_host._current_module = "encoding"
+modules.encoding.register(module_host)
 module_host._current_module = "threading"
 modules.threading.register(module_host)
 module_host._current_module = "theming"

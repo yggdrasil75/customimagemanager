@@ -613,6 +613,18 @@ _PIL_FORMAT = {'.webp': 'WEBP', '.avif': 'AVIF', '.png': 'PNG', '.jpg': 'JPEG',
                '.jpeg': 'JPEG', '.gif': 'GIF', '.bmp': 'BMP'}
 
 
+def _enc():
+    """The encoding core module: codec arguments for every conversion here.
+    Imported lazily (importing the modules package is heavy at import time)."""
+    import modules.encoding as enc
+    return enc
+
+
+def cjxl_cmd(src: str, out: str, jpeg_source: bool, threads: int) -> list:
+    """The cjxl command line for an image → .jxl conversion."""
+    return ['cjxl', src, out, f'--num_threads={threads}', *_enc().cjxl_args(jpeg_source)]
+
+
 def convert_image(src: str, out: str, delays_ms=None) -> str | None:
     """Convert a still/animated image to `out`'s format (not .jxl — cjxl does
     that) with Pillow, losslessly where the format allows. JXL sources are
@@ -639,15 +651,9 @@ def convert_image(src: str, out: str, delays_ms=None) -> str | None:
         alpha = fmt not in ('JPEG', 'BMP') and any(
             'A' in f.mode or 'transparency' in f.info for f in frames)
         frames = [f.convert('RGBA' if alpha else 'RGB') for f in frames]
-        kw = {}
+        kw = _enc().pillow_kwargs(fmt)
         if info.get('icc_profile'):
             kw['icc_profile'] = info['icc_profile']
-        if fmt == 'WEBP':
-            kw.update(lossless=True, quality=100, method=4)
-        elif fmt == 'AVIF':
-            kw.update(quality=100, subsampling='4:4:4')
-        elif fmt == 'JPEG':
-            kw.update(quality=95, subsampling=0)
         if len(frames) > 1 and fmt in ('WEBP', 'AVIF', 'PNG', 'GIF'):
             kw.update(save_all=True, append_images=frames[1:],
                       duration=durs[:len(frames)], loop=0)
@@ -657,19 +663,6 @@ def convert_image(src: str, out: str, delays_ms=None) -> str | None:
         return str(e) or e.__class__.__name__
 
 
-_AV_ARGS = {
-    '.mp4':  ['-map', '0:v:0', '-map', '0:a?', '-c:v', 'libx264', '-crf', '18',
-              '-preset', 'medium', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
-              '-movflags', '+faststart'],
-    '.webm': ['-map', '0:v:0', '-map', '0:a?', '-c:v', 'libvpx-vp9', '-crf', '30',
-              '-b:v', '0', '-c:a', 'libopus', '-b:a', '160k'],
-    '.mkv':  ['-map', '0:v:0', '-map', '0:a?', '-c:v', 'libx264', '-crf', '18',
-              '-preset', 'medium', '-c:a', 'aac', '-b:a', '192k'],
-    '.flac': ['-c:a', 'flac'],
-    '.opus': ['-c:a', 'libopus', '-b:a', '160k'],
-    '.ogg':  ['-c:a', 'libvorbis', '-q:a', '6'],
-    '.mp3':  ['-c:a', 'libmp3lame', '-q:a', '0', '-id3v2_version', '3'],
-}
 _COVER_ARGS = ['-map', '0:v?', '-c:v', 'copy', '-disposition:v', 'attached_pic']
 
 
@@ -680,14 +673,17 @@ def convert_av(src: str, out: str) -> str | None:
         return "ffmpeg not installed"
     e = _ext(out)
     base = ['ffmpeg', '-y', '-loglevel', 'error', '-i', src, '-map_metadata', '0']
+    enc = _enc().av_args(e)                      # codec / quality per Settings → Media → Encoding
     if e == '.mkv':
-        attempts = [['-map', '0', '-c', 'copy'], _AV_ARGS[e]]
+        attempts = [['-map', '0', '-c', 'copy'], enc]
     elif e in ('.flac', '.mp3'):
-        attempts = [['-map', '0:a'] + _COVER_ARGS + _AV_ARGS[e], ['-map', '0:a'] + _AV_ARGS[e]]
+        attempts = [['-map', '0:a'] + _COVER_ARGS + enc, ['-map', '0:a'] + enc]
     elif e in ('.opus', '.ogg'):
-        attempts = [['-map', '0:a'] + _AV_ARGS[e]]
+        attempts = [['-map', '0:a'] + enc]
+    elif enc:
+        attempts = [enc]
     else:
-        attempts = [_AV_ARGS[e]]
+        attempts = []
     err = "unsupported target"
     for args in attempts:
         try:
@@ -1120,7 +1116,7 @@ def anim_video_ext() -> str:
 
 def transcode_animation_to_video(src_path: str, out_path: str,
                                  delays_ms=None, jxl_frames=None) -> bool:
-    """Transcode an animated source to a real video (H.264, or VP9 for .webm).
+    """Transcode an animated source to a real video (codec per Settings → Media → Encoding).
 
     Two source kinds:
       • GIF / APNG / animated WebP → ffmpeg decodes them directly.
@@ -1142,10 +1138,7 @@ def transcode_animation_to_video(src_path: str, out_path: str,
                 fps = max(1.0, min(60.0, 1000.0 / mean_ms))
         except Exception:
             fps = 12.0
-    if _ext(out_path) == '.webm':
-        venc = ['-c:v', 'libvpx-vp9', '-crf', '30', '-b:v', '0', '-pix_fmt', 'yuv420p']
-    else:
-        venc = ['-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p']
+    venc = _enc().video_args(_ext(out_path))
     try:
         if jxl_frames is not None:
             # Raw-RGB pipe path (animated JXL). All frames must share a shape.

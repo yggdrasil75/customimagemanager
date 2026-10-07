@@ -34,7 +34,7 @@ lot of model tests fail the same way — it's usually the photo, not the model.
 | `barcode_1d.png` + `barcode_1d.txt` | an EAN-13 / Code-128 barcode; its digits | barcodes, test_providers |
 | `text_document.jpg` + `text_document.txt` | printed text, ≥ 3 lines; a phrase that must be read | ocr, test_providers |
 | `animated.gif` | ≥ 4 frames, < 5 s | core ingest |
-| `clip.mp4` | 2–10 s H.264, a person moving | core ingest, video tracks |
+| `clip.mp4` | 2-10 s H.264, a person moving | core ingest, video tracks |
 | `photo_exif.jpg` | camera JPEG with EXIF (DateTimeOriginal at least) | core ingest, metadata |
 | `photo_with_xmp.jpg` + `photo_with_xmp.xmp` | a photo + XMP sidecar from Lightroom/digiKam/ACDSee with face regions | core ingest (foreign regions) |
 | `book.epub` | DRM-free epub with title, author, cover | books |

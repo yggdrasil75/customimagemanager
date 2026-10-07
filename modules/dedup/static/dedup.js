@@ -653,7 +653,7 @@ async function highlightDiffAudio(gid,fa,fb){
     document.getElementById('diff_video_verdict').innerText='Network error comparing tracks.'; return;
   }
   if(!d||!d.success){ document.getElementById('diff_video_verdict').innerText='Could not compare: '+((d&&d.error)||'unknown error'); return; }
-  const pct=x=>x==null?'–':(x*100).toFixed(1)+'%';
+  const pct=x=>x==null?'-':(x*100).toFixed(1)+'%';
   document.getElementById('diff_video_verdict').innerText=
     `${d.verdict}   ·   phash ${pct(d.phash)}, naive ${pct(d.naive)}`+(d.learned!=null?`, ${d.scorer} ${pct(d.learned)}`:'')+
     (d.offset_s!=null?`   ·   B is offset ${d.offset_s.toFixed(2)}s`:'');

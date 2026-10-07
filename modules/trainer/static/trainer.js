@@ -155,7 +155,7 @@
     const showing = $('tr_showing');
     if (showing && items.length) {
       const start = trPage * trPageSize() + 1, end = Math.min((trPage + 1) * trPageSize(), items.length);
-      showing.innerText = `Showing ${start}–${end} of ${items.length}`;
+      showing.innerText = `Showing ${start}-${end} of ${items.length}`;
     }
     const prev = $('tr_prev'), next = $('tr_next');
     if (prev) prev.disabled = trPage === 0;

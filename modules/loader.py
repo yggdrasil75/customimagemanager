@@ -194,6 +194,10 @@ _CORE = [
     {"id": "metadata", "name": "Metadata (EXIF / IPTC / XMP)", "version": "builtin",
      "core": True, "requires": [], "pip": [], "assets": [],
      "description": "Read and write EXIF, IPTC and XMP (incl. MWG) metadata."},
+    {"id": "encoding", "name": "Encoding", "version": "builtin", "core": True,
+     "requires": [], "pip": [], "assets": [],
+     "description": "Lossless/lossy, quality, effort, video codec and bitrate for "
+                    "uploads converted to the Settings → Media formats."},
     {"id": "threading", "name": "Thread Manager", "version": "builtin", "core": True,
      "requires": [], "pip": [], "assets": [],
      "description": "Background worker pool and model-memory scheduler."},
@@ -206,7 +210,7 @@ _CORE = [
 # folder names that are the core building blocks / infrastructure, NOT plugins.
 # The loader skips these during disk discovery so it doesn't try to import
 # auth/ as a plugin manifest.
-_RESERVED_DIRS = {"auth", "capabilities", "metadata", "threading", "theming",
+_RESERVED_DIRS = {"auth", "capabilities", "metadata", "encoding", "threading", "theming",
                   "__pycache__"}
 
 _MODULES_DIR = os.path.dirname(os.path.abspath(__file__))

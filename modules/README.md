@@ -143,7 +143,7 @@ touching `media_types.py`.
 
 ### Settings
 
-A module owns its settings: declare the key (default, validation, change hook) and, if the user should see it, a widget. Widgets render in the General pane by default, in your own tab with `pane=<tab id>`, in the Models tab with `pane="models"` (only for things that genuinely belong next to a model pick), or — for module-specific knobs that aren't global settings — with `pane="module"`, which puts a ⚙ Settings button on the module's row in the Modules tab that unfolds them. Model *selection* is never a settings field — see capabilities.
+A module owns its settings: declare the key (default, validation, change hook) and, if the user should see it, a widget. In your own tab with `pane=<tab id>`, in the Models tab with `pane="models"` (only for things that genuinely belong next to a model pick), or — for module-specific knobs that aren't global settings — with `pane="module"`, which puts a ⚙ Settings button on the module's row in the Modules tab that unfolds them. Model *selection* is never a settings field — see capabilities. Less than 3 settings should always be a module setting. More than 3 should be considered for a dedicated tab if it doesnt fit an existing tab better.
 
 ```python
 host.add_config_key("dup_cnn_width", default=1.0,
