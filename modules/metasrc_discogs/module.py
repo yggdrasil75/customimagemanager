@@ -1,4 +1,5 @@
-"""Discogs — music metadata source (personal access token required)."""
+"""! @file
+@brief Discogs - music metadata source (personal access token required)."""
 MANIFEST = {
     "id": "metasrc_discogs", "name": "Discogs (music)", "version": "1.0.0",
     "description": "Release metadata from discogs.com: album, artist, year, genre, label. "
@@ -27,7 +28,7 @@ def register(host):
         for r in reg.http_json("https://api.discogs.com/database/search", params, headers=_hdr()).get("results", []):
             artist, _, album = r.get("title", "").partition(" - ")
             out.append({"id": r.get("id"), "title": album or r.get("title", ""),
-                        "subtitle": " · ".join(x for x in (artist, str(r.get("year") or ""),
+                        "subtitle": " | ".join(x for x in (artist, str(r.get("year") or ""),
                                                           ", ".join(r.get("label") or [])[:40]) if x),
                         "thumb": r.get("thumb"),
                         "fields": {"album": album or r.get("title", ""), "albumartist": artist,

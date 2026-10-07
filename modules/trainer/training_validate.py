@@ -1,4 +1,5 @@
-"""training_validate.py — compare a trained model's predictions against the
+"""! @file
+@brief training_validate.py - compare a trained model's predictions against the
 ground-truth boxes on the same images, classify the differences, and score it.
 
 Per image we greedily match predicted boxes to ground-truth boxes of the SAME
@@ -25,7 +26,7 @@ do with the diffs (show them, let the user confirm, maybe retrain).
 
 
 def _iou(a, b):
-    """IoU of two center-form normalised boxes {cx,cy,w,h}."""
+    """! @brief IoU of two center-form normalised boxes {cx,cy,w,h}."""
     ax1, ay1 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
     ax2, ay2 = a["cx"] + a["w"] / 2, a["cy"] + a["h"] / 2
     bx1, by1 = b["cx"] - b["w"] / 2, b["cy"] - b["h"] / 2
@@ -54,7 +55,7 @@ DUP_CONTAIN = 0.85
 
 
 def _is_dup(a, b):
-    """Same-class boxes covering the same object: IoU >= DUP_IOU, or the smaller
+    """! @brief Same-class boxes covering the same object: IoU >= DUP_IOU, or the smaller
     box is >= DUP_CONTAIN inside the larger."""
     if (a.get("class_name") or "").strip() != (b.get("class_name") or "").strip():
         return False
@@ -68,7 +69,7 @@ def _is_dup(a, b):
 
 
 def split_dups(boxes):
-    """(kept, dups): the first box of each same-object cluster is kept, later
+    """! @brief (kept, dups): the first box of each same-object cluster is kept, later
     ones are dups. First = earliest drawn, which is usually the careful one."""
     kept, dups = [], []
     for b in boxes or []:
@@ -77,7 +78,7 @@ def split_dups(boxes):
 
 
 def diff_image(gt, pred, iou_ok=0.7, iou_min=0.3, area_tol=0.15):
-    """Compare one image's ground-truth vs predicted boxes.
+    """! @brief Compare one image's ground-truth vs predicted boxes.
 
     Returns {boxes:[...], counts:{...}, matched:[(iou)], mean_iou}. Each box entry
     carries enough to draw it and to explain the verdict.
@@ -160,11 +161,11 @@ def diff_image(gt, pred, iou_ok=0.7, iou_min=0.3, area_tol=0.15):
 
 
 def propose_image(pred):
-    """For a NEW image with no ground truth: turn the model's raw predictions
+    """! @brief For a NEW image with no ground truth: turn the model's raw predictions
     into review rows without scoring anything. Every predicted box is a proposal
     the human can Accept as the image's first label. Returns the same shape as
     diff_image so the frontend renders it identically, but carries no verdicts
-    that would pollute the accuracy score — the caller must NOT feed this into
+    that would pollute the accuracy score - the caller must NOT feed this into
     aggregate().
     """
     pred = list(pred or [])
@@ -181,7 +182,7 @@ def propose_image(pred):
 
 
 def aggregate(per_image, iou_ok=0.7):
-    """Roll per-image diffs into a dataset score.
+    """! @brief Roll per-image diffs into a dataset score.
 
     TP = correct (matched at/above iou_ok); everything matched below counts as a
     localisation issue but still a detection (so it's a TP for F1, tracked

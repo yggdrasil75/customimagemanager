@@ -1,4 +1,5 @@
-"""Gelbooru — photo tag source (md5 match, or tag search; key optional)."""
+"""! @file
+@brief Gelbooru - photo tag source (md5 match, or tag search; key optional)."""
 MANIFEST = {
     "id": "metasrc_gelbooru", "name": "Gelbooru (photos)", "version": "1.0.0",
     "description": "Tags and source URL for an image found on gelbooru.com by md5; the "

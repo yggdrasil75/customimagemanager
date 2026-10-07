@@ -1,4 +1,5 @@
-"""Layout: Intermediate.
+"""! @file
+@brief Layout: Intermediate.
 
 Like Simple (one full-screen pane, pictures open full screen), but Timeline /
 Albums / People / Music are tabs down the left, and the viewer's Meta button

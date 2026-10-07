@@ -1,4 +1,5 @@
-"""search_sort: filter tokens and sort: keys against synthetic files rows."""
+"""! @file
+@brief search_sort: filter tokens and sort: keys against synthetic files rows."""
 import json
 import pytest
 from common import table_exists

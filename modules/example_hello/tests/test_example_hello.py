@@ -1,4 +1,5 @@
-"""Template for a module's own tests — copy this folder into your module.
+"""! @file
+@brief Template for a module's own tests - copy this folder into your module.
 
 Put tests in modules/<your_module>/tests/test_*.py. They are collected with the
 rest of the suite (./run_tests.sh modules/<your_module> runs just yours) and

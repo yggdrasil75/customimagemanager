@@ -1,10 +1,10 @@
-"""
-YOLO / Ultralytics model provider.
+"""! @file
+@brief YOLO / Ultralytics model provider.
 ======================================================================
 Registers Ultralytics YOLO as a provider for the core capabilities it can
 satisfy: detect (box / oriented-box types), detect.faces, segment, tag (-cls),
 pose, depth. This is the first real
-consumer of the model broker — it proves that a module can hand the app a
+consumer of the model broker - it proves that a module can hand the app a
 model for a named capability, normalize the model's native output to the
 capability's canonical shape, and be swapped out for a different provider
 (e.g. Mayuki) without any consumer changing.
@@ -15,7 +15,7 @@ evict least-recently-used), and each provider ships a transform that turns
 an Ultralytics Results object into the plain normalized dicts the contract
 in modules/model_contracts.py specifies.
 
-One provider is registered per (family, capability): yolov8 … yolo26 each
+One provider is registered per (family, capability): yolov8 ... yolo26 each
 offer the heads that generation ships (see _FAMILIES). The user picks the
 family + size in the Models tab; the loader derives the stock weights name
 from that, unless a custom-weights path is set for the capability.
@@ -49,9 +49,9 @@ MANIFEST = {
 _SIZES = ("n", "s", "m", "l", "x")
 
 
-# ── loaders (backed by the runtime model_registry LRU) ──────────────────────
+# -- loaders (backed by the runtime model_registry LRU) ----------------------
 def _canon(path, chore="detect"):
-    """Bare stock names live in models/yolo/<chore>/; ultralytics downloads the
+    """! @brief Bare stock names live in models/yolo/<chore>/; ultralytics downloads the
     asset to that exact path when it's missing. Explicit paths pass through."""
     p = path if os.path.dirname(path) else os.path.join(model_registry.model_dir("yolo", chore), path)
     try:
@@ -77,7 +77,7 @@ def _build(path, chore="detect"):
 
 
 def _loader_for(path, chore="detect"):
-    """Return a zero-arg loader that yields a cached, callable YOLO model.
+    """! @brief Return a zero-arg loader that yields a cached, callable YOLO model.
 
     For the generic 'box' capability which takes model_path at runtime,
     we register on first use (not at module load time since the path varies)."""
@@ -93,7 +93,7 @@ def _loader_for(path, chore="detect"):
 
 
 def _run_yolo_path(model_path, feed, conf):
-    """Run the model at model_path over feed (one image or a list), with the
+    """! @brief Run the model at model_path over feed (one image or a list), with the
     bn/fuse-error unload+retry the old manager path had. Returns ultralytics
     results or None."""
     load = _loader_for(model_path)
@@ -112,11 +112,11 @@ def _run_yolo_path(model_path, feed, conf):
         raise RuntimeError(f"YOLO could not run {os.path.basename(str(model_path))}: {ex}") from ex
 
 
-# ── families: which heads each ultralytics generation ships ─────────────────
+# -- families: which heads each ultralytics generation ships -----------------
 # stock weights = f"{prefix}{size}{suffix}.pt"; ultralytics auto-downloads.
 _NSMLX = ["n", "s", "m", "l", "x"]
 # -cls is an ImageNet-1000 head: it names things in the picture, so it serves
-# 'tag' (its weights still live in models/yolo/classify/), not 'classify' —
+# 'tag' (its weights still live in models/yolo/classify/), not 'classify' -
 # that capability is the image's overarching category from a fixed set.
 _FULL = {"detect": "", "segment": "-seg", "tag": "-cls", "pose": "-pose"}
 _OBB_FAMILIES = {"yolov8", "yolo11", "yolo26"}   # ship -obb heads (yolo12 does not)
@@ -147,7 +147,7 @@ def _weights_key(cap):
 
 
 def _stock_path(host, cap, prefix, suffix):
-    """Custom weights for this capability when set, else the stock name for
+    """! @brief Custom weights for this capability when set, else the stock name for
     the picked size (and, for detect, the picked box type: '' or '-obb')."""
     custom = (host.config.get(_weights_key(cap)) or "").strip()
     if custom:
@@ -159,14 +159,14 @@ def _stock_path(host, cap, prefix, suffix):
 
 
 def _tf_detect(res, *a, **k):
-    """Boxes, or oriented boxes (with angle) when the result has an obb head."""
+    """! @brief Boxes, or oriented boxes (with angle) when the result has an obb head."""
     r = res[0] if isinstance(res, (list, tuple)) else res
     return _tf_obb(res) if getattr(r, "obb", None) is not None else _tf_objects(res)
 
 
-# ── transforms: Ultralytics Results -> canonical contract shape ─────────────
+# -- transforms: Ultralytics Results -> canonical contract shape -------------
 def _norm_boxes(res, want_names=False):
-    """Ultralytics detection Results -> normalized center-form box dicts."""
+    """! @brief Ultralytics detection Results -> normalized center-form box dicts."""
     out = []
     r = res[0] if isinstance(res, (list, tuple)) else res
     boxes = getattr(r, "boxes", None)
@@ -268,7 +268,7 @@ def _tf_obb(res, *a, **k):
 
 
 def _tf_tag(res, *a, **k):
-    """-cls head -> the 'tag' contract: [{tag, conf}] top-5, conf desc."""
+    """! @brief -cls head -> the 'tag' contract: [{tag, conf}] top-5, conf desc."""
     r = res[0] if isinstance(res, (list, tuple)) else res
     probs = getattr(r, "probs", None)
     if probs is None:
@@ -283,7 +283,7 @@ def _tf_tag(res, *a, **k):
 
 
 def _tf_depth(res, *a, **k):
-    """ultralytics Results.depth is a DepthMap (a result wrapper); the map
+    """! @brief ultralytics Results.depth is a DepthMap (a result wrapper); the map
     itself is its .data tensor. Wrapping the wrapper in np.asarray gave a
     0-d object array, which read as "no depth"."""
     r = res[0] if isinstance(res, (list, tuple)) else res
@@ -302,7 +302,7 @@ def _tf_depth(res, *a, **k):
 
 
 def _parse_yolo_result(r, H, W, keep_classes, as_obb):
-    """Turn one ultralytics Result into normalised center-form boxes. Same logic
+    """! @brief Turn one ultralytics Result into normalised center-form boxes. Same logic
     the single-image path uses; factored out so batched detect reuses it."""
     out = []
     obb = getattr(r, "obb", None)
@@ -330,16 +330,16 @@ def _parse_yolo_result(r, H, W, keep_classes, as_obb):
     return out
 
 
-# ── availability ─────────────────────────────────────────────────────────────
+# -- availability -------------------------------------------------------------
 def _avail():
     return bool(_HAVE_YOLO)
 
 
-# ── registration ─────────────────────────────────────────────────────────────
+# -- registration -------------------------------------------------------------
 def register(host):
     reason = "ultralytics not installed"
 
-    # One picker widget per capability: optional custom .pt overriding the
+    ## @brief One picker widget per capability: optional custom .pt overriding the
     # stock family/size weights. Custom files live in models/yolo/<chore>/ so a
     # -seg checkpoint never shows up as a detect option.
     def _weights_opts(cap):
@@ -369,7 +369,7 @@ def register(host):
                 declared.add(key)
             host.provide_model(
                 cap, fid, label=flabel, family="YOLO", sizes=_HEAD_SIZES.get((fid, cap), sizes),
-                types=({"pose": [{"value": "body", "label": "Body · 17 pts"}],
+                types=({"pose": [{"value": "body", "label": "Body | 17 pts"}],
                         "detect": box_types if fid in _OBB_FAMILIES else None}.get(cap)),
                 classes=_classes_for(cap, prefix, suffix) if cap in ("detect", "segment") else None,
                 settings=[{"key": key, "label": "Custom weights", "kind": "select",
@@ -378,12 +378,12 @@ def register(host):
                 loader=(lambda c=cap, p=prefix, sfx=suffix:
                         _loader_for(_stock_path(host, c, p, sfx), "classify" if c == "tag" else c)()),
                 transform=transforms[cap], available=_avail, reason=reason,
-                note=fnote + " Size n…x trades speed for accuracy.",
+                note=fnote + " Size n...x trades speed for accuracy.",
                 cost_mb=300 if cap == "segment" else 250,
                 gpu=model_registry.on_gpu())
 
-    # Dedicated face detector: akanametov yolo-face weights (sizes n/s/m/l, or
-    # a custom .pt). This module runs them — it is the ultralytics runtime —
+    ## @brief Dedicated face detector: akanametov yolo-face weights (sizes n/s/m/l, or
+    # a custom .pt). This module runs them - it is the ultralytics runtime -
     # while the faces module owns the weight registry (download, custom files)
     # and the face filter (min size, drawn-face rejection) and hands both over
     # on its service; the person module consumes 'detect.faces'.
@@ -425,7 +425,7 @@ def register(host):
         settings=[{"key": "face_weights", "label": "Custom weights", "kind": "select",
                    "options": lambda: (_faces().get("detector_options") or (lambda: []))(),
                    "help": "Blank = stock yolo-face weights for the picked size."}],
-        note="akanametov yolo-face weights. Nano misses small/profile faces — the ones "
+        note="akanametov yolo-face weights. Nano misses small/profile faces - the ones "
              "cluster density depends on; go larger if you can afford it.",
         loader=_face_loader, transform=None,
         available=lambda: _avail() and bool(_faces()),
@@ -434,7 +434,7 @@ def register(host):
 
     # Person detection: (a) the picked Detection model filtered to 'person'
     # (any family/size), (b) dedicated person weights (custom OBB/box .pt in
-    # models/yolo/detectpersons/) — the old core "person model".
+    # models/yolo/detectpersons/) - the old core "person model".
 
     _PERSON_CLASSES = {"person", "persons", "people", "human", "humans",
                        "body", "figure", "character", "char"}
@@ -485,7 +485,7 @@ def register(host):
         return run
 
     host.provide_model(
-        "detect.persons", "detect-class", label="Detection model · person class", family="YOLO",
+        "detect.persons", "detect-class", label="Detection model | person class", family="YOLO",
         speed="fast", note="Uses whatever Detection model is picked and keeps its 'person' boxes. "
                            "Nothing extra to load.",
         loader=_persons_from_detect, transform=None, available=_avail, reason=reason, cost_mb=0)
@@ -504,7 +504,7 @@ def register(host):
                                             or model_registry.list_weights("yolo", "detect.persons", exts=(".pt",))),
         reason="no person weights configured", cost_mb=250, gpu=model_registry.on_gpu())
 
-    # Generic box detector: runs any YOLO .pt (incl. OBB) at a given path and
+    ## @brief Generic box detector: runs any YOLO .pt (incl. OBB) at a given path and
     # returns canonical {class_name,cx,cy,w,h}. This is what the box consumers
     # (faces/persons/panels/objects/video) dispatch to via broker.detector_for,
     # so a different provider (Mayaku) can answer for its own model files.
@@ -552,7 +552,7 @@ def register(host):
         handles=lambda p: str(p).lower().endswith(".pt"),
         cost_mb=250, gpu=model_registry.on_gpu())
 
-    # Service for modules that own their own YOLO weights (personal_box):
+    ## @brief Service for modules that own their own YOLO weights (personal_box):
     # a canonical-boxes handle (with .batch / .registry_key) and the class list.
     def _detector(model_path, chore="detect"):
         loader = _loader_for(model_path, chore)

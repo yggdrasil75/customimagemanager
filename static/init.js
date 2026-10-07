@@ -19,7 +19,7 @@ setPane(_initialPane);
 loadGallery();
 refreshReviewCount();
 
-// ── Branding ────────────────────────────────────────────────────────────────
+// -- Branding ----------------------------------------------------------------
 
 function applyBranding(s){
   if(!s) return;
@@ -56,9 +56,10 @@ function clearBrandLogo(){
   if(st) st.textContent='Logo will be removed on save.';
 }
 
-// Persist branding (multipart: name + optional logo file). Returns {ok} /
-// {ok:false,error}. No-ops (ok:true) when the branding section isn't available
-// to this user, so the unified Save can call it unconditionally.
+/** @brief Persist branding (multipart: name + optional logo file). Returns {ok} /
+ *  {ok:false,error}. No-ops (ok:true) when the branding section isn't available
+ *  to this user, so the unified Save can call it unconditionally.
+ */
 async function persistBranding(){
   const sec=document.getElementById('branding_section');
   if(!sec || sec.classList.contains('hidden')) return {ok:true};

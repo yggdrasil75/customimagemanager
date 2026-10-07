@@ -1,13 +1,13 @@
-"""
-xmp_import.py
+"""! @file
+@brief xmp_import.py
 =============
 
 Reads XMP metadata from an image (or its sidecar) and returns it merged with the
 schema in xmp_fields.py, so the editor can render every known property alongside
 its current value, type, cardinality, and enumerated-value labels.
 
-This mirrors iptc_import.py exactly in shape — same read strategy, same
-present/unknown surfacing — but keyed by XMP namespace instead of IPTC record.
+This mirrors iptc_import.py exactly in shape - same read strategy, same
+present/unknown surfacing - but keyed by XMP namespace instead of IPTC record.
 
 XMP is larger and messier than IPTC: competing vendor namespaces overlap (dc,
 photoshop, lr, acdsee all have "keywords"-like ideas), so we key strictly by
@@ -40,12 +40,12 @@ import re
 log = logging.getLogger("xmp_import")
 
 def _candidate_paths(filepath):
-    """Yield the paths worth trying for XMP data, most-specific first.
+    """! @brief Yield the paths worth trying for XMP data, most-specific first.
 
     A sidecar (.xmp with the same stem) is tried FIRST: it's the safest source
     and the one we write, and for formats pyexiv2 can't open directly (notably
     JXL) it's the only source we can read without risking a throw. We then fall
-    back to XMP embedded in the file itself — this is what makes RAW/DNG/JPEG
+    back to XMP embedded in the file itself - this is what makes RAW/DNG/JPEG
     imports that carry an internal XMP packet (but no sidecar) actually work.
 
     For JXL we skip trying the file directly (pyexiv2 throws on many JXLs); a JXL
@@ -64,21 +64,21 @@ def _candidate_paths(filepath):
             yield p
 
 def _read_raw_xmp(filepath):
-    """Return the raw {tag_string: value} XMP dict from the first readable
+    """! @brief Return the raw {tag_string: value} XMP dict from the first readable
     candidate path, or ({}, None) if none. tag_string looks like
     'Xmp.acdsee.Caption'."""
     raw, source, _ = resolve_xmp(filepath)
     return raw, source
 
 def resolve_xmp(filepath):
-    """Resolve XMP for a file from the best available source and return
+    """! @brief Resolve XMP for a file from the best available source and return
     (raw_dict, source_path, raw_xml_text).
 
     Source preference matches _candidate_paths: sidecar first, then XMP embedded
     in the file itself (skipped for JXL). This is the single entry point every
     XMP consumer should use so that a file carrying only an EMBEDDED XMP packet
     (common for RAW/DNG/JPEG imports without a sidecar) is read the same as one
-    with a sidecar — instead of being silently ignored.
+    with a sidecar - instead of being silently ignored.
 
     raw_xml_text is the decoded XMP packet as text when we can get it (always for
     a sidecar; for embedded XMP, via pyexiv2's raw packet), so callers that parse
@@ -111,7 +111,7 @@ def resolve_xmp(filepath):
     return {}, None, ""
 
 def _split_tag(tag_string):
-    """'Xmp.acdsee.Caption' -> ('acdsee', 'Caption').
+    """! @brief 'Xmp.acdsee.Caption' -> ('acdsee', 'Caption').
     Returns (None, None) for anything that doesn't fit the pattern."""
     parts = tag_string.split(".")
     if len(parts) >= 3 and parts[0] == "Xmp":
@@ -121,7 +121,7 @@ def _split_tag(tag_string):
     return None, None
 
 def read_xmp(filepath):
-    """Read XMP and return a structure organized by namespace:
+    """! @brief Read XMP and return a structure organized by namespace:
 
     {
       "source": "/path/that/had/the/xmp" | None,
@@ -200,14 +200,14 @@ def read_xmp(filepath):
 
     return {"source": source, "namespaces": namespaces_out}
 
-# ── Ingest folding ──────────────────────────────────────────────────────────
+# -- Ingest folding ----------------------------------------------------------
 def _as_list(v):
     if v is None:
         return []
     return list(v) if isinstance(v, (list, tuple)) else [v]
 
 def _langalt_text(value):
-    """Extract plain text from an XMP value that may be a lang-alt block.
+    """! @brief Extract plain text from an XMP value that may be a lang-alt block.
     pyexiv2 returns lang-alt as a dict keyed like {'lang="x-default"': text}.
     Prefer x-default; otherwise take the first entry. Plain strings/lists pass
     through (first element for a list). Returns '' when there's nothing usable."""
@@ -227,7 +227,7 @@ def _langalt_text(value):
     return str(lst[0]) if lst else ""
 
 def _flatten_hierarchical_tag(path):
-    """Reduce a hierarchical tag path to a flat booru tag.
+    """! @brief Reduce a hierarchical tag path to a flat booru tag.
 
     digiKam (and Lightroom's lr:hierarchicalSubject) store tags as slash-
     delimited trees, e.g. "People/Cosplayers/Jane" or "Character/Link". A flat
@@ -244,14 +244,14 @@ def _flatten_hierarchical_tag(path):
     return parts[-1] if parts else s
 
 def folded_values(filepath):
-    """Extract the XMP values that fold into fields we already maintain, so the
+    """! @brief Extract the XMP values that fold into fields we already maintain, so the
     scan/ingest path can merge them.
 
     Returns {"description": str|None, "tags": [str,...], "rating": float|None}.
 
     Multiple namespaces can feed the same target (acdsee:Caption, dc:description
     and crd/crs:Description all feed description; acdsee:Rating and dex:Rating
-    both feed rating). We do NOT let dict order decide — we apply an explicit
+    both feed rating). We do NOT let dict order decide - we apply an explicit
     source precedence so results are deterministic:
 
       description : acdsee:Caption  >  dc:description  >  crd/crs:Description
@@ -315,10 +315,10 @@ def folded_values(filepath):
             "event": event, "catalog_sets": catalog_sets}
 
 def dc_extras(filepath):
-    """Extract Dublin Core fields that are meaningful but have no column in the
+    """! @brief Extract Dublin Core fields that are meaningful but have no column in the
     current `files` schema yet: creator (artist), date (initial creation date),
     and language. Returned so that if/when columns are added, wiring them in is a
-    one-liner — nothing consumes this today.
+    one-liner - nothing consumes this today.
 
     Returns {"creator": [str,...], "date": str|None, "language": [str,...]}.
     date is the earliest dc:date value (ISO string) when several are present.
@@ -330,19 +330,19 @@ def dc_extras(filepath):
     date = min(dates) if dates else None   # ISO 8601 sorts chronologically
     return {"creator": creator, "date": date, "language": language}
 
-# ── IPTC Extension (iptcExt) folds ──────────────────────────────────────────
+# -- IPTC Extension (iptcExt) folds ------------------------------------------
 # Three things the ingest path pulls out of the IPTC Extension schema:
-#   * artist       — ArtworkCreator and Creator/CreatorName join dc:creator as
+#   * artist       - ArtworkCreator and Creator/CreatorName join dc:creator as
 #                    sources for our artist column.
-#   * ai_generated — the AI-provenance fields (and a synthetic DigitalSourceType)
+#   * ai_generated - the AI-provenance fields (and a synthetic DigitalSourceType)
 #                    flip a simple boolean flag; we don't store the detail.
-#   * regions      — DataOnScreen text regions fold into the MWG-RS region store.
+#   * regions      - DataOnScreen text regions fold into the MWG-RS region store.
 # All three read the same resolved XMP; the field DEFINITIONS (and which props
-# feed what) live in iptc_fields via xmp_fields' feed_map — these functions just
+# feed what) live in iptc_fields via xmp_fields' feed_map - these functions just
 # know how to extract the values.
 
 def iptcext_creators(filepath):
-    """Return artist-name strings from the IPTC Extension schema:
+    """! @brief Return artist-name strings from the IPTC Extension schema:
     ArtworkCreator (AOCreator) and Creator's Name (CreatorName). Both are
     surfaced as extra sources for our artist column, joining dc:creator.
 
@@ -372,10 +372,10 @@ def iptcext_creators(filepath):
     return out
 
 def iptcext_model_age(filepath):
-    """Return the model age from IPTC Extension ModelAge, or None.
+    """! @brief Return the model age from IPTC Extension ModelAge, or None.
 
     ModelAge is an integer list (one per model shown). We store a single number,
-    so we take the MINIMUM present — the most cautious reading when several ages
+    so we take the MINIMUM present - the most cautious reading when several ages
     are given. Non-integer / empty values are ignored. None when absent.
     """
     raw, _ = _read_raw_xmp(filepath)
@@ -395,10 +395,10 @@ def iptcext_model_age(filepath):
     return min(ages) if ages else None
 
 def iptcext_persons(filepath):
-    """Return the names of people shown, from IPTC Extension PersonInImage and
+    """! @brief Return the names of people shown, from IPTC Extension PersonInImage and
     the richer PersonInImageWDetails (its PersonInImageName lang-alt leaf).
 
-    Flat name list — the plain PersonInImage carries no face box (those live in
+    Flat name list - the plain PersonInImage carries no face box (those live in
     ImageRegion / DataOnScreen), so like Expression Media's People these fold
     into both our persons column and the tag list. De-duped, order-preserving.
     [] when none present.
@@ -430,11 +430,11 @@ def iptcext_persons(filepath):
     return out
 
 def prism_extras(filepath):
-    """Extract the PRISM fields that map to our columns:
-      * genre      — prism:Genre (image genre) -> our genre column
-      * alt_of     — prism:HasAlternative + prism:IsAlternativeOf (variant links)
+    """! @brief Extract the PRISM fields that map to our columns:
+      * genre      - prism:Genre (image genre) -> our genre column
+      * alt_of     - prism:HasAlternative + prism:IsAlternativeOf (variant links)
                      -> our alt_of column (union of both directions)
-      * page_count — prism:PageCount (int) -> our page_count column
+      * page_count - prism:PageCount (int) -> our page_count column
     (prism:Keyword -> tags is handled by folded_values, not here.)
 
     Returns {"genre": [str,...], "alt_of": [str,...], "page_count": int|None}.
@@ -465,7 +465,7 @@ def prism_extras(filepath):
     return {"genre": genre, "alt_of": alt_of, "page_count": page_count}
 
 def is_ai_generated(filepath):
-    """True if the file's IPTC Extension metadata marks it as AI-generated.
+    """! @brief True if the file's IPTC Extension metadata marks it as AI-generated.
 
     Triggers on either:
       * any of the AI-provenance fields carrying a value
@@ -497,18 +497,18 @@ def is_ai_generated(filepath):
                 return True
     return False
 
-# ── DataOnScreen (iptcExt TextRegion) -> MWG-RS ─────────────────────────────
+# -- DataOnScreen (iptcExt TextRegion) -> MWG-RS -----------------------------
 # IPTC Extension DataOnScreen is a repeating TextRegion struct: each has a
 # RegionText plus a Region (Area struct). Unlike acdsee-rs (center-based), the
-# IPTC Area X/Y is the TOP-LEFT corner with W/H the size, all normalized — the
-# same convention as the legacy iptcExt ImageRegion path — so we convert to the
+# IPTC Area X/Y is the TOP-LEFT corner with W/H the size, all normalized - the
+# same convention as the legacy iptcExt ImageRegion path - so we convert to the
 # center-based MWG dict (cx = x + w/2, cy = y + h/2). RegionText becomes the
 # region label so on-screen text is searchable alongside other regions. These
 # import unconfirmed (they're extracted metadata, not user-placed boxes).
 _DOS_BASE = "Xmp.iptcExt.DataOnScreen"
 
 def _parse_dataonscreen_regions(xmp):
-    """Read Xmp.iptcExt.DataOnScreen text regions and return them in the MWG
+    """! @brief Read Xmp.iptcExt.DataOnScreen text regions and return them in the MWG
     region dict shape (same as manager._parse_mwg_regions). Returns [] if none.
 
     pyexiv2 flattens the struct; per index n the leaves are:
@@ -555,7 +555,7 @@ def _parse_dataonscreen_regions(xmp):
     return regions
 
 def read_dataonscreen_regions(filepath):
-    """Convenience wrapper: read the file's XMP and return converted DataOnScreen
+    """! @brief Convenience wrapper: read the file's XMP and return converted DataOnScreen
     text regions (MWG dict shape). [] when there are none / pyexiv2 unavailable.
     The ingest path folds these into the merged region list."""
     raw, _ = _read_raw_xmp(filepath)
@@ -567,24 +567,24 @@ def read_dataonscreen_regions(filepath):
         log.warning(f"DataOnScreen region parse failed on {filepath}: {e}")
         return []
 
-# ── ACDSee regions (acdsee-rs) -> MWG-RS ────────────────────────────────────
+# -- ACDSee regions (acdsee-rs) -> MWG-RS ------------------------------------
 # ACDSee stores face/object regions in the Xmp.acdsee-rs.Regions struct. Its
 # geometry convention matches MWG's: an Area is a CENTER point (X, Y) plus a
 # size (W, H), all normalized to AppliedToDimensions. So the conversion to our
-# internal MWG region dict is a direct field rename — no top-left/center or
+# internal MWG region dict is a direct field rename - no top-left/center or
 # pixel/normalized fixups needed (unlike the iptcExt legacy path, which is
 # top-left based). Each region can carry two areas:
-#   DLYArea ("display") — the user-placed/edited rectangle. Preferred.
-#   ALGArea ("algorithm") — the detector's original guess. Fallback.
+#   DLYArea ("display") - the user-placed/edited rectangle. Preferred.
+#   ALGArea ("algorithm") - the detector's original guess. Fallback.
 # We emit the same dict shape _parse_mwg_regions produces so downstream storage
 # (write-back, DB sync, YOLO export) treats them identically.
 _ACD_RS_BASE = "Xmp.acdsee-rs.Regions"
 _ACD_RS_LIST = _ACD_RS_BASE + "/acdsee-rs:RegionList"
 
 def _acd_area(xmp, region_path, which):
-    """Return (cx, cy, w, h) for the given area struct ('DLYArea'|'ALGArea')
+    """! @brief Return (cx, cy, w, h) for the given area struct ('DLYArea'|'ALGArea')
     under a region path, or None if that area isn't present / is degenerate.
-    X/Y are already the center and W/H the size, normalized — a direct map."""
+    X/Y are already the center and W/H the size, normalized - a direct map."""
     a = f"{region_path}/acdsee-rs:{which}"
     try:
         cx = float(xmp.get(f"{a}/acdsee-rs:X", ""))
@@ -598,7 +598,7 @@ def _acd_area(xmp, region_path, which):
     return cx, cy, w, h
 
 def _parse_acdsee_regions(xmp):
-    """Read regions from Xmp.acdsee-rs.Regions and return them in the same MWG
+    """! @brief Read regions from Xmp.acdsee-rs.Regions and return them in the same MWG
     region dict shape as manager._parse_mwg_regions. Returns [] if none.
 
     Area preference: DLYArea (user-placed) over ALGArea (detector guess).
@@ -636,7 +636,7 @@ def _parse_acdsee_regions(xmp):
     return regions
 
 def read_acdsee_regions(filepath):
-    """Convenience wrapper: read the file's XMP and return converted ACDSee
+    """! @brief Convenience wrapper: read the file's XMP and return converted ACDSee
     regions (MWG dict shape). [] when there are none or pyexiv2 is unavailable.
     This is what the ingest path calls as a fallback when neither MWG-RS nor the
     legacy iptcExt regions are present."""
@@ -649,15 +649,15 @@ def read_acdsee_regions(filepath):
         log.warning(f"acdsee region parse failed on {filepath}: {e}")
         return []
 
-# ── Crop geometry (crd) for duplicate / crop detection ──────────────────────
+# -- Crop geometry (crd) for duplicate / crop detection ----------------------
 # Adobe Camera Raw's crd:Crop{Top,Left,Bottom,Right} are the normalized (0..1)
 # edges of the kept region within the ORIGINAL frame. If an image is a crop of a
-# larger original, that box tells us which sub-rectangle was kept — useful signal
+# larger original, that box tells us which sub-rectangle was kept - useful signal
 # for spotting "B is a crop of A" beyond pixel hashing. We expose the box in a
 # normalized, convention-neutral form (x/y top-left + w/h, all 0..1) so the dedup
 # code can compare it without knowing crd's edge layout.
 def crop_box(filepath):
-    """Return the crd crop rectangle as {'x','y','w','h','angle'} normalized to
+    """! @brief Return the crd crop rectangle as {'x','y','w','h','angle'} normalized to
     0..1 of the original frame, or None if the file carries no crd crop.
 
     A full-frame crop (0,0,1,1) still returns a box; callers deciding whether an
@@ -687,7 +687,7 @@ def crop_box(filepath):
     return {"x": left, "y": top, "w": w, "h": h, "angle": angle}
 
 def is_cropped(filepath, epsilon=1e-3):
-    """True if the file has a crd crop box that keeps less than the full frame.
+    """! @brief True if the file has a crd crop box that keeps less than the full frame.
     Cheap gate for the dedup path: only images that were actually cropped are
     worth crop-vs-original comparison."""
     box = crop_box(filepath)
@@ -696,7 +696,7 @@ def is_cropped(filepath, epsilon=1e-3):
     return box["w"] < 1.0 - epsilon or box["h"] < 1.0 - epsilon
 
 def summarize(filepath):
-    """Compact counts for logging / list views: how many known fields carry a
+    """! @brief Compact counts for logging / list views: how many known fields carry a
     value, and how many unknown tags were seen."""
     data = read_xmp(filepath)
     present = sum(1 for n in data["namespaces"]

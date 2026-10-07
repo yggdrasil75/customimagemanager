@@ -1,4 +1,4 @@
-/* theme_intermediate.js — activates the Simple theme's shared viewer for the
+/* theme_intermediate.js - activates the Simple theme's shared viewer for the
  * "intermediate" layout: Meta shows the controls pane (Editor +
  * EXIF / IPTC / XMP), no albums strip, Timeline / Albums / People / Music. */
 (function () {

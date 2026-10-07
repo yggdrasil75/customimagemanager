@@ -1,5 +1,5 @@
-"""
-SAM 3 / 3.1 provider (Meta Segment Anything 3, via ultralytics'
+"""! @file
+@brief SAM 3 / 3.1 provider (Meta Segment Anything 3, via ultralytics'
 SAM3SemanticPredictor).
 ======================================================================
 Class-agnostic, and the first SAM with a native text/concept head, so:
@@ -63,7 +63,7 @@ def _hf_files(repo):
 
 
 def _ensure(path, typ):
-    """Return `path`, downloading the checkpoint from HuggingFace on a miss."""
+    """! @brief Return `path`, downloading the checkpoint from HuggingFace on a miss."""
     if os.path.exists(path):
         return path
     repo = _HF.get(typ) or _HF["3"]

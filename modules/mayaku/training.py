@@ -1,8 +1,8 @@
-"""
-Mayaku (COCO-format) training support for customimagemanager.
+"""! @file
+@brief Mayaku (COCO-format) training support for customimagemanager.
 
 Drop-in companion to the existing YOLO path in manager.py. Nothing here replaces
-YOLO — it adds a parallel COCO dataset writer and a Mayaku training worker so a
+YOLO - it adds a parallel COCO dataset writer and a Mayaku training worker so a
 set can be trained with either backend.
 
 The manager's /api/train route already gathers, per still image:
@@ -22,9 +22,9 @@ Image, _HAVE_PIL = optional_import("PIL.Image")
 cv2, _HAVE_CV2 = optional_import("cv2")
 
 
-# ── YOLO(normalised cx,cy,w,h) → COCO(abs x,y,w,h, top-left) ──────────────────
+# -- YOLO(normalised cx,cy,w,h) -> COCO(abs x,y,w,h, top-left) ------------------
 def yolo_region_to_coco_bbox(r: dict, img_w: int, img_h: int):
-    """Return COCO [x, y, w, h] in pixels, or None if the region is unusable."""
+    """! @brief Return COCO [x, y, w, h] in pixels, or None if the region is unusable."""
     try:
         cx, cy = float(r["cx"]), float(r["cy"])
         w, h = float(r["w"]), float(r["h"])
@@ -44,7 +44,7 @@ def yolo_region_to_coco_bbox(r: dict, img_w: int, img_h: int):
 
 
 def _image_size(jpg_path: str):
-    """(width, height) of a written jpg. Tries PIL, falls back to cv2."""
+    """! @brief (width, height) of a written jpg. Tries PIL, falls back to cv2."""
     try:
         with Image.open(jpg_path) as im:
             return im.width, im.height
@@ -61,10 +61,10 @@ def _image_size(jpg_path: str):
 
 
 def write_coco_split(images_dir: str, out_json: str, entries, cls_id: dict):
-    """
-    entries : iterable of (basename, [regions]) whose .jpg already exist in
+    """!
+    @brief entries : iterable of (basename, [regions]) whose .jpg already exist in
               images_dir.
-    cls_id  : {class_name: local_contiguous_index} — SAME indexing YOLO used.
+    cls_id  : {class_name: local_contiguous_index} - SAME indexing YOLO used.
 
     COCO category ids are 1-based (0 is reserved), so we store id = local_idx + 1.
     Writes a Roboflow/Mayaku-style _annotations.coco.json.
@@ -111,13 +111,13 @@ def write_coco_split(images_dir: str, out_json: str, entries, cls_id: dict):
     return len(images), len(annotations)
 
 
-# ── Training worker (mirrors yolo_train_worker_cfg's contract) ────────────────
+# -- Training worker (mirrors yolo_train_worker_cfg's contract) ----------------
 def mayaku_train_worker(dset_dir: str, base_model: str, cfg: dict,
                         run_name: str, models_dir: str,
                         state: dict, training_logger,
                         populate_model_selector) -> None:
-    """
-    Run Mayaku training in a subprocess against the COCO splits under dset_dir.
+    """!
+    @brief Run Mayaku training in a subprocess against the COCO splits under dset_dir.
     Expects: dset_dir/{train,val}/_annotations.coco.json and image dirs
              dset_dir/{train,val}/ (jpgs copied alongside their json).
     """

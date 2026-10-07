@@ -7,7 +7,7 @@
 
 
   <div class="flex justify-between items-center">
-    <span class="text-sm font-bold text-purple-300">Train box model</span>
+    <span class="text-sm font-bold text-indigo-300">Train box model</span>
     <span id="tr_status" class="text-xs text-gray-400"></span>
   </div>
   <div class="tr-flow items-end">
@@ -15,7 +15,7 @@
       <select id="tr_preset_select" class="trinp" onchange="trPresetSelect()"></select></div>
     <button onclick="trPresetReload()" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-xs" title="Discard edits and restore the selected preset's settings.">Reload</button>
     <button onclick="trPresetOverwrite()" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-xs" title="Save the current settings back into the selected preset.">Overwrite</button>
-    <button onclick="trPresetNew()" class="bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded text-xs" title="Save the current settings as a new named preset.">New…</button>
+    <button onclick="trPresetNew()" class="bg-indigo-700 hover:bg-indigo-600 px-2 py-1 rounded text-xs" title="Save the current settings as a new named preset.">New...</button>
     <button onclick="trPresetDelete()" class="bg-red-800 hover:bg-red-700 px-2 py-1 rounded text-xs" title="Delete the selected preset.">Delete</button>
   </div>
 
@@ -62,10 +62,10 @@
   </div>
 
   <label class="trck" title="Crop each image tightly around its boxes (plus a margin) before resizing, so the objects keep more detail.">
-    <input type="checkbox" id="tr_crop_to_boxes" class="accent-purple-500"> Crop to boxes (higher-quality input)</label>
+    <input type="checkbox" id="tr_crop_to_boxes" class="accent-indigo-500"> Crop to boxes (higher-quality input)</label>
 
   <details id="tr_advanced_wrap">
-    <summary class="trlbl cursor-pointer select-none text-purple-300">Advanced</summary>
+    <summary class="trlbl cursor-pointer select-none text-indigo-300">Advanced</summary>
     <div id="tr_advanced" class="space-y-2 mt-2">
       <div class="tr-flow">
         <div class="tr-field"><label class="trlbl">Patience</label><input id="tr_patience" type="number" value="100" min="0" max="10000" step="1" class="trinp" title="Stop early if accuracy hasn't improved for this many epochs (0 disables early stopping)."></div>
@@ -74,7 +74,7 @@
             <option value="auto">auto</option><option value="SGD">SGD</option>
             <option value="Adam">Adam</option><option value="AdamW">AdamW</option><option value="RMSProp">RMSProp</option>
           </select></div>
-        <div class="tr-field"><label class="trlbl">lr0</label><input id="tr_lr0" type="number" value="0.01" step="0.001" min="0" max="1" class="trinp" title="Initial learning rate — how big each weight update is at the start."></div>
+        <div class="tr-field"><label class="trlbl">lr0</label><input id="tr_lr0" type="number" value="0.01" step="0.001" min="0" max="1" class="trinp" title="Initial learning rate - how big each weight update is at the start."></div>
         <div class="tr-field"><label class="trlbl">lrf</label><input id="tr_lrf" type="number" value="0.01" step="0.001" min="0" max="1" class="trinp" title="Final learning rate as a fraction of lr0, decayed to over training."></div>
         <div class="tr-field"><label class="trlbl">Momentum</label><input id="tr_momentum" type="number" value="0.937" step="0.001" min="0" max="1" class="trinp" title="How much the previous update carries into the next, smoothing learning."></div>
         <div class="tr-field"><label class="trlbl">Weight decay</label><input id="tr_weight_decay" type="number" value="0.0005" step="0.0001" min="0" max="1" class="trinp" title="Penalty on large weights that curbs overfitting."></div>
@@ -86,9 +86,9 @@
         <div class="tr-field"><label class="trlbl">Close mosaic</label><input id="tr_close_mosaic" type="number" value="10" min="0" max="10000" step="1" class="trinp" title="Turn off mosaic augmentation for the final N epochs to fine-tune on real images."></div>
       </div>
       <div class="tr-flow">
-        <label class="trck" title="Decay the learning rate along a smooth cosine curve instead of linearly."><input type="checkbox" id="tr_cos_lr" class="accent-purple-500"> Cosine</label>
-        <label class="trck" title="Pad images to rectangles per batch instead of squares, saving compute."><input type="checkbox" id="tr_rect" class="accent-purple-500"> Rect</label>
-        <label class="trck" title="Treat every box as one merged class, ignoring class labels."><input type="checkbox" id="tr_single_cls" class="accent-purple-500"> 1-class</label>
+        <label class="trck" title="Decay the learning rate along a smooth cosine curve instead of linearly."><input type="checkbox" id="tr_cos_lr" class="accent-indigo-500"> Cosine</label>
+        <label class="trck" title="Pad images to rectangles per batch instead of squares, saving compute."><input type="checkbox" id="tr_rect" class="accent-indigo-500"> Rect</label>
+        <label class="trck" title="Treat every box as one merged class, ignoring class labels."><input type="checkbox" id="tr_single_cls" class="accent-indigo-500"> 1-class</label>
       </div>
       <label class="trlbl pt-1">Augmentation</label>
       <p class="text-xs text-gray-500 mb-1">Our own box-safe pipeline. Each transform has a <b>chance</b> (how often it fires per image) and an <b>amount</b> (its magnitude). Variants are generated on disk into the training set and don't touch your originals. Native Ultralytics augments (incl. mosaic) are disabled while this is on.</p>
@@ -97,27 +97,27 @@
       </div>
       <div class="tr-flow">
         <div class="tr-field"><label class="trlbl">rotate chance</label><input id="tr_aug_rotate_p" type="number" value="0" step="0.05" min="0" max="1" class="trinp" title="Probability each image is rotated."></div>
-        <div class="tr-field"><label class="trlbl">rotate ±deg</label><input id="tr_aug_rotate" type="number" value="10" step="1" min="0" max="180" class="trinp" title="When it fires, rotate by a random amount in [-deg, +deg]."></div>
+        <div class="tr-field"><label class="trlbl">rotate +/-deg</label><input id="tr_aug_rotate" type="number" value="10" step="1" min="0" max="180" class="trinp" title="When it fires, rotate by a random amount in [-deg, +deg]."></div>
         <div class="tr-field"><label class="trlbl">scale chance</label><input id="tr_aug_scale_p" type="number" value="0" step="0.05" min="0" max="1" class="trinp" title="Probability each image is zoomed."></div>
-        <div class="tr-field"><label class="trlbl">scale ±frac</label><input id="tr_aug_scale" type="number" value="0.2" step="0.05" min="0" max="1" class="trinp" title="When it fires, zoom by a random factor in 1 ± frac."></div>
+        <div class="tr-field"><label class="trlbl">scale +/-frac</label><input id="tr_aug_scale" type="number" value="0.2" step="0.05" min="0" max="1" class="trinp" title="When it fires, zoom by a random factor in 1 +/- frac."></div>
         <div class="tr-field"><label class="trlbl">translate chance</label><input id="tr_aug_translate_p" type="number" value="0" step="0.05" min="0" max="1" class="trinp" title="Probability each image is shifted."></div>
-        <div class="tr-field"><label class="trlbl">translate ±frac</label><input id="tr_aug_translate" type="number" value="0.1" step="0.05" min="0" max="1" class="trinp" title="When it fires, shift by a random fraction of the side in [-frac, +frac]."></div>
+        <div class="tr-field"><label class="trlbl">translate +/-frac</label><input id="tr_aug_translate" type="number" value="0.1" step="0.05" min="0" max="1" class="trinp" title="When it fires, shift by a random fraction of the side in [-frac, +frac]."></div>
         <div class="tr-field"><label class="trlbl">shear chance</label><input id="tr_aug_shear_p" type="number" value="0" step="0.05" min="0" max="1" class="trinp" title="Probability each image is sheared."></div>
-        <div class="tr-field"><label class="trlbl">shear ±deg</label><input id="tr_aug_shear" type="number" value="10" step="1" min="0" max="45" class="trinp" title="When it fires, slant by a random amount in [-deg, +deg]."></div>
+        <div class="tr-field"><label class="trlbl">shear +/-deg</label><input id="tr_aug_shear" type="number" value="10" step="1" min="0" max="45" class="trinp" title="When it fires, slant by a random amount in [-deg, +deg]."></div>
         <div class="tr-field"><label class="trlbl">flip-lr chance</label><input id="tr_aug_fliplr_p" type="number" value="0" step="0.1" min="0" max="1" class="trinp" title="Probability each image is flipped left-to-right."></div>
         <div class="tr-field"><label class="trlbl">flip-ud chance</label><input id="tr_aug_flipud_p" type="number" value="0" step="0.1" min="0" max="1" class="trinp" title="Probability each image is flipped upside down."></div>
         <div class="tr-field"><label class="trlbl">hue chance</label><input id="tr_aug_hsv_h_p" type="number" value="0" step="0.05" min="0" max="1" class="trinp" title="Probability each image's hue is shifted."></div>
-        <div class="tr-field"><label class="trlbl">hue ±frac</label><input id="tr_aug_hsv_h" type="number" value="0.015" step="0.005" min="0" max="1" class="trinp" title="When it fires, shift hue by a random fraction of the colour wheel."></div>
+        <div class="tr-field"><label class="trlbl">hue +/-frac</label><input id="tr_aug_hsv_h" type="number" value="0.015" step="0.005" min="0" max="1" class="trinp" title="When it fires, shift hue by a random fraction of the colour wheel."></div>
         <div class="tr-field"><label class="trlbl">sat chance</label><input id="tr_aug_hsv_s_p" type="number" value="0" step="0.05" min="0" max="1" class="trinp" title="Probability each image's saturation is jittered."></div>
-        <div class="tr-field"><label class="trlbl">sat ±frac</label><input id="tr_aug_hsv_s" type="number" value="0.4" step="0.05" min="0" max="1" class="trinp" title="When it fires, multiply saturation by a random factor in 1 ± frac."></div>
+        <div class="tr-field"><label class="trlbl">sat +/-frac</label><input id="tr_aug_hsv_s" type="number" value="0.4" step="0.05" min="0" max="1" class="trinp" title="When it fires, multiply saturation by a random factor in 1 +/- frac."></div>
         <div class="tr-field"><label class="trlbl">bright chance</label><input id="tr_aug_hsv_v_p" type="number" value="0" step="0.05" min="0" max="1" class="trinp" title="Probability each image's brightness is jittered."></div>
-        <div class="tr-field"><label class="trlbl">bright ±frac</label><input id="tr_aug_hsv_v" type="number" value="0.4" step="0.05" min="0" max="1" class="trinp" title="When it fires, multiply brightness by a random factor in 1 ± frac."></div>
+        <div class="tr-field"><label class="trlbl">bright +/-frac</label><input id="tr_aug_hsv_v" type="number" value="0.4" step="0.05" min="0" max="1" class="trinp" title="When it fires, multiply brightness by a random factor in 1 +/- frac."></div>
       </div>
     </div>
   </details>
 
   <button onclick="trStartTraining()"
-    class="w-full bg-purple-600 hover:bg-purple-700 py-2 rounded font-bold text-sm">Start training</button>
+    class="w-full bg-indigo-600 hover:bg-indigo-700 py-2 rounded font-bold text-sm">Start training</button>
 
   <details class="text-xs">
     <summary class="text-gray-400 cursor-pointer">Live log</summary>
@@ -139,9 +139,9 @@
           </select></div>
         <div class="tr-field"><label class="trlbl">New images (if new)</label>
           <input id="tr_val_addnew" type="number" value="20" min="1" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">IoU ok ≥</label><input id="tr_val_iouok" type="number" value="0.7" step="0.05" min="0" max="1" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">Conf ≥</label><input id="tr_val_conf" type="number" value="0.25" step="0.05" min="0" max="1" class="trinp"></div>
-        <div class="tr-field"><label class="trlbl">Snap IoU ≥</label><input id="tr_val_snap" type="number" value="0.5" step="0.05" min="0" max="1" class="trinp" title="Snap moves your box onto the model's box when they overlap at least this much."></div>
+        <div class="tr-field"><label class="trlbl">IoU ok >=</label><input id="tr_val_iouok" type="number" value="0.7" step="0.05" min="0" max="1" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">Conf >=</label><input id="tr_val_conf" type="number" value="0.25" step="0.05" min="0" max="1" class="trinp"></div>
+        <div class="tr-field"><label class="trlbl">Snap IoU >=</label><input id="tr_val_snap" type="number" value="0.5" step="0.05" min="0" max="1" class="trinp" title="Snap moves your box onto the model's box when they overlap at least this much."></div>
         <div class="tr-field"><label class="trlbl">Accept below F1</label><input id="tr_val_bound" type="number" value="0.8" step="0.05" min="0" max="1" class="trinp"></div>
       </div>
       <label class="trck text-xs" title="Write every predicted box into each image's mwg-rs regions flagged cim:Debug, with set, model run, verdict and confidence in the region description. Replaces this set's previous debug boxes. Debug boxes are never used as training data or ground truth.">
@@ -156,7 +156,7 @@
         class="w-full bg-sky-700 hover:bg-sky-600 py-1.5 rounded font-bold text-xs"
         title="Snap every validated image: your boxes move onto the model's where they agree, duplicates you drew are removed.">Snap all to model</button>
       <button id="tr_val_retrain" onclick="trStartTraining()"
-        class="hidden w-full bg-purple-700 hover:bg-purple-600 py-2 rounded font-bold text-sm">
+        class="hidden w-full bg-indigo-700 hover:bg-indigo-600 py-2 rounded font-bold text-sm">
         Retrain on corrected labels</button>
     </div>
   </details>

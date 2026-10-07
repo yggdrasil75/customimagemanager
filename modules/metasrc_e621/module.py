@@ -1,4 +1,5 @@
-"""e621 — photo tag source (md5 match, or tag search; no key)."""
+"""! @file
+@brief e621 - photo tag source (md5 match, or tag search; no key)."""
 MANIFEST = {
     "id": "metasrc_e621", "name": "e621 (photos)", "version": "1.0.0",
     "description": "Tags, artist and source URL for an image found on e621.net by md5; "

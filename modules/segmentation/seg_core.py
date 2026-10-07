@@ -1,5 +1,5 @@
-"""
-Segmentation — masks from the picked segmenter, stored as compact SVG paths.
+"""! @file
+@brief Segmentation - masks from the picked segmenter, stored as compact SVG paths.
 ======================================================================
 Consumes the broker's segmentation models (YOLO-seg, Mayaku, SAM 2/3,
 MobileSAM, FastSAM) through the `segment` / `segment.box` capabilities and
@@ -29,7 +29,7 @@ cv2, _HAVE_CV2 = optional_import("cv2")
 
 HOST = None
 _db = state = MEDIA_DIR = get_safe_path = read_jxl = _to_bgr = _coerce_bgr3 = None
-read_metadata = write_metadata = _merge_regions = access_logger = save_classes = None
+read_metadata = update_file = _merge_regions = access_logger = save_classes = None
 _iou_center = None
 
 
@@ -39,13 +39,13 @@ def _bind(host):
         "HOST": host, "_db": host.db, "state": host.config, "MEDIA_DIR": host.media_dir,
         "get_safe_path": host.safe_path, "read_jxl": c.read_image, "_to_bgr": c.to_bgr,
         "_coerce_bgr3": common.coerce_bgr, "read_metadata": c.read_metadata,
-        "write_metadata": c.write_metadata, "_merge_regions": c.merge_regions,
+        "update_file": c.update_file, "_merge_regions": c.merge_regions,
         "access_logger": host.logger, "save_classes": c.save_classes, "_iou_center": common.iou_center,
     })
 
 
 def _segment_boxes(img, boxes: list) -> list:
-    """Masks for boxes via the picked segmenter (broker 'segment.box'). Returns
+    """! @brief Masks for boxes via the picked segmenter (broker 'segment.box'). Returns
     instance dicts {class_name, cx, cy, w, h, mask_svg}; [] if none/failed."""
     if not boxes:
         return []
@@ -87,7 +87,7 @@ def _attach_masks(img, regions: list) -> None:
 
 
 def _polygon_mask_svg(poly, W, H):
-    """Normalised polygon -> mask_svg paths dict (what regions store), or None."""
+    """! @brief Normalised polygon -> mask_svg paths dict (what regions store), or None."""
     try:
         pts = np.array([[int(round(x * W)), int(round(y * H))] for x, y in poly], np.int32)
         if len(pts) < 3:
@@ -100,7 +100,7 @@ def _polygon_mask_svg(poly, W, H):
 
 
 def _segment_image(img_bgr, classes=None) -> list:
-    """Run the picked fixed-class segmenter (broker 'segment', foreground pick)
+    """! @brief Run the picked fixed-class segmenter (broker 'segment', foreground pick)
     and return region dicts {class_name, cx, cy, w, h, confirmed, mask_svg,
     score}. classes: whitelist (None = the capability's picker whitelist;
     [] = keep all). Raises NoProviderError when nothing serves it."""
@@ -129,7 +129,7 @@ def _segment_image(img_bgr, classes=None) -> list:
 
 
 def _segment_regions(bgr, query):
-    """Segment whatever `query` describes with the picked foreground segmenter
+    """! @brief Segment whatever `query` describes with the picked foreground segmenter
     (broker 'segment': SAM 3 natively, SAM 2 via VLM seed boxes; a fixed-class
     model ignores the prompt) and return unconfirmed region dicts (box +
     mask_svg), or []. Never raises."""
@@ -171,7 +171,7 @@ def _segment_regions(bgr, query):
 
 
 def bulk_segment():
-    """Run the picked segmenter (Models tab → Segmentation) over many files,
+    """! @brief Run the picked segmenter (Models tab -> Segmentation) over many files,
     writing masked regions (mask_svg in each region's Extensions) UNCONFIRMED.
     Body: {filenames, classes?} - classes overrides the saved whitelist."""
     filenames = request.json.get("filenames", [])
@@ -198,20 +198,19 @@ def bulk_segment():
                     if n["class_name"] not in state["classes"]:
                         state["classes"].append(n["class_name"])
                 save_classes()
-                write_metadata(fp, meta["tags"], meta["description"],
-                               _merge_regions(meta["regions"], new))
+                update_file(fp, set={"regions": _merge_regions(meta["regions"], new)}, meta=meta)
                 segmented += 1
             done += 1
-            state["status_text"] = f"Segment: {done}/{total} ({segmented} done)..."
+            HOST.set_status(f"Segment: {done}/{total} ({segmented} done)...")
         except Exception as e:
             errors.append(fn)
             access_logger.error(f"bulk_segment {fn}: {e}")
-    state["status_text"] = "Ready."
+    HOST.set_status("Ready.")
     return jsonify({"success": True, "done": done, "segmented": segmented,
                     "errors": errors})
 
 def api_segment():
-    """Run the selected YOLO-seg (background) model on one image on demand and
+    """! @brief Run the selected YOLO-seg (background) model on one image on demand and
     return masked regions, so the user can trigger class-aware segmentation
     manually from the AI Tools panel instead of waiting for the idle worker.
 
@@ -227,16 +226,16 @@ def api_segment():
     img = read_jxl(fp)
     if img is None:
         return jsonify({"success": False, "error": "Decode failed."})
-    state["status_text"] = "Segmenting…"
+    HOST.set_status("Segmenting...")
     try:
         regions = _segment_image(_to_bgr(img), request.json.get("classes"))
     except NoProviderError as e:
-        state["status_text"] = "Ready."
+        HOST.set_status("Ready.")
         return jsonify({"success": False, "error": f"Segmentation unavailable: {e}"})
     except Exception as e:
-        state["status_text"] = "Ready."
+        HOST.set_status("Ready.")
         return jsonify({"success": False, "error": f"Segment failed: {e}"})
-    state["status_text"] = "Ready."
+    HOST.set_status("Ready.")
     return jsonify({"success": True, "regions": regions,
                     "model": HOST.broker.selected_id("segment"),
                     "count": len(regions), "note": "" if regions else "No objects segmented."})

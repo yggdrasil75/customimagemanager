@@ -16,7 +16,7 @@ const MODS = path.join(__dirname, "_module_assets.json");
 
 function readJson(p, dflt) { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return dflt; } }
 
-/** Enabled modules' JS assets: [{module_id, url, file}] in load order. */
+/** @brief Enabled modules' JS assets: [{module_id, url, file}] in load order. */
 function moduleAssets() {
   const m = readJson(MODS, { assets: [], dirs: {} });
   return (m.assets || []).filter(a => a.kind !== "css" && !a.url.startsWith("/static/vendor/"))
@@ -93,9 +93,9 @@ function stubCanvas(window) {
   window.HTMLCanvasElement.prototype.toDataURL = () => "data:,";
 }
 
-/** boot({url}) → {window, document, api, run(js)}. */
+/** @brief boot({url}) -> {window, document, api, run(js)}. */
 function boot(opts = {}) {
-  if (!fs.existsSync(HTML)) throw new Error("tests/js/_app.html missing — run via pytest (tests/test_frontend.py) or ./run_tests.sh");
+  if (!fs.existsSync(HTML)) throw new Error("tests/js/_app.html missing - run via pytest (tests/test_frontend.py) or ./run_tests.sh");
   const html = fs.readFileSync(HTML, "utf8");
   const scripts = [...html.matchAll(/<script src="([^"]+)"><\/script>/g)].map(m => m[1])
     .filter(s => s.startsWith("/static/") && !s.includes("/vendor/"));
@@ -133,8 +133,9 @@ function boot(opts = {}) {
     }
   }
   const tick = (ms = 0) => new Promise(r => setTimeout(r, ms));
-  // val(): like run() but returns a plain-realm copy, so node's strict
-  // deepEqual doesn't trip over jsdom-realm Array/Object prototypes.
+  /** @brief val(): like run() but returns a plain-realm copy, so node's strict
+   *  deepEqual doesn't trip over jsdom-realm Array/Object prototypes.
+   */
   const val = (code, name) => JSON.parse(JSON.stringify(run(code, name)));
   return { window, document: window.document, api, run, val, errors, tick, dom };
 }

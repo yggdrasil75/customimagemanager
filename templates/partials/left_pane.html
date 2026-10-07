@@ -2,12 +2,12 @@
      The gallery pane owns the image grid and all its chrome (folder picker,
      search, upload, bulk bar, pager). These used to be duplicated into a
      gallery modal as well, which put two elements with each id in the DOM
-     (#folder_select, #gallery_grid, …) — getElementById returned the wrong one,
+     (#folder_select, #gallery_grid, ...) - getElementById returned the wrong one,
      so loadFolders() populated a <select> nobody could see. There is now exactly
      one of each, and the grid lives here, beside the editor. -->
 {% include 'partials/left_tabs.html' %}
 {% include 'partials/gallery_pane.html' %}
 {% include 'partials/albums_pane.html' %}
 {% include 'partials/review_pane.html' %}
-{# Module-contributed left-pane content (books shelf, …), server-rendered. #}
+{# Module-contributed left-pane content (books shelf, ...), server-rendered. #}
 {% for _p in module_left_panes %}{% include _p.template ignore missing %}{% endfor %}

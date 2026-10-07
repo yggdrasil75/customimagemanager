@@ -1,5 +1,5 @@
-"""
-Sequence duplicate model — the shared core of HEURDUV (video) and HEARDU (audio).
+"""! @file
+@brief Sequence duplicate model - the shared core of HEURDUV (video) and HEARDU (audio).
 ======================================================================
 A timeline (video frames at media_sig.VIDEO_FPS, audio as 1 s log-mel
 windows every 0.5 s) becomes one embedding per step:
@@ -10,13 +10,13 @@ windows every 0.5 s) becomes one embedding per step:
 
 Two timelines compare as a step x step matrix S = sigmoid(a * cos + b)
 (a, b learned: the calibration of "same content"), and closed-end DTW
-(seq_align) turns S into the shared fraction of the longer timeline — the
+(seq_align) turns S into the shared fraction of the longer timeline - the
 same rule the image, phash and naive scores use, so a trimmed copy, a
 re-encode at another fps, a re-cut all land where they should.
 
 Training (modules/dedup_train/build_seq) feeds (a_steps, b_steps, map):
 map[j] = the step of a that b's step j shows, or -1 (unrelated / edited
-over). Loss: per-cell BCE on S — S[map[j], j] -> 1, cells further than
+over). Loss: per-cell BCE on S - S[map[j], j] -> 1, cells further than
 `tol` steps from it -> 0, a -1 column -> all 0; positives up-weighted to
 balance. Everything is a no-op without torch (available False).
 
@@ -51,7 +51,7 @@ def ch(width: float) -> int:
 
 
 def parse_sizes(text) -> dict:
-    """"name width depth" per line; empty / invalid -> SIZES."""
+    """! @brief "name width depth" per line; empty / invalid -> SIZES."""
     out = {}
     for line in str(text or "").splitlines():
         p = [x for x in line.replace(",", " ").split() if x]
@@ -87,7 +87,7 @@ if _HAVE_TORCH:
             self.b = nn.Parameter(torch.tensor(-7.0))
 
         def embed(self, x):
-            """x [T, ...] -> [T, C] unit vectors (one timeline)."""
+            """! @brief x [T, ...] -> [T, C] unit vectors (one timeline)."""
             e = self.step(x)                                 # [T, C]
             h = e.t()[None]                                  # [1, C, T]
             for blk in self.temporal:
@@ -111,21 +111,21 @@ class SeqDupModel:
         self.trained, self.error = False, ""
         self.net = _SeqNet(self._step_encoder(ch(self.width)), ch(self.width), self.depth) if _HAVE_TORCH else None
 
-    # ── subclass hooks ───────────────────────────────────────────────────
+    # -- subclass hooks ---------------------------------------------------
     def _step_encoder(self, C: int):
         raise NotImplementedError
 
     @staticmethod
     def prep(x: np.ndarray) -> np.ndarray:
-        """Stored steps (e.g. uint8 frames) -> float32 [T, *STEP_SHAPE]. Identity by default."""
+        """! @brief Stored steps (e.g. uint8 frames) -> float32 [T, *STEP_SHAPE]. Identity by default."""
         return np.asarray(x, np.float32)
 
     @staticmethod
     def steps_from_path(path: str) -> "np.ndarray | None":
-        """File -> float32 steps [T, *STEP_SHAPE] (subclass)."""
+        """! @brief File -> float32 steps [T, *STEP_SHAPE] (subclass)."""
         raise NotImplementedError
 
-    # ── plumbing ─────────────────────────────────────────────────────────
+    # -- plumbing ---------------------------------------------------------
     @classmethod
     def sized(cls, size: str, sizes: "dict | None" = None):
         tbl = sizes or cls.SIZES
@@ -170,9 +170,9 @@ class SeqDupModel:
             self.error = f"{type(e).__name__}: {e}"
             return False
 
-    # ── inference ────────────────────────────────────────────────────────
+    # -- inference --------------------------------------------------------
     def embed(self, steps: np.ndarray, device: str = "cpu"):
-        """steps [T, ...] float32 -> torch [T, C] (no grad)."""
+        """! @brief steps [T, ...] float32 -> torch [T, C] (no grad)."""
         self.net.to(device).eval()
         with torch.no_grad():
             x = torch.from_numpy(np.ascontiguousarray(self.prep(steps), np.float32))
@@ -196,7 +196,7 @@ class SeqDupModel:
     def score_paths(self, path_a: str, path_b: str, device: str = "cpu") -> "float | None":
         return self.score_steps(self.steps_from_path(path_a), self.steps_from_path(path_b), device)
 
-    # ── training ─────────────────────────────────────────────────────────
+    # -- training ---------------------------------------------------------
     def fit_batches(self, batches, lr: float = 1e-3, device: str = "cpu", _opt_holder: dict = None,
                     tol: int = 2) -> "float | None":
         """!
@@ -251,7 +251,7 @@ class SeqDupModel:
 
 
 def pair_targets(ta: int, mp: np.ndarray, tol: int = 2) -> "tuple[np.ndarray, np.ndarray]":
-    """(target [Ta, Tb] 0/1, weight [Ta, Tb]) for a step map (map[j] in 0..Ta-1 or -1).
+    """! @brief (target [Ta, Tb] 0/1, weight [Ta, Tb]) for a step map (map[j] in 0..Ta-1 or -1).
     Cells within tol of a match but not on it are ignored (weight 0): adjacent
     steps of slow footage legitimately look the same. Positives are weighted
     up to balance the negatives."""
@@ -273,7 +273,7 @@ def pair_targets(ta: int, mp: np.ndarray, tol: int = 2) -> "tuple[np.ndarray, np
 
 
 def subsample_pair(a, b, mp, cap: int = 64):
-    """Keep <= cap evenly spaced steps of each side, remapping map (a step of b
+    """! @brief Keep <= cap evenly spaced steps of each side, remapping map (a step of b
     whose partner was dropped maps to the nearest kept step of a, if within 1)."""
     ia, ib = seq_align.resample_idx(len(a), cap), seq_align.resample_idx(len(b), cap)
     mp = np.asarray(mp)
@@ -288,7 +288,7 @@ def subsample_pair(a, b, mp, cap: int = 64):
 
 
 def pack_steps(a: np.ndarray, b: np.ndarray, mp, cap: int = 64) -> bytes:
-    """Feedback sample: two step arrays (stored in their own dtype; uint8 frames
+    """! @brief Feedback sample: two step arrays (stored in their own dtype; uint8 frames
     stay uint8) + the step map, at most `cap` steps a side."""
     a, b, mp = subsample_pair(np.asarray(a), np.asarray(b), mp, cap)
     if a.dtype != np.uint8:
@@ -299,7 +299,7 @@ def pack_steps(a: np.ndarray, b: np.ndarray, mp, cap: int = 64) -> bytes:
 
 
 def unpack_steps(blob: bytes):
-    """-> (a, b, map) as stored (uint8 or float32)."""
+    """! @brief -> (a, b, map) as stored (uint8 or float32)."""
     d = np.load(io.BytesIO(blob))
     a, b = d["a"], d["b"]
     if a.dtype != np.uint8:

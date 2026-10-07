@@ -1,66 +1,24 @@
-"""
-Module host / context.
-======================================================================
-The single object every pluggable module receives in its register(host)
-call. It is the *seam* between the application core and third-party code:
-a module is written against this surface, not against manager.py's
-internals, so someone can publish a folder, drop it in modules/, and have
-it integrate on the next restart.
+"""! @file
+@brief The Host: everything a module's register(host) gets from the core.
 
-Design (per the agreed scope for v1):
-  * PERMISSIVE. The host exposes the real Flask app, the real DB accessor,
-    the real thread manager, and the live config dict. We are explicitly
-    NOT sandboxing yet — the goal right now is to prove the loading seam
-    and give module authors enough to build against. Tightening the
-    surface (capability tokens, per-module permission scoping) is a later
-    pass and is why every raw handle also has a narrow helper beside it:
-    modules that use the helpers keep working when we lock the raw handles
-    down.
-  * ADDITIVE. Modules contribute routes, settings tabs, front-end assets,
-    background worker sources, and startup hooks. The host records those
-    contributions; manager.py wires the recorded contributions into the
-    page and the app.
-
-Nothing here imports manager.py. manager.py builds ONE Host, hands it to
-the loader, and reads back the contributions. That keeps the dependency
-arrow pointing from the core into the module system, never the reverse.
+Modules build against this object, never against manager.py. The host records
+what a module contributes (routes, assets, settings, tables, workers, hooks)
+and manager.py wires those in after loading. Nothing here imports manager.py.
 """
 import os
 import time
 
 class Host:
-    """API surface handed to each module's register(host).
+    """! @brief The API handed to each module's register(host).
 
-    Raw handles (permissive, v1):
-        host.app            the Flask app  (add routes, before_request, …)
-        host.db             callable -> sqlite3 connection for this request
-        host.config         live state dict (read/write app settings)
-        host.logger         access logger
-        host.thread_manager the background worker pool
-        host.media_dir      absolute path to the media library root
-        host.safe_path      get_safe_path(root, rel) path-traversal guard
-        host.save_config    persist host.config to disk
-        host.core           namespace of core helpers the core hands over
-                            (read_image, to_bgr, resolve_media, read/write_
-                            metadata, auth, llm_call, ...). Modules never import
-                            the app; the app populates this before register().
-        host.media          the media-type registry (kind(path), is_video, ...)
-                            plus host.register_media_type() for new kinds.
-
-    Contribution helpers (recorded, wired by manager.py):
-        host.add_route(rule, view, feature=, level=, **opts)  register a (gated) Flask route
-        @host.route(rule, feature=, level=, **opts)  decorator form of add_route
-        host.add_asset(module_id, filename, kind)   inject a JS/CSS file
-        host.add_settings_tab(id, label, ...)       add a settings modal tab
-        host.add_worker_source(name, claim, handle) register a thread source
-        host.on_startup(fn)                          run fn() once at boot
-        host.module_static_url(module_id, filename)  URL for a module asset
+    Raw handles: app, db, config, logger, thread_manager, media_dir, safe_path,
+    save_config, broker, core (core helpers) and media (the media-type registry).
+    Prefer the helpers below over the raw handles.
     """
 
     def __init__(self, *, app, db, config, logger, thread_manager,
                  media_dir, safe_path, save_config, broker=None,
                  config_registry=None, core=None, media=None):
-        # ── raw handles ──────────────────────────────────────────────────
         self.app = app
         self.db = db
         self.config = config
@@ -69,100 +27,67 @@ class Host:
         self.media_dir = media_dir
         self.safe_path = safe_path
         self.save_config = save_config
-        # Model capability broker. Modules provide/request models through the
-        # helpers below rather than importing it, so the seam stays one object.
+        # model capability broker (see provide_model / request_model)
         self.broker = broker
 
-        # Config registry: declared settings (defaults, validation, change
-        # handlers, persistence). Modules own their settings through it.
         self.config_registry = config_registry
-        # Core helper namespace + media-type registry (see class docstring).
         self.core = core
         self.media = media
 
-        # ── recorded contributions (read back by manager.py after load) ──
-        # asset  = {"module_id","filename","kind"}  kind in {"js","css"}
+        # -- contributions, read back by manager.py after loading --
+        # {"module_id", "filename", "kind": "js" | "css"}
         self.assets = []
-        # settings tab = {"id","label","icon","admin_only","assets"}
+        # {"id", "label", "icon", "admin_only", "assets"}
         self.settings_tabs = []
-        # startup hook = zero-arg callable, run inside __main__ after serve setup
+        # zero-argument callables run after the server is up
         self.startup_hooks = []
-        self.event_hooks = {}         # event name -> [fn(**kw)]
-        # pipeline stages a module contributes: name -> {"fn", "label",
-        # "editor"}. manager spreads the fns into run_pipeline and exposes the
-        # list so the pipeline editor only offers stages whose module is on.
+        self.event_hooks = {}  # event -> [fn(**kw)]
+        # name -> {"fn", "label", "editor"}
         self.pipeline_stages = {}
-        # DB tables a module owns: list of {"ddl", "check", "module_id"}.
-        # manager creates them after register_all and runs each check() once at
-        # startup for read-cache consistency. This is how a module adds a new
-        # searchable feature backed by its own table.
+        # {"ddl", "check", "module_id"}; created after all modules register
         self.db_tables = []
-        self.background_sweeps = {}   # cap_id -> {pending, run, module_id}
+        self.background_sweeps = {}  # cap_id -> {pending, run, module_id}
         self._sweep_rr, self._sweep_idle, self._sweep_skip, self._sweep_done = 0, {}, set(), {}
         self._sweep_inflight = 0
-        # File-row enrichers a module contributes: fn(db, rel_paths) -> {rel_path:
-        # {field: value}}. Core folds these into gallery/list rows, so a module
-        # can attach its own per-file data (e.g. rating) without a core column.
+        # fn(db, rel_paths) -> {rel_path: {field: value}}, merged into listing rows
         self.file_enrichers = []
-        # Settings UI fields a module contributes into a pane (its own or a core
-        # default pane): list of field descriptors read by /api/modules and
-        # rendered by the settings modal.
+        # settings-UI field descriptors (see add_settings_field)
         self.settings_fields = []
-        # Settings key -> settings tab id that owns it, for keys saved from a
-        # module's own pane without a settings field (add_config_key(tab=)).
-        # update_settings uses it to check settings.<tab> per key.
+        # setting key -> owning tab, for keys saved without a settings field
         self.config_tabs = {}
-        # Per-user settings (User settings tab): key -> descriptor, see
-        # add_user_setting. Stored per account, saved by the user themselves.
+        # per-user setting key -> descriptor (see add_user_setting)
         self.user_settings = {}
-        # Controls-pane partials a module contributes: {tab_id: template_name}.
-        # The template lives in the module's own templates/ dir and is rendered
-        # SERVER-SIDE by the controls pane — a module ships pane HTML without any
-        # core edit or client fetch. Paired with a registered controls tab.
+        # {tab_id: template}: controls-pane partials rendered server-side
         self.controls_panes = []
-        # Top-level modals a module contributes: server-rendered partials from
-        # the module's templates/ dir, injected into app.html's modal area.
+        # modal partials rendered into app.html
         self.app_modals = []
         self.centre_panes = []
-        self.search_help = {}         # search prefix -> {help, module_id}
-        self.action_targets = {}      # AI-action target -> fn(fp, bgr, meta, action)
-        self.ai_action_groups = []    # the editor's AI action picker: see register_ai_actions
-        self.gallery_filters = []     # SQL clauses hiding container members from the flat gallery
-        # Access policies (see register_access_policy): per-request visibility
-        # and write rules for files and albums. Core consults them at its
-        # choke points; the ownership module is the first implementation.
+        self.search_help = {}  # search prefix -> {help, module_id}
+        self.action_targets = {}  # AI-action target -> fn(fp, bgr, meta, action)
+        self.ai_action_groups = []  # see register_ai_actions
+        self.gallery_filters = []  # SQL clauses that hide rows from the flat gallery
+        # see register_access_policy
         self.access_policies = []
-        # Left-pane content partials a module contributes (e.g. the books shelf),
-        # server-rendered into the left column alongside the built-in panes.
+        # left-column pane partials
         self.left_panes = []
-        # Search providers: fn(text, folder, structured) -> [entry]. Modules
-        # (books, …) contribute non-image results merged into the gallery.
+        # fn(text, folder, structured) -> [entry]
         self.search_providers = []
-        # Search type handlers: token_prefix -> fn(token, value) -> (sql_clause, params).
-        # Modules register handlers for custom search tokens (e.g. "exif:Make").
+        # token prefix -> fn(token, value) -> (sql, params)
         self.search_types = {}
-        # Sort keys: name -> SQL ORDER BY expression (or a callable returning one,
-        # or None to skip). `sort:<name>` / `sort:-<name>` in the search box.
+        # sort name -> ORDER BY expression (or a callable returning one)
         self.sort_keys = {}
-        # Named services (registry points): a module publishes a service other
-        # modules consume if present. {name: {"obj","module_id"}}. Consumers use
-        # get_service(name) and must shim a None result (missing/disabled
-        # provider), so an optional dependency degrades instead of crashing.
+        # {name: {"obj", "module_id", "priority"}}
         self.services = {}
-        # which module is currently being registered (set by the loader) so
-        # helpers can attribute contributions without the author passing an id
+        # the module being registered, so contributions are attributed to it
         self._current_module = None
 
-    # ── route registration ──────────────────────────────────────────────
     def add_route(self, rule, view_func, *, feature=None, level="read",
                   action=None, fields=(), **options):
-        """Register a Flask route. Thin pass-through to app.add_url_rule.
-
-        feature -- auth feature key to gate on (see require_feature). level
-                   defaults to "read"; pass level="write" for mutations. action
-                   and fields feed the audit log. No feature = login-only.
-        endpoint defaults to a module-namespaced name so two modules can
-        both define a view called `list` without colliding.
+        """! @brief Register a Flask route, gated by a feature permission.
+        @param feature  permission key; None = any signed-in user.
+        @param level    "read" to view, "write" to change.
+        @param opts     passed to add_url_rule; action / fields feed the audit log.
+        The endpoint name is namespaced by module, so two modules may both have `list`.
         """
         if feature:
             view_func = self.require_feature(feature, action=action,
@@ -174,8 +99,7 @@ class Host:
         self.app.add_url_rule(rule, endpoint, view_func, **options)
 
     def route(self, rule, **options):
-        """Decorator form of add_route — use instead of @host.app.route so the
-        gate is declared next to the view:
+        """! @brief Decorator form of add_route:
 
             @host.route("/api/thing", methods=["POST"], feature="tab.thing", level="write")
             def api_thing(): ...
@@ -185,16 +109,11 @@ class Host:
             return fn
         return deco
 
-    # ── front-end assets ─────────────────────────────────────────────────
     def add_asset(self, filename, kind=None, module_id=None):
-        """Inject a static file into the main app page.
-
-        filename -- path relative to the module's own static/ folder,
-                    e.g. "hello.js"; or an absolute URL path ("/static/vendor/x.js")
-                    for a core-vendored library install.sh fetches.
-        kind     -- "js" or "css"; inferred from the extension if omitted.
-        The file is served at /modules/<module_id>/static/<filename> by the
-        route manager.py mounts, and injected into app.html on load.
+        """! @brief Load a JS or CSS file in the main page.
+        @param filename  path inside the module's static/ folder (served at
+                         /modules/<id>/static/<filename>), or an absolute /static/... URL.
+        @param kind      "js" or "css"; taken from the extension when omitted.
         """
         module_id = module_id or self._current_module
         if kind is None:
@@ -206,19 +125,11 @@ class Host:
         module_id = module_id or self._current_module
         return f"/modules/{module_id}/static/{filename}"
 
-    # ── settings tab ─────────────────────────────────────────────────────
     def add_settings_tab(self, tab_id, label, icon="", admin_only=False, group="modules"):
-        """Declare a settings-modal tab this module owns.
-
-        manager.py exposes the declared tabs via /api/modules so the front
-        end can render the tab button and an empty pane; the module's own
-        JS (added via add_asset) fills the pane and does the wiring. This
-        keeps the host framework-agnostic about the module's UI.
-
-        The tab gets a permission, settings.<tab_id> (read = shown, write =
-        saveable; admin_only blocks it for every non-admin role by default),
-        and sits in the rail group `group` ("you", "server", "admin" or
-        "modules", the default).
+        """! @brief Add a Settings tab; the module's own JS fills its pane.
+        @param group       rail group: "you", "server", "admin" or "modules".
+        @param admin_only  block the tab for every non-admin role by default.
+        The tab gets the permission settings.<tab_id>: read shows it, write saves it.
         """
         feature = self.core.features.register_settings_tab(tab_id, label, admin_only=admin_only)
         self.settings_tabs.append({
@@ -228,20 +139,14 @@ class Host:
             "module_id": self._current_module,
         })
 
-    # ── settings ─────────────────────────────────────────────────────────
     def add_config_key(self, key, *, default=None, save=True,
                        validate=None, on_change=None, tab=None):
-        """Declare a config setting this module owns.
-
-        The registry seeds its default into state, includes it in the save
-        allowlist (unless save=False), validates incoming values, and runs
-        on_change(new, old) when update_settings changes it. This is how a
-        module stops needing core to know its setting exists.
-
-        tab    -- the settings tab whose permission (settings.<tab>) guards
-                  writes to this key. Only needed when the key has no settings
-                  field and the module has more than one tab (otherwise it is
-                  derived: field pane, else the module's tab, else Modules).
+        """! @brief Declare a setting this module owns (default, persistence, validation).
+        @param save       persist it.
+        @param validate   fn(value) -> cleaned value; raise or return None to reject.
+        @param on_change  fn(new, old) after a saved change.
+        @param tab        the tab whose permission guards writes; only needed for a
+                          key without a settings field in a module with several tabs.
         """
         self.config_registry.declare(
             key, default=default, save=save, validate=validate,
@@ -249,12 +154,31 @@ class Host:
         if tab:
             self.config_tabs[key] = tab
 
-    def on_setting_change(self, key, fn):
-        """Attach a change handler to an already-declared setting.
-
-        Convenience for the common case of adding a side effect to a key
-        (core or otherwise) without redeclaring its default.
+    def set_config(self, key, value, save=True):
+        """! @brief Change a setting from code through its validator and change hook.
+        @param save  persist now (False to batch several, then save_config()).
+        @return the stored value.
+        @throws ValueError when the validator rejects the value.
         """
+        handled, err = self.config_registry.apply(key, value, self.config)
+        if handled and err and not err.startswith("applied"):
+            raise ValueError(f"{key}: {err}")
+        if not handled:
+            self.config[key] = value
+        if save:
+            self.save_config()
+        return self.config.get(key)
+
+    def persist_model_selection(self, save=True):
+        """! @brief Persist the broker's current model picks (after broker.select)."""
+        return self.set_config("model_selection", self.broker.current_selection(), save=save)
+
+    def set_status(self, text):
+        """! @brief Set the header status line (job progress; never persisted)."""
+        self.config["status_text"] = str(text)
+
+    def on_setting_change(self, key, fn):
+        """! @brief Add a change handler to an already declared setting."""
         d = self.config_registry._settings.get(key)
         if d is not None:
             d["on_change"] = fn
@@ -262,25 +186,14 @@ class Host:
     def add_settings_field(self, *, key, label, kind="text", pane="general",
                            tab=None, options=None, help=None, admin_only=False,
                            section=None, columns=None):
-        """Contribute one settings-UI field bound to a config key.
-
-        kind    -- "text" | "number" | "toggle" | "select".
-        pane    -- pane id to place it in; "general" is the shared default pane.
-        tab     -- settings tab id; defaults to the module's own tab if it has
-                   one, else the General tab.
-        options -- for "select": list of {value,label} or a callable returning
-                   that (evaluated server-side at render, so a module can list
-                   e.g. its model providers).
-        section -- a named spot inside the pane: renders into
-                   #module_settings_fields_<pane>_<section> when the pane has
-                   one (General has "defaults" near the top and "system", a
-                   compact one-line strip at the bottom), else the pane's
-                   main list.
-        columns -- for kind="rows" (an editable list of small records):
-                   [{key, label, placeholder?}], one input per column.
-        The field renders in the settings modal and reads/writes its config key
-        through the normal settings save path; saving it needs write on the
-        pane's tab permission (settings.<tab>).
+        """! @brief Add a settings field bound to a config key.
+        @param kind     text | number | toggle | select | rows.
+        @param pane     pane id ("general" or a module pane).
+        @param tab      settings tab; defaults to the module's own tab, else General.
+        @param options  select choices [{value, label}] or a callable returning them.
+        @param section  a named spot inside the pane (General: "defaults", "system").
+        @param columns  for "rows": [{key, label, placeholder?}].
+        Saving needs write on the tab's permission.
         """
         self.settings_fields.append({
             "key": key, "label": label, "kind": kind, "pane": pane,
@@ -288,20 +201,14 @@ class Host:
             "admin_only": bool(admin_only), "section": section, "columns": columns,
             "module_id": self._current_module})
 
-    # ── per-user settings / account fields ───────────────────────────────
     def add_user_setting(self, key, *, label, kind="text", default=None, validate=None,
                          options=None, columns=None, feature=None, help=None, order=100):
-        """Declare a per-user setting, shown in Settings → User settings and
-        saved by each user for themselves (no settings.* permission needed).
-
-        kind     -- like add_settings_field: text | number | toggle | select | rows.
-        default  -- the value a user who never set it gets; a callable
-                    default(user) is evaluated per request (an admin default).
-        validate -- fn(value) -> cleaned value; raise ValueError to reject.
-        options  -- for select: [{value,label}] or a callable returning it.
-        feature  -- a permission the user needs at WRITE to change it (they
-                    still see it, read-only, with READ).
-        Read the effective value with host.user_setting(key).
+        """! @brief Declare a per-user setting (Settings > User settings).
+        @param kind      as add_settings_field.
+        @param default   value, or fn(user) evaluated per request.
+        @param validate  fn(value) -> cleaned value; raise ValueError to reject.
+        @param feature   permission needed at write to change it (read shows it).
+        Read it with user_setting(key).
         """
         self.user_settings[key] = {
             "key": key, "label": label, "kind": kind, "default": default,
@@ -310,28 +217,44 @@ class Host:
             "module_id": self._current_module}
 
     def user_setting(self, key, username=None):
-        """The current (or named) user's value for a per-user setting: their
-        own if set, else the declared default."""
+        """! @brief A user's value for a per-user setting, else its default."""
         return self.core.user_setting(key, username)
 
     def add_account_field(self, key, label, *, options=None, scopes=("user", "group"), help=None):
-        """Add a field an admin sets per account and / or per group in
-        Settings → Users (a user's value wins over their group's). Read the
-        resolved value off the request's user: g.user["account"].get(key).
-        options: [{value,label}] or a callable returning it ("" = unset)."""
+        """! @brief Add a field an admin sets per account and/or group in Settings > Users.
+        A user's value beats the group's; read it from g.user["account"][key].
+        @param options  [{value, label}] or a callable returning them ("" = unset).
+        """
         return self.core.auth.register_account_field(key, label, options=options,
                                                       scopes=scopes, help=help)
 
-    # ── registry points / services ───────────────────────────────────────
-    def provide_service(self, name, obj, priority=0):
-        """Publish a named service other modules may consume.
+    def update_file(self, target=None, **kw):
+        """! @brief Write file metadata or a per-file DB row (core update_file).
 
-        A "registry point": e.g. a training module exposes "trainer" so a UI
-        module can drive it. Highest priority wins; ties go to the later
-        registration (module reload safe). Modules that each ship a copy of a
-        shared helper publish it with priority=<its VERSION> so the newest copy
-        serves every module and nothing lives in the core. Consumers fetch via
-        get_service(name) and must handle None (provider absent).
+            host.update_file(rel, add={"tags": ["cat"]})
+            host.update_file(rel, remove={"regions": lambda r: r.get("debug")})
+            host.update_file(rel, exif={"Rating": 4})
+            host.update_file(rel, db={"face_done": 1}, dont_write=True)
+            host.update_file(rel, table="image_embeddings", key={"model": m},
+                             set={"vec": blob}, dont_write=True)
+
+        dont_write=True keeps the change in the DB only; module tables require it.
+        """
+        return self.core.update_file(target, **kw)
+
+    def register_metadata_writer(self, kind, fn, fields=(), claims=None):
+        """! @brief Route update_file(set=...) for a media kind to this module's writer.
+        @param fn      fn(rel, abs_path, fields, dont_write) -> falsy if the file is
+                       unknown, else True or a dict of extra result keys.
+        @param fields  field names the writer owns; the rest take the core path.
+        @param claims  fn(rel) -> bool for files the extension doesn't place in `kind`.
+        """
+        self.core.register_metadata_writer(kind, fn, fields, claims)
+
+    def provide_service(self, name, obj, priority=0):
+        """! @brief Publish a service other modules can look up with get_service.
+        @param priority  highest wins (ties: latest). A helper several modules ship a
+                         copy of is published with its version, so the newest serves all.
         """
         cur = self.services.get(name)
         if cur is None or priority >= cur.get("priority", 0):
@@ -340,9 +263,9 @@ class Host:
         return name
 
     def get_service(self, name, default=None):
-        """Fetch a service another module published, or `default` if no module
-        provides it (not installed / disabled). Consumers are expected to shim
-        this: `svc = host.get_service("trainer"); if not svc: <degrade>`."""
+        """! @brief A service another module published.
+        @return the service, or `default` when no enabled module provides it.
+        """
         s = self.services.get(name)
         return s["obj"] if s else default
 
@@ -352,119 +275,83 @@ class Host:
     def register_feature(self, key, label, *, section="modules",
                          section_label="Modules", default="write",
                          role_defaults=None):
-        """Register an auth feature this module owns.
-
-        default       -- the feature's own default LEVEL ("block"/"read"/
-                         "write"); an "inherit" user resolves to this.
-        role_defaults -- optional {role: level} baked into the role bundles, e.g.
-                         admin-only: {"viewer":"block","uploader":"block",
-                         "custom":"block"}. Enforce with host.require_feature.
+        """! @brief Register a permission feature this module owns.
+        @param default        the level an "inherit" user gets.
+        @param role_defaults  {role: level}, e.g. {"viewer": "block"}.
         """
         return self.core.features.register_feature(
             key, label, section=section, section_label=section_label,
             default=default, role_defaults=role_defaults)
 
     def require_feature(self, feature_key, action=None, fields=(), level="read"):
-        """The auth decorator, so a module gates its own endpoints. Enforces at
-        `level` (read to view, write to modify) using the current user's
-        resolved permission level for feature_key."""
+        """! @brief Decorator: require `level` on a feature for the current user."""
         return self.core.auth.require_feature(feature_key, action=action, fields=fields,
                                     level=level)
 
     def register_centre_pane(self, template):
-        """Contribute a centre-pane partial (rendered beside the image viewer,
-        hidden until its media mode is entered — pair with registerMediaMode
-        in your JS)."""
+        """! @brief Add a centre-pane partial (pair with registerMediaMode in JS)."""
         self.centre_panes.append({"template": template,
                                   "module_id": self._current_module})
 
     def register_app_modal(self, template):
-        """Contribute a top-level modal partial (from this module's templates/
-        dir) rendered into app.html server-side. The module owns the modal
-        markup; the trigger button can stay in core or be injected."""
+        """! @brief Add a modal partial from this module's templates/, rendered into app.html."""
         self.app_modals.append({"template": template,
                                 "module_id": self._current_module})
 
     def register_search_provider(self, fn):
-        """Contribute non-image search results merged into the gallery.
-        fn(text, folder, structured) -> list of entry dicts (each with a
-        distinct 'kind' the front end can render, e.g. 'book'/'comic')."""
+        """! @brief Add non-image search results to the gallery.
+        @param fn  fn(text, folder, structured) -> [entry], each with its own "kind".
+        """
         self.search_providers.append(fn)
 
     def register_search_type(self, prefix, handler, *, help=None):
-        """Register a custom search token handler.
-
-        prefix  -- token prefix including colon, e.g. "exif:" or "iptc:".
-        handler -- fn(token, value) -> (sql_clause, params) or ("", []).
-                   token is the full token (e.g. "exif:Make"), value is the
-                   part after the colon. Return empty clause to ignore.
-        help    -- one line shown in Settings → Info (syntax + example).
+        """! @brief Handle a custom search token.
+        @param prefix   token prefix with colon, e.g. "exif:".
+        @param handler  fn(token, value) -> (sql_clause, params); ("", []) to ignore.
+        @param help     one line for Settings > Info.
         """
         self.search_types[prefix] = handler
         self.search_help[prefix] = {"help": help or "", "module_id": self._current_module}
 
     def register_sort_key(self, name, expr, *, help=None):
-        """Register a gallery sort key for the `sort:` search token.
-
-        name -- key after `sort:` (lowercase), e.g. "width".
-        expr -- SQL expression over `files` used in ORDER BY, or a callable
-                returning one (evaluated per query; None skips the key).
-                Must take no parameters.
-        `sort:<name>` ascending, `sort:-<name>` or `sort:<name>:desc`
-        descending; several sort tokens chain in order; rel_path breaks ties.
+        """! @brief Add a key for the `sort:` search token.
+        @param name  the key, lowercase (`sort:name`, `sort:-name` for descending).
+        @param expr  SQL ORDER BY expression over files, without parameters, or a
+                     callable returning one (None skips it).
         """
         self.sort_keys[name.lower()] = expr
         names = ", ".join(sorted(self.sort_keys))
         self.search_help["sort:"] = {
             "help": f"sort:<key> or sort:-<key> (descending); keys: {names}"
-                    + (f" — {help}" if help else ""),
+                    + (f" - {help}" if help else ""),
             "module_id": self._current_module}
 
     def register_left_pane(self, template):
-        """Contribute a left-column pane partial (e.g. a shelf), server-rendered
-        into the left pane alongside the built-in panes. Pair with a left tab
-        (register_left_tab) whose pane_id matches the partial's root element."""
+        """! @brief Add a left-column pane partial; pair it with a left tab of the same pane id."""
         self.left_panes.append({"template": template,
                                 "module_id": self._current_module})
 
     def register_controls_pane(self, tab_id, template, *, feature=None):
-        """Contribute a controls-pane partial rendered server-side.
-
-        tab_id   -- matches the controls tab id (e.g. "exif"); the pane div
-                    becomes #controls_pane_<tab_id>.
-        template -- template name resolvable by Jinja, living in this module's
-                    templates/ dir (e.g. "exif_editor.html"). Rendered inside the
-                    controls pane at page build — no client fetch, no core edit.
-        feature  -- optional data-feature gate for the pane wrapper.
+        """! @brief Add a controls-pane partial, rendered server-side as #controls_pane_<tab_id>.
+        @param template  template in this module's templates/ folder.
+        @param feature   optional data-feature gate on the pane.
         """
         self.controls_panes.append({
             "tab_id": tab_id, "template": template, "feature": feature,
             "module_id": self._current_module})
 
-    # ── background workers ───────────────────────────────────────────────
     def add_worker_source(self, name, claim, handle, key_of=None, cost_of=None):
-        """Register a background worker source with the thread manager.
-
-        Same signature as thread_manager.register_source; here so a module
-        never has to import thread_manager by name.
-        """
+        """! @brief Register a thread-manager work source (see thread_manager.register_source)."""
         self.thread_manager.register_source(
             name, claim, handle, key_of=key_of, cost_of=cost_of)
 
-    # ── background sweeps ────────────────────────────────────────────────
     def add_background_sweep(self, cap_id, pending, run, batch=1):
-        """Give a non-region capability's "Run in background on every image"
-        switch (Models tab) something to do. The module that STORES the output
-        registers it: pending(db, n) -> up to n rel_paths still lacking this
-        capability's output under the background model; run(rel_path,
-        abs_path, handle) computes and stores it, handle being the background
-        provider's bound model. The core sweep source claims one file at a
-        time from every switched-on sweep, round robin, on the thread
-        manager's spare slots — new uploads are picked up the same way.
-        Region-shaped capabilities (detect/segment) keep the ingest path.
-        batch > 1: up to that many files go into one job and run is called as
-        run(rel_paths, abs_paths, handle) — for detectors that batch a forward
-        pass."""
+        """! @brief Give a capability's "run in background" switch its work.
+        @param pending  fn(db, n) -> up to n rel_paths still lacking this output.
+        @param run      fn(rel, abs, handle) computes and stores it; with batch > 1,
+                        fn(rels, abs_paths, handle).
+        Detect / segment capabilities use the ingest path instead.
+        """
         self.background_sweeps[cap_id] = {"pending": pending, "run": run,
                                           "batch": max(1, int(batch or 1)),
                                           "module_id": self._current_module}
@@ -473,9 +360,7 @@ class Host:
         caps = [c for c in self.broker.background_capabilities() if c in self.background_sweeps]
         if not caps:
             return None
-        # A library sweep never drains, so as the thread manager's lead source
-        # it would fill every free slot every tick and nothing else (downloads,
-        # uploads, a forced scan) would ever run. Take at most half the pool.
+        # A sweep never runs dry: cap it at half the pool so other work still gets slots.
         try:
             cap = max(1, int(self.thread_manager.max_slots()) // 2)
         except Exception:
@@ -512,12 +397,12 @@ class Host:
                     self._sweep_inflight += 1
                     return {"cap": cap, "rel_path": rels[0], "rel_paths": rels,
                             "key": keys[0], "keys": keys, "slot": slot}
-                if len(rows) < n or n >= 512:      # exhausted (or only failures left)
+                if len(rows) < n or n >= 512:
                     break
                 n *= 4
             if slot:
                 self.thread_manager.release_key(slot)
-            self._sweep_idle[cap] = now + 60       # nothing to do: look again in a minute
+            self._sweep_idle[cap] = now + 60
         return None
 
     def _sweep_handle(self, job):
@@ -539,9 +424,9 @@ class Host:
                 sweep["run"](ok[0][0], ok[0][1], handle)
             n = self._sweep_done[cap] = self._sweep_done.get(cap, 0) + len(ok)
             if n // 25 != (n - len(ok)) // 25:
-                self.config["status_text"] = f"[bg {cap}] {n} done…"
+                self.set_status(f"[bg {cap}] {n} done...")
         except Exception as e:
-            for r in rels:                          # don't spin on the same failure
+            for r in rels:  # skip failures instead of retrying them every tick
                 self._sweep_skip.add((cap, r))
             self.logger.error(f"background {cap} {rels[0]}{' +%d' % (len(rels) - 1) if len(rels) > 1 else ''}: {e}")
         finally:
@@ -557,14 +442,10 @@ class Host:
             self.thread_manager.register_source("background_sweep", self._sweep_claim,
                                                 self._sweep_handle, key_of=lambda j: j["key"])
 
-    # ── model capabilities ───────────────────────────────────────────────
     def declare_capability(self, cap_id, *, summary, input, output, label=None,
                            background=False):
-        """Declare a NEW model capability contract (first declarer owns it).
-
-        The core already declares detect / detect.faces / segment / pose / classify / depth.
-        Use this only to add a capability the core doesn't have. Attributed to
-        the calling module.
+        """! @brief Declare a new capability contract (first declarer owns it).
+        Only for capabilities the core doesn't declare already.
         """
         return self.broker.declare(cap_id, summary=summary, input=input,
                                    output=output, owner=self._current_module,
@@ -576,37 +457,22 @@ class Host:
                       sizes=None, types=None, settings=None, classes=None,
                       prompted=False, note="", speed="", supports_conf=None,
                       resource=None, concurrency=1):
-        """Register this module's model as a provider for a capability.
-
-        loader()   -> a callable model handle (back it with the runtime
-                      model_registry so repeat loads are cheap / LRU-evicted).
-        transform(raw_output, *call_args) -> the capability's canonical shape;
-                      this is where a provider reconciles its native format
-                      (e.g. YOLO boxes) with the contract so consumers get one
-                      shape regardless of which model ran.
-        available()-> bool; when False the provider is shown greyed-out and
-                      request() raises rather than returning it.
-        handles(model_path) -> bool, for path-parameterized caps ('box').
-        family     -> picker group label ("YOLO", "Mayaku"); defaults to label.
-        sizes      -> size ids the model comes in (["n","s","m","l","x"]);
-                      the picker greys the size select out when < 2.
-        types      -> [{value,label}] variants (pose 17 vs whole-body); same.
-        settings   -> extra widgets for this provider, [{key,label,kind,
-                      options?,help?}] with kind in text|number|toggle|select
-                      (options may be a callable). Each key must be declared
-                      via add_config_key; values save through update_settings.
-        classes()  -> ordered class names the model emits (may load weights);
-                      feeds the background-run class whitelist.
-        prompted   -> the handle takes (img, prompt) and needs the prompt (a
-                      vision LLM); foreground-only, never the background pick.
-        note       -> one-liner on when to pick this model (shown in the picker).
-        speed      -> "fast" | "balanced" | "accurate" cost class badge.
-        supports_conf -> the handle honours conf=<0..1>; the picker offers a
-                      min-confidence input. Defaults on for detect/segment/pose.
-        resource   -> name of the shared backend this model runs on (an external
-                      endpoint); every provider naming it shares one background
-                      budget of `concurrency` parallel jobs (int or callable).
-        The chosen size/type is read back with host.model_variant(cap_id).
+        """! @brief Register this module's model as a provider of a capability.
+        @param loader     fn() -> a callable model handle (cache it in model_registry).
+        @param transform  fn(raw, *args) -> the capability's canonical output.
+        @param available  fn() -> bool; unavailable providers show greyed out.
+        @param handles    fn(model_path) -> bool, for path-parameterised capabilities.
+        @param family     picker group label.
+        @param sizes      size ids, e.g. ["n", "s", "m"].
+        @param types      [{value, label}] variants.
+        @param settings   extra provider widgets [{key, label, kind, options?, help?}];
+                          each key must be declared with add_config_key.
+        @param classes    fn() -> class names, for the background class whitelist.
+        @param prompted   the handle takes (img, prompt); never a background pick.
+        @param note       one line shown in the picker.
+        @param speed      "fast" | "balanced" | "accurate".
+        @param supports_conf  the handle accepts conf=0..1.
+        @param resource   shared backend name; providers on it share `concurrency` jobs.
         """
         return self.broker.provide(
             cap_id, provider_id, label=label, loader=loader, transform=transform,
@@ -618,46 +484,38 @@ class Host:
             module_id=self._current_module)
 
     def model_variant(self, cap_id, role=None, provider=None):
-        """{"size","type","background","classes"} the user picked for a
-        capability (size/type default to the selected provider's first option).
-        Providers call this inside their loader."""
+        """! @brief The user's picks for a capability: {"size", "type", "background", "classes"}.
+        Called by providers inside their loader.
+        """
         return self.broker.variant(cap_id, role, provider)
 
     def request_model(self, cap_id, role="fg", provider=None):
-        """Get a ready handle for the user-selected provider of a capability.
-
-        Raises broker.NoProviderError (typed) when nothing satisfies it — the
-        consumer is expected to catch and degrade. The handle returns the
-        capability's canonical output shape.
+        """! @brief A ready handle for the selected provider of a capability.
+        @throws broker.NoProviderError when nothing can serve it.
         """
         return self.broker.request(cap_id, role, provider)
 
     def register_authenticator(self, fn):
-        """Add a way to authenticate a request besides the session cookie
-        (an API key module, a reverse-proxy header…). fn() runs before the
-        cookie on every request and returns None (nothing of mine on this
-        request), False (mine, but refused — the request stays anonymous) or
-        (user, info): user as core.authmgr._row_to_user builds it, info any
-        dict stored on g.api_key for policies to read."""
+        """! @brief Add a way to authenticate a request besides the session cookie.
+        @param fn  fn() -> None (not mine), False (mine, refused) or (user, info);
+                   info is stored on g.api_key.
+        """
         self.core.authmgr.authenticators.append(fn)
         
     def register_access_policy(self, policy):
-        """Add an object deciding, per request, what the current user may see
-        and change. Every method is optional (duck-typed):
+        """! @brief Add a per-request access policy (all methods optional):
 
-          files_clause(column) -> (clauses, params)   SQL on the files table
-                                                       limiting rows to the viewer
-          check_path(rel_path, write) -> bool          may this request resolve
-                                                       (write: modify) a media path
-          albums_clause(alias) -> (clauses, params)   SQL limiting album rows
-          album_level(name) -> 'owner'|'write'|'read'|None
-          album_info(name) -> dict                     merged into each album's
-                                                       /api/albums entry
-          album_event(event, **kw)                     created(name) / deleted(name)
-                                                       / renamed(old, new)
-          upload_folder(folder, form) -> folder        rewrite an upload's target
-        Core applies every registered policy (the most restrictive answer wins).
-        A request outside a Flask context, or with no policy, is unrestricted."""
+            files_clause(column) -> (clauses, params)   limit file rows
+            check_path(rel_path, write) -> bool
+            albums_clause(alias) -> (clauses, params)
+            album_level(name) -> "owner" | "write" | "read" | None
+            album_info(name) -> dict                    merged into /api/albums
+            album_event(event, **kw)                    created / deleted / renamed
+            upload_folder(folder, form) -> folder
+
+        The most restrictive answer of all policies wins; outside a request nothing
+        is restricted.
+        """
         self.access_policies.append(policy)
 
     def files_clause(self, column="rel_path"):
@@ -685,8 +543,7 @@ class Host:
     _LEVEL_RANK = {None: 0, "read": 1, "write": 2, "owner": 3}
 
     def album_level(self, name):
-        """The viewer's level on an album: the lowest any policy grants
-        ('owner' when no policy has an opinion)."""
+        """! @brief The viewer's level on an album: the lowest any policy gives ("owner" if none)."""
         level = "owner"
         for pol in self.access_policies:
             fn = getattr(pol, "album_level", None)
@@ -718,52 +575,33 @@ class Host:
         return folder
 
     def register_gallery_filter(self, clause):
-        """Hide rows from the flat gallery/folders listing: `clause` is a SQL
-        condition on the files table (no params), e.g. a comics module hiding
-        pages that belong to a comic folder."""
+        """! @brief Hide matching rows from the flat gallery (a SQL condition on files)."""
         self.gallery_filters.append(clause)
 
     def register_ai_actions(self, source, list_fn, run_fn, *, feature=None):
-        """Contribute actions to the editor's AI picker (target → action → Run)
-        and the bulk bar.
-
-        source   -- short id for this contributor ("vlm", "ocr", "detect")
-        list_fn  -- () -> [{"id", "label", "target"}] — target is WHAT the
-                    action produces: description | tags | regions (boxes) |
-                    segment | flag | body | ocr … (the same targets the VLM
-                    action editor uses). The picker's first dropdown is the
-                    target, the second the actions every contributor offers
-                    for it. Evaluated per request, so an editable list stays
-                    current.
-        run_fn   -- (action_id, fp, bgr, meta) -> dict, any of: regions (added
-                    unconfirmed), tags (added), description (appended), flag
-                    ({delete, reason}), note (toast). Single-image runs are
-                    applied live by the editor and saved by its autosave;
-                    bulk runs are written by the core.
-        feature  -- auth feature gating this contributor (omit = ai_tooling).
-        Which MODEL runs an action is the Models tab's business."""
+        """! @brief Add actions to the editor's AI picker and the bulk bar.
+        @param source   contributor id, e.g. "vlm".
+        @param list_fn  fn() -> [{"id", "label", "target"}]; target is what the
+                        action produces (description, tags, regions, flag, ...).
+        @param run_fn   fn(action_id, fp, bgr, meta) -> {regions, tags, description,
+                        flag, note} (any of them).
+        @param feature  permission gating these actions (default ai_tooling).
+        """
         self.ai_action_groups.append({"source": source, "list": list_fn, "run": run_fn,
                                       "feature": feature, "module_id": self._current_module})
 
     def register_action_target(self, name, fn):
-        """Contribute an AI-action target (the "target" of a configured action,
-        next to the core's description/tags/regions/flag). fn(fp, bgr, meta,
-        action) does the work and returns the regions it added (or True)."""
+        """! @brief Add an AI-action target.
+        @param fn  fn(fp, bgr, meta, action) -> the regions added, or True.
+        """
         self.action_targets[name] = fn
 
     def register_pipeline_stage(self, name, fn, *, label=None, editor=None):
-        """Contribute a stage the AI pipeline can run.
-
-        name   -- the node type used in the pipeline tree (e.g. "pose").
-        fn     -- fn(image_bgr) -> the stage's result dict, matching what
-                  run_pipeline expects for that stage (pose_fn/ocr_fn/etc.).
-        label  -- human label for the pipeline editor's node menu.
-        editor -- optional dict of editor hints (has_prompt, has_store, …) so
-                  the front end can render the node's controls; defaults to a
-                  plain no-LLM stage.
-        manager spreads the registered fns into run_pipeline as "<name>_fn",
-        so when this module is disabled the fn is simply absent and the
-        pipeline treats that node as an inert no-op.
+        """! @brief Add a stage the AI pipeline can run.
+        @param name    node type in the pipeline tree.
+        @param fn      fn(image_bgr) -> the stage result.
+        @param editor  hints for the pipeline editor (has_prompt, has_store, ...).
+        A disabled module's stage is simply absent and its nodes do nothing.
         """
         self.pipeline_stages[name] = {
             "fn": fn, "label": label or name,
@@ -771,39 +609,24 @@ class Host:
         return name
 
     def add_table(self, ddl, *, check=None):
-        """Declare a DB table this module owns.
-
-        ddl   -- a CREATE TABLE IF NOT EXISTS statement (or executescript-able
-                 string of several statements) run once after modules load.
-        check -- optional callable check(db) run once at startup for read-cache
-                 consistency: a module whose table caches a slower source of
-                 truth (e.g. ratings living in file XMP) uses this to detect and
-                 repair drift. Receives a live DB connection.
-        Recorded now; manager creates the table and runs the check after
-        register_all (the DB exists well before then). Modules that are
-        disabled never get here, so their table simply isn't created.
+        """! @brief Declare a table this module owns.
+        @param ddl    CREATE TABLE IF NOT EXISTS statement(s).
+        @param check  fn(db) run once at startup to repair a cache table that drifted
+                      from its source of truth.
         """
         self.db_tables.append({"ddl": ddl, "check": check,
                                "module_id": self._current_module})
 
     def register_file_enricher(self, fn):
-        """Contribute per-file fields to core gallery/list rows.
-
-        fn(db, rel_paths) -> {rel_path: {field: value, …}}. Core calls every
-        enabled module's enricher with the batch of paths it's rendering and
-        merges the returned fields into each row dict. Lets a module surface its
-        own data (rating, dimensions, …) in listings without a core column.
-        Enrichers must be cheap and batch-oriented; one query per call, not per
-        row.
+        """! @brief Add per-file fields to gallery / list rows.
+        @param fn  fn(db, rel_paths) -> {rel_path: {field: value}}; one query per call.
         """
         self.file_enrichers.append({"fn": fn, "module_id": self._current_module})
 
     def enrich_file_rows(self, db, rows, path_key="filename"):
-        """Apply all enabled enrichers to a list of row dicts in place.
-
-        rows      -- list of dicts already built from a files query.
-        path_key  -- which key holds the rel_path (gallery uses "filename").
-        Returns rows. Missing/failed enrichers are skipped, never fatal.
+        """! @brief Merge every enricher's fields into `rows` (in place).
+        @param path_key  the row key holding the rel_path.
+        @return rows.
         """
         if not rows or not self.file_enrichers:
             return rows
@@ -822,48 +645,40 @@ class Host:
         return rows
 
     def on_startup(self, fn):
-        """Queue fn() to run once, after the server is set up (in __main__).
-
-        Use for anything that must NOT run at import time — spawning
-        indexers, warming caches, registering worker sources that need the
-        thread manager already wired.
-        """
+        """! @brief Run fn() once after the server is up (not at import time)."""
         self.startup_hooks.append(fn)
 
     def register_media_type(self, kind, **spec):
-        """Declare a new file kind (extensions, mime, flags) with the core
-        media registry. The core then routes uploads / listings / kind()
-        for those extensions; the module never edits media_types.py."""
+        """! @brief Register a new file kind (extensions, mime, flags) with the media registry."""
         return self.media.register_media_type(kind, **spec)
 
     def extend_media_type(self, kind, **spec):
-        """Add extensions/mimes to a kind another module owns (comics -> book)."""
+        """! @brief Add extensions or mime types to a kind another module owns."""
         return self.media.extend_media_type(kind, **spec)
 
     def add_public_prefix(self, prefix):
-        """Open a URL prefix ("/api/<module>/inbound/") to the login gate so
-        another machine can call it without a browser session. Routes under
-        it MUST verify their own credential (a peer key) on every request."""
+        """! @brief Let a URL prefix through the login gate (machine-to-machine calls).
+        Routes under it must check their own credential on every request.
+        """
         return self.core.auth.add_public_prefix(prefix)
 
     def current_user(self):
-        """Username of the request's authenticated user ('' if none)."""
+        """! @brief The signed-in username, or ''."""
         from_g = getattr(self.core, "current_user", None)
         return from_g() if from_g else ""
 
     def on(self, event, fn):
-        """Subscribe fn(**kw) to a core event. Core emits, modules react, and
-        the core never has to know which module cares. Current events:
-          library.reconcile            after the image index scan (no args)
-          upload.duplicate_check(sha, filename) -> existing rel_path | None
-          upload.stored(rel_path, filename)     after a file lands in the library
-          file.renamed(old_rel, new_rel)        after a rename / move
+        """! @brief Subscribe fn(**kw) to a core event, e.g. library.reconcile,
+        upload.duplicate_check(sha, filename), upload.stored(rel_path, filename),
+        file.renamed(old_rel, new_rel), file.deleted(rel_path),
+        file.metadata_changed(rel_path, abs_path, fields).
         """
         self.event_hooks.setdefault(event, []).append(fn)
 
     def emit(self, event, **kw):
-        """Run every subscriber for event; returns the list of non-None results
-        (a failing subscriber is logged and skipped)."""
+        """! @brief Call every subscriber of `event`; a failing one is logged and skipped.
+        @return the non-None results.
+        """
         out = []
         for fn in self.event_hooks.get(event, []):
             try:
@@ -876,7 +691,6 @@ class Host:
         return out
 
     def run_startup_hooks(self):
-        """Called by manager.py from __main__ after core startup."""
         for fn in self.startup_hooks:
             try:
                 fn()
@@ -885,13 +699,7 @@ class Host:
         self._start_sweeps()
 
     def apply_db_tables(self, db):
-        """Create module-owned tables and run their consistency checks once.
-
-        Called by manager after register_all, with a live DB connection. Each
-        table's DDL runs first (idempotent CREATE IF NOT EXISTS), then its
-        check() if given. Failures are logged, never raised, so one module's
-        bad DDL can't stop the app.
-        """
+        """! @brief Create module tables and run their checks; failures are logged, never raised."""
         for t in self.db_tables:
             try:
                 db.executescript(t["ddl"])

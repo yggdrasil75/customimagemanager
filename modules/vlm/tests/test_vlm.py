@@ -1,4 +1,5 @@
-"""Vision-LLM module: routes and provider wiring. Calls to the endpoint only
+"""! @file
+@brief Vision-LLM module: routes and provider wiring. Calls to the endpoint only
 happen with --cim-remote (and --cim-config pointing at a config with the
 endpoint + model)."""
 import pytest

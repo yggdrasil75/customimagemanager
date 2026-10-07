@@ -1,9 +1,9 @@
-"""
-family_share: end-to-end encryption.
+"""! @file
+@brief family_share: end-to-end encryption.
 ======================================================================
 Every photo and every byte of metadata is encrypted on the SENDING instance
-and decrypted only on the RECEIVING instance. Nothing in between — the
-apartment router, the ISP, whoever is on the wifi, a reverse proxy — sees
+and decrypted only on the RECEIVING instance. Nothing in between - the
+apartment router, the ISP, whoever is on the wifi, a reverse proxy - sees
 more than ciphertext plus a peer name and an envelope header. TLS is still
 worth having (it hides the peer name and sizes) but nothing here relies on it.
 
@@ -51,7 +51,7 @@ class CryptoError(Exception):
     pass
 
 
-# ── keys ────────────────────────────────────────────────────────────────────
+# -- keys --------------------------------------------------------------------
 def b64e(b):
     return base64.urlsafe_b64encode(b).decode().rstrip("=")
 
@@ -62,7 +62,7 @@ def b64d(s):
 
 
 def generate_private_key():
-    """-> base64 raw 32-byte private key."""
+    """! @brief -> base64 raw 32-byte private key."""
     return b64e(X25519PrivateKey.generate().private_bytes(
         serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()))
 
@@ -73,7 +73,7 @@ def public_key(priv_b64):
 
 
 def fingerprint(pub_b64):
-    """Short human-checkable form of a public key (first 16 hex of SHA-256)."""
+    """! @brief Short human-checkable form of a public key (first 16 hex of SHA-256)."""
     h = hashes.Hash(hashes.SHA256()); h.update(b64d(pub_b64))
     hexd = h.finalize().hex()[:16]
     return " ".join(hexd[i:i + 4] for i in range(0, 16, 4))
@@ -101,9 +101,9 @@ def _derive(shared, salt, label):
                 info=_INFO + label).derive(shared)
 
 
-# ── sender ──────────────────────────────────────────────────────────────────
+# -- sender ------------------------------------------------------------------
 class Sealer:
-    """One envelope: seal_meta() once, then stream a file through seal_file()."""
+    """! @brief One envelope: seal_meta() once, then stream a file through seal_file()."""
 
     def __init__(self, sender_priv_b64, recipient_pub_b64):
         eph = X25519PrivateKey.generate()
@@ -123,13 +123,13 @@ class Sealer:
         return b64e(nonce + ct)
 
     def seal_file(self, src_path, dst_path):
-        """Write the framed ciphertext stream of src_path to dst_path."""
+        """! @brief Write the framed ciphertext stream of src_path to dst_path."""
         with open(src_path, "rb") as fin, open(dst_path, "wb") as fout:
             self.seal_stream(fin, os.path.getsize(src_path), fout)
         return dst_path
 
     def seal_stream(self, fin, size, fout):
-        """Frame `size` bytes read from fin into fout (see module docstring)."""
+        """! @brief Frame `size` bytes read from fin into fout (see module docstring)."""
         aes = AESGCM(self._k_file)
         done = 0; i = 0
         while True:
@@ -144,7 +144,7 @@ class Sealer:
                 break
 
     def iter_frames(self, path, size):
-        """Generator of sealed frames for a streamed response, made as they are
+        """! @brief Generator of sealed frames for a streamed response, made as they are
         sent so a video never sits in RAM."""
         aes = AESGCM(self._k_file)
         done = 0; i = 0
@@ -161,7 +161,7 @@ class Sealer:
                     return
 
     def seal_bytes(self, data):
-        """Framed ciphertext of an in-memory blob (a thumbnail, a listing)."""
+        """! @brief Framed ciphertext of an in-memory blob (a thumbnail, a listing)."""
         out = io.BytesIO()
         self.seal_stream(io.BytesIO(data), len(data), out)
         return out.getvalue()
@@ -171,7 +171,7 @@ def _file_aad(i, last):
     return b"file:%d:%d" % (i, 1 if last else 0)
 
 
-# ── receiver ────────────────────────────────────────────────────────────────
+# -- receiver ----------------------------------------------------------------
 class Opener:
     def __init__(self, recipient_priv_b64, sender_pub_b64, header):
         try:
@@ -205,7 +205,7 @@ class Opener:
         return obj
 
     def open_file(self, stream, dst_path):
-        """Decrypt a framed stream (a file-like with .read) into dst_path."""
+        """! @brief Decrypt a framed stream (a file-like with .read) into dst_path."""
         with open(dst_path, "wb") as fout:
             self.open_stream(stream, fout)
         return dst_path
@@ -255,7 +255,7 @@ def _read_exact(stream, n):
 
 
 def check_freshness(meta, my_id, max_age=MAX_SKEW):
-    """The decrypted metadata must be recent and addressed to us. max_age is
+    """! @brief The decrypted metadata must be recent and addressed to us. max_age is
     MAX_SKEW for direct delivery; mailbox items may legitimately wait days,
     and are protected from replay by the seen-envelope table instead."""
     ts = float(meta.get("ts") or 0)
@@ -266,9 +266,9 @@ def check_freshness(meta, my_id, max_age=MAX_SKEW):
         raise CryptoError("envelope is addressed to another instance")
 
 
-# ── pairing code ────────────────────────────────────────────────────────────
+# -- pairing code ------------------------------------------------------------
 def make_pairing_code(name, url, pub_b64, key_in, instance_id="", peer_name=""):
-    """One string to hand the other side: who I am, where I am, my public key,
+    """! @brief One string to hand the other side: who I am, where I am, my public key,
     the secret they must send me, and the name I have them under (they must
     present exactly that name, so it travels with the code)."""
     body = json.dumps({"v": VERSION, "name": name, "url": url, "pub": pub_b64, "key": key_in,

@@ -1,5 +1,5 @@
-"""
-Qwen3-VL-Embedding module — multimodal embeddings (HuggingFace).
+"""! @file
+@brief Qwen3-VL-Embedding module - multimodal embeddings (HuggingFace).
 ======================================================================
 Provides `embed` with Alibaba's Qwen3-VL-Embedding, sizes 2B (2048-d) and
 8B (4096-d). Images and text share one vector space, so this is the local
@@ -44,7 +44,7 @@ MANIFEST = {
 MODELS = {"2b": "Qwen/Qwen3-VL-Embedding-2B", "8b": "Qwen/Qwen3-VL-Embedding-8B"}
 _SIZES = ["2b", "8b"]
 _COST_MB = {"2b": 4500, "8b": 17000}        # bf16 weights; float32 on CPU is ~2x
-FACTOR = 32                                  # one visual token = 16px patch × 2 merge
+FACTOR = 32                                  # one visual token = 16px patch x 2 merge
 MAX_LENGTH = 8192
 DOC_INSTRUCTION = "Represent the user's input."
 QUERY_INSTRUCTION = "Retrieve images or text relevant to the user's query."
@@ -54,7 +54,7 @@ _registered: set = set()
 
 
 def _model_class():
-    """The reference wrapper: Qwen3VLModel (no LM head) under `model`, so the
+    """! @brief The reference wrapper: Qwen3VLModel (no LM head) under `model`, so the
     published checkpoint's keys (model.language_model.*, model.visual.*)
     load as-is. Built lazily because the base class is None without
     transformers."""
@@ -97,7 +97,7 @@ class _Embedder:
         text = self.proc.apply_chat_template([messages], add_generation_prompt=True,
                                              tokenize=False)
         # the image processor's own smart_resize: sides to multiples of
-        # patch×merge (32) inside the pixel budget, aspect kept
+        # patchxmerge (32) inside the pixel budget, aspect kept
         kw = {"images": images, "min_pixels": 4 * FACTOR * FACTOR,
               "max_pixels": max_tokens * FACTOR * FACTOR} if images else {}
         inputs = self.proc(text=text, padding=True, truncation=True, max_length=MAX_LENGTH,
@@ -124,7 +124,7 @@ class _Embedder:
         return _normalise(v, dims)
 
     def embed_doc_text(self, text, dims):
-        """A passage (document side): the reference's document instruction."""
+        """! @brief A passage (document side): the reference's document instruction."""
         text = (text or "").strip()
         if not text:
             return None
@@ -137,7 +137,7 @@ def registry_key(model_id):
 
 
 def load(model_id, size):
-    """The embedder via the runtime registry (LRU-evicted), or None."""
+    """! @brief The embedder via the runtime registry (LRU-evicted), or None."""
     key = registry_key(model_id)
     with _lock:
         if key not in _registered:
@@ -178,13 +178,13 @@ def register(host):
              "most GPUs; 8B wants ~17 GB VRAM in bf16.",
         settings=[
             {"key": "qwen3vl_embed_max_tokens", "label": "Max image tokens", "kind": "number",
-             "help": "Visual tokens per image (pixels ÷ 1024 after resize). The reference "
+             "help": "Visual tokens per image (pixels / 1024 after resize). The reference "
                      "uses 1800; lower is faster."},
             {"key": "qwen3vl_embed_dims", "label": "Vector dims (MRL)", "kind": "number",
              "help": "0 = native (2048 for 2B, 4096 for 8B). Smaller vectors stay comparable "
                      "and keep the table small; changing it means regenerating."},
         ])
-    # embed.text: the same model as a text-only pick. Useful when one model
+    ## @brief embed.text: the same model as a text-only pick. Useful when one model
     # should serve everything; a dedicated text model (text_embed module) is
     # the better pick for long passages.
     def _text_loader():

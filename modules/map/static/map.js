@@ -16,7 +16,7 @@
     loading: null,       // Promise for the lazy Leaflet load
     map: null,
     cluster: null,
-    points: [],          // [[rel, lat, lon, isVideo], …]
+    points: [],          // [[rel, lat, lon, isVideo], ...]
     byRel: new Map(),    // rel -> L.Marker
     current: null,       // L.CircleMarker ring on the open file
     currentRel: null,
@@ -63,7 +63,7 @@
     return S.loading;
   }
 
-  // ── markers ───────────────────────────────────────────────────────────
+  // -- markers -----------------------------------------------------------
   function photoIcon(rel, video) {
     return L.divIcon({
       className: "cim-map-pin",
@@ -112,7 +112,7 @@
     if (el) el.textContent = `${S.points.length.toLocaleString()} geotagged`;
     const sc = document.getElementById("map_scan");
     if (sc) sc.textContent = scan && scan.running
-      ? `reading locations… ${scan.done.toLocaleString()}/${scan.total.toLocaleString()}` : "";
+      ? `reading locations... ${scan.done.toLocaleString()}/${scan.total.toLocaleString()}` : "";
   }
 
   async function fetchPoints() {
@@ -140,7 +140,7 @@
     } catch (e) { console.error(e); }
   }
 
-  // ── map setup ─────────────────────────────────────────────────────────
+  // -- map setup ---------------------------------------------------------
   async function init() {
     await loadLeaflet();
     const d = await fetchPoints();
@@ -195,7 +195,7 @@
     return !!(S.map && pane && !pane.classList.contains("hidden"));
   }
 
-  // ── open-file highlight ───────────────────────────────────────────────
+  // -- open-file highlight -----------------------------------------------
   async function highlight(rel, pan) {
     if (!S.map) return;
     S.currentRel = rel;
@@ -227,7 +227,7 @@
     });
   }
 
-  // ── toolbar actions ───────────────────────────────────────────────────
+  // -- toolbar actions ---------------------------------------------------
   function mapFitAll() {
     if (!S.map) return;
     if (!S.points.length) { S.map.setView([20, 0], 2); return; }
@@ -262,7 +262,7 @@
         body: JSON.stringify({ force: true }),
       }).then(r => r.json());
       if (!d.success) { toast(d.error || "Rescan failed"); return; }
-      toast("Re-reading locations…");
+      toast("Re-reading locations...");
       updateCount({ running: true, done: 0, total: (d.scan && d.scan.total) || 0 });
       clearTimeout(S.poll);
       S.poll = setTimeout(reload, 1500);

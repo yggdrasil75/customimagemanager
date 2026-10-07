@@ -1,4 +1,5 @@
-"""Module registry: every plugin discovered, manifest shape, toggle API."""
+"""! @file
+@brief Module registry: every plugin discovered, manifest shape, toggle API."""
 import os
 import pytest
 

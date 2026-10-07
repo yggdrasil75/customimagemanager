@@ -2,19 +2,19 @@
    straight into MWG-rs regions; the SQLite cluster cache is disposable.
 
    Two sub-sections stacked in one scroll area:
-     * FACES  — ArcFace identity clusters (the original pane).
-     * BODIES — DINOv3 re-id clusters of the 'person' boxes, each associated
+     * FACES  - ArcFace identity clusters (the original pane).
+     * BODIES - DINOv3 re-id clusters of the 'person' boxes, each associated
                 with a face cluster by in-image containment. Only rendered when
                 Body re-id is enabled in Settings. #}
 <div id="faces_pane" class="hidden flex-1 flex flex-col overflow-hidden">
   <div class="flex items-center gap-2 p-2 bg-gray-800 border-b border-gray-700 flex-shrink-0" data-feature="tab.faces.edit">
     <button onclick="rescanFaces()"
-      class="text-xs bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded font-bold">
+      class="text-xs bg-indigo-700 hover:bg-indigo-600 px-2 py-1 rounded font-bold">
       Force Scan
     </button>
     <label class="flex items-center gap-1 text-xs text-gray-300 select-none cursor-pointer"
       title="Reset: clear results and re-detect at live priority. Unchecked: run the existing scan as the current task, no reset.">
-      <input type="checkbox" id="faces_reset" class="accent-purple-600">
+      <input type="checkbox" id="faces_reset" class="accent-indigo-600">
       reset
     </label>
     <button onclick="reclusterFaces()"
@@ -29,8 +29,8 @@
     <span id="faces_status" class="text-[11px] text-gray-500 ml-auto"></span>
   </div>
   <div id="faces_warn"
-    class="hidden text-[11px] bg-yellow-900/40 text-yellow-300 px-3 py-1.5 border-b border-yellow-800">
-    insightface not installed — clustering by appearance only. The same person
+    class="hidden text-[11px] bg-amber-900/40 text-amber-300 px-3 py-1.5 border-b border-amber-800">
+    insightface not installed - clustering by appearance only. The same person
     may split across several clusters. <code>pip install insightface onnxruntime</code>
   </div>
   <div id="faces_drawn_bar"

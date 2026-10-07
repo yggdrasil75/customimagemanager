@@ -66,9 +66,10 @@
       'border:0;border-radius:6px;padding:3px 8px;cursor:pointer">Logout</button>';
     document.body.appendChild(b);
     document.getElementById('cim-logout-btn').onclick = state.logout;
-    // The badge floats over the top-right corner. Publish its width so a
-    // layout whose header runs under that corner can leave room for it:
-    // padding-right: calc(var(--cim-user-badge-w, 0px) + 16px).
+    /** @brief The badge floats over the top-right corner. Publish its width so a
+     *  layout whose header runs under that corner can leave room for it:
+     *  padding-right: calc(var(--cim-user-badge-w, 0px) + 16px).
+     */
     const publish = () => document.documentElement.style.setProperty(
       '--cim-user-badge-w', Math.ceil(b.getBoundingClientRect().width) + 'px');
     publish();
@@ -212,7 +213,7 @@
       '<option value="' + r + '"' + (r === sel ? ' selected' : '') + '>' + r + '</option>').join('');
   }
   function groupOptions(sel) {
-    return '<option value="">— none —</option>' + _groups.map(g =>
+    return '<option value="">- none -</option>' + _groups.map(g =>
       '<option value="' + g.id + '"' + (g.id === sel ? ' selected' : '') + '>' +
       esc(g.name) + '</option>').join('');
   }
@@ -223,7 +224,7 @@
   function xfFor(scope) { return _accountFields.filter(f => (f.scopes || []).includes(scope)); }
   function xfOptions(f, sel) {
     const opts = (f.options || []).slice();
-    if (!opts.some(o => o.value === '')) opts.unshift({ value: '', label: '—' });
+    if (!opts.some(o => o.value === '')) opts.unshift({ value: '', label: '-' });
     return opts.map(o => '<option value="' + esc(o.value) + '"' + ((o.value || '') === (sel || '') ? ' selected' : '') +
       '>' + esc(o.label) + '</option>').join('');
   }
@@ -231,7 +232,7 @@
     return '<select ' + attrs + ' title="' + esc(f.help || f.label) + '" style="background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:5px;padding:2px">' +
       xfOptions(f, sel) + '</select>';
   }
-  // The "add" rows get their selects once the field list is known.
+  /** @brief The "add" rows get their selects once the field list is known. */
   function syncAddRows() {
     for (const [scope, rowId, prefix] of [['user', 'cim-add', 'cim-na-xf-'], ['group', 'cim-grp-add', 'cim-ng-xf-']]) {
       const btn = document.getElementById(rowId);
@@ -335,9 +336,9 @@
       '<div style="background:#1f2937;color:#e5e7eb;border-radius:12px;padding:20px;' +
       'width:460px;max-width:92vw;max-height:86vh;overflow:auto">' +
       '<div style="display:flex;justify-content:space-between;align-items:center">' +
-      '<h2 style="margin:0;font-size:15px">Features · ' + esc(label) + '</h2>' +
+      '<h2 style="margin:0;font-size:15px">Features | ' + esc(label) + '</h2>' +
       '<button id="cim-feat-close" style="background:none;border:0;color:#9ca3af;font-size:20px;cursor:pointer">&times;</button></div>' +
-      '<p style="color:#9ca3af;margin:6px 0 12px">Per feature: default (role/group), inherit (feature default), or an explicit level — block &lt; read &lt; write.</p>' +
+      '<p style="color:#9ca3af;margin:6px 0 12px">Per feature: default (role/group), inherit (feature default), or an explicit level - block &lt; read &lt; write.</p>' +
       '<table style="width:100%;border-collapse:collapse">' + rows + '</table>' +
       '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">' +
       '<button id="cim-feat-cancel" style="background:#4b5563;color:#e5e7eb;border:0;border-radius:6px;padding:6px 12px;cursor:pointer">Cancel</button>' +

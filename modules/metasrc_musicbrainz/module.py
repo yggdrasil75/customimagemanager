@@ -1,4 +1,5 @@
-"""MusicBrainz — music metadata source (no key)."""
+"""! @file
+@brief MusicBrainz - music metadata source (no key)."""
 MANIFEST = {
     "id": "metasrc_musicbrainz", "name": "MusicBrainz (music)", "version": "1.0.0",
     "description": "Track metadata from musicbrainz.org: title, artist, album, year, "
@@ -25,7 +26,7 @@ def register(host):
             med = (rel.get("media") or [{}])[0]
             trk = (med.get("track") or [{}])[0]
             out.append({"id": rec["id"], "title": rec.get("title", ""),
-                        "subtitle": " · ".join(x for x in (artist, rel.get("title"), (rel.get("date") or "")[:4]) if x),
+                        "subtitle": " | ".join(x for x in (artist, rel.get("title"), (rel.get("date") or "")[:4]) if x),
                         "thumb": f"https://coverartarchive.org/release/{rel['id']}/front-250" if rel.get("id") else None,
                         "fields": {"title": rec.get("title", ""), "artist": artist, "album": rel.get("title", ""),
                                    "albumartist": ", ".join(a.get("name", "") for a in rel.get("artist-credit", [])

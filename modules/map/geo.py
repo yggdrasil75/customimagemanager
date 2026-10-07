@@ -1,9 +1,9 @@
-"""
-Where a file was taken, read from the file itself (the source of truth).
+"""! @file
+@brief Where a file was taken, read from the file itself (the source of truth).
 
 Order, last one wins:
-  1. the file's own EXIF GPS IFD        (Exif.GPSInfo.GPSLatitude …)
-  2. the file's embedded XMP            (Xmp.exif.GPSLatitude …)
+  1. the file's own EXIF GPS IFD        (Exif.GPSInfo.GPSLatitude ...)
+  2. the file's embedded XMP            (Xmp.exif.GPSLatitude ...)
   3. a video's container location tag   (ffprobe: ISO 6709 '+37.7749-122.4194/')
   4. the .xmp sidecar beside the file   (imports and edits land here)
 
@@ -43,7 +43,7 @@ if _HAVE_PYEXIV2 and hasattr(pyexiv2, "enableBMFF") and _pyexiv2_version() < (2,
 
 
 def valid(lat, lon):
-    """Signed decimal degrees in range, and not the (0, 0) no-fix marker."""
+    """! @brief Signed decimal degrees in range, and not the (0, 0) no-fix marker."""
     try:
         lat, lon = float(lat), float(lon)
     except (TypeError, ValueError):
@@ -56,13 +56,13 @@ def valid(lat, lon):
 
 
 def _num(s):
-    """'37/1' or '37.5' -> float."""
+    """! @brief '37/1' or '37.5' -> float."""
     n, _, d = str(s).strip().partition("/")
     return float(n) / (float(d) if d.strip() else 1.0)
 
 
 def exif_rational(value, ref):
-    """EXIF GPS triple '37/1 46/1 1629/100' (+ ref N/S/E/W) -> signed degrees."""
+    """! @brief EXIF GPS triple '37/1 46/1 1629/100' (+ ref N/S/E/W) -> signed degrees."""
     if value in (None, ""):
         return None
     try:
@@ -83,7 +83,7 @@ _XMP_COORD = re.compile(r"^\s*([+-]?\d+(?:\.\d+)?)(?:,(\d+(?:\.\d+)?))?(?:,(\d+(
 
 
 def xmp_coord(value):
-    """XMP GPSCoordinate -> signed degrees.
+    """! @brief XMP GPSCoordinate -> signed degrees.
 
     'DDD,MM,SSk', 'DDD,MM.mmk', 'DDD.dddk' or a bare signed decimal."""
     if value in (None, ""):
@@ -105,7 +105,7 @@ _ISO6709 = re.compile(r"([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)")
 
 
 def iso6709(value):
-    """'+37.7749-122.4194+010.000/' -> (lat, lon) or None (decimal form only)."""
+    """! @brief '+37.7749-122.4194+010.000/' -> (lat, lon) or None (decimal form only)."""
     if not value:
         return None
     m = _ISO6709.search(str(value))
@@ -115,7 +115,7 @@ def iso6709(value):
     return (lat, lon) if valid(lat, lon) else None
 
 
-# Attribute form  exif:GPSLatitude="37,46.27N"  or element form
+## @brief Attribute form  exif:GPSLatitude="37,46.27N"  or element form
 # <exif:GPSLatitude>37,46.27N</exif:GPSLatitude>, any prefix bound to the exif ns.
 def _xmp_text_value(text, local):
     m = re.search(r'\b[\w-]+:' + local + r'\s*=\s*"([^"]*)"', text)
@@ -126,7 +126,7 @@ def _xmp_text_value(text, local):
 
 
 def from_xmp_text(text):
-    """(lat, lon) from raw XMP packet text, or None."""
+    """! @brief (lat, lon) from raw XMP packet text, or None."""
     if not text or "GPSLatitude" not in text:
         return None
     lat = xmp_coord(_xmp_text_value(text, "GPSLatitude"))
@@ -191,7 +191,7 @@ def _from_container(path):
 
 
 def source_mtime(path):
-    """Newest mtime of the file and its sidecar: changes when either is edited."""
+    """! @brief Newest mtime of the file and its sidecar: changes when either is edited."""
     t = 0.0
     for p in (path, sidecar_path(path)):
         try:
@@ -202,7 +202,7 @@ def source_mtime(path):
 
 
 def read_location(path, is_video=False):
-    """(lat, lon) for a library file, or None."""
+    """! @brief (lat, lon) for a library file, or None."""
     best = None
     if is_video:
         best = _from_container(path)
@@ -217,7 +217,7 @@ def read_location(path, is_video=False):
 
 
 def box_around(lat, lon, km):
-    """(south, west, north, east) of a square ~km around a point. Longitude is
+    """! @brief (south, west, north, east) of a square ~km around a point. Longitude is
     widened by 1/cos(lat); near the poles it opens to the whole band."""
     dlat = km / 111.32
     c = math.cos(math.radians(lat))
@@ -234,7 +234,7 @@ def box_around(lat, lon, km):
 
 
 def bbox_clause(s, w, n, e):
-    """SQL over geo(lat, lon) for a box; w > e crosses the antimeridian."""
+    """! @brief SQL over geo(lat, lon) for a box; w > e crosses the antimeridian."""
     if w <= e:
         return "(lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?)", [s, n, w, e]
     return "(lat BETWEEN ? AND ? AND (lon >= ? OR lon <= ?))", [s, n, w, e]

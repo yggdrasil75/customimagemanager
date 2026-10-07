@@ -1,5 +1,5 @@
-"""
-People — face/body region scan worker, clustering, person records and the
+"""! @file
+@brief People - face/body region scan worker, clustering, person records and the
 Faces / Person / mesh APIs. Moved out of manager.py verbatim; the core names
 the bodies reference are bound into this module's globals by register()
 (see _bind) so the logic is unchanged while manager.py no longer knows
@@ -26,10 +26,18 @@ import common
 
 # core names bound by _bind(host); declared so linters and readers see them
 _db = state = MEDIA_DIR = get_safe_path = read_jxl = _to_bgr = read_metadata = None
-write_metadata = access_logger = thread_manager = _background_instances = None
+update_file = access_logger = thread_manager = _background_instances = None
 _fold_background = _detect_obb_or_box = None
 _faces = _bodies = _body_on = HOST = None
 _merge_regions = _read_pose_from_xmp = _kpts_in_box = _last_activity = None
+
+
+def _rows(table, where, params=(), set=None, remove=False, commit=False):
+    """! @brief Region-cache rows (face_regions / body_regions / ...) are DB-only: every
+    change goes through core update_file with dont_write=True. Returns the
+    number of rows touched."""
+    return update_file(table=table, where=(where, tuple(params)), set=set, remove=remove,
+                       dont_write=True, commit=commit).get("rows", 0)
 
 
 def _bind(host):
@@ -37,7 +45,7 @@ def _bind(host):
     globals().update({
         "HOST": host, "_db": host.db, "state": host.config, "MEDIA_DIR": host.media_dir,
         "get_safe_path": host.safe_path, "read_jxl": c.read_image, "_to_bgr": c.to_bgr,
-        "read_metadata": c.read_metadata, "write_metadata": c.write_metadata,
+        "read_metadata": c.read_metadata, "update_file": c.update_file,
         "access_logger": host.logger, "thread_manager": host.thread_manager,
         "_background_instances": c.background_instances, "_fold_background": c.fold_background,
         "_detect_obb_or_box": c.detect_boxes,
@@ -49,7 +57,7 @@ def _bind(host):
     })
 
 
-# ── Background face / person boxing + clustering ───────────────────────────────
+# -- Background face / person boxing + clustering -------------------------------
 # set whenever new embeddings land; the worker reclusters once the queue drains
 _face_dirty = {"v": False}
 # A MANUAL "Rescan all" is an explicit instruction, so it must bypass the idle
@@ -73,8 +81,8 @@ def _face_log(msg, *args):
     access_logger.info("face: " + (msg % args if args else msg))
 
 def _face_err(msg, *args):
-    """Problems, not progress. access_logger carries the shared ERROR handler, so
-    anything logged here also lands in logs/error.log — which is where you look
+    """! @brief Problems, not progress. access_logger carries the shared ERROR handler, so
+    anything logged here also lands in logs/error.log - which is where you look
     when the scan misbehaves, instead of grepping it out of access.log."""
     access_logger.error("face: " + (msg % args if args else msg))
 
@@ -136,14 +144,14 @@ def _face_regions_for_batch(imgs, rels, face_run=None, person_run=None,
     @brief Batched equivalent of _face_regions_for for a list of images.
     @return List (len == len(imgs)) of MWG-shaped region-dict lists.
     @note Runs each detector ONCE over the whole batch (face, person, optional
-          custom) — the real YOLO batching. Per-image background segmentation is
+          custom) - the real YOLO batching. Per-image background segmentation is
           still done per image (segmenters are not batch-aware); it is skipped in
           the batched path only when no background capability is on (the default).
     """
     n = len(imgs)
     results = [[] for _ in range(n)]
 
-    # Faces — one forward pass over the batch through the picked provider
+    # Faces - one forward pass over the batch through the picked provider
     # (the sweep hands in the background pick; a forced scan uses the foreground one).
     try:
         run = face_run or HOST.broker.request("detect.faces")
@@ -162,7 +170,7 @@ def _face_regions_for_batch(imgs, rels, face_run=None, person_run=None,
                                "confirmed": False, "region_tags": [],
                                "region_description": "", "_drawn": b.get("_drawn")})
 
-    # People — the picked 'detect.persons' provider, batched when it can.
+    # People - the picked 'detect.persons' provider, batched when it can.
     try:
         prun = person_run or HOST.request_model("detect.persons")
         pconf = HOST.broker.variant("detect.persons", "bg" if person_run else None)["conf"]
@@ -183,7 +191,7 @@ def _face_regions_for_batch(imgs, rels, face_run=None, person_run=None,
                                           "region_tags": [], "region_description": ""})
 
     # Region-shaped background capabilities (detect/segment, Models tab) ride
-    # the face pass — per image; ponytail: no batch API on handles.
+    # the face pass - per image; ponytail: no batch API on handles.
     for i in range(n):
         if faces and imgs[i] is not None:
             _fold_background(_background_instances(imgs[i]), person_regions_per[i], results[i])
@@ -212,18 +220,8 @@ def _upsert_region_embeddings(table: str, rel: str, boxes: list, vecs: list,
         cols   = {"w": w, "h": h, "embedding": blob, "embed_mode": mode}
         if extra and extra[i]:
             cols.update(extra[i])
-        cur = db.execute(
-            f"SELECT id FROM {table} WHERE rel_path=? AND cx=? AND cy=?",
-            (rel, cx, cy)).fetchone()
-        if cur:
-            sets = ",".join(f"{c}=?" for c in cols)
-            db.execute(f"UPDATE {table} SET {sets} WHERE id=?",
-                       (*cols.values(), cur[0]))
-        else:
-            allcols = ["rel_path", "cx", "cy", *cols]
-            ph = ",".join("?" * len(allcols))
-            db.execute(f"INSERT INTO {table} ({','.join(allcols)}) VALUES ({ph})",
-                       (rel, cx, cy, *cols.values()))
+        update_file(rel, table=table, key={"cx": cx, "cy": cy}, set=cols,
+                    dont_write=True, commit=False)
     db.commit()
 
 def _cache_faces(rel: str, img, regions: list) -> None:
@@ -267,7 +265,7 @@ def _reject_eps() -> float:
     return float(state.get("face_cluster_eps") or (_faces() or {}).get("DEFAULT_EPS", 0.4))
 
 def _reject_centroids(mode: str):
-    """(N,d) float32 matrix of rejected-cluster centroids for this embedding
+    """! @brief (N,d) float32 matrix of rejected-cluster centroids for this embedding
     space, or None when there are none."""
     rows = _db().execute("SELECT centroid FROM face_rejects WHERE mode=?", (mode or "",)).fetchall()
     vecs = [np.frombuffer(r[0], np.float32) for r in rows]
@@ -285,7 +283,7 @@ def _near_reject(v, rejects) -> bool:
     return bool((1.0 - rejects @ v).min() < _reject_eps())
 
 def _skip_scan_reason(rel: str) -> str:
-    """Why an image should get no face scan at all ('' = scan it): flagged
+    """! @brief Why an image should get no face scan at all ('' = scan it): flagged
     AI-generated, or carrying one of the user's skip tags."""
     skip_ai = bool(state.get("face_skip_ai_generated"))
     skip_tags = {t.strip().lower() for t in str(state.get("face_skip_tags") or "").split(",") if t.strip()}
@@ -330,10 +328,8 @@ def _sync_names_from_metadata(rel: str) -> int:
                 or name.lower() in {str(r.get(k, "")).lower()
                                     for k in ("class_name", "region_type")}):
             continue
-        n += db.execute(
-            "UPDATE face_regions SET name=?, confirmed=1 WHERE rel_path=? "
-            "AND abs(cx-?)<1e-3 AND abs(cy-?)<1e-3",
-            (name, rel, float(r["cx"]), float(r["cy"]))).rowcount
+        n += _rows("face_regions", "rel_path=? AND abs(cx-?)<1e-3 AND abs(cy-?)<1e-3",
+                   (rel, float(r["cx"]), float(r["cy"])), set={"name": name, "confirmed": 1})
     db.commit()
     return n
 
@@ -357,14 +353,13 @@ def _cache_bodies(rel: str, img, regions: list) -> None:
 
 def _mark_body_done(rel: str) -> None:
     """! @brief Mark a file's body-embedding pass complete."""
-    _db().execute("UPDATE files SET body_done=1 WHERE rel_path=?", (rel,))
-    _db().commit()
+    update_file(rel, db={"body_done": 1}, dont_write=True)
 
 def _face_scan_lease_keys():
-    """Registry keys the face-scan pass touches per image, so we can lease them
+    """! @brief Registry keys the face-scan pass touches per image, so we can lease them
     resident for the whole pass. On a small resident-model budget, acquiring
     insightface (or the body backbone) after the YOLO detector would otherwise
-    evict the detector, forcing a reload+refuse on the very next image — the thrash
+    evict the detector, forcing a reload+refuse on the very next image - the thrash
     that both wastes time and trips ultralytics' double-fuse ('Conv has no bn')."""
     keys = []
     fs = _faces()
@@ -414,9 +409,9 @@ def _face_process_one(job) -> None:
         # wise re-enter setup every poll. Back off so we retry ~once a minute and
         # keep the queue intact; the source self-heals the moment the model loads.
         _face_setup_backoff["until"] = time.time() + 60
-        _face_err("SETUP FAILED (%s) — backing off 60s", e)
+        _face_err("SETUP FAILED (%s) - backing off 60s", e)
         err = (_faces() or {}).get("face_model_error", lambda: "")() or "model/detector unavailable"
-        state["status_text"] = f"Face scan: stalled ({err}) — retrying, check Settings."
+        HOST.set_status(f"Face scan: stalled ({err}) - retrying, check Settings.")
         return
     _face_setup_backoff["until"] = 0.0   # setup worked → clear any prior backoff
     failed = 0
@@ -429,7 +424,7 @@ def _face_process_one(job) -> None:
             pass
         # Did the batch actually advance the queue? If these rows are still
         # face_done=0 the scan will re-serve them forever and the count will sit
-        # still — this line is the one that proves it either way.
+        # still - this line is the one that proves it either way.
         try:
             qs = ",".join("?" * len(rels))
             still = _db().execute(
@@ -454,8 +449,8 @@ def _face_detect_batch(rels: list, face_run=None, person_run=None,
     @brief Detect faces/people for a whole batch with ONE YOLO forward pass per
            detector, then finish (metadata + embed) per image.
     @return Count of images that failed and were marked done to keep the queue moving.
-    @note This is the real batching. Detection — the slow, GPU-bound part even
-          under migraphx — was previously N sequential single-image calls; now the
+    @note This is the real batching. Detection - the slow, GPU-bound part even
+          under migraphx - was previously N sequential single-image calls; now the
           batch's decoded images are handed to YOLO as one list. Decode, metadata
           write and embedding stay per image (they are not GPU-batchable here).
     """
@@ -467,7 +462,7 @@ def _face_detect_batch(rels: list, face_run=None, person_run=None,
             _mark_face_done(rel)
         if bodies:
             _mark_body_done(rel)
-    # ── decode phase: load every image up front so detection sees a full batch ──
+    # -- decode phase: load every image up front so detection sees a full batch --
     abs_paths, imgs, decoded_rels = [], [], []
     for rel in rels:
         abs_p = get_safe_path(MEDIA_DIR, rel)
@@ -499,13 +494,13 @@ def _face_detect_batch(rels: list, face_run=None, person_run=None,
     if not decoded_rels:
         return failed
 
-    # ── detect phase: single batched forward pass per detector ──
+    # -- detect phase: single batched forward pass per detector --
     _t = time.time()
     try:
         regions_per = _face_regions_for_batch(imgs, decoded_rels, face_run, person_run,
                                               faces=faces, bodies=bodies)
     except Exception as e:
-        # Detection blew up for the whole batch — fall back so the queue still drains.
+        # Detection blew up for the whole batch - fall back so the queue still drains.
         _face_err("batch detect failed, marking %d done: %s", len(decoded_rels), e)
         for rel in decoded_rels:
             failed += 1
@@ -514,14 +509,14 @@ def _face_detect_batch(rels: list, face_run=None, person_run=None,
         return failed
     _face_t["detect"] += time.time() - _t
 
-    # ── finish phase: metadata + embeds, per image (one bad image can't sink the rest) ──
+    # -- finish phase: metadata + embeds, per image (one bad image can't sink the rest) --
     for rel, abs_p, bgr, found in zip(decoded_rels, abs_paths, imgs, regions_per):
         try:
             if found:
                 _t = time.time()
                 meta = read_metadata(abs_p)
                 merged = _merge_regions(meta["regions"], found)
-                write_metadata(abs_p, meta["tags"], meta["description"], merged)
+                update_file(abs_p, set={"regions": merged}, meta=meta)
                 _face_t["meta"] += time.time() - _t
                 _t = time.time()
                 if faces:
@@ -563,21 +558,21 @@ def _claim_face_job():
         _face_skip("queue empty (nothing with face_done=0)")
         # queue drained: trailing cluster pass, then settle status
         if _face_dirty["v"]:
-            state["status_text"] = "Face scan: clustering…"
+            HOST.set_status("Face scan: clustering...")
             n = _recluster()
             _face_dirty["v"] = False
-            state["status_text"] = f"Face scan: done ({n} cluster(s))."
+            HOST.set_status(f"Face scan: done ({n} cluster(s)).")
         elif forced:
-            state["status_text"] = "Face scan: complete."
+            HOST.set_status("Face scan: complete.")
         else:
-            state["status_text"] = "Face scan: all caught up."
+            HOST.set_status("Face scan: all caught up.")
         _face_force["v"] = False
         return None
     left = _db().execute(
         "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
     _face_log("claimed %d (%s), %d left", len(rows),
               "forced" if forced else "idle", left)
-    state["status_text"] = f"Face scan: {left} image(s) left…"
+    HOST.set_status(f"Face scan: {left} image(s) left...")
     return [r[0] for r in rows]
 
 def _register_face_source():
@@ -585,7 +580,7 @@ def _register_face_source():
         "face", _claim_face_job, _face_process_one,
         key_of=lambda job: "face-scan")
 
-# ── Models-tab sweeps: Face detection and Person detection, each on its own ──
+# -- Models-tab sweeps: Face detection and Person detection, each on its own --
 # switch, each marking only its own *_done column. The host batches files for
 # them (FACE_BATCH) so the detector still gets one forward pass per batch.
 _body_dirty = {"v": False}
@@ -595,8 +590,8 @@ def _face_sweep_pending(db, n):
                       "AND media_kind='image' ORDER BY rel_path LIMIT ?", (n,)).fetchall()
     if not rows and _face_dirty["v"]:            # drained: trailing cluster pass
         _face_dirty["v"] = False
-        state["status_text"] = "Face scan: clustering…"
-        state["status_text"] = f"Face scan: done ({_recluster()} cluster(s))."
+        HOST.set_status("Face scan: clustering...")
+        HOST.set_status(f"Face scan: done ({_recluster()} cluster(s)).")
     return [r[0] for r in rows]
 
 def _face_sweep_run(rels, fps, handle):
@@ -607,7 +602,7 @@ def _body_sweep_pending(db, n):
                       "AND media_kind='image' ORDER BY rel_path LIMIT ?", (n,)).fetchall()
     if not rows and _body_dirty["v"]:
         _body_dirty["v"] = False
-        state["status_text"] = f"Body scan: done ({_recluster_bodies()} cluster(s))."
+        HOST.set_status(f"Body scan: done ({_recluster_bodies()} cluster(s)).")
     return [r[0] for r in rows]
 
 def _body_sweep_run(rels, fps, handle):
@@ -619,8 +614,7 @@ def _register_sweeps():
 
 def _mark_face_done(rel: str) -> None:
     """! @brief Mark a file's face-boxing pass complete."""
-    _db().execute("UPDATE files SET face_done=1 WHERE rel_path=?", (rel,))
-    _db().commit()
+    update_file(rel, db={"face_done": 1}, dont_write=True)
 
 def _recluster_table(table: str, default_mode: str, eps_for) -> int:
     """!
@@ -677,14 +671,15 @@ def _recluster_table(table: str, default_mode: str, eps_for) -> int:
     updates = [(-1, i) for i in old_by_id]
     for lab, members in new_members.items():
         updates += [(assign[lab], i) for i in members]
-    db.executemany(f"UPDATE {table} SET cluster_id=? WHERE id=?", updates)
+    for cid, rid in updates:
+        _rows(table, "id=?", (rid,), set={"cluster_id": cid})
     return len(new_members)
 
 def _enforce_confirmed_names(ids, labels, name_by_id):
-    """Never let one cluster hold two different confirmed names.
+    """! @brief Never let one cluster hold two different confirmed names.
 
     Post-process the clusterer's labels: for every proposed cluster, look at the
-    confirmed names inside it. If it carries more than one, split it by name —
+    confirmed names inside it. If it carries more than one, split it by name -
     each confirmed name keeps its own sub-cluster, and unconfirmed members follow
     the confirmed name they sit closest to *by majority* (we have no vectors here,
     so unnamed rows go to the largest confirmed group in that cluster, which is the
@@ -751,8 +746,7 @@ def _propagate_cluster_names(db, table: str) -> set:
             f"SELECT name FROM {table} WHERE cluster_id=? AND confirmed=1 "
             "AND name<>'' LIMIT 1", (lab,)).fetchone()
         if known:
-            db.execute(f"UPDATE {table} SET name=? WHERE cluster_id=? "
-                       "AND confirmed=0", (known[0], lab))
+            _rows(table, "cluster_id=? AND confirmed=0", (lab,), set={"name": known[0]})
             named.add(lab)
     return named
 
@@ -779,12 +773,11 @@ def _recluster_bodies() -> int:
             "WHERE b.cluster_id=? AND f.name<>'' "
             "GROUP BY f.name ORDER BY c DESC LIMIT 1", (lab,)).fetchone()
         if face_name:
-            db.execute("UPDATE body_regions SET name=? WHERE cluster_id=? "
-                       "AND confirmed=0", (face_name[0], lab))
+            _rows("body_regions", "cluster_id=? AND confirmed=0", (lab,), set={"name": face_name[0]})
     db.commit()
     return total
 
-# ── Unified person model ────────────────────────────────────────────────────--
+# -- Unified person model ------------------------------------------------------
 def _build_appearances(cluster_id: int) -> list:
     """! @brief Split a face cluster into time-scoped appearances by embedding drift.
     @return List of appearance dicts, each with era-scoped centroids, membership and date span.
@@ -1007,7 +1000,7 @@ def estimate_person_mesh(cluster_id: int, appearance_id: Optional[str] = None) -
     @return True when a mesh was produced and written for that era; False if the
             estimator is absent, the person/era is unresolved, or too few usable
             crops exist. Shape is averaged across the era's crops with outliers
-            dropped — never mixed across eras, never a single view.
+            dropped - never mixed across eras, never a single view.
     """
     bs = _bodies()
     if not bs or not bs["have_mesh_estimator"]():
@@ -1035,7 +1028,7 @@ def _person_face_crops(cluster_id: int, rel_set: set,
                        cap: int = 300):
     """! @brief Load face crops for one appearance's images, for 3D face fitting.
     @param rel_set Only images in this era contribute, so a face mesh never mixes
-           an 18- and a 60-year-old face — same era-isolation as the body path.
+           an 18- and a 60-year-old face - same era-isolation as the body path.
     @param min_frac Skip face boxes whose smaller side is under this fraction of the
            image; a tiny or truncated face gives a garbage 3DMM fit.
     @return List of (bgr_image, box), largest first and capped; empty when none.
@@ -1074,7 +1067,7 @@ def estimate_person_face_mesh(cluster_id: int,
     fs = _faces()
     if not fs or not fs["have_face_estimator"]():
         return False, ("No face estimator available: the buffalo_l face model isn't "
-                       "loadable. Ensure insightface and its models are installed — "
+                       "loadable. Ensure insightface and its models are installed - "
                        "the default landmark-based face mesh needs no extra download.")
     person_uuid, app = _resolve_appearance(cluster_id, appearance_id)
     if app is None:
@@ -1095,10 +1088,10 @@ def estimate_person_face_mesh(cluster_id: int,
     personlib.upsert_appearance(MEDIA_DIR, person_uuid, app)
     return True, ""
 
-# ── Faces API ─────────────────────────────────────────────────────────────────
+# -- Faces API -----------------------------------------------------------------
 def _cluster_summary(table, extra_cols, sample_cols, sample_key, row_to_sample,
                      extra_to_fields=None, sample_limit=30, flag_filter=""):
-    """Shared face/body cluster listing. One aggregate query for counts/names and
+    """! @brief Shared face/body cluster listing. One aggregate query for counts/names and
     one windowed query for up-to-N samples per cluster, instead of a per-cluster
     sample SELECT (N+1 -> 2 queries total).
 
@@ -1136,7 +1129,7 @@ def _cluster_summary(table, extra_cols, sample_cols, sample_key, row_to_sample,
     return clusters, singles
 
 def _cluster_outlier_dists(cluster_ids):
-    """For each given face cluster, cosine distance of every member from the
+    """! @brief For each given face cluster, cosine distance of every member from the
     cluster centroid, keyed by face-region id.
 
     This is what powers "show the least-certain faces last": a face far from its
@@ -1182,7 +1175,7 @@ def _cluster_outlier_dists(cluster_ids):
     return dists
 
 def api_face_clusters():
-    """Clusters for the Faces tab, biggest first. Unnamed clusters lead.
+    """! @brief Clusters for the Faces tab, biggest first. Unnamed clusters lead.
 
     Unknown and not_face rows are excluded from the listing. Each face sample
     carries `dist` (cosine distance from its cluster centroid) so the UI can sort
@@ -1230,7 +1223,7 @@ def api_face_clusters():
                     "identity": bool(_faces() and _faces()["have_identity_embedder"]())})
 
 def _body_cluster_ids_for_face_cluster(db, face_cid: int) -> list:
-    """Body clusters bound to a face cluster: any body row holding one of its
+    """! @brief Body clusters bound to a face cluster: any body row holding one of its
     faces votes for its body cluster; keep clusters where that binding is the
     majority so one mis-binding can't hijack a stranger's body cluster."""
     rows = db.execute(
@@ -1269,7 +1262,7 @@ def _attach_body_info(clusters: list, sample: int = 12) -> None:
                        for r in rows[:sample]]
 
 def api_body_clusters():
-    """Body (re-id) clusters for the Faces tab, biggest first. Each cluster
+    """! @brief Body (re-id) clusters for the Faces tab, biggest first. Each cluster
     reports how many of its members are linked to a face (associated) so the UI
     can show the face<->body binding strength."""
     clusters, singles = _cluster_summary(
@@ -1284,7 +1277,7 @@ def api_body_clusters():
                     "identity": bool(_bodies() and _bodies()["have_body_embedder"]())})
 
 def api_body_deny():
-    """A body chip on a person card is wrong: unbind it from its face and push it
+    """! @brief A body chip on a person card is wrong: unbind it from its face and push it
     out of its cluster (-1) so the person no longer reaches that photo through
     the body bridge. Confirmed rows are left alone."""
     d = request.json or {}
@@ -1292,13 +1285,12 @@ def api_body_deny():
     if bid < 0:
         return jsonify({"success": False, "error": "id required"})
     db = _db()
-    db.execute("UPDATE body_regions SET cluster_id=-1, face_id=NULL, name='' "
-               "WHERE id=? AND COALESCE(confirmed,0)=0", (bid,))
-    db.commit()
+    _rows("body_regions", "id=? AND COALESCE(confirmed,0)=0", (bid,),
+          set={"cluster_id": -1, "face_id": None, "name": ""}, commit=True)
     return jsonify({"success": True})
 
 def api_body_name():
-    """Bulk-name a body cluster. Writes the name into every MWG 'person' region
+    """! @brief Bulk-name a body cluster. Writes the name into every MWG 'person' region
     it covers (metadata is the source of truth), same contract as face naming."""
     d = request.json or {}
     cid  = int(d.get("cluster_id", -1))
@@ -1322,12 +1314,9 @@ def api_body_name():
                 r["confirmed"]   = True
                 hit = True
         if hit:
-            write_metadata(abs_p, meta["tags"], meta["description"], meta["regions"])
+            update_file(abs_p, set={"regions": meta["regions"]})
             touched += 1
-    _db().execute(
-        "UPDATE body_regions SET name=?, confirmed=1 WHERE cluster_id=?",
-        (name, cid))
-    _db().commit()
+    _rows("body_regions", "cluster_id=?", (cid,), set={"name": name, "confirmed": 1}, commit=True)
     return jsonify({"success": True, "named": touched})
 
 def _person_date_flags(cluster_id: int) -> list:
@@ -1420,7 +1409,7 @@ def api_person_tag_suggestions(cluster_id):
                     "image_total": image_total})
 
 def api_person_get(cluster_id):
-    """The unified person record for a face cluster (created on first view).
+    """! @brief The unified person record for a face cluster (created on first view).
     Each appearance reports whether its T-pose and mesh exist, plus any faces whose
     stored date disagrees with their embedding era (advisory, never auto-applied)."""
     person_uuid = person_for_cluster(cluster_id, create=True)
@@ -1446,7 +1435,7 @@ def api_person_get(cluster_id):
                     "face_estimator_name": (_faces() or {}).get("face_estimator_name", lambda: "")()})
 
 def api_person_field(cluster_id):
-    """Set one body/bio/list field, through the same store the pipeline uses.
+    """! @brief Set one body/bio/list field, through the same store the pipeline uses.
     Body fields target an appearance (defaults to the largest era)."""
     d = request.json or {}
     ok = store_person_field(cluster_id, d.get("section", ""), d.get("key", ""),
@@ -1454,7 +1443,7 @@ def api_person_field(cluster_id):
     return jsonify({"success": ok})
 
 def api_person_relationship(cluster_id):
-    """Replace one relationship line and write the reciprocal edge on each linked
+    """! @brief Replace one relationship line and write the reciprocal edge on each linked
     person, so both records hold the link. External edges (name only) write one side."""
     d = request.json or {}
     line = d.get("line", "")
@@ -1468,9 +1457,9 @@ def api_person_relationship(cluster_id):
     return jsonify({"success": ok})
 
 def api_persons_directory():
-    """Typeahead source: every KNOWN (named) person as {uuid, name, cluster_id}.
+    """! @brief Typeahead source: every KNOWN (named) person as {uuid, name, cluster_id}.
 
-    A person is anyone with a name — either a written .person record or a named
+    A person is anyone with a name - either a written .person record or a named
     face cluster that has no record yet. Unnamed records are excluded: you can't
     link a relationship to a person you can't identify. Named clusters without a
     record are included so typeahead finds every named person in the library, not
@@ -1482,7 +1471,7 @@ def api_persons_directory():
     for desc in personlib.list_all(MEDIA_DIR):
         name = (desc.get("name") or "").strip()
         if not name:
-            continue      # can't identify — never offered as a relationship target
+            continue      # can't identify - never offered as a relationship target
         row = db.execute("SELECT cluster_id FROM persons WHERE uuid=? LIMIT 1",
                          (desc["uuid"],)).fetchone()
         by_uuid[desc["uuid"]] = {"uuid": desc["uuid"], "name": name,
@@ -1503,11 +1492,11 @@ def api_persons_directory():
     return jsonify({"success": True, "people": sorted(out, key=lambda p: p["name"].lower())})
 
 def api_persons_review():
-    """One-sided relationship edges for the review tab (never auto-repaired)."""
+    """! @brief One-sided relationship edges for the review tab (never auto-repaired)."""
     return jsonify({"success": True, "problems": personlib.check_reciprocity(MEDIA_DIR)})
 
 def _run_estimator(fn, cluster_id, appearance_id):
-    """Run an estimator and turn any unexpected error into a clean (False, reason)
+    """! @brief Run an estimator and turn any unexpected error into a clean (False, reason)
     JSON response. Normal 'can't do it' cases already return (False, reason); this
     only catches genuine faults (e.g. a corrupt insightface install raising on the
     canonical mean shape) so the UI shows why instead of an opaque 500."""
@@ -1519,23 +1508,23 @@ def _run_estimator(fn, cluster_id, appearance_id):
     return jsonify({"success": ok, "reason": reason})
 
 def api_person_tpose(cluster_id):
-    """Estimate and store the canonical T-pose for one appearance."""
+    """! @brief Estimate and store the canonical T-pose for one appearance."""
     d = request.json or {}
     return _run_estimator(estimate_person_tpose, cluster_id, d.get("appearance_id"))
 
 def api_person_mesh(cluster_id):
-    """Estimate and store the body mesh for one appearance (no-op if estimator absent)."""
+    """! @brief Estimate and store the body mesh for one appearance (no-op if estimator absent)."""
     d = request.json or {}
     return _run_estimator(estimate_person_mesh, cluster_id, d.get("appearance_id"))
 
 def api_person_face_mesh(cluster_id):
-    """Estimate and store the 3D FACE mesh for one appearance (no-op if no face
+    """! @brief Estimate and store the 3D FACE mesh for one appearance (no-op if no face
     estimator is installed)."""
     d = request.json or {}
     return _run_estimator(estimate_person_face_mesh, cluster_id, d.get("appearance_id"))
 
 def api_person_face_mesh_data(cluster_id, appearance_id):
-    """Serve one appearance's canonical FACE mesh as a raw .obj, for the 3D viewer's
+    """! @brief Serve one appearance's canonical FACE mesh as a raw .obj, for the 3D viewer's
     Face mode. 404 when the person, appearance, or face-mesh member is absent so the
     front-end falls back to the placeholder."""
     person_uuid = person_for_cluster(cluster_id, create=False)
@@ -1548,7 +1537,7 @@ def api_person_face_mesh_data(cluster_id, appearance_id):
     return data, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
 def api_person_mesh_data(cluster_id, appearance_id):
-    """Serve one appearance's canonical body mesh as a raw .obj, for the 3D viewer.
+    """! @brief Serve one appearance's canonical body mesh as a raw .obj, for the 3D viewer.
 
     Returns 404 when the person, appearance, or mesh member is absent so the
     front-end can fall back to a placeholder rather than erroring."""
@@ -1562,7 +1551,7 @@ def api_person_mesh_data(cluster_id, appearance_id):
     return data, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
 def api_person_tpose_data(cluster_id, appearance_id):
-    """Serve one appearance's canonical T-pose keypoints as JSON, for the 3D
+    """! @brief Serve one appearance's canonical T-pose keypoints as JSON, for the 3D
     viewer's skeleton fallback when no mesh has been estimated yet."""
     person_uuid = person_for_cluster(cluster_id, create=False)
     if not person_uuid:
@@ -1574,7 +1563,7 @@ def api_person_tpose_data(cluster_id, appearance_id):
     return data, 200, {"Content-Type": "application/json"}
 
 def api_face_scan():
-    """Force a rescan (clears face_done) or just recluster what's cached.
+    """! @brief Force a rescan (clears face_done) or just recluster what's cached.
 
     A rescan used to be a no-op in practice: it reset face_done and returned,
     but nothing consumed the queue (the worker thread was never started) and
@@ -1587,10 +1576,11 @@ def api_face_scan():
     if reset or "reset" in d or "rescan" in d:
         db = _db()
         if reset:
-            db.execute("UPDATE files SET face_done=0, body_done=0")
-            db.execute("DELETE FROM face_regions WHERE COALESCE(confirmed,0)=0 "
-                       "AND COALESCE(not_face,0)=0 AND COALESCE(unknown,0)=0")
-            db.execute("DELETE FROM body_regions WHERE COALESCE(confirmed,0)=0")
+            update_file(where=("1=1", ()), db={"face_done": 0, "body_done": 0},
+                        dont_write=True, commit=False)
+            _rows("face_regions", "COALESCE(confirmed,0)=0 AND COALESCE(not_face,0)=0 "
+                                  "AND COALESCE(unknown,0)=0", remove=True)
+            _rows("body_regions", "COALESCE(confirmed,0)=0", remove=True)
             db.commit()
         _face_dirty["v"] = True
         _face_force["v"] = True
@@ -1600,7 +1590,7 @@ def api_face_scan():
         pending = db.execute(
             "SELECT COUNT(*) FROM files WHERE COALESCE(face_done,0)=0").fetchone()[0]
         verb = "starting" if reset else "resuming"
-        state["status_text"] = f"Face scan: {verb} ({pending} image(s))…"
+        HOST.set_status(f"Face scan: {verb} ({pending} image(s))...")
         return jsonify({"success": True, "status": "rescanning", "pending": pending,
                         "reset": reset, "forced": True})
     n = _recluster()
@@ -1608,7 +1598,7 @@ def api_face_scan():
     return jsonify({"success": True, "clusters": n})
 
 def api_face_recover():
-    """Rebuild names + person links after a broken recluster: pull every confirmed
+    """! @brief Rebuild names + person links after a broken recluster: pull every confirmed
     name back out of file metadata, drop stale unconfirmed name suggestions,
     recluster (confirmed names never share a cluster), then re-point each .person
     record at the cluster(s) carrying its name."""
@@ -1616,8 +1606,7 @@ def api_face_recover():
     named = 0
     for (rel,) in db.execute("SELECT DISTINCT rel_path FROM face_regions").fetchall():
         named += _sync_names_from_metadata(rel)
-    db.execute("UPDATE face_regions SET name='' WHERE COALESCE(confirmed,0)=0")
-    db.commit()
+    _rows("face_regions", "COALESCE(confirmed,0)=0", set={"name": ""}, commit=True)
     clusters = _recluster()
     relinked = 0
     for desc in personlib.list_all(MEDIA_DIR):
@@ -1636,7 +1625,7 @@ def api_face_recover():
                     "persons_relinked": relinked})
 
 def api_face_progress():
-    """Poll target for the Faces tab: how much of the library is still queued."""
+    """! @brief Poll target for the Faces tab: how much of the library is still queued."""
     db = _db()
     fs = _faces()
     pending = db.execute(
@@ -1662,7 +1651,7 @@ def api_face_progress():
                     "status": state.get("status_text", "")})
 
 def api_face_name():
-    """Bulk-name a cluster. Writes the name into every MWG region it covers —
+    """! @brief Bulk-name a cluster. Writes the name into every MWG region it covers -
     metadata is the source of truth, the DB is only the cache."""
     d = request.json or {}
     cid  = int(d.get("cluster_id", -1))
@@ -1687,17 +1676,14 @@ def api_face_name():
                 r["confirmed"]   = True
                 hit = True
         if hit:
-            write_metadata(abs_p, meta["tags"], meta["description"], meta["regions"])
+            update_file(abs_p, set={"regions": meta["regions"]})
             touched += 1
 
-    _db().execute(
-        "UPDATE face_regions SET name=?, confirmed=1 WHERE cluster_id=?",
-        (name, cid))
-    _db().commit()
+    _rows("face_regions", "cluster_id=?", (cid,), set={"name": name, "confirmed": 1}, commit=True)
     return jsonify({"success": True, "named": touched})
 
 def api_face_split():
-    """Kick a wrong face out of its cluster (back to unclustered)."""
+    """! @brief Kick a wrong face out of its cluster (back to unclustered)."""
     d = request.json or {}
     ids = d.get("ids")
     if ids is None:
@@ -1715,16 +1701,12 @@ def api_face_split():
             "SELECT COALESCE(MAX(cluster_id), -1) FROM face_regions").fetchone()[0]
         new_id = int(top) + 1
         # A carved-off group is a user decision, not the clusterer's guess, so
-        # clear name/confirmed — they'll name it themselves in the new row.
-        db.execute(
-            f"UPDATE face_regions SET cluster_id=?, name='', confirmed=0 "
-            f"WHERE id IN ({ph})", (new_id, *ids))
-        db.commit()
+        # clear name/confirmed - they'll name it themselves in the new row.
+        _rows("face_regions", f"id IN ({ph})", ids,
+              set={"cluster_id": new_id, "name": "", "confirmed": 0}, commit=True)
         return jsonify({"success": True, "cluster_id": new_id, "moved": len(ids)})
 
-    db.execute(
-        f"UPDATE face_regions SET cluster_id=-1 WHERE id IN ({ph})", ids)
-    db.commit()
+    _rows("face_regions", f"id IN ({ph})", ids, set={"cluster_id": -1}, commit=True)
     return jsonify({"success": True, "moved": len(ids)})
 
 def _face_rows_by_ids(ids):
@@ -1734,7 +1716,7 @@ def _face_rows_by_ids(ids):
         [int(i) for i in ids]).fetchall()
 
 def _strip_mwg_region(rel, cx, cy):
-    """Remove the matching MWG face region from an image's metadata (source of
+    """! @brief Remove the matching MWG face region from an image's metadata (source of
     truth), used when a detection is declared 'not a face'."""
     abs_p = get_safe_path(MEDIA_DIR, rel)
     if not abs_p or not os.path.exists(abs_p):
@@ -1744,14 +1726,14 @@ def _strip_mwg_region(rel, cx, cy):
             if not (r.get("class_name") == "face"
                     and abs(r["cx"] - cx) < 1e-3 and abs(r["cy"] - cy) < 1e-3)]
     if len(kept) != len(meta["regions"]):
-        write_metadata(abs_p, meta["tags"], meta["description"], kept)
+        update_file(abs_p, set={"regions": kept}, meta=meta)
 
 def api_face_not_face():
-    """Declare one or more detections to be NOT a face.
+    """! @brief Declare one or more detections to be NOT a face.
 
     Tombstones the row (not_face=1, cluster_id=-1) so it leaves every cluster, is
-    excluded from reclustering, and — because a rescan re-detecting the same box
-    checks these tombstones — stays dropped instead of reappearing each scan. Also
+    excluded from reclustering, and - because a rescan re-detecting the same box
+    checks these tombstones - stays dropped instead of reappearing each scan. Also
     removes the matching MWG face region from the image so the box vanishes from the
     editor too. Undo with /api/faces/unmark."""
     d = request.json or {}
@@ -1766,14 +1748,12 @@ def api_face_not_face():
         _strip_mwg_region(rel, cx, cy)
     db = _db()
     ph = ",".join("?" * len(ids))
-    db.execute(
-        f"UPDATE face_regions SET not_face=1, unknown=0, cluster_id=-1, "
-        f"name='', confirmed=0 WHERE id IN ({ph})", [int(i) for i in ids])
-    db.commit()
+    _rows("face_regions", f"id IN ({ph})", [int(i) for i in ids], commit=True,
+          set={"not_face": 1, "unknown": 0, "cluster_id": -1, "name": "", "confirmed": 0})
     return jsonify({"success": True, "marked": len(ids)})
 
 def api_face_unknown():
-    """Mark faces as 'unknown': a real face that is deliberately NOT a person you
+    """! @brief Mark faces as 'unknown': a real face that is deliberately NOT a person you
     want to identify (a photobomber, a stranger in the background).
 
     The face stays valid (it's still a face, unlike not_face) but is pulled out of
@@ -1789,14 +1769,12 @@ def api_face_unknown():
         return jsonify({"success": False, "error": "no face id(s) given"})
     db = _db()
     ph = ",".join("?" * len(ids))
-    db.execute(
-        f"UPDATE face_regions SET unknown=1, not_face=0, cluster_id=-1, "
-        f"name='', confirmed=0 WHERE id IN ({ph})", [int(i) for i in ids])
-    db.commit()
+    _rows("face_regions", f"id IN ({ph})", [int(i) for i in ids], commit=True,
+          set={"unknown": 1, "not_face": 0, "cluster_id": -1, "name": "", "confirmed": 0})
     return jsonify({"success": True, "marked": len(ids)})
 
 def api_face_unknown_cluster():
-    """Mark an ENTIRE person (face cluster) as 'unknown' in one shot.
+    """! @brief Mark an ENTIRE person (face cluster) as 'unknown' in one shot.
 
     Same semantics as /api/faces/unknown, applied to every face in the cluster:
     a convention dump can leave you with 30+ shots of one stranger, and marking the
@@ -1811,17 +1789,15 @@ def api_face_unknown_cluster():
     if cluster_id < 0:
         return jsonify({"success": False, "error": "cluster_id required"})
     db = _db()
-    cur = db.execute(
-        "UPDATE face_regions SET unknown=1, not_face=0, cluster_id=-1, "
-        "name='', confirmed=0 WHERE cluster_id=?", (cluster_id,))
-    db.commit()
-    return jsonify({"success": True, "marked": cur.rowcount})
+    n = _rows("face_regions", "cluster_id=?", (cluster_id,), commit=True,
+              set={"unknown": 1, "not_face": 0, "cluster_id": -1, "name": "", "confirmed": 0})
+    return jsonify({"success": True, "marked": n})
 
 def api_face_not_real_cluster():
-    """Declare a whole cluster NOT a real person (a drawn character, a statue,
+    """! @brief Declare a whole cluster NOT a real person (a drawn character, a statue,
     a doll). Every face is tombstoned like not_face and its MWG region removed,
     and the cluster centroid is remembered in face_rejects so any future face
-    within cluster radius of it is tombstoned at cache time — one click per
+    within cluster radius of it is tombstoned at cache time - one click per
     character instead of one per scan."""
     d = request.json or {}
     try:
@@ -1851,14 +1827,12 @@ def api_face_not_real_cluster():
             _strip_mwg_region(rel, cx, cy)
         except Exception as e:
             access_logger.warning(f"not_real strip {rel}: {e}")
-    cur = db.execute(
-        "UPDATE face_regions SET not_face=1, unknown=0, cluster_id=-1, "
-        "name='', confirmed=0 WHERE cluster_id=?", (cluster_id,))
-    db.commit()
-    return jsonify({"success": True, "marked": cur.rowcount, "remembered": remembered})
+    n = _rows("face_regions", "cluster_id=?", (cluster_id,), commit=True,
+              set={"not_face": 1, "unknown": 0, "cluster_id": -1, "name": "", "confirmed": 0})
+    return jsonify({"success": True, "marked": n, "remembered": remembered})
 
 def api_face_unmark():
-    """Clear an unknown / not_face flag, returning the face to the unclustered pool.
+    """! @brief Clear an unknown / not_face flag, returning the face to the unclustered pool.
     A recluster then folds it back into a group."""
     d = request.json or {}
     ids = d.get("ids")
@@ -1869,16 +1843,14 @@ def api_face_unmark():
         return jsonify({"success": False, "error": "no face id(s) given"})
     db = _db()
     ph = ",".join("?" * len(ids))
-    db.execute(
-        f"UPDATE face_regions SET unknown=0, not_face=0 WHERE id IN ({ph})",
-        [int(i) for i in ids])
-    db.commit()
+    _rows("face_regions", f"id IN ({ph})", [int(i) for i in ids],
+          set={"unknown": 0, "not_face": 0}, commit=True)
     return jsonify({"success": True, "unmarked": len(ids)})
 
 def api_face_merge():
-    """Merge face cluster `src` into `dst` (both become one).
+    """! @brief Merge face cluster `src` into `dst` (both become one).
 
-    Deliberately a distinct, explicit action — the UI must confirm it before
+    Deliberately a distinct, explicit action - the UI must confirm it before
     calling, because merging two ids is easy to do by accident and (with confirmed
     names on both sides) exactly the mistake that fuses two real people. The
     endpoint itself requires `confirm: true` as a server-side backstop so a stray
@@ -1905,19 +1877,17 @@ def api_face_merge():
     keep_name = (dname[0] if dname else (sname[0] if sname else ""))
     moved = db.execute("SELECT COUNT(*) FROM face_regions WHERE cluster_id=?",
                        (src,)).fetchone()[0]
-    db.execute("UPDATE face_regions SET cluster_id=? WHERE cluster_id=?",
-               (dst, src))
+    _rows("face_regions", "cluster_id=?", (src,), set={"cluster_id": dst})
     if keep_name:
         # Propagate the surviving name across the merged cluster as a suggestion;
         # confirmed rows keep their own name (already equal to keep_name).
-        db.execute("UPDATE face_regions SET name=? WHERE cluster_id=? "
-                   "AND confirmed=0", (keep_name, dst))
+        _rows("face_regions", "cluster_id=? AND confirmed=0", (dst,), set={"name": keep_name})
     db.commit()
     return jsonify({"success": True, "cluster_id": dst, "moved": moved,
                     "name": keep_name})
 
 def api_body_split():
-    """Kick a wrong body out of its cluster (back to unclustered), or carve a
+    """! @brief Kick a wrong body out of its cluster (back to unclustered), or carve a
     selection into a new cluster. Same contract as /api/faces/split."""
     d = request.json or {}
     ids = d.get("ids")
@@ -1934,13 +1904,9 @@ def api_body_split():
         top = db.execute(
             "SELECT COALESCE(MAX(cluster_id), -1) FROM body_regions").fetchone()[0]
         new_id = int(top) + 1
-        db.execute(
-            f"UPDATE body_regions SET cluster_id=?, name='', confirmed=0 "
-            f"WHERE id IN ({ph})", (new_id, *ids))
-        db.commit()
+        _rows("body_regions", f"id IN ({ph})", ids,
+              set={"cluster_id": new_id, "name": "", "confirmed": 0}, commit=True)
         return jsonify({"success": True, "cluster_id": new_id, "moved": len(ids)})
 
-    db.execute(
-        f"UPDATE body_regions SET cluster_id=-1 WHERE id IN ({ph})", ids)
-    db.commit()
+    _rows("body_regions", f"id IN ({ph})", ids, set={"cluster_id": -1}, commit=True)
     return jsonify({"success": True, "moved": len(ids)})

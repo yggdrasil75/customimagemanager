@@ -1,5 +1,5 @@
-"""
-Trainer module — the Trainer tab: persistent training sets (isolated working
+"""! @file
+@brief Trainer module - the Trainer tab: persistent training sets (isolated working
 copies under media/.training_sets), selection strategies (recent / random /
 diverse via the embedding module), box editing + validation against a
 trained model, augmentation, and local / remote YOLO or Mayaku training runs.
@@ -50,9 +50,9 @@ def register(host):
                           section_label="Gallery tabs", default="write",
                           role_defaults={"viewer": "block"})
     for key, label in (("ai.trainer", "Trainer portal link"),
-                       ("ai.trainer.select", "Trainer — build/select image sets"),
-                       ("ai.trainer.keep", "Trainer — modify persistent sets"),
-                       ("ai.trainer.run", "Trainer — start a training run")):
+                       ("ai.trainer.select", "Trainer - build/select image sets"),
+                       ("ai.trainer.keep", "Trainer - modify persistent sets"),
+                       ("ai.trainer.run", "Trainer - start a training run")):
         host.register_feature(key, label, section="ai_tooling", section_label="AI Tooling",
                               default="write", role_defaults={"viewer": "block"})
     host.add_route("/api/trainer/devices", tc.trainer_devices, feature="ai.trainer")
@@ -80,12 +80,6 @@ def register(host):
     host.register_left_pane("trainer_pane.html")
     host.register_controls_pane("trainer", "controls_pane_trainer.html", feature="tab.trainer")
     def _file_deleted(rel_path):
-        db = host.db()
-        for tbl in ("training_set_members",):
-            try:
-                db.execute(f"DELETE FROM {tbl} WHERE rel_path=?", (rel_path,))
-            except Exception:
-                pass
-        db.commit()
+        host.update_file(rel_path, table="training_set_members", remove=True, dont_write=True)
     host.on("file.deleted", _file_deleted)
     host.logger.info("trainer module: registered sets, routes, Trainer tab")

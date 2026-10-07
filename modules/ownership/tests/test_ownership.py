@@ -1,4 +1,5 @@
-"""Ownership & sharing: files under users/<name>/ belong to that account;
+"""! @file
+@brief Ownership & sharing: files under users/<name>/ belong to that account;
 albums carry owner + visibility; library (partner) and album shares open
 them up. Auth is off in the test app (every request is an admin), so `as`
 swaps g.user for a real non-admin account for the duration of a block."""
@@ -13,7 +14,7 @@ from cimtest import png_bytes
 
 @pytest.fixture(scope="module")
 def accounts(client):
-    """Two real non-admin accounts (through the admin API; the test app's
+    """! @brief Two real non-admin accounts (through the admin API; the test app's
     requests are all admin), removed afterwards."""
     out = {}
     for name in ("own_alice", "own_bob"):
@@ -96,7 +97,7 @@ def test_ownership_end_to_end(app, client, upload, accounts, host):
         assert client.get(f"/api/thumb/{mine}").status_code == 200
         assert mine in _names(client)                          # shared-album members show in the gallery too
         assert client.post("/api/albums/add", json={"album": "own_album", "files": [pub]}).status_code == 403
-        client.post("/api/delete", json={"filename": mine})    # read share ≠ write
+        client.post("/api/delete", json={"filename": mine})    # read share != write
     assert os.path.exists(os.path.join("media", mine))
 
     # public album: everyone sees it

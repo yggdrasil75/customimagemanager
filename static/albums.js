@@ -1,13 +1,13 @@
-// albums.js — the Albums tab (IMAGE albums).
+// albums.js - the Albums tab (IMAGE albums).
 //
 // NAMING: music.js already defines a global loadImageAlbums() for *music* albums,
-// and it is loaded after this file — so a function of that name here would be
+// and it is loaded after this file - so a function of that name here would be
 // silently overwritten by it (and init.js would end up calling the music
 // loader). Ours are therefore loadImageAlbums()/renderImageAlbums().
 //
 // Albums are many-to-many: an image can live in any number of them. The server
 // persists membership into each image's XMP sidecar (mwg-coll:Collections), so
-// nothing here is the source of truth — we just render and mutate.
+// nothing here is the source of truth - we just render and mutate.
 
 let allAlbums = [];
 
@@ -31,7 +31,7 @@ function renderImageAlbums() {
   const rows = allAlbums.filter(a => !q || a.name.toLowerCase().includes(q));
 
   box.innerHTML = '';
-  // Only claim "no albums" when there genuinely are none — not when a filter
+  // Only claim "no albums" when there genuinely are none - not when a filter
   // merely matched nothing, which is a different message.
   if (empty) empty.classList.toggle('hidden', allAlbums.length > 0);
 
@@ -83,7 +83,7 @@ function albumRow(a) {
       ? `<div class="text-xs text-gray-500 truncate">${escapeHtml(a.description)}</div>`
       : '');
 
-  // actions — stopPropagation so they don't also open the album
+  // actions - stopPropagation so they don't also open the album
   const acts = document.createElement('div');
   acts.className = 'flex gap-1 opacity-0 group-hover:opacity-100 flex-shrink-0';
   acts.setAttribute('data-feature', 'tab.albums.edit');
@@ -107,7 +107,7 @@ function albumRow(a) {
   return d;
 }
 
-// ── CRUD ────────────────────────────────────────────────────────────────────
+// -- CRUD --------------------------------------------------------------------
 async function createAlbumPrompt() {
   const name = prompt('New album name:');
   if (name === null) return;
@@ -140,7 +140,7 @@ async function renameAlbumPrompt(oldName) {
 
 async function deleteAlbumPrompt(name) {
   // Worth being explicit that this is non-destructive to the images themselves.
-  if (!confirm(`Delete the album “${name}”?\n\nThe images stay in your library — only the album grouping is removed.`))
+  if (!confirm(`Delete the album "${name}"?\n\nThe images stay in your library - only the album grouping is removed.`))
     return;
   try {
     const d = await fetch('/api/albums/delete', {
@@ -152,10 +152,11 @@ async function deleteAlbumPrompt(name) {
   } catch (e) { alert('Network error deleting album.'); }
 }
 
-// ── Membership (driven from the gallery modal's bulk bar) ───────────────────
-// NOTE: the gallery's multi-select Set is itself named `selectedFiles`
-// (globals.js), so this accessor deliberately does NOT reuse that name — a
-// function of the same name would shadow the Set and silently break selection.
+// -- Membership (driven from the gallery modal's bulk bar) -------------------
+/** @brief NOTE: the gallery's multi-select Set is itself named `selectedFiles`
+ *  (globals.js), so this accessor deliberately does NOT reuse that name - a
+ *  function of the same name would shadow the Set and silently break selection.
+ */
 function albumSelection() {
   try { return Array.from(selectedFiles || []); } catch (e) { return []; }
 }
@@ -183,7 +184,7 @@ async function addSelectedToAlbum() {
     }).then(r => r.json());
     if (!d.success) { alert(d.error || 'Could not add to album.'); return; }
     const st = document.getElementById('status_text');
-    if (st) st.innerText = `Added ${d.added} image(s) to “${n}”.`;
+    if (st) st.innerText = `Added ${d.added} image(s) to "${n}".`;
     await loadImageAlbums();
   } catch (e) { alert('Network error adding to album.'); }
 }
@@ -192,7 +193,7 @@ async function albumRemoveSelected() {
   if (!currentAlbum) return;
   const files = albumSelection();
   if (!files.length) { alert('Select the images you want removed from this album.'); return; }
-  if (!confirm(`Remove ${files.length} image${files.length === 1 ? '' : 's'} from “${currentAlbum}”?\n\nThe images stay in your library.`))
+  if (!confirm(`Remove ${files.length} image${files.length === 1 ? '' : 's'} from "${currentAlbum}"?\n\nThe images stay in your library.`))
     return;
   try {
     const d = await fetch('/api/albums/remove', {
@@ -219,7 +220,7 @@ async function albumSetCoverSelected() {
     await loadImageAlbums();
   } catch (e) { alert('Network error setting cover.'); }
 }
-// ── Per-image albums (right-hand editor pane) ───────────────────────────────
+// -- Per-image albums (right-hand editor pane) -------------------------------
 // Powered by /api/albums/of, which returns both this file's albums and the full
 // album list. Kept separate from the bulk-bar flow above: that one acts on the
 // gallery's `selectedFiles` Set, this one acts on the single `currentFile`.
@@ -266,13 +267,13 @@ function renderAlbumChips() {
   currentFileAlbums.forEach(name => {
     const canEdit = !window.CIMFeatures || window.CIMFeatures.allowed('tab.albums.edit');
     const chip = document.createElement('span');
-    chip.className = 'inline-flex items-center gap-1 text-[10px] bg-fuchsia-900/60 border ' +
-      'border-fuchsia-700 text-fuchsia-100 px-2 py-0.5 rounded-full';
+    chip.className = 'inline-flex items-center gap-1 text-[10px] bg-indigo-900/60 border ' +
+      'border-indigo-700 text-indigo-100 px-2 py-0.5 rounded-full';
     chip.innerHTML =
       `<span class="cursor-pointer hover:underline" title="Open this album">${escapeHtml(name)}</span>` +
-      (canEdit ? `<span class="cursor-pointer text-fuchsia-300 hover:text-white font-bold" title="Remove from this album">✕</span>` : '');
+      (canEdit ? `<span class="cursor-pointer text-indigo-300 hover:text-white font-bold" title="Remove from this album">✕</span>` : '');
     // Clicking the name scopes the gallery grid to that album (openAlbumGallery
-    // switches to the Gallery tab itself); the ✕ removes just this image.
+    // switches to the Gallery tab itself); the x removes just this image.
     chip.children[0].onclick = () => openAlbumGallery(name);
     if (canEdit && chip.children[1]) chip.children[1].onclick = () => removeCurrentFromAlbum(name);
     box.appendChild(chip);
@@ -293,7 +294,7 @@ async function addCurrentToAlbum() {
   if (!n) return;
 
   if (currentFileAlbums.includes(n)) {
-    alert(`This image is already in “${n}”.`);
+    alert(`This image is already in "${n}".`);
     return;
   }
 
@@ -308,7 +309,7 @@ async function addCurrentToAlbum() {
     renderAlbumChips();
     await loadImageAlbums();           // refresh counts + tab badge
     const st = document.getElementById('status_text');
-    if (st) st.innerText = `Added to album “${n}”.`;
+    if (st) st.innerText = `Added to album "${n}".`;
   } catch (e) { alert('Network error adding to album.'); }
 }
 

@@ -1,5 +1,5 @@
-"""
-book_index.py — books & comics side of the media manager.
+"""! @file
+@brief book_index.py - books & comics side of the media manager.
 =========================================================
 
 Self-contained module in the same shape as music_index.py, so it bolts onto
@@ -8,13 +8,13 @@ MEDIA_DIR and the OAI embedding client; this module owns everything that knows
 what a *book* is.
 
 WHY BOOKS ARE HARDER THAN AUDIO
-───────────────────────────────
+-------------------------------
 For music, ".mp3 means music" is true. For books it is emphatically not:
 
     .txt   is a book  OR  the tag sidecar this app writes next to every asset
     .htm(l) is a book OR  a saved webpage OR one chapter inside an unpacked epub
     .pdb   is a book  OR  a generic Palm database (contacts, memos, anything)
-    .opf   is a book's *manifest*, not a book — the folder around it is the book
+    .opf   is a book's *manifest*, not a book - the folder around it is the book
     .doc   is a book  OR  any other OLE2 compound document
     .pkg   is a book  OR  a macOS installer
     .cbz   is a comic OR  (very often) a RAR that someone renamed
@@ -22,14 +22,14 @@ For music, ".mp3 means music" is true. For books it is emphatically not:
 
 So classification here is THREE layers, in this order:
 
-  1. `ext_candidate()`  — is this extension even in the running? (cheap)
-  2. `sniff()`          — what do the first bytes actually say? (cheap, decisive
+  1. `ext_candidate()`  - is this extension even in the running? (cheap)
+  2. `sniff()`          - what do the first bytes actually say? (cheap, decisive
                           for ~everything with a magic number)
-  3. `classify()`       — context: what else is in this directory? Is there a
-                          sibling asset with the same basename (→ sidecar)? A
-                          sibling `mimetype`/`.opf`/`toc.ncx` (→ we're INSIDE an
+  3. `classify()`       - context: what else is in this directory? Is there a
+                          sibling asset with the same basename (-> sidecar)? A
+                          sibling `mimetype`/`.opf`/`toc.ncx` (-> we're INSIDE an
                           unpacked book, so the folder is the unit, not us)? A
-                          `foo_files/` dir (→ saved webpage)?
+                          `foo_files/` dir (-> saved webpage)?
 
 Anything the three layers cannot settle is NOT guessed. It lands in the
 `book_triage` table with the reason, and the UI asks the human once. With
@@ -37,19 +37,19 @@ thousands of ao3 dumps and Kindle exports, a silent 2% misfile rate is worse
 than a triage queue you can clear with two clicks.
 
 READER MODEL
-────────────
+------------
 Two render modes, because there are genuinely two kinds of book:
 
-  • 'paged' — PDF and every cb* comic archive. The page IS an image. The reader
+  - 'paged' - PDF and every cb* comic archive. The page IS an image. The reader
     asks for `/api/books/page/<n>` and gets a JPEG. This reuses the existing
     comic viewer's mental model.
 
-  • 'flow'  — epub, txt, html, fb2, mobi/azw, docx, rtf, lit, chm, pdb… The page
+  - 'flow'  - epub, txt, html, fb2, mobi/azw, docx, rtf, lit, chm, pdb... The page
     is a reader-side concept. We extract to sanitized HTML once, cache it as
     chapters, and the reader does its own pagination/columns/font sizing.
 
 EXTRACTION BACKENDS
-───────────────────
+-------------------
 Native Python first (ebooklib / pymupdf / rarfile / py7zr / python-docx /
 striprtf / stdlib zipfile+tarfile), then Calibre's `ebook-convert` CLI as the
 universal fallback for the long tail (.lit, .chm, .ceb, .kfx, .pdb, .azw*).
@@ -58,11 +58,11 @@ missing one degrades to `status='needs_backend'` with a message naming what to
 install, rather than an exception.
 
 EMBEDDING SEARCH
-────────────────
+----------------
 A book is far too long for one vector. We chunk the extracted text (~1200 chars,
 200 overlap), embed each chunk with the same OAI embedding model the images use,
 and store them in `book_chunks`. Search then returns *passages*, and the book
-score is the max over its chunks — so "the bit where they argue on the bridge"
+score is the max over its chunks - so "the bit where they argue on the bridge"
 finds the book AND the page.
 """
 from __future__ import annotations
@@ -85,6 +85,7 @@ import shutil as _sh
 import tempfile
 
 from optional_deps import optional_import
+from .book_meta_write import EMBEDDED_FMTS, opf_name, read_pdf_xmp
 # Format backends are optional; each extractor checks its flag and reports
 # 'needs_backend' rather than failing the module.
 fitz, _HAVE_FITZ = optional_import("pymupdf", quiet=True)   # PyMuPDF (new name)
@@ -115,7 +116,7 @@ UNAMBIGUOUS_BOOK_EXTS = {
 #  - SIGNATURE-ambiguous: the extension collides with something that isn't a
 #    book at all (a tag sidecar, a webpage, a generic OLE2/Palm blob) AND has no
 #    signature that distinguishes the book case. These can only be resolved with
-#    directory context, so they must NOT be accepted blind on upload — only the
+#    directory context, so they must NOT be accepted blind on upload - only the
 #    MEDIA_DIR walk, which can see that context, may classify them.
 KIND_AMBIGUOUS_BOOK_EXTS = {
     '.pdf',      # book | comic | scanned junk    → sniffable ('%PDF-'), kind TBD
@@ -126,7 +127,7 @@ SIGNATURE_AMBIGUOUS_BOOK_EXTS = {
     '.htm', '.html',  # book | webpage | epub innards
     '.pdb',      # book | any Palm database
     '.pkg',      # book | macOS installer
-    '.opf',      # a book's manifest — the FOLDER is the book
+    '.opf',      # a book's manifest - the FOLDER is the book
 }
 AMBIGUOUS_BOOK_EXTS = KIND_AMBIGUOUS_BOOK_EXTS | SIGNATURE_AMBIGUOUS_BOOK_EXTS
 
@@ -134,14 +135,32 @@ BOOK_EXTS = UNAMBIGUOUS_BOOK_EXTS | AMBIGUOUS_BOOK_EXTS
 
 # Book extensions accepted from an uploader: the unambiguous ones plus the
 # kind-ambiguous ones (which are identifiable by content). Signature-ambiguous
-# extensions are deliberately excluded — see above.
+# extensions are deliberately excluded - see above.
 UPLOADABLE_BOOK_EXTS = UNAMBIGUOUS_BOOK_EXTS | KIND_AMBIGUOUS_BOOK_EXTS
 
 # The core's shared media-type registry (host.media), bound in register(). It
 # answers "is this a library asset" (a .txt sharing its basename is a tag
 # sidecar, never a book) and "is this a page image", so stored formats chosen
-# in Settings → Media are recognised here without a second extension list.
+# in Settings -> Media are recognised here without a second extension list.
 _media = None
+
+_comicinfo = None    # fn() -> the comics module's "comicinfo" service or None
+
+
+def bind_comicinfo(getter):
+    """! @brief How to reach the comics module's ComicInfo reader (a getter,
+    because comics may register after books, or be off)."""
+    global _comicinfo
+    _comicinfo = getter
+
+
+def comicinfo_service():
+    """! @brief The "comicinfo" service, or None when comics is off."""
+    try:
+        return _comicinfo() if _comicinfo else None
+    except Exception:
+        return None
+
 
 def bind_media(media):
     global _media
@@ -173,12 +192,12 @@ def _ext(path: str) -> str:
     return os.path.splitext(path)[1].lower()
 
 def ext_candidate(path: str) -> bool:
-    """Layer 1: is this extension even in the running for being a book?"""
+    """! @brief Layer 1: is this extension even in the running for being a book?"""
     return _ext(path) in BOOK_EXTS
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # 2. CONTENT SNIFFING
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 # Palm PDB type+creator codes at offset 60..68. This is the ONLY thing that
 # separates "a book" from "someone's 2003 address book" for .pdb/.prc/.pkg.
@@ -206,18 +225,18 @@ def _zip_names(path: str, limit: int = 400) -> list[str]:
         return []
 
 def sniff(path: str) -> str | None:
-    """Layer 2: what format do the BYTES say this is?
+    """! @brief Layer 2: what format do the BYTES say this is?
 
     Returns a canonical format id ('epub', 'pdf', 'mobi', 'cbz', 'zip', 'rar',
-    'ole2', 'text', 'html', …) or None if nothing matched. This never trusts the
-    filename, which is the whole point — a .cbz holding a RAR reports 'rar', and
+    'ole2', 'text', 'html', ...) or None if nothing matched. This never trusts the
+    filename, which is the whole point - a .cbz holding a RAR reports 'rar', and
     a .pdb holding contacts reports 'palm-other' so classify() can reject it.
     """
     head = _read_head(path, 8192)
     if len(head) < 8:
         return None
 
-    # ── magic numbers, most specific first ────────────────────────────────────
+    # -- magic numbers, most specific first ------------------------------------
     if head[:5] == b'%PDF-':
         return 'pdf'
     if head[:4] == b'ITSF':
@@ -243,22 +262,22 @@ def sniff(path: str) -> str | None:
     if head[:4] == b'CEBX' or head[:4] == b'\x43\x45\x42\x58':
         return 'ceb'
 
-    # tar (comic .cbt) — magic lives at offset 257
+    # tar (comic .cbt) - magic lives at offset 257
     if len(head) > 262 and head[257:262] == b'ustar':
         return 'tar'
 
-    # ── Palm database family (.pdb .prc .mobi .azw .pkg) ──────────────────────
-    # 32-byte name, then attrs/version/dates…, type at 60, creator at 64.
+    # -- Palm database family (.pdb .prc .mobi .azw .pkg) ----------------------
+    # 32-byte name, then attrs/version/dates..., type at 60, creator at 64.
     if len(head) >= 68:
         tc = head[60:68]
         if tc in _PALM_BOOK_TYPES:
             return _PALM_BOOK_TYPES[tc]
         # Looks structurally like a PDB (printable type/creator) but isn't a
-        # book type → say so explicitly so classify() can reject with a reason.
+        # book type -> say so explicitly so classify() can reject with a reason.
         if all(32 <= b < 127 for b in tc) and head[0] not in (0, 32):
             return 'palm-other'
 
-    # ── ZIP-based: epub vs cbz vs docx vs plain zip ───────────────────────────
+    # -- ZIP-based: epub vs cbz vs docx vs plain zip ---------------------------
     if head[:2] == b'PK':
         try:
             with zipfile.ZipFile(path) as z:
@@ -284,7 +303,7 @@ def sniff(path: str) -> str | None:
         except Exception:
             return 'zip'
 
-    # ── XML-ish: fb2 vs xhtml vs opf ──────────────────────────────────────────
+    # -- XML-ish: fb2 vs xhtml vs opf ------------------------------------------
     probe = head[:4096].lstrip(b'\xef\xbb\xbf').lstrip()
     low = probe[:2048].lower()
     if low.startswith(b'<?xml') or low.startswith(b'<'):
@@ -296,7 +315,7 @@ def sniff(path: str) -> str | None:
             return 'html'
         return 'xml'
 
-    # ── plain text (heuristic: mostly printable, decodes as utf-8/latin-1) ────
+    # -- plain text (heuristic: mostly printable, decodes as utf-8/latin-1) ----
     if _looks_like_text(head):
         return 'text'
     return None
@@ -314,19 +333,19 @@ def _looks_like_text(buf: bytes) -> bool:
     printable = sum(1 for b in buf if 9 <= b <= 13 or 32 <= b < 127 or b >= 160)
     return printable / len(buf) > 0.90
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # 3. CONTEXTUAL CLASSIFICATION
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 class Verdict:
-    """Result of classify(). `status` is one of:
+    """! @brief Result of classify(). `status` is one of:
 
-      'book'     — index it. `fmt` is the canonical format, `kind` book|comic.
-      'sidecar'  — this app's own metadata file. Skip silently.
-      'part'     — a component of a book that lives elsewhere (a chapter inside
+      'book'     - index it. `fmt` is the canonical format, `kind` book|comic.
+      'sidecar'  - this app's own metadata file. Skip silently.
+      'part'     - a component of a book that lives elsewhere (a chapter inside
                    an unpacked epub, a page inside a comic folder). Skip.
-      'skip'     — confidently not a book (Palm address book, installer, …).
-      'triage'   — could be a book; we won't guess. Ask the human.
+      'skip'     - confidently not a book (Palm address book, installer, ...).
+      'triage'   - could be a book; we won't guess. Ask the human.
     """
     __slots__ = ('status', 'fmt', 'kind', 'reason', 'confidence')
 
@@ -345,7 +364,7 @@ class Verdict:
                 'reason': self.reason, 'confidence': self.confidence}
 
 def _dir_context(abs_path: str) -> dict:
-    """Everything classify() needs to know about the file's neighbourhood.
+    """! @brief Everything classify() needs to know about the file's neighbourhood.
 
     Computed once per directory by the caller when scanning in bulk (see
     `walk_candidates`), because os.listdir per file on a 50k-file library is the
@@ -376,7 +395,7 @@ def _context_from_listing(files: set, dirs: set) -> dict:
     }
 
 def classify(abs_path: str, ctx: dict | None = None) -> Verdict:
-    """Layer 3. The single entry point the indexer calls per candidate file."""
+    """! @brief Layer 3. The single entry point the indexer calls per candidate file."""
     ext = _ext(abs_path)
     name = os.path.basename(abs_path)
     stem = os.path.splitext(name)[0]
@@ -387,7 +406,7 @@ def classify(abs_path: str, ctx: dict | None = None) -> Verdict:
     if ctx is None:
         ctx = _dir_context(abs_path)
 
-    # ── Rule 0: are we standing inside an unpacked book? ──────────────────────
+    # -- Rule 0: are we standing inside an unpacked book? ----------------------
     # An extracted epub is a directory of .html + .opf + .ncx. Every one of those
     # .html files is a *chapter*, not a book. The .opf is what represents it.
     if ctx['unpacked_marker'] and ext in ('.htm', '.html', '.txt', '.xml'):
@@ -396,15 +415,15 @@ def classify(abs_path: str, ctx: dict | None = None) -> Verdict:
 
     fmt = sniff(abs_path)
 
-    # ── Rule 1: .txt — book or this app's tag sidecar? ────────────────────────
+    # -- Rule 1: .txt - book or this app's tag sidecar? ------------------------
     if ext == '.txt':
         return _classify_txt(abs_path, stem, ctx)
 
-    # ── Rule 2: .htm(l) — book, saved webpage, or epub innards? ───────────────
+    # -- Rule 2: .htm(l) - book, saved webpage, or epub innards? ---------------
     if ext in ('.htm', '.html'):
         return _classify_html(abs_path, stem, ctx, fmt)
 
-    # ── Rule 3: .opf — the manifest represents its folder ─────────────────────
+    # -- Rule 3: .opf - the manifest represents its folder ---------------------
     if ext == '.opf':
         # Only treat it as the book if the folder actually holds content.
         if ctx['unpacked_marker'] or any(_ext(f) in ('.htm', '.html', '.xhtml')
@@ -414,7 +433,7 @@ def classify(abs_path: str, ctx: dict | None = None) -> Verdict:
         return Verdict('triage', 'opf', 'book',
                        'stray .opf with no content beside it')
 
-    # ── Rule 4: Palm-family containers (.pdb, .pkg) ───────────────────────────
+    # -- Rule 4: Palm-family containers (.pdb, .pkg) ---------------------------
     if ext in ('.pdb', '.pkg'):
         if fmt in ('mobi', 'palmdoc', 'ereader', 'plucker', 'ztxt'):
             return Verdict('book', fmt, 'book', f'Palm type code says {fmt}')
@@ -425,7 +444,7 @@ def classify(abs_path: str, ctx: dict | None = None) -> Verdict:
         return Verdict('triage', fmt, 'book',
                        f'{ext} with unrecognised content ({fmt or "unknown"})')
 
-    # ── Rule 5: .doc — OLE2 could be anything ─────────────────────────────────
+    # -- Rule 5: .doc - OLE2 could be anything ---------------------------------
     if ext == '.doc':
         if fmt == 'ole2':
             if _ole2_has_word_stream(abs_path):
@@ -438,7 +457,7 @@ def classify(abs_path: str, ctx: dict | None = None) -> Verdict:
             return Verdict('book', fmt, 'book', f'.doc that is really {fmt}')
         return Verdict('triage', fmt, 'book', 'unrecognised .doc content')
 
-    # ── Rule 6: comic archives — trust the CONTENT for the container ──────────
+    # -- Rule 6: comic archives - trust the CONTENT for the container ----------
     if ext in COMIC_ARCHIVE_EXTS:
         real = {'zip': 'cbz', 'cbz': 'cbz', 'rar': 'cbr', '7z': 'cb7',
                 'tar': 'cbt', 'ace': 'cba'}.get(fmt or '')
@@ -451,13 +470,13 @@ def classify(abs_path: str, ctx: dict | None = None) -> Verdict:
         return Verdict('triage', fmt, 'comic',
                        f'comic extension but content sniffs as {fmt or "unknown"}')
 
-    # ── Rule 7: PDF — book or comic? ──────────────────────────────────────────
+    # -- Rule 7: PDF - book or comic? ------------------------------------------
     if ext == '.pdf':
         if fmt != 'pdf':
             return Verdict('triage', fmt, 'book', 'named .pdf but not a PDF')
         return Verdict('book', 'pdf', 'book', 'PDF')   # kind refined at index time
 
-    # ── Rule 8: everything left is an unambiguous extension ───────────────────
+    # -- Rule 8: everything left is an unambiguous extension -------------------
     canonical = {
         '.epub': 'epub', '.mobi': 'mobi', '.azw': 'mobi', '.azw3': 'azw3',
         '.kf8': 'azw3', '.kfx': 'kfx', '.lit': 'lit', '.fb2': 'fb2',
@@ -465,7 +484,7 @@ def classify(abs_path: str, ctx: dict | None = None) -> Verdict:
         '.docx': 'docx', '.rtf': 'rtf',
     }.get(ext)
     if canonical:
-        # Sniff disagreeing is worth a note but not a rejection — several of
+        # Sniff disagreeing is worth a note but not a rejection - several of
         # these (.lrx, .ceb, .kfx) have poorly documented magic.
         if fmt and fmt not in (canonical, 'zip', 'xml', None):
             if fmt in ('rar', '7z', 'ole2') and canonical in ('epub', 'docx'):
@@ -476,11 +495,11 @@ def classify(abs_path: str, ctx: dict | None = None) -> Verdict:
     return Verdict('triage', fmt, 'book', 'unclassified')
 
 def _classify_txt(abs_path: str, stem: str, ctx: dict) -> Verdict:
-    """.txt is the nastiest case: this app writes tag sidecars as .txt.
+    """! @brief .txt is the nastiest case: this app writes tag sidecars as .txt.
 
     Tests, in order of decisiveness:
-      1. A sibling library asset with the same stem  → sidecar. Definitive.
-      2. Tiny file                                   → sidecar-shaped.
+      1. A sibling library asset with the same stem  -> sidecar. Definitive.
+      2. Tiny file                                   -> sidecar-shaped.
       3. Content shape: one line of comma-separated short tokens with no
          sentence punctuation is a tag list, not prose.
       4. Otherwise: prose. It's a book.
@@ -494,7 +513,7 @@ def _classify_txt(abs_path: str, stem: str, ctx: dict) -> Verdict:
         return Verdict('skip', reason='unreadable')
 
     if size < 512:
-        return Verdict('sidecar', reason=f'{size} B — too small to be a book')
+        return Verdict('sidecar', reason=f'{size} B - too small to be a book')
 
     head = _read_head(abs_path, 8192)
     if not _looks_like_text(head):
@@ -516,7 +535,7 @@ def _classify_txt(abs_path: str, stem: str, ctx: dict) -> Verdict:
             return Verdict('sidecar',
                            reason='single comma-separated line with no prose')
         return Verdict('triage', 'text', 'book',
-                       f'{size} B .txt — short enough to be either')
+                       f'{size} B .txt - short enough to be either')
 
     # Real prose: sentences, paragraphs, plausible word length.
     words = re.findall(r"[A-Za-z']+", text)
@@ -525,7 +544,7 @@ def _classify_txt(abs_path: str, stem: str, ctx: dict) -> Verdict:
     return Verdict('book', 'text', 'book', f'{size} B of prose')
 
 def _classify_html(abs_path: str, stem: str, ctx: dict, fmt: str | None) -> Verdict:
-    """.htm(l): standalone story (very common for ao3/ffn downloads), a saved
+    """! @brief .htm(l): standalone story (very common for ao3/ffn downloads), a saved
     webpage, or a chapter inside an unpacked epub."""
     # Saved-webpage marker: Chrome/IE write `Foo.html` + `Foo_files/`.
     for suffix in ('_files', '.files', '_arquivos', '-Dateien'):
@@ -555,16 +574,16 @@ def _classify_html(abs_path: str, stem: str, ctx: dict, fmt: str | None) -> Verd
     text_len = len(_strip_tags(head.decode('utf-8', 'replace')))
     link_count = low.count(b'<a ')
     if size < 8192 and text_len < 1500:
-        return Verdict('skip', reason='small HTML with little text — a webpage')
+        return Verdict('skip', reason='small HTML with little text - a webpage')
     if link_count > 60 and text_len < 4000:
-        return Verdict('skip', reason='link-dense HTML — an index page')
+        return Verdict('skip', reason='link-dense HTML - an index page')
     if text_len > 6000:
         return Verdict('book', 'html', 'book', f'{text_len} chars of body text')
     return Verdict('triage', 'html', 'book',
-                   f'{text_len} chars of text, {link_count} links — ambiguous')
+                   f'{text_len} chars of text, {link_count} links - ambiguous')
 
 def _ole2_has_word_stream(path: str) -> bool:
-    """Cheap check for a WordDocument stream in an OLE2 compound file.
+    """! @brief Cheap check for a WordDocument stream in an OLE2 compound file.
 
     A full CFB directory walk needs a parser; the stream NAME is stored as
     UTF-16LE in the directory sector, so scanning the first 64 KB for the
@@ -573,9 +592,9 @@ def _ole2_has_word_stream(path: str) -> bool:
     head = _read_head(path, 65536)
     return b'W\x00o\x00r\x00d\x00D\x00o\x00c\x00u\x00m\x00e\x00n\x00t\x00' in head
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # 4. SCHEMA
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def ensure_tables(db):
     db.executescript("""
@@ -583,7 +602,7 @@ def ensure_tables(db):
             rel_path     TEXT PRIMARY KEY,
             mtime        REAL,
             size         INTEGER,
-            fmt          TEXT,            -- epub | pdf | cbz | mobi | text | …
+            fmt          TEXT,            -- epub | pdf | cbz | mobi | text | ...
             kind         TEXT,            -- 'book' | 'comic'
             reader       TEXT,            -- 'flow' | 'paged'
             -- editable metadata --
@@ -596,7 +615,7 @@ def ensure_tables(db):
             published    TEXT DEFAULT '',
             language     TEXT DEFAULT '',
             isbn         TEXT DEFAULT '',
-            identifiers  TEXT DEFAULT '{}',   -- JSON dict (asin, ao3, goodreads…)
+            identifiers  TEXT DEFAULT '{}',   -- JSON dict (asin, ao3, goodreads...)
             description  TEXT DEFAULT '',
             subjects     TEXT DEFAULT '[]',   -- JSON list (publisher's own)
             tags         TEXT DEFAULT '[]',   -- JSON list (user's)
@@ -613,7 +632,7 @@ def ensure_tables(db):
                          -- Not computed at index time: hashing 3000 books would
                          -- add minutes to a scan for a check most people never
                          -- trigger. Filled on demand by book_routes.sha_exists.
-            source       TEXT DEFAULT '',     -- ao3 | kindle | gutenberg | …
+            source       TEXT DEFAULT '',     -- ao3 | kindle | gutenberg | ...
             added        REAL,
             indexed      REAL
         );
@@ -679,7 +698,7 @@ def ensure_tables(db):
         CREATE INDEX IF NOT EXISTS idx_bmark ON book_bookmarks(rel_path);
 
         -- Per-page comic analysis: panel boxes and OCR text. Only paged books
-        -- get rows here, and only once someone asks for the analysis — a
+        -- get rows here, and only once someone asks for the analysis - a
         -- library of 300 volumes is ~60k pages and detecting them all up front
         -- would be hours of work nobody requested.
         --
@@ -721,12 +740,12 @@ def ensure_tables(db):
     """)
     db.commit()
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # 5. WALKING
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def walk_candidates(media_dir: str):
-    """Yield (rel_path, abs_path, Verdict) for every book candidate under
+    """! @brief Yield (rel_path, abs_path, Verdict) for every book candidate under
     `media_dir`. Directory context is computed once per directory."""
     for root, dirs, files in os.walk(media_dir):
         base = os.path.basename(root)
@@ -739,7 +758,7 @@ def walk_candidates(media_dir: str):
         ctx = _context_from_listing(fileset, set(dirs))
 
         # A directory that IS an unpacked book yields one entry (its .opf), not
-        # one per chapter — classify() enforces that via the 'part' verdict.
+        # one per chapter - classify() enforces that via the 'part' verdict.
         for f in files:
             if not ext_candidate(f):
                 continue
@@ -751,19 +770,19 @@ def walk_candidates(media_dir: str):
                 v = Verdict('triage', None, 'book', f'classify error: {e}')
             yield rp, ap, v
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # 6. METADATA EXTRACTION
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 _EMPTY_META = {
     'title': '', 'authors': [], 'series': '', 'series_index': None,
     'publisher': '', 'published': '', 'language': '', 'isbn': '',
     'identifiers': {}, 'description': '', 'subjects': [],
-    'page_count': None, 'cover_bytes': None, 'source': '',
+    'page_count': None, 'cover_bytes': None, 'source': '', 'rating': None,
 }
 
 def read_metadata(abs_path: str, fmt: str) -> dict:
-    """Normalise metadata from any format into one flat dict. Never raises."""
+    """! @brief Normalise metadata from any format into one flat dict. Never raises."""
     meta = dict(_EMPTY_META)
     meta['identifiers'] = {}
     meta['authors'] = []
@@ -789,6 +808,7 @@ def read_metadata(abs_path: str, fmt: str) -> dict:
             _meta_text(abs_path, meta)
     except Exception:
         pass
+    _overlay_sidecar(abs_path, fmt, meta)
 
     if not meta['title']:
         meta['title'] = _title_from_filename(abs_path)
@@ -800,8 +820,54 @@ def read_metadata(abs_path: str, fmt: str) -> dict:
         meta['source'] = _guess_source(abs_path, meta)
     return meta
 
+def _overlay_sidecar(abs_path: str, fmt: str, meta: dict):
+    """! @brief Formats with no embedded metadata home (MOBI, plain text, ...)
+    keep edited fields in the app's XMP sidecar; read them back over what the
+    file itself says. Formats that embed their metadata ignore the sidecar."""
+    if fmt in EMBEDDED_FMTS:
+        return
+    side = os.path.splitext(abs_path)[0] + '.xmp'
+    if not os.path.exists(side):
+        return
+    try:
+        with open(side, encoding='utf-8', errors='replace') as f:
+            x = f.read()
+    except Exception:
+        return
+    def items(tag):
+        m = re.search(rf'<{tag}>(.*?)</{tag}>', x, re.S)
+        if m:
+            lis = re.findall(r'<rdf:li[^>]*>(.*?)</rdf:li>', m.group(1), re.S)
+            return [_html.unescape(v).strip() for v in lis] or [_html.unescape(m.group(1)).strip()]
+        m = re.search(rf'\s{tag}="([^"]*)"', x)
+        return [_html.unescape(m.group(1)).strip()] if m else []
+    v = items('dc:title')
+    if v and v[0]:
+        meta['title'] = v[0]
+    v = items('dc:creator')
+    if v:
+        meta['authors'] = [a for a in v if a]
+    for tag, key in (('dc:publisher', 'publisher'), ('dc:date', 'published'),
+                     ('dc:language', 'language'), ('dc:source', 'source'),
+                     ('prism:SeriesTitle', 'series')):
+        v = items(tag)
+        if v and v[0]:
+            meta[key] = v[0][:10] if key == 'published' else v[0]
+    v = items('prism:ISBN')
+    if v and v[0]:
+        meta['isbn'] = re.sub(r'[^0-9Xx]', '', v[0])
+    v = items('prism:SeriesNumber')
+    if v and v[0]:
+        try:
+            meta['series_index'] = float(v[0])
+        except ValueError:
+            pass
+    v = items('prism:Genre')
+    if v:
+        meta['subjects'] = [s for s in v if s]
+
 def embedded_metadata(abs_path: str, fmt: str) -> list[dict]:
-    """The metadata the FILE carries, listed raw: [{group, key, value}].
+    """! @brief The metadata the FILE carries, listed raw: [{group, key, value}].
     This is what the format tab shows (EPUB / MOBI / PDF / FB2 / DOCX /
     ComicInfo); the Book tab holds the normalised, editable DB copy. Plain
     text and HTML carry nothing, so they return [] and get no tab. Never
@@ -849,7 +915,7 @@ def embedded_metadata(abs_path: str, fmt: str) -> list[dict]:
             for block in root.iter():
                 if not block.tag.endswith('}description'):
                     continue
-                for section in block:                       # title-info, document-info, publish-info…
+                for section in block:                       # title-info, document-info, publish-info...
                     g = section.tag.split('}')[-1]
                     for el in section:
                         k = el.tag.split('}')[-1]
@@ -963,7 +1029,7 @@ def _guess_source(path: str, meta: dict) -> str:
         return 'ffn'
     return ''
 
-# ── epub ──────────────────────────────────────────────────────────────────────
+# -- epub ----------------------------------------------------------------------
 _DC = '{http://purl.org/dc/elements/1.1/}'
 _OPF = '{http://www.idpf.org/2007/opf}'
 
@@ -982,17 +1048,7 @@ def _meta_epub(path: str, meta: dict):
                 pass
 
 def _epub_opf_name(z: zipfile.ZipFile) -> str | None:
-    try:
-        container = ET.fromstring(z.read('META-INF/container.xml'))
-        for rf in container.iter():
-            if rf.tag.endswith('rootfile') and rf.get('full-path'):
-                return rf.get('full-path')
-    except Exception:
-        pass
-    for n in z.namelist():
-        if n.lower().endswith('.opf'):
-            return n
-    return None
+    return opf_name(z)
 
 def _parse_opf(root: ET.Element, meta: dict):
     for el in root.iter():
@@ -1014,6 +1070,8 @@ def _parse_opf(root: ET.Element, meta: dict):
             meta['description'] = _strip_tags(txt)
         elif tag == _DC + 'subject' and txt:
             meta['subjects'].append(txt)
+        elif tag == _DC + 'source' and txt and not meta['source']:
+            meta['source'] = txt
         elif tag == _DC + 'identifier' and txt:
             scheme = (el.get(_OPF + 'scheme') or el.get('scheme') or '').lower()
             if scheme == 'isbn' or txt.lower().startswith('urn:isbn'):
@@ -1032,6 +1090,11 @@ def _parse_opf(root: ET.Element, meta: dict):
             elif name in ('calibre:series_index', 'group-position'):
                 try:
                     meta['series_index'] = float(content)
+                except ValueError:
+                    pass
+            elif name == 'calibre:rating':
+                try:
+                    meta['rating'] = int(round(float(content) / 2))
                 except ValueError:
                     pass
     # de-dupe authors, preserve order
@@ -1094,7 +1157,7 @@ def _meta_opf_folder(opf_path: str, meta: dict):
                 pass
             break
 
-# ── pdf ───────────────────────────────────────────────────────────────────────
+# -- pdf -----------------------------------------------------------------------
 def _meta_pdf(path: str, meta: dict):
     doc = _open_pdf(path)
     if doc is None:
@@ -1105,12 +1168,17 @@ def _meta_pdf(path: str, meta: dict):
         author = (info.get('author') or '').strip()
         if author:
             meta['authors'] = [a.strip() for a in re.split(r'[;&]| and ', author) if a.strip()]
-        meta['publisher'] = (info.get('producer') or '').strip()
+        # Info has no publisher slot ("producer" is the software that made the
+        # PDF); publisher, date, language, series and ISBN come from the XMP.
         meta['description'] = (info.get('subject') or '').strip()
         kw = (info.get('keywords') or '').strip()
         if kw:
             meta['subjects'] = [k.strip() for k in re.split(r'[,;]', kw) if k.strip()]
         meta['page_count'] = doc.page_count
+        try:
+            read_pdf_xmp(doc.get_xml_metadata() or '', meta)
+        except Exception:
+            pass
         try:
             pix = doc.load_page(0).get_pixmap(dpi=96)
             meta['cover_bytes'] = pix.tobytes('jpeg') if hasattr(pix, 'tobytes') \
@@ -1131,10 +1199,10 @@ def _open_pdf(path):
     except Exception:
         return None
 
-# ── comic archives ────────────────────────────────────────────────────────────
+# -- comic archives ------------------------------------------------------------
 def comic_page_names(abs_path: str, fmt: str) -> list[str]:
-    """Sorted list of page entry names inside a comic archive. Natural sort, so
-    page2 < page10 — the single most common complaint about comic readers."""
+    """! @brief Sorted list of page entry names inside a comic archive. Natural sort, so
+    page2 < page10 - the single most common complaint about comic readers."""
     names = []
     try:
         if fmt == 'cbz':
@@ -1187,16 +1255,26 @@ def _meta_comic(path: str, fmt: str, meta: dict):
     meta['page_count'] = len(pages)
     if pages:
         meta['cover_bytes'] = comic_page_bytes(path, fmt, pages[0])
-    # ComicInfo.xml is the de-facto standard sidecar inside cb* archives.
-    if fmt == 'cbz':
-        try:
-            with zipfile.ZipFile(path) as z:
-                for n in z.namelist():
-                    if os.path.basename(n).lower() == 'comicinfo.xml':
-                        _parse_comicinfo(z.read(n), meta)
-                        break
-        except Exception:
-            pass
+    # ComicInfo.xml is the de-facto standard metadata file inside cb* archives.
+    data = None
+    svc = comicinfo_service()
+    try:
+        if svc:
+            data = svc["read_bytes"](path, fmt)
+    except Exception:
+        data = None
+    if data is None:
+        if fmt == 'cbz':
+            try:
+                with zipfile.ZipFile(path) as z:
+                    for n in z.namelist():
+                        if os.path.basename(n).lower() == 'comicinfo.xml':
+                            data = z.read(n)
+                            break
+            except Exception:
+                pass
+    if data:
+        _parse_comicinfo(data, meta)
 
 def _parse_comicinfo(data: bytes, meta: dict):
     try:
@@ -1217,7 +1295,9 @@ def _parse_comicinfo(data: bytes, meta: dict):
             meta['series_index'] = float(t('Number'))
         except ValueError:
             pass
-    for tag in ('Writer', 'Penciller', 'Inker', 'Colorist'):
+    # Authors are the Writer field (what the app writes); the art credits only
+    # stand in when a file names no writer.
+    for tag in ('Writer',) if t('Writer') else ('Penciller', 'Inker', 'Colorist'):
         v = t(tag)
         if v:
             meta['authors'].extend(a.strip() for a in v.split(',') if a.strip())
@@ -1226,13 +1306,22 @@ def _parse_comicinfo(data: bytes, meta: dict):
     if t('Summary'):
         meta['description'] = t('Summary')
     if t('Year'):
-        meta['published'] = '-'.join(x for x in (t('Year'), t('Month'), t('Day')) if x)
+        meta['published'] = '-'.join([t('Year')] + [x.zfill(2) for x in (t('Month'), t('Day')) if x])
     if t('Genre'):
         meta['subjects'] = [g.strip() for g in t('Genre').split(',') if g.strip()]
     if t('LanguageISO'):
         meta['language'] = t('LanguageISO')
+    if t('Web'):
+        meta['source'] = t('Web')
+    if t('GTIN'):
+        meta['isbn'] = re.sub(r'[^0-9Xx]', '', t('GTIN'))
+    if t('CommunityRating'):
+        try:
+            meta['rating'] = int(round(float(t('CommunityRating'))))
+        except ValueError:
+            pass
 
-# ── fb2 ───────────────────────────────────────────────────────────────────────
+# -- fb2 -----------------------------------------------------------------------
 def _meta_fb2(path: str, meta: dict):
     try:
         root = ET.parse(path).getroot()
@@ -1257,6 +1346,11 @@ def _meta_fb2(path: str, meta: dict):
     for g in root.findall('.//fb:title-info/fb:genre', ns):
         if g.text:
             meta['subjects'].append(g.text.strip())
+    meta['publisher'] = find('.//fb:publish-info/fb:publisher')
+    meta['published'] = find('.//fb:publish-info/fb:year')
+    isbn = find('.//fb:publish-info/fb:isbn')
+    if isbn:
+        meta['isbn'] = re.sub(r'[^0-9Xx]', '', isbn)
     seq = root.find('.//fb:title-info/fb:sequence', ns)
     if seq is not None:
         meta['series'] = seq.get('name') or ''
@@ -1272,9 +1366,9 @@ def _meta_fb2(path: str, meta: dict):
                 pass
             break
 
-# ── mobi / azw ────────────────────────────────────────────────────────────────
+# -- mobi / azw ----------------------------------------------------------------
 def _meta_mobi(path: str, meta: dict):
-    """Parse the MOBI EXTH header directly — no dependency needed for the
+    """! @brief Parse the MOBI EXTH header directly - no dependency needed for the
     handful of fields that matter, and `mobi`/calibre are only needed for the
     TEXT."""
     try:
@@ -1336,7 +1430,7 @@ def _meta_mobi(path: str, meta: dict):
     except Exception:
         pass
 
-# ── docx / html / text ────────────────────────────────────────────────────────
+# -- docx / html / text --------------------------------------------------------
 def _meta_docx(path: str, meta: dict):
     try:
         with zipfile.ZipFile(path) as z:
@@ -1355,9 +1449,13 @@ def _meta_docx(path: str, meta: dict):
         if el.tag == _DC + 'title':
             meta['title'] = txt
         elif el.tag == _DC + 'creator':
-            meta['authors'].append(txt)
+            meta['authors'].extend(a.strip() for a in txt.split(';') if a.strip())
         elif el.tag == _DC + 'description':
             meta['description'] = txt
+        elif el.tag == _DC + 'language':
+            meta['language'] = txt
+        elif el.tag == CP + 'category':
+            meta['series'] = txt
         elif el.tag == CP + 'keywords':
             meta['subjects'] = [k.strip() for k in re.split(r'[,;]', txt) if k.strip()]
 
@@ -1366,15 +1464,24 @@ def _meta_html(path: str, meta: dict):
     m = re.search(r'<title[^>]*>(.*?)</title>', head, re.I | re.S)
     if m:
         meta['title'] = _html.unescape(_strip_tags(m.group(1))).strip()
-    for name, key in (('author', 'author'), ('description', 'description')):
-        m = re.search(rf'<meta[^>]+name=["\']{name}["\'][^>]+content=["\'](.*?)["\']',
+    for name, key in (('author', 'author'), ('description', 'description'),
+                      ('keywords', 'subjects'), ('dc.publisher', 'publisher'),
+                      ('dc.date', 'published'), ('dc.language', 'language'),
+                      ('dc.source', 'source'), ('calibre:series', 'series'),
+                      ('dc.identifier', 'isbn')):
+        m = re.search(rf'<meta[^>]+name=["\']{re.escape(name)}["\'][^>]+content=["\'](.*?)["\']',
                       head, re.I | re.S)
         if m:
             v = _html.unescape(m.group(1)).strip()
             if key == 'author':
-                meta['authors'].append(v)
+                meta['authors'].extend(a.strip() for a in v.split(',') if a.strip())
+            elif key == 'subjects':
+                meta['subjects'] = [k.strip() for k in re.split(r'[,;]', v) if k.strip()]
+            elif key == 'isbn':
+                if v.lower().startswith('urn:isbn'):
+                    meta['isbn'] = re.sub(r'[^0-9Xx]', '', v)
             else:
-                meta['description'] = v
+                meta[key] = v
     if 'archiveofourown.org' in head:
         m = re.search(r'archiveofourown\.org/works/(\d+)', head)
         if m:
@@ -1399,29 +1506,29 @@ def _meta_text(path: str, meta: dict):
         if len(first) < 120:
             meta['title'] = first
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 7. TEXT EXTRACTION → SECTIONS
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# 7. TEXT EXTRACTION -> SECTIONS
+# ==============================================================================
 
 class ExtractResult:
     __slots__ = ('status', 'sections', 'error', 'word_count')
 
     def __init__(self, status, sections=None, error='', word_count=0):
         self.status = status              # ok | needs_backend | failed | unsupported
-        self.sections = sections or []    # [{'title':…, 'html':…}]
+        self.sections = sections or []    # [{'title':..., 'html':...}]
         self.error = error
         self.word_count = word_count
 
 def extract_sections(abs_path: str, fmt: str) -> ExtractResult:
-    """Extract a flow book into sanitized HTML sections.
+    """! @brief Extract a flow book into sanitized HTML sections.
 
     Order of attack: a native Python reader if one exists for the format, then
-    Calibre. `needs_backend` is a first-class result, not an error — the UI shows
+    Calibre. `needs_backend` is a first-class result, not an error - the UI shows
     "install X to read these" rather than a stack trace.
     """
     try:
         if fmt in PAGED_FORMATS:
-            return ExtractResult('unsupported', error='paged format — rendered on demand')
+            return ExtractResult('unsupported', error='paged format - rendered on demand')
         if fmt == 'epub':
             return _extract_epub(abs_path)
         if fmt == 'opf-folder':
@@ -1439,7 +1546,7 @@ def extract_sections(abs_path: str, fmt: str) -> ExtractResult:
     except Exception as e:
         return ExtractResult('failed', error=f'{type(e).__name__}: {e}')
 
-    # Long tail: mobi, azw3, kfx, lit, chm, ceb, lrf, doc, palmdoc…
+    # Long tail: mobi, azw3, kfx, lit, chm, ceb, lrf, doc, palmdoc...
     return _extract_via_calibre(abs_path, fmt)
 
 def _finish(sections) -> ExtractResult:
@@ -1612,8 +1719,8 @@ def _extract_docx(path: str) -> ExtractResult:
         d = docx.Document(path)
     except Exception:
         # python-docx insists on a well-formed OPC package ([Content_Types].xml
-        # and friends). Plenty of real-world .docx files — anything produced by
-        # a converter, a scraper, or Google Docs export gone wrong — are missing
+        # and friends). Plenty of real-world .docx files - anything produced by
+        # a converter, a scraper, or Google Docs export gone wrong - are missing
         # parts python-docx considers mandatory but that still contain perfectly
         # readable text. Fall back to pulling <w:t> runs directly rather than
         # telling the user their manuscript is unreadable.
@@ -1634,13 +1741,13 @@ def _extract_docx(path: str) -> ExtractResult:
     return _finish(sections)
 
 def _extract_docx_raw(path: str) -> ExtractResult:
-    """python-docx-free fallback: pull <w:t> runs straight out of the XML."""
+    """! @brief python-docx-free fallback: pull <w:t> runs straight out of the XML."""
     try:
         with zipfile.ZipFile(path) as z:
             xml = z.read('word/document.xml').decode('utf-8', 'replace')
     except Exception as e:
         return ExtractResult('failed', error=str(e))
-    # paragraphs are <w:p>…</w:p>; text is in <w:t>
+    # paragraphs are <w:p>...</w:p>; text is in <w:t>
     paras = []
     for pm in re.finditer(r'<w:p[ >].*?</w:p>', xml, re.S):
         runs = re.findall(r'<w:t[^>]*>(.*?)</w:t>', pm.group(0), re.S)
@@ -1657,7 +1764,7 @@ def _extract_rtf(path: str) -> ExtractResult:
         text = _rtf_to_text(f.read(), errors='ignore')
     return _finish([{'title': '', 'html': _paras_to_html(text.splitlines())}])
 
-# ── Calibre fallback ──────────────────────────────────────────────────────────
+# -- Calibre fallback ----------------------------------------------------------
 _CALIBRE_FORMATS = {'mobi', 'azw3', 'kfx', 'lit', 'chm', 'ceb', 'lrf',
                     'doc', 'palmdoc', 'ereader', 'plucker', 'ztxt', 'opf'}
 
@@ -1665,7 +1772,7 @@ def have_calibre() -> bool:
     return _sh.which('ebook-convert') is not None
 
 def _extract_via_calibre(abs_path: str, fmt: str) -> ExtractResult:
-    """Universal fallback. `ebook-convert IN OUT.epub` then read the epub.
+    """! @brief Universal fallback. `ebook-convert IN OUT.epub` then read the epub.
 
     This is how the long tail gets handled without this repo growing six more
     fragile format parsers. Calibre is a big install, so it is optional and the
@@ -1674,7 +1781,7 @@ def _extract_via_calibre(abs_path: str, fmt: str) -> ExtractResult:
     if not have_calibre():
         return ExtractResult(
             'needs_backend',
-            error=f'{fmt} needs Calibre — install it and make `ebook-convert` '
+            error=f'{fmt} needs Calibre - install it and make `ebook-convert` '
                   f'available on PATH (apt install calibre)')
     with tempfile.TemporaryDirectory() as td:
         out = os.path.join(td, 'out.epub')
@@ -1688,9 +1795,9 @@ def _extract_via_calibre(abs_path: str, fmt: str) -> ExtractResult:
             return ExtractResult('failed', error=f'ebook-convert failed: {tail}')
         return _extract_epub(out)
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # 8. HTML SANITIZER
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # Book HTML comes from the internet. It goes straight into our DOM. A tiny
 # allowlist sanitizer beats pulling in bleach, and beats trusting epub authors.
 
@@ -1793,12 +1900,12 @@ def _first_heading(fragment: str) -> str:
     m = re.search(r'<h[1-6][^>]*>(.*?)</h[1-6]>', fragment or '', re.I | re.S)
     return _strip_tags(m.group(1))[:120] if m else ''
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # 9. CHUNKING + EMBEDDINGS
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def chunk_sections(sections: list[dict]) -> list[dict]:
-    """Split sections into overlapping ~CHUNK_CHARS passages on sentence
+    """! @brief Split sections into overlapping ~CHUNK_CHARS passages on sentence
     boundaries. Returns [{'section', 'offset', 'text'}].
 
     Overlap matters: a passage split mid-scene otherwise buries the very thing
@@ -1844,7 +1951,7 @@ def emb_sig(model_tag: str) -> str:
     return f"{EMB_SIG_PREFIX}:{model_tag}"
 
 def rank_by_vector(qv: np.ndarray, rows) -> list[tuple]:
-    """Score (rel_path, idx, section, offset, text, emb) rows against a query
+    """! @brief Score (rel_path, idx, section, offset, text, emb) rows against a query
     vector. Returns [(score, rel_path, idx, section, offset, text)] descending.
     Vectors from the OAI client are already L2-normalised, so this is a dot."""
     out = []
@@ -1861,15 +1968,15 @@ def rank_by_vector(qv: np.ndarray, rows) -> list[tuple]:
     out.sort(key=lambda t: -t[0])
     return out
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # 10. MISC
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def reader_for(fmt: str) -> str:
     return 'paged' if fmt in PAGED_FORMATS else 'flow'
 
 def sort_title(title: str) -> str:
-    """'The Hobbit' → 'hobbit, the' so browsing by title isn't 4000 T's."""
+    """! @brief 'The Hobbit' -> 'hobbit, the' so browsing by title isn't 4000 T's."""
     t = (title or '').strip()
     m = re.match(r'^(a|an|the|der|die|das|le|la|les|el|los|las)\s+(.+)$', t, re.I)
     if m:
@@ -1881,7 +1988,7 @@ def cover_cache_name(rel_path: str) -> str:
     return f"{h}.jpg"
 
 def make_cover_jpeg(data: bytes, max_edge: int = 640) -> bytes | None:
-    """Normalise any cover image to a bounded JPEG. cv2 is already a hard dep."""
+    """! @brief Normalise any cover image to a bounded JPEG. cv2 is already a hard dep."""
     if not data:
         return None
     try:
@@ -1933,7 +2040,7 @@ def page_count_for(abs_path: str, fmt: str) -> int | None:
     return None
 
 def pdf_is_probably_comic(abs_path: str) -> bool:
-    """A PDF whose first pages carry almost no extractable text is a scan — i.e.
+    """! @brief A PDF whose first pages carry almost no extractable text is a scan - i.e.
     a comic/manga rip, not a novel. Decides `kind` so the reader defaults to the
     right chrome (spreads + fit-width vs columns + font size)."""
     doc = _open_pdf(abs_path)

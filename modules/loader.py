@@ -1,40 +1,15 @@
-"""
-Module loader.
-======================================================================
-The real module system. Discovers pluggable modules on disk, resolves
-load order from their declared dependencies, and calls register(host) on
-each enabled one so it can wire itself into the app. This is what makes
-"publish a folder, drop it in modules/, restart" actually work.
+"""! @file
+@brief Module discovery, enable state, dependency order and registration.
 
-A pluggable module is a directory under modules/ containing a module.py
-(or a package whose __init__.py) that exposes:
+A module is a folder under modules/ whose module.py (or __init__.py) defines
 
-    MANIFEST = {
-        "id":          "hello",           # stable unique key (== folder name)
-        "name":        "Hello Example",   # label for the Modules settings tab
-        "version":     "1.0.0",
-        "description": "one-line summary",
-        "core":        False,             # True => always on, can't disable
-        "requires":    [],                # other module ids that must load first
-        "pip":         [],                # pip deps the author expects present
-        "assets":      [],                # optional; static files to inject
-        "default_enabled": True,          # optional; False => off until the user turns it on
-    }
+    MANIFEST = {"id", "name", "version", "description", "core", "requires",
+                "pip", "assets", "default_enabled"}
+    def register(host): ...
 
-    def register(host):                   # called at startup if enabled
-        ...
-
-Enable-state lives in app_config.json under "modules" ({id: bool}); core
-modules are forced True. Discovery reads every manifest (even disabled
-ones) so the settings UI can list what's installed; register() is called
-only for enabled modules, in dependency order.
-
-The five original building blocks (auth, capabilities, cimlogger,
-metadata, threading) are NOT loaded through this system yet — manager.py
-still imports them directly. They are declared here as built-in CORE
-descriptors so the Modules tab shows them (locked on) alongside real
-plugins. Converting one of them to load through register(host) is the
-next section's job; the seam is now here for it.
+Enable state lives in app_config.json under "modules"; core modules are always
+on. Every manifest is read so Settings > Modules lists disabled modules too;
+register() runs only for enabled ones, in dependency order.
 """
 
 import ast
@@ -52,23 +27,23 @@ import optional_deps
 
 _log = logging.getLogger("modules.loader")
 
-# Wheels that must come from requirements-<backend>.txt (right wheel index),
-# never from a module's manifest at runtime — auto-installing these would drag
-# a 2 GB CUDA torch onto a CPU box.
+# Backend wheels come from requirements-<backend>.txt, never from a manifest
+# (auto-installing them would pull a CUDA torch onto a CPU box).
 _BACKEND_PIP = {"torch", "torchvision", "torchaudio", "onnxruntime", "onnxruntime-gpu",
                 "onnxruntime-rocm", "onnxruntime-migraphx"}
 
 
 def _alternatives(dep):
-    """A dep spec may list interchangeable packages, first = preferred:
-    'ai-edge-litert:ai_edge_litert|tflite-runtime:tflite_runtime|tensorflow'.
-    Any one of them satisfies it; auto-install picks the first."""
+    """! @brief The interchangeable packages of a dep spec, preferred first
+    ("a:mod_a|b:mod_b|c"); any one satisfies it.
+    """
     return [a.strip() for a in str(dep).split("|") if a.strip()]
 
 
 def _split_dep(dep):
-    """'pkg' / 'pkg:import_name' / 'pkg @ git+https://...:import_name' ->
-    (pip spec, import name or ''). Splits on the last colon so URL specs work."""
+    """! @brief Split "pkg", "pkg:import_name" or "pkg @ git+https://...:import_name".
+    @return (pip spec, import name or ""); splits on the last colon so URLs survive.
+    """
     pip_name, sep, import_name = dep.rpartition(":")
     if not sep or "/" in import_name:
         return dep, ""
@@ -80,15 +55,13 @@ def _one_label(dep):
 
 
 def _dep_label(dep):
-    """Display name of a dep spec: 'pkg>=1.2' stays, 'pkg @ git+https://...' -> 'pkg',
-    alternatives -> 'first (or second / third)'."""
+    """! @brief Display name of a dep spec ("pkg @ git+..." -> "pkg", alternatives joined with "or")."""
     alts = [_one_label(a) for a in _alternatives(dep)]
     return alts[0] + (f" (or {' / '.join(alts[1:])})" if len(alts) > 1 else "")
 
 
 def _import_name(dep):
-    """Top-level import name of a dep spec: explicit ':import_name', else the
-    pip name stripped of extras / version / URL, '-' -> '_'."""
+    """! @brief Top-level import name: the explicit ":name", else the pip name with "-" -> "_"."""
     pip_name, import_name = _split_dep(dep)
     if import_name:
         return import_name.strip()
@@ -103,14 +76,12 @@ def _one_installed(dep):
 
 
 def _dep_installed(dep):
-    """Is a manifest dep spec (or one of its alternatives) present on disk
-    (not necessarily importable)?"""
+    """! @brief True when the dep (or an alternative) is installed (it may still fail to import)."""
     return any(_one_installed(a) for a in _alternatives(dep))
 
 
 def _dep_problem(dep):
-    """None when the dep (or one of its alternatives) imports; otherwise why
-    not (missing vs. broken)."""
+    """! @brief None when the dep (or an alternative) imports, else why not."""
     alts = [a for a in _alternatives(dep) if _one_installed(a)]
     if not alts:
         return f"pip dependency '{_dep_label(dep)}' not installed"
@@ -126,8 +97,7 @@ def _dep_problem(dep):
 
 
 def _manifest_from_source(folder, entry_file):
-    """The MANIFEST dict literal of a module that failed to import, read
-    without running it (so its id, name and pip deps are still known), or None."""
+    """! @brief Read the MANIFEST literal of a module that failed to import, without running it."""
     try:
         with open(os.path.join(folder, entry_file), encoding="utf-8") as f:
             tree = ast.parse(f.read())
@@ -144,9 +114,7 @@ def _manifest_from_source(folder, entry_file):
 
 
 def _import_failure(manifest, exc):
-    """A readable reason for a module whose import raised: a missing package
-    that the manifest declares (or any missing package) is reported like an
-    uninstalled pip dep, so the Modules tab shows it and enabling installs it."""
+    """! @brief Why a module's import failed, phrased like a missing pip dep when that is the cause."""
     if isinstance(exc, ModuleNotFoundError) and exc.name:
         top = exc.name.split(".")[0]
         for dep in (manifest or {}).get("pip", []):
@@ -157,11 +125,9 @@ def _import_failure(manifest, exc):
 
 
 def _pip_install(deps, logger):
-    """pip-install manifest deps. Returns what it installed.
-
-    Subprocess, not `import pip`: pip has no library API, and it must not run
-    inside the interpreter it's installing into. Failure is not fatal — the
-    module just keeps reporting its missing dep."""
+    """! @brief pip-install deps in a subprocess (pip has no library API).
+    @return the packages installed; a failure is logged, not raised.
+    """
     want = [_split_dep(_alternatives(d)[0])[0].strip() for d in deps]
     skip = [p for p in want if p in _BACKEND_PIP]
     want = [p for p in want if p not in _BACKEND_PIP]
@@ -177,7 +143,7 @@ def _pip_install(deps, logger):
     return want
 
 
-# ── built-in core descriptors (imported directly by manager, shown locked) ──
+# -- built-in core parts manager imports directly; listed so Settings shows them --
 _CORE = [
     {"id": "auth", "name": "Authentication", "version": "builtin", "core": True,
      "requires": [], "pip": [], "assets": [],
@@ -207,9 +173,7 @@ _CORE = [
                     "The themes themselves are modules."},
 ]
 
-# folder names that are the core building blocks / infrastructure, NOT plugins.
-# The loader skips these during disk discovery so it doesn't try to import
-# auth/ as a plugin manifest.
+# Core folders that are not plugins; discovery skips them.
 _RESERVED_DIRS = {"auth", "capabilities", "metadata", "encoding", "threading", "theming",
                   "__pycache__"}
 
@@ -217,35 +181,30 @@ _MODULES_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 class LoadedModule:
-    """A discovered pluggable module and its runtime state."""
+    """! @brief A discovered module and its runtime state."""
     def __init__(self, manifest, py_module, path):
         self.manifest = manifest
-        self.py_module = py_module      # the imported python module object
-        self.path = path                # folder on disk
+        self.py_module = py_module
+        self.path = path
         self.registered = False
-        self.error = None               # str if register() blew up
+        self.error = None  # why register() failed, or None
 
     @property
     def id(self):
         return self.manifest["id"]
 
 
-# ── the registry ────────────────────────────────────────────────────────────
 class ModuleRegistry:
-    """Owns discovery, enable-state, ordering, and registration."""
+    """! @brief Discovery, enable state, ordering and registration of plugin modules."""
 
     def __init__(self):
         self._core = {m["id"]: dict(m) for m in _CORE}
-        self._plugins = {}          # id -> LoadedModule (discovered on disk)
-        self._enabled = {}          # id -> bool  (plugins only; core always True)
+        self._plugins = {}  # id -> LoadedModule
+        self._enabled = {}  # id -> enabled (plugins only)
 
-    # ── discovery ────────────────────────────────────────────────────────
     def discover(self):
-        """Scan modules/ for plugin folders and import their manifests.
-
-        Import failures are recorded, not raised: one broken third-party
-        module must not stop the app or the other modules from loading.
-        Called once at import time by modules/__init__.py.
+        """! @brief Import every plugin folder's manifest. A module that fails to import
+        is recorded with its error; it never stops the others.
         """
         for name in sorted(os.listdir(_MODULES_DIR)):
             if name in _RESERVED_DIRS or name.startswith((".", "_")):
@@ -264,7 +223,7 @@ class ModuleRegistry:
                 py = importlib.import_module(entry)
                 manifest = getattr(py, "MANIFEST", None)
                 if not isinstance(manifest, dict) or "id" not in manifest:
-                    continue  # not a module, just a folder that happens to import
+                    continue  # not a module
                 manifest.setdefault("id", name)
                 manifest.setdefault("name", name)
                 manifest.setdefault("version", "0")
@@ -275,10 +234,8 @@ class ModuleRegistry:
                 manifest.setdefault("assets", [])
                 self._plugins[manifest["id"]] = LoadedModule(manifest, py, folder)
             except Exception as e:
-                # Record the failure against a stub so the UI can show it. The
-                # manifest is read from source when possible, so the stub keeps
-                # its real id and pip list (missing deps get reported and
-                # installed like any other module's).
+                # Keep a stub with the manifest read from source, so the failure shows with
+                # the module's real id and missing deps.
                 src = _manifest_from_source(folder, entry_file) or {}
                 man = {"id": name, "name": name, "version": "?", "description": "failed to import",
                        "core": False, "requires": [], "pip": [], "assets": []}
@@ -288,14 +245,11 @@ class ModuleRegistry:
                 stub.error = _import_failure(man, e) or traceback.format_exc(limit=3)
                 self._plugins[man["id"]] = stub
 
-    # ── enable-state ─────────────────────────────────────────────────────
     def init_state(self, persisted):
-        """Seed enable-state from app_config.json's "modules" dict.
-
-        Core modules are forced True. Unknown ids in the persisted dict are
-        dropped. Plugins default to enabled unless persisted False or their
-        manifest says default_enabled: False (tooling most users never need).
-        Returns the normalized {id: bool} map to write back.
+        """! @brief Load enable state from the saved "modules" dict.
+        Core modules are on; unknown ids are dropped; plugins are on unless saved off
+        or their manifest sets default_enabled False.
+        @return the normalised {id: bool} to save back.
         """
         persisted = persisted or {}
         self._enabled = {}
@@ -321,30 +275,23 @@ class ModuleRegistry:
         return bool(self._enabled.get(module_id, False))
 
     def set_enabled(self, module_id, value):
-        """Toggle a plugin. Returns (ok, error|None). Core => refused.
-
-        Note: enabling/disabling takes effect on the NEXT restart, because
-        register(host) runs at startup. The caller persists and tells the
-        user to restart. (Hot-reload is out of scope for v1.)
+        """! @brief Enable or disable a plugin (applies after a restart).
+        @return (ok, error or None); core modules can't be disabled.
         """
         if not self.exists(module_id):
             return False, "unknown module"
         if self.is_core(module_id) and not value:
             return False, "core module cannot be disabled"
         if self.is_core(module_id):
-            return True, None  # already always-on
+            return True, None
         self._enabled[module_id] = bool(value)
         if value:
             self.install_deps(module_id)
         return True, None
 
     def install_deps(self, module_id, logger=None):
-        """pip-install a module's declared deps that aren't importable yet.
-
-        Called when the user enables a module, so 'enable it in Settings' is
-        the whole procedure — the restart that loads it finds its deps there.
-        Never fatal: a dep that won't install just leaves the module reporting
-        it in the Modules tab. CIM_NO_AUTO_INSTALL=1 turns this off.
+        """! @brief pip-install a module's missing deps when it is enabled.
+        Never fatal; CIM_NO_AUTO_INSTALL=1 turns it off.
         """
         lm = self._plugins.get(module_id)
         if not lm:
@@ -353,12 +300,10 @@ class ModuleRegistry:
         return _pip_install(need, logger or _log) if need else []
 
     def install_all_deps(self, config_path="app_config.json", logger=None):
-        """Pre-launch pass (run.sh): pip-install the missing declared deps of
-        every ENABLED plugin, so a module switched on in Settings has its
-        packages by the time the real process imports it. Runs in its own
-        interpreter on purpose: optional_import decides at import time, so a
-        dep installed after the app imported the module wouldn't be seen
-        until the next start anyway. Returns {module_id: [installed pkgs]}."""
+        """! @brief Before launch (run.sh): install missing deps of every enabled plugin.
+        Runs in its own interpreter, since imports are decided once at startup.
+        @return {module_id: [installed packages]}.
+        """
         log = logger or _log
         persisted = {}
         try:
@@ -383,12 +328,9 @@ class ModuleRegistry:
         state.update({pid: self.is_enabled(pid) for pid in self._plugins})
         return state
 
-    # ── load order ───────────────────────────────────────────────────────
     def _ordered_enabled_plugins(self):
-        """Topologically sort enabled plugins by their `requires`.
-
-        Missing or disabled dependencies mean the dependent is skipped with
-        a recorded error. Cycles are broken by skipping the offending node.
+        """! @brief Enabled plugins sorted by `requires`. A plugin whose dependency is
+        missing or disabled, or that sits in a cycle, is skipped with an error.
         """
         enabled = {pid: lm for pid, lm in self._plugins.items()
                    if self.is_enabled(pid) and lm.py_module is not None}
@@ -403,7 +345,7 @@ class ModuleRegistry:
             visiting.add(pid)
             for dep in enabled[pid].manifest.get("requires", []):
                 if dep in self._core:
-                    continue  # core is always available
+                    continue
                 if dep not in enabled:
                     enabled[pid].error = f"requires '{dep}' (missing or disabled)"
                     visiting.discard(pid)
@@ -421,17 +363,10 @@ class ModuleRegistry:
             visit(pid)
         return ordered
 
-    # ── registration ─────────────────────────────────────────────────────
     def register_all(self, host):
-        """Call register(host) on every enabled plugin, in dep order.
-
-        Sets host._current_module around each call so contribution helpers
-        (add_asset, add_settings_tab, …) attribute correctly. One module
-        raising does not stop the others.
-
-        Core modules (auth, capabilities, metadata, threading, cimlogger) are
-        imported directly by manager and register themselves; register_all()
-        only handles discovered plugins.
+        """! @brief Call register(host) on every enabled plugin in dependency order.
+        host._current_module is set around each call; a module that raises is
+        recorded and the rest continue.
         """
         if getattr(self, "_register_all_done", False):
             host.logger.debug("register_all() already called, skipping")
@@ -444,9 +379,8 @@ class ModuleRegistry:
                 continue
             if lm.registered:
                 continue
-            # Availability gate: a module either loads whole or not at all. Its
-            # manifest 'pip' deps must import, and a module may set AVAILABLE /
-            # UNAVAILABLE_REASON at import time (a lazy probe of a heavy dep).
+            # A module loads whole or not at all: its pip deps must import and its
+            # AVAILABLE flag (an import-time probe) must not be False.
             why = self._unavailable_reason(lm)
             if why:
                 lm.error = why
@@ -463,11 +397,9 @@ class ModuleRegistry:
             finally:
                 host._current_module = None
 
-    # ── UI / API snapshot ────────────────────────────────────────────────
     @staticmethod
     def _unavailable_reason(lm):
-        """Why a plugin can't load whole: an AVAILABLE=False probe at import
-        time, or a manifest 'pip' dep that doesn't import. None = fine."""
+        """! @brief Why a plugin can't load (AVAILABLE=False, or a pip dep that won't import), or None."""
         for dep in lm.manifest.get("pip", []):
             why = _dep_problem(dep)
             if why:
@@ -476,13 +408,13 @@ class ModuleRegistry:
             reason = getattr(lm.py_module, "UNAVAILABLE_REASON", None) or "unavailable"
             failed = optional_deps.BY_CALLER.get(getattr(lm.py_module, "__name__", ""), [])
             if failed:
-                reason += " — " + "; ".join(f"import {n} failed: {optional_deps.ERRORS.get(n, '?')}"
+                reason += " - " + "; ".join(f"import {n} failed: {optional_deps.ERRORS.get(n, '?')}"
                                             for n in dict.fromkeys(failed))
             return reason
         return None
 
     def status(self):
-        """Descriptor list for /api/modules and the settings tab."""
+        """! @brief Module descriptors for /api/modules."""
         out = []
         for m in self._core.values():
             out.append({
@@ -506,12 +438,7 @@ class ModuleRegistry:
         return out
 
     def missing_pip(self):
-        """Best-effort list of declared pip deps that don't import.
-
-        Advisory only — used to warn in the UI. Uses the dep's top-level
-        import name when the author gives 'pkg:import_name', else the pip
-        name with '-' -> '_'.
-        """
+        """! @brief Declared pip deps that don't import (for the UI warning)."""
         missing = {}
         for pid, lm in self._plugins.items():
             miss = [_dep_label(dep)
@@ -522,5 +449,4 @@ class ModuleRegistry:
         return missing
 
 
-# module-level singleton used by modules/__init__.py and manager.py
 registry = ModuleRegistry()

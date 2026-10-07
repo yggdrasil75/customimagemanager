@@ -1,5 +1,5 @@
-"""
-API keys: a user's permissions, or a subset, for another app.
+"""! @file
+@brief API keys: a user's permissions, or a subset, for another app.
 ======================================================================
 A key authenticates a request as its owner with `Authorization: Bearer
 cim_<prefix>_<secret>` (no cookie, no CSRF). What it may do is the
@@ -10,7 +10,7 @@ never an admin, however its owner logs in: it holds features only (an admin's
 policies), and keys cannot create or list keys.
 
 scope 'all' is the owner's view of the library; scope 'personal' confines the
-key to the owner's own users/<name>/ tree — uploads land there whatever the
+key to the owner's own users/<name>/ tree - uploads land there whatever the
 form says, and nothing public or shared is visible or writable. The
 ownership module reads g.api_key["scope"] for that.
 
@@ -48,7 +48,7 @@ def _hash(key):
 
 
 def _clamp(key_perms, owner_perms):
-    """Feature map = min(level on the key, owner's current level)."""
+    """! @brief Feature map = min(level on the key, owner's current level)."""
     return {k: min(features.level_of(key_perms.get(k, features.BLOCK)), features.level_of(v))
             for k, v in owner_perms.items()}
 
@@ -78,9 +78,9 @@ def register(host):
     host.add_settings_tab("api_keys", "API keys", icon="🔑", group="you")
     db, authmgr = host.db, host.core.authmgr
 
-    # ── authentication ───────────────────────────────────────────────────
+    # -- authentication ---------------------------------------------------
     def user_for_request():
-        """None when no Bearer header; False when one is sent but is unknown,
+        """! @brief None when no Bearer header; False when one is sent but is unknown,
         expired or its owner is gone (the request then stays anonymous rather
         than falling back to a cookie); else (user, info) with the clamped
         feature map and is_admin=False."""
@@ -103,7 +103,7 @@ def register(host):
 
     host.register_authenticator(user_for_request)
 
-    # ── routes ───────────────────────────────────────────────────────────
+    # -- routes -----------------------------------------------------------
     def _signed_in():
         return g.get("user") and g.user.get("id") and not g.get("api_key")   # keys don't manage keys
 

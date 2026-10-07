@@ -1,10 +1,10 @@
-"""
-Music module — the Music tab: artists / albums / songs, in-browser player,
+"""! @file
+@brief Music module - the Music tab: artists / albums / songs, in-browser player,
 tag editing, offline audio embeddings, clustering and shuffle-by.
 ======================================================================
 Audio is stored natively (no lossless shrink), organised and tagged in
 place. This module owns:
-  - the 'audio' media kind (extensions, mimes) — core stores/serves audio
+  - the 'audio' media kind (extensions, mimes) - core stores/serves audio
     without knowing what it is;
   - the `music` / `music_clusters` tables;
   - indexing: on the library walk (`file.index`), after upload
@@ -64,8 +64,8 @@ def register(host):
     def _is_audio(path):
         return os.path.splitext(path)[1].lower() in AUDIO_EXTS
 
-    # ── the audio embedding pick (Models → Audio embedding) ───────────────
-    # The librosa fingerprint is registered as the no-download fallback; the
+    # -- the audio embedding pick (Models -> Audio embedding) ---------------
+    ## @brief The librosa fingerprint is registered as the no-download fallback; the
     # CLAP / MuQ modules register real models. A model with a joint text space
     # exposes .embed_text on its handle, which is what "sem:" over music needs.
     def _librosa_loader():
@@ -81,7 +81,7 @@ def register(host):
              "search. Similar-sounding tracks only.")
 
     def _audio_handle():
-        """(embed_fn, space, embed_text_or_None) for the picked audio model;
+        """! @brief (embed_fn, space, embed_text_or_None) for the picked audio model;
         raises RuntimeError with the broker's reason when unusable."""
         try:
             h = host.request_model("embed.audio")
@@ -105,9 +105,9 @@ def register(host):
         # z-score only the librosa fingerprint; model spaces stay as stored
         return ml.is_fingerprint_space(space or _audio_space())
 
-    # ── indexing ──────────────────────────────────────────────────────────
+    # -- indexing ----------------------------------------------------------
     def upsert(rel_path, abs_path, force=False):
-        """Index one track if new or changed. Returns True if (re)indexed."""
+        """! @brief Index one track if new or changed. Returns True if (re)indexed."""
         try:
             st = os.stat(abs_path)
         except OSError:
@@ -118,27 +118,22 @@ def register(host):
             if row and abs(row["mtime"] - mtime) < 1e-6:
                 return False
         m = ml.read_audio_metadata(abs_path)
-        db().execute("""
-            INSERT INTO music(rel_path,mtime,size,duration,bitrate,samplerate,channels,
-                              title,artist,album,albumartist,track,disc,year,genre,
-                              composer,comment,tags,created)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'[]',?)
-            ON CONFLICT(rel_path) DO UPDATE SET
-                mtime=excluded.mtime, size=excluded.size, duration=excluded.duration,
-                bitrate=excluded.bitrate, samplerate=excluded.samplerate,
-                channels=excluded.channels, title=excluded.title, artist=excluded.artist,
-                album=excluded.album, albumartist=excluded.albumartist, track=excluded.track,
-                disc=excluded.disc, year=excluded.year, genre=excluded.genre,
-                composer=excluded.composer, comment=excluded.comment
-        """, (rel_path, mtime, size, m["duration"], m["bitrate"], m["samplerate"],
-              m["channels"], m["title"] or os.path.splitext(os.path.basename(rel_path))[0],
-              m["artist"], m["album"], m["albumartist"], m["track"], m["disc"],
-              m["year"], m["genre"], m["composer"], m["comment"], time.time()))
+        # Index row read from the file: DB only (the tags are already in it).
+        host.update_file(rel_path, table="music", dont_write=True, commit=False,
+                         defaults={"tags": "[]", "created": time.time()},
+                         set={"mtime": mtime, "size": size, "duration": m["duration"],
+                              "bitrate": m["bitrate"], "samplerate": m["samplerate"],
+                              "channels": m["channels"],
+                              "title": m["title"] or os.path.splitext(os.path.basename(rel_path))[0],
+                              "artist": m["artist"], "album": m["album"],
+                              "albumartist": m["albumartist"], "track": m["track"],
+                              "disc": m["disc"], "year": m["year"], "genre": m["genre"],
+                              "composer": m["composer"], "comment": m["comment"]})
         db().commit()
         return True
 
     def index_all(force=False):
-        """Walk the library for tracks. Resumable and self-guarding."""
+        """! @brief Walk the library for tracks. Resumable and self-guarding."""
         if state["indexing"]:
             return
         state.update(indexing=True, status="scanning")
@@ -182,9 +177,8 @@ def register(host):
                         log.error(f"music embed {rp}: {e}")
                         vec = None
                     if vec is not None:
-                        db().execute("UPDATE music SET emb=?, emb_sig=? WHERE rel_path=?",
-                                     (ml._pack_emb(vec), sig, rp))
-                        db().commit()
+                        host.update_file(rp, table="music", dont_write=True,
+                                         set={"emb": ml._pack_emb(vec), "emb_sig": sig})
                 state["emb_done"] += 1
             state["status"] = "idle"
         except RuntimeError as e:
@@ -194,7 +188,7 @@ def register(host):
             state["embedding"] = False
 
     def load_embeddings(space=None):
-        """Every stored vector in the current audio space (rows in another
+        """! @brief Every stored vector in the current audio space (rows in another
         model's space are kept but not comparable)."""
         space = space or _audio_space()
         rows = db().execute("SELECT rel_path, emb FROM music WHERE emb IS NOT NULL AND emb_sig=?",
@@ -210,7 +204,7 @@ def register(host):
         return paths, embs
 
     def rank_by_vector(qv, exclude=None, limit=500):
-        """[(rel_path, cosine)] best first against every track in the current
+        """! @brief [(rel_path, cosine)] best first against every track in the current
         space; `exclude` drops one rel_path (the seed itself)."""
         paths, embs = load_embeddings()
         if not paths:
@@ -233,7 +227,7 @@ def register(host):
                 by_path[r["rel_path"]] = row_dict(r)
         return [by_path[p] for p in order if p in by_path]
 
-    # ── core events ───────────────────────────────────────────────────────
+    # -- core events -------------------------------------------------------
     def _file_index(rel_path, abs_path, force=False):
         if not _is_audio(abs_path):
             return None
@@ -246,14 +240,14 @@ def register(host):
     host.on("upload.stored", lambda rel_path, filename:
             threading.Thread(target=index_all, daemon=True).start() if _is_audio(filename) else None)
     host.on("file.renamed", lambda old_rel, new_rel:
-            (db().execute("UPDATE music SET rel_path=? WHERE rel_path=?", (new_rel, old_rel)),
-             db().commit()) if _is_audio(old_rel) else None)
+            host.update_file(table="music", where=("rel_path=?", (old_rel,)), set={"rel_path": new_rel},
+                             dont_write=True) if _is_audio(old_rel) else None)
 
     def _file_deleted(rel_path):
-        db().execute("DELETE FROM music WHERE rel_path=?", (rel_path,)); db().commit()
+        host.update_file(rel_path, table="music", remove=True, dont_write=True)
     host.on("file.deleted", _file_deleted)
 
-    # ── routes ────────────────────────────────────────────────────────────
+    # -- routes ------------------------------------------------------------
     def row_dict(r):
         return {"rel_path": r["rel_path"], "title": r["title"], "artist": r["artist"],
                 "album": r["album"], "albumartist": r["albumartist"], "track": r["track"],
@@ -306,7 +300,7 @@ def register(host):
         try:
             labels, kk = ml.cluster_embeddings(paths, embs, k=int(k) if k else None, zscore=_zscore())
             for rp, c in labels.items():
-                db().execute("UPDATE music SET cluster=? WHERE rel_path=?", (c, rp))
+                host.update_file(rp, table="music", set={"cluster": c}, dont_write=True, commit=False)
             db().execute("DELETE FROM music_clusters")
             for c in range(kk):
                 members = [p for p, cc in labels.items() if cc == c]
@@ -337,7 +331,7 @@ def register(host):
         return jsonify({"success": True, "albums": [dict(r) for r in rows]})
 
     def semantic_songs(query, limit=200):
-        """Text → tracks through the audio model's text tower ("sem:christmas").
+        """! @brief Text -> tracks through the audio model's text tower ("sem:christmas").
         Returns (songs, error)."""
         _, space, embed_text = _try_audio_handle()
         if not space:
@@ -355,7 +349,7 @@ def register(host):
             return [], "Failed to embed the query."
         hits = rank_by_vector(qv, limit=limit)
         if not hits:
-            return [], f"No tracks embedded in '{space}' — press Embed first."
+            return [], f"No tracks embedded in '{space}' - press Embed first."
         negs = [v for v in (embed_text(t) for t in neg) if v is not None]
         if negs:
             paths, embs = load_embeddings()
@@ -401,30 +395,33 @@ def register(host):
         return jsonify({"success": True, "total": total, "page": page, "page_size": per,
                         "songs": [row_dict(r) for r in rows]})
 
-    def write_meta(rp, d):
-        """Write tag fields to the file and mirror them into the index.
-        Returns file_written (bool) or None when the track is unknown."""
-        ap = host.safe_path(host.media_dir, rp)
+    _TAG_KEYS = ("title", "artist", "album", "albumartist", "track", "disc",
+                 "year", "genre", "composer", "comment")
+
+    def write_meta(rp, ap, d, dont_write=False):
+        """! @brief The audio kind's writer for core update_file(set=...): tag fields go
+        into the file (unless dont_write) and are mirrored into the index.
+        Returns {"file_written"} or None when the track is unknown."""
         if not ap or not os.path.exists(ap):
             return None
-        fields = {k: d[k] for k in ("title", "artist", "album", "albumartist", "track", "disc",
-                                    "year", "genre", "composer", "comment") if k in d}
-        wrote = ml.write_audio_metadata(ap, fields)
-        sets = [f"{k}=?" for k in fields]; params = list(fields.values())
+        fields = {k: d[k] for k in _TAG_KEYS if k in d}
+        wrote = False if dont_write else ml.write_audio_metadata(ap, fields)
+        row = dict(fields)
         if "tags" in d:
-            sets.append("tags=?"); params.append(json.dumps(d["tags"]))
-        if sets:
-            db().execute(f"UPDATE music SET {','.join(sets)} WHERE rel_path=?", (*params, rp))
-            db().commit()
+            row["tags"] = json.dumps(d["tags"])
+        if row:
+            host.update_file(rp, table="music", set=row, dont_write=True)
         host.core.audit("music_meta", f"file={rp!r} fields={sorted(fields)}")
-        return wrote
+        return {"file_written": wrote}
+    host.register_metadata_writer("audio", write_meta, fields=_TAG_KEYS + ("tags",))
 
     def meta():
         d = request.json or {}
-        wrote = write_meta(d.get("rel_path", ""), d)
-        if wrote is None:
-            return jsonify({"success": False, "error": "file not found"}), 404
-        return jsonify({"success": True, "file_written": wrote})
+        res = host.update_file(d.get("rel_path", ""),
+                               set={k: d[k] for k in _TAG_KEYS + ("tags",) if k in d})
+        if not res.get("success"):
+            return jsonify({"success": False, "error": res.get("error") or "file not found"}), 404
+        return jsonify({"success": True, "file_written": res.get("file_written", False)})
 
     def stream(filename):
         fp = host.safe_path(host.media_dir, filename)
@@ -449,8 +446,8 @@ def register(host):
         return jsonify({"success": True, "songs": songs_for(order)})
 
     def similar_tracks(rel_path, top_k=60):
-        """(hits, songs, error): the tracks nearest to one track in the current
-        space — the editor's Similar button and the player's next-track pick."""
+        """! @brief (hits, songs, error): the tracks nearest to one track in the current
+        space - the editor's Similar button and the player's next-track pick."""
         row = db().execute("SELECT emb, emb_sig FROM music WHERE rel_path=?", (rel_path,)).fetchone()
         space = _audio_space()
         if not space:
@@ -460,22 +457,22 @@ def register(host):
             embed, _, _ = _try_audio_handle()
             ap = host.safe_path(host.media_dir, rel_path)
             if embed is None or not ap or not os.path.exists(ap):
-                return [], [], "Track has no embedding in the current space — press Embed."
+                return [], [], "Track has no embedding in the current space - press Embed."
             v = embed(ap)
             if v is None:
                 return [], [], "Could not embed the track."
-            db().execute("UPDATE music SET emb=?, emb_sig=? WHERE rel_path=?",
-                         (ml._pack_emb(v), space, rel_path)); db().commit()
+            host.update_file(rel_path, table="music", dont_write=True,
+                             set={"emb": ml._pack_emb(v), "emb_sig": space})
         hits = rank_by_vector(v, exclude=rel_path, limit=top_k)
         if not hits:
-            return [], [], f"No other tracks embedded in '{space}' — press Embed first."
+            return [], [], f"No other tracks embedded in '{space}' - press Embed first."
         out = songs_for([p for p, _ in hits])
         score = dict(hits)
         for s_ in out:
             s_["score"] = round(score.get(s_["rel_path"], 0.0), 4)
         return hits, out, None
 
-    # ── radio: a route through the whole library, round after round ───────
+    # -- radio: a route through the whole library, round after round -------
     # One round = every eligible track once, ordered as a smooth walk through
     # embedding space (music_lib.route_playlist). Seasonal tracks stay out;
     # low-rated tracks sit some rounds out; loved tracks may come round twice,
@@ -525,7 +522,7 @@ def register(host):
         db().execute("INSERT OR REPLACE INTO music_radio(k,v) VALUES(?,?)", (k, json.dumps(v))); db().commit()
 
     def _stars():
-        """{rel_path: user_stars} from the rating module's cache, if present."""
+        """! @brief {rel_path: user_stars} from the rating module's cache, if present."""
         try:
             return {r["rel_path"]: r["user_stars"] for r in
                     db().execute("SELECT rel_path, user_stars FROM ratings WHERE user_stars IS NOT NULL")}
@@ -533,7 +530,7 @@ def register(host):
             return {}
 
     def _seasonal(rows, embs_by_path, embed_text):
-        """rel_paths to leave out: term match on the tags, plus (opt-in) the
+        """! @brief rel_paths to leave out: term match on the tags, plus (opt-in) the
         audio model's own text tower."""
         terms = [t.strip().lower() for t in (host.config.get("music_radio_seasonal_terms") or "").split(",") if t.strip()]
         out = set()
@@ -557,7 +554,7 @@ def register(host):
         return out
 
     def _place_after_gap(order, dur, item, min_gap, after_idx, embs_by_path):
-        """Insert `item` into `order` at the smoothest spot at least `min_gap`
+        """! @brief Insert `item` into `order` at the smoothest spot at least `min_gap`
         seconds of playback after position `after_idx`; returns the index used
         or None when the round isn't long enough."""
         cum = np.cumsum([dur.get(p, 240.0) for p in order])
@@ -582,13 +579,13 @@ def register(host):
         return j + 1
 
     def radio_round(seed=None):
-        """Build the next round. Returns (songs, info, error)."""
+        """! @brief Build the next round. Returns (songs, info, error)."""
         _, space, embed_text = _try_audio_handle()
         if not space:
             return [], {}, "No audio embedding model (Settings → Models → Audio embedding)."
         paths, embs = load_embeddings()
         if len(paths) < 2:
-            return [], {}, f"Fewer than 2 tracks embedded in '{space}' — press Embed first."
+            return [], {}, f"Fewer than 2 tracks embedded in '{space}' - press Embed first."
         rows = {r["rel_path"]: r for r in db().execute(
             "SELECT rel_path, title, album, genre, tags, comment, duration FROM music WHERE emb_sig=?", (space,))}
         embs_by_path = dict(zip(paths, embs))
@@ -653,7 +650,7 @@ def register(host):
         return songs_for_ordered(order), info, None
 
     def songs_for_ordered(order):
-        """Like songs_for but keeps duplicates (a repeated track is a second
+        """! @brief Like songs_for but keeps duplicates (a repeated track is a second
         entry in the queue)."""
         by = {s_["rel_path"]: s_ for s_ in songs_for(list(dict.fromkeys(order)))}
         return [dict(by[p]) for p in order if p in by]
@@ -700,11 +697,13 @@ def register(host):
         host.add_route(rule, fn, methods=methods, feature="tab.music", level=level)
 
     host.provide_service("music", {"index_all": index_all, "upsert": upsert, "state": state,
-                                   "write_meta": lambda rp, d: write_meta(rp, d) is not None,
+                                   "write_meta": lambda rp, d: host.update_file(
+                                       rp, set={k: d[k] for k in _TAG_KEYS + ("tags",) if k in d}
+                                   ).get("success", False),
                                    "similar_tracks": similar_tracks, "semantic_songs": semantic_songs,
                                    "radio_round": radio_round})
 
-    # The editor's Similar button routes audio here (embedding module hosts
+    ## @brief The editor's Similar button routes audio here (embedding module hosts
     # it). The embedding module may load after us, so register lazily.
     def _hook_similar(tries=0):
         svc = host.get_service("embedding")

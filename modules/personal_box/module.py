@@ -1,12 +1,12 @@
-"""
-Personal box detector — the model you trained yourself.
+"""! @file
+@brief Personal box detector - the model you trained yourself.
 ======================================================================
-The Trainer writes YOLO runs under models/runs/…/best.pt (state
+The Trainer writes YOLO runs under models/runs/.../best.pt (state
 'model_groups.trained'). This module surfaces them as a box-detection
 capability of their own, `detect.personal`, so the pipeline and the
 background scan can run your model next to the stock ones:
 
-  provider "trained"  — a picked run (or the latest by default). Its classes
+  provider "trained"  - a picked run (or the latest by default). Its classes
                         are whatever you trained (read from the weights), so
                         the background whitelist lists them.
 
@@ -38,7 +38,7 @@ def register(host):
         "detect.personal", label="Personal box detection", background=True,
         summary="Boxes from the model you trained in the Trainer (classes are "
                 "whatever you labelled).",
-        input="detect(img_bgr) — HxWx3 uint8 BGR",
+        input="detect(img_bgr) - HxWx3 uint8 BGR",
         output="list of {class_name, cx, cy, w, h, conf} normalized 0..1 center-form")
 
     def _runs():
@@ -54,7 +54,7 @@ def register(host):
     def _loader():
         mp = _weights()
         if not mp:
-            raise RuntimeError("no trained model yet — train one in the Trainer tab")
+            raise RuntimeError("no trained model yet - train one in the Trainer tab")
         yolo = host.get_service("yolo")
         if not yolo:
             raise RuntimeError("yolo module unavailable")
@@ -78,17 +78,19 @@ def register(host):
         available=lambda: bool(_weights() and host.has_service("yolo")),
         reason="no trained model (Trainer) yet", cost_mb=250, gpu=model_registry.on_gpu())
 
-    # Legacy core keys: our_model (pick) and our_model_bg (background toggle).
+    ## @brief Legacy core keys: our_model (pick) and our_model_bg (background toggle).
     def _migrate():
         cfg = host.config
         chosen = (cfg.pop("our_model", "") or "").strip()
         bg = cfg.pop("our_model_bg", None)
         if chosen:
-            cfg["personal_box_weights"] = chosen
+            host.set_config("personal_box_weights", chosen, save=False)
         if bg is not None:
             sel = host.broker.current_selection().get("detect.personal") or {}
             host.broker.select("detect.personal", "trained", None, None, bool(bg), sel.get("classes"))
-            cfg["model_selection"] = host.broker.current_selection()
+            host.persist_model_selection(save=False)
+        if chosen or bg is not None:
+            host.save_config()
     host.on_startup(_migrate)
 
     def detect(img_bgr):

@@ -19,7 +19,7 @@ python deps and fetches the vendored front-end JS. Modes are the docker ones:
 ```
 
 Modules are enabled and disabled in Settings -> Modules, and enabling one
-installs its declared pip deps for you — that is the whole procedure, no
+installs its declared pip deps for you - that is the whole procedure, no
 requirements file to hunt down. torch / torchvision / onnxruntime are the
 exception: they come from `requirements-<backend>.txt` so they resolve against
 the right wheel index, so a module needing them says so and waits for

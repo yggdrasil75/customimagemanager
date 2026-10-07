@@ -1,10 +1,11 @@
-"""Metadata module: EXIF/IPTC/XMP read, EXIF write, and the undo/redo history."""
+"""! @file
+@brief Metadata module: EXIF/IPTC/XMP read, EXIF write, and the undo/redo history."""
 import pytest
 from cimtest import read_meta
 
 
 def _where_is(fn, tag):
-    """Which copy of a file's metadata still holds a tag: the image, its XMP
+    """! @brief Which copy of a file's metadata still holds a tag: the image, its XMP
     sidecar, or both. A value that survives in either one comes back through
     the merged read."""
     import os
@@ -60,7 +61,7 @@ def test_exif_write_then_undo_redo(client, upload):
     assert j.get("success"), j
     read = lambda: _field(client.post("/api/exif/read", json={"filename": fn}).get_json()["data"], "Artist")
     assert read() == "CIM Tester", ("/api/metadata/write reported success but the value is not "
-                                    "readable back — the write is being dropped for this format")
+                                    "readable back - the write is being dropped for this format")
     hist = client.post("/api/exif/history", json={"filename": fn}).get_json()
     assert hist["success"] and any("Artist" in h["field"] for h in hist["history"])
     undo = client.post("/api/exif/undo", json={"filename": fn}).get_json()
@@ -83,7 +84,7 @@ def test_write_rejects_bad_input(client, upload):
 
 
 def test_xmp_sidecar_overwrites_exif_namespace(client, host, upload):
-    """Exiv2's sidecar backend copies its Exif conversion back over Xmp.exif.*
+    """! @brief Exiv2's sidecar backend copies its Exif conversion back over Xmp.exif.*
     on write; a second write to the same key must still land."""
     import os
     import pyexiv2
@@ -99,7 +100,7 @@ def test_xmp_sidecar_overwrites_exif_namespace(client, host, upload):
     assert x["Xmp.dc.source"] == "x"
 
 def test_jxl_exif_box_fallback(tmp_path, monkeypatch):
-    """A container JXL whose Exif Exiv2 refuses to parse still yields its
+    """! @brief A container JXL whose Exif Exiv2 refuses to parse still yields its
     Exif through the box reader (brotli-packed `brob` box, as cjxl writes)."""
     import shutil, subprocess
     import numpy as np, cv2, pyexiv2

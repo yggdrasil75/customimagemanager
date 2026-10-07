@@ -9,7 +9,7 @@
 #   docker build --build-arg BUILD_ANDROID=1 .   # same thing inside the image
 #
 # KEEP android/keystore/ (gitignored). An APK signed with a different key will
-# not install over the previous one — back it up with your app_config.json.
+# not install over the previous one - back it up with your app_config.json.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="${OUT:-$HERE/../static/app/cim-family.apk}"
@@ -21,7 +21,7 @@ export ANDROID_SDK_ROOT ANDROID_HOME="$ANDROID_SDK_ROOT"
 
 command -v java >/dev/null || { echo "build.sh: needs a JDK 17 (java on PATH)"; exit 1; }
 
-# ── SDK ──────────────────────────────────────────────────────────────────────
+# -- SDK ----------------------------------------------------------------------
 if [ ! -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
     echo "==> fetching Android command-line tools"
     mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
@@ -36,7 +36,7 @@ SDKM="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
 yes | "$SDKM" --licenses >/dev/null 2>&1 || true
 "$SDKM" --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" >/dev/null
 
-# ── Gradle ───────────────────────────────────────────────────────────────────
+# -- Gradle -------------------------------------------------------------------
 if [ ! -x "$GRADLE_HOME/bin/gradle" ]; then
     echo "==> fetching Gradle $GRADLE_VERSION"
     tmp="$(mktemp -d)"
@@ -47,7 +47,7 @@ if [ ! -x "$GRADLE_HOME/bin/gradle" ]; then
     cp -a "$tmp/gradle-${GRADLE_VERSION}/." "$GRADLE_HOME/"; rm -rf "$tmp"
 fi
 
-# ── keystore (generated once, then reused) ───────────────────────────────────
+# -- keystore (generated once, then reused) -----------------------------------
 KS_DIR="$HERE/keystore"
 mkdir -p "$KS_DIR"
 if [ ! -f "$KS_DIR/release.jks" ]; then
@@ -59,7 +59,7 @@ if [ ! -f "$KS_DIR/release.jks" ]; then
     chmod 600 "$KS_DIR/keystore.properties"
 fi
 
-# ── build ────────────────────────────────────────────────────────────────────
+# -- build --------------------------------------------------------------------
 export CIM_APP_VERSION_CODE="${CIM_APP_VERSION_CODE:-$(date +%Y%m%d%H)}"
 export CIM_APP_VERSION_NAME="${CIM_APP_VERSION_NAME:-1.0.$(date +%Y%m%d)}"
 echo "==> gradle assembleRelease (version $CIM_APP_VERSION_NAME / $CIM_APP_VERSION_CODE)"

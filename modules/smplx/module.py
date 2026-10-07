@@ -1,5 +1,5 @@
-"""
-SMPL-X module — the parametric body model (pip `smplx`).
+"""! @file
+@brief SMPL-X module - the parametric body model (pip `smplx`).
 ======================================================================
 SMPL-X is a body *model*, not an estimator: given shape parameters it
 produces a mesh. This module provides that as `body.mesh` (used to rebuild

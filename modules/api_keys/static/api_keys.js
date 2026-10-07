@@ -1,4 +1,4 @@
-/* api_keys.js — Settings → API keys (the api_keys module's settings tab).
+/* api_keys.js - Settings -> API keys (the api_keys module's settings tab).
  *
  * Lists the account's keys, creates one (the clear key is shown once) and
  * deletes. The permission picker shows every feature the account itself has,
@@ -11,14 +11,14 @@
   const esc = s => (window.escapeHtml ? escapeHtml(s) : String(s));
   const post = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
                                           body: JSON.stringify(body) }).then(r => r.json());
-  const when = t => t ? new Date(t * 1000).toLocaleString() : '—';
+  const when = t => t ? new Date(t * 1000).toLocaleString() : '-';
 
   async function loadApiKeys() {
     const pane = $('settings_pane_module_api_keys');
     if (!pane) return;
     if (!$('api_keys_list')) {
       pane.innerHTML = `<p class="text-[11px] text-gray-500 mb-3">Keys let another app act as you with at most your
-        permissions — send <code class="text-gray-300">Authorization: Bearer &lt;key&gt;</code>. Each key can be
+        permissions - send <code class="text-gray-300">Authorization: Bearer &lt;key&gt;</code>. Each key can be
         narrower: upload only, read only, or confined to your personal folder.</p>
         <div id="api_keys_list" class="space-y-1 mb-4"></div>
         <div id="api_keys_new" class="border-t border-gray-700 pt-3"></div>`;
@@ -42,10 +42,10 @@
       row.className = 'flex items-center justify-between gap-3 text-xs bg-gray-800 rounded px-3 py-2';
       row.innerHTML =
         `<div class="min-w-0">
-           <div class="font-bold truncate">${esc(k.name)} <span class="font-normal text-gray-500">cim_${esc(k.prefix)}_…</span></div>
-           <div class="text-gray-500">${k.scope === 'personal' ? 'personal folder only' : 'your whole view'} ·
-             ${n} feature${n === 1 ? '' : 's'} · created ${when(k.created_at)} · last used ${when(k.last_used)}
-             ${k.expires_at ? ' · expires ' + when(k.expires_at) : ''}</div>
+           <div class="font-bold truncate">${esc(k.name)} <span class="font-normal text-gray-500">cim_${esc(k.prefix)}_...</span></div>
+           <div class="text-gray-500">${k.scope === 'personal' ? 'personal folder only' : 'your whole view'} |
+             ${n} feature${n === 1 ? '' : 's'} | created ${when(k.created_at)} | last used ${when(k.last_used)}
+             ${k.expires_at ? ' | expires ' + when(k.expires_at) : ''}</div>
          </div>
          <button class="text-red-300 hover:text-red-200 px-2 py-1 rounded bg-gray-700 flex-shrink-0">Revoke</button>`;
       row.querySelector('button').onclick = async () => {
@@ -66,7 +66,7 @@
         ${feats.map(f => `<label class="flex items-center justify-between gap-2 text-xs py-0.5">
           <span class="truncate">${esc(f.label)} <span class="text-gray-600">(you: ${d.max[f.key]})</span></span>
           <select data-feature="${f.key}" class="bg-gray-700 rounded px-1 py-0.5 text-xs">
-            <option value="">—</option><option value="read">read</option>
+            <option value="">-</option><option value="read">read</option>
             ${d.max[f.key] === 'write' ? '<option value="write">write</option>' : ''}
           </select></label>`).join('')}</div>`;
     }).join('');
@@ -101,7 +101,7 @@
       const out = $('api_key_result');
       out.classList.remove('hidden');
       if (!r.success) { out.innerHTML = `<span class="text-red-300">${esc(r.error || 'Could not create key.')}</span>`; return; }
-      out.innerHTML = `<div class="text-amber-300 font-bold mb-1">Copy this key now — it is not shown again.</div>
+      out.innerHTML = `<div class="text-amber-300 font-bold mb-1">Copy this key now - it is not shown again.</div>
         <code class="block bg-gray-900 rounded p-2 break-all select-all">${esc(r.key)}</code>`;
       renderList($('api_keys_list'), (await fetch('/api/auth/keys').then(x => x.json())).keys);
     };

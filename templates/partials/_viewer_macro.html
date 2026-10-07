@@ -3,8 +3,8 @@
    Both the main editor pane and the AI-review modal mount THIS same markup so
    they share one draw/box/video-scrub code path (see static/viewer.js). The
    `p` argument is an id prefix so the two instances don't collide:
-     - main pane  → p = ''      (ids stay media_canvas, vt_bar, … unchanged)
-     - review     → p = 'rv_'   (ids become rv_media_canvas, rv_vt_bar, …)
+     - main pane  → p = ''      (ids stay media_canvas, vt_bar, ... unchanged)
+     - review     → p = 'rv_'   (ids become rv_media_canvas, rv_vt_bar, ...)
 
    `chrome` toggles the surrounding filename bar + footer controls (the review
    modal supplies its own header, so it passes chrome=False). #}
@@ -38,14 +38,14 @@
         class="flex-1 h-1 accent-blue-500 cursor-pointer">
       <span id="{{ p }}vt_time" class="text-[10px] text-gray-400 tabular-nums w-20 text-right">0:00 / 0:00</span>
       <button id="{{ p }}vt_auto"
-        class="text-[10px] px-1.5 py-0.5 rounded bg-purple-700 hover:bg-purple-600 text-white">Auto-detect</button>
+        class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-700 hover:bg-indigo-600 text-white">Auto-detect</button>
     </div>
     <!-- Filmstrip for ANIMATED JXL boxing (approach B). A horizontal row of the
          ~30 sampled keyframe thumbnails. Clicking one loads that frame onto the
          canvas as a still so the normal box editor applies; boxes become
          keyframes at that frame's time. "Track" fills every drawn box across the
          strip via YOLO. "Play" swaps to the live animated <img>. Hidden unless
-         an animated JXL (≤ cutoff) is selected. -->
+         an animated JXL (<= cutoff) is selected. -->
     <div id="{{ p }}strip_bar" class="absolute hidden z-30 left-0 right-0 bottom-0
              bg-gray-900/95 border-t border-gray-700">
       <div class="flex items-center gap-2 px-2 h-[26px]">
@@ -54,7 +54,7 @@
         <span id="{{ p }}strip_pos" class="text-[10px] text-gray-400 tabular-nums">frame 1</span>
         <span class="flex-1"></span>
         <button id="{{ p }}strip_track"
-          class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white"
+          class="text-[10px] px-1.5 py-0.5 rounded bg-green-700 hover:bg-green-600 text-white"
           title="Track every drawn box across all frames with YOLO">Track boxes</button>
       </div>
       <div id="{{ p }}strip_thumbs"
@@ -63,7 +63,7 @@
   </div>
   {% if chrome %}
   <div class="px-3 py-1 bg-gray-800 border-t border-gray-700 flex justify-between items-center flex-shrink-0">
-    <span class="text-[10px] text-gray-500">Drag: add box · hover to locate</span>
+    <span class="text-[10px] text-gray-500">Drag: add box | hover to locate</span>
     <div class="flex items-center gap-2">
       <button onclick="openPopout()" title="Open in popout for detail labelling"
         class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-gray-300">⛶ Popout</button>
@@ -73,7 +73,7 @@
       </label>
       <label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer"
         title="Show fine segmentation masks (SVG) on regions that have one">
-        <input type="checkbox" id="{{ p }}toggle_masks" checked onchange="drawCanvas()" class="accent-fuchsia-500">
+        <input type="checkbox" id="{{ p }}toggle_masks" checked onchange="drawCanvas()" class="accent-indigo-500">
         Masks
       </label>
       <span data-ext-area="viewer_toggles" class="contents"></span>

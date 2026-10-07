@@ -1,4 +1,5 @@
-"""dedup_train: the video / audio / animation builds end to end on generated
+"""! @file
+@brief dedup_train: the video / audio / animation builds end to end on generated
 media (tiny sizes, one epoch): caches, trains, evaluates, writes checkpoints."""
 import logging
 import os
@@ -18,7 +19,10 @@ needs = pytest.mark.skipif(not dc._HAVE_TORCH or not shutil.which("ffmpeg"), rea
 
 
 def _host(tmp):
-    return types.SimpleNamespace(config={}, logger=logging.getLogger("t"), get_service=lambda n: None,
+    cfg = {}
+    return types.SimpleNamespace(config=cfg, logger=logging.getLogger("t"),
+                                 set_status=lambda t: cfg.__setitem__("status_text", t),
+                                 set_config=lambda k, v, save=True: cfg.__setitem__(k, v), get_service=lambda n: None,
                                  core=types.SimpleNamespace(models_dir=os.path.join(tmp, "models")))
 
 

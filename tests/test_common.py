@@ -1,4 +1,5 @@
-"""common.py: pure helpers (tags, boxes, dates)."""
+"""! @file
+@brief common.py: pure helpers (tags, boxes, dates)."""
 import pytest
 import common
 

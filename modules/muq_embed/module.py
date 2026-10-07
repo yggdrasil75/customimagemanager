@@ -1,14 +1,14 @@
-"""
-MuQ module — music embeddings (Tencent MuQ / MuQ-MuLan).
+"""! @file
+@brief MuQ module - music embeddings (Tencent MuQ / MuQ-MuLan).
 ======================================================================
 Provides `embed.audio` with two music-specific models from the `muq` package:
 
-  muq_mulan  MuQ-MuLan-large: music ↔ text in one 512-d space, trained on
+  muq_mulan  MuQ-MuLan-large: music <-> text in one 512-d space, trained on
              music captions/tags, so mood and genre queries ("wintery",
              "christmas", "lo-fi study") land better than general CLAP.
              The handle carries .embed_text.
   muq        MuQ-large (self-supervised, MSD iteration): audio only, 1024-d
-             mean-pooled last layer. Best pure audio→audio similarity; no
+             mean-pooled last layer. Best pure audio->audio similarity; no
              text search.
 
 Tracks are embedded as the mean over `muq_window` s crops from the middle

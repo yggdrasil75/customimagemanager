@@ -1,4 +1,4 @@
-/* Settings › Fetch sites — per-site gallery-dl config in one place.
+/* Settings > Fetch sites - per-site gallery-dl config in one place.
  *
  * Left: every site we know (anything with fields, a mapping, opts or a login).
  * Right: the selected site's login on top, then every field ever discovered
@@ -23,11 +23,11 @@
     const el = $("gs_status");
     if (!el) return;
     el.textContent = msg || "";
-    el.className = "text-xs " + (kind === "err" ? "text-rose-400"
-      : kind === "ok" ? "text-emerald-400" : "text-gray-400");
+    el.className = "text-xs " + (kind === "err" ? "text-red-400"
+      : kind === "ok" ? "text-green-400" : "text-gray-400");
   }
 
-  // ── shell ──────────────────────────────────────────────────────────────
+  // -- shell --------------------------------------------------------------
   function shell() {
     const pane = $("settings_pane_module_gdl_sites");
     if (!pane || $("gs_root")) return pane;
@@ -48,7 +48,7 @@
     return pane;
   }
 
-  // ── site list ──────────────────────────────────────────────────────────
+  // -- site list ----------------------------------------------------------
   async function loadList() {
     const r = await fetch("/api/gdl/sites").then((x) => x.json()).catch(() => null);
     const list = $("gs_list");
@@ -62,7 +62,7 @@
 <button data-site="${_esc(s.site)}" class="gs-site w-full text-left px-2 py-1 rounded hover:bg-gray-700
   ${s.site === _site ? "bg-gray-700 text-white" : "text-gray-300"}">
   <div class="truncate font-mono">${_esc(s.site)}</div>
-  <div class="text-[10px] text-gray-500">${s.mapped}/${s.fields} mapped${s.auth !== "none" ? " · login" : ""}</div>
+  <div class="text-[10px] text-gray-500">${s.mapped}/${s.fields} mapped${s.auth !== "none" ? " | login" : ""}</div>
 </button>`).join("");
     list.querySelectorAll(".gs-site").forEach((b) =>
       b.addEventListener("click", () => select(b.dataset.site)));
@@ -87,7 +87,7 @@
     }
   }
 
-  // ── detail ─────────────────────────────────────────────────────────────
+  // -- detail -------------------------------------------------------------
   async function select(site) {
     _site = site;
     const r = await post("/api/gdl/sites", { site });
@@ -102,10 +102,10 @@
     const a = _rec.auth || { method: "none" };
     d.innerHTML = `
 <div class="flex items-center justify-between mb-2">
-  <span class="text-sm font-bold text-emerald-400 font-mono">${_esc(_site)}</span>
+  <span class="text-sm font-bold text-green-400 font-mono">${_esc(_site)}</span>
   <div class="flex items-center gap-3">
     <span id="gs_status" class="text-xs text-gray-400"></span>
-    <button id="gs_forget" class="text-[10px] text-rose-400 hover:text-rose-300">forget site</button>
+    <button id="gs_forget" class="text-[10px] text-red-400 hover:text-red-300">forget site</button>
   </div>
 </div>
 
@@ -120,11 +120,11 @@
   <div id="gs_auth_userpass" class="hidden space-y-2 mb-2">
     <input id="gs_auth_user" type="text" placeholder="username" class="${inp}" value="${_esc(a.username || "")}">
     <input id="gs_auth_pass" type="password" class="${inp}"
-      placeholder="${a.has_password ? "password (on file — leave blank to keep)" : "password"}">
+      placeholder="${a.has_password ? "password (on file - leave blank to keep)" : "password"}">
   </div>
   <div id="gs_auth_cookies" class="hidden mb-2">
     <textarea id="gs_auth_cookies_text" rows="3" class="${inp} font-mono text-[11px]"
-      placeholder="${a.has_cookies ? "Cookies on file — paste again to replace" : "Paste cookies.txt (Netscape) or name=value; name2=value2"}"></textarea>
+      placeholder="${a.has_cookies ? "Cookies on file - paste again to replace" : "Paste cookies.txt (Netscape) or name=value; name2=value2"}"></textarea>
   </div>
   <div id="gs_auth_browser" class="hidden mb-2">
     <select id="gs_auth_browser_sel" class="${inp}">
@@ -143,7 +143,7 @@
   </div>
   <div class="flex gap-2 mb-2">
     <input id="gs_url" type="text" placeholder="Sample post/gallery URL to (re)discover fields" class="${inp} flex-1">
-    <button id="gs_discover" class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1 rounded font-bold whitespace-nowrap">Check fields</button>
+    <button id="gs_discover" class="text-xs bg-sky-700 hover:bg-sky-600 px-3 py-1 rounded font-bold whitespace-nowrap">Check fields</button>
   </div>
   <p class="text-[10px] text-gray-600 mb-1">New fields are added to this list; nothing is ever removed.
     Use 👁 to hide a field you don't care about.</p>
@@ -160,7 +160,7 @@
 </details>
 
 <div class="flex justify-end">
-  <button id="gs_save" class="text-sm bg-emerald-700 hover:bg-emerald-600 px-4 py-1.5 rounded font-bold">Save site</button>
+  <button id="gs_save" class="text-sm bg-green-700 hover:bg-green-600 px-4 py-1.5 rounded font-bold">Save site</button>
 </div>`;
 
     $("gs_auth_method").value = a.method || "none";
@@ -238,7 +238,7 @@
   async function discover() {
     const url = $("gs_url").value.trim();
     if (!url) { status("Enter a sample URL first.", "err"); return; }
-    status("Checking fields…");
+    status("Checking fields...");
     // persist current edits first so discovery doesn't overwrite them on reload
     await post("/api/gdl/config", { site: _site, mapping: _gdlCurrentMapping($("gs_rows")),
       hidden: hiddenList() });

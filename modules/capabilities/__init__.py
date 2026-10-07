@@ -1,1 +1,2 @@
-"""capabilities module."""
+"""! @file
+@brief capabilities module."""

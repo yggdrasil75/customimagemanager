@@ -1,4 +1,5 @@
-"""CIM test kit — the pytest plugin every test (core and module) shares.
+"""! @file
+@brief CIM test kit - the pytest plugin every test (core and module) shares.
 
 Loaded by the root conftest.py. Import helpers with `from cimtest import ...`.
 
@@ -22,7 +23,7 @@ Command-line options (./run_tests.sh --help lists them under "cim")
 
 Fixtures
   ungated      lift the machine-capability 503 gate for one test
-  app          the imported manager module (app.module_host, app.state, …)
+  app          the imported manager module (app.module_host, app.state, ...)
   client       Flask test client
   upload       upload("x.png", seed=1) synthetic; upload.media("person_single.jpg")
                real fixture; every upload is deleted after the test
@@ -60,7 +61,7 @@ _APP = None
 REMOTE = False                                           # --cim-remote
 
 
-# ── options + environment ──────────────────────────────────────────────────
+# -- options + environment --------------------------------------------------
 def pytest_addoption(parser):
     g = parser.getgroup("cim", "CIM test kit")
     g.addoption("--cim-config", metavar="PATH", default=None,
@@ -73,7 +74,7 @@ def pytest_addoption(parser):
                 help="exhaustively test the models of these capabilities: every size, type, "
                      "weights file and (for wrapper providers) every underlying model. "
                      "'all', or a comma list: --cim-all-variants pose  /  box,depth. "
-                     "Naming capabilities also NARROWS the run to those models — nothing "
+                     "Naming capabilities also NARROWS the run to those models - nothing "
                      "else is collected. Without this option each model is tested once, "
                      "with the variant in effect, alongside the rest of the suite.")
     g.addoption("--cim-timeout", metavar="SECONDS", type=int, default=600,
@@ -121,7 +122,7 @@ def pytest_unconfigure(config):
 
 
 def load_app():
-    """Import manager once (also usable at collection time)."""
+    """! @brief Import manager once (also usable at collection time)."""
     global _APP
     if _APP is None:
         import manager
@@ -131,7 +132,7 @@ def load_app():
     return _APP
 
 
-# ── fixtures ───────────────────────────────────────────────────────────────
+# -- fixtures ---------------------------------------------------------------
 @pytest.fixture(scope="session")
 def app():
     return load_app()
@@ -161,13 +162,13 @@ class _Uploader:
         return j
 
     def __call__(self, name="pic.png", seed=None, folder="", raw=False, **form):
-        """Synthetic PNG → stored filename (raw=True returns the response)."""
+        """! @brief Synthetic PNG -> stored filename (raw=True returns the response)."""
         j = self._post({"file": (io.BytesIO(png_bytes(seed=seed)), name),
                         "mode": "sync", "folder": folder, **form}, name)
         return j if raw else j["filename"]
 
     def media(self, fixture_name, as_name=None, folder="", raw=False, **form):
-        """A real fixture file (skips when absent) → stored filename."""
+        """! @brief A real fixture file (skips when absent) -> stored filename."""
         p = fixture(fixture_name)
         with open(p, "rb") as fh:
             data = fh.read()
@@ -190,16 +191,16 @@ def upload(client):
 
 @pytest.fixture
 def ungated(monkeypatch):
-    """Lift the machine-capability gate (modules/capabilities) for one test:
+    """! @brief Lift the machine-capability gate (modules/capabilities) for one test:
     routes stop answering 503 "feature unavailable on this server" because a
-    pip package (torch, ultralytics, …) is missing on this box."""
+    pip package (torch, ultralytics, ...) is missing on this box."""
     from modules.capabilities import capabilities
     monkeypatch.setattr(capabilities, "capability_denials", lambda: {})
 
 
 @pytest.fixture
 def fake_model(app, ungated):
-    """fake_model(cap, fn, **provider_kw) → registers `fn` as the selected
+    """! @brief fake_model(cap, fn, **provider_kw) -> registers `fn` as the selected
     provider for `cap` for the duration of the test. Also lifts the machine
     gate: with a fake provider the feature works regardless of installed pips."""
     b = app.module_host.broker
@@ -233,7 +234,7 @@ def fake_model(app, ungated):
                 b._providers.pop(cap, None)
 
 
-# ── module gate + coverage summary ────────────────────────────────────────
+# -- module gate + coverage summary ----------------------------------------
 def _module_dir_of(path):
     p = os.path.abspath(str(path))
     if not p.startswith(MODULES + os.sep):
@@ -241,12 +242,12 @@ def _module_dir_of(path):
     return os.path.relpath(p, MODULES).split(os.sep)[0]
 
 
-# ── keep one model in memory at a time ─────────────────────────────────────
+# -- keep one model in memory at a time -------------------------------------
 _LOADED_FOR = {"model": "<none>"}
 
 
 def free_models():
-    """Drop every loaded model and hand the memory back. The registry only
+    """! @brief Drop every loaded model and hand the memory back. The registry only
     evicts GPU entries over a VRAM budget, so a long parametrized run would
     otherwise keep every CPU model it ever loaded."""
     try:
@@ -271,7 +272,7 @@ TIMEOUT = 600
 
 @pytest.fixture(autouse=True)
 def _model_test_timeout(request):
-    """SIGALRM watchdog around each model test (provider suite + test_real_*):
+    """! @brief SIGALRM watchdog around each model test (provider suite + test_real_*):
     a model that never returns fails with a timeout instead of freezing the
     whole run. Linux/macOS main thread only; elsewhere it's a no-op."""
     import signal
@@ -301,7 +302,7 @@ def _model_test_timeout(request):
 
 @pytest.fixture(autouse=True)
 def _one_model_at_a_time(request):
-    """Provider tests are ordered by model (see pytest_collection_modifyitems);
+    """! @brief Provider tests are ordered by model (see pytest_collection_modifyitems);
     when the model changes, free the previous one before loading the next, so
     peak memory is one model rather than all of them."""
     cs = getattr(request.node, "callspec", None)
@@ -336,12 +337,12 @@ ALL_VARIANTS = frozenset()       # capabilities to sweep exhaustively; {"all"} =
 
 
 def sweeping(cap):
-    """Is this capability being swept exhaustively (--cim-all-variants)?"""
+    """! @brief Is this capability being swept exhaustively (--cim-all-variants)?"""
     return "all" in ALL_VARIANTS or cap in ALL_VARIANTS
 
 
 def pytest_collection_modifyitems(session, config, items):
-    """Run provider tests grouped by provider so each model loads once instead
+    """! @brief Run provider tests grouped by provider so each model loads once instead
     of being evicted and reloaded between test functions, and honour
     --cim-no-models."""
     if config.getoption("--cim-no-models"):
@@ -390,12 +391,12 @@ def _module_source(d):
     return "\n".join(out)
 
 
-# ── per-model result matrix ────────────────────────────────────────────────
+# -- per-model result matrix ------------------------------------------------
 _MODEL_RESULTS = {}          # "cap:provider[variant]" -> {"pass": n, "fail": [(test, why)], "skip": n}
 
 
 def _prov_of(nodeid):
-    """'tests/test_providers.py::test_contract[pose:yolo12]' -> 'pose:yolo12'."""
+    """! @brief 'tests/test_providers.py::test_contract[pose:yolo12]' -> 'pose:yolo12'."""
     if "test_providers.py" not in nodeid or "[" not in nodeid:
         return None
     inside = nodeid[nodeid.index("[") + 1:nodeid.rindex("]")]
@@ -481,7 +482,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         tr.write_line(f"NO tests ({len(no_tests)}): {', '.join(no_tests)}")
 
 
-# ── helpers ────────────────────────────────────────────────────────────────
+# -- helpers ----------------------------------------------------------------
 # The README names fixtures with one extension, but any equivalent format is
 # fine: barcode_qr.jpg satisfies barcode_qr.png.
 _ALT_EXTS = {
@@ -497,7 +498,7 @@ _ALT_EXTS = {
 
 
 def find_fixture(name):
-    """Path to a fixture, accepting any equivalent extension, or None."""
+    """! @brief Path to a fixture, accepting any equivalent extension, or None."""
     base, ext = os.path.splitext(name)
     for e in _ALT_EXTS.get(ext.lower(), (ext,)):
         for cand in (base + e, base + e.upper()):
@@ -519,7 +520,7 @@ def has_fixture(name):
 
 
 def expected(name):
-    """The <name>.txt expectation next to a fixture, or None."""
+    """! @brief The <name>.txt expectation next to a fixture, or None."""
     p = os.path.join(FIXTURES, os.path.splitext(name)[0] + ".txt")
     if not os.path.exists(p):
         return None
@@ -528,8 +529,8 @@ def expected(name):
 
 
 def text_matches(want, got, recall=0.6):
-    """Does `got` contain what `want` says? A short expectation (one line, few
-    words — a barcode payload, a phrase) must appear verbatim; a long one (a
+    """! @brief Does `got` contain what `want` says? A short expectation (one line, few
+    words - a barcode payload, a phrase) must appear verbatim; a long one (a
     whole paragraph of a scanned page) is matched on word recall, because OCR
     legitimately differs on layout, hyphenation and reading order.
     Returns (ok, detail)."""
@@ -547,7 +548,7 @@ def text_matches(want, got, recall=0.6):
 
 
 def load_image(name):
-    """Fixture image as BGR ndarray (skips when missing)."""
+    """! @brief Fixture image as BGR ndarray (skips when missing)."""
     import cv2
     img = cv2.imread(fixture(name), cv2.IMREAD_COLOR)
     assert img is not None, f"cannot decode fixture {name}"
@@ -555,7 +556,7 @@ def load_image(name):
 
 
 def png_bytes(w=48, h=32, color=(128, 128, 128), seed=None):
-    """Tiny PNG. `seed` varies the pixels so uploads don't dedupe."""
+    """! @brief Tiny PNG. `seed` varies the pixels so uploads don't dedupe."""
     import cv2
     img = np.full((h, w, 3), color, np.uint8)
     if seed is not None:
@@ -588,7 +589,7 @@ def write_meta(client, fn, tags=None, desc="", regions=None):
 
 
 def picked_name(app, cap):
-    """'pose:rtmw' — the capability and the model currently picked for it, for
+    """! @brief 'pose:rtmw' - the capability and the model currently picked for it, for
     failure messages: a model test must say WHICH model failed."""
     try:
         return f"{cap}:{app.module_host.broker.selected_id(cap) or '<none>'}"
@@ -597,7 +598,7 @@ def picked_name(app, cap):
 
 
 def picked_model(app, cap, why=""):
-    """The handle for the capability's picked provider, or skip: no provider,
+    """! @brief The handle for the capability's picked provider, or skip: no provider,
     deps missing, or the pick runs on an external endpoint without
     --cim-remote (a test must never depend on a server being up)."""
     from modules.model_broker import NoProviderError
@@ -609,14 +610,14 @@ def picked_model(app, cap, why=""):
     try:
         return b.request(cap)
     except NoProviderError as e:
-        pytest.skip(f"no {cap} model{(' — ' + why) if why else ''}: {e}")
+        pytest.skip(f"no {cap} model{(' - ' + why) if why else ''}: {e}")
     except (ImportError, ModuleNotFoundError) as e:
         pytest.skip(f"{cap} provider deps missing: {e}")
 
 
 def post_json(client, url, body):
-    """POST and return the JSON body; skip (not fail) when the machine gate
-    answers 503 for a missing pip package — tests/test_capabilities.py is
+    """! @brief POST and return the JSON body; skip (not fail) when the machine gate
+    answers 503 for a missing pip package - tests/test_capabilities.py is
     where a wrong gate is reported."""
     r = client.post(url, json=body)
     if r.status_code == 503:

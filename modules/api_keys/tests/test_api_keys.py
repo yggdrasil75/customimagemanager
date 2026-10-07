@@ -1,4 +1,5 @@
-"""API keys: Bearer auth without cookie/CSRF, permissions clamped to the
+"""! @file
+@brief API keys: Bearer auth without cookie/CSRF, permissions clamped to the
 owner's, never admin, 'personal' scope confined to the owner's own tree."""
 import io, os
 import pytest
@@ -7,7 +8,7 @@ from cimtest import png_bytes
 
 @pytest.fixture
 def auth_on(app, client):
-    """Turn auth on with a local admin + an uploader for the test, then back off."""
+    """! @brief Turn auth on with a local admin + an uploader for the test, then back off."""
     auth = app._authmgr
     app.state["auth"]["enabled"] = True
     app.state["auth"]["mode"] = "local"
@@ -93,7 +94,7 @@ def test_api_keys(app, client, auth_on):
     assert client.get("/api/auth/me", headers=_bearer(key)).status_code == 401
 
     # admin sees and revokes anyone's keys; an admin's key is never the admin
-    # flag itself — it holds features (settings.users included when granted)
+    # flag itself - it holds features (settings.users included when granted)
     acsrf = _login(client, "k_admin")
     ak = client.post("/api/auth/keys/create", headers=acsrf, json={"name": "a", "perms": "all"}).get_json()["key"]
     assert client.get("/api/auth/me", headers=_bearer(ak)).get_json()["user"]["is_admin"] is False

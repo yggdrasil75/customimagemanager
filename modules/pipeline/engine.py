@@ -1,5 +1,5 @@
-"""
-pipeline.py — configurable AI tagging decision tree.
+"""! @file
+@brief pipeline.py - configurable AI tagging decision tree.
 ====================================================
 
 A small, transport-agnostic engine. You hand it:
@@ -8,7 +8,7 @@ A small, transport-agnostic engine. You hand it:
   - `llm`       : a callable that talks to your model
 
 and it walks the tree, threading a mutable context of results, and returns a
-structured `analysis` dict. It never does any networking or file IO itself —
+structured `analysis` dict. It never does any networking or file IO itself -
 all model access goes through the injected `llm` callable, so the same engine
 works against OpenAI, a local KoboldCpp/LM-Studio server, or a test stub.
 
@@ -62,9 +62,9 @@ cv2, _HAVE_CV2 = optional_import("cv2")
 
 SCHEMA = "mm.analysis/1"
 
-# ── geometry ──────────────────────────────────────────────────────────────────
+# -- geometry ------------------------------------------------------------------
 def _crop_rect(h, w, box, pad=0.04):
-    """Pixel rect (x1,y1,x2,y2) of a padded normalised box, clamped to the image."""
+    """! @brief Pixel rect (x1,y1,x2,y2) of a padded normalised box, clamped to the image."""
     cx, cy, bw, bh = box.get("cx", .5), box.get("cy", .5), box.get("w", 1.), box.get("h", 1.)
     x1 = int((cx - bw / 2 - pad) * w); y1 = int((cy - bh / 2 - pad) * h)
     x2 = int((cx + bw / 2 + pad) * w); y2 = int((cy + bh / 2 + pad) * h)
@@ -73,7 +73,7 @@ def _crop_rect(h, w, box, pad=0.04):
     return x1, y1, x2, y2
 
 def crop_box(image_bgr, box, pad=0.04):
-    """Return the sub-image for a normalised box, with a little padding."""
+    """! @brief Return the sub-image for a normalised box, with a little padding."""
     h, w = image_bgr.shape[:2]
     x1, y1, x2, y2 = _crop_rect(h, w, box, pad)
     if x2 - x1 < 4 or y2 - y1 < 4:
@@ -81,18 +81,18 @@ def crop_box(image_bgr, box, pad=0.04):
     return image_bgr[y1:y2, x1:x2]
 
 def _region_to_page(b, ox, oy, ow, oh):
-    """Remap a box normalised within a panel/region (origin ox,oy and size ow,oh
+    """! @brief Remap a box normalised within a panel/region (origin ox,oy and size ow,oh
     in PAGE-normalised units) back to full-page normalised coords."""
     return {"class_name": b.get("class_name", "part"),
             "cx": ox + b["cx"] * ow, "cy": oy + b["cy"] * oh,
             "w": b["w"] * ow, "h": b["h"] * oh}
 
 def _strip_name(b):
-    """Drop class_name, keep only the four geometry keys (subject['box'] shape)."""
+    """! @brief Drop class_name, keep only the four geometry keys (subject['box'] shape)."""
     return {k: b[k] for k in ("cx", "cy", "w", "h")}
 
 def _map_box_to_full(b, x1, y1, x2, y2, W, H):
-    """Map a crop-local normalised box back to full-image normalised coords."""
+    """! @brief Map a crop-local normalised box back to full-image normalised coords."""
     cb = _clamp(b)
     if not cb:
         return None
@@ -116,7 +116,7 @@ def _valid_box(b):
     return 0 <= cx <= 1 and 0 <= cy <= 1 and 0 < w <= 1 and 0 < h <= 1
 
 def _clamp(b):
-    """Clamp a normalised center-form box to the image; new dict or None."""
+    """! @brief Clamp a normalised center-form box to the image; new dict or None."""
     try:
         cx, cy, w, h = float(b["cx"]), float(b["cy"]), float(b["w"]), float(b["h"])
     except (KeyError, TypeError, ValueError):
@@ -139,7 +139,7 @@ def _fmt(s, ctx, subj=None):
     return s
 
 def _known_text(known):
-    """Render the caller-supplied `known` dict into a compact prompt block.
+    """! @brief Render the caller-supplied `known` dict into a compact prompt block.
     `known` may carry: names (list), tags (list), description (str),
     filename (str), folder (str)."""
     if not known:
@@ -167,7 +167,7 @@ def _dedup(seq):
     return out
 
 def _cond_ok(when, subj):
-    """Evaluate a step guard against the subject's accumulated fields."""
+    """! @brief Evaluate a step guard against the subject's accumulated fields."""
     if not when:
         return True
     field = when.get("field")
@@ -175,9 +175,9 @@ def _cond_ok(when, subj):
         return True
     return subj.get(field) == when.get("equals")
 
-# ── pose ↔ box validation ─────────────────────────────────────────────────────
+# -- pose <-> box validation -----------------------------------------------------
 def _iou_boxes(a, b):
-    """IoU of two normalised center-form boxes ({cx,cy,w,h}). 0 on no overlap."""
+    """! @brief IoU of two normalised center-form boxes ({cx,cy,w,h}). 0 on no overlap."""
     try:
         ax1, ay1 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
         ax2, ay2 = a["cx"] + a["w"] / 2, a["cy"] + a["h"] / 2
@@ -194,7 +194,7 @@ def _iou_boxes(a, b):
     return inter / ua if ua > 0 else 0.0
 
 def _box_corners(b):
-    """(x1,y1,x2,y2) for a normalised center-form box."""
+    """! @brief (x1,y1,x2,y2) for a normalised center-form box."""
     cx, cy = float(b["cx"]), float(b["cy"])
     w, h = float(b["w"]), float(b["h"])
     return cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2
@@ -202,7 +202,7 @@ def _box_corners(b):
 _kpts_in_box = og.kpts_in_box
 
 def _box_from_kpts(person, vis_thresh=0.2, pad=0.03):
-    """Synthesise a normalised box from a skeleton's visible-keypoint extent."""
+    """! @brief Synthesise a normalised box from a skeleton's visible-keypoint extent."""
     pts = [p for p in person.get("keypoints", []) if p.get("v", 0) >= vis_thresh]
     if len(pts) < 2:
         return None
@@ -215,7 +215,7 @@ def _box_from_kpts(person, vis_thresh=0.2, pad=0.03):
 
 def match_pose_boxes(boxes, pose, unmatched_box="keep",
                      contain_thresh=0.4, vis_thresh=0.2):
-    """Validate detector boxes against pose skeletons and return enriched subjects.
+    """! @brief Validate detector boxes against pose skeletons and return enriched subjects.
 
     Each detector box is matched to the skeleton that places the largest fraction
     of its visible keypoints inside it. A skeleton with no box gets a synthesised
@@ -262,12 +262,12 @@ def match_pose_boxes(boxes, pose, unmatched_box="keep",
                              "from_pose": True})
     return subjects
 
-# ── engine ────────────────────────────────────────────────────────────────────
+# -- engine --------------------------------------------------------------------
 def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
                  max_boxes=12, max_steps=200, pose_fn=None, ocr_fn=None,
                  person_fn=None, panel_fn=None, seg_fn=None, endpoints=None,
                  max_workers=None, known=None, stage_fns=None):
-    """Execute `tree` against `image_bgr` using the `llm` callable.
+    """! @brief Execute `tree` against `image_bgr` using the `llm` callable.
 
     Injected detectors (all optional, called as fn(image_bgr)):
       pose_fn   -> {"people":[{"keypoints":[{x,y,v}...]}], ...}
@@ -334,7 +334,7 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
                 return llm(prompt, img, want, choices, endpoint)
             return llm(prompt, img, want, choices)
         except TypeError:
-            # llm callable doesn't accept an endpoint arg — call without it
+            # llm callable doesn't accept an endpoint arg - call without it
             try:
                 return llm(prompt, img, want, choices)
             except Exception as e:
@@ -369,9 +369,9 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
         else:
             subj[key] = value
 
-    # ── region-scoped helpers (work on the full image OR a panel crop) ──────────
+    # -- region-scoped helpers (work on the full image OR a panel crop) ----------
     def detect_subjects_in(region_bgr, node, endpoint=None):
-        """Run detector+pose+match (or LLM fallback) on a region; return a list of
+        """! @brief Run detector+pose+match (or LLM fallback) on a region; return a list of
         subject dicts whose boxes are normalised to the REGION, not the page."""
         unmatched = node.get("unmatched_box",
                              tree.get("settings", {}).get("unmatched_box", "keep"))
@@ -419,7 +419,7 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
         } for m in matched]
 
     def _describe_one_subject(region_bgr, subj, steps, off, endpoint):
-        """Run all `steps` for a single subject. Steps stay sequential (data
+        """! @brief Run all `steps` for a single subject. Steps stay sequential (data
         deps via `when`). Mutates only `subj`, so it's safe to run many of these
         concurrently as long as each owns a different subject."""
         H, W = region_bgr.shape[:2]
@@ -464,7 +464,7 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
                 store_subj(subj, st.get("store"), want, out)
 
     def describe_subjects_in(region_bgr, subjects, steps, off=None, pool=None):
-        """Describe every subject in a region. When a thread `pool` is supplied
+        """! @brief Describe every subject in a region. When a thread `pool` is supplied
         the subjects are processed concurrently (each pinned to one endpoint);
         otherwise sequentially."""
         if pool is not None and len(subjects) > 1:
@@ -680,7 +680,7 @@ def run_pipeline(tree, image_bgr, llm, progress=None, crop_pad=0.04,
         "ocr": ctx.get("ocr"),
     }
 
-# ── default decision tree ─────────────────────────────────────────────────────
+# -- default decision tree -----------------------------------------------------
 # Flow:
 #   1. classify the image (character / group / scenery)
 #   2. overall booru tags  -> merged into the file's tags

@@ -1,4 +1,5 @@
-"""HEURDU 1.0: a 0.9 net upgraded with the temporal block scores exactly as
+"""! @file
+@brief HEURDU 1.0: a 0.9 net upgraded with the temporal block scores exactly as
 before, saves/loads as 1.0, trains on clips, and scores animations (same
 clip ~ its re-encode; a trim scores its shared fraction; unrelated ~0)."""
 import os

@@ -1,5 +1,5 @@
 """!
-@brief HEURDUV — learned duplicate scorer for video (> 30 frames).
+@brief HEURDUV - learned duplicate scorer for video (> 30 frames).
 
 A clip is its timeline at media_sig.VIDEO_FPS (lowered for clips longer
 than media_sig.MAX_STEPS steps), each frame SIDE x SIDE RGB. A small 2D CNN
@@ -37,7 +37,7 @@ class HEURDUV(SeqDupModel):
 
     @staticmethod
     def frames_from_path(path: str) -> "np.ndarray | None":
-        """uint8 [T, SIDE, SIDE, 3] timeline (the stored / training form)."""
+        """! @brief uint8 [T, SIDE, SIDE, 3] timeline (the stored / training form)."""
         r = media_sig.decode_frames(path, square=SIDE)
         return None if r is None else r[0]
 

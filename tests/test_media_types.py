@@ -1,4 +1,5 @@
-"""media_types.py: naming, content sniffing, extension reconciliation."""
+"""! @file
+@brief media_types.py: naming, content sniffing, extension reconciliation."""
 import os
 import numpy as np
 import pytest

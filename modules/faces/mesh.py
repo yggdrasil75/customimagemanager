@@ -4,19 +4,19 @@
 Two backends, tried in order and both optional so the module degrades to
 "unavailable" rather than raising:
 
-  insight3d : insightface.thirdparty.face3d — a 3DMM (BFM basis). insightface is
+  insight3d : insightface.thirdparty.face3d - a 3DMM (BFM basis). insightface is
               already a dependency for identity embedding, so its landmark model
               gives us the 2D->3D fit with no new heavy download. We fit a mesh
               per crop from its 68/106 landmarks and the basis, and average the
               SHAPE COEFFICIENTS across a person's crops (pose/expression are
               per-image and meaningless to average, exactly like SMPL betas).
-  deep3d    : sicxu/Deep3DFaceRecon_pytorch — a stronger single-image reconstructor.
+  deep3d    : sicxu/Deep3DFaceRecon_pytorch - a stronger single-image reconstructor.
               Used through a thin adapter (deep3d_runner) if the user has installed
               it and its BFM weights; absent by default.
 
 Output is the SAME Wavefront-OBJ member contract bodies.py uses (bodies.mesh_to_obj),
 stored per appearance in the person container, so the 3D viewer loads it with the
-identical OBJLoader path — the only difference downstream is which member it reads.
+identical OBJLoader path - the only difference downstream is which member it reads.
 
 Nothing here raises: every public call returns None / False on any failure.
 """
@@ -38,10 +38,10 @@ _log = logging.getLogger(__name__)
 get_object, _HAVE_INSIGHT_DATA = optional_import("insightface.data", attr="get_object")
 
 
-# insightface's face3d morphable model only needs mesh.transform (pure numpy),
+## @brief insightface's face3d morphable model only needs mesh.transform (pure numpy),
 # but its package __init__ imports the cython mesh, which pip never ships or
 # builds. face3d ships an identical numpy implementation (mesh_numpy), so we
-# alias that in as `mesh` and import the morphable model normally — no build
+# alias that in as `mesh` and import the morphable model normally - no build
 # step, nothing for the user to do.
 def _load_face3d():
     try:
@@ -85,7 +85,7 @@ from . import facelib
 
 MODELS_DIR = facelib.MODELS_DIR
 
-# Fewest per-crop fits we'll trust an average over — a single view carries the
+# Fewest per-crop fits we'll trust an average over - a single view carries the
 # artist's/camera's angle baked in, so one is never canonical.
 MIN_VIEWS = 3
 # Drop crops whose smaller side is under this fraction of the source image: a tiny
@@ -113,9 +113,9 @@ def _meanshape() -> np.ndarray:
     return _MEANSHAPE["pts"]
 
 
-# ── insightface face3d (3DMM) backend ─────────────────────────────────────────
+# -- insightface face3d (3DMM) backend -----------------------------------------
 def _build_insight3d():
-    """Construct the (FaceAnalysis app, 3DMM basis) pair, or None on any failure.
+    """! @brief Construct the (FaceAnalysis app, 3DMM basis) pair, or None on any failure.
 
     We need TWO things from insightface: a landmark detector (buffalo_l already
     ships one, and faces.py loads exactly this app for identity) and the face3d
@@ -136,7 +136,7 @@ def _build_insight3d():
                                           + (facelib.face_model_error() or "unknown"))
             return None
         # The morphable model basis: fetched to models/face3d on first use.
-        # NB: _fetch_bfm(), not ensure_basis() — that one goes back through
+        # NB: _fetch_bfm(), not ensure_basis() - that one goes back through
         # the registry for the very key being built here and deadlocks on
         # its load lock.
         if not _fetch_bfm():
@@ -154,7 +154,7 @@ _insight3d_state = {"reason": ""}
 
 
 def insight3d_reason():
-    """Why insight3d isn't available right now (empty when it is)."""
+    """! @brief Why insight3d isn't available right now (empty when it is)."""
     if not _insight3d_state["reason"]:
         _load_insight3d()
     return _insight3d_state["reason"]
@@ -168,12 +168,12 @@ def _load_insight3d():
     return model_registry.acquire("faces:mesh3dmm")
 
 
-# ── deep3d backend (optional, stronger) ───────────────────────────────────────
+# -- deep3d backend (optional, stronger) ---------------------------------------
 _deep3d = {"tried": False, "runner": None}
 
 
 def _load_deep3d():
-    """Thin adapter to sicxu/Deep3DFaceRecon_pytorch, if the user installed it.
+    """! @brief Thin adapter to sicxu/Deep3DFaceRecon_pytorch, if the user installed it.
 
     Kept behind a soft import (deep3d_runner) with the same shape as the body
     runner: infer(img_bgr, box) -> {vertices, faces, coeff, confidence}. Absent by
@@ -195,7 +195,7 @@ _BFM_URL = "https://github.com/peterjiang4648/BFM_model/releases/download/1.0/BF
 
 
 def _fetch_bfm() -> bool:
-    """Download BFM.mat into models/face3d if it isn't there. Registry-free, so
+    """! @brief Download BFM.mat into models/face3d if it isn't there. Registry-free, so
     it is safe to call from inside a model build."""
     if os.path.exists(_BFM_PATH):
         return True
@@ -218,7 +218,7 @@ def ensure_basis(timeout: int = 120) -> bool:
     """! @brief Provision the 3DMM basis (models/face3d/BFM.mat) if missing.
     @return True if a usable face estimator exists after the attempt. Downloads the
             basis once; if deep3d is already available, or the file is already
-            present, this is a no-op. Never raises — returns False on any failure so
+            present, this is a no-op. Never raises - returns False on any failure so
             the caller can surface a clear message.
     """
     if have_face_estimator():
@@ -234,8 +234,8 @@ def ensure_basis(timeout: int = 120) -> bool:
     return have_face_estimator()
 
 
-# ── landmarks3d backend (no basis, no download) ───────────────────────────────
-# buffalo_l — already loaded for identity embedding — ships a 3D 68-point landmark
+# -- landmarks3d backend (no basis, no download) -------------------------------
+# buffalo_l - already loaded for identity embedding - ships a 3D 68-point landmark
 # model (landmark_3d_68). That gives a real, if sparse, 3D face directly, with zero
 # extra weights and no morphable-model basis. We triangulate the fixed 68-point
 # topology once and average the (pose-normalised) 3D landmark positions across a
@@ -262,12 +262,12 @@ def _landmark68_triangles() -> np.ndarray:
 
 
 def _fit_landmarks3d(img_bgr, box) -> Optional[dict]:
-    """Return a per-crop 3D face from buffalo_l's 68 3D landmarks, pose-normalised.
+    """! @brief Return a per-crop 3D face from buffalo_l's 68 3D landmarks, pose-normalised.
 
     The landmarks come in image pixels with a relative z; we recentre on the nose,
     scale by inter-ocular distance, and (cheaply) remove yaw/pitch/roll by aligning
     to the canonical template with a similarity transform. What we hand back as
-    "coeff" is the flattened normalised (68,3) point set — the person-stable shape
+    "coeff" is the flattened normalised (68,3) point set - the person-stable shape
     the caller averages across views, exactly like SMPL betas / 3DMM sp.
     """
     app = facelib._load_insight()
@@ -300,7 +300,7 @@ def _fit_landmarks3d(img_bgr, box) -> Optional[dict]:
     pts = pts[:68, :3].copy()
     # Frontalise by fitting a 3D similarity (scale+rotation+translation) that maps
     # this crop's landmarks onto insightface's canonical mean shape, then applying
-    # its inverse — the same 3D-to-3D alignment the landmark model uses for pose.
+    # its inverse - the same 3D-to-3D alignment the landmark model uses for pose.
     # This removes yaw/pitch/roll properly (a flat 2D affine can't), so only true
     # identity shape survives into the average. Falls back to nose-centre + inter-
     # ocular scale if the fit degenerates.
@@ -322,10 +322,10 @@ def _fit_landmarks3d(img_bgr, box) -> Optional[dict]:
 
 
 def _align_similarity_3d(src: np.ndarray, dst: np.ndarray) -> Optional[np.ndarray]:
-    """Umeyama similarity fit mapping src->dst; returns src expressed in dst's frame.
+    """! @brief Umeyama similarity fit mapping src->dst; returns src expressed in dst's frame.
 
-    Solves for scale s, rotation R, translation t minimising ||dst-(sR·src+t)|| and
-    returns (sR·src+t), i.e. the crop's landmarks rigidly+uniformly aligned onto the
+    Solves for scale s, rotation R, translation t minimising ||dst-(sR-src+t)|| and
+    returns (sR-src+t), i.e. the crop's landmarks rigidly+uniformly aligned onto the
     canonical mean. Pure identity shape (deviation from the mean) is what remains
     after the person-invariant pose/scale is removed. None on a degenerate fit.
     """
@@ -351,7 +351,7 @@ def _align_similarity_3d(src: np.ndarray, dst: np.ndarray) -> Optional[np.ndarra
 
 
 def _have_landmarks3d() -> bool:
-    """Whether the zero-download landmark backend can run (buffalo_l present)."""
+    """! @brief Whether the zero-download landmark backend can run (buffalo_l present)."""
     try:
         return facelib._load_insight() is not None
     except Exception:
@@ -361,7 +361,7 @@ def _have_landmarks3d() -> bool:
 def have_face_estimator() -> bool:
     """! @brief Whether ANY face-mesh backend is available.
     @note True whenever buffalo_l is loadable, since the landmarks3d backend needs
-          no extra weights — so this is effectively always available in a working
+          no extra weights - so this is effectively always available in a working
           install, and the deep3d/BFM paths are quality upgrades layered on top.
     """
     return (_load_deep3d() is not None
@@ -380,7 +380,7 @@ def face_estimator_name() -> str:
     return ""
 
 
-# ── per-crop fitting ──────────────────────────────────────────────────────────
+# -- per-crop fitting ----------------------------------------------------------
 def _fit_deep3d(img_bgr, box) -> Optional[dict]:
     runner = _load_deep3d()
     if runner is None:
@@ -399,7 +399,7 @@ def _fit_deep3d(img_bgr, box) -> Optional[dict]:
 
 
 def _fit_insight3d(img_bgr, box) -> Optional[dict]:
-    """Fit the 3DMM to one crop's landmarks and return SHAPE coefficients + mesh.
+    """! @brief Fit the 3DMM to one crop's landmarks and return SHAPE coefficients + mesh.
 
     We separate identity SHAPE (sp) from EXPRESSION (ep) and POSE: only sp is a
     stable per-person quantity, so it's what the caller averages. The returned
@@ -476,14 +476,14 @@ def estimate_params(img_bgr: np.ndarray, box: dict,
     return None
 
 
-# ── shape fusion (same robust averaging as bodies.estimate_shape) ─────────────
+# -- shape fusion (same robust averaging as bodies.estimate_shape) -------------
 def estimate_shape(crops: list, min_views: int = MIN_VIEWS,
                    min_confidence: float = 0.3, prefer: str = "auto") -> Optional[tuple]:
     """! @brief Fuse many per-crop face fits into one canonical, outlier-robust mesh.
     @param crops List of (img_bgr, box) for a person's reasonably-sized face crops.
     @return (vertices, faces) for a neutral mesh rebuilt from the averaged identity
             coefficients, or None when too few crops survive. Only identity SHAPE is
-            averaged — expression/pose are per-image and are dropped — so the result
+            averaged - expression/pose are per-image and are dropped - so the result
             is the person's face, not any one photo's grimace.
     """
     fits = [p for p in (estimate_params(img, box, prefer) for img, box in crops) if p is not None]
@@ -491,7 +491,7 @@ def estimate_shape(crops: list, min_views: int = MIN_VIEWS,
     if len(fits) < min_views:
         # A single decent fit is still worth showing (a face mesh from one clear
         # photo is useful), so fall back to the best single view rather than
-        # nothing — but only when we truly can't average.
+        # nothing - but only when we truly can't average.
         if fits:
             best = max(fits, key=lambda f: f["confidence"])
             return (best["vertices"], best["faces"])
@@ -527,7 +527,7 @@ def estimate_shape(crops: list, min_views: int = MIN_VIEWS,
         except Exception:
             pass
     # landmarks3d path: the coeff IS the flattened (68,3) point set, so the averaged
-    # coeff is the averaged face directly — reshape it back into vertices.
+    # coeff is the averaged face directly - reshape it back into vertices.
     if mean_coeff.size % 3 == 0 and mean_coeff.size == kept_fits[0]["vertices"].size:
         verts = mean_coeff.reshape(-1, 3).astype(np.float32)
         return (verts, np.asarray(faces_tri, np.int32))
@@ -536,5 +536,5 @@ def estimate_shape(crops: list, min_views: int = MIN_VIEWS,
     return (kept_fits[int(np.argmin(d))]["vertices"], faces_tri)
 
 
-# Serialisation is identical to bodies — one OBJ contract for both meshes.
+# Serialisation is identical to bodies - one OBJ contract for both meshes.
 mesh_to_obj = og.mesh_to_obj

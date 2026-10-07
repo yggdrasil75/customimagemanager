@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 
 _zxing_cache: dict[str, object] = {}
 
-# A barcode model's class names vary by whoever trained it — "barcode", "qr",
+# A barcode model's class names vary by whoever trained it - "barcode", "qr",
 # "QR_CODE", "1d"/"2d", "DataMatrix". Rather than demand one vocabulary, accept
 # any class whose name looks code-ish. A dedicated barcode model usually has
 # only these classes anyway, so this is mostly a guard against a general model
@@ -21,7 +21,7 @@ _CLASS_HINTS = ("barcode", "bar_code", "bar code", "qr", "qrcode", "datamatrix",
                 "data_matrix", "aztec", "pdf417", "ean", "upc", "code39",
                 "code93", "code128", "itf", "databar", "1d", "2d", "matrix")
 
-# keys are lowercased with all separators stripped — see normalize_format
+# keys are lowercased with all separators stripped - see normalize_format
 _FORMAT_ALIASES = {
     "qrcode": "QRCode", "qr": "QRCode",
     "microqrcode": "MicroQRCode", "rmqrcode": "rMQRCode",
@@ -39,8 +39,8 @@ _MATRIX_FORMATS = {"QRCode", "MicroQRCode", "rMQRCode", "DataMatrix", "Aztec",
                    "PDF417", "MaxiCode"}
 _PRODUCT_FORMATS = {"EAN-13", "EAN-8", "UPC-A", "UPC-E"}
 
-# Rotation retries for 1-D codes. Linear decoders read within about ±12° of
-# axis-aligned; 22.5° steps are the coarsest set whose ±12° bands overlap with
+# Rotation retries for 1-D codes. Linear decoders read within about +/-12 deg of
+# axis-aligned; 22.5 deg steps are the coarsest set whose +/-12 deg bands overlap with
 # no gap, so three retries cover a full quarter-turn (the rest is symmetry).
 _ROTATE_ANGLES = (22.5, 45.0, 67.5)
 
@@ -49,11 +49,11 @@ _ROTATE_ANGLES = (22.5, 45.0, 67.5)
 _TARGET_SHORT_SIDE = 320
 
 def normalize_format(raw) -> str:
-    """Map an engine's symbology spelling onto one canonical name.
+    """! @brief Map an engine's symbology spelling onto one canonical name.
 
-    The three sources disagree on spelling for the same thing — zxing says
+    The three sources disagree on spelling for the same thing - zxing says
     "QR Code" or "BarcodeFormat.QRCode", OpenCV says "EAN_13", zbar says
-    "QRCODE" — so the lookup strips every separator rather than trying to
+    "QRCODE" - so the lookup strips every separator rather than trying to
     enumerate each variant. Without this, the same code scanned on two
     machines writes two different values into the file's metadata.
     """
@@ -73,10 +73,10 @@ def looks_like_barcode_class(name: str) -> bool:
     n = str(name or "").strip().lower()
     return any(h in n for h in _CLASS_HINTS)
 
-# ── helpers ─────────────────────────────────────────────────────────────────
+# -- helpers -----------------------------------------------------------------
 
 def _as_bgr(img: np.ndarray) -> np.ndarray:
-    """Coerce to contiguous 3-channel uint8 BGR."""
+    """! @brief Coerce to contiguous 3-channel uint8 BGR."""
     if img.ndim == 2:
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     elif img.shape[2] == 4:
@@ -87,7 +87,7 @@ def _as_bgr(img: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(img)
 
 def _payload(data) -> tuple[str, bool]:
-    """(value, is_binary). A QR code can carry arbitrary bytes; those become
+    """! @brief (value, is_binary). A QR code can carry arbitrary bytes; those become
     base64 rather than being mangled by a replace-errors UTF-8 decode."""
     if isinstance(data, (bytes, bytearray)):
         try:
@@ -97,10 +97,10 @@ def _payload(data) -> tuple[str, bool]:
     return str(data or ""), False
 
 def _crop(bgr: np.ndarray, box: dict, pad: float = 0.12):
-    """Pixel crop around a normalised box, padded. Returns (crop, x1, y1).
+    """! @brief Pixel crop around a normalised box, padded. Returns (crop, x1, y1).
 
-    The padding is not cosmetic: every symbology specifies a quiet zone — clear
-    margin either side — and decoders enforce it. A box drawn tight to the bars
+    The padding is not cosmetic: every symbology specifies a quiet zone - clear
+    margin either side - and decoders enforce it. A box drawn tight to the bars
     (which is what a well-trained detector gives you) has no quiet zone left,
     so cropping tight makes a perfectly good barcode undecodable.
     """
@@ -123,7 +123,7 @@ def _upscale(crop: np.ndarray) -> np.ndarray:
     return cv2.resize(crop, None, fx=f, fy=f, interpolation=cv2.INTER_CUBIC)
 
 def _enhance(crop: np.ndarray) -> np.ndarray:
-    """Local contrast + sharpen. CLAHE rather than a global stretch, because
+    """! @brief Local contrast + sharpen. CLAHE rather than a global stretch, because
     barcode photos are usually unevenly lit and a global curve blows out the
     bright half before the dark half becomes readable."""
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
@@ -142,19 +142,19 @@ def _rotate(img: np.ndarray, deg: float) -> np.ndarray:
     return cv2.warpAffine(img, m, (nw, nh), flags=cv2.INTER_CUBIC,
                           borderValue=(255, 255, 255))
 
-# ── decoders ────────────────────────────────────────────────────────────────
+# -- decoders ----------------------------------------------------------------
 # Each returns [{value, format, binary}] for the image it was handed. Geometry
 # is deliberately ignored here: the YOLO box already localises the code, and a
-# decoder's own quad — measured inside a padded, upscaled, possibly rotated
-# crop — is less reliable than the box we started from.
+# decoder's own quad - measured inside a padded, upscaled, possibly rotated
+# crop - is less reliable than the box we started from.
 
 def _framed_for_linear(img: np.ndarray) -> np.ndarray:
-    """Normalise scale, then pad out with a wide white margin.
+    """! @brief Normalise scale, then pad out with a wide white margin.
 
     Counter-intuitive but measured: cv2.barcode.BarcodeDetector searches at
     detector scales of 0.01-0.08 of the frame, i.e. it expects the barcode to
-    be a *small* part of a *larger* scene. Hand it a tight crop — exactly what
-    a good YOLO box gives you — and it finds nothing at all, at any bar height
+    be a *small* part of a *larger* scene. Hand it a tight crop - exactly what
+    a good YOLO box gives you - and it finds nothing at all, at any bar height
     or resolution.
 
     Padding the crop back out until the code occupies a small fraction of the
@@ -177,7 +177,7 @@ def _framed_for_linear(img: np.ndarray) -> np.ndarray:
 
 def _decode_opencv(img: np.ndarray) -> list[dict]:
     out = []
-    # QR — works on the crop as-is; no framing trick needed.
+    # QR - works on the crop as-is; no framing trick needed.
     try:
         ok, infos, pts, _ = cv2.QRCodeDetector().detectAndDecodeMulti(img)
         if ok:
@@ -190,7 +190,7 @@ def _decode_opencv(img: np.ndarray) -> list[dict]:
         log.debug("opencv QR multi failed: %s", e)
     if not out:
         try:
-            # Curved/warped QR on a bottle, mug or bag — a case the flat
+            # Curved/warped QR on a bottle, mug or bag - a case the flat
             # detector above gives up on.
             text, _, _ = cv2.QRCodeDetector().detectAndDecodeCurved(img)
             if text:
@@ -198,7 +198,7 @@ def _decode_opencv(img: np.ndarray) -> list[dict]:
                             "binary": False})
         except Exception as e:
             log.debug("opencv QR curved failed: %s", e)
-    # Linear (EAN/UPC) — needs the framing above.
+    # Linear (EAN/UPC) - needs the framing above.
     if not out and hasattr(cv2, "barcode"):
         try:
             ok, infos, types, _ = (cv2.barcode.BarcodeDetector()
@@ -214,7 +214,7 @@ def _decode_opencv(img: np.ndarray) -> list[dict]:
     return out
 
 def _decode_zxing(img: np.ndarray) -> list[dict] | None:
-    """None when zxing-cpp isn't installed, so callers can tell "absent" from
+    """! @brief None when zxing-cpp isn't installed, so callers can tell "absent" from
     "found nothing"."""
     # NB: never rebind the module global here. `zx = _zxing_cache["mod"]` used
     # to make zx a local, so the else-branch read it before assignment,
@@ -260,17 +260,17 @@ def has_zxing() -> bool:
     return _decode_zxing(np.zeros((32, 32, 3), np.uint8)) is not None
 
 def _decode_once(img: np.ndarray) -> list[dict]:
-    """zxing when present (wider symbology coverage), else OpenCV."""
+    """! @brief zxing when present (wider symbology coverage), else OpenCV."""
     hits = _decode_zxing(img)
     if hits:
         return hits
     return _decode_opencv(img)
 
 def decode_crop(crop: np.ndarray, *, deep: bool = True) -> dict | None:
-    """Read a code out of a single crop, escalating through cheap variants.
+    """! @brief Read a code out of a single crop, escalating through cheap variants.
 
     Returns {value, format, binary, via} or None. `via` names the variant that
-    worked, which is the useful diagnostic when tuning a detector — lots of
+    worked, which is the useful diagnostic when tuning a detector - lots of
     hits arriving via 'rotate' means the source photos are consistently skewed.
     """
     if crop is None or crop.size == 0:
@@ -291,10 +291,10 @@ def decode_crop(crop: np.ndarray, *, deep: bool = True) -> dict | None:
             return {**hit, "via": via}
     return None
 
-# ── scan ────────────────────────────────────────────────────────────────────
+# -- scan --------------------------------------------------------------------
 
 def _grad_boxes(gray: np.ndarray, mode: str) -> list[tuple]:
-    """Candidate rects from directional gradient energy.
+    """! @brief Candidate rects from directional gradient energy.
 
     mode "1d" keeps regions where gradient along one axis dominates the other
     (parallel bars); "2d" keeps regions strong on both (matrix codes).
@@ -324,11 +324,11 @@ def _grad_boxes(gray: np.ndarray, mode: str) -> list[tuple]:
     return [cv2.boundingRect(c) for c in cnts]
 
 def detect_cv(bgr: np.ndarray) -> list[dict]:
-    """Locate probable barcodes with no model. Returns detector-shaped boxes.
+    """! @brief Locate probable barcodes with no model. Returns detector-shaped boxes.
 
     Tuned to over-produce rather than under-produce: a candidate that isn't a
     barcode costs one failed decode, while a missed one costs the whole code.
-    Callers are expected to drop CV candidates that fail to decode (see scan) —
+    Callers are expected to drop CV candidates that fail to decode (see scan) -
     unlike YOLO boxes, a heuristic box with no payload is more likely a text
     block than a damaged barcode.
     """
@@ -391,9 +391,9 @@ def _iou(a: dict, b: dict) -> float:
 
 def scan(bgr: np.ndarray, detect_fn=None, *, deep: bool = True,
          min_conf: float = 0.25) -> dict:
-    """Detect barcodes with YOLO, then decode each one.
+    """! @brief Detect barcodes with YOLO, then decode each one.
 
-    detect_fn(bgr) -> [{class_name, cx, cy, w, h, conf?}] — injected so this
+    detect_fn(bgr) -> [{class_name, cx, cy, w, h, conf?}] - injected so this
     module never imports the app (the same arrangement comic_pages uses for its
     panel/OCR callbacks). Pass None to skip detection and decode the whole
     frame, which is the no-model fallback.
@@ -465,7 +465,7 @@ def scan(bgr: np.ndarray, detect_fn=None, *, deep: bool = True,
             note += (" Scanned with the built-in detector; a trained barcode "
                      "model in Settings will do better on small or angled codes.")
     elif heuristic and detect_fn is not None:
-        note = ("Your barcode model found nothing — fell back to the built-in "
+        note = ("Your barcode model found nothing - fell back to the built-in "
                 "detector. If the model you selected isn't a barcode model, its "
                 "classes won't match.")
     else:
@@ -477,7 +477,7 @@ def scan(bgr: np.ndarray, detect_fn=None, *, deep: bool = True,
             "decoded": sum(1 for c in codes if c["decoded"]), "note": note}
 
 def _box_from_quad(quad, W: int, H: int) -> dict | None:
-    """Normalised centre-form box from a decoder's 4-point corner quad."""
+    """! @brief Normalised centre-form box from a decoder's 4-point corner quad."""
     if not quad or len(quad) < 3:
         return None
     try:
@@ -495,7 +495,7 @@ def _box_from_quad(quad, W: int, H: int) -> dict | None:
             "h": clamp((y2 - y1) / max(1, H))}
 
 def _make_code(box: dict | None, hit: dict | None) -> dict:
-    """One result row. Geometry comes from the detector box when there is one;
+    """! @brief One result row. Geometry comes from the detector box when there is one;
     a whole-frame decode has no box, so it covers the frame."""
     geo = ({"cx": round(float(box["cx"]), 6), "cy": round(float(box["cy"]), 6),
             "w": round(float(box["w"]), 6), "h": round(float(box["h"]), 6)}
@@ -505,7 +505,7 @@ def _make_code(box: dict | None, hit: dict | None) -> dict:
         **geo,
         "value": (hit or {}).get("value"),
         # Fall back to the detector's own class for the format when the code
-        # didn't decode — a model with separate qr/ean classes still tells us
+        # didn't decode - a model with separate qr/ean classes still tells us
         # what kind of code it is even though we couldn't read it.
         "format": normalize_format((hit or {}).get("format")
                                    or (box or {}).get("class_name") or ""),
@@ -516,8 +516,8 @@ def _make_code(box: dict | None, hit: dict | None) -> dict:
         "det_class": (box or {}).get("class_name"),
     }
 
-# ── marking ─────────────────────────────────────────────────────────────────
-# A code becomes an MWG region with Type="BarCode" — one of the four region
+# -- marking -----------------------------------------------------------------
+# A code becomes an MWG region with Type="BarCode" - one of the four region
 # types the MWG spec predefines alongside Face/Pet/Focus. That is what makes
 # this properly marked rather than just another labelled rectangle: other
 # MWG-aware tools recognise it without knowing anything about this app.
@@ -527,11 +527,11 @@ def _make_code(box: dict | None, hit: dict | None) -> dict:
 # per-region UUID on every region it writes, and that identity is load-bearing
 # (the frontend keys off it; changing it would orphan every existing box in
 # every already-tagged file). So the payload goes into the Extensions open
-# struct as cim:BarCodeValue — which is what an open struct is for — and the
+# struct as cim:BarCodeValue - which is what an open struct is for - and the
 # UUID keeps its slot. See mwg_fields.build_region_list_xml.
 
 def code_label(code: dict, max_len: int = 64) -> str:
-    """Display name for the region."""
+    """! @brief Display name for the region."""
     fmt = normalize_format(code.get("format"))
     if not code.get("decoded"):
         return f"{fmt} (not decoded)" if fmt != "Unknown" else "barcode (not decoded)"
@@ -539,10 +539,10 @@ def code_label(code: dict, max_len: int = 64) -> str:
     if code.get("binary"):
         return f"{fmt} (binary, {len(v)}B b64)"
     v = " ".join(v.split())
-    return v if len(v) <= max_len else v[:max_len - 1] + "…"
+    return v if len(v) <= max_len else v[:max_len - 1] + "..."
 
 def code_tags(code: dict) -> list[str]:
-    """Coarse on purpose: 'barcode' groups every code in the library, the
+    """! @brief Coarse on purpose: 'barcode' groups every code in the library, the
     symbology narrows it, and the rest are what people actually filter on."""
     fmt = normalize_format(code.get("format"))
     tags = ["barcode"]
@@ -560,7 +560,7 @@ def code_tags(code: dict) -> list[str]:
     return list(dict.fromkeys(tags))
 
 def to_regions(result: dict, *, confirmed: bool = False) -> list[dict]:
-    """Turn a scan() result into app region dicts ready for write_metadata.
+    """! @brief Turn a scan() result into app region dicts ready for update_file.
 
     confirmed=False by default, matching every other detector in the app: a
     machine-made box stays unconfirmed until a human agrees with it, even when
@@ -594,14 +594,14 @@ def to_regions(result: dict, *, confirmed: bool = False) -> list[dict]:
     return regions
 
 def summary_text(result: dict) -> str:
-    """One line per decoded code, for appending to an image description.
-    Undecoded boxes are left out — they carry no text worth adding."""
+    """! @brief One line per decoded code, for appending to an image description.
+    Undecoded boxes are left out - they carry no text worth adding."""
     lines = []
     for c in result.get("codes", []) or []:
         if not c.get("decoded"):
             continue
         val = c.get("value") or ""
         if c.get("binary"):
-            val = f"<binary, base64: {val[:40]}{'…' if len(val) > 40 else ''}>"
+            val = f"<binary, base64: {val[:40]}{'...' if len(val) > 40 else ''}>"
         lines.append(f"{normalize_format(c.get('format'))}: {val}")
     return "\n".join(lines)

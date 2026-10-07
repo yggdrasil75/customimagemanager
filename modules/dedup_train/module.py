@@ -1,5 +1,5 @@
-"""
-Dedup-train module - the "Dedup" sub-tab of the Trainer tab.
+"""! @file
+@brief Dedup-train module - the "Dedup" sub-tab of the Trainer tab.
 ======================================================================
 Off by default. Trains the dedup_cnn siamese CNN size series (nano..xxl)
 on THIS library - plus optional dataset folders on disk - by streaming
@@ -113,8 +113,7 @@ def register(host):
         d = request.get_json(force=True, silent=True) or {}
         folders = [f for f in str(d.get("folders") or "").splitlines() if f.strip()]
         if d.get("folders") is not None:
-            host.config["dedup_train_folders"] = "\n".join(folders)
-            host.save_config()
+            host.set_config("dedup_train_folders", "\n".join(folders))
         paths = []
         if d.get("use_library", True):
             paths += _library_paths()
@@ -122,8 +121,7 @@ def register(host):
         if not paths:
             return jsonify({"success": False, "error": "nothing to train on: library has no images and no folders given"})
         if d.get("sizes_text") is not None:
-            host.config["dup_cnn_sizes"] = str(d["sizes_text"])
-            host.save_config()
+            host.set_config("dup_cnn_sizes", str(d["sizes_text"]))
         tbl = _sizes()
         sizes = {z: tbl[z] for z in (d.get("sizes") or []) if z in tbl}
         if not sizes:
@@ -150,7 +148,7 @@ def register(host):
         return jsonify({"success": started, "error": None if started else "a build is already running"})
 
     def api_activate():
-        """Make an already-trained size the live one (copies models/dup_cnn_<size>.pt over dup_cnn.pt)."""
+        """! @brief Make an already-trained size the live one (copies models/dup_cnn_<size>.pt over dup_cnn.pt)."""
         import shutil
         d = request.get_json(force=True, silent=True) or {}
         z = str(d.get("size") or "")
@@ -163,7 +161,7 @@ def register(host):
     def api_stop():
         return jsonify({"success": True, "was_running": bd.stop()})
 
-    # ── timeline models: HEURDUV (video), HEARDU (audio), HEURDU 1.0 (anim) ──
+    # -- timeline models: HEURDUV (video), HEARDU (audio), HEURDU 1.0 (anim) --
     host.add_config_key("dedup_train_video_folders", default="", validate=lambda v: str(v or ""))
     host.add_config_key("dedup_train_audio_folders", default="", validate=lambda v: str(v or ""))
 
@@ -190,8 +188,7 @@ def register(host):
         svc = host.get_service("dedup_cnn" if kind == "anim" else f"dedup_{kind}_model")
         try:
             if kind == "anim":
-                host.config["heurdu_release"] = "1.0"
-                host.save_config()
+                host.set_config("heurdu_release", "1.0")
             return bool(svc and svc.get("reload") and svc["reload"](active))
         except Exception as e:
             host.logger.warning(f"dedup_train: reload {kind}: {e}")
@@ -225,8 +222,7 @@ def register(host):
         fkey = f"dedup_train_{'audio' if kind == 'audio' else 'video'}_folders"
         folders = [f for f in str(d.get("folders") or "").splitlines() if f.strip()]
         if d.get("folders") is not None:
-            host.config[fkey] = "\n".join(folders)
-            host.save_config()
+            host.set_config(fkey, "\n".join(folders))
         paths = (_seq_library(kind) if d.get("use_library", True) else []) + \
             (bs.audio_dataset.scan(folders) if kind == "audio" else bs.video_dataset.scan(folders))
         if not paths:

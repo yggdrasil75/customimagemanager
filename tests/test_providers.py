@@ -1,13 +1,14 @@
-"""Generic model-provider suite.
+"""! @file
+@brief Generic model-provider suite.
 
 Every provider registered with the broker (any module, any capability) is
 parametrized into these tests, so a NEW MODEL IS COVERED THE MOMENT IT
-REGISTERS — no edit to this file, ever. Adding a model:
+REGISTERS - no edit to this file, ever. Adding a model:
 
     1. register it (host.provide_model(...)) as usual
     2. ./run_tests.sh tests/test_providers.py -k "pose:mymodel"
     3. if it deviates from the capability contract on purpose, say so in
-       tests/model_expectations.json — data, not code.
+       tests/model_expectations.json - data, not code.
 
 Each run ends with a "model results" table: one line per model, ok or the
 first failure, so "yolo pose works, mediapipe holistic doesn't" is readable at
@@ -18,7 +19,7 @@ exhaustively instead: every size, every type, every weights file a
 path-parameterized provider can run, and for a wrapper provider every
 underlying model it can run.
 
-These tests ask whether the program can USE a model — the input reaches it in
+These tests ask whether the program can USE a model - the input reaches it in
 the form it wants, it returns without raising, and what comes back fits the
 capability's contract so consumers don't choke. They are not accuracy tests: a
 skeleton a few pixels off, or a slightly different mask, passes.
@@ -64,7 +65,7 @@ EXPECTATIONS = _load_expectations()
 
 
 def expectation(cap, pid, test_name=None):
-    """The entry for this model ('cap:provider', or 'cap:*' for every provider
+    """! @brief The entry for this model ('cap:provider', or 'cap:*' for every provider
     of a capability), narrowed to one test when test_name is given."""
     e = dict(EXPECTATIONS.get(f"{cap}:{pid}") or EXPECTATIONS.get(f"{cap}:*") or {})
     per_test = e.pop("tests", {}) or {}
@@ -77,10 +78,10 @@ SPEEDS = {"", "fast", "balanced", "accurate"}
 PROMPT = "person"
 
 
-# ── parametrization ────────────────────────────────────────────────────────
+# -- parametrization --------------------------------------------------------
 def for_caps(*caps):
-    """Restrict a test to providers of these capabilities (prefix match on
-    'detect.' etc. is not implied — list them)."""
+    """! @brief Restrict a test to providers of these capabilities (prefix match on
+    'detect.' etc. is not implied - list them)."""
     def deco(fn):
         fn.caps = caps
         return fn
@@ -88,7 +89,7 @@ def for_caps(*caps):
 
 
 def _variants(p):
-    """[(size, type)] to test for a provider: the variant in effect (None,
+    """! @brief [(size, type)] to test for a provider: the variant in effect (None,
     None = leave the broker's resolution alone) or, with --cim-all-variants,
     every combination the provider declares."""
     if not cimtest.sweeping(p.get("capability") or p.get("cap") or ""):
@@ -99,7 +100,7 @@ def _variants(p):
 
 
 def _weights_for(prov_obj, cap="box"):
-    """Weights files under models/ that a path-parameterized provider ('box')
+    """! @brief Weights files under models/ that a path-parameterized provider ('box')
     says it can run: one when testing normally, all of them when the capability
     is being swept."""
     import glob
@@ -127,7 +128,7 @@ def _weights_for(prov_obj, cap="box"):
 
 
 def _weights_tag(path):
-    """models/yolo/detect/yolo12n.pt -> 'yolo/detect/yolo12n.pt': unique, so two
+    """! @brief models/yolo/detect/yolo12n.pt -> 'yolo/detect/yolo12n.pt': unique, so two
     weights with the same file name don't collide in the test id."""
     try:
         import model_registry
@@ -144,7 +145,7 @@ def _safe_handles(handles, path):
 
 
 def _delegate_of(cap, pid):
-    """A provider that runs whatever model another capability has picked (e.g.
+    """! @brief A provider that runs whatever model another capability has picked (e.g.
     detect.persons:detect-class runs the picked 'detect' model) declares that
     capability as "delegates" in tests/model_expectations.json. Testing it once
     only tests the current pick, so each underlying model becomes its own
@@ -197,7 +198,7 @@ _LOAD_ERR = {}
 
 @pytest.fixture
 def P(prov, app, request):
-    """(provider, bound handle) for a callable provider, or skip/fail.
+    """! @brief (provider, bound handle) for a callable provider, or skip/fail.
     Applies tests/model_expectations.json and, when sweeping, pins the size /
     type for the duration of the test."""
     cap, pid, size, typ, extra = prov
@@ -250,13 +251,13 @@ def P(prov, app, request):
 
 
 def _exempt(p):
-    """Skip a behaviour test for a model that deliberately doesn't do this."""
+    """! @brief Skip a behaviour test for a model that deliberately doesn't do this."""
     r = expectation(p.capability, p.id).get("exempt")
     if r:
         pytest.skip(f"model_expectations.json: {r}")
 
 
-# ── calling convention per capability ──────────────────────────────────────
+# -- calling convention per capability --------------------------------------
 CENTER_BOX = {"class_name": "person", "cx": .5, "cy": .5, "w": .6, "h": .9}
 
 
@@ -295,7 +296,7 @@ def _call(p, h, img, **kw):
 
 
 def std_image():
-    """person_single.jpg when present, else a textured synthetic frame."""
+    """! @brief person_single.jpg when present, else a textured synthetic frame."""
     if has_fixture("person_single.jpg"):
         return load_image("person_single.jpg")
     rng = np.random.default_rng(0)
@@ -303,7 +304,7 @@ def std_image():
     return cv2.GaussianBlur(rng.integers(0, 255, (240, 320, 3), dtype=np.uint8), (9, 9), 0)
 
 
-# ── validators (the canonical shapes from modules/model_contracts.py) ──────
+# -- validators (the canonical shapes from modules/model_contracts.py) ------
 def _num01(v, what):
     v = float(v)
     assert -1e-6 <= v <= 1 + 1e-6, f"{what}={v} outside 0..1"
@@ -480,7 +481,7 @@ def validate(p, out, img, n_boxes=1, blank=False):
         return v_iqa(out, cap, blank=blank)
     if cap in ("face.shape", "body.shape", "body.mesh"):
         return v_mesh(out, cap)
-    pytest.skip(f"no generic validator for capability '{cap}' — ship a test in the providing module")
+    pytest.skip(f"no generic validator for capability '{cap}' - ship a test in the providing module")
 
 
 def _count(p, out):
@@ -492,7 +493,7 @@ def _cos(a, b):
     return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
 
 
-# ── every provider ─────────────────────────────────────────────────────────
+# -- every provider ---------------------------------------------------------
 def test_declaration(prov, app):
     cap, pid = prov[0], prov[1]
     b = app.module_host.broker
@@ -546,7 +547,7 @@ def test_batch(P):
     assert abs(_count(p, out[0]) - single) <= 1, "batch and single call disagree on the same image"
 
 
-# ── behaviour on real fixtures ─────────────────────────────────────────────
+# -- behaviour on real fixtures ---------------------------------------------
 def _confident(out, t=0.5):
     return [b for b in out if float(b.get("conf", 1.0)) >= t]
 
@@ -581,7 +582,7 @@ def test_faces_counts(P):
 
 
 def _raw_peek(h, img, n=400):
-    """What the provider's model returned BEFORE its transform, for a failure
+    """! @brief What the provider's model returned BEFORE its transform, for a failure
     message: when the contract shape is empty, this is what it came from."""
     model = getattr(h, "model", None)
     if model is None or not callable(model):
@@ -612,7 +613,7 @@ def test_detect_finds_person(P):
     typ = getattr(p, "test_variant", (None, None))[1]
     if typ and typ != _default_type(p):
         # A non-default type is a different weights family with its own classes
-        # — ultralytics' -obb weights are DOTA (plane, ship, storage tank), so
+        # - ultralytics' -obb weights are DOTA (plane, ship, storage tank), so
         # "no person in a wedding photo" is the right answer for them.
         pytest.skip(f"type '{typ}' is a different weights family with its own classes; "
                     f"its output shape is still checked by test_contract")
@@ -625,14 +626,14 @@ def test_detect_finds_person(P):
     # A model's class list depends on the variant in play: the -obb weights are
     # DOTA aerial models (plane, storage tank, harbor), so "no person here" is
     # correct for them, not a failure. Judge by the vocabulary actually in use
-    # — what it can say, plus what it just said.
+    # - what it can say, plus what it just said.
     if seen and vocab and not (seen & vocab):
         pytest.skip(f"the model reports classes outside what it declares ({sorted(seen)[:4]} vs "
                     f"{sorted(vocab)[:4]}): the weights in play aren't the ones classes() "
                     f"describes, so this fixture can't judge them")
     if "person" not in (vocab | seen):
         pytest.skip("this model's classes don't include 'person' (it says "
-                    + ", ".join(sorted(seen or vocab)[:6]) + ") — wrong domain for this fixture")
+                    + ", ".join(sorted(seen or vocab)[:6]) + ") - wrong domain for this fixture")
     assert any(b["class_name"] == "person" for b in out), sorted(seen)
 
 
@@ -647,7 +648,7 @@ def test_barcodes_found(P):
         h_, w_ = img.shape[:2]
         assert call(p, h, img), (
             f"{name} ({w_}x{h_}): this model found no barcode. A code that is small in a "
-            f"big frame is the usual reason — crop the fixture, or record the limitation "
+            f"big frame is the usual reason - crop the fixture, or record the limitation "
             f'in tests/model_expectations.json: "{p.capability}:{p.id}": '
             f'{{"exempt": "misses small codes in large frames"}}')
     assert call(p, h, load_image("no_person.jpg")) == []
@@ -769,5 +770,5 @@ def test_iqa_prefers_sharp(P):
                     f"(sharp={sharp}, blurred={blurred})")
     assert float(sharp) > float(blurred), (
         f"{p.id} rates a heavily blurred copy ({float(blurred):.3f}) at or above the "
-        f"sharp original ({float(sharp):.3f}) — fine for an aesthetic metric, wrong for "
+        f"sharp original ({float(sharp):.3f}) - fine for an aesthetic metric, wrong for "
         f"one used to pick the best shot")

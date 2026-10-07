@@ -1,4 +1,5 @@
-"""Dedup of video, animation and audio: signatures, phash / naive scores,
+"""! @file
+@brief Dedup of video, animation and audio: signatures, phash / naive scores,
 and the scan grouping a re-encode / a trim / a transcode with its original
 while leaving unrelated media alone. Media is generated with ffmpeg + numpy
 (skips without ffmpeg)."""

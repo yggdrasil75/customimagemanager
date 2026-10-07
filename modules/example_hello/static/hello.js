@@ -6,8 +6,9 @@
  * renders the tab button and an empty <div data-settings-pane="module_example_hello">;
  * everything inside is up to the module. */
 (function () {
-  // The core creates a pane element with this id for each module settings tab:
-  //   #settings_pane_module_<module_id>
+  /** @brief The core creates a pane element with this id for each module settings tab:
+   *    #settings_pane_module_<module_id>
+   */
   function paneFor(id) {
     return document.getElementById("settings_pane_module_" + id);
   }
@@ -24,7 +25,7 @@
       '<pre id="hello_out" class="mt-3 text-[11px] text-gray-300 whitespace-pre-wrap"></pre>';
     pane.querySelector("#hello_ping").addEventListener("click", async () => {
       const out = pane.querySelector("#hello_out");
-      out.textContent = "…";
+      out.textContent = "...";
       try {
         const data = await fetch("/api/hello").then((r) => r.json());
         out.textContent = JSON.stringify(data, null, 2);

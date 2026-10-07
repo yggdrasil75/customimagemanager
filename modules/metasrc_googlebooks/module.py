@@ -1,4 +1,5 @@
-"""Google Books — book metadata source (key optional)."""
+"""! @file
+@brief Google Books - book metadata source (key optional)."""
 MANIFEST = {
     "id": "metasrc_googlebooks", "name": "Google Books (books)", "version": "1.0.0",
     "description": "Book metadata from the Google Books API. An API key is optional "
@@ -23,7 +24,7 @@ def register(host):
             ids = {x["type"]: x["identifier"] for x in v.get("industryIdentifiers", [])}
             out.append({"id": it["id"], "title": v.get("title", ""),
                         "subtitle": ", ".join(v.get("authors") or []) +
-                                    (f" · {v['publishedDate'][:4]}" if v.get("publishedDate") else ""),
+                                    (f" | {v['publishedDate'][:4]}" if v.get("publishedDate") else ""),
                         "thumb": (v.get("imageLinks") or {}).get("thumbnail"),
                         "fields": {"title": v.get("title", ""), "authors": v.get("authors") or [],
                                    "publisher": v.get("publisher", ""), "published": v.get("publishedDate", ""),

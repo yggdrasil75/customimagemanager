@@ -20,7 +20,7 @@ import java.io.InputStream
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-/** Keys and settings. The private key never leaves the hardware-backed
+/** @brief Keys and settings. The private key never leaves the hardware-backed
  *  EncryptedSharedPreferences; a device backup does not carry it. */
 class Prefs(ctx: Context) {
     private val p = EncryptedSharedPreferences.create(
@@ -74,7 +74,7 @@ class Prefs(ctx: Context) {
     fun unpair() { p.edit().remove("srv_name").remove("srv_url").remove("srv_pub").remove("srv_key").remove("srv_id").apply() }
 }
 
-/** Local bookkeeping: which MediaStore items are uploaded, and per-bucket policy. */
+/** @brief Local bookkeeping: which MediaStore items are uploaded, and per-bucket policy. */
 class Db(ctx: Context) : SQLiteOpenHelper(ctx, "cim_family.db", null, 2) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""CREATE TABLE uploaded (
@@ -119,7 +119,7 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "cim_family.db", null, 2) {
             System.currentTimeMillis() - it.getLong(1) > wait
         }
     }
-    /** Uploads made before originals were read (maybe redacted), still on the phone. */
+    /** @brief Uploads made before originals were read (maybe redacted), still on the phone. */
     fun unverified(limit: Int = 200): List<Pair<Long, String>> = readableDatabase.rawQuery(
         "SELECT media_id, sha FROM uploaded WHERE orig=0 AND purged=0 LIMIT $limit", null).use { c ->
         val out = ArrayList<Pair<Long, String>>(); while (c.moveToNext()) out.add(c.getLong(0) to c.getString(1)); out
@@ -127,7 +127,7 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "cim_family.db", null, 2) {
     fun markVerified(mediaId: Long) { writableDatabase.execSQL("UPDATE uploaded SET orig=1 WHERE media_id=?", arrayOf(mediaId)) }
     fun unverifiedCount(): Int = readableDatabase.rawQuery("SELECT COUNT(*) FROM uploaded WHERE orig=0 AND purged=0", null).use { it.moveToFirst(); it.getInt(0) }
 
-    /** Uploaded items in "upload & purge" buckets still on the phone. */
+    /** @brief Uploaded items in "upload & purge" buckets still on the phone. */
     fun purgeCandidates(): List<Long> = readableDatabase.rawQuery(
         "SELECT u.media_id FROM uploaded u JOIN folders f ON f.bucket=u.bucket WHERE f.policy='purge' AND u.purged=0", null).use { c ->
         val out = ArrayList<Long>(); while (c.moveToNext()) out.add(c.getLong(0)); out
@@ -149,7 +149,7 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "cim_family.db", null, 2) {
 
 class ApiException(msg: String) : Exception(msg)
 
-/** Talks to the paired server. Every push is sealed to the server's pinned
+/** @brief Talks to the paired server. Every push is sealed to the server's pinned
  *  key; every read comes back sealed to ours. */
 class Api(private val prefs: Prefs) {
     private val http = OkHttpClient.Builder()
@@ -165,7 +165,7 @@ class Api(private val prefs: Prefs) {
         .put("ts", System.currentTimeMillis() / 1000.0).put("to", prefs.serverId).put("from", prefs.deviceId)
 
     private fun check(r: okhttp3.Response): okhttp3.Response {
-        if (r.code == 401) throw ApiException("server rejected us as '${prefs.deviceName}': that name must match the peer row on the server and the key must be from the server's current pairing code — re-paste it")
+        if (r.code == 401) throw ApiException("server rejected us as '${prefs.deviceName}': that name must match the peer row on the server and the key must be from the server's current pairing code - re-paste it")
         if (r.code == 404) throw ApiException("server has no family_share endpoint (module off?)")
         if (r.code >= 400) {
             val body = try { JSONObject(r.body?.string() ?: "").optString("error") } catch (e: Exception) { "" }
@@ -188,7 +188,7 @@ class Api(private val prefs: Prefs) {
     data class PushResult(val stored: Boolean, val updated: Boolean, val duplicate: Boolean, val declined: Boolean,
                           val queued: Boolean, val needFile: Boolean, val filename: String)
 
-    /** file == null: metadata only (the server answers need_file if it lacks the bytes).
+    /** @brief file == null: metadata only (the server answers need_file if it lacks the bytes).
      *  sha is the SHA-256 of the original bytes; the server re-hashes what it
      *  decrypted and rejects a mismatch. replaces: shas of earlier (damaged)
      *  uploads of the same photo that this one supersedes. */
@@ -217,7 +217,7 @@ class Api(private val prefs: Prefs) {
         }
     }
 
-    /** Which of these originals the server already has (batched, sealed both ways). */
+    /** @brief Which of these originals the server already has (batched, sealed both ways). */
     fun have(shas: List<String>): Set<String> {
         val s = sealer()
         val body = JSONObject().put("env", s.header).put("meta", s.sealMeta(inner(JSONObject().put("shas", JSONArray(shas)))))
@@ -242,7 +242,7 @@ class Api(private val prefs: Prefs) {
         openSealed(check(r)).first
     }
 
-    /** Full file, decrypted straight to disk (videos never fit in RAM). */
+    /** @brief Full file, decrypted straight to disk (videos never fit in RAM). */
     fun media(path: String, dst: File): String = http.newCall(req("/media?p=" + java.net.URLEncoder.encode(path, "UTF-8")).get().build()).execute().use { r ->
         check(r)
         val env = r.header("X-Family-Env") ?: throw ApiException("unsealed response from server")

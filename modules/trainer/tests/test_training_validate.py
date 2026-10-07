@@ -1,4 +1,5 @@
-"""training_validate: duplicate boxes (yours and the model's) and scoring."""
+"""! @file
+@brief training_validate: duplicate boxes (yours and the model's) and scoring."""
 from modules.trainer import training_validate as tv
 
 
@@ -42,7 +43,7 @@ def test_debug_regions_roundtrip_and_stay_out_of_labels(client, upload):
 
 
 def test_validate_debug_runs_and_snap(app, client, upload, monkeypatch, ungated):
-    """Validate a numbered run with debug storage, re-validate (replaces, not
+    """! @brief Validate a numbered run with debug storage, re-validate (replaces, not
     stacks), then snap: one real box on the model's geometry, dup gone."""
     import os
     import numpy as np

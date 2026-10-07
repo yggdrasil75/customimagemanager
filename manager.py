@@ -1,22 +1,7 @@
-"""
-AI Media & Asset Manager
-========================
-Designed for 100k+ image libraries.
-
-Key architectural decisions vs the naive version:
-- SQLite replaces the flat JSON hash cache AND the in-memory metadata dict.
-  Every read/write is a single indexed query; no full-file loads.
-- /api/list is paginated + server-side filtered. The browser never receives
-  more than one page of records.
-- Dedup uses numpy uint8 matrix hamming: pack each 8×8 aHash into 8 bytes,
-  stack into an (n,8) uint8 matrix, then for each row XOR the whole matrix
-  and sum the popcount column-wise with np.unpackbits. That's ~1 ms for
-  50k images vs hours of Python loops.
-- Thumbnails are cached on disk (media/.thumbs/) as JPEG so a restart does
-  not re-decode every JXL. In-memory LRU sits on top for the hottest files.
-- Metadata index is built incrementally: only files whose mtime changed get
-  re-read from XMP. The rest are served directly from SQLite.
-- Background workers use daemon threads; startup is non-blocking.
+"""! @file
+@brief The app: Flask routes, the SQLite index, metadata read/write, uploads,
+thumbnails, dedup and the background workers. Modules extend it through the
+Host (modules/host.py).
 """
 
 import os, glob, subprocess, shutil, numpy as np
@@ -24,12 +9,9 @@ from types import SimpleNamespace
 import tempfile, io, time, random, json, threading
 import base64, re, xml.sax.saxutils as saxutils
 from optional_deps import optional_import
-# Install the modules package FIRST: importing it registers the core modules
-# (auth, capabilities, metadata, threading) under both their new dotted paths
-# and their legacy flat names, so every `import auth` / `import thread_manager`
-# / `import exif_import` below (and inside sibling files) keeps resolving after
-# the move into modules/ subfolders. See modules/__init__.py.
-import model_registry          # first: pins TORCH_HOME / HF_HOME under models/ before any library reads them
+# The modules package installs the core modules under their old flat names
+# (auth, thread_manager, exif_import, ...), so it must be imported first.
+import model_registry  # first: pins TORCH_HOME / HF_HOME before any library reads them
 import modules
 from modules import registry as module_registry
 modules.config.declare("install", default={}, owner="core")
@@ -50,7 +32,7 @@ import object_grouping as og
 import model_registry
 import common
 import media_types as mt
-# Settings → Media: storage format per kind + filename cleanup (see media_types).
+# Settings > Media: storage format per kind and filename cleanup.
 modules.config.declare("media_storage", default=mt.media_prefs(), owner="core",
                        validate=mt.clean_media_prefs,
                        on_change=lambda new, old: mt.set_media_prefs(new))
@@ -60,9 +42,6 @@ modules.config.declare("filename_cleanup", default=dict(mt.DEFAULT_FILENAME_PREF
 import video_tracks as vt
 import tiering
 
-# ── loose-disk file helpers (formerly routed through packio) ─────────────────
-# Everything lives as ordinary files on disk now; these keep the old call sites
-# terse and null-safe.
 def _read_bytes_loose(path):
     try:
         with open(path, "rb") as f:
@@ -86,14 +65,10 @@ except Exception:
     rawpy = None
 
 
-# ── Bootstrap ─────────────────────────────────────────────────────────────────
 app       = Flask(__name__)
 
-# Let modules ship server-rendered template partials: any file in a
-# modules/<id>/templates/ dir becomes includable by name, exactly like a core
-# partial, so a module can contribute pane HTML without editing core templates
-# or shuttling HTML over fetch. The app's own loader stays first (core wins on
-# name clashes); module dirs are appended.
+# Template partials in modules/<id>/templates/ are includable by name;
+# the app's own templates win on a name clash.
 import glob as _glob
 from jinja2 import ChoiceLoader as _ChoiceLoader, FileSystemLoader as _FSLoader
 _mod_tpl_dirs = sorted(_glob.glob(os.path.join(
@@ -104,21 +79,18 @@ if _mod_tpl_dirs:
 MEDIA_DIR = "media"
 MODELS_DIR = "models"
 DB_PATH   = os.path.join(MEDIA_DIR, "library.db")
-THUMB_DB  = os.path.join(MEDIA_DIR, "thumbs.db")   # disposable BLOB cache
+THUMB_DB  = os.path.join(MEDIA_DIR, "thumbs.db")  # disposable BLOB cache
 CFG_FILE  = "app_config.json"
 
 
-# Updated on every request; the background auto-tagger only runs when the
-# server has been idle for a while so it never competes with the user.
+# Time of the last request: background work waits for the server to be idle.
 _last_activity = time.time()
 
 os.makedirs(MEDIA_DIR, exist_ok=True)
 os.makedirs(MODELS_DIR, exist_ok=True)
-shutil.rmtree(os.path.join(MEDIA_DIR, ".thumbs"), ignore_errors=True)  # retired loose cache
+shutil.rmtree(os.path.join(MEDIA_DIR, ".thumbs"), ignore_errors=True)  # old loose thumbnail cache
 os.makedirs("logs",     exist_ok=True)
 
-# All loggers and the audit helpers live in cimlogger so any module can import
-# them without reaching back into manager.py. See cimlogger.py.
 from cimlogger import access_logger, audit, training_logger as cimlogger_training_logger
 
 state = {
@@ -132,15 +104,12 @@ state = {
         "ldap": {},
     },
     "brand_name": "Media Library",
-    "brand_logo": "",   # relative URL under /media, or "" for none
+    "brand_logo": "",  # URL under /media, or ''
     "model_groups": {},
     "page_size": 200,
     "tiers": None,
-    # Per-install module on/off map, {module_id: bool}. Left empty here on
-    # purpose: load_config() calls registry.init_state() which fills it in from
-    # the persisted file (or plugin defaults when a plugin is unlisted). Seeding
-    # it from current_state() at import time would freeze a pre-discovery
-    # snapshot and wrongly disable freshly added plugins.
+    # {module_id: enabled}; filled by load_config() from the saved file
+    # (seeding it here would disable plugins added later).
     "modules": {},
     "model_selection": {},
     "search_quick_filters": [
@@ -157,21 +126,19 @@ state = {
     "gdl_auth": {}
 }
 
-# In-memory thumbnail LRU (hot files only; disk cache handles the rest)
+# in-memory thumbnail LRU over the disk cache
 _thumb_lru: "OrderedDict[str, tuple]" = OrderedDict()
 _thumb_lock = threading.Lock()
 _thumb_lru_bytes = 0
 
 def _rel(path: str) -> str:
-    """!
-    @brief Convert an absolute path to a forward-slash rel_path under MEDIA_DIR.
-    @return The DB-canonical relative path.
-    """
+    """! @brief An absolute path under MEDIA_DIR as a forward-slash rel_path."""
     return os.path.relpath(path, MEDIA_DIR).replace('\\', '/')
 
 def _thumb_lru_put(rel_path: str, mtime: float, data: bytes) -> None:
-    """Insert under the byte budget, evicting oldest first. Caller must NOT
-    hold _thumb_lock."""
+    """! @brief Add a thumbnail under the byte budget, evicting oldest first.
+    The caller must not hold _thumb_lock.
+    """
     global _thumb_lru_bytes
     with _thumb_lock:
         old = _thumb_lru.pop(rel_path, None)
@@ -220,21 +187,18 @@ def _meta_cache_drop(rel_path: str) -> None:
     with _meta_cache_lock:
         _meta_cache.pop(rel_path, None)
 
-@functools.lru_cache(maxsize=48)          # arrays are large; keep this modest
+@functools.lru_cache(maxsize=48)  # arrays are large
 def _decode_cached(path, mtime):
     arr = _decode_jxl_uncached(path)
     if arr is not None:
         arr.flags.writeable = False
     return arr
 
-# ── SQLite ─────────────────────────────────────────────────────────────────────
-# Each thread gets its own connection (check_same_thread=False + thread-local).
+# -- SQLite: one connection per thread --
 _db_local = threading.local()
 
-# Every open connection we've handed out, so stragglers can be closed at exit.
-# NOTE: sqlite3.Connection is not weakref-able, so this is a strong-ref dict
-# keyed by id(); _db_close() removes entries, keeping it bounded by the number
-# of *live* connections rather than growing with every thread ever created.
+# Every connection handed out, keyed by id() (connections can't be weakly
+# referenced), so they can be closed at exit.
 _all_conns = {}
 _all_conns_lock = threading.Lock()
 DB_BUSY_TIMEOUT_MS = 30000
@@ -244,12 +208,11 @@ def _db() -> sqlite3.Connection:
     if conn is None:
         conn = sqlite3.connect(DB_PATH, check_same_thread=False,
                                timeout=DB_BUSY_TIMEOUT_MS / 1000.0)
-        # busy_timeout FIRST: switching journal modes itself needs a brief
-        # exclusive lock, so on a busy library even this pragma could fail.
+        # busy_timeout first: changing the journal mode itself needs a lock.
         conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA cache_size=-32000")   # 32 MB page cache
+        conn.execute("PRAGMA cache_size=-32000")  # 32 MB page cache
         conn.row_factory = sqlite3.Row
         _db_local.conn = conn
         with _all_conns_lock:
@@ -257,14 +220,10 @@ def _db() -> sqlite3.Connection:
     return conn
 
 def _db_retry(fn, *args, attempts=6, **kwargs):
-    """Run `fn` (a self-contained write transaction) retrying SQLITE_BUSY.
-
-    busy_timeout covers a writer waiting on a lock, but NOT the case where a
-    deferred transaction has to upgrade read->write after someone else committed
-    -- SQLite returns SQLITE_BUSY there immediately, no waiting. So the caller
-    still needs to be able to start over. `fn` must therefore be idempotent and
-    must own its own commit; on a busy error we roll back before retrying so the
-    connection never keeps a half-finished transaction (and its write lock).
+    """! @brief Run a self-contained write transaction, retrying SQLITE_BUSY.
+    busy_timeout doesn't cover a deferred transaction upgrading to write after
+    another commit; that fails at once. `fn` must be idempotent and commit
+    itself; it is rolled back before each retry.
     """
     for i in range(attempts):
         try:
@@ -279,20 +238,13 @@ def _db_retry(fn, *args, attempts=6, **kwargs):
                 pass
             if i == attempts - 1:
                 raise
-            # Exponential backoff, jittered so contending workers don't
-            # resynchronise and collide again on the next attempt.
+            # jittered backoff so contending writers don't collide again
             time.sleep(min(2.0, 0.05 * (2 ** i)) * (1.0 + random.random() * 0.25))
 
 @app.teardown_request
 def _db_rollback_leaked(exc=None):
-    """Safety net: never let a request thread finish holding the write lock.
-
-    A handler that runs an INSERT/UPDATE/DELETE and returns without committing
-    leaves an open transaction on its thread-local connection. Because
-    _all_conns holds a strong reference, that connection is never collected --
-    so the write lock survives the thread and every later write in the process
-    fails with "database is locked" until a restart. Uncommitted work at the end
-    of a request is lost either way; releasing the lock is strictly better.
+    """! @brief Roll back a transaction a request left open: its connection outlives
+    the thread and would hold the write lock until restart.
     """
     conn = getattr(_db_local, 'conn', None)
     if conn is not None and conn.in_transaction:
@@ -305,12 +257,8 @@ def _db_rollback_leaked(exc=None):
             pass
 
 def _db_close():
-    """Release this thread's connection.
-
-    MUST be called by any pooled/short-lived worker thread that touched _db().
-    A thread-local connection is otherwise orphaned when its thread dies -- the
-    Connection object stays alive but unreachable, holding fds for the db, the
-    -wal and the -shm file until process exit.
+    """! @brief Close this thread's connection. Worker threads that used _db() must
+    call it; otherwise the connection and its file handles live until exit.
     """
     conn = getattr(_db_local, 'conn', None)
     if conn is not None:
@@ -329,19 +277,16 @@ def _db_close():
 
 
 def _db_release_pool(ex, n_workers):
-    """Close the DB connection held by each worker thread in `ex`.
-
-    ex.map over a range >= n_workers doesn't *guarantee* every thread runs the
-    finalizer, but ThreadPoolExecutor hands work to idle threads round-robin, so
-    oversubscribing by 4x reliably drains a pool this size. Anything missed is
-    caught by the atexit sweep.
+    """! @brief Close the connection of every worker thread in a pool.
+    Mapping over 4x the workers reaches each thread in practice; the atexit sweep
+    catches the rest.
     """
     try:
         list(ex.map(lambda _: _db_close(), range(n_workers * 4)))
     except Exception:
         pass
 
-_exiting = threading.Event()   # set once process teardown starts; bg loops stop
+_exiting = threading.Event()  # set at teardown; background loops stop
 
 @atexit.register
 def _db_close_all():
@@ -427,7 +372,7 @@ def _init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_raws_derived ON raws(derived_rel);
 
-        -- ── Albums ──────────────────────────────────────────────────────────
+        -- -- Albums ----------------------------------------------------------
         -- Album-level metadata that has nowhere to live inside an image file
         -- (cover choice, description, creation time). Membership itself is NOT
         -- authoritative here: it is rebuilt from each file's XMP
@@ -458,91 +403,49 @@ def _init_db():
         "ALTER TABLE files ADD COLUMN analysis TEXT DEFAULT ''",
         "ALTER TABLE files ADD COLUMN flagged_delete INTEGER DEFAULT 0",
         "ALTER TABLE files ADD COLUMN flag_reason TEXT DEFAULT ''",
-        # NR-IQA (BRISQUE) per-image quality. iqa_score is 0..5 stars (NULL =
-        # not yet scored); iqa_brisque keeps the raw BRISQUE number for ref.
-        # iqa_manual is DEPRECATED: user ratings now live in rating/rating_user
-        # (see below); the startup consolidation folds any old iqa_manual stars
-        # into those columns. iqa_score is now BRISQUE-only.
+        # NR-IQA quality, 0..5 stars (NULL = not scored); iqa_brisque keeps the raw
+        # score. iqa_manual is obsolete: user ratings are rating / rating_user.
         "ALTER TABLE files ADD COLUMN iqa_score REAL DEFAULT NULL",
         "ALTER TABLE files ADD COLUMN iqa_brisque REAL DEFAULT NULL",
-        # Which NR-IQA model produced iqa_score, so a model switch can
-        # invalidate/re-scan only the rows scored by the old one.
+        # model that produced iqa_score, so a model change rescans only its rows
         "ALTER TABLE files ADD COLUMN iqa_model TEXT DEFAULT NULL",
         "ALTER TABLE files ADD COLUMN iqa_manual INTEGER DEFAULT 0",
-        # Media type: 'image' (any .jxl, incl. animated ones from gifs) or
-        # 'video' (stored natively). duration is seconds for videos, else NULL.
+        # 'image' or 'video'; duration in seconds for videos
         "ALTER TABLE files ADD COLUMN media_kind TEXT DEFAULT 'image'",
         "ALTER TABLE files ADD COLUMN duration REAL DEFAULT NULL",
-        # User rating, 0..5 stars (NULL = unrated). Mirrored from EXIF Rating /
-        # RatingPercent by the EXIF editor. rating_user=1 marks it as a genuine
-        # user rating (set in-app, or read from the image's EXIF at upload /
-        # full rebuild) which overrides the preliminary BRISQUE estimate in
-        # iqa_score; rating_user=0/NULL means "no user rating yet".
+        # User rating 0..5 (NULL = none), mirrored from EXIF Rating. rating_user=1
+        # marks a real user rating, which beats the IQA estimate.
         "ALTER TABLE files ADD COLUMN rating INTEGER DEFAULT NULL",
         "ALTER TABLE files ADD COLUMN rating_user INTEGER DEFAULT 0",
-        # Artist/author (dc:creator) and language (dc:language). language is set
-        # when the image likely contains foreign-language text, so it's worth
-        # retaining. Both are read from XMP dc on ingest; empty string = unknown.
+        # dc:creator and dc:language from the XMP; '' = unknown
         "ALTER TABLE files ADD COLUMN artist TEXT DEFAULT ''",
         "ALTER TABLE files ADD COLUMN language TEXT DEFAULT ''",
-        # Event (Expression Media Event) and catalog sets (photo-shoot grouping).
-        # Both read from XMP on ingest but editable in-app; empty = unset.
+        # Expression Media event and catalog sets; '' = unset
         "ALTER TABLE files ADD COLUMN event TEXT DEFAULT ''",
         "ALTER TABLE files ADD COLUMN catalog_sets TEXT DEFAULT ''",
-        # Last XMP/sidecar write error for this file, NULL when the most recent
-        # write succeeded. Exists because a failed metadata write was previously
-        # only ever reported to a log nobody reads — this makes the failure
-        # queryable, survives a restart, and lets the UI badge affected files.
+        # last sidecar write error, NULL after a successful write (badged in the UI)
         "ALTER TABLE files ADD COLUMN metadata_error TEXT DEFAULT NULL",
-        # AI-generated marker. Set to 1 when the file's IPTC Extension metadata
-        # carries AI-provenance fields (AIPrompt*/AISystem*) or a synthetic
-        # DigitalSourceType. Simple boolean — we don't store the prompt/system
-        # detail, just whether the image is AI-generated. 0 = not (or unknown).
+        # 1 when IPTC Extension AI-provenance fields or a synthetic source type are present
         "ALTER TABLE files ADD COLUMN ai_generated INTEGER DEFAULT 0",
-        # Model age (IPTC Extension ModelAge). The minimum age when several are
-        # given. NULL = unknown. Read-only source; surfaced for reference.
+        # IPTC Extension ModelAge (lowest when several); NULL = unknown
         "ALTER TABLE files ADD COLUMN model_age INTEGER DEFAULT NULL",
-        # People shown in the image (IPTC Extension PersonInImage /
-        # PersonInImageWDetails Name). Comma-joined names; also folded into the
-        # tags list so tag-based search finds them. Empty = none/unknown.
+        # IPTC Extension PersonInImage names, comma-joined (also added to tags)
         "ALTER TABLE files ADD COLUMN persons TEXT DEFAULT ''",
-        # Image genre (PRISM Genre). Comma-joined; read-only source. Empty = none.
+        # PRISM genre, comma-joined
         "ALTER TABLE files ADD COLUMN genre TEXT DEFAULT ''",
-        # Variant links (PRISM HasAlternative / IsAlternativeOf) — pointers to
-        # alternate versions of the same image ("same shot, blue accents"). Stored
-        # as a comma-joined list of link strings/URLs/identifiers. Read-only.
+        # PRISM HasAlternative / IsAlternativeOf links, comma-joined
         "ALTER TABLE files ADD COLUMN alt_of TEXT DEFAULT ''",
-        # Page count (PRISM PageCount). Bidirectional: written into a comic's
-        # cover page on comic create/update; read back here. NULL = unknown.
+        # PRISM PageCount (written for comics)
         "ALTER TABLE files ADD COLUMN page_count INTEGER DEFAULT NULL",
-        # Albums. An image can be in MANY albums, so this is a JSON list of
-        # album names — the DB is only a CACHE. The portable source of truth is
-        # the XMP sidecar's mwg-coll:Collections block, which write_metadata
-        # emits and read_metadata folds back, so moving a library to a new
-        # machine and reindexing restores every album membership.
+        # JSON list of album names; a cache of the sidecar's mwg-coll:Collections
         "ALTER TABLE files ADD COLUMN albums TEXT DEFAULT '[]'",
         "ALTER TABLE albums ADD COLUMN description TEXT DEFAULT ''",
         "ALTER TABLE albums ADD COLUMN cover TEXT DEFAULT ''",
         "ALTER TABLE albums ADD COLUMN created REAL",
-        # Semantic capture/creation dates, each normalized to 'YYYY-MM-DD' for
-        # the date search filters, with a matching *_epoch (unix seconds) for
-        # range math. Resolved at index time by _resolve_dates, which scans every
-        # date-bearing field across EXIF / IPTC / XMP (mapped AND unmapped) plus
-        # the file's own inode times, and sorts each into one of five buckets by
-        # the qualifier in the field name:
-        #   d_actual     — "date"/"datetime" with no more-specific qualifier
-        #                  (EXIF DateTime, xmp:CreateDate, IPTC DateCreated...)
-        #   d_original   — field name contains "original" (EXIF DateTimeOriginal)
-        #   d_capture    — field name contains "capture"
-        #   d_digitized  — field name contains "digitized" (EXIF DateTimeDigitized)
-        #                  OR the file/inode creation time (ctime/birthtime)
-        #   d_modified   — field name contains "modified" (EXIF ModifyDate)
-        #                  OR the file/inode modified time (mtime)
-        # Search tokens: date: = actual|original|digitized, datetime: = actual,
-        # dateoriginal: = original, capture_date: = capture,
-        # datedigitized: = digitized, modified: = modified. Matching is STRICT:
-        # a token only matches files whose corresponding bucket is populated.
-        # NULL = that bucket had no source on this file.
+        # Capture dates as YYYY-MM-DD (plus *_epoch), resolved by _resolve_dates from
+        # every date field in EXIF / IPTC / XMP and the file times, bucketed by the
+        # field name: d_actual (plain date), d_original, d_capture, d_digitized (also
+        # the file creation time), d_modified.
         "ALTER TABLE files ADD COLUMN d_actual TEXT DEFAULT NULL",
         "ALTER TABLE files ADD COLUMN d_actual_epoch REAL DEFAULT NULL",
         "ALTER TABLE files ADD COLUMN d_original TEXT DEFAULT NULL",
@@ -553,8 +456,7 @@ def _init_db():
         "ALTER TABLE files ADD COLUMN d_digitized_epoch REAL DEFAULT NULL",
         "ALTER TABLE files ADD COLUMN d_modified TEXT DEFAULT NULL",
         "ALTER TABLE files ADD COLUMN d_modified_epoch REAL DEFAULT NULL",
-        # Which source field won each bucket, for explainability (e.g. a
-        # surprising d_actual). JSON: {"d_actual":"Exif.Photo.DateTime", ...}.
+        # which field won each date bucket: {"d_actual": "Exif.Photo.DateTime", ...}
         "ALTER TABLE files ADD COLUMN date_sources TEXT DEFAULT NULL",
     ]:
         try:
@@ -567,11 +469,8 @@ def _init_db():
         db.commit()
     except Exception:
         pass
-    # One-time consolidation: iqa_manual is retired in favor of rating_user.
-    # Fold any pre-existing manual IQA ratings (iqa_manual=1) into the unified
-    # rating columns so upgrading users don't lose their hand-set stars. Guarded
-    # so it only runs while the legacy column still exists and only touches rows
-    # not already carrying a user rating. Safe to run every startup (idempotent).
+    # Fold legacy manual IQA stars (iqa_manual=1) into rating / rating_user,
+    # for rows without a user rating yet. Idempotent.
     try:
         cols = {r[1] for r in db.execute("PRAGMA table_info(files)").fetchall()}
         if "iqa_manual" in cols:
@@ -580,8 +479,6 @@ def _init_db():
                 "rating_user=1 "
                 "WHERE COALESCE(iqa_manual,0)=1 AND COALESCE(rating_user,0)=0 "
                 "AND iqa_score IS NOT NULL")
-            # Clear the legacy flag so BRISQUE can re-score iqa_score freely; the
-            # authoritative user rating now lives in rating/rating_user.
             db.execute("UPDATE files SET iqa_manual=0 WHERE COALESCE(iqa_manual,0)=1")
             db.commit()
     except Exception:
@@ -601,11 +498,7 @@ def _upsert_file(rel_path, mtime, width, height, sha256, phash8, phash32, tags, 
           json.dumps(tags), description))
     _db().commit()
 
-# ── Tag confirmation ──────────────────────────────────────────────────────────
-# Tags are stored as plain strings in a JSON list. To mark a tag "unconfirmed"
-# (an AI/auto suggestion the user hasn't accepted yet) we prefix it with a single
-# '?' sentinel, e.g. "?redhead". This mirrors how boxes carry confirmed=False,
-# survives the JSON-list storage + `tags LIKE` search, and needs no schema change.
+# -- tags: an unconfirmed tag is stored with a '?' prefix --
 _TAG_UNCONF = common.TAG_UNCONF
 tag_is_confirmed, tag_name, make_tag = common.tag_is_confirmed, common.tag_name, common.make_tag
 count_unconfirmed_tags = common.count_unconfirmed_tags
@@ -613,14 +506,11 @@ _norm_date_literal, _clamp_box, _iou_center = common.norm_date_literal, common.c
 _coerce_bgr3, _table_exists, _getmtime_loose = common.coerce_bgr, common.table_exists, common.getmtime_loose
 
 def _merge_meta(cur, inc):
-    """! @brief Fold an incoming metadata packet into a file's current metadata.
-
-    Pure: takes and returns plain dicts, no I/O — the same image posted to five
-    boorus gives five packets that all have to land on one file.
-
-    @param cur Current metadata (read_metadata shape: tags/description/regions).
-    @param inc Incoming packet (gdl.apply_mapping shape).
-    @return (tags, description, regions, changed)
+    """! @brief Fold an incoming metadata packet into a file's current metadata
+    (the same image fetched from several sites). No I/O.
+    @param cur  current metadata (tags / description / regions).
+    @param inc  incoming packet.
+    @return (tags, description, regions, changed).
     """
     tags = list(cur.get("tags") or [])
     have = {tag_name(t).lower() for t in tags}
@@ -632,14 +522,11 @@ def _merge_meta(cur, inc):
 
     desc = (cur.get("description") or "").strip()
     add  = (inc.get("description") or "").strip()
-    # Substring check, not equality: re-fetching the same site must not stack the
-    # same blurb twice, but a second site's longer write-up still gets appended.
+    # A blurb already contained is not added again; a longer one is appended.
     if add and add not in desc:
         desc = (desc + "\n\n" + add) if desc else add
 
-    # ponytail: regions only fill an empty slot — same bytes means same geometry,
-    # so two sites' note boxes would otherwise pile up as near-duplicate overlays.
-    # Union them if per-site translation notes turn out to be worth stacking.
+    # Regions only fill an empty slot: same bytes, same geometry.
     regions = cur.get("regions") or list(inc.get("regions") or [])
 
     changed = (tags != (cur.get("tags") or [])
@@ -648,8 +535,7 @@ def _merge_meta(cur, inc):
     return tags, desc, regions, changed
 
 def _free_store_path(store_path: str) -> str:
-    """! @brief First free '<base>_<n><ext>' beside an occupied store path
-    (sidecars count as occupying the name)."""
+    """! @brief The first free '<base>_<n><ext>' beside an occupied path (sidecars count)."""
     base, ext = os.path.splitext(store_path)
     for n in range(1, 100000):
         cand = f"{base}_{n}{ext}"
@@ -658,7 +544,7 @@ def _free_store_path(store_path: str) -> str:
     return f"{base}_{uuid.uuid4().hex[:12]}{ext}"
 
 def _merge_albums(rel_path, albums):
-    """! @brief Add albums (from upload metadata) to a library file; never removes."""
+    """! @brief Add albums from upload metadata to a library file (never removes)."""
     albums = [str(a).strip() for a in (albums or []) if str(a).strip()]
     if not albums:
         return False
@@ -669,8 +555,8 @@ def _merge_albums(rel_path, albums):
     return _set_file_albums(rel_path, new)
 
 def _merge_into_existing(rel_path, meta):
-    """! @brief Apply an upload's metadata to the file that already holds those bytes.
-    @return True if the file's metadata actually changed.
+    """! @brief Apply an upload's metadata to the file that already holds the same bytes.
+    @return True when the file's metadata changed.
     """
     fp = get_safe_path(MEDIA_DIR, rel_path)
     if not fp or not os.path.exists(fp):
@@ -685,23 +571,19 @@ def _merge_into_existing(rel_path, meta):
     try:
         tags, desc, regions, changed = _merge_meta(cur, meta)
         if changed:
-            write_metadata(fp, tags, desc, regions)
+            update_file(fp, set={"tags": tags, "description": desc, "regions": regions}, meta=cur)
     except Exception as e:
         access_logger.error(f"dup merge: write failed for {rel_path}: {e}")
 
-    # Must run after write_metadata (it rewrites the sidecar wholesale). Both
-    # patch writers validate and skip unknown tokens, so a bad mapping can't
-    # damage a file that was already in the library.
-    # ponytail: scalar XMP/EXIF properties are last-write-wins across sites —
-    # add per-property conflict rules only if losing the first value bites.
-    for patch, writer, what in (
-            (meta.get("exif"), exif_export.write_exif, "exif"),
-            (meta.get("xmp"),  xmp_export.write_xmp,   "xmp")):
+    # After the sidecar rewrite; unknown tokens are skipped by the writers.
+    # Scalar properties are last-write-wins across sources.
+    for what in ("exif", "xmp"):
+        patch = meta.get(what)
         if not patch:
             continue
         try:
-            writer(fp, patch)
-            changed = True
+            if update_file(fp, history=False, **{what: patch}).get("changed"):
+                changed = True
         except Exception as e:
             access_logger.error(f"dup merge: {what} patch failed for {rel_path}: {e}")
     try:
@@ -712,7 +594,7 @@ def _merge_into_existing(rel_path, meta):
     return changed
 
 def _form_metadata(rel_path=""):
-    """! @brief Parse an upload request's `metadata` form field. Never fatal."""
+    """! @brief The upload's `metadata` form field, parsed ({} when absent or bad)."""
     try:
         meta = json.loads(request.form.get("metadata", "{}") or "{}")
         if not isinstance(meta, dict):
@@ -725,22 +607,19 @@ def _form_metadata(rel_path=""):
         return {}
 
 def _update_meta(rel_path, tags, description):
-    _db().execute(
-        "UPDATE files SET tags=?, description=? WHERE rel_path=?",
-        (json.dumps(tags), description, rel_path))
-    _db().commit()
+    update_file(rel_path, set={"tags": tags, "description": description},
+                dont_write=True, meta={"tags": None, "description": None})
 
-# ── File edit changelog (undo/redo + EXIF ImageHistory) ──────────────────────
+# -- per-file changelog (undo / redo, EXIF ImageHistory) --
 def _history_record(rel_path, field, old_value, new_value, commit=True):
-    """Append one reversible change to a file's changelog. `field` is a logical
-    field name (e.g. 'exif:Compression', 'description'); old/new are stored
-    JSON-encoded so an undo can restore old_value verbatim. Recording a fresh
-    edit clears any 'redo' tail (entries previously undone) so history stays
-    linear, matching typical ctrl+z semantics."""
+    """! @brief Append one reversible change to a file's changelog; a new edit drops
+    the redo tail.
+    @param field  logical field, e.g. "exif:Compression".
+    @param old_value, new_value  stored JSON-encoded so undo restores them verbatim.
+    """
     if old_value == new_value:
-        return                       # no-op edit, don't clutter the log
+        return  # no-op edit
     db = _db()
-    # Drop any undone tail — a new edit invalidates the redo stack.
     db.execute("DELETE FROM file_history WHERE rel_path=? AND undone=1", (rel_path,))
     row = db.execute(
         "SELECT COALESCE(MAX(seq),0) AS m FROM file_history WHERE rel_path=?",
@@ -755,7 +634,7 @@ def _history_record(rel_path, field, old_value, new_value, commit=True):
         db.commit()
 
 def _history_entries(rel_path, include_undone=False):
-    """Return a file's changelog as a list of dicts, oldest first."""
+    """! @brief A file's changelog entries, oldest first."""
     q = ("SELECT seq, ts, field, old_value, new_value, undone "
          "FROM file_history WHERE rel_path=?")
     if not include_undone:
@@ -772,9 +651,9 @@ def _history_entries(rel_path, include_undone=False):
     return out
 
 def _history_undo(rel_path):
-    """Return the most recent not-yet-undone change (so a caller can revert it),
-    marking it undone, or None if there's nothing to undo. The caller is
-    responsible for actually applying old_value back to the file/DB."""
+    """! @brief Mark the latest active change undone.
+    @return the entry (the caller applies old_value), or None.
+    """
     db = _db()
     r = db.execute(
         "SELECT id, seq, field, old_value, new_value FROM file_history "
@@ -789,8 +668,9 @@ def _history_undo(rel_path):
             "new": json.loads(r["new_value"]) if r["new_value"] is not None else None}
 
 def _history_redo(rel_path):
-    """Return the oldest undone change (so a caller can re-apply new_value),
-    marking it active again, or None if there's nothing to redo."""
+    """! @brief Mark the oldest undone change active again.
+    @return the entry (the caller applies new_value), or None.
+    """
     db = _db()
     r = db.execute(
         "SELECT id, seq, field, old_value, new_value FROM file_history "
@@ -805,9 +685,7 @@ def _history_redo(rel_path):
             "new": json.loads(r["new_value"]) if r["new_value"] is not None else None}
 
 def _history_as_imagehistory(rel_path, limit=64):
-    """Render the active changelog as a compact string suitable for EXIF
-    ImageHistory (0x9213): one line per change, most recent last. Trimmed to the
-    last `limit` entries so the tag doesn't grow without bound."""
+    """! @brief The changelog as EXIF ImageHistory text: one line per change, last `limit`."""
     entries = _history_entries(rel_path)[-limit:]
     lines = []
     for e in entries:
@@ -815,12 +693,11 @@ def _history_as_imagehistory(rel_path, limit=64):
         lines.append(f"{ts} {e['field']}: {e['old']!r} -> {e['new']!r}")
     return "\n".join(lines)
 
-# ── Hidden raw store (RawDataUniqueID <-> original camera raw) ────────────────
-# When keep_raws is enabled, an uploaded camera-raw source is copied into a
-# hidden directory under MEDIA_DIR and recorded in the `raws` table. The derived
-# library image carries the 16-byte RawDataUniqueID (EXIF 0xc65d) as the lookup
-# key, and OriginalRawFileName (0xc68b) records the raw's original name.
-_RAW_STORE_DIRNAME = ".raws"     # leading dot -> excluded from library walks
+# -- hidden raw store --
+# With keep_raws on, an uploaded raw is copied here and recorded in `raws`; the
+# derived image carries its RawDataUniqueID (EXIF 0xc65d) and
+# OriginalRawFileName (0xc68b).
+_RAW_STORE_DIRNAME = ".raws"  # dot: skipped by library walks
 
 def _raw_store_dir():
     d = os.path.join(MEDIA_DIR, _RAW_STORE_DIRNAME)
@@ -828,14 +705,13 @@ def _raw_store_dir():
     return d
 
 def _new_raw_uid():
-    """A 16-byte unique ID as 32 hex chars, matching the EXIF RawDataUniqueID
-    width (16 bytes)."""
-    return uuid.uuid4().hex     # 32 hex chars == 16 bytes
+    """! @brief A RawDataUniqueID: 16 bytes as 32 hex characters."""
+    return uuid.uuid4().hex
 
 def _store_raw(raw_src_path, orig_name, derived_rel):
-    """Copy a camera-raw file into the hidden store and record it. Returns the
-    RawDataUniqueID (hex) on success, or None on failure. Best-effort: a failure
-    here must never break an upload."""
+    """! @brief Copy a raw into the hidden store and record it.
+    @return its RawDataUniqueID, or None (a failure never breaks the upload).
+    """
     try:
         uid = _new_raw_uid()
         ext = os.path.splitext(orig_name)[1].lower() or ".raw"
@@ -853,16 +729,14 @@ def _store_raw(raw_src_path, orig_name, derived_rel):
         return None
 
 def _raw_by_uid(uid):
-    """Look up a stored raw by its RawDataUniqueID. Returns the row dict or None."""
+    """! @brief The stored raw with this RawDataUniqueID, or None."""
     if not uid:
         return None
     r = _db().execute("SELECT * FROM raws WHERE uid=?", (str(uid).strip(),)).fetchone()
     return dict(r) if r else None
 
 def _raw_uid_for_image(rel_path):
-    """Return the RawDataUniqueID linked to a derived library image, preferring
-    the DB link (raws.derived_rel) and falling back to the image's EXIF
-    RawDataUniqueID tag. None if the image has no stored raw."""
+    """! @brief The RawDataUniqueID of a derived image (the DB link, else its EXIF), or None."""
     r = _db().execute(
         "SELECT uid FROM raws WHERE derived_rel=? ORDER BY added DESC LIMIT 1",
         (rel_path,)).fetchone()
@@ -880,18 +754,13 @@ def _raw_uid_for_image(rel_path):
     return None
 
 def _link_raw_to_image(raw_src_path, orig_name, derived_rel, derived_abs):
-    """After deriving a library image from a camera raw, set the raw-link EXIF on
-    the derived image:
-      * OriginalRawFileName (0xc68b): set to the raw's name, but ONLY if the
-        derived image doesn't already carry one (never overwrite — an earlier
-        tool may have set it, e.g. a convert-and-convert-back round trip).
-      * RawDataUniqueID (0xc65d): when keep_raws is enabled, stash the raw in the
-        hidden store and write the resulting uid so the raw can be reopened.
-    Best-effort; never raises into the upload path."""
+    """! @brief Write the raw link into a derived image's EXIF: OriginalRawFileName
+    (only when absent), and with keep_raws the RawDataUniqueID of the stored raw.
+    Never raises into the upload.
+    """
     try:
         patch = {}
 
-        # OriginalRawFileName: only if not already present.
         existing_name = None
         try:
             edata = exif_import.read_exif(derived_abs)
@@ -904,14 +773,13 @@ def _link_raw_to_image(raw_src_path, orig_name, derived_rel, derived_abs):
         if not existing_name:
             patch["OriginalRawFileName"] = orig_name
 
-        # RawDataUniqueID + hidden storage, only when the option is on.
         if state.get("keep_raws"):
             uid = _store_raw(raw_src_path, orig_name, derived_rel)
             if uid:
                 patch["RawDataUniqueID"] = uid
 
         if patch:
-            exif_export.write_exif(derived_abs, patch)
+            update_file(derived_abs, exif=patch, history=False)
     except Exception as e:
         access_logger.warning(f"_link_raw_to_image {orig_name}: {e}")
 
@@ -920,11 +788,8 @@ def _delete_file_row(rel_path):
     _db().commit()
 
 def _purge_file_everywhere(rel_path):
-    """Remove EVERY DB trace of a file: the core rows (`files`, `file_history`,
-    `album_members`) here, and every module's rel_path-keyed rows through the `file.deleted`
-    event (books, people, dedup, music, ratings, embeddings, training sets…).
-    The delete routes and the reconcile scan all go through this, so a file
-    that vanished on disk is forgotten everywhere, not just in the gallery.
+    """! @brief Remove every DB trace of a file: core rows here, module rows through
+    the file.deleted event.
     """
     db = _db()
     for sql in ("DELETE FROM files         WHERE rel_path=?",
@@ -941,25 +806,22 @@ def _get_file_row(rel_path):
     return _db().execute("SELECT * FROM files WHERE rel_path=?", (rel_path,)).fetchone()
 
 _FILTER_RE = re.compile(r'(width|height|min|max):?\s*(<=|>=|<|>|=)\s*(\d+)$', re.I)
-# min/max = shorter/longer side, so `min<512` is "below 512 in width OR height".
+# min / max = shorter / longer side: "min<512" means either side under 512
 _DIM_COLS = {"width": "width", "height": "height",
              "min": "MIN(width,height)", "max": "MAX(width,height)"}
 
-# Date search tokens. Each maps to the set of bucket columns it queries; a match
-# is STRICT (the file must have at least one of those buckets populated). The
-# broad `date:` spans actual+original+digitized per the search grammar; the
-# narrow tokens hit one bucket each.
+# Date tokens -> the buckets they search; a file matches only through a
+# filled bucket. date: covers actual, original and digitized.
 _DATE_TOKEN_COLS = {
     "date":         ("d_actual", "d_original", "d_digitized"),
     "datetime":     ("d_actual",),
     "dateoriginal": ("d_original",),
     "capture_date": ("d_capture",),
-    "capturedate":  ("d_capture",),   # tolerate the un-underscored spelling
+    "capturedate":  ("d_capture",),  # also without the underscore
     "datedigitized": ("d_digitized",),
     "modified":     ("d_modified",),
 }
-# key:op?value  where value is a date or partial date (YYYY, YYYY-MM, YYYY-MM-DD)
-# or a range a..b. op is one of < <= > >= = (default: prefix/equality match).
+# key[op]value with a (partial) date or a range a..b; op is < <= > >= =
 _DATE_RE = re.compile(
     r'^(' + '|'.join(_DATE_TOKEN_COLS) + r'):'
     r'(<=|>=|<|>|=)?'
@@ -967,11 +829,11 @@ _DATE_RE = re.compile(
     r'(?:\.\.[0-9]{4}(?:[-/][0-9]{1,2}){0,2})?)$', re.I)
 
 def _date_clause(cols: tuple, op: str | None, literal: str) -> tuple[str, list]:
-    """Build a SQL WHERE fragment + params matching any of `cols` against a date
-    literal/range. STRICT: NULL buckets never match (SQL comparisons on NULL are
-    already false, so no extra guard needed). Compares the stored 'YYYY-MM-DD'
-    text lexicographically, which is correct for zero-padded ISO dates."""
-    # Range form a..b (inclusive), ignores op.
+    """! @brief SQL matching any of `cols` against a date literal or range.
+    NULL buckets never match; dates compare as zero-padded ISO text.
+    @return (sql, params).
+    """
+    # a..b, inclusive
     if '..' in literal:
         lo_raw, hi_raw = literal.split('..', 1)
         lo = _norm_date_literal(lo_raw, end=False)
@@ -991,8 +853,7 @@ def _date_clause(cols: tuple, op: str | None, literal: str) -> tuple[str, list]:
         bound = _norm_date_literal(literal, end=(op == ">"))
         cmp = ">" if op == ">" else ">="
     else:
-        # Bare or '=': match the whole named period (prefix match), so
-        # `date:2021` matches all of 2021 and `date:2021-05` all of that month.
+        # bare or '=': the whole named period (date:2021 is all of 2021)
         lo = _norm_date_literal(literal, end=False)
         hi = _norm_date_literal(literal, end=True)
         if not lo or not hi:
@@ -1009,9 +870,9 @@ def _date_clause(cols: tuple, op: str | None, literal: str) -> tuple[str, list]:
     return f"({ors})", [bound] * len(cols)
 
 def _parse_search(search: str) -> tuple[str, list, list, list]:
-    """!
-    @brief Pull structured filters (width:/height: comparisons, is: flags, metadata fields) out of free text.
-    @return (free_text, [sql_clause...], [param...]).
+    """! @brief Split structured tokens (width:, is:, date:, sort:, module tokens, ...)
+    from free text.
+    @return (free_text, where_clauses, params, structured).
     """
     text, where, params, structured = [], [], [], []
     for tok in search.split():
@@ -1020,7 +881,7 @@ def _parse_search(search: str) -> tuple[str, list, list, list]:
             col, opx, val = m.group(1).lower(), m.group(2), int(m.group(3))
             where.append(f"{_DIM_COLS[col]} {opx} ?")
             params.append(val)
-            structured.append(("dim", col, opx, val))   # images-only
+            structured.append(("dim", col, opx, val))  # images only
             continue
         dm = _DATE_RE.match(tok)
         if dm:
@@ -1037,7 +898,7 @@ def _parse_search(search: str) -> tuple[str, list, list, list]:
             neg = low.startswith('-')
             name = tok.split(':', 1)[1].strip()
             if name:
-                # tags is a JSON list; unconfirmed tags carry a leading '?'.
+                # tags is a JSON list; unconfirmed tags start with '?'
                 where.append(("NOT " if neg else "") +
                              "EXISTS (SELECT 1 FROM json_each(files.tags) "
                              "WHERE lower(ltrim(json_each.value,'?'))=?)")
@@ -1045,8 +906,7 @@ def _parse_search(search: str) -> tuple[str, list, list, list]:
                 structured.append(("tag", name, neg))
             continue
         if low.startswith('sort:'):
-            # Ordering, not filtering: resolved against module-registered sort
-            # keys (host.register_sort_key). Unknown keys are dropped.
+            # sort: orders rather than filters; unknown keys are dropped
             key, desc = low[5:], False
             if key.startswith('-'):
                 key, desc = key[1:], True
@@ -1070,10 +930,10 @@ def _parse_search(search: str) -> tuple[str, list, list, list]:
             where.append("COALESCE(unconfirmed_count,0) > 0")
             structured.append(("is", "unconfirmed"))
         elif low == 'is:tagunconfirmed':
-            where.append("tags LIKE '%\"?%'")     # unconfirmed tags are JSON strings starting with '?'
+            where.append("tags LIKE '%\"?%'")
             structured.append(("is", "tagunconfirmed"))
         else:
-            # Check for module-registered search types (e.g., exif:Make, iptc:Keywords, xmp:dc:creator)
+            # module-registered tokens (exif:, iptc:, xmp:, ...)
             if ':' in tok and 'module_host' in globals():
                 prefix = tok.split(':', 1)[0] + ':'
                 handler = getattr(module_host, "search_types", {}).get(prefix)
@@ -1091,17 +951,15 @@ def _parse_search(search: str) -> tuple[str, list, list, list]:
     return ' '.join(text).strip(), where, params, structured
 
 def _files_where(search: str, folder: str = '', album: str = ''):
-    """!
-    @brief The image-rows WHERE for a gallery query (search tokens, module
-           gallery filters, album scope, folder scope, free text).
+    """! @brief The WHERE for a gallery query (tokens, gallery filters, access policies,
+    album, folder, free text).
     @return (where_sql, params, text, structured).
     """
     text, where, params, structured = _parse_search(search)
     clauses, p = list(where), list(params)
-    # Modules that group files into a container (comics: a folder of pages)
-    # register a clause that hides members from the flat gallery.
+    # modules hide container members (a comic's pages) from the flat gallery
     clauses.extend(module_host.gallery_filters)
-    vclauses, vp = module_host.files_clause("rel_path")   # access policies (ownership)
+    vclauses, vp = module_host.files_clause("rel_path")  # access policies
     clauses += vclauses
     p += vp
     if album:
@@ -1120,18 +978,14 @@ def _files_where(search: str, folder: str = '', album: str = ''):
 
 def _query_files(search: str, offset: int, limit: int,
                  folder: str = '', album: str = '') -> tuple[list, int]:
-    """!
-    @brief Page the flat gallery: comics/books first (one cover tile each), then images.
-    @param album If given, restrict to that album's members and suppress comics/books.
-    @return (entries, total) where entries are typed dicts (kind='comic'|'book'|'image').
+    """! @brief One gallery page: module results (books, comics: one tile each) first,
+    then images.
+    @param album  only that album's images; module results are left out.
+    @return (entries, total); entries carry kind "comic" | "book" | "image".
     """
     where_sql, p, text, structured = _files_where(search, folder, album)
 
-    # Non-image search contributors (books, comics, …) come from modules via
-    # host.register_search_provider; core merges their entries in front of the
-    # image results. Skipped for an album (a flat image set). With no such
-    # module the app searches only images.
-    # sort tokens order the image rows; they don't filter, so providers never see them
+    # sort tokens order images; search providers only get the filters
     filters = [s for s in structured if s[0] != "sort"]
     order = ", ".join(f"{s[1]} {'DESC' if s[2] else 'ASC'}" for s in structured if s[0] == "sort")
     order_sql = f"{order}, rel_path" if order else "rel_path"
@@ -1164,27 +1018,23 @@ def _query_files(search: str, offset: int, limit: int,
                           "tags": json.loads(r["tags"] or "[]"),
                           "description": r["description"] or "",
                           "width": r["width"] or 0, "height": r["height"] or 0})
-        # Rating fields (rating / iqa_score / effective_rating) are attached by
-        # the rating module's enricher when it's enabled; absent otherwise.
+        # module fields (rating, ...) from the registered enrichers
         module_host.enrich_file_rows(_db(), batch)
         entries.extend(batch)
     return entries, total
 
-# ── Path safety ────────────────────────────────────────────────────────────────
 _MEDIA_ABS = os.path.abspath(MEDIA_DIR)
 
 def get_safe_path(base_dir: str, user_path: str) -> str | None:
-    """!
-    @brief Resolve user_path under base_dir, rejecting directory traversal.
-    @return The absolute path, or None if it would escape base_dir.
+    """! @brief Resolve `user_path` under `base_dir`, rejecting traversal.
+    @return the absolute path, or None when it escapes base_dir or an access
+            policy hides it.
     """
     abs_base   = os.path.abspath(base_dir)
     abs_target = os.path.abspath(os.path.join(base_dir, user_path.lstrip('\\/')))
     if os.path.commonpath([abs_base, abs_target]) != abs_base:
         return None
-    # Access policies: a request may only resolve media it is allowed to see
-    # (or, on a write endpoint, change) — a hidden file is "not found" by name
-    # too. No-op outside a request (workers) and with no policy registered.
+    # A file an access policy hides is "not found" by name too (requests only).
     if abs_base == _MEDIA_ABS and 'module_host' in globals() and module_host.access_policies \
             and has_request_context():
         rel = os.path.relpath(abs_target, abs_base).replace('\\', '/')
@@ -1192,13 +1042,10 @@ def get_safe_path(base_dir: str, user_path: str) -> str | None:
             return None
     return abs_target
 
-# ── JXL decode ─────────────────────────────────────────────────────────────────
 def read_jxl(path: str) -> np.ndarray | None:
-    """!
-    @brief Decode a JXL (or a video's poster frame) to a normalised uint8 ndarray.
-    @return (h,w) gray, (h,w,3) RGB, or (h,w,4) RGBA — never (h,w,1)/(h,w,2) or float/uint16;
-            None (logged as warning) if missing, unreadable, or not a JXL.
-    @note Videos return a single RGB poster frame so every read_jxl consumer works on them transparently.
+    """! @brief Decode a stored image (or a video's poster frame), cached on mtime.
+    @return uint8 (h, w) gray, (h, w, 3) RGB or (h, w, 4) RGBA; None when missing
+            or undecodable (logged).
     """
     if mt.is_video(path):
         frame = mt.video_poster_frame(path)
@@ -1206,7 +1053,7 @@ def read_jxl(path: str) -> np.ndarray | None:
             access_logger.warning(f"read_jxl: could not extract video frame: {path}")
         return frame
     try:
-        mtime = _getmtime_loose(path)          # keys the decode LRU; 0.0 means missing
+        mtime = _getmtime_loose(path)  # 0.0 = missing
         if mtime == 0.0 and not os.path.exists(path):
             access_logger.warning(f"read_jxl: file missing: {path}")
             return None
@@ -1216,10 +1063,7 @@ def read_jxl(path: str) -> np.ndarray | None:
         return None
 
 def _decode_jxl_uncached(path: str) -> np.ndarray | None:
-    """!
-    @brief Decode and normalise a JXL from disk without the cache.
-    @return uint8 ndarray in the read_jxl channel contract, or None on failure.
-    """
+    """! @brief read_jxl without the cache."""
     try:
         data = _read_bytes_loose(path)
         if data is None:
@@ -1228,13 +1072,13 @@ def _decode_jxl_uncached(path: str) -> np.ndarray | None:
         if len(data) < 2:
             access_logger.warning(f"read_jxl: file too small: {path}")
             return None
-        # JXL magic: bare codestream FF 0A; ISOBMFF container 00 00 00 0C 'JXL '
+        # JXL magic: bare FF 0A, container 00 00 00 0C 'JXL '
         is_bare      = data[:2] == b'\xff\x0a'
         is_container = data[4:8] == b'JXL '
         if is_bare or is_container:
             img = imagecodecs.jpegxl_decode(data)
         else:
-            # Natively stored image (Settings → Media): png/webp/jpg/gif/avif/heic.
+            # natively stored images (Settings > Media)
             try:
                 with Image.open(io.BytesIO(data)) as im:
                     im = ImageOps.exif_transpose(im)
@@ -1258,52 +1102,47 @@ def _decode_jxl_uncached(path: str) -> np.ndarray | None:
             else:
                 img = img.astype(np.uint8)
         elif img.size and int(img.max()) == 1:
-            # A 1-bit JXL (bilevel PNG source: QR codes, fax, line art) decodes
-            # as 0/1 in uint8. No 8-bit image peaks at 1/255 in practice, so
-            # this is the bit-depth case: stretch it back to 0/255.
+            # A 1-bit JXL decodes as 0/1: stretch it to 0/255.
             img = img * np.uint8(255)
 
         if img.ndim == 3:
             c = img.shape[2]
             if c == 1 or c == 2:
-                img = img[:, :, 0]              # (h,w,1) or gray+alpha → (h,w)
+                img = img[:, :, 0]  # (h, w, 1) or gray + alpha -> (h, w)
             elif c > 4:
-                img = img[:, :, :4]             # keep at most RGBA
+                img = img[:, :, :4]  # at most RGBA
         return img
     except Exception as e:
         access_logger.warning(f"read_jxl: {path}: {e}")
         return None
 
 def _cvt_channels(img: np.ndarray, from3, from4, gray_code=None) -> np.ndarray:
-    """!
-    @brief Dispatch a JXL-decoded array to a target colour space by channel count.
-    @param from3 cv2 code for 3-channel (RGB) input.
-    @param from4 cv2 code for 4-channel (RGBA) input.
-    @param gray_code cv2 code to expand 1/2-channel gray to the target; None keeps it 2D.
+    """! @brief Convert a decoded image to a colour space by its channel count.
+    @param from3, from4  cv2 codes for RGB and RGBA input.
+    @param gray_code     cv2 code to expand gray; None keeps it 2D.
     """
     if img.ndim == 2:
         return img if gray_code is None else cv2.cvtColor(img, gray_code)
     c = img.shape[2]
-    if c == 1 or c == 2:                        # gray, or gray+alpha (drop alpha)
+    if c == 1 or c == 2:  # gray (+ alpha, dropped)
         g = img[:, :, 0]
         return g if gray_code is None else cv2.cvtColor(g, gray_code)
     if c == 3:
         return cv2.cvtColor(img, from3)
     if c == 4:
         return cv2.cvtColor(img, from4)
-    return cv2.cvtColor(img[:, :, :3], from3)   # >4: first 3 as RGB
+    return cv2.cvtColor(img[:, :, :3], from3)  # more than 4: first 3 as RGB
 
 def _to_bgr(img: np.ndarray) -> np.ndarray:
-    """! @brief Convert any JXL-decoded ndarray to 3-channel BGR for OpenCV."""
+    """! @brief A decoded image as 3-channel BGR."""
     return _cvt_channels(img, cv2.COLOR_RGB2BGR, cv2.COLOR_RGBA2BGR, cv2.COLOR_GRAY2BGR)
 
 def _to_gray(img: np.ndarray) -> np.ndarray:
-    """! @brief Convert any JXL-decoded ndarray to single-channel grayscale."""
+    """! @brief A decoded image as grayscale."""
     return _cvt_channels(img, cv2.COLOR_RGB2GRAY, cv2.COLOR_RGBA2GRAY, None)
 
-# ── Hashing ────────────────────────────────────────────────────────────────────
 def _ahash_bytes(gray: np.ndarray, size: int) -> bytes:
-    """! @brief aHash of a grayscale image, packed to size²/8 bytes."""
+    """! @brief aHash of a grayscale image, packed to size^2 / 8 bytes."""
     small = cv2.resize(gray, (size, size), interpolation=cv2.INTER_AREA)
     bits  = (small >= small.mean()).flatten()
     pad   = (-len(bits)) % 8
@@ -1312,12 +1151,12 @@ def _ahash_bytes(gray: np.ndarray, size: int) -> bytes:
     return np.packbits(bits).tobytes()
 
 def _sha256(path: str) -> str:
-    """! @brief Streaming SHA-256 hex digest of a file."""
+    """! @brief SHA-256 hex digest of a file (streamed)."""
     with open(path, 'rb') as f:
         return hashlib.file_digest(f, 'sha256').hexdigest()
 
 def _set_media_kind(rel_path: str) -> None:
-    """! @brief Stamp media_kind ('image'/'video') and, for videos, duration onto the row."""
+    """! @brief Store media_kind and, for videos, the duration."""
     try:
         kind = mt.kind(rel_path)
         dur = None
@@ -1325,42 +1164,34 @@ def _set_media_kind(rel_path: str) -> None:
             ap = get_safe_path(MEDIA_DIR, rel_path)
             if ap:
                 dur = mt.video_duration(ap)
-        _db().execute("UPDATE files SET media_kind=?, duration=? WHERE rel_path=?",
-                      (kind, dur, rel_path))
-        _db().commit()
+        update_file(rel_path, db={"media_kind": kind, "duration": dur}, dont_write=True)
     except Exception as e:
         access_logger.warning(f"_set_media_kind {rel_path}: {e}")
 
 def _index_file(rel_path: str, force: bool = False,
                 known_sha: str | None = None) -> bool:
-    """
-    Compute hashes + read metadata for one file, write to DB.
-    Skips if mtime unchanged (unless force=True).
-    If the file can't be decoded (wrong format, truncated), writes a stub row
-    with NULL phash values so dedup/thumb skip it but the file isn't retried
-    every startup.
-    Returns True if the DB was updated.
+    """! @brief Hash, read metadata and update the DB row of one file, unless its mtime
+    is unchanged. An undecodable file gets a stub row (no hashes) so it isn't
+    retried every start.
+    @return True when the row was written.
     """
     abs_path = get_safe_path(MEDIA_DIR, rel_path)
     if not abs_path or not os.path.exists(abs_path):
         return False
-    # Kinds a module owns (audio): the module indexes them on file.index and
-    # the row never enters the image tables.
+    # kinds a module owns (audio) are indexed by the module
     if module_host.emit("file.index", rel_path=rel_path, abs_path=abs_path, force=force):
         return True
     try:
         mtime = _getmtime_loose(abs_path)
         row   = _get_file_row(rel_path)
         if not force and row and abs(row['mtime'] - mtime) < 0.01:
-            return False   # up-to-date
+            return False
 
         sha = known_sha or _sha256(abs_path)
         img = read_jxl(abs_path)
 
         if img is None:
-            # Undecodable — write stub so we don't retry every run. Its sidecar
-            # (tags, description, albums) still counts: a file we can't draw is
-            # still one the user tagged and filed.
+            # Undecodable: a stub row; its sidecar (tags, albums) still counts.
             try:
                 _smeta = read_metadata(abs_path) or {}
             except Exception:
@@ -1384,113 +1215,49 @@ def _index_file(rel_path: str, force: bool = False,
         ph8   = _ahash_bytes(gray, 8)
         ph32  = _ahash_bytes(gray, 32)
 
-        # Build the thumbnail HERE, from the array we already have decoded.
-        # Generating it on first view costs a full decode of the original on a
-        # request thread; generating it here costs a resize and a JPEG encode,
-        # because the decode is already paid for. On a library that grows
-        # continuously the grid is always showing recent images, so "generate on
-        # first view" meant every page of new kits was a wall of cold misses.
+        # Build the thumbnail from the decode already paid for, instead of decoding
+        # again on the first view.
         try:
             _t = _thumb_from_array(img)
             if _t is not None:
                 _thumb_put(rel_path, _t, mtime)
                 _thumb_lru_put(rel_path, mtime, _t)
         except Exception as e:
-            # A thumbnail is derived data; failing to build one must never fail
-            # the index of the image itself.
             access_logger.warning(f"thumb at index {rel_path}: {e}")
 
         meta  = read_metadata(abs_path)
         _upsert_file(rel_path, mtime, w, h, sha, ph8, ph32,
                      meta['tags'], meta['description'])
-        # Resolve the five semantic date buckets from all metadata + inode times.
         try:
             _store_dates(rel_path, _resolve_dates(abs_path, mtime))
         except Exception as e:
             access_logger.warning(f"date resolve {rel_path}: {e}")
-        # Rebuild the analysis + flag caches from the sidecar so moving files to
-        # a new machine and reindexing restores AI analysis and deletion flags.
+        # analysis and flag come back from the sidecar (a moved library keeps them)
         _an = meta.get('analysis')
         _fl = meta.get('flag')
         fd  = 1 if (_fl and _fl.get('delete')) else 0
         fr  = (_fl.get('reason', '') if _fl else '')
-        # Rebuild the unconfirmed-box count from the sidecar too, otherwise files
-        # with pending (unconfirmed) boxes never re-enter the review queue after a
-        # scan/reindex (review_list filters on unconfirmed_count>0).
+        # pending boxes from the sidecar, so the file stays in the review queue
         _uc = sum(1 for r in meta['regions'] if not r.get('confirmed', True))
-        _db().execute(
-            "UPDATE files SET analysis=?, flagged_delete=?, flag_reason=?, "
-            "unconfirmed_count=? WHERE rel_path=?",
-            (json.dumps(_an) if _an else '', fd, fr, _uc, rel_path))
-        # A rating stored in the image's EXIF counts as a user rating on
-        # upload/rebuild and overrides any preliminary BRISQUE score. Only set
-        # it when present so a re-index never wipes an in-app rating.
-        _rt = meta.get('rating')
-        if _rt is not None:
-            _db().execute(
-                "UPDATE files SET rating=?, rating_user=1 WHERE rel_path=?",
-                (int(_rt), rel_path))
-        # dc:creator -> artist, dc:language -> language. Only overwrite when we
-        # actually read a value, so a re-index doesn't wipe an in-app edit.
-        _artist = meta.get('artist') or ''
-        _lang = meta.get('language') or ''
-        if _artist:
-            _db().execute("UPDATE files SET artist=? WHERE rel_path=?",
-                          (_artist, rel_path))
-        if _lang:
-            _db().execute("UPDATE files SET language=? WHERE rel_path=?",
-                          (_lang, rel_path))
-        # Expression Media Event / CatalogSets. Only overwrite when we read a
-        # value so a re-index doesn't wipe an in-app edit.
-        _ev = meta.get('event') or ''
-        _cs = meta.get('catalog_sets') or ''
-        if _ev:
-            _db().execute("UPDATE files SET event=? WHERE rel_path=?",
-                          (_ev, rel_path))
-        if _cs:
-            _db().execute("UPDATE files SET catalog_sets=? WHERE rel_path=?",
-                          (_cs, rel_path))
-        # Albums (mwg-coll:Collections) -> the album caches. This is the step
-        # that makes album membership portable: copy the media + sidecars to a
-        # new machine, reindex, and every album rebuilds itself from the files.
-        # Unlike the fields above we sync UNCONDITIONALLY — an empty list is a
-        # meaningful state ("in no albums"), not a missing value, so skipping it
-        # would strand files in albums they'd been removed from.
-        _sync_album_cache(rel_path, meta.get('albums') or [])
-        # AI-generated marker. Only set it to 1 when the metadata says so; never
-        # clear it on re-index, so a detected AI origin sticks and any future
-        # in-app toggle isn't wiped by a rescan of a file lacking the fields.
+        # Mirror the file into the row (DB only). Optional fields are set only when
+        # the file has a value, so a re-index never wipes an in-app edit.
+        row = {"analysis": json.dumps(_an) if _an else '', "flagged_delete": fd,
+               "flag_reason": fr, "unconfirmed_count": _uc}
+        if meta.get('rating') is not None:
+            row.update(rating=int(meta['rating']), rating_user=1)
+        for col in ('artist', 'language', 'event', 'catalog_sets', 'persons', 'genre', 'alt_of'):
+            if meta.get(col):
+                row[col] = meta[col]
         if meta.get('ai_generated'):
-            _db().execute("UPDATE files SET ai_generated=1 WHERE rel_path=?",
-                          (rel_path,))
-        # Model age (IPTC Extension ModelAge). Only overwrite when we read one,
-        # so a re-index of a file without it doesn't wipe a stored value.
-        _ma = meta.get('model_age')
-        if _ma is not None:
-            _db().execute("UPDATE files SET model_age=? WHERE rel_path=?",
-                          (int(_ma), rel_path))
-        # People shown (IPTC Extension PersonInImage). The names are also in
-        # meta['tags'] (written by _upsert_file); this stores the dedicated
-        # persons column. Only overwrite when we read some, so a re-index of a
-        # file without them doesn't wipe an in-app edit.
-        _pers = meta.get('persons') or ''
-        if _pers:
-            _db().execute("UPDATE files SET persons=? WHERE rel_path=?",
-                          (_pers, rel_path))
-        # PRISM Genre / variant links / page count. Only overwrite when read, so
-        # a re-index of a file without them doesn't wipe an in-app value.
-        _gen = meta.get('genre') or ''
-        _alt = meta.get('alt_of') or ''
-        _pc  = meta.get('page_count')
-        if _gen:
-            _db().execute("UPDATE files SET genre=? WHERE rel_path=?",
-                          (_gen, rel_path))
-        if _alt:
-            _db().execute("UPDATE files SET alt_of=? WHERE rel_path=?",
-                          (_alt, rel_path))
-        if _pc is not None:
-            _db().execute("UPDATE files SET page_count=? WHERE rel_path=?",
-                          (int(_pc), rel_path))
+            row["ai_generated"] = 1
+        if meta.get('model_age') is not None:
+            row["model_age"] = int(meta['model_age'])
+        if meta.get('page_count') is not None:
+            row["page_count"] = int(meta['page_count'])
+        update_file(rel_path, db=row, dont_write=True, commit=False)
+        # Album membership from the sidecar (empty = no albums): albums survive a
+        # move to another machine.
+        _sync_album_cache(rel_path, meta.get('albums') or [])
         _db().commit()
         _set_media_kind(rel_path)
         module_host.emit("file.indexed", rel_path=rel_path, abs_path=abs_path)
@@ -1500,8 +1267,8 @@ def _index_file(rel_path: str, force: bool = False,
         return False
 
 def _build_index_background():
-    """Walk MEDIA_DIR and index every file not yet in DB or whose mtime changed."""
-    state["status_text"] = "Indexing library…"
+    """! @brief Index every file that is new or changed, then reconcile."""
+    state["status_text"] = "Indexing library..."
     count = 0
     batch = []
     with thread_manager.pool(want=8, name="libwalk") as ex:
@@ -1512,12 +1279,12 @@ def _build_index_background():
                     if updated:
                         count += 1
                 batch = []
-                state["status_text"] = f"Indexing… {count} updated so far"
+                state["status_text"] = f"Indexing... {count} updated so far"
         if batch:
             for updated in ex.map(_index_file, batch):
                 if updated: count += 1
         _db_release_pool(ex, 8)
-    # Self-heal: drop DB rows whose backing file no longer exists on disk.
+    # drop rows whose file is gone
     try:
         removed = _reconcile_deleted()
         if removed:
@@ -1530,32 +1297,20 @@ def _build_index_background():
         access_logger.error(f"reconcile: {e}")
         state["status_text"] = f"Ready. (indexed {count} new/changed files)"
     access_logger.info(f"Background index complete: {count} files updated")
-    # Books ride along with the same startup pass. Its own walk is resumable and
-    # skips unchanged mtimes, so on a warm library this costs one os.walk and
-    # nothing else — but it means a book dropped into the media folder while the
-    # server was down is on the shelf by the time the image index finishes,
-    # rather than waiting for someone to press Reindex.
+    # modules (books) run their own incremental scans
     module_host.emit("library.reconcile")
 
 def _enumerate_library():
-    """Every library-file rel_path, whether loose on disk OR folded into a pack.
-
-    A plain os.walk(MEDIA_DIR) only sees loose files, so once a file is packed
-    it would be invisible to indexing, dedup, and reconciliation — which is how
-    packed files ended up looking 'missing'. This unions the disk walk with the
-    keys the pack store holds, so packed files stay first-class members of the
-    library. Sidecars and thumbnail cache keys (.thumbs/) are excluded; only
-    real library files are returned.
-    """
+    """! @brief Every library file's rel_path (sidecars, thumbnails and tier stores excluded)."""
     seen = set()
     for root, dirs, filenames in os.walk(MEDIA_DIR):
         dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'runs'
-                   and d != tiering.OBJECT_DIR            # a tier store under MEDIA_DIR is bytes, not library
+                   and d != tiering.OBJECT_DIR  # a tier store under MEDIA_DIR holds bytes, not library files
                    and not (root == MEDIA_DIR and d == 'branding')]
         for f in filenames:
             if f.startswith('.'):
                 continue
-            if not mt.is_library_file(f):   # registered kinds (audio, books) included
+            if not mt.is_library_file(f):  # module kinds included
                 continue
             rel = _rel(os.path.join(root, f))
             if rel not in seen:
@@ -1563,36 +1318,26 @@ def _enumerate_library():
                 yield rel
 
 def _reconcile_deleted():
-    """Walk the `files` table and purge every row whose backing file is gone
-    from disk AND not present in a pack. Complements _build_index_background
-    (which only ADDS or UPDATES files that exist): together they make the DB an
-    exact mirror of the library (loose + packed).
-
-    Returns the number of files purged. mtime-changed / externally-edited files
-    are handled by the normal index pass — _index_file already re-reads any file
-    whose mtime differs from the stored one — so this only concerns itself with
-    disappearances.
+    """! @brief Purge every row whose file is gone (changed files are the index pass's job).
+    @return the number purged.
     """
     rows = _db().execute("SELECT rel_path FROM files").fetchall()
     removed = 0
     for (rel_path,) in rows:
         abs_path = get_safe_path(MEDIA_DIR, rel_path)
-        # Rows indexed from inside a tier object store (cim-objects/<aa>/<id>)
-        # are the tiering bug of old: the sidecar carrying that DocumentID puts
-        # the object back at its real rel_path (tiering.restore_orphans).
+        # Rows from inside a tier store are lost tier objects: restore_orphans
+        # puts them back at their real path.
         if tiering.is_object_path(rel_path) or not abs_path or not os.path.exists(abs_path):
             _purge_file_everywhere(rel_path)
             removed += 1
     return removed
 
-# ── Config / classes ──────────────────────────────────────────────────────────
-_SAVED_CONFIG = {}   # raw app_config.json; module-declared keys are picked up from it later
+_SAVED_CONFIG = {}  # raw app_config.json; module keys are resolved from it later
 
 def load_config():
-    """Load app_config.json into state. Core keys apply now; keys a module
-    declares later (add_config_key runs after this) are resolved from the same
-    file when the registry seeds defaults — a saved module setting must win
-    over the module's default, not be dropped for not existing yet."""
+    """! @brief Load app_config.json into state. Keys modules declare later are seeded
+    from the same file, so a saved module setting beats the module's default.
+    """
     global _SAVED_CONFIG
     if os.path.exists(CFG_FILE):
         try:
@@ -1602,22 +1347,14 @@ def load_config():
                 if k in state: state[k] = v
         except Exception as e:
             access_logger.error(f"load_config: {e}")
-    # Normalize the module on/off map: force core modules True, drop unknown
-    # ids, and write the cleaned map back into state so save_config persists a
-    # canonical version. Hand-disabling a core module in the file is ignored.
+    # canonical module map: core forced on, unknown ids dropped
     state["modules"] = module_registry.init_state(state.get("modules"))
-    # Point the iqa module at the persisted model choice. Weights (if any) load
-    # lazily on first score, so this does not slow down startup.
-    # (IQA model selection is now the broker's job — see model_selection /
-    # broker.init_selection after register_all; the legacy iqa_model setting is
-    # migrated into it there.)
 
 def save_config():
     keys = ["remote_ip","keep_raws",
             "brand_name","brand_logo","auth","gdl_sites","gdl_opts","gdl_auth",
             "page_size","thumb_lru_bytes","meta_cache_max","wsgi_threads","cjxl_threads","search_quick_filters","tiers","modules","model_selection"]
-    # Add any keys modules declared through the config registry, so a module's
-    # settings persist without being hand-added to this list.
+    # settings modules declared persist too
     try:
         keys = list(dict.fromkeys(keys + modules.config.save_keys()))
     except Exception:
@@ -1636,9 +1373,9 @@ def save_classes():
         f.writelines(c+'\n' for c in state["classes"])
 
 def populate_model_selector():
-    """Trained runs + anything in ./models. 'available_models' stays the flat
-    list older code expects; 'model_groups' is the structured view the settings
-    UI uses (common / ours / face / custom)."""
+    """! @brief Fill the model choices: "available_models" (flat list) and
+    "model_groups" (common / ours / face / custom) for the settings UI.
+    """
     trained = sorted(
         glob.glob(os.path.join(MODELS_DIR, "**", "*.pt"), recursive=True),
         key=os.path.getmtime)
@@ -1654,32 +1391,26 @@ load_config()
 load_classes()
 populate_model_selector()
 
-# ── authentication / user management ──────────────────────────────────────────
-# Installed here (after _db and config are ready) so its before_request gate is
-# the first hook to run. All routes except /login and /api/auth/* are protected.
+# -- authentication: its before_request gate runs first; only /login and /api/auth/* are open --
 _authmgr = _auth.Auth(
     app, _db,
     get_cfg=lambda: state.get("auth"),
     save_cfg=save_config,
 ).install()
 
-# ── XMP metadata ──────────────────────────────────────────────────────────────
-# The structured AI analysis is stored in the sidecar (the portable source of
-# truth) under a private namespace, base64-encoded to avoid XML escaping. The
-# DB column `analysis` is only a cache rebuilt from the sidecar on index.
+# -- XMP: AI analysis lives in the sidecar under a private namespace, base64 JSON;
+# the analysis column is a cache rebuilt on index --
 _MM_NS = "http://mediamanager/ns/1.0/"
 
 def _embed_analysis_xml(analysis):
-    """Return (namespace_attr, xml_element) for the analysis block, or ('','')."""
+    """! @brief (namespace attribute, XML element) for the analysis block, or ('', '')."""
     if not analysis:
         return "", ""
     raw = base64.b64encode(json.dumps(analysis).encode("utf-8")).decode("ascii")
     return f' xmlns:mm="{_MM_NS}"', f'<mm:analysis>{raw}</mm:analysis>'
 
 def _read_mm_tag(xmp_path, tag):
-    """Pull a base64+JSON payload stored under <mm:TAG> in a sidecar, or None.
-    Every mm: block is written the same way (see _b64dump), so every reader is
-    this one function differing only by tag name."""
+    """! @brief The base64 JSON payload under <mm:TAG> in a sidecar, or None."""
     try:
         if not os.path.exists(xmp_path):
             return None
@@ -1693,57 +1424,50 @@ def _read_mm_tag(xmp_path, tag):
         return None
 
 def _document_id(path):
-    """A file's xmpMM:DocumentID (its identity across tiering), or None. `path`
-    may be the media file or its sidecar; the metadata module picks the source."""
+    """! @brief A file's xmpMM:DocumentID (media file or sidecar path), or None."""
     return xmp_import.resolve_xmp(path)[0].get("Xmp.xmpMM.DocumentID") or None
 
 def _ensure_document_id(filepath, doc_id=None):
-    """The file's DocumentID, minting one (or adopting `doc_id`) through the
-    metadata module when it has none. A file without a sidecar gets one first,
-    from its current metadata, so the id lands in the sidecar even for JXL."""
+    """! @brief The file's DocumentID, created (or set to `doc_id`) when missing.
+    A file without a sidecar gets one first, so the id lands in the sidecar.
+    """
     cur = _document_id(filepath)
     if cur:
         return cur
     if not os.path.exists(os.path.splitext(filepath)[0] + '.xmp'):
-        meta = read_metadata(filepath)
-        write_metadata(filepath, meta.get("tags", []), meta.get("description", ""),
-                       meta.get("regions", []))
+        update_file(filepath, force=True)
     doc_id = doc_id or uuid.uuid4().hex
-    res = xmp_export.write_xmp(filepath, {"Xmp.xmpMM.DocumentID": doc_id})
+    res = update_file(filepath, xmp={"Xmp.xmpMM.DocumentID": doc_id}).get("xmp") or {"success": False, "skipped": "write failed"}
     if not res["success"]:
         raise ValueError(f"DocumentID for {filepath}: {res['skipped']}")
     return doc_id
 
 def _read_analysis_from_xmp(xmp_path):
-    """Pull the structured analysis dict back out of a sidecar, or None."""
+    """! @brief The analysis dict from a sidecar, or None."""
     return _read_mm_tag(xmp_path, "analysis")
 
 def _b64dump(obj):
     return base64.b64encode(json.dumps(obj).encode("utf-8")).decode("ascii")
 
 def _read_flag_from_xmp(xmp_path):
-    """Pull the AI deletion flag {delete, reason} back out of a sidecar, or None."""
+    """! @brief The deletion flag {delete, reason} from a sidecar, or None."""
     return _read_mm_tag(xmp_path, "flag")
 
 def _read_pose_from_xmp(xmp_path):
-    """Pull the pose/skeleton keypoints back out of a sidecar, or None."""
+    """! @brief The pose keypoints from a sidecar, or None."""
     return _read_mm_tag(xmp_path, "pose")
 
 def _read_anim_delays_from_xmp(xmp_path):
-    """Pull animation frame delays back out of a sidecar, or None.
-
-    Returns {"delays_ms":[...],"duration_ms":N,"n_frames":N} — the timing for an
-    animated JXL, captured from the source GIF/APNG at upload. This is the
-    portable duration source the viewer uses to decide boxable-strip vs. video.
+    """! @brief Animation timing from a sidecar (captured from the source at upload).
+    @return {"delays_ms", "duration_ms", "n_frames"}, or None.
     """
     return _read_mm_tag(xmp_path, "animDelays")
 
 def _extract_anim_delays(src_path):
-    """Read per-frame delays (ms) from a source GIF/APNG/WebP via Pillow.
-
-    Returns {"delays_ms":[...],"duration_ms":total,"n_frames":n} or None for a
-    non-animated / unreadable source. Called at upload BEFORE cjxl runs, since
-    cjxl collapses the timing we want to keep. Best-effort: never raises."""
+    """! @brief Per-frame delays of an animated GIF / APNG / WebP, read before cjxl
+    drops them.
+    @return {"delays_ms", "duration_ms", "n_frames"}, or None. Never raises.
+    """
     if not _HAVE_PIL:
         return None
     try:
@@ -1754,9 +1478,7 @@ def _extract_anim_delays(src_path):
         delays = []
         for i in range(n):
             im.seek(i)
-            # GIF/WebP store per-frame duration in ms in info['duration'];
-            # APNG exposes it the same way through Pillow. Default to a sane
-            # ~10fps (100ms) when a frame omits it.
+            # frames without a duration count as 100 ms
             d = im.info.get("duration", 100)
             try:
                 d = int(round(float(d)))
@@ -1769,24 +1491,15 @@ def _extract_anim_delays(src_path):
         access_logger.warning(f"_extract_anim_delays {src_path}: {e}")
         return None
 
-# PRISM namespace, used to persist prism:PageCount in our sidecars (the one
-# PRISM field we write — bidirectional for comics).
+# PRISM: prism:PageCount is written for comics
 _PRISM_NS = "http://prismstandard.org/namespaces/basic/3.0/"
 
-# MWG Collections namespace. This is the standards-blessed home for "which
-# named collections does this image belong to" — i.e. our albums. We already
-# READ it (mwg_fields.parse_collections folds it into catalog_sets); now we
-# WRITE it too, so albums live in the file's own sidecar and survive a move to
-# a new system. Using the standard (rather than a private mm: blob) also means
-# Lightroom/digiKam/ExifTool can see our albums.
+# MWG Collections: albums live in the sidecar here, readable by Lightroom,
+# digiKam and ExifTool.
 _MWG_COLL_NS = "http://www.metadataworkinggroup.com/schemas/collections/"
 
 def _read_albums_from_xmp(filepath):
-    """Return the album names for a file straight from its XMP, or [].
-
-    Reads the resolved XMP packet (sidecar OR embedded) so an image that
-    arrives from another machine with collections baked into the file itself
-    still lands in the right albums. Best-effort: never raises."""
+    """! @brief Album names from the file's XMP (sidecar or embedded), or []. Never raises."""
     try:
         xmp, _src, _xml = xmp_import.resolve_xmp(filepath)
         if not xmp:
@@ -1797,14 +1510,11 @@ def _read_albums_from_xmp(filepath):
         return []
 
 def _build_mwg_collections_xml(albums):
-    """Serialise album names as an mwg-coll:Collections bag.
-
-    Returns (xml, ns_attr) mirroring _build_mwg_regions_xml's contract, so
-    write_metadata can splice it in without special-casing. Each entry is a
-    CollectionInfo struct with a CollectionName; we omit CollectionURI since we
-    have no meaningful URI to give (the field is optional in the spec)."""
+    """! @brief Album names as an mwg-coll:Collections bag (CollectionName only).
+    @return (xml, namespace attribute), like _build_mwg_regions_xml.
+    """
     names = [str(a).strip() for a in (albums or []) if str(a).strip()]
-    # De-dupe, order-preserving — an image must not appear twice in one album.
+    # an image is in an album once
     seen, uniq = set(), []
     for n in names:
         if n not in seen:
@@ -1823,13 +1533,12 @@ def _build_mwg_collections_xml(albums):
     return xml, f' xmlns:mwg-coll="{_MWG_COLL_NS}"'
 
 def _read_page_count_from_xmp(xmp_path):
-    """Pull prism:PageCount back out of a sidecar as an int, or None."""
+    """! @brief prism:PageCount from a sidecar, or None."""
     try:
         if not os.path.exists(xmp_path):
             return None
         text = _read_text_loose(xmp_path) or ""
-        # Both the attribute form (prism:PageCount="12") and element form
-        # (<prism:PageCount>12</prism:PageCount>) are accepted.
+        # attribute or element form
         m = (re.search(r'prism:PageCount\s*=\s*"(\d+)"', text) or
              re.search(r'<prism:PageCount>\s*(\d+)\s*</prism:PageCount>', text))
         return int(m.group(1)) if m else None
@@ -1837,31 +1546,19 @@ def _read_page_count_from_xmp(xmp_path):
         access_logger.warning(f"_read_page_count_from_xmp {xmp_path}: {e}")
         return None
 
-# ── Region metadata (MWG-RS) ────────────────────────────────────────────────
-# We store regions in the MWG Regions schema (Xmp.mwg-rs.*), which gives us
-# richer per-region fields than the legacy Xmp.iptcExt.ImageRegion bag:
-#
-#   Area         -> normalized rectangle (x/y are the CENTER in MWG, w/h the size)
-#   Name         -> region label / class name
-#   Type         -> "confirmed" or "unconfirmed" (AI box state)
-#   SeeAlso      -> a filter link that selects images sharing this region name
-#   BarCodeValue -> a UUID for cross-database identification
-#   Description  -> JSON: {"description": str, "tags": [{"tag","generated","confirmed"}]}
-#
-# The Description JSON encodes booru-style per-region tags. A tag with
-# generated==true is AI-produced and carries a `confirmed` bool; a tag without
-# `generated` (or generated==false) is user-added and always treated confirmed.
+# -- regions: MWG Regions (Xmp.mwg-rs.*) --
+# Area (centre x/y, w/h), Name (label), Type (confirmed / unconfirmed),
+# SeeAlso (filter link), BarCodeValue (UUID), Description (JSON: description and
+# per-region tags; generated tags carry a confirmed flag, user tags are confirmed).
 
 _MWG_RS_NS = mwg_fields.MWG_RS_URI
 _MWG_ST_NS = mwg_fields.MWG_ST_URI
 
 def _region_filter_link(name):
-    # A stable link others can use to filter the shared library by region name.
     return f"cim:region?name={urllib.parse.quote(str(name or ''))}"
 
 def _region_desc_to_json(region):
-    """Serialize a region's per-region tags + description to the JSON blob
-    that lives in mwg-rs:Description."""
+    """! @brief A region's description and tags as the mwg-rs:Description JSON."""
     tags = []
     for t in region.get("region_tags", []) or []:
         if isinstance(t, str):
@@ -1869,7 +1566,7 @@ def _region_desc_to_json(region):
             continue
         entry = {"tag": t.get("tag", ""), "generated": bool(t.get("generated", False))}
         if entry["generated"]:
-            # only generated tags carry a confirmed flag; absence == not-yet-confirmed
+            # only generated tags carry confirmed
             if "confirmed" in t and t["confirmed"] is not None:
                 entry["confirmed"] = bool(t["confirmed"])
         tags.append(entry)
@@ -1880,16 +1577,14 @@ def _region_desc_to_json(region):
     return json.dumps(payload, ensure_ascii=False)
 
 def _region_desc_from_json(raw):
-    """Parse the mwg-rs:Description JSON blob back into
-    (description, tags list, class_str). class_str is '' when the blob carries
-    no explicit class (caller falls back to the instance Name).
-    Tolerant of empty / malformed / plain-text values."""
+    """! @brief Parse mwg-rs:Description JSON (plain text is taken as the description).
+    @return (description, tags, class name or '').
+    """
     if not raw:
         return "", [], ""
     try:
         obj = json.loads(raw)
     except Exception:
-        # Legacy or hand-edited: treat the whole thing as free-text description.
         return str(raw), [], ""
     if not isinstance(obj, dict):
         return "", [], ""
@@ -1906,16 +1601,12 @@ def _region_desc_from_json(raw):
     return str(obj.get("description", "") or ""), tags, str(obj.get("class", "") or "")
 
 def _parse_mwg_regions(xmp: dict) -> list:
-    """!
-    @brief Read regions from Xmp.mwg-rs.Regions.
-    @return Region list, or [] if none present.
-    """
+    """! @brief Regions from Xmp.mwg-rs.Regions, or []."""
     return mwg_fields.parse_region_list(xmp, _region_desc_from_json)
 
 def _parse_legacy_iptc_regions(xmp: dict) -> list:
-    """!
-    @brief Read Xmp.iptcExt.ImageRegion regions, folded into the MWG-RS model.
-    @return Center-form region dicts; non-rectangle and pixel-unit regions skipped.
+    """! @brief Xmp.iptcExt.ImageRegion regions as centre-form boxes (non-rectangles and
+    pixel units skipped).
     """
     regions = []
     indices = {re.search(r'\[(\d+)\]', k).group(1)
@@ -1925,7 +1616,7 @@ def _parse_legacy_iptc_regions(xmp: dict) -> list:
         rb = f'{p}/iptcExt:RegionBoundary'
 
         def _g(*keys, default=None):
-            """! @brief First non-empty value among alternative key spellings."""
+            """! @brief The first non-empty value among alternative key spellings."""
             for k in keys:
                 v = xmp.get(k)
                 if v is not None and str(v).strip() != "":
@@ -1935,9 +1626,9 @@ def _parse_legacy_iptc_regions(xmp: dict) -> list:
         shape = str(_g(f'{rb}/iptcExt:RbShape', default='rectangle')).lower()
         unit  = str(_g(f'{rb}/iptcExt:RbUnit', default='relative')).lower()
         if shape and shape != 'rectangle':
-            continue                      # circle/polygon don't fit the box model
+            continue  # not a rectangle
         if unit and unit not in ('relative', ''):
-            continue                      # pixel units need image dims we lack here
+            continue  # pixel units need the image size
         try:
             w  = float(_g(f'{rb}/iptcExt:RbW', f'{rb}/iptcExt:rbW', default=0))
             h  = float(_g(f'{rb}/iptcExt:RbH', f'{rb}/iptcExt:rbH', default=0))
@@ -1958,16 +1649,12 @@ def _parse_legacy_iptc_regions(xmp: dict) -> list:
     return regions
 
 def _build_mwg_regions_xml(regions: list) -> tuple[str, str]:
-    """!
-    @brief Emit the <mwg-rs:Regions> XML block.
-    @return (xml, ns_attrs); xml is '' when there are no regions.
-    """
+    """! @brief The <mwg-rs:Regions> block. @return (xml, namespace attributes); xml is '' with no regions."""
     return mwg_fields.build_region_list_xml(
         regions, saxutils.escape,
         _region_desc_to_json, _region_filter_link,
         lambda: str(uuid.uuid4()))
 
-# ── Date resolution ───────────────────────────────────────────────────────────
 
 _MONTHS = {m.lower(): i for i, m in enumerate(
     ["", "January", "February", "March", "April", "May", "June", "July",
@@ -1977,17 +1664,14 @@ _MONTHS.update({m.lower(): i for i, m in enumerate(
      "Oct", "Nov", "Dec"]) if m})
 
 def _parse_any_date(val) -> tuple[str, float] | None:
-    """!
-    @brief Parse a date/datetime value in almost any common layout.
-    @return (isodate 'YYYY-MM-DD', epoch_seconds) or None if nothing usable.
-    @note Time and timezone are used for the epoch when present but the stored
-          date string is the local calendar date. Two-digit years and impossible
-          dates are rejected; day/month order is disambiguated when a value >12
-          forces it, else assumed the dominant field order of the source.
+    """! @brief Parse a date in most common layouts (ISO / EXIF, year-last with day or
+    month first, textual month, YYYYMMDD, bare year).
+    @return (YYYY-MM-DD, epoch), or None. Day and month are told apart when one
+            exceeds 12, else day-first is assumed.
     """
     if val is None:
         return None
-    # exiv2/pyexiv2 sometimes returns lists (repeated tags) — take first usable.
+    # exiv2 can return a list for repeated tags
     if isinstance(val, (list, tuple)):
         for v in val:
             r = _parse_any_date(v)
@@ -1998,9 +1682,7 @@ def _parse_any_date(val) -> tuple[str, float] | None:
     if not s or s in ("0000:00:00 00:00:00", "0000-00-00", "0000:00:00"):
         return None
 
-    # 1) ISO 8601 and the EXIF 'YYYY:MM:DD[ T]HH:MM:SS' family. Accept ':' or '-'
-    #    or '/' between date parts, optional time, optional fractional seconds,
-    #    optional 'Z'/±HH:MM offset. This is the overwhelmingly common case.
+    # 1) ISO 8601 / EXIF 'YYYY:MM:DD HH:MM:SS' with optional fraction and offset
     m = re.match(
         r'^\s*(\d{4})[:/-](\d{1,2})[:/-](\d{1,2})'
         r'(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?'
@@ -2010,27 +1692,22 @@ def _parse_any_date(val) -> tuple[str, float] | None:
         hh = int(m.group(4) or 0); mm = int(m.group(5) or 0); ss = int(m.group(6) or 0)
         return _mk_date(y, mo, d, hh, mm, ss, m.group(7))
 
-    # 2) Slash/dash/dot dates with the YEAR LAST: DD-MM-YYYY, MM/DD/YYYY,
-    #    DD.MM.YYYY, with optional trailing time. Order disambiguated below.
+    # 2) year last: DD-MM-YYYY, MM/DD/YYYY, DD.MM.YYYY
     m = re.match(
         r'^\s*(\d{1,2})[./-](\d{1,2})[./-](\d{4})'
         r'(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?\s*$', s)
     if m:
         a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
         hh = int(m.group(4) or 0); mm = int(m.group(5) or 0); ss = int(m.group(6) or 0)
-        # If one field is >12 it must be the day; otherwise assume DD/MM (the
-        # more common worldwide order for year-last strings). US MM/DD still
-        # resolves correctly whenever the day is >12, and same-value ambiguity
-        # (e.g. 03/04) can't be resolved without locale, so we pick one.
         if a > 12 and b <= 12:
             d, mo = a, b
         elif b > 12 and a <= 12:
             d, mo = b, a
         else:
-            d, mo = a, b   # assume day-first
+            d, mo = a, b  # day first
         return _mk_date(y, mo, d, hh, mm, ss, None)
 
-    # 3) Textual month: '22 May 2021', 'May 22, 2021', 'May 2021'.
+    # 3) textual month
     m = re.match(r'^\s*(\d{1,2})\s+([A-Za-z]{3,9})\.?\s+(\d{4})', s)
     if m and m.group(2).lower() in _MONTHS:
         return _mk_date(int(m.group(3)), _MONTHS[m.group(2).lower()], int(m.group(1)), 0, 0, 0, None)
@@ -2041,13 +1718,13 @@ def _parse_any_date(val) -> tuple[str, float] | None:
     if m and m.group(1).lower() in _MONTHS:
         return _mk_date(int(m.group(2)), _MONTHS[m.group(1).lower()], 1, 0, 0, 0, None)
 
-    # 4) Compact 'YYYYMMDD' (e.g. IPTC DateCreated raw) with optional 'HHMMSS'.
+    # 4) YYYYMMDD[HHMMSS]
     m = re.match(r'^\s*(\d{4})(\d{2})(\d{2})(?:(\d{2})(\d{2})(\d{2}))?\s*$', s)
     if m:
         g = [int(x) if x else 0 for x in m.groups()]
         return _mk_date(g[0], g[1], g[2], g[3], g[4], g[5], None)
 
-    # 5) Bare year 'YYYY' — least precise, but better than nothing for search.
+    # 5) bare year
     m = re.match(r'^\s*(\d{4})\s*$', s)
     if m:
         return _mk_date(int(m.group(1)), 1, 1, 0, 0, 0, None)
@@ -2055,8 +1732,8 @@ def _parse_any_date(val) -> tuple[str, float] | None:
     return None
 
 def _mk_date(y, mo, d, hh, mm, ss, tz) -> tuple[str, float] | None:
-    """Validate parts and return ('YYYY-MM-DD', epoch) or None if impossible."""
-    if not (1826 <= y <= 2100):   # first photograph ~1826; guard junk years
+    """! @brief (YYYY-MM-DD, epoch) from parts, or None when impossible."""
+    if not (1826 <= y <= 2100):  # photography starts ~1826
         return None
     if not (1 <= mo <= 12):
         return None
@@ -2064,7 +1741,7 @@ def _mk_date(y, mo, d, hh, mm, ss, tz) -> tuple[str, float] | None:
         return None
     try:
         from datetime import timezone, timedelta
-        # Clamp obviously-bad day-of-month rather than rejecting the whole date.
+        # an impossible day of month is clamped, not rejected
         for dd in (d, 28):
             try:
                 base = datetime(y, mo, dd, min(hh, 23), min(mm, 59), min(ss, 59))
@@ -2088,37 +1765,30 @@ def _mk_date(y, mo, d, hh, mm, ss, tz) -> tuple[str, float] | None:
     except Exception:
         return None
 
-# Bucket classification. Order matters: the more specific qualifiers are tested
-# before the generic "actual", because e.g. 'DateTimeOriginal' contains both
-# 'date' and 'original'.
-# A few tag names carry a semantic that their plain wording doesn't reveal.
-# EXIF 'CreateDate' (exiftool) IS DateTimeDigitized; EXIF 'ModifyDate' IS the
-# base DateTime ("actual"). Keyed by the trailing tag name, case-insensitive.
+# Date fields whose name hides their meaning, by tag name. Specific qualifiers
+# are tested before the generic "actual" ("DateTimeOriginal" contains both).
 _DATE_NAME_OVERRIDES = {
-    "createdate": "d_digitized",       # 0x9004 == DateTimeDigitized
+    "createdate": "d_digitized",  # DateTimeDigitized
     "datetimedigitized": "d_digitized",
-    "modifydate": "d_actual",          # 0x0132 == DateTime (the "actual" date)
+    "modifydate": "d_actual",  # DateTime
     "datetime": "d_actual",
     "datetimeoriginal": "d_original",
 }
 
 def _date_bucket(field_name: str) -> str | None:
-    """Which semantic bucket a date-bearing field name belongs to, or None."""
+    """! @brief The date bucket of a field name, or None."""
     n = field_name.lower()
     tail = n.rsplit(".", 1)[-1]
-    # 'createdate' means DateTimeDigitized in EXIF but "resource created"
-    # (actual) in XMP, so only apply the EXIF-specific overrides to EXIF fields.
+    # In XMP 'createdate' means created (actual); the EXIF overrides apply to EXIF only.
     if n.startswith("exif.") and tail in _DATE_NAME_OVERRIDES:
         return _DATE_NAME_OVERRIDES[tail]
-    if tail in ("datetimeoriginal",):   # unambiguous across standards
+    if tail in ("datetimeoriginal",):
         return "d_original"
-    # Must look date/time-bearing at all. 'digitized'/'modified'/'created'/
-    # 'capture' imply a time even without the word 'date' in some schemas.
+    # names that imply a time without saying 'date'
     if not any(k in n for k in ("date", "time", "digitized", "modified",
                                 "created", "capture")):
         return None
-    # Exclude non-temporal look-alikes (e.g. 'TimeZone'/'OffsetTime' carry no
-    # date; subsec fields hold fractions, not dates — their values won't parse).
+    # time zones and sub-second fields are not dates
     if "zone" in n or "offsettime" in n or "subsectime" in n:
         return None
     if "original" in n:
@@ -2129,13 +1799,11 @@ def _date_bucket(field_name: str) -> str | None:
         return "d_digitized"
     if "modif" in n:
         return "d_modified"
-    # Plain create/created/creation and bare date/datetime -> the "actual" date.
+    # plain created / date / datetime
     return "d_actual"
 
 def _iter_metadata_date_fields(filepath: str):
-    """Yield (fully_qualified_name, raw_value) for every date-ish field on the
-    file across EXIF, IPTC and XMP — both schema-mapped fields and unmapped
-    ('unknown') tags, so nothing like a SubIFD DateTimeDigitized is missed."""
+    """! @brief (field name, raw value) for every date-like field in EXIF, IPTC and XMP, mapped or not."""
     readers = (
         ("Exif", exif_import.read_exif, "groups"),
         ("Iptc", iptc_import.read_iptc, "records"),
@@ -2157,15 +1825,11 @@ def _iter_metadata_date_fields(filepath: str):
                     yield f"{prefix}.{grp}.{u.get('name')}", u.get("raw")
 
 def _resolve_dates(filepath: str, mtime: float | None = None) -> dict:
-    """!
-    @brief Resolve the five semantic date buckets for one file.
-    @return {"d_actual":iso|None, "d_actual_epoch":float|None, ... , "sources":{bucket:field}}
-    @note Metadata beats inode times. Within a bucket the EARLIEST valid date
-          wins for capture-like buckets (actual/original/capture/digitized) and
-          the LATEST wins for 'modified' — a file edited twice keeps the most
-          recent edit, while capture time is the earliest evidence of the shot.
-          Inode ctime feeds d_digitized (a proxy for "entered this system") and
-          inode mtime feeds d_modified, but only when no metadata filled them.
+    """! @brief The five date buckets of a file.
+    Metadata beats file times. The earliest date wins in capture-like buckets,
+    the latest in d_modified. File creation time fills d_digitized and mtime
+    d_modified only when metadata left them empty.
+    @return {"d_actual", "d_actual_epoch", ..., "sources": {bucket: field}}.
     """
     buckets = {b: None for b in ("d_actual", "d_original", "d_capture",
                                  "d_digitized", "d_modified")}
@@ -2190,10 +1854,10 @@ def _resolve_dates(filepath: str, mtime: float | None = None) -> dict:
         iso, epoch = parsed
         consider(bucket, iso, epoch, name, prefer_latest=(bucket == "d_modified"))
 
-    # Inode fallbacks — only where metadata left the bucket empty.
+    # file times only where metadata left a bucket empty
     try:
         st = os.stat(filepath)
-        # birthtime (creation) where the platform exposes it, else ctime.
+        # birthtime where available, else ctime
         ctime = getattr(st, "st_birthtime", None) or st.st_ctime
         mt = mtime if mtime is not None else st.st_mtime
         if buckets["d_digitized"] is None and ctime:
@@ -2213,24 +1877,15 @@ def _resolve_dates(filepath: str, mtime: float | None = None) -> dict:
     return out
 
 def _store_dates(rel_path: str, dates: dict) -> None:
-    """Write resolved date buckets onto the files row (no commit; caller batches)."""
-    _db().execute(
-        "UPDATE files SET d_actual=?, d_actual_epoch=?, d_original=?, "
-        "d_original_epoch=?, d_capture=?, d_capture_epoch=?, d_digitized=?, "
-        "d_digitized_epoch=?, d_modified=?, d_modified_epoch=?, date_sources=? "
-        "WHERE rel_path=?",
-        (dates["d_actual"], dates["d_actual_epoch"],
-         dates["d_original"], dates["d_original_epoch"],
-         dates["d_capture"], dates["d_capture_epoch"],
-         dates["d_digitized"], dates["d_digitized_epoch"],
-         dates["d_modified"], dates["d_modified_epoch"],
-         json.dumps(dates.get("sources") or {}), rel_path))
+    cols = ("d_actual", "d_original", "d_capture", "d_digitized", "d_modified")
+    row = {c: dates[c] for c in cols}
+    row.update({f"{c}_epoch": dates[f"{c}_epoch"] for c in cols})
+    row["date_sources"] = json.dumps(dates.get("sources") or {})
+    update_file(rel_path, db=row, dont_write=True, commit=False)
 
 def _set_compressed_bpp(filepath: str, width: int | None = None,
                         height: int | None = None) -> None:
-    """!
-    @brief Compute and write EXIF CompressedBitsPerPixel for a compressed file.
-    """
+    """! @brief Write EXIF CompressedBitsPerPixel for a compressed file."""
     try:
         w, h = width, height
         if not (w and h):
@@ -2240,16 +1895,13 @@ def _set_compressed_bpp(filepath: str, width: int | None = None,
             h, w = img.shape[:2]
         size = os.path.getsize(filepath)
         bpp = (size * 8.0) / (w * h)
-        rational = f"{int(round(bpp * 1000))}/1000"   # EXIF rational num/1000
-        exif_export.write_exif(filepath, {"CompressedBitsPerPixel": rational})
+        rational = f"{int(round(bpp * 1000))}/1000"  # EXIF rational
+        update_file(filepath, exif={"CompressedBitsPerPixel": rational}, history=False)
     except Exception as e:
         access_logger.warning(f"_set_compressed_bpp {filepath}: {e}")
 
 def _exif_rating(filepath: str) -> int | None:
-    """!
-    @brief Map the file's EXIF Rating/RatingPercent to a 0-5 star rating.
-    @return Star rating, or None if neither tag is present or mappable.
-    """
+    """! @brief EXIF RatingPercent (else Rating) as 0..5 stars, or None."""
     try:
         edata = exif_import.read_exif(filepath)
         raw = {}
@@ -2257,7 +1909,6 @@ def _exif_rating(filepath: str) -> int | None:
             for f in g.get("fields", []):
                 if f.get("present") and f.get("name") in ("Rating", "RatingPercent"):
                     raw[f["name"]] = f.get("raw")
-        # RatingPercent wins (clean 0-100 -> stars); else fall back to Rating.
         for name, conv in (("RatingPercent", exif_export._rating_percent),
                            ("Rating",        exif_export._rating_halfstar)):
             if name in raw and raw[name] is not None:
@@ -2269,10 +1920,7 @@ def _exif_rating(filepath: str) -> int | None:
     return None
 
 def _exif_description(filepath: str) -> str:
-    """!
-    @brief Read the file's EXIF ImageDescription as a stripped string.
-    @return The description, or "" if absent or unreadable.
-    """
+    """! @brief EXIF ImageDescription, or ''."""
     try:
         edata = exif_import.read_exif(filepath)
         for g in edata.get("groups", []):
@@ -2285,10 +1933,7 @@ def _exif_description(filepath: str) -> str:
     return ""
 
 def _read_xp_fields(filepath: str) -> dict:
-    """!
-    @brief Read the Windows Explorer XP EXIF tags.
-    @return Dict with any present keys: title, comment, author, keywords, subject.
-    """
+    """! @brief The Windows XP EXIF tags present: title, comment, author, keywords, subject."""
     out = {}
     names = {"XPTitle": "title", "XPComment": "comment", "XPAuthor": "author",
              "XPKeywords": "keywords", "XPSubject": "subject"}
@@ -2306,9 +1951,8 @@ def _read_xp_fields(filepath: str) -> dict:
     return out
 
 def _ingest_xp(filepath: str, tags: list, desc: str) -> tuple[list, str, dict | None]:
-    """!
-    @brief Fold Windows XP EXIF tags into scan-time metadata.
-    @return (tags, description, xp_provenance) where provenance is None if no XP tags.
+    """! @brief Fold the Windows XP EXIF tags into tags and description.
+    @return (tags, description, provenance or None).
     """
     xp = _read_xp_fields(filepath)
     if not xp:
@@ -2336,12 +1980,7 @@ def _ingest_xp(filepath: str, tags: list, desc: str) -> tuple[list, str, dict | 
 
 def _regions_overlap(a: dict, b: dict, iou_thresh: float = 0.5,
                      center_thresh: float = 0.04) -> bool:
-    """!
-    @brief Test whether two regions describe the same box.
-    @param a First region (normalized center-form: cx, cy, w, h).
-    @param b Second region, same form.
-    @return True if the boxes match by center proximity or IoU threshold.
-    """
+    """! @brief True when two centre-form boxes are the same region (close centres or IoU)."""
     if (abs(a["cx"] - b["cx"]) <= center_thresh and
             abs(a["cy"] - b["cy"]) <= center_thresh and
             abs(a["w"] - b["w"]) <= center_thresh * 2 and
@@ -2361,11 +2000,8 @@ def _regions_overlap(a: dict, b: dict, iou_thresh: float = 0.5,
     return union > 0 and (inter / union) >= iou_thresh
 
 def _merge_region(keep: dict, incoming: dict) -> dict:
-    """!
-    @brief Backfill a region's empty fields from a lower-precedence duplicate.
-    @param keep Higher-precedence region; mutated in place and returned.
-    @param incoming Lower-precedence region whose fields fill gaps in keep.
-    @return keep, with missing fields filled and confirmed OR-ed in.
+    """! @brief Fill a region's empty fields from a lower-precedence duplicate.
+    @return `keep`, updated in place (confirmed is OR-ed).
     """
     if not keep.get("class_name") or keep["class_name"] == "object":
         if incoming.get("class_name") and incoming["class_name"] != "object":
@@ -2389,14 +2025,12 @@ def _merge_region(keep: dict, incoming: dict) -> dict:
     return keep
 
 def _merge_regions(*sources: list) -> list:
-    """!
-    @brief Deduplicate region lists across metadata standards.
-    @param sources Region lists in precedence order; earlier sources win on conflict.
-    @return One merged list with overlapping boxes collapsed.
+    """! @brief Merge region lists from several standards, earlier lists winning.
+    @return one list with duplicates collapsed.
     """
     merged = []
     for src in sources:
-        prior = list(merged)  # snapshot: only fold against EARLIER sources
+        prior = list(merged)  # fold only against earlier sources
         for r in src or []:
             for existing in prior:
                 if _regions_overlap(existing, r):
@@ -2407,9 +2041,8 @@ def _merge_regions(*sources: list) -> list:
     return merged
 
 def read_metadata(filepath: str) -> dict:
-    """!
-    @brief Read all tags, description, rating, regions and folded XMP/EXIF fields for a file.
-    @return Metadata dict; falls back to EXIF-only when no XMP is present.
+    """! @brief Everything known about a file: tags, description, rating, regions and
+    folded XMP / EXIF fields (EXIF only when there is no XMP).
     """
     try:
         tags, desc, regions = [], "", []
@@ -2554,8 +2187,7 @@ def read_metadata(filepath: str) -> dict:
         except Exception as e:
             access_logger.warning(f"prism_extras {filepath}: {e}")
 
-        # Albums from mwg-coll:Collections. Parsed off the XMP packet we already
-        # resolved above (sidecar or embedded) — no extra file read.
+        # albums from mwg-coll:Collections, in the packet already read
         try:
             albums = mwg_fields.parse_collections(xmp)
         except Exception as e:
@@ -2583,17 +2215,11 @@ def read_metadata(filepath: str) -> dict:
                 "albums": [],
                 "analysis": None, "flag": None, "pose": None}
 
-# ── Albums ────────────────────────────────────────────────────────────────────
-# Membership is many-to-many: one image can sit in any number of albums. The
-# XMP sidecar (mwg-coll:Collections) is the source of truth; the `files.albums`
-# column and the `album_members` table are caches rebuilt from it, which is what
-# makes a library survive being copied to a new system.
+# -- albums: many-to-many; the sidecar's mwg-coll:Collections is the source,
+# files.albums and album_members are caches --
 
 def _sync_album_cache(rel_path: str, albums: list) -> None:
-    """!
-    @brief Point the DB album caches (files.albums + album_members) at `albums` for one file.
-    @note Does not commit; callers batch their commits.
-    """
+    """! @brief Point one file's album caches at `albums` (no commit)."""
     names = list(dict.fromkeys(
         s for a in (albums or []) if (s := str(a).strip())))
     db = _db()
@@ -2609,10 +2235,7 @@ def _sync_album_cache(rel_path: str, albums: list) -> None:
                    "VALUES (?,?,?)", (n, rel_path, now))
 
 def _file_albums(rel_path: str) -> list:
-    """!
-    @brief Album names for one file, from the DB cache.
-    @return List of album names, or [] if none/unreadable.
-    """
+    """! @brief One file's album names from the cache, or []."""
     row = _db().execute("SELECT albums FROM files WHERE rel_path=?",
                         (rel_path,)).fetchone()
     if not row:
@@ -2623,25 +2246,16 @@ def _file_albums(rel_path: str) -> list:
         return []
 
 def _set_file_albums(rel_path: str, albums: list) -> bool:
-    """!
-    @brief Write a file's album list through to its XMP sidecar and the DB cache.
-    @return True on success, False if the file is missing.
-    """
+    """! @brief Set a file's albums (sidecar and cache). @return False when the file is missing."""
     fp = get_safe_path(MEDIA_DIR, rel_path)
     if not fp or not os.path.exists(fp):
         return False
-    meta = read_metadata(fp)
-    return write_metadata(
-        fp, meta.get("tags", []), meta.get("description", ""),
-        meta.get("regions", []), analysis=meta.get("analysis"),
-        flag=meta.get("flag"), pose=meta.get("pose"),
-        page_count=meta.get("page_count"), albums=albums)
+    return update_file(fp, set={"albums": list(albums or [])}).get("success", False)
 
 def _album_apply(rel_paths: list, transform) -> int:
-    """!
-    @brief Apply a membership change to many files, writing only those that change.
-    @param transform Maps a file's current album list to its new one.
-    @return Number of files actually changed.
+    """! @brief Apply an album-membership change to many files.
+    @param transform  fn(current albums) -> new albums.
+    @return how many files changed.
     """
     n = 0
     for rp in rel_paths:
@@ -2652,10 +2266,7 @@ def _album_apply(rel_paths: list, transform) -> int:
     return n
 
 def _album_add(rel_paths: list, album: str) -> int:
-    """!
-    @brief Add many files to one album.
-    @return Number of files actually changed.
-    """
+    """! @brief Add files to an album. @return how many changed."""
     album = str(album).strip()
     if not album:
         return 0
@@ -2668,21 +2279,14 @@ def _album_add(rel_paths: list, album: str) -> int:
     return n
 
 def _album_remove(rel_paths: list, album: str) -> int:
-    """!
-    @brief Remove many files from one album.
-    @return Number of files actually changed.
-    """
+    """! @brief Remove files from an album. @return how many changed."""
     album = str(album).strip()
     n = _album_apply(rel_paths, lambda cur: [a for a in cur if a != album])
     _db().commit()
     return n
 
 def _album_list() -> list:
-    """!
-    @brief List every album with its member count and a cover thumbnail.
-    @return Album dicts (name, description, cover, count, created); cover falls
-            back to the first member when unset or stale.
-    """
+    """! @brief Every album with its count and cover (the first member when unset or stale)."""
     vclauses, vp = module_host.albums_clause("a")
     where = (" WHERE " + " AND ".join(vclauses)) if vclauses else ""
     rows = _db().execute(f"""
@@ -2713,10 +2317,8 @@ def _album_list() -> list:
                     **module_host.album_info(r["name"])})
     return out
 
-# Properties write_metadata owns and rebuilds on every write. Everything else
-# in a sidecar (a capture date or GPS from an import, gallery-dl's XMP mapping,
-# another tool's fields) is carried across the rewrite as XML, verbatim, in the
-# same single write — so editing tags or albums never erases it.
+# Properties write_metadata rebuilds on each write; everything else in a
+# sidecar is carried over verbatim.
 _XMP_DC_NS = "http://purl.org/dc/elements/1.1/"
 _XMP_RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 def _xmp_owned(ns: str, local: str) -> bool:
@@ -2725,8 +2327,7 @@ def _xmp_owned(ns: str, local: str) -> bool:
             or (ns == _PRISM_NS and local == "PageCount"))
 
 def _foreign_xmp_xml(xmp_path: str) -> str:
-    """! @brief Serialised XML of the properties in an existing sidecar that
-    write_metadata doesn't own (attribute-form properties become elements)."""
+    """! @brief The sidecar properties write_metadata doesn't own, as XML (attributes become elements)."""
     if not os.path.exists(xmp_path):
         return ""
     import xml.etree.ElementTree as ET
@@ -2767,11 +2368,11 @@ def write_metadata(filepath: str, tags: list, description: str, regions: list,
                    analysis: dict | None = None, flag: dict | None = None,
                    pose: dict | None = None, page_count: int | None = None,
                    albums: list | None = None, anim_delays: dict | None = None) -> bool:
-    """!
-    @brief Write a file's full metadata packet to its XMP sidecar and DB row atomically.
-    @param pose Pass {"clear": True} to delete a stored skeleton; None preserves the existing one.
-    @param albums None preserves current membership; an explicit list (incl. []) replaces it.
-    @return True on success, False on failure (also recorded in the failure surface).
+    """! @brief Write a file's whole metadata packet to its sidecar and DB row.
+    Low-level: everything else goes through update_file().
+    @param pose    {"clear": True} deletes the skeleton; None keeps it.
+    @param albums  None keeps membership; a list (even []) replaces it.
+    @return True on success; failures are recorded for the UI.
     """
     try:
         try:
@@ -2875,16 +2476,12 @@ def write_metadata(filepath: str, tags: list, description: str, regions: list,
         _record_metadata_failure(filepath, e)
         return False
 
-# ── metadata-write failure surface ────────────────────────────────────────────
 _metadata_failures = {}
 _metadata_failures_lock = threading.Lock()
 _METADATA_FAILURE_MAX = 500
 
 def _record_metadata_failure(filepath: str, exc: Exception) -> None:
-    """!
-    @brief Record that an XMP write failed for a file, in memory and on its DB row.
-    @note Best-effort; never raises (runs inside an exception handler).
-    """
+    """! @brief Record a failed sidecar write (memory and DB row). Never raises."""
     try:
         rel = _rel(filepath)
     except Exception:
@@ -2907,9 +2504,7 @@ def _record_metadata_failure(filepath: str, exc: Exception) -> None:
         pass
 
 def _clear_metadata_failure(filepath: str, defer_commit: bool = False) -> None:
-    """!
-    @brief Clear a recorded metadata-write failure for a file.
-    """
+    """! @brief Clear a recorded sidecar-write failure."""
     try:
         rel = _rel(filepath)
     except Exception:
@@ -2929,18 +2524,387 @@ def _clear_metadata_failure(filepath: str, defer_commit: bool = False) -> None:
                 pass
 
 def metadata_failures() -> list:
-    """!
-    @brief Current unresolved metadata-write failures, newest first.
-    @return List of failure entries sorted by time descending.
-    """
+    """! @brief Unresolved sidecar-write failures, newest first."""
     with _metadata_failures_lock:
         return sorted(_metadata_failures.values(),
                       key=lambda e: e["when"], reverse=True)
 
-def _sync_yolo(filepath: str, regions: list) -> None:
-    """!
-    @brief Write a file's confirmed regions out as a YOLO label .txt (or remove it).
+# -- update_file: the one write path for file metadata and per-file DB rows.
+# It knows how a change reaches the file (sidecar, EXIF, XMP, a kind's own
+# writer), mirrors it into the DB, logs it, and fires the caches / events.
+# dont_write=True keeps data in the DB only (embeddings, caches, flags). --
+FILE_FIELDS = ("tags", "description", "regions", "analysis", "flag", "pose",
+               "page_count", "albums", "anim_delays")
+_FILE_LIST_FIELDS = ("tags", "regions", "albums")
+_metadata_writers = {}  # media kind -> (writer, owned field names, claims)
+_files_columns_cache = set()
+_IDENT_OK = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def register_metadata_writer(kind: str, fn, fields=(), claims=None) -> None:
+    """! @brief Route update_file(set=...) for a media kind to a module's writer.
+    @param fn      fn(rel, abs_path, fields, dont_write) -> falsy when the file is
+                   unknown, else True or a dict of extra result keys.
+    @param fields  the fields the writer owns; everything else takes the normal path.
+    @param claims  fn(rel) -> bool for files the extension can't place (a .txt book).
     """
+    _metadata_writers[kind] = (fn, frozenset(fields), claims)
+
+
+def _metadata_writer_for(rel):
+    """! @brief (writer, owned fields) for a file, or (None, {})."""
+    w = _metadata_writers.get(mt.kind(rel))
+    if w:
+        return w[0], w[1]
+    for fn, owned, claims in _metadata_writers.values():
+        try:
+            if claims and claims(rel):
+                return fn, owned
+        except Exception:
+            pass
+    return None, frozenset()
+
+
+def _files_columns(refresh=False) -> set:
+    if refresh:
+        _files_columns_cache.clear()
+    if not _files_columns_cache:
+        _files_columns_cache.update(
+            r[1] for r in _db().execute("PRAGMA table_info(files)").fetchall())
+    return _files_columns_cache
+
+
+def _ident(name: str) -> str:
+    if not isinstance(name, str) or not _IDENT_OK.match(name):
+        raise ValueError(f"bad identifier {name!r}")
+    return name
+
+
+def _norm_target(target):
+    """! @brief (rel, abs) for a rel or abs path; abs is None when outside the library."""
+    if not target:
+        raise ValueError("update_file: no target")
+    media_root = os.path.abspath(MEDIA_DIR) + os.sep
+    if os.path.isabs(target) or os.path.abspath(target).startswith(media_root):
+        return _rel(target), target
+    fp = get_safe_path(MEDIA_DIR, target)
+    return target, fp
+
+
+def _merge_field(name, cur, set_=None, add=None, remove=None, has_set=False):
+    """! @brief One field's value after set, then add, then remove."""
+    val = set_ if has_set else cur
+    if add is not None:
+        if name == "tags":
+            out = list(val or [])
+            idx = {tag_name(t).lower(): i for i, t in enumerate(out)}
+            for t in add:
+                nm = tag_name(t)
+                if not nm:
+                    continue
+                k = nm.lower()
+                if k in idx:
+                    if tag_is_confirmed(t) and not tag_is_confirmed(out[idx[k]]):
+                        out[idx[k]] = make_tag(nm, confirmed=True)
+                else:
+                    idx[k] = len(out)
+                    out.append(make_tag(nm, confirmed=tag_is_confirmed(t)))
+            val = out
+        elif name == "regions":
+            val = list(val or []) + list(add)
+        elif name == "albums":
+            val = list(val or []) + [a for a in add if a not in (val or [])]
+        elif name == "description":
+            cur_d, add_d = (val or "").strip(), str(add or "").strip()
+            if add_d and add_d not in cur_d:
+                val = f"{cur_d}\n\n{add_d}" if cur_d else add_d
+        else:
+            raise ValueError(f"update_file: cannot add to {name}")
+    if remove is not None and remove is not False:
+        if name == "tags":
+            drop = {tag_name(t).lower() for t in remove}
+            val = [t for t in (val or []) if tag_name(t).lower() not in drop]
+        elif name == "regions":
+            if callable(remove):
+                val = [r for r in (val or []) if not remove(r)]
+            else:
+                gone = set(remove)
+                val = [r for i, r in enumerate(val or []) if i not in gone]
+        elif name == "albums":
+            val = [a for a in (val or []) if a not in set(remove)]
+        elif name == "description":
+            val = ""
+        elif name == "pose":
+            val = {"clear": True}
+        else:  # analysis / flag / page_count / anim_delays
+            val = {} if name in ("analysis", "flag", "anim_delays") else None
+    return val
+
+
+def _mirror_exif_db(rel, db_cols):
+    """! @brief Mirror the DB columns an EXIF write reports (description, rating)."""
+    db = _db()
+    for col, val in (db_cols or {}).items():
+        if col not in _EXIF_DB_COLUMNS:
+            continue
+        if col == "rating":
+            if val is None:
+                db.execute("UPDATE files SET rating=NULL, rating_user=0 WHERE rel_path=?", (rel,))
+            else:
+                try:
+                    db.execute("UPDATE files SET rating=?, rating_user=1 WHERE rel_path=?",
+                               (int(val), rel))
+                except (TypeError, ValueError):
+                    continue
+        else:
+            db.execute(f"UPDATE files SET {_ident(col)}=? WHERE rel_path=?",
+                       ("" if val is None else str(val), rel))
+
+
+def _update_table(table, target, *, set_, remove, key, where, defaults=None):
+    """! @brief Upsert / update / delete rows of a module table keyed by rel_path (+ key)."""
+    table = _ident(table)
+    db = _db()
+    key = dict(key or {})
+    if target is not None:
+        rel = _norm_target(target)[0] if isinstance(target, str) else None
+        if rel is None:
+            raise ValueError("update_file: table target must be a path")
+        key = {"rel_path": rel, **key}
+    conds = [f"{_ident(k)}=?" for k in key]
+    params = list(key.values())
+    if where:
+        conds.append(f"({where[0]})")
+        params += list(where[1] if len(where) > 1 else [])
+    if not conds:
+        raise ValueError("update_file: a table write needs a target, key or where")
+    cond = " AND ".join(conds)
+    if remove:
+        return db.execute(f"DELETE FROM {table} WHERE {cond}", params).rowcount
+    if not set_:
+        return 0
+    cols = [_ident(c) for c in set_]
+    n = db.execute(f"UPDATE {table} SET {', '.join(c + '=?' for c in cols)} WHERE {cond}",
+                   list(set_.values()) + params).rowcount
+    if n == 0 and not where:
+        row = {**(defaults or {}), **key, **set_}
+        db.execute(f"INSERT INTO {table}({', '.join(_ident(c) for c in row)}) "
+                   f"VALUES({', '.join('?' * len(row))})", list(row.values()))
+        n = 1
+    return n
+
+
+def _present(fp) -> bool:
+    """! @brief True when the media file or its sidecar exists (a tier object may be away)."""
+    return bool(fp) and (os.path.exists(fp) or os.path.exists(os.path.splitext(fp)[0] + ".xmp"))
+
+
+def update_file(target=None, *, set=None, add=None, remove=None, exif=None, xmp=None,
+                db=None, table="files", key=None, where=None, defaults=None, dont_write=False,
+                history=True, meta=None, force=False, commit=True) -> dict:
+    """! @brief The one write path for file metadata and per-file DB rows.
+    @param target      rel or abs path, or a list of them.
+    @param set         {field: value} replacing file fields; the columns to upsert
+                       for a module table.
+    @param add         tags (union; a confirmed tag confirms a suggestion), regions
+                       (appended), albums (union), description (new paragraph).
+    @param remove      tags / albums (names), regions (indices or fn(region) -> True),
+                       description / pose / flag / analysis / page_count /
+                       anim_delays (True clears); True deletes a module-table row.
+    @param exif        {Tag: value}; None deletes the tag.
+    @param xmp         {"ns.Prop": value}.
+    @param db          {column: value} on the files row (never in the file).
+    @param table       "files" or a module table keyed by rel_path.
+    @param key         extra key columns for a module table.
+    @param where       (sql, params) instead of a target, for bulk DB-only changes.
+    @param defaults    module table: columns set only when the row is created.
+    @param dont_write  DB only; required for module tables.
+    @param history     log EXIF edits for undo (undo / redo pass False).
+    @param meta        the caller's freshly read metadata (skips a re-read).
+    @param force       write the sidecar even when nothing changed.
+    @return {"success", "changed": [...], "error"?, ...}.
+    @throws ValueError on a malformed call (unknown field, missing dont_write).
+    """
+    if isinstance(target, (list, tuple)):
+        results = {t: update_file(t, set=set, add=add, remove=remove, exif=exif, xmp=xmp,
+                                  db=db, table=table, key=key, dont_write=dont_write,
+                                  history=history, force=force, commit=commit) for t in target}
+        return {"success": all(r.get("success") for r in results.values()),
+                "changed": sorted({c for r in results.values() for c in r.get("changed", [])}),
+                "results": results}
+    try:
+        if table != "files":
+            if not dont_write:
+                raise ValueError(f"update_file: table {table!r} is DB-only; pass dont_write=True")
+            n = _update_table(table, target, set_=set, remove=remove, key=key, where=where,
+                              defaults=defaults)
+            if commit:
+                _db().commit()
+            return {"success": True, "changed": list(set or {}) if n else [], "rows": n}
+
+        if where is not None:
+            if set or add or remove or exif or xmp or not dont_write:
+                raise ValueError("update_file: a where= write is DB-only (db=, dont_write=True)")
+            cols = [_ident(c) for c in (db or {})]
+            bad = [c for c in cols if c not in _files_columns()
+                   and c not in _files_columns(refresh=True)]
+            if bad:
+                raise ValueError(f"update_file: unknown files column(s) {bad}")
+            n = _db().execute(f"UPDATE files SET {', '.join(c + '=?' for c in cols)} "
+                              f"WHERE {where[0]}",
+                              list(db.values()) + list(where[1] if len(where) > 1 else [])).rowcount
+            if commit:
+                _db().commit()
+            return {"success": True, "changed": cols if n else [], "rows": n}
+
+        rel, fp = _norm_target(target)
+        if not dont_write and not _present(fp):
+            return {"success": False, "changed": [], "error": "file not found"}
+        set, add, remove = dict(set or {}), dict(add or {}), dict(remove or {})
+        changed = []
+        result = {"success": True, "changed": changed}
+
+        # a kind's writer takes the set= fields it owns
+        kind_writer, owned = _metadata_writer_for(rel) if set else (None, frozenset())
+        mine = {k: v for k, v in set.items() if k in owned} if kind_writer else {}
+        if mine:
+            out = kind_writer(rel, fp, mine, dont_write)
+            if not out:
+                return {"success": False, "changed": [], "error": "file not found"}
+            if isinstance(out, dict):
+                result.update({k: v for k, v in out.items() if k not in ("success", "changed")})
+            changed += list(mine)
+            set = {k: v for k, v in set.items() if k not in mine}
+
+        fields = [f for f in FILE_FIELDS if f in set or f in add or f in remove]
+        unknown = [f for f in list(set) + list(add) + list(remove) if f not in FILE_FIELDS]
+        if unknown:
+            raise ValueError(f"update_file: not file fields {unknown}; use db= for DB columns")
+        if (exif or xmp) and dont_write:
+            raise ValueError("update_file: exif / xmp patches are file writes")
+        if (fields or force) and (not _present(fp)):
+            return {"success": False, "changed": [], "error": "file not found"}
+
+        if fields or (force and not dont_write):
+            cur = meta if meta is not None else read_metadata(fp)
+            new = {f: _merge_field(f, cur.get(f), set.get(f), add.get(f), remove.get(f),
+                                   has_set=f in set) for f in fields}
+            for f in fields:
+                was = cur.get(f)
+                if meta is not None and f in set:
+                    # the caller's packet may share (and have changed) these dicts: trust it
+                    changed.append(f)
+                    continue
+                if f == "pose":
+                    if (new[f] or {}).get("clear") and not was:
+                        continue
+                elif new[f] == (was if was is not None else ([] if f in _FILE_LIST_FIELDS else was)):
+                    continue
+                changed.append(f)
+            if force and not dont_write and "sidecar" not in changed:
+                changed.append("sidecar")
+            if any(f in changed for f in fields) or (force and not dont_write):
+                tags = new.get("tags", cur.get("tags") or [])
+                desc = new.get("description", cur.get("description") or "")
+                regions = new.get("regions", cur.get("regions") or [])
+                if dont_write:
+                    sets = {"tags": json.dumps(tags), "description": desc,
+                            "unconfirmed_count": sum(1 for r in regions if not r.get("confirmed", True))}
+                    if "analysis" in new:
+                        sets["analysis"] = json.dumps(new["analysis"]) if new["analysis"] else ""
+                    if "flag" in new:
+                        fl = new["flag"] or {}
+                        sets["flagged_delete"] = 1 if fl.get("delete") else 0
+                        sets["flag_reason"] = fl.get("reason", "") or ""
+                    if "page_count" in new:
+                        sets["page_count"] = new["page_count"]
+                    _db().execute(f"UPDATE files SET {', '.join(k + '=?' for k in sets)} "
+                                  f"WHERE rel_path=?", list(sets.values()) + [rel])
+                    if "albums" in new:
+                        _sync_album_cache(rel, new["albums"])
+                else:
+                    ok = write_metadata(
+                        fp, tags, desc, regions,
+                        analysis=new.get("analysis"), flag=new.get("flag"),
+                        pose=new.get("pose"), page_count=new.get("page_count"),
+                        albums=new.get("albums"), anim_delays=new.get("anim_delays"))
+                    if not ok:
+                        return {"success": False, "changed": [], "error": "metadata write failed"}
+                result.update({f: new[f] for f in fields if f != "pose"})
+
+        if exif:
+            if not _present(fp):
+                return {"success": False, "changed": changed, "error": "file not found"}
+            before = {}
+            if history:
+                try:
+                    for grp in exif_import.read_exif(fp).get("groups", []):
+                        for fl in grp.get("fields", []):
+                            if fl.get("name") in exif:
+                                before[fl["name"]] = fl.get("raw")
+                except Exception:
+                    pass
+            res = exif_export.write_exif(fp, exif)
+            result["exif"] = res
+            if not res.get("success"):
+                result.update(success=False, error=res.get("error") or "exif write failed")
+                return result
+            _mirror_exif_db(rel, res.get("db"))
+            touched = [w["tag"].split(".")[-1] for w in res.get("written", [])] + \
+                      [d.split(".")[-1] for d in res.get("deleted", [])]
+            touched = [t for t in touched if t != "ImageHistory"]
+            changed += [f"exif:{t}" for t in touched]
+            if touched:
+                if history:
+                    for t in touched:
+                        _history_record(rel, f"exif:{t}", before.get(t), exif.get(t), commit=False)
+                _db().commit()
+                try:
+                    exif_export.write_exif(fp, {"ImageHistory": _history_as_imagehistory(rel)})
+                except Exception as e:
+                    access_logger.warning(f"ImageHistory {rel}: {e}")
+
+        if xmp:
+            if not _present(fp):
+                return {"success": False, "changed": changed, "error": "file not found"}
+            res = xmp_export.write_xmp(fp, xmp)
+            result["xmp"] = res
+            if not res.get("success"):
+                result.update(success=False, error=res.get("error") or "xmp write failed")
+                return result
+            changed += [f"xmp:{k}" for k in xmp]
+
+        if db:
+            cols = [_ident(c) for c in db]
+            bad = [c for c in cols if c not in _files_columns()
+                   and c not in _files_columns(refresh=True)]
+            if bad:
+                raise ValueError(f"update_file: unknown files column(s) {bad}")
+            _db().execute(f"UPDATE files SET {', '.join(c + '=?' for c in cols)} WHERE rel_path=?",
+                          list(db.values()) + [rel])
+            changed += cols
+
+        if commit:
+            _db().commit()
+        if changed:
+            _meta_cache_drop(rel)
+            if (exif or xmp or fields) and not dont_write and 'module_host' in globals():
+                module_host.emit("file.metadata_changed", rel_path=rel, abs_path=fp,
+                                 fields=list(changed))
+        return result
+    except ValueError:
+        raise
+    except sqlite3.OperationalError as e:
+        if "no such table" not in str(e):
+            access_logger.error(f"update_file {target}: {e}", exc_info=True)
+        return {"success": False, "changed": [], "error": str(e)}
+    except Exception as e:
+        access_logger.error(f"update_file {target}: {type(e).__name__}: {e}", exc_info=True)
+        return {"success": False, "changed": [], "error": str(e)}
+
+
+def _sync_yolo(filepath: str, regions: list) -> None:
+    """! @brief Write confirmed regions as a YOLO label .txt (or delete it)."""
     def _usable(r):
         name = r.get('class_name')
         return (isinstance(name, str) and name != "" and
@@ -2964,11 +2928,10 @@ def _sync_yolo(filepath: str, regions: list) -> None:
             except (TypeError, ValueError):
                 continue
 
-# ── Thumbnails ─────────────────────────────────────────────────────────────────
 _thumbdb_local = threading.local()
 
 def _thumbdb() -> sqlite3.Connection:
-    """! @brief Thread-local connection to the thumbnail BLOB cache."""
+    """! @brief This thread's connection to the thumbnail cache."""
     conn = getattr(_thumbdb_local, 'conn', None)
     if conn is None:
         conn = sqlite3.connect(THUMB_DB, check_same_thread=False,
@@ -2986,10 +2949,7 @@ def _thumbdb() -> sqlite3.Connection:
     return conn
 
 def _thumb_get(rel_path: str, mtime: float) -> bytes | None:
-    """!
-    @brief Read cached thumbnail bytes if at least as new as the source.
-    @return JPEG bytes, or None if absent or stale.
-    """
+    """! @brief Cached thumbnail JPEG at least as new as `mtime`, or None."""
     try:
         row = _thumbdb().execute(
             "SELECT data FROM thumbs WHERE rel_path=? AND mtime>=?",
@@ -2999,7 +2959,7 @@ def _thumb_get(rel_path: str, mtime: float) -> bytes | None:
         return None
 
 def _thumb_put(rel_path: str, data: bytes, mtime: float) -> None:
-    """! @brief Store thumbnail bytes in the cache (best-effort, upsert)."""
+    """! @brief Store a thumbnail (best effort)."""
     try:
         db = _thumbdb()
         db.execute("INSERT INTO thumbs(rel_path, mtime, data) VALUES(?,?,?) "
@@ -3010,7 +2970,7 @@ def _thumb_put(rel_path: str, data: bytes, mtime: float) -> None:
         pass
 
 def _thumb_drop(rel_path: str) -> None:
-    """! @brief Invalidate a source file's cached thumbnail (cache + LRU)."""
+    """! @brief Forget a file's thumbnail (cache and LRU)."""
     try:
         db = _thumbdb()
         db.execute("DELETE FROM thumbs WHERE rel_path=?", (rel_path,))
@@ -3020,10 +2980,7 @@ def _thumb_drop(rel_path: str) -> None:
     _thumb_lru_drop(rel_path)
 
 def _thumb_from_array(img) -> bytes | None:
-    """!
-    @brief Encode an already-decoded image array as thumbnail JPEG bytes.
-    @return JPEG bytes (max dim 400px), or None if img is None.
-    """
+    """! @brief An image array as a thumbnail JPEG (long side 400 px), or None."""
     if img is None:
         return None
     h, w = img.shape[:2]
@@ -3036,20 +2993,17 @@ def _thumb_from_array(img) -> bytes | None:
     return buf.tobytes() if ok else None
 
 def _make_thumb_bytes(abs_path: str) -> bytes | None:
-    """! @brief Decode a file and encode its thumbnail JPEG bytes."""
+    """! @brief Decode a file and return its thumbnail JPEG."""
     return _thumb_from_array(read_jxl(abs_path))
 
 def serve_thumb(rel_path: str, abs_path: str, mtime: float | None = None):
-    """!
-    @brief Serve a thumbnail via LRU, then BLOB cache, then on-demand generation.
-    @return A Flask JPEG response, or the raw file / 404 when no thumbnail can be made.
-    """
+    """! @brief A thumbnail response (LRU, cache, then generated); the file itself or 404 when none can be made."""
     if mtime is None:
         mtime = _getmtime_loose(abs_path)
 
     def _finish(data: bytes, mimetype: str):
         etag = hashlib.md5(f"{rel_path}:{mtime}:{len(data)}".encode()).hexdigest()
-        # 304 fast-path: if the browser already has this exact version, don't resend.
+        # 304 when the browser has this version
         inm = request.headers.get("If-None-Match")
         if inm and etag in [t.strip().strip('"') for t in inm.split(",")]:
             resp = app.response_class(status=304)
@@ -3068,20 +3022,20 @@ def serve_thumb(rel_path: str, abs_path: str, mtime: float | None = None):
 
 
 def thumb_bytes(rel_path: str, abs_path: str, mtime: float | None = None):
-    """(bytes, mimetype) for a file's thumbnail via LRU, BLOB cache, then
-    on-demand generation; the raw file when no thumbnail can be made; None
-    when the file is unreadable. serve_thumb wraps this in a response; modules
-    that ship thumbnails elsewhere (family_share to a phone) use it directly."""
+    """! @brief A file's thumbnail (LRU, cache, then generated).
+    @return (bytes, mimetype): the file itself when no thumbnail can be made;
+            None when unreadable.
+    """
     if mtime is None:
         mtime = _getmtime_loose(abs_path)
-    data = _thumb_lru_get(rel_path, mtime)          # 1. in-process LRU
+    data = _thumb_lru_get(rel_path, mtime)
     if data is not None:
         return data, 'image/jpeg'
-    data = _thumb_get(rel_path, mtime)              # 2. BLOB cache
+    data = _thumb_get(rel_path, mtime)
     if data:
         _thumb_lru_put(rel_path, mtime, data)
         return data, 'image/jpeg'
-    data = _make_thumb_bytes(abs_path)              # 3. generate
+    data = _make_thumb_bytes(abs_path)
     if data is None:
         raw = _read_bytes_loose(abs_path)
         if raw is None: return None
@@ -3111,18 +3065,9 @@ def _build_yolo(model_path):
                            "YOLO detection/segmentation is unavailable")
     canon = _canonical_yolo_path(model_path)
     access_logger.info("Loading YOLO model %s", canon)
-    # if access_logger.isEnabledFor(logging.DEBUG):
-    #     try:
-    #         import traceback
-    #         stack = "".join(traceback.format_stack(limit=8)[:-1])
-    #         access_logger.debug("BUILD_YOLO %s\n%s", canon, stack)
-    #     except Exception:
-    #         pass
     m = YOLO(canon)
-    # Pin to the accelerator explicitly (ROCm presents as 'cuda'). Ultralytics'
-    # auto-device is unreliable on ROCm/migraphx and otherwise leaves these .pt
-    # detectors on CPU — the migraphx path only accelerates the ONNX recognition
-    # models, not these torch YOLO weights.
+    # Pin to the GPU (ROCm shows as cuda); ultralytics' auto-device leaves these
+    # .pt detectors on the CPU under ROCm.
     try:
         if model_registry.on_gpu():
             m.to(model_registry.device())
@@ -3135,13 +3080,8 @@ def _build_yolo(model_path):
     return m
 
 def _load_yolo(model_path):
-    """!
-    @brief Load-on-demand YOLO loader backed by the central model registry, so
-           the several detectors we alternate between (person / face / barcode /
-           trained) share one global memory budget and the least-recently-used
-           one is evicted instead of all of them staying resident.
-    @note Invalidate with _load_yolo.cache_clear() when a setting repoints a
-          model path (kept for source compatibility with existing call sites).
+    """! @brief Load a YOLO model through the model registry (one memory budget, LRU).
+    Call _load_yolo.cache_clear() when a setting repoints a model path.
     """
     key = _yolo_key(model_path)
     if key not in _yolo_registered:
@@ -3152,23 +3092,19 @@ def _load_yolo(model_path):
     return model_registry.acquire(key)
 
 def _load_yolo_cache_clear():
-    """Drop every YOLO the manager has loaded (mirrors the old lru_cache API)."""
+    """! @brief Drop every YOLO model loaded here."""
     for k in list(_yolo_registered):
         try:
             model_registry.unload(k)
         except Exception:
             pass
 
-# Preserve the `.cache_clear()` call sites without changing them.
 _load_yolo.cache_clear = _load_yolo_cache_clear
 
 _SIZES = ("n", "s", "m", "l", "x")
 def _detect_objects(img_bgr, keep_classes: set | None = None, conf: float | None = None) -> list:
-    """!
-    @brief Run the 'detect' capability's selected provider (family/size picked in
-           the Models tab) and return normalised center-form boxes.
-    @return List of {class_name, cx, cy, w, h, conf}; [] when no provider is
-            available or it fails.
+    """! @brief Boxes from the selected 'detect' provider.
+    @return [{class_name, cx, cy, w, h, conf}]; [] when none is available or it fails.
     """
     try:
         run = modules.broker.request("detect")
@@ -3190,18 +3126,13 @@ def _detect_objects(img_bgr, keep_classes: set | None = None, conf: float | None
     return boxes
 
 
-# ── character / panel detectors (for the pipeline) ───────────────────────────--
 
 def _detect_obb_or_box(img_bgr, model_path: str, keep_classes: set | None = None,
                        conf: float = 0.25, as_obb: bool = False) -> list:
-    """!
-    @brief Run the detector that owns `model_path` (broker 'box' capability:
-           YOLO for .pt, Mayaku for its own files, ...) and return normalised
-           center-form boxes.
-    @param keep_classes If set, only boxes whose class name is in it are returned.
-    @param as_obb Reduce oriented boxes to their axis-aligned enclosing box.
-    @return List of {class_name, cx, cy, w, h}; [] on empty input, no provider
-            or failure. Core has no detector of its own.
+    """! @brief Boxes from the detector that owns `model_path` (broker 'box' capability).
+    @param keep_classes  only these class names.
+    @param as_obb        reduce oriented boxes to their axis-aligned bounds.
+    @return [{class_name, cx, cy, w, h}]; [] on empty input, no provider or failure.
     """
     try:
         det = modules.broker.detector_for("box", model_path)
@@ -3218,10 +3149,7 @@ def _detect_obb_or_box(img_bgr, model_path: str, keep_classes: set | None = None
 
 def _detect_obb_or_box_batch(imgs, model_path: str, keep_classes: set | None = None,
                              conf: float = 0.25, as_obb: bool = False) -> list:
-    """!
-    @brief Batched _detect_obb_or_box through the owning provider's .batch handle.
-    @return List (len == len(imgs)) of per-image box lists, order preserved.
-    """
+    """! @brief _detect_obb_or_box over many images in one batch. @return one box list per image."""
     n = len(imgs)
     if n == 0:
         return []
@@ -3241,11 +3169,9 @@ def _detect_obb_or_box_batch(imgs, model_path: str, keep_classes: set | None = N
         return [[] for _ in range(n)]
 
 def _background_instances(img_bgr) -> list:
-    """!
-    @brief Run every capability whose "run in background" switch is on (Models tab)
-           and return region-shaped instances: {class_name, cx, cy, w, h, conf,
-           mask_svg?}. Class whitelist per capability; empty = keep all.
-    @note Provider-agnostic: whatever family/size the user picked serves it.
+    """! @brief Region instances from every capability whose "run in background" switch
+    is on, filtered by its class whitelist (empty = all).
+    @return [{class_name, cx, cy, w, h, conf, mask_svg?}].
     """
     out = []
     c = _coerce_bgr3(img_bgr)
@@ -3253,10 +3179,10 @@ def _background_instances(img_bgr) -> list:
         return out
     H, W = c.shape[:2]
     for cap in modules.broker.background_capabilities():
-        if cap in module_host.background_sweeps:      # embed/pose/iqa/…: the module's sweep, not regions
+        if cap in module_host.background_sweeps:  # non-region capabilities have their own sweep
             continue
         try:
-            run = modules.broker.request(cap, role="bg")   # may be a different model than the button
+            run = modules.broker.request(cap, role="bg")  # the background model may differ from the foreground one
         except modules.model_broker.NoProviderError as e:
             access_logger.warning(f"background {cap}: {e}")
             continue
@@ -3284,8 +3210,7 @@ def _background_instances(img_bgr) -> list:
                         "polygon": poly}
             if inst:
                 out.append(inst)
-    # Polygons -> stored mask form (mask_svg) is the segmentation module's job;
-    # without it the sweep still yields boxes.
+    # polygons become mask_svg in the segmentation module; without it, boxes only
     for _ in module_host.emit("regions.masks", instances=out, width=W, height=H):
         pass
     for inst in out:
@@ -3293,9 +3218,9 @@ def _background_instances(img_bgr) -> list:
     return out
 
 def _fold_background(insts, person_regions, out):
-    """Attach background instances to region lists: a segment 'person' mask
-    snaps onto an overlapping detected person box; everything else becomes its
-    own unconfirmed region."""
+    """! @brief Add background instances to the region lists: a 'person' mask joins an
+    overlapping person box; anything else becomes its own unconfirmed region.
+    """
     for inst in insts:
         if inst.get("class_name") == "person" and inst.get("mask_svg"):
             best, best_iou = None, 0.0
@@ -3314,10 +3239,8 @@ def _fold_background(insts, person_regions, out):
         (person_regions if reg["class_name"] == "person" else out).append(reg)
 
 def _folder_scope_clause(column: str, folder: str) -> tuple[list, list]:
-    """!
-    @brief Build the SQL clause(s) restricting `column` to one folder's direct children.
-    @param column Path column to scope ('folder' for comics, 'rel_path' for books).
-    @return (clauses, params) — '/' means top level only; a folder means its immediate children.
+    """! @brief SQL limiting `column` to the direct children of a folder ('/' = top level).
+    @return (clauses, params).
     """
     if folder == '/':
         return [f"{column} NOT LIKE '%/%'"], []
@@ -3326,11 +3249,9 @@ def _folder_scope_clause(column: str, folder: str) -> tuple[list, list]:
         return [f"({column} LIKE ? AND {column} NOT LIKE ?)"], [f + '/%', f + '/%/%']
     return [], []
 
-# ── Routes ─────────────────────────────────────────────────────────────────────
-# Endpoints that are POLLED by a UI on a timer. These must NOT count as user
-# activity: the idle workers only run after IDLE_SECS of quiet, so a tab polling
-# every 2s would keep _last_activity permanently fresh and starve them forever.
-# (This is why an open Faces tab could sit at "queued" and never advance.)
+# -- routes --
+# Polled endpoints don't count as activity, or an open tab would keep the
+# idle-only background work from ever running.
 _POLL_PATHS = {"/api/state", "/api/faces/progress", "/api/workers"}
 
 @app.before_request
@@ -3345,10 +3266,8 @@ def index(): return render_template("app.html")
 
 @app.route("/web/<path:filename>")
 def web_asset(filename):
-    """Serve the UI's static assets (css/js) from the web/ directory next to
-    this module. Restricted to .css/.js and guarded against path traversal."""
+    """! @brief Serve a .css / .js file from web/ (plain file names only)."""
     web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
-    # only allow simple filenames with safe extensions
     if ("/" in filename or "\\" in filename or ".." in filename
             or not filename.endswith((".css", ".js"))):
         return "", 404
@@ -3360,8 +3279,7 @@ def web_asset(filename):
 
 @app.route("/static/<path:filename>")
 def static_asset(filename):
-    """Serve editor assets from the static/ directory (css/js only), guarded
-    against path traversal — mirrors web_asset."""
+    """! @brief Serve a .css / .js file from static/ (plain file names only)."""
     static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
     if ("\\" in filename or ".." in filename
             or not filename.endswith((".css", ".js"))
@@ -3374,16 +3292,11 @@ def static_asset(filename):
     mime = "text/css" if filename.endswith(".css") else "application/javascript"
     return send_file(fp, mimetype=mime)
 
-# ── XMP editor (parallels the IPTC editor above; acdsee is read-only) ───────
-# ── EXIF editor (parallels the IPTC editor above) ───────────────────────────
-# Columns an EXIF db_field is allowed to write. The column name is interpolated
-# into SQL, so this MUST stay a fixed allowlist — never let a tag's db_field
-# reach the query unchecked. Keep in sync with EXIFField.db_field values.
+# Columns an EXIF field may mirror into. Interpolated into SQL: keep this a fixed allowlist.
 _EXIF_DB_COLUMNS = {"description", "rating"}
 
 def _resolve_media(filename):
-    """Resolve a rel path under MEDIA_DIR to an abs path, guarding traversal.
-    Returns (abs_path, None) on success or (None, (json, status)) on failure."""
+    """! @brief A rel path under MEDIA_DIR. @return (abs_path, None) or (None, (json, status))."""
     if not filename:
         return None, (jsonify({"success": False, "error": "filename required"}), 400)
     abs_media = os.path.abspath(MEDIA_DIR)
@@ -3396,16 +3309,7 @@ def _resolve_media(filename):
 
 @app.route("/api/metadata/failures")
 def api_metadata_failures():
-    """List files whose most recent XMP/sidecar write failed.
-
-    The point of this endpoint is that metadata write failures are otherwise
-    invisible: write_metadata returns False and almost every caller ignores it,
-    so the UI happily reports 'saved' for a file whose sidecar never landed.
-    Polling this lets the frontend show a real warning.
-
-    Merges the durable DB record with in-process state so failures are still
-    reported if the DB column is missing on an older database.
-    """
+    """! @brief Files whose last sidecar write failed (DB record merged with in-process state)."""
     out = {}
     try:
         rows = _db().execute(
@@ -3424,9 +3328,7 @@ def api_metadata_failures():
 
 @app.route("/api/metadata/write", methods=["POST"])
 def api_metadata_write():
-    """Unified metadata write. Body: {kind, filename, patch}. Gates on
-    meta.<kind>.edit, then forwards to the metadata module writer service; the
-    actual write logic lives in the module, not here."""
+    """! @brief Write a metadata patch: {kind, filename, patch}; gated on meta.<kind>.edit, written by the metadata module."""
     data = request.get_json(force=True, silent=True) or {}
     kind = (data.get("kind") or "exif").lower()
     if kind not in ("exif", "iptc", "xmp"):
@@ -3443,7 +3345,7 @@ def api_metadata_write():
 @app.route("/api/exif/history", methods=["POST"])
 @_auth.require_feature("meta.exif")
 def api_exif_history():
-    """Return a file's edit changelog (oldest first) for display / the undo UI."""
+    """! @brief A file's changelog, oldest first."""
     data = request.get_json(force=True, silent=True) or {}
     fp, err = _resolve_media(data.get("filename", ""))
     if err:
@@ -3456,8 +3358,7 @@ def api_exif_history():
 @app.route("/api/exif/undo", methods=["POST"])
 @_auth.require_feature("meta.exif", level="write", action="exif_undo", fields=("filename",))
 def api_exif_undo():
-    """Undo the most recent EXIF edit on a file (ctrl+z): revert the changed tag
-    to its previous value on disk and in the DB, and refresh ImageHistory."""
+    """! @brief Undo the latest EXIF edit of a file."""
     data = request.get_json(force=True, silent=True) or {}
     fp, err = _resolve_media(data.get("filename", ""))
     if err:
@@ -3471,7 +3372,7 @@ def api_exif_undo():
 @app.route("/api/exif/redo", methods=["POST"])
 @_auth.require_feature("meta.exif", level="write", action="exif_redo", fields=("filename",))
 def api_exif_redo():
-    """Redo the most recently undone EXIF edit: re-apply the tag's new value."""
+    """! @brief Redo the latest undone EXIF edit of a file."""
     data = request.get_json(force=True, silent=True) or {}
     fp, err = _resolve_media(data.get("filename", ""))
     if err:
@@ -3483,37 +3384,23 @@ def api_exif_redo():
     return _apply_history_step(fp, rel, entry, "new")
 
 def _apply_history_step(fp, rel, entry, which):
-    """Apply an undo (which='old') or redo (which='new') changelog step: write
-    the target value back to the file's EXIF (and mirror to the DB where the
-    field is db-backed), then refresh ImageHistory. The write itself is not
-    re-logged, so undo/redo don't create new changelog entries."""
-    field = entry["field"]                    # e.g. 'exif:Compression'
+    """! @brief Write an undo ('old') or redo ('new') step back to the file without
+    logging it again.
+    """
+    field = entry["field"]  # e.g. 'exif:Compression'
     target = entry[which]
     if not field.startswith("exif:"):
         return jsonify({"success": False, "error": f"can't revert field {field}"})
     tag = field.split(":", 1)[1]
     try:
-        res = exif_export.write_exif(fp, {tag: target})
-        # Mirror db-backed values (description/rating) so the DB tracks the revert.
-        for col, val in (res.get("db") or {}).items():
-            if col not in _EXIF_DB_COLUMNS:
-                continue
-            if col == "rating":
-                if val is None:
-                    _db().execute("UPDATE files SET rating=NULL, rating_user=0 "
-                                  "WHERE rel_path=?", (rel,))
-                else:
-                    _db().execute("UPDATE files SET rating=?, rating_user=1 "
-                                  "WHERE rel_path=?", (int(val), rel))
-            else:
-                _db().execute(f"UPDATE files SET {col}=? WHERE rel_path=?",
-                              ("" if val is None else str(val), rel))
-        _db().commit()
-        # Refresh ImageHistory to reflect the now-active changelog.
-        try:
-            exif_export.write_exif(fp, {"ImageHistory": _history_as_imagehistory(rel)})
-        except Exception:
-            pass
+        out = update_file(fp, exif={tag: target}, history=False)
+        res = out.get("exif") or {"success": False, "error": out.get("error")}
+        if not out.get("changed"):
+            # refresh ImageHistory even when the value was already in place
+            try:
+                exif_export.write_exif(fp, {"ImageHistory": _history_as_imagehistory(rel)})
+            except Exception:
+                pass
         return jsonify({"success": res.get("success", False),
                         "field": tag, "value": target, "result": res})
     except Exception as e:
@@ -3523,8 +3410,7 @@ def _apply_history_step(fp, rel, entry, which):
 @app.route("/api/raw/info", methods=["POST"])
 @_auth.require_feature("tab.gallery")
 def api_raw_info():
-    """Report whether a library image has a stored original raw, and its details
-    (so the UI can show an 'Open raw' button). Returns has_raw + uid/orig_name."""
+    """! @brief Whether an image has a stored raw: {has_raw, uid, orig_name}."""
     data = request.get_json(force=True, silent=True) or {}
     fp, err = _resolve_media(data.get("filename", ""))
     if err:
@@ -3539,15 +3425,13 @@ def api_raw_info():
 @app.route("/api/raw/open/<uid>")
 @_auth.require_feature("tab.gallery")
 def api_raw_open(uid):
-    """Serve the stored original raw for a given RawDataUniqueID, so a button can
-    open it. The raw lives in the hidden store; this is the only way to reach it
-    (library walks skip the dot-directory)."""
+    """! @brief Serve the stored raw with this RawDataUniqueID (the only way to reach the hidden store)."""
     row = _raw_by_uid(uid)
     if not row:
         return jsonify({"success": False, "error": "raw not found"}), 404
     abs_path = os.path.abspath(os.path.join(MEDIA_DIR, row["path"]))
     store = os.path.abspath(_raw_store_dir())
-    # Guard: the resolved path must stay inside the hidden raw store.
+    # stay inside the raw store
     if not abs_path.startswith(store + os.sep) or not os.path.exists(abs_path):
         return jsonify({"success": False, "error": "raw file missing"}), 404
     return send_file(abs_path, as_attachment=True,
@@ -3556,7 +3440,7 @@ def api_raw_open(uid):
 @app.route("/api/raw/keep", methods=["POST"])
 @_auth.require_feature("settings.media", level="write", action="raw_keep", fields=("enabled",))
 def api_raw_keep():
-    """Get or set the keep_raws option (store uploaded camera raws hidden)."""
+    """! @brief Get or set keep_raws."""
     if request.method == "POST" and request.json is not None and "enabled" in (request.json or {}):
         state["keep_raws"] = bool(request.json.get("enabled", False))
         save_config()
@@ -3564,15 +3448,13 @@ def api_raw_keep():
 
 @app.route("/api/state")
 def api_state():
-    # state.get(), not state[k]: this endpoint is the whole UI's bootstrap, so a
-    # single missing/renamed setting should degrade one control, not 500 the
-    # entire front-end.
+    # state.get(): one missing setting must not break the whole UI bootstrap
     out = {k: state.get(k) for k in
         ("classes","available_models","status_text","remote_ip",
          "model_groups","iqa_model","brand_name","brand_logo",
          "media_storage","filename_cleanup")}
     out["media_targets"] = mt.MEDIA_TARGETS
-    # The search chips are per user: their own list, else the admin's default.
+    # per user: their own chips, else the admin default
     out["search_quick_filters"] = _user_setting("search_quick_filters") or []
     return jsonify(out)
 
@@ -3582,26 +3464,18 @@ def api_workers():
 
 @app.route("/api/modules")
 def api_modules():
-    """Descriptor + on/off state for every declared module.
-
-    Feeds the Modules tab in settings. Read-only and unauthenticated-safe
-    (it leaks no secrets — just which building blocks exist and whether
-    they're on), mirroring /api/state.
-    """
-    # settings_tabs is populated during register_all(); only include tabs whose
-    # owning module is still enabled.
+    """! @brief Every module's descriptor and on/off state (Settings > Modules)."""
+    # tabs of enabled modules only
     tabs = [t for t in getattr(module_host, "settings_tabs", [])
             if module_registry.is_enabled(t["module_id"])]
-    # Pipeline stages contributed by enabled modules, so the pipeline editor
-    # only offers a node type when its module is on.
+    # pipeline stages of enabled modules only
     stages = [{"name": name, "label": s["label"], "editor": s["editor"]}
               for name, s in getattr(module_host, "pipeline_stages", {}).items()
               if module_registry.is_enabled(s["module_id"])]
-    # Module-contributed settings fields; resolve callable option-lists now so
-    # the front end gets concrete choices (e.g. current iqa providers).
+    # option callables resolved now
     fields = []
     for f in getattr(module_host, "settings_fields", []):
-        if f["module_id"] and not module_registry.is_enabled(f["module_id"]):   # None = core
+        if f["module_id"] and not module_registry.is_enabled(f["module_id"]):  # None = core
             continue
         opts = f.get("options")
         if callable(opts):
@@ -3623,12 +3497,8 @@ def api_modules():
 @app.route("/api/modules/toggle", methods=["POST"])
 @_auth.require_feature("settings.modules", level="write", action='toggle_module', fields=())
 def api_modules_toggle():
-    """Enable/disable a non-core module. Admin-gated via the settings feature.
-
-    Body: {"id": "<module_id>", "enabled": true|false}. Core modules reject
-    a disable with 400; the UI renders their toggle locked so this is a
-    belt-and-suspenders guard. On success the new map is persisted to
-    app_config.json so the choice survives a restart.
+    """! @brief Enable or disable a non-core module and save the choice.
+    Body: {"id", "enabled"}. Core modules answer 400.
     """
     d = request.json or {}
     mid = d.get("id")
@@ -3641,9 +3511,7 @@ def api_modules_toggle():
     return jsonify({"success": True, "modules": module_registry.status()})
 
 def _models_payload():
-    """Broker snapshot for the Models tab, JSON-safe: hidden capabilities are
-    dropped, callable widget option-lists are resolved and current values
-    attached."""
+    """! @brief Broker snapshot for the Models tab: hidden capabilities dropped, options resolved, values attached."""
     caps = []
     for c in modules.broker.status():
         if c.get("hidden"):
@@ -3661,7 +3529,7 @@ def _models_payload():
         caps.append(c)
     return caps
 
-# ── Settings → Info: what this install can do, from the core + every module ──
+# -- Settings > Info: what this install can do --
 _CORE_SEARCH_HELP = [
     ("free text", "words match description, tags and file names; quote for phrases"),
     ("tag:<name> / -tag:<name>", "images carrying / not carrying that exact tag"),
@@ -3676,7 +3544,7 @@ _CORE_SEARCH_HELP = [
 def api_info():
     filters = [{"token": t, "help": h, "source": "core"} for t, h in _CORE_SEARCH_HELP]
     for prefix, meta in sorted(module_host.search_help.items()):
-        filters.append({"token": prefix + "…", "help": meta["help"], "source": meta["module_id"] or "module"})
+        filters.append({"token": prefix + "...", "help": meta["help"], "source": meta["module_id"] or "module"})
     return jsonify({"success": True, "sections": [
         {"id": "search", "title": "Search filters",
          "description": "Type these in the gallery search box; combine freely.",
@@ -3685,31 +3553,22 @@ def api_info():
 
 @app.route("/api/models")
 def api_models():
-    """Model capabilities, their providers, and the current selection.
-
-    Feeds the Models tab: for each capability the user sees the available
-    providers (families), their sizes/types and widgets, and the selection.
-    """
+    """! @brief Capabilities, their providers (sizes, types, widgets) and the current picks."""
     return jsonify({"capabilities": _models_payload()})
 
 @app.route("/api/models/classes")
 @_auth.require_feature("settings.models")
 def api_models_classes():
-    """Class names the selected provider for ?capability= emits (may load the
-    weights on first call), for the background-run whitelist."""
+    """! @brief Class names the selected provider of ?capability= emits (may load weights)."""
     cap = request.args.get("capability", "")
     return jsonify({"capability": cap, "classes": modules.broker.provider_classes(cap)})
 
 @app.route("/api/models/select", methods=["POST"])
 @_auth.require_feature("settings.models", level="write", action='select_model', fields=())
 def api_models_select():
-    """Choose which provider (+ size/type) serves a capability. Admin-gated.
-
-    Body: {"capability", "provider", "size"?, "type"?, "background"?, "classes"?,
-           "bg"?: {"provider","size","type"} for a separate background model,
-           "conf"?: min confidence 0..1}. Selecting
-    an unavailable provider is allowed (weights may appear later); the choice
-    persists to app_config.json.
+    """! @brief Pick the provider of a capability and save it.
+    Body: {capability, provider, size?, type?, background?, classes?, conf?,
+    bg?: {provider, size, type}}. An unavailable provider may be picked.
     """
     d = request.json or {}
     ok, err = modules.broker.select(d.get("capability"), d.get("provider"),
@@ -3720,15 +3579,12 @@ def api_models_select():
         return jsonify({"error": err or "selection failed"}), 400
     state["model_selection"] = modules.broker.current_selection()
     save_config()
-    thread_manager.wake()                    # a background switch just flipped: start sweeping now
+    thread_manager.wake()  # a background switch flipped: start now
     return jsonify({"success": True, "capabilities": _models_payload()})
 
-# ── Settings permissions: which tab owns a key ───────────────────────────────
-# Every Settings tab has a permission, settings.<tab> (features.py registers the
-# core ones, host.add_settings_tab the module ones): read shows the tab, write
-# lets its settings be saved. update_settings checks each incoming key against
-# the tab that owns it, so a user may save the tabs they can write and nothing
-# else. A key no tab owns is admin-only.
+# -- which Settings tab owns a key --
+# Saving a key needs write on its tab's permission (settings.<tab>); a key no
+# tab owns is admin-only.
 _CORE_KEY_TABS = {"search_quick_filters": "general", "media_storage": "media",
                   "filename_cleanup": "media", "keep_raws": "media"}
 
@@ -3741,7 +3597,7 @@ def _settings_tab_for_key(key):
         if f["key"] == key:
             pane = f.get("pane") or "general"
             return "modules" if pane == "module" else (f.get("tab") or pane)
-    for c in modules.broker.status():                     # a model provider's widget
+    for c in modules.broker.status():  # a model provider's widget
         for p in c.get("providers", []):
             if any(w.get("key") == key for w in p.get("settings", [])):
                 return "models"
@@ -3752,7 +3608,7 @@ def _settings_tab_for_key(key):
     return None
 
 def _settings_denied(keys, level="write"):
-    """Keys of an update the current user may not save (empty for admins)."""
+    """! @brief Keys of an update the current user may not save (none for admins)."""
     u = g.get("user") or {}
     if u.get("is_admin"):
         return []
@@ -3765,8 +3621,7 @@ def _settings_denied(keys, level="write"):
     return out
 
 def _clean_quick_filters(v):
-    """Search quick-filters: [{id,label,query}], malformed rows dropped, so a
-    bad save can't break the search UI."""
+    """! @brief Search quick filters [{id, label, query}] with malformed rows dropped."""
     clean = []
     for i, it in enumerate(v or []):
         if not isinstance(it, dict):
@@ -3787,9 +3642,7 @@ def update_settings():
         audit("update_settings_denied", f"user={(g.get('user') or {}).get('username')!r} keys={denied}")
         return jsonify({"error": "not permitted to change: " + ", ".join(sorted(denied)),
                         "denied": sorted(denied)}), 403
-    # Registry-owned settings (core or module-declared) are validated, stored,
-    # and their change handlers fired here — no per-key branch needed. A key
-    # not declared in the registry falls through to the legacy handling below.
+    # declared settings: validated, stored and their handlers run here
     _reg_errors = {}
     for _k in list(d.keys()):
         handled, err = modules.config.apply(_k, d[_k], state)
@@ -3799,10 +3652,7 @@ def update_settings():
     save_config()
     return jsonify({"success": True, "errors": _reg_errors})
 
-# ── Per-user settings (Settings → User settings) ─────────────────────────────
-# Declared with host.add_user_setting; stored per account in user_prefs; saved
-# by the user themselves (login is all it needs, plus a declared feature at
-# write for settings that carry one).
+# -- per-user settings (Settings > User settings), saved by each user --
 def _user_name():
     return (g.get("user") or {}).get("username", "") or ""
 
@@ -3856,9 +3706,9 @@ def api_user_settings():
 
 @app.route("/api/user/settings", methods=["POST"])
 def api_user_settings_save():
-    """Body {key: value}; value null resets the key to its default. All or
-    nothing: an unknown key, a failed validation or a missing feature rejects
-    the whole save."""
+    """! @brief Save the user's own settings: {key: value}, null resets to the default.
+    All or nothing: one bad key rejects the save.
+    """
     d = request.json or {}
     if not isinstance(d, dict):
         return jsonify({"success": False, "error": "expected an object"}), 400
@@ -3888,10 +3738,7 @@ def api_user_settings_save():
 @app.route("/api/branding", methods=["POST"])
 @_auth.require_feature("branding", level="write", action='update_branding', fields=())
 def update_branding():
-    # Locked to admins (or a custom role explicitly granted "branding").
-    # require_feature already lets admins through and denies anyone whose
-    # role sets branding=False; this extra check makes the default deny for
-    # non-admins whose role hasn't been granted it.
+    # Default deny for non-admins unless their role has "branding".
 
     name = (request.form.get("brand_name") or "").strip()
     if name:
@@ -3908,13 +3755,13 @@ def update_branding():
         brand_dir = os.path.join(MEDIA_DIR, "branding")
         os.makedirs(brand_dir, exist_ok=True)
         dest = os.path.join(brand_dir, "logo" + ext)
-        # drop any previous logo of a different extension
+        # remove an old logo with another extension
         for old in os.listdir(brand_dir):
             if old.startswith("logo."):
                 try: os.remove(os.path.join(brand_dir, old))
                 except OSError: pass
         f.save(dest)
-        # cache-bust so a replaced logo shows immediately
+        # cache-bust
         state["brand_logo"] = "/api/branding/logo?v=" + str(int(time.time()))
 
     save_config()
@@ -3953,10 +3800,7 @@ def api_list():
     album  = request.args.get("album","").strip()
     page   = max(0, int(request.args.get("page",0)))
 
-    # Semantic search lives INSIDE the normal gallery search: a query prefixed
-    # with "sem:" (or "~") ranks the library by text→image embedding similarity
-    # instead of the SQL keyword match. Falls back with a helpful error if OAI
-    # embeddings aren't available. Folder/album scope still applies.
+    # "sem:" or "~" ranks by text-to-image embedding similarity instead of keywords.
     sem = None
     if search.lower().startswith("sem:"):
         sem = search[4:].strip()
@@ -3979,9 +3823,7 @@ def api_list():
 @app.route("/api/list_all")
 @_auth.require_feature("tab.gallery")
 def api_list_all():
-    """Every image rel_path matching a gallery query, unpaged — the "select all
-    N results" set the bulk bar operates on. Images only (no books/comics,
-    no semantic mode)."""
+    """! @brief Every image rel_path a gallery query matches, unpaged (bulk "select all")."""
     search = request.args.get("q", "").strip()
     if search.lower().startswith("sem:") or search.startswith("~"):
         return jsonify({"success": False, "error": "Select-all is not available for semantic search."})
@@ -3993,12 +3835,10 @@ def api_list_all():
 @app.route("/api/dates/backfill", methods=["POST"])
 @_auth.require_feature("settings.general", level="write", action='dates_backfill', fields=())
 def api_dates_backfill():
-    """Populate the five date buckets for rows that don't have them yet, without a
-    full re-index (no re-hash / re-thumbnail). Idempotent and resumable: only
-    touches rows where all five buckets are NULL, so re-running continues where it
-    left off. Pass ?force=1 to recompute every row (e.g. after a parser change).
-    Bounded per call by ?limit (default 500) so it never blocks the worker for
-    long; the response reports remaining, and the client loops until done."""
+    """! @brief Fill the date buckets of rows that have none, without re-indexing.
+    ?force=1 recomputes all rows; ?limit bounds one call (default 500) and the
+    response says how many remain.
+    """
     force = request.args.get("force", "") in ("1", "true", "yes")
     limit = max(1, min(5000, int(request.args.get("limit", 500))))
     db = _db()
@@ -4030,10 +3870,9 @@ def api_dates_backfill():
     return jsonify({"success": True, "processed": done, "remaining": remaining})
 
 def _semantic_list(query, offset, limit, folder='', album=''):
-    """Rank the library by text→image embedding similarity for the gallery
-    search. Returns (entries, total, error). `error` is a user-facing string when
-    semantic search can't run (no OAI model, or stored vectors aren't OAI).
-    Delegates to the embedding module."""
+    """! @brief Rank the library by text-to-image similarity (embedding module).
+    @return (entries, total, error); error is shown to the user.
+    """
     if not query:
         return [], 0, "Empty semantic query."
     db = _db()
@@ -4042,20 +3881,18 @@ def _semantic_list(query, offset, limit, folder='', album=''):
         return [], 0, "Embedding module not available."
     return emb_svc["semantic_list"](query, offset, limit, folder, album)
 
-# ── Albums ───────────────────────────────────────────────────────────────────
-# Album membership is stored in each image's XMP (mwg-coll:Collections) and only
-# cached in the DB, so everything here writes through to the sidecars.
+# -- albums: membership is written to each member's sidecar --
 
 @app.route("/api/albums")
 @_auth.require_feature("tab.albums")
 def api_albums():
-    """List every album with a member count and a cover thumbnail."""
+    """! @brief Every album with its count and cover."""
     return jsonify({"success": True, "albums": _album_list()})
 
 @app.route("/api/albums/create", methods=["POST"])
 @_auth.require_feature("tab.albums", level="write", action='album_create', fields=('name',))
 def api_album_create():
-    """Create an empty album (optionally seeded with files)."""
+    """! @brief Create an album, optionally with files."""
     d = request.json or {}
     name = str(d.get("name", "")).strip()
     if not name:
@@ -4074,8 +3911,7 @@ def api_album_create():
 @app.route("/api/albums/delete", methods=["POST"])
 @_auth.require_feature("tab.albums", level="write", action='album_delete', fields=('name',))
 def api_album_delete():
-    """Delete an album. Removes the collection from every member's XMP; the
-    images themselves are never touched."""
+    """! @brief Delete an album (removed from every member's sidecar; images stay)."""
     d = request.json or {}
     name = str(d.get("name", "")).strip()
     if not name:
@@ -4094,7 +3930,7 @@ def api_album_delete():
 @app.route("/api/albums/rename", methods=["POST"])
 @_auth.require_feature("tab.albums", level="write", action='album_rename', fields=('old', 'new', 'old_name', 'new_name'))
 def api_album_rename():
-    """Rename an album, rewriting the collection name in every member's XMP."""
+    """! @brief Rename an album in every member's sidecar."""
     d = request.json or {}
     old = str(d.get("name", "")).strip()
     new = str(d.get("new_name", "")).strip()
@@ -4108,7 +3944,7 @@ def api_album_rename():
         return jsonify({"success": False, "error": "An album with that name already exists."}), 409
     members = [r["rel_path"] for r in _db().execute(
         "SELECT rel_path FROM album_members WHERE album=?", (old,)).fetchall()]
-    # Rewrite each member's sidecar, preserving position in its album list.
+    # keep each member's album order
     changed = 0
     for rp in members:
         cur = _file_albums(rp)
@@ -4130,7 +3966,7 @@ def api_album_rename():
 @app.route("/api/albums/add", methods=["POST"])
 @_auth.require_feature("tab.albums", level="write", action='album_add', fields=('name', 'filename', 'filenames'))
 def api_album_add():
-    """Add one or more files to an album (creating it if new)."""
+    """! @brief Add files to an album (created if new)."""
     d = request.json or {}
     name = str(d.get("album", "")).strip()
     files = d.get("files") or []
@@ -4143,7 +3979,7 @@ def api_album_add():
 @app.route("/api/albums/remove", methods=["POST"])
 @_auth.require_feature("tab.albums", level="write", action='album_remove', fields=('name', 'filename', 'filenames'))
 def api_album_remove():
-    """Remove one or more files from an album."""
+    """! @brief Remove files from an album."""
     d = request.json or {}
     name = str(d.get("album", "")).strip()
     files = d.get("files") or []
@@ -4156,7 +3992,7 @@ def api_album_remove():
 @app.route("/api/albums/set_cover", methods=["POST"])
 @_auth.require_feature("tab.albums", level="write")
 def api_album_set_cover():
-    """Pin a specific member image as the album's cover tile."""
+    """! @brief Set an album's cover image."""
     d = request.json or {}
     name = str(d.get("album", "")).strip()
     cover = str(d.get("cover", "")).strip()
@@ -4171,7 +4007,7 @@ def api_album_set_cover():
 @app.route("/api/albums/of", methods=["POST"])
 @_auth.require_feature("tab.albums")
 def api_albums_of():
-    """Which albums is this file in? Powers the per-image album chips."""
+    """! @brief The albums a file is in."""
     d = request.json or {}
     fn = str(d.get("filename", "")).strip()
     visible = _album_list()
@@ -4180,9 +4016,7 @@ def api_albums_of():
                     "all": [a["name"] for a in visible]})
 
 def _predicted_rel(tdir, orig_name):
-    """Best-guess stored rel_path for an upload, for duplicate short-circuits and
-    for the `filename` field returned on the spool path (where the true stored
-    name isn't known until a worker converts it)."""
+    """! @brief The rel_path an upload will probably get (the real one is known after conversion)."""
     try:
         return os.path.relpath(os.path.join(tdir, mt.stored_name(orig_name)),
                                MEDIA_DIR).replace('\\', '/')
@@ -4190,10 +4024,7 @@ def _predicted_rel(tdir, orig_name):
         return orig_name
 
 def _spool_upload_to_disk(file, orig_name):
-    """Stream the raw upload to the durable spool dir and return its path. No
-    decode, no cjxl — just the write. Shared by the spool path and by the inline
-    path (which spools first so an inline attempt is still crash-durable and can
-    fall back to the queue on a transient failure)."""
+    """! @brief Write the raw upload to the spool dir (no decoding) and return its path."""
     os.makedirs(_UPLOAD_SPOOL_DIR, exist_ok=True)
     fd, spool_path = tempfile.mkstemp(dir=_UPLOAD_SPOOL_DIR, prefix="up-",
                                       suffix="-" + orig_name)
@@ -4202,14 +4033,13 @@ def _spool_upload_to_disk(file, orig_name):
     return spool_path
 
 def _enqueue_spooled_upload(spool_path, orig_name, folder, metadata, pred):
-    """Insert (or collapse into) an upload_queue row for an already-spooled file
-    and return the JSON response tuple. Collapsing a duplicate re-POST drops the
-    redundant spool. On enqueue failure the spool is removed and a 500 returned."""
+    """! @brief Queue a spooled upload, or fold a repeat POST into its pending job.
+    @return the response tuple; 500 (spool removed) when queueing fails.
+    """
     now = time.time()
     def _enqueue():
         db = _db()
-        # Same name already waiting/processing? Collapse the duplicate re-POST
-        # into the existing job rather than adding a second doomed row.
+        # a job for this name is pending: fold the repeat into it
         dup = db.execute(
             "SELECT id FROM upload_queue WHERE orig_name=? AND folder=? "
             "AND status IN ('pending','processing') LIMIT 1",
@@ -4233,7 +4063,6 @@ def _enqueue_spooled_upload(spool_path, orig_name, folder, metadata, pred):
                         "error": "Could not queue upload."}), 500
 
     if kind == "dup":
-        # A job for this name is already in flight; drop the redundant spool.
         try: os.remove(spool_path)
         except OSError: pass
         return jsonify({"success": True, "queued": False, "duplicate": True,
@@ -4244,29 +4073,20 @@ def _enqueue_spooled_upload(spool_path, orig_name, folder, metadata, pred):
                     "filename": pred}), 202
 
 def _process_spooled_inline(spool_path, orig_name, folder, metadata):
-    """Run the full convert/index chain for a just-spooled upload *inline*, in
-    the request thread, reusing the exact queue-worker code path so the verdict
-    is identical whether a file goes inline or through the pool. Returns
-    (outcome, payload, http_code):
-      - outcome 'done'   -> payload is the real pipeline JSON (true filename,
-                            corrected_extension, duplicate, etc.); spool removed.
-      - outcome 'failed' -> terminal, known-bad file (corrupt/dup/etc.); the
-                            real error payload is returned; spool removed.
-      - outcome 'retry'  -> transient server-side failure; spool is LEFT on disk
-                            for the caller to enqueue so the file is never lost.
+    """! @brief Convert and index a spooled upload in the request thread, through the
+    same code as the queue worker.
+    @return (outcome, payload, status): "done" (real receipt, spool removed),
+            "failed" (bad file, spool removed) or "retry" (transient, spool kept
+            for the caller to queue).
     """
     try:
         with open(spool_path, "rb") as f:
             data = f.read()
     except OSError as e:
-        # Spool vanished before we could read it — nothing to run inline. Let the
-        # caller treat this as transient (it will try to enqueue, which will also
-        # notice the missing spool and fail cleanly).
+        # spool gone: transient; queueing will notice too
         return "retry", {"error": f"spool missing: {e}"}, 503
 
-    # Run the exact same pipeline the queue worker runs, but keep its FULL JSON
-    # body so the client gets the true receipt (real filename, duplicate flag,
-    # corrected_extension) rather than the flattened queue outcome.
+    # the queue worker's pipeline, keeping its full JSON receipt
     ctx = app.test_request_context("/api/upload", method="POST",
             data={"file": (io.BytesIO(data), orig_name),
                   "folder": folder or "", "metadata": metadata or "{}"},
@@ -4284,7 +4104,7 @@ def _process_spooled_inline(spool_path, orig_name, folder, metadata):
 
     ecode = payload.get("error_code") or ""
     if ecode in ("exact_duplicate", "filename_exists"):
-        # Already in the library — a true, terminal duplicate verdict.
+        # already in the library
         try: os.remove(spool_path)
         except OSError: pass
         existing = payload.get("existing_file") or payload.get("filename")
@@ -4292,55 +4112,31 @@ def _process_spooled_inline(spool_path, orig_name, folder, metadata):
                         "filename": existing, "existing_file": existing,
                         "error_code": ecode}, 200
     if ecode in _TERMINAL_UPLOAD_CODES:
-        # Known-bad file (corrupt / unconvertible / malformed request). Terminal:
-        # return the real error so the client can skip it, and drop the spool.
+        # bad file: final
         try: os.remove(spool_path)
         except OSError: pass
         return "failed", payload, (code if code >= 400 else 422)
 
-    # server_error / index_failed / unknown -> transient. Leave the spool on disk
-    # for the caller to enqueue so a good file is never lost to a hiccup.
+    # transient: keep the spool for the queue
     return "retry", payload, (code if code >= 400 else 503)
 
 @app.route("/api/upload", methods=["POST"])
 @_auth.require_feature("data.upload", level="write", action='upload', fields=('folder',))
 def api_upload():
-    """Adaptive ingest. Two ways a file can be taken:
+    """! @brief Upload a file, inline or queued.
 
-      * INLINE (synchronous) — the raw bytes are spooled, then the full
-        convert/index chain runs in the request thread and the response carries
-        the *true* receipt: the real stored filename, real SHA duplicate
-        detection, real conversion/corruption verdict, and any extension
-        correction. This is the old upload.py behaviour, and it's what a
-        near-sequential uploader (the home photo album) wants: immediate,
-        trustworthy confirmation and a clean retry if the stored result is bad.
-
-      * SPOOL (deferred) — the raw bytes are spooled to a durable dir, a queue
-        row is enqueued, and the request returns 202 immediately with a
-        *predicted* filename. The heavy chain drains in the worker pool later.
-        This is what a burst uploader (the factory quality lines) wants: each
-        request costs only a disk write, so many devices ingest concurrently
-        during the day and the queue lets out during breaks / after close.
-
-    Mode selection, in priority order:
-      1. explicit `mode` form field — 'sync' forces inline, 'spool' forces
-         deferred, 'auto' (default) lets the server decide;
-      2. in 'auto', run inline when the background pool can currently afford it
-         (a free slot and not under memory pressure), and spool when it can't —
-         i.e. only fall back to the queue when the box can't keep up.
-
-    Safety net: an inline attempt that hits a *transient* server-side failure is
-    not lost — its already-written spool is enqueued and the client is told it
-    was queued, exactly as if it had taken the spool path to begin with. A file
-    can therefore never be dropped by choosing inline.
+    Inline: the file is spooled, converted and indexed in the request; the reply
+    is the real receipt (stored name, duplicate, corrections). Queued: the file
+    is spooled and queued; 202 with the predicted name.
+    The `mode` form field picks "sync", "spool" or "auto" (inline while the
+    worker pool has a free slot and memory). A transient failure inline falls
+    back to the queue, so no file is lost.
     """
     if 'file' not in request.files:
         return jsonify({"success": False, "error_code": "no_file",
                         "error": "No file part in request."}), 400
     file   = request.files['file']
-    # Access policies may redirect the target (ownership: scope=personal
-    # lands under the uploader's own folder). Applied once, here; the queue
-    # and inline pipeline receive the resolved folder.
+    # access policies may redirect the target folder
     folder = module_host.upload_folder(request.form.get("folder", "").strip(), request.form)
     tdir   = get_safe_path(MEDIA_DIR, folder) if folder else MEDIA_DIR
     if not tdir:
@@ -4351,19 +4147,16 @@ def api_upload():
     metadata  = request.form.get("metadata", "{}") or "{}"
     pred      = _predicted_rel(tdir, orig_name)
 
-    # Already in the library on disk? Report it like the pipeline would, without
-    # spending anything. (Content-level dupes under a different name are still
-    # caught by the SHA check inside the conversion pipeline.)
+    # already on disk under this name (same content under another name is caught by SHA later)
     if os.path.exists(os.path.join(MEDIA_DIR, pred)):
         return jsonify({"success": True, "queued": False, "duplicate": True,
                         "filename": pred, "existing_file": pred}), 200
 
-    # ── choose a mode ────────────────────────────────────────────────────────
     mode = (request.form.get("mode", "auto") or "auto").strip().lower()
     if mode not in ("auto", "sync", "spool"):
         mode = "auto"
     if mode == "auto":
-        # Inline while the box keeps up; spool once the pool is saturated.
+        # inline while the pool keeps up
         try:
             inline = not thread_manager.ingest_pressure()["saturated"]
         except Exception:
@@ -4371,8 +4164,7 @@ def api_upload():
     else:
         inline = (mode == "sync")
 
-    # Bytes hit the durable spool dir first either way — an inline run stays
-    # crash-safe and can fall back to the queue without a re-upload.
+    # always spool first: inline stays crash-safe and can fall back to the queue
     try:
         spool_path = _spool_upload_to_disk(file, orig_name)
     except Exception as e:
@@ -4384,13 +4176,11 @@ def api_upload():
         return _enqueue_spooled_upload(spool_path, orig_name, folder,
                                        metadata, pred)
 
-    # ── inline: run the real pipeline and return the true receipt ────────────
     try:
         outcome, payload, code = _process_spooled_inline(
             spool_path, orig_name, folder, metadata)
     except Exception as e:
-        # An unexpected crash inline is transient by definition — fall through
-        # to the queue rather than dropping the file.
+        # an unexpected crash is transient: queue it
         access_logger.error(f"inline upload crashed for {orig_name}: {e}",
                             exc_info=True)
         outcome = "retry"
@@ -4398,16 +4188,14 @@ def api_upload():
     if outcome != "retry":
         return jsonify(payload), code
 
-    # Transient failure inline: enqueue the spool we already wrote so the file
-    # is retried by the pool, and answer as the deferred path would.
+    # transient: queue the spool already written
     return _enqueue_spooled_upload(spool_path, orig_name, folder,
                                    metadata, pred)
 
 def _run_upload():
-    """The full convert+index pipeline for one upload. Reads the file and form
-    from the *current request context* exactly as before. The queue worker calls
-    this inside a rebuilt request context (see _process_upload_job), so this body
-    is unchanged whether it runs from a live HTTP request or a drained queue."""
+    """! @brief Convert and index one upload from the current request context
+    (a live request or the queue worker's rebuilt one).
+    """
     if 'file' not in request.files:
         return jsonify({"success": False, "error_code": "no_file",
                         "error": "No file part in request."}), 400
@@ -4422,30 +4210,20 @@ def _run_upload():
     fname    = mt.clean_filename(file.filename)
     in_ext   = os.path.splitext(fname)[1].lower()
     unknown_type = in_ext not in mt.UPLOAD_EXTS
-    # Set to the original (wrong) extension if content-sniffing had to correct
-    # it; reported back to the client so the rename is visible, not silent.
+    # the original extension when the content said otherwise
     corrected_from = None
 
     with tempfile.TemporaryDirectory() as tmp:
-        # Save first (streamed to disk by Werkzeug), so an unknown/absent
-        # extension can be recovered by sniffing the actual bytes. This is what
-        # lets the client's --aggressive mode rescue misnamed files.
+        # save first so the bytes can be sniffed
         orig = os.path.join(tmp, fname or "upload.bin")
         file.save(orig)
 
-        # ALWAYS reconcile the declared extension against the actual bytes —
-        # not just when the extension is unrecognised. A file named ".png" that
-        # is really a JPEG has a perfectly valid-looking extension, so the old
-        # `if unknown_type:` guard skipped sniffing entirely and handed the
-        # mislabeled file straight to cjxl, which dies with "The file contains
-        # data of an unknown image type". Correcting here means the type is
-        # right before any downstream tool (cjxl, pyexiv2, the XMP writer) ever
-        # sees it, and the mismatch is reported instead of failing obscurely.
+        # Always check the extension against the bytes: a JPEG named .png has a
+        # valid-looking extension and would make cjxl fail.
         fixed_name, sniffed, sniff_status = mt.reconcile_ext(orig, fname)
 
         if sniff_status == 'unknown' and unknown_type:
-            # Extension is unsupported AND the content matches nothing we know.
-            # Nothing to fall back on: reject cleanly.
+            # unknown extension and unknown content: reject
             return jsonify({"success": False, "error_code": "conversion_failed",
                             "error": f"Unsupported file type '{in_ext}'.",
                             "detail": "Accepted: images, gifs, "
@@ -4454,19 +4232,13 @@ def _run_upload():
                                       "not match any known type either."}), 422
 
         if sniff_status == 'unknown':
-            # Declared extension IS supported but has no signature in our table.
-            # Camera raws are the normal case here (TIFF-ish, vendor-specific),
-            # so proceed on the declared type — but leave a trail, because this
-            # is also what a truncated or corrupt upload looks like.
+            # Supported extension without a known signature (raws, or a truncated file): proceed, logged.
             access_logger.info(
                 f"upload: could not sniff content of '{fname}'; "
                 f"proceeding on declared extension '{in_ext}'")
 
         elif sniff_status == 'corrected':
-            # The bytes disagree with the name and we know what they really are.
-            # Rename to the true type so the rest of the pipeline routes it
-            # correctly, and record it loudly — a silent rename is how "why is
-            # my png a jpeg" tickets happen.
+            # the content is another known type: rename, logged
             access_logger.warning(
                 f"upload: '{fname}' is labeled '{in_ext or '(none)'}' but its "
                 f"content is '{sniffed}'; correcting extension to '{sniffed}'")
@@ -4479,8 +4251,7 @@ def _run_upload():
                 os.rename(orig, new_orig)
                 orig = new_orig
 
-        # Stored name/format follows Settings → Media (default: images → .jxl,
-        # video/audio/books kept as uploaded).
+        # name and format per Settings > Media
         store_name = mt.stored_name(fname)
         store_ext  = os.path.splitext(store_name)[1].lower()
         store_path = os.path.join(tdir, store_name)
@@ -4488,38 +4259,28 @@ def _run_upload():
         out        = os.path.join(tmp, "out" + store_ext)
 
         if os.path.exists(store_path):
-            # Same NAME is not same PHOTO (two phones both shoot
-            # 20240720_092345.jpg). Take a free name; identical content is
-            # still caught below by the content-hash duplicate check.
+            # Same name is not same photo: take a free name (same content is caught by SHA).
             store_path = _free_store_path(store_path)
             store_name = os.path.basename(store_path)
             rel_path   = _rel(store_path)
 
         is_raw_src = mt.is_raw(fname)
         is_heif_src = mt.is_heif(fname)
-        # Capture per-frame animation timing from the SOURCE now, while it still
-        # exists — cjxl collapses it. Meaningful for animated GIF/APNG/WebP and,
-        # separately, animated JXL sources. Still images/videos yield None.
+        # capture animation timing before cjxl drops it
         anim_delays = None
         if not is_raw_src and not is_heif_src and not mt.is_video(fname):
             if in_ext in ('.gif', '.apng', '.png', '.webp'):
                 anim_delays = _extract_anim_delays(orig)
             elif in_ext == '.jxl':
-                # Animated JXL: frame count from the codestream; per-frame timing
-                # isn't recoverable from libjxl here, so duration is estimated at
-                # a nominal rate purely to apply the >30s video cutoff. The strip
-                # UI doesn't rely on exact ms for a short clip.
+                # Animated JXL: frame count only; duration is estimated for the video cutoff.
                 _ji = mt.jxl_anim_info(orig)
                 if _ji.get('animated') and _ji.get('n_frames'):
                     n = int(_ji['n_frames'])
-                    per = 100  # nominal 10fps when true timing is unknown
+                    per = 100  # 10 fps when the timing is unknown
                     anim_delays = {"delays_ms": [per] * n, "duration_ms": per * n,
                                    "n_frames": n, "estimated": True}
 
-        # Decide whether this animation is too long to keep as an animated JXL.
-        # If so, transcode to a real video (MKV) and store THAT natively — JXL is
-        # a poor video container, and a video flows through the <video> + video
-        # box-tracking pipeline. This re-points the stored name/ext/path.
+        # too long to stay an animated JXL: transcode to a video
         transcode_to_video = False
         if anim_delays and not mt.is_video(fname):
             dur_s = (anim_delays.get("duration_ms") or 0) / 1000.0
@@ -4540,13 +4301,10 @@ def _run_upload():
 
         try:
             if transcode_to_video:
-                # Long animation → real video. Animated JXL can't be fed to
-                # ffmpeg directly (unreliable animated-JXL decode), so decode its
-                # frames via imagecodecs and pipe raw RGB; GIF/APNG/WebP decode in
-                # ffmpeg directly. Frame rate comes from the captured delays.
+                # animated JXL frames are piped raw to ffmpeg; GIF / APNG / WebP decode there
                 jxl_frames = None
                 if in_ext == '.jxl':
-                    jxl_frames = mt.jxl_decode_frames(orig)  # all frames
+                    jxl_frames = mt.jxl_decode_frames(orig)
                 ok = mt.transcode_animation_to_video(
                     orig, out, delays_ms=anim_delays.get("delays_ms"),
                     jxl_frames=jxl_frames)
@@ -4556,13 +4314,11 @@ def _run_upload():
                         "error": "Animation-to-video transcode failed.",
                         "detail": f"Could not transcode '{fname}' to video."
                     }), 422
-                # Timing now lives in the video itself; no XMP delays needed.
+                # the video holds the timing now
                 anim_delays = None
             elif mt.is_video(fname) or mt.is_audio(fname) or mt.is_uploadable_book(fname):
-                # Video, audio and books: stored as uploaded, or converted to the
-                # Settings → Media target. Audio is organised + tagged in place by
-                # the music indexer and books by the book indexer; neither ever
-                # enters the image DB.
+                # Video, audio and books: stored as uploaded or converted to the Settings > Media
+                # target; the music and books modules index them.
                 if in_ext == store_ext:
                     shutil.copy(orig, out)
                 else:
@@ -4576,10 +4332,7 @@ def _run_upload():
             elif in_ext == store_ext:
                 shutil.copy(orig, out)
             else:
-                # For camera raws, develop with rawpy (libraw) into an
-                # intermediate 16-bit PNG first, then transcode THAT to .jxl.
-                # This is far more reliable than feeding the raw straight to
-                # cjxl, whose per-camera raw support is spotty.
+                # raws are developed to a 16-bit PNG first (cjxl's raw support is spotty)
                 cjxl_src = orig
                 if is_raw_src:
                     dev_png = os.path.join(tmp, "developed.png")
@@ -4602,8 +4355,7 @@ def _run_upload():
                     cjxl_src = dev_png
 
                 if store_ext != '.jxl':
-                    # Non-JXL target (webp/avif/png/jpg) via Pillow. A developed
-                    # 16-bit PNG headed for .png is already the answer.
+                    # Pillow for non-JXL targets; a developed PNG headed for .png is done already
                     if cjxl_src != orig and store_ext == '.png':
                         shutil.copy(cjxl_src, out)
                         err = None
@@ -4617,11 +4369,7 @@ def _run_upload():
                             "error": f"Conversion to {store_ext} failed.",
                             "detail": err}), 422
                 else:
-                    # cjxl handles still images and animated GIF/APNG, producing a
-                    # .jxl. --lossless_jpeg only makes sense for a real JPEG
-                    # bitstream (never for a developed raw / png).
-                    # Codec arguments (lossless/lossy, effort, bit-exact JPEG)
-                    # come from the encoding module via media_types.
+                    # --lossless_jpeg only for a real JPEG bitstream; codec arguments from the encoding module
                     jpeg_source = not is_raw_src and not is_heif_src and in_ext in ('.jpg', '.jpeg')
                     cjxl_cmd = mt.cjxl_cmd(cjxl_src, out, jpeg_source, state["cjxl_threads"])
                     result = subprocess.run(cjxl_cmd, capture_output=True, text=True)
@@ -4633,8 +4381,7 @@ def _run_upload():
                         }), 422
 
             sha = _sha256(out)
-            # Modules that keep their own library (books) get first say on
-            # whether this content already exists; `files` only knows images.
+            # modules with their own library (books) answer duplicate checks first
             for bdup in module_host.emit("upload.duplicate_check", sha=sha, filename=fname):
                 return jsonify({
                     "success": False, "error_code": "exact_duplicate",
@@ -4644,11 +4391,7 @@ def _run_upload():
             dup = _db().execute(
                 "SELECT rel_path FROM files WHERE sha256=?", (sha,)).fetchone()
             if dup:
-                # Same bytes, different source. Downloading one artist's gallery
-                # off three boorus yields identical files carrying different
-                # tags/descriptions, so fold the new metadata into the copy we
-                # already have rather than discarding it. (A name collision
-                # with different content took a free name above.)
+                # Same bytes from another source: merge its metadata into the existing file.
                 existing = dup["rel_path"]
                 merged = _merge_into_existing(existing, _form_metadata(existing))
                 return jsonify({
@@ -4658,11 +4401,7 @@ def _run_upload():
 
             shutil.move(out, store_path)
 
-            # Books are not image assets either: no bpp, no XMP regions, no
-            # image index. Index the ONE file synchronously so the uploader's
-            # response means "it's in the library and readable", rather than
-            # kicking off a whole-tree walk per uploaded file — a 3000-book
-            # bulk upload would otherwise start 3000 full scans.
+            # books: index this one file now, not a whole-tree walk per upload
             module_host.emit("upload.stored", rel_path=rel_path, filename=fname)
             if mt.is_book(fname):
                 resp = {"success": True, "filename": rel_path, "media_kind": "book"}
@@ -4671,8 +4410,7 @@ def _run_upload():
                                                    "to": in_ext}
                 return jsonify(resp), 200
 
-            # Audio is not an image asset: the music module indexes it on
-            # upload.stored (emitted below); skip bpp/XMP/image-index entirely.
+            # audio: indexed by the music module on upload.stored
             if mt.is_audio(fname):
                 module_host.emit("upload.stored", rel_path=rel_path, filename=fname)
                 resp = {"success": True, "filename": rel_path}
@@ -4681,59 +4419,55 @@ def _run_upload():
                                                    "to": in_ext}
                 return jsonify(resp), 200
 
-            # If the source was a camera raw, optionally stash the original raw
-            # (hidden) and link it to this derived image via RawDataUniqueID, and
-            # record OriginalRawFileName — but never overwrite an OriginalRawFileName
-            # a prior tool already set (guards against convert-and-convert-back).
+            # link the derived image to its raw (and keep the raw when keep_raws is on)
             if is_raw_src:
                 _link_raw_to_image(orig, fname, rel_path, store_path)
 
             meta = _form_metadata(rel_path)
             try:
-                write_metadata(store_path, meta.get("tags", []),
-                               meta.get("description", ""), meta.get("regions", []),
-                               anim_delays=anim_delays,
-                               albums=[str(a) for a in (meta.get("albums") or []) if str(a).strip()] or None)
+                up = {"tags": meta.get("tags", []), "description": meta.get("description", ""),
+                      "regions": meta.get("regions", [])}
+                if anim_delays:
+                    up["anim_delays"] = anim_delays
+                albums = [str(a) for a in (meta.get("albums") or []) if str(a).strip()]
+                if albums:
+                    up["albums"] = albums
+                update_file(store_path, set=up, force=True)
             except Exception as e:
-                # A single malformed region shouldn't sink the whole file. Log it,
-                # write the image with no sidecar metadata, and let ingest proceed.
+                # a malformed region doesn't sink the file: store it without sidecar metadata
                 access_logger.warning(
                     f"upload: metadata write failed for {rel_path}: {e}; "
                     f"ingesting file without sidecar metadata")
                 try:
-                    write_metadata(store_path, [], "", [], anim_delays=anim_delays)
+                    update_file(store_path, set={"tags": [], "description": "", "regions": [],
+                                                 **({"anim_delays": anim_delays} if anim_delays else {})},
+                                force=True)
                 except Exception as e2:
                     access_logger.error(
                         f"upload: metadata write failed even when empty for "
                         f"{rel_path}: {e2}")
-            # A developed raw / decoded HEIF loses the original's EXIF, so carry
-            # its capture date and GPS into the sidecar. Runs before the
-            # caller's own XMP patch, which may override it.
+            # a developed raw / decoded HEIF lost its EXIF: carry date and GPS into the sidecar
             if is_raw_src or is_heif_src:
                 try:
                     carry = mt.capture_xmp(orig)
                     if carry:
-                        xmp_export.write_xmp(store_path, carry)
+                        update_file(store_path, xmp=carry)
                 except Exception as e:
                     access_logger.warning(f"upload: carrying capture metadata for {rel_path}: {e}")
 
             exif_patch = meta.get("exif")
             if exif_patch:
                 try:
-                    exif_export.write_exif(store_path, exif_patch)
+                    update_file(store_path, exif=exif_patch, history=False)
                 except Exception as e:
                     access_logger.error(
                         f"upload: exif patch failed for {rel_path}: {e}")
 
-            # XMP patch MUST run after write_metadata: that call rewrites the
-            # whole .xmp sidecar from scratch, so writing XMP earlier would be
-            # wiped. write_xmp merges into the existing sidecar via pyexiv2,
-            # validates each token against the schema, and skips unknown ones,
-            # so a bad mapping can't fail the upload.
+            # after the sidecar write, which rewrites the whole file
             xmp_patch = meta.get("xmp")
             if xmp_patch:
                 try:
-                    xmp_export.write_xmp(store_path, xmp_patch)
+                    update_file(store_path, xmp=xmp_patch)
                 except Exception as e:
                     access_logger.error(
                         f"upload: xmp patch failed for {rel_path}: {e}")
@@ -4767,14 +4501,11 @@ def _run_upload():
             return jsonify({"success": False, "error_code": "server_error",
                             "error": str(e)}), 500
 
-# ── Durable upload queue + worker pool ────────────────────────────────────────
-# The upload request spools raw bytes and enqueues; these workers drain the
-# queue and run the (slow) convert/index chain — cjxl parallelism lives here, not
-# on the request threads. Sized so parallel encoders stay near the core count.
+# -- upload queue and worker pool: requests spool and queue, workers convert --
 _UPLOAD_SPOOL_DIR   = os.path.join(os.path.dirname(DB_PATH), ".upload_spool")
 _UPLOAD_STALE_SECS  = 300
 _upload_wake        = threading.Event()
-_upload_started     = threading.Event()   # guards one-time pool start
+_upload_started     = threading.Event()  # one-time pool start
 
 def _upload_workers_wake():
     _upload_wake.set()
@@ -4807,7 +4538,7 @@ def _claim_upload_job():
             (time.time(), target)).rowcount
         db.commit()
         if not n:
-            return "retry"        # lost the race; caller loops again
+            return "retry"  # lost the race
         row = db.execute("SELECT * FROM upload_queue WHERE id=?",
                           (target,)).fetchone()
         if row is not None:
@@ -4819,29 +4550,25 @@ def _claim_upload_job():
         if got != "retry":
             return got
 
-# Error codes that are a genuine, handled verdict on the file itself — retrying
-# the identical bytes cannot change the result, so these are terminal.
+# verdicts on the file itself: retrying the same bytes can't change them
 _TERMINAL_UPLOAD_CODES = frozenset({
-    "exact_duplicate", "filename_exists",   # already in the library
-    "conversion_failed",                    # undecodable = corrupt / invalid format
-    "no_file", "bad_folder",                # malformed request; identical retry is pointless
+    "exact_duplicate", "filename_exists",  # already in the library
+    "conversion_failed",  # corrupt or unsupported
+    "no_file", "bad_folder",  # malformed request
 })
 
 def _process_upload_job(job) -> tuple[str, str, str]:
-    """!
-    @brief Run the convert/index pipeline for one queued job.
-    @return (outcome, detail, rel_path) where outcome is 'done', 'failed'
-            (terminal, known-bad file), or 'retry' (transient — try again later).
-    @note Only a handled verdict on the file (duplicate, corrupt, invalid format)
-          is terminal. Collisions, DB locks and unknown errors are 'retry' so a
-          good file is never dropped.
+    """! @brief Convert and index one queued upload.
+    @return (outcome, detail, rel_path): "done", "failed" (a verdict on the file:
+            duplicate, corrupt, unsupported) or "retry" (anything else, so a good
+            file is never dropped).
     """
     spool_path = job["spool_path"]
     try:
         with open(spool_path, "rb") as f:
             data = f.read()
     except OSError as e:
-        # Spool genuinely gone -> nothing to retry from. Terminal.
+        # spool gone: nothing to retry from
         return "failed", f"spool missing: {e}", ""
 
     ctx = app.test_request_context("/api/upload", method="POST",
@@ -4858,15 +4585,15 @@ def _process_upload_job(job) -> tuple[str, str, str]:
 
     ecode = payload.get("error_code") or ""
     if ecode in ("exact_duplicate", "filename_exists"):
-        # Already in the library (possibly just written by a colliding worker).
+        # already in the library (maybe written by a colliding worker)
         return "done", "", payload.get("existing_file", "")
     if ecode in _TERMINAL_UPLOAD_CODES:
         return "failed", payload.get("error", ecode) or ecode, ""
-    # server_error / index_failed / unknown -> transient. Retry.
+    # transient
     return "retry", payload.get("error", ecode or "unknown") or "unknown", ""
 
 def _finish_upload_job(job_id, ok: bool, err: str, rel_path: str) -> None:
-    """! @brief Write a terminal outcome (done|error) for a job."""
+    """! @brief Store a job's final outcome (done or error)."""
     def _fin():
         db = _db()
         db.execute(
@@ -4877,15 +4604,14 @@ def _finish_upload_job(job_id, ok: bool, err: str, rel_path: str) -> None:
     _db_retry(_fin)
 
 def _handle_upload_job(job):
-    """Run one claimed upload job to a terminal state. Same retry/backoff/finish
-    logic the old loop body had — but this is a single task submitted to the
-    thread manager's pool, not a parked worker thread. Backoff on 'retry' happens
-    inline before the row goes back to pending so a hot-looping bad job can't
-    starve the pool."""
+    """! @brief Run one claimed upload job to a final state, as a thread-manager task.
+    A retry backs off before the row returns to pending, so a failing job can't
+    hog the pool.
+    """
     try:
         outcome, detail, rel = _process_upload_job(job)
     except Exception as e:
-        # An unhandled crash is transient by definition — retry, never park.
+        # an unhandled crash is transient
         outcome, detail, rel = "retry", str(e), ""
         access_logger.error(f"upload job {job['id']} crashed: {e}",
                             exc_info=True)
@@ -4899,10 +4625,9 @@ def _handle_upload_job(job):
             db.commit()
         try: _db_retry(_requeue)
         except Exception: pass
-        time.sleep(min(30.0, 0.5 * max(1, job["attempts"])))   # capped backoff
+        time.sleep(min(30.0, 0.5 * max(1, job["attempts"])))  # capped backoff
         return
 
-    # Terminal: 'done' or 'failed' (known-bad file).
     _finish_upload_job(job["id"], outcome == "done", detail, rel)
     if outcome == "done":
         try: os.remove(job["spool_path"])
@@ -4936,10 +4661,9 @@ def _spool_cost_mb(spool_path, orig_name):
     return max(48.0, size_mb * 5.0)
 
 def _upload_job_cost_mb(job):
-    """Memory cost for an upload job. Prefer the estimate the claim already
-    computed; if it's missing (a requeued row re-fetched without it, a dict that
-    lost the key), recompute from the spool file rather than reserving 0 — a
-    silent 0 here defeats the whole admission guard for that job."""
+    """! @brief Memory to reserve for an upload job: the claim's estimate, else
+    recomputed from the spool file (reserving 0 would bypass admission).
+    """
     c = job.get("_cost_mb") if hasattr(job, "get") else None
     if c and c > 0:
         return c
@@ -4953,7 +4677,7 @@ def _register_upload_source():
         "upload", _claim_upload_job, _handle_upload_job,
         cost_of=_upload_job_cost_mb)
 
-_upload_threads = []   # live worker Thread objects, for liveness reporting
+_upload_threads = []  # for liveness reporting
 
 def _start_upload_workers():
     if _upload_started.is_set():
@@ -4963,8 +4687,7 @@ def _start_upload_workers():
         os.makedirs(_UPLOAD_SPOOL_DIR, exist_ok=True)
     except Exception as e:
         access_logger.error(f"upload spool dir create failed: {e}")
-    # Requeue anything left mid-flight by a restart: 'processing' rows had a
-    # worker that never finished; their spooled originals are still on disk.
+    ## @brief Requeue jobs a restart interrupted ('processing'); their spools are still there.
     def _requeue_stale():
         db = _db()
         db.execute("UPDATE upload_queue SET status='pending', updated=? "
@@ -4974,33 +4697,25 @@ def _start_upload_workers():
         _db_retry(_requeue_stale)
     except Exception as e:
         access_logger.error(f"upload queue boot requeue failed: {e}")
-    # Hand ingest to the manager's background processor — it fills every free
-    # thread across all sources. No dispatcher thread or executor of our own.
+    # ingest runs on the thread manager's pool
     _register_upload_source()
     _upload_workers_wake()
     _start_spool_janitor()
 
-# ── spool janitor ────────────────────────────────────────────────────────────
-# Periodic cleaner for the upload spool + ingest queue. Not a dumb rm — each pass
-# tries to *resolve* mess rather than just delete it:
-#   1. Errored jobs whose spooled bytes survive -> requeued (same convert/index
-#      chain the workers run). Jobs past _JANITOR_MAX_ATTEMPTS are left parked
-#      for a human to /api/upload/discard.
-#   2. Orphaned spool files with no queue row (crash-dropped originals) ->
-#      re-ingested via _run_upload, which decides new-vs-duplicate itself.
-#   3. Spools of already-'done' or duplicate originals -> deleted; the file is
-#      already in the library, so the leftover bytes are redundant.
-# Terminal-vs-transient uses the SAME _TERMINAL_UPLOAD_CODES the workers use, so
-# the janitor can never drop a good original a worker would have kept.
+# -- spool janitor (every 15 min) --
+# 1. errored jobs whose spool survives are requeued (up to _JANITOR_MAX_ATTEMPTS,
+#    then parked for /api/upload/discard);
+# 2. spool files without a job are re-ingested (the upload path dedups);
+# 3. spools of finished or duplicate uploads are deleted.
+# It uses the workers' _TERMINAL_UPLOAD_CODES, so it never drops a file they would keep.
 _JANITOR_INTERVAL_SECS = 15 * 60
 _JANITOR_MAX_ATTEMPTS  = 5
-_JANITOR_ORPHAN_MIN_AGE = 120       # ignore spool files younger than this (in flight)
+_JANITOR_ORPHAN_MIN_AGE = 120  # younger spool files may still be in flight
 _janitor_started = threading.Event()
 _janitor_wake    = threading.Event()
 
 def _janitor_requeue_errors(db):
-    """Errored jobs whose spool survives and are under the attempt budget go
-    back to 'pending'. Returns (requeued_ids, parked_ids)."""
+    """! @brief Requeue errored jobs with a spool and attempts left. @return (requeued ids, parked ids)."""
     rows = db.execute(
         "SELECT id, spool_path, attempts FROM upload_queue "
         "WHERE status='error'").fetchall()
@@ -5008,9 +4723,9 @@ def _janitor_requeue_errors(db):
     for r in rows:
         sp = r["spool_path"]
         if not (sp and os.path.exists(sp)):
-            continue                       # no bytes -> nothing to retry from
+            continue  # no bytes
         if r["attempts"] >= _JANITOR_MAX_ATTEMPTS:
-            parked.append(r["id"])         # keep bytes, stop auto-retrying
+            parked.append(r["id"])  # keep the bytes, stop retrying
             continue
         def _rq(_id=r["id"]):
             d = _db()
@@ -5025,8 +4740,7 @@ def _janitor_requeue_errors(db):
     return requeued, parked
 
 def _janitor_drop_done_spools(db):
-    """A 'done' job's original is already in the library; a crash between finish
-    and remove can leave its spool behind. Drop it. Returns count removed."""
+    """! @brief Delete spools of finished jobs. @return how many."""
     rows = db.execute(
         "SELECT id, spool_path FROM upload_queue "
         "WHERE status='done' AND spool_path<>''").fetchall()
@@ -5045,8 +4759,9 @@ def _janitor_drop_done_spools(db):
     return n
 
 def _janitor_reingest_one(data, name):
-    """Push raw bytes back through _run_upload (the call the workers make).
-    Returns 'done' | 'duplicate' | 'retry'."""
+    """! @brief Run spooled bytes through the upload pipeline again.
+    @return "done" | "duplicate" | "retry".
+    """
     ctx = app.test_request_context(
         "/api/upload", method="POST",
         data={"file": (io.BytesIO(data), name), "folder": "", "metadata": "{}"},
@@ -5061,13 +4776,13 @@ def _janitor_reingest_one(data, name):
     if ecode in ("exact_duplicate", "filename_exists"):
         return "duplicate"
     if ecode in _TERMINAL_UPLOAD_CODES:
-        return "duplicate"             # corrupt/undecodable: bytes worthless, drop
+        return "duplicate"  # corrupt: drop
     return "retry"
 
 def _janitor_reingest_orphans(db):
-    """Spool files on disk that no queue row references — crash-dropped between
-    spool and enqueue, or after a row was deleted. Re-run each through the normal
-    upload path. Returns (reingested, deleted, skipped)."""
+    """! @brief Re-ingest spool files no job refers to.
+    @return (reingested, deleted, skipped).
+    """
     if not os.path.isdir(_UPLOAD_SPOOL_DIR):
         return 0, 0, 0
     referenced = {
@@ -5083,14 +4798,13 @@ def _janitor_reingest_orphans(db):
         try: st = os.stat(path)
         except OSError: continue
         if now - st.st_mtime < _JANITOR_ORPHAN_MIN_AGE:
-            skipped += 1               # too fresh; a request may still own it
+            skipped += 1  # too fresh
             continue
         if st.st_size == 0:
-            try: os.remove(path); deleted += 1     # empty = failed write, junk
+            try: os.remove(path); deleted += 1  # empty: a failed write
             except OSError: pass
             continue
-        # Original filename is lost for a true orphan; the upload path dedups on
-        # content hash anyway, so a real duplicate collapses to a spool drop.
+        # the original name is lost; content dedup handles real duplicates
         try:
             with open(path, "rb") as f:
                 data = f.read()
@@ -5103,11 +4817,11 @@ def _janitor_reingest_orphans(db):
             try: os.remove(path); reingested += 1
             except OSError: pass
         else:
-            skipped += 1               # transient: leave it for the next sweep
+            skipped += 1  # transient: next sweep
     return reingested, deleted, skipped
 
 def _janitor_sweep():
-    """Run all three cleaning actions once. Returns a summary dict."""
+    """! @brief Run the three janitor steps once. @return a summary."""
     db = _db()
     db.rollback()
     requeued, parked = _janitor_requeue_errors(db)
@@ -5129,13 +4843,13 @@ def _janitor_loop():
             _janitor_sweep()
         except Exception as e:
             if _exiting.is_set():
-                return             # db closed under us mid-sweep: normal at exit
+                return  # DB closed at exit
             access_logger.error(f"spool janitor sweep failed: {e}", exc_info=True)
         _janitor_wake.wait(timeout=_JANITOR_INTERVAL_SECS)
         _janitor_wake.clear()
 
 def _start_spool_janitor():
-    """Start the janitor thread. Idempotent; called from _start_upload_workers."""
+    """! @brief Start the janitor thread (once)."""
     if _janitor_started.is_set():
         return
     _janitor_started.set()
@@ -5145,19 +4859,18 @@ def _start_spool_janitor():
 @app.route("/api/upload/clean", methods=["POST"])
 @_auth.require_feature("data.upload", level="write", action='upload_clean')
 def api_upload_clean():
-    """Run a cleaning pass now: requeue recoverable errors, re-ingest orphaned
-    spool files, drop spools of already-processed originals."""
+    """! @brief Run a janitor pass now."""
     return jsonify({"success": True, "result": _janitor_sweep()})
 
 @app.route("/api/upload/queue")
 @_auth.require_feature("data.upload")
 def api_upload_queue_status():
-    """Queue depth by status — lets the Pis or an admin see backlog/health."""
+    """! @brief Upload queue depth by status, plus failing jobs."""
     db = _db()
     rows = db.execute(
         "SELECT status, COUNT(*) c FROM upload_queue GROUP BY status").fetchall()
     counts = {r["status"]: r["c"] for r in rows}
-    # Any job that failed or is stuck retrying, newest first, with its error.
+    # failed or retrying jobs, newest first
     errs = db.execute(
         "SELECT id, orig_name, folder, status, attempts, error, spool_path "
         "FROM upload_queue WHERE status IN ('error','pending','processing') "
@@ -5177,7 +4890,7 @@ def api_upload_queue_status():
                     "processing": counts.get("processing", 0),
                     "error": counts.get("error", 0),
                     "done": counts.get("done", 0),
-                    "lost": lost,   # errored jobs whose original bytes are gone
+                    "lost": lost,  # errored jobs whose bytes are gone
                     "workers": thread_manager.slots_for(),
                     "workers_alive": sum(1 for t in _upload_threads if t.is_alive()),
                     "workers_started": _upload_started.is_set(),
@@ -5186,9 +4899,9 @@ def api_upload_queue_status():
 @app.route("/api/upload/retry", methods=["POST"])
 @_auth.require_feature("data.upload", level="write", action="upload_retry", fields=("id",))
 def api_upload_retry():
-    """Requeue errored jobs whose spooled original still exists. Pass {"id": N}
-    for one job, or nothing to retry every recoverable errored job. Jobs whose
-    spool is gone are reported as unrecoverable rather than silently skipped."""
+    """! @brief Requeue errored jobs whose spool exists: {"id": N} for one, nothing for all.
+    Jobs without a spool are reported as unrecoverable.
+    """
     want = (request.json or {}).get("id") if request.is_json else None
     db = _db()
     q = "SELECT id, spool_path FROM upload_queue WHERE status='error'"
@@ -5218,8 +4931,7 @@ def api_upload_retry():
 @app.route("/api/upload/discard", methods=["POST"])
 @_auth.require_feature("data.upload", level="write", action="upload_discard", fields=("id",))
 def api_upload_discard():
-    """Intentionally drop a parked-error job and its spooled bytes. Explicit,
-    never automatic — the only sanctioned way an errored original is deleted."""
+    """! @brief Drop a parked job and its spool (the only way an errored original is deleted)."""
     _id = (request.json or {}).get("id")
     if _id is None:
         return jsonify({"success": False, "error": "id required"}), 400
@@ -5257,10 +4969,7 @@ def api_move():
             src, dst = ob + ext, nb + ext
             if os.path.exists(src): shutil.move(src, dst)
         new_rel = _rel(new_path)
-        # A book's rel_path is its primary key across six tables (books,
-        # book_authors, book_sections, book_chunks, book_progress,
-        # book_bookmarks). Moving the file without repointing them silently
-        # orphans the extracted text, every bookmark, and how far you'd read.
+        # Modules key rows by rel_path (books: progress, bookmarks, text): repoint them.
         module_host.emit("file.renamed", old_rel=filename, new_rel=new_rel)
         if mt.is_book(old_path):
             return jsonify({"success": True})
@@ -5291,7 +5000,7 @@ def _fulljpg_lru_put(rel_path: str, mtime: float, data: bytes) -> None:
             _FULLJPG_LRU.popitem(last=False)
 
 def _full_jpeg_bytes(abs_path: str) -> bytes | None:
-    """! @brief Decode a still JXL and encode it as full-resolution JPEG bytes."""
+    """! @brief A still image as full-resolution JPEG bytes."""
     img = read_jxl(abs_path)
     if img is None:
         return None
@@ -5302,7 +5011,7 @@ def _full_jpeg_bytes(abs_path: str) -> bytes | None:
     return buf.tobytes() if ok else None
 
 def _client_supports_jxl() -> bool:
-    """! @brief True if the requesting browser advertises JXL in its Accept header."""
+    """! @brief True when the browser's Accept header lists JXL."""
     return 'image/jxl' in (request.headers.get('Accept') or '')
 
 @app.route("/api/file/<path:filename>")
@@ -5313,8 +5022,7 @@ def api_file(filename):
         access_logger.error("api_file: rejected path %r", filename)
         return "rejected path", 400
     if os.path.exists(fp):
-        # Browser-unsafe stills (jxl for non-JXL browsers, natively stored
-        # heic) are served as a JPEG rendition.
+        # stills the browser can't show (JXL, HEIC) go out as JPEG
         _ext = os.path.splitext(fp)[1].lower()
         if (mt.kind(fp) == 'image' and _ext not in mt.SAFE_EXTS['image']
                 and not (_ext == '.jxl' and _client_supports_jxl())
@@ -5327,19 +5035,16 @@ def api_file(filename):
                     _fulljpg_lru_put(filename, mtime, data)
             if data is not None:
                 return send_file(io.BytesIO(data), mimetype='image/jpeg')
-            # decode failed → fall through to serving the raw file
+            # decode failed: serve the file as is
             access_logger.error("api_file: JXL decode failed, serving raw %r", filename)
-        # conditional=True enables HTTP Range requests so <video> can seek/stream
-        # instead of downloading the whole clip up front.
+        # conditional=True: Range requests, so <video> can seek
         return send_file(fp, mimetype=mt.mime_for(filename), conditional=True)
     access_logger.error("api_file: not found on disk %r", filename)
     return "",404
 
 @app.route("/api/client_log", methods=["POST"])
 def api_client_log():
-    """Sink for client-side errors so they land in logs/error.log instead of
-    dying in the browser. The frontend posts {msg, context?} when it shows an
-    error the user can't otherwise trace."""
+    """! @brief Log a browser-side error {msg, context?} to error.log."""
     body = request.get_json(silent=True) or {}
     msg = str(body.get("msg", "")).strip()[:1000]
     if not msg:
@@ -5360,9 +5065,7 @@ def api_thumb(filename):
     return serve_thumb(filename, fp, mtime)
 
 def _jxl_duration_s(fp):
-    """Duration (seconds) of an animated JXL from its portable XMP timing, or
-    None. The libjxl build here can't recover frame timing from pixels, so the
-    delays captured at upload are the source of truth."""
+    """! @brief Duration of an animated JXL from its XMP timing (libjxl can't tell), or None."""
     d = _read_anim_delays_from_xmp(os.path.splitext(fp)[0] + '.xmp')
     if d and d.get("duration_ms"):
         try:
@@ -5374,11 +5077,9 @@ def _jxl_duration_s(fp):
 @app.route("/api/is_animated/<path:filename>")
 @_auth.require_feature("tab.gallery")
 def api_is_animated(filename):
-    """Report whether a stored asset is animated, plus its duration and whether
-    it should be treated as a video (>30s), so the viewer can route it to a
-    boxable frame-strip, a live <img>, or the native video path. Cached per
-    (path, mtime) in media_types for the animated flag; duration comes from the
-    file's own XMP timing."""
+    """! @brief Whether a stored file animates, its duration and whether it counts as
+    a video (> 30 s): picks frame strip, live <img> or the video player.
+    """
     fp = get_safe_path(MEDIA_DIR, filename)
     if not fp or not os.path.exists(fp):
         return jsonify({"animated": False}), 404
@@ -5396,11 +5097,9 @@ def api_is_animated(filename):
 @app.route("/api/jxl_frames/<path:filename>")
 @_auth.require_feature("tab.gallery")
 def api_jxl_frames(filename):
-    """Return the boxable keyframe strip for an animated JXL: a list of frames
-    (index + normalised time t in [0,1]) plus a JPEG for each, so the viewer can
-    let the user box on representative frames. Frames chosen by
-    mt.jxl_keyframe_indices (step-4, capped at 30). Times are derived from the
-    per-frame delays in XMP when available, else evenly spaced by frame index."""
+    """! @brief The boxable keyframe strip of an animated JXL: frames (index, time 0..1)
+    with a JPEG each. Times from the XMP delays, else evenly spaced.
+    """
     fp = get_safe_path(MEDIA_DIR, filename)
     if not fp or not os.path.exists(fp) or mt.kind(fp) != 'image':
         return jsonify({"success": False, "error": "not found"}), 404
@@ -5409,7 +5108,6 @@ def api_jxl_frames(filename):
         return jsonify({"success": False, "error": "not animated"}), 400
     n = info.get("n_frames") or 0
     idxs = mt.jxl_keyframe_indices(n)
-    # Per-frame timestamps (seconds), from XMP delays if we have them.
     delays = _read_anim_delays_from_xmp(os.path.splitext(fp)[0] + '.xmp')
     dl = (delays or {}).get("delays_ms")
     total_ms = (delays or {}).get("duration_ms")
@@ -5437,15 +5135,12 @@ def api_jxl_frames(filename):
 @app.route("/api/jxl_track/<path:filename>", methods=["POST"])
 @_auth.require_feature("ai.autotag", level="write")
 def api_jxl_track(filename):
-    """Track every user-defined box across the keyframe strip of an animated JXL.
-
-    Input JSON: {"tracks":[{id,label,class_name,keyframes:[{t,cx,cy,w,h}]}]}.
-    For each track we run the existing COCO YOLO detector on every keyframe and
-    associate detections to that track by class + IoU against its nearest user
-    box, filling in a keyframe at each frame time. Objects YOLO can't detect
-    keep only the boxes the user drew (honest: no fabricated motion). Mirrors the
-    detect+greedy-IoU approach of api_video_detect. Nothing is persisted here —
-    the client saves via the normal region-save path."""
+    """! @brief Propagate the user's boxes across an animated JXL's keyframes.
+    Body: {"tracks": [{id, label, class_name, keyframes: [{t, cx, cy, w, h}]}]}.
+    Detections are matched to each track by class and IoU against its nearest
+    user box; objects the detector can't see keep only the user's boxes.
+    Nothing is saved here.
+    """
     fp = get_safe_path(MEDIA_DIR, filename)
     if not fp or not os.path.exists(fp) or mt.kind(fp) != 'image':
         return jsonify({"success": False, "error": "not found"}), 404
@@ -5483,7 +5178,7 @@ def api_jxl_track(filename):
         ua = a["w"] * a["h"] + b["w"] * b["h"] - inter
         return inter / ua if ua > 0 else 0.0
 
-    # Detect once per keyframe, reused across all tracks.
+    # detect once per keyframe
     dets_by_frame = []
     for rgb in frames:
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
@@ -5495,9 +5190,7 @@ def api_jxl_track(filename):
         if not kfs:
             continue
         cls = (tr.get("class_name") or tr.get("label") or "").strip()
-        # The user's boxes stay as anchors; we add detected positions between/around
-        # them for the same object. Seed "expected" position from the nearest user
-        # keyframe at each frame time, then pick the detection best matching it.
+        # user boxes are anchors; each frame takes the detection closest to the nearest one
         user_kfs = sorted(kfs, key=lambda k: k.get("t", 0))
         def nearest_user(t):
             return min(user_kfs, key=lambda k: abs(k.get("t", 0) - t))
@@ -5505,7 +5198,7 @@ def api_jxl_track(filename):
                   for k in user_kfs}
         for fi, t in enumerate(times):
             tk = round(t, 5)
-            if tk in merged:            # user already fixed this frame
+            if tk in merged:  # set by the user
                 continue
             exp = nearest_user(t)
             best, best_s = None, 0.20
@@ -5531,9 +5224,9 @@ def api_jxl_track(filename):
 @app.route("/api/crop")
 @_auth.require_feature("tab.gallery")
 def api_crop():
-    """Serve a cropped, downscaled JPEG of one normalised box within an image.
-    Query: file, cx, cy, w, h (all normalised). Used by the object-grouping UI to
-    show each cluster member's actual object rather than the whole image."""
+    """! @brief A downscaled JPEG of one normalised box of an image.
+    Query: file, cx, cy, w, h.
+    """
     fn = request.args.get("file", "")
     fp = get_safe_path(MEDIA_DIR, fn)
     if not fp or not os.path.exists(fp):
@@ -5565,9 +5258,7 @@ def api_crop():
 @app.route("/api/video_tracks/<path:filename>", methods=["GET"])
 @_auth.require_feature("annot.boxes")
 def api_video_tracks_get(filename):
-    """Return the time-indexed bounding-box tracks for a video. Optional ?t=<sec>
-    also returns the interpolated boxes visible at that instant (handy for the
-    overlay / for a quick server-side check)."""
+    """! @brief A video's tracks; ?t=<sec> also returns the boxes visible then."""
     fp = get_safe_path(MEDIA_DIR, filename)
     if not fp or not os.path.exists(fp):
         return jsonify({"success": False, "error": "not found"}), 404
@@ -5584,8 +5275,7 @@ def api_video_tracks_get(filename):
 @app.route("/api/video_tracks/<path:filename>", methods=["POST"])
 @_auth.require_feature("annot.boxes", level="write", action="video_tracks_set")
 def api_video_tracks_set(filename):
-    """Persist the tracks document for a video (whole-document replace). The video
-    file is never touched — only the .tracks.json sidecar."""
+    """! @brief Replace a video's tracks document (only the sidecar is written)."""
     fp = get_safe_path(MEDIA_DIR, filename)
     if not fp or not os.path.exists(fp):
         return jsonify({"success": False, "error": "not found"}), 404
@@ -5597,19 +5287,11 @@ def api_video_tracks_set(filename):
     except Exception as e:
         access_logger.warning(f"api_video_tracks_set {filename}: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
-    # Mirror any person labels into the file's tags so video subjects are
-    # searchable alongside image tags.
+    # track labels become tags, so videos are searchable by subject
     lbls = vt.labels(saved)
     if lbls:
         try:
-            meta = read_metadata(fp)
-            existing = {tag_name(t).lower() for t in meta["tags"]}
-            merged = list(meta["tags"])
-            for l in lbls:
-                if tag_name(l).lower() not in existing:
-                    merged.append(l); existing.add(tag_name(l).lower())
-            if merged != meta["tags"]:
-                write_metadata(fp, merged, meta["description"], meta["regions"])
+            update_file(fp, add={"tags": list(lbls)})
         except Exception as e:
             access_logger.warning(f"api_video_tracks_set tag-sync {filename}: {e}")
     return jsonify({"success": True, "tracks": saved["tracks"], "labels": lbls})
@@ -5617,10 +5299,9 @@ def api_video_tracks_set(filename):
 @app.route("/api/video_detect/<path:filename>", methods=["POST"])
 @_auth.require_feature("ai.autotag", level="write")
 def api_video_detect(filename):
-    """Sample frames across a video, run the existing COCO YOLO detector on each,
-    and associate detections into tracks (greedy IoU matching per class). Returns
-    proposed tracks/keyframes for the user to validate — nothing is saved here.
-    Works for any COCO class (person, dog, cat, car, …), not just people."""
+    """! @brief Propose tracks for a video: detect on frames sampled every ~0.5 s, link
+    detections per class by IoU. Nothing is saved.
+    """
     fp = get_safe_path(MEDIA_DIR, filename)
     if not fp or not os.path.exists(fp):
         return jsonify({"success": False, "error": "not found"}), 404
@@ -5631,7 +5312,7 @@ def api_video_detect(filename):
     if dur <= 0:
         return jsonify({"success": False, "error": "could not read video duration"}), 422
 
-    # Sample ~1 frame every 0.5s, capped so long clips stay responsive.
+    # ~2 frames per second, at most 48
     n = max(2, min(48, int(dur / 0.5)))
     times = [dur * i / (n - 1) for i in range(n)]
 
@@ -5650,7 +5331,7 @@ def api_video_detect(filename):
     if not cap.isOpened():
         return jsonify({"success": False, "error": "could not open video"}), 422
 
-    tracks = []          # each: {id,label,class_name,keyframes,_last}
+    tracks = []  # {id, label, class_name, keyframes, _last}
     counters = {}
     try:
         for t in times:
@@ -5661,7 +5342,7 @@ def api_video_detect(filename):
             dets = _detect_objects(frame, conf=0.35)
             used = set()
             for d in dets:
-                # match to an existing open track of the same class by best IoU
+                # best-IoU open track of the same class
                 best, best_i = 0.30, -1
                 for i, tr in enumerate(tracks):
                     if i in used or tr["class_name"] != d["class_name"]:
@@ -5692,19 +5373,16 @@ def api_video_detect(filename):
     return jsonify({"success": True, "tracks": out, "sampled": len(times)})
 
 def _fast_metadata(fn, fp):
-    """Fast path for the metadata read used on every image open. Tags and
-    description are written to the `files` table at index time, and face/body
-    boxes live in the region tables — so the common case needs zero file I/O.
-    Only fall back to the slow full-file XMP parse when the DB has no row (an
-    un-indexed file), so a normal library never pays the multi-MB materialize +
-    triple XMP pass that made this take ~30s per packed 4K image."""
+    """! @brief The metadata for opening an image, from the DB row and region tables
+    (no file I/O); the full sidecar parse only for a file not indexed yet.
+    """
     db = _db()
     row = db.execute(
         "SELECT tags, description, artist, language, event, catalog_sets, "
         "flagged_delete, flag_reason "
         "FROM files WHERE rel_path=?", (fn,)).fetchone()
     if row is None:
-        # Not indexed yet — read the file's XMP directly.
+        # not indexed: read the XMP
         if os.path.exists(fp):
             return read_metadata(fp)
         return {"tags": [], "description": "", "regions": []}
@@ -5716,14 +5394,12 @@ def _fast_metadata(fn, fp):
             j = json.loads(v)
             return j if isinstance(j, type(default)) else default
         except Exception:
-            # tags may be stored as a plain comma string in older rows
+            # older rows store tags as a comma string
             return [t.strip() for t in v.split(",") if t.strip()] \
                    if isinstance(default, list) else default
 
     tags = _loads(row["tags"], [])
-    # The deletion flag is core (review queue, /api/flag, banner) and is cached
-    # on the row like tags/description; returning None here hid the banner.
-    # Module-owned fields (analysis, ratings, …) arrive via file enrichers.
+    # the deletion flag is cached on the row; module fields come from enrichers
     flag = ({"delete": True, "reason": row["flag_reason"] or ""}
             if row["flagged_delete"] else None)
 
@@ -5736,12 +5412,11 @@ def _fast_metadata(fn, fp):
             regions = []
 
     if not regions and not os.path.exists(_side_xmp):
-        # Modules that cache regions (people: faces/bodies) answer here.
+        # modules caching regions (people) answer here
         for extra in module_host.emit("regions.cached", rel_path=fn):
             regions.extend(extra or [])
 
-    # No sidecar and no cached rows: last-resort full read (also covers a file
-    # whose only regions live in embedded XMP for non-JXL formats).
+    # no sidecar and no cached rows: full read
     if not regions and not os.path.exists(_side_xmp) and os.path.exists(fp):
         try:
             regions = read_metadata(fp).get("regions", []) or []
@@ -5781,15 +5456,12 @@ def api_metadata():
         if meta is None:
             meta = _fast_metadata(fn, fp)
             _meta_cache_put(fn, mt_, meta)
-        meta = dict(meta)   # per-request copy: the rating fields below are
-                            # request-specific and must not mutate the cached dict
-        # Rating fields come from the rating module's enricher (its own table),
-        # not a core column. When the module is disabled they're simply absent.
+        meta = dict(meta)  # per-request copy: enricher fields must not touch the cached dict
+        # rating fields come from the rating module's enricher (absent when it is off)
         _rr = [{"filename": fn}]
         module_host.enrich_file_rows(_db(), _rr)
         _r = _rr[0]
-        # Every enricher field rides into the packet (analysis, …); the rating
-        # lines below keep their legacy names on top.
+        # every enricher field, plus the rating fields under their old names
         meta.update({k: v for k, v in _r.items() if k != "filename"})
         brisque = _r.get("iqa_score")
         user = _r.get("rating") if _r.get("rating_user") else None
@@ -5817,21 +5489,18 @@ def api_metadata():
                 tags = cur.get("tags", [])
             if _denied("annot.boxes"):
                 regions = cur.get("regions", [])
-        ok = write_metadata(fp, tags, desc, regions)
-        _meta_cache_drop(fn)
-        return jsonify({"success":ok})
+        ok = update_file(fp, set={"tags": tags, "description": desc, "regions": regions})
+        return jsonify({"success": ok.get("success", False)})
 
-# ── Tiered storage ───────────────────────────────────────────────────────────
 def _recover_lost_tier_objects(apply=False):
-    """Give a home back to tier objects orphaned before DocumentIDs existed
-    (cim-objects/<aa>/<random>.<ext> with no symlink). Candidates are the
-    sidecars whose media is gone; a sidecar is matched to an object when the
-    thumbnail cache entry for that rel_path has the media's mtime (copystat
-    kept it on the object) or its thumbnail aHash is within 6 bits of the
-    object's. A unique match writes the object's name into the sidecar as its
-    DocumentID (through the metadata module), after which the normal
-    tiering.restore_orphans() relinks it. Returns the report; apply=False only
-    plans."""
+    """! @brief Re-home tier objects lost before DocumentIDs existed.
+    A homeless sidecar matches an object when the thumbnail cache's mtime for its
+    rel_path equals the object's, or their thumbnail aHashes are within 6 bits.
+    A unique match writes the object's name into the sidecar as DocumentID;
+    tiering.restore_orphans() then relinks it.
+    @param apply  False only plans.
+    @return the report.
+    """
     def ahash(img):
         return int.from_bytes(_ahash_bytes(_to_gray(img), 8), "big") if img is not None else None
     def bits(a, b):
@@ -5872,7 +5541,7 @@ def _recover_lost_tier_objects(apply=False):
             homes.remove(rel[:-len(ext)])
     if apply:
         report["relinked"] = tiering.restore_orphans()
-        for e in report["matched"]:                      # forget the cim-objects/… rows
+        for e in report["matched"]:  # forget the cim-objects rows
             if _rel(e["object"]) and tiering.is_object_path(_rel(e["object"])):
                 _purge_file_everywhere(_rel(e["object"]))
     return report
@@ -5880,8 +5549,7 @@ def _recover_lost_tier_objects(apply=False):
 @app.route("/api/tiers/recover", methods=["POST"])
 @_auth.require_feature("settings.storage", level="write", action="tiers_recover", fields=("apply",))
 def api_tiers_recover():
-    """Plan (default) or apply the recovery of lost tier objects; see
-    _recover_lost_tier_objects."""
+    """! @brief Plan (default) or apply the recovery of lost tier objects."""
     apply = bool((request.get_json(silent=True) or {}).get("apply"))
     return jsonify({"success": True, "applied": apply, **_recover_lost_tier_objects(apply)})
 
@@ -5928,10 +5596,9 @@ def api_delete():
     return jsonify({"success":True})
 
 def _delete_file(rel_path):
-    """Remove a library file from disk (plus its sidecars, thumbs) and from
-    every DB table. Returns whether the file existed, or None for an unsafe
-    path. Shared by the delete route and modules that remove files they own
-    (family_share honouring a revoke)."""
+    """! @brief Delete a library file with its sidecars, thumbnail and DB rows.
+    @return whether it existed; None for an unsafe path.
+    """
     fp = get_safe_path(MEDIA_DIR, rel_path)
     if not fp:
         return None
@@ -5947,24 +5614,19 @@ def _delete_file(rel_path):
 @app.route("/api/reconcile", methods=["POST"])
 @_auth.require_feature("library.reconcile", level="write")
 def api_reconcile():
-    """Purge DB rows for files deleted on disk. Externally-edited files are
-    picked up by re-indexing (mtime change), so trigger both a reconcile and a
-    background re-index. Returns how many stale rows were purged."""
+    """! @brief Purge rows of files deleted on disk and start a re-index (changed files).
+    @return how many rows were purged.
+    """
     removed = _reconcile_deleted()
-    # kick off a normal index pass so externally-edited files get re-read
     threading.Thread(target=_build_index_background, daemon=True).start()
     return jsonify({"success": True, "purged": removed})
 
 @app.route("/api/tag_review", methods=["POST"])
 @_auth.require_feature("tab.review", level="write")
 def api_tag_review():
-    """Apply a per-tag review decision to one file in a single write.
-
-    Body: { filename, tag, action } where action is:
-      'accept'  -> mark the tag confirmed (strip the '?' sentinel)
-      'reject'  -> remove the tag entirely
-      'unconfirm' -> mark the tag unconfirmed (add the '?' sentinel)
-    Tag is matched by bare name (sentinel-insensitive)."""
+    """! @brief Review one tag of a file: {filename, tag, action}; action "accept",
+    "reject" or "unconfirm". Matched by name.
+    """
     d = request.json or {}
     fn = d.get("filename", "")
     tag = tag_name(d.get("tag", ""))
@@ -5980,33 +5642,33 @@ def api_tag_review():
         if tag_name(t).lower() == tag.lower():
             found = True
             if action == "reject":
-                continue                                   # drop it
+                continue
             out.append(make_tag(tag, confirmed=(action != "unconfirm")))
         else:
             out.append(t)
     if not found and action != "reject":
         out.append(make_tag(tag, confirmed=(action != "unconfirm")))
-    write_metadata(fp, out, meta["description"], meta["regions"])
+    update_file(fp, set={"tags": out}, meta=meta)
     return jsonify({"success": True, "tags": out,
                     "remaining_unconfirmed_tags": count_unconfirmed_tags(out)})
 
 @app.route("/api/confirm_all_tags", methods=["POST"])
 @_auth.require_feature("annot.tags", level="write", action="confirm_all_tags", fields=("filename",))
 def api_confirm_all_tags():
-    """Mark every tag on a file as confirmed (accept all AI tag suggestions)."""
+    """! @brief Confirm every tag of a file."""
     fn = (request.json or {}).get("filename", "")
     fp = get_safe_path(MEDIA_DIR, fn)
     if not fp or not os.path.exists(fp):
         return jsonify({"success": False, "error": "File not found."})
     meta = read_metadata(fp)
     out = [make_tag(t, confirmed=True) for t in meta["tags"]]
-    write_metadata(fp, out, meta["description"], meta["regions"])
+    update_file(fp, set={"tags": out}, meta=meta)
     return jsonify({"success": True, "tags": out, "confirmed": len(out)})
 
 @app.route("/api/bulk_tag", methods=["POST"])
 @_auth.require_feature("annot.tags", level="write")
 def bulk_tag():
-    """Add tags to many files at once without touching regions or description."""
+    """! @brief Add tags to many files."""
     filenames = request.json.get("filenames", [])
     new_tags  = [t.strip() for t in request.json.get("tags", []) if t.strip()]
     if not filenames or not new_tags:
@@ -6018,22 +5680,10 @@ def bulk_tag():
         if not fp or not os.path.exists(fp):
             errors.append(fn); continue
         try:
-            meta = read_metadata(fp)
-            # Map bare-name -> index so we can upgrade an existing unconfirmed
-            # tag to confirmed when the user explicitly adds the same name.
-            merged = list(meta["tags"])
-            by_name = {tag_name(t).lower(): i for i, t in enumerate(merged)}
-            changed = False
-            for t in new_tags:
-                nm = tag_name(t); key = nm.lower()
-                if key in by_name:
-                    i = by_name[key]
-                    if not tag_is_confirmed(merged[i]):   # confirm the suggestion
-                        merged[i] = make_tag(nm, confirmed=True); changed = True
-                else:
-                    merged.append(make_tag(nm, confirmed=True)); changed = True
-            if changed:
-                write_metadata(fp, merged, meta["description"], meta["regions"])
+            # add= confirms an existing suggestion
+            if not update_file(fp, add={"tags": [make_tag(tag_name(t), confirmed=True)
+                                                 for t in new_tags]}).get("success"):
+                raise RuntimeError("write failed")
             updated += 1
         except Exception as e:
             errors.append(fn)
@@ -6043,7 +5693,7 @@ def bulk_tag():
 @app.route("/api/bulk_untag", methods=["POST"])
 @_auth.require_feature("annot.tags", level="write")
 def bulk_untag():
-    """Remove tags (by bare name, confirmed or not) from many files at once."""
+    """! @brief Remove tags (by name, confirmed or not) from many files."""
     filenames = request.json.get("filenames", [])
     drop = {tag_name(t).lower() for t in request.json.get("tags", []) if t.strip()}
     if not filenames or not drop:
@@ -6054,10 +5704,7 @@ def bulk_untag():
         if not fp or not os.path.exists(fp):
             errors.append(fn); continue
         try:
-            meta = read_metadata(fp)
-            kept = [t for t in meta["tags"] if tag_name(t).lower() not in drop]
-            if len(kept) != len(meta["tags"]):
-                write_metadata(fp, kept, meta["description"], meta["regions"])
+            if "tags" in update_file(fp, remove={"tags": list(drop)}).get("changed", []):
                 updated += 1
         except Exception as e:
             errors.append(fn)
@@ -6084,17 +5731,14 @@ def bulk_delete():
         except Exception as e:
             errors.append(fn)
             access_logger.error(f"bulk_delete {fn}: {e}")
-    # Record the full list so a mistaken bulk delete can be traced to the user
-    # and the exact files identified. Truncate the inline list if huge, but
-    # always log the count.
+    # audit the full list (inline list cut at 50)
     shown = filenames if len(filenames) <= 50 else filenames[:50] + ["...(+%d more)" % (len(filenames) - 50)]
     audit("bulk_delete", f"deleted={deleted} errors={len(errors)} files={shown}")
     return jsonify({"success": True, "deleted": deleted, "errors": errors})
 
 @app.route("/api/audit_log")
 def api_audit_log():
-    """Admin-only: return the tail of the audit trail so a mistaken delete can
-    be traced to a user. Read-only; the file itself is the source of truth."""
+    """! @brief The tail of the audit log (admin only)."""
     u = g.get("user") or {}
     if not u.get("is_admin"):
         return jsonify({"error": "admin only"}), 403
@@ -6112,28 +5756,19 @@ def api_audit_log():
 @app.route("/api/review_list")
 @_auth.require_feature("tab.review")
 def review_list():
-    """Images with pending AI suggestions: a deletion flag and/or unconfirmed boxes.
-
-    Paginated so the queue is no longer capped at 2000. `total` is a real COUNT
-    over the whole queue (used by the UI to size its counter: 1k/10k/100k/1M…),
-    while `items` is one page. Query: offset (default 0), limit (default 500).
+    """! @brief Files with pending review work, paged.
+    Query: offset, limit (default 500), queue = delete | box | tag.
+    @return {items, total, counts} (counts overlap: a file can be in several queues).
     """
     db = _db()
-    # The review queue spans three independent kinds of pending work, any of
-    # which can put a file in the queue:
-    #   • delete queue — flagged_delete=1
-    #   • box queue    — unconfirmed_count>0 (unconfirmed regions)
-    #   • tag queue    — tags JSON carries a '?'-sentinel (unconfirmed) tag
-    # The tag test mirrors the `is:tagunconfirmed` search filter.
+    # Queues: delete (flagged_delete), box (unconfirmed_count > 0), tag (a '?' tag,
+    # as the is:tagunconfirmed filter).
     tag_pred = "tags LIKE '%\"?%'"
     vclauses, vp = module_host.files_clause("rel_path")
     vis = (" AND " + " AND ".join(vclauses)) if vclauses else ""
     where = (f"WHERE (flagged_delete=1 OR COALESCE(unconfirmed_count,0)>0 OR {tag_pred}){vis}")
     total = db.execute(f"SELECT COUNT(*) FROM files {where}", vp).fetchone()[0]
 
-    # Per-queue totals so the pane can label its groups without walking the
-    # whole (possibly huge) queue on the client. These overlap: one file may be
-    # counted in more than one bucket.
     counts = {
         "delete": db.execute(
             f"SELECT COUNT(*) FROM files WHERE flagged_delete=1{vis}", vp).fetchone()[0],
@@ -6153,9 +5788,6 @@ def review_list():
     except Exception:
         limit = 500
 
-    # Optional queue filter: ?queue=delete|box|tag returns just that bucket
-    # (with a matching `total`), which is what the grouped review pane pages
-    # through one group at a time.
     queue = (request.args.get("queue", "") or "").lower()
     q_where = {
         "delete": f"WHERE flagged_delete=1{vis}",
@@ -6189,30 +5821,22 @@ def review_list():
 @app.route("/api/flag", methods=["POST"])
 @_auth.require_feature("tab.review", level="write", action="flag", fields=("filename", "delete"))
 def api_flag():
-    """Manually set or clear the deletion flag on a file."""
+    """! @brief Set or clear a file's deletion flag."""
     fn = request.json.get("filename", "")
     fp = get_safe_path(MEDIA_DIR, fn)
     if not fp or not os.path.exists(fp):
         return jsonify({"success": False, "error": "File not found."})
     delete = bool(request.json.get("delete", False))
     reason = str(request.json.get("reason", ""))[:300]
-    meta = read_metadata(fp)
-    write_metadata(fp, meta["tags"], meta["description"], meta["regions"],
-                   flag={"delete": delete, "reason": reason})
+    update_file(fp, set={"flag": {"delete": delete, "reason": reason}})
     return jsonify({"success": True})
 
 @app.route("/api/review_boxes", methods=["POST"])
 @_auth.require_feature("tab.review", level="write", action='review_boxes', fields=('filename',))
 def api_review_boxes():
-    """Apply per-box review decisions to one file in a single write.
-
-    Body: {filename, decisions:[{index, action, name?}, ...]}
-      action 'accept' -> mark that region confirmed=True (keep its name, or
-                         rename if `name` is given)
-      action 'deny'   -> remove that region entirely
-      action 'rename' -> set class_name=name, leave confirmed as-is
-    Indices refer to the regions array as returned by /api/metadata read.
-    Recomputes unconfirmed_count so the queue badge stays accurate.
+    """! @brief Review boxes of one file: {filename, decisions: [{index, action, name?}]};
+    action "accept" (confirm, optionally rename), "deny" (remove), "rename".
+    Indices refer to the regions of /api/metadata.
     """
     d = request.json or {}
     fn = d.get("filename", "")
@@ -6249,7 +5873,7 @@ def api_review_boxes():
             r["class_name"] = nm
         kept.append(r)
 
-    write_metadata(fp, meta.get("tags", []), meta.get("description", ""), kept)
+    update_file(fp, set={"regions": kept}, meta=meta)
     remaining = sum(1 for r in kept if not r.get("confirmed"))
     return jsonify({"success": True, "accepted": accepted, "denied": denied,
                     "remaining_unconfirmed": remaining})
@@ -6257,23 +5881,23 @@ def api_review_boxes():
 @app.route("/api/confirm_all", methods=["POST"])
 @_auth.require_feature("annot.boxes", level="write", action="confirm_all_boxes", fields=("filename",))
 def api_confirm_all():
-    """Mark every region on a file as confirmed (accept all AI boxes)."""
+    """! @brief Confirm every box of a file."""
     fn = request.json.get("filename", "")
     fp = get_safe_path(MEDIA_DIR, fn)
     if not fp or not os.path.exists(fp):
         return jsonify({"success": False, "error": "File not found."})
     meta = read_metadata(fp)
-    for r in meta["regions"]:
-        r["confirmed"] = True
-    write_metadata(fp, meta["tags"], meta["description"], meta["regions"])
+    regions = [{**r, "confirmed": True} for r in meta["regions"]]
+    update_file(fp, set={"regions": regions}, meta=meta)
     return jsonify({"success": True, "confirmed": len(meta["regions"])})
 
 @app.route("/api/bulk_box", methods=["POST"])
 @_auth.require_feature("ai.autotag", level="write")
 def bulk_box():
-    """Run box detection on many files. method 'detect' uses the picked
-    Detection model (Models tab; the default); 'yolo' a given .pt path;
-    'llm' the configured vision model. Boxes are added UNCONFIRMED."""
+    """! @brief Detect boxes on many files (added unconfirmed).
+    method "detect" (the Models-tab detector, default), "yolo" (a given .pt) or
+    "llm" (the vision model).
+    """
     filenames = request.json.get("filenames", [])
     method    = request.json.get("method", "detect")
     model     = request.json.get("model", "")
@@ -6331,16 +5955,14 @@ def bulk_box():
                     except Exception:
                         pass
             if new:
-                meta = read_metadata(fp)
                 for n in new:
                     if n["class_name"] not in state["classes"]:
                         state["classes"].append(n["class_name"])
                 save_classes()
-                write_metadata(fp, meta["tags"], meta["description"],
-                               meta["regions"] + new)
+                update_file(fp, add={"regions": new})
                 boxed += 1
             done += 1
-            state["status_text"] = f"AI Box: {done}/{total} ({boxed} boxed)…"
+            state["status_text"] = f"AI Box: {done}/{total} ({boxed} boxed)..."
         except Exception as e:
             errors.append(fn)
             access_logger.error(f"bulk_box {fn}: {e}")
@@ -6348,7 +5970,7 @@ def bulk_box():
     return jsonify({"success": True, "done": done, "boxed": boxed, "errors": errors})
 
 def _bodies():
-    """The bodies module's service dict, or None when it's off."""
+    """! @brief The bodies module's service, or None."""
     return module_host.get_service("bodies") if 'module_host' in globals() else None
 
 def _body_on():
@@ -6356,24 +5978,20 @@ def _body_on():
     return bool(b and b["enabled"]())
 
 def _faces():
-    """The faces module's service dict, or None when the module is off — every
-    face-dependent path in the people machinery degrades through this."""
+    """! @brief The faces module's service, or None."""
     return module_host.get_service("faces") if 'module_host' in globals() else None
 
 def _embedding_iter():
-    """The embedding module's whole-image embedding iterator, or None when the
-    module is off (training's 'diverse' pick then degrades to random)."""
+    """! @brief The embedding module's image-embedding iterator, or None."""
     svc = module_host.get_service("embedding") if 'module_host' in globals() else None
     return (svc or {}).get("iter_embeddings_ordered")
 
-# ── AI actions: target → action → run (the editor's AI picker) ──────────────
-# Contributors (host.register_ai_actions) offer actions tagged with what they
-# produce; the picker's first dropdown is that target, the second the actions
-# for it from every contributor. The core contributes "Detect objects" (the
-# picked Detection model → boxes), which is what the old Auto-Tag button did.
+# -- AI actions: target -> action -> run (the editor's AI picker) --
+# Contributors tag actions with what they produce; the core adds
+# "Detect objects" (the Models-tab detector -> boxes).
 AI_TARGET_LABELS = [("description", "📝 Description"), ("tags", "🏷 Tags"), ("regions", "📦 Boxes"),
-                    ("segment", "🎭 Segment"), ("flag", "🚩 Flag"), ("body", "🧍 Body"),
-                    ("ocr", "🔤 OCR"), ("pose", "🕺 Pose")]
+                    ("segment", "Segment"), ("flag", "🚩 Flag"), ("body", "Body"),
+                    ("ocr", "OCR"), ("pose", "Pose")]
 
 
 def _ai_sources():
@@ -6389,8 +6007,7 @@ def _ai_sources():
 
 
 def _ai_groups():
-    """[{target, label, actions:[{id: "source:action", label}]}] in a fixed
-    target order, unknown targets after, empty targets dropped."""
+    """! @brief [{target, label, actions: [{id, label}]}]: fixed target order, unknown last, empty dropped."""
     by = {}
     for g, a in _ai_sources():
         by.setdefault(str(a.get("target") or "description"), []).append(
@@ -6453,13 +6070,12 @@ def api_ai_run():
                 raise RuntimeError("Decode failed")
             meta = read_metadata(fp)
             res = g["run"](str(a["id"]), fp, _to_bgr(img), meta) or {}
-            if bulk:                                   # persist here; the editor applies live otherwise
-                tags = list(meta["tags"]) + list(res.get("tags") or [])
-                desc = meta["description"]
-                if res.get("description"):
-                    desc = (desc.strip() + "\n\n" + res["description"]).strip()
-                write_metadata(fp, tags, desc, meta["regions"] + list(res.get("regions") or []),
-                               flag=res.get("flag"))
+            if bulk:  # the editor applies single runs itself
+                add = {k: res[k] for k in ("tags", "regions", "description") if res.get(k)}
+                upd = update_file(fp, add=add, set={"flag": res["flag"]} if res.get("flag") else None,
+                                  meta=meta)
+                if not upd.get("success"):
+                    raise RuntimeError(upd.get("error") or "write failed")
             else:
                 out = res
             done += 1
@@ -6486,13 +6102,9 @@ def get_tailwind():
         return jsonify({"error":"not found"}),404
     return open('static/tailwindcss.js').read(),200,{'Content-Type':'application/javascript'}
 
-# ── Precompiled Tailwind ─────────────────────────────────────────────────────
-# The Play-CDN script (/tailwind) is a JIT compiler that scans the DOM in the
-# browser on EVERY page load, which is why the panes/tabs pop in late after a
-# reload. If the Tailwind standalone CLI is available (tools/tailwindcss[.exe]
-# or on PATH; no node needed) we compile the stylesheet once at startup over
-# every template + script, and app.html links the static CSS instead. Without
-# the CLI, or if it fails, the page falls back to the JIT script as before.
+# -- precompiled Tailwind --
+# With the standalone Tailwind CLI (tools/ or PATH) the stylesheet is built once
+# at startup; otherwise the page uses the in-browser JIT script.
 _TAILWIND_CSS = os.path.join("static", "tailwind.css")
 _TAILWIND_CLI = next((p for p in ("tools/tailwindcss.exe", "tools/tailwindcss",
                  shutil.which("tailwindcss") or "") if p and os.path.exists(p)), None)
@@ -6530,24 +6142,14 @@ def _build_tailwind():
 
 @app.context_processor
 def _inject_tailwind():
-    # Version stamp = mtime so a rebuild busts the browser cache.
+    # mtime as version: a rebuild busts the cache
     try:
         return {"tailwind_css": int(os.path.getmtime(_TAILWIND_CSS))}
     except OSError:
         return {"tailwind_css": None}
-# ── Pluggable module system ───────────────────────────────────────────────--
-# Everything above this line is the application core. Below, third-party
-# modules discovered in modules/ get their register(host) called so they can
-# extend the app through the Host surface (routes, settings tabs, assets,
-# worker sources, startup hooks). See modules/host.py + modules/loader.py.
-#
-# The Host hands modules the SAME real objects the core uses (permissive v1):
-# the Flask app, the per-request DB accessor, the live config dict, the logger,
-# and the thread manager. book_routes above is effectively a hand-wired module;
-# this generalizes that pattern so strangers can do the same without editing
-# manager.py.
-# Everything a module may need from the core, handed over as one namespace so
-# no module ever imports manager. Add here rather than reaching in.
+# -- module system --
+# Everything a module needs from the core, as one namespace handed over on
+# host.core. Add here instead of letting modules import manager.
 _core_api = SimpleNamespace(
     detect_boxes=_detect_obb_or_box, refresh_model_groups=populate_model_selector,
     meta_cache_drop=_meta_cache_drop, folder_scope_clause=_folder_scope_clause,
@@ -6555,7 +6157,9 @@ _core_api = SimpleNamespace(
     model_key=_yolo_key, merge_regions=_merge_regions,
     read_image=read_jxl, to_bgr=_to_bgr, resolve_media=_resolve_media, rel=_rel,
     db_retry=_db_retry, db_close=_db_close, db_release_pool=_db_release_pool,
-    read_metadata=read_metadata, write_metadata=write_metadata,
+    read_metadata=read_metadata,
+    update_file=update_file, register_metadata_writer=register_metadata_writer,
+    FILE_FIELDS=FILE_FIELDS,
     parse_mwg_regions=_parse_mwg_regions, EXIF_DB_COLUMNS=_EXIF_DB_COLUMNS,
     history_record=_history_record, history_as_imagehistory=_history_as_imagehistory,
     index_file=_index_file, enumerate_library=_enumerate_library,
@@ -6591,10 +6195,10 @@ module_host = modules.host.Host(
     media=mt,
 )
 
-# Serve each module's static/ assets at /modules/<id>/static/<file>.
+## @brief Serve modules' static assets at /modules/<id>/static/<file>.
 @app.route("/modules/<module_id>/static/<path:filename>")
 def module_static(module_id, filename):
-    # The module's own folder (its id need not match the folder name).
+    # the id need not match the folder name
     lm = module_registry._plugins.get(module_id)
     folder = lm.path if lm is not None and lm.path else os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "modules", module_id)
@@ -6602,17 +6206,15 @@ def module_static(module_id, filename):
     fp = get_safe_path(base, filename)
     if not fp or not os.path.isfile(fp):
         return ("not found", 404)
-    # Only ship front-end asset types; never let this become a file-read hole.
+    # asset types only
     if not filename.lower().endswith((".js", ".css", ".map", ".svg", ".png",
                                       ".woff", ".woff2")):
         return ("forbidden", 403)
     from flask import send_file as _send_file
     return _send_file(fp)
 
-# Core (always-on) modules register first, then every enabled plugin in
-# dependency order. The core ones aren't discovered by the loader, so they're
-# wired here explicitly; without this the metadata panes/services never existed.
-# The core's own AI action: the picked Detection model → boxes.
+# Core modules register first (the loader doesn't discover them), then enabled
+# plugins in dependency order. Then the core's own AI action.
 module_host.register_ai_actions(
     "detect", lambda: [{"id": "boxes", "label": "Detect objects (picked Detection model)", "target": "regions"}],
     _detect_action, feature="ai.autotag")
@@ -6625,8 +6227,7 @@ modules.threading.register(module_host)
 module_host._current_module = "theming"
 modules.theming.register(module_host)
 module_host._current_module = None
-# Core-owned settings: the per-user settings store, and the search quick-filters
-# (an admin default in General, each user's own list in User settings).
+# core tables: per-user settings
 module_host.add_table("""CREATE TABLE IF NOT EXISTS user_prefs (
     username TEXT NOT NULL, key TEXT NOT NULL, value TEXT,
     PRIMARY KEY (username, key))""")
@@ -6655,8 +6256,7 @@ def _asset_cache_headers(resp):
 
 @app.context_processor
 def _inject_module_ui():
-    """Expose module-contributed UI to templates. controls panes are filtered
-    to enabled modules so a disabled module's pane isn't rendered."""
+    """! @brief Module UI for templates (controls panes of enabled modules only)."""
     panes = [p for p in getattr(module_host, "controls_panes", [])
              if module_registry.is_enabled(p["module_id"])]
     modals = [m for m in getattr(module_host, "app_modals", [])
@@ -6668,12 +6268,8 @@ def _inject_module_ui():
     return {"module_controls_panes": panes, "module_app_modals": modals,
             "module_centre_panes": centre, "module_left_panes": left_panes}
 
-# Providers are now registered; seed the user's per-capability model selection
-# from persisted config. Kept after register_all so unknown/removed providers
-# are dropped rather than dangling. Written back so save_config persists a clean
-# map.
-# Seed defaults for any config keys modules declared (e.g. rating's iqa_model)
-# that aren't already in state from the loaded config.
+# Seed defaults of settings modules declared, then the saved per-capability model
+# picks (providers are registered now, so removed ones are dropped).
 modules.config.seed_defaults(state, saved=_SAVED_CONFIG)
 try:
     mt.set_media_prefs(state.get("media_storage"))
@@ -6684,16 +6280,13 @@ state["media_storage"] = mt.media_prefs()
 state["filename_cleanup"] = dict(mt._FILENAME_PREFS)
 
 state["model_selection"] = modules.broker.init_selection(state.get("model_selection"))
-# Migrate the legacy single iqa_model setting into the broker's per-capability
-# selection (first run after the IQA refactor). Harmless once migrated.
+# legacy iqa_model -> broker selection
 _legacy_iqa = state.get("iqa_model")
 if _legacy_iqa and "iqa" not in state["model_selection"]:
     if modules.broker.select("iqa", _legacy_iqa)[0]:
         state["model_selection"] = modules.broker.current_selection()
 
-# Create module-owned DB tables and run their startup consistency checks. Done
-# after register_all so every enabled module has declared its tables, and after
-# _init_db so the core schema already exists for foreign references.
+# module tables and their checks, after the core schema
 try:
     module_host.apply_db_tables(_db())
 except Exception as _e:
@@ -6702,12 +6295,7 @@ except Exception as _e:
 
 @app.route("/api/module_assets")
 def api_module_assets():
-    """Front-end asset list for enabled modules, injected by app.html on load.
-
-    Returns [{"url","kind","module_id"}, …]. Kept separate from /api/modules
-    (which is the admin descriptor list) so the boot path is a single small
-    fetch that any logged-in user can make.
-    """
+    """! @brief Asset URLs of enabled modules for the page to load: [{url, kind, module_id}]."""
     out = []
     for a in module_host.assets:
         if not module_registry.is_enabled(a["module_id"]):
@@ -6720,21 +6308,18 @@ def api_module_assets():
         })
     return jsonify({"assets": out})
 
-# ── HTML templates ────────────────────────────────────────────────────────--
-# UI templates live in templates.py (imported at top of file).
 
 if __name__=='__main__':
     from waitress import serve
     thread_manager.set_activity_source(lambda: _last_activity)
     model_registry.set_memory_hook(lambda cost_mb, gpu: thread_manager.reserve_model(cost_mb, gpu))
     model_registry.log_backend(access_logger)
-    model_registry.standardize_onnx(access_logger)   # every ORT session (rtmlib, insightface, ultralytics .onnx…) → onnx_providers()
+    model_registry.standardize_onnx(access_logger)  # every onnxruntime session uses onnx_providers()
 
-    access_logger.info("Compiling Tailwind stylesheet…")
+    access_logger.info("Compiling Tailwind stylesheet...")
     _build_tailwind()
-    access_logger.info("Starting storage tiering worker…")
-    # Persist tier config inside the shared app_config.json (state["tiers"]) via
-    # save_config, same as every other setting — not a standalone tiers_config.json.
+    access_logger.info("Starting storage tiering worker...")
+    ## @brief Tier config lives in app_config.json (state["tiers"]).
     def _load_tiers_cfg():
         return state.get("tiers") or None
     def _store_tiers_cfg(cfg):
@@ -6744,25 +6329,22 @@ if __name__=='__main__':
                   load_stored_cfg=_load_tiers_cfg, store_cfg=_store_tiers_cfg,
                   read_document_id=_document_id, ensure_document_id=_ensure_document_id)
 
-    # Tiering is priority #1 at boot: an aggressive (no hysteresis, no idle
-    # wait, unthrottled) rebalance runs to completion BEFORE the indexer and the
-    # upload workers start, so nothing new lands while files are still on the
-    # wrong tier. The HTTP server comes up meanwhile; uploads just queue.
+    ## @brief Tiering runs first at boot: an unthrottled rebalance finishes before the
+    # indexer and upload workers start (uploads queue meanwhile).
     def _boot_tiering_then_workers():
-        access_logger.info("Boot rebalance: placing library on the right tiers…")
+        access_logger.info("Boot rebalance: placing library on the right tiers...")
         try:
             tiering.rebalance(block=True, aggressive=True)
         except Exception as e:
             access_logger.error(f"boot rebalance failed: {e}")
         access_logger.info(f"Boot rebalance done: {tiering._state['run']['phase']}")
-        access_logger.info("Starting background indexer…")
+        access_logger.info("Starting background indexer...")
         threading.Thread(target=_build_index_background, daemon=True).start()
-        access_logger.info("Registering background sources (autotag, face, upload)…")
+        access_logger.info("Registering background sources (autotag, face, upload)...")
         _start_upload_workers()
     threading.Thread(target=_boot_tiering_then_workers, daemon=True).start()
-    access_logger.info("Starting background book indexer…")
-    # Fire module startup hooks now that the server and thread manager are up.
-    access_logger.info("Running module startup hooks…")
+    access_logger.info("Starting background book indexer...")
+    access_logger.info("Running module startup hooks...")
     module_host.run_startup_hooks()
     thread_manager.wake()
     access_logger.info("Serving on :8000")

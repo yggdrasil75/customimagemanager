@@ -1,6 +1,6 @@
-/* Family share — front-end.
+/* Family share - front-end.
  *
- * Renders the Settings → Family share tab (identity, peers, rules, options,
+ * Renders the Settings -> Family share tab (identity, peers, rules, options,
  * preview, outbox, received) into the pane the core created for this
  * module, and a small "who sees this?" badge in the viewer toggles. All
  * state lives on the server; this file only reads /api/family_share/* and
@@ -13,7 +13,7 @@
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const toast = (m) => (window.showToast ? showToast(m) : console.log(m));
-  const when = (t) => (t ? new Date(t * 1000).toLocaleString() : "—");
+  const when = (t) => (t ? new Date(t * 1000).toLocaleString() : "-");
 
   async function get(path) {
     const r = await fetch(API + path);
@@ -41,17 +41,13 @@
     const b = document.getElementById("fs_unsaved"); if (!b) return;
     const n = Object.keys(pending).length;
     b.hidden = !n;
-    b.textContent = n ? `${n} unsaved change${n === 1 ? "" : "s"} — click Save below` : "";
+    b.textContent = n ? `${n} unsaved change${n === 1 ? "" : "s"} - click Save below` : "";
   }
   window.persistFamilyShare = async function () {
     const keys = Object.keys(pending);
     if (!keys.length) return { ok: true };
-    const body = Object.assign({}, pending);
-    try {
-      const r = await fetch("/api/update_settings", { method: "POST",
-        headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      if (!r.ok) return { ok: false, error: "Family share settings failed to save" };
-    } catch (e) { return { ok: false, error: "Family share settings failed to save" }; }
+    const res = await window.postSettings(Object.assign({}, pending));
+    if (!res.ok) return { ok: false, error: "Family share settings failed to save" };
     pending = {};
     markUnsaved();
     if (window.showToast) showToast(`Family share: ${keys.length} setting${keys.length === 1 ? "" : "s"} saved`);
@@ -62,7 +58,7 @@
 
   const pane = () => document.getElementById("settings_pane_module_" + ID);
 
-  // ── layout ────────────────────────────────────────────────────────────
+  // -- layout ------------------------------------------------------------
   function shell() {
     const p = pane(); if (!p) return null;
     if (!p.querySelector(".fs-root")) {
@@ -95,7 +91,7 @@
     renderOutbox(); renderReceived(); markUnsaved();
   }
 
-  // ── identity ──────────────────────────────────────────────────────────
+  // -- identity ----------------------------------------------------------
   function renderIdentity() {
     const el = document.getElementById("fs_identity");
     el.innerHTML = `<h3>This instance</h3>
@@ -111,22 +107,22 @@
       <p class="fs-help">🔒 Every photo and its metadata is end-to-end encrypted to the peer's pinned public key
       (X25519 + AES-256-GCM). Routers, ISPs and anyone on the wifi only ever see ciphertext.</p>
       <div class="fs-row"><span>Outbox</span><span>${
-        ["pending", "sent", "revoke", "error"].map((k) => `${k}: ${state.outbox[k] || 0}`).join(" · ")
+        ["pending", "sent", "revoke", "error"].map((k) => `${k}: ${state.outbox[k] || 0}`).join(" | ")
       }</span></div>
       <div class="fs-row"><span>Last plan</span><span>${when(state.last_plan_at)}${
         state.last_plan ? ` (desired ${state.last_plan.desired}, new ${state.last_plan.new}, changed ${state.last_plan.changed}, revoke ${state.last_plan.revoke})` : ""}${
-        state.dirty ? " · re-plan pending" : ""}</span></div>
+        state.dirty ? " | re-plan pending" : ""}</span></div>
       <div class="fs-actions"><button id="fs_sync" class="fs-btn">Plan &amp; sync now</button>
         <button id="fs_reload" class="fs-btn fs-btn-ghost">Refresh</button></div>`;
     el.querySelector("#fs_myurl").addEventListener("change", (ev) => setOption("family_share_my_url", ev.target.value.trim()));
     el.querySelector("#fs_name").addEventListener("change", (ev) => setOption("family_share_name", ev.target.value.trim()));
     el.querySelector("#fs_sync").addEventListener("click", async () => {
-      try { await post("/sync"); toast("Planning…"); setTimeout(load, 1500); } catch (e) { toast(e.message); }
+      try { await post("/sync"); toast("Planning..."); setTimeout(load, 1500); } catch (e) { toast(e.message); }
     });
     el.querySelector("#fs_reload").addEventListener("click", load);
   }
 
-  // ── options ───────────────────────────────────────────────────────────
+  // -- options -----------------------------------------------------------
   const OPTS = [
     ["family_share_outbound", "toggle", "Send to peers", "Master switch for everything leaving this instance."],
     ["family_share_inbound", "toggle", "Accept from peers", "Master switch for everything peers push here."],
@@ -160,8 +156,8 @@
     }));
   }
 
-  // ── peers ─────────────────────────────────────────────────────────────
-  // How a family peer is reached. "auto" = their URL if they have one, else they poll me.
+  // -- peers -------------------------------------------------------------
+  /** @brief How a family peer is reached. "auto" = their URL if they have one, else they poll me. */
   function routeSel(p) {
     const cur = p.route === "via" ? `via:${p.via_peer}` : (p.route || "");
     const hubs = state.peers.filter((h) => h.id !== p.id && h.kind !== "device" && h.url && h.route !== "via");
@@ -189,11 +185,11 @@
             ${routeSel(p)}
             ${p.mailbox_items ? `<div class="fs-why">${p.mailbox_items} item(s), ${(p.mailbox_bytes / 1048576).toFixed(1)} MB waiting for them</div>` : ""}</td>
         <td><input class="fs-p-key" placeholder="${p.has_key_out && p.pub_key ? "paired" : "paste their pairing code"}">
-            ${p.pub_key ? `<div class="fs-fp" title="Their key fingerprint — compare with what they see">🔒 ${esc(p.fingerprint)}</div>`
-                        : `<div class="fs-err">no key pinned — nothing will be sent</div>`}</td>
+            ${p.pub_key ? `<div class="fs-fp" title="Their key fingerprint - compare with what they see">🔒 ${esc(p.fingerprint)}</div>`
+                        : `<div class="fs-err">no key pinned - nothing will be sent</div>`}</td>
         <td><input class="fs-p-en" type="checkbox" ${p.enabled ? "checked" : ""}></td>
         <td class="fs-status">${p.last_error ? `<span class="fs-err" title="${esc(p.last_error)}">error</span>`
-          : (p.last_ok ? `<span class="fs-ok" title="${when(p.last_ok)}">ok</span>` : "—")}</td>
+          : (p.last_ok ? `<span class="fs-ok" title="${when(p.last_ok)}">ok</span>` : "-")}</td>
         <td class="fs-actions">
           <button class="fs-btn fs-btn-sm fs-p-save">Save</button>
           <button class="fs-btn fs-btn-sm fs-btn-ghost fs-p-test">${p.kind === "device" ? "Last seen" : "Test"}</button>
@@ -214,11 +210,11 @@
       <p class="fs-help"><b>My phone</b> peers are your own devices running the CIM Family app
       (<a href="/static/app/cim-family.apk" download>download APK</a>, built with the docker image). Their uploads are your own
       photos: they land in the folder above, get no "from:" tag and flow to family through the rules like anything else.
-      Pair the same way — the app shows its pairing code, and you paste this instance's code into the app.</p>
+      Pair the same way - the app shows its pairing code, and you paste this instance's code into the app.</p>
       <p class="fs-help"><b>No domain?</b> Only one instance needs a public URL. Turn on <i>Act as a gateway</i> there;
       everyone else leaves their URL empty and pairs with it. Instances without a URL poll the gateway for waiting items.
       Two of them can still share with each other: pair them directly (exchange pairing codes) and set the route to
-      "through &lt;gateway&gt;" — items are sealed to the recipient, so the gateway only ever holds ciphertext.</p>
+      "through &lt;gateway&gt;" - items are sealed to the recipient, so the gateway only ever holds ciphertext.</p>
       <p class="fs-help">Set-up: add the peer here (name only is fine), click <b>Pairing code for them</b> and send them
       the string. They paste it in this box on their instance, which creates/pairs the peer entry for you, then they send
       you <i>their</i> pairing code, which you paste here. <b>Test</b> checks the connection and that the pinned key
@@ -244,7 +240,7 @@
       const test = q(".fs-p-test"); if (test) test.addEventListener("click", async () => {
         try { const d = await post("/peers/test", { id });
           toast(d.device ? d.message
-            : `Reached ${d.peer.name} · fingerprint ${d.peer.fingerprint}${d.pinned ? " · matches pinned key" : " · NOT PINNED: paste their pairing code"}`);
+            : `Reached ${d.peer.name} | fingerprint ${d.peer.fingerprint}${d.pinned ? " | matches pinned key" : " | NOT PINNED: paste their pairing code"}`);
           await load(); }
         catch (e) { toast("Test failed: " + e.message); await load(); }
       });
@@ -282,7 +278,7 @@
     });
   }
 
-  // ── rules ─────────────────────────────────────────────────────────────
+  // -- rules -------------------------------------------------------------
   function peerChecks(sel) {
     return state.peers.map((p) => `<label class="fs-chk"><input type="checkbox" value="${p.id}"
       ${sel.includes(p.id) ? "checked" : ""}> ${esc(p.name)}</label>`).join("") || "<i>add a peer first</i>";
@@ -312,12 +308,12 @@
   function renderRules() {
     const el = document.getElementById("fs_rules");
     const rules = state.rules.slice().sort((a, b) => (a.mode === b.mode ? a.id - b.id : (a.mode === "block" ? -1 : 1)));
-    el.innerHTML = `<h3>Rules <small>share = allow to these peers · block = never to these peers (block wins)</small></h3>
+    el.innerHTML = `<h3>Rules <small>share = allow to these peers | block = never to these peers (block wins)</small></h3>
       <datalist id="fs_dl_folders">${state.folders.map((f) => `<option value="${esc(f)}">`).join("")}</datalist>
       <datalist id="fs_dl_albums">${state.albums.map((a) => `<option value="${esc(a)}">`).join("")}</datalist>
       <table class="fs-table"><thead><tr><th>Mode</th><th>Kind</th><th>Value</th><th>Peers</th><th>Note</th><th>On</th><th></th></tr></thead>
       <tbody>${rules.map(ruleRow).join("")}${ruleRow({ mode: "share", kind: "album", value: "", recursive: 1, peers: [], name: "", enabled: 1 })}</tbody></table>
-      <p class="fs-help">Examples — <i>share album "Beach 2026" → sister, cousins</i>; <i>share tag "family" → mom</i>;
+      <p class="fs-help">Examples - <i>share album "Beach 2026" → sister, cousins</i>; <i>share tag "family" → mom</i>;
       <i>block folder "work" → everyone</i>; <i>block tag "sister" → cousins</i>.</p>`;
     el.querySelectorAll("tbody tr").forEach((tr) => {
       const id = Number(tr.dataset.id || 0);
@@ -348,7 +344,7 @@
     });
   }
 
-  // ── preview ───────────────────────────────────────────────────────────
+  // -- preview -----------------------------------------------------------
   function renderPreview() {
     const el = document.getElementById("fs_preview");
     el.innerHTML = `<h3>Preview <small>what a peer would have, under the current rules</small></h3>
@@ -358,13 +354,13 @@
       <div id="fs_pv_list" class="fs-list"></div>`;
     el.querySelector("#fs_pv_go").addEventListener("click", async () => {
       const pid = el.querySelector("#fs_pv_peer").value; if (!pid) return;
-      const list = el.querySelector("#fs_pv_list"); list.textContent = "…";
+      const list = el.querySelector("#fs_pv_list"); list.textContent = "...";
       try {
         const d = await get(`/preview?peer_id=${pid}&limit=1000`);
         el.querySelector("#fs_pv_n").textContent = `${d.total} file${d.total === 1 ? "" : "s"}`;
         list.innerHTML = d.files.length ? d.files.map((f) =>
           `<div class="fs-item"><a href="#" data-open="${esc(f.rel_path)}">${esc(f.rel_path)}</a>
-            <span class="fs-why">${esc(f.reasons.join("; "))}${f.albums.length ? " · albums: " + esc(f.albums.join(", ")) : ""}</span></div>`).join("")
+            <span class="fs-why">${esc(f.reasons.join("; "))}${f.albums.length ? " | albums: " + esc(f.albums.join(", ")) : ""}</span></div>`).join("")
           : "<i>nothing would be shared with this peer</i>";
         list.querySelectorAll("[data-open]").forEach((a) => a.addEventListener("click", (ev) => {
           ev.preventDefault(); if (window.selectFile) selectFile(a.dataset.open);
@@ -373,7 +369,7 @@
     });
   }
 
-  // ── outbox / received ─────────────────────────────────────────────────
+  // -- outbox / received -------------------------------------------------
   async function renderOutbox() {
     const el = document.getElementById("fs_outbox");
     el.innerHTML = `<h3>Outbox <small>what is waiting to go, what failed</small></h3>
@@ -384,12 +380,12 @@
       <div id="fs_ob_list" class="fs-list"></div>`;
     const show = async () => {
       const st = el.querySelector("#fs_ob_status").value;
-      const list = el.querySelector("#fs_ob_list"); list.textContent = "…";
+      const list = el.querySelector("#fs_ob_list"); list.textContent = "...";
       try {
         const d = await get(`/outbox?status=${st}&limit=300`);
         list.innerHTML = d.rows.length ? d.rows.map((r) =>
           `<div class="fs-item"><span class="fs-tag fs-st-${r.status}">${r.status}</span> ${esc(r.rel_path)}
-           → <b>${esc(r.peer)}</b> <span class="fs-why">${when(r.updated)}${r.attempts ? ` · attempts ${r.attempts}` : ""}${r.error ? " · " + esc(r.error) : ""}</span></div>`).join("")
+           → <b>${esc(r.peer)}</b> <span class="fs-why">${when(r.updated)}${r.attempts ? ` | attempts ${r.attempts}` : ""}${r.error ? " | " + esc(r.error) : ""}</span></div>`).join("")
           : "<i>empty</i>";
       } catch (e) { list.innerHTML = `<span class="fs-err">${esc(e.message)}</span>`; }
     };
@@ -405,12 +401,12 @@
       <div class="fs-actions"><button id="fs_rc_go" class="fs-btn fs-btn-ghost">Show recent</button></div>
       <div id="fs_rc_list" class="fs-list"></div>`;
     el.querySelector("#fs_rc_go").addEventListener("click", async () => {
-      const list = el.querySelector("#fs_rc_list"); list.textContent = "…";
+      const list = el.querySelector("#fs_rc_list"); list.textContent = "...";
       try {
         const d = await get("/received?limit=300");
         list.innerHTML = d.rows.length ? d.rows.map((r) =>
           `<div class="fs-item"><b>${esc(r.peer)}</b> → ${r.rel_path ? esc(r.rel_path) : (r.queue_id ? "<i>still ingesting</i>" : "<i>deleted here (declined)</i>")}
-           <span class="fs-why">${when(r.received)}${r.duplicate ? " · already had it" : ""}</span></div>`).join("")
+           <span class="fs-why">${when(r.received)}${r.duplicate ? " | already had it" : ""}</span></div>`).join("")
           : "<i>nothing yet</i>";
       } catch (e) { list.innerHTML = `<span class="fs-err">${esc(e.message)}</span>`; }
     });
@@ -421,7 +417,7 @@
   const _origOpen = window.refreshModuleSettings;
   if (typeof _origOpen === "function") window.refreshModuleSettings = async function () { pending = {}; return _origOpen.apply(this, arguments); };
 
-  // ── viewer badge: who sees the current photo ──────────────────────────
+  // -- viewer badge: who sees the current photo --------------------------
   if (window.registerControlButton) {
     registerControlButton("viewer_toggles",
       '<button id="fs_badge" class="fs-badge" title="Family share: who sees this photo" hidden>👪</button>');
@@ -438,8 +434,8 @@
       const parts = [];
       if (d.received_from) parts.push("from " + d.received_from);
       if (shared.length) parts.push("→ " + shared.join(", "));
-      b.textContent = "👪 " + (parts.join(" · ") || "not shared");
-      b.title = d.peers.map((p) => `${p.peer}: ${p.shared ? "shared" : "not shared"}${p.reasons.length ? " — " + p.reasons.join("; ") : ""}`).join("\n") || "no peers";
+      b.textContent = "👪 " + (parts.join(" | ") || "not shared");
+      b.title = d.peers.map((p) => `${p.peer}: ${p.shared ? "shared" : "not shared"}${p.reasons.length ? " - " + p.reasons.join("; ") : ""}`).join("\n") || "no peers";
       b.classList.toggle("fs-badge-on", shared.length > 0);
       b.hidden = !(d.peers.length || d.received_from);
     } catch (_) { /* module off or no permission: stay hidden */ }

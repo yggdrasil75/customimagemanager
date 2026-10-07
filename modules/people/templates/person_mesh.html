@@ -1,14 +1,14 @@
-<!-- Person mesh viewer — the centre-pane swap for a person.
+<!-- Person mesh viewer - the centre-pane swap for a person.
 
      #editor_region normally holds the image viewer (#image_pane). Opening a
-     person (faces tab ▸ "Person") hides #image_pane and shows this instead,
+     person (faces tab > "Person") hides #image_pane and shows this instead,
      exactly like the book reader swap, while the controls pane switches to its
      own "Person" tab. Same geometry, different centre.
 
      The viewport renders the selected appearance's canonical body mesh (or its
      T-pose skeleton when no mesh exists yet) in a Three.js scene. A scrub bar
      underneath steps through the person's appearances in time order, so you can
-     drag across a life — 18-year-old body → 60-year-old body — and watch the
+     drag across a life - 18-year-old body -> 60-year-old body - and watch the
      shape change. -->
 <div id="person_pane" class="hidden flex-1 flex flex-col bg-gray-900 min-w-0">
 
@@ -31,7 +31,7 @@
   <div id="person_mesh_container" class="flex-1 bg-black overflow-hidden relative" style="min-height:120px">
     <div id="person_mesh_empty"
       class="absolute inset-0 flex items-center justify-center text-gray-600 text-sm pointer-events-none">
-      No mesh or T-pose for this appearance yet — estimate one in the Person tab.
+      No mesh or T-pose for this appearance yet - estimate one in the Person tab.
     </div>
   </div>
 

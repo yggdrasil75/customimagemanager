@@ -1,4 +1,4 @@
-// music.js — the Music tab (module "music"). Talks to /api/music/*.
+// music.js - the Music tab (module "music"). Talks to /api/music/*.
 // Registers itself with the core tab controller (registerLeftTab), so nothing
 // in the core knows this tab exists.
 let musicCurrentView = 'artists';
@@ -29,17 +29,17 @@ async function musicRefreshStatus() {
     if (!d.success) return;
     const s = d.state;
     let extra = '';
-    if (s.indexing)   extra = ` · indexing ${s.indexed}/${s.total}`;
-    if (s.embedding)  extra = ` · embedding ${s.emb_done}/${s.emb_total}`;
-    if (s.clustering) extra = ` · clustering…`;
-    const model = d.space ? ` · ${d.space}${d.text_search ? ' (sem: on)' : ''}` : ' · no audio model';
+    if (s.indexing)   extra = ` | indexing ${s.indexed}/${s.total}`;
+    if (s.embedding)  extra = ` | embedding ${s.emb_done}/${s.emb_total}`;
+    if (s.clustering) extra = ` | clustering...`;
+    const model = d.space ? ` | ${d.space}${d.text_search ? ' (sem: on)' : ''}` : ' | no audio model';
     document.getElementById('music_stat').textContent =
-      `${d.tracks} tracks · ${d.artists} artists · ${d.albums} albums · ` +
-      `${d.embedded} embedded · ${d.clusters} clusters${model}${extra}`;
+      `${d.tracks} tracks | ${d.artists} artists | ${d.albums} albums | ` +
+      `${d.embedded} embedded | ${d.clusters} clusters${model}${extra}`;
     const inp = document.getElementById('music_search');
     if (inp) inp.placeholder = d.text_search
-      ? 'Search title / artist / album / tag…  or sem:christmas -metal'
-      : 'Search title / artist / album / genre / tag…';
+      ? 'Search title / artist / album / tag...  or sem:christmas -metal'
+      : 'Search title / artist / album / genre / tag...';
     // keep polling while a background job runs
     if (s.indexing || s.embedding || s.clustering) {
       setTimeout(musicRefreshStatus, 1500);
@@ -71,10 +71,10 @@ function musicView(view) {
   else if (view === 'clusters') loadClusters();
 }
 
-// ── browse: artists ─────────────────────────────────────────────
+// -- browse: artists ---------------------------------------------
 async function loadArtists() {
   const el = document.getElementById('music_list');
-  el.innerHTML = '<div class="text-gray-500 text-sm">Loading…</div>';
+  el.innerHTML = '<div class="text-gray-500 text-sm">Loading...</div>';
   const d = await fetch('/api/music/artists').then(r => r.json());
   if (!d.success) { el.innerHTML = '<div class="text-red-400">Failed.</div>'; return; }
   if (!d.artists.length) { el.innerHTML = emptyMsg(); return; }
@@ -83,7 +83,7 @@ async function loadArtists() {
       <div onclick="drillArtist(${esc(a.name)})"
         class="bg-gray-800 hover:bg-gray-700 rounded p-3 cursor-pointer border border-gray-700">
         <div class="font-bold truncate">${escHtml(a.name)}</div>
-        <div class="text-xs text-gray-400">${a.albums} albums · ${a.tracks} tracks</div>
+        <div class="text-xs text-gray-400">${a.albums} albums | ${a.tracks} tracks</div>
       </div>`).join('') + `</div>`;
 }
 function drillArtist(name) {
@@ -91,10 +91,10 @@ function drillArtist(name) {
   musicCurrentView = 'albums'; _setTab('albums'); loadAlbums();
 }
 
-// ── browse: albums ──────────────────────────────────────────────
+// -- browse: albums ----------------------------------------------
 async function loadAlbums() {
   const el = document.getElementById('music_list');
-  el.innerHTML = '<div class="text-gray-500 text-sm">Loading…</div>';
+  el.innerHTML = '<div class="text-gray-500 text-sm">Loading...</div>';
   const qs = musicCtx.artist ? '?artist=' + encodeURIComponent(musicCtx.artist) : '';
   const d = await fetch('/api/music/albums' + qs).then(r => r.json());
   if (!d.success) { el.innerHTML = '<div class="text-red-400">Failed.</div>'; return; }
@@ -108,7 +108,7 @@ async function loadAlbums() {
         class="bg-gray-800 hover:bg-gray-700 rounded p-3 cursor-pointer border border-gray-700">
         <div class="font-bold truncate">${escHtml(a.album)}</div>
         <div class="text-xs text-gray-400 truncate">${escHtml(a.artist)}</div>
-        <div class="text-xs text-gray-500">${a.year || ''} · ${a.tracks} tracks</div>
+        <div class="text-xs text-gray-500">${a.year || ''} | ${a.tracks} tracks</div>
       </div>`).join('') + `</div>`;
 }
 function drillAlbum(album, artist) {
@@ -116,10 +116,10 @@ function drillAlbum(album, artist) {
   musicCurrentView = 'songs'; _setTab('songs'); loadSongs();
 }
 
-// ── browse: songs ───────────────────────────────────────────────
+// -- browse: songs -----------------------------------------------
 async function loadSongs() {
   const el = document.getElementById('music_list');
-  el.innerHTML = '<div class="text-gray-500 text-sm">Loading…</div>';
+  el.innerHTML = '<div class="text-gray-500 text-sm">Loading...</div>';
   const p = new URLSearchParams();
   if (musicCtx.artist) p.set('artist', musicCtx.artist);
   if (musicCtx.album)  p.set('album', musicCtx.album);
@@ -141,7 +141,7 @@ function renderSongTable(el, songs, total, label) {
     if (musicCtx.artist) bits.push('Artist: <b class="text-white">' + escHtml(musicCtx.artist) + '</b>');
     if (musicCtx.album)  bits.push('Album: <b class="text-white">' + escHtml(musicCtx.album) + '</b>');
     if (musicCtx.cluster !== '') bits.push('Cluster: <b class="text-white">' + musicCtx.cluster + '</b>');
-    crumb = `<div class="mb-3 text-sm text-gray-400">${bits.join(' · ')}
+    crumb = `<div class="mb-3 text-sm text-gray-400">${bits.join(' | ')}
       <button onclick="clearMusicCtx()" class="ml-2 text-blue-400 hover:underline">clear</button></div>`;
   }
   const rows = songs.map((s, i) => `
@@ -156,7 +156,7 @@ function renderSongTable(el, songs, total, label) {
       <td class="px-2 py-1 text-gray-500 w-12 text-right">${s.score !== undefined ? s.score.toFixed(2) : ''}</td>
       <td class="px-2 py-1 w-24 text-right whitespace-nowrap">
         <button onclick="event.stopPropagation();musicSimilarTo(${esc(s.rel_path)})" title="Tracks that sound like this"
-          class="text-xs text-purple-400 hover:underline mr-2">similar</button><button onclick="event.stopPropagation();openMusicEditor(${i})"
+          class="text-xs text-indigo-400 hover:underline mr-2">similar</button><button onclick="event.stopPropagation();openMusicEditor(${i})"
           class="text-xs text-blue-400 hover:underline">edit</button></td>
     </tr>`).join('');
   el.innerHTML = crumb +
@@ -173,11 +173,11 @@ function clearMusicCtx() {
   loadSongs();
 }
 
-// ── browse: clusters ────────────────────────────────────────────
+// -- browse: clusters --------------------------------------------
 async function loadClusters() {
   const el = document.getElementById('music_list');
-  el.innerHTML = '<div class="text-gray-500 text-sm">Loading…</div>';
-  // clusters list comes from songs grouped by cluster — use the status + a probe
+  el.innerHTML = '<div class="text-gray-500 text-sm">Loading...</div>';
+  // clusters list comes from songs grouped by cluster - use the status + a probe
   const d = await fetch('/api/music/songs?page=0').then(r => r.json());
   if (!d.success) { el.innerHTML = '<div class="text-red-400">Failed.</div>'; return; }
   // build distinct cluster set client-side from a cheap full-ish probe is wrong
@@ -186,7 +186,7 @@ async function loadClusters() {
   let clusters = (c && c.success) ? c.clusters : [];
   if (!clusters.length) {
     el.innerHTML = `<div class="text-gray-500 text-sm">No clusters yet. Generate embeddings, then press
-      <b class="text-purple-300">Cluster</b>.</div>`;
+      <b class="text-indigo-300">Cluster</b>.</div>`;
     return;
   }
   el.innerHTML = `<div class="grid gap-2" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr))">` +
@@ -202,7 +202,7 @@ function drillCluster(cluster) {
   musicCurrentView = 'songs'; _setTab('songs'); loadSongs();
 }
 
-// ── player ──────────────────────────────────────────────────────
+// -- player ------------------------------------------------------
 function playFromQueue(i) {
   musicQueueIdx = i;
   const s = musicQueue[i];
@@ -212,7 +212,7 @@ function playFromQueue(i) {
   a.play().catch(() => {});
   document.getElementById('np_title').textContent = s.title || s.rel_path;
   document.getElementById('np_sub').textContent =
-    [s.artist, s.album].filter(Boolean).join(' — ') || '—';
+    [s.artist, s.album].filter(Boolean).join(' - ') || '-';
   document.getElementById('music_player_bar').classList.remove('hidden');
   a.onended = () => playNext();
   if (musicRadio) {
@@ -228,7 +228,7 @@ function playNext() {
   if (musicRadio) radioNextRound(true);          // end of the round: walk again from here
 }
 
-// ── radio: the whole library as one walk through embedding space ─────
+// -- radio: the whole library as one walk through embedding space -----
 async function radioNextRound(autoplay) {
   const d = await fetch('/api/music/radio/next', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
@@ -239,10 +239,10 @@ async function radioNextRound(autoplay) {
   musicCurrentView = 'songs'; _setTab('songs');
   const inf = d.info;
   renderSongTable(document.getElementById('music_list'), d.songs, d.songs.length,
-    `Radio round ${inf.round} · ${inf.tracks} tracks · ${inf.hours} h` +
-    (inf.repeats ? ` · ${inf.repeats} repeats` : '') +
-    (inf.seasonal_skipped ? ` · ${inf.seasonal_skipped} seasonal out` : '') +
-    (inf.rating_skipped ? ` · ${inf.rating_skipped} sat out` : ''));
+    `Radio round ${inf.round} | ${inf.tracks} tracks | ${inf.hours} h` +
+    (inf.repeats ? ` | ${inf.repeats} repeats` : '') +
+    (inf.seasonal_skipped ? ` | ${inf.seasonal_skipped} seasonal out` : '') +
+    (inf.rating_skipped ? ` | ${inf.rating_skipped} sat out` : ''));
   _radioButton();
   showToastM(`Radio round ${inf.round}: ${inf.tracks} tracks, ~${inf.hours} h.`);
   if (autoplay !== false) playFromQueue(0);
@@ -250,7 +250,7 @@ async function radioNextRound(autoplay) {
 function toggleRadio() {
   if (musicRadio) {
     musicRadio = false; musicRadioInfo = null; _radioButton();
-    showToastM('Radio off — the current list keeps playing to its end.');
+    showToastM('Radio off - the current list keeps playing to its end.');
     return;
   }
   radioNextRound(true);
@@ -258,20 +258,20 @@ function toggleRadio() {
 function _radioButton() {
   const b = document.getElementById('radio_btn');
   if (!b) return;
-  b.classList.toggle('bg-rose-600', musicRadio); b.classList.toggle('bg-gray-700', !musicRadio);
+  b.classList.toggle('bg-red-600', musicRadio); b.classList.toggle('bg-gray-700', !musicRadio);
   b.textContent = musicRadio ? 'Radio ●' : 'Radio';
   const pos = document.getElementById('music_radio_pos');
   if (pos && !musicRadio) pos.textContent = '';
 }
 
-// ── similarity: next track / similar list ───────────────────────
+// -- similarity: next track / similar list -----------------------
 const _musicPlayed = new Set();   // rel_paths played under auto-similar, so it doesn't loop
 
 function toggleAutoSimilar() {
   musicAutoSimilar = !musicAutoSimilar;
   _musicPlayed.clear();
   const b = document.getElementById('auto_similar_btn');
-  if (b) { b.classList.toggle('bg-purple-600', musicAutoSimilar); b.classList.toggle('bg-gray-700', !musicAutoSimilar); }
+  if (b) { b.classList.toggle('bg-indigo-600', musicAutoSimilar); b.classList.toggle('bg-gray-700', !musicAutoSimilar); }
   showToastM(musicAutoSimilar ? 'Next track picked by similarity to the one playing.' : 'Auto-similar off.');
 }
 
@@ -296,7 +296,7 @@ async function playNextSimilar() {
   playFromQueue(1);
 }
 
-// Show the tracks nearest to `rel` as the list (and the queue).
+/** @brief Show the tracks nearest to `rel` as the list (and the queue). */
 function musicShowSimilar(rel, songs) {
   musicQueue = songs; musicQueueIdx = -1; musicSimilarSeed = rel;
   musicCurrentView = 'songs'; _setTab('songs');
@@ -334,7 +334,7 @@ async function shuffleByCurrent(kind) {
   playFromQueue(0);
 }
 
-// ── metadata editor ─────────────────────────────────────────────
+// -- metadata editor ---------------------------------------------
 function openMusicEditor(i) {
   const s = musicQueue[i];
   if (!s) return;
@@ -367,8 +367,8 @@ function openMusicEditor(i) {
     <textarea data-mk="comment" class="w-full bg-gray-700 rounded border border-gray-600 text-sm px-2 py-1" rows="2">${escHtml(s.comment || '')}</textarea>
     ${f('Tags (comma-separated)', 'tags', (s.tags || []).join(', '))}
     <div class="text-[11px] text-gray-500 mt-2">
-      ${fmtDur(s.duration)} · ${s.samplerate || '?'} Hz · ${s.channels || '?'}ch ·
-      ${Math.round((s.bitrate || 0) / 1000)} kbps · ${s.has_emb ? 'embedded' : 'no embedding'}</div>
+      ${fmtDur(s.duration)} | ${s.samplerate || '?'} Hz | ${s.channels || '?'}ch |
+      ${Math.round((s.bitrate || 0) / 1000)} kbps | ${s.has_emb ? 'embedded' : 'no embedding'}</div>
     <button onclick="saveMusicMeta(${i})"
       class="mt-3 w-full bg-blue-600 hover:bg-blue-500 font-bold rounded py-1.5 text-sm">Save</button>`;
 
@@ -396,24 +396,24 @@ async function saveMusicMeta(i) {
   } else showToastM(r.error || 'Save failed.');
 }
 
-// ── background jobs ─────────────────────────────────────────────
+// -- background jobs ---------------------------------------------
 async function musicReindex() {
   await fetch('/api/music/reindex', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-  showToastM('Reindexing music…'); musicRefreshStatus();
+  showToastM('Reindexing music...'); musicRefreshStatus();
 }
 async function musicEmbed() {
   const d = await fetch('/api/music/embed', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.json());
   if (!d.success) { showToastM(d.error || 'Embed failed.'); return; }
-  showToastM('Generating audio embeddings (runs in background)…'); musicRefreshStatus();
+  showToastM('Generating audio embeddings (runs in background)...'); musicRefreshStatus();
 }
 async function musicCluster() {
-  showToastM('Clustering…');
+  showToastM('Clustering...');
   const d = await fetch('/api/music/cluster', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.json());
   if (d.success) { showToastM(`Built ${d.k} clusters.`); musicRefreshStatus(); }
   else showToastM(d.error || 'Cluster failed.');
 }
 
-// ── helpers ─────────────────────────────────────────────────────
+// -- helpers -----------------------------------------------------
 function fmtDur(sec) {
   sec = Math.round(sec || 0);
   const m = Math.floor(sec / 60), s = sec % 60;
@@ -434,7 +434,7 @@ function showToastM(msg) {
   document.getElementById('music_stat').textContent = msg;
 }
 
-// ── registration with the core UI ───────────────────────────────────────────
+// -- registration with the core UI -------------------------------------------
 (function () {
   function init() {
     if (!window.registerLeftTab) return;

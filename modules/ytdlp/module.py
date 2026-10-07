@@ -1,5 +1,5 @@
-"""
-yt-dlp fetcher module.
+"""! @file
+@brief yt-dlp fetcher module.
 ======================================================================
 Registers yt-dlp as a FETCHER in the fetch module's registry, the same way
 modules/gallerydl does, so YouTube channels/playlists/videos (and whatever
@@ -47,7 +47,7 @@ def _host_of(url):
 
 
 def _flatten_info(info):
-    """Keep the scalar fields of a yt-dlp info dict plus tags/categories;
+    """! @brief Keep the scalar fields of a yt-dlp info dict plus tags/categories;
     drop formats/thumbnails/etc. so the packet stays small."""
     out = {}
     for k, v in (info or {}).items():
@@ -114,7 +114,7 @@ def register(host):
             def error(self, msg): errors.append(str(msg))
 
         class _Emit(_ytdl.postprocessor.PostProcessor):
-            # Runs after the final file is in place: hand it (and its info) off.
+            ## @brief Runs after the final file is in place: hand it (and its info) off.
             def run(self, info):
                 path = info.get("filepath")
                 if path and os.path.isfile(path):

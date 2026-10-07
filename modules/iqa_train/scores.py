@@ -1,5 +1,5 @@
-"""
-Engagement counts -> a 0..1 rating, for images that carry booru-style numbers
+"""! @file
+@brief Engagement counts -> a 0..1 rating, for images that carry booru-style numbers
 instead of a human score: tags "score_up: 12", "score_down: 3", "views: 4100",
 "source: e621" (or a labels.csv with score_up/score_down/views[/source] columns).
 
@@ -24,7 +24,7 @@ _KEYS = {"score_up": "up", "score_down": "down", "views": "views", "source": "so
 
 
 def parse_tags(tag_names):
-    """Tag strings -> {up, down, views, source} (only the keys present)."""
+    """! @brief Tag strings -> {up, down, views, source} (only the keys present)."""
     out = {}
     for t in tag_names:
         m = _NUM.match(str(t))
@@ -60,7 +60,7 @@ def usable(r):
 
 
 def estimate(rows):
-    """rows: [{"key", "up", "down"?, "views"?, "source"?}] -> {key: rating 0..1}.
+    """! @brief rows: [{"key", "up", "down"?, "views"?, "source"?}] -> {key: rating 0..1}.
     Rows lacking down and views are dropped."""
     rows = [r for r in rows if usable(r)]
     by_src = {}

@@ -1,5 +1,5 @@
-"""
-gallery-dl fetcher module.
+"""! @file
+@brief gallery-dl fetcher module.
 ======================================================================
 Registers gallery-dl as a FETCHER into the fetch module's registry (found
 via host.get_service("fetch")). The generic queue/worker/ingestion lives
@@ -49,7 +49,7 @@ def register(host):
     host.add_settings_tab("gdl_sites", "Fetch sites", icon="\u2b07")
     _COOKIE_DIR = os.path.join(os.path.dirname(host.media_dir), "gdl_cookies")
 
-    # ── per-site auth -> gallery-dl opt strings ──────────────────────────
+    # -- per-site auth -> gallery-dl opt strings --------------------------
     def _write_cookie_file(key, text):
         try:
             os.makedirs(_COOKIE_DIR, exist_ok=True)
@@ -124,7 +124,7 @@ def register(host):
             site, {"fields": [], "hidden": []})
 
     def _learn_fields(site, fields):
-        """Union newly discovered fields into the site's known list (never
+        """! @brief Union newly discovered fields into the site's known list (never
         removes). Saves only if something actually changed."""
         if not site:
             return
@@ -148,7 +148,7 @@ def register(host):
             keys.update(s for s in cfg.get(k, {}) if s)
         return sorted(keys)
 
-    # ── the fetcher ──────────────────────────────────────────────────────
+    # -- the fetcher ------------------------------------------------------
     def _fetch(url, tmpdir, on_file=None):
         # A sidecar that never landed (or a site that omits "category") would
         # otherwise map to no site and lose all metadata: pin the category
@@ -184,7 +184,7 @@ def register(host):
         "map_meta": _map_meta,
     })
 
-    # ── gallery-dl-specific config endpoints ─────────────────────────────
+    # -- gallery-dl-specific config endpoints -----------------------------
     m = host.core
 
     def api_available():
@@ -214,13 +214,13 @@ def register(host):
                             "opts": cfg.get("gdl_opts", {}),
                             "auth": {s: _auth_public(s) for s in cfg.get("gdl_auth", {})}})
         d = request.get_json(force=True, silent=True) or {}
-        # Two shapes: the modal/settings tab save ONE site — {site,
-        # auth:{method,…}, mapping:{…}, hidden:[…], opts:"one per line"} —
+        # Two shapes: the modal/settings tab save ONE site - {site,
+        # auth:{method,...}, mapping:{...}, hidden:[...], opts:"one per line"} -
         # while a whole-config client sends the maps {sites:{site:mapping},
-        # opts:{site:[…]}, auth:{site:blob}}.
+        # opts:{site:[...]}, auth:{site:blob}}.
         site = (d.get("site") or "").strip()
         if "sites" in d:
-            cfg["gdl_sites"] = d["sites"] or {}
+            host.set_config("gdl_sites", d["sites"] or {}, save=False)
         if "mapping" in d and site:
             # MERGE: only fields the client mentions change ("ignore" drops
             # one). Fields it didn't render (hidden, or not shown by this
@@ -240,7 +240,7 @@ def register(host):
             return jsonify({"success": True})
         if "opts" in d:
             if isinstance(d["opts"], dict):
-                cfg["gdl_opts"] = d["opts"]
+                host.set_config("gdl_opts", d["opts"], save=False)
             elif site:                                   # textarea: one option per line
                 lines = d["opts"] if isinstance(d["opts"], list) else str(d["opts"] or "").splitlines()
                 cfg.setdefault("gdl_opts", {})[site] = [l.strip() for l in lines if l.strip()]
@@ -256,7 +256,7 @@ def register(host):
                 cur.update({k: v for k, v in blob.items()
                             if k not in ("has_password", "has_cookies")})
                 existing[s_] = cur
-            cfg["gdl_auth"] = existing
+            host.set_config("gdl_auth", existing, save=False)
         host.save_config()
         return jsonify({"success": True})
 
@@ -275,7 +275,7 @@ def register(host):
         return jsonify({"success": True, **_site_public(site)})
 
     def api_sites():
-        """Every site we know anything about, for the settings tab's list."""
+        """! @brief Every site we know anything about, for the settings tab's list."""
         if request.method == "POST":     # {site} -> full record
             site = (request.get_json(force=True, silent=True) or {}).get("site", "").strip()
             if not site:

@@ -1,5 +1,5 @@
-"""
-Metadata sources hub — registry + search/apply for external lookups.
+"""! @file
+@brief Metadata sources hub - registry + search/apply for external lookups.
 ======================================================================
 Plex has its own library and falls back to IMDb/TVDB; Calibre asks
 Goodreads/Google. This module is that fallback layer for the three media
@@ -7,7 +7,7 @@ kinds the app manages: photos, music and books. It owns the registry, the
 HTTP helper, the "what do I know about this file" query builder, the
 candidate merge and the per-kind writer. It knows nothing about any
 particular site: every site is its own module (metasrc_openlibrary,
-metasrc_musicbrainz, metasrc_danbooru, …) that registers into the
+metasrc_musicbrainz, metasrc_danbooru, ...) that registers into the
 `metasrc` service this module publishes.
 
 A source is a dict:
@@ -49,7 +49,7 @@ MANIFEST = {
     "name":        "Metadata sources",
     "version":     "1.0.0",
     "description": "Look up photo / music / book metadata from external sources "
-                   "(Open Library, MusicBrainz, Danbooru, …). Source modules "
+                   "(Open Library, MusicBrainz, Danbooru, ...). Source modules "
                    "register into this one.",
     "core":        False,
     "requires":    [],
@@ -65,7 +65,7 @@ _BOOK_KEYS = ("title", "authors", "series", "series_index", "publisher", "publis
 
 
 def http_json(url, params=None, headers=None, timeout=12, data=None, method=None):
-    """GET (or POST `data`) `url` and parse JSON. Raises on HTTP/network error."""
+    """! @brief GET (or POST `data`) `url` and parse JSON. Raises on HTTP/network error."""
     if params:
         url += ("&" if "?" in url else "?") + urllib.parse.urlencode(params, doseq=True)
     hdrs = {"User-Agent": USER_AGENT, "Accept": "application/json"}
@@ -79,7 +79,7 @@ def http_json(url, params=None, headers=None, timeout=12, data=None, method=None
 
 
 def http_multipart(url, fields, files, headers=None, timeout=30):
-    """POST multipart/form-data; files = {name: (filename, bytes)}."""
+    """! @brief POST multipart/form-data; files = {name: (filename, bytes)}."""
     b = "----cim" + hashlib.md5(os.urandom(8)).hexdigest()
     body = bytearray()
     for k, v in (fields or {}).items():
@@ -104,7 +104,7 @@ def _md5(path):
 
 
 def _gps(path):
-    """(lat, lon) from EXIF GPS, or None."""
+    """! @brief (lat, lon) from EXIF GPS, or None."""
     if not _HAVE_EXIV:
         return None
     try:
@@ -130,7 +130,7 @@ def _gps(path):
 
 
 def merge_fields(kind, current, fields, overwrite):
-    """Fields to actually write: with overwrite=False only fill blanks. Photo
+    """! @brief Fields to actually write: with overwrite=False only fill blanks. Photo
     tags are always unioned (a lookup adds tags, it never drops yours)."""
     out = {}
     for k, v in (fields or {}).items():
@@ -183,7 +183,7 @@ def register(host):
     core = host.core
     log = host.logger
 
-    # ── what we already know about the file (query hints + fill baseline) ──
+    ## @brief -- what we already know about the file (query hints + fill baseline) --
     def _current(kind, rel):
         if kind == "music":
             r = host.db().execute("SELECT * FROM music WHERE rel_path=?", (rel,)).fetchone()
@@ -220,32 +220,29 @@ def register(host):
             query["q"] = query["q"] or stem
         return query
 
-    # ── writers ───────────────────────────────────────────────────────────
+    # -- writers -----------------------------------------------------------
     def _write(kind, rel, fields):
+        # One write path for every kind: core.update_file hands music / book
+        # fields to the writer their module registered for that media kind.
         if kind == "music":
-            fn = (host.get_service("music") or {}).get("write_meta")
-            if not fn:
+            if not host.has_service("music"):
                 return False, "music module is off"
-            return fn(rel, {k: v for k, v in fields.items() if k in _MUSIC_KEYS}), ""
+            res = core.update_file(rel, set={k: v for k, v in fields.items() if k in _MUSIC_KEYS})
+            return res.get("success", False), res.get("error", "")
         if kind == "book":
-            fn = (host.get_service("books") or {}).get("update_meta")
-            if not fn:
+            if not host.has_service("books"):
                 return False, "books module is off"
-            return fn(rel, {k: v for k, v in fields.items() if k in _BOOK_KEYS}), ""
-        ap = host.safe_path(host.media_dir, rel)
-        m = core.read_metadata(ap)
-        ok = core.write_metadata(ap, fields.get("tags", m.get("tags") or []),
-                                 fields.get("description", m.get("description") or ""),
-                                 m.get("regions") or [])
+            res = core.update_file(rel, set={k: v for k, v in fields.items() if k in _BOOK_KEYS})
+            return res.get("success", False), res.get("error", "")
         xmp = {k: v for k, v in (("dc.creator", [fields["artist"]] if fields.get("artist") else None),
                                  ("dc.source", fields.get("source_url"))) if v}
-        if ok and xmp:
-            w = (host.get_service("xmp") or {}).get("write")
-            if w and not w(ap, xmp).get("success"):
-                log.warning(f"metasrc: xmp write failed for {rel}")
-        return ok, ""
+        res = core.update_file(rel, set={k: fields[k] for k in ("tags", "description") if k in fields},
+                               xmp=xmp or None)
+        if not res.get("success"):
+            log.warning(f"metasrc: write failed for {rel}: {res.get('error')}")
+        return res.get("success", False), ""
 
-    # ── routes ────────────────────────────────────────────────────────────
+    # -- routes ------------------------------------------------------------
     def api_sources():
         return jsonify({"success": True, "sources": reg.listing()})
 
@@ -270,7 +267,7 @@ def register(host):
                 c["source"] = s["id"]; c["source_label"] = s["label"]
             return out, ""
         cands, errors = [], []
-        # ponytail: one thread per source, no cap — a handful of sources is the realistic max
+        # ponytail: one thread per source, no cap - a handful of sources is the realistic max
         with ThreadPoolExecutor(max_workers=max(1, len(srcs))) as ex:
             for out, err in ex.map(_one, srcs):
                 cands += out

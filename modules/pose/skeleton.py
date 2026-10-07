@@ -25,7 +25,7 @@ except Exception:
     _HAVE_WHOLEBODY = False
 
 
-# ── Keypoint topology ─────────────────────────────────────────────────────────
+# -- Keypoint topology ---------------------------------------------------------
 COCO_KP_NAMES = ["nose", "left_eye", "right_eye", "left_ear", "right_ear",
                  "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
                  "left_wrist", "right_wrist", "left_hip", "right_hip",
@@ -73,11 +73,11 @@ TOPOLOGIES = {17:  ("body",      COCO_KP_NAMES,   COCO_SKELETON),
               543: ("holistic",  HOLISTIC_NAMES,  HOLISTIC_EDGES)}
 
 def topology(n_kp: int):
-    """(kind, names, edges) for a keypoint count; unknown counts draw as bare points."""
+    """! @brief (kind, names, edges) for a keypoint count; unknown counts draw as bare points."""
     return TOPOLOGIES.get(n_kp, ("body", [f"kp{i}" for i in range(n_kp)], []))
 
 
-# ── default tokens for learners (personal_iqa etc.) ─────────────────────────
+# -- default tokens for learners (personal_iqa etc.) -------------------------
 # COCO-17 segments whose lengths / torso length are the pose-independent
 # body proportions. First 17 points of wholebody-133 are the same COCO points.
 BONES = [(5, 7), (7, 9), (6, 8), (8, 10), (11, 13), (13, 15), (12, 14), (14, 16), (5, 6), (11, 12),
@@ -106,7 +106,7 @@ def tokens(keypoints: list) -> Optional[dict]:
 _WB_REGISTERED = set()
 
 # Official ONNX SDK checkpoints (mmpose release names). Sizes are the paper's
-# t/s/m/l/x for RTMPose-body and m/l/x for RTMW (whole-body, 133 kpts) — not
+# t/s/m/l/x for RTMPose-body and m/l/x for RTMW (whole-body, 133 kpts) - not
 # rtmlib's "lightweight/balanced/performance" presets.
 _SDK = "https://download.openmmlab.com/mmpose/v1/projects/"
 _DET = {"tiny": (_SDK + "rtmposev1/onnx_sdk/yolox_tiny_8xb8-300e_humanart-6f3252f9.zip", (416, 416)),
@@ -127,7 +127,7 @@ WHOLEBODY_SIZES = {   # RTMW-{size} cocktail14 (133 kpts)
 
 
 def _rtm_device():
-    """rtmlib picks its ONNX provider from a device string through its own
+    """! @brief rtmlib picks its ONNX provider from a device string through its own
     table (device='rocm' -> ROCMExecutionProvider, which a MIGraphX wheel
     doesn't have). Point that table entry at the app's common provider so
     RTMPose runs on the same EP as every other ONNX model here."""
@@ -141,7 +141,7 @@ def _rtm_device():
 
 
 def _load_rtm(kind: str, size: str, own_detector: bool = False):
-    """kind 'body' (RTMPose) or 'wholebody' (RTMW); size an official letter.
+    """! @brief kind 'body' (RTMPose) or 'wholebody' (RTMW); size an official letter.
 
     RTMPose is top-down: it needs person boxes. The cached handle is
     run(img, persons): persons is fn(img_bgr) -> normalized center-form boxes
@@ -177,7 +177,7 @@ def _load_rtm(kind: str, size: str, own_detector: bool = False):
 
 
 def _load_wholebody(mode: str):
-    """Legacy entry: rtmlib preset -> official RTMW size."""
+    """! @brief Legacy entry: rtmlib preset -> official RTMW size."""
     return _load_rtm("wholebody", {"lightweight": "m", "balanced": "l", "performance": "x"}.get(mode, "l"))
 
 
@@ -210,7 +210,7 @@ def rtm_people(img_bgr, kind: str = "wholebody", size: str = "l", persons=None) 
     return people
 
 def wholebody_people(img_bgr, mode: str = "balanced") -> list:
-    """Legacy wrapper (rtmlib preset names)."""
+    """! @brief Legacy wrapper (rtmlib preset names)."""
     return rtm_people(img_bgr, "wholebody",
                       {"lightweight": "m", "balanced": "l", "performance": "x"}.get(mode, "l"))
 
@@ -218,7 +218,7 @@ def wholebody_people(img_bgr, mode: str = "balanced") -> list:
 def has_wholebody() -> bool:
     return bool(_HAVE_WHOLEBODY)
 
-# ── T-pose estimation ─────────────────────────────────────────────────────────
+# -- T-pose estimation ---------------------------------------------------------
 # COCO-17 landmark indices used to define the body-local frame; the same indices
 # lead the wholebody-133 table, so both topologies normalise identically.
 _L_SHOULDER, _R_SHOULDER, _L_HIP, _R_HIP = 5, 6, 11, 12

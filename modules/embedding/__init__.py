@@ -1,4 +1,5 @@
-"""embedding module — image embeddings, clustering, semantic search.
+"""! @file
+@brief embedding module - image embeddings, clustering, semantic search.
 ======================================================================
 
 Owns the embedding surface: whole-image embeddings (local CNN or OAI),
@@ -35,18 +36,18 @@ cv2, _HAVE_CV2 = optional_import("cv2")
 
 
 def register(host):
-    # ── auth features ──────────────────────────────────────────────────────
+    # -- auth features ------------------------------------------------------
     host.register_feature("tab.review", "Review tab (embeddings, clustering, search)",
                           section="gallery_tabs", section_label="Gallery tabs",
                           default="read", role_defaults={"viewer": "read"})
 
-    # ── assets ─────────────────────────────────────────────────────────────
+    # -- assets -------------------------------------------------------------
     host.add_asset("embedding.js", kind="js", module_id="embedding")
     host.add_asset("embedding.css", kind="css", module_id="embedding")
 
-    # ── settings (shared OAI keys; the core AI pane renders them) ──────────
+    # -- settings (shared OAI keys; the core AI pane renders them) ----------
 
-    # ── semantic search tuning ─────────────────────────────────────────────
+    # -- semantic search tuning ---------------------------------------------
     _clamp = lambda lo, hi, d: (lambda v: max(lo, min(hi, float(v if v not in (None, "") else d))))
     host.add_config_key("semantic_relative_cutoff", default=0.75, validate=_clamp(0.0, 1.0, 0.75))
     host.add_config_key("semantic_min_score", default=0.0, validate=_clamp(-1.0, 1.0, 0.0))
@@ -60,10 +61,10 @@ def register(host):
                             help="Extra floor on the raw cosine score. Model-specific; 0 = off.")
     host.add_settings_field(key="semantic_negative_weight", label="Semantic search: weight of -negative terms",
                             kind="number", pane="module",
-                            help="'sem:man -woman' subtracts this × the similarity to 'woman'.")
+                            help="'sem:man -woman' subtracts this x the similarity to 'woman'.")
 
-    # ── database tables ────────────────────────────────────────────────────
-    # One row per (image, model): switching embedding models keeps every
+    # -- database tables ----------------------------------------------------
+    ## @brief One row per (image, model): switching embedding models keeps every
     # model's vectors, so going to a bigger model and back later costs nothing
     # for images already embedded in that space.
     def _migrate_embeddings(db):
@@ -113,7 +114,7 @@ def register(host):
             updated   REAL)
     """)
 
-    # ── which embedder: the 'embed' capability's pick in the Models tab ──────
+    # -- which embedder: the 'embed' capability's pick in the Models tab ------
     _CNN_ARCHS = ["efficientnet_b0", "efficientnet_b1", "efficientnet_b2", "mobilenet_v3"]
 
     def _cnn_choice():
@@ -123,15 +124,15 @@ def register(host):
     def _embed_provider():
         return host.broker.selected_id("embed")
 
-    # ── the picked embedder, via the broker ───────────────────────────────
+    # -- the picked embedder, via the broker -------------------------------
     # This module never names a model. The broker hands back the provider the
-    # user picked under Models → Embeddings; the handle embeds an image, and a
+    # user picked under Models -> Embeddings; the handle embeds an image, and a
     # provider that can ALSO embed text (a multimodal endpoint) exposes
     # handle.model.embed_text, which is what text search needs. handle.model.space
     # names the vector space (rows are tagged with it so a model switch is
     # detected); providers that don't declare one get "<provider>:<size>".
     def _handle():
-        """Bound embed handle for the current pick; raises RuntimeError with
+        """! @brief Bound embed handle for the current pick; raises RuntimeError with
         the broker's reason when the pick isn't usable."""
         try:
             return host.request_model("embed")
@@ -153,7 +154,7 @@ def register(host):
         return f"{pid}:{host.model_variant('embed', role).get('size') or ''}"
 
     def _text_embedder(handle=None):
-        """embed_text(text) -> vector of the picked provider, or None if it
+        """! @brief embed_text(text) -> vector of the picked provider, or None if it
         can't embed text."""
         handle = handle or _try_handle()
         fn = getattr(getattr(handle, "model", None), "embed_text", None)
@@ -162,7 +163,7 @@ def register(host):
     def _text_search_enabled():
         return _text_embedder() is not None
 
-    # ── the text and audio picks (Models → Text embedding / Audio embedding) ─
+    ## @brief -- the text and audio picks (Models -> Text embedding / Audio embedding) -
     # Same pattern as the image pick: this module never names a model. The
     # text pick embeds passages (books, notes) in its own space; the audio pick
     # embeds tracks (music module) and, when the model has a joint text space
@@ -188,7 +189,7 @@ def register(host):
         return f"{pid}:{host.model_variant(cap).get('size') or ''}" if pid else ""
 
     def _text_doc_embedder():
-        """embed(text) -> vector of the picked TEXT provider, or None."""
+        """! @brief embed(text) -> vector of the picked TEXT provider, or None."""
         h = _try_cap("embed.text")
         return h if h is not None else None
 
@@ -200,7 +201,7 @@ def register(host):
         return fn if callable(fn) else h
 
     def _audio_embedder():
-        """embed(abs_path) -> vector of the picked AUDIO provider, or None."""
+        """! @brief embed(abs_path) -> vector of the picked AUDIO provider, or None."""
         return _try_cap("embed.audio")
 
     def _audio_text_embedder():
@@ -212,7 +213,7 @@ def register(host):
         return "" if _text_search_enabled() else \
             "The picked embedding model can't embed text, so text search is off."
 
-    # ── core embedding functions ───────────────────────────────────────────
+    # -- core embedding functions -------------------------------------------
     def _normalise(v):
         n = np.linalg.norm(v)
         return v / n if n else v
@@ -232,13 +233,16 @@ def register(host):
         return (mtime is None) or (row["mtime"] == mtime)
 
     def _flush_embeddings(db, rows):
-        db.executemany(
-            "INSERT OR REPLACE INTO image_embeddings"
-            "(rel_path,dim,vec,model,mtime,updated) VALUES (?,?,?,?,?,?)", rows)
+        # Embeddings are DB-only (too big for a sidecar, invalidated by a model
+        # change): the core write path with dont_write=True.
+        for rel, dim, vec, model, mtime, updated in rows:
+            host.update_file(rel, table="image_embeddings", key={"model": model}, dont_write=True,
+                             set={"dim": dim, "vec": vec, "mtime": mtime, "updated": updated},
+                             commit=False)
         db.commit()
 
     def _iter_embeddings_ordered(db, dim, batch=4096, model=None):
-        """Rows of one model (the picked one by default) and of the requested
+        """! @brief Rows of one model (the picked one by default) and of the requested
         dimension only: the library keeps every model's vectors side by side,
         and unpacking a 512-float blob as 768 floats raises."""
         offset = 0
@@ -259,7 +263,7 @@ def register(host):
             yield [r["rel_path"] for r in good], np.stack([_unpack(r["vec"], dim) for r in good])
 
     def _embed_image(img_bgr, cnn_model=None):
-        """One whole-image embedding using local CNN."""
+        """! @brief One whole-image embedding using local CNN."""
         if img_bgr is None:
             return None
         try:
@@ -273,7 +277,7 @@ def register(host):
         except Exception:
             return None
 
-    # ── model providers for the 'embed' capability ─────────────────────────
+    # -- model providers for the 'embed' capability -------------------------
     def _cnn_handle(arch):
         fn = lambda img, *a, **k: _embed_image(img, arch)
         fn.space = arch          # rows written by older versions are tagged by arch
@@ -336,7 +340,7 @@ def register(host):
             return None
 
     def _run_embed(db, file_list, force=False):
-        """Embed file_list with whatever the broker serves for 'embed'. Nothing
+        """! @brief Embed file_list with whatever the broker serves for 'embed'. Nothing
         here knows which model that is. Progress goes to the header status;
         a pick that isn't usable raises with the broker's reason, and a run
         where every image failed (unreadable files, endpoint down) raises too
@@ -345,9 +349,9 @@ def register(host):
         handle = _handle()
         pid, total = _embed_provider(), len(file_list)
         failed = {"load": 0, "embed": 0, "last": ""}
-        host.config["status_text"] = f"[embed:{pid}] 0/{total}…"
+        host.set_status(f"[embed:{pid}] 0/{total}...")
         def _progress(_phase, done, tot, what):
-            host.config["status_text"] = f"[embed:{pid}] {done}/{tot} {what}…"
+            host.set_status(f"[embed:{pid}] {done}/{tot} {what}...")
         def _embed(img):
             try:
                 v = handle(img)
@@ -369,13 +373,13 @@ def register(host):
             summary += f", {failed['load']} unreadable, {failed['embed']} failed"
             if failed["last"]:
                 summary += f" ({failed['last']})"
-        host.config["status_text"] = summary + "."
+        host.set_status(summary + ".")
         if n == 0 and (failed["load"] or failed["embed"]) and not any(
                 _have_embedding(db, r, _embed_tag(handle), _img_mtime(r)) for r in file_list[:50]):
             raise RuntimeError(summary)
         return n, pid
 
-    # Background sweep (Models → Embeddings → "Run in background"): every image
+    ## @brief Background sweep (Models -> Embeddings -> "Run in background"): every image
     # without a vector in the background model's space, one at a time.
     def _bg_pending(db, n):
         tag = _embed_tag(host.request_model("embed", role="bg"), role="bg")
@@ -399,7 +403,7 @@ def register(host):
     host.add_background_sweep("embed", _bg_pending, _bg_run)
 
     def _stored_models(db):
-        """[{model, count, dim}] for every embedding space the library holds."""
+        """! @brief [{model, count, dim}] for every embedding space the library holds."""
         return [{"model": r["model"], "count": r["c"], "dim": r["dim"]} for r in db.execute(
             "SELECT model, COUNT(*) c, MAX(dim) dim FROM image_embeddings GROUP BY model ORDER BY c DESC").fetchall()]
 
@@ -425,8 +429,7 @@ def register(host):
         if not dim:
             return 0
         if total < min_cluster:
-            db.execute("DELETE FROM image_clusters")
-            db.commit()
+            host.update_file(table="image_clusters", where=("1=1", ()), remove=True, dont_write=True)
             return 0
 
         def _vec_batches():
@@ -444,8 +447,7 @@ def register(host):
         if not np.any(np.asarray(labels) >= 0):
             labels = _bruteforce_cluster(db, dim, total, eps, min_cluster, _prog)
 
-        db.execute("DELETE FROM image_clusters")
-        db.commit()
+        host.update_file(table="image_clusters", where=("1=1", ()), remove=True, dont_write=True)
         gi = 0
         now = time.time()
         for names, _mat in _iter_embeddings_ordered(db, dim):
@@ -455,9 +457,9 @@ def register(host):
                     break
                 rows.append((nm, int(labels[gi]), None, now))
                 gi += 1
-            db.executemany(
-                "INSERT OR REPLACE INTO image_clusters"
-                "(rel_path,label,dist,updated) VALUES (?,?,?,?)", rows)
+            for nm, lab, dist, upd in rows:
+                host.update_file(nm, table="image_clusters", dont_write=True, commit=False,
+                                 set={"label": lab, "dist": dist, "updated": upd})
             db.commit()
             if gi >= len(labels):
                 break
@@ -550,9 +552,9 @@ def register(host):
                 "VALUES (?,?,?,?,?,?,?,?)",
                 (int(lab), len(members), _pack(centroid), dim,
                  radius, spread, suggested, now))
-            db.executemany(
-                "UPDATE image_clusters SET dist=? WHERE rel_path=?",
-                [(float(d), m["rel_path"]) for d, m in zip(dists, members)])
+            for d, m in zip(dists, members):
+                host.update_file(table="image_clusters", where=("rel_path=?", (m["rel_path"],)),
+                                 set={"dist": float(d)}, dont_write=True, commit=False)
             summaries.append({"cluster": int(lab), "size": len(members),
                               "radius": round(radius, 4), "spread": round(spread, 4),
                               "suggested": suggested})
@@ -616,7 +618,7 @@ def register(host):
         return _search_by_vector(db, _normalise(np.asarray(v, np.float32)), top_k=top_k)
 
     def _parse_semantic(query):
-        """'woman on a beach -child -dog' -> ('woman on a beach', ['child', 'dog']).
+        """! @brief 'woman on a beach -child -dog' -> ('woman on a beach', ['child', 'dog']).
         A leading '-' on a word makes it a negative term; everything else is
         the positive query, kept together as one phrase."""
         pos, neg = [], []
@@ -631,7 +633,7 @@ def register(host):
         db = host.db()
         if _embedding_count(db) == 0:
             others = [m["model"] for m in _stored_models(db)]
-            return [], 0, (f"No embeddings for the current model '{_embed_tag()}' — generate them "
+            return [], 0, (f"No embeddings for the current model '{_embed_tag()}' - generate them "
                            "(Settings → Models → Embeddings)."
                            + (f" Stored spaces: {', '.join(others)}." if others else ""))
         embed_text = _text_embedder()
@@ -652,7 +654,7 @@ def register(host):
         hits = _relevance_cut(hits)
 
         # Scope (folder / album) and the requester's visibility filter the
-        # ranked list — the same WHERE the grid uses; ranking order is kept.
+        # ranked list - the same WHERE the grid uses; ranking order is kept.
         where_sql, vparams, _t, _s = host.core.files_where("", folder, album)
         if where_sql:
             names = [n for n, _ in hits]
@@ -671,7 +673,7 @@ def register(host):
         return _entries_for(db, page), total, None
 
     def _entries_for(db, hits):
-        """Gallery entries (score order, best first) for [(rel_path, score)]."""
+        """! @brief Gallery entries (score order, best first) for [(rel_path, score)]."""
         names = [n for n, _ in hits]
         if not names:
             return []
@@ -692,7 +694,7 @@ def register(host):
         return entries
 
     def _score_library(db, qv, negs=(), top_k=5000):
-        """[(rel_path, score)] best first. score = cos(query) - w * max cos(negatives):
+        """! @brief [(rel_path, score)] best first. score = cos(query) - w * max cos(negatives):
         an image that matches a negative term strongly is pushed down, one that
         doesn't is left alone."""
         q = _normalise(np.asarray(qv, np.float32).ravel())
@@ -714,7 +716,7 @@ def register(host):
         return [(names[i], float(sc[i])) for i in order]
 
     def _relevance_cut(hits):
-        """Drop the long tail. Text->image cosine scores are low and compressed
+        """! @brief Drop the long tail. Text->image cosine scores are low and compressed
         (a clear match ~0.4, unrelated ~0.1 for most models), so an absolute
         threshold doesn't carry between models; keep what scores within a
         fraction of the best hit, plus an optional absolute floor."""
@@ -727,7 +729,7 @@ def register(host):
         kept = [h for h in hits if h[1] >= cut]
         return kept or hits[:1]
 
-    # ── API endpoints ──────────────────────────────────────────────────────
+    # -- API endpoints ------------------------------------------------------
     @host.route("/api/embedding/status", feature="tab.review")
     def embedding_status():
         db = host.db()
@@ -756,7 +758,7 @@ def register(host):
     # Backward-compatible endpoints (matching original manager.py API)
     @host.route("/api/embed_status", feature="tab.review")
     def embed_status():
-        """Status probe for the Review-tab button."""
+        """! @brief Status probe for the Review-tab button."""
         db = host.db()
         models = _stored_models(db)
         cur = _embedding_count(db)
@@ -782,7 +784,7 @@ def register(host):
 
     @host.route("/api/library_embed", methods=["POST"], feature="tab.review", level="write")
     def library_embed():
-        """Generate (or regenerate) library embeddings for the Review tab.
+        """! @brief Generate (or regenerate) library embeddings for the Review tab.
         Matches the original manager.py API signature."""
         body = request.json or {}
         db = host.db()
@@ -802,7 +804,7 @@ def register(host):
         try:
             n, backend = _run_embed(db, file_list, force=force)
         except Exception as e:
-            host.config["status_text"] = f"Embeddings failed: {e}"
+            host.set_status(f"Embeddings failed: {e}")
             return jsonify({"success": False, "error": str(e)})
 
         total = _embedding_count(db)
@@ -824,7 +826,7 @@ def register(host):
         try:
             n, backend = _run_embed(db, file_list, force=force)
         except Exception as e:
-            host.config["status_text"] = f"Embeddings failed: {e}"
+            host.set_status(f"Embeddings failed: {e}")
             return jsonify({"success": False, "error": str(e)})
 
         total = _embedding_count(db)
@@ -835,7 +837,7 @@ def register(host):
 
     @host.route("/api/embedding/bulk", methods=["POST"], feature="tab.review", level="write")
     def embedding_bulk():
-        """Bulk embed selected images. Called from gallery bulk actions."""
+        """! @brief Bulk embed selected images. Called from gallery bulk actions."""
         body = request.json or {}
         filenames = body.get("filenames") or []
         if not filenames:
@@ -845,7 +847,7 @@ def register(host):
         try:
             n, backend = _run_embed(db, filenames, force=True)
         except Exception as e:
-            host.config["status_text"] = f"Embeddings failed: {e}"
+            host.set_status(f"Embeddings failed: {e}")
             return jsonify({"success": False, "error": str(e)})
 
         total = _embedding_count(db)
@@ -861,7 +863,7 @@ def register(host):
         db = host.db()
         if _embedding_count(db) == 0:
             return jsonify({"success": False,
-                            "error": "No image embeddings yet — run generate first."})
+                            "error": "No image embeddings yet - run generate first."})
         n = _stage_cluster_images(db, eps=eps, min_cluster=min_cluster)
         return jsonify({"success": True, "clusters": n,
                         "embeddings": _embedding_count(db)})
@@ -890,7 +892,7 @@ def register(host):
             return jsonify({"success": False, "error": "empty query"})
         db = host.db()
         if _embedding_count(db) == 0:
-            return jsonify({"success": False, "error": "No embeddings — generate first."})
+            return jsonify({"success": False, "error": "No embeddings - generate first."})
         embed_text = _text_embedder()
         if embed_text is None:
             return jsonify({"success": False,
@@ -946,9 +948,9 @@ def register(host):
 
     @host.route("/api/embedding/similar", methods=["POST"], feature="tab.review")
     def embedding_similar():
-        """Similar items to one file, whatever it is: the editor's Similar
+        """! @brief Similar items to one file, whatever it is: the editor's Similar
         button. Images/videos rank the image space; other media kinds go to
-        the module that owns them (audio → music)."""
+        the module that owns them (audio -> music)."""
         body = request.json or {}
         filename = body.get("filename", "")
         top_k = min(200, int(body.get("top_k", 60)))
@@ -970,17 +972,12 @@ def register(host):
                         "files": entries})
 
     def _file_deleted(rel_path):
-        db = host.db()
         for tbl in ("image_embeddings", "image_clusters"):
-            try:
-                db.execute(f"DELETE FROM {tbl} WHERE rel_path=?", (rel_path,))
-            except Exception:
-                pass
-        db.commit()
+            host.update_file(rel_path, table=tbl, remove=True, dont_write=True)
     host.on("file.deleted", _file_deleted)
     host.logger.info("embedding module: embeddings + clustering + semantic search registered")
 
-    # ── services ───────────────────────────────────────────────────────────
+    # -- services -----------------------------------------------------------
     # Provide embedding functions for other modules
     _iter_embeddings_ordered.current_tag = _embed_tag       # trainer: which space to sample from
     host.provide_service("embedding", {

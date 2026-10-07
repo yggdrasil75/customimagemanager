@@ -33,7 +33,7 @@
       .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
-  // ── State ────────────────────────────────────────────────────────────────
+  // -- State ----------------------------------------------------------------
   let current = null;        // last-loaded data structure
   let showEmpty = false;
   let showUnmapped = false;
@@ -52,7 +52,7 @@
     else if (s && s.textContent.indexOf("unsaved") !== -1) setStatus("");
   }
 
-  // ── Render helpers ─────────────────────────────────────────────────────────
+  // -- Render helpers ---------------------------------------------------------
   function renderFieldInput(f) {
     const wrap = document.createElement("div");
     wrap.className = "exif-field-input";
@@ -78,7 +78,7 @@
       const sel = document.createElement("select");
       sel.disabled = !editable;
       const blank = document.createElement("option");
-      blank.value = ""; blank.textContent = "— unset —";
+      blank.value = ""; blank.textContent = "- unset -";
       sel.appendChild(blank);
       const rawStr = f.raw == null ? "" : String(f.raw);
       let matched = false;
@@ -201,7 +201,7 @@
     if (!shown && grp.mapped) {
       const div = document.createElement("div");
       div.className = "exif-empty";
-      div.textContent = showEmpty ? "No fields." : "No populated fields (toggle “Show empty fields”).";
+      div.textContent = showEmpty ? "No fields." : "No populated fields (toggle 'Show empty fields').";
       fieldsHolder.appendChild(div);
     }
 
@@ -217,7 +217,7 @@
     const grps = current.groups.filter((g) => showUnmapped || g.mapped ||
       (g.unknown && g.unknown.length));
     if (!grps.length) {
-      grpEl.innerHTML = `<div class="exif-empty">No groups to show. Toggle “Show unmapped groups”.</div>`;
+      grpEl.innerHTML = `<div class="exif-empty">No groups to show. Toggle "Show unmapped groups".</div>`;
     } else {
       grps.forEach((g) => grpEl.appendChild(renderGroup(g)));
     }
@@ -233,14 +233,14 @@
     if (src) src.textContent = current.source ? `← ${current.source}` : "(no EXIF found)";
   }
 
-  // ── Load ───────────────────────────────────────────────────────────────────
+  // -- Load -------------------------------------------------------------------
   async function load(filename) {
     if (!filename) { setStatus("no file", "err"); return; }
     root().dataset.filename = filename;
     dirty.clear();
     const btn = $("#exif-save");
     if (btn) btn.disabled = true;
-    setStatus("loading…");
+    setStatus("loading...");
     try {
       const r = await fetch("/api/exif/read", {
         method: "POST",
@@ -261,13 +261,13 @@
     }
   }
 
-  // ── Save ───────────────────────────────────────────────────────────────────
+  // -- Save -------------------------------------------------------------------
   async function save() {
     const filename = root().dataset.filename;
     if (!filename || dirty.size === 0) return;
     const patch = {};
     dirty.forEach((v, k) => { patch[k] = v; });
-    setStatus("saving…");
+    setStatus("saving...");
     const btn = $("#exif-save");
     if (btn) btn.disabled = true;
     try {
@@ -295,7 +295,7 @@
     }
   }
 
-  // ── Wiring ──────────────────────────────────────────────────────────────────
+  // -- Wiring ------------------------------------------------------------------
   function init() {
     if (!root()) return;
     const se = $("#exif-show-empty");

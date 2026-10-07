@@ -1,5 +1,5 @@
-"""
-ViTPose++ pose provider (17 COCO body or 133 COCO-WholeBody).
+"""! @file
+@brief ViTPose++ pose provider (17 COCO body or 133 COCO-WholeBody).
 ======================================================================
 Top-down ViT pose, sizes s / b / l / h:
 
@@ -76,7 +76,7 @@ def _build_body(size):
 
 
 def _resolve_external_data(path, url):
-    """Make an ONNX export's external weights loadable.
+    """! @brief Make an ONNX export's external weights loadable.
 
     The h export stores its tensors outside the graph. Two things go wrong:
     the referenced file isn't downloaded with the graph, and the export can
@@ -122,7 +122,7 @@ def _resolve_external_data(path, url):
 
 
 def _wholebody_onnx(size):
-    """(heatmaps(x) -> (K,hh,hw), input h, input w) from easy_ViTPose's ONNX."""
+    """! @brief (heatmaps(x) -> (K,hh,hw), input h, input w) from easy_ViTPose's ONNX."""
     path = common.fetch_file(_WB_URL.format(s=size),
                              os.path.join(model_registry.model_dir("vitpose", "pose"),
                                           f"vitpose-{size}-wholebody.onnx"))
@@ -214,7 +214,7 @@ def _vitpose_net(size, K=133):
 
 
 def _wholebody_torch(size):
-    """Same contract as _wholebody_onnx, from the published torch checkpoint."""
+    """! @brief Same contract as _wholebody_onnx, from the published torch checkpoint."""
     path = common.fetch_file(_WB_TORCH_URL.format(s=size),
                              os.path.join(model_registry.model_dir("vitpose", "pose"),
                                           f"vitpose-{size}-wholebody.pth"))
@@ -294,7 +294,7 @@ def register(host):
         return lambda img: det(img, conf=0.25)
 
     def _needs():
-        """(deps present, what to install) for the size/type vitpose would run."""
+        """! @brief (deps present, what to install) for the size/type vitpose would run."""
         v = host.model_variant("pose", provider="vitpose") or {}
         if v.get("type") != "wholebody":
             return bool(_HAVE_TORCH and _HAVE_TF), "pip install transformers torch (body)"
@@ -306,10 +306,10 @@ def register(host):
 
     host.provide_model(
         "pose", "vitpose", label="ViTPose++", family="ViTPose", sizes=_SIZES,
-        types=[{"value": "body", "label": "Body · 17 pts"},
-               {"value": "wholebody", "label": "Whole-body · 133 (hands+face)"}],
+        types=[{"value": "body", "label": "Body | 17 pts"},
+               {"value": "wholebody", "label": "Whole-body | 133 (hands+face)"}],
         note="Plain-ViT top-down pose (ViTPose++). Body head via transformers; whole-body "
-             "via easy_ViTPose ONNX. Sizes s…h; h is the most accurate model here.",
+             "via easy_ViTPose ONNX. Sizes s...h; h is the most accurate model here.",
         speed="accurate",
         loader=lambda: (lambda v: (lambda img, *a, **k: _people(img, v["type"], v["size"], _persons())))(
             host.model_variant("pose")),

@@ -1,5 +1,5 @@
-"""
-Barcodes module (detect + decode, mark as MWG BarCode regions).
+"""! @file
+@brief Barcodes module (detect + decode, mark as MWG BarCode regions).
 ======================================================================
 Owns the /api/barcodes endpoint, the 'detect.barcodes' model providers,
 the ai.barcodes auth feature and the "Scan barcodes" control button. The
@@ -91,7 +91,7 @@ def register(host):
         return float(host.model_variant("detect.barcodes")["conf"])
 
     def _detect_fn():
-        """The picked detector; None = the built-in (scan's own fallback)."""
+        """! @brief The picked detector; None = the built-in (scan's own fallback)."""
         if host.broker.selected_id("detect.barcodes") == "builtin":
             return None
         try:
@@ -120,9 +120,9 @@ def register(host):
         img = core.read_image(fp)
         if img is None:
             return jsonify({"success": False, "error": "Decode failed."})
-        host.config["status_text"] = "Scanning for barcodes…"
+        host.set_status("Scanning for barcodes...")
         res = run(core.to_bgr(img), deep=bool(d.get("deep", True)))
-        host.config["status_text"] = "Ready."
+        host.set_status("Ready.")
         return jsonify({"success": True, "regions": _scan.to_regions(res),
                         "summary": _scan.summary_text(res), **res})
 

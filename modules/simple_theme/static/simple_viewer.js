@@ -1,14 +1,14 @@
-/* simple_viewer.js — the full-screen picture viewer shared by the Simple and
+/* simple_viewer.js - the full-screen picture viewer shared by the Simple and
  * Intermediate layouts (window.CIMSimpleViewer).
  *
  * While active:
  *   - a plain click on a gallery / timeline tile opens the picture in the
  *     popout (the editor region is hidden by the theme's CSS);
- *   - the popout grows prev / next (◀ ▶, on-screen arrows, ← →), a position
+ *   - the popout grows prev / next (< >, on-screen arrows, <- ->), a position
  *     counter, a "People in photo" list and a Meta button;
  *   - Meta shows either a read-only description / tags / albums panel
- *     (metaMode "simple") or the whole controls pane — Editor + EXIF / IPTC /
- *     XMP tabs — moved into the viewer (metaMode "controls");
+ *     (metaMode "simple") or the whole controls pane - Editor + EXIF / IPTC /
+ *     XMP tabs - moved into the viewer (metaMode "controls");
  *   - the gallery is forced onto the timeline view, and an albums strip can
  *     sit above it (opts.albumsStrip);
  *   - left-pane tabs outside opts.panes bounce back to the gallery.
@@ -17,7 +17,7 @@
  * (annot.boxes, annot.description, annot.tags, tab.albums) and CIMFeatures is
  * re-applied after each render, so a user who may not see tags doesn't see
  * them here either. Box drawing is disabled in "simple" meta mode whatever the
- * user may do elsewhere — it is a viewer, not an editor.
+ * user may do elsewhere - it is a viewer, not an editor.
  *
  *   CIMSimpleViewer.activate(owner, {metaMode, albumsStrip, panes})
  *   CIMSimpleViewer.release(owner)      deactivate if `owner` is the active one
@@ -35,7 +35,7 @@
   const popoutIsOpen = () => { const m = $("popout_modal"); return !!m && !m.classList.contains("hidden"); };
   const features = () => (window.CIMFeatures && window.CIMFeatures.apply) ? window.CIMFeatures.apply.bind(window.CIMFeatures) : null;
 
-  // ── DOM: extend the popout once ───────────────────────────────────────
+  // -- DOM: extend the popout once ---------------------------------------
   function build() {
     if (S.built) return;
     const modal = $("popout_modal"), wrap = $("popout_canvas_wrap"), fnEl = $("popout_filename");
@@ -97,7 +97,7 @@
     document.addEventListener("keydown", onKey);
   }
 
-  // ── activation ────────────────────────────────────────────────────────
+  // -- activation --------------------------------------------------------
   function activate(owner, opts) {
     build();
     if (!S.built) return false;
@@ -146,7 +146,7 @@
     }
   }
 
-  // ── hooks into core functions ─────────────────────────────────────────
+  // -- hooks into core functions -----------------------------------------
   function wrapGlobal(name, after) {
     if (typeof window[name] !== "function" || window[name].__svHooked) return;
     const orig = window[name];
@@ -155,7 +155,7 @@
     window[name] = wrapped;
   }
   function hookAll() {
-    // selectFile is async: open the viewer once the file (and its regions) loaded.
+    /** @brief selectFile is async: open the viewer once the file (and its regions) loaded. */
     const hookSelect = () => {
       if (typeof window.selectFile !== "function") { setTimeout(hookSelect, 200); return; }
       if (window.selectFile.__svHooked) return;
@@ -187,7 +187,7 @@
     }
   }
 
-  // ── media: video swap ─────────────────────────────────────────────────
+  // -- media: video swap -------------------------------------------------
   function refreshMedia() {
     const fn = window.currentFile;
     const vid = $("sv_video"), canvas = $("popout_canvas");
@@ -204,7 +204,7 @@
     }
   }
 
-  // ── meta panel ────────────────────────────────────────────────────────
+  // -- meta panel --------------------------------------------------------
   function syncChrome() {
     const btn = $("sv_meta_btn");
     if (btn) {
@@ -217,10 +217,11 @@
     else restoreControlsPane();
     syncSide();
   }
-  // The side panel only takes room when it has something to show: Meta is on,
-  // or the photo has people (and the user may see them). Otherwise the
-  // picture gets the full width; the canvas refits on its own (ResizeObserver
-  // on #popout_canvas_wrap).
+  /** @brief The side panel only takes room when it has something to show: Meta is on,
+   *  or the photo has people (and the user may see them). Otherwise the
+   *  picture gets the full width; the canvas refits on its own (ResizeObserver
+   *  on #popout_canvas_wrap).
+   */
   function syncSide() {
     const sec = $("sv_people_section");
     const hasPeople = !!sec && S.peopleCount > 0 && !sec.classList.contains("cim-feature-hidden");
@@ -233,7 +234,7 @@
     syncChrome();
     if (S.metaOpen) fillPanels();
   }
-  // Moving the element keeps every id and handler (and every data-feature gate) intact.
+  /** @brief Moving the element keeps every id and handler (and every data-feature gate) intact. */
   function moveControlsPaneIn() {
     const pane = $("controls_pane"), host = $("sv_meta_host");
     if (!pane || !host || pane.parentElement === host) return;
@@ -249,7 +250,7 @@
     pane.__svHome = null;
   }
 
-  // ── people + meta content ─────────────────────────────────────────────
+  // -- people + meta content ---------------------------------------------
   function peopleOf(regions) {
     const out = [], seen = new Set();
     (regions || []).forEach((r, i) => {
@@ -288,7 +289,7 @@
 
     if (S.metaMode === "simple") {
       const md = $("meta_desc");
-      const desc = $("sv_desc"); if (desc) desc.textContent = (md && md.value) || "—";
+      const desc = $("sv_desc"); if (desc) desc.textContent = (md && md.value) || "-";
       const tl = (typeof currentTags !== "undefined" && Array.isArray(currentTags)) ? currentTags : [];
       const tags = $("sv_tags");
       if (tags) tags.innerHTML = tl.length ? tl.map(t => `<span class="sv-tag">${esc(String(t).replace(/^\?/, ""))}</span>`).join("") : `<span class="text-gray-500 text-xs">No tags</span>`;
@@ -316,7 +317,7 @@
     if (typeof drawPopout === "function") drawPopout();
   }
 
-  // ── prev / next over what the gallery view shows ──────────────────────
+  // -- prev / next over what the gallery view shows ----------------------
   const navList = () => (typeof galleryFiles !== "undefined" && Array.isArray(galleryFiles)) ? galleryFiles : [];
   function navIndex() { const l = navList(); return { n: l.length, i: l.findIndex(f => f.filename === window.currentFile) }; }
   function step(dir) {
@@ -333,7 +334,7 @@
     else if (e.key === "ArrowLeft") { e.preventDefault(); step(-1); }
   }
 
-  // ── albums strip ──────────────────────────────────────────────────────
+  // -- albums strip ------------------------------------------------------
   async function loadAlbumsStrip() {
     const gen = ++S.albumsGen;
     try {

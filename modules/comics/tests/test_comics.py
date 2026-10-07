@@ -1,4 +1,5 @@
-"""Comics module: cbz archives on the books shelf (paged reader) and folder comics."""
+"""! @file
+@brief Comics module: cbz archives on the books shelf (paged reader) and folder comics."""
 import io
 import time
 import pytest

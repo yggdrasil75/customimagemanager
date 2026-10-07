@@ -1,21 +1,10 @@
-"""
-Feature / permission registry — ORDERED LEVELS.
-======================================================================
-Each feature carries a LEVEL, not a boolean:  block(0) < read(1) < write(2).
+"""! @file
+@brief Feature permissions with ordered levels: block < read < write.
 
-- block : no access (default for a not-logged-in visitor).
-- read  : may see/open it (viewer default).
-- write : may see AND modify/run it (normal-user default). write implies read.
-
-This replaces allow/deny booleans and the separate ".edit" keys. An endpoint
-that shows data needs `read`; one that changes it needs `write`. Every feature
-is uniformly block/read/write; for pure actions ("run OCR") the read level is
-just unused (grant=write, deny=block).
-
-Overrides may be an explicit level, or symbolic:
-  "inherit" -> the feature's declared DEFAULT level (what the module shipped).
-  "default" -> the role/group default level.
-Resolution: user override, then group override, then role default.
+read lets a user see or open a feature, write lets them change or run it
+(write implies read). An override is a level, "inherit" (the feature's
+declared default) or "default" (the role's default); a user override beats a
+group override, which beats the role default.
 """
 
 BLOCK, READ, WRITE = 0, 1, 2
@@ -33,7 +22,7 @@ def level_of(v, fallback=BLOCK):
     return fallback
 
 
-# section_key: {label, features:[(key, label, default_level), ...]}
+# section key -> {label, features: [(key, label, default level), ...]}
 FEATURE_SECTIONS = {
     "ai_tooling": {
         "label": "AI Tooling",
@@ -70,9 +59,7 @@ FEATURE_SECTIONS = {
                 "features": [("view.3d", "3D viewer (mesh / body)", "read")]},
 }
 
-# Legacy ".edit" leaves that collapsed into a base feature's WRITE (module
-# features handle their own; only the core album tab is left here). Old keys
-# such as ai.tiers / ai.reconcile are renamed on migration too.
+# Legacy ".edit" keys folded into the WRITE level of their base feature.
 COLLAPSED = {"tab.albums.edit": "tab.albums"}
 RENAMED = {"ai.tiers": "settings.storage", "settings.tiers": "settings.storage",
            "ai.reconcile": "library.reconcile"}
@@ -123,13 +110,11 @@ def register_feature(key, label, *, section="modules", section_label="Modules",
 
 
 def settings_tab_feature(tab_id):
-    """The permission key for a Settings-modal tab: settings.<tab id>."""
+    """! @brief The permission key of a Settings tab."""
     return "settings." + str(tab_id)
 
 
-# Non-admin role levels for a settings tab, by kind. An admin-only tab is
-# blocked for every other role until an admin grants it; a normal tab is
-# viewable (read) by custom accounts and hidden from viewers / uploaders.
+# Non-admin levels for a Settings tab: admin-only tabs start blocked, others readable.
 _TAB_ROLE_DEFAULTS = {
     "admin_only": {"viewer": "block", "uploader": "block", "custom": "block"},
     "normal":     {"viewer": "block", "uploader": "block"},
@@ -138,9 +123,9 @@ _TAB_ROLE_DEFAULTS = {
 
 
 def register_settings_tab(tab_id, label, *, admin_only=False, public=False, default="read"):
-    """Register the permission for one Settings tab (core or module): read =
-    the tab is shown, write = its settings can be saved. Called for the core
-    tabs below and by host.add_settings_tab for module tabs."""
+    """! @brief Register the permission of one Settings tab (core or module).
+    read shows the tab; write lets its settings be saved.
+    """
     kind = "admin_only" if admin_only else ("public" if public else "normal")
     return register_feature(settings_tab_feature(tab_id), f"Settings: {label} tab",
                             section="settings", section_label="Settings",
@@ -212,14 +197,15 @@ def has_level(perms, key, need=READ):
 
 
 def migrate_perms(old):
-    """Fold legacy {key: bool} overrides into {key: level_name}.
-    true->write, false->block; .edit/.delete collapse into base at write."""
+    """! @brief Convert legacy {key: bool} overrides to {key: level name}.
+    true -> write, false -> block; ".edit" / ".delete" keys fold into their base.
+    """
     if not old:
         return {}
     out = {}
     for k, v in old.items():
         k = RENAMED.get(k, k)
-        if k in ("ai.bg_autotag",):       # feature no longer exists
+        if k in ("ai.bg_autotag",):  # removed feature
             continue
         if k in COLLAPSED:
             if level_of(v) >= WRITE:
@@ -246,8 +232,7 @@ def catalog():
     }
 
 
-# Core Settings tabs. "user" (per-account settings) has no permission: every
-# signed-in user may read and save their own.
+# The core tabs. "user" has no permission: every signed-in user edits their own.
 for _tid, _lbl, _kw in (("general", "General", {}), ("media", "Media", {}),
                         ("storage", "Storage", {}), ("models", "Models", {}),
                         ("info", "Info", {"public": True}),

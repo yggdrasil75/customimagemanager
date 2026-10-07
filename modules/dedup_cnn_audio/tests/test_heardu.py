@@ -1,4 +1,5 @@
-"""HEARDU: log-mel windows, the audio dataset, a toy learn, save / load, registry kind."""
+"""! @file
+@brief HEARDU: log-mel windows, the audio dataset, a toy learn, save / load, registry kind."""
 import numpy as np
 import pytest
 

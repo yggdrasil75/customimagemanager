@@ -1,4 +1,4 @@
-/* AI actions (vlm module): the ✨ AI action picker in the editor, the bulk and
+/* AI actions (vlm module): the AI action picker in the editor, the bulk and
    comic "Run AI" buttons, and the actions editor in the module's settings tab. */
 (function () {
   let actions = [];
@@ -21,13 +21,13 @@
     });
   }
 
-  // ── editor: run one action on the open file, apply live ────────────────
+  // -- editor: run one action on the open file, apply live ----------------
   async function runLLM() {
     if (!window.currentFile) return;
     const aid = document.getElementById('llm_action_select').value;
     if (!aid) { alert('Select an action.'); return; }
     const btn = document.getElementById('btn_run_llm');
-    btn.innerHTML = '…'; btn.disabled = true;
+    btn.innerHTML = '...'; btn.disabled = true;
     try {
       const d = await fetch('/api/run_llm', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filename: window.currentFile, action_id: aid }) }).then(r => r.json());
@@ -46,7 +46,7 @@
         }
       } else alert('AI failed: ' + (d.error || ''));
     } catch (e) { alert('Network error running AI action.'); }
-    btn.innerHTML = '✨ AI'; btn.disabled = false;
+    btn.innerHTML = 'AI'; btn.disabled = false;
   }
   window.runLLM = runLLM;
 
@@ -61,7 +61,7 @@
     const aid = sel && sel.value;
     if (!aid) { alert('No AI action selected. Add actions in the Vision LLM module settings.'); return false; }
     const name = sel.selectedOptions[0]?.text || 'AI';
-    showToast(`Running "${name}" on ${files.length} ${what}…`);
+    showToast(`Running "${name}" on ${files.length} ${what}...`);
     const d = await fetch('/api/bulk_llm', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ filenames: files, action_id: aid }) }).then(r => r.json());
     if (d.success) {
@@ -83,12 +83,12 @@
     if (await bulkRun('comic_action_select', comicState.pages, 'page(s)')) showToast('Open a page to review.');
   };
 
-  // ── settings editor (module settings tab) ──────────────────────────────
+  // -- settings editor (module settings tab) ------------------------------
   const TARGETS = [['description', '📝 Desc'], ['tags', '🏷 Tags'], ['regions', '📦 Boxes'],
-                   ['segment', '🎭 Segment'], ['flag', '🚩 Flag'], ['body', '🧍 Body']];
+                   ['segment', 'Segment'], ['flag', '🚩 Flag'], ['body', 'Body']];
   function renderEditor(mount) {
     mount.innerHTML = `<div class="flex justify-between items-center mb-2">
-        <label class="text-xs text-rose-300 font-bold">AI actions
+        <label class="text-xs text-red-300 font-bold">AI actions
           <span class="font-normal text-gray-500">(named prompts you can run on an image)</span></label>
         <button type="button" id="ai_actions_add" class="text-xs bg-indigo-600 hover:bg-indigo-500 px-2 py-0.5 rounded font-bold">+ Add</button>
       </div>
@@ -139,30 +139,30 @@
   }
   window.persistVlmActions = async function () {
     if (!_dirty) return { ok: true };
-    try {
-      const r = await fetch('/api/update_settings', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ oai_actions: actions }) });
-      if (!r.ok) return { ok: false, error: 'AI actions failed to save' };
-    } catch (e) { return { ok: false, error: 'AI actions failed to save' }; }
+    const res = await window.postSettings({ oai_actions: actions });
+    if (!res.ok) return { ok: false, error: 'AI actions failed to save' };
     _dirty = false;
     return { ok: true };
   };
   if (window.registerSettingsPersist) window.registerSettingsPersist(window.persistVlmActions);
   else (window._settingsPersistSteps = window._settingsPersistSteps || []).push(window.persistVlmActions);
 
-  // ── wiring ───────────────────────────────────────────────────────────────
+  // -- wiring ---------------------------------------------------------------
   function init() {
     if (window.registerControlButton) {
+      // One wrapper element: an area appends the registration's first element only.
       registerControlButton('gallery_bulk',
+        '<span class="inline-flex items-center gap-1" data-feature="ai.llm">' +
         '<select id="bulk_action_select" data-ai-actions data-feature="ai.llm" title="AI action to run on each selected image" ' +
         'class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-1.5 max-w-[130px]"></select>' +
-        '<button onclick="bulkRunAI()" data-feature="ai.llm" title="Run the chosen AI action on every selected image" ' +
-        'class="text-xs bg-yellow-600 hover:bg-yellow-500 px-3 py-1.5 rounded font-bold">✨ Run AI</button>');
+        cimButton({label: 'Run AI', onclick: 'bulkRunAI()', feature: 'ai.llm', variant: 'warn',
+                   title: 'Run the chosen AI action on every selected image'}) + '</span>');
       registerControlButton('comic_tools',
+        '<span class="inline-flex items-center gap-1" data-feature="ai.llm">' +
         '<select id="comic_action_select" data-ai-actions data-feature="ai.llm" title="AI action to run on every page" ' +
         'class="text-xs bg-gray-700 text-white rounded border border-gray-600 px-1 py-1 max-w-[130px]"></select>' +
-        '<button onclick="comicRunAI()" data-feature="ai.llm" ' +
-        'class="text-xs bg-yellow-600 hover:bg-yellow-500 px-3 py-1 rounded font-bold">✨ Run AI</button>');
+        cimButton({label: 'Run AI', onclick: 'comicRunAI()', feature: 'ai.llm', variant: 'warn',
+                   title: 'Run the chosen AI action on every page'}) + '</span>');
     }
     document.addEventListener('module-settings-tab', ev => {
       if (ev.detail !== 'vlm') return;

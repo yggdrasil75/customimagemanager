@@ -10,7 +10,7 @@
   const pickedSizes = () => [...document.querySelectorAll('#ddt_sizes [data-size]:checked')].map(e => e.dataset.size);
 
 
-  // Inline SVG loss chart: one polyline per size, x = step, y = loss. No deps.
+  /** @brief Inline SVG loss chart: one polyline per size, x = step, y = loss. No deps. */
   function drawLoss(svgId, hist, label) {
     const svg = $(svgId); if (!svg) return;
     if (!hist || hist.length < 2) { svg.innerHTML = ''; svg.style.display = 'none'; return; }
@@ -51,7 +51,7 @@
       const picked = new Set(pickedSizes());
       _sizesKey = key;
       box.innerHTML = Object.entries(_sizes).map(([z, sp]) =>
-        `<label class="trck" title="width ${sp.width} x depth ${sp.depth}"><input type="checkbox" data-size="${z}" class="accent-purple-500"${picked.has(z) ? ' checked' : ''}> ${z} <span class="text-gray-500" data-params="${z}"></span></label>`).join('');
+        `<label class="trck" title="width ${sp.width} x depth ${sp.depth}"><input type="checkbox" data-size="${z}" class="accent-indigo-500"${picked.has(z) ? ' checked' : ''}> ${z} <span class="text-gray-500" data-params="${z}"></span></label>`).join('');
       const act = $('ddt_active').value;
       $('ddt_active').innerHTML = Object.keys(_sizes).map(z => `<option value="${z}">${z}</option>`).join('');
       $('ddt_active').value = _sizes[act] ? act : (s.active_size && _sizes[s.active_size] ? s.active_size : Object.keys(_sizes)[0]);
@@ -63,7 +63,7 @@
     }
   }
 
-  // Parse the textarea the same way the server does, so the tick list follows edits live.
+  /** @brief Parse the textarea the same way the server does, so the tick list follows edits live. */
   function ddtSizesChanged() {
     const out = {};
     for (const line of $('ddt_sizes_text').value.split('\n')) {
@@ -82,7 +82,7 @@
       if (!b.params && !r.params) continue;
       const ho = r.held_out && r.held_out.all != null ? r.held_out.all : '-';
       const act = _installed.includes(z)
-        ? `<button onclick="ddtActivate('${z}')" class="text-purple-300 hover:text-purple-200" title="Make this trained size the live one (copies models/dup_cnn_${z}.pt over dup_cnn.pt and reloads the scorer).">activate</button>` : '';
+        ? `<button onclick="ddtActivate('${z}')" class="text-indigo-300 hover:text-indigo-200" title="Make this trained size the live one (copies models/dup_cnn_${z}.pt over dup_cnn.pt and reloads the scorer).">activate</button>` : '';
       rows.push(`<tr><td>${z}</td><td class="text-right">${fmtN(r.params || b.params)}</td>` +
         `<td class="text-right">${cpu.ms_per_pair_b1 ?? '-'}</td>` +
         `<td class="text-right">${gpu.gpu_ms_per_pair_batch ?? (r.bench_gpu ? r.bench_gpu.ms_per_pair_batch : null) ?? '-'}</td>` +
@@ -208,7 +208,7 @@
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();
 
-// ── timeline models (HEURDUV / HEARDU / HEURDU 1.0) ──────────────────────────
+// -- timeline models (HEURDUV / HEARDU / HEURDU 1.0) --------------------------
 let _ddtsStatus=null, _ddtsTimer=null;
 async function ddtsRefresh(){
   const s=await fetch('/api/dedup_train/seq/status').then(r=>r.json()).catch(()=>null);
@@ -219,11 +219,11 @@ async function ddtsRefresh(){
   if(document.activeElement!==fol) fol.value=k.folders||'';
   document.getElementById('ddts_info').innerText=
     `${k.family}: ${k.library} in library, ${k.feedback} feedback pair(s), installed: ${(k.installed||[]).join(', ')||'none'}`+
-    (k.scorer?`; live: ${k.scorer.size||'-'}${k.scorer.trained?' (loaded)':''}${k.scorer.error?' — '+k.scorer.error:''}`:'');
+    (k.scorer?`; live: ${k.scorer.size||'-'}${k.scorer.trained?' (loaded)':''}${k.scorer.error?' - '+k.scorer.error:''}`:'');
   const sz=document.getElementById('ddts_sizes');
   if(sz.dataset.kind!==kind){
     sz.dataset.kind=kind;
-    sz.innerHTML=Object.keys(k.sizes||{}).map(z=>`<label class="trck"><input type="checkbox" class="ddts-size accent-purple-500" value="${z}" ${z==='medium'||z==='nano'?'checked':''}> ${z}</label>`).join('');
+    sz.innerHTML=Object.keys(k.sizes||{}).map(z=>`<label class="trck"><input type="checkbox" class="ddts-size accent-indigo-500" value="${z}" ${z==='medium'||z==='nano'?'checked':''}> ${z}</label>`).join('');
     document.getElementById('ddts_steps').value=kind==='anim'?8:(kind==='audio'?40:32);
   }
   document.getElementById('ddts_build').disabled=!!s.running;

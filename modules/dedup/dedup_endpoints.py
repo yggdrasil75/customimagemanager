@@ -1,10 +1,10 @@
-"""
-Dedup pipeline endpoints — moved out of manager.py.
+"""! @file
+@brief Dedup pipeline endpoints - moved out of manager.py.
 ======================================================================
 The naive dedup pipeline (/api/dedup) + its sibling endpoints, extracted
 from manager into the dedup module. The function bodies are verbatim; the
 core names they use (_db, state, get_safe_path, the dedup_core shims via
-manager, media_types, thread pools, …) are bound into this module's
+manager, media_types, thread pools, ...) are bound into this module's
 globals at register() time from manager, so the pipeline logic lives here
 while still using the shared indexing/runtime primitives.
 """
@@ -34,7 +34,7 @@ _db, state, MEDIA_DIR, get_safe_path, read_jxl, _to_bgr, mt, thread_manager, _in
 
 
 def _bind(host):
-    """Bind the core helpers the endpoint bodies reference (all handed over
+    """! @brief Bind the core helpers the endpoint bodies reference (all handed over
     by the app via host / host.core) into this module's globals."""
     c = host.core
     globals()["_HOST"] = host
@@ -46,17 +46,17 @@ def _bind(host):
         "_getmtime_loose": common.getmtime_loose, "tiering": c.tiering, "_thumb_drop": c.thumb_drop,
         "_delete_file_row": c.delete_file_row, "_purge_file_everywhere": c.purge_file_everywhere,
         "audit": c.audit, "access_logger": host.logger, "_db_release_pool": c.db_release_pool,
-        "read_metadata": c.read_metadata, "write_metadata": c.write_metadata,
+        "read_metadata": c.read_metadata, "update_file": c.update_file,
     })
 
 
-# ── Dedup - hamming search ─────────────────────────────────────────────────────
+# -- Dedup - hamming search -----------------------------------------------------
 # Bit-count per byte value; np.bitwise_count (numpy>=2) when present.
 _POP8 = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).sum(1).astype(np.uint8)
 
 
 def _popcount_rows(x: np.ndarray) -> np.ndarray:
-    """Hamming weight along the last axis of a uint8 array."""
+    """! @brief Hamming weight along the last axis of a uint8 array."""
     if hasattr(np, "bitwise_count"):
         return np.bitwise_count(x).sum(axis=-1, dtype=np.int32)
     return _POP8[x].sum(axis=-1, dtype=np.int32)
@@ -117,7 +117,7 @@ def _find_similar_pairs(blobs: list[bytes], threshold: int, progress=None) -> np
 
 
 def _pair_hamming(blobs: list[bytes], pairs: np.ndarray, progress=None) -> np.ndarray:
-    """Hamming distance of each (i, j) in pairs; O(pairs), chunked."""
+    """! @brief Hamming distance of each (i, j) in pairs; O(pairs), chunked."""
     H = _hash_matrix(blobs)
     out = np.empty(len(pairs), np.int32)
     step = max(1, (64 * 1024 * 1024) // max(1, H.shape[1]))
@@ -130,7 +130,7 @@ def _pair_hamming(blobs: list[bytes], pairs: np.ndarray, progress=None) -> np.nd
 
 
 def _components(n: int, pairs) -> list[list[int]]:
-    """Connected components (size > 1) of an undirected edge list; union-find."""
+    """! @brief Connected components (size > 1) of an undirected edge list; union-find."""
     parent = list(range(n))
 
     def find(x):
@@ -186,7 +186,7 @@ def _bgr3(img: np.ndarray) -> np.ndarray:
 
 
 def _naive_image_score(a: np.ndarray, b: np.ndarray) -> float:
-    """Bytewise-equal pixels -> 1.0. Otherwise: align, then the unchanged
+    """! @brief Bytewise-equal pixels -> 1.0. Otherwise: align, then the unchanged
     fraction of CONTENT cells (flat background on both sides doesn't count,
     a changed cell always does) x the overlap's share of the larger frame."""
     if a.shape == b.shape and np.array_equal(a, b):
@@ -240,7 +240,7 @@ def _naive_image_score(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _naive_ctx_scorer():
-    """Scorer-registry naive fallback: ctx -> prob (images or video frames)."""
+    """! @brief Scorer-registry naive fallback: ctx -> prob (images or video frames)."""
 
     def score(ctx):
         if ctx.get("is_video"):
@@ -251,7 +251,7 @@ def _naive_ctx_scorer():
     return score
 
 
-# ── Temporal (animation / video) and audio dedup ─────────────────────────────
+# -- Temporal (animation / video) and audio dedup -----------------------------
 # Stills keep stages 3-7 above. Videos and animated JXLs (kind anim/video) and
 # audio tracks get per-step signatures (media_sig) during stage 2, are taken
 # out of the still-image hash stages, and are grouped in stage 8 (temporal)
@@ -264,7 +264,7 @@ from . import media_sig, seq_align
 
 
 class LazyCtx(dict):
-    """Scorer ctx whose keys decode on first get() (and are cached), so a
+    """! @brief Scorer ctx whose keys decode on first get() (and are cached), so a
     scorer that answers from the path never pays for a decode it doesn't use."""
 
     def __init__(self, base, loaders):
@@ -292,7 +292,7 @@ def _rgb2bgr(frames):
 
 
 class _Decodes:
-    """Per-group decode cache: each member is decoded once per mode."""
+    """! @brief Per-group decode cache: each member is decoded once per mode."""
 
     def __init__(self):
         self.c, self.lk = {}, threading.Lock()
@@ -321,7 +321,7 @@ class _Decodes:
 
 
 def _classify_and_sign(files_on_disk, progress):
-    """Stage 2 tail: kind of every JXL / video / audio file (memoised per
+    """! @brief Stage 2 tail: kind of every JXL / video / audio file (memoised per
     mtime in dedup_media_sig) and per-step signatures for anim / video /
     audio. Returns {rel_path: (kind, sig dict | None, row)} for temporal and
     audio files whose signature exists."""
@@ -383,7 +383,7 @@ def _classify_and_sign(files_on_disk, progress):
 
 
 def _prob_components(n, probs, size_of):
-    """[(member indices ordered reference first, scores)] at prob >= 0.5 —
+    """! @brief [(member indices ordered reference first, scores)] at prob >= 0.5 -
     the same grouping rule the image verify uses."""
     adj = {p: set() for p in range(n)}
     for (p, q), pr in probs.items():
@@ -411,7 +411,7 @@ def _prob_components(n, probs, size_of):
 
 def _seq_group_stage(stage, label, items, sha_of, exclusions, scorers, candidates, verify_score,
                      make_ctx, naive, kind_of, size_of):
-    """One temporal / audio stage. items: [(rel, kind, sig)]. Returns
+    """! @brief One temporal / audio stage. items: [(rel, kind, sig)]. Returns
     [(group kind, [rel...], [score...])]."""
     n = len(items)
     groups = []
@@ -487,7 +487,7 @@ def _seq_group_stage(stage, label, items, sha_of, exclusions, scorers, candidate
 
 
 def _temporal_groups(sigs, sha_by_path, exclusions, scorers):
-    """Stage 8: animations + videos."""
+    """! @brief Stage 8: animations + videos."""
     items = [(rel, k, sig) for rel, (k, sig, _r) in sorted(sigs.items()) if k in ("anim", "video")]
 
     def make_ctx(kind, a, b, dec):
@@ -515,7 +515,7 @@ def _temporal_groups(sigs, sha_by_path, exclusions, scorers):
 
 
 def _audio_groups(sigs, exclusions, scorers):
-    """Stage 9: audio tracks."""
+    """! @brief Stage 9: audio tracks."""
     items = [(rel, k, sig) for rel, (k, sig, _r) in sorted(sigs.items()) if k == "audio"]
     sha = {rel: r["sha256"] for rel, (k, _s, r) in sigs.items() if k == "audio"}
 
@@ -538,9 +538,9 @@ def _audio_groups(sigs, exclusions, scorers):
         make_ctx, naive, lambda a, b: "audio", lambda it: float(it[2].get("duration") or 0))
 
 
-# ── Dedup ──────────────────────────────────────────────────────────────────────
+# -- Dedup ----------------------------------------------------------------------
 
-# ── Progress ───────────────────────────────────────────────────────────────────
+# -- Progress -------------------------------------------------------------------
 # One scan at a time; its live state is polled by /api/dedup_progress.
 DEDUP_STAGES = 9
 _PROG_LOCK = threading.Lock()
@@ -548,14 +548,14 @@ _PROGRESS: dict = {"running": False}
 
 
 def _prog(stage, label, done=0, total=0, **extra):
-    """Publish where the scan is. Per-stage done/total drives the bar + ETA."""
+    """! @brief Publish where the scan is. Per-stage done/total drives the bar + ETA."""
     now = time.time()
     with _PROG_LOCK:
         if _PROGRESS.get("stage") != stage:
             _PROGRESS["stage_started"] = now
         _PROGRESS.update(stage=stage, label=label, done=int(done), total=int(total), updated=now, **extra)
-    state["status_text"] = (f"Dedup {stage}/{DEDUP_STAGES}: {label}"
-                            + (f" {int(done)}/{int(total)}" if total else "…"))
+    _HOST.set_status(f"Dedup {stage}/{DEDUP_STAGES}: {label}"
+                            + (f" {int(done)}/{int(total)}" if total else "..."))
 
 
 def dedup_progress():
@@ -572,7 +572,7 @@ def dedup_progress():
 
 
 def _quality(rel_path):
-    """What the stored file was made from, which is what a dedup decision
+    """! @brief What the stored file was made from, which is what a dedup decision
     needs (every library file is itself a lossless JXL, so that label said
     nothing). A JPEG transcode keeps a 'jbrd' reconstruction box in the
     container header; anything else came from a lossless source (PNG, RAW,
@@ -592,7 +592,7 @@ def _fmt_size(n):
 
 
 def _dedup_format_groups(cached_groups, rows_by_path):
-    """Turn stored group dicts into the detail format the frontend expects."""
+    """! @brief Turn stored group dicts into the detail format the frontend expects."""
     out = []
     for g in cached_groups:
         detail = []
@@ -612,7 +612,7 @@ def _dedup_format_groups(cached_groups, rows_by_path):
     return out
 
 def dedup_status():
-    """Returns what stage the cached scan reached and how many groups are stored."""
+    """! @brief Returns what stage the cached scan reached and how many groups are stored."""
     cp = core.checkpoint_get()
     group_count = _db().execute("SELECT COUNT(*) FROM dedup_groups WHERE kind != 'pending'").fetchone()[0]
     if cp:
@@ -638,8 +638,8 @@ def dedup_clear_group():
     return jsonify({"success": True})
 
 def dedup_exclude():
-    """
-    Remove a file from a stored group without deleting it, and record
+    """!
+    @brief Remove a file from a stored group without deleting it, and record
     a persistent exclusion so it won't be grouped with those files again.
     """
     file  = request.json.get("file", "")
@@ -694,13 +694,13 @@ def dedup_exclude():
         _db().commit()
         return jsonify({"success": True, "group_remains": True})
     else:
-        # Only one member left — disband the group
+        # Only one member left - disband the group
         _db().execute("DELETE FROM dedup_groups WHERE id=?", (db_id,))
         _db().commit()
         return jsonify({"success": True, "group_remains": False})
 
 def _meta_str(v, limit=300):
-    """Display form of a metadata value; bytes summarized, long text clipped."""
+    """! @brief Display form of a metadata value; bytes summarized, long text clipped."""
     if v is None:
         return None
     if isinstance(v, (bytes, bytearray)):
@@ -716,11 +716,11 @@ def _meta_str(v, limit=300):
         v = str(v)
     except Exception as e:
         v = f"<unprintable {type(v).__name__}: {e}>"
-    return v if len(v) <= limit else v[:limit] + f"… (+{len(v) - limit} chars)"
+    return v if len(v) <= limit else v[:limit] + f"... (+{len(v) - limit} chars)"
 
 
 def _blank(v):
-    """None / empty string / empty container — without `in`/`==`, which
+    """! @brief None / empty string / empty container - without `in`/`==`, which
     raise on array-like EXIF values."""
     if v is None:
         return True
@@ -730,7 +730,7 @@ def _blank(v):
 
 
 def _embedded_fields(path):
-    """{"EXIF ▸ Group ▸ Field": value} for every field present on the file
+    """! @brief {"EXIF > Group > Field": value} for every field present on the file
     across EXIF / IPTC / XMP (schema-mapped and unknown alike). Readers come
     from the metadata module; missing ones are skipped."""
     out = {}
@@ -751,15 +751,15 @@ def _embedded_fields(path):
                 if _blank(val):
                     val = f.get("raw")
                 if not _blank(val):
-                    out[f"{label} ▸ {grp} ▸ {f.get('name')}"] = _meta_str(val)
+                    out[f"{label} > {grp} > {f.get('name')}"] = _meta_str(val)
             for u in coll.get("unknown", []) or []:
                 if not _blank(u.get("raw")):
-                    out[f"{label} ▸ {grp} ▸ {u.get('name')}"] = _meta_str(u.get("raw"))
+                    out[f"{label} > {grp} > {u.get('name')}"] = _meta_str(u.get("raw"))
     return out
 
 
 def _file_facts(rel, path):
-    """File-level facts: what the stored file is, how big, when, which hash."""
+    """! @brief File-level facts: what the stored file is, how big, when, which hash."""
     row = _db().execute("SELECT width,height,sha256,mtime FROM files WHERE rel_path=?", (rel,)).fetchone()
     src, size = _quality(rel) if os.path.exists(path) else ("packed", 0)
     w, h = (row["width"], row["height"]) if row else (None, None)
@@ -770,10 +770,10 @@ def _file_facts(rel, path):
     facts = {
         "Folder":        os.path.dirname(rel) or "/",
         "Filename":      os.path.basename(rel),
-        "Extension":     os.path.splitext(rel)[1].lower() or "—",
+        "Extension":     os.path.splitext(rel)[1].lower() or "-",
         "Source format": src,
         "File size":     f"{_fmt_size(size)} ({size:,} B)" if size else None,
-        "Resolution":    f"{w}×{h}" if w and h else None,
+        "Resolution":    f"{w}x{h}" if w and h else None,
         "Megapixels":    f"{w * h / 1e6:.2f} MP" if w and h else None,
         "Aspect":        f"{w / h:.4f}" if w and h else None,
         "Bytes / pixel": f"{size / (w * h):.3f}" if w and h and size else None,
@@ -784,8 +784,8 @@ def _file_facts(rel, path):
 
 
 def dedup_compare_meta():
-    """Side-by-side metadata of two library files for the compare view:
-    file facts, library metadata (tags, description, rating, people …) and
+    """! @brief Side-by-side metadata of two library files for the compare view:
+    file facts, library metadata (tags, description, rating, people ...) and
     every embedded EXIF / IPTC / XMP field present on either file. Each row
     carries `same` so the UI can show only what differs. A section that
     fails is reported in `errors` (and logged) instead of failing the call."""
@@ -860,7 +860,7 @@ def dedup_compare_meta():
 
 
 def dedup_change_map():
-    """HEURDU's view of two images: b aligned onto a at native resolution,
+    """! @brief HEURDU's view of two images: b aligned onto a at native resolution,
     the per-cell change map, the score. Returns display-sized PNGs (base64)
     of a, aligned b, and the heat overlay; the map itself is full-cell
     resolution (one value per 8x8 block of a)."""
@@ -898,7 +898,7 @@ def dedup_change_map():
 
 
 def dedup_compare_video():
-    """Compare two videos frame-by-frame at matched timestamps.
+    """! @brief Compare two videos frame-by-frame at matched timestamps.
 
     Images can be diffed in the browser with a <canvas>, but videos can't be
     loaded into an <img>, which is why "highlight differences" failed on them.
@@ -964,7 +964,7 @@ def dedup_compare_video():
     diffs = [p["diff"] for p in profile if p["diff"] is not None]
     mean_diff = round(sum(diffs) / len(diffs), 3) if diffs else None
     max_diff = round(max(diffs), 3) if diffs else None
-    # Heuristic verdict: low-and-flat → recompression; a spike or long-tail → edit.
+    # Heuristic verdict: low-and-flat -> recompression; a spike or long-tail -> edit.
     verdict = "inconclusive"
     if mean_diff is not None:
         dur_gap = abs(dur_a - dur_b)
@@ -1006,8 +1006,8 @@ def _dedup_sort_key(sort: str):
     return keys.get(sort, keys["resolution"])
 
 def dedup_groups_page():
-    """
-    Paginated fetch of stored dedup groups.
+    """!
+    @brief Paginated fetch of stored dedup groups.
     Returns one page of fully-detailed groups; client never holds more than
     one page in memory at a time.
     """
@@ -1069,7 +1069,7 @@ def dedup_groups_page():
                 detail.append({"filename": path, "format": os.path.splitext(path)[1].lstrip(".").upper(),
                                "kind": "audio",
                                "resolution": f"{int(dur // 60)}:{int(dur % 60):02d}"
-                                             + (f" · {br // 1000} kbps" if br else ""),
+                                             + (f" | {br // 1000} kbps" if br else ""),
                                "quality": media_sig.audio_quality(path), "size": size,
                                "size_h": _fmt_size(size), "score": score_map.get(path), "db_id": row["id"],
                                "pixels": int(dur * max(br, 1)), "path_len": len(path),
@@ -1087,8 +1087,8 @@ def dedup_groups_page():
                                                        else os.path.splitext(path)[1].lstrip(".").upper(),
                             "kind": kind,
                             "resolution": (f"{w}x{h}" if w else "N/A")
-                                          + (f" · {sr['n_src']}f" if sr is not None and kind == "anim" else "")
-                                          + (f" · {sr['duration']:.0f}s" if sr is not None and kind == "video"
+                                          + (f" | {sr['n_src']}f" if sr is not None and kind == "anim" else "")
+                                          + (f" | {sr['duration']:.0f}s" if sr is not None and kind == "video"
                                              and sr["duration"] else ""),
                             "quality": q, "size": size, "size_h": _fmt_size(size),
                             "score": score_map.get(path),
@@ -1106,7 +1106,7 @@ def dedup_groups_page():
     return jsonify({"success": True})
 
 def _CLIP_T():
-    """Frames-per-clip for video dedup sampling. Comes from the CNN-video
+    """! @brief Frames-per-clip for video dedup sampling. Comes from the CNN-video
     scorer module when installed, else a sane default (16)."""
     try:
         s = _HOST.get_service("dedup_scorers")
@@ -1120,7 +1120,7 @@ def _CLIP_T():
     return 16
 
 def dedup():
-    """Run a scan. {"background": true} starts it on a thread and returns at
+    """! @brief Run a scan. {"background": true} starts it on a thread and returns at
     once (poll /api/dedup_progress; the result lands in its "result"); without
     it the call blocks and returns the result, as before."""
     d = request.json if request.is_json else {}
@@ -1157,14 +1157,14 @@ def _dedup_run(force):
     try:
         if force:
             core.verdicts_clear()       # re-judge every pair; exclusions ("not a duplicate") persist
-        # ── 0. Count files on disk ────────────────────────────────────────
+        # -- 0. Count files on disk ----------------------------------------
         _prog(1, "Counting files")
         # Union of loose + packed, so packed files are deduped too rather than
         # disappearing from the candidate set.
         files_on_disk = list(_enumerate_library())
         disk_count = len(files_on_disk)
 
-        # ── 0b. Return cached result if still valid ───────────────────────
+        # -- 0b. Return cached result if still valid -----------------------
         _scorers = _HOST.get_service("dedup_scorers") if _HOST else None
         model_tag = _scorers.tag() if _scorers else "naive"
         # The stored groups carry verdicts of the image, video and audio scorers.
@@ -1183,7 +1183,7 @@ def _dedup_run(force):
                     return ({"success": True, "total_groups": total_groups,
                                     "from_cache": True, "cache_stage": cp["stage"], "scorer": full_tag})
 
-        # ── 1. Index stale/new files ──────────────────────────────────────
+        # -- 1. Index stale/new files --------------------------------------
         _prog(2, "Checking index", 0, disk_count)
         db_mtimes = {r[0]: r[1] for r in
                      _db().execute("SELECT rel_path, mtime FROM files").fetchall()}
@@ -1220,7 +1220,7 @@ def _dedup_run(force):
             "SELECT COUNT(*) FROM files WHERE phash8 IS NOT NULL").fetchone()[0]
         core.checkpoint_set(disk_count, hashed_count, "indexed")
 
-        # ── 1b. Video / animation / audio signatures ──────────────────────
+        # -- 1b. Video / animation / audio signatures ----------------------
         _prog(2, "Video/audio signatures")
         try:
             sigs = _classify_and_sign(files_on_disk, lambda d_, t_: _prog(2, "Video/audio signatures", d_, t_))
@@ -1230,7 +1230,7 @@ def _dedup_run(force):
         temporal_paths = {rel for rel, (k, _s, _r) in sigs.items() if k in ("anim", "video")}
 
         def _extra():
-            """Stages 8-9: temporal + audio groups, appended after the stills."""
+            """! @brief Stages 8-9: temporal + audio groups, appended after the stills."""
             if not sigs:
                 return 0
             excl = core.load_exclusion_set()
@@ -1246,7 +1246,7 @@ def _dedup_run(force):
                 core.append_groups(g)
             return len(g)
 
-        # ── 2. Load hashes ────────────────────────────────────────────────
+        # -- 2. Load hashes ------------------------------------------------
         _prog(3, "Loading hashes")
         rows = _db().execute(
             "SELECT rel_path,sha256,phash8,phash32,width,height FROM files "
@@ -1260,7 +1260,7 @@ def _dedup_run(force):
 
         rows_by_path = {r["rel_path"]: r for r in rows}
 
-        # ── 3. Exact duplicates via SHA-256 ───────────────────────────────
+        # -- 3. Exact duplicates via SHA-256 -------------------------------
         _prog(4, "Exact duplicates (sha256)")
         sha_map: dict[str, list] = {}
         for i, r in enumerate(rows):
@@ -1273,13 +1273,13 @@ def _dedup_run(force):
         remaining_idx    = [i for i in range(len(rows)) if i not in exact_set] + \
                            [g[0] for g in exact_row_groups]
 
-        # Checkpoint after exact stage — save what we have so far
+        # Checkpoint after exact stage - save what we have so far
         exact_members = [[rows[i]["rel_path"] for i in g] for g in exact_row_groups]
         core.save_groups([("exact", m, [1.0] * len(m)) for m in exact_members])
         core.checkpoint_set(disk_count, hashed_count, "exact")
         _PROGRESS["groups"] = len(exact_members)
 
-        # ── 4. Perceptual similarity ──────────────────────────────────────
+        # -- 4. Perceptual similarity --------------------------------------
         sim_groups_raw = []
         if remaining_idx:
             blobs8  = [bytes(rows[i]["phash8"])  for i in remaining_idx]
@@ -1311,7 +1311,7 @@ def _dedup_run(force):
                 for comp in _components(n, edges):
                     sim_groups_raw.append([remaining_idx[c] for c in comp])
 
-        # Checkpoint after perceptual — candidates stored as 'pending' (hidden
+        # Checkpoint after perceptual - candidates stored as 'pending' (hidden
         # from the UI); verified groups are appended as they finish.
         perceptual_members = [[rows[i]["rel_path"] for i in g] for g in sim_groups_raw]
         core.save_groups(
@@ -1320,7 +1320,7 @@ def _dedup_run(force):
         )
         core.checkpoint_set(disk_count, hashed_count, "perceptual")
 
-        # ── 5. Score candidate groups (full-res decode + scorer) ──────────
+        # -- 5. Score candidate groups (full-res decode + scorer) ----------
         img_total = sum(len(g) for g in sim_groups_raw)
         _prog(7, "Scoring candidate groups", 0, img_total,
               groups_done=0, groups_total=len(sim_groups_raw))
@@ -1483,15 +1483,15 @@ def _dedup_run(force):
             _flush()
             _db_release_pool(ex, 4)
 
-        # Final checkpoint — candidates are now all judged
+        # Final checkpoint - candidates are now all judged
         core.drop_pending()
 
-        # ── 5b. Video & animation, audio ──────────────────────────────────
+        # -- 5b. Video & animation, audio ----------------------------------
         n_extra = _extra()
         core.checkpoint_set(disk_count, hashed_count, "verified",
                             scorer=(f"fallback:{full_tag}" if fallbacks else full_tag))
 
-        # ── 6. Format and return — count only, client fetches pages ─────────
+        # -- 6. Format and return - count only, client fetches pages ---------
         total_groups = len(exact_members) + verified_count + n_extra
         warning = None
         if fallbacks:
@@ -1499,7 +1499,7 @@ def _dedup_run(force):
             why = "; ".join(f"{k}: {v}" for k, v in errs.items())
             warning = (f"Selected scorer '{model_tag}' did not answer; pairs were scored by "
                        f"{', '.join(sorted(fallbacks))} instead (naive = pixel compare). "
-                       + (f"Reason — {why}. " if why else "")
+                       + (f"Reason - {why}. " if why else "")
                        + "Check Settings > Models > HEURDU.")
             access_logger.warning(f"dedup: {warning}")
         return ({"success": True, "total_groups": total_groups,
@@ -1509,7 +1509,7 @@ def _dedup_run(force):
         access_logger.error(f"dedup: {e}", exc_info=True)
         return ({"success": False, "error": str(e)})
     finally:
-        state["status_text"] = "Ready."
+        _HOST.set_status("Ready.")
 
 def dedup_merge():
     data   = request.json
@@ -1551,7 +1551,8 @@ def dedup_merge():
                            abs(r1["cx"]-r2["cx"])<0.05 and abs(r1["cy"]-r2["cy"])<0.05
                            for r1 in bm["regions"]):
                     bm["regions"].append(r2)
-        ok = write_metadata(tp, bm["tags"], bm["description"], bm["regions"])
+        ok = update_file(tp, set={"tags": bm["tags"], "description": bm["description"],
+                                  "regions": bm["regions"]}).get("success")
         if ok:
             for other in others:
                 op = get_safe_path(MEDIA_DIR, other)
@@ -1576,7 +1577,7 @@ def dedup_merge():
 
 
 def _dedup_merge_audio(target, tp, others, db_id):
-    """Merge for tracks: tags live inside the audio file (music module), so
+    """! @brief Merge for tracks: tags live inside the audio file (music module), so
     nothing is merged into the target; the others are recorded as positive
     HEARDU samples and removed everywhere (music row, groups, signatures)."""
     try:
@@ -1600,7 +1601,7 @@ def _dedup_merge_audio(target, tp, others, db_id):
 
 
 def dedup_compare_audio():
-    """Two tracks side by side: phash score + offset, a per-block bit error
+    """! @brief Two tracks side by side: phash score + offset, a per-block bit error
     profile (an edit shows as a run of bad blocks), the naive score, the
     learned score when HEARDU answers, and both tracks' metadata."""
     d = request.json or {}

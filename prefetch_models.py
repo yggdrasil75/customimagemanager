@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Download the weights for every model the app knows, up front.
+"""! @file
+@brief Download the weights for every model the app knows, up front.
 
     python prefetch_models.py                 every capability, every size/type
     python prefetch_models.py pose segment    only these capabilities
@@ -9,8 +10,8 @@
                                               checks they answer)
 
 Runs from the repo root, against the same models/ folder and app_config.json
-the app uses. Every provider is bound once per size/type it declares — that is
-what triggers a provider's own download — then dropped again, so only one
+the app uses. Every provider is bound once per size/type it declares - that is
+what triggers a provider's own download - then dropped again, so only one
 model is resident at a time. Weights already on disk are not re-fetched.
 
 Exit status is the number of models that failed, and the summary at the end
@@ -33,7 +34,7 @@ def _variants(p):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__.split("@brief", 1)[-1].strip(), formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("caps", nargs="*", help="capabilities to fetch (default: all)")
     ap.add_argument("--list", action="store_true", help="only list what would be fetched")
     ap.add_argument("--remote", action="store_true", help="include endpoint-backed models")

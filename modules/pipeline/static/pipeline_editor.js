@@ -1,4 +1,4 @@
-// pipeline_editor.js — visual node editor for the Smart Tag pipeline.
+// pipeline_editor.js - visual node editor for the Smart Tag pipeline.
 // -------------------------------------------------------------------
 // This is pure UI sugar over the existing #cfg_pipeline <textarea>. The
 // textarea remains the single source of truth: saveAiSettings() parses it and
@@ -13,7 +13,7 @@
 (function () {
     'use strict';
 
-    // ── vocabulary pulled straight from pipeline.py ───────────────────────────
+    // -- vocabulary pulled straight from pipeline.py ---------------------------
     // Built-in node types. Module-contributed stages (e.g. "pose" from the pose
     // module) are merged in at load from /api/modules, so a stage only appears
     // when its module is enabled. Kept as `let` so the merge can extend it.
@@ -33,13 +33,14 @@
     let modelState = { start: '', settings: {}, nodes: [] };
     let mounted = false;
 
-    // ── (de)serialisation against the textarea ────────────────────────────────
+    // -- (de)serialisation against the textarea --------------------------------
     function textarea() { return document.getElementById('cfg_pipeline'); }
 
-    // Rewrite legacy node types to the unified `for_each` shape:
-    //   for_each_box   -> for_each, source:"subjects"
-    //   for_each_panel -> for_each, source:"panels"
-    // Returns true if anything changed (so we can persist the migration).
+    /** @brief Rewrite legacy node types to the unified `for_each` shape:
+     *    for_each_box   -> for_each, source:"subjects"
+     *    for_each_panel -> for_each, source:"panels"
+     *  Returns true if anything changed (so we can persist the migration).
+     */
     function migrateNodes(nodes) {
         let changed = false;
         for (const n of nodes) {
@@ -90,7 +91,7 @@
         return id;
     }
 
-    // ── small DOM helpers ─────────────────────────────────────────────────────
+    // -- small DOM helpers -----------------------------------------------------
     function el(tag, cls, txt) {
         const e = document.createElement(tag);
         if (cls) e.className = cls;
@@ -110,7 +111,7 @@
     function select(value, options, onChange, opts) {
         const s = el('select', INPUT);
         (opts && opts.allowEmpty ? ['', ...options] : options).forEach(o => {
-            const opt = el('option', null, o === '' ? (opts && opts.emptyLabel || '—') : o);
+            const opt = el('option', null, o === '' ? (opts && opts.emptyLabel || '-') : o);
             opt.value = o;
             s.appendChild(opt);
         });
@@ -127,13 +128,13 @@
         return i;
     }
 
-    // ── one node card ─────────────────────────────────────────────────────────
+    // -- one node card ---------------------------------------------------------
     function renderNode(node, idx) {
         const card = el('div', 'bg-gray-800 border border-gray-600 rounded p-2 space-y-1.5');
 
         // header: id + type + reorder/delete
         const head = el('div', 'flex items-center gap-1');
-        const idIn = el('input', INPUT + ' font-bold text-teal-300 flex-1');
+        const idIn = el('input', INPUT + ' font-bold text-sky-300 flex-1');
         idIn.value = node.id || '';
         idIn.placeholder = 'node id';
         idIn.addEventListener('input', () => { node.id = idIn.value.trim(); sync(); });
@@ -278,7 +279,7 @@
             card.appendChild(renderSteps(node));
         }
 
-        // next (types that fall through — everything except pure branch routing)
+        // next (types that fall through - everything except pure branch routing)
         const nextTypes = new Set(NODE_TYPES);  // all support next as a fallthrough
         if (nextTypes.has(node.type)) {
             card.appendChild(labelled('next →', select(node.next || '', nodeIds(), v => {
@@ -289,7 +290,7 @@
         return card;
     }
 
-    // ── for_each_box step list ────────────────────────────────────────────────
+    // -- for_each_box step list ------------------------------------------------
     function renderSteps(node) {
         node.steps = Array.isArray(node.steps) ? node.steps : [];
         const box = el('div', 'space-y-1 border-l-2 border-indigo-700 pl-2');
@@ -344,7 +345,7 @@
         return box;
     }
 
-    // ── render the whole editor ───────────────────────────────────────────────
+    // -- render the whole editor -----------------------------------------------
     function render() {
         const host = document.getElementById('pl_editor_body');
         if (!host) return;
@@ -354,7 +355,7 @@
         bar.appendChild(el('span', 'text-[10px] text-gray-400', 'start node:'));
         bar.appendChild(select(modelState.start, nodeIds(), v => { modelState.start = v; sync(); },
             { allowEmpty: true, emptyLabel: '(first)' }));
-        const addNode = el('button', 'text-xs bg-teal-600 hover:bg-teal-500 px-2 py-0.5 rounded font-bold ml-auto', '+ node');
+        const addNode = el('button', 'text-xs bg-sky-600 hover:bg-sky-500 px-2 py-0.5 rounded font-bold ml-auto', '+ node');
         addNode.addEventListener('click', () => {
             const id = uid('node');
             modelState.nodes.push({ id, type: 'llm', want: 'text', label: 'step', prompt: '', next: null });
@@ -365,7 +366,7 @@
         host.appendChild(bar);
 
         if (!modelState.nodes.length) {
-            host.appendChild(el('p', 'text-[10px] text-gray-500', 'No nodes yet — add one, or switch to JSON view.'));
+            host.appendChild(el('p', 'text-[10px] text-gray-500', 'No nodes yet - add one, or switch to JSON view.'));
         }
         modelState.nodes.forEach((n, i) => host.appendChild(renderNode(n, i)));
     }
@@ -373,7 +374,7 @@
     function swap(a, b) { const t = modelState.nodes[a]; modelState.nodes[a] = modelState.nodes[b]; modelState.nodes[b] = t; }
     function sync() { writeToTextarea(); }  // keep textarea live so Save always works
 
-    // ── mount: inject toggle + container beside the textarea ──────────────────
+    // -- mount: inject toggle + container beside the textarea ------------------
     function mount() {
         if (mounted) return;
         const ta = textarea();
@@ -381,7 +382,7 @@
         const container = ta.parentElement;  // the bordered pipeline block
 
         const toggleBar = el('div', 'flex items-center gap-2 mb-1');
-        const visBtn = el('button', 'text-[10px] bg-purple-600 hover:bg-purple-500 px-2 py-0.5 rounded font-bold', '🎛 Visual editor');
+        const visBtn = el('button', 'text-[10px] bg-indigo-600 hover:bg-indigo-500 px-2 py-0.5 rounded font-bold', 'Visual editor');
         const jsonBtn = el('button', 'text-[10px] bg-gray-600 hover:bg-gray-500 px-2 py-0.5 rounded font-bold', '{ } JSON');
         toggleBar.appendChild(visBtn);
         toggleBar.appendChild(jsonBtn);
@@ -396,13 +397,13 @@
         function showVisual() {
             loadFromTextarea(); render();
             editor.classList.remove('hidden'); ta.classList.add('hidden');
-            visBtn.className = visBtn.className.replace('bg-gray-600 hover:bg-gray-500', 'bg-purple-600 hover:bg-purple-500');
-            jsonBtn.className = jsonBtn.className.replace('bg-purple-600 hover:bg-purple-500', 'bg-gray-600 hover:bg-gray-500');
+            visBtn.className = visBtn.className.replace('bg-gray-600 hover:bg-gray-500', 'bg-indigo-600 hover:bg-indigo-500');
+            jsonBtn.className = jsonBtn.className.replace('bg-indigo-600 hover:bg-indigo-500', 'bg-gray-600 hover:bg-gray-500');
         }
         function showJson() {
             editor.classList.add('hidden'); ta.classList.remove('hidden');
-            jsonBtn.className = jsonBtn.className.replace('bg-gray-600 hover:bg-gray-500', 'bg-purple-600 hover:bg-purple-500');
-            visBtn.className = visBtn.className.replace('bg-purple-600 hover:bg-purple-500', 'bg-gray-600 hover:bg-gray-500');
+            jsonBtn.className = jsonBtn.className.replace('bg-gray-600 hover:bg-gray-500', 'bg-indigo-600 hover:bg-indigo-500');
+            visBtn.className = visBtn.className.replace('bg-indigo-600 hover:bg-indigo-500', 'bg-gray-600 hover:bg-gray-500');
         }
         visBtn.addEventListener('click', showVisual);
         jsonBtn.addEventListener('click', showJson);
@@ -412,8 +413,9 @@
         mounted = true;
     }
 
-    // pipeline.js creates the textarea when the Pipeline settings tab opens and
-    // calls mountPipelineEditor() once it is filled.
+    /** @brief pipeline.js creates the textarea when the Pipeline settings tab opens and
+     *  calls mountPipelineEditor() once it is filled.
+     */
     window.mountPipelineEditor = function () { if (!mounted) mount(); mergeModuleStages(); loadFromTextarea(); render(); };
 
     // Merge module-contributed pipeline stages into the node-type list. Runs
@@ -434,7 +436,7 @@
     }
     mergeModuleStages();
 
-    // expose a refresh hook so the app can re-sync after loading settings
+    /** @brief expose a refresh hook so the app can re-sync after loading settings */
     window.pipelineEditorRefresh = function () {
         if (!mounted) mount();
         mergeModuleStages();

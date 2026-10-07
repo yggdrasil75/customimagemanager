@@ -4,15 +4,15 @@
 <div id="comic_pane" class="hidden flex-1 flex flex-col bg-gray-900 min-w-0">
   <div class="flex items-center gap-3 px-3 py-1.5 bg-gray-800 border-b border-gray-700 flex-shrink-0">
     <button onclick="closeComic()" title="Back to images" class="text-gray-400 hover:text-white text-sm">‹ Back</button>
-    <span class="text-purple-300 font-bold truncate" id="comic_title_h">Comic</span>
+    <span class="text-indigo-300 font-bold truncate" id="comic_title_h">Comic</span>
     <span id="comic_kind_badge" class="text-[10px] px-1.5 rounded bg-gray-700 text-gray-300"></span>
     <span id="comic_pageinfo" class="text-xs text-gray-400"></span>
     <div class="ml-auto flex gap-2 items-center">
       <span data-ext-area="comic_tools" class="contents"></span>
       <button onclick="comicPipeline()" data-feature="ai.smarttag" data-comic-kind="folder"
-        class="text-xs bg-teal-600 hover:bg-teal-500 px-3 py-1 rounded font-bold">✨ Smart Tag</button>
+        class="text-xs bg-sky-600 hover:bg-sky-500 px-3 py-1 rounded font-bold">Smart Tag</button>
       <button onclick="comicBoxAll()" data-feature="ai.autotag" data-comic-kind="folder"
-        class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1 rounded font-bold">📦 Box all pages</button>
+        class="text-xs bg-sky-700 hover:bg-sky-600 px-3 py-1 rounded font-bold">📦 Box all pages</button>
     </div>
   </div>
   <div class="flex-1 flex flex-col overflow-hidden">

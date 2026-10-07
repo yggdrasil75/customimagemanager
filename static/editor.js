@@ -50,7 +50,7 @@ function cancelRegion(){
   if(popoutOpen) drawPopout();
 }
 
-// ── Regions list (reliable confirm/edit even when boxes overlap) ────────────
+// -- Regions list (reliable confirm/edit even when boxes overlap) ------------
 function setActiveRegion(i){
   if(isVideoFile(window.currentFile)){ vtOverlay.setActive(i); return; }
   activeRegionIdx=i;
@@ -103,11 +103,12 @@ function deleteRegion(i){
   drawCanvas(); if(popoutOpen) drawPopout(); triggerAutosave();
 }
 
-// ── Per-region editor (description + booru tags for one box) ─────────────────
-// A region tag is an object {tag, generated, confirmed?}:
-//   generated:false            -> user-added, always treated confirmed
-//   generated:true, no confirm -> AI suggestion, not yet confirmed
-//   generated:true, confirmed  -> AI suggestion the user resolved (true/false)
+// -- Per-region editor (description + booru tags for one box) -----------------
+/** @brief A region tag is an object {tag, generated, confirmed?}:
+ *    generated:false            -> user-added, always treated confirmed
+ *    generated:true, no confirm -> AI suggestion, not yet confirmed
+ *    generated:true, confirmed  -> AI suggestion the user resolved (true/false)
+ */
 function rtagName(t){ return (typeof t==='string')?t:(t&&t.tag)||''; }
 function rtagIsConfirmed(t){
   if(typeof t==='string') return true;
@@ -156,7 +157,7 @@ function renderRegionTags(){
     box.innerHTML=tags.map((t,i)=>{
       const name=rtagName(t), conf=rtagIsConfirmed(t), pending=rtagIsPending(t);
       const dot=conf?'#3B82F6':(pending?'#F59E0B':'#6B7280');
-      const title=pending?'Generated suggestion — confirm or reject':(t.generated?'Generated':'User-added');
+      const title=pending?'Generated suggestion - confirm or reject':(t.generated?'Generated':'User-added');
       return `<div class="rrow tag-row ${pending?'tag-unconfirmed':''} flex items-center gap-1" title="${title}">
         <span class="inline-block w-2 h-2 rounded-full flex-shrink-0" style="background:${dot}"></span>
         <input class="tag-edit flex-1 min-w-0 bg-transparent border-b border-transparent focus:border-gray-500 focus:outline-none"
@@ -169,7 +170,7 @@ function renderRegionTags(){
   }
   const pend=tags.filter(rtagIsPending).length;
   const c=document.getElementById('region_tag_count');
-  if(c) c.textContent = tags.length?`${tags.length} tag${tags.length>1?'s':''}${pend?` · ${pend} pending`:''}`:'';
+  if(c) c.textContent = tags.length?`${tags.length} tag${tags.length>1?'s':''}${pend?` | ${pend} pending`:''}`:'';
   const btn=document.getElementById('btn_confirm_all_region_tags');
   if(btn) btn.style.display = pend?'inline-block':'none';
   if(window.CIMFeatures) window.CIMFeatures.apply(box);
@@ -234,7 +235,7 @@ function confirmAllRegionTags(){
   renderRegionTags(); renderTags(); triggerAutosave();
 }
 
-// ── Popout labelling window ────────────────────────────────────────────────
+// -- Popout labelling window ------------------------------------------------
 const pc     = document.getElementById('popout_canvas');
 const pctx   = pc.getContext('2d');
 pc.addEventListener('auxclick',e=>{ if(e.button===1) e.preventDefault(); });
@@ -266,7 +267,7 @@ function closePopout(){
   const badge=document.getElementById('cim-user-badge'); if(badge) badge.style.display='';
 }
 
-// Box edits in the popout need WRITE on annot.boxes, same as the main canvas.
+/** @brief Box edits in the popout need WRITE on annot.boxes, same as the main canvas. */
 function popoutBoxesEditable(){
   return !window.CIMFeatures || CIMFeatures.canWrite('annot.boxes');
 }
@@ -332,7 +333,7 @@ function drawPopout(){
   pctx.restore();
 }
 
-// Convert canvas pixel → image-space coords
+/** @brief Convert canvas pixel -> image-space coords */
 function pcToImg(cx,cy){
   return [(cx-pPanX)/pZoom, (cy-pPanY)/pZoom];
 }

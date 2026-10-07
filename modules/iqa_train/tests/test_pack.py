@@ -1,4 +1,5 @@
-"""iqa_train.pack -> train_pack: a feature pack is written from a labelled folder
+"""! @file
+@brief iqa_train.pack -> train_pack: a feature pack is written from a labelled folder
 (fake providers), trained standalone with ablation, and a rerun is all cache hits.
     python -m pytest -q modules/iqa_train/tests/test_pack.py
 """
@@ -8,7 +9,7 @@ pytest.importorskip("torch")
 
 
 def _fake_host(d, monkeypatch):
-    """Minimal host with every capability the personal scorer asks for; a stripped
+    """! @brief Minimal host with every capability the personal scorer asks for; a stripped
     copy of the one in modules/personal_iqa/tests/test_iqa.py."""
     import sqlite3, types, logging, os, numpy as np, cv2
     import model_registry

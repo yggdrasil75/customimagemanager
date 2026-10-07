@@ -1,4 +1,4 @@
-/* theme_simple.js — activates the shared viewer for the "simple" layout
+/* theme_simple.js - activates the shared viewer for the "simple" layout
  * theme: read-only Meta, albums strip, gallery only. Releases it when another
  * layout takes over. */
 (function () {

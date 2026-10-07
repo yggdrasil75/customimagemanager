@@ -1,5 +1,5 @@
-"""
-Train the duplicate-detector CNN size series from this library (and/or
+"""! @file
+@brief Train the duplicate-detector CNN size series from this library (and/or
 dataset folders on disk).
 ======================================================================
 Images come from the app's own library and/or extra folders; the build
@@ -59,7 +59,7 @@ progress = {"running": False, "phase": "", "images_total": 0, "images_done": 0, 
 
 
 def _say(host, msg):
-    host.config["status_text"] = "Dedup train: " + msg
+    host.set_status("Dedup train: " + msg)
     host.logger.info("dedup_train: " + msg)
     progress["log"] = (progress["log"] + [f"{time.strftime('%H:%M:%S')} {msg}"])[-200:]
 
@@ -70,7 +70,7 @@ def _note_loss(z, loss):
 
 
 def scan(folders, exts=IMG_EXTS):
-    """Every image file under the folders, recursively (sorted for determinism)."""
+    """! @brief Every image file under the folders, recursively (sorted for determinism)."""
     out = []
     for root in folders:
         root = os.path.expanduser(str(root).strip())
@@ -85,9 +85,9 @@ def scan(folders, exts=IMG_EXTS):
 
 
 def _decode_worker(args):
-    """Process-pool worker: decode one file to a side x side uint8 BGR crop
+    """! @brief Process-pool worker: decode one file to a side x side uint8 BGR crop
     at NATIVE resolution from a random position (real pixel detail, noise
-    and sharpness — what the change net sees at scan time). Images smaller
+    and sharpness - what the change net sees at scan time). Images smaller
     than a crop are used whole, upscaled. None when unusable. Standalone on
     purpose: no app state crosses the process boundary."""
     path, side = args
@@ -139,7 +139,7 @@ def _train_dir(host):
 
 
 def clean_train_dir(host, keep=()):
-    """Remove everything in models/dedup_train except `keep` (full paths):
+    """! @brief Remove everything in models/dedup_train except `keep` (full paths):
     stale caches from other file lists / sides, half-written .part files,
     checkpoints of other builds. Returns bytes freed."""
     d, freed = _train_dir(host), 0
@@ -160,11 +160,11 @@ def ckpt_path(host, cache_file):
 
 
 def build_cache(host, paths, side, workers, in_ram=False):
-    """Decode every path once into a [N, side, side, 3] uint8 .npy of
+    """! @brief Decode every path once into a [N, side, side, 3] uint8 .npy of
     native-resolution crops (skipping files that fail) and return (array,
     kept_paths). Reused on later builds with the same file list and side.
-    in_ram loads the whole array instead of memory-mapping it (side²·3 bytes
-    per image: 196 KB at 256 → 12.8 GB for 65k images)."""
+    in_ram loads the whole array instead of memory-mapping it (side^2-3 bytes
+    per image: 196 KB at 256 -> 12.8 GB for 65k images)."""
     cp = cache_path(host, paths, side)
     meta = cp + ".paths"
     if os.path.exists(cp) and os.path.exists(meta):
@@ -205,7 +205,7 @@ def _chunks(seq, n):
 
 
 def _cnn_arrays(pairs):
-    """pairs -> (a, b, m, kinds): a, b uint8 [n,S,S,3] aligned pairs, m float32
+    """! @brief pairs -> (a, b, m, kinds): a, b uint8 [n,S,S,3] aligned pairs, m float32
     [n,S/8,S/8] per-cell change target (mean of the per-pixel mask)."""
     a_l, b_l, m_l, k_l = [], [], [], []
     for a, b, m, kind in pairs:
@@ -221,7 +221,7 @@ _WCACHE = {}    # pair-gen worker: cache path -> mmap'd array (one per process)
 
 
 def _pairs_worker(args):
-    """Process-pool worker: synthetic pairs for a slice of cache indices.
+    """! @brief Process-pool worker: synthetic pairs for a slice of cache indices.
     Standalone (mmaps the cache itself), so it works under fork or spawn."""
     cache_file, idx, per_image, seed = args
     arr = _WCACHE.get(cache_file)
@@ -243,7 +243,7 @@ def _cat(parts):
 
 
 def _feedback_arrays(fb_cnn):
-    """(blob, label) rows from dup_cnn_samples -> (a, b, m) arrays, or None.
+    """! @brief (blob, label) rows from dup_cnn_samples -> (a, b, m) arrays, or None.
     label 1 (merged) -> all-zero change target, 0 -> all-one. Old float CHW
     samples are converted to WORK-side uint8."""
     a_l, b_l, m_l = [], [], []
@@ -274,7 +274,7 @@ def _batches(arr, batch):
 
 
 def _acc(cnn, arr, device, kinds=None):
-    """Accuracy (score>=0.5 vs unchanged-fraction>=0.5) of one model on
+    """! @brief Accuracy (score>=0.5 vs unchanged-fraction>=0.5) of one model on
     prepared (a, b, m) arrays; per kind when given, plus "mae" = mean
     |score - unchanged fraction|, which is what matters for graded edits."""
     a, b, m = arr[:3]
@@ -291,7 +291,7 @@ def _acc(cnn, arr, device, kinds=None):
 
 
 def _evaluate(models, hold_imgs, rng, per_image, devs):
-    """Held-out accuracy per pair kind for every size (images never trained on)."""
+    """! @brief Held-out accuracy per pair kind for every size (images never trained on)."""
     imgs = [np.ascontiguousarray(im) for im in hold_imgs]
     if len(imgs) < 4:
         return {}
@@ -302,7 +302,7 @@ def _evaluate(models, hold_imgs, rng, per_image, devs):
 
 
 def devices(spec, sizes):
-    """Size -> device. `spec`: "" (auto: first GPU or CPU), "cuda:1" (all sizes),
+    """! @brief Size -> device. `spec`: "" (auto: first GPU or CPU), "cuda:1" (all sizes),
     "cuda:0,cuda:1" (sizes spread over the list, biggest first on the first
     device), or "xl=cuda:0,nano=cuda:1" (explicit; unmapped sizes use the plain
     devices / auto). Sizes on different devices train concurrently."""
@@ -314,7 +314,7 @@ def devices(spec, sizes):
 
 
 def gpus():
-    """[{value: "cuda:N", label: name}] for the device picker (empty = CPU only)."""
+    """! @brief [{value: "cuda:N", label: name}] for the device picker (empty = CPU only)."""
     if not (dc._HAVE_TORCH and dc.torch.cuda.is_available()):
         return []
     return [{"value": f"cuda:{i}", "label": f"cuda:{i} {dc.torch.cuda.get_device_name(i)}"}
@@ -322,7 +322,7 @@ def gpus():
 
 
 def bench(sizes=None, batch=256):
-    """Untrained speed-vs-parameters table for a size table {name: {width, depth}}
+    """! @brief Untrained speed-vs-parameters table for a size table {name: {width, depth}}
     (no data needed)."""
     sizes = sizes or dc.SIZES
     if not dc._HAVE_TORCH:
@@ -345,7 +345,7 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
           per_image=6, epochs=3, chunk=1024, batch=256, lr=1e-3, workers=4, holdout=0.03,
           seed=0, install=True, ship=False, cache_side=CACHE_SIDE, in_ram=False, amp="bf16",
           device="", compile=False, micro=0, resume=True, on_installed=None):
-    """Blocking build. `paths`: image files to learn from (library + extra
+    """! @brief Blocking build. `paths`: image files to learn from (library + extra
     folders, already scanned). `feedback`: {"cnn": [(blob, label)]} from the
     Dedup panel's merge / not-a-duplicate decisions. `sizes`: {name: {width,
     depth}} (default dc.SIZES), all trained on the same stream. `active`: which size becomes
@@ -409,7 +409,7 @@ def build(host, paths, feedback=None, sizes=None, active=None, max_images=200_00
         opts = {z: {} for z in sizes}
         done = 0
 
-        # ── checkpoint / resume ───────────────────────────────────────────
+        # -- checkpoint / resume -------------------------------------------
         ck = ckpt_path(host, cache_file)
         start_ep, start_ci, last_ck = 0, 0, [0.0]
         if resume and os.path.exists(ck):

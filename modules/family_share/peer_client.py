@@ -1,5 +1,5 @@
-"""
-family_share: the outbound side — one function per thing we ask a peer.
+"""! @file
+@brief family_share: the outbound side - one function per thing we ask a peer.
 
 Every call carries our identity (X-Family-Peer = the name the peer knows us
 by, X-Family-Key = the secret they gave us). Every BODY is end-to-end
@@ -44,7 +44,7 @@ def _base(peer):
 
 
 def _headers(peer, my_name):
-    """The peer knows us by the name ITS peer row carries (my_name, learned
+    """! @brief The peer knows us by the name ITS peer row carries (my_name, learned
     from its pairing code); our global name is only the fallback."""
     if not peer.get("key_out"):
         raise PeerError("no outbound key set for this peer (paste their pairing code)")
@@ -69,9 +69,9 @@ def _check(resp):
         body = {}
     if resp.status_code == 401:
         raise PeerError("peer rejected us (401): the name we present must match the peer row on "
-                        "their side and the key must be theirs — re-paste their pairing code")
+                        "their side and the key must be theirs - re-paste their pairing code")
     if resp.status_code == 404:
-        raise PeerError("peer has no family_share endpoint (404) — module off there?")
+        raise PeerError("peer has no family_share endpoint (404) - module off there?")
     if resp.status_code >= 400:
         raise PeerError(f"peer answered {resp.status_code}: {body.get('error') or resp.text[:200]}")
     return body
@@ -82,9 +82,9 @@ def file_sha256(path):
         return hashlib.file_digest(f, "sha256").hexdigest()
 
 
-# ── sealing (transport-independent) ─────────────────────────────────────────
+# -- sealing (transport-independent) -----------------------------------------
 def seal_item(recipient, my_id, my_priv, inner, file_path=None, tmp_dir=None):
-    """Seal one push/revoke to `recipient` (a peer row with pub_key and
+    """! @brief Seal one push/revoke to `recipient` (a peer row with pub_key and
     instance_id). Returns (header dict, meta blob, path of the sealed file or
     None). The caller removes the sealed file."""
     s = _sealer(recipient, my_priv)
@@ -115,7 +115,7 @@ def _post_sealed(url, headers, header, meta, enc, extra=None, timeout=600):
             fh.close()
 
 
-# ── direct ──────────────────────────────────────────────────────────────────
+# -- direct ------------------------------------------------------------------
 def ping(peer, my_name, timeout=10):
     r = requests.get(_base(peer) + INBOUND + "/ping", headers=_headers(peer, my_name), timeout=timeout)
     return _check(r)
@@ -123,7 +123,7 @@ def ping(peer, my_name, timeout=10):
 
 def push(peer, my_name, my_id, my_priv, *, origin_sha, origin_id, folder, orig_name, metadata,
          file_path=None, tmp_dir=None, timeout=600):
-    """Send one file (or, with file_path=None, just its metadata) straight to
+    """! @brief Send one file (or, with file_path=None, just its metadata) straight to
     the peer. Returns the peer's JSON: {ok, stored|updated|duplicate|need_file, filename}."""
     inner = {"origin_sha": origin_sha, "origin_id": origin_id, "folder": folder,
              "orig_name": orig_name, "metadata": metadata}
@@ -145,9 +145,9 @@ def revoke(peer, my_name, my_id, my_priv, origin_sha, timeout=30):
     return _check(r)
 
 
-# ── via a hub ───────────────────────────────────────────────────────────────
+# -- via a hub ---------------------------------------------------------------
 def relay(hub, recipient, kind, my_name, my_id, my_priv, header, meta, enc, timeout=600):
-    """Hand an item already sealed to `recipient` to `hub` for its mailbox.
+    """! @brief Hand an item already sealed to `recipient` to `hub` for its mailbox.
     The outer ticket (sealed to the hub) names the recipient by public key and
     proves this instance sent it; the hub never sees inside."""
     ticket_header, ticket_meta, _ = seal_item(hub, my_id, my_priv,
@@ -158,9 +158,9 @@ def relay(hub, recipient, kind, my_name, my_id, my_priv, header, meta, enc, time
     return _check(r)
 
 
-# ── polling a hub's mailbox for items addressed to us ──────────────────────
+# -- polling a hub's mailbox for items addressed to us ----------------------
 def mailbox_list(hub, my_name, my_priv, timeout=30):
-    """-> list of items; the listing itself comes back sealed to us."""
+    """! @brief -> list of items; the listing itself comes back sealed to us."""
     r = requests.get(_base(hub) + INBOUND + "/mailbox", headers=_headers(hub, my_name), timeout=timeout)
     _check_raw(r)
     env = r.headers.get("X-Family-Env")
@@ -174,7 +174,7 @@ def mailbox_list(hub, my_name, my_priv, timeout=30):
 
 
 def mailbox_fetch(hub, my_name, item_id, dst, timeout=600):
-    """Stream one item's sealed file into dst (still ciphertext)."""
+    """! @brief Stream one item's sealed file into dst (still ciphertext)."""
     with requests.get(_base(hub) + INBOUND + "/mailbox/blob", params={"id": item_id},
                       headers=_headers(hub, my_name), stream=True, timeout=timeout) as r:
         _check_raw(r)

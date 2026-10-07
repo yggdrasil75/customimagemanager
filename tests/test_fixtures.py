@@ -1,9 +1,10 @@
-"""Are the fixture files what the tests assume?
+"""! @file
+@brief Are the fixture files what the tests assume?
 
 When a model test fails on tests/fixtures/person_single.jpg, there are two
 suspects: the model and the photo. These tests check the photo, so a whole
 column of red in test_providers.py has one obvious explanation. They use the
-PICKED models (Models tab) only — a failure here means "this fixture doesn't
+PICKED models (Models tab) only - a failure here means "this fixture doesn't
 work with the models this machine is set up with", which is exactly the
 premise the other tests rely on.
 """
@@ -22,11 +23,11 @@ IMAGES = ["person_single.jpg", "person_multi.jpg", "face_closeup.jpg", "no_perso
 
 
 def test_which_fixtures_are_present(record_property):
-    """Not a check — a record. Shows what the run had to work with."""
+    """! @brief Not a check - a record. Shows what the run had to work with."""
     have = [n for n in IMAGES + ["animated.gif", "clip.mp4", "book.epub", "comic.cbz",
                                  "song.mp3", "photo_with_xmp.xmp"] if has_fixture(n)]
     record_property("fixtures", have)
-    assert have, "no fixture media at all — see tests/fixtures/README.md"
+    assert have, "no fixture media at all - see tests/fixtures/README.md"
 
 
 @pytest.mark.parametrize("name", IMAGES)
@@ -44,9 +45,9 @@ def test_image_is_usable(name):
 
 
 def _count_people(app, name):
-    """People found in a fixture by EVERY installed detector, one at a time
+    """! @brief People found in a fixture by EVERY installed detector, one at a time
     (freeing each before the next). Both capabilities are swept: detect.persons
-    providers, and plain detect models counting their 'person' boxes — because
+    providers, and plain detect models counting their 'person' boxes - because
     the usual detect.persons provider ('detect-class') is a thin wrapper that
     reuses whichever detect model is picked, so a wrong pick THERE is what
     shows up here. Two suspects, one answer: if nothing sees it, the photo is
@@ -89,8 +90,8 @@ def _verdict(name, counts, picked, want, got, ok_fn):
 
 
 def test_person_single_holds_exactly_one_person(app):
-    """The premise of most model tests. When this fails, every 'no person / no
-    skeleton / no mask on person_single' failure elsewhere follows from it —
+    """! @brief The premise of most model tests. When this fails, every 'no person / no
+    skeleton / no mask on person_single' failure elsewhere follows from it -
     top-down pose and segmentation models are fed by this detector."""
     counts, picked = _count_people(app, "person_single.jpg")
     got = counts.get(picked)
@@ -120,7 +121,7 @@ def test_face_fixtures_have_faces(app):
 
 
 def test_near_dup_pair_really_is_a_pair():
-    """Same picture, different size/quality — not two different photos."""
+    """! @brief Same picture, different size/quality - not two different photos."""
     import cv2
     a, b = load_image("near_dup_a.jpg"), load_image("near_dup_b.jpg")
     ar, br = (a.shape[1] / a.shape[0]), (b.shape[1] / b.shape[0])
@@ -131,7 +132,7 @@ def test_near_dup_pair_really_is_a_pair():
 
 
 def test_expectation_files_are_sane():
-    """barcode_*.txt must be the exact payload; text_document.txt is matched
+    """! @brief barcode_*.txt must be the exact payload; text_document.txt is matched
     loosely (word recall), so a whole page is fine but a short phrase from the
     image is a sharper test."""
     for name in ("barcode_qr.png", "barcode_1d.png"):

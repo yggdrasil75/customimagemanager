@@ -4,8 +4,8 @@ async function loadFolders(){
     allFolders=d.folders||[];
     const sel=document.getElementById('folder_select');
     if(sel){
-      // Rebuild, then restore the selection from `currentFolder` — the app's
-      // single source of truth — NOT from the <select>'s own value. On a fresh
+      // Rebuild, then restore the selection from `currentFolder` - the app's
+      // single source of truth - NOT from the <select>'s own value. On a fresh
       // load the options don't exist yet, so the old `prev = sel.value` read was
       // always '' and, worse, assigning a value that isn't an <option> yet is a
       // no-op: the picker fell out of sync with currentFolder and only righted
@@ -35,7 +35,7 @@ function onFolderChange(){
 }
 
 // Multi-selection
-// ── Gallery ────────────────────────────────────────────────────────────────
+// -- Gallery ----------------------------------------------------------------
 let searchDebounce=null;
 document.getElementById('search_input').addEventListener('input',e=>{
   clearTimeout(searchDebounce);
@@ -45,17 +45,18 @@ document.getElementById('search_input').addEventListener('input',e=>{
   },300);
 });
 
-// ── Quick-filter dropdown ────────────────────────────────────────────────────
-// Chips shown when the search box is focused. Their labels/queries come from the
-// configurable `search_quick_filters` setting, so home vs. work can surface
-// different filters. Clicking a chip drops its query into the search box.
+// -- Quick-filter dropdown ----------------------------------------------------
+/** @brief Chips shown when the search box is focused. Their labels/queries come from the
+ *  configurable `search_quick_filters` setting, so home vs. work can surface
+ *  different filters. Clicking a chip drops its query into the search box.
+ */
 function renderQuickFilters(){
   const list=document.getElementById('quick_filters_list');
   if(!list) return;
   const filters=(typeof quick_filters_cache!=='undefined' && quick_filters_cache) || [];
   list.innerHTML='';
   if(!filters.length){
-    list.innerHTML='<span class="text-xs text-gray-500 px-1 py-1">No quick filters set — add some in Settings → User settings.</span>';
+    list.innerHTML='<span class="text-xs text-gray-500 px-1 py-1">No quick filters set - add some in Settings → User settings.</span>';
     return;
   }
   filters.forEach(f=>{
@@ -92,7 +93,7 @@ function toggleDatePicker(){
   document.getElementById('date_picker_pop').classList.toggle('hidden');
 }
 
-// Strip any existing date-family token from the search box, returning the rest.
+/** @brief Strip any existing date-family token from the search box, returning the rest. */
 function _stripDateTokens(value){
   const keys=['date','datetime','dateoriginal','capture_date','capturedate','datedigitized','modified'];
   return value.split(/\s+/).filter(t=>{
@@ -134,14 +135,14 @@ document.addEventListener('click',e=>{
   }
 });
 
-// ── Gallery views ──────────────────────────────────────────────────────────
+// -- Gallery views ----------------------------------------------------------
 // The grid is one view of the gallery's result set; modules add others
-// (timeline, …) with registerGalleryView({id, label, title, feature, mount,
+// (timeline, ...) with registerGalleryView({id, label, title, feature, mount,
 // refresh, unmount}):
 //   mount(host, ctx)   build the view inside `host` (#gallery_view_host)
 //   refresh(ctx)       the search / folder / album changed (loadGallery)
 //   unmount()          leaving the view; host is emptied by the core
-// ctx = galleryQuery() → {q, folder, album}. Tiles that carry class
+// ctx = galleryQuery() -> {q, folder, album}. Tiles that carry class
 // "gallery-item" + data-filename get the grid's selection/current-file styling
 // from refreshSelectionUI; handleGalleryClick gives them ctrl/shift select.
 // A view that sets galleryFiles to what it shows gets shift-range for free.
@@ -211,7 +212,7 @@ function syncUrl(){
   if(typeof galleryView!=='undefined' && galleryView!=='grid') p.set('view',galleryView);
   if(currentSearch) p.set('q',currentSearch);
   if(currentFolder) p.set('folder',currentFolder);
-  // Preserve ?tab= — this rebuild used to drop it, so a refresh always came
+  // Preserve ?tab= - this rebuild used to drop it, so a refresh always came
   // back to Gallery no matter which tab set it (panes.js:_syncPaneUrl).
   if(typeof currentPane!=='undefined' && currentPane && currentPane!=='gallery'){
     p.set('tab',currentPane);
@@ -248,7 +249,7 @@ async function loadGallery(){
   updatePager();
 }
 
-// Render a fixed result set (cluster members / similar / outliers) in the grid.
+/** @brief Render a fixed result set (cluster members / similar / outliers) in the grid. */
 function renderGallery(files){
   // Books and comics are not part of the image multi-select / bulk-op set:
   // "confirm all boxes" or "run pose" over an epub is meaningless, and letting
@@ -278,7 +279,7 @@ function renderGallery(files){
     }
     if(item.kind==='book'){
       // A book tile in the folder browser. Clicking it opens the reader in the
-      // centre pane rather than loading it into the image editor — that's the
+      // centre pane rather than loading it into the image editor - that's the
       // whole point of the media-mode swap.
       const div=document.createElement('div');
       div.className='gallery-item';
@@ -337,7 +338,7 @@ function changePage(dir){
   loadGallery();
 }
 
-// ── Selection ──────────────────────────────────────────────────────────────
+// -- Selection --------------------------------------------------------------
 function handleGalleryClick(e, f){
   if(e.ctrlKey || e.metaKey){
     // Ctrl/Cmd: toggle this file in the selection set
@@ -385,7 +386,7 @@ function refreshSelectionUI(){
       chk?.classList.add('hidden');
     }
     // Keep single-select highlight: whatever the centre is showing (image, book,
-    // comic — a comic tile also rings while one of its pages is in the editor)
+    // comic - a comic tile also rings while one of its pages is in the editor)
     const cf=window.currentFile||'';
     const isCur=f===cf || (el.dataset.kind==='comic' && cf.startsWith(f+'/'));
     if(isCur && selectedFiles.size===0)
@@ -411,8 +412,9 @@ function refreshSelectionUI(){
   }
 }
 
-// Select every image matching the current search/folder/album, across all
-// pages, so any bulk button (core or module) runs over the whole result set.
+/** @brief Select every image matching the current search/folder/album, across all
+ *  pages, so any bulk button (core or module) runs over the whole result set.
+ */
 async function selectAllMatching(){
   const params=new URLSearchParams({q:currentSearch,folder:currentFolder});
   if(typeof galleryModalMode!=='undefined' && galleryModalMode==='album' && currentAlbum)
@@ -424,14 +426,15 @@ async function selectAllMatching(){
   showToast(`Selected ${selectedFiles.size} image(s) across all pages.`);
 }
 
-// ── File select (single) ───────────────────────────────────────────────────
+// -- File select (single) ---------------------------------------------------
 let _selectSeq=0;   // bumped each selectFile call; a load applies only if still latest
-// opts.keepCentre: load the file into the editor/controls without swapping the
-// centre back to the image viewer — a comic page shown by the comic reader.
+/** @brief opts.keepCentre: load the file into the editor/controls without swapping the
+ *  centre back to the image viewer - a comic page shown by the comic reader.
+ */
 async function selectFile(fn, opts){
   opts = opts || {};
   // A book is not an image. Everything below this line assumes a decodable
-  // pixel surface — it reads /api/metadata (which decodes the file), pokes the
+  // pixel surface - it reads /api/metadata (which decodes the file), pokes the
   // canvas, and enables the YOLO controls. Handing it an epub produces a broken
   // editor and a 500 in the log, so route to the reader and stop here.
   if(typeof isBookFile==='function' && isBookFile(fn)){
@@ -527,13 +530,13 @@ async function selectFile(fn, opts){
   }
 }
 
-// ── Autosave ───────────────────────────────────────────────────────────────
+// -- Autosave ---------------------------------------------------------------
 function triggerAutosave(){
   if(!window.currentFile) return;
   renderRegionsList();
   const ind=document.getElementById('save_indicator');
-  ind.classList.remove('hidden','text-green-400'); ind.classList.add('text-yellow-400');
-  ind.innerText='Saving…';
+  ind.classList.remove('hidden','text-green-400'); ind.classList.add('text-amber-400');
+  ind.innerText='Saving...';
   clearTimeout(autosaveTO);
   autosaveTO=setTimeout(saveMetadata,900);
 }
@@ -546,7 +549,7 @@ async function saveMetadata(){
   }).then(r=>r.json());
   if(r.success){
     const ind=document.getElementById('save_indicator');
-    ind.classList.remove('text-yellow-400'); ind.classList.add('text-green-400');
+    ind.classList.remove('text-amber-400'); ind.classList.add('text-green-400');
     ind.innerText='✓ Saved';
     setTimeout(()=>{ if(ind.innerText==='✓ Saved'){ ind.classList.remove('text-green-400');
       ind.classList.add('text-gray-500'); } },2000);
@@ -554,7 +557,7 @@ async function saveMetadata(){
   }
 }
 
-// ── File ops ───────────────────────────────────────────────────────────────
+// -- File ops ---------------------------------------------------------------
 async function moveCurrentFile(){
   if(!window.currentFile) return;
   const cur=window.currentFile.split('/').slice(0,-1).join('/');
@@ -575,7 +578,7 @@ async function deleteCurrentFile(){
   loadGallery();
 }
 
-// ── Bulk operations ────────────────────────────────────────────────────────
+// -- Bulk operations --------------------------------------------------------
 // Transparent chunking for every bulk endpoint (core and modules): a POST whose
 // JSON body has more than BULK_CHUNK filenames goes out as sequential chunk
 // requests and the replies are merged (numbers summed, arrays concatenated,
@@ -589,7 +592,7 @@ const BULK_CHUNK=200;
       const v=d[k], a=acc[k];
       if(k==='success') acc[k]=!!a && !!v;
       else if(Array.isArray(v)) acc[k]=(Array.isArray(a)?a:[]).concat(v);
-      // ponytail: "total*" fields are library-wide, not per-chunk — keep the last one.
+      // ponytail: "total*" fields are library-wide, not per-chunk - keep the last one.
       else if(typeof v==='number' && typeof a==='number' && !k.startsWith('total')) acc[k]=a+v;
       else acc[k]=v;
     }
@@ -609,7 +612,7 @@ const BULK_CHUNK=200;
       let d; try{ d=await r.json(); }catch(_){ d={success:false,error:'HTTP '+r.status}; }
       acc=merge(acc,d);
       done+=part.length;
-      showToast(`${String(url).replace(/^.*\//,'')}: ${done}/${names.length}…`);
+      showToast(`${String(url).replace(/^.*\//,'')}: ${done}/${names.length}...`);
       if(d.success===false && d.error) break;   // config/model errors repeat per chunk; stop
     }
     const text=JSON.stringify(acc);

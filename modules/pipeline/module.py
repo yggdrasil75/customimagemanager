@@ -1,5 +1,5 @@
-"""
-Smart Tag pipeline module — the decision tree that turns one image into
+"""! @file
+@brief Smart Tag pipeline module - the decision tree that turns one image into
 tags, description, boxes and flags, plus the auto-tag background worker.
 ======================================================================
   engine.py          the tree runner (node types, LLM prompts, parallelism)
@@ -61,7 +61,7 @@ def register(host):
     host.add_route("/api/pipeline_tree", _tree, feature="settings.pipeline")
 
     def _meta_fields():
-        """EXIF field names the metadata module knows (for meta_get/meta_set pickers)."""
+        """! @brief EXIF field names the metadata module knows (for meta_get/meta_set pickers)."""
         sch = host.get_service("metadata_schema")
         names = ["tags", "description", "rating", "artist", "event", "persons", "genre"]
         if sch:
@@ -75,7 +75,7 @@ def register(host):
     host.add_route("/api/run_pipeline", pc.run_pipeline_route, methods=["POST"], feature="ai.smarttag", level="write")
     host.add_route("/api/bulk_pipeline", pc.bulk_pipeline, methods=["POST"], feature="ai.smarttag", level="write")
     host.add_route("/api/autotag_toggle", pc.autotag_toggle, methods=["POST"], feature="ai.smarttag", level="write", action="autotag_toggle", fields=("enabled",))
-    # The structured analysis this module writes (files.analysis, mirrored in
+    ## @brief The structured analysis this module writes (files.analysis, mirrored in
     # the sidecar) reaches the metadata packet through the enricher; pipeline.js
     # picks it up with registerFileMetaHook. Core never names it.
     def _enrich(db, rel_paths):
@@ -93,7 +93,7 @@ def register(host):
     host.register_file_enricher(_enrich)
     host.add_asset("pipeline.js")
     host.add_asset("pipeline_editor.js")
-    host.add_settings_tab("pipeline", "Pipeline", icon="✨", admin_only=True)
+    host.add_settings_tab("pipeline", "Pipeline", admin_only=True)
     host.on_startup(pc._register_autotag_source)
     host.provide_service("pipeline", {
         "run": pc._run_pipeline_on, "apply": pc._apply_pipeline_result,

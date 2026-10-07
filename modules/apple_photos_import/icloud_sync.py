@@ -1,5 +1,5 @@
-"""
-Live iCloud Photos sync (no Mac, no iPhone app): the iCloud web API through
+"""! @file
+@brief Live iCloud Photos sync (no Mac, no iPhone app): the iCloud web API through
 pyicloud, the same route icloudpd uses. Kept separate from module.py and
 written against the few pyicloud calls it needs, so it can be tested with a
 stand-in account object.
@@ -13,7 +13,7 @@ stand-in account object.
                     to Recently Deleted, where they stay recoverable for 30 days.
 
 Requirements on Apple's side: two-factor authentication, and "Access iCloud
-Data on the Web" on (Settings → Apple ID → iCloud). Advanced Data Protection
+Data on the Web" on (Settings -> Apple ID -> iCloud). Advanced Data Protection
 blocks web access unless that switch is on.
 """
 
@@ -56,7 +56,7 @@ def _favorite(asset):
 
 
 def _downloader(api, asset, version, name):
-    """Stream one version of an asset to disk (videos can be gigabytes, so not
+    """! @brief Stream one version of an asset to disk (videos can be gigabytes, so not
     through pyicloud's download(), which reads it all into memory)."""
     def opener(tmp):
         dst = os.path.join(tmp, "ic-" + safe_name(name))
@@ -100,7 +100,7 @@ def items(api, cfg, message=lambda m: None):
     lib = api.photos
     album_map = {}
     if cfg.get("albums", True):
-        message("reading your albums…")
+        message("reading your albums...")
         for name, album in _albums(lib):
             if name in SMART_ALBUMS:
                 continue
@@ -123,7 +123,7 @@ def items(api, cfg, message=lambda m: None):
 
 
 def purge(ctx, host, delivered, cfg, now=None):
-    """Delete from iCloud what is safely in the library. Returns the count.
+    """! @brief Delete from iCloud what is safely in the library. Returns the count.
 
     An asset qualifies only if ALL hold: the ledger says it was imported
     (status done), its library file exists, a live photo's video half is

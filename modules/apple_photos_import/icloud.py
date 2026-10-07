@@ -1,14 +1,14 @@
-"""
-Apple iCloud Photos export (privacy.apple.com → "Request a copy of your data"
-→ iCloud Photos) → import Items. Pure logic over a modules._importkit.Tree.
+"""! @file
+@brief Apple iCloud Photos export (privacy.apple.com -> "Request a copy of your data"
+-> iCloud Photos) -> import Items. Pure logic over a modules._importkit.Tree.
 
 The export is a set of zips ("iCloud Photos Part 1 of 7.zip", ...) holding:
 
   iCloud Photos/Photos/IMG_0001.HEIC          the originals (and live-photo .MOVs)
   iCloud Photos/Photo Details.csv            imgName, fileChecksum, favorite, hidden,
-  iCloud Photos/Photo Details-1.csv          deleted, originalCreationDate, importDate …
+  iCloud Photos/Photo Details-1.csv          deleted, originalCreationDate, importDate ...
   iCloud Photos/Albums/Beach 2019.csv        one CSV per album, listing file names
-  iCloud Shared Albums/<album>/…             shared albums: media inside a folder per album
+  iCloud Shared Albums/<album>/...             shared albums: media inside a folder per album
 
 Apple has changed the layout and the date wording between exports, so
 nothing here depends on exact paths or column positions: a CSV is "photo
@@ -64,7 +64,7 @@ def _build(y, mon, d, hh, mm, ss, ampm, off):
 
 
 def parse_date(s):
-    """Aware datetime from Apple's export wording, or None. Times without a
+    """! @brief Aware datetime from Apple's export wording, or None. Times without a
     zone are read as UTC, which is what the export writes ('GMT')."""
     s = str(s or "").strip()
     if not s:
@@ -105,7 +105,7 @@ def _norm(h):
 
 
 def scan(tree):
-    """-> list of Items."""
+    """! @brief -> list of Items."""
     media = [e for e in tree.entries.values() if is_media(e.name)]
     by_name = {}
     for e in media:
@@ -134,7 +134,7 @@ def scan(tree):
                     if cell in by_name:
                         albums.setdefault(cell, []).append(album)
 
-    # shared albums: media inside "…Shared Albums/<album>/"
+    # shared albums: media inside "...Shared Albums/<album>/"
     for e in media:
         parts = e.folder.split("/")
         for i, p in enumerate(parts[:-1]):

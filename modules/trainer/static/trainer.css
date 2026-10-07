@@ -7,20 +7,20 @@
          border-radius:.25rem; color:#fff; font-size:.75rem; }
 .trck  { display:flex; align-items:center; gap:.3rem; font-size:.7rem; color:#d1d5db; }
 
-#tr_grid .gallery-item.has-boxes  { border-color:#22c55e; }
-#tr_grid .gallery-item.tr-current { outline:3px solid #60a5fa; outline-offset:-3px; }
+#tr_grid .gallery-item.has-boxes  { border-color:var(--cim-ok-500, #22c55e); }
+#tr_grid .gallery-item.tr-current { outline:3px solid var(--cim-accent-400, #60a5fa); outline-offset:-3px; }
 /* Per-image status ring (colour set from JS-added class). Matches box colours:
    yellow = unconfirmed boxes in the checked classes, blue = confirmed,
    green = the image has been opened/checked. */
-#tr_grid .gallery-item.st-yellow { border-color:#eab308; }
-#tr_grid .gallery-item.st-blue   { border-color:#3b82f6; }
-#tr_grid .gallery-item.st-green  { border-color:#22c55e; }
+#tr_grid .gallery-item.st-yellow { border-color:var(--cim-warn-500, #f59e0b); }
+#tr_grid .gallery-item.st-blue   { border-color:var(--cim-accent-500, #3b82f6); }
+#tr_grid .gallery-item.st-green  { border-color:var(--cim-ok-500, #22c55e); }
 #tr_grid .gallery-item.st-none   { border-color:#374151; }
 
 .tr-vrow { display:flex; align-items:center; gap:.5rem; padding:.25rem .4rem;
            border-radius:.25rem; cursor:pointer; background:#111827; }
 .tr-vrow:hover      { background:#1f2937; }
-.tr-vrow.tr-current { outline:2px solid #60a5fa; }
+.tr-vrow.tr-current { outline:2px solid var(--cim-accent-400, #60a5fa); }
 .tr-vthumb { width:44px; height:44px; object-fit:cover; border-radius:.2rem; flex-shrink:0; }
 .tr-chip   { font-size:.6rem; padding:0 .3rem; border-radius:.6rem; }
 
@@ -31,7 +31,7 @@
 .tr-field { flex:1 1 7rem; min-width:6rem; max-width:12rem; }
 .tr-flow .trck { flex:0 0 auto; }
 #tr_classes.tr-flow .trck { flex:1 1 7rem; min-width:6rem; }
-/* Trainer sub-tab bar (Box / Dedup / …). */
+/* Trainer sub-tab bar (Box / Dedup / ...). */
 .tr-subtab { flex:1 1 auto; padding:.4rem .75rem; border-bottom:2px solid transparent; color:#9ca3af; }
 .tr-subtab:hover { color:#e5e7eb; background:#2d3748; }
-.tr-subtab.active { color:#60a5fa; border-bottom-color:#3b82f6; background:#2d3748; }
+.tr-subtab.active { color:var(--cim-accent-400, #60a5fa); border-bottom-color:var(--cim-accent-500, #3b82f6); background:#2d3748; }

@@ -1,4 +1,5 @@
-"""Frontend: renders the real `/` page through Flask, snapshots the boot-time
+"""! @file
+@brief Frontend: renders the real `/` page through Flask, snapshots the boot-time
 API responses and the enabled modules' asset list, then runs `node --test`
 over tests/js/*.test.js and every modules/<id>/tests/*.test.js. Skips if node
 is missing; installs jsdom (the only dependency) into tests/js on first run."""

@@ -1,8 +1,8 @@
-"""
-FastSAM provider (via ultralytics).
+"""! @file
+@brief FastSAM provider (via ultralytics).
 ======================================================================
 A YOLOv8-seg trained to emit SAM-like "everything" masks in one pass, with
-CLIP grounding so a text prompt filters those masks (texts=[...]) — no LLM
+CLIP grounding so a text prompt filters those masks (texts=[...]) - no LLM
 needed, but coarser than SAM 3's native head. Class-agnostic. Sizes s / x.
 Weights: models/fastsam/segment/FastSAM-<size>.pt (ultralytics downloads).
 """

@@ -1,5 +1,5 @@
-"""
-Google Takeout (Google Photos) → import Items.
+"""! @file
+@brief Google Takeout (Google Photos) -> import Items.
 
 Pure logic over a modules._importkit.Tree, so it is testable without the app.
 
@@ -51,7 +51,7 @@ def _pop_counter(b):
 
 
 def json_target(json_name):
-    """'IMG.jpg.supplemental-metadata(1).json' -> ('IMG.jpg', 1)
+    """! @brief 'IMG.jpg.supplemental-metadata(1).json' -> ('IMG.jpg', 1)
        'IMG.jpg(1).json' -> ('IMG.jpg', 1);  'IMG.jpg.sup.json' -> ('IMG.jpg', None)"""
     base, n = _pop_counter(json_name[:-5])
     if "." in base:
@@ -109,7 +109,7 @@ def _is_sidecar(d):
 
 
 def scan(tree, log=None):
-    """-> list of Items (one per distinct photo/video), companions attached."""
+    """! @brief -> list of Items (one per distinct photo/video), companions attached."""
     folders = tree.by_folder()
     records = []            # (entry, folder, data, album_title, is_year, edited, trash, has_edited_twin)
     companions_of = {}      # id(image entry) -> [video entries]
@@ -234,7 +234,7 @@ def _item(key, entry, folder, data, albums, edited, trash, videos):
 
 
 def items_for(tree, edited_mode="both", log=None):
-    """Items with the edited-copies option applied: 'both', 'original' (skip
+    """! @brief Items with the edited-copies option applied: 'both', 'original' (skip
     edited copies) or 'edited' (skip originals that have an edited copy)."""
     for it, edited, has_edit in scan(tree, log):
         if edited_mode == "original" and edited:

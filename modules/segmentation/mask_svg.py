@@ -1,5 +1,5 @@
-"""
-mask_svg.py
+"""! @file
+@brief mask_svg.py
 ===========
 Convert SAM (Segment Anything) boolean pixel masks into compact, normalized SVG
 path data so region masks can be stored in mwg-rs:Extensions instead of as
@@ -11,7 +11,7 @@ SAM emits a per-pixel boolean mask (this pixel is / isn't part of the object).
 Storing that verbatim is huge, and even RLE/PNG-compressed it bloats sidecars.
 A donut mask, for example, is thousands of pixels but is *geometrically* two
 loops. This module traces the mask boundary, simplifies it, and emits SVG path
-strings whose coordinates are normalized to [0,1] against the image dimensions —
+strings whose coordinates are normalized to [0,1] against the image dimensions -
 so a mask becomes a few hundred bytes of `d="..."` that round-trips through XMP.
 
 THREE SCAN METHODS
@@ -19,13 +19,13 @@ THREE SCAN METHODS
 A pixel mask has stairstep edges. Fitting a smooth-ish outline to it forces a
 choice about which side of the stairstep the curve lands on:
 
-    underscan   — outline sits INSIDE the mask (slightly smaller, drops edges).
+    underscan   - outline sits INSIDE the mask (slightly smaller, drops edges).
                   Erode by ~half a pixel of slack before tracing. Safe when you
                   must not include any background.
-    overscan    — outline sits OUTSIDE the mask (slightly larger, keeps every
+    overscan    - outline sits OUTSIDE the mask (slightly larger, keeps every
                   edge pixel, sometimes grabs a sliver of background). Dilate
                   first. Safe when you must not clip the object.
-    centerline  — the middle road: trace the raw boundary and let simplification
+    centerline  - the middle road: trace the raw boundary and let simplification
                   average the stairstep, so the curve runs through the middle of
                   the step edges. The default.
 
@@ -37,7 +37,7 @@ MULTI-CONTOUR SHAPES
 cv2.findContours with RETR_CCOMP gives outer contours and their holes. A donut
 comes back as an outer loop plus an inner (hole) loop; we emit both as separate
 subpaths in one `d` string. SVG's even-odd / nonzero fill then renders the hole
-correctly. This is the "2 splines for a donut" case from the ask — not the
+correctly. This is the "2 splines for a donut" case from the ask - not the
 theoretical 2-arc minimum, but far better than nothing and still tiny.
 
 CONTRACT
@@ -56,12 +56,12 @@ Two backends produce the outline; the scan-method morphology (erode/dilate/none)
 is applied identically before either runs, so under/over/centerline mean the
 same thing whichever traces:
 
-    vtracer  (preferred, if installed) — visioncortex VTracer fits smooth cubic
+    vtracer  (preferred, if installed) - visioncortex VTracer fits smooth cubic
              Béziers to the boundary (`C` commands), so a rounded object stores
              as a handful of curves instead of dozens of line segments: smaller
              AND a better fit. `pip install vtracer`. This is the "modern option"
              upgrade over the polyline tracer.
-    cv2      (always available fallback) — findContours + approxPolyDP emits
+    cv2      (always available fallback) - findContours + approxPolyDP emits
              straight-line (`L`) polygons. Coarser, but zero extra deps and it's
              what ships. Used automatically when vtracer isn't importable.
 
@@ -98,13 +98,13 @@ SCAN_SLACK_PX = 1
 # noise (a 2-point "contour" isn't a region).
 MIN_CONTOUR_PTS = 3
 
-# Holes smaller than this fraction of the outer contour's area are dropped — a
+# Holes smaller than this fraction of the outer contour's area are dropped - a
 # real donut hole is large; a 3px speckle hole is trace noise.
 MIN_HOLE_AREA_FRAC = 0.01
 
 # vtracer knobs. filter_speckle drops islands under N px (its own MIN area);
 # path_precision is decimal places in vtracer's pixel-space output before we
-# renormalize (2 is plenty — we re-round to 4 decimals normalized anyway).
+# renormalize (2 is plenty - we re-round to 4 decimals normalized anyway).
 # length_threshold merges very short segments (fewer, longer curves = smaller
 # `d`). mode='spline' is what gives us Béziers; 'polygon' would mimic cv2.
 VTRACER_FILTER_SPECKLE = 4
@@ -113,7 +113,7 @@ VTRACER_LENGTH_THRESHOLD = 8.0
 VTRACER_MODE = "spline"
 
 def _as_uint8_mask(mask):
-    """Coerce whatever SAM/caller handed us into a single-channel uint8 {0,255}
+    """! @brief Coerce whatever SAM/caller handed us into a single-channel uint8 {0,255}
     mask, or None if it can't be interpreted."""
     if mask is None:
         return None
@@ -129,7 +129,7 @@ def _as_uint8_mask(mask):
     return m
 
 def _prep(mask_u8, method):
-    """Apply the scan-method morphology. underscan erodes (outline inside),
+    """! @brief Apply the scan-method morphology. underscan erodes (outline inside),
     overscan dilates (outline outside), centerline is untouched."""
     if method == "centerline" or SCAN_SLACK_PX <= 0 or cv2 is None:
         return mask_u8
@@ -142,7 +142,7 @@ def _prep(mask_u8, method):
     return mask_u8
 
 def _vtracer_to_d(mask_u8):
-    """Trace mask_u8 with vtracer, returning a normalized SVG `d` string with
+    """! @brief Trace mask_u8 with vtracer, returning a normalized SVG `d` string with
     cubic-Bézier (`C`) segments. Returns '' when vtracer is unavailable, the
     mask is empty, or tracing yields nothing. Never raises."""
     if vtracer is None or mask_u8 is None:
@@ -171,7 +171,7 @@ def _vtracer_to_d(mask_u8):
     return _normalize_vtracer_svg(svg, W, H)
 
 def _normalize_vtracer_svg(svg, W, H):
-    """Extract path `d` strings from a vtracer SVG document and renormalize
+    """! @brief Extract path `d` strings from a vtracer SVG document and renormalize
     their pixel coordinates to [0,1] against (W,H), preserving M/L/C/Z commands.
 
     vtracer emits object-LOCAL coordinates plus a per-<path>
@@ -192,12 +192,12 @@ def _normalize_vtracer_svg(svg, W, H):
     return " ".join(p for p in out if p)
 
 # Path commands whose operands are coordinate pairs (absolute uppercase, which
-# is all vtracer emits). We transform every operand pairwise as (x,y) — correct
+# is all vtracer emits). We transform every operand pairwise as (x,y) - correct
 # for M/L/C/S/Q/T. H/V/A never appear in vtracer output.
 _PAIR_CMDS = set("MLCSQT")
 
 def _renorm_d(d, W, H, tx=0.0, ty=0.0):
-    """Renormalize one object-local pixel-space `d` string to [0,1] against
+    """! @brief Renormalize one object-local pixel-space `d` string to [0,1] against
     (W,H), adding the path's (tx,ty) translate offset first, and re-rounding to
     the compact 4-decimal form the cv2 backend uses. Handles M/L/C/Z."""
     import re
@@ -225,19 +225,19 @@ def _renorm_d(d, W, H, tx=0.0, ty=0.0):
             out.append("Z")
             i += 1
         else:
-            i += 1  # stray number without a command — skip
+            i += 1  # stray number without a command - skip
     s = " ".join(out)
     s = re.sub(r'([MLCSQTZ]) ', r'\1', s)  # no space after command letter
     return s
 
 def _contours_to_d(mask_u8, simplify):
-    """Trace mask_u8 into a normalized SVG `d` string (outer contours + holes as
+    """! @brief Trace mask_u8 into a normalized SVG `d` string (outer contours + holes as
     separate subpaths). Returns '' when the mask is empty."""
     H, W = mask_u8.shape[:2]
     if H == 0 or W == 0 or not mask_u8.any():
         return ""
-    # RETR_CCOMP: 2-level hierarchy — outer boundaries at level 0, holes at
-    # level 1 — which is exactly the donut (outer loop + inner loop) case.
+    # RETR_CCOMP: 2-level hierarchy - outer boundaries at level 0, holes at
+    # level 1 - which is exactly the donut (outer loop + inner loop) case.
     res = cv2.findContours(mask_u8, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
     contours, hierarchy = res[-2], res[-1]
     if not contours:
@@ -273,12 +273,12 @@ def _contours_to_d(mask_u8, simplify):
     return _pts_to_d(subpaths)
 
 def _fmt(v):
-    """Compact fixed-point coordinate: 4 decimals, no trailing zeros/point."""
+    """! @brief Compact fixed-point coordinate: 4 decimals, no trailing zeros/point."""
     s = f"{v:.4f}".rstrip("0").rstrip(".")
     return s if s else "0"
 
 def _pts_to_d(subpaths):
-    """Build an SVG `d` from normalized point loops. Each loop -> M x y L ... Z.
+    """! @brief Build an SVG `d` from normalized point loops. Each loop -> M x y L ... Z.
     Kept as polylines (L) rather than curves: cheap, exact to the simplified
     polygon, and the consumer can smooth on render if it wants."""
     parts = []
@@ -295,7 +295,7 @@ def _pts_to_d(subpaths):
 
 def mask_to_svg_paths(mask, method="all", simplify=DEFAULT_SIMPLIFY,
                       backend="auto"):
-    """Convert a boolean/uint8 pixel mask to normalized SVG path data.
+    """! @brief Convert a boolean/uint8 pixel mask to normalized SVG path data.
 
     method:  'underscan' | 'overscan' | 'centerline' | 'all'.
     backend: 'auto'  -> vtracer (smooth Béziers) if installed, else cv2.
@@ -327,7 +327,7 @@ def mask_to_svg_paths(mask, method="all", simplify=DEFAULT_SIMPLIFY,
     return out
 
 def _cubic(p0, p1, p2, p3, steps=12):
-    """Flatten one cubic Bézier into `steps` line points (excluding p0, which
+    """! @brief Flatten one cubic Bézier into `steps` line points (excluding p0, which
     the caller already has). Enough segments that fill/rasterize is smooth."""
     ts = np.linspace(0.0, 1.0, steps + 1)[1:]
     p0, p1, p2, p3 = (np.asarray(q, float) for q in (p0, p1, p2, p3))
@@ -340,7 +340,7 @@ def _cubic(p0, p1, p2, p3, steps=12):
     return out
 
 def svg_d_to_points(d):
-    """Parse one of our own `d` strings back into a list of normalized point
+    """! @brief Parse one of our own `d` strings back into a list of normalized point
     loops (list of Nx2 arrays). Understands M/L/Z (cv2 backend) and C cubic
     Béziers (vtracer backend), flattening curves to polylines. Returns []."""
     if not d:
@@ -382,7 +382,7 @@ def svg_d_to_points(d):
     return loops
 
 def rasterize(d, width, height):
-    """Render a stored `d` string back to a boolean pixel mask of the given
+    """! @brief Render a stored `d` string back to a boolean pixel mask of the given
     size, using even-odd fill so holes (donut interior) stay empty. For
     round-trip tests and any consumer that needs pixels back. Returns a
     (height,width) bool array; all-False on empty/invalid input."""

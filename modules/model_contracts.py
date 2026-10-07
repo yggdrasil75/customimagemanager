@@ -1,7 +1,7 @@
-"""
-Core capability contracts.
+"""! @file
+@brief Core capability contracts.
 ======================================================================
-The initial set of capability contracts the core declares at startup —
+The initial set of capability contracts the core declares at startup -
 the ones YOLO already does. A module may declare NEW capabilities beyond
 these; the first declarer owns the contract. These four are owned by
 'core' so providers (YOLO now, others later) have a fixed shape to
@@ -21,7 +21,7 @@ CORE_CAPABILITIES = {
         "hidden": True,   # internal dispatch seam, not a user-facing pick
         "summary": "Run an object/keypoint detector by model path and return "
                    "normalized boxes. Path-parameterized: providers declare "
-                   "which model files they can run (YOLO .pt, Mayaku, …).",
+                   "which model files they can run (YOLO .pt, Mayaku, ...).",
         "input": "detect(img_bgr, model_path, keep_classes=None, conf=0.25, "
                  "as_obb=False)",
         "output": "list of {class_name, cx, cy, w, h} with coords normalized "
@@ -35,7 +35,7 @@ CORE_CAPABILITIES = {
                    "LLM); background pick is the small unprompted model that "
                    "runs on every image. Some providers offer an oriented-box "
                    "type; those boxes carry an extra `angle`.",
-        "input": "detect(img_bgr, prompt='') — HxWx3 uint8 BGR; prompt is used "
+        "input": "detect(img_bgr, prompt='') - HxWx3 uint8 BGR; prompt is used "
                  "only by providers flagged prompted",
         "output": "list of {class_name, cx, cy, w, h, conf?, angle?} normalized "
                   "0..1 center-form; angle in radians for oriented boxes",
@@ -72,7 +72,7 @@ CORE_CAPABILITIES = {
                    "manual buttons (may be a prompted model: SAM 2/3 given a "
                    "text query); background pick is the fixed-class model that "
                    "runs unprompted on every image.",
-        "input": "segment(img_bgr, prompt='') — HxWx3 uint8 BGR; prompt is "
+        "input": "segment(img_bgr, prompt='') - HxWx3 uint8 BGR; prompt is "
                  "used only by providers flagged prompted",
         "output": "list of {class_name, mask, conf?} where mask is a list of "
                   "normalized 0..1 (x, y) polygon points",
@@ -81,7 +81,7 @@ CORE_CAPABILITIES = {
         "label": "Box-prompted masks",
         "hidden": True,   # served by whichever segmenter is picked; not a separate pick
         "summary": "Refine given boxes into masks (SAM-style box prompt).",
-        "input": "segment(img_bgr, boxes) — HxWx3 uint8 BGR + normalized boxes",
+        "input": "segment(img_bgr, boxes) - HxWx3 uint8 BGR + normalized boxes",
         "output": "list of {class_name, mask, conf?} where mask is a list of "
                   "normalized 0..1 (x, y) polygon points, one per input box",
     },
@@ -110,7 +110,7 @@ CORE_CAPABILITIES = {
         "label": "Classification",
         "background": True,   # non-region: served by the module's background sweep
         "summary": "One overarching category for the whole image from a small fixed "
-                   "set (photo / illustration / screenshot… / explicit) — the image's "
+                   "set (photo / illustration / screenshot... / explicit) - the image's "
                    "type, as the pipeline's classify node means it. Not tags: a "
                    "1000-noun ImageNet head belongs under 'tag'.",
         "input": _IMG,
@@ -121,13 +121,13 @@ CORE_CAPABILITIES = {
         "label": "Tagging",
         "summary": "Open-set image tags (booru-style taggers such as WD, or a vision "
                    "LLM with a prompt).",
-        "input": "tag(img_bgr, prompt='') — prompt used only by prompted providers",
+        "input": "tag(img_bgr, prompt='') - prompt used only by prompted providers",
         "output": "list of {tag, conf} sorted by conf desc; conf 0..1",
     },
     "describe": {
         "label": "Description",
         "summary": "Natural-language caption / description of the image.",
-        "input": "describe(img_bgr, prompt='') — prompt used only by prompted providers",
+        "input": "describe(img_bgr, prompt='') - prompt used only by prompted providers",
         "output": "str",
     },
     "ocr": {
@@ -149,7 +149,7 @@ CORE_CAPABILITIES = {
         "summary": "Text-to-text embedding for passages and queries (books, notes, "
                    "descriptions). A separate space from image embeddings: a dedicated "
                    "text model handles long passages and query/document asymmetry.",
-        "input": "embed(text) — a document/passage; the handle also exposes "
+        "input": "embed(text) - a document/passage; the handle also exposes "
                  ".embed_query(text) for a search query (falls back to embed) and "
                  ".space (vector-space tag)",
         "output": "1-D float32 ndarray, L2-normalised; None on failure",
@@ -160,7 +160,7 @@ CORE_CAPABILITIES = {
         "summary": "Whole-track audio embedding for similarity, clustering and "
                    "shuffle-by. A model with a joint text space (CLAP, MuQ-MuLan) "
                    "also exposes .embed_text so 'sem:christmas' works on music.",
-        "input": "embed(abs_path) — path to an audio file; handle may expose "
+        "input": "embed(abs_path) - path to an audio file; handle may expose "
                  ".embed_text(text) (query into the same space) and .space",
         "output": "1-D float32 ndarray, L2-normalised; None on failure",
     },
@@ -168,7 +168,7 @@ CORE_CAPABILITIES = {
         "label": "Image quality",
         "background": True,   # non-region: served by the module's background sweep
         "summary": "No-reference image quality assessment: a normalized score.",
-        "input": "score(img_bgr, rel_path=None) — HxWx3 uint8 BGR; rel_path (library-"
+        "input": "score(img_bgr, rel_path=None) - HxWx3 uint8 BGR; rel_path (library-"
                  "relative) is passed when known so a provider can use the file's "
                  "stored tags/regions/pose; providers may ignore it",
         "output": "dict {raw, quality} where quality is normalized 0..1 "
@@ -178,6 +178,6 @@ CORE_CAPABILITIES = {
 
 
 def declare_core_capabilities(broker):
-    """Declare every core capability on the given broker. Idempotent."""
+    """! @brief Declare every core capability on the given broker. Idempotent."""
     for cap_id, c in CORE_CAPABILITIES.items():
         broker.declare(cap_id, owner="core", **c)

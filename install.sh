@@ -28,7 +28,7 @@ if [ -z "$MODE" ]; then
 fi
 [ "$MODE" = ultralight ] && MINIMAL=1
 
-# ── system packages (best effort: a missing CLI degrades, it doesn't crash) ──
+# -- system packages (best effort: a missing CLI degrades, it doesn't crash) --
 SYS="build-essential python3-venv python3-dev curl git libjxl-tools libexiv2-dev libboost-python-dev libgomp1"
 [ "$MODE" = ultralight ] || SYS="$SYS ffmpeg libgl1 libglib2.0-0 p7zip-full unrar-free calibre"
 if [ "$SYSTEM" = 1 ]; then
@@ -38,7 +38,7 @@ if [ "$SYSTEM" = 1 ]; then
         # not allowed (or needs a password we can't ask for) skips the system
         # packages instead of erroring out of the whole install.
         if command -v sudo >/dev/null && sudo -n true 2>/dev/null; then SUDO="sudo"
-        else SYSTEM=0; echo "warn: no root/sudo — skipping system packages. Ask an admin for: $SYS" >&2; fi
+        else SYSTEM=0; echo "warn: no root/sudo - skipping system packages. Ask an admin for: $SYS" >&2; fi
     fi
 fi
 if [ "$SYSTEM" = 1 ]; then
@@ -47,11 +47,11 @@ if [ "$SYSTEM" = 1 ]; then
         $SUDO apt-get update -qq && $SUDO apt-get install -y --no-install-recommends $SYS \
             || echo "warn: some packages failed; continuing" >&2
     else
-        echo "warn: not apt — install the equivalents of: $SYS" >&2
+        echo "warn: not apt - install the equivalents of: $SYS" >&2
     fi
 fi
 
-# ── venv + python deps ─────────────────────────────────────────────────────
+# -- venv + python deps -----------------------------------------------------
 [ -x venv/bin/python ] || python3 -m venv venv
 PIP="venv/bin/python -m pip"
 $PIP install -q --upgrade pip wheel
@@ -68,7 +68,7 @@ fi
         -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.0/ \
         || echo "warn: no ROCm onnxruntime wheels; CPU inference" >&2; }
 
-# ── vendored front-end JS (temp file then move: never leave an empty .js) ───
+# -- vendored front-end JS (temp file then move: never leave an empty .js) ---
 get() { [ -s "$2" ] && return 0; mkdir -p "$(dirname "$2")"; t=$(mktemp)
     curl -fsSL "$1" -o "$t" 2>/dev/null && [ -s "$t" ] && mv "$t" "$2" \
         || { rm -f "$t"; echo "warn: download failed: $1" >&2; }; }

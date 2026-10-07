@@ -47,7 +47,7 @@ test("autosave POSTs the write packet once, debounced", async () => {
   b.api.reset();
   b.run(`window.currentFile="x.jxl"; currentRegions=[]; setTags(["cat"]); document.getElementById("meta_desc").value="d";
          triggerAutosave(); triggerAutosave();`);
-  assert.equal($("save_indicator").innerText, "Saving…");
+  assert.equal($("save_indicator").innerText, "Saving...");
   await b.tick(1000);
   const w = b.api.find("/api/metadata", "POST");
   assert.equal(w.length, 1);

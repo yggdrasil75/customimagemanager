@@ -1,4 +1,4 @@
-/* theming.js — core theme state (modules/theming).
+/* theming.js - core theme state (modules/theming).
  *
  * Loads /api/theme, sets body[data-layout] / body[data-palette], and exposes
  * window.CIMTheme for theme modules:
@@ -9,7 +9,7 @@
  *   CIMTheme.ready                promise, resolves after the first load
  *   event "cim:theme" on window    after every change, detail {layout, palette}
  *
- * The pickers live in Settings → User settings (the "layout" / "palette" user
+ * The pickers live in Settings -> User settings (the "layout" / "palette" user
  * settings); saving them fires "cim:user-settings", which reloads the theme.
  *
  * Permissions are not the theme's business: after every switch this re-runs

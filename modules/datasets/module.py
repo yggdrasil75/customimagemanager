@@ -1,5 +1,5 @@
-"""
-Datasets fetcher module.
+"""! @file
+@brief Datasets fetcher module.
 ======================================================================
 Registers a "datasets" FETCHER into the fetch module's registry and a
 Settings > Datasets tab. Closed zoos (pyiqa's IQA benchmark mirror, the
@@ -35,7 +35,7 @@ MANIFEST = {
 
 
 def _add_line(text, line, folder):
-    """Append line to a newline list unless a line for folder is already there."""
+    """! @brief Append line to a newline list unless a line for folder is already there."""
     lines = [l for l in str(text or "").splitlines() if l.strip()]
     if any(l.split()[0] == folder for l in lines):
         lines = [line if l.split()[0] == folder else l for l in lines]
@@ -67,13 +67,15 @@ def register(host):
                 "kaggle_key": cfg.get("datasets_kaggle_key")}
 
     def _say(msg):
-        cfg["status_text"] = "Datasets: " + msg
+        host.set_status("Datasets: " + msg)
 
     def _register_dataset(folder, labels):
-        cfg["dedup_train_folders"] = _add_line(cfg.get("dedup_train_folders"), folder, folder)
+        host.set_config("dedup_train_folders",
+                        _add_line(cfg.get("dedup_train_folders"), folder, folder), save=False)
         if labels:
-            cfg["iqa_train_datasets"] = _add_line(cfg.get("iqa_train_datasets"),
-                                                  f"{folder} {labels}", folder)
+            host.set_config("iqa_train_datasets",
+                            _add_line(cfg.get("iqa_train_datasets"), f"{folder} {labels}", folder),
+                            save=False)
         host.save_config()
 
     def _fetch(target, tmpdir, on_file=None):

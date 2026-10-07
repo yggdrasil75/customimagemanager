@@ -1,5 +1,5 @@
-"""
-Pretrain the Personal IQA scorer size series from labelled datasets on disk.
+"""! @file
+@brief Pretrain the Personal IQA scorer size series from labelled datasets on disk.
 ======================================================================
 Datasets are folders of images plus a labels file (AVA.txt vote histograms,
 or any CSV/TSV of "filename,score"). Each image goes through the same
@@ -19,7 +19,7 @@ from it (it never shrinks a larger pretrained model).
 
 pack(): the same feature pass, but instead of training it writes one
 self-contained .pt (samples + labels + token dims + the per-stage ms
-profile) that train_pack.py can train anywhere torch runs — a rented GPU
+profile) that train_pack.py can train anywhere torch runs - a rented GPU
 box needs the pack and net.py, not the library, the models or the app.
 """
 import csv
@@ -43,13 +43,13 @@ progress = {"running": False, "phase": "", "images_total": 0, "images_done": 0, 
 
 
 def _say(host, msg):
-    host.config["status_text"] = "IQA train: " + msg
+    host.set_status("IQA train: " + msg)
     host.logger.info("iqa_train: " + msg)
     progress["log"] = (progress["log"] + [f"{time.strftime('%H:%M:%S')} {msg}"])[-200:]
 
 
 def parse_dataset_lines(text):
-    """"<folder> <labels file>" per line (labels optional when the folder holds
+    """! @brief "<folder> <labels file>" per line (labels optional when the folder holds
     labels.csv / AVA.txt). Returns [(folder, labels_path)]."""
     out = []
     for line in str(text or "").splitlines():
@@ -67,7 +67,7 @@ def parse_dataset_lines(text):
 
 
 def _index_images(folder):
-    """basename-without-extension -> path, and basename -> path, for label lookup."""
+    """! @brief basename-without-extension -> path, and basename -> path, for label lookup."""
     idx = {}
     for dp, _dn, fns in os.walk(folder):
         for fn in fns:
@@ -79,7 +79,7 @@ def _index_images(folder):
 
 
 def read_labels(folder, labels_path):
-    """(path, score 0..1) pairs. AVA.txt rows are "idx image_id v1..v10 ..." (mean of
+    """! @brief (path, score 0..1) pairs. AVA.txt rows are "idx image_id v1..v10 ..." (mean of
     the 1..10 histogram / 10); a CSV whose header has score_up/score_down/views
     (and optionally source) is engagement data -> scores.estimate; anything
     else is "name,score" CSV/TSV with an optional header. Scores > 1 are taken
@@ -136,7 +136,7 @@ def _is_val(key):
 
 
 def bench(svc, sizes, embed_dim=512, batch=64):
-    """Untrained speed-vs-parameters per size (params without torch; timings with)."""
+    """! @brief Untrained speed-vs-parameters per size (params without torch; timings with)."""
     dims = {"embed": embed_dim, "tile": embed_dim, "object": embed_dim, "region": embed_dim,
             "tag_text": embed_dim, **svc["token_dims"]}
     out = {}
@@ -169,7 +169,7 @@ def bench(svc, sizes, embed_dim=512, batch=64):
 
 
 def scored_from_tags(db):
-    """Library files whose tags carry score_up / score_down / views (/ source)
+    """! @brief Library files whose tags carry score_up / score_down / views (/ source)
     -> [(rel_path, rating)] via scores.estimate. Rated files are left to the
     ratings table."""
     import json
@@ -188,7 +188,7 @@ def scored_from_tags(db):
 
 
 def collect(host, db, svc, datasets, use_ratings, max_images, summary, use_scores=False):
-    """Labels -> features for every labelled image (cache-first). Fills
+    """! @brief Labels -> features for every labelled image (cache-first). Fills
     summary[datasets/skipped/images/profile] and returns (train, val) sample
     lists [{key, feats, y}]. profile: per-stage ms over images computed this
     run (cache hits carry no timing), so the slow stage is visible."""
@@ -249,7 +249,7 @@ def collect(host, db, svc, datasets, use_ratings, max_images, summary, use_score
 
 
 def pack(host, datasets, use_ratings=False, max_images=100_000, holdout=VAL_PCT, name="pack", use_scores=False):
-    """Blocking. Feature pass only; writes <ckpt_dir>/packs/<name>.pt for train_pack.py.
+    """! @brief Blocking. Feature pass only; writes <ckpt_dir>/packs/<name>.pt for train_pack.py.
     Samples keep every token list and y; dims are inferred so the pack is self-describing."""
     if not _lock.acquire(blocking=False):
         return {"ok": False, "error": "a build is already running"}
@@ -304,7 +304,7 @@ def pack(host, datasets, use_ratings=False, max_images=100_000, holdout=VAL_PCT,
 
 def build(host, datasets, sizes, active=None, use_ratings=False, max_images=100_000, epochs=10,
           batch=64, lr=1e-3, holdout=VAL_PCT, install=True, on_installed=None, use_scores=False):
-    """Blocking. datasets: [(folder, labels_path)]; sizes: {name: {d, depth}}."""
+    """! @brief Blocking. datasets: [(folder, labels_path)]; sizes: {name: {d, depth}}."""
     if not _lock.acquire(blocking=False):
         return {"ok": False, "error": "a build is already running"}
     svc = host.get_service("personal_iqa")

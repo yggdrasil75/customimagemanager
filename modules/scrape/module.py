@@ -1,11 +1,11 @@
-"""
-Page-scrape fetcher (catch-all).
+"""! @file
+@brief Page-scrape fetcher (catch-all).
 ======================================================================
 Last-resort fetcher for URLs nothing else claims: downloads the page, pulls
 every image/video reference out of it (<img src/srcset/data-src>, <source>,
 <video>, <a href="...jpg"> and og:image), and downloads those that really
 are media (by extension or Content-Type). Needs only `requests` and the
-stdlib HTML parser — no jdownloader/aria.
+stdlib HTML parser - no jdownloader/aria.
 
 Registered with a low priority so gallery-dl / yt-dlp / datasets win
 whenever they recognise the target.
@@ -38,7 +38,7 @@ _SRC_ATTRS = ("src", "data-src", "data-original", "data-lazy-src", "data-full", 
 
 
 class _Links(HTMLParser):
-    """Collects candidate media URLs and the page title."""
+    """! @brief Collects candidate media URLs and the page title."""
     def __init__(self, base):
         super().__init__(convert_charrefs=True)
         self.base = base; self.urls = []; self.alts = {}; self.title = ""

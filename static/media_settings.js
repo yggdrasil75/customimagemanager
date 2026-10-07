@@ -1,4 +1,4 @@
-// Settings → Media: storage format per media kind + filename cleanup.
+// Settings -> Media: storage format per media kind + filename cleanup.
 // Loads from /api/state on first open of the pane; saved by the unified Save.
 const _MEDIA_LABELS = { image: 'Images', book: 'Books', audio: 'Music', video: 'Videos' };
 const _MEDIA_MODES = [['all', 'Convert all to this'], ['unsafe', 'Convert unsafe to this'], ['none', 'Convert none']];
@@ -42,13 +42,7 @@ async function persistMediaSettings() {
     web: document.getElementById('fn_clean_web').checked,
     storage: document.getElementById('fn_clean_storage').value,
   };
-  try {
-    const r = await fetch('/api/update_settings', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ media_storage, filename_cleanup }),
-    });
-    if (!r.ok) return { ok: false, error: 'Media settings save failed (' + r.status + ')' };
-  } catch (e) { return { ok: false, error: 'Media settings save failed' }; }
-  return { ok: true };
+  const res = await window.postSettings({ media_storage, filename_cleanup });
+  return res.ok ? { ok: true } : { ok: false, error: 'Media settings: ' + res.error };
 }
 if (window.registerSettingsPersist) window.registerSettingsPersist(persistMediaSettings, 'media');

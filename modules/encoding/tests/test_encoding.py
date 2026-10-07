@@ -1,4 +1,5 @@
-"""Settings → Media → Encoding drive every codec argument media_types passes
+"""! @file
+@brief Settings -> Media -> Encoding drive every codec argument media_types passes
 to cjxl / Pillow / ffmpeg; a codec the container can't carry falls back."""
 import io, os, subprocess
 import media_types as mt
@@ -23,7 +24,7 @@ def test_arguments_follow_settings(app, client, upload, monkeypatch):
         assert enc.pillow_kwargs("WEBP") == {"lossless": False, "quality": 75, "method": 0}
         assert enc.pillow_kwargs("JPEG")["quality"] == 75
 
-        # video: codec, crf, preset — and the container decides when it can't carry it
+        # video: codec, crf, preset - and the container decides when it can't carry it
         _set(app, enc_video_codec="h265", enc_video_crf=22, enc_video_preset="slow", enc_audio_bitrate=96)
         a = enc.av_args(".mp4")
         assert a[a.index("-c:v") + 1] == "libx265" and "-tag:v" in a and a[a.index("-crf") + 1] == "22"

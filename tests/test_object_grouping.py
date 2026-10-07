@@ -1,4 +1,5 @@
-"""object_grouping.py: clustering on synthetic embeddings (no models)."""
+"""! @file
+@brief object_grouping.py: clustering on synthetic embeddings (no models)."""
 import numpy as np
 import object_grouping as og
 

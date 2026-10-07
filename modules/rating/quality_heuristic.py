@@ -1,5 +1,5 @@
-"""
-Quality heuristic (junk-image gate).
+"""! @file
+@brief Quality heuristic (junk-image gate).
 ======================================================================
 The model-agnostic part of the old iqa.py: given a NORMALIZED quality
 score (0..1, higher = better, produced by whichever IQA provider the user
@@ -12,7 +12,7 @@ bad, and how many stars" verdict, independent of which model scored it.
 All model/scoring code moved into the brisque and pyiqa provider modules;
 nothing here imports torch, pyiqa, or a model registry.
 
-The caller supplies `quality` (from broker.request("iqa")) — this module
+The caller supplies `quality` (from broker.request("iqa")) - this module
 no longer runs any model itself.
 """
 
@@ -27,7 +27,7 @@ LOW_EDGE_DENSITY = 0.004  # edge-pixel fraction below this => near-featureless
 
 
 def structure(img_bgr):
-    """(lum_std, edge_density): cheap stats to catch blank/featureless junk
+    """! @brief (lum_std, edge_density): cheap stats to catch blank/featureless junk
     that distortion metrics rate as 'perfect'."""
     if not _HAVE_CV2 or img_bgr is None:
         return 999.0, 1.0     # assume "fine" on error, don't false-flag
@@ -40,7 +40,7 @@ def structure(img_bgr):
 
 
 def to_stars(q, blank=False):
-    """Normalized quality (0..1, higher=better) -> 0..5 half-stars.
+    """! @brief Normalized quality (0..1, higher=better) -> 0..5 half-stars.
 
     A blank/featureless image is capped at 1 star so undistorted junk can't
     masquerade as five."""
@@ -54,7 +54,7 @@ def to_stars(q, blank=False):
 
 def assess(img_bgr, quality, raw=None, model="", quality_bad=None,
            blank_std=None, low_edge_density=None, brisque_bad=None):
-    """Junk verdict for one image, given its already-computed quality.
+    """! @brief Junk verdict for one image, given its already-computed quality.
 
     quality -- NORMALIZED 0..1 (higher=better) from the selected IQA provider,
                or None if unscored.

@@ -1,4 +1,5 @@
-"""metasrc hub: a fake photo source goes through search → apply → file tags."""
+"""! @file
+@brief metasrc hub: a fake photo source goes through search -> apply -> file tags."""
 from cimtest import read_meta, post_json
 
 from modules.metasrc.module import merge_fields

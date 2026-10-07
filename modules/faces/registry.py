@@ -9,13 +9,13 @@ different jobs and the old single "face model" box conflated them:
                 yolov11-face n/s/m/l weights (there is no 'x'); the user can also
                 drop any *.pt with a "face" class in models/face/yolo and it shows
                 up here. A generic object detector without a "face" class is NOT a
-                face detector — the previous "auto" option silently assumed the
+                face detector - the previous "auto" option silently assumed the
                 configured box model had a "face" class, which is the confusion
                 this split removes.
 
   recognition : the insightface model pack that produces the identity embedding
-                (ArcFace head) and landmarks. We ship a curated list — the buffalo
-                family (l/m/s/sc) and antelopev2 — even though the app currently
+                (ArcFace head) and landmarks. We ship a curated list - the buffalo
+                family (l/m/s/sc) and antelopev2 - even though the app currently
                 loads buffalo_l; the others are here so a smaller/faster pack can be
                 chosen on modest hardware. insightface downloads a pack by name into
                 its root on first use.
@@ -47,27 +47,27 @@ _YOLO_EXTS = (".pt",)
 # (Ultralytics' zoo has no official face model, hence a pinned allowlisted release.)
 FACE_MODEL_REPO = "https://github.com/akanametov/yolo-face/releases/download/1.0.0"
 
-# ── detector registry ─────────────────────────────────────────────────────────
+# -- detector registry ---------------------------------------------------------
 # Each entry:
 #   id      stable key persisted in settings (face_detector)
 #   label   dropdown text
-#   size    n|s|m|l — speed/accuracy class
+#   size    n|s|m|l - speed/accuracy class
 #   speed   badge
 #   weights bare filename fetched from FACE_MODEL_REPO on first use, OR a user path
 #   note    one-liner under the dropdown
 #   custom  True for a discovered user file
 YOLO_FACE_MODELS = [
-    {"id": "yolov11n-face", "label": "YOLO11 face · nano", "size": "n",
+    {"id": "yolov11n-face", "label": "YOLO11 face | nano", "size": "n",
      "speed": "fast", "weights": "yolov11n-face.pt",
-     "note": "Fastest. Misses small / profile faces — those are the ones cluster "
+     "note": "Fastest. Misses small / profile faces - those are the ones cluster "
              "density depends on, so prefer a larger size if you can afford it."},
-    {"id": "yolov11s-face", "label": "YOLO11 face · small", "size": "s",
+    {"id": "yolov11s-face", "label": "YOLO11 face | small", "size": "s",
      "speed": "fast", "weights": "yolov11s-face.pt",
-     "note": "Small — a step up in recall over nano at modest cost."},
-    {"id": "yolov11m-face", "label": "YOLO11 face · medium", "size": "m",
+     "note": "Small - a step up in recall over nano at modest cost."},
+    {"id": "yolov11m-face", "label": "YOLO11 face | medium", "size": "m",
      "speed": "balanced", "weights": "yolov11m-face.pt",
-     "note": "Medium — good recall on small/profile faces; GPU helps."},
-    {"id": "yolov11l-face", "label": "YOLO11 face · large", "size": "l",
+     "note": "Medium - good recall on small/profile faces; GPU helps."},
+    {"id": "yolov11l-face", "label": "YOLO11 face | large", "size": "l",
      "speed": "accurate", "weights": "yolov11l-face.pt",
      "note": "Largest published face weight (there is no 'x'). Best recall, "
              "slowest."},
@@ -75,19 +75,19 @@ YOLO_FACE_MODELS = [
 YOLO_FACE_DEFAULT = "yolov11n-face"
 _YOLO_BY_ID = {m["id"]: m for m in YOLO_FACE_MODELS}
 
-# ── recognition (insightface pack) registry ───────────────────────────────────
+# -- recognition (insightface pack) registry -----------------------------------
 # insightface downloads a pack by NAME into INSIGHT_DIR on first use, so
-# availability is "insightface importable" — the weights fetch lazily.
+# availability is "insightface importable" - the weights fetch lazily.
 INSIGHT_MODELS = [
     {"id": "buffalo_l", "label": "Buffalo-L (default)", "dim": 512,
      "speed": "accurate",
      "note": "Full buffalo pack: SCRFD detector + ArcFace r50 (512-d). The app's "
-             "default and what all existing embeddings were built with — switching "
+             "default and what all existing embeddings were built with - switching "
              "away means a rescan to rebuild them."},
     {"id": "buffalo_m", "label": "Buffalo-M", "dim": 512, "speed": "balanced",
-     "note": "Medium buffalo pack — lighter than L, same 512-d space."},
+     "note": "Medium buffalo pack - lighter than L, same 512-d space."},
     {"id": "buffalo_s", "label": "Buffalo-S", "dim": 512, "speed": "fast",
-     "note": "Small buffalo pack — fastest buffalo, for modest hardware."},
+     "note": "Small buffalo pack - fastest buffalo, for modest hardware."},
     {"id": "buffalo_sc", "label": "Buffalo-SC (tiny)", "dim": 512, "speed": "fast",
      "note": "Smallest buffalo pack (mobilefacenet). Least accurate; use only when "
              "memory is tight."},
@@ -118,9 +118,9 @@ def _have_insightface():
 
 
 def _detector_weight_path(entry):
-    """Local checkpoint path for a detector entry, or '' if not on disk. Custom
+    """! @brief Local checkpoint path for a detector entry, or '' if not on disk. Custom
     entries carry a full path; built-ins may have a fetched copy under
-    models/face/yolo. '' is not an error — the built-in downloads on first use."""
+    models/face/yolo. '' is not an error - the built-in downloads on first use."""
     w = entry.get("weights", "")
     if entry.get("custom"):
         return w
@@ -150,7 +150,7 @@ def _detector_available(entry):
 
 
 def list_detectors():
-    """Face DETECTOR registry (built-ins + discovered) for the settings dropdown.
+    """! @brief Face DETECTOR registry (built-ins + discovered) for the settings dropdown.
     Each entry: id,label,size,speed,note,available,reason,custom. Never raises."""
     out = []
     seen = set()
@@ -173,7 +173,7 @@ def list_detectors():
 
 
 def list_recognition():
-    """Recognition (insightface pack) registry for the settings dropdown.
+    """! @brief Recognition (insightface pack) registry for the settings dropdown.
     Each entry: id,label,dim,speed,note,available,reason. Never raises."""
     avail_base = _have_insightface()
     out = []
@@ -197,7 +197,7 @@ def detector_info(model_id):
 
 
 def resolve_detector_id(model_id):
-    """Coerce a persisted detector id to a valid one: keep it if known/discovered,
+    """! @brief Coerce a persisted detector id to a valid one: keep it if known/discovered,
     else fall back to the default."""
     if model_id in _YOLO_BY_ID:
         return model_id
@@ -213,7 +213,7 @@ def resolve_recognition_id(model_id):
 
 
 def detector_weight_ref(model_id):
-    """(local_path_or_empty, bare_download_name) for a detector id.
+    """! @brief (local_path_or_empty, bare_download_name) for a detector id.
 
     A local path (custom file, or a built-in already fetched) is returned as the
     first element; otherwise the second element is the bare filename to fetch from

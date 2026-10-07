@@ -1,5 +1,5 @@
-"""
-exif_export.py
+"""! @file
+@brief exif_export.py
 ==============
 
 Writes edited EXIF/TIFF values back to an image (or its sidecar), validated
@@ -62,7 +62,7 @@ _XMP_KEYS = {}          # 'Exif.Image.Artist' -> ['Xmp.dc.creator']
 
 
 def _xmp_keys_for(tag):
-    """Which XMP properties exiv2 stores an Exif tag as, in a sidecar.
+    """! @brief Which XMP properties exiv2 stores an Exif tag as, in a sidecar.
 
     Exiv2's XMP-sidecar backend maps Exif tags onto their XMP equivalents
     (Exif.Image.Artist -> Xmp.dc.creator) and only accepts modify_exif for a
@@ -93,7 +93,7 @@ def _xmp_keys_for(tag):
 
 
 def _write_sidecar(target, to_set, to_del):
-    """Apply Exif sets/deletes to an XMP sidecar through the XMP properties the
+    """! @brief Apply Exif sets/deletes to an XMP sidecar through the XMP properties the
     tags map to. A tag the sidecar doesn't hold yet is written as Exif (which
     creates the mapped property); everything else is set or cleared on the XMP
     side, because modify_exif is a no-op there once the property exists."""
@@ -123,9 +123,9 @@ def _write_sidecar(target, to_set, to_del):
 
 
 def _writable_target(filepath):
-    """Pick the path we should write EXIF to. For formats pyexiv2 can open in
+    """! @brief Pick the path we should write EXIF to. For formats pyexiv2 can open in
     place we write the file directly; when only a sidecar exists we write that.
-    Falls back to the primary path. (No sidecar is created here — that policy
+    Falls back to the primary path. (No sidecar is created here - that policy
     lives in manager.write_metadata; this keeps EXIF writes on whatever already
     holds the metadata.)"""
     stem = os.path.splitext(filepath)[0]
@@ -136,7 +136,7 @@ def _writable_target(filepath):
                 return p
         # No sidecar yet: make an empty one rather than mangling the image.
         # An XMP packet with no properties is valid and is what write_metadata
-        # would have produced a moment later anyway. Only for loose files — a
+        # would have produced a moment later anyway. Only for loose files - a
         # packed image's sidecar belongs in the pack, so leave that to the
         # normal path rather than scattering a loose .xmp beside it.
         if not os.path.exists(filepath):
@@ -156,7 +156,7 @@ def _writable_target(filepath):
     return filepath
 
 def _coerce(field, value):
-    """Coerce an incoming JSON value to the field's declared type.
+    """! @brief Coerce an incoming JSON value to the field's declared type.
     Returns (coerced_value, error|None). A None/empty value signals deletion and
     passes straight through as None."""
     if value is None or (isinstance(value, str) and value.strip() == ""):
@@ -212,12 +212,12 @@ def _enum_int_keys(field):
             pass
     return keys
 
-# ── db_transform converters ──────────────────────────────────────────────────
+# -- db_transform converters --------------------------------------------------
 # Map a coerced EXIF value to the value stored in its db_field column. Each
 # returns the column value, or None to skip the DB mirror (leave the column
 # untouched) when the EXIF value doesn't map cleanly.
 def _rating_halfstar(v):
-    """Rating (0x4746): 0-10 half-star units -> 0-5 stars (value / 2). Values
+    """! @brief Rating (0x4746): 0-10 half-star units -> 0-5 stars (value / 2). Values
     outside 0-10 are a raw 'likes' count that doesn't map to stars -> skip."""
     try:
         iv = int(v)
@@ -228,7 +228,7 @@ def _rating_halfstar(v):
     return None            # out-of-range 'likes' rating: don't touch stars
 
 def _rating_percent(v):
-    """RatingPercent (0x4749): 0-100 -> 0-5 stars (round(percent / 20)),
+    """! @brief RatingPercent (0x4749): 0-100 -> 0-5 stars (round(percent / 20)),
     clamped to the 0-5 range."""
     try:
         iv = int(v)
@@ -242,7 +242,7 @@ _DB_TRANSFORMS = {
 }
 
 def _apply_db_transform(field, coerced):
-    """Return the value to store in field.db_field for a coerced EXIF value.
+    """! @brief Return the value to store in field.db_field for a coerced EXIF value.
     Applies field.db_transform if set; otherwise stores the coerced value as-is.
     Returns (value, skip): skip=True means don't write the DB column."""
     if coerced is None:
@@ -259,7 +259,7 @@ def _apply_db_transform(field, coerced):
     return out, False
 
 def write_exif(filepath, patch, allow_repackage=False):
-    """Apply a {tag_name: value} patch to the file's EXIF.
+    """! @brief Apply a {tag_name: value} patch to the file's EXIF.
 
     Returns:
       {
@@ -357,7 +357,7 @@ def write_exif(filepath, patch, allow_repackage=False):
         result["success"] = True
     except Exception as e:
         # A container-form (ISOBMFF) JXL can't take an Exif write. New uploads
-        # are bare, but legacy files may still be containered — repackage this
+        # are bare, but legacy files may still be containered - repackage this
         # one to a bare codestream in place, then retry the write once.
         if (allow_repackage
                 and _BMFF_WRITE_ERR in str(e)
@@ -379,14 +379,14 @@ def write_exif(filepath, patch, allow_repackage=False):
     return result
 
 def _repackage_jxl_bare(path):
-    """Rewrite a container (ISOBMFF) JXL in place as a bare codestream so Exiv2
+    """! @brief Rewrite a container (ISOBMFF) JXL in place as a bare codestream so Exiv2
     can write Exif into it. Transcodes to a temp file with cjxl --container=0,
     then atomically replaces the original. Lossless (-d 0). Returns True on
     success, False (leaving the original untouched) on any failure.
 
     Note: this drops any metadata that lived only in the container's boxes. For
-    this app that's acceptable — the whole point is that the app is about to
-    (re)write the Exif it cares about — and it only ever runs as a last-resort
+    this app that's acceptable - the whole point is that the app is about to
+    (re)write the Exif it cares about - and it only ever runs as a last-resort
     fallback for legacy containered files.
     """
     if shutil.which("cjxl") is None:

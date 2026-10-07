@@ -15,7 +15,7 @@ N(N-1)/2 cheap head passes on feature grids, giving an NxN matrix.
 Images are aligned before comparison (ORB + RANSAC similarity transform, the
 other image warped onto the reference), so crops, re-frames and scaled
 copies compare where they overlap; framing that cannot be aligned is a
-different picture. Very large images are encoded in overlapping strips —
+different picture. Very large images are encoded in overlapping strips -
 a memory bound only, never a resolution cut.
 
 Trained on native-resolution crops with a per-pixel change mask target
@@ -23,7 +23,7 @@ Trained on native-resolution crops with a per-pixel change mask target
 blocks); checkpoints carry their own width/depth.
 
 HEURDU 1.0 (animation, <= ANIM_MAX_FRAMES frames): the same encoder and
-head, plus a temporal block — a residual Conv3d (3,1,1) over each clip's
+head, plus a temporal block - a residual Conv3d (3,1,1) over each clip's
 stacked feature grids, zero-initialised so a 0.9 checkpoint upgraded to 1.0
 scores exactly as before until it is trained. A clip pair is aligned once
 (one transform, every frame warped the same), every frame of each clip is
@@ -148,7 +148,7 @@ def cell_mask(px_mask: "np.ndarray") -> "np.ndarray":
 
 
 def _similarity(rs, is_, s_ref, s_img, min_inliers):
-    """ORB + RANSAC similarity transform mapping is_ (scaled s_img) onto rs (scaled s_ref); (M, inliers)."""
+    """! @brief ORB + RANSAC similarity transform mapping is_ (scaled s_img) onto rs (scaled s_ref); (M, inliers)."""
     try:
         orb = cv2.ORB_create(2000)
         k1, d1 = orb.detectAndCompute(cv2.cvtColor(rs, cv2.COLOR_BGR2GRAY), None)
@@ -248,7 +248,7 @@ def encode_pair(img_a: "np.ndarray", img_b: "np.ndarray") -> "bytes | None":
 
 if _HAVE_TORCH:
     def _tensor(x, device: str) -> "torch.Tensor":
-        """[n,H,W,3] uint8 HWC (or [n,3,H,W] float32) numpy -> float 0..1 channels_last tensor."""
+        """! @brief [n,H,W,3] uint8 HWC (or [n,3,H,W] float32) numpy -> float 0..1 channels_last tensor."""
         t = torch.from_numpy(np.ascontiguousarray(x))
         if device != "cpu":
             t = t.pin_memory()
@@ -258,12 +258,12 @@ if _HAVE_TORCH:
         return t.contiguous(memory_format=torch.channels_last)
 
     def _clip_tensor(x, device: str) -> "torch.Tensor":
-        """[n,T,H,W,3] uint8 numpy -> float 0..1 [n,T,3,H,W] tensor."""
+        """! @brief [n,T,H,W,3] uint8 numpy -> float 0..1 [n,T,3,H,W] tensor."""
         t = torch.from_numpy(np.ascontiguousarray(x)).to(device, non_blocking=True)
         return t.permute(0, 1, 4, 2, 3).float().div_(255.0).contiguous()
 
     class _Encoder(nn.Module):
-        """One image -> per-cell feature grid [C, H/8, W/8]. Lossless stem."""
+        """! @brief One image -> per-cell feature grid [C, H/8, W/8]. Lossless stem."""
 
         def __init__(self, width_mult: float, depth: int) -> None:
             super().__init__()
@@ -280,7 +280,7 @@ if _HAVE_TORCH:
             return self.body(self.stem(x))
 
     class _Head(nn.Module):
-        """Two feature grids -> change logit per cell [H/8, W/8]."""
+        """! @brief Two feature grids -> change logit per cell [H/8, W/8]."""
 
         def __init__(self, C: int) -> None:
             super().__init__()
@@ -291,7 +291,7 @@ if _HAVE_TORCH:
             return self.net(torch.cat([(fa - fb).abs(), fa * fb], dim=1)).squeeze(1)
 
     class _Temporal(nn.Module):
-        """HEURDU 1.0: residual Conv3d (3,1,1) across a clip's frames, per cell.
+        """! @brief HEURDU 1.0: residual Conv3d (3,1,1) across a clip's frames, per cell.
         Zero-initialised: identity until trained, so 0.9 weights upgrade losslessly."""
 
         def __init__(self, C: int) -> None:
@@ -301,7 +301,7 @@ if _HAVE_TORCH:
             nn.init.zeros_(self.conv.bias)
 
         def forward(self, f):
-            """f [N, T, C, h, w] -> same shape."""
+            """! @brief f [N, T, C, h, w] -> same shape."""
             x = f.permute(0, 2, 1, 3, 4).contiguous()
             return f + self.conv(x).permute(0, 2, 1, 3, 4)
 
@@ -317,7 +317,7 @@ if _HAVE_TORCH:
             return self.head(self.enc(a), self.enc(b))
 
         def forward_clips(self, a, b):
-            """a, b [N, T, 3, S, S] frame-aligned clips -> change logits [N, T, S/8, S/8]."""
+            """! @brief a, b [N, T, 3, S, S] frame-aligned clips -> change logits [N, T, S/8, S/8]."""
             N, T = a.shape[:2]
             fa = self.enc(a.flatten(0, 1).contiguous(memory_format=torch.channels_last))
             fb = self.enc(b.flatten(0, 1).contiguous(memory_format=torch.channels_last))
@@ -341,7 +341,7 @@ class DupCNN:
 
     @property
     def temporal(self) -> bool:
-        """True for a HEURDU 1.0 net (has the temporal block)."""
+        """! @brief True for a HEURDU 1.0 net (has the temporal block)."""
         return bool(self.available and hasattr(self._raw(), "temporal"))
 
     @property
@@ -374,7 +374,7 @@ class DupCNN:
         return getattr(self.net, "_orig_mod", self.net)
 
     def _place(self, device: str):
-        """Move to device; 2D convs channels_last (a 1.0 net's Conv3d can't be)."""
+        """! @brief Move to device; 2D convs channels_last (a 1.0 net's Conv3d can't be)."""
         net = self.net.to(device)
         for mod in net.modules():
             if isinstance(mod, nn.Conv2d):
@@ -487,12 +487,12 @@ class DupCNN:
         self.trained = self.trained or n > 0
         return total / n if n else None
 
-    # ── inference ────────────────────────────────────────────────────────────
+    # -- inference ------------------------------------------------------------
     def encode(self, img: "np.ndarray", device: str = "cpu", max_pixels: int = 16_000_000) -> "torch.Tensor":
         """!
         @brief Feature grid [C, H/8, W/8] of one BGR image at native resolution.
                Above `max_pixels` the image is encoded in horizontal strips with
-               margin_px(depth) of overlap, margins cropped off — the features
+               margin_px(depth) of overlap, margins cropped off - the features
                are identical to a single pass, only memory is bounded.
         """
         self._place(device).eval()
@@ -549,7 +549,7 @@ class DupCNN:
                once; each pair is one head pass on feature grids. Members that
                cannot be aligned to the reference are scored among themselves
                with their own reference (recursively). Diagonal = 1.
-        @return (matrix float32 [N,N], maps) — maps is {(i,j): change map in
+        @return (matrix float32 [N,N], maps) - maps is {(i,j): change map in
                 the frame of i} when want_maps, else None.
         """
         N = len(imgs)
@@ -616,7 +616,7 @@ class DupCNN:
                the frame x frame pair_score matrix; DTW turns it into the shared
                fraction of the longer clip. Unalignable -> 0.0.
                clip_pixels bounds T x H x W per clip (frames are scaled down past
-               it — a memory bound for long native-resolution animations).
+               it - a memory bound for long native-resolution animations).
         @return score (float), or (score, matrix [Ta, Tb]) when want_matrix; None untrained.
         """
         from modules.dedup.seq_align import dtw_score, resample_idx

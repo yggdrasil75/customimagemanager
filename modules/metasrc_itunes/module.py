@@ -1,4 +1,5 @@
-"""iTunes Search API — music metadata source (no key)."""
+"""! @file
+@brief iTunes Search API - music metadata source (no key)."""
 MANIFEST = {
     "id": "metasrc_itunes", "name": "iTunes (music)", "version": "1.0.0",
     "description": "Track metadata from the iTunes Search API: title, artist, album, "
@@ -16,7 +17,7 @@ def register(host):
         out = []
         for t in r.get("results", []):
             out.append({"id": t.get("trackId"), "title": t.get("trackName", ""),
-                        "subtitle": " · ".join(x for x in (t.get("artistName"), t.get("collectionName"),
+                        "subtitle": " | ".join(x for x in (t.get("artistName"), t.get("collectionName"),
                                                           (t.get("releaseDate") or "")[:4]) if x),
                         "thumb": t.get("artworkUrl100"),
                         "fields": {"title": t.get("trackName", ""), "artist": t.get("artistName", ""),

@@ -1,4 +1,5 @@
-"""Pose module: /api/pose, /api/bulk_pose, /api/pose_remove, stored skeletons."""
+"""! @file
+@brief Pose module: /api/pose, /api/bulk_pose, /api/pose_remove, stored skeletons."""
 import pytest
 from cimtest import post_json, picked_model, picked_name, read_meta, write_meta, box
 
@@ -72,5 +73,5 @@ def test_real_pose_single_person(client, upload, app):
         pytest.fail(f"{picked_name(app, 'pose')} failed on person_single: {j['pose']['note']}")
     assert len(j["pose"]["people"]) == 1, (
         f"{picked_name(app, 'pose')} found {len(j['pose']['people'])} skeletons in "
-        f"person_single.jpg, want 1 — tests/test_fixtures.py says whether the photo or "
+        f"person_single.jpg, want 1 - tests/test_fixtures.py says whether the photo or "
         f"the model is at fault")

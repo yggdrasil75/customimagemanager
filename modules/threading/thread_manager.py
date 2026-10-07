@@ -1,3 +1,6 @@
+"""! @file
+@brief The global thread manager: fair-share worker pools, the background
+processor that runs every durable queue, and memory / VRAM admission."""
 import os
 import time
 import threading
@@ -37,7 +40,7 @@ def _gpu_kind():
             return "shared"
         if any(t in name for t in ("integrated", "igpu", " apu", "radeon graphics",
                                    "iris", "uhd graphics", "hd graphics", "vega")):
-            # Common integrated-GPU name fragments (Intel iGPU, AMD APU/Vega).
+            # integrated GPU names (Intel iGPU, AMD APU / Vega)
             return "shared"
         total_ram = 0
         if psutil is not None:
@@ -46,20 +49,17 @@ def _gpu_kind():
             except Exception:
                 total_ram = 0
         if total_ram and vram and abs(vram - total_ram) / total_ram < 0.12:
-            # Its 'VRAM' is essentially the machine's RAM -> shared.
+            # its VRAM is system RAM
             return "shared"
         return "dedicated"
     except Exception:
         return "none"
 
 def _detect_mem_limit_mb():
-    """The memory limit this process actually runs under, in MB, or 0 if none.
-
-    Prefers the cgroup limit (what a Docker `--memory` cap or a k8s limit sets),
-    which is the number that matters on Docker-for-Windows/Mac where the whole
-    engine runs in a memory-capped VM. Falls back to total system RAM. Reads both
-    cgroup v2 (memory.max) and v1 (memory.limit_in_bytes); a limit at/above total
-    RAM means 'unlimited' and is ignored."""
+    """! @brief The memory limit this process runs under, in MB (0 = none): the cgroup
+    limit (Docker --memory, k8s; v2 or v1), else total RAM. A limit at or above
+    total RAM counts as none.
+    """
     total = 0
     if psutil is not None:
         try:
@@ -78,8 +78,7 @@ def _detect_mem_limit_mb():
                 break
         except Exception:
             continue
-    # A cgroup 'limit' of ~unlimited shows as a huge sentinel; treat >= total RAM
-    # (or absurdly large) as no real cap.
+    # an 'unlimited' cgroup reports a huge sentinel
     if limit and (limit < (total or limit + 1)) and limit < (1 << 62):
         return limit / (1024 * 1024)
     if total:
@@ -90,14 +89,11 @@ def _default_max():
     n = os.cpu_count() or 8
     return max(2, n)
 
-_TLS = threading.local()   # .worker: True on a thread running a dispatched job
+_TLS = threading.local()  # .worker: True on a pool job thread
 
 
 def _nice_worker(nice=10):
-    """Lower the calling thread's scheduling priority (Linux: niceness is
-    per-thread, so this touches only pool workers, never the request threads).
-    Background model runs then yield the CPU to the web front end on a
-    saturated box instead of competing with it as equals. No-op elsewhere."""
+    """! @brief Lower this thread's priority (Linux, per thread) so background jobs yield to requests."""
     try:
         os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), nice)
     except Exception:
@@ -105,57 +101,53 @@ def _nice_worker(nice=10):
 
 
 class ThreadManager:
-    """Global slot allocator. Thread-safe. Not a fixed executor: it tracks how
-    many logical tasks are active and computes each task's fair share of the
-    spare (non-reserved) slots on demand."""
+    """! @brief The global slot allocator: counts active tasks and hands each a fair share
+    of the spare slots; also the memory / VRAM admission and the background
+    processor that runs every durable queue.
+    """
 
     def __init__(self):
         self._lock = threading.RLock()
-        self._active = 0          # number of live logical tasks sharing spares
-        self._get_last_activity = None   # set via set_activity_source()
+        self._active = 0  # live tasks sharing the spares
+        self._get_last_activity = None  # set by set_activity_source()
         self._foreground = None
 
-    # ── sizing ────────────────────────────────────────────────────────────
     def max_slots(self):
-        """Total worker slots in the global pool: the CPU count (min 2)."""
+        """! @brief Total slots: the CPU count, at least 2."""
         return _default_max()
 
     def reserved(self):
-        """Slots kept free for responsiveness; clamped so at least 1 spare
-        remains."""
+        """! @brief Slots kept free for responsiveness (at least 1 spare remains)."""
         return max(0, min(RESERVED_SLOTS, self.max_slots() - 1))
 
     def spare(self):
-        """Slots available to hand out to background/feature tasks."""
+        """! @brief Slots available to background and feature tasks."""
         return max(1, self.max_slots() - self.reserved())
 
     def face_batch_size(self):
         kind = self.gpu_kind()
         if kind == "dedicated":
-            # Total card VRAM, not the resident-model budget fraction: batch
-            # activations are transient, not a persistent reservation, so sizing
-            # them off the budget would needlessly starve big cards. ~8GB→16,
-            # ~16GB→32, ~32GB→64 (R9700).
+            # Batch size from the card's total VRAM (activations are transient):
+            # ~8 GB -> 16, ~16 GB -> 32, ~32 GB -> 64.
             vram_gb = 0.0
             try:
                 if torch is not None and torch.cuda.is_available():
                     vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
             except Exception:
                 vram_gb = 0.0
-            n = int(vram_gb * 2)            # ~2 imgs per GB of VRAM
-            # round down to a power of two for predictable batches, clamp 4..64
+            n = int(vram_gb * 2)  # ~2 images per GB
+            # power of two, 4..64
             b = 1
             while b * 2 <= n:
                 b *= 2
             return max(4, min(64, b))
         if kind == "shared":
             return 4
-        # CPU-only: one image per core, floor 1 (a Pi lands at 1).
+        # CPU only: one image per core
         return max(1, min(8, (os.cpu_count() or 1)))
 
     def slots_for(self, want=None):
-        """Fair share of the spare pool for one task, given how many tasks are
-        currently active. Always >= 1; never more than `want` if given."""
+        """! @brief One task's fair share of the spare slots (at least 1, at most `want`)."""
         with self._lock:
             active = max(1, self._active)
             share = max(1, self.spare() // active)
@@ -163,7 +155,6 @@ class ThreadManager:
             share = min(share, max(1, int(want)))
         return share
 
-    # ── task lifecycle ────────────────────────────────────────────────────
     def _enter(self):
         with self._lock:
             self._active += 1
@@ -173,9 +164,7 @@ class ThreadManager:
             self._active = max(0, self._active - 1)
 
     def pool(self, want=None, name=None):
-        """Context manager yielding a ThreadPoolExecutor sized to this task's
-        fair share. Registers the task for the duration so concurrent tasks
-        split the spares evenly.
+        """! @brief A ThreadPoolExecutor sized to this task's fair share, for a `with` block:
 
             with tm.pool(want=8) as ex:
                 ex.map(...)
@@ -183,20 +172,17 @@ class ThreadManager:
         return _ManagedPool(self, want, name)
 
     def run(self, fn, iterable, want=None, name=None):
-        """Convenience: map fn over iterable on a fair-share pool, return list of
-        results in completion order is NOT guaranteed — order follows executor.map
-        (input order)."""
+        """! @brief executor.map over a fair-share pool. @return results in input order."""
         with self.pool(want=want, name=name) as ex:
             return list(ex.map(fn, iterable))
 
-    # ── background processor ──────────────────────────────────────────────
-    # One worker thread services every durable queue (upload, gdl, …). Each
-    # subsystem registers a *source*: a claim() that returns the next unit of
-    # work or None, and a handle() that runs it. The loop round-robins the
-    # sources, and on each pass fills every free thread in the shared pool with
-    # whatever it can claim — so a subsystem never owns threads or sizes a pool,
-    # it just says "here's how to get one job and how to run it." Concurrency is
-    # the global spare-slot budget, shared across all sources at once.
+    ## @brief Register a durable work source for the background processor.
+    # One thread round-robins the sources and fills every free pool slot with
+    # claim() results; a source never owns threads.
+    # @param claim   fn() -> the next job, or None.
+    # @param handle  fn(job) runs it.
+    # @param key_of  fn(job) -> serialisation key (one job per key at a time).
+    # @param cost_of fn(job) -> MB to reserve.
     def register_source(self, name, claim, handle, key_of=None, cost_of=None):
         with self._lock:
             srcs = getattr(self, "_sources", None)
@@ -207,11 +193,10 @@ class ThreadManager:
             self._ensure_processor()
 
     def can_afford(self, cost_mb, inflight_hint=None):
-        """True if a job estimated at cost_mb MB may start now: either it fits in
-        current headroom, or nothing is running yet (we always let at least one
-        job through so a job bigger than the whole budget can't deadlock the
-        queue — the best a tiny box can do is one-at-a-time). No budget set →
-        always True. Sources call this in claim() before taking a big row."""
+        """! @brief True when a job of `cost_mb` may start now: it fits the headroom, or
+        nothing is running (one job always runs, so an oversized one can't deadlock).
+        No budget = always True.
+        """
         if cost_mb is None or cost_mb <= 0:
             return True
         if self.mem_budget_mb() <= 0:
@@ -219,11 +204,11 @@ class ThreadManager:
         with self._lock:
             running = len({f for f in getattr(self, "_inflight", ()) if not f.done()})
         if (inflight_hint if inflight_hint is not None else running) == 0:
-            return True                      # deadlock guard: one always runs
+            return True  # one always runs
         return self.mem_headroom_mb() >= cost_mb
 
     def wake(self):
-        """Nudge the background processor to look for work now."""
+        """! @brief Wake the background processor now."""
         ev = getattr(self, "_wake", None)
         if ev is not None:
             ev.set()
@@ -234,8 +219,7 @@ class ThreadManager:
         self.wake()
 
     def clear_foreground(self, name=None):
-        """Drop foreground promotion. If name is given, only clears when it
-        matches (so a stale clear can't cancel a newer foreground)."""
+        """! @brief End foreground promotion (only for `name` when given, so a stale clear can't cancel a newer one)."""
         with self._lock:
             if name is None or self._foreground == name:
                 self._foreground = None
@@ -246,19 +230,19 @@ class ThreadManager:
             return self._foreground
 
     def _ensure_processor(self):
-        # Called under _lock. Starts the single processor thread once.
+        # called under _lock; starts the processor once
         if getattr(self, "_proc_started", False):
             return
         self._proc_started = True
         self._wake = threading.Event()
-        self._inflight = set()          # live futures, for slot accounting
+        self._inflight = set()  # running futures, for slot accounting
         self._ex = ThreadPoolExecutor(max_workers=self.max_slots(),
                                       thread_name_prefix="bg", initializer=_nice_worker)
         threading.Thread(target=self._process_loop, daemon=True,
                          name="bg-processor").start()
 
     def _free_slots(self):
-        # Spare budget minus jobs currently running under the processor.
+        # spare slots minus running jobs
         with self._lock:
             self._inflight = {f for f in self._inflight if not f.done()}
             return self.spare() - len(self._inflight), len(self._inflight)
@@ -293,14 +277,14 @@ class ThreadManager:
         with self._lock:
             try:
                 fut = self._ex.submit(_run)
-            except RuntimeError:           # executor torn down: interpreter exiting
+            except RuntimeError:  # executor gone: interpreter exiting
                 self._exiting = True
                 self._uncommit_mem(cost)
                 if key:
                     self.release_key(key)
                 return False
-            fut._src_name = src_name          # so _foreground_idle can tell whose
-            self._inflight.add(fut)           # jobs are still running
+            fut._src_name = src_name  # tag the source, for _foreground_idle
+            self._inflight.add(fut)
         return True
 
     def _process_loop(self):
@@ -309,11 +293,7 @@ class ThreadManager:
             try:
                 self._process_once(POLL)
             except Exception:
-                # A bug in one source's claim/dispatch must never kill the only
-                # background thread — that would silently stop ALL cycling. Log
-                # via stderr and keep going after a short breather.
-                # import traceback, sys
-                # traceback.print_exc(file=sys.stderr)
+                # A bug in one source must not kill the only background thread: log and go on.
                 time.sleep(POLL)
 
     def _process_once(self, POLL):
@@ -326,13 +306,11 @@ class ThreadManager:
         if not all_sources:
             self._wake.wait(timeout=POLL); self._wake.clear(); return
 
-        # Foreground preemption: while a source is promoted, service ONLY it,
-        # so a manual action gets the whole pool. When it produces no job on a
-        # pass that had free slots AND its own in-flight work is done, it's
-        # drained -> auto-clear and fall back to round-robin next iteration.
+        # A promoted (foreground) source gets the whole pool until it has nothing
+        # pending or running; then round-robin resumes.
         if fg is not None:
             src = all_sources.get(fg)
-            if src is None:                       # promoted source vanished
+            if src is None:  # promoted source gone
                 self.clear_foreground(fg); return
             started = 0
             while free > 0:
@@ -352,7 +330,7 @@ class ThreadManager:
         for i, (name, src) in enumerate(ordered):
             if free <= 0:
                 break
-            with self._lock:                      # honor a mid-run promotion
+            with self._lock:  # a promotion may arrive mid-pass
                 if self._foreground is not None:
                     return
             started = 0
@@ -362,19 +340,15 @@ class ThreadManager:
                 else:
                     break
             if started and i == 0 and self._source_idle(name):
-                # The lead produced work and is now fully drained (nothing pending
-                # or running): hand the lead to the next source next tick.
+                # this source produced work and is drained: the next source leads
                 self._advance_rr(name)
-            # Whether it drained, stayed busy, or had nothing, fall through to the
-            # next source so any remaining free slots get used.
+            # free slots left: try the next source
 
         if not started_any:
             self._wake.wait(timeout=POLL); self._wake.clear()
 
     def _rr_order(self, all_sources):
-        """Sources in service order for this tick, rotated so the cursor source is
-        tried first. Keeps a stable order otherwise, so drain-one-at-a-time is
-        deterministic and every source eventually leads."""
+        """! @brief Sources in service order, rotated so the cursor's source goes first."""
         items = list(all_sources.items())
         cur = getattr(self, "_rr_cursor", None)
         if cur is not None:
@@ -383,9 +357,7 @@ class ThreadManager:
         return items
 
     def _advance_rr(self, drained_name):
-        """Move the round-robin cursor past the source that just drained, so the
-        next source leads next tick (prevents one busy source from always going
-        first and starving the rest)."""
+        """! @brief Move the cursor past a drained source so no source always leads."""
         with self._lock:
             names = list(getattr(self, "_sources", {}).keys())
         if not names:
@@ -397,39 +369,34 @@ class ThreadManager:
         self._rr_cursor = names[(i + 1) % len(names)]
 
     def inflight(self, name=None):
-        """Jobs running under the processor, for one source or all of them."""
+        """! @brief Jobs running for one source, or all."""
         with self._lock:
             self._inflight = {f for f in self._inflight if not f.done()}
             return sum(1 for f in self._inflight
                        if name is None or getattr(f, "_src_name", None) == name)
 
     def _source_idle(self, name):
-        """True when `name` has no jobs in flight. Mirrors _foreground_idle but for
-        any source, so drain-one-at-a-time can tell 'claim dried up but a batch is
-        still running' (wait) from 'truly nothing left' (advance)."""
+        """! @brief True when a source has no jobs running."""
         with self._lock:
             self._inflight = {f for f in self._inflight if not f.done()}
             return not any(getattr(f, "_src_name", None) == name
                            for f in self._inflight)
 
     def _foreground_idle(self, name):
-        """True when the foreground source has no in-flight jobs left. We tag each
-        dispatched future with its source name so we can tell whose work is still
-        running."""
+        """! @brief True when the foreground source has no jobs running."""
         with self._lock:
             self._inflight = {f for f in self._inflight if not f.done()}
             return not any(getattr(f, "_src_name", None) == name
                            for f in self._inflight)
 
-    # ── memory manager ────────────────────────────────────────────────────
     def rss_mb(self):
-        """Resident set size in MB, or 0 if unknown."""
+        """! @brief Resident memory in MB, or 0."""
         if _PROC is not None:
             try:
                 return _PROC.memory_info().rss / (1024 * 1024)
             except Exception:
                 pass
-        try:  # /proc fallback (Linux)
+        try:  # /proc fallback
             with open(f"/proc/{os.getpid()}/statm") as f:
                 pages = int(f.read().split()[1])
             return pages * (os.sysconf("SC_PAGE_SIZE") / (1024 * 1024))
@@ -437,14 +404,10 @@ class ThreadManager:
             return 0.0
 
     def mem_budget_mb(self):
-        """Soft RSS budget in MB. Resolution order:
-          1. CIM_MEM_BUDGET_MB if set (explicit wins; 0 disables admission).
-          2. The container's cgroup memory limit (Docker on Windows/Mac/Linux all
-             surface one) times CIM_MEM_BUDGET_FRAC, default 0.8 — this is what
-             makes a 2 GB Docker cap Just Work with no configuration.
-          3. Total system RAM times the same fraction, if psutil is present.
-          4. 0 (disabled) when nothing is detectable.
-        Cached briefly since cgroup reads hit the filesystem."""
+        """! @brief Soft RSS budget in MB: CIM_MEM_BUDGET_MB (0 disables), else the cgroup
+        limit, else total RAM, times CIM_MEM_BUDGET_FRAC (0.8); 0 when nothing is
+        known. Cached briefly.
+        """
         now = time.time()
         cached = getattr(self, "_budget_cache", None)
         if cached and now - cached[1] < 10:
@@ -463,18 +426,12 @@ class ThreadManager:
         return (self.rss_mb() + committed) / budget
 
     def under_memory_pressure(self, threshold=0.9):
-        """True when RSS is within `threshold` of the soft budget. Producers can
-        poll this to shrink batches or pause enqueuing."""
+        """! @brief True when RSS is within `threshold` of the budget."""
         return self.memory_pressure() >= threshold
 
     def ingest_pressure(self):
-        """! @brief Snapshot of how loaded the background pool is right now.
-        @return dict with: busy (running bg jobs), spare (total handoutable
-                slots), free (spare - busy), mem (memory_pressure ratio),
-                saturated (bool: no free slot OR near the memory budget).
-        Used by the upload endpoint to decide, per request, whether it can
-        afford to run the convert/index chain inline (and give the client a
-        true receipt) or must spool and defer. Cheap: no work, just accounting.
+        """! @brief How loaded the background pool is (for inline vs queued uploads).
+        @return {busy, spare, free, mem, saturated}.
         """
         with self._lock:
             inflight = getattr(self, "_inflight", None)
@@ -486,8 +443,7 @@ class ThreadManager:
                 "saturated": free <= 0 or mem >= 0.9}
 
     def mem_headroom_mb(self):
-        """MB of soft budget still free right now (budget - current RSS -
-        committed cost of in-flight jobs). inf when no budget is set."""
+        """! @brief Budget left: budget - RSS - committed job costs (inf without a budget)."""
         budget = self.mem_budget_mb()
         if budget <= 0:
             return float("inf")
@@ -504,19 +460,17 @@ class ThreadManager:
             self._committed_mb = max(0.0,
                 getattr(self, "_committed_mb", 0.0) - max(0.0, cost_mb))
 
-    # ── GPU / VRAM axis ───────────────────────────────────────────────────
     def gpu_kind(self):
-        """'dedicated', 'shared', or 'none' — cached. See _gpu_kind."""
+        """! @brief "dedicated", "shared" or "none" (cached)."""
         k = getattr(self, "_gpu_kind_cache", None)
         if k is None:
             k = self._gpu_kind_cache = _gpu_kind()
         return k
 
     def vram_budget_mb(self):
-        """Soft budget for DEDICATED VRAM (its own pool, separate from RAM). 0
-        disables the axis. Explicit CIM_VRAM_BUDGET_MB wins; else a fraction of
-        the discrete card's reported memory. Meaningless on shared/none GPUs
-        (their memory is RAM and is governed by the RAM budget instead)."""
+        """! @brief Budget for dedicated VRAM: CIM_VRAM_BUDGET_MB, else a share of the card.
+        0 disables (shared GPUs use the RAM budget).
+        """
         if self.gpu_kind() != "dedicated":
             return 0
         if torch is None:
@@ -528,8 +482,7 @@ class ThreadManager:
             return 0
 
     def vram_headroom_mb(self):
-        """Free dedicated-VRAM budget (budget - committed model VRAM). inf when no
-        VRAM budget/axis."""
+        """! @brief VRAM budget left (inf without one)."""
         if self.vram_budget_mb() <= 0:
             return float("inf")
         with self._lock:
@@ -541,7 +494,7 @@ class ThreadManager:
             d = str(device).lower()
             on_cuda = d.startswith("cuda") or d.startswith("gpu")
             if not on_cuda:
-                return "ram"                       # cpu / mps / anything non-CUDA
+                return "ram"  # CPU, MPS, anything not CUDA
             return "vram" if self.gpu_kind() == "dedicated" else "ram"
         if gpu and self.gpu_kind() == "dedicated":
             return "vram"
@@ -562,7 +515,7 @@ class ThreadManager:
             if committed <= 0:
                 return True
             return self.vram_headroom_mb() >= cost_mb
-        # RAM path (CPU model, or shared/integrated GPU whose VRAM is system RAM).
+        # RAM: a CPU model, or a shared GPU
         return self.can_afford(cost_mb)
 
     def reserve_model(self, cost_mb, gpu=False, device=None):
@@ -579,10 +532,8 @@ class ThreadManager:
             self._committed_vram_mb = max(0.0,
                 getattr(self, "_committed_vram_mb", 0.0) - max(0.0, cost_mb))
 
-    # ── idle tool ─────────────────────────────────────────────────────────
     def set_activity_source(self, get_last_activity):
-        """Register a zero-arg callable returning the epoch time of the last
-        user activity (manager passes `lambda: _last_activity`)."""
+        """! @brief Set fn() -> epoch of the last user activity."""
         self._get_last_activity = get_last_activity
 
     def idle_secs(self):
@@ -597,18 +548,13 @@ class ThreadManager:
             return float("inf")
 
     def is_idle(self):
-        """True when the app has been quiet long enough for background work.
-        Also refuses to report idle while under memory pressure, so heavy
-        background jobs don't kick off when there's no headroom."""
+        """! @brief True when the app has been quiet long enough and memory isn't tight."""
         return self.seconds_since_activity() >= self.idle_secs()
 
-    # ── per-key serialization gate ────────────────────────────────────────
     def try_acquire_key(self, key):
-        """Non-blocking claim of a serialization key (e.g. a gdl site). Returns
-        True if this caller now owns `key` and must call release_key(key) when
-        done; False if another task already holds it. Used to guarantee at most
-        one in-flight task per key (one download per site) while different keys
-        run concurrently."""
+        """! @brief Claim a serialisation key (e.g. one download per site) without blocking.
+        @return True when claimed (call release_key), False when held elsewhere.
+        """
         with self._lock:
             held = getattr(self, "_keys", None)
             if held is None:
@@ -618,27 +564,20 @@ class ThreadManager:
             held.add(key)
             return True
 
-    # ── models: signed up by the broker, admitted here ───────────────────
-    # Memory is budgeted at load time (can_load_model / reserve_model); this is
-    # the job side. The broker registers every provider it takes
-    # (register_model) with what it runs on and what it costs; background
-    # sources ask try_acquire_model before claiming a job for it.
-    #   GPU model   → admitted by MEMORY: each running job reserves a working
-    #                 set sized from the model (activations + batch), against
-    #                 the device budget minus loaded models. So a 5090 runs
-    #                 dozens of yolo-n jobs and one or two 16 GB embedders,
-    #                 a 1080 Ti ten Mayaku jobs, a Pi two — the card decides,
-    #                 not a count. gpu_max_jobs (this module's setting) is an
-    #                 optional ceiling on top; 0 = memory alone.
-    #   external    → the concurrency its provider declared (an endpoint).
-    #   CPU model   → ungated here; slots and the RAM budget bound it.
-    JOB_MIN_MB = 384            # even a 6 MB yolo-n needs activations + batch
-    JOB_FRAC = 0.5              # working set ≈ half the model's own footprint
+    # Job admission per model (load-time memory is reserve_model's job):
+    #   GPU model: each job reserves a working set sized from the model, against
+    #              the device budget minus loaded models; gpu_max_jobs is an
+    #              optional ceiling (0 = memory alone).
+    #   external:  the concurrency its provider declared.
+    #   CPU model: not gated here; slots and the RAM budget bound it.
+    JOB_MIN_MB = 384  # even a tiny model needs activations
+    JOB_FRAC = 0.5  # working set ~ half the model
 
     def register_model(self, key, *, gpu=False, resource=None, concurrency=1, cost_mb=0):
-        """Sign a model up: key = "<capability>:<provider>". resource names an
-        external shared backend (its budget = concurrency, int or callable);
-        gpu=True puts it on the device memory budget; neither = CPU."""
+        """! @brief Sign a model up for job admission (key "<capability>:<provider>").
+        @param resource     external backend name; its budget is `concurrency`.
+        @param gpu          budget it against device memory; neither = CPU.
+        """
         with self._lock:
             models = getattr(self, "_models", None)
             if models is None:
@@ -651,8 +590,7 @@ class ThreadManager:
             return dict(getattr(self, "_models", {}))
 
     def set_gpu_max_jobs(self, n_or_fn):
-        """Optional ceiling on concurrent background GPU jobs (int or callable);
-        0 = by memory alone."""
+        """! @brief Ceiling on concurrent background GPU jobs (int or callable; 0 = memory alone)."""
         self._gpu_max_jobs = n_or_fn
 
     def gpu_max_jobs(self):
@@ -667,8 +605,7 @@ class ThreadManager:
         return max(self.JOB_MIN_MB, m.get("cost_mb", 0.0) * self.JOB_FRAC)
 
     def gpu_job_headroom_mb(self):
-        """Device memory left for jobs: budget − loaded models − running jobs.
-        Dedicated card: the VRAM budget; APU / iGPU: the RAM budget."""
+        """! @brief Device memory left for jobs (VRAM budget on a card, RAM budget on an APU)."""
         with self._lock:
             jobs = getattr(self, "_committed_gpu_job_mb", 0.0)
             loaded = getattr(self, "_committed_vram_mb", 0.0)
@@ -682,10 +619,10 @@ class ThreadManager:
             return len(getattr(self, "_gpu_jobs", {}))
 
     def try_acquire_model(self, key):
-        """Admission for one background job on model `key`: a token to
-        release_model() when done ("" when the model is ungated), or None when
-        its device/resource can't take another job now or a foreground caller
-        is on it."""
+        """! @brief Admit one background job on a model.
+        @return a token for release_model() ("" when ungated), or None when the device
+                or resource is full or in foreground use.
+        """
         m = self.models().get(key) or {}
         if m.get("resource"):
             c = m.get("concurrency", 1)
@@ -708,7 +645,7 @@ class ThreadManager:
             if len(jobs) >= self.spare():
                 return None
             cost = self.job_cost_mb(key)
-            if jobs and self.gpu_job_headroom_mb() < cost:      # one always runs (deadlock guard)
+            if jobs and self.gpu_job_headroom_mb() < cost:  # one always runs
                 return None
             tok = f"gpujob#{getattr(self, '_gpu_job_seq', 0)}"
             self._gpu_job_seq = getattr(self, "_gpu_job_seq", 0) + 1
@@ -717,7 +654,7 @@ class ThreadManager:
             return tok
 
     def release_model(self, token):
-        """Give back what try_acquire_model handed out."""
+        """! @brief Return what try_acquire_model handed out."""
         if not token:
             return
         with self._lock:
@@ -728,13 +665,10 @@ class ThreadManager:
                 return
         self.release_key(token)
 
-    # ── shared resources (the slots behind try_acquire_model) ────────────
-    # Interactive callers mark a resource busy (foreground_use) so no new
-    # background slot on it is handed out while they wait on it.
     def try_acquire_slot(self, resource, limit=1):
-        """Claim one of `limit` background slots on `resource`. Returns the slot
-        key to release_key() when done, or None if all are taken or a
-        foreground caller is using the resource (foreground_use)."""
+        """! @brief Claim one of `limit` background slots on a resource.
+        @return the key for release_key(), or None when full or in foreground use.
+        """
         with self._lock:
             if getattr(self, "_fg_use", {}).get(resource, 0) > 0:
                 return None
@@ -746,8 +680,7 @@ class ThreadManager:
 
     @contextmanager
     def foreground_use(self, resource):
-        """Mark `resource` as in interactive use for the block: background
-        claims on it wait (in-flight background jobs finish normally)."""
+        """! @brief Context manager: hold background claims on `resource` off while it is used interactively."""
         with self._lock:
             fg = getattr(self, "_fg_use", None)
             if fg is None:
@@ -761,19 +694,17 @@ class ThreadManager:
             self.wake()
 
     def in_worker(self):
-        """True on a thread running one of this manager's dispatched jobs."""
+        """! @brief True on a pool job thread."""
         return bool(getattr(_TLS, "worker", False))
 
     def key_free(self, key):
-        """True if `key` is not currently held. Non-mutating peek, for sources
-        that let the dispatcher (key_of) own acquisition/release and only want to
-        avoid claiming work while a batch under the same key is still in flight."""
+        """! @brief True when `key` is free (peek only)."""
         with self._lock:
             held = getattr(self, "_keys", None)
             return not (held and key in held)
 
     def release_key(self, key):
-        """Release a key claimed via try_acquire_key. Safe if not held."""
+        """! @brief Release a key (no-op when not held)."""
         with self._lock:
             held = getattr(self, "_keys", None)
             if held is not None:
@@ -783,7 +714,6 @@ class ThreadManager:
         with self._lock:
             return set(getattr(self, "_keys", None) or ())
 
-    # ── introspection ─────────────────────────────────────────────────────
     def status(self):
         with self._lock:
             active = self._active
@@ -810,30 +740,14 @@ class ThreadManager:
         }
 
 class _ModelReservation:
-    """Reserve a model's memory against the right pool for the duration of a
-    `with` block.
-
-    The RAM and VRAM cases are asymmetric on purpose:
-
-    * RAM (CPU model, or a shared / integrated GPU whose 'VRAM' is system RAM):
-      once the model is loaded its bytes are already in the process RSS, and
-      mem_headroom_mb subtracts RSS. Holding the reservation for the model's
-      whole life would double-count it. So the RAM reservation is a *transient*
-      that covers the load spike, then settles: after `settle()` (or a short
-      grace once entered) the committed amount is released because RSS now
-      reflects it. Callers that just wrap acquire+use get the load covered; the
-      steady state is accounted by RSS.
-
-    * VRAM (dedicated GPU): those bytes are NOT in RSS — they live on the card.
-      The reservation is held for the entire `with` block so vram_headroom_mb
-      reflects the pinned model the whole time.
-
-    Either budget being disabled makes the accounting a no-op."""
+    """! @brief Reserve a model's memory for a `with` block.
+    VRAM (dedicated card): held for the whole block; those bytes are not in RSS.
+    RAM (CPU or shared GPU): covers the load spike, then settles, because RSS
+    then counts the model and holding it would count it twice.
+    """
 
     def resize(self, new_cost_mb):
-        """Adjust a live reservation to the measured cost (the declared estimate
-        was only a guess). Applies the overhead pad and commits/releases the
-        delta against the current target pool."""
+        """! @brief Adjust to the measured cost (plus overhead pad) on the current pool."""
         new_cost = max(0.0, float(new_cost_mb or 0.0)) * self._tm.model_overhead_factor()
         if not self._active:
             self._cost = new_cost
@@ -852,7 +766,7 @@ class _ModelReservation:
         if new_target == self._target:
             return
         if self._active and self._cost > 0:
-            # Move the live commitment across pools.
+            # move the commitment across pools
             if self._target == "vram":
                 self._tm._uncommit_vram(self._cost)
                 self._tm._commit_mem(self._cost)
@@ -878,14 +792,9 @@ class _ModelReservation:
         return self
 
     def settle(self):
-        """Begin releasing a RAM reservation, but on a grace delay rather than
-        instantly. A just-loaded model's bytes aren't all in RSS yet (allocation
-        is lazy — memory faults in over the first moments of use), so dropping the
-        reservation the instant load() returns would open a window where headroom
-        looks larger than it really is and an upload raw could slip in and OOM.
-        We keep the reservation for CIM_MODEL_SETTLE_SECS (default 8s) so RSS
-        catches up, then release — after which the model is accounted purely by
-        RSS. No-op for VRAM (never in RSS; held until unload)."""
+        """! @brief Release a RAM reservation after CIM_MODEL_SETTLE_SECS (8 s): a fresh
+        model's memory faults in lazily, so RSS lags behind. No-op for VRAM.
+        """
         if not (self._active and self._target == "ram"):
             return
         delay = MODEL_SETTLE_SECONDS
@@ -894,7 +803,7 @@ class _ModelReservation:
             return
         def _release(cost=self._cost):
             self._tm._uncommit_mem(cost)
-        self._active = False           # logically settled; timer frees the bytes
+        self._active = False  # settled; the timer frees the bytes
         t = threading.Timer(delay, _release)
         t.daemon = True
         t.start()
@@ -909,8 +818,7 @@ class _ModelReservation:
         return False
 
 class _ManagedPool:
-    """Context manager returned by ThreadManager.pool(). Counts the task as
-    active for its lifetime and builds a right-sized ThreadPoolExecutor."""
+    """! @brief What ThreadManager.pool() returns: counts the task and sizes the executor."""
 
     def __init__(self, tm, want, name):
         self._tm = tm
@@ -935,7 +843,7 @@ class _ManagedPool:
             self._tm._leave()
         return False
 
-# Process-wide singleton + module-level shortcuts (mirrors model_registry).
+# process-wide manager and module-level shortcuts
 MANAGER = ThreadManager()
 
 max_slots = MANAGER.max_slots
@@ -967,7 +875,6 @@ release_key = MANAGER.release_key
 held_keys = MANAGER.held_keys
 seconds_since_activity = MANAGER.seconds_since_activity
 status = MANAGER.status
-# models: broker sign-up + job admission (see try_acquire_model)
 register_model = MANAGER.register_model
 models = MANAGER.models
 try_acquire_model = MANAGER.try_acquire_model
@@ -977,7 +884,6 @@ gpu_max_jobs = MANAGER.gpu_max_jobs
 gpu_jobs_running = MANAGER.gpu_jobs_running
 job_cost_mb = MANAGER.job_cost_mb
 gpu_job_headroom_mb = MANAGER.gpu_job_headroom_mb
-# shared resources (an external endpoint) + interactive-use marking
 try_acquire_slot = MANAGER.try_acquire_slot
 foreground_use = MANAGER.foreground_use
 in_worker = MANAGER.in_worker

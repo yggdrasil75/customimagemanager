@@ -28,7 +28,7 @@ body {
 
 .gallery-item:hover {
   transform: scale(1.03);
-  border-color: #60A5FA;
+  border-color: var(--cim-accent-400, #60a5fa);
   z-index: 10
 }
 
@@ -38,8 +38,8 @@ body {
 }
 
 .multi-selected {
-  border-color: #22c55e !important;
-  box-shadow: 0 0 0 2px #22c55e
+  border-color: var(--cim-ok-500, #22c55e) !important;
+  box-shadow: 0 0 0 2px var(--cim-ok-500, #22c55e)
 }
 
 .sel-check {
@@ -94,7 +94,7 @@ body {
   position: absolute;
   top: 3px;
   left: 3px;
-  background: #7c3aed;
+  background: var(--cim-accent2-600, #4f46e5);
   color: #fff;
   font-size: 9px;
   font-weight: 700;
@@ -231,7 +231,7 @@ canvas {
 }
 
 /* The reader occupies the same slot as the image viewer, so it must inherit the
-   same flex behaviour in BOTH editor_region orientations — otherwise switching
+   same flex behaviour in BOTH editor_region orientations - otherwise switching
    to book mode in the horizontal (stacked) layout collapses it to zero height.
    Tailwind's flex-1 is `flex:1 1 0%`, which is close but not identical to the
    `auto` basis #image_pane relies on, so it's set explicitly here rather than
@@ -331,7 +331,7 @@ canvas {
 }
 
 .tag-row .tag-x:hover {
-  color: #f87171
+  color: var(--cim-danger-400, #f87171)
 }
 
 .tag-row .tag-name {
@@ -348,18 +348,18 @@ canvas {
 
 .tag-row.tag-unconfirmed {
   border-style: dashed;
-  border-color: #b45309;
-  background: #2a1f12
+  border-color: var(--cim-warn-700, #b45309);
+  background: color-mix(in srgb, var(--cim-warn-900, #78350f) 45%, #111827)
 }
 
 .tag-row.tag-unconfirmed .tag-edit {
-  color: #fcd34d;
+  color: var(--cim-warn-300, #fcd34d);
   font-style: italic
 }
 
 .tag-row .tag-ok {
   cursor: pointer;
-  color: #4ade80;
+  color: var(--cim-ok-400, #4ade80);
   font-weight: 700;
   line-height: 1;
   padding: 0 2px;
@@ -367,7 +367,7 @@ canvas {
 }
 
 .tag-row .tag-ok:hover {
-  color: #86efac
+  color: var(--cim-ok-300, #86efac)
 }
 
 #meta_stars .star {
@@ -377,7 +377,7 @@ canvas {
 }
 
 #meta_stars .star.on {
-  color: #fbbf24
+  color: var(--cim-warn-400, #fbbf24)
 }
 
 #meta_stars:hover .star {
@@ -402,7 +402,7 @@ canvas {
   letter-spacing: 1px;
   line-height: 1.2
 }
-.iqa-stars-manual { color: #fbbf24; }   /* a rating you set: amber */
+.iqa-stars-manual { color: var(--cim-warn-400, #fbbf24); }   /* a rating you set: amber */
 
 /* A gallery view other than the grid is showing: the grid's own chrome
    (dropzone, pager, scroll) steps aside. Separate from .hidden so features.js
@@ -428,6 +428,6 @@ canvas {
 
 /* Settings: a pane the user may read but not save. */
 .cim-read-only[data-settings-pane]::before {
-  content: "Read only — you can view these settings but not change them.";
-  display: block; margin-bottom: 8px; font-size: 11px; color: #fbbf24;
+  content: "Read only - you can view these settings but not change them.";
+  display: block; margin-bottom: 8px; font-size: 11px; color: var(--cim-warn-400, #fbbf24);
 }

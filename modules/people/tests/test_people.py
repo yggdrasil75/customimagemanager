@@ -1,4 +1,5 @@
-"""People module: person/face region creation, box reuse on rescan, and name
+"""! @file
+@brief People module: person/face region creation, box reuse on rescan, and name
 propagation from the Faces/Bodies tabs into the image's MWG regions.
 
 Model-free tests hand _face_detect_batch fake detectors; the last test uses
@@ -41,7 +42,7 @@ def test_detection_writes_person_and_face_regions(client, upload):
 
 
 def test_rescan_reuses_boxes(client, upload):
-    """Detecting again (boxes jitter slightly between runs) must not stack boxes."""
+    """! @brief Detecting again (boxes jitter slightly between runs) must not stack boxes."""
     fn = upload(seed=102)
     _detect(fn)
     jitter_p = dict(PERSON, cx=.505, w=.41)
@@ -110,7 +111,7 @@ def test_read_routes(client, route, ungated):
 
 
 def test_real_detectors_on_single_person(client, upload, app):
-    """The picked detect.persons / detect.faces on a real one-person photo."""
+    """! @brief The picked detect.persons / detect.faces on a real one-person photo."""
     picked_model(app, "detect.persons")
     fn = upload.media("person_single.jpg")
     assert pc._face_detect_batch([fn], faces=True, bodies=True) == 0

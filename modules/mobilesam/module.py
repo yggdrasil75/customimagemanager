@@ -1,5 +1,5 @@
-"""
-MobileSAM provider (via ultralytics).
+"""! @file
+@brief MobileSAM provider (via ultralytics).
 ======================================================================
 A distilled SAM (ViT-Tiny encoder, ~40 MB): same promptable interface as
 SAM 2 at a fraction of the cost, lower mask quality. Class-agnostic, no

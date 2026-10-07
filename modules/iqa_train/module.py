@@ -1,5 +1,5 @@
-"""
-IQA-train module - the "IQA" sub-tab of the Trainer tab.
+"""! @file
+@brief IQA-train module - the "IQA" sub-tab of the Trainer tab.
 ======================================================================
 Off by default. Pretrains the Personal IQA scorer size series from
 labelled datasets on disk (AVA and friends: folder + labels file), using
@@ -55,8 +55,7 @@ def register(host):
             if d and os.path.isdir(d) else []
 
     def _reload_live(active):
-        host.config["iqa_train_active"] = active
-        host.save_config()
+        host.set_config("iqa_train_active", active)
         s = svc()
         try:
             return bool(s and s["reload"]())
@@ -103,7 +102,7 @@ def register(host):
         for key, cfg in (("datasets_text", "iqa_train_datasets"), ("sizes_text", "personal_iqa_sizes"),
                          ("required", "personal_iqa_required")):
             if d.get(key) is not None:
-                host.config[cfg] = str(d[key])
+                host.set_config(cfg, str(d[key]), save=False)
         host.save_config()
         datasets = bd.parse_dataset_lines(host.config.get("iqa_train_datasets", ""))
         tbl = _sizes()
@@ -126,7 +125,7 @@ def register(host):
             return jsonify({"success": False, "error": "personal_iqa module (and torch) required"})
         for key, cfg in (("datasets_text", "iqa_train_datasets"), ("required", "personal_iqa_required")):
             if d.get(key) is not None:
-                host.config[cfg] = str(d[key])
+                host.set_config(cfg, str(d[key]), save=False)
         host.save_config()
         datasets = bd.parse_dataset_lines(host.config.get("iqa_train_datasets", ""))
         if not datasets and not d.get("use_ratings") and not d.get("use_scores"):

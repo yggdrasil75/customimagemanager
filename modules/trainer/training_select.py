@@ -1,4 +1,5 @@
-"""Persistent training-image selection.
+"""! @file
+@brief Persistent training-image selection.
 
 A "selection set" is a named, persistent bag of rel_paths the user is curating
 for a training run. It survives restarts (stored in library.db) so a 5000-image
@@ -10,8 +11,8 @@ Selection strategies (pick N images from the library, minus what's already kept)
   - diverse  : greedy farthest-point over whole-image embeddings, so the picked
                set spreads across embedding space (most distinct look/content)
 
-Running a selection creates a fresh numbered set ("Set 1", "Set 2", …) and
-stores the picks into it immediately — there is no separate "keep" step. You
+Running a selection creates a fresh numbered set ("Set 1", "Set 2", ...) and
+stores the picks into it immediately - there is no separate "keep" step. You
 can optionally exclude images that already live in any other set so the same
 image isn't pulled into two sets. "clear" empties a set; "delete" removes it.
 Neither ever touches the gallery/library.
@@ -24,7 +25,7 @@ import numpy as np
 
 
 
-# ── schema ────────────────────────────────────────────────────────────────────
+# -- schema --------------------------------------------------------------------
 def ensure_tables(db):
     db.execute("""CREATE TABLE IF NOT EXISTS training_sets(
         name     TEXT PRIMARY KEY,
@@ -41,7 +42,7 @@ def ensure_tables(db):
         weights  TEXT,
         accuracy REAL,
         updated  REAL)""")
-    # ── migrations ──────────────────────────────────────────────────────────
+    # -- migrations ----------------------------------------------------------
     # A set now keeps an isolated WORKING COPY of each image under
     # media/.training_sets/<set>/input/, so editing/adding/removing boxes for
     # training never touches the gallery original. Members therefore carry:
@@ -70,7 +71,7 @@ def ensure_tables(db):
 
 
 def set_meta(db, name, **fields):
-    """Upsert per-set metadata (weights path, last accuracy, gallery_safe). Only
+    """! @brief Upsert per-set metadata (weights path, last accuracy, gallery_safe). Only
     provided fields are changed."""
     ensure_tables(db)
     row = db.execute("SELECT weights, accuracy, gallery_safe FROM training_set_meta "
@@ -97,7 +98,7 @@ def get_meta(db, name):
             "gallery_safe": bool(row["gallery_safe"]), "updated": row["updated"]}
 
 
-# ── training-config presets ───────────────────────────────────────────────────
+# -- training-config presets ---------------------------------------------------
 # A preset is a named snapshot of the trainer's settings fields. `settings` is a
 # dict of field-id -> value; a partial preset lists only what differs from the
 # UI defaults (the client fills the rest in). Presets are global, not per-set.
@@ -126,7 +127,7 @@ DEFAULT_PRESETS = {
 
 
 def _seed_default_presets(db):
-    """Insert the shipped default presets once, if the table is empty."""
+    """! @brief Insert the shipped default presets once, if the table is empty."""
     n = db.execute("SELECT COUNT(*) AS c FROM training_presets").fetchone()["c"]
     if n:
         return
@@ -138,7 +139,7 @@ def _seed_default_presets(db):
 
 
 def list_presets(db):
-    """All presets, oldest-created first so the defaults stay in a stable order."""
+    """! @brief All presets, oldest-created first so the defaults stay in a stable order."""
     ensure_tables(db)
     _seed_default_presets(db)
     rows = db.execute("SELECT name, settings, updated FROM training_presets "
@@ -154,7 +155,7 @@ def list_presets(db):
 
 
 def save_preset(db, name, settings):
-    """Create or overwrite a preset. `settings` must be a dict."""
+    """! @brief Create or overwrite a preset. `settings` must be a dict."""
     ensure_tables(db)
     name = (name or "").strip()
     if not name:
@@ -175,7 +176,7 @@ def delete_preset(db, name):
     db.commit()
 
 
-# ── set management ────────────────────────────────────────────────────────────
+# -- set management ------------------------------------------------------------
 def list_sets(db):
     ensure_tables(db)
     rows = db.execute(
@@ -209,7 +210,7 @@ def members(db, name):
 
 
 def member_records(db, name):
-    """Full per-member rows: source rel_path, editable work_path, checked flag."""
+    """! @brief Full per-member rows: source rel_path, editable work_path, checked flag."""
     ensure_tables(db)
     rows = db.execute(
         "SELECT rel_path, work_path, COALESCE(checked,0) AS checked "
@@ -219,7 +220,7 @@ def member_records(db, name):
 
 
 def work_paths(db, name):
-    """The editable copies for this set (falling back to source if a copy is
+    """! @brief The editable copies for this set (falling back to source if a copy is
     somehow missing), for training/validation to operate on."""
     return [(r["work_path"] or r["rel_path"]) for r in member_records(db, name)]
 
@@ -236,7 +237,7 @@ def member_set(db, name):
 
 
 def all_member_set(db):
-    """Union of rel_paths across every set — for 'exclude images already in a
+    """! @brief Union of rel_paths across every set - for 'exclude images already in a
     set' so the same image isn't pulled into two different sets."""
     ensure_tables(db)
     rows = db.execute("SELECT DISTINCT rel_path FROM training_set_members").fetchall()
@@ -244,7 +245,7 @@ def all_member_set(db):
 
 
 def next_set_name(db):
-    """Next free numbered name: 'Set 1', 'Set 2', … Reuses the lowest gap so
+    """! @brief Next free numbered name: 'Set 1', 'Set 2', ... Reuses the lowest gap so
     deleting Set 2 then creating again gives 'Set 2' back."""
     ensure_tables(db)
     used = set()
@@ -262,7 +263,7 @@ def next_set_name(db):
 
 
 def keep(db, name, rel_paths, work_paths_map=None):
-    """Add rel_paths to the persistent set. When work_paths_map is given
+    """! @brief Add rel_paths to the persistent set. When work_paths_map is given
     (rel_path -> work_path), store the editable-copy path alongside each source.
     Returns new member count."""
     ensure_tables(db)
@@ -285,7 +286,7 @@ def keep(db, name, rel_paths, work_paths_map=None):
 
 
 def clear(db, name):
-    """Empty the SELECTION (persistent set). Does NOT touch files/gallery."""
+    """! @brief Empty the SELECTION (persistent set). Does NOT touch files/gallery."""
     ensure_tables(db)
     db.execute("DELETE FROM training_set_members WHERE set_name=?", (name,))
     db.execute("UPDATE training_sets SET updated=? WHERE name=?", (time.time(), name))
@@ -301,8 +302,8 @@ def remove(db, name, rel_paths):
     db.commit()
 
 
-# ── selection strategies ──────────────────────────────────────────────────────
-# `kinds` is a set of allowed media_kind values ('image', 'video'). None => all.
+# -- selection strategies ------------------------------------------------------
+## @brief `kinds` is a set of allowed media_kind values ('image', 'video'). None => all.
 # YOLO can't train on audio, so callers pass {'image'} or {'image','video'}.
 def _kind_clause(kinds):
     if not kinds:
@@ -318,7 +319,7 @@ def _all_paths(db, exclude, kinds=None):
 
 
 def select_recent(db, n, exclude, kinds=None):
-    """Semi-random over the most recent n*2 files by mtime."""
+    """! @brief Semi-random over the most recent n*2 files by mtime."""
     pool_size = max(n * 2, n)
     where, params = _kind_clause(kinds)
     rows = db.execute(
@@ -337,7 +338,7 @@ def select_random(db, n, exclude, kinds=None):
 
 
 def select_diverse(db, n, exclude, kinds=None, iter_emb=None):
-    """Greedy farthest-point sampling over whole-image embeddings.
+    """! @brief Greedy farthest-point sampling over whole-image embeddings.
 
     Picks a random seed, then repeatedly adds the image whose nearest already-
     picked image is farthest away (max-min cosine distance). Spreads picks across
@@ -359,7 +360,7 @@ def select_diverse(db, n, exclude, kinds=None, iter_emb=None):
         except Exception:
             dim = None
     if not dim:
-        # no embeddings computed — nothing to be diverse over
+        # no embeddings computed - nothing to be diverse over
         return select_random(db, n, exclude, kinds)
     allowed = None
     if kinds:
@@ -401,7 +402,7 @@ STRATEGIES = {"recent": select_recent, "random": select_random, "diverse": selec
 
 def select(db, strategy, n, exclude_all_sets=True, set_name=None, extra_exclude=None,
            kinds=None, iter_emb=None):
-    """Return a list of rel_paths chosen by strategy.
+    """! @brief Return a list of rel_paths chosen by strategy.
 
     exclude_all_sets -- when True, skip any image that already lives in ANY set,
                         so a new set doesn't re-pick images you've already
@@ -430,7 +431,7 @@ def select(db, strategy, n, exclude_all_sets=True, set_name=None, extra_exclude=
 
 
 def create_run(db, strategy, n, exclude_all_sets=True, kinds=None):
-    """DEPRECATED — do not use for the trainer flow.
+    """! @brief DEPRECATED - do not use for the trainer flow.
 
     This selects + stores members but does NOT copy the images into the set's
     isolated working folder, so edits would fall through to the gallery original.

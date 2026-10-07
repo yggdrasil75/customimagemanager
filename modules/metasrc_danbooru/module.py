@@ -1,4 +1,5 @@
-"""Danbooru — photo tag source (md5 match, or tag search; no key)."""
+"""! @file
+@brief Danbooru - photo tag source (md5 match, or tag search; no key)."""
 MANIFEST = {
     "id": "metasrc_danbooru", "name": "Danbooru (photos)", "version": "1.0.0",
     "description": "Tags, artist and source URL for an image found on danbooru.donmai.us "
@@ -12,7 +13,7 @@ def _cand(p):
     tags = [t for k in ("tag_string_character", "tag_string_copyright", "tag_string_general")
             for t in (p.get(k) or "").split()]
     return {"id": p.get("id"), "title": f"post #{p.get('id')}",
-            "subtitle": " · ".join(x for x in (p.get("tag_string_artist"), p.get("tag_string_copyright", "")[:60]) if x),
+            "subtitle": " | ".join(x for x in (p.get("tag_string_artist"), p.get("tag_string_copyright", "")[:60]) if x),
             "thumb": p.get("preview_file_url"),
             "fields": {"tags": [t.replace("_", " ") for t in tags],
                        "artist": (p.get("tag_string_artist") or "").replace("_", " "),

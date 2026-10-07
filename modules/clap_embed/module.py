@@ -1,5 +1,5 @@
-"""
-CLAP module — audio ↔ text embeddings (LAION CLAP, Microsoft CLAP).
+"""! @file
+@brief CLAP module - audio <-> text embeddings (LAION CLAP, Microsoft CLAP).
 ======================================================================
 Provides `embed.audio` with two CLAP families. Both put audio and text in
 one vector space, so the handle carries .embed_text: the music module uses
@@ -66,8 +66,8 @@ def _normalise(v):
 
 
 def load_windows(abs_path, max_seconds, sr=SR, window=WINDOW):
-    """Mono waveform windows of `window` s from the middle `max_seconds` of the
-    file; the last partial window is kept when it is ≥ 1 s. [] when unreadable."""
+    """! @brief Mono waveform windows of `window` s from the middle `max_seconds` of the
+    file; the last partial window is kept when it is >= 1 s. [] when unreadable."""
     try:
         total = float(librosa.get_duration(path=abs_path))
     except Exception:

@@ -5,7 +5,7 @@
 <div id="dedup_train_pane" class="hidden flex-1 overflow-y-auto p-3 space-y-3 text-sm">
   <div>
     <div class="flex justify-between items-center">
-      <span class="font-bold text-purple-300">Train duplicate detector (CNN sizes)</span>
+      <span class="font-bold text-indigo-300">Train duplicate detector (CNN sizes)</span>
       <span id="ddt_phase" class="text-xs text-gray-400">idle</span>
     </div>
     <p class="text-xs text-gray-500 mt-1">Library images are turned into synthetic pairs: re-encoded, resized,
@@ -34,8 +34,8 @@
   <!-- Sources -->
   <div class="space-y-1">
     <label class="trlbl">Sources</label>
-    <label class="trck" title="Use every image in this library as training material. Images are only read, never changed."><input type="checkbox" id="ddt_use_library" checked class="accent-purple-500"> This library</label>
-    <label class="trck" title="Also learn from the pairs you merged or marked 'not a duplicate' in the Dedup panel. They get one extra pass per epoch and their own accuracy column in the report."><input type="checkbox" id="ddt_use_feedback" checked class="accent-purple-500"> My dedup decisions (<span id="ddt_fb_n">0</span> pairs)</label>
+    <label class="trck" title="Use every image in this library as training material. Images are only read, never changed."><input type="checkbox" id="ddt_use_library" checked class="accent-indigo-500"> This library</label>
+    <label class="trck" title="Also learn from the pairs you merged or marked 'not a duplicate' in the Dedup panel. They get one extra pass per epoch and their own accuracy column in the report."><input type="checkbox" id="ddt_use_feedback" checked class="accent-indigo-500"> My dedup decisions (<span id="ddt_fb_n">0</span> pairs)</label>
     <label class="trlbl mt-1">Extra dataset folders <span class="text-gray-500">(optional, one per line, scanned recursively)</span></label>
     <textarea id="ddt_folders" rows="2" class="trinp font-mono" title="Folders of images outside the library to add to the pool (large public dumps make the models generalise better). Saved for next time."
               placeholder="/data/AVA/images&#10;/data/gelbooru"></textarea>
@@ -50,7 +50,7 @@
   </div>
 
   <details>
-    <summary class="trlbl cursor-pointer select-none text-purple-300">Advanced</summary>
+    <summary class="trlbl cursor-pointer select-none text-indigo-300">Advanced</summary>
     <div class="tr-flow mt-2">
       <div class="tr-field"><label class="trlbl">Chunk (images)</label><input id="ddt_chunk" type="number" value="1024" min="8" class="trinp" title="Images per work chunk. Pairs for the next chunk are prepared while the current one trains; bigger chunks use more RAM."></div>
       <div class="tr-field"><label class="trlbl">Batch</label><input id="ddt_batch" type="number" value="1024" min="4" class="trinp" title="Pairs per optimiser step, for every size. Bigger is better for the graded labels; if it does not fit the GPU, keep this and set a micro-batch instead."></div>
@@ -63,20 +63,20 @@
       <div class="tr-field"><label class="trlbl">Seed</label><input id="ddt_seed" type="number" value="0" min="0" class="trinp" title="Random seed; same seed + same inputs = reproducible build."></div>
     </div>
     <div class="tr-flow mt-2">
-      <label class="trck" title="Load the whole decoded cache into RAM instead of memory-mapping it (side*side*3 bytes per image: 196 KB at 256 px, 786 KB at 512). Faster if it fits."><input type="checkbox" id="ddt_in_ram" class="accent-purple-500"> Hold cache in RAM</label>
-      <label class="trck" title="Continue an interrupted build (crash, stop, reboot) from its checkpoint when the file list, sizes, seed and chunk match. A checkpoint is written after every chunk, at most once a minute, and deleted when the build finishes. Untick to start over."><input type="checkbox" id="ddt_resume" checked class="accent-purple-500"> Resume from checkpoint</label>
-      <label class="trck" title="torch.compile the nets (CUDA, or ROCm 6.4+ with Triton for your card). Slower first chunk, faster after. Untick if the build fails right after 'compiling nets'."><input type="checkbox" id="ddt_compile" class="accent-purple-500"> torch.compile</label>
+      <label class="trck" title="Load the whole decoded cache into RAM instead of memory-mapping it (side*side*3 bytes per image: 196 KB at 256 px, 786 KB at 512). Faster if it fits."><input type="checkbox" id="ddt_in_ram" class="accent-indigo-500"> Hold cache in RAM</label>
+      <label class="trck" title="Continue an interrupted build (crash, stop, reboot) from its checkpoint when the file list, sizes, seed and chunk match. A checkpoint is written after every chunk, at most once a minute, and deleted when the build finishes. Untick to start over."><input type="checkbox" id="ddt_resume" checked class="accent-indigo-500"> Resume from checkpoint</label>
+      <label class="trck" title="torch.compile the nets (CUDA, or ROCm 6.4+ with Triton for your card). Slower first chunk, faster after. Untick if the build fails right after 'compiling nets'."><input type="checkbox" id="ddt_compile" class="accent-indigo-500"> torch.compile</label>
     </div>
   </details>
 
   <!-- Outputs -->
   <div class="tr-flow">
-    <label class="trck" title="Write every trained size to models/dup_cnn_&lt;size&gt;.pt, copy the active one to models/dup_cnn.pt and reload the running Dedup scorer right away. No restart needed."><input type="checkbox" id="ddt_install" checked class="accent-emerald-500"> Install for this app (live)</label>
-    <label class="trck" title="Also write modules/dedup_cnn/pretrained/dup_cnn_&lt;size&gt;.pt (+ dup_cnn.pt = active), the copies the module falls back to. Ready to commit and ship."><input type="checkbox" id="ddt_ship" class="accent-purple-500"> Ship (write modules/dedup_cnn/pretrained)</label>
+    <label class="trck" title="Write every trained size to models/dup_cnn_&lt;size&gt;.pt, copy the active one to models/dup_cnn.pt and reload the running Dedup scorer right away. No restart needed."><input type="checkbox" id="ddt_install" checked class="accent-green-500"> Install for this app (live)</label>
+    <label class="trck" title="Also write modules/dedup_cnn/pretrained/dup_cnn_&lt;size&gt;.pt (+ dup_cnn.pt = active), the copies the module falls back to. Ready to commit and ship."><input type="checkbox" id="ddt_ship" class="accent-indigo-500"> Ship (write modules/dedup_cnn/pretrained)</label>
   </div>
 
   <div class="flex gap-2">
-    <button onclick="ddtBuild()" id="ddt_build" class="flex-1 bg-purple-600 hover:bg-purple-700 py-2 rounded font-bold text-sm"
+    <button onclick="ddtBuild()" id="ddt_build" class="flex-1 bg-indigo-600 hover:bg-indigo-700 py-2 rounded font-bold text-sm"
       title="Start training the ticked sizes with the settings above. Runs in the background; progress shows next to the title and in the status bar.">Train dedup models</button>
     <button onclick="ddtStop()" id="ddt_stop" class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded font-bold text-sm disabled:opacity-40" disabled
       title="Stop the running build. Nothing is written when stopped early.">Stop</button>
@@ -121,14 +121,14 @@
       <textarea id="ddts_folders" rows="2" class="trinp w-full font-mono"></textarea></label>
     <div class="flex flex-wrap gap-2 mt-1 items-center">
       <span id="ddts_sizes" class="flex gap-2"></span>
-      <label class="trck" title="Also train on this library's videos / tracks"><input type="checkbox" id="ddts_lib" checked class="accent-emerald-500"> library</label>
-      <label class="trck" title="Mix in your Dedup-panel merge / not-a-duplicate decisions on videos / tracks"><input type="checkbox" id="ddts_fb" checked class="accent-emerald-500"> feedback</label>
+      <label class="trck" title="Also train on this library's videos / tracks"><input type="checkbox" id="ddts_lib" checked class="accent-green-500"> library</label>
+      <label class="trck" title="Mix in your Dedup-panel merge / not-a-duplicate decisions on videos / tracks"><input type="checkbox" id="ddts_fb" checked class="accent-green-500"> feedback</label>
       <label class="text-gray-400">epochs <input id="ddts_epochs" type="number" value="3" min="1" class="trinp w-14"></label>
       <label class="text-gray-400" title="Steps per training window: 1 fps frames (video), 0.5 s windows (audio), consecutive frames (anim, &lt;= 30)">steps <input id="ddts_steps" type="number" value="32" min="2" class="trinp w-14"></label>
       <label class="text-gray-400">max items <input id="ddts_max" type="number" value="20000" min="2" class="trinp w-20"></label>
-      <label class="trck" title="Write every size to models/ and reload the live scorer (anim: also switches HEURDU Release to 1.0)"><input type="checkbox" id="ddts_install" checked class="accent-emerald-500"> install</label>
-      <label class="trck" title="Also write the module's pretrained/ folder, ready to commit"><input type="checkbox" id="ddts_ship" class="accent-purple-500"> ship</label>
-      <button onclick="ddtsBuild()" id="ddts_build" class="bg-purple-600 hover:bg-purple-700 px-3 py-1 rounded font-bold">Train</button>
+      <label class="trck" title="Write every size to models/ and reload the live scorer (anim: also switches HEURDU Release to 1.0)"><input type="checkbox" id="ddts_install" checked class="accent-green-500"> install</label>
+      <label class="trck" title="Also write the module's pretrained/ folder, ready to commit"><input type="checkbox" id="ddts_ship" class="accent-indigo-500"> ship</label>
+      <button onclick="ddtsBuild()" id="ddts_build" class="bg-indigo-600 hover:bg-indigo-700 px-3 py-1 rounded font-bold">Train</button>
       <button onclick="ddtsStop()" id="ddts_stop" class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded font-bold disabled:opacity-40" disabled>Stop</button>
     </div>
     <pre id="ddts_log" class="mt-1 bg-gray-950 border border-gray-700 rounded p-2 text-gray-400 font-mono text-[10px] whitespace-pre-wrap h-24 overflow-y-auto"></pre>

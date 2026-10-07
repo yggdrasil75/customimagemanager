@@ -20,7 +20,7 @@
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
-  // ── left column: width ──────────────────────────────────────────────────
+  // -- left column: width --------------------------------------------------
   function initLeft() {
     const pane = document.getElementById("left_pane");
     const grip = document.getElementById("left_splitter");
@@ -51,7 +51,7 @@
     });
   }
 
-  // ── controls pane: width (vertical) or height (horizontal) ────────────────
+  // -- controls pane: width (vertical) or height (horizontal) ----------------
   function initControls() {
     const region = document.getElementById("editor_region");
     const pane = document.getElementById("controls_pane");

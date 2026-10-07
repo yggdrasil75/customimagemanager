@@ -1,5 +1,5 @@
-"""
-iptc_import.py
+"""! @file
+@brief iptc_import.py
 ==============
 
 Reads IPTC IIM metadata from an image (or its sidecar) and returns it merged
@@ -40,7 +40,7 @@ EXIV2_RECORD_ALIASES = {
 }
 
 def _candidate_paths(filepath):
-    """Yield the paths worth trying for IPTC data, most-specific first.
+    """! @brief Yield the paths worth trying for IPTC data, most-specific first.
     A sidecar with the same stem takes priority for formats pyexiv2 chokes on."""
     stem = os.path.splitext(filepath)[0]
     seen = []
@@ -50,7 +50,7 @@ def _candidate_paths(filepath):
             yield p
 
 def _read_raw_iptc(filepath):
-    """Return the raw {tag_string: value} IPTC dict from the first readable
+    """! @brief Return the raw {tag_string: value} IPTC dict from the first readable
     candidate path, or {} if none. tag_string looks like
     'Iptc.NewsPhoto.ColorRepresentation'."""
     if pyexiv2 is None:
@@ -67,7 +67,7 @@ def _read_raw_iptc(filepath):
     return {}, None
 
 def _split_tag(tag_string):
-    """'Iptc.NewsPhoto.ColorRepresentation' -> ('NewsPhoto','ColorRepresentation').
+    """! @brief 'Iptc.NewsPhoto.ColorRepresentation' -> ('NewsPhoto','ColorRepresentation').
     Applies exiv2->schema record aliases (e.g. Application2 -> Application).
     Returns (None, None) for anything that doesn't fit the pattern."""
     parts = tag_string.split(".")
@@ -77,7 +77,7 @@ def _split_tag(tag_string):
     return None, None
 
 def read_iptc(filepath):
-    """Read IPTC and return a structure organized by record:
+    """! @brief Read IPTC and return a structure organized by record:
 
     {
       "source": "/path/that/had/the/iptc" | None,
@@ -156,7 +156,7 @@ def read_iptc(filepath):
     return {"source": source, "records": records_out}
 
 def summarize(filepath):
-    """Compact counts for logging / list views: how many known fields carry a
+    """! @brief Compact counts for logging / list views: how many known fields carry a
     value, and how many unknown tags were seen."""
     data = read_iptc(filepath)
     present = sum(1 for r in data["records"] for f in r["fields"] if f.get("present"))

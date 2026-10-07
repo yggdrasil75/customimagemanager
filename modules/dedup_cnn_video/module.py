@@ -1,5 +1,5 @@
-"""
-HEURDUV — learned video duplicate scorer (dedup_cnn_video).
+"""! @file
+@brief HEURDUV - learned video duplicate scorer (dedup_cnn_video).
 ======================================================================
 Scores pairs of kind "video" (more than 30 source frames; animations up to
 30 frames stay with HEURDU in dedup_cnn) with the HEURDUV sequence model
@@ -36,7 +36,7 @@ HF_SIZES = ["nano", "small", "medium", "large"]
 
 
 def _map(sa, sb, abs_a, abs_b):
-    """Step map for a merged pair: DTW path over the frames' 1024-bit hashes."""
+    """! @brief Step map for a merged pair: DTW path over the frames' 1024-bit hashes."""
     ha, hb = media_sig.frame_hashes(sa)[1], media_sig.frame_hashes(sb)[1]
     return path_to_map(seq_align.dtw_path(media_sig.seq_phash_cost(ha, hb)), len(sb))
 

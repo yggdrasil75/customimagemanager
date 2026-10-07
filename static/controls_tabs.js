@@ -15,12 +15,12 @@
   // filename last loaded per editor, so switching tabs doesn't refetch needlessly.
   const loaded = {};
 
-  // ── generic controls-tab registry ──────────────────────────────────────────
+  // -- generic controls-tab registry ------------------------------------------
   // Modules register their tabs instead of the core template hard-coding them.
   // A registered tab: {id, label, feature, onShow(filename)}. The button is
   // injected into the controls tab-bar extension area; its pane is expected to
   // exist as #controls_pane_<id> (module-provided partial or injected). The
-  // module doesn't know WHERE its tab goes — core places it.
+  // module doesn't know WHERE its tab goes - core places it.
   const REGISTERED = {};   // id -> {label, feature, onShow}
 
   function registerControlsTab(spec) {
@@ -32,7 +32,7 @@
       modeTab: !!spec.modeTab,   // hidden unless a left tab claims it (panes.js applyControlsMode)
     };
     // The pane (#controls_pane_<id>) is contributed server-side by the module
-    // (host.register_controls_pane), so it's already in the DOM — we only wire
+    // (host.register_controls_pane), so it's already in the DOM - we only wire
     // the button here.
     renderRegisteredTabs();
   }
@@ -100,15 +100,16 @@
     if (REGISTERED[tab]) loadEditor(tab, false);
   }
 
-  // When the open file changes, refresh the visible metadata tab and drop cached
-  // filenames for the hidden ones so they reload lazily on next visit.
+  /** @brief When the open file changes, refresh the visible metadata tab and drop cached
+   *  filenames for the hidden ones so they reload lazily on next visit.
+   */
   function onFileChanged() {
     const fn = currentFilename();
     Object.keys(REGISTERED).forEach((t) => { if (t !== activeTab) loaded[t] = null; });
     if (REGISTERED[activeTab] && fn) loadEditor(activeTab, true);
   }
 
-  // Wrap selectFile (gallery.js) so we get notified after each selection.
+  /** @brief Wrap selectFile (gallery.js) so we get notified after each selection. */
   function hookSelectFile() {
     if (typeof window.selectFile !== "function") { setTimeout(hookSelectFile, 200); return; }
     if (window.selectFile.__tabsHooked) return;

@@ -3,8 +3,8 @@
  * Injected by the module loader (host.add_asset("pose.js")). Owns:
  *   - the skeleton overlay, registered into the core canvas-overlay hook so it
  *     draws on top of the image and vanishes when this module is disabled;
- *   - the 🦴 Pose button (controls panel) + 🗑 Remove skeleton button;
- *   - the bulk 🦴 Pose button in the gallery selection bars.
+ *   - the Pose button (controls panel) + Remove skeleton button;
+ *   - the bulk Pose button in the gallery selection bars.
  * All buttons are injected into named mount points in the core templates; if a
  * mount is absent (template changed), injection is a silent no-op.
  *
@@ -23,7 +23,7 @@
   function redraw() {
     drawCanvas(); if (typeof popoutOpen !== "undefined" && popoutOpen) drawPopout();
   }
-  // ── overlay ────────────────────────────────────────────────────────────────
+  // -- overlay ----------------------------------------------------------------
   function drawSkeleton(c, dw, dh, scale) {
     const t = document.getElementById("toggle_skeleton");
     const pose = currentPose;
@@ -51,11 +51,11 @@
   }
   if (window.registerCanvasOverlay) registerCanvasOverlay(drawSkeleton);
 
-  // ── single-image handlers ───────────────────────────────────────────────────
+  // -- single-image handlers ---------------------------------------------------
   async function runPose() {
     if (!window.currentFile) { alert("Select an image first."); return; }
     const btn = document.getElementById("btn_pose"); const og = btn.innerText;
-    btn.innerText = "🦴 …"; btn.disabled = true;
+    btn.innerText = "Posing..."; btn.disabled = true;
     try {
       const response = await fetch("/api/pose", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -88,7 +88,7 @@
     if (!window.currentFile) { alert("Select an image first."); return; }
     if (!confirm("Delete the stored skeleton for this image? This cannot be undone.")) return;
     const btn = document.getElementById("btn_pose_remove"); const og = btn.innerText;
-    btn.innerText = "🗑 …"; btn.disabled = true;
+    btn.innerText = "🗑 ..."; btn.disabled = true;
     try {
       const d = await fetch("/api/pose_remove", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -105,13 +105,13 @@
     btn.innerText = og; btn.disabled = false;
   }
 
-  // ── bulk handler ────────────────────────────────────────────────────────────
+  // -- bulk handler ------------------------------------------------------------
   async function bulkPose() {
     const files = [...(selectedFiles || [])];
     if (!files.length) return;
     const btn = document.querySelector('.pose-bulk-btn');
-    const orig = btn ? btn.innerHTML : ""; if (btn) { btn.disabled = true; btn.innerHTML = "🦴 …"; }
-    showToast(`Estimating pose on ${files.length} image(s)…`);
+    const orig = btn ? btn.innerHTML : ""; if (btn) { btn.disabled = true; btn.innerHTML = "Posing..."; }
+    showToast(`Estimating pose on ${files.length} image(s)...`);
     try {
       const d = await fetch("/api/bulk_pose", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -133,27 +133,25 @@
   window.bulkPose = bulkPose;
   window.redrawPose = redraw;
 
-  // ── button injection ────────────────────────────────────────────────────────
-  // Append buttons to the general AI-tools and gallery-bulk extension areas.
-  // No pose-specific mount points in the core template — any module can do this.
+  // -- button injection --------------------------------------------------------
+  /** @brief Append buttons to the general AI-tools and gallery-bulk extension areas.
+   *  No pose-specific mount points in the core template - any module can do this.
+   */
   function buildButtons() {
     if (!window.registerControlButton) return;
     registerControlButton("viewer_toggles",
       '<label class="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">' +
-      '<input type="checkbox" id="toggle_skeleton" onchange="redrawPose()" class="accent-cyan-500">' +
+      '<input type="checkbox" id="toggle_skeleton" onchange="redrawPose()" class="accent-sky-500">' +
       'Skeleton</label>');
-    registerControlButton("ai_tools",
-      '<button onclick="runPose()" id="btn_pose" data-feature="ai.pose" ' +
-      'class="w-full bg-cyan-700 hover:bg-cyan-600 py-1.5 rounded font-bold text-sm">🦴 Pose</button>');
-    registerControlButton("ai_tools",
-      '<button onclick="removePose()" id="btn_pose_remove" style="display:none" ' +
-      'data-feature="ai.pose_remove" title="Delete the current (bad) skeleton from this image" ' +
-      'class="w-full bg-rose-800 hover:bg-rose-700 py-1.5 rounded font-bold text-sm">🗑 Remove skeleton</button>');
-    registerControlButton("gallery_bulk",
-      '<button onclick="bulkPose()" data-feature="ai.pose" ' +
-      'title="Estimate a skeleton/pose on every selected image and store it — this is what ' +
-      'T-pose aggregation reads, so run it over a person\'s images before Estimate T-pose" ' +
-      'class="pose-bulk-btn text-xs bg-cyan-700 hover:bg-cyan-600 px-3 py-1.5 rounded font-bold">🦴 Pose</button>');
+    registerControlButton("ai_tools", {label: "Pose", onclick: "runPose()", id: "btn_pose", feature: "ai.pose",
+      variant: "tertiary"});
+    registerControlButton("ai_tools", {label: "🗑 Remove skeleton", onclick: "removePose()", id: "btn_pose_remove",
+      hidden: true, feature: "ai.pose_remove", variant: "danger",
+      title: "Delete the current (bad) skeleton from this image"});
+    registerControlButton("gallery_bulk", {label: "Pose", onclick: "bulkPose()", feature: "ai.pose",
+      variant: "tertiary", cls: "pose-bulk-btn",
+      title: "Estimate a skeleton/pose on every selected image and store it - this is what " +
+             "T-pose aggregation reads, so run it over a person's images before Estimate T-pose"});
   }
 
   if (document.readyState === "loading")

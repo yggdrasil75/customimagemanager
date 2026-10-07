@@ -1,5 +1,5 @@
-"""
-People module — the People tab: face/body region scan worker, identity
+"""! @file
+@brief People module - the People tab: face/body region scan worker, identity
 clustering, person records (bio, appearances, relationships), the person
 editor and the T-pose / body / face mesh viewer.
 ======================================================================
@@ -10,7 +10,7 @@ detections + embeddings, clusters them into people, and owns every
 
 Core touchpoints are events and one service:
   service "people"      person_for_cluster, store_person_field, BODY_FIELDS,
-                        clusters_in_image — used by the LLM body-description action
+                        clusters_in_image - used by the LLM body-description action
   event  regions.cached(rel_path) -> cached face/body regions for an image
   event  labels.pool()            -> class names for the trainer's label pool
   event  file.deleted(rel_path)   -> drop cached rows
@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS persons (
 
 
 def _migrate(db):
-    """Columns added after the tables' first release (all no-ops when present)."""
+    """! @brief Columns added after the tables' first release (all no-ops when present)."""
     for stmt in ("ALTER TABLE files ADD COLUMN face_done INTEGER DEFAULT 0",
                  "ALTER TABLE files ADD COLUMN body_done INTEGER DEFAULT 0",
                  "ALTER TABLE face_regions ADD COLUMN unknown INTEGER DEFAULT 0",
@@ -168,15 +168,15 @@ def register(host):
     host.add_route("/api/faces/merge", pc.api_face_merge, methods=["POST"], feature="tab.faces", level="write", action='face_merge', fields=('src', 'dst'))
     host.add_route("/api/bodies/split", pc.api_body_split, methods=["POST"], feature="tab.faces", level="write")
 
-    # ── UI: People tab (left pane) + Person editor (controls pane) + mesh ──
+    # -- UI: People tab (left pane) + Person editor (controls pane) + mesh --
     for a in MANIFEST["assets"]:
         host.add_asset(a)
     host.register_left_pane("faces_pane.html")
     host.register_controls_pane("person", "person_editor.html", feature="tab.faces")
     host.register_centre_pane("person_mesh.html")
 
-    # ── background scan worker + persons cache ────────────────────────────
-    # Legacy: the People module used to own "detect faces on every scan"; that
+    # -- background scan worker + persons cache ----------------------------
+    ## @brief Legacy: the People module used to own "detect faces on every scan"; that
     # is the Face-detection model's own background switch now.
     def _migrate_settings():
         cfg = host.config
@@ -184,15 +184,15 @@ def register(host):
             sel = host.broker.current_selection().get("detect.faces") or {}
             host.broker.select("detect.faces", sel.get("provider") or host.broker.selected_id("detect.faces"),
                                sel.get("size"), sel.get("type"), True, sel.get("classes"))
-            cfg["model_selection"] = host.broker.current_selection()
+            host.persist_model_selection(save=False)
         if "face_bg_custom" in cfg:
-            cfg["our_model_bg"] = bool(cfg.pop("face_bg_custom"))   # personal_box migrates it on
+            host.set_config("our_model_bg", bool(cfg.pop("face_bg_custom")), save=False)  # personal_box migrates it on
     host.on_startup(_migrate_settings)
     host.on_startup(pc._register_face_source)      # the forced "Scan faces" button
     pc._register_sweeps()                          # Face / Person detection background switches
     host.on_startup(lambda: pc.rebuild_persons_cache())
 
-    # ── core integration ──────────────────────────────────────────────────
+    # -- core integration --------------------------------------------------
     def _regions_cached(rel_path):
         out = []
         db = host.db()
@@ -221,13 +221,8 @@ def register(host):
     host.on("labels.pool", _labels_pool)
 
     def _file_deleted(rel_path):
-        db = host.db()
         for tbl in ("face_regions", "body_regions"):
-            try:
-                db.execute(f"DELETE FROM {tbl} WHERE rel_path=?", (rel_path,))
-            except Exception:
-                pass
-        db.commit()
+            host.update_file(rel_path, table=tbl, remove=True, dont_write=True)
     host.on("file.deleted", _file_deleted)
 
     def _person_search(tok, value):
@@ -243,7 +238,7 @@ def register(host):
             params += bcids
         return clause, params
     host.register_search_type("person:", _person_search,
-        help="person:<id> — photos of a person (face cluster id, plus body-bridged photos when bodies are on)")
+        help="person:<id> - photos of a person (face cluster id, plus body-bridged photos when bodies are on)")
 
     host.provide_service("people", {
         "person_for_cluster": pc.person_for_cluster,

@@ -4,7 +4,7 @@
   async function runSegment(){
     if(!window.currentFile){ alert('Select an image first.'); return; }
     const btn=document.getElementById('btn_segment'); const og=btn.innerText;
-    btn.innerText='🎭 …'; btn.disabled=true;
+    btn.innerText='Segmenting...'; btn.disabled=true;
     try{
       const d=await fetch('/api/segment',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({filename:window.currentFile})}).then(r=>r.json());
@@ -27,8 +27,8 @@
     const files=[...selectedFiles];
     if(!files.length) return;
     const btn=document.querySelector('[data-ext-area="gallery_bulk"] button[onclick="bulkSegment()"]');
-    const orig=btn?btn.innerHTML:''; if(btn){ btn.disabled=true; btn.innerHTML='🎭 …'; }
-    showToast(`Segmenting ${files.length} image(s)…`);
+    const orig=btn?btn.innerHTML:''; if(btn){ btn.disabled=true; btn.innerHTML='Segmenting...'; }
+    showToast(`Segmenting ${files.length} image(s)...`);
     try{
       const d=await fetch('/api/bulk_segment',{method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -47,14 +47,12 @@
 
   function buildButtons() {
     if (!window.registerControlButton) return;
-    registerControlButton("ai_tools",
-      '<button onclick="runSegment()" id="btn_segment" data-feature="ai.segment" ' +
-      'title="Run the picked segmenter (Models → Segmentation) on this image and add masked regions for the whitelisted classes." ' +
-      'class="w-full bg-fuchsia-700 hover:bg-fuchsia-600 py-1.5 rounded font-bold text-sm">🎭 Segment</button>');
-    registerControlButton("gallery_bulk",
-      '<button onclick="bulkSegment()" data-feature="ai.segment" ' +
-      'title="Run the picked segmenter on every selected image, adding masked regions for the whitelisted classes" ' +
-      'class="text-xs bg-fuchsia-700 hover:bg-fuchsia-600 px-3 py-1.5 rounded font-bold">🎭 Segment</button>');
+    registerControlButton("ai_tools", {label: "Segment", onclick: "runSegment()", id: "btn_segment",
+      feature: "ai.segment", variant: "secondary",
+      title: "Run the picked segmenter (Models > Segmentation) on this image and add masked regions for the whitelisted classes."});
+    registerControlButton("gallery_bulk", {label: "Segment", onclick: "bulkSegment()", feature: "ai.segment",
+      variant: "secondary",
+      title: "Run the picked segmenter on every selected image, adding masked regions for the whitelisted classes"});
   }
   if (document.readyState === "loading") window.addEventListener("DOMContentLoaded", buildButtons);
   else buildButtons();

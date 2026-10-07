@@ -1,5 +1,5 @@
-"""
-Segmentation module — see seg_core.py.
+"""! @file
+@brief Segmentation module - see seg_core.py.
 """
 from . import seg_core as sc
 
@@ -28,16 +28,15 @@ def register(host):
     # Pipeline: the segment node's box-masking hook (run_pipeline seg_fn).
     host.register_pipeline_stage("segment_boxes", sc._segment_boxes, label="Segment (masks)")
 
-    # AI action target "segment": prompted masks merged into the file's regions.
+    ## @brief AI action target "segment": prompted masks merged into the file's regions.
     def _action(fp, bgr, meta, action):
         new = sc._segment_regions(bgr, action.get("prompt", ""))
         if new:
-            sc.write_metadata(fp, meta["tags"], meta["description"],
-                              sc._merge_regions(meta["regions"], new))
+            host.update_file(fp, set={"regions": sc._merge_regions(meta["regions"], new)}, meta=meta)
         return new
     host.register_action_target("segment", _action)
 
-    # The editor's AI picker: target "segment" → everything the picked
+    ## @brief The editor's AI picker: target "segment" -> everything the picked
     # segmentation model finds (masks become regions).
     def _picker_run(action_id, fp, bgr, meta):
         regs = sc._segment_regions(bgr, "") or []
@@ -46,7 +45,7 @@ def register(host):
     host.register_ai_actions("segment", lambda: [{"id": "all", "label": "Segment objects (picked model)", "target": "segment"}],
                              _picker_run, feature="ai.segment")
 
-    # Background sweep: polygons -> mask_svg on the instances the core built.
+    ## @brief Background sweep: polygons -> mask_svg on the instances the core built.
     def _masks(instances, width, height):
         for inst in instances:
             poly = inst.get("polygon")

@@ -1,8 +1,8 @@
-"""
-Faces module — face detection, identity embedding (ArcFace/insightface),
+"""! @file
+@brief Faces module - face detection, identity embedding (ArcFace/insightface),
 3D face shape, and the drawn-face gate.
 ======================================================================
-Model picks (Settings → Models):
+Model picks (Settings -> Models):
   detect.faces   YOLO face weights from the face registry (sizes n/s/m/l,
                  custom .pt), fetched into models/face/yolo on first use.
                  The handle applies this module's post-filter (min 32 px,
@@ -39,7 +39,7 @@ _SIZES = ["n", "s", "m", "l"]
 def register(host):
     core = host.core
 
-    # ── settings this module owns ─────────────────────────────────────────
+    # -- settings this module owns -----------------------------------------
     host.add_config_key("face_reject_drawn", default=True, validate=bool)
     host.add_config_key("face_drawn_thresh", default=facelib.DRAWN_THRESH,
                         validate=lambda v: max(0.0, min(1.0, float(v))))
@@ -50,21 +50,21 @@ def register(host):
     host.add_settings_field(key="face_drawn_thresh", label="Drawn-face threshold (0-1)",
                             kind="number", pane="module")
 
-    # ── capabilities ──────────────────────────────────────────────────────
+    # -- capabilities ------------------------------------------------------
     host.declare_capability(
         "embed.faces", label="Face identity",
         summary="Identity embedding per face box (ArcFace-style); vectors in one "
                 "space cluster by person.",
-        input="embed(img_bgr, boxes, want_shape=False) — normalized center-form boxes",
+        input="embed(img_bgr, boxes, want_shape=False) - normalized center-form boxes",
         output="(vectors: list[np.ndarray|None], mode: 'arcface'|'appearance', "
                "shapes: list[np.ndarray|None] when want_shape)")
     host.declare_capability(
         "face.shape", label="Face 3D shape",
         summary="Aggregate a person's face crops into a neutral 3D face mesh.",
-        input="estimate_shape(crops: list[(img_bgr, box)]) — several views",
+        input="estimate_shape(crops: list[(img_bgr, box)]) - several views",
         output="{vertices, faces, ...} mesh dict or None when too few clean fits")
 
-    # ── detect.faces: YOLO face weights via the face registry ─────────────
+    # -- detect.faces: YOLO face weights via the face registry -------------
     def _detector_id():
         custom = (host.config.get("face_weights") or "").strip()
         if custom:
@@ -78,7 +78,7 @@ def register(host):
     _FRAME = {"cx": 0.5, "cy": 0.5, "w": 1.0, "h": 1.0}
 
     def _filter(img_bgr, boxes):
-        """Drop sub-32px boxes and (optionally) drawn faces; label the rest.
+        """! @brief Drop sub-32px boxes and (optionally) drawn faces; label the rest.
         Every kept box carries `_drawn` = max(crop score, whole-frame score):
         an illustration is far easier to recognise at frame level than inside
         a small face crop, and the people module stores the score so the tab
@@ -103,7 +103,7 @@ def register(host):
     # ultralytics runtime); it takes the weights and the filter from the
     # service below. face_weights (custom .pt) is the picker setting it shows.
 
-    # ── embed.faces: insightface packs + appearance fallback ──────────────
+    # -- embed.faces: insightface packs + appearance fallback --------------
     def _pack():
         pid = host.broker.selected_id("embed.faces")
         if pid == "antelopev2":
@@ -121,7 +121,7 @@ def register(host):
         sizes=["l", "m", "s", "sc"], speed="accurate", supports_conf=False,
         note="SCRFD detector + ArcFace head, 512-d. l is the default and what existing "
              "embeddings were built with; sc is mobilefacenet for tight memory. Switching "
-             "packs means a rescan — packs don't share a space.",
+             "packs means a rescan - packs don't share a space.",
         loader=_insight_loader, transform=None,
         available=registry._have_insightface, reason="pip install insightface onnxruntime",
         cost_mb=1100, gpu=facelib.og.has_gpu())
@@ -141,10 +141,10 @@ def register(host):
                         facelib.embed_faces_appearance(img, boxes, want_shape)),
         transform=None, available=lambda: True, reason="", cost_mb=0)
 
-    # ── face.shape: 3D estimators ─────────────────────────────────────────
+    # -- face.shape: 3D estimators -----------------------------------------
     for pid, label, avail, note, why in (
         ("deep3d", "Deep3DFaceRecon", lambda: mesh._load_deep3d() is not None,
-         "Full 3DMM regression (BFM basis). Not implemented yet — " + mesh.DEEP3D_REASON + ".",
+         "Full 3DMM regression (BFM basis). Not implemented yet - " + mesh.DEEP3D_REASON + ".",
          mesh.DEEP3D_REASON),
         ("insight3d", "insightface 3D", lambda: mesh._load_insight3d() is not None,
          "Morphable-model fit via insightface's face3d; needs its cython mesh extension "
@@ -160,7 +160,7 @@ def register(host):
             loader=(lambda p=pid: (lambda crops, *a, **k: mesh.estimate_shape(crops, prefer=p))),
             transform=None, available=avail, reason=why, cost_mb=150)
 
-    # ── service for the core's people machinery ───────────────────────────
+    # -- service for the core's people machinery ---------------------------
     def embed_faces(img, boxes, want_shape=False):
         try:
             return host.request_model("embed.faces")(img, boxes, want_shape)
@@ -198,7 +198,7 @@ def register(host):
         "mesh_to_obj": mesh.mesh_to_obj,
     })
 
-    # Legacy config: face_detector / face_recognition / face_model+face_size /
+    ## @brief Legacy config: face_detector / face_recognition / face_model+face_size /
     # face_estimator were core keys; fold them into the broker pick once.
     def _migrate():
         cfg = host.config
@@ -206,7 +206,7 @@ def register(host):
         legacy_model = (cfg.pop("face_model", "") or "").strip()
         legacy_size = (cfg.pop("face_size", "") or "").strip().lower()
         if legacy_model:
-            cfg["face_weights"] = legacy_model
+            host.set_config("face_weights", legacy_model, save=False)
         size = next((s for s in _SIZES if det.startswith(f"yolov11{s}")), None) or \
                (legacy_size if legacy_size in _SIZES else None)
         rec = (cfg.pop("face_recognition", "") or "").strip()
@@ -220,7 +220,7 @@ def register(host):
                 host.broker.select("embed.faces", "buffalo", rec[len("buffalo_"):], None)
         if est in ("deep3d", "insight3d", "landmarks3d") and not host.broker.current_selection().get("face.shape"):
             host.broker.select("face.shape", est, None, None)
-        cfg["model_selection"] = host.broker.current_selection()
+        host.persist_model_selection()
     host.on_startup(_migrate)
 
     # A recognition-pack change moves embeddings to a different space: point the
@@ -240,12 +240,12 @@ def register(host):
         if first:
             return
         try:
-            db = host.db()
-            db.execute("UPDATE files SET face_done=0 WHERE rel_path IN "
-                       "(SELECT rel_path FROM face_regions WHERE COALESCE(confirmed,0)=0)")
-            db.execute("DELETE FROM face_regions WHERE COALESCE(confirmed,0)=0 "
-                       "AND COALESCE(not_face,0)=0 AND COALESCE(unknown,0)=0")
-            db.commit()
+            host.update_file(where=("rel_path IN (SELECT rel_path FROM face_regions "
+                                    "WHERE COALESCE(confirmed,0)=0)", ()),
+                             db={"face_done": 0}, dont_write=True, commit=False)
+            host.update_file(table="face_regions", dont_write=True, remove=True,
+                             where=("COALESCE(confirmed,0)=0 AND COALESCE(not_face,0)=0 "
+                                    "AND COALESCE(unknown,0)=0", ()))
         except Exception as e:
             host.logger.warning(f"faces: pack change cleanup: {e}")
     host.broker.on_select(_on_select)

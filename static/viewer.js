@@ -27,8 +27,9 @@ function maskPath2D(d, dw, dh) {
   return path;
 }
 
-// Pick which of the three stored scan variants to draw. Centerline is the
-// balanced default; fall back to whichever exists.
+/** @brief Pick which of the three stored scan variants to draw. Centerline is the
+ *  balanced default; fall back to whichever exists.
+ */
 function maskD(b) {
   const m = b && b.mask_svg;
   if (!m) return '';
@@ -77,7 +78,7 @@ function makeViewer(prefix, opts) {
   const canvas = self.canvas, mediaVideo = self.mediaVideo, imgObj = self.imgObj, ctx = self.ctx;
   const mediaAnim = self.mediaAnim;
 
-  // ── which regions/toggles this instance draws ──
+  /** @brief -- which regions/toggles this instance draws -- */
   function regionsFor() { return isMain ? currentRegions : self.regions; }
   function regionsVisible() {
     const t = P('toggle_regions');
@@ -85,7 +86,7 @@ function makeViewer(prefix, opts) {
   }
   function activeIdx() { return isMain ? activeRegionIdx : -1; }
 
-  // ── image canvas draw ──
+  /** @brief -- image canvas draw -- */
   function drawCanvas() {
     if (!imgObj.src || !imgObj.width) return;
     const p = canvas.parentElement, pw = p.clientWidth, ph = p.clientHeight;
@@ -144,7 +145,7 @@ function makeViewer(prefix, opts) {
           ctx.fillStyle = col; ctx.fillRect(x, y - 18, lw, 18);
           ctx.fillStyle = '#fff'; ctx.fillText(label, x + 4, y - 5);
         } else if (pinned) {
-          // Persistent marker so the pinned face is findable without hovering —
+          // Persistent marker so the pinned face is findable without hovering -
           // in a crowd of blurry boxes this is the one you clicked from People.
           const label = '\u25B6 this one';
           const lw = ctx.measureText(label).width + 8;
@@ -160,13 +161,14 @@ function makeViewer(prefix, opts) {
     }
   }
 
-  // Choose side-by-side vs stacked layout based on image orientation, then
-  // draw. Only the main editor pane has an #editor_region to toggle; the
-  // review viewer just needs the redraw.
-  // Toggle the #editor_region between side-by-side (vertical) and stacked
-  // (horizontal) based on the media's orientation. Shared by images, videos,
-  // and animated assets so every media type places the right/bottom pane the
-  // same way. w/h of 0 (unknown) falls back to side-by-side.
+  /** @brief Choose side-by-side vs stacked layout based on image orientation, then
+   *  draw. Only the main editor pane has an #editor_region to toggle; the
+   *  review viewer just needs the redraw.
+   *  Toggle the #editor_region between side-by-side (vertical) and stacked
+   *  (horizontal) based on the media's orientation. Shared by images, videos,
+   *  and animated assets so every media type places the right/bottom pane the
+   *  same way. w/h of 0 (unknown) falls back to side-by-side.
+   */
   function applyMediaLayout(w, h) {
     const reg = isMain ? document.getElementById('editor_region') : null;
     if (!reg) return;
@@ -182,7 +184,7 @@ function makeViewer(prefix, opts) {
 
   imgObj.onload = () => { applyEditorLayout(); };
 
-  // ── canvas box-editing events (MAIN pane only — review is read-only draw) ──
+  // -- canvas box-editing events (MAIN pane only - review is read-only draw) --
   if (isMain && canvas) {
     const boxesEditable = () =>
       !window.CIMFeatures || window.CIMFeatures.canWrite('annot.boxes');
@@ -247,7 +249,7 @@ function makeViewer(prefix, opts) {
     });
   }
 
-  // ── video overlay (time-indexed boxes + custom scrub bar) ──
+  /** @brief -- video overlay (time-indexed boxes + custom scrub bar) -- */
   const vt = (() => {
     const svg = P('vt_overlay'), bar = P('vt_bar'), playB = P('vt_play'),
           seek = P('vt_seek'), timeEl = P('vt_time'), autoB = P('vt_auto'),
@@ -407,7 +409,7 @@ function makeViewer(prefix, opts) {
     }
     autoB.onclick = async () => {
       if (!file) return;
-      autoB.disabled = true; const old = autoB.textContent; autoB.textContent = 'Detecting…';
+      autoB.disabled = true; const old = autoB.textContent; autoB.textContent = 'Detecting...';
       try {
         const r = await fetch(`/api/video_detect/${encodeURIComponent(file)}`, { method: 'POST' }).then(r => r.json());
         if (r.success && r.tracks?.length) { doc.tracks = doc.tracks.concat(r.tracks); refresh(); save(); }
@@ -466,20 +468,20 @@ function makeViewer(prefix, opts) {
   self.drawCanvas = drawCanvas;
   self.vtOverlay = vt;
 
-  // ── animated-JXL filmstrip (approach B: box on sampled frames) ──────────────
+  // -- animated-JXL filmstrip (approach B: box on sampled frames) --------------
   // Owns the ~30 keyframe frames of an animated JXL. Clicking a thumbnail paints
   // that frame onto the canvas via showImage(), so ALL existing box editing (the
   // canvas mouse handlers, region rows, tag modal) applies unchanged. Each drawn
   // box is a keyframe at its frame's time; boxes for the same object across
   // frames form a track. "Track boxes" asks the backend to fill every drawn box
-  // across all frames with YOLO. Main pane only — review never boxes.
+  // across all frames with YOLO. Main pane only - review never boxes.
   const strip = (function () {
     const bar    = P('strip_bar');
     const thumbs = P('strip_thumbs');
     const posEl  = P('strip_pos');
     const playB  = P('strip_play');
     const trackB = P('strip_track');
-    // Guard: markup may be absent (older templates) — degrade to no strip.
+    // Guard: markup may be absent (older templates) - degrade to no strip.
     if (!bar || !thumbs) {
       return { enable() {}, disable() { }, active: () => false, frameT: () => null };
     }
@@ -489,7 +491,7 @@ function makeViewer(prefix, opts) {
     let playing = false;
 
     function active() { return file != null; }
-    // The time to stamp on a box drawn right now (the current frame's t).
+    /** @brief The time to stamp on a box drawn right now (the current frame's t). */
     function frameT() { return (cur >= 0 && frames[cur]) ? frames[cur].t : null; }
 
     function renderThumbs() {
@@ -553,7 +555,7 @@ function makeViewer(prefix, opts) {
           cx: b.cx, cy: b.cy, w: b.w, h: b.h,
         })),
       }));
-      const old = trackB.textContent; trackB.disabled = true; trackB.textContent = 'Tracking…';
+      const old = trackB.textContent; trackB.disabled = true; trackB.textContent = 'Tracking...';
       try {
         const r = await fetch(`/api/jxl_track/${encodeURIComponent(file)}`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -583,7 +585,7 @@ function makeViewer(prefix, opts) {
       async enable(fn) {
         file = fn; frames = []; cur = -1; stopPlay();
         bar.classList.remove('hidden');
-        thumbs.innerHTML = '<span class="text-[10px] text-gray-500 px-2">Loading frames…</span>';
+        thumbs.innerHTML = '<span class="text-[10px] text-gray-500 px-2">Loading frames...</span>';
         try {
           const r = await fetch(`/api/jxl_frames/${encodeURIComponent(fn)}`).then(r => r.json());
           if (!r.success || !r.frames?.length) {
@@ -608,7 +610,7 @@ function makeViewer(prefix, opts) {
   })();
   self.strip = strip;
 
-  // Layout observers (main pane only — review sizes to its flex container).
+  // Layout observers (main pane only - review sizes to its flex container).
   const _cc = P('canvas_container');
   if (_cc) {
     if (isMain) {
@@ -620,8 +622,9 @@ function makeViewer(prefix, opts) {
     }
   }
 
-  // ── high-level show helpers ──
-  // Load a still image (optionally with regions/decisions for review mode).
+  /** @brief -- high-level show helpers --
+   *  Load a still image (optionally with regions/decisions for review mode).
+   */
   self.showImage = function (url, regions, decisions) {
     vt.disable();
     mediaVideo.pause(); mediaVideo.removeAttribute('src'); mediaVideo.classList.add('hidden');
@@ -639,11 +642,12 @@ function makeViewer(prefix, opts) {
         .then(() => applyEditorLayout());
     }
   };
-  // Load an ANIMATED image (animated JXL/GIF/APNG/WebP). A canvas snapshot can
-  // only ever show one frame, so animated assets are shown through a real DOM
-  // <img> the browser animates natively. Region/skeleton overlays are not drawn
-  // over animated content (they are frame-specific and would fight the motion);
-  // switch back to a still to edit boxes.
+  /** @brief Load an ANIMATED image (animated JXL/GIF/APNG/WebP). A canvas snapshot can
+   *  only ever show one frame, so animated assets are shown through a real DOM
+   *  <img> the browser animates natively. Region/skeleton overlays are not drawn
+   *  over animated content (they are frame-specific and would fight the motion);
+   *  switch back to a still to edit boxes.
+   */
   self.showAnimated = function (url) {
     vt.disable();
     if (self.strip) self.strip.disable();
@@ -656,16 +660,17 @@ function makeViewer(prefix, opts) {
       applyMediaLayout(mediaAnim.naturalWidth, mediaAnim.naturalHeight);
     mediaAnim.src = url;
   };
-  // Load an animated JXL in BOXABLE mode: the filmstrip loads sampled frames and
-  // paints frame 0 onto the canvas so the normal box editor applies. Used for
-  // animated JXLs at or under the duration cutoff; longer ones go to showVideo.
+  /** @brief Load an animated JXL in BOXABLE mode: the filmstrip loads sampled frames and
+   *  paints frame 0 onto the canvas so the normal box editor applies. Used for
+   *  animated JXLs at or under the duration cutoff; longer ones go to showVideo.
+   */
   self.showAnimatedStrip = function (fn) {
     vt.disable();
     mediaVideo.pause(); mediaVideo.removeAttribute('src'); mediaVideo.classList.add('hidden');
     if (!self.strip) { self.showAnimated(`/api/file/${encodeURIComponent(fn)}`); return; }
     self.strip.enable(fn);   // paints frame 0 to the canvas via showImage
   };
-  // Load a video (time-indexed boxes via the overlay).
+  /** @brief Load a video (time-indexed boxes via the overlay). */
   self.showVideo = function (url, fn) {
     canvas.classList.add('hidden');
     if (self.strip) self.strip.disable();
@@ -698,12 +703,12 @@ function makeViewer(prefix, opts) {
   return self;
 }
 
-// ── instantiate the two viewers ──────────────────────────────────────────────
+// -- instantiate the two viewers ----------------------------------------------
 const mainViewer   = makeViewer('');
 const reviewViewer = makeViewer('rv_');
 
 // Re-export the main viewer's members as the original globals so every existing
-// call site (selectFile, editor.js, ai_tools.js, pipeline_editor.js, …) keeps
+// call site (selectFile, editor.js, ai_tools.js, pipeline_editor.js, ...) keeps
 // working unchanged.
 const canvas     = mainViewer.canvas;
 const ctx        = mainViewer.ctx;
@@ -716,7 +721,7 @@ function drawCanvas() { return mainViewer.drawCanvas(); }
 const VIDEO_RE = /\.(mp4|webm|mkv|mov|avi|m4v|mpg|mpeg|wmv|flv|ts|ogv)$/i;
 function isVideoFile(fn) { return VIDEO_RE.test(fn || ''); }
 
-// Books. Deliberately only the UNAMBIGUOUS extensions — the same split the
+// Books. Deliberately only the UNAMBIGUOUS extensions - the same split the
 // server draws in media_types.UNAMBIGUOUS_BOOK_EXTS. A `.txt` or `.html` in the
 // library might be a book, but it might equally be this app's tag sidecar or a
 // saved webpage, and only the server (which can see the file's bytes and its

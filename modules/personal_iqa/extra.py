@@ -1,5 +1,5 @@
-"""
-Cheap, model-free feature vectors for the personal scorer (numpy + cv2 only).
+"""! @file
+@brief Cheap, model-free feature vectors for the personal scorer (numpy + cv2 only).
 
 Everything here is derived from passes that already ran (the decoded frame,
 boxes from the detector, masks from the segmenter, the depth map) or from
@@ -24,14 +24,14 @@ def gray(img):
 
 
 def sharpness(img):
-    """log1p(Laplacian variance) of a crop, ~0..10. 0 for empty crops."""
+    """! @brief log1p(Laplacian variance) of a crop, ~0..10. 0 for empty crops."""
     if img is None or img.size == 0 or min(img.shape[:2]) < 3:
         return 0.0
     return float(math.log1p(cv2.Laplacian(gray(img), cv2.CV_64F).var()))
 
 
 def box_px(b, W, H):
-    """Normalised center-form box -> (x0, y0, x1, y1) ints clipped to the frame."""
+    """! @brief Normalised center-form box -> (x0, y0, x1, y1) ints clipped to the frame."""
     cx, cy, w, h = (float(b.get(k, 0.0)) for k in ("cx", "cy", "w", "h"))
     x0, x1 = int(max(0, (cx - w / 2) * W)), int(min(W, (cx + w / 2) * W))
     y0, y1 = int(max(0, (cy - h / 2) * H)), int(min(H, (cy + h / 2) * H))
@@ -45,7 +45,7 @@ def crop(img, b):
 
 
 def object_raw(b, crop_img):
-    """[cx, cy, w, h, conf, log_area, aspect, sharpness] for one detector box."""
+    """! @brief [cx, cy, w, h, conf, log_area, aspect, sharpness] for one detector box."""
     w, h = float(b.get("w", 0.0)), float(b.get("h", 0.0))
     return [float(b.get("cx", 0.0)), float(b.get("cy", 0.0)), w, h, float(b.get("conf", 1.0)),
             math.log1p(1000.0 * w * h), math.log((w + 1e-6) / (h + 1e-6)), sharpness(crop_img)]
@@ -56,7 +56,7 @@ def tile_raw(gx, gy, grid, tile_img):
 
 
 def style(img):
-    """12-bin hue histogram + saturation/luminance mean&std + RMS contrast +
+    """! @brief 12-bin hue histogram + saturation/luminance mean&std + RMS contrast +
     clipped highlight/shadow fractions + edge density = STYLE_DIM floats."""
     small = img if max(img.shape[:2]) <= 256 else cv2.resize(img, (256, 256 * img.shape[0] // img.shape[1] or 1))
     hsv = cv2.cvtColor(small[:, :, :3], cv2.COLOR_BGR2HSV)
@@ -70,7 +70,7 @@ def style(img):
 
 
 def detail_level(img, W, H):
-    """0..1 'how much is there to look at': log megapixels (1 MP -> 0, 256 MP -> 1)
+    """! @brief 0..1 'how much is there to look at': log megapixels (1 MP -> 0, 256 MP -> 1)
     + edge density + how unevenly sharpness is spread over a 4x4 grid (small
     sharp things in a soft frame score high). ponytail: fixed weights, no model;
     the mode gate inside the scorer learns what to do with it."""
@@ -85,7 +85,7 @@ def detail_level(img, W, H):
 
 
 def norm_depth(depth, shape):
-    """Provider depth (larger = farther) -> float32 0..1 at the frame's shape."""
+    """! @brief Provider depth (larger = farther) -> float32 0..1 at the frame's shape."""
     d = np.asarray(depth, np.float32)
     if d.shape != tuple(shape[:2]):
         d = cv2.resize(d, (shape[1], shape[0]), interpolation=cv2.INTER_LINEAR)
@@ -94,7 +94,7 @@ def norm_depth(depth, shape):
 
 
 def band_masks(d01):
-    """DEPTH_BANDS boolean masks on fixed thirds of normalised depth (near..far)."""
+    """! @brief DEPTH_BANDS boolean masks on fixed thirds of normalised depth (near..far)."""
     return [(d01 >= i / DEPTH_BANDS) & (d01 < (i + 1) / DEPTH_BANDS + (1e-6 if i == DEPTH_BANDS - 1 else 0))
             for i in range(DEPTH_BANDS)]
 
@@ -108,7 +108,7 @@ def polygon_mask(poly, shape):
 
 
 def masked_crop(img, mask):
-    """Crop to the mask's bbox with everything outside the mask filled with the
+    """! @brief Crop to the mask's bbox with everything outside the mask filled with the
     mask's mean colour, so the encoder sees the region and not its surroundings."""
     ys, xs = np.where(mask)
     if len(ys) == 0:
@@ -121,7 +121,7 @@ def masked_crop(img, mask):
 
 
 def region_raw(mask, bbox, d01, crop_img, kind):
-    """[band, area_frac, cx, cy, bw, bh, mean_depth, depth_std, sharpness, kind]
+    """! @brief [band, area_frac, cx, cy, bw, bh, mean_depth, depth_std, sharpness, kind]
     kind: 0 = depth band, 1 = segment mask."""
     H, W = mask.shape
     x0, y0, x1, y1 = bbox
@@ -133,7 +133,7 @@ def region_raw(mask, bbox, d01, crop_img, kind):
 
 
 def depth_vec(d01, img, boxes, grid=3):
-    """8-bin depth histogram + foreground fraction + DoF proxy (corr of per-tile
+    """! @brief 8-bin depth histogram + foreground fraction + DoF proxy (corr of per-tile
     sharpness vs per-tile depth, negative = sharp near / soft far) + subject-to-
     background depth gap for the largest box = DEPTH_DIM floats."""
     hist = (np.histogram(d01, bins=8, range=(0, 1))[0] / max(1, d01.size)).tolist()
@@ -155,7 +155,7 @@ def depth_vec(d01, img, boxes, grid=3):
 
 
 def composition(boxes, img):
-    """[subject offset from nearest thirds point, subject area, subject cx, cy,
+    """! @brief [subject offset from nearest thirds point, subject area, subject cx, cy,
     n boxes/10, horizon angle (radians, via Hough on edges)] = COMP_DIM floats."""
     out = [0.0, 0.0, 0.5, 0.5, 0.0, 0.0]
     if boxes:
@@ -177,7 +177,7 @@ def composition(boxes, img):
 
 
 def _num(v):
-    """EXIF value ('85/1', '1/250', 4032, Fraction) -> float or None."""
+    """! @brief EXIF value ('85/1', '1/250', 4032, Fraction) -> float or None."""
     try:
         if isinstance(v, str) and "/" in v:
             a, b = v.split("/", 1); return float(a) / float(b) if float(b) else None
@@ -187,7 +187,7 @@ def _num(v):
 
 
 def exif_vec(raw, W, H, file_bytes):
-    """[log focal mm, log f-number, log ISO, log exposure s, log megapixels, log aspect,
+    """! @brief [log focal mm, log f-number, log ISO, log exposure s, log megapixels, log aspect,
     bits per pixel, has_exif] = EXIF_DIM floats. raw: {'Exif.Photo.FocalLength': '85/1', ...}."""
     def g(*keys):
         for k in keys:
@@ -204,7 +204,7 @@ def exif_vec(raw, W, H, file_bytes):
 
 
 def exif_tags(raw):
-    """Camera / lens as tag strings so the text embedder places them."""
+    """! @brief Camera / lens as tag strings so the text embedder places them."""
     out = []
     for k, pre in (("Exif.Image.Model", "camera:"), ("Exif.Photo.LensModel", "lens:")):
         v = str((raw or {}).get(k) or "").strip()

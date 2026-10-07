@@ -62,7 +62,7 @@ test("region tag helpers handle string + generated forms", () => {
   assert.equal(b.run(`rtagIsPending({tag:"y",generated:true,confirmed:false})`), false);
   b.run(`currentRegions=[${JSON.stringify(box({ region_tags: [{ tag: "smile", generated: true }, "hat"] }))}]; selectRegion(0);
          acceptRegionTag(0); rejectRegionTag(0);`);
-  // accept then reject → confirmed:false, record kept
+  // accept then reject -> confirmed:false, record kept
   let t = b.val("currentRegions")[0].region_tags;
   assert.equal(t[0].confirmed, false); assert.equal(t.length, 2);
   b.run(`removeRegionTag(0)`);

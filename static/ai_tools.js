@@ -1,4 +1,4 @@
-// ── AI picker: class → action → run (classes come from /api/ai/actions) ─────
+// -- AI picker: class -> action -> run (classes come from /api/ai/actions) -----
 let _aiGroups=[];
 async function loadAiActions(){
   try{
@@ -22,7 +22,7 @@ function aiGroupChanged(){
   const btn=document.getElementById('btn_ai_run');
   if(btn) btn.innerText=acts.length===1?acts[0].label:'Run on this image';
 }
-// Apply a run result to the open editor (saved by autosave, like any edit).
+/** @brief Apply a run result to the open editor (saved by autosave, like any edit). */
 function applyAiResult(d){
   if(d.regions&&d.regions.length){ currentRegions=currentRegions.concat(d.regions); drawCanvas();
     if(typeof popoutOpen!=='undefined'&&popoutOpen&&typeof drawPopout==='function') drawPopout();
@@ -40,7 +40,7 @@ async function runAiAction(){
   if(!window.currentFile) return;
   const a=document.getElementById('ai_action').value;
   if(!a) return;
-  const btn=document.getElementById('btn_ai_run'); const og=btn.innerText; btn.innerText='…'; btn.disabled=true;
+  const btn=document.getElementById('btn_ai_run'); const og=btn.innerText; btn.innerText='...'; btn.disabled=true;
   try{
     const d=await fetch('/api/ai/run',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({filename:window.currentFile,action:a})}).then(r=>r.json());
@@ -49,14 +49,14 @@ async function runAiAction(){
   btn.innerText=og; btn.disabled=false;
 }
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',loadAiActions); else loadAiActions();
-// ── AI box (bulk): the picked Detection model (Models tab) ──────────────────
+// -- AI box (bulk): the picked Detection model (Models tab) ------------------
 function _boxMethod(){
   return {method:'detect', model:''};
 }
 async function comicBoxAll(){
   if(!comicState.pages.length) return;
   const bm=_boxMethod();
-  showToast(`Boxing ${comicState.pages.length} page(s)…`);
+  showToast(`Boxing ${comicState.pages.length} page(s)...`);
   const d=await fetch('/api/bulk_box',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({filenames:comicState.pages, method:bm.method, model:bm.model})}).then(r=>r.json());
   if(d.success) showToast(`Boxed ${d.boxed}/${d.done} page(s). Open a page to confirm boxes.`);
@@ -65,7 +65,7 @@ async function comicBoxAll(){
 async function bulkBox(){
   const files=[...selectedFiles]; if(!files.length) return;
   const bm=_boxMethod();
-  showToast(`Boxing ${files.length} image(s)…`);
+  showToast(`Boxing ${files.length} image(s)...`);
   const d=await fetch('/api/bulk_box',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({filenames:files, method:bm.method, model:bm.model})}).then(r=>r.json());
   if(d.success){

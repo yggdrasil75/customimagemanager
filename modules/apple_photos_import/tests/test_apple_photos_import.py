@@ -1,5 +1,6 @@
-"""Apple import: the privacy.apple.com export (CSVs, albums, live photos,
-Recently Deleted), and live iCloud against a fake account — 2FA sign-in,
+"""! @file
+@brief Apple import: the privacy.apple.com export (CSVs, albums, live photos,
+Recently Deleted), and live iCloud against a fake account - 2FA sign-in,
 import, and a purge that only removes what is safely in the library, older
 than the keep window, and not a favourite; an expired session asks to sign in."""
 import os, time, zipfile
@@ -14,7 +15,7 @@ from pyicloud import exceptions as E
 MOV = b"\x00\x00\x00\x14ftypqt  " + b"\x00" * 64
 
 
-# ── Apple data export ────────────────────────────────────────────────────────
+# -- Apple data export --------------------------------------------------------
 def test_apple_export(client, app, imports):
     p = "iCloud Photos/"
     with zipfile.ZipFile(str(imports / "iCloud Photos Part 1 of 1.zip"), "w") as z:
@@ -42,7 +43,7 @@ def test_apple_export(client, app, imports):
     assert mov["status"] == "done" and "Summer" in app._file_albums(mov["rel_path"])   # live video follows its still
 
 
-# ── live iCloud, faked ───────────────────────────────────────────────────────
+# -- live iCloud, faked -------------------------------------------------------
 OLD = datetime.now(timezone.utc) - timedelta(days=400)
 NEW = datetime.now(timezone.utc) - timedelta(days=2)
 

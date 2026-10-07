@@ -1,4 +1,4 @@
-/* ── Storage tiers ─────────────────────────────────────────────────────── */
+/* -- Storage tiers ------------------------------------------------------- */
 let _tiersPoll = null;
 let _tiersLoaded = false;   // storage tab opened at least once this session?
 
@@ -16,12 +16,13 @@ function addTierRow(t) {
   document.getElementById('tiers_rows').insertAdjacentHTML('beforeend', tierRowHtml(t));
 }
 
-// ── Settings tabs: permissions, grouping, switching ───────────────────────
-// Every tab button carries data-settings-tab and (except User settings)
-// data-feature="settings.<tab>"; every pane data-settings-pane plus the same
-// data-feature and data-write-gate. features.js hides a tab the user can't
-// read and makes a pane read-only when they can't write it, so this file only
-// needs to know which tabs are usable.
+// -- Settings tabs: permissions, grouping, switching -----------------------
+/** @brief Every tab button carries data-settings-tab and (except User settings)
+ *  data-feature="settings.<tab>"; every pane data-settings-pane plus the same
+ *  data-feature and data-write-gate. features.js hides a tab the user can't
+ *  read and makes a pane read-only when they can't write it, so this file only
+ *  needs to know which tabs are usable.
+ */
 function settingsTabFeature(name) {
   const b = document.querySelector(`.settings-tab[data-settings-tab="${name}"]`);
   return b ? b.getAttribute('data-feature') : null;
@@ -42,7 +43,7 @@ function _visibleTabs() {
     .filter(b => settingsCanRead(b.dataset.settingsTab) && !b.classList.contains('hidden'));
 }
 
-// Re-apply the permission gates to the whole modal (after any render).
+/** @brief Re-apply the permission gates to the whole modal (after any render). */
 function applySettingsGates() {
   const m = document.getElementById('settings_modal');
   if (m && window.CIMFeatures) CIMFeatures.apply(m);
@@ -104,7 +105,7 @@ window.organizeSettingsRail = organizeSettingsRail;
 
 function settingsTab(name) {
   // A tab the user can't read (or that doesn't exist) falls back to the first
-  // one they can — User settings is always there.
+  // one they can - User settings is always there.
   if (!settingsCanRead(name) || !document.querySelector(`[data-settings-pane="${name}"]`)) {
     const first = _visibleTabs()[0];
     name = first ? first.dataset.settingsTab : 'user';
@@ -139,7 +140,7 @@ function settingsTab(name) {
   }).observe(m, { childList: true, subtree: true });
 })();
 
-/* ── Modules tab ───────────────────────────────────────────────────────────
+/** @brief -- Modules tab -----------------------------------------------------------
    Lists every declared module from /api/modules and renders an on/off toggle.
    Core modules render locked (disabled checkbox + a "core" badge) because the
    server refuses to disable them anyway. Toggling posts to /api/modules/toggle
@@ -151,7 +152,7 @@ async function loadModulesTab() {
     const { modules } = await fetch('/api/modules').then(r => r.json());
     renderModules(modules || []);
   } catch (e) {
-    mount.innerHTML = '<p class="text-xs text-rose-400">Failed to load modules.</p>';
+    mount.innerHTML = '<p class="text-xs text-red-400">Failed to load modules.</p>';
   }
 }
 
@@ -171,7 +172,7 @@ function renderModules(modules) {
     const req = (m.requires && m.requires.length)
       ? `<p class="text-[10px] text-gray-600 mt-1">requires: ${m.requires.map(escapeHtml).join(', ')}</p>` : '';
     const err = m.error
-      ? `<p class="text-[10px] text-rose-400 mt-1 font-mono whitespace-pre-wrap">${escapeHtml(m.error)}</p>` : '';
+      ? `<p class="text-[10px] text-red-400 mt-1 font-mono whitespace-pre-wrap">${escapeHtml(m.error)}</p>` : '';
     // A plugin whose enabled flag and registered flag disagree needs a restart.
     const needsRestart = (!m.core && m.enabled && !m.registered && !m.error)
       || (!m.core && !m.enabled && m.registered);
@@ -197,8 +198,9 @@ function renderModules(modules) {
   renderModuleSettingsButtons();
 }
 
-// A module with pane="module" fields gets a Settings button on its row that
-// unfolds those fields in place (they save through the normal settings path).
+/** @brief A module with pane="module" fields gets a Settings button on its row that
+ *  unfolds those fields in place (they save through the normal settings path).
+ */
 function renderModuleSettingsButtons() {
   const fields = window._moduleFields || {};
   document.querySelectorAll('[data-module-settings-btn]').forEach(slot => {
@@ -249,7 +251,7 @@ async function openSettings(tab = 'general') {
   // Refetch module tabs / fields / model picks first (they're rebuilt from the
   // server), THEN apply the permission gates to whatever now exists.
   if (window.refreshModuleSettings) { try { await refreshModuleSettings(); } catch (e) { /* keep last */ } }
-  // Fresh edit session: reset per-open flags so a Close→Open cycle starts from
+  // Fresh edit session: reset per-open flags so a Close->Open cycle starts from
   // the saved server state, never from a half-finished previous edit.
   _tiersLoaded = false;
   _brandClearLogo = false;
@@ -257,7 +259,7 @@ async function openSettings(tab = 'general') {
   window._userSettingsLoaded = false;
   // Take one fresh snapshot from the server, THEN freeze: while the modal is open
   // the background poll won't touch the working copy, so nothing refreshes out
-  // from under the user — even if someone else saves settings meanwhile.
+  // from under the user - even if someone else saves settings meanwhile.
   try {
     const s = await fetch('/api/state').then(r => r.json());
     if (typeof populateSettingsForm === 'function') populateSettingsForm(s);
@@ -283,6 +285,21 @@ function closeSettings() {
 // write that tab (the server would refuse it anyway); a step with no tab
 // (a module pane buffering its own edits) always runs and no-ops if untouched.
 window._settingsPersistSteps = window._settingsPersistSteps || [];
+
+/** @brief The one client path that writes settings: every pane, core or module, posts
+ *  through it (a change to how settings are saved happens here once).
+ *  -> {ok, error, data}
+ */
+window.postSettings = async function (values) {
+  try {
+    const r = await fetch('/api/update_settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values || {}) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || data.success === false)
+      return { ok: false, error: data.error || ('Settings save failed (' + r.status + ')'), data };
+    return { ok: true, data };
+  } catch (e) { return { ok: false, error: 'Settings save failed' }; }
+};
 window.registerSettingsPersist = function (fn, tab) {
   if (typeof fn !== 'function') return;
   if (window._settingsPersistSteps.some(s => (s.fn || s) === fn)) return;
@@ -291,7 +308,7 @@ window.registerSettingsPersist = function (fn, tab) {
 
 async function saveAllSettings() {
   const btn = document.getElementById('settings_save_btn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
   const steps = [];
   if (typeof persistBranding === 'function')      steps.push({ fn: persistBranding, tab: null });   // gates itself on the branding feature
   if (typeof persistTiersConfig === 'function')   steps.push({ fn: persistTiersConfig, tab: 'storage' });
@@ -352,9 +369,10 @@ function collectTiersConfig() {
   };
 }
 
-// Persist storage tiers. Returns {ok}/{ok:false,error}. No-ops (ok:true) if the
-// Storage tab was never opened this session, so the unified Save can't wipe the
-// saved tier config with an empty, never-populated form.
+/** @brief Persist storage tiers. Returns {ok}/{ok:false,error}. No-ops (ok:true) if the
+ *  Storage tab was never opened this session, so the unified Save can't wipe the
+ *  saved tier config with an empty, never-populated form.
+ */
 async function persistTiersConfig() {
   if (!_tiersLoaded) return { ok: true };
   try {
@@ -374,19 +392,19 @@ async function persistTiersConfig() {
 }
 
 function fmtBytes(b) {
-  if (b == null) return '—';
+  if (b == null) return '-';
   const u = ['B','KB','MB','GB','TB']; let i = 0;
   while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
   return b.toFixed(i ? 1 : 0) + ' ' + u[i];
 }
 
 function fmtGB(b) {
-  if (b == null) return '—';
+  if (b == null) return '-';
   return (b / 1e9).toFixed(b >= 1e10 ? 0 : 2) + ' GB';
 }
 
 function fmtCount(n) {
-  if (n == null) return '—';
+  if (n == null) return '-';
   return n.toLocaleString() + (n === 1 ? ' file' : ' files');
 }
 
@@ -414,8 +432,8 @@ async function refreshTiersStatus() {
   if (!r?.success) { el.textContent = 'Status unavailable.'; return; }
   const run = r.run || {};
   const worker = `<div class="text-[11px] text-gray-500 mb-2">Worker:
-      <span class="text-yellow-400">${run.phase || 'idle'}</span>` +
-    (run.planned ? ` — ${run.done}/${run.planned} moves, ${fmtBytes(run.moved_bytes)} moved` : '') +
+      <span class="text-amber-400">${run.phase || 'idle'}</span>` +
+    (run.planned ? ` - ${run.done}/${run.planned} moves, ${fmtBytes(run.moved_bytes)} moved` : '') +
     (run.errors ? `, <span class="text-red-400">${run.errors} errors</span>` : '') + `</div>`;
 
   const tiers = r.tiers || [];
@@ -425,7 +443,7 @@ async function refreshTiersStatus() {
 
   let rows = '';
   if (media) {
-    rows += _statusRow('media/ <span class="text-[10px] text-gray-500 font-normal">(links · DB · thumbs)</span>',
+    rows += _statusRow('media/ <span class="text-[10px] text-gray-500 font-normal">(links | DB | thumbs)</span>',
       media.path || '', media.files, media.bytes, null, null);
   }
   for (const t of tiers) {
@@ -433,9 +451,9 @@ async function refreshTiersStatus() {
     const over = pct != null && pct > 100;
     const sub = `target ${fmtGB(t.budget_bytes)}`;
     rows += _statusRow(t.name, sub, t.actual_files, t.actual_bytes,
-      pct, over ? 'bg-rose-500' : 'bg-amber-500');
+      pct, over ? 'bg-red-500' : 'bg-amber-500');
   }
-  if (!rows) rows = `<div class="text-gray-500 text-[11px] py-1">No tiers configured — all bytes live in media/.</div>`;
+  if (!rows) rows = `<div class="text-gray-500 text-[11px] py-1">No tiers configured - all bytes live in media/.</div>`;
 
   const total = `<div class="flex justify-between items-baseline pt-2 mt-1 border-t border-gray-700">
       <span class="text-gray-400 font-medium">Total</span>
@@ -459,7 +477,7 @@ async function tiersRecover() {
   const n = plan.matched.length, amb = plan.ambiguous.length, un = plan.unmatched.length;
   if (!n) { alert(`Nothing to recover.${amb ? ` ${amb} object(s) match several paths.` : ''}${un ? ` ${un} object(s) match nothing.` : ''}`); return; }
   const lines = plan.matched.slice(0, 20).map(m => `  ${m.rel_path}  (${m.how})`).join('\n');
-  if (!confirm(`Relink ${n} lost object(s) at their original paths?\n\n${lines}${n > 20 ? '\n  …' : ''}` +
+  if (!confirm(`Relink ${n} lost object(s) at their original paths?\n\n${lines}${n > 20 ? '\n  ...' : ''}` +
                `${amb ? `\n\n${amb} ambiguous and ` : '\n\n'}${un} unmatched object(s) stay where they are.`)) return;
   const done = await fetch('/api/tiers/recover', { method: 'POST', headers: { 'Content-Type': 'application/json' },
                            body: JSON.stringify({ apply: true }) }).then(r => r.json());

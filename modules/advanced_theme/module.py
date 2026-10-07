@@ -1,4 +1,5 @@
-"""Layout: Advanced — the full side-by-side layout (gallery beside the editor
+"""! @file
+@brief Layout: Advanced - the full side-by-side layout (gallery beside the editor
 and controls pane). It is the stock layout, so it ships no CSS or JS:
 registering it makes "Advanced" a pickable layout, the default for admins and
 the fallback when nothing else applies."""

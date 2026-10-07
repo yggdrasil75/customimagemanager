@@ -5,7 +5,7 @@
  * data-feature key the user is not allowed. A denied section key hides the
  * whole section; a denied leaf key hides just that control.
  *
- * This is a UX layer only — the server still enforces the same permissions on
+ * This is a UX layer only - the server still enforces the same permissions on
  * the matching endpoints. Hiding here just keeps the UI honest.
  */
 (function () {
@@ -19,8 +19,9 @@
     document.head.appendChild(s);
   }
 
-  // Permission levels mirror features.py: block(0) < read(1) < write(2).
-  // The server sends numeric levels. Absent => fail-open (untagged/new keys).
+  /** @brief Permission levels mirror features.py: block(0) < read(1) < write(2).
+   *  The server sends numeric levels. Absent => fail-open (untagged/new keys).
+   */
   function levelOf(feats, key) {
     const v = feats[key];
     if (v === undefined || v === null) return 2;   // fail-open
@@ -73,7 +74,7 @@
     // data-annot-edit="<key>") becomes read-only when the user lacks WRITE on
     // that key: text inputs / textareas go readOnly (the value stays visible),
     // selects, checkboxes, radios and file inputs are disabled, and buttons are
-    // hidden — except ones marked data-gate-keep (navigation such as a
+    // hidden - except ones marked data-gate-keep (navigation such as a
     // collapsible header). Re-run apply(root) after rendering into a gated
     // container; settings panes do this on every render.
     scope.querySelectorAll('[data-write-gate], [data-annot-edit]').forEach(container => {
@@ -161,8 +162,9 @@
     ready.then(() => apply(document)).catch(() => apply(document));
   }
 
-  // Let dynamically-injected markup (e.g. module buttons that carry
-  // data-feature) re-run the visibility pass after insertion.
+  /** @brief Let dynamically-injected markup (e.g. module buttons that carry
+   *  data-feature) re-run the visibility pass after insertion.
+   */
   window.applyFeatureVisibility = function(root){ apply(root || document); };
 
   if (document.readyState === 'loading') {

@@ -1,4 +1,4 @@
-<!-- Book reader — the centre-pane swap.
+<!-- Book reader - the centre-pane swap.
 
      #editor_region normally holds the image viewer (#image_pane) beside the
      controls pane. In book mode setMediaMode('book') hides #image_pane and
@@ -7,10 +7,10 @@
 
      Two readers live in here because there are genuinely two kinds of book:
 
-       #reader_flow  — epub/txt/html/mobi/…  sanitized HTML in a CSS-columns
+       #reader_flow  - epub/txt/html/mobi/...  sanitized HTML in a CSS-columns
                        box. Font size, family, width, theme and 1/2-column
                        layout are all reader-side; nothing round-trips.
-       #reader_paged — pdf/cb*.  Server-rendered page images. Single page or
+       #reader_paged - pdf/cb*.  Server-rendered page images. Single page or
                        two-up spread, fit-width / fit-height / actual size.
 
      Both share the header, the seek bar and the keyboard handler. -->
@@ -20,7 +20,7 @@
   <div class="px-3 py-2 bg-gray-800 border-b border-gray-700 flex items-center gap-2 flex-shrink-0">
     <div class="min-w-0 flex-1">
       <p id="reader_title" class="text-xs font-bold text-blue-400 truncate">No book open</p>
-      <p id="reader_sub" class="text-[10px] text-gray-500 truncate">—</p>
+      <p id="reader_sub" class="text-[10px] text-gray-500 truncate">-</p>
     </div>
     <button id="reader_toc_btn" onclick="toggleToc()" title="Table of contents"
       class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">☰ Contents</button>
@@ -141,6 +141,6 @@
     <input id="reader_seek" type="range" min="0" max="1000" value="0" oninput="readerSeek(this.value)"
       class="flex-1 h-1 accent-blue-500 cursor-pointer">
     <button onclick="readerNudge(1)" class="text-xs text-gray-300 hover:text-white w-5">›</button>
-    <span id="reader_pos" class="text-[10px] text-gray-400 tabular-nums w-32 text-right">—</span>
+    <span id="reader_pos" class="text-[10px] text-gray-400 tabular-nums w-32 text-right">-</span>
   </div>
 </div>

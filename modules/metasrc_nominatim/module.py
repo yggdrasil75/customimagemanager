@@ -1,4 +1,5 @@
-"""Nominatim (OpenStreetMap) — reverse geocoding for photos with GPS (no key)."""
+"""! @file
+@brief Nominatim (OpenStreetMap) - reverse geocoding for photos with GPS (no key)."""
 MANIFEST = {
     "id": "metasrc_nominatim", "name": "Nominatim / OSM (photos)", "version": "1.0.0",
     "description": "Turns a photo's EXIF GPS position into place tags (city, region, "

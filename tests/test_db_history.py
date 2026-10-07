@@ -1,4 +1,5 @@
-"""File edit changelog (record / undo / redo / ImageHistory text) + upsert,
+"""! @file
+@brief File edit changelog (record / undo / redo / ImageHistory text) + upsert,
 against manager's live implementation (`_history_*`, `_upsert_file`)."""
 import pytest
 

@@ -1,5 +1,5 @@
-"""
-llm_preprocess.py — image preprocessing applied to every image handed to a
+"""! @file
+@brief llm_preprocess.py - image preprocessing applied to every image handed to a
 vision LLM (Smart Tag pipeline, SAM exemplar-region identification, and the
 standalone AI actions all route through here via the host's encode helper).
 
@@ -116,7 +116,7 @@ def _pad(bgr, cfg):
     return canvas
 
 def preprocess(bgr, config=None):
-    """Apply compression then padding to a BGR ndarray per `config`.
+    """! @brief Apply compression then padding to a BGR ndarray per `config`.
     Returns a (possibly new) BGR ndarray. Never mutates the input in place for
     the pad step; compress may return the original array untouched. Any bad
     config value degrades to a no-op for that step rather than raising."""

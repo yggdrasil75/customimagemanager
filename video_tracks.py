@@ -1,33 +1,11 @@
-"""video_tracks.py — time-indexed bounding boxes for videos, stored as a sidecar.
+"""! @file
+@brief Time-indexed boxes for videos, kept in a `<video>.tracks.json` sidecar.
 
-The video file itself is never modified. Annotations live in a JSON sidecar next
-to it (``<video-basename>.tracks.json``), travelling with the asset through the
-same move/delete plumbing as .txt/.xmp sidecars.
-
-A "track" is one tagged subject (a person, usually) that persists across the clip.
-Instead of a box on every frame, a track carries sparse KEYFRAMES and everything
-between them is linearly interpolated — the same model CVAT/Label-Studio use:
-
-    track = {
-        "id": "t_ab12",
-        "label": "Alice",              # the person's name → your tag
-        "class_name": "person",
-        "keyframes": [                 # sorted by t (seconds)
-            {"t": 3.2, "cx":.4, "cy":.5, "w":.1, "h":.3},
-            {"t": 5.0, "cx":.5, "cy":.5, "w":.1, "h":.3, "outside": True},
-            {"t": 8.0, "cx":.2, "cy":.5, "w":.1, "h":.3},
-        ],
-    }
-
-Semantics of ``boxes_at(t)``:
-  • A track is visible only within [first keyframe t, last keyframe t].
-  • Between two keyframes we lerp cx/cy/w/h by time fraction …
-  • … unless the earlier keyframe is ``outside`` — then that span is a gap
-    (subject not on screen), so nothing is drawn until the next keyframe.
-  • Exactly on a keyframe returns that box (unless it's ``outside``).
-
-Coordinates are normalized 0-1 (cx, cy = box centre; w, h = size), identical to
-the image region model, so the same overlay math draws both.
+A track is one subject across the clip, stored as sparse keyframes
+{t, cx, cy, w, h[, outside]} in seconds and normalised centre-form
+coordinates. Between keyframes the box is interpolated linearly; a keyframe
+marked `outside` starts a gap that lasts until the next keyframe. A track is
+visible only between its first and last keyframe.
 """
 from __future__ import annotations
 
@@ -38,13 +16,13 @@ import uuid
 BOX_KEYS = ("cx", "cy", "w", "h")
 
 def sidecar_path(video_path: str) -> str:
-    """`/media/clip.mp4` → `/media/clip.tracks.json`."""
+    """! @brief The sidecar path of a video."""
     return os.path.splitext(video_path)[0] + ".tracks.json"
 
-# ── load / save ───────────────────────────────────────────────────────────────
 def load(video_path: str) -> dict:
-    """Return the tracks document (``{"version":1,"tracks":[...]}``). A missing or
-    unreadable sidecar yields an empty document rather than raising."""
+    """! @brief Read a video's tracks document.
+    @return {"version": 1, "tracks": [...]}; empty when missing or unreadable.
+    """
     p = sidecar_path(video_path)
     if not os.path.exists(p):
         return {"version": 1, "tracks": []}
@@ -61,12 +39,12 @@ def load(video_path: str) -> dict:
         return {"version": 1, "tracks": []}
 
 def save(video_path: str, doc: dict) -> dict:
-    """Validate and write the document. Empty tracks are dropped; if nothing is
-    left the sidecar is deleted so we don't litter empty files. Returns the
-    cleaned document that was written."""
+    """! @brief Validate and write a tracks document; an empty one deletes the sidecar.
+    @return the document as written.
+    """
     tracks = [_clean_track(t) for t in (doc or {}).get("tracks", [])
               if isinstance(t, dict)]
-    tracks = [t for t in tracks if t["keyframes"]]        # drop empty tracks
+    tracks = [t for t in tracks if t["keyframes"]]
     out = {"version": 1, "tracks": tracks}
     p = sidecar_path(video_path)
     if not tracks:
@@ -97,8 +75,7 @@ def _clean_track(t: dict) -> dict:
         "id": str(t.get("id") or ("t_" + uuid.uuid4().hex[:8])),
         "label": str(t.get("label", "")).strip(),
         "class_name": str(t.get("class_name", "object")).strip() or "object",
-        # Confirmation parity with image regions: manual boxes are confirmed,
-        # YOLO proposals arrive unconfirmed until the user accepts them.
+        # Manual boxes are confirmed; detector proposals wait for the user.
         "confirmed": bool(t.get("confirmed", True)),
         "keyframes": kfs,
     }
@@ -107,16 +84,16 @@ def _clamp(v) -> float:
     v = float(v)
     return 0.0 if v < 0 else 1.0 if v > 1 else v
 
-# ── interpolation ─────────────────────────────────────────────────────────────
 def box_at(track: dict, t: float) -> dict | None:
-    """The interpolated box for one track at time ``t``, or None if the subject
-    isn't on screen then."""
+    """! @brief A track's interpolated box at time `t`.
+    @return the box, or None when the subject is not on screen.
+    """
     kfs = track.get("keyframes") or []
     if not kfs or t < kfs[0]["t"] or t > kfs[-1]["t"]:
         return None
 
-    prev = None       # last keyframe at or before t
-    nxt = None        # first keyframe strictly after t
+    prev = None  # last keyframe at or before t
+    nxt = None  # first keyframe after t
     for k in kfs:
         if k["t"] <= t:
             prev = k
@@ -127,9 +104,8 @@ def box_at(track: dict, t: float) -> dict | None:
     if prev is None:
         return None
     if prev.get("outside"):
-        return None                       # inside a declared gap
+        return None
     if nxt is None or prev["t"] == t:
-        # exactly on prev (or prev is the final keyframe)
         return {k: prev[k] for k in BOX_KEYS}
 
     span = nxt["t"] - prev["t"]
@@ -137,8 +113,7 @@ def box_at(track: dict, t: float) -> dict | None:
     return {k: prev[k] + (nxt[k] - prev[k]) * f for k in BOX_KEYS}
 
 def boxes_at(doc: dict, t: float) -> list[dict]:
-    """Every visible box at time ``t`` across all tracks, each annotated with its
-    track id / label / class — ready to hand to an overlay renderer."""
+    """! @brief Every visible box at time `t`, with its track id, label and class."""
     out = []
     for tr in doc.get("tracks", []):
         b = box_at(tr, t)
@@ -149,7 +124,7 @@ def boxes_at(doc: dict, t: float) -> list[dict]:
     return out
 
 def labels(doc: dict) -> list[str]:
-    """Distinct non-empty person labels in the document (for tagging / search)."""
+    """! @brief Distinct non-empty labels across all tracks."""
     seen, out = set(), []
     for tr in doc.get("tracks", []):
         lb = (tr.get("label") or "").strip()

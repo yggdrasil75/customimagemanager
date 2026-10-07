@@ -6,7 +6,7 @@
  *   months  a collage card per month, under year headings
  *   days    every file grouped by day, one continuous scroll; each month's
  *           files load as its section nears the viewport
- * Zoom with the Years/Months/Days buttons, − / +, or ctrl/⌘ + mouse wheel
+ * Zoom with the Years/Months/Days buttons, - / +, or ctrl/⌘ + mouse wheel
  * (trackpad pinch). Clicking a card zooms in on that period. The year rail on
  * the right jumps between years. Tiles behave like grid tiles: click opens the
  * file, ctrl/⌘ toggles selection, shift selects a range, the bulk bar applies.
@@ -23,12 +23,12 @@
     anchor: "",                  // period at the top of the view: YYYY | YYYY-MM | YYYY-MM-DD | undated
     gen: 0,                      // bumped per render; stale fetches drop their result
     secObs: null,                // IntersectionObserver for day-level month sections
-    loaded: new Map(),           // month key -> [file, …] in display order
+    loaded: new Map(),           // month key -> [file, ...] in display order
     wheelAt: 0,
     scrollT: null,
   };
 
-  // ── helpers ───────────────────────────────────────────────────────────
+  // -- helpers -----------------------------------------------------------
   const esc = s => String(s).replace(/[&<>"']/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const thumb = rel => "/api/thumb/" + encodeURIComponent(rel);
@@ -63,7 +63,7 @@
   const fmt = n => Number(n).toLocaleString();
   const cssq = s => (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/["\\]/g, "\\$&");
 
-  // ── chrome ────────────────────────────────────────────────────────────
+  // -- chrome ------------------------------------------------------------
   function buildChrome(host) {
     host.innerHTML = `
       <div class="tl-bar">
@@ -73,7 +73,7 @@
         <div class="tl-levels">
           ${LEVELS.map(l => `<button type="button" data-tl-level="${l}">${l[0].toUpperCase() + l.slice(1)}</button>`).join("")}
         </div>
-        <button type="button" class="tl-zoom" data-tl-zoom="-1" title="Zoom out (ctrl + wheel)">−</button>
+        <button type="button" class="tl-zoom" data-tl-zoom="-1" title="Zoom out (ctrl + wheel)">-</button>
         <button type="button" class="tl-zoom" data-tl-zoom="1" title="Zoom in (ctrl + wheel)">+</button>
       </div>
       <div class="tl-main">
@@ -121,7 +121,7 @@
     S.rail.innerHTML = "";
   }
 
-  // ── level / zoom ──────────────────────────────────────────────────────
+  // -- level / zoom ------------------------------------------------------
   function setLevel(level, anchor) {
     if (!LEVELS.includes(level)) return;
     S.level = level;
@@ -144,7 +144,7 @@
     zoom(e.deltaY < 0 ? 1 : -1);
   }
 
-  // The period whose block is at the top of the scroll view.
+  /** @brief The period whose block is at the top of the scroll view. */
   function topKey() {
     if (!S.body) return "";
     const top = S.body.getBoundingClientRect().top + 4;
@@ -181,12 +181,12 @@
     }
   }
 
-  // ── year rail ─────────────────────────────────────────────────────────
+  // -- year rail ---------------------------------------------------------
   function buildRail(keys) {
     const years = [...new Set(keys.filter(k => k !== "undated").map(k => k.slice(0, 4)))];
     if (keys.includes("undated")) years.push("undated");
     S.rail.innerHTML = years.length > 1
-      ? years.map(y => `<button type="button" data-year="${y}">${y === "undated" ? "—" : y}</button>`).join("")
+      ? years.map(y => `<button type="button" data-year="${y}">${y === "undated" ? "-" : y}</button>`).join("")
       : "";
     S.rail.querySelectorAll("[data-year]").forEach(b =>
       b.addEventListener("click", () => scrollToKey(b.dataset.year)));
@@ -197,14 +197,14 @@
     S.rail?.querySelectorAll("[data-year]").forEach(b => b.classList.toggle("on", b.dataset.year === y));
   }
 
-  // ── collages (years / months) ─────────────────────────────────────────
+  // -- collages (years / months) -----------------------------------------
   function collage(b, cls) {
     const imgs = b.samples.map(r => `<img loading="lazy" src="${esc(thumb(r))}" alt="">`).join("");
     return `<div class="tl-collage ${cls} n${Math.min(b.samples.length, 9)}">${imgs}</div>`;
   }
 
   function card(b, title, sub, cls) {
-    return `<button type="button" class="tl-card" data-key="${esc(b.key)}" title="${esc(title)} · ${fmt(b.count)}">
+    return `<button type="button" class="tl-card" data-key="${esc(b.key)}" title="${esc(title)} | ${fmt(b.count)}">
         ${b.samples.length ? collage(b, cls) : '<div class="tl-collage tl-none"></div>'}
         <span class="tl-card-label"><b>${esc(title)}</b>${sub ? " " + esc(sub) : ""}<i>${fmt(b.count)}</i></span>
       </button>`;
@@ -251,7 +251,7 @@
     scrollToKey(S.anchor);
   }
 
-  // ── days ──────────────────────────────────────────────────────────────
+  // -- days --------------------------------------------------------------
   async function renderDays(gen) {
     const d = await getJSON("/api/timeline/buckets?" + params({ level: "month" }));
     if (gen !== S.gen) return;
@@ -344,7 +344,7 @@
     if (typeof refreshSelectionUI === "function") refreshSelectionUI();
   }
 
-  // Shift-range in the grid walks galleryFiles; give it what's on screen, in order.
+  /** @brief Shift-range in the grid walks galleryFiles; give it what's on screen, in order. */
   function syncGalleryFiles() {
     const out = [];
     S.body?.querySelectorAll(".tl-month").forEach(s => {
@@ -354,14 +354,14 @@
     try { galleryFiles = out; } catch (e) { /* gallery.js absent */ }
   }
 
-  // ── render ────────────────────────────────────────────────────────────
+  // -- render ------------------------------------------------------------
   async function render() {
     if (!S.host) return;
     const gen = ++S.gen;
     if (S.secObs) { S.secObs.disconnect(); S.secObs = null; }
     S.loaded.clear();
     syncChrome();
-    setBusy("Loading…");
+    setBusy("Loading...");
     try {
       if (S.level === "years") await renderYears(gen);
       else if (S.level === "months") await renderMonths(gen);
@@ -372,7 +372,7 @@
     if (gen === S.gen) syncChrome();
   }
 
-  // ── view contract ─────────────────────────────────────────────────────
+  // -- view contract -----------------------------------------------------
   const view = {
     id: "timeline",
     label: "🕑",

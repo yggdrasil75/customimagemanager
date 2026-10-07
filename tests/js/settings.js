@@ -1,9 +1,9 @@
 // Settings modal: per-tab permissions (hidden / read-only / writable), the
-// grouped rail, the generic field widgets and Settings → User settings.
+// grouped rail, the generic field widgets and Settings -> User settings.
 const { page, test, assert } = require("cim");
 
 const FIELDS = { modules: [], settings_tabs: [
-    { id: "pipeline", label: "Pipeline", icon: "✨", admin_only: true, group: "modules", feature: "settings.pipeline", module_id: "pipeline" }],
+    { id: "pipeline", label: "Pipeline", icon: "", admin_only: true, group: "modules", feature: "settings.pipeline", module_id: "pipeline" }],
   settings_fields: [
     { key: "search_quick_filters", label: "Quick filters", kind: "rows", pane: "general", section: "defaults",
       columns: [{ key: "label", label: "Label" }, { key: "query", label: "Query" }],

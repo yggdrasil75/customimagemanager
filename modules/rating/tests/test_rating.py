@@ -1,4 +1,5 @@
-"""Rating module: user stars, IQA scan through the picked iqa model, and the
+"""! @file
+@brief Rating module: user stars, IQA scan through the picked iqa model, and the
 rating fields it enriches onto /api/metadata."""
 import pytest
 from cimtest import read_meta, post_json, load_image, picked_model, picked_name
@@ -39,7 +40,7 @@ def test_models_route(client):
 
 
 def test_real_iqa_prefers_sharp(client, upload, app):
-    """The picked iqa model rates the sharp fixture above a blurred copy."""
+    """! @brief The picked iqa model rates the sharp fixture above a blurred copy."""
     import cv2, io
     picked_model(app, "iqa")
     img = load_image("person_single.jpg")

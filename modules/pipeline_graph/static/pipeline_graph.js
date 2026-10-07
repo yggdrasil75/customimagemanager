@@ -1,10 +1,10 @@
-// pipeline_graph.js — node/port dataflow editor for the Smart Tag pipeline.
+// pipeline_graph.js - node/port dataflow editor for the Smart Tag pipeline.
 // ---------------------------------------------------------------------------
 // Edits the graph/1 format graph_engine.py runs: nodes with typed input and
 // output ports, wires in node.in = {port: [srcId, srcPort]} (or a list of
 // wires for multi ports), positions in node.ui, and for_each sub-graphs
 // opened in place with a breadcrumb. Save posts pipeline_tree through
-// /api/update_settings — the same key the raw-JSON box writes.
+// /api/update_settings - the same key the raw-JSON box writes.
 (function () {
   'use strict';
 
@@ -17,7 +17,7 @@
   let root = null;              // the whole pipeline (graph/1)
   let catalog = {};             // type -> {label, kind, inputs, outputs, params, help}
   let metaFields = [];
-  let stack = [];               // [{graph, title}] — last is the graph on screen
+  let stack = [];               // [{graph, title}] - last is the graph on screen
   let editor = null, dfToTid = {}, tidToDf = {};
   let selected = null, dirty = false, mounted = false, rendering = false, addCount = 0;
 
@@ -25,7 +25,7 @@
   const byId = tid => cur().nodes.find(n => n.id === tid);
   const inner = () => stack.length > 1;
 
-  // ── specs ────────────────────────────────────────────────────────────────
+  // -- specs ----------------------------------------------------------------
   function spec(n) {
     const s = catalog[n.type];
     if (s) return s;
@@ -48,14 +48,14 @@
     else n.in[port] = (p && p.multi) ? list : list[0];
   }
 
-  // ── node html ────────────────────────────────────────────────────────────
+  // -- node html ------------------------------------------------------------
   function nodeHtml(n) {
     const s = spec(n);
     let sub = s.label;
-    if (n.type === 'llm') sub = 'LLM · ' + (n.want || 'text');
-    if (n.type === 'meta_get' || n.type === 'meta_set') sub = s.label + (n.field ? ' · ' + n.field : '');
+    if (n.type === 'llm') sub = 'LLM | ' + (n.want || 'text');
+    if (n.type === 'meta_get' || n.type === 'meta_set') sub = s.label + (n.field ? ' | ' + n.field : '');
     if (n.type === 'regex') sub = 'regex ' + (n.pattern || '');
-    if (n.type === 'for_each') sub = `for each · ${((n.graph || {}).nodes || []).length} inner node(s) · dbl-click to open`;
+    if (n.type === 'for_each') sub = `for each | ${((n.graph || {}).nodes || []).length} inner node(s) | dbl-click to open`;
     return `<div class="plg-title" title="${esc(n.id)}">${esc(n.label || n.id)}</div><div class="plg-type" title="${esc(sub)}">${esc(sub)}</div>`;
   }
 
@@ -72,7 +72,7 @@
     if (n.type === 'for_each') el.addEventListener('dblclick', () => openSub(n));
   }
 
-  // ── layout ───────────────────────────────────────────────────────────────
+  // -- layout ---------------------------------------------------------------
   function autoLayout(force) {
     const g = cur(), ids = g.nodes.map(n => n.id);
     const indeg = {}; ids.forEach(i => indeg[i] = 0);
@@ -95,7 +95,7 @@
     }
   }
 
-  // ── render ───────────────────────────────────────────────────────────────
+  // -- render ---------------------------------------------------------------
   function ensureIO() {
     const g = cur();
     if (inner()) {
@@ -129,8 +129,8 @@
 
   function crumbs() {
     const el = $('plg_crumbs'); if (!el) return;
-    el.innerHTML = stack.map((s, i) => i === stack.length - 1 ? `<span class="text-teal-300 font-bold">${esc(s.title)}</span>`
-      : `<a href="#" data-lvl="${i}" class="text-cyan-400 hover:underline">${esc(s.title)}</a> ›`).join(' ');
+    el.innerHTML = stack.map((s, i) => i === stack.length - 1 ? `<span class="text-sky-300 font-bold">${esc(s.title)}</span>`
+      : `<a href="#" data-lvl="${i}" class="text-sky-400 hover:underline">${esc(s.title)}</a> ›`).join(' ');
     el.querySelectorAll('[data-lvl]').forEach(a => a.onclick = e => { e.preventDefault(); stack = stack.slice(0, +a.dataset.lvl + 1); selected = null; render(); });
   }
 
@@ -142,7 +142,7 @@
   function refreshNode(tid) { const el = document.querySelector(`#node-${tidToDf[tid]} .drawflow_content_node`); if (el) el.innerHTML = nodeHtml(byId(tid)); }
   function markDirty() { dirty = true; const b = $('plg_save'); if (b) b.classList.add('ring-2', 'ring-amber-400'); }
 
-  // ── canvas events -> graph ───────────────────────────────────────────────
+  // -- canvas events -> graph -----------------------------------------------
   function wireEvents() {
     editor.on('connectionCreated', c => {
       if (rendering) return;
@@ -183,7 +183,7 @@
     editor.on('nodeUnselected', () => inspect(null));
   }
 
-  // ── inspector ────────────────────────────────────────────────────────────
+  // -- inspector ------------------------------------------------------------
   const field = (label, html) => `<div class="plg-field"><label>${esc(label)}</label>${html}</div>`;
   const sel = (id, val, opts) => `<select id="${id}">${opts.map(o => `<option value="${esc(o)}"${String(o) === String(val) ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
 
@@ -192,13 +192,13 @@
     const box = $('plg_inspector'); if (!box) return;
     const n = tid ? byId(tid) : null;
     if (!n) {
-      box.innerHTML = `<p class="text-[11px] text-gray-500">Select a node to edit it. Drag from an output dot to an input dot to wire values; wire types must match (hover a dot). A node with a <b>run</b> input only runs when it receives true — wire yes/no, is_set/missing, found/missing there to branch.</p>
+      box.innerHTML = `<p class="text-[11px] text-gray-500">Select a node to edit it. Drag from an output dot to an input dot to wire values; wire types must match (hover a dot). A node with a <b>run</b> input only runs when it receives true - wire yes/no, is_set/missing, found/missing there to branch.</p>
         ${inner() ? '' : field('Unmatched box (global)', sel('plg_unmatched', (root.settings || {}).unmatched_box || 'keep', ['keep', 'drop', 'flag']))}`;
       const u = $('plg_unmatched'); if (u) u.onchange = e => { root.settings = root.settings || {}; root.settings.unmatched_box = e.target.value; markDirty(); };
       return;
     }
     const s = spec(n), fixed = ['start', 'end', '_inner_start', '_inner_end'].includes(n.type);
-    let h = `<div class="flex items-center justify-between mb-1"><span class="text-xs font-bold text-teal-300">${esc(s.label)}</span>
+    let h = `<div class="flex items-center justify-between mb-1"><span class="text-xs font-bold text-sky-300">${esc(s.label)}</span>
       ${fixed ? '' : '<button id="plg_del" class="text-[10px] bg-red-800 hover:bg-red-700 px-2 py-0.5 rounded">Delete</button>'}</div>`;
     if (s.help) h += `<p class="text-[10px] text-gray-500 mb-1">${esc(s.help)}</p>`;
     if (!fixed) { h += field('Id', `<input id="plg_id" value="${esc(n.id)}">`); h += field('Label', `<input id="plg_label" value="${esc(n.label || '')}">`); }
@@ -211,9 +211,9 @@
       else if (kind === 'bool') h += field(k, sel('plg_p_' + k, v === false ? 'no' : (v == null ? 'default' : 'yes'), ['default', 'yes', 'no']));
       else if (kind === 'list') h += field(k + ' (comma-separated)', `<input data-p="${k}" data-list="1" value="${esc((v || []).join(', '))}">`);
       else if (Array.isArray(kind)) h += field(k, sel('plg_p_' + k, v == null ? kind[0] : v, kind));
-      else if (kind === 'graph') h += `<button id="plg_open" class="w-full mt-2 text-[11px] bg-violet-800 hover:bg-violet-700 px-2 py-1 rounded font-bold">Open sub-graph ▸</button>`;
+      else if (kind === 'graph') h += `<button id="plg_open" class="w-full mt-2 text-[11px] bg-indigo-800 hover:bg-indigo-700 px-2 py-1 rounded font-bold">Open sub-graph ▸</button>`;
     }
-    const ins = inPorts(n).map(p => { const ws = wiresOf(n, p.name); return `<div><span class="text-gray-400">${esc(p.name)}</span> ← ${ws.length ? ws.map(w => esc(w[0] + '.' + w[1])).join(', ') : '<span class="text-gray-600">—</span>'}</div>`; }).join('');
+    const ins = inPorts(n).map(p => { const ws = wiresOf(n, p.name); return `<div><span class="text-gray-400">${esc(p.name)}</span> ← ${ws.length ? ws.map(w => esc(w[0] + '.' + w[1])).join(', ') : '<span class="text-gray-600">-</span>'}</div>`; }).join('');
     h += `<details class="mt-2"><summary class="text-[10px] text-gray-500 cursor-pointer">Inputs</summary><div class="text-[10px] mt-1">${ins || '<i>none</i>'}</div></details>`;
     const own = new Set(['id', 'type', 'label', 'in', 'ui', 'graph', ...Object.keys(params)]);
     const extra = {}; for (const k of Object.keys(n)) if (!own.has(k)) extra[k] = n[k];
@@ -252,7 +252,7 @@
     });
   }
 
-  // ── add / save / load ────────────────────────────────────────────────────
+  // -- add / save / load ----------------------------------------------------
   function addNode(type) {
     let id = type, k = 1; while (byId(id)) id = `${type}_${++k}`;
     const n = { id, type, label: catalog[type] ? catalog[type].label : type, in: {} };
@@ -269,8 +269,8 @@
 
   async function save() {
     try {
-      const r = await fetch('/api/update_settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pipeline_tree: root }) }).then(r => r.json());
-      if (!r.success) throw new Error(r.error || 'save failed');
+      const r = await window.postSettings({ pipeline_tree: root });
+      if (!r.ok) throw new Error(r.error || 'save failed');
       dirty = false; const b = $('plg_save'); if (b) b.classList.remove('ring-2', 'ring-amber-400');
       const ta = $('cfg_pipeline'); if (ta) ta.value = JSON.stringify(root, null, 2);
       const bn = $('plg_banner'); if (bn) bn.classList.add('hidden');
@@ -288,7 +288,7 @@
     const add = $('plg_add');
     const groups = {};
     for (const [k, s] of Object.entries(catalog)) { if (k.startsWith('_') || k === 'start' || k === 'end') continue; (groups[s.kind || 'other'] = groups[s.kind || 'other'] || []).push([k, s.label]); }
-    add.innerHTML = '<option value="">+ Add node…</option>' + Object.entries(groups).map(([g, items]) =>
+    add.innerHTML = '<option value="">+ Add node...</option>' + Object.entries(groups).map(([g, items]) =>
       `<optgroup label="${esc(g)}">${items.map(([k, l]) => `<option value="${esc(k)}">${esc(l)}</option>`).join('')}</optgroup>`).join('');
     add.onchange = () => { if (add.value) addNode(add.value); add.value = ''; };
     const bn = $('plg_banner'); if (bn) bn.classList.toggle('hidden', !!t.is_graph);
@@ -305,14 +305,14 @@
         <span id="plg_crumbs" class="font-bold"></span>
         <select id="plg_add" class="bg-gray-900 border border-gray-700 rounded px-2 py-1"></select>
         <datalist id="plg_metafields"></datalist>
-        <span class="text-[10px] text-gray-500">wire dot→dot · scroll zooms · drag canvas pans · dbl-click a For-each to open it</span>
+        <span class="text-[10px] text-gray-500">wire dot→dot | scroll zooms | drag canvas pans | dbl-click a For-each to open it</span>
         <div class="ml-auto flex gap-1">
           <button id="plg_layout" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Auto-layout</button>
           <button id="plg_fit" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Reset view</button>
           <button id="plg_reload" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Reload</button>
           <button id="plg_save" class="bg-green-700 hover:bg-green-600 px-3 py-1 rounded font-bold">Save pipeline</button>
         </div></div>
-      <p id="plg_banner" class="hidden text-[10px] text-amber-300 mb-1">Converted from the older step-chain format — check the wiring, then Save to keep it as a graph.</p>
+      <p id="plg_banner" class="hidden text-[10px] text-amber-300 mb-1">Converted from the older step-chain format - check the wiring, then Save to keep it as a graph.</p>
       <div id="plg_wrap"><div id="plg_canvas"></div><div id="plg_inspector"></div></div>`;
     host.prepend(wrap);
     const ta = host.querySelector('#cfg_pipeline'); const rawBox = ta && ta.closest('div');

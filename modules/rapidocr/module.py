@@ -1,11 +1,11 @@
-"""
-RapidOCR provider — ONNX OCR, models bundled with the wheel (fast, CPU-friendly).
+"""! @file
+@brief RapidOCR provider - ONNX OCR, models bundled with the wheel (fast, CPU-friendly).
 """
 import model_registry
 from optional_deps import optional_import
 
 # `rapidocr` (3.x) is the current package; `rapidocr` is its
-# retired 1.x name. Both run on onnxruntime's CPU provider — no CUDA needed.
+# retired 1.x name. Both run on onnxruntime's CPU provider - no CUDA needed.
 RapidOCR, _HAVE = optional_import("rapidocr", attr="RapidOCR")
 _LEGACY = False
 if not _HAVE:

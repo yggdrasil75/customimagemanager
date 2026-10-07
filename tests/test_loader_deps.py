@@ -1,4 +1,5 @@
-"""Loader dependency reporting: alternative deps, and modules whose import
+"""! @file
+@brief Loader dependency reporting: alternative deps, and modules whose import
 fails on a missing package still report it as a missing pip dep."""
 import os
 from modules import loader

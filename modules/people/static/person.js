@@ -1,6 +1,6 @@
 // Person editor (controls pane "Person" tab): bio / body fields, appearances,
 // relationships, tag suggestions, and the T-pose / mesh estimate buttons.
-// ── Person editor: unified body/bio fields + T-pose/mesh estimation ──────────
+// -- Person editor: unified body/bio fields + T-pose/mesh estimation ----------
 // Bio fields that render as a specific input type; everything else is short text.
 const _DATE_FIELDS = ['birthday', 'death_date'];
 const _MULTILINE_FIELDS = ['notes'];
@@ -17,9 +17,10 @@ async function _loadDirectory() {
 // Which cluster's editor is currently shown in the right-pane Person tab.
 let _openPersonCid = null;
 
-// Open a person: take over the centre pane with their body mesh (+ appearance
-// scrub bar) and fill the right-pane "Person" tab with the editor. Clicking the
-// same person again while it's open closes back to the image view.
+/** @brief Open a person: take over the centre pane with their body mesh (+ appearance
+ *  scrub bar) and fill the right-pane "Person" tab with the editor. Clicking the
+ *  same person again while it's open closes back to the image view.
+ */
 async function openPerson(cid) {
   if (_openPersonCid === cid && typeof mediaMode !== 'undefined' && mediaMode === 'person') {
     if (typeof setMediaMode === 'function') setMediaMode('image');
@@ -27,7 +28,7 @@ async function openPerson(cid) {
     return;
   }
   const body = document.getElementById('person_editor_body');
-  if (body) body.innerHTML = '<div class="text-xs text-gray-500">Loading…</div>';
+  if (body) body.innerHTML = '<div class="text-xs text-gray-500">Loading...</div>';
   const [d] = await Promise.all([
     (await fetch('/api/persons/' + cid)).json(), _loadDirectory()]);
   if (!d.success) {
@@ -42,14 +43,14 @@ async function openPerson(cid) {
   _renderPersonEditor(cid, d);
 }
 
-// Build the person editor markup into the right-pane Person tab body.
+/** @brief Build the person editor markup into the right-pane Person tab body. */
 function _renderPersonEditor(cid, d) {
   const el = document.getElementById('person_editor_body');
   if (!el) return;
   const p = d.person;
   const esc = v => (v || '').replace(/"/g, '&quot;');
 
-  // Typed person-level bio field.
+  /** @brief Typed person-level bio field. */
   const bioField = k => {
     const label = `<span class="text-[10px] text-gray-400">${k.replace(/_/g, ' ')}</span>`;
     if (_DATE_FIELDS.includes(k))
@@ -64,7 +65,7 @@ function _renderPersonEditor(cid, d) {
     if (_CHOICE_FIELDS[k]) {
       const cur = p.bio[k] || '';
       const opts = _CHOICE_FIELDS[k].map(o =>
-        `<option value="${o}"${o === cur ? ' selected' : ''}>${o || '—'}</option>`).join('');
+        `<option value="${o}"${o === cur ? ' selected' : ''}>${o || '-'}</option>`).join('');
       return `<label class="flex flex-col gap-0.5">${label}
         <select onchange="savePersonField(${cid},'bio','${k}',this.value,null)"
                 class="p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white">${opts}</select></label>`;
@@ -77,12 +78,12 @@ function _renderPersonEditor(cid, d) {
   const bioRows = d.bio_fields.map(bioField).join('');
 
   // Hold each list (aliases, tags) in memory so chip add/remove mutate state
-  // directly, then persist the whole list — the same pattern relationships use.
+  // directly, then persist the whole list - the same pattern relationships use.
   _personLists[cid] = {};
   (d.list_fields || []).forEach(k => { _personLists[cid][k] = (p.lists[k] || []).slice(); });
 
   // List fields (aliases, tags) as chip editors that match the gallery Tags box:
-  // one chip per entry with an inline-editable name and an × to remove, plus an
+  // one chip per entry with an inline-editable name and an x to remove, plus an
   // adder that splits on comma/Enter. tags additionally gets a suggestions panel.
   const listRows = (d.list_fields || []).map(k => {
     const suggest = (k === 'tags')
@@ -107,7 +108,7 @@ function _renderPersonEditor(cid, d) {
 
   const flagBanner = (d.date_flags && d.date_flags.length)
     ? `<div class="mt-2 p-1.5 bg-amber-900/40 border border-amber-700 rounded text-[10px] text-amber-200">
-         ⚠ ${d.date_flags.length} photo(s) have a date that disagrees with their look —
+         ⚠ ${d.date_flags.length} photo(s) have a date that disagrees with their look -
          likely a scan date. Review before trusting; nothing was changed automatically.
        </div>` : '';
 
@@ -120,15 +121,15 @@ function _renderPersonEditor(cid, d) {
                 class="p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white"></label>`).join('');
     return `<div class="mt-2 pt-2 border-t border-gray-700">
         <div class="text-[11px] text-blue-300 font-bold mb-1">${a.label || a.id}
-          <span class="text-gray-500 font-normal">· ${a.rel_paths.length} photo(s)</span></div>
+          <span class="text-gray-500 font-normal">| ${a.rel_paths.length} photo(s)</span></div>
         <div class="grid grid-cols-2 gap-1.5">${bodyRows}</div>
         <div class="flex items-center gap-2 mt-2">
           <button onclick="estimatePose(${cid},'${a.id}')"
-            class="text-xs bg-teal-700 hover:bg-teal-600 px-2 py-1 rounded font-bold"
+            class="text-xs bg-sky-700 hover:bg-sky-600 px-2 py-1 rounded font-bold"
             title="Fuses this appearance's pose skeletons into one canonical T-pose. Needs the pose stage to have run and at least 2 full-torso views (both shoulders + hips visible).">
             ${a.has_tpose ? 'Re-estimate T-pose' : 'Estimate T-pose'}</button>
           <button onclick="estimateMesh(${cid},'${a.id}')" ${d.mesh_estimator ? '' : 'disabled'}
-            class="text-xs bg-teal-700 hover:bg-teal-600 disabled:opacity-40 px-2 py-1 rounded font-bold"
+            class="text-xs bg-sky-700 hover:bg-sky-600 disabled:opacity-40 px-2 py-1 rounded font-bold"
             title="${d.mesh_estimator ? '' : 'shape estimator not installed'}">
             ${a.has_mesh ? 'Re-estimate mesh' : 'Estimate mesh'}</button>
           <button onclick="estimateFaceMesh(${cid},'${a.id}')"
@@ -163,7 +164,7 @@ let _personLists = {};
 // memory for the session. {mode:'count'|'frac', value:number}.
 let _tagSuggestState = {};
 
-// Render one list field as gallery-style tag chips (blue dot, inline-edit, ×).
+/** @brief Render one list field as gallery-style tag chips (blue dot, inline-edit, x). */
 function _renderPersonList(cid, key) {
   const box = document.getElementById('person_list_' + cid + '_' + key);
   if (!box) return;
@@ -192,7 +193,7 @@ async function _savePersonList(cid, key) {
   if (key === 'tags') _paintTagSuggestions(cid);   // grey out newly-added ones
 }
 
-// Add one or more items (split on comma), case-insensitive dedupe, then persist.
+/** @brief Add one or more items (split on comma), case-insensitive dedupe, then persist. */
 function addPersonListItems(cid, key, raw) {
   const cur = _personLists[cid][key] || (_personLists[cid][key] = []);
   const have = new Set(cur.map(t => t.toLowerCase()));
@@ -221,15 +222,16 @@ function removePersonListItem(cid, key, i) {
   _savePersonList(cid, key);
 }
 
-// ── Tag suggestions ─────────────────────────────────────────────────────────
-// Suggestions come from the tags on every image this person appears in. The
-// server returns each tag with its occurrence count and total tagged images;
-// the threshold (an absolute count, or a fraction of those images) is applied
-// here so moving the slider is instant and needs no round-trip.
+// -- Tag suggestions ---------------------------------------------------------
+/** @brief Suggestions come from the tags on every image this person appears in. The
+ *  server returns each tag with its occurrence count and total tagged images;
+ *  the threshold (an absolute count, or a fraction of those images) is applied
+ *  here so moving the slider is instant and needs no round-trip.
+ */
 async function _loadTagSuggestions(cid) {
   const wrap = document.getElementById('person_tagsuggest_' + cid);
   if (!wrap) return;
-  wrap.innerHTML = '<div class="text-[10px] text-gray-500">Loading tag suggestions…</div>';
+  wrap.innerHTML = '<div class="text-[10px] text-gray-500">Loading tag suggestions...</div>';
   let d;
   try { d = await (await fetch('/api/persons/' + cid + '/tag_suggestions')).json(); }
   catch (e) { wrap.innerHTML = ''; return; }
@@ -278,8 +280,8 @@ function _paintTagSuggestions(cid) {
   const sliderMax = st.mode === 'frac' ? 100 : Math.max(1, maxCount);
   const sliderVal = st.mode === 'frac' ? Math.round(st.value * 100) : st.value;
   const thLabel = st.mode === 'frac'
-    ? `in ≥ ${Math.round(st.value * 100)}% of images`
-    : `in ≥ ${st.value} image(s)`;
+    ? `in >= ${Math.round(st.value * 100)}% of images`
+    : `in >= ${st.value} image(s)`;
 
   wrap.innerHTML = `
     <div class="mt-1 pt-1 border-t border-gray-700">
@@ -297,7 +299,7 @@ function _paintTagSuggestions(cid) {
       </div>
       <div class="flex flex-wrap gap-1">${passing.map(chip).join('') || '<span class="text-[10px] text-gray-600 italic">none above threshold</span>'}</div>
       ${addable.length ? `<button onclick="addAllSuggestedTags(${cid})"
-          class="mt-1 text-[10px] px-2 py-0.5 bg-teal-700 hover:bg-teal-600 rounded font-bold">
+          class="mt-1 text-[10px] px-2 py-0.5 bg-sky-700 hover:bg-sky-600 rounded font-bold">
           + Add all ${addable.length} above threshold</button>` : ''}
     </div>`;
 }
@@ -330,9 +332,10 @@ function addAllSuggestedTags(cid) {
 // In-memory relationships per open person, so add/remove mutate state directly.
 let _relState = {};
 
-// One relationship line. Single lines (mother/father/spouse) show a single slot:
-// a filled chip that can only be cleared, or one adder. Multi lines (siblings,
-// children, ex-spouses, step-family) show all chips plus an always-present adder.
+/** @brief One relationship line. Single lines (mother/father/spouse) show a single slot:
+ *  a filled chip that can only be cleared, or one adder. Multi lines (siblings,
+ *  children, ex-spouses, step-family) show all chips plus an always-present adder.
+ */
 function _renderRelationLine(cid, line, edges, single) {
   const label = line.replace(/_/g, ' ');
   const chip = (e, i) =>
@@ -357,7 +360,7 @@ function _renderRelationLine(cid, line, edges, single) {
     </div>`;
 }
 
-// Add an edge: match the typed name to a known person, else store as external.
+/** @brief Add an edge: match the typed name to a known person, else store as external. */
 async function addRelation(cid, line, name) {
   name = (name || '').trim();
   if (!name) return;
@@ -404,7 +407,7 @@ async function savePersonField(cid, section, key, value, appearance_id) {
 
 async function _personTask(cid, appearanceId, path, label) {
   const s = document.getElementById('person_status_' + cid + '_' + appearanceId);
-  if (s) s.textContent = label + '…';
+  if (s) s.textContent = label + '...';
   const d = await (await fetch('/api/persons/' + cid + path, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ appearance_id: appearanceId })
@@ -432,11 +435,12 @@ async function _personTask(cid, appearanceId, path, label) {
 }
 const estimatePose = (cid, aid) => _personTask(cid, aid, '/tpose', 'T-pose');
 const estimateMesh = (cid, aid) => _personTask(cid, aid, '/mesh', 'Mesh');
-// After estimating a face mesh, flip the viewer to Face mode so the result shows
-// without the user having to hit the toggle.
+/** @brief After estimating a face mesh, flip the viewer to Face mode so the result shows
+ *  without the user having to hit the toggle.
+ */
 async function estimateFaceMesh(cid, aid) {
   const s = document.getElementById('person_status_' + cid + '_' + aid);
-  if (s) { s.className = 'text-[10px] text-gray-400'; s.textContent = 'Face mesh…'; }
+  if (s) { s.className = 'text-[10px] text-gray-400'; s.textContent = 'Face mesh...'; }
   await _personTask(cid, aid, '/face_mesh', 'Face mesh');
   if (window.personView && window.personView.setView) window.personView.setView('face');
 }

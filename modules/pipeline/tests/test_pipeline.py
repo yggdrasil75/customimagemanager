@@ -1,4 +1,5 @@
-"""Pipeline module: applying an analysis to a file's metadata."""
+"""! @file
+@brief Pipeline module: applying an analysis to a file's metadata."""
 import pytest
 from cimtest import read_meta, write_meta, box, media_path
 

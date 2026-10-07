@@ -1,9 +1,9 @@
-"""
-Google Photos importer (from Google Takeout).
+"""! @file
+@brief Google Photos importer (from Google Takeout).
 ======================================================================
 Google closed library-wide read access in its Photos API (March 2025): an
 app can only read photos it uploaded itself. The complete way out is Google
-Takeout (takeout.google.com → Google Photos). The Takeout quirks (split
+Takeout (takeout.google.com -> Google Photos). The Takeout quirks (split
 archives, truncated and renamed sidecars, album copies, edited copies, live
 photos) are handled in takeout.py.
 

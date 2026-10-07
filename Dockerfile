@@ -1,4 +1,4 @@
-# ── optional stage: the Android app (BUILD_ANDROID=1) ─────────────────────────
+# -- optional stage: the Android app (BUILD_ANDROID=1) -------------------------
 # Builds android/ into static/app/cim-family.apk with a JDK + the Android SDK
 # fetched by android/build.sh. Off by default because it pulls ~1.5 GB of SDK;
 # the runtime image copies whatever this stage produced (an empty dir when off).

@@ -1,24 +1,6 @@
-/* colors_blue: the "blue" palette. Variables: modules/theming/static/theming.css. */
+/* colors_blue: the "blue" palette (blue, indigo, sky). Contract: modules/theming/gen_theming_css.py. */
 body[data-palette="blue"] {
-  --cim-accent-200: #bfdbfe;
-  --cim-accent-300: #93c5fd;
-  --cim-accent-400: #60a5fa;
-  --cim-accent-500: #3b82f6;
-  --cim-accent-600: #2563eb;
-  --cim-accent-700: #1d4ed8;
-  --cim-accent-800: #1e40af;
-  --cim-accent-900: #1e3a8a;
-  --cim-accent2-200: #c7d2fe;
-  --cim-accent2-300: #a5b4fc;
-  --cim-accent2-400: #818cf8;
-  --cim-accent2-500: #6366f1;
-  --cim-accent2-600: #4f46e5;
-  --cim-accent2-700: #4338ca;
-  --cim-accent2-800: #3730a3;
-  --cim-accent3-300: #7dd3fc;
-  --cim-accent3-400: #38bdf8;
-  --cim-accent3-500: #0ea5e9;
-  --cim-accent3-600: #0284c7;
-  --cim-accent3-700: #0369a1;
-  --cim-accent3-800: #075985;
+  --cim-accent-50: #eff6ff; --cim-accent-100: #dbeafe; --cim-accent-200: #bfdbfe; --cim-accent-300: #93c5fd; --cim-accent-400: #60a5fa; --cim-accent-500: #3b82f6; --cim-accent-600: #2563eb; --cim-accent-700: #1d4ed8; --cim-accent-800: #1e40af; --cim-accent-900: #1e3a8a; --cim-accent-950: #172554;
+  --cim-accent2-50: #eef2ff; --cim-accent2-100: #e0e7ff; --cim-accent2-200: #c7d2fe; --cim-accent2-300: #a5b4fc; --cim-accent2-400: #818cf8; --cim-accent2-500: #6366f1; --cim-accent2-600: #4f46e5; --cim-accent2-700: #4338ca; --cim-accent2-800: #3730a3; --cim-accent2-900: #312e81; --cim-accent2-950: #1e1b4b;
+  --cim-accent3-50: #f0f9ff; --cim-accent3-100: #e0f2fe; --cim-accent3-200: #bae6fd; --cim-accent3-300: #7dd3fc; --cim-accent3-400: #38bdf8; --cim-accent3-500: #0ea5e9; --cim-accent3-600: #0284c7; --cim-accent3-700: #0369a1; --cim-accent3-800: #075985; --cim-accent3-900: #0c4a6e; --cim-accent3-950: #082f49;
 }

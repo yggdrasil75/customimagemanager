@@ -1,5 +1,5 @@
-"""
-Map module — every geotagged photo and video on a world map.
+"""! @file
+@brief Map module - every geotagged photo and video on a world map.
 
   * a Map left tab: Leaflet + marker clustering, thumbnail markers; click one
     to open the file in the editor, "Show in gallery" filters the gallery to
@@ -93,7 +93,7 @@ def register(host):
     scan = {"running": False, "done": 0, "total": 0, "found": 0, "finished": 0.0}
     scan_lock = threading.Lock()
 
-    # ── reading / caching ────────────────────────────────────────────────
+    # -- reading / caching ------------------------------------------------
     def _abs(rel):
         p = host.safe_path(host.media_dir, rel)
         return p if p and os.path.isfile(p) else None
@@ -106,12 +106,11 @@ def register(host):
 
     def _store(db, rel, pos, mtime):
         lat, lon = pos if pos else (None, None)
-        db.execute("INSERT INTO geo(rel_path, lat, lon, src_mtime) VALUES(?,?,?,?) "
-                   "ON CONFLICT(rel_path) DO UPDATE SET lat=excluded.lat, lon=excluded.lon, "
-                   "src_mtime=excluded.src_mtime", (rel, lat, lon, mtime))
+        host.update_file(rel, table="geo", set={"lat": lat, "lon": lon, "src_mtime": mtime},
+                         dont_write=True, commit=False)
 
     def refresh(rel, abs_path=None, force=False, commit=True):
-        """Re-read one file if it (or its sidecar) changed. -> (lat, lon) | None."""
+        """! @brief Re-read one file if it (or its sidecar) changed. -> (lat, lon) | None."""
         fp = abs_path or _abs(rel)
         db = host.db()
         if not fp:
@@ -159,8 +158,8 @@ def register(host):
                 if pending >= 200:
                     db.commit()
                     pending = 0
-            db.execute("DELETE FROM geo WHERE rel_path NOT IN (SELECT rel_path FROM files)")
-            db.commit()
+            host.update_file(table="geo", where=("rel_path NOT IN (SELECT rel_path FROM files)", ()),
+                             remove=True, dont_write=True)
         except Exception as e:
             host.logger.error(f"map: location scan failed: {e}")
         finally:
@@ -174,7 +173,7 @@ def register(host):
         threading.Thread(target=_scan_all, kwargs={"force": force},
                          name="map-scan", daemon=True).start()
 
-    # ── events ───────────────────────────────────────────────────────────
+    # -- events -----------------------------------------------------------
     def _on_indexed(rel_path, abs_path=None):
         try:
             refresh(rel_path, abs_path)
@@ -182,15 +181,12 @@ def register(host):
             host.logger.warning(f"map: {rel_path}: {e}")
 
     def _on_deleted(rel_path):
-        db = host.db()
-        db.execute("DELETE FROM geo WHERE rel_path=?", (rel_path,))
-        db.commit()
+        host.update_file(rel_path, table="geo", remove=True, dont_write=True)
 
     def _on_renamed(old_rel, new_rel):
-        db = host.db()
-        db.execute("DELETE FROM geo WHERE rel_path=?", (new_rel,))
-        db.execute("UPDATE geo SET rel_path=? WHERE rel_path=?", (new_rel, old_rel))
-        db.commit()
+        host.update_file(new_rel, table="geo", remove=True, dont_write=True, commit=False)
+        host.update_file(table="geo", where=("rel_path=?", (old_rel,)), set={"rel_path": new_rel},
+                         dont_write=True)
 
     host.on("file.indexed", _on_indexed)
     host.on("file.deleted", _on_deleted)
@@ -198,7 +194,7 @@ def register(host):
     host.on("library.reconcile", lambda: _scan_async())
     host.on_startup(lambda: _scan_async())
 
-    # ── search tokens ────────────────────────────────────────────────────
+    # -- search tokens ----------------------------------------------------
     def _search_gps(token, value):
         v = value.strip().lower()
         if v in ("yes", "true", "1", "y"):
@@ -226,13 +222,13 @@ def register(host):
         return f"rel_path IN (SELECT rel_path FROM geo WHERE {clause})", params
 
     host.register_search_type("gps:", _search_gps,
-                              help="gps:yes / gps:no — has (or lacks) a GPS position")
+                              help="gps:yes / gps:no - has (or lacks) a GPS position")
     host.register_search_type("near:", _search_near,
-                              help="near:<lat>,<lon>[,<km>] — within ~km (default 1) of a point, e.g. near:48.8584,2.2945,2")
+                              help="near:<lat>,<lon>[,<km>] - within ~km (default 1) of a point, e.g. near:48.8584,2.2945,2")
     host.register_search_type("bbox:", _search_bbox,
-                              help="bbox:<south>,<west>,<north>,<east> — inside a lat/lon box (the Map tab's 'Show in gallery')")
+                              help="bbox:<south>,<west>,<north>,<east> - inside a lat/lon box (the Map tab's 'Show in gallery')")
 
-    # ── routes ───────────────────────────────────────────────────────────
+    # -- routes -----------------------------------------------------------
     def api_points():
         db = host.db()
         rows = db.execute(

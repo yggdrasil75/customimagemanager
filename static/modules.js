@@ -11,7 +11,7 @@
  * settings modal tab bar and <div id="module_settings_panes"> for the panes;
  * this file populates both from /api/modules. */
 (function () {
-  // ── 1. inject module assets ───────────────────────────────────────────────
+  // -- 1. inject module assets -----------------------------------------------
   async function injectAssets() {
     let assets = [];
     try {
@@ -35,15 +35,16 @@
     }
   }
 
-  // ── 2. render module settings tabs ────────────────────────────────────────
+  // -- 2. render module settings tabs ----------------------------------------
   // Render module-contributed settings fields into their target pane. For now
   // pane="general" is supported (the default pane); a field's value is saved
   // through the same /api/update_settings path core settings use.
   // Fields with pane="module" belong to a per-module Settings popover in the
   // Modules tab (tiers.js renders the button); they are not global settings.
   window._moduleFields = {};
-  // Mount for a field: #module_settings_fields_<pane>_<section> when the pane
-  // has that section, else the pane's main list.
+  /** @brief Mount for a field: #module_settings_fields_<pane>_<section> when the pane
+   *  has that section, else the pane's main list.
+   */
   function fieldMount(f) {
     const pane = f.pane || "general";
     let mount = (f.section && document.getElementById(`module_settings_fields_${pane}_${f.section}`))
@@ -75,10 +76,11 @@
     if (window.applyFeatureVisibility) applyFeatureVisibility();
   }
 
-  // One settings widget. save(key, value) receives every change (module
-  // settings and User settings both buffer it for the modal's Save).
-  // compact = inline label + small input on one line, help as a tooltip.
-  // Kinds: text | number | toggle | select | combo | textarea | rows.
+  /** @brief One settings widget. save(key, value) receives every change (module
+   *  settings and User settings both buffer it for the modal's Save).
+   *  compact = inline label + small input on one line, help as a tooltip.
+   *  Kinds: text | number | toggle | select | combo | textarea | rows.
+   */
   function fieldEl(f, save, compact) {
     save = save || saveSetting;
     const wrap = document.createElement(compact ? "label" : (f.kind === "rows" ? "div" : "label"));
@@ -136,7 +138,7 @@
       if (f.default != null) {
         const reset = document.createElement("button");
         reset.type = "button"; reset.textContent = "reset to default";
-        reset.className = "text-[10px] text-cyan-400 hover:text-cyan-300 ml-2";
+        reset.className = "text-[10px] text-sky-400 hover:text-sky-300 ml-2";
         reset.addEventListener("click", () => { input.value = f.default; save(f.key, f.default); });
         wrap.querySelector("div")?.appendChild(reset);
       }
@@ -161,8 +163,9 @@
     return wrap;
   }
 
-  // An editable list of small records ({col: value}): one input per column,
-  // a ✕ per row and "+ Add". Every edit hands the whole list to save().
+  /** @brief An editable list of small records ({col: value}): one input per column,
+   *  a x per row and "+ Add". Every edit hands the whole list to save().
+   */
   function rowsEditor(f, save) {
     const cols = f.columns || [{ key: "value", label: "Value" }];
     const box = document.createElement("div");
@@ -216,30 +219,26 @@
   // Edits are buffered and written by the settings modal's Save button
   // (saveAllSettings picks up window.persist* functions); closing the modal
   // without saving discards them, same as the core panes.
+  // Module panes with their own UI buffer edits here too: queueSetting(key, value).
   let _pendingFields = {};
   function saveSetting(key, value) { _pendingFields[key] = value; }
+  window.queueSetting = saveSetting;
   window.persistModuleFields = async function () {
-    const keys = Object.keys(_pendingFields);
-    if (!keys.length) return { ok: true };
-    try {
-      const r = await fetch("/api/update_settings", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(_pendingFields),
-      });
-      if (!r.ok) return { ok: false, error: "Module settings failed to save" };
-    } catch (e) { return { ok: false, error: "Module settings failed to save" }; }
+    if (!Object.keys(_pendingFields).length) return { ok: true };
+    const res = await window.postSettings(_pendingFields);
+    if (!res.ok) return { ok: false, error: res.error || "Module settings failed to save" };
     _pendingFields = {};
     return { ok: true };
   };
   if (window.registerSettingsPersist) window.registerSettingsPersist(window.persistModuleFields);
   else (window._settingsPersistSteps = window._settingsPersistSteps || []).push(window.persistModuleFields);
 
-  // ── model selection tab ───────────────────────────────────────────────────
+  // -- model selection tab ---------------------------------------------------
   // One row per broker capability: family (provider) / size / type selects,
   // then the selected provider's own widgets. A select with < 2 choices is
-  // disabled (greyed). Core only renders what /api/models reports — it has no
+  // disabled (greyed). Core only renders what /api/models reports - it has no
   // idea what the providers are.
-const SPEED_BADGE = { fast: "⚡", balanced: "⚖", accurate: "🎯" };
+const SPEED_BADGE = { fast: "fast", balanced: "balanced", accurate: "accurate" };
   const SEL = "w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white " +
               "disabled:opacity-40 disabled:cursor-not-allowed";
   function _select(opts, value, onChange, title) {
@@ -301,8 +300,8 @@ const SPEED_BADGE = { fast: "⚡", balanced: "⚖", accurate: "🎯" };
         provs.map((x) => ({ value: x.id, title: x.available ? "" : x.reason,
           label: (SPEED_BADGE[x.speed] ? SPEED_BADGE[x.speed] + " " : "") + x.label
                  + (x.family && x.family !== x.label ? ` (${x.family})` : "")
-                 + (x.prompted ? " · prompted" : "")
-                 + (x.available ? "" : " · unavailable") })),
+                 + (x.prompted ? " | prompted" : "")
+                 + (x.available ? "" : " | unavailable") })),
         p.id, (id) => pick({ provider: id, size: null, type: null }))));
       grid.appendChild(_cell("Size", _select(
         (p.sizes || []).map((s) => ({ value: s, label: s })), v.size, (s) => pick({ size: s }))));
@@ -333,8 +332,9 @@ const SPEED_BADGE = { fast: "⚡", balanced: "⚖", accurate: "🎯" };
     }
     if (window.applyFeatureVisibility) applyFeatureVisibility(mount);
   }
-  // "Run on every image" toggle + class whitelist for region-producing
-  // capabilities. Classes come from the selected provider (may load weights).
+  /** @brief "Run on every image" toggle + class whitelist for region-producing
+   *  capabilities. Classes come from the selected provider (may load weights).
+   */
   function backgroundBlock(c, p, v, pick) {
     const wrap = document.createElement("div");
     wrap.className = "mt-2 border-t border-gray-700 pt-2";
@@ -343,7 +343,7 @@ const SPEED_BADGE = { fast: "⚡", balanced: "⚖", accurate: "🎯" };
     const lbl = document.createElement("label");
     lbl.className = "flex items-center gap-2 text-xs text-gray-300 cursor-pointer";
     const cb = document.createElement("input");
-    cb.type = "checkbox"; cb.className = "accent-cyan-500"; cb.checked = !!v.background;
+    cb.type = "checkbox"; cb.className = "accent-sky-500"; cb.checked = !!v.background;
     cb.addEventListener("change", () => pick({ background: cb.checked }));
     lbl.appendChild(cb);
     lbl.appendChild(document.createTextNode(" Run in background on every image"));
@@ -355,7 +355,7 @@ const SPEED_BADGE = { fast: "⚡", balanced: "⚖", accurate: "🎯" };
     note.className = "text-[10px] text-gray-600 mt-1";
     if (p.has_classes) {
       const tog = document.createElement("button");
-      tog.type = "button"; tog.className = "text-[10px] text-cyan-400 hover:text-cyan-300";
+      tog.type = "button"; tog.className = "text-[10px] text-sky-400 hover:text-sky-300";
       const sel = new Set(v.classes || []);
       tog.textContent = sel.size ? `classes (${sel.size} ticked)` : "classes (all)";
       tog.title = "Classes the background model was trained on; the whitelist filters the unprompted run.";
@@ -363,7 +363,7 @@ const SPEED_BADGE = { fast: "⚡", balanced: "⚖", accurate: "🎯" };
       tog.addEventListener("click", async () => {
         const hidden = box.classList.toggle("hidden");
         if (hidden || loaded) return;
-        box.innerHTML = '<span class="text-[10px] text-gray-500 col-span-4">loading class list…</span>';
+        box.innerHTML = '<span class="text-[10px] text-gray-500 col-span-4">loading class list...</span>';
         let classes = [];
         try {
           const d = await fetch("/api/models/classes?capability=" + encodeURIComponent(c.id)).then((r) => r.json());
@@ -377,7 +377,7 @@ const SPEED_BADGE = { fast: "⚡", balanced: "⚖", accurate: "🎯" };
           const l = document.createElement("label");
           l.className = "flex items-center gap-1 text-[11px] text-gray-300";
           const i = document.createElement("input");
-          i.type = "checkbox"; i.className = "accent-cyan-500"; i.checked = sel.has(name);
+          i.type = "checkbox"; i.className = "accent-sky-500"; i.checked = sel.has(name);
           i.addEventListener("change", () => {
             if (i.checked) sel.add(name); else sel.delete(name);
             tog.textContent = sel.size ? `classes (${sel.size} ticked)` : "classes (all)";
@@ -406,7 +406,7 @@ const SPEED_BADGE = { fast: "⚡", balanced: "⚖", accurate: "🎯" };
       };
       grid.appendChild(_cell("Background family", _select(
         [{ value: "", label: "Same as foreground" }].concat(
-          provs.map((x) => ({ value: x.id, label: x.label + (x.available ? "" : " · unavailable") }))),
+          provs.map((x) => ({ value: x.id, label: x.label + (x.available ? "" : " | unavailable") }))),
         bp ? bp.id : "", (id) => pickBg({ provider: id, size: null, type: null }))));
       grid.appendChild(_cell("Background size", _select(
         bp ? (bp.sizes || []).map((s) => ({ value: s, label: s })) : [],
@@ -473,8 +473,9 @@ const SPEED_BADGE = { fast: "⚡", balanced: "⚖", accurate: "🎯" };
     if (window.organizeSettingsRail) organizeSettingsRail();
   }
 
-  // Settings open → refetch, so module fields show what the server has now
-  // rather than the values captured at page load (tiers.js openSettings).
+  /** @brief Settings open -> refetch, so module fields show what the server has now
+   *  rather than the values captured at page load (tiers.js openSettings).
+   */
   window.refreshModuleSettings = async function () {
     _pendingFields = {};               // a fresh open starts from what the server has
     await buildSettingsTabs();

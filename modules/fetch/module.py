@@ -1,16 +1,16 @@
-"""
-Fetch module — generic download-queue + worker + fetcher registry.
+"""! @file
+@brief Fetch module - generic download-queue + worker + fetcher registry.
 ======================================================================
 Owns the reusable machinery for pulling remote media into the library:
 a queue table, a background worker with per-target concurrency, the
-spool→upload_queue ingestion, and a REGISTRY of fetchers. gallery-dl is a
-fetcher that registers here (modules/gallerydl); yt-dlp — or anything else
-that turns a URL/target into files — becomes another fetcher module with
+spool->upload_queue ingestion, and a REGISTRY of fetchers. gallery-dl is a
+fetcher that registers here (modules/gallerydl); yt-dlp - or anything else
+that turns a URL/target into files - becomes another fetcher module with
 ZERO core or fetch-module edits: it just registers into the service this
 module publishes.
 
 A fetcher is a dict/object providing:
-    id            stable id ("gallerydl", "ytdlp", …)
+    id            stable id ("gallerydl", "ytdlp", ...)
     label         human label
     available()   -> bool          (tool installed?)
     handles(t)    -> bool          (can I fetch this target string?)
@@ -22,7 +22,7 @@ A fetcher is a dict/object providing:
 
 A fetcher whose fetch() takes a `ctx` keyword also gets a FetchContext (see
 below): a per-item LEDGER so re-runs and watches only fetch what is new
-(ctx.seen / on_file(..., key=…)), progress (ctx.total / ctx.message), and
+(ctx.seen / on_file(..., key=...)), progress (ctx.total / ctx.message), and
 the cancel flag. Library importers (Immich, Google Takeout, Apple) use it;
 plain URL fetchers ignore it.
 
@@ -107,7 +107,7 @@ _BAD_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 
 def expand_path(template, meta, orig_name):
-    """Expand `{key}` placeholders in a folder template from the file's
+    """! @brief Expand `{key}` placeholders in a folder template from the file's
     metadata; returns (folder, filename).
 
     Keys are the (flattened) fetcher metadata keys plus `original_name`
@@ -139,7 +139,7 @@ def expand_path(template, meta, orig_name):
 
 
 class FetchRegistry:
-    """Holds registered fetchers and dispatches a target to the right one."""
+    """! @brief Holds registered fetchers and dispatches a target to the right one."""
     def __init__(self):
         self._fetchers = {}          # id -> fetcher
 
@@ -173,7 +173,7 @@ class FetchRegistry:
         return out
 
     def for_target(self, target):
-        """The highest-priority available fetcher that handles `target`, or
+        """! @brief The highest-priority available fetcher that handles `target`, or
         None. `priority` (default 0) lets catch-all fetchers (page scraper)
         sit behind specific ones regardless of module load order."""
         ranked = sorted(self._fetchers.values(),
@@ -195,7 +195,7 @@ MAX_ITEM_ATTEMPTS = 3
 
 
 class FetchContext:
-    """What a keyed fetcher gets as `ctx`. Keys are the source's own stable
+    """! @brief What a keyed fetcher gets as `ctx`. Keys are the source's own stable
     ids (an asset id, a content hash); `scope` names the account or library
     they belong to, so two Immich servers never share a key space."""
 
@@ -207,7 +207,7 @@ class FetchContext:
         self._total = 0
         self._counts = {"new": 0, "known": 0, "skipped": 0, "failed": 0}
 
-    # ledger
+    ## @brief ledger
     def _row(self, key):
         return self._host.db().execute("SELECT * FROM fetch_items WHERE fetcher=? AND scope=? AND item_key=?",
                                        (self.fetcher, self.scope, str(key))).fetchone()
@@ -217,7 +217,7 @@ class FetchContext:
         return dict(r) if r else None
 
     def seen(self, key):
-        """True when this item needs nothing now: imported, being ingested,
+        """! @brief True when this item needs nothing now: imported, being ingested,
         or failed too often (unless retrying). Skipped items are not 'seen':
         the fetcher re-decides every run (an option may have changed)."""
         r = self._row(key)
@@ -254,10 +254,10 @@ class FetchContext:
         self._counts["failed"] += 1
 
     def mark(self, key, status="done", rel_path="", name=""):
-        """Record an item handled without a download (e.g. a set marker)."""
+        """! @brief Record an item handled without a download (e.g. a set marker)."""
         self._record(key, status, rel_path=rel_path, name=name)
 
-    # progress
+    ## @brief progress
     def total(self, n):
         self._total = int(n)
         self._update(total=self._total)
@@ -277,7 +277,7 @@ class FetchContext:
 
 
 def reconcile(host):
-    """Ledger items whose ingest finished: record where they landed (or that
+    """! @brief Ledger items whose ingest finished: record where they landed (or that
     they failed, so the next run retries them)."""
     db = host.db()
     rows = db.execute("SELECT i.fetcher, i.scope, i.item_key, u.status AS ustatus, u.rel_path AS urel, "
@@ -321,7 +321,7 @@ def register(host):
                           section="fetch", section_label="Fetch",
                           default="write", role_defaults={"viewer": "read"})
 
-    # Storage guard: downloads pause (not cancel) while free space is under this.
+    ## @brief Storage guard: downloads pause (not cancel) while free space is under this.
     def _set_min_free(new, old=None):
         common.MIN_FREE_GB = float(new or 0)
     host.add_config_key("min_free_gb", default=0,
@@ -333,7 +333,7 @@ def register(host):
                                  "0 = automatic: 10 GB on drives over 1 TB, else 1 GB.")
     host.on_startup(lambda: _set_min_free(host.config.get("min_free_gb")))
 
-    # ── queue helpers (lazy manager import for core DB + upload ingest) ────
+    # -- queue helpers (lazy manager import for core DB + upload ingest) ----
     m = host.core
 
     def _attr(f, name, default=None):
@@ -360,7 +360,7 @@ def register(host):
     def _clear_cancel(qid): _cancel.discard(qid)
 
     def _process(job):
-        """Run the job's fetcher, streaming produced files into upload_queue."""
+        """! @brief Run the job's fetcher, streaming produced files into upload_queue."""
         qid, target, folder = job["id"], job["target"], job["folder"]
         fetcher = registry.get(job.get("fetcher")) or registry.for_target(target)
         if fetcher is None:
@@ -378,7 +378,7 @@ def register(host):
         ctx = FetchContext(host, fid, qid, lambda **c: _update(qid, **c), lambda: _is_canceled(qid))
 
         def _on_file(media_path, meta, key=None):
-            """Hand one produced file to the ingest queue. meta may carry
+            """! @brief Hand one produced file to the ingest queue. meta may carry
             'filename' (the name to store under; default: the file's own,
             sanitised) and '_move' (the file is the fetcher's to give away).
             With a key, the item is recorded in the ledger."""
@@ -475,7 +475,7 @@ def register(host):
         return why
 
     def _claim():
-        """Peek pending rows; claim the first whose target_key bucket is free."""
+        """! @brief Peek pending rows; claim the first whose target_key bucket is free."""
         tm = host.thread_manager
         if _pause_reason():
             return None                       # queue paused: rows stay 'pending'
@@ -550,7 +550,7 @@ def register(host):
 
     _watch_next = {"at": 0.0}
     def _tick_watches(force_ids=None):
-        """Queue every enabled watch whose interval has elapsed, unless a run
+        """! @brief Queue every enabled watch whose interval has elapsed, unless a run
         for that target is already pending/downloading. Runs from _claim (the
         processor polls every second) but only does SQL once a minute."""
         now = time.time()
@@ -579,12 +579,12 @@ def register(host):
         _recon_next["at"] = time.time() + _WATCH_TICK
         reconcile(host)
 
-    # ── service API used by importer modules ──────────────────────────────
+    # -- service API used by importer modules ------------------------------
     def _svc_enqueue(target, folder, fetcher_id):
         return _enqueue([target], folder, fetcher_id)
 
     def _svc_watch(target, folder, every_h, fetcher_id, enabled=True, queued_now=False):
-        """Create or update the watch for `target`; every_h=None removes it."""
+        """! @brief Create or update the watch for `target`; every_h=None removes it."""
         db = host.db()
         row = db.execute("SELECT id FROM fetch_watch WHERE target=?", (target,)).fetchone()
         if every_h is None:
@@ -628,7 +628,7 @@ def register(host):
     registry.cancel = lambda qid: _cancel.add(int(qid))
 
     def _svc_run(qid):
-        """Run one queued job synchronously (tests, CLI)."""
+        """! @brief Run one queued job synchronously (tests, CLI)."""
         row = host.db().execute("SELECT * FROM fetch_queue WHERE id=?", (int(qid),)).fetchone()
         if row is None:
             return None
@@ -639,7 +639,7 @@ def register(host):
     registry.run = _svc_run
 
     def _start():
-        # Requeue anything left mid-flight by a restart: 'downloading' rows had
+        ## @brief Requeue anything left mid-flight by a restart: 'downloading' rows had
         # a worker that never finished. The interrupted attempt isn't charged.
         def _requeue_stale():
             db = host.db()
@@ -654,7 +654,7 @@ def register(host):
         host.thread_manager.register_source("fetch", _claim, _worker, key_of=_key)
     host.on_startup(_start)
 
-    # ── endpoints ─────────────────────────────────────────────────────────
+    # -- endpoints ---------------------------------------------------------
 
     def api_fetch_add():
         d = request.get_json(force=True, silent=True) or {}
@@ -682,7 +682,7 @@ def register(host):
         db = host.db()
         if d.get("all"):
             # Pending rows are canceled in the DB directly (nothing is running
-            # them yet — possibly because the queue is paused); running ones
+            # them yet - possibly because the queue is paused); running ones
             # get the flag their worker polls.
             db.execute("UPDATE fetch_queue SET status='canceled', updated=? WHERE status='pending'",
                        (time.time(),))
@@ -702,7 +702,7 @@ def register(host):
         host.db().commit()
         return jsonify({"success": True})
 
-    # ── watches (scheduled re-fetches) ────────────────────────────────────
+    # -- watches (scheduled re-fetches) ------------------------------------
     def api_watch():
         if request.method == "GET":
             rows = host.db().execute("SELECT * FROM fetch_watch ORDER BY id").fetchall()

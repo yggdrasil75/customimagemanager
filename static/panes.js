@@ -1,19 +1,20 @@
-// panes.js — the left-pane tab controller (Gallery / Albums / Faces / Review /
+// panes.js - the left-pane tab controller (Gallery / Albums / Faces / Review /
 // Music / Books).
 //
 // Replaces the old header Images|Music pill pair. The three tabs are:
-//   gallery  — folder browser; opens the gallery modal
-//   albums   — album list; opens the gallery modal filtered to one album
+//   gallery  - folder browser; opens the gallery modal
+//   albums   - album list; opens the gallery modal filtered to one album
 //
 
 let currentPane = 'gallery';
 
-// Keep the URL's ?tab= param in sync with the active pane so a refresh (or a
-// bookmarked/shared link) lands back on the same tab instead of resetting to
-// Gallery. Gallery is the default, so we drop the param entirely in that case
-// to keep plain "/" URLs clean. pushState (not replaceState) so the browser's
-// back/forward buttons move between tabs too; history.state carries the pane
-// so popstate can restore it without re-deriving anything from the DOM.
+/** @brief Keep the URL's ?tab= param in sync with the active pane so a refresh (or a
+ *  bookmarked/shared link) lands back on the same tab instead of resetting to
+ *  Gallery. Gallery is the default, so we drop the param entirely in that case
+ *  to keep plain "/" URLs clean. pushState (not replaceState) so the browser's
+ *  back/forward buttons move between tabs too; history.state carries the pane
+ *  so popstate can restore it without re-deriving anything from the DOM.
+ */
 function _syncPaneUrl(pane) {
   if (typeof history === 'undefined' || !history.pushState) return;
   const url = new URL(location.href);
@@ -31,7 +32,7 @@ window.addEventListener('popstate', (e) => {
   if (pane !== currentPane) setPane(pane);
 });
 
-// ── left-tab registry ─────────────────────────────────────────────────────
+// -- left-tab registry -----------------------------------------------------
 // Modules add left-pane tabs without a fixed slot: registerLeftTab({id, label,
 // feature, paneId, onShow}) injects a button into the left tab-bar extension
 // area and drives it through setPane generically. Built-in tabs (gallery,
@@ -162,7 +163,7 @@ function setPane(pane) {
 
 // A registered left tab may own a controls tab (the trainer's set editor):
 // while it is active that tab is shown and the per-image metadata tabs are
-// hidden — description/tags/AI tooling live in the Editor pane, so simply not
+// hidden - description/tags/AI tooling live in the Editor pane, so simply not
 // showing it removes the clutter. Leaving restores the normal tab set.
 let _controlsModePrev = null;
 function applyControlsMode(tabId) {
@@ -205,14 +206,14 @@ function safeClearSelection() {
   catch (e) { /* non-fatal */ }
 }
 
-// Small shared escaper — album names and folder paths are user-controlled.
+/** @brief Small shared escaper - album names and folder paths are user-controlled. */
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => (
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
   ));
 }
 
-// ── Album scoping (no modal) ────────────────────────────────────────────────
+// -- Album scoping (no modal) ------------------------------------------------
 // The grid lives inline in the Gallery pane. Albums don't open an overlay; they
 // switch to the Gallery tab and scope that same grid to the album's members, so
 // clicking a tile still loads it into the editor on the right. Browsing an album
@@ -259,8 +260,9 @@ function openAlbumGallery(album) {
   loadGallery();
 }
 
-// Drop the album filter and go back to normal folder browsing.
-// reload=false is used when a caller is about to call loadGallery() itself.
+/** @brief Drop the album filter and go back to normal folder browsing.
+ *  reload=false is used when a caller is about to call loadGallery() itself.
+ */
 function exitAlbumView(reload = true) {
   const wasAlbum = (galleryModalMode === 'album');
   galleryModalMode = 'gallery';
@@ -278,7 +280,7 @@ function exitAlbumView(reload = true) {
   }
 }
 
-// Show/hide the bits of gallery chrome that are meaningless inside an album.
+/** @brief Show/hide the bits of gallery chrome that are meaningless inside an album. */
 function toggleGalleryChrome(show) {
   ['folder_select', 'btn_make_comic'].forEach(id => {
     const el = document.getElementById(id);
@@ -286,7 +288,7 @@ function toggleGalleryChrome(show) {
   });
 }
 
-// ── media modes: what the centre pane shows ─────────────────────────────────
+// -- media modes: what the centre pane shows ---------------------------------
 // 'image' is built in (the viewer + the Main/EXIF/IPTC/XMP tabs). A module
 // that takes over the centre (a book reader, a person's mesh) registers a mode
 // naming its centre element and controls tab; setMediaMode shows exactly one.
@@ -297,15 +299,16 @@ const IMAGE_ONLY_TABS = ['main', 'exif', 'iptc', 'xmp'];
 function registerMediaMode(spec) {
   // {id, centreId, controlsTab, tabs}: controlsTab is the tab the mode lands
   // on; tabs (array, or a function of current state) are the other controls
-  // tabs it keeps visible — another module's mode tab ('book') or the image
+  // tabs it keeps visible - another module's mode tab ('book') or the image
   // tabs ('main','exif','iptc','xmp') when the mode's content is images.
   window._mediaModes[spec.id] = spec;
 }
 window.registerMediaMode = registerMediaMode;
 
-// Which controls tabs the current media mode shows. Modules call this after
-// changing the state their `tabs` function reads (a different comic kind, a
-// book that turned out to carry embedded metadata).
+/** @brief Which controls tabs the current media mode shows. Modules call this after
+ *  changing the state their `tabs` function reads (a different comic kind, a
+ *  book that turned out to carry embedded metadata).
+ */
 function applyMediaModeTabs() {
   const isImage = (mediaMode === 'image');
   const cur = window._mediaModes[mediaMode];

@@ -1,4 +1,5 @@
-"""wait_for_space blocks while the disk is under its floor and resumes/cancels."""
+"""! @file
+@brief wait_for_space blocks while the disk is under its floor and resumes/cancels."""
 import shutil
 from collections import namedtuple
 import common

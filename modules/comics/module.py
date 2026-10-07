@@ -1,5 +1,5 @@
-"""
-Comics module — folder comics and comic archives.
+"""! @file
+@brief Comics module - folder comics and comic archives.
 ======================================================================
 Two shapes of the same thing:
   * a folder of page images with a comic.json (the `comics` table and
@@ -12,6 +12,7 @@ Two shapes of the same thing:
 """
 from . import comics_core as cc
 from . import comic_pages as cp
+from . import comicinfo as ci
 
 MANIFEST = {
     "id":          "comics",
@@ -94,4 +95,7 @@ def register(host):
         "build_text": cp.build_text})
     host.provide_service("comics", {"folders": cc._comic_folder_set,
                                     "load": cc._load_comic_json, "pages": cc._comic_ordered_pages})
+    # ComicInfo.xml for other modules (books writes a comic's metadata here).
+    host.provide_service("comicinfo", {"can_write": ci.can_write, "write": ci.write,
+                                       "read_bytes": ci._read_xml_bytes, "read": ci.read})
     host.logger.info("comics module: registered folder comics + archive page rendering")

@@ -2,7 +2,7 @@
  *
  * Owns the rating ACTIONS and buttons. The small display primitives
  * (starBadge, renderStars, updateTileStar) stay in core globals.js and just
- * render whatever rating data the backend enricher attaches — they no-op when
+ * render whatever rating data the backend enricher attaches - they no-op when
  * the module is off. This file provides:
  *   - window.ratingSet: the write called by the core star control;
  *   - bulkRate: rate the current selection (gallery bulk bar);
@@ -10,7 +10,7 @@
  *   - injected buttons in the gallery bulk area and the review pane. */
 (function () {
   // Per-file state lives HERE, filled from meta.iqa_score / meta.iqa_manual by
-  // the core file-meta hook on every selectFile — never in core globals (a
+  // the core file-meta hook on every selectFile - never in core globals (a
   // top-level `let` in globals.js is not window.X, which is how the old shared
   // `window.currentIqa` ended up showing one rating on every image).
   let iqa = null, manual = false;
@@ -20,13 +20,14 @@
     renderStars();
   });
 
-  // ── star display primitives (moved from core globals.js) ─────────────────────
-  // Compact star badge for a gallery tile. Kept a simple display fn so the core
-  // tile template can call it (guarded) — it renders whatever iqa_score the
-  // rating enricher attached, and returns '' when the module is off.
-  // Tile badge. Takes the gallery row (or a bare number): a manual rating
-  // wins over the IQA estimate — the enricher's effective_rating — and is
-  // marked so the two are told apart at a glance.
+  // -- star display primitives (moved from core globals.js) ---------------------
+  /** @brief Compact star badge for a gallery tile. Kept a simple display fn so the core
+   *  tile template can call it (guarded) - it renders whatever iqa_score the
+   *  rating enricher attached, and returns '' when the module is off.
+   *  Tile badge. Takes the gallery row (or a bare number): a manual rating
+   *  wins over the IQA estimate - the enricher's effective_rating - and is
+   *  marked so the two are told apart at a glance.
+   */
   window.starBadge = function (item) {
     let score, manual = false;
     if (item !== null && typeof item === "object") {
@@ -39,12 +40,12 @@
     if (score === null || score === undefined) return "";
     const full = Math.floor(score), half = (score - full) >= 0.5;
     let s = "★".repeat(full) + (half ? "½" : "");
-    if (!s) s = "·";
+    if (!s) s = "|";
     const title = manual ? `Your rating: ${score}/5` : `Quality (estimated): ${score}/5`;
     return `<span class="iqa-stars${manual ? " iqa-stars-manual" : ""}" title="${title}">${s}</span>`;
   };
 
-  // Interactive 0..5 star control in the per-image controls pane.
+  /** @brief Interactive 0..5 star control in the per-image controls pane. */
   window.renderStars = function () {
     const el = document.getElementById("meta_stars"); if (!el) return;
     const score = iqa;
@@ -74,8 +75,9 @@
     if (window.ratingSet) await window.ratingSet(window.currentFile, null);
     updateTileStar(window.currentFile, null);
   };
-  // After a manual set/clear: the tile shows the new effective value now
-  // (manual until cleared; after a clear the IQA estimate returns on reload).
+  /** @brief After a manual set/clear: the tile shows the new effective value now
+   *  (manual until cleared; after a clear the IQA estimate returns on reload).
+   */
   window.updateTileStar = function (fn, score, manual) {
     const tile = document.getElementById("t_" + fn.replace(/[^a-zA-Z0-9]/g, "_"));
     if (!tile) return;
@@ -87,11 +89,11 @@
     }
   };
 
-  // Score THIS image now (per-image button in the AI tools area).
+  /** @brief Score THIS image now (per-image button in the AI tools area). */
   window.rateThis = async function () {
     if (!window.currentFile) { alert("Select an image first."); return; }
     const btn = document.getElementById("btn_rate_this"); const og = btn ? btn.innerText : "";
-    if (btn) { btn.innerText = "★ …"; btn.disabled = true; }
+    if (btn) { btn.innerText = "★ ..."; btn.disabled = true; }
     try {
       const d = await fetch("/api/iqa_scan", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -103,7 +105,7 @@
     if (btn) { btn.innerText = og; btn.disabled = false; }
   };
 
-  // Write a single user rating. Called by core setStars/clearStars.
+  /** @brief Write a single user rating. Called by core setStars/clearStars. */
   window.ratingSet = async function (filename, stars) {
     try {
       await fetch("/api/iqa_set", {
@@ -113,11 +115,11 @@
     } catch (e) { /* non-fatal: the star UI already updated optimistically */ }
   };
 
-  // Rate the whole library.
+  /** @brief Rate the whole library. */
   async function iqaScan(scope) {
     const tgt = document.querySelector(".rating-scan-btn");
     const orig = tgt ? tgt.innerHTML : "";
-    if (tgt) { tgt.disabled = true; tgt.innerHTML = "Rating…"; }
+    if (tgt) { tgt.disabled = true; tgt.innerHTML = "Rating..."; }
     try {
       const d = await fetch("/api/iqa_scan", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -136,12 +138,12 @@
   }
   window.iqaScan = iqaScan;
 
-  // Rate the current selection.
+  /** @brief Rate the current selection. */
   async function bulkRate() {
     const files = [...(selectedFiles || [])];
     if (!files.length) return;
     const btn = document.querySelector(".rating-bulk-btn");
-    const orig = btn ? btn.innerHTML : ""; if (btn) { btn.disabled = true; btn.innerHTML = "Rating…"; }
+    const orig = btn ? btn.innerHTML : ""; if (btn) { btn.disabled = true; btn.innerHTML = "Rating..."; }
     try {
       const d = await fetch("/api/iqa_scan", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -160,7 +162,7 @@
   }
   window.bulkRate = bulkRate;
 
-  // Inject buttons into the general extension areas.
+  /** @brief Inject buttons into the general extension areas. */
   function buildButtons() {
     if (!window.registerControlButton) return;
     // Per-image quality control + score-this button, in the AI tools area.
@@ -172,20 +174,17 @@
       '</div>' +
       '<div class="flex items-center gap-2">' +
       '<div id="meta_stars" class="flex items-center gap-0.5 text-xl leading-none select-none"></div>' +
-      '<button onclick="clearStars()" title="Clear rating" ' +
-      'class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded text-gray-300">Clear</button>' +
-      '<button id="btn_rate_this" onclick="rateThis()" title="Score this image now" ' +
-      'class="text-[10px] bg-emerald-700 hover:bg-emerald-600 px-2 py-0.5 rounded text-white">★ Rate</button>' +
+      cimButton({label: "Clear", onclick: "clearStars()", title: "Clear rating", variant: "neutral", size: "xs"}) +
+      cimButton({label: "★ Rate", onclick: "rateThis()", id: "btn_rate_this", title: "Score this image now",
+                 variant: "ok", size: "xs"}) +
       '<span id="iqa_brisque_hint" class="text-[10px] text-gray-500"></span>' +
       '</div></div>');
-    registerControlButton("gallery_bulk",
-      '<button onclick="bulkRate()" data-feature="ai.iqa" ' +
-      'title="Score image quality (NR-IQA) for every selected image — model is set in Settings" ' +
-      'class="rating-bulk-btn text-xs bg-emerald-700 hover:bg-emerald-600 px-3 py-1.5 rounded font-bold">⭐ Rate selected</button>');
-    registerControlButton("review_actions",
-      '<button onclick="iqaScan(\'library\')" data-feature="ai.iqa" ' +
-      'title="Score image quality (NR-IQA) for the whole library — model is set in Settings" ' +
-      'class="rating-scan-btn text-xs bg-emerald-800 hover:bg-emerald-700 px-2 py-1 rounded font-bold">Rate library</button>');
+    registerControlButton("gallery_bulk", {label: "★ Rate selected", onclick: "bulkRate()", feature: "ai.iqa",
+      variant: "ok", cls: "rating-bulk-btn",
+      title: "Score image quality (NR-IQA) for every selected image - model is set in Settings"});
+    registerControlButton("review_actions", {label: "Rate library", onclick: "iqaScan('library')", feature: "ai.iqa",
+      variant: "ok", cls: "rating-scan-btn",
+      title: "Score image quality (NR-IQA) for the whole library - model is set in Settings"});
   }
   if (document.readyState === "loading")
     window.addEventListener("DOMContentLoaded", buildButtons);

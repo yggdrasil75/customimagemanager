@@ -1,4 +1,5 @@
-"""Dedup module: grouping end to end, the hash search, the naive fallback,
+"""! @file
+@brief Dedup module: grouping end to end, the hash search, the naive fallback,
 the scorer registry, progress / background scans, scorer-tagged cache, and
 the metadata compare.
 (Upload-time dedupe is sha256-only and is tested in tests/test_api.py.)"""
@@ -23,7 +24,7 @@ def _get(client, url, **qs):
     return r
 
 
-# ── end to end ────────────────────────────────────────────────────────────────
+# -- end to end ----------------------------------------------------------------
 def test_near_duplicate_pair_grouped(client, upload):
     a = upload.media("near_dup_a.jpg")
     b = upload.media("near_dup_b.jpg")
@@ -63,7 +64,7 @@ def test_cached_result_is_tied_to_scorer(client, upload):
         client.post("/api/dedup_clear", json={})
 
 
-# ── progress / background ─────────────────────────────────────────────────────
+# -- progress / background -----------------------------------------------------
 def test_progress_endpoint_idle_and_after_sync_run(client, upload):
     upload(seed=21)
     try:
@@ -106,7 +107,7 @@ def test_background_scan_reports_progress_and_result(client, upload):
         client.post("/api/dedup_clear", json={})
 
 
-# ── metadata compare ──────────────────────────────────────────────────────────
+# -- metadata compare ----------------------------------------------------------
 def test_compare_meta_rows(client, upload):
     a, b = upload(seed=41), upload(seed=42)
     r = client.post("/api/dedup_compare_meta", json={"a": a, "b": b})
@@ -152,7 +153,7 @@ def test_meta_str_handles_awkward_values():
     assert not de._blank(np.zeros(3))                              # no ambiguous-truth error
 
 
-# ── hash search ───────────────────────────────────────────────────────────────
+# -- hash search ---------------------------------------------------------------
 def _brute(H, thr):
     bits = np.unpackbits(H, axis=1).astype(np.int32)
     n = len(H)
@@ -199,9 +200,9 @@ def test_pair_hamming_and_components():
     assert comps == [[0, 1, 2], [4, 5]]
 
 
-# ── naive fallback (full resolution, per cell) ────────────────────────────────
+# -- naive fallback (full resolution, per cell) --------------------------------
 def _figure(angle_shift=0, h=900, w=600):
-    """A figure on a pure white background; angle_shift moves its parts the
+    """! @brief A figure on a pure white background; angle_shift moves its parts the
     way a camera orbit would."""
     img = np.full((h, w, 3), 255, np.uint8)
     cx = w // 2 + angle_shift
@@ -228,7 +229,7 @@ def test_naive_smaller_copy_is_not_punished():
 
 
 def test_naive_rotated_subject_on_white_is_not_a_duplicate():
-    """The white background must not dilute the change in the subject."""
+    """! @brief The white background must not dilute the change in the subject."""
     a, b = _figure(0), _figure(60)
     assert de._naive_image_score(a, b) < 0.5
 
@@ -241,7 +242,7 @@ def test_naive_ctx_scorer_images_and_video():
     assert sc({"is_video": True, "ref_frames": [], "other_frames": []}) == 0.0
 
 
-# ── scorer registry ───────────────────────────────────────────────────────────
+# -- scorer registry -----------------------------------------------------------
 def test_registry_records_failures_and_uses_naive_callable():
     reg = ScorerRegistry()
     reg.logger = logging.getLogger("t")
@@ -276,7 +277,7 @@ def test_registry_constant_naive_still_supported():
     assert out == [(0.25, "naive")]
 
 
-# ── dedup_cnn: trained sizes are recognized ───────────────────────────────────
+# -- dedup_cnn: trained sizes are recognized -----------------------------------
 def _fake_host(tmp_path, size):
     reg = ScorerRegistry()
     st = {"size": size, "provided": {}, "services": {}, "selected": [], "saved": 0}
@@ -300,6 +301,10 @@ def _fake_host(tmp_path, size):
 
     host = types.SimpleNamespace(
         logger=logging.getLogger("t"), config={}, broker=broker,
+        persist_model_selection=lambda save=True: (
+            host.config.__setitem__("model_selection", broker.current_selection()),
+            save and host.save_config()),
+        set_status=lambda t: None,
         core=types.SimpleNamespace(models_dir=str(tmp_path / "models")),
         get_service=lambda name: reg if name == "dedup_scorers" else st["services"].get(name),
         declare_capability=lambda *a, **k: None,

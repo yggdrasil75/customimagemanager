@@ -19,7 +19,7 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * Byte-for-byte the same scheme as modules/family_share/crypto.py on the
+ * @brief Byte-for-byte the same scheme as modules/family_share/crypto.py on the
  * server: X25519 (ephemeral + static) -> HKDF-SHA256 -> AES-256-GCM, a
  * sealed JSON metadata blob and a framed 1 MiB chunk stream for files.
  */
@@ -99,7 +99,7 @@ object Crypto {
             return b64e(nonce + ct)
         }
 
-        /** Frames the stream until EOF. The last frame is found by reading one
+        /** @brief Frames the stream until EOF. The last frame is found by reading one
          *  chunk ahead, never from a reported size: MediaStore's SIZE can be
          *  stale, and trusting it truncated (or never finished) uploads. */
         fun sealStream(input: InputStream, out: OutputStream) {
@@ -164,7 +164,7 @@ object Crypto {
         }
     }
 
-    /** Fill buf as far as the stream allows; returns bytes read (0 at EOF). */
+    /** @brief Fill buf as far as the stream allows; returns bytes read (0 at EOF). */
     private fun readFull(input: InputStream, buf: ByteArray): Int {
         var got = 0
         while (got < buf.size) {
@@ -182,7 +182,7 @@ object Crypto {
         if (to.isNotEmpty() && to != myId) throw CryptoException("envelope is addressed to another device")
     }
 
-    // ── pairing codes ────────────────────────────────────────────────────
+    // -- pairing codes ----------------------------------------------------
     data class Pairing(val name: String, val url: String, val pub: ByteArray, val key: String, val id: String, val peerName: String)
 
     fun makePairingCode(name: String, url: String, pub: ByteArray, keyIn: String, id: String): String {

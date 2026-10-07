@@ -1,9 +1,6 @@
-"""
-common.py — small pure helpers shared by the core and the modules.
-======================================================================
-Stand-alone on purpose: nothing here imports the app, a module, Flask or
-the database layer, so any module can `import common` without pulling the
-core in. Keep it that way — string/box/date helpers only.
+"""! @file
+@brief Pure helpers shared by the core and the modules (tags, boxes, dates,
+disk space, model downloads). Imports nothing from the app.
 """
 import os
 from datetime import datetime
@@ -13,21 +10,22 @@ import numpy as np
 from optional_deps import optional_import
 cv2, _HAVE_CV2 = optional_import("cv2")
 
-# Tags: an unconfirmed tag is stored with a leading '?' sentinel.
+# An unconfirmed tag is stored with this prefix.
 TAG_UNCONF = '?'
 
 
 def norm_date_literal(s: str, end: bool = False) -> str | None:
-    """Normalize a user date literal to 'YYYY-MM-DD'. Partial dates expand to the
-    first (or, with end=True, the last) day of the given period so range/compare
-    math is well defined. Returns None if unparseable."""
+    """! @brief Normalise a date literal ("2021", "2021-05", "2021-05-04") to YYYY-MM-DD.
+    @param end  expand a partial date to the last day of its period instead of the first.
+    @return the date string, or None when unparseable.
+    """
     s = s.strip().replace('/', '-')
     parts = s.split('-')
     try:
-        if len(parts) == 1:            # YYYY
+        if len(parts) == 1:
             y = int(parts[0])
             return f"{y:04d}-12-31" if end else f"{y:04d}-01-01"
-        if len(parts) == 2:            # YYYY-MM
+        if len(parts) == 2:
             y, mo = int(parts[0]), int(parts[1])
             if not (1 <= mo <= 12):
                 return None
@@ -35,35 +33,34 @@ def norm_date_literal(s: str, end: bool = False) -> str | None:
                 from calendar import monthrange
                 return f"{y:04d}-{mo:02d}-{monthrange(y, mo)[1]:02d}"
             return f"{y:04d}-{mo:02d}-01"
-        if len(parts) == 3:            # YYYY-MM-DD
+        if len(parts) == 3:
             y, mo, d = int(parts[0]), int(parts[1]), int(parts[2])
-            datetime(y, mo, d)          # validate
+            datetime(y, mo, d)
             return f"{y:04d}-{mo:02d}-{d:02d}"
     except Exception:
         return None
     return None
 
 def tag_is_confirmed(tag: str) -> bool:
-    """A tag is unconfirmed iff it starts with the '?' sentinel."""
+    """! @brief True unless the tag carries the unconfirmed prefix."""
     return not str(tag).startswith(TAG_UNCONF)
 
 def tag_name(tag: str) -> str:
-    """The display/comparison name of a tag, sentinel stripped."""
+    """! @brief The tag without its unconfirmed prefix."""
     t = str(tag)
     return t[len(TAG_UNCONF):] if t.startswith(TAG_UNCONF) else t
 
 def make_tag(name: str, confirmed: bool = True) -> str:
-    """Build a stored tag string from a bare name + confirmed flag."""
-    n = tag_name(name)   # never double-prefix
+    """! @brief The stored form of a tag name."""
+    n = tag_name(name)
     return n if confirmed else (TAG_UNCONF + n)
 
 def count_unconfirmed_tags(tags) -> int:
     return sum(1 for t in (tags or []) if not tag_is_confirmed(t))
 
 def clamp_box(b: dict) -> dict | None:
-    """!
-    @brief Clamp a normalised center-form box to the image bounds.
-    @return A new box dict, or None if the input is malformed or clamps to empty.
+    """! @brief Clamp a normalised centre-form box to the image.
+    @return a new box, or None when malformed or empty after clamping.
     """
     try:
         cx, cy, w, h = float(b["cx"]), float(b["cy"]), float(b["w"]), float(b["h"])
@@ -79,7 +76,7 @@ def clamp_box(b: dict) -> dict | None:
     return nb
 
 def iou_center(a, b) -> float:
-    """IoU of two normalised center-form boxes."""
+    """! @brief IoU of two normalised centre-form boxes."""
     ax1, ay1 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
     ax2, ay2 = a["cx"] + a["w"] / 2, a["cy"] + a["h"] / 2
     bx1, by1 = b["cx"] - b["w"] / 2, b["cy"] - b["h"] / 2
@@ -93,8 +90,9 @@ def iou_center(a, b) -> float:
     return inter / ua if ua > 0 else 0.0
 
 def coerce_bgr(img_bgr):
-    """Coerce to 3-channel uint8 BGR, or None if unusable. YOLO's first conv
-    needs exactly 3 channels; shared by the single and batched detect paths."""
+    """! @brief The image as 3-channel uint8 BGR (what the detectors expect).
+    @return the converted image, or None when it can't be converted.
+    """
     if img_bgr is None or getattr(img_bgr, "size", 0) == 0:
         return None
     if img_bgr.ndim == 2:
@@ -124,15 +122,16 @@ def getmtime_loose(path):
 
 
 def rel_path(root: str, path: str) -> str:
-    """Absolute path -> forward-slash path relative to `root`."""
+    """! @brief `path` relative to `root`, with forward slashes."""
     return os.path.relpath(path, root).replace(os.sep, "/")
 
-# ── storage guard (fetch queue / model downloads pause, never cancel) ────────
-MIN_FREE_GB = 0.0   # settings key "min_free_gb"; 0 = automatic (see below)
+MIN_FREE_GB = 0.0  # "min_free_gb" setting; 0 = automatic
 
 def min_free_bytes(path: str) -> int:
-    """Free-space floor for the disk holding `path`: the "min_free_gb" setting
-    when set, else 10 GiB on >1 TiB disks and 1 GiB otherwise."""
+    """! @brief The free-space floor for the disk holding `path`.
+    @return bytes: the "min_free_gb" setting, else 10 GiB on disks over 1 TiB and
+            1 GiB otherwise.
+    """
     if MIN_FREE_GB > 0:
         return int(MIN_FREE_GB * (1 << 30))
     import shutil
@@ -141,8 +140,10 @@ def min_free_bytes(path: str) -> int:
 
 
 def disk_low(*paths: str) -> str | None:
-    """The first of `paths` whose disk is under its floor, or None. Missing
-    paths fall back to their nearest existing parent."""
+    """! @brief The first path whose disk is below its floor (a missing path is
+    checked at its nearest existing parent).
+    @return that path, or None.
+    """
     import shutil
     for p in paths:
         q = p or "."
@@ -154,8 +155,10 @@ def disk_low(*paths: str) -> str | None:
 
 
 def wait_for_space(*paths: str, stop=None, poll: float = 30.0) -> bool:
-    """Block while any of `paths` is low on disk. Returns False if `stop()`
-    turned true (caller canceled), True once space is available."""
+    """! @brief Block while any path's disk is below its floor.
+    @param stop  fn() -> True to give up.
+    @return True once there is space, False when stopped.
+    """
     import logging, time
     log = logging.getLogger("cim.storage")
     warned = None
@@ -171,10 +174,11 @@ def wait_for_space(*paths: str, stop=None, poll: float = 30.0) -> bool:
         log.info("resumed: space freed on %s", warned)
     return True
 
-# ── model-file / top-down pose helpers (shared by the pose provider modules) ──
 def fetch_file(url: str, dest: str, min_bytes: int = 1 << 16) -> str:
-    """Download `url` to `dest` once (atomic via .part). A CDN 404 still writes
-    an HTML page, so anything under min_bytes is rejected as not-a-model."""
+    """! @brief Download `url` to `dest` unless it is already there (atomic via .part).
+    @param min_bytes  smaller downloads are rejected: a CDN 404 page is not a model.
+    @return dest.
+    """
     if os.path.exists(dest):
         return dest
     import urllib.request
@@ -193,10 +197,11 @@ def fetch_file(url: str, dest: str, min_bytes: int = 1 << 16) -> str:
 
 
 def person_crops(img_bgr, persons=None, pad: float = 0.15) -> list:
-    """Top-down pose helper. persons = fn(img) -> normalized center-form boxes
-    (the broker's detect.persons handle) or None. Returns [(crop, x0, y0, w, h)]
-    in pixels: one padded crop per person, the whole image when there is no
-    detector, [] when the detector finds nobody."""
+    """! @brief Padded per-person crops for top-down pose models.
+    @param persons  fn(img) -> normalised boxes (the broker's detect.persons), or None.
+    @return [(crop, x0, y0, w, h)] in pixels; the whole image when there is no
+            detector, [] when it finds nobody.
+    """
     H, W = img_bgr.shape[:2]
     if persons is None:
         return [(img_bgr, 0, 0, W, H)]
@@ -211,12 +216,9 @@ def person_crops(img_bgr, persons=None, pad: float = 0.15) -> list:
 
 
 def crop_keypoints(pts, x0, y0, w, h, W, H) -> list:
-    """Map crop-local normalized [(x, y, v)] back to whole-image normalized
-    {x,y,v} dicts (the broker 'pose' contract)."""
-    # float(): callers feed numpy scalars, and round() keeps numpy's type, which
-    # jsonify then refuses (numpy.float32 is not JSON serialisable).
+    """! @brief Crop-local normalised [(x, y, v)] -> whole-image keypoint dicts."""
+    # float(): numpy scalars would survive round() and break jsonify.
     return [{"x": round(max(0.0, min(1.0, float(x0 + x * w) / W)), 4),
              "y": round(max(0.0, min(1.0, float(y0 + y * h) / H)), 4),
-             # SimCC/heatmap peak scores (RTMPose, ViTPose) can exceed 1;
-             # the contract, and every consumer, treats v as 0..1.
+             # Some heatmap scores exceed 1; v is 0..1 by contract.
              "v": round(max(0.0, min(1.0, float(v))), 3)} for x, y, v in pts]

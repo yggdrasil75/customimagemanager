@@ -1,5 +1,5 @@
-"""
-Books module — ebook/comic library: reader, shelf, search.
+"""! @file
+@brief Books module - ebook/comic library: reader, shelf, search.
 ======================================================================
 book_routes.py was already a hand-wired register(app, ctx) module (the
 comment in manager even said so); this wraps it as a real module. It:
@@ -41,6 +41,7 @@ def _no_llm(*a, **k):
 
 def register(host):
     bi.bind_media(host.media)
+    bi.bind_comicinfo(lambda: host.get_service("comicinfo"))
     # Teach core what a "book" is. Without this the app is a pure image gallery
     # that never sees an epub/cbz. The ext lists + mime map live with the module.
     _BOOK_MIME = {
@@ -53,7 +54,7 @@ def register(host):
         '.lrx': 'application/x-sony-bbeb', '.rtf': 'application/rtf',
         '.txt': 'text/plain; charset=utf-8', '.html': 'text/html; charset=utf-8',
     }
-    # Comic archives (cbz/cbr/cb7…) are books too, but the comics module owns
+    # Comic archives (cbz/cbr/cb7...) are books too, but the comics module owns
     # them: it extends this kind with its extensions and page renderer.
     host.register_media_type(
         "book", exts=bi.BOOK_EXTS - bi.COMIC_ARCHIVE_EXTS,
@@ -79,7 +80,7 @@ def register(host):
     # (the tab bar is a front-end extension area), so the button + onShow live
     # with the module's JS, not a Python slot.
 
-    # Wire the actual routes via the existing register(app, ctx). ctx is built
+    ## @brief Wire the actual routes via the existing register(app, ctx). ctx is built
     # from the host + a couple of core helpers reached lazily.
     # Embedding functions come from the embedding module's service, reached
     # lazily like llm/comic_pages: it may register after books, or be disabled,
@@ -89,6 +90,7 @@ def register(host):
     core = host.core
     book_routes.register(host, {
         "db":            host.db,
+        "update_file":   host.update_file,
         "media_dir":     host.media_dir,
         "safe_path":     host.safe_path,
         "logger":        host.logger,
@@ -108,6 +110,10 @@ def register(host):
     # Archive / PDF page access for the comics module (cbz/cbr/cb7 pages).
     # Metadata writes for other modules (metasrc applies lookups through it).
     host.provide_service("books", {"update_meta": book_routes.update_meta})
+    host.register_metadata_writer(
+        "book", book_routes.write_book_meta, fields=book_routes._META_KEYS,
+        claims=lambda rel: host.db().execute("SELECT 1 FROM books WHERE rel_path=?",
+                                             (rel,)).fetchone() is not None)
     host.provide_service("book_archive", {"comic_page_bytes": bi.comic_page_bytes,
                                           "comic_page_names": bi.comic_page_names,
                                           "render_pdf_page": bi.render_pdf_page})

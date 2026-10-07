@@ -1,4 +1,5 @@
-"""personal_iqa: every token type is produced from fake providers, cached,
+"""! @file
+@brief personal_iqa: every token type is produced from fake providers, cached,
 fitted, and an old checkpoint grows into the new token types.
     python -m pytest -q modules/personal_iqa/tests/test_features.py
 """
@@ -85,7 +86,7 @@ def test_features_fit_grow(tmp_path, monkeypatch):
     f, mk, t = net.batch([fe], g.dims, "cpu")
     assert g(f, mk, t).shape == (1,)
 
-    # ── tier switch: a pretrained scorer_<size>.pt for the tier wins over growing ──
+    # -- tier switch: a pretrained scorer_<size>.pt for the tier wins over growing --
     import sqlite3
     ckdir = svc["ckpt_dir"]; os.makedirs(ckdir, exist_ok=True)
     for i in range(60):                                   # 60 ratings -> tier "nano"

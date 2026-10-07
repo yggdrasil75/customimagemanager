@@ -6,7 +6,7 @@
 #   NVIDIA CUDA:             docker compose --profile cuda up cim-cuda
 #   AMD ROCm:                docker compose --profile rocm up cim-rocm
 #
-# The ultra-light service builds a tiny image with none of the ML/CV stack —
+# The ultra-light service builds a tiny image with none of the ML/CV stack -
 # just enough to browse a library and read/write metadata. Optional features
 # hide themselves at runtime (see optional_deps.py + capabilities.py).
 #
@@ -28,7 +28,7 @@ x-common: &common
   restart: unless-stopped
 
 services:
-  # ── Ultra-light (image viewer only) ────────────────────────────────────────
+  # -- Ultra-light (image viewer only) ----------------------------------------
   # Bare minimum: gallery, UI, viewer, and the core modules (auth,
   # capabilities, cimlogger, metadata, threading). No torch / no ML / no CV.
   # Smallest image and fastest build. Everything heavy hides itself at runtime.
@@ -40,7 +40,7 @@ services:
       args:
         GPU_BACKEND: ultralight
 
-  # ── CPU (default) ──────────────────────────────────────────────────────────
+  # -- CPU (default) ----------------------------------------------------------
   cim:
     <<: *common
     build:
@@ -50,7 +50,7 @@ services:
         # 1 = also build the Android app into static/app/cim-family.apk
         BUILD_ANDROID: ${BUILD_ANDROID:-0}
 
-  # ── NVIDIA CUDA ────────────────────────────────────────────────────────────
+  # -- NVIDIA CUDA ------------------------------------------------------------
   # Requires the NVIDIA Container Toolkit on the host.
   cim-cuda:
     <<: *common
@@ -71,7 +71,7 @@ services:
               count: all
               capabilities: [gpu]
 
-  # ── AMD ROCm ───────────────────────────────────────────────────────────────
+  # -- AMD ROCm ---------------------------------------------------------------
   # Requires ROCm drivers on the host. The container needs the kfd + dri devices
   # and the video/render groups to talk to the GPU.
   cim-rocm:

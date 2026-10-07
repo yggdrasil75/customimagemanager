@@ -1,4 +1,4 @@
-/* Trainer portal — numbered persistent sets + shared-viewer reviewer + local
+/* Trainer portal - numbered persistent sets + shared-viewer reviewer + local
  * YOLO box training.
  *
  * Reuse over reinvention:
@@ -9,7 +9,7 @@
  *     /api/file with its real boxes drawn, exactly like review.js.
  *
  * Model: "Create set of n" runs a selection and stores it into a fresh numbered
- * set (Set 1, Set 2, …) immediately — no separate keep step. Only set images
+ * set (Set 1, Set 2, ...) immediately - no separate keep step. Only set images
  * that already have boxes are used for training. CSRF + feature hiding come from
  * auth.js / features.js.
  */
@@ -25,13 +25,13 @@ const jpost = (u, b, m) => fetch(u, {
 }).then(r => r.json());
 const enc = s => encodeURIComponent(s);
 
-// ── sets ────────────────────────────────────────────────────────────────────
+// -- sets --------------------------------------------------------------------
 async function loadSets(preferred) {
   const d = await jget('/api/trainer/sets');
   const sets = d.sets || [];
   const sel = $('set_select');
   if (!sets.length) {
-    sel.innerHTML = '<option value="">— no sets yet —</option>';
+    sel.innerHTML = '<option value="">- no sets yet -</option>';
     currentSet = null; items = []; renderGrid();
     return;
   }
@@ -61,14 +61,14 @@ async function deleteSet() {
   await loadSets();
 }
 
-// ── build a new set ───────────────────────────────────────────────────────────
+// -- build a new set -----------------------------------------------------------
 async function buildSet() {
   const n = parseInt($('sel_n').value, 10) || 0;
   if (n < 1) { alert('Set a count of 1 or more.'); return; }
   const strategy = $('sel_strategy').value;
   const exclude_all_sets = $('sel_exclude_sets').checked;
   const media = $('sel_media').value;
-  $('app_status').innerText = 'Building set…';
+  $('app_status').innerText = 'Building set...';
   const d = await jpost('/api/trainer/select', { strategy, n, exclude_all_sets, media });
   if (!d.success) { $('app_status').innerText = 'Error: ' + (d.error || '?'); return; }
   $('app_status').innerText = `${d.set}: ${d.count} images (${d.strategy})`;
@@ -82,9 +82,9 @@ async function clearSet() {
   await loadSets(currentSet);
 }
 
-// ── grid ──────────────────────────────────────────────────────────────────────
+// -- grid ----------------------------------------------------------------------
 function renderGrid() {
-  $('grid_title').innerText = currentSet ? `${currentSet} — ${items.length} images` : 'No set selected';
+  $('grid_title').innerText = currentSet ? `${currentSet} - ${items.length} images` : 'No set selected';
   const grid = $('grid');
   if (!items.length) {
     grid.innerHTML = `<p class="text-gray-600 text-sm p-4">`
@@ -98,7 +98,7 @@ function renderGrid() {
      </div>`).join('');
 }
 
-// ── reviewer ────────────────────────────────────────────────────────────────
+// -- reviewer ----------------------------------------------------------------
 function openReviewer(i) {
   if (i < 0 || i >= items.length) return;
   revIdx = i;
@@ -150,7 +150,7 @@ async function showRev() {
   const it = items[revIdx];
   if (!it) { closeReviewer(); return; }
   $('rev_info').innerText =
-    `${currentSet} · ${revIdx + 1}/${items.length} · ${it.rel_path}`;
+    `${currentSet} | ${revIdx + 1}/${items.length} | ${it.rel_path}`;
   revRegions = [];
   try {
     const d = await jpost('/api/trainer/boxes', { action: 'read', filename: it.rel_path });
@@ -180,7 +180,7 @@ function renderBoxList() {
     <div class="flex items-center gap-1">
       <span class="text-[10px] w-4 text-gray-500">${i + 1}</span>
       <input list="rev_labels" id="rev_name_${i}" value="${(r.class_name || '').replace(/"/g, '&quot;')}"
-        oninput="revName(${i}, this.value)" placeholder="label…"
+        oninput="revName(${i}, this.value)" placeholder="label..."
         class="flex-1 min-w-0 text-xs bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-white focus:border-amber-500">
       <button onclick="revDelBox(${i})" title="delete box"
         class="text-xs bg-red-800 hover:bg-red-700 px-1.5 rounded">✕</button>
@@ -194,7 +194,7 @@ async function revSaveBoxes() {
   const it = items[revIdx];
   if (!it) return;
   const bad = revRegions.some(r => !(r.class_name || '').trim());
-  if (bad && !confirm('Some boxes have no label — save anyway? (unlabelled boxes are ignored by training)')) return;
+  if (bad && !confirm('Some boxes have no label - save anyway? (unlabelled boxes are ignored by training)')) return;
   const d = await jpost('/api/trainer/boxes',
     { action: 'write', filename: it.rel_path, regions: revRegions });
   if (!d.success) { alert('Save failed: ' + (d.error || '?')); return; }
@@ -243,7 +243,7 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'Delete') revRemove();
 });
 
-// ── training ────────────────────────────────────────────────────────────────
+// -- training ----------------------------------------------------------------
 function toggleAdvanced() {
   const a = $('advanced'), t = $('adv_toggle');
   const open = a.classList.toggle('hidden') === false;
@@ -287,7 +287,7 @@ async function startTraining() {
   $('app_status').innerText = `Training started (${d.train} train / ${d.val} val)`;
 }
 
-// ── status/log poll ─────────────────────────────────────────────────────────
+// -- status/log poll ---------------------------------------------------------
 async function poll() {
   try {
     const s = await jget('/api/state');

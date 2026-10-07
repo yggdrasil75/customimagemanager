@@ -1,4 +1,5 @@
-"""Machine-capability gate (modules/capabilities) vs. the model broker.
+"""! @file
+@brief Machine-capability gate (modules/capabilities) vs. the model broker.
 
 The gate answers 503 "feature unavailable on this server" for a feature whose
 pip package is missing. The broker knows whether a model for that feature is
@@ -20,7 +21,7 @@ FEATURE_CAPS = {
 
 
 def _local_available(b, cap):
-    """Providers that run on this machine (endpoint-backed ones excluded:
+    """! @brief Providers that run on this machine (endpoint-backed ones excluded:
     their availability only means 'configured')."""
     return [pid for pid, p in b._providers.get(cap, {}).items()
             if p.available() and not p.resource and pid != "cim_test_fake"]

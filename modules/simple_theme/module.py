@@ -1,4 +1,5 @@
-"""Layout: Simple.
+"""! @file
+@brief Layout: Simple.
 
 The timeline (with the albums across the top) is the whole screen. Clicking a
 picture opens it full screen with the people in it, a Meta button for the

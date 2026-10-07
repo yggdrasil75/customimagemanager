@@ -31,14 +31,14 @@ async function unpackageComic(){
   if(d.success){ closeComic(); await loadFolders(); loadGallery(); showToast('Comic unpackaged.'); }
 }
 
-// ── per-comic AI actions (folder comics: pages are library files) ───────────
+// -- per-comic AI actions (folder comics: pages are library files) -----------
 function _boxMethod() {
   return { method: 'detect', model: '' };          // the picked Detection model (Models tab)
 }
 async function comicBoxAll() {
   if (comicState.kind !== 'folder' || !comicState.pageFiles.length) return;
   const bm = _boxMethod();
-  showToast(`Boxing ${comicState.pageFiles.length} page(s)…`);
+  showToast(`Boxing ${comicState.pageFiles.length} page(s)...`);
   const d = await fetch('/api/bulk_box', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ filenames: comicState.pageFiles, method: bm.method, model: bm.model }) }).then(r => r.json());
   if (d.success) showToast(`Boxed ${d.boxed}/${d.done} page(s). Open a page to confirm boxes.`);
@@ -47,7 +47,7 @@ async function comicBoxAll() {
 async function comicPipeline() {
   if (comicState.kind !== 'folder' || !comicState.pageFiles.length) return;
   if (!confirm(`Run Smart Tag on all ${comicState.pageFiles.length} page(s) and summarise the comic? This makes many AI calls.`)) return;
-  showToast(`Smart Tag on ${comicState.pageFiles.length} page(s)…`);
+  showToast(`Smart Tag on ${comicState.pageFiles.length} page(s)...`);
   try {
     const d = await fetch('/api/comic_pipeline', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ folder: comicState.target }) }).then(r => r.json());
@@ -57,7 +57,7 @@ async function comicPipeline() {
 }
 window.comicBoxAll = comicBoxAll; window.comicPipeline = comicPipeline;
 
-// ── open / close (media mode "comic") ───────────────────────────────────────
+// -- open / close (media mode "comic") ---------------------------------------
 async function openComic(target) {
   const d = await fetch('/api/comics/open?target=' + encodeURIComponent(target)).then(r => r.json());
   if (!d.success) { alert('Could not open comic: ' + (d.error || '')); return; }
@@ -107,7 +107,7 @@ function showComicPage(i) {
   document.getElementById('comic_pageinfo').innerText = `Page ${comicState.idx + 1} / ${comicState.pages.length}`;
   [...document.querySelectorAll('#comic_strip .cstrip')].forEach((el, j) => {
     el.classList.toggle('ring-2', j === comicState.idx);
-    el.classList.toggle('ring-purple-400', j === comicState.idx);
+    el.classList.toggle('ring-indigo-400', j === comicState.idx);
   });
 }
 function comicPage(d) { showComicPage(comicState.idx + d); }
@@ -122,7 +122,7 @@ function renderComicStrip() {
   });
 }
 
-// ── Comic controls tab: grouped editor rendered from /api/comics/schema ─────
+// -- Comic controls tab: grouped editor rendered from /api/comics/schema -----
 function _cEsc(v) { return String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 async function comicRenderEditor() {
   const mount = document.getElementById('comic_meta_groups'); if (!mount) return;
@@ -145,7 +145,7 @@ async function comicRenderEditor() {
     if (!rows.length) continue;
     const sec = document.createElement('section');
     sec.className = 'border border-gray-700 rounded p-2';
-    sec.innerHTML = `<div class="text-[11px] font-bold text-purple-200/80 mb-1">${_cEsc(g.title)}</div>
+    sec.innerHTML = `<div class="text-[11px] font-bold text-indigo-200/80 mb-1">${_cEsc(g.title)}</div>
       <div class="grid grid-cols-2 gap-x-3 gap-y-1.5">${rows.map(f => {
         const v = _cEsc(vals[f.name] ?? '');
         const ro = !f.writable || !comicState.writable;
@@ -159,7 +159,7 @@ async function comicRenderEditor() {
         } else {
           input = `<input data-cmeta="${f.name}" type="${f.dtype === 'int' || f.dtype === 'float' ? 'number' : 'text'}" value="${v}" class="${cls}" ${ro ? 'readonly' : ''}>`;
         }
-        return `<label class="${f.multiline ? 'col-span-2' : ''}"><span class="text-[10px] text-gray-500 block">${_cEsc(f.name)}${f.note ? ` <span class="text-gray-600">· ${_cEsc(f.note)}</span>` : ''}</span>${input}</label>`;
+        return `<label class="${f.multiline ? 'col-span-2' : ''}"><span class="text-[10px] text-gray-500 block">${_cEsc(f.name)}${f.note ? ` <span class="text-gray-600">| ${_cEsc(f.note)}</span>` : ''}</span>${input}</label>`;
       }).join('')}</div>`;
     mount.appendChild(sec);
   }
@@ -203,7 +203,7 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'Escape') closeComic();
 });
 
-// ── registration with the core UI ───────────────────────────────────────────
+// -- registration with the core UI -------------------------------------------
 (function () {
   function init() {
     if (window.registerMediaMode)
@@ -218,9 +218,8 @@ document.addEventListener('keydown', e => {
                             onShow: comicRenderEditor });
     document.getElementById('comic_show_empty')?.addEventListener('change', comicRenderEditor);
     if (window.registerControlButton)
-      registerControlButton('gallery_tools',
-        '<button id="btn_make_comic" onclick="makeComic()" title="Package the current folder as a comic" data-feature="comics.make" ' +
-        'class="text-xs bg-purple-700 hover:bg-purple-600 px-2 rounded font-bold whitespace-nowrap">📚 Make comic</button>');
+      registerControlButton('gallery_tools', {label: 'Make comic', onclick: 'makeComic()', id: 'btn_make_comic',
+        feature: 'comics.make', variant: 'secondary', title: 'Package the current folder as a comic'});
   }
   if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', init);
   else init();

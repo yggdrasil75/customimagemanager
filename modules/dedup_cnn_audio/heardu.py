@@ -1,5 +1,5 @@
 """!
-@brief HEARDU — learned duplicate scorer for audio (FLAC vs MP3 of one song).
+@brief HEARDU - learned duplicate scorer for audio (FLAC vs MP3 of one song).
 
 A track is its log-mel spectrogram (16 kHz mono, 64 mels, 10 ms hop) cut
 into 1 s windows every 0.5 s; each window is mean-normalised (gain-free)
@@ -38,7 +38,7 @@ def mel_filterbank(sr: int = SR, n_fft: int = N_FFT, n_mels: int = N_MELS, fmin=
 
 
 def log_mel(pcm: np.ndarray) -> np.ndarray:
-    """[frames, N_MELS] log-mel (dB) of mono float PCM at SR."""
+    """! @brief [frames, N_MELS] log-mel (dB) of mono float PCM at SR."""
     x = np.asarray(pcm, np.float32)
     if len(x) < N_FFT:
         return np.zeros((0, N_MELS), np.float32)
@@ -54,7 +54,7 @@ def log_mel(pcm: np.ndarray) -> np.ndarray:
 
 
 def windows(mel: np.ndarray) -> np.ndarray:
-    """[frames, N_MELS] -> steps [T, 1, N_MELS, WIN], each mean-normalised."""
+    """! @brief [frames, N_MELS] -> steps [T, 1, N_MELS, WIN], each mean-normalised."""
     if len(mel) < WIN:
         if not len(mel):
             return np.zeros((0, 1, N_MELS, WIN), np.float32)

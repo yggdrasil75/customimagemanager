@@ -34,7 +34,7 @@
     const c = current();
     sel.value = KEYS.some(k => k[0] === c.key) ? c.key : "";
     dir.dataset.desc = c.desc ? "1" : "0";
-    dir.textContent = c.desc ? "↓" : "↑";
+    dir.textContent = c.desc ? "Desc" : "Asc";
   }
 
   const opts = KEYS.map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
@@ -43,7 +43,7 @@
        <select id="ss_sort_key" title="Sort the gallery (adds a sort: token to the search)"
          class="bg-gray-700 text-xs rounded px-1 py-1">${opts}</select>
        <button type="button" id="ss_sort_dir" data-desc="0" title="Ascending / descending"
-         class="bg-gray-700 hover:bg-gray-600 text-xs rounded px-2 py-1">↑</button>
+         class="bg-gray-700 hover:bg-gray-600 text-xs rounded px-2 py-1">Asc</button>
      </span>`);
 
   document.addEventListener("change", e => { if (e.target.id === "ss_sort_key") apply(); });

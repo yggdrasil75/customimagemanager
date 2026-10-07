@@ -1,17 +1,18 @@
-"""The file is the source of truth. The database is a disposable cache.
+"""! @file
+@brief The file is the source of truth. The database is a disposable cache.
 
 Every photo manager that "stores everything in the image" still ends up with
-state that only lives in its database — a name written to XMP once and never
+state that only lives in its database - a name written to XMP once and never
 read back, a field the reindex refuses to overwrite, a cache row that outlives
 the file it mirrors. These tests exist to catch that class of bug for ALL
 metadata, not one field at a time:
 
-  1. wipe every DB row about a file, reindex → every read field comes back
+  1. wipe every DB row about a file, reindex -> every read field comes back
   2. change the file behind the app's back (another tool, another machine),
-     reindex → every read field follows the FILE, even where the DB row
+     reindex -> every read field follows the FILE, even where the DB row
      already held a different, non-empty value
   3. a cache row that exists but lacks what the file says (the "write once,
-     read never" shape) → reindex fills it from the file
+     read never" shape) -> reindex fills it from the file
 
 They are field-agnostic on purpose: they diff the whole /api/metadata read
 packet, so a field added tomorrow is covered the day it's added. Add a field
@@ -38,7 +39,7 @@ FULL_REGIONS = [
 
 
 def _packet(client, fn):
-    """The read packet with derived noise removed and regions made comparable."""
+    """! @brief The read packet with derived noise removed and regions made comparable."""
     m = {k: v for k, v in read_meta(client, fn).items() if k not in VOLATILE}
     m["regions"] = sorted(
         ({k: v for k, v in r.items() if k in ("class_name", "region_name", "region_type",
@@ -50,7 +51,7 @@ def _packet(client, fn):
 
 
 def _tables_about_files(db):
-    """Every (table, column) that keys rows by a media path — discovered from the
+    """! @brief Every (table, column) that keys rows by a media path - discovered from the
     schema so a table added tomorrow is wiped too."""
     out = []
     for (t,) in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
@@ -90,7 +91,7 @@ def _sidecar(app, fn):
     return os.path.splitext(_abs(app, fn))[0] + ".xmp"
 
 
-# ── 1. the DB is disposable ───────────────────────────────────────────────────
+# -- 1. the DB is disposable ---------------------------------------------------
 
 def test_wipe_db_reindex_restores_every_field(client, upload, app):
     fn = upload(seed=901)
@@ -106,10 +107,10 @@ def test_wipe_db_reindex_restores_every_field(client, upload, app):
     assert not missing, f"fields that only lived in the DB: {missing}"
 
 
-# ── 2. the file wins, even over a non-empty DB value ─────────────────────────
+# -- 2. the file wins, even over a non-empty DB value -------------------------
 
 def test_file_changed_behind_apps_back_wins(client, upload, app):
-    """Simulate another tool / another machine editing the metadata: copy A's
+    """! @brief Simulate another tool / another machine editing the metadata: copy A's
     sidecar over B's. B's DB row still holds B's old values (non-empty, so any
     "don't overwrite an in-app edit" shortcut would keep them). After a reindex
     every field must read as A's."""
@@ -121,7 +122,7 @@ def test_file_changed_behind_apps_back_wins(client, upload, app):
 
     sa, sb = _sidecar(app, a), _sidecar(app, b)
     if not os.path.exists(sa):
-        pytest.skip("no XMP sidecar written for this media type — nothing to copy")
+        pytest.skip("no XMP sidecar written for this media type - nothing to copy")
     shutil.copyfile(sa, sb)
     os.utime(_abs(app, b), None)          # the file changed; the app must notice
     _reindex(app, b)
@@ -132,7 +133,7 @@ def test_file_changed_behind_apps_back_wins(client, upload, app):
 
 
 def test_cleared_field_in_file_clears_the_db(client, upload, app):
-    """Emptying a value in the file is a real edit, not a missing value. The
+    """! @brief Emptying a value in the file is a real edit, not a missing value. The
     reindex must not keep the DB's stale copy."""
     fn = upload(seed=904)
     _populate(client, fn, desc="to be removed", tags=("keep-me",))
@@ -156,11 +157,11 @@ def test_cleared_field_in_file_clears_the_db(client, upload, app):
     assert got["tags"] == ["keep-me"]
 
 
-# ── 3. "write once, read never": a cache row exists but lacks what the file says ──
+# -- 3. "write once, read never": a cache row exists but lacks what the file says --
 
 def test_cache_row_is_refreshed_from_file(client, upload, app):
-    """A module cache row (here: face_regions) exists for the box, but without
-    the name the file carries. This is the exact shape of the people bug —
+    """! @brief A module cache row (here: face_regions) exists for the box, but without
+    the name the file carries. This is the exact shape of the people bug -
     api_face_name wrote the name to XMP and nothing ever read it back. The
     invariant is generic: no cache row may disagree with the file after a
     reindex."""
@@ -188,7 +189,7 @@ def test_cache_row_is_refreshed_from_file(client, upload, app):
 
 
 def test_class_label_in_name_slot_is_not_a_name(client, upload, app):
-    """A legacy writer put the class ("face") in mwg-rs:Name. That is not a
+    """! @brief A legacy writer put the class ("face") in mwg-rs:Name. That is not a
     person and must never become one."""
     fn = upload(seed=906)
     write_meta(client, fn, regions=[box(class_name="face", region_name="face", confirmed=True,

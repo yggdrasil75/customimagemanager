@@ -4,7 +4,7 @@
 <div id="gdl_modal" class="hidden absolute inset-0 bg-black/70 flex items-center justify-center z-50">
   <div class="bg-gray-800 p-6 rounded-lg border border-gray-600 w-[720px] max-w-[95vw] flex flex-col max-h-[90vh]">
     <div class="flex justify-between items-center mb-4 flex-shrink-0">
-      <h2 class="font-bold text-emerald-400">Fetch with gallery-dl</h2>
+      <h2 class="font-bold text-green-400">Fetch with gallery-dl</h2>
       <div class="flex items-center gap-3">
         <button onclick="gdlOpenSettings()" title="Settings › Fetch sites"
           class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">⚙ Fetch settings</button>
@@ -25,21 +25,21 @@
             onblur="gdlUrlChanged()"
             class="flex-1 p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
           <button onclick="gdlDiscover()"
-            class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1 rounded font-bold whitespace-nowrap">Check fields</button>
+            class="text-xs bg-sky-700 hover:bg-sky-600 px-3 py-1 rounded font-bold whitespace-nowrap">Check fields</button>
         </div>
         <p class="text-[10px] text-gray-600 mt-1">
           Any <a href="https://gdl-org.github.io/docs/supported.html" target="_blank"
-            class="text-teal-500 underline">gallery-dl-supported site</a>. Checking fields doesn't download anything.
+            class="text-sky-500 underline">gallery-dl-supported site</a>. Checking fields doesn't download anything.
         </p>
       </div>
 
-        {# ── Login / auth for this site ────────────────────────────────
+        {# -- Login / auth for this site --------------------------------
            Most sites tie an API/rate limit to an account. Pick a method; it's
            saved per site and applied to fetches. Secrets aren't sent back to
            the browser once saved (you'll see "on file" instead). #}
         <div class="border-t border-gray-700 pt-2">
           <label class="text-xs text-gray-400 block mb-1">Login for this site
-            <b id="gdl_auth_site" class="text-emerald-400"></b></label>
+            <b id="gdl_auth_site" class="text-green-400"></b></label>
           <p class="text-[10px] text-gray-600 mb-1">Set this before Check fields for API/login-only sites (e.g. reddit).</p>
           <select id="gdl_auth_method" onchange="gdlAuthMethodChange()"
             class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-xs text-white mb-2">
@@ -88,7 +88,7 @@
         </div>
       <div>
         <label class="text-xs text-gray-400 block mb-1">URLs to queue
-          <span class="text-gray-600">(one per line — e.g. an artist's several blogs)</span></label>
+          <span class="text-gray-600">(one per line - e.g. an artist's several blogs)</span></label>
         <textarea id="gdl_urls" rows="3"
           placeholder="https://site-a.com/artist&#10;https://site-b.com/artist&#10;https://site-c.com/artist"
           class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white font-mono"></textarea>
@@ -110,21 +110,21 @@
       </div>
 
       <div class="flex items-center gap-2 text-xs text-gray-400">
-        <input id="gdl_watch" type="checkbox" class="accent-emerald-600">
-        <label for="gdl_watch">Watch these URLs — re-check every</label>
+        <input id="gdl_watch" type="checkbox" class="accent-green-600">
+        <label for="gdl_watch">Watch these URLs - re-check every</label>
         <input id="gdl_watch_h" type="number" min="1" step="1" value="24"
           class="w-16 p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white">
         <span>hours</span>
         <span class="text-gray-600">(manage in <a href="#" onclick="gdlOpenSettings('module_fetch_watch');return false"
-          class="text-teal-500 underline">Settings > Watched fetches</a>)</span>
+          class="text-sky-500 underline">Settings > Watched fetches</a>)</span>
       </div>
 
-      {# Field mapping — populated after "Check fields". Every field the site
+      {# Field mapping - populated after "Check fields". Every field the site
          exposes gets its own row; route each to tags/description/regions or
          leave it ignored. Saved per-site and reused. #}
       <div id="gdl_mapping" class="hidden border-t border-gray-700 pt-3 space-y-3">
-        <p class="text-xs text-gray-400">Site: <b id="gdl_site" class="text-emerald-400"></b>
-          <span id="gdl_mapping_known" class="hidden text-[10px] text-gray-500">(saved mapping loaded — change and save to update)</span>
+        <p class="text-xs text-gray-400">Site: <b id="gdl_site" class="text-green-400"></b>
+          <span id="gdl_mapping_known" class="hidden text-[10px] text-gray-500">(saved mapping loaded - change and save to update)</span>
         </p>
         <div>
           <div class="flex items-center gap-2 pb-1 mb-1 border-b border-gray-700 text-[10px] uppercase tracking-wide text-gray-500">
@@ -136,7 +136,7 @@
             Route each field to <b class="text-gray-500">Tags</b>
             (with an optional <b class="text-gray-500">prefix</b> like <code>character:</code> for provenance),
             <b class="text-gray-500">Description</b>, an <b class="text-gray-500">EXIF</b> tag,
-            an <b class="text-gray-500">XMP</b> property (dc, iptcCore, cc, prism, …),
+            an <b class="text-gray-500">XMP</b> property (dc, iptcCore, cc, prism, ...),
             or <b class="text-gray-500">Regions</b> (note/translation boxes, e.g. e621 <code>notes</code>).
             Unlisted fields are ignored.
           </p>
@@ -153,7 +153,7 @@
         </details>
       </div>
 
-      {# Download queue — live status of URLs being fetched. Populated by
+      {# Download queue - live status of URLs being fetched. Populated by
          gdlQueuePoll(); each row shows status and downloaded/total counts. #}
       <div class="border-t border-gray-700 pt-3">
         <div class="flex items-center justify-between mb-1">
@@ -171,7 +171,7 @@
     <div class="flex justify-between items-center mt-4 flex-shrink-0 border-t border-gray-700 pt-3">
       <span id="gdl_status" class="text-xs text-gray-400"></span>
       <button id="gdl_fetch_btn" onclick="gdlFetch()"
-        class="text-sm bg-emerald-700 hover:bg-emerald-600 px-4 py-2 rounded font-bold">Add to queue</button>
+        class="text-sm bg-green-700 hover:bg-green-600 px-4 py-2 rounded font-bold">Add to queue</button>
     </div>
   </div>
 </div>

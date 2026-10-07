@@ -1,5 +1,5 @@
-"""
-Pose module (YOLO body pose + RTMPose wholebody).
+"""! @file
+@brief Pose module (YOLO body pose + RTMPose wholebody).
 ======================================================================
 The pose feature, extracted from manager.py into a pluggable module.
 It owns the pose ENDPOINTS, the on-image skeleton OVERLAY, the controls-
@@ -46,11 +46,11 @@ MANIFEST = {
 
 
 def _estimate(host, img_bgr, detect=None):
-    """Run the selected pose provider and shape its output for storage.
+    """! @brief Run the selected pose provider and shape its output for storage.
 
     Returns the sidecar pose dict {model, kind, names, edges, people}. The
     topology follows the keypoint count the provider returned (17 COCO body,
-    33 BlazePose, 133 whole-body, 543 holistic — see skeleton.TOPOLOGIES), so
+    33 BlazePose, 133 whole-body, 543 holistic - see skeleton.TOPOLOGIES), so
     the picker's type choice needs no extra plumbing.
     On no provider / failure returns an empty-people dict with a `note`.
     """
@@ -85,7 +85,7 @@ def register(host):
                           section="ai_tooling", section_label="AI Tooling",
                           default="write", role_defaults={"viewer": "read"})
 
-    # RTMPose whole-body (133 pts) as its own pose provider. Size maps onto
+    ## @brief RTMPose whole-body (133 pts) as its own pose provider. Size maps onto
     # rtmlib's mode; the picker's type select shows the single whole-body type.
     # Learner tokens for a stored pose dict: [{kind, norm, raw, bones}] per person.
     # Shim only: the conversion lives with whoever made the skeleton. A provider
@@ -106,7 +106,7 @@ def register(host):
     host.provide_service("pose.tpose", lambda skeletons: _pose_core.aggregate_tpose(
         skeletons, _pose_core.COCO_KP_NAMES, _pose_core.COCO_SKELETON))
 
-    # RTMPose family with the official checkpoint sizes: 17-pt body (t/s/m/l/x)
+    ## @brief RTMPose family with the official checkpoint sizes: 17-pt body (t/s/m/l/x)
     # and RTMW whole-body 133 pts (m/l/x) as separate providers because the
     # size ladders differ. Person boxes come from the app's Person detection
     # pick (Models tab: YOLO on torch), the same detector the people module
@@ -120,10 +120,10 @@ def register(host):
 
     for pid, label, kind, sizes, types, note in (
         ("rtmpose", "RTMPose", "body", ["t", "s", "m", "l", "x"],
-         [{"value": "body", "label": "Body · 17 pts"}],
+         [{"value": "body", "label": "Body | 17 pts"}],
          "OpenMMLab SimCC top-down body pose; strong accuracy per FLOP, official t..x sizes."),
         ("rtmw", "RTMW (whole-body)", "wholebody", ["m", "l", "x"],
-         [{"value": "wholebody", "label": "Whole-body · 133 (hands+face)"}],
+         [{"value": "wholebody", "label": "Whole-body | 133 (hands+face)"}],
          "RTMPose whole-body: adds feet, hands and face keypoints. Official m/l/x."),
     ):
         host.provide_model(
@@ -134,7 +134,7 @@ def register(host):
             transform=None, available=_pose_core.has_wholebody,
             reason="pip install rtmlib onnxruntime", cost_mb=1000)
 
-    # Contribute the "pose" pipeline stage. The pipeline calls this with an
+    ## @brief Contribute the "pose" pipeline stage. The pipeline calls this with an
     # image (whole image or a cropped region) and expects a pose dict; when this
     # module is disabled the stage isn't registered and the pipeline no-ops it.
     def _pipeline_pose(img_bgr):
@@ -143,7 +143,7 @@ def register(host):
 
     core = host.core        # image decode + metadata IO handed over by the app
 
-    # Pose itself lives in the sidecar (write_metadata pose=); this marker is
+    # Pose itself lives in the sidecar (update_file set pose); this marker is
     # what lets the background sweep find images not yet posed by a model
     # without opening every XMP.
     host.add_table("CREATE TABLE IF NOT EXISTS pose_runs("
@@ -151,14 +151,11 @@ def register(host):
 
     def _mark(rel, pose_data, model=None):
         model = model or host.broker.selected_id("pose") or ""
-        db = host.db()
-        db.execute("INSERT INTO pose_runs(rel_path, model, people, updated) VALUES(?,?,?,?) "
-                   "ON CONFLICT(rel_path) DO UPDATE SET model=excluded.model, "
-                   "people=excluded.people, updated=excluded.updated",
-                   (rel, model, len((pose_data or {}).get("people") or []), time.time()))
-        db.commit()
+        host.update_file(rel, table="pose_runs", dont_write=True,
+                         set={"model": model, "people": len((pose_data or {}).get("people") or []),
+                              "updated": time.time()})
 
-    # Background sweep (Models → Pose → "Run in background").
+    ## @brief Background sweep (Models -> Pose -> "Run in background").
     def _bg_pending(db, n):
         model = host.broker.selected_id("pose", "bg") or ""
         return [r["rel_path"] for r in db.execute(
@@ -173,12 +170,11 @@ def register(host):
         pose_data = _estimate(host, core.to_bgr(img), detect=handle)
         if pose_data.get("note") and not pose_data.get("people"):
             raise RuntimeError(pose_data["note"])
-        meta = core.read_metadata(fp)
-        core.write_metadata(fp, meta["tags"], meta["description"], meta["regions"], pose=pose_data)
+        core.update_file(fp, set={"pose": pose_data})
         _mark(rel, pose_data, host.broker.selected_id("pose", "bg"))
     host.add_background_sweep("pose", _bg_pending, _bg_run)
 
-    # ── POST /api/pose ───────────────────────────────────────────────────
+    # -- POST /api/pose ---------------------------------------------------
     def api_pose():
         fn = (request.json or {}).get("filename", "")
         fp = host.safe_path(host.media_dir, fn)
@@ -187,20 +183,18 @@ def register(host):
         img = core.read_image(fp)
         if img is None:
             return jsonify({"success": False, "error": "Decode failed."})
-        host.config["status_text"] = "Estimating pose…"
+        host.set_status("Estimating pose...")
         pose_data = _estimate(host, core.to_bgr(img))
-        meta = core.read_metadata(fp)
-        core.write_metadata(fp, meta["tags"], meta["description"], meta["regions"],
-                         pose=pose_data)
+        core.update_file(fp, set={"pose": pose_data})
         _mark(fn, pose_data)
-        host.config["status_text"] = "Ready."
+        host.set_status("Ready.")
         if not pose_data.get("people"):
             return jsonify({"success": True, "pose": pose_data,
                             "note": pose_data.get("note",
                                     "No people detected (or pose model unavailable).")})
         return jsonify({"success": True, "pose": pose_data})
 
-    # ── POST /api/bulk_pose ──────────────────────────────────────────────
+    # -- POST /api/bulk_pose ----------------------------------------------
     def bulk_pose():
         filenames = (request.json or {}).get("filenames", [])
         done, posed, errors = 0, 0, []
@@ -214,22 +208,20 @@ def register(host):
                 if img is None:
                     errors.append(fn); continue
                 pose_data = _estimate(host, core.to_bgr(img))
-                meta = core.read_metadata(fp)
-                core.write_metadata(fp, meta["tags"], meta["description"],
-                                 meta["regions"], pose=pose_data)
+                core.update_file(fp, set={"pose": pose_data})
                 _mark(fn, pose_data)
                 if (pose_data or {}).get("people"):
                     posed += 1
                 done += 1
-                host.config["status_text"] = f"Pose: {done}/{total} ({posed} with people)..."
+                host.set_status(f"Pose: {done}/{total} ({posed} with people)...")
             except Exception as e:
                 errors.append(fn)
                 host.logger.error(f"bulk_pose {fn}: {e}")
-        host.config["status_text"] = "Ready."
+        host.set_status("Ready.")
         return jsonify({"success": True, "done": done, "posed": posed,
                         "errors": errors})
 
-    # ── POST /api/pose_remove ────────────────────────────────────────────
+    # -- POST /api/pose_remove --------------------------------------------
     def api_pose_remove():
         d = request.json or {}
         fn = d.get("filename", "")
@@ -242,8 +234,7 @@ def register(host):
             regions = []
             for r in meta["regions"]:
                 r = dict(r); r.pop("pose", None); regions.append(r)
-            core.write_metadata(fp, meta["tags"], meta["description"], regions,
-                             analysis=meta.get("analysis"), pose={"clear": True})
+            core.update_file(fp, set={"regions": regions}, remove={"pose": True}, meta=meta)
             return jsonify({"success": True, "cleared": "image"})
         try:
             ri = int(ri)
@@ -255,13 +246,12 @@ def register(host):
         regions[ri].pop("pose", None)
         people = [r["pose"] for r in regions if r.get("pose")]
         new_pose = {"kind": "body", "people": people} if people else {"clear": True}
-        core.write_metadata(fp, meta["tags"], meta["description"], regions,
-                         analysis=meta.get("analysis"), pose=new_pose)
+        core.update_file(fp, set={"regions": regions, "pose": new_pose}, meta=meta)
         return jsonify({"success": True, "cleared": ri,
                         "remaining_people": len(people)})
 
     # All three run/store/remove skeletons, so they require WRITE on ai.pose.
-    # (ai.pose_remove no longer exists as a separate key — it collapsed into
+    # (ai.pose_remove no longer exists as a separate key - it collapsed into
     # ai.pose's write level.)
     host.add_route("/api/pose", api_pose, methods=["POST"], feature="ai.pose", level="write")
     host.add_route("/api/bulk_pose", bulk_pose, methods=["POST"], feature="ai.pose", level="write")

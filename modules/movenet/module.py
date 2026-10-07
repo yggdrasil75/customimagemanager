@@ -1,11 +1,11 @@
-"""
-MoveNet pose provider (Google, 17 COCO keypoints).
+"""! @file
+@brief MoveNet pose provider (Google, 17 COCO keypoints).
 ======================================================================
 Registers the official MoveNet TFLite models as a 'pose' provider:
 
   size lightning  fast, 192 px input
   size thunder    accurate, 256 px input
-  type single     one person per run — cropped per 'detect.persons' box when
+  type single     one person per run - cropped per 'detect.persons' box when
                   the app has a person pick, else the whole image
   type multipose  up to 6 people in one pass (lightning only); ignores the
                   person detector
@@ -117,8 +117,8 @@ def register(host):
     host.provide_model(
         "pose", "movenet", label="MoveNet", family="MoveNet",
         sizes=["lightning", "thunder"],
-        types=[{"value": "single", "label": "Single-pose · 17 pts"},
-               {"value": "multipose", "label": "Multi-pose · 17 pts (lightning only)"}],
+        types=[{"value": "single", "label": "Single-pose | 17 pts"},
+               {"value": "multipose", "label": "Multi-pose | 17 pts (lightning only)"}],
         note="Google MoveNet TFLite: lightning is the fastest pose model here; thunder is "
              "the accurate one. Single-pose crops per detected person.",
         speed="fast",

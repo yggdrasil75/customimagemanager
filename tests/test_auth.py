@@ -1,4 +1,5 @@
-"""Auth gate: 401 without session, bootstrap admin, CSRF, logout."""
+"""! @file
+@brief Auth gate: 401 without session, bootstrap admin, CSRF, logout."""
 import pytest
 
 

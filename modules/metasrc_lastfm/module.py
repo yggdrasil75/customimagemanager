@@ -1,4 +1,5 @@
-"""Last.fm — music metadata source (API key required)."""
+"""! @file
+@brief Last.fm - music metadata source (API key required)."""
 MANIFEST = {
     "id": "metasrc_lastfm", "name": "Last.fm (music)", "version": "1.0.0",
     "description": "Track metadata from last.fm: title, artist, album, top tags as genre. "

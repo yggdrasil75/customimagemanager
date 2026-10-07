@@ -1,3 +1,6 @@
+"""! @file
+@brief Model files, accelerator detection (CUDA / ROCm / CPU, ONNX providers) and
+the LRU cache that keeps heavy models within the memory budget."""
 import os
 import gc
 import threading
@@ -48,22 +51,20 @@ try:
 except Exception:
     psutil = None
 
-# Every model file the app pulls in lives under here — the app's own weights
-# (models/<backend>/<chore>/) and every library cache it can redirect (below).
-# CIM_MODELS_DIR moves the whole tree, e.g. onto the big model drive: nothing
-# is supposed to land in a hidden ~/.cache on the OS disk.
+# Every downloaded model and library cache lives under here; CIM_MODELS_DIR
+# moves the whole tree (nothing should land in ~/.cache on the OS disk).
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
 def model_dir(backend, chore):
-    """models/<backend>/<chore>/ — where every backend keeps its weights for a
-    capability (chore = capability id with dots removed: detect, detectobb,
-    segment, pose, classify, depth). Created on first use."""
+    """! @brief models/<backend>/<chore>/, created on first use.
+    @param chore  capability id without dots (detect, detectobb, segment, pose, ...).
+    """
     d = os.path.join(MODELS_DIR, backend, str(chore).replace(".", ""))
     os.makedirs(d, exist_ok=True)
     return d
 
 def list_weights(backend, chore, exts=(".pt", ".pth")):
-    """Weight files a user dropped (or a backend fetched) under models/<backend>/<chore>/."""
+    """! @brief Weight files under models/<backend>/<chore>/."""
     d = model_dir(backend, chore)
     return sorted(os.path.join(d, f) for f in os.listdir(d)
                   if f.lower().endswith(tuple(exts)))
@@ -90,20 +91,17 @@ def _model_device(model):
     return None
 
 
-# Library caches redirected under MODELS_DIR unless the user set the variable
-# themselves. Must run before those libraries are imported (they read the
-# environment at import), which is why this module is imported first.
-#   TORCH_HOME  torch.hub / rtmlib / pyiqa checkpoints        -> models/torch
-#   HF_HOME     huggingface_hub: hub snapshots (transformers,
-#               diffusers, timm …) AND the xet chunk cache the
-#               downloader keeps beside them — the part that
-#               silently eats the OS disk for a 16 GB model     -> models/huggingface
+# Library caches redirected under MODELS_DIR unless already set. Must run before
+# those libraries import (they read the environment then):
+#   TORCH_HOME  torch.hub, rtmlib, pyiqa checkpoints
+#   HF_HOME     Hugging Face snapshots and the xet chunk cache
 _PINNED = {"TORCH_HOME": "torch", "HF_HOME": "huggingface"}
 
 
 def pin_cache_dir():
-    """Point each library cache at MODELS_DIR/<sub> if the user hasn't set it.
-    Idempotent. Returns {var: effective path}."""
+    """! @brief Point each library cache at MODELS_DIR/<sub> unless the user set it.
+    @return {variable: effective path}.
+    """
     out = {}
     for var, sub in _PINNED.items():
         if not os.environ.get(var):
@@ -140,9 +138,7 @@ def _detect_backend():
 
 
 def backend_reason():
-    """One-line explanation of why backend() decided what it did, for logs and
-    the UI. Every CPU fallback in _detect_backend is silent and they look
-    identical from outside, so name the branch that actually fired."""
+    """! @brief Which branch of the backend detection fired (every CPU fallback looks alike otherwise)."""
     if torch is None:
         return f"CPU: torch did not import ({_TORCH_IMPORT_ERROR or 'unknown'})"
     try:
@@ -151,7 +147,7 @@ def backend_reason():
             return ("CPU: torch.cuda.is_available()=False, "
                     + (f"torch is a ROCm build (HIP {hip}) so the runtime isn't "
                        "seeing the GPU" if hip else
-                       "torch is NOT a ROCm build (no HIP) — wrong wheel for this image"))
+                       "torch is NOT a ROCm build (no HIP) - wrong wheel for this image"))
     except Exception as e:
         return f"CPU: probing torch.cuda failed ({type(e).__name__}: {e})"
     hip = _torch_hip_version()
@@ -163,16 +159,10 @@ def backend_reason():
 
 
 def log_backend(log):
-    """Dump everything that decides GPU-vs-CPU, once, at startup.
-
-    This runs in-process so it reflects what the app actually sees — the same
-    interpreter, env and device nodes the scan will use. Hand-running a probe in
-    a shell inside the container can disagree with the real process, which is
-    exactly when you'd be chasing the wrong thing.
+    """! @brief Log everything that decides GPU vs CPU, once at startup, from inside
+    the real process (a shell probe can see a different environment).
     """
-    # A silent CPU fallback isn't a status note — for this workload it's ~100x
-    # slower and it's the thing you'll be hunting. Emit the WHOLE dump at ERROR so
-    # it lands in error.log as one readable block; a healthy GPU is just INFO.
+    # A silent CPU fallback is ~100x slower: log it at ERROR as one block.
     cpu = backend() == "cpu"
     emit = log.error if cpu else log.info
     emit("gpu: %s (%s)", "running on CPU" if cpu else f"backend={backend()}",
@@ -182,11 +172,8 @@ def log_backend(log):
         v = os.environ.get(k)
         if v:
             emit("gpu: env %s=%s", k, v)
-    # ROCm needs both device nodes passed into the container AND the process must
-    # be able to OPEN them. os.path.exists() is not enough: the classic failure is
-    # a node that is present but unreadable because the container user isn't in
-    # the video/render groups. That enumerates as device_count=0 — identical
-    # symptom to having no GPU at all, which is why existence alone misleads.
+    # ROCm needs the device nodes present AND openable; a node the container user
+    # can't open (not in video/render) looks exactly like having no GPU.
     try:
         import glob as _g
         def _acc(p):
@@ -204,10 +191,8 @@ def log_backend(log):
             pass
         emit("gpu: process uid=%s gid=%s groups=%s",
              os.getuid(), os.getgid(), sorted(os.getgroups()))
-        # What the amdgpu/kfd KERNEL driver enumerates, independent of torch. If
-        # agents show up here but torch still reports 0 devices, the kernel is
-        # fine and ROCm userspace is rejecting the card — usually an unsupported
-        # gfx target, which HSA_OVERRIDE_GFX_VERSION exists to work around.
+        # What the kernel driver enumerates, independent of torch. Agents here but no
+        # torch devices usually means an unsupported gfx target (HSA_OVERRIDE_GFX_VERSION).
         for nd in sorted(_g.glob("/sys/class/kfd/kfd/topology/nodes/*/properties")):
             try:
                 props = dict(
@@ -215,7 +200,7 @@ def log_backend(log):
                     if len(ln.split(None, 1)) == 2)
                 gfx = props.get("gfx_target_version", "0").strip()
                 simd = props.get("simd_count", "0").strip()
-                if gfx != "0" and simd != "0":     # 0/0 == the CPU node, skip
+                if gfx != "0" and simd != "0":  # 0/0 is the CPU node
                     g = int(gfx)
                     maj, mnr, stp = g // 10000, (g // 100) % 100, g % 100
                     emit("gpu: kfd agent %s = gfx%d%x%x (HSA_OVERRIDE_GFX_VERSION=%d.%d.%d) simd_count=%s",
@@ -239,7 +224,7 @@ def log_backend(log):
         want = {"cuda": "CUDAExecutionProvider", "rocm": "MIGraphXExecutionProvider"}.get(backend())
         emit("gpu: onnxruntime=%s providers=%s", _ort.__version__, provs)
         if want and want not in provs:
-            log.error("gpu: onnxruntime is missing %s on a %s backend — face "
+            log.error("gpu: onnxruntime is missing %s on a %s backend - face "
                       "detection will run on CPU (~100x slower). Install the GPU "
                       "onnxruntime build for this backend.", want, backend())
     except Exception as e:
@@ -250,9 +235,9 @@ _BACKEND = None
 _DEVICE = None
 
 def backend():
-    """The detected accelerator vendor: 'cuda' (NVIDIA), 'rocm' (AMD), or 'cpu'.
-    Decided once, process-wide. Use this when the vendor matters (ONNX providers,
-    logging). For the torch device string, use device()."""
+    """! @brief The accelerator vendor, decided once: "cuda", "rocm" or "cpu".
+    For the torch device string use device().
+    """
     global _BACKEND
     if _BACKEND is None:
         _BACKEND = _detect_backend()
@@ -265,19 +250,15 @@ def device():
     return _DEVICE
 
 def on_gpu():
-    """True when a GPU accelerator (CUDA or ROCm) was chosen. Convenience for
-    loaders that only care 'GPU vs CPU', not the vendor."""
+    """! @brief True when a GPU (CUDA or ROCm) was chosen."""
     return device() == "cuda"
 
 _DEVICES = None
 
 def available_devices():
-    """The compute devices torch can see, as [{'value','label'}], for the UI's
-    device picker. Uses the module-level torch (no per-call import) and is
-    computed once and cached process-wide — device topology doesn't change while
-    we run, and probing torch on every request is what caused the bloat/ulimit/
-    slowdown. CPU is always first; CUDA/ROCm GPUs are enumerated by index with
-    their names; MPS is listed only when torch reports it built and available."""
+    """! @brief Devices for the UI's device picker, [{value, label}], cached once:
+    CPU first, then each GPU by index, then MPS when available.
+    """
     global _DEVICES
     if _DEVICES is not None:
         return _DEVICES
@@ -290,7 +271,7 @@ def available_devices():
                         nm = torch.cuda.get_device_name(i)
                     except Exception:
                         nm = f"GPU {i}"
-                    devs.append({"value": str(i), "label": f"GPU {i} — {nm}"})
+                    devs.append({"value": str(i), "label": f"GPU {i} - {nm}"})
             mps = getattr(torch.backends, "mps", None)
             if mps is not None and mps.is_available() and mps.is_built():
                 devs.append({"value": "mps", "label": "MPS (Apple)"})
@@ -300,16 +281,10 @@ def available_devices():
     return _DEVICES
 
 def onnx_providers():
-    """The ONNX Runtime execution-provider preference list for the detected
-    backend, most-preferred first, always ending in CPUExecutionProvider so a
-    session still builds if the GPU provider isn't in the installed onnxruntime
-    wheel. Any library that constructs an onnxruntime InferenceSession (insight-
-    face, rtmlib, rapidocr, ...) should pass this instead of hardcoding CUDA.
-
-    Filtered against onnxruntime.get_available_providers() when that import is
-    cheap, so we never hand ORT a provider it doesn't have and trigger its noisy
-    fallback warning; if onnxruntime isn't importable we return the unfiltered
-    preference and let the caller deal with it."""
+    """! @brief ONNX Runtime providers for this backend, preferred first, ending in CPU.
+    Filtered to what the installed onnxruntime offers when it imports cheaply.
+    Pass this to any InferenceSession instead of hardcoding CUDA.
+    """
     b = backend()
     if b == "rocm":
         pref = ["MIGraphXExecutionProvider", "CPUExecutionProvider"]
@@ -321,7 +296,6 @@ def onnx_providers():
         import onnxruntime as ort
         avail = set(ort.get_available_providers())
         filtered = [p for p in pref if p in avail]
-        # Guarantee CPU is always present as the final fallback.
         if "CPUExecutionProvider" not in filtered:
             filtered.append("CPUExecutionProvider")
         return filtered
@@ -329,11 +303,9 @@ def onnx_providers():
         return pref
 
 def onnx_provider():
-    """THE execution provider name every ONNX model in this app runs on (the
-    first of onnx_providers()): "MIGraphXExecutionProvider" on a ROCm box
-    with the MIGraphX wheel, "CUDAExecutionProvider" on CUDA, else CPU. A
-    module that builds an onnxruntime session passes onnx_providers(); one
-    that talks to a library taking a single provider name passes this."""
+    """! @brief The single provider name every ONNX model here runs on (first of
+    onnx_providers()), for libraries that take one name.
+    """
     return onnx_providers()[0]
 
 
@@ -341,14 +313,10 @@ _ONNX_STD = {"installed": False}
 
 
 def standardize_onnx(log=None):
-    """Route every ONNX Runtime session in this process through
-    onnx_providers(). Libraries derive provider names from their own device
-    strings (rtmlib: device='rocm' -> ROCMExecutionProvider), so on a wheel
-    that ships MIGraphX instead they ask for a provider that isn't there and
-    ORT drops them to the CPU. This wraps InferenceSession once: a request
-    naming a provider this wheel doesn't have is replaced by the app's list;
-    satisfiable requests pass through untouched. One log line per distinct
-    substitution. Idempotent, safe without onnxruntime."""
+    """! @brief Wrap InferenceSession once so a request for a provider this wheel lacks
+    (rtmlib asks for ROCm on a MIGraphX build and drops to CPU) gets the app's
+    list instead. Satisfiable requests pass untouched; idempotent.
+    """
     if _ONNX_STD["installed"]:
         return True
     try:
@@ -378,8 +346,7 @@ def standardize_onnx(log=None):
 
 
 def onnx_device_id():
-    """ctx/device id for ONNX-style APIs that take an int (insightface's ctx_id,
-    rtmlib device string suffix, ...): 0 on a GPU backend, -1 on CPU."""
+    """! @brief Integer device id for ONNX-style APIs: 0 on a GPU backend, -1 on CPU."""
     return 0 if on_gpu() else -1
 
 def _rss_mb():
@@ -404,24 +371,20 @@ def _vram_mb():
         return 0.0
 
 def _mem_snapshot():
-    """(rss_mb, vram_mb) before a load, for measuring what it actually cost."""
+    """! @brief (rss_mb, vram_mb) before a load."""
     return (_rss_mb(), _vram_mb())
 
 def _measure_cost(before, dev):
-    """Actual MB a load consumed, measured as the delta from `before`. Uses the
-    VRAM delta when the model landed on CUDA (dedicated card), else the RSS delta.
-    This is what makes cost_mb self-calibrating: the declared value is only a
-    pre-load estimate; once loaded we know the truth and store it. Returns 0 when
-    the delta is non-positive (measurement noise / shared pages) so the caller
-    keeps the declared estimate."""
+    """! @brief Memory a load actually used: the VRAM delta on CUDA, else the RSS delta.
+    @return MB, or 0 when the delta is noise (the declared estimate then stays).
+    """
     rss0, vram0 = before
     on_cuda = dev is not None and str(dev).lower().startswith(("cuda", "gpu"))
     if on_cuda:
         d = _vram_mb() - vram0
         if d > 1.0:
             return d
-        # VRAM delta unreliable (allocator caching / non-torch backend) — fall
-        # back to RSS delta, which still moves for host-side buffers.
+        # VRAM delta unreliable here; RSS still moves for host buffers.
     d = _rss_mb() - rss0
     return d if d > 1.0 else 0.0
 
@@ -440,9 +403,9 @@ def _file_cost_mb(model_path):
     return 0.0
 
 class ModelRegistry:
-    """Thread-safe LRU cache of heavy models. A failed load is cached as None
-    (retried at most once); a failed unload is ignored. Eviction never touches
-    the key currently being acquired."""
+    """! @brief Thread-safe LRU cache of heavy models. A failed load is cached as None
+    and retried once; eviction never touches the key being acquired.
+    """
 
     def __init__(self):
         self._lock = threading.RLock()
@@ -499,7 +462,7 @@ class ModelRegistry:
                         model = e["model"]
                     if not loaded:
                         if _file_cost_mb(e.get("model_path")) <= 0:
-                            # first load may download weights: pause until disk has room
+                            # a first load may download weights
                             from common import wait_for_space
                             wait_for_space(MODELS_DIR)
                         print(f"REGBUILD key={key} entry_id={id(e)} entries_id={id(self._entries.get(key))} loaded={e['loaded']} nkeys={len(self._entries)}", file=sys.stderr, flush=True)
@@ -544,7 +507,7 @@ class ModelRegistry:
                 self._pinned.discard(key)
 
     def touch(self, key):
-        """Mark key most-recently-used without forcing a load."""
+        """! @brief Mark a key most recently used without loading it."""
         with self._lock:
             e = self._entries.get(key)
             if e and e["loaded"]:
@@ -552,15 +515,13 @@ class ModelRegistry:
                 e["seq"] = self._seq
 
     def hold(self, *keys):
-        """Pin one or more keys resident until release(). Refcounted, so paired
-        hold/release nest safely. Prefer the lease() context manager below."""
+        """! @brief Pin keys resident until release() (refcounted; prefer lease())."""
         with self._lock:
             for k in keys:
                 self._leased[k] = self._leased.get(k, 0) + 1
 
     def release(self, *keys):
-        """Undo one hold() for each key; the key becomes evictable again once its
-        refcount hits zero. After release, trim anything now over budget."""
+        """! @brief Undo one hold() per key, then evict anything over budget."""
         with self._lock:
             for k in keys:
                 n = self._leased.get(k, 0) - 1
@@ -579,29 +540,26 @@ class ModelRegistry:
             self.release(*keys)
 
     def unload(self, key):
-        """Free one model now. Safe if never loaded."""
+        """! @brief Free one model (no-op when not loaded)."""
         with self._lock:
             self._unload_locked(key)
 
     def clear(self, prefix=None):
-        """Free every model, or every key starting with prefix."""
+        """! @brief Free every model, or those whose key starts with `prefix`."""
         with self._lock:
             for k in [k for k in self._entries
                       if prefix is None or str(k).startswith(prefix)]:
                 self._unload_locked(k)
 
     def set_memory_hook(self, hook):
-        """Install a callable hook(cost_mb, gpu) -> reservation context manager,
-        used to reserve a model's memory through the thread manager on load. The
-        reservation must support __enter__/__exit__ and a settle() method (RAM
-        reservations settle after load; VRAM reservations are held until the
-        model is unloaded). None disables reservation. Kept optional so the
-        registry has no hard dependency on the thread manager."""
+        """! @brief Reserve model memory through the thread manager on load.
+        @param hook  fn(cost_mb, gpu) -> context manager with settle(); None disables.
+        """
         with self._lock:
             self._mem_hook = hook
 
     def status(self):
-        """Snapshot: list of (key, loaded, cost_mb, gpu)."""
+        """! @brief [(key, loaded, cost_mb, gpu)]."""
         with self._lock:
             return [(k, e["loaded"], e["cost_mb"], e["gpu"])
                     for k, e in self._entries.items()]
@@ -616,7 +574,7 @@ class ModelRegistry:
         res = e.pop("mem_res", None)
         if res is not None:
             try:
-                res.__exit__(None, None, None)   # frees any held VRAM reservation
+                res.__exit__(None, None, None)  # frees a held VRAM reservation
             except Exception:
                 pass
         if model is None:

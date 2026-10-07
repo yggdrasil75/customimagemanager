@@ -1,8 +1,8 @@
-"""
-Apple Photos importer — two ways in, both fetch-module fetchers.
+"""! @file
+@brief Apple Photos importer - two ways in, both fetch-module fetchers.
 ======================================================================
 iCloud Photos, LIVE (fetcher "icloud"). Signs in to the iCloud web API
-(pyicloud — the route icloudpd uses; no Mac or iPhone app needed), pulls
+(pyicloud - the route icloudpd uses; no Mac or iPhone app needed), pulls
 originals with their dates, favourites, hidden state, albums and live-photo
 videos, and with a schedule keeps pulling what's new. Optionally PURGES from
 iCloud what is safely here and older than a keep window, so the phone can
@@ -12,8 +12,8 @@ in Recently Deleted for 30 days). Needs two-factor authentication and
 in and never stored; the session lasts about two months, then the tab asks to
 sign in again.
 
-Apple's data EXPORT (fetcher "apple_export"): privacy.apple.com → "Request a
-copy of your data" → iCloud Photos. Zips of originals plus CSVs (favourite,
+Apple's data EXPORT (fetcher "apple_export"): privacy.apple.com -> "Request a
+copy of your data" -> iCloud Photos. Zips of originals plus CSVs (favourite,
 hidden, deleted, creation date, albums); see icloud.py. A plain folder of
 originals (icloudpd output) works too.
 """
@@ -31,8 +31,8 @@ MANIFEST = {
     "id":          "apple_photos_import",
     "name":        "Apple Photos import",
     "version":     "1.1.0",
-    "description": "Import from iCloud Photos — live and periodic via the iCloud web API, with optional purge "
-                   "from iCloud once safely imported — or from Apple's data export.",
+    "description": "Import from iCloud Photos - live and periodic via the iCloud web API, with optional purge "
+                   "from iCloud once safely imported - or from Apple's data export.",
     "core":        False,
     "requires":    ["fetch"],
     "pip":         ["pyicloud", "rich"],
@@ -85,7 +85,7 @@ def register(host):
             raise ValueError(f"iCloud: {e} (with Advanced Data Protection, turn on "
                              f"'Access iCloud Data on the Web' in Settings → Apple ID → iCloud)")
 
-    # ── iCloud (live) ──────────────────────────────────────────────────────
+    # -- iCloud (live) ------------------------------------------------------
     def _validate_icloud(cfg, secrets, sid):
         apple_id = str(cfg.get("apple_id") or "").strip()
         if not apple_id:
@@ -135,7 +135,7 @@ def register(host):
                 raise ValueError("sign-in needed")
         except ValueError as e:
             icloud_imp.update_source(src["id"], status="needs sign-in")
-            raise RuntimeError(f"iCloud session expired or signed out ({e}) — sign in again from the iCloud tab")
+            raise RuntimeError(f"iCloud session expired or signed out ({e}) - sign in again from the iCloud tab")
         delivered = []
 
         def collect(it_iter):
@@ -156,7 +156,7 @@ def register(host):
                     "handles": lambda t: str(t).startswith("icloud:"), "target_key": lambda t: t,
                     "fetch": _fetch_icloud, "map_meta": map_meta})
 
-    # ── Apple data export ──────────────────────────────────────────────────
+    # -- Apple data export --------------------------------------------------
     def _validate_export(cfg, secrets, sid):
         if not cfg.get("path"):
             raise ValueError("choose the export zip or the folder it's in")

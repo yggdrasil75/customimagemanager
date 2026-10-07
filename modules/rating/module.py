@@ -1,13 +1,13 @@
-"""
-Rating module.
+"""! @file
+@brief Rating module.
 ======================================================================
 Owns image quality rating end to end: the star UI, the four endpoints
 (iqa_models, iqa_scan, iqa_set, quality_sweep), the bulk "rate library"
-action, and — new — its OWN storage, moved out of the core files table.
+action, and - new - its OWN storage, moved out of the core files table.
 
 Architecture (as specified):
   * SOURCE OF TRUTH is the file's own XMP/EXIF rating. A user rating is
-    written into the file via the metadata layer (exif_export.write_exif),
+    written into the file through the core write path (host.update_file),
     so it travels with the file and survives a DB rebuild.
   * A module-owned `ratings` table is the long-term READ CACHE: one row per
     file holding the user star rating (mirrored from XMP) and the IQA
@@ -43,7 +43,7 @@ MANIFEST = {
     "assets":      ["rating.js"],
 }
 
-# ── the read-cache table ─────────────────────────────────────────────────────
+# -- the read-cache table -----------------------------------------------------
 _DDL = """
 CREATE TABLE IF NOT EXISTS ratings (
     rel_path    TEXT PRIMARY KEY,
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS ratings (
 
 
 def _effective(row):
-    """user rating wins over the IQA estimate."""
+    """! @brief user rating wins over the IQA estimate."""
     if row is None:
         return None
     us = row["user_stars"] if not isinstance(row, dict) else row.get("user_stars")
@@ -70,22 +70,21 @@ def register(host):
                           section_label="AI Tooling", default="write")
 
     core = host.core
-    exif = host.get_service("exif") or {}     # metadata module's EXIF writer
 
-    # The rating module OWNS the iqa_model setting now: declaring it here seeds
-    # the default, persists it, and — via on_change — points the broker at the
+    ## @brief The rating module OWNS the iqa_model setting now: declaring it here seeds
+    # the default, persists it, and - via on_change - points the broker at the
     # chosen IQA provider. manager no longer has any iqa_model branch.
     def _on_iqa_model(new, old):
         ok, _ = host.broker.select("iqa", new)
         if ok:
-            host.config["model_selection"] = host.broker.current_selection()
+            host.persist_model_selection(save=False)   # the settings save that fired this persists
     def _valid_iqa_model(v):
         return v if host.broker.selected_id("iqa") is not None or \
             v in [p["id"] for p in host.broker.providers_for("iqa")] else v
     host.add_config_key("iqa_model", default="brisque",
                         on_change=_on_iqa_model)
     def _to_stars(q, blank=False):
-        """Normalized quality (0..1, higher=better) -> 0..5 half-stars.
+        """! @brief Normalized quality (0..1, higher=better) -> 0..5 half-stars.
 
         Owned by the rating module now (was iqa.to_stars). Blank/featureless
         images are capped at 1 star so undistorted junk can't score five."""
@@ -99,7 +98,7 @@ def register(host):
     def _selected_iqa_id():
         return host.broker.selected_id("iqa")
 
-    # ── table + consistency check ────────────────────────────────────────
+    # -- table + consistency check ----------------------------------------
     def _consistency_check(db):
         # One-time migration: pull existing ratings out of the core files table
         # into this module's table, then rely on the table thereafter. Runs only
@@ -131,8 +130,8 @@ def register(host):
                     or not os.path.exists(host.safe_path(host.media_dir, r["rel_path"]))]
             for i in range(0, len(gone), 400):
                 chunk = gone[i:i+400]
-                db.execute("DELETE FROM ratings WHERE rel_path IN (%s)"
-                           % ",".join("?" * len(chunk)), chunk)
+                host.update_file(table="ratings", where=("rel_path IN (%s)" % ",".join("?" * len(chunk)), chunk),
+                                 remove=True, dont_write=True, commit=False)
             db.commit()
             if gone:
                 host.logger.info(f"rating: pruned {len(gone)} stale cache rows")
@@ -141,7 +140,7 @@ def register(host):
 
     host.add_table(_DDL, check=_consistency_check)
 
-    # ── enrich core gallery/list rows from the cache ─────────────────────
+    # -- enrich core gallery/list rows from the cache ---------------------
     def _enricher(db, rel_paths):
         out = {}
         try:
@@ -162,8 +161,8 @@ def register(host):
         return out
     host.register_file_enricher(_enricher)
 
-    # ── pipeline 'rate' stage ────────────────────────────────────────────
-    # Scores the image with the selected IQA provider, WRITES the star to the
+    # -- pipeline 'rate' stage --------------------------------------------
+    ## @brief Scores the image with the selected IQA provider, WRITES the star to the
     # ratings table (so it shows up everywhere ratings do), AND returns the
     # result downstream so later pipeline nodes can branch on quality. When the
     # module is disabled the stage isn't registered and the pipeline no-ops it.
@@ -187,36 +186,24 @@ def register(host):
     host.register_pipeline_stage("rate", _pipeline_rate,
                                  label="Rate (image quality)")
 
-    # ── storage helpers ──────────────────────────────────────────────────
+    # -- storage helpers --------------------------------------------------
     def _write_user_rating(db, fp, rel_path, stars):
-        """Write a user rating: XMP first (source of truth), then cache."""
-        if stars is None:
-            try:
-                exif.get("write", lambda *a: None)(fp, {"Rating": 0})
-            except Exception as e:
-                host.logger.error(f"rating XMP clear {rel_path}: {e}")
-            db.execute("UPDATE ratings SET user_stars=NULL WHERE rel_path=?",
-                       (rel_path,))
-        else:
-            try:
-                exif.get("write", lambda *a: None)(fp, {"Rating": int(stars) * 2})  # 0..10 halfstars
-            except Exception as e:
-                host.logger.error(f"rating XMP write {rel_path}: {e}")
-            db.execute(
-                "INSERT INTO ratings(rel_path, user_stars) VALUES(?,?) "
-                "ON CONFLICT(rel_path) DO UPDATE SET user_stars=excluded.user_stars",
-                (rel_path, int(stars)))
-        db.commit()
+        """! @brief Write a user rating: the file's EXIF Rating first (source of truth,
+        0..10 half-stars, 0 = cleared), then the cache row."""
+        res = host.update_file(fp, exif={"Rating": 0 if stars is None else int(stars) * 2})
+        if not res.get("success"):
+            host.logger.error(f"rating write {rel_path}: {res.get('error')}")
+        host.update_file(rel_path, table="ratings",
+                         set={"user_stars": None if stars is None else int(stars)},
+                         dont_write=True)
 
     def _write_iqa(db, rel_path, stars, raw, model):
-        db.execute(
-            "INSERT INTO ratings(rel_path, iqa_stars, iqa_raw, iqa_model) "
-            "VALUES(?,?,?,?) ON CONFLICT(rel_path) DO UPDATE SET "
-            "iqa_stars=excluded.iqa_stars, iqa_raw=excluded.iqa_raw, "
-            "iqa_model=excluded.iqa_model",
-            (rel_path, stars, raw, model))
+        """! @brief IQA estimate: a DB cache only (recomputable), never written to the file."""
+        host.update_file(rel_path, table="ratings",
+                         set={"iqa_stars": stars, "iqa_raw": raw, "iqa_model": model},
+                         dont_write=True, commit=False)
 
-    # Background sweep (Models → Image quality → "Run in background"): images
+    ## @brief Background sweep (Models -> Image quality -> "Run in background"): images
     # with no user rating that the background IQA model hasn't scored yet.
     def _bg_pending(db, n):
         model = host.broker.selected_id("iqa", "bg") or ""
@@ -241,7 +228,7 @@ def register(host):
         db.commit()
     host.add_background_sweep("iqa", _bg_pending, _bg_run)
 
-    # ── endpoints ────────────────────────────────────────────────────────
+    # -- endpoints --------------------------------------------------------
     def api_iqa_models():
         # Model list now comes from the broker's iqa providers, not iqa.py.
         provs = host.broker.providers_for("iqa")
@@ -327,13 +314,13 @@ def register(host):
             scored += 1
             if scored % 25 == 0:
                 db.commit()
-            host.config["status_text"] = f"[IQA] {i+1}/{total} scored…"
+            host.set_status(f"[IQA] {i+1}/{total} scored...")
         db.commit()
-        host.config["status_text"] = f"IQA scan complete — scored {scored} image(s)."
+        host.set_status(f"IQA scan complete - scored {scored} image(s).")
         return jsonify({"success": True, "scored": scored, "total": total})
 
     def quality_sweep():
-        """Score image quality with the picked IQA model and flag junk for
+        """! @brief Score image quality with the picked IQA model and flag junk for
         review (files.flagged_delete / flag_reason), so it shows in the review
         queue. Was a core route; lives here with the rest of IQA.
 
@@ -389,13 +376,14 @@ def register(host):
             if r.get("bad"):
                 bad.append(fn)
                 if write_flags:
-                    db.execute("UPDATE files SET flagged_delete=1, flag_reason=? WHERE rel_path=?",
-                               (r.get("reason") or "low quality", fn))
+                    # The flag lives in the sidecar like every other flag.
+                    host.update_file(fn, set={"flag": {"delete": True,
+                                                       "reason": r.get("reason") or "low quality"}})
             if scored % 25 == 0:
                 db.commit()
-            host.config["status_text"] = f"[quality] {i+1}/{total}"
+            host.set_status(f"[quality] {i+1}/{total}")
         db.commit()
-        host.config["status_text"] = "Quality sweep complete."
+        host.set_status("Quality sweep complete.")
         return jsonify({"success": True, "scored": scored, "total": total,
                         "flagged": sorted(bad)[:500], "wrote_flags": write_flags})
 
@@ -405,12 +393,6 @@ def register(host):
     host.add_route("/api/iqa_scan", iqa_scan, methods=["POST"], feature="ai.iqa", level="write")
 
     def _file_deleted(rel_path):
-        db = host.db()
-        for tbl in ("ratings",):
-            try:
-                db.execute(f"DELETE FROM {tbl} WHERE rel_path=?", (rel_path,))
-            except Exception:
-                pass
-        db.commit()
+        host.update_file(rel_path, table="ratings", remove=True, dont_write=True)
     host.on("file.deleted", _file_deleted)
     host.logger.info("rating module: registered ratings table + iqa endpoints")

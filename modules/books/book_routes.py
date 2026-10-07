@@ -1,5 +1,5 @@
-"""
-book_routes.py — HTTP surface for the books/comics side.
+"""! @file
+@brief book_routes.py - HTTP surface for the books/comics side.
 ========================================================
 
 manager.py is already 8.5k lines. Rather than append a twelfth feature block to
@@ -18,7 +18,7 @@ manager.py stays where it is; this is the pattern to move toward, not a
 retroactive demand that music be moved.
 
 ENDPOINTS
-─────────
+---------
   GET  /api/books/status                  counts + worker progress
   POST /api/books/reindex                 walk MEDIA_DIR, classify, upsert
   POST /api/books/extract                 extract text for books missing it
@@ -48,6 +48,7 @@ from flask import request, jsonify, send_file, Response
 
 
 from . import book_index as bi
+from . import book_meta_write as bmw
 import hashlib
 
 # Filled in by register().
@@ -69,6 +70,16 @@ _comic_cancel = threading.Event()
 def _db():
     return CTX["db"]()
 
+
+def _uf(*a, **kw):
+    """! @brief A books-table row write through the core's update_file.
+    These are the index rows (text, chunks, progress, triage, the cached
+    copy of the metadata) and so are DB-only (dont_write=True). The book's own
+    metadata reaches the file through write_book_meta, the book kind's
+    writer, whenever it is edited."""
+    kw.setdefault("dont_write", True)
+    return CTX["update_file"](*a, **kw)
+
 def _media():
     return CTX["media_dir"]
 
@@ -84,13 +95,13 @@ def _cache_dir():
     return d
 
 def _cp():
-    """Comic page renderer/analyser from the comics module, or None."""
+    """! @brief Comic page renderer/analyser from the comics module, or None."""
     f = CTX.get("comic_pages")
     return f() if f else None
 
 
 def _user():
-    """Current username, or '' when auth is off. Progress is per-user so a
+    """! @brief Current username, or '' when auth is off. Progress is per-user so a
     shared library doesn't have two people fighting over one bookmark."""
     fn = CTX.get("current_user")
     try:
@@ -98,12 +109,12 @@ def _user():
     except Exception:
         return ""
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # Indexing
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def _upsert_book(rel_path, abs_path, verdict, force=False) -> bool:
-    """Index one book if new or changed. Returns True if (re)indexed."""
+    """! @brief Index one book if new or changed. Returns True if (re)indexed."""
     try:
         st = os.stat(abs_path)
     except OSError:
@@ -181,15 +192,24 @@ def _upsert_book(rel_path, abs_path, verdict, force=False) -> bool:
           json.dumps(meta["subjects"]), page_count, cover_name,
           meta["source"], time.time(), time.time()))
 
-    db.execute("DELETE FROM book_authors WHERE rel_path=?", (rel_path,))
-    for a in meta["authors"]:
-        db.execute("INSERT OR IGNORE INTO book_authors(rel_path,author) VALUES(?,?)",
-                   (rel_path, a.strip()))
+    # The row keeps an edit the file doesn't have yet; mirror what it holds.
+    kept = db.execute("SELECT authors FROM books WHERE rel_path=?", (rel_path,)).fetchone()
+    try:
+        authors = json.loads(kept["authors"]) if kept and kept["authors"] else meta["authors"]
+    except (TypeError, ValueError):
+        authors = meta["authors"]
+    _set_authors(rel_path, authors)
     db.commit()
     return True
 
+
+def _set_authors(rel_path, authors):
+    _uf(rel_path, table="book_authors", remove=True, commit=False)
+    for a in dict.fromkeys(a.strip() for a in authors if a and a.strip()):
+        _uf(rel_path, table="book_authors", key={"author": a}, set={"author": a}, commit=False)
+
 def _record_triage(rel_path, abs_path, verdict):
-    """Park an undecidable file in the triage queue with enough context for a
+    """! @brief Park an undecidable file in the triage queue with enough context for a
     human to answer in one glance."""
     db = _db()
     row = db.execute("SELECT decision FROM book_triage WHERE rel_path=?",
@@ -229,7 +249,7 @@ def _index_background(force=False):
                 found.append((rel, ap, v))
             elif v.status == "triage":
                 triage.append((rel, ap, v))
-            # 'sidecar' / 'part' / 'skip' are silent by design — the whole point
+            # 'sidecar' / 'part' / 'skip' are silent by design - the whole point
             # is that a library full of .txt sidecars produces zero noise.
 
         # A file the user already said "yes, it's a book" about is promoted out
@@ -277,7 +297,7 @@ def _index_background(force=False):
         book_state["indexing"] = False
 
 def reconcile():
-    """Drop book rows whose file has vanished, then run an incremental scan.
+    """! @brief Drop book rows whose file has vanished, then run an incremental scan.
 
     Called from manager's startup index pass so books stay in step with disk
     without the user pressing anything. Cheap on a warm library: the walk skips
@@ -297,7 +317,7 @@ def reconcile():
     return len(gone)
 
 def index_one(rel_path: str) -> dict:
-    """Index exactly ONE book. Called by manager.api_upload.
+    """! @brief Index exactly ONE book. Called by manager.api_upload.
 
     The uploader must not trigger a whole-tree walk per file -- a 3000-book bulk
     upload would start 3000 scans. This classifies the single file (with real
@@ -327,7 +347,7 @@ def index_one(rel_path: str) -> dict:
     return v.as_dict()
 
 def rename_book(old_rel: str, new_rel: str) -> bool:
-    """Repoint every book table from old_rel to new_rel. Called by api_move.
+    """! @brief Repoint every book table from old_rel to new_rel. Called by api_move.
 
     rel_path is the primary key across books, book_authors, book_sections,
     book_chunks, book_progress and book_bookmarks. Re-indexing at the new path
@@ -353,34 +373,28 @@ def rename_book(old_rel: str, new_rel: str) -> bool:
         except OSError:
             new_cover = ""
 
-    for t in ("books", "book_authors", "book_sections", "book_chunks",
-              "book_progress", "book_bookmarks"):
-        db.execute(f"UPDATE {t} SET rel_path=? WHERE rel_path=?", (new_rel, old_rel))
-    db.execute("UPDATE books SET cover=?, sort_title=sort_title WHERE rel_path=?",
-               (new_cover, new_rel))
     # Triage decisions follow the file too, so a moved-then-rescanned book isn't
     # re-asked about.
-    db.execute("UPDATE book_triage SET rel_path=? WHERE rel_path=?",
-               (new_rel, old_rel))
+    for t in ("books", "book_authors", "book_sections", "book_chunks",
+              "book_progress", "book_bookmarks", "book_triage"):
+        _uf(table=t, where=("rel_path=?", (old_rel,)), set={"rel_path": new_rel}, commit=False)
+    _uf(new_rel, table="books", set={"cover": new_cover}, commit=False)
     db.commit()
     return True
 
 def remove_book(rel_path: str) -> None:
-    """Drop every book table row for a file (delete / vanished on disk). A book
+    """! @brief Drop every book table row for a file (delete / vanished on disk). A book
     is keyed by rel_path across all of them; leaving any behind is how a
     deleted book keeps showing up with a broken cover or resurrects bookmarks."""
     db = _db()
     for tbl in ("books", "book_authors", "book_sections", "book_chunks", "book_pages",
                 "book_progress", "book_bookmarks", "book_triage"):
-        try:
-            db.execute(f"DELETE FROM {tbl} WHERE rel_path=?", (rel_path,))
-        except Exception:
-            pass
+        _uf(rel_path, table=tbl, remove=True, commit=False)    # a missing table just fails
     db.commit()
 
 
 def sha_exists(sha: str) -> str | None:
-    """rel_path of a book whose content hash matches, or None.
+    """! @brief rel_path of a book whose content hash matches, or None.
 
     Books aren't in the `files` table, so manager's image dedup query can never
     see them. Re-uploading the same epub from a second device is the single most
@@ -404,7 +418,7 @@ def sha_exists(sha: str) -> str | None:
         if not ap or not os.path.exists(ap):
             continue
         h = _sha256_file(ap)
-        db.execute("UPDATE books SET sha256=? WHERE rel_path=?", (h, rr["rel_path"]))
+        _uf(rr["rel_path"], table="books", set={"sha256": h}, commit=False)
         if h == sha:
             db.commit()
             return rr["rel_path"]
@@ -419,7 +433,7 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 def delete_book(rel_path: str, remove_file: bool = True) -> bool:
-    """Delete a book: its rows, its cover cache, and optionally the file."""
+    """! @brief Delete a book: its rows, its cover cache, and optionally the file."""
     ap = _abs(rel_path)
     _purge_book(rel_path)
     if remove_file and ap and os.path.exists(ap):
@@ -440,12 +454,12 @@ def _purge_book(rel_path):
             pass
     for t in ("books", "book_authors", "book_sections", "book_chunks",
               "book_progress", "book_bookmarks"):
-        db.execute(f"DELETE FROM {t} WHERE rel_path=?", (rel_path,))
+        _uf(rel_path, table=t, remove=True, commit=False)
     db.commit()
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # Text extraction
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def _extract_one(rel_path) -> str:
     db = _db()
@@ -457,26 +471,24 @@ def _extract_one(rel_path) -> str:
     if not ap or not os.path.exists(ap):
         return "missing"
     if row["reader"] == "paged":
-        db.execute("UPDATE books SET text_status='unsupported', "
-                   "text_error='paged format — pages render on demand' "
-                   "WHERE rel_path=?", (rel_path,))
-        db.commit()
+        _uf(rel_path, table="books", set={"text_status": "unsupported",
+                                          "text_error": "paged format - pages render on demand"})
         return "unsupported"
 
     res = bi.extract_sections(ap, row["fmt"])
-    db.execute("DELETE FROM book_sections WHERE rel_path=?", (rel_path,))
+    _uf(rel_path, table="book_sections", remove=True, commit=False)
     if res.status == "ok":
         for i, sec in enumerate(res.sections):
-            db.execute("INSERT INTO book_sections(rel_path,idx,title,html,chars) "
-                       "VALUES(?,?,?,?,?)",
-                       (rel_path, i, sec.get("title", ""), sec["html"],
-                        len(sec["html"])))
-        db.execute("UPDATE books SET text_status='ok', text_error='', "
-                   "word_count=?, page_count=COALESCE(page_count,?) WHERE rel_path=?",
-                   (res.word_count, max(1, res.word_count // 300), rel_path))
+            _uf(rel_path, table="book_sections", key={"idx": i}, commit=False,
+                set={"title": sec.get("title", ""), "html": sec["html"], "chars": len(sec["html"])})
+        cur = db.execute("SELECT page_count FROM books WHERE rel_path=?", (rel_path,)).fetchone()
+        row = {"text_status": "ok", "text_error": "", "word_count": res.word_count}
+        if not cur or cur["page_count"] is None:
+            row["page_count"] = max(1, res.word_count // 300)
+        _uf(rel_path, table="books", set=row, commit=False)
     else:
-        db.execute("UPDATE books SET text_status=?, text_error=? WHERE rel_path=?",
-                   (res.status, res.error[:500], rel_path))
+        _uf(rel_path, table="books", set={"text_status": res.status, "text_error": res.error[:500]},
+            commit=False)
     db.commit()
     return res.status
 
@@ -505,9 +517,9 @@ def _extract_background(force=False):
     finally:
         book_state["extracting"] = False
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Comic pages — panel detection + OCR
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# Comic pages - panel detection + OCR
+# ==============================================================================
 
 def _page_row(rel_path, n):
     return _db().execute("SELECT * FROM book_pages WHERE rel_path=? AND page=?",
@@ -530,7 +542,7 @@ def _save_page(rel_path, n, res):
     _db().commit()
 
 def _comic_background(rel_path, do_panels, do_ocr, force, rtl, per_panel):
-    """Analyse every page of one comic.
+    """! @brief Analyse every page of one comic.
 
     Runs page by page and commits each result as it lands. That matters more
     than it looks: these jobs take minutes to hours, and a crash or a restart at
@@ -562,7 +574,7 @@ def _comic_background(rel_path, do_panels, do_ocr, force, rtl, per_panel):
         total = (row["page_count"] or 0) if fmt == "pdf" else len(names or [])
         if not total:
             book_state["last_error"] = (
-                f"No pages readable from this {fmt} — rarfile / py7zr may be missing.")
+                f"No pages readable from this {fmt} - rarfile / py7zr may be missing.")
             return
         book_state["comic_total"] = total
 
@@ -628,15 +640,15 @@ def _comic_background(rel_path, do_panels, do_ocr, force, rtl, per_panel):
         book_state.update(comic=False, comic_book="", comic_stage="")
         CTX.get("db_close", lambda: None)()
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # Embeddings
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def _embed_background(force=False):
     if book_state["embedding"]:
         return
     if not CTX["embed_enabled"]():
-        book_state["last_error"] = ("No text embedding model picked — set one "
+        book_state["last_error"] = ("No text embedding model picked - set one "
                                     "in Settings to enable passage search.")
         return
     book_state["embedding"] = True
@@ -671,20 +683,19 @@ def _embed_one(rel_path, sig):
     if not secs:
         return
     chunks = bi.chunk_sections([{"html": s["html"]} for s in secs])
-    db.execute("DELETE FROM book_chunks WHERE rel_path=?", (rel_path,))
+    _uf(rel_path, table="book_chunks", remove=True, commit=False)
     embed = CTX["embed_text"]
     for i, c in enumerate(chunks):
         vec = embed(c["text"])
-        db.execute("INSERT INTO book_chunks(rel_path,idx,section,offset,text,emb,emb_sig) "
-                   "VALUES(?,?,?,?,?,?,?)",
-                   (rel_path, i, c["section"], c["offset"], c["text"],
-                    bi.pack_emb(vec) if vec is not None else None, sig))
-    db.execute("UPDATE books SET emb_status='ok' WHERE rel_path=?", (rel_path,))
+        _uf(rel_path, table="book_chunks", key={"idx": i}, commit=False,
+            set={"section": c["section"], "offset": c["offset"], "text": c["text"],
+                 "emb": bi.pack_emb(vec) if vec is not None else None, "emb_sig": sig})
+    _uf(rel_path, table="books", set={"emb_status": "ok"}, commit=False)
     db.commit()
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # Row shaping
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def _row_dict(r):
     return {
@@ -705,11 +716,11 @@ def _row_dict(r):
         "source": r["source"],
     }
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # register()
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
-# ── gallery search providers (core search loop calls these per query) ─────────
+# -- gallery search providers (core search loop calls these per query) ---------
 def db():
     return CTX["db"]()
 
@@ -724,15 +735,15 @@ def _norm_date_literal(text, end=False):
 
 
 def structured_book_date(structured: list | None):
-    """Translate structured search tokens for the books/comics tables.
+    """! @brief Translate structured search tokens for the books/comics tables.
 
     Returns (clause, params):
-      ("", [])          no structured tokens, or none that apply — no filter.
+      ("", [])          no structured tokens, or none that apply - no filter.
       (sql, params)     a `published`-column date filter to AND in.
-      (None, [])        an image-only token is present (person:/width:/is:…);
+      (None, [])        an image-only token is present (person:/width:/is:...);
                         the caller should exclude books/comics entirely.
 
-    date:/datetime:/dateoriginal:/… all collapse to the single `published`
+    date:/datetime:/dateoriginal:/... all collapse to the single `published`
     column here (books have no separate actual/original/digitized buckets), so
     any date token narrows by publication date. Multiple date tokens AND together.
     """
@@ -751,14 +762,14 @@ def structured_book_date(structured: list | None):
                 # An unparseable date literal shouldn't silently pass every book.
                 return None, []
         else:
-            # dim/person/is — nothing a book row can satisfy.
+            # dim/person/is - nothing a book row can satisfy.
             return None, []
     if not ors:
         return "", []
     return "(" + " AND ".join(ors) + ")", params
 
 def _published_clause(op: str | None, literal: str):
-    """A WHERE fragment matching the books.published text column against a date
+    """! @brief A WHERE fragment matching the books.published text column against a date
     literal/range, reusing the image date normaliser. STRICT: empty/NULL
     published never matches. Mirrors _date_clause but for one text column."""
     col = "published"
@@ -873,46 +884,98 @@ def query_books(text: str, folder: str, structured: list | None = None) -> list:
 
 
 
-def update_meta(rp: str, d: dict) -> bool:
-    """Apply editable metadata fields from `d` to the book row. False if unknown."""
-    if not _db().execute("SELECT 1 FROM books WHERE rel_path=?", (rp,)).fetchone():
-        return False
-    sets, params = [], []
-    for k in ("title", "series", "publisher", "published", "language",
-              "isbn", "description", "source"):
-        if k in d:
-            sets.append(f"{k}=?")
-            params.append(d[k] or "")
-    if "title" in d:
-        sets.append("sort_title=?")
-        params.append(bi.sort_title(d["title"] or ""))
-    if "series_index" in d:
-        sets.append("series_index=?")
+_META_KEYS = ("title", "series", "publisher", "published", "language", "isbn",
+              "description", "source", "series_index", "rating", "tags", "subjects",
+              "identifiers", "authors")
+
+
+_FILE_KEYS = ("title", "authors", "series", "series_index", "publisher", "published",
+              "language", "isbn", "identifiers", "description", "subjects", "tags",
+              "source", "rating")
+
+
+def _row_fields(r):
+    """! @brief The books row as writer fields (JSON columns decoded)."""
+    def j(v, default):
         try:
-            params.append(float(d["series_index"]))
+            return json.loads(v) if v else default
         except (TypeError, ValueError):
-            params.append(None)
-    if "rating" in d:
-        sets.append("rating=?")
-        params.append(int(d["rating"] or 0))
-    for k in ("tags", "subjects", "identifiers"):
-        if k in d:
-            sets.append(f"{k}=?")
-            params.append(json.dumps(d[k]))
+            return default
+    return {"title": r["title"] or "", "authors": j(r["authors"], []), "series": r["series"] or "",
+            "series_index": r["series_index"], "publisher": r["publisher"] or "",
+            "published": r["published"] or "", "language": r["language"] or "",
+            "isbn": r["isbn"] or "", "identifiers": j(r["identifiers"], {}),
+            "description": r["description"] or "", "subjects": j(r["subjects"], []),
+            "tags": j(r["tags"], []), "source": r["source"] or "", "rating": r["rating"] or 0}
+
+
+def write_book_meta(rp, abs_path, d, dont_write=False):
+    """! @brief The book kind's writer for core update_file(set=...).
+
+    The edited fields go into the book file itself (book_meta_write: OPF,
+    PDF Info + XMP, ComicInfo, FB2, DOCX core props, HTML head; the XMP
+    sidecar for formats with no metadata home), then into the books row. The
+    whole editable set is written, so values that only ever lived in the DB
+    reach the file on the next edit. dont_write=True updates the row only.
+    @return False when the book is unknown, else {"file_written", "target"[, "file_error"]}.
+    """
     db = _db()
+    r = db.execute("SELECT * FROM books WHERE rel_path=?", (rp,)).fetchone()
+    if not r:
+        return False
+    fields = _row_fields(r)
+    for k in _FILE_KEYS:
+        if k in d:
+            fields[k] = d[k]
     if "authors" in d:
-        authors = [a.strip() for a in (d["authors"] or []) if a.strip()]
-        sets.append("authors=?")
-        params.append(json.dumps(authors))
-        db.execute("DELETE FROM book_authors WHERE rel_path=?", (rp,))
-        for a in authors:
-            db.execute("INSERT OR IGNORE INTO book_authors(rel_path,author) "
-                       "VALUES(?,?)", (rp, a))
-    if sets:
-        params.append(rp)
-        db.execute(f"UPDATE books SET {','.join(sets)} WHERE rel_path=?", params)
+        fields["authors"] = [a.strip() for a in (d["authors"] or []) if a and a.strip()]
+    if "series_index" in d:
+        try:
+            fields["series_index"] = float(d["series_index"]) if d["series_index"] not in (None, "") else None
+        except (TypeError, ValueError):
+            fields["series_index"] = None
+    if "rating" in d:
+        fields["rating"] = max(0, min(5, int(d["rating"] or 0)))
+
+    out = {"file_written": False, "target": ""}
+    if not dont_write and abs_path and os.path.exists(abs_path):
+        res = bmw.write(abs_path, r["fmt"], fields, comicinfo=bi.comicinfo_service())
+        if res["error"]:
+            out["file_error"] = res["error"]
+            CTX["logger"].warning(f"books: {rp}: {res['error']} - using the XMP sidecar")
+        if res["written"]:
+            out.update(file_written=True, target="file")
+        else:
+            # No embedded home (or it failed): the app's XMP sidecar.
+            side = os.path.splitext(abs_path)[0] + ".xmp"
+            if not os.path.exists(side):
+                CTX["update_file"](rp, force=True)
+            sres = CTX["update_file"](rp, xmp=bmw.sidecar_patch(fields))
+            out.update(file_written=bool(sres.get("success")), target="sidecar")
+
+    row = {k: (fields[k] or "") for k in ("title", "series", "publisher", "published", "language",
+                                         "isbn", "description", "source")}
+    row.update(sort_title=bi.sort_title(fields["title"] or ""), series_index=fields["series_index"],
+               rating=int(fields["rating"] or 0), authors=json.dumps(fields["authors"]),
+               tags=json.dumps(fields["tags"]), subjects=json.dumps(fields["subjects"]),
+               identifiers=json.dumps(fields["identifiers"]))
+    if out["target"] == "file":
+        # The file changed under us: record its new stamp so the next scan
+        # doesn't re-index (and re-extract text for) a book we just wrote.
+        try:
+            st = os.stat(abs_path)
+            row.update(mtime=st.st_mtime, size=st.st_size)
+        except OSError:
+            pass
+    _uf(rp, table="books", set=row, commit=False)
+    _set_authors(rp, fields["authors"])
     db.commit()
-    return True
+    return out
+
+
+def update_meta(rp: str, d: dict) -> bool:
+    """! @brief Service entry (books.update_meta): the same core write path."""
+    return CTX["update_file"](rp, set={k: v for k, v in d.items() if k in _META_KEYS}).get("success", False)
 
 
 def register(host, ctx: dict):
@@ -926,7 +989,7 @@ def register(host, ctx: dict):
     except Exception as e:
         ctx["logger"].error(f"book ensure_tables: {e}")
 
-    # ── status / workers ─────────────────────────────────────────────────────
+    # -- status / workers -----------------------------------------------------
     @host.route("/api/books/status", feature="tab.books")
     def books_status():
         db = _db()
@@ -978,7 +1041,7 @@ def register(host, ctx: dict):
         threading.Thread(target=_embed_background, args=(force,), daemon=True).start()
         return jsonify({"success": True})
 
-    # ── browsing ─────────────────────────────────────────────────────────────
+    # -- browsing -------------------------------------------------------------
     @host.route("/api/books/list", feature="tab.books")
     def books_list():
         a = request.args
@@ -1056,7 +1119,7 @@ def register(host, ctx: dict):
 
     @host.route("/api/books/embedded", feature="tab.books")
     def books_embedded():
-        """Raw metadata carried by the file itself, grouped, for the format tab.
+        """! @brief Raw metadata carried by the file itself, grouped, for the format tab.
         [] for plain text/HTML (DB only)."""
         rp = request.args.get("rel_path", "")
         r = _db().execute("SELECT fmt FROM books WHERE rel_path=?", (rp,)).fetchone()
@@ -1076,11 +1139,12 @@ def register(host, ctx: dict):
     @host.route("/api/books/meta", methods=["POST"], feature="tab.books", level="write")
     def books_meta():
         d = request.json or {}
-        if not update_meta(d.get("rel_path", ""), d):
+        fields = {k: v for k, v in d.items() if k in _META_KEYS}
+        if not CTX["update_file"](d.get("rel_path", ""), set=fields).get("success"):
             return jsonify({"success": False, "error": "not found"}), 404
         return jsonify({"success": True})
 
-    # ── assets ───────────────────────────────────────────────────────────────
+    # -- assets ---------------------------------------------------------------
     @host.route("/api/books/cover/<path:rel_path>", feature="tab.books")
     def books_cover(rel_path):
         r = _db().execute("SELECT cover FROM books WHERE rel_path=?",
@@ -1126,7 +1190,7 @@ def register(host, ctx: dict):
 
     @host.route("/api/books/page/<path:rel_path>", feature="tab.books")
     def books_page(rel_path):
-        """One page of a paged book (PDF / cb*) as an image."""
+        """! @brief One page of a paged book (PDF / cb*) as an image."""
         n = int(request.args.get("n", 0))
         row = _db().execute("SELECT fmt, reader FROM books WHERE rel_path=?",
                             (rel_path,)).fetchone()
@@ -1147,7 +1211,7 @@ def register(host, ctx: dict):
         names = bi.comic_page_names(ap, fmt)
         if not names:
             return jsonify({"success": False,
-                            "error": f"cannot read {fmt} archive — "
+                            "error": f"cannot read {fmt} archive - "
                                      f"install rarfile/py7zr (or unrar/7z)"}), 501
         if n < 0 or n >= len(names):
             return jsonify({"success": False, "error": "page out of range"}), 404
@@ -1159,14 +1223,14 @@ def register(host, ctx: dict):
                 ".jxl": "image/jxl", ".avif": "image/avif"}.get(ext, "image/jpeg")
         return Response(data, mimetype=mime)
 
-    # ── comic pages: panels + OCR ────────────────────────────────────────────
+    # -- comic pages: panels + OCR --------------------------------------------
     @host.route("/api/books/comic/analyze", methods=["POST"], feature="tab.books", level="write")
     def books_comic_analyze():
-        """Kick off panel detection and/or OCR over a comic's pages.
+        """! @brief Kick off panel detection and/or OCR over a comic's pages.
 
         `mode` is 'panels', 'ocr' or 'both'. OCR without panels is legal and
-        reuses whatever panels are already stored, so the usual flow — detect
-        panels, eyeball a page, then OCR — doesn't redetect.
+        reuses whatever panels are already stored, so the usual flow - detect
+        panels, eyeball a page, then OCR - doesn't redetect.
         """
         d = request.json or {}
         rp = d.get("rel_path", "")
@@ -1201,7 +1265,7 @@ def register(host, ctx: dict):
 
     @host.route("/api/books/comic/page", feature="tab.books")
     def books_comic_page():
-        """Stored analysis for one page — what the reader overlay draws."""
+        """! @brief Stored analysis for one page - what the reader overlay draws."""
         rp = request.args.get("rel_path", "")
         n = int(request.args.get("n", 0))
         r = _page_row(rp, n)
@@ -1218,7 +1282,7 @@ def register(host, ctx: dict):
 
     @host.route("/api/books/comic/summary", feature="tab.books")
     def books_comic_summary():
-        """How much of this comic has been analysed, for the controls pane."""
+        """! @brief How much of this comic has been analysed, for the controls pane."""
         rp = request.args.get("rel_path", "")
         c = _db().execute(
             "SELECT COUNT(*) pages, "
@@ -1241,14 +1305,14 @@ def register(host, ctx: dict):
 
     @host.route("/api/books/comic/text", feature="tab.books")
     def books_comic_text():
-        """The whole transcript, in reading order. Also the thing worth feeding
+        """! @brief The whole transcript, in reading order. Also the thing worth feeding
         to an LLM or a search index."""
         rp = request.args.get("rel_path", "")
         rows = _db().execute(
             "SELECT page, text FROM book_pages WHERE rel_path=? AND text!='' "
             "ORDER BY page", (rp,)).fetchall()
         if request.args.get("format") == "txt":
-            body = "\n\n".join(f"── page {r['page'] + 1} ──\n{r['text']}"
+            body = "\n\n".join(f"-- page {r['page'] + 1} --\n{r['text']}"
                                for r in rows)
             return Response(body, mimetype="text/plain; charset=utf-8")
         return jsonify({"success": True,
@@ -1257,7 +1321,7 @@ def register(host, ctx: dict):
 
     @host.route("/api/books/comic/panels", methods=["POST"], feature="tab.books", level="write")
     def books_comic_set_panels():
-        """Replace one page's panels by hand.
+        """! @brief Replace one page's panels by hand.
 
         Detection is good, not perfect, and a wrong panel box quietly misfiles
         every OCR line inside it. Letting someone correct a page is cheaper than
@@ -1274,7 +1338,7 @@ def register(host, ctx: dict):
             for p in (d.get("panels") or [])], rtl)
         prev = _page_row(rp, n)
         lines = json.loads(prev["lines"] or "[]") if prev else []
-        # Rebind existing OCR lines to the corrected panels — that's the whole
+        # Rebind existing OCR lines to the corrected panels - that's the whole
         # point of fixing a box, so it shouldn't need a re-run of OCR.
         for ln in lines:
             ln["panel"] = (cp.get("assign_panel") or (lambda l, p: None))(ln, panels)
@@ -1293,7 +1357,7 @@ def register(host, ctx: dict):
             return jsonify({"success": False, "error": "not found"}), 404
         return send_file(os.path.abspath(ap), as_attachment=True, conditional=True)
 
-    # ── reading position ─────────────────────────────────────────────────────
+    # -- reading position -----------------------------------------------------
     @host.route("/api/books/progress", methods=["GET", "POST"], feature="tab.books")
     def books_progress():
         if request.method == "GET":
@@ -1340,10 +1404,10 @@ def register(host, ctx: dict):
         db.commit()
         return jsonify({"success": True, "id": cur.lastrowid})
 
-    # ── search ───────────────────────────────────────────────────────────────
+    # -- search ---------------------------------------------------------------
     @host.route("/api/books/search", methods=["POST"], feature="tab.books")
     def books_search():
-        """Passage-level semantic search. Returns matching PASSAGES grouped by
+        """! @brief Passage-level semantic search. Returns matching PASSAGES grouped by
         book, so you land on the page rather than on the cover."""
         d = request.json or {}
         q = (d.get("q") or "").strip()
@@ -1367,7 +1431,7 @@ def register(host, ctx: dict):
                                          f"'{other['emb_sig']}', not the current "
                                          f"model. Re-embed to search."})
             return jsonify({"success": False,
-                            "error": "No passage embeddings yet — run Embed."})
+                            "error": "No passage embeddings yet - run Embed."})
         qv = (ctx.get("embed_query") or ctx["embed_text"])(q)
         if qv is None:
             return jsonify({"success": False, "error": "failed to embed the query"})
@@ -1400,8 +1464,8 @@ def register(host, ctx: dict):
     @host.route("/api/books/delete", methods=["POST"], feature="tab.books", level="write",
                 action="book_delete", fields=("rel_path", "keep_file"))
     def books_delete():
-        """Delete a book. `keep_file` removes it from the library but leaves the
-        bytes on disk — useful when the shelf is wrong but the file isn't."""
+        """! @brief Delete a book. `keep_file` removes it from the library but leaves the
+        bytes on disk - useful when the shelf is wrong but the file isn't."""
         d = request.json or {}
         rp = d.get("rel_path", "")
         if not _db().execute("SELECT 1 FROM books WHERE rel_path=?", (rp,)).fetchone():
@@ -1409,13 +1473,13 @@ def register(host, ctx: dict):
         ok = delete_book(rp, remove_file=not d.get("keep_file"))
         return jsonify({"success": ok})
 
-    # ── LLM ──────────────────────────────────────────────────────────────────
+    # -- LLM ------------------------------------------------------------------
     @host.route("/api/books/summarize", methods=["POST"], feature="tab.books", level="write")
     def books_summarize():
-        """Blurb a book with the configured LLM.
+        """! @brief Blurb a book with the configured LLM.
 
         /api/run_llm can't serve this: it decodes the file as an image first,
-        which is exactly the wrong move for an epub. We send TEXT instead — the
+        which is exactly the wrong move for an epub. We send TEXT instead - the
         opening and a few sampled passages rather than the whole book, because a
         400k-word novel is not going in a context window and the first chapter
         plus a spread of samples is enough to write a jacket blurb.
@@ -1435,19 +1499,19 @@ def register(host, ctx: dict):
             (rp,)).fetchall()
         if not secs:
             return jsonify({"success": False,
-                            "error": "No extracted text — run Extract first."})
+                            "error": "No extracted text - run Extract first."})
         texts = [bi._strip_tags(s["html"]) for s in secs]
         sample = texts[0][:6000]
         step = max(1, len(texts) // 4)
         for t in texts[step::step][:3]:
-            sample += "\n\n[…]\n\n" + t[:2000]
+            sample += "\n\n[...]\n\n" + t[:2000]
 
         prompt = (
             f"Below are excerpts from a book titled {row['title']!r} by "
             f"{', '.join(json.loads(row['authors'] or '[]')) or 'an unknown author'}.\n"
             "Write a 3-5 sentence jacket blurb: what it is about, its tone, and "
             "who would enjoy it. No spoilers past the opening act. Reply with the "
-            "blurb only — no preamble, no headings.\n\n"
+            "blurb only - no preamble, no headings.\n\n"
             f"{sample[:14000]}"
         )
         try:
@@ -1457,11 +1521,10 @@ def register(host, ctx: dict):
             return jsonify({"success": False, "error": str(e)})
         if not text:
             return jsonify({"success": False, "error": "empty response"})
-        db.execute("UPDATE books SET description=? WHERE rel_path=?", (text, rp))
-        db.commit()
+        CTX["update_file"](rp, set={"description": text})
         return jsonify({"success": True, "description": text})
 
-    # ── triage ───────────────────────────────────────────────────────────────
+    # -- triage ---------------------------------------------------------------
     @host.route("/api/books/triage", feature="tab.books")
     def books_triage():
         rows = _db().execute(
@@ -1477,9 +1540,8 @@ def register(host, ctx: dict):
         if decision not in ("book", "not_book"):
             return jsonify({"success": False, "error": "bad decision"}), 400
         db = _db()
-        db.execute("UPDATE book_triage SET decision=?, decided=? WHERE rel_path=?",
-                   (decision, time.time(), rp))
-        db.commit()
+        _uf(table="book_triage", where=("rel_path=?", (rp,)),
+            set={"decision": decision, "decided": time.time()})
         if decision == "book":
             ap = _abs(rp)
             if ap and os.path.exists(ap):
@@ -1492,7 +1554,7 @@ def register(host, ctx: dict):
 
     @host.route("/api/books/triage/decide_all", methods=["POST"], feature="tab.books", level="write")
     def books_triage_decide_all():
-        """Bulk-answer every pending item sharing an extension + reason. With
+        """! @brief Bulk-answer every pending item sharing an extension + reason. With
         thousands of ao3 dumps the queue is repetitive by nature; one click
         should clear a whole class."""
         d = request.json or {}
@@ -1505,8 +1567,8 @@ def register(host, ctx: dict):
             "SELECT rel_path, sniffed FROM book_triage WHERE decision IS NULL "
             "AND ext=? AND reason=?", (ext, reason)).fetchall()
         for r in rows:
-            _db().execute("UPDATE book_triage SET decision=?, decided=? "
-                          "WHERE rel_path=?", (decision, time.time(), r["rel_path"]))
+            _uf(table="book_triage", where=("rel_path=?", (r["rel_path"],)),
+                set={"decision": decision, "decided": time.time()}, commit=False)
             if decision == "book":
                 ap = _abs(r["rel_path"])
                 if ap and os.path.exists(ap):
@@ -1522,5 +1584,5 @@ def register(host, ctx: dict):
     return host
 
 def start_background(force=False):
-    """Called from manager.py's __main__ block, mirroring the music indexer."""
+    """! @brief Called from manager.py's __main__ block, mirroring the music indexer."""
     threading.Thread(target=_index_background, args=(force,), daemon=True).start()

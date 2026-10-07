@@ -1,32 +1,11 @@
-"""
-Optional-dependency import helper.
-======================================================================
-Most of requirements.txt is heavy, optional ML tooling. On a minimal
-box (e.g. a Pi running only the gallery) those packages aren't
-installed, and a bare top-level `import cv2` / `import torch` /
-`from ultralytics import YOLO` would abort the whole process at import
-time — before the app can serve even the pages that need none of it.
-
-This module centralises the "import if you can, otherwise degrade"
-pattern so every call site looks the same and logs once, consistently.
-
-Pairs with capabilities.py: that module decides what to SHOW based on
-what's installed; this one makes sure a missing dep doesn't crash the
-IMPORT. A feature whose dep is absent is hidden by capabilities AND its
-code path guards on the _HAVE_* flag / None module returned here.
-
-Usage
------
-    from optional_deps import optional_import
+"""! @file
+@brief Import a dependency if it is installed, degrade if it is not.
 
     cv2, HAVE_CV2 = optional_import("cv2")
-    if HAVE_CV2:
-        cv2.imread(...)
-
     YOLO, HAVE_YOLO = optional_import("ultralytics", attr="YOLO")
 
-    # submodule + attribute:
-    cfg, _ = optional_import("gallery_dl.config")
+A missing package logs one warning and returns (None, False), so a minimal
+install still serves the pages that don't need it.
 """
 
 import importlib
@@ -35,36 +14,29 @@ import sys
 
 _log = logging.getLogger("optional_deps")
 
-# Remember what we've already reported so a missing dep imported from ten
-# modules only logs one warning, not ten.
+# Names already warned about (one warning per missing package).
 _reported = set()
 
-# Populated as a side effect of every optional_import call, so other modules
-# (capabilities.py, an admin/debug endpoint) can see what actually loaded.
-LOADED = {}     # module_name -> True/False
-ERRORS = {}     # module_name -> "ExcType: message" of the failed import
-BY_CALLER = {}  # importing module's __name__ -> [names it failed to import]
+# What loaded, for capabilities.py and the debug endpoints.
+LOADED = {}
+ERRORS = {}  # name -> "ExcType: message"
+BY_CALLER = {}  # caller __name__ -> names it failed to import
 
 
 def optional_import(name, attr=None, quiet=False):
-    """Import `name` (optionally its `.attr`); return (obj_or_None, ok_bool).
-
-    name  -- dotted module path, e.g. "cv2", "gallery_dl.config",
-             "ultralytics".
-    attr  -- if given, return getattr(module, attr) instead of the module
-             (e.g. optional_import("ultralytics", attr="YOLO")).
-    quiet -- suppress the one-time warning (for probes that expect misses).
-
-    On any failure returns (None, False) and logs a single warning the
-    first time that module is seen missing. Never raises.
+    """! @brief Import a module (or one attribute of it) if available.
+    @param name   dotted module path.
+    @param attr   return this attribute of the module instead of the module.
+    @param quiet  no warning (probes that expect a miss).
+    @return (module or attribute, True), or (None, False). Never raises.
     """
     try:
         mod = importlib.import_module(name)
         obj = getattr(mod, attr) if attr else mod
         LOADED[name] = True
         return obj, True
-    except Exception as e:                     # ImportError, and anything a
-        LOADED[name] = False                   # broken native wheel throws.
+    except Exception as e:  # broken native wheels raise more than ImportError
+        LOADED[name] = False
         ERRORS[name] = f"{e.__class__.__name__}: {e}"
         try:
             caller = sys._getframe(1).f_globals.get("__name__", "")
@@ -73,8 +45,7 @@ def optional_import(name, attr=None, quiet=False):
             pass
         if not quiet and name not in _reported:
             _reported.add(name)
-            # A ModuleNotFoundError deep inside a package (e.g. an unbuilt
-            # cython extension) names the real culprit in e.name; show it.
+            # A miss deep inside a package names the real missing module in e.name.
             culprit = e.name if isinstance(e, ModuleNotFoundError) else None
             detail = (f"missing module {culprit!r}" if culprit and culprit != name
                       else e.__class__.__name__)
@@ -84,5 +55,5 @@ def optional_import(name, attr=None, quiet=False):
 
 
 def have(name):
-    """True if `name` was successfully imported via optional_import earlier."""
+    """! @brief True when `name` was imported successfully by optional_import."""
     return bool(LOADED.get(name))

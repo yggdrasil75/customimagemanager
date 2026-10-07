@@ -1,4 +1,4 @@
-# CIM Family — Android app
+# CIM Family - Android app
 
 End-to-end encrypted photo backup + gallery for your own customimagemanager.
 Same wire format as `modules/family_share/crypto.py`: X25519 + HKDF + AES-256-GCM,
@@ -6,14 +6,14 @@ so the server, your family's instances and this app all speak one protocol.
 
 What it does
 - **Backup folders** (Backup tab): every MediaStore bucket (Camera, Screenshots,
-  WhatsApp Images, …) gets a policy — *Off*, *Keep* (upload, leave the copy on
+  WhatsApp Images, ...) gets a policy - *Off*, *Keep* (upload, leave the copy on
   the phone) or *Upload & purge* (upload; later free it from the phone).
 - Uploads run in the background (WorkManager): on a new-photo trigger, every 15
   minutes, and on "Back up now". Wi-Fi-only / charging-only / videos are toggles.
   Hashes are checked against the server in one batch so a first sync of a big
   library doesn't need one round trip per photo.
 - **Free up space** (Settings): removes photos that are already on the server
-  from *Upload & purge* folders. Android requires you to confirm the batch — the
+  from *Upload & purge* folders. Android requires you to confirm the batch - the
   app cannot silently delete media it didn't create.
 - **Library** tab: the server's whole library as a day-grouped grid, thumbnails
   and full images fetched sealed to this phone's key; videos open in the system
@@ -22,9 +22,9 @@ What it does
   device backups.
 
 Pairing
-1. Server → Settings → 👪 Family share → add a peer, kind **my phone**, name e.g.
+1. Server -> Settings -> Family share -> add a peer, kind **my phone**, name e.g.
    `pixel`, choose the library folder its uploads land in.
-2. Click **Pairing code for them**, get the `fs1.…` string to the phone (any
+2. Click **Pairing code for them**, get the `fs1....` string to the phone (any
    channel; it contains the secret the phone uses to reach the server, so not a
    public forum), paste it in the app, tap **Pair**.
 3. The app shows *its* pairing code (QR + text). Paste it into the peer's row on
@@ -48,6 +48,6 @@ re-pair and re-scan). For the docker build, copy an existing keystore into
 Not done yet / known limits
 - No in-app video player (system player via FileProvider).
 - Thumbnails and viewed media are cached decrypted in the app's private cache
-  (Settings → Clear cached thumbnails / media).
+  (Settings -> Clear cached thumbnails / media).
 - The app has not been compiled in the environment that wrote it; the first
   `./android/build.sh` run is the compile.

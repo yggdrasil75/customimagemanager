@@ -53,7 +53,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-// ── thumbnails: decrypted once, cached in app-private storage ────────────────
+// -- thumbnails: decrypted once, cached in app-private storage ----------------
 object ThumbCache {
     private val mem = object : LruCache<String, Bitmap>(64 * 1024 * 1024) {
         override fun sizeOf(key: String, value: Bitmap) = value.byteCount
@@ -114,7 +114,7 @@ fun App(prefs: Prefs) {
     }
 }
 
-// ── setup: paste the server's pairing code, hand over ours ──────────────────
+// -- setup: paste the server's pairing code, hand over ours ------------------
 @Composable
 fun SetupScreen(prefs: Prefs, onPaired: () -> Unit) {
     var code by remember { mutableStateOf("") }
@@ -126,7 +126,7 @@ fun SetupScreen(prefs: Prefs, onPaired: () -> Unit) {
         Text("End-to-end encrypted backup of this phone's photos to your own image manager, and a gallery of everything on it.", color = Color.Gray)
         OutlinedTextField(name, { name = it.lowercase().replace(Regex("[^a-z0-9._-]"), "-") }, label = { Text("This phone's name (the server's pairing code overrides it)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Text("1. On the server: Settings → Family share → add a peer of kind \"my phone\", then click \"Pairing code for them\" and paste it here. The code carries the name the server gave this phone.", color = Color.LightGray)
-        OutlinedTextField(code, { code = it }, label = { Text("Server pairing code (fs1.…)") }, modifier = Modifier.fillMaxWidth(), minLines = 3)
+        OutlinedTextField(code, { code = it }, label = { Text("Server pairing code (fs1....)") }, modifier = Modifier.fillMaxWidth(), minLines = 3)
         if (err.isNotEmpty()) Text(err, color = MaterialTheme.colorScheme.error)
         Button({
             try { prefs.deviceName = name; prefs.applyPairing(code); name = prefs.deviceName; mine = prefs.myPairingCode(); err = "" }
@@ -136,7 +136,7 @@ fun SetupScreen(prefs: Prefs, onPaired: () -> Unit) {
             BackHandler { mine = null }
             Divider()
             Text("2. Paste THIS phone's pairing code into that peer's row on the server (the pairing box), then tap Done.", color = Color.LightGray)
-            Text("Fingerprint ${Crypto.fingerprint(prefs.publicKey)} — the server shows the same after pasting.", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+            Text("Fingerprint ${Crypto.fingerprint(prefs.publicKey)} - the server shows the same after pasting.", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
             QrImage(m)
             SelectionContainer { Text(m, fontFamily = FontFamily.Monospace, fontSize = 10.sp) }
             val ctx = LocalContext.current
@@ -159,7 +159,7 @@ fun QrImage(text: String) {
     Image(bmp.asImageBitmap(), "pairing QR", Modifier.fillMaxWidth().height(220.dp), alignment = Alignment.Center)
 }
 
-// ── timeline: the server's library, newest first, grouped by day ────────────
+// -- timeline: the server's library, newest first, grouped by day ------------
 @Composable
 fun TimelineScreen(api: Api, onOpen: (Api.Item) -> Unit) {
     var items by remember { mutableStateOf<List<Api.Item>>(emptyList()) }
@@ -209,7 +209,7 @@ fun Tile(api: Api, item: Api.Item, onClick: () -> Unit) {
     }
 }
 
-// ── viewer: images inline, videos handed to the system player ───────────────
+// -- viewer: images inline, videos handed to the system player ---------------
 @Composable
 fun ViewerScreen(api: Api, item: Api.Item, onBack: () -> Unit) {
     val ctx = LocalContext.current
@@ -241,7 +241,7 @@ fun ViewerScreen(api: Api, item: Api.Item, onBack: () -> Unit) {
     }
 }
 
-// ── backup folders: per bucket, off / keep / upload & purge ─────────────────
+// -- backup folders: per bucket, off / keep / upload & purge -----------------
 @Composable
 fun FoldersScreen(prefs: Prefs, db: Db) {
     val ctx = LocalContext.current
@@ -270,7 +270,7 @@ fun FoldersScreen(prefs: Prefs, db: Db) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(b.name, fontWeight = FontWeight.SemiBold)
-                        Text("${b.count} items · ${b.uploaded} backed up", color = Color.Gray, fontSize = 12.sp)
+                        Text("${b.count} items | ${b.uploaded} backed up", color = Color.Gray, fontSize = 12.sp)
                     }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 4.dp)) {
@@ -295,7 +295,7 @@ fun hasMediaPermission(ctx: android.content.Context): Boolean = mediaPermissions
     androidx.core.content.ContextCompat.checkSelfPermission(ctx, it) == android.content.pm.PackageManager.PERMISSION_GRANTED
 }
 
-// ── settings / status ───────────────────────────────────────────────────────
+// -- settings / status -------------------------------------------------------
 @Composable
 fun SettingsScreen(prefs: Prefs, db: Db, onUnpair: () -> Unit) {
     val ctx = LocalContext.current
@@ -315,14 +315,14 @@ fun SettingsScreen(prefs: Prefs, db: Db, onUnpair: () -> Unit) {
     }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Server", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-        Text("${prefs.serverName} · ${prefs.serverUrl}\nThis phone is peer \"${prefs.deviceName}\" there", color = Color.LightGray)
+        Text("${prefs.serverName} | ${prefs.serverUrl}\nThis phone is peer \"${prefs.deviceName}\" there", color = Color.LightGray)
         Text("Server key ${Crypto.fingerprint(prefs.serverPub ?: ByteArray(32))}\nThis phone ${Crypto.fingerprint(prefs.publicKey)}", fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Color.Gray)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton({ scope.launch { pingMsg = withContext(Dispatchers.IO) { runCatching {
                 val j = Api(prefs).ping()
                 val pub = j.optString("pub_key")
                 if (pub.isNotEmpty() && !Crypto.b64d(pub).contentEquals(prefs.serverPub ?: ByteArray(0))) "KEY MISMATCH: server at that URL has ${j.optString("fingerprint")}. Re-pair before trusting it."
-                else "Reached ${j.optString("name")} · key matches"
+                else "Reached ${j.optString("name")} | key matches"
             }.getOrElse { "Failed: ${it.message}" } } } }) { Text("Test connection") }
             OutlinedButton(onUnpair, colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Unpair") }
         }
@@ -334,7 +334,7 @@ fun SettingsScreen(prefs: Prefs, db: Db, onUnpair: () -> Unit) {
         if (reverify > 0) Text("$reverify earlier upload(s) queued to be re-checked against the original " +
             "(older versions of this app could upload an altered copy; mismatches are re-sent and replace the server's copy).",
             color = Color(0xFFE0B060), fontSize = 12.sp)
-        Text("${counts.first} uploaded · ${counts.second} failing · last run ${if (prefs.lastRun > 0) SimpleDateFormat("d MMM HH:mm", Locale.getDefault()).format(Date(prefs.lastRun)) else "never"}", color = Color.LightGray, fontSize = 13.sp)
+        Text("${counts.first} uploaded | ${counts.second} failing | last run ${if (prefs.lastRun > 0) SimpleDateFormat("d MMM HH:mm", Locale.getDefault()).format(Date(prefs.lastRun)) else "never"}", color = Color.LightGray, fontSize = 13.sp)
         if (prefs.lastError.isNotEmpty()) Text(prefs.lastError, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
         ToggleRow("Only on Wi-Fi", wifi) { wifi = it; prefs.wifiOnly = it; UploadWorker.schedule(ctx, prefs) }
         ToggleRow("Only while charging", charging) { charging = it; prefs.chargingOnly = it; UploadWorker.schedule(ctx, prefs) }
@@ -352,7 +352,7 @@ fun SettingsScreen(prefs: Prefs, db: Db, onUnpair: () -> Unit) {
         val fails = remember(tick) { db.failures() }
         if (fails.isNotEmpty()) {
             Text("Failing items", fontWeight = FontWeight.SemiBold)
-            fails.forEach { (id, n, e) -> Text("#$id · $n attempts · $e", fontSize = 11.sp, color = Color.Gray) }
+            fails.forEach { (id, n, e) -> Text("#$id | $n attempts | $e", fontSize = 11.sp, color = Color.Gray) }
         }
 
         Divider()

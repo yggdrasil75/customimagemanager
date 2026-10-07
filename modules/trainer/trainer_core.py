@@ -1,5 +1,5 @@
-"""
-Trainer — persistent training sets, selection strategies, validation,
+"""! @file
+@brief Trainer - persistent training sets, selection strategies, validation,
 augmentation, and the local / remote YOLO (and Mayaku) training runs.
 Moved out of manager.py verbatim; core names are bound in register().
 """
@@ -26,12 +26,12 @@ import common
 
 HOST = None
 _db = state = MEDIA_DIR = MODELS_DIR = get_safe_path = read_jxl = read_metadata = None
-write_metadata = access_logger = training_logger = populate_model_selector = None
-_clamp_box = _detect_obb_or_box = _meta_cache_drop = None
+update_file = access_logger = training_logger = populate_model_selector = None
+_clamp_box = _detect_obb_or_box = None
 
 
 def _mayaku_training():
-    """Mayaku's COCO training backend (its module's 'mayaku_training' service)."""
+    """! @brief Mayaku's COCO training backend (its module's 'mayaku_training' service)."""
     svc = HOST.get_service("mayaku_training")
     if not svc:
         raise RuntimeError("mayaku module not available")
@@ -43,10 +43,10 @@ def _bind(host):
     globals().update({
         "HOST": host, "_db": host.db, "state": host.config, "MEDIA_DIR": host.media_dir,
         "MODELS_DIR": c.models_dir, "get_safe_path": host.safe_path, "read_jxl": c.read_image,
-        "read_metadata": c.read_metadata, "write_metadata": c.write_metadata,
+        "read_metadata": c.read_metadata, "update_file": c.update_file,
         "access_logger": host.logger, "training_logger": c.training_logger,
         "populate_model_selector": c.refresh_model_groups, "_clamp_box": common.clamp_box,
-        "_detect_obb_or_box": c.detect_boxes, "_meta_cache_drop": c.meta_cache_drop,
+        "_detect_obb_or_box": c.detect_boxes,
     })
 
 
@@ -68,9 +68,9 @@ def yolo_train_worker(abs_folder: str, dataset_dir: str, yaml_path: str,
             lf.write(f"[{datetime.now()}] YOLO Training Started\n"); lf.flush()
             subprocess.run(cmd,check=True,cwd=run_dir,stdout=lf,stderr=subprocess.STDOUT)
         populate_model_selector()
-        state["status_text"] = "Training Complete!"
+        HOST.set_status("Training Complete!")
     except Exception as e:
-        state["status_text"] = f"Training error: {e}"
+        HOST.set_status(f"Training error: {e}")
         training_logger.error(e)
 
 def yolo_train_worker_cfg(dataset_dir: str, yaml_path: str, base_model: str,
@@ -124,9 +124,9 @@ def yolo_train_worker_cfg(dataset_dir: str, yaml_path: str, base_model: str,
             lf.flush()
             subprocess.run(cmd, check=True, cwd=run_dir, stdout=lf, stderr=subprocess.STDOUT)
         populate_model_selector()
-        state["status_text"] = "Training Complete!"
+        HOST.set_status("Training Complete!")
     except Exception as e:
-        state["status_text"] = f"Training error: {e}"
+        HOST.set_status(f"Training error: {e}")
         training_logger.error(e)
 
 def remote_yolo_train_worker(abs_folder: str, dataset_dir: str, config: dict,
@@ -135,7 +135,7 @@ def remote_yolo_train_worker(abs_folder: str, dataset_dir: str, config: dict,
     zip_p = os.path.join(abs_folder,"yolo_dataset.zip")
     hdr = {"X-Worker-Token": ""}
     try:
-        state["status_text"] = f"Zipping → {remote_ip}…"
+        HOST.set_status(f"Zipping → {remote_ip}...")
         shutil.make_archive(zip_p.replace('.zip',''),'zip',dataset_dir)
         with open(zip_p,'rb') as f:
             res = requests.post(f"http://{remote_ip}/api/start_train",
@@ -143,7 +143,7 @@ def remote_yolo_train_worker(abs_folder: str, dataset_dir: str, config: dict,
                                 headers=hdr,timeout=30)
         if res.status_code!=200: raise Exception(res.text)
         job_id = res.json()['job_id']
-        state["status_text"] = f"Remote job {job_id}"
+        HOST.set_status(f"Remote job {job_id}")
         while True:
             time.sleep(3)
             s = requests.get(f"http://{remote_ip}/api/status/{job_id}",headers=hdr,timeout=10).json()
@@ -157,16 +157,16 @@ def remote_yolo_train_worker(abs_folder: str, dataset_dir: str, config: dict,
             os.makedirs(td,exist_ok=True)
             with open(os.path.join(td,"best.pt"),'wb') as wf: wf.write(dl.content)
             populate_model_selector()
-            state["status_text"] = "Remote training done!"
+            HOST.set_status("Remote training done!")
         else:
             raise Exception("Remote job failed")
     except Exception as e:
-        state["status_text"] = f"Remote error: {e}"
+        HOST.set_status(f"Remote error: {e}")
     finally:
         if os.path.exists(zip_p): os.remove(zip_p)
 
 
-# ── training-selection: persistent image sets ────────────────────────────────
+# -- training-selection: persistent image sets --------------------------------
 # A "set" is a named, persistent bag of rel_paths curated for a training run. It
 # survives restarts, so a 5000-image pick is still there next week. See
 # training_select.py for the selection strategies and storage.
@@ -176,7 +176,7 @@ def remote_yolo_train_worker(abs_folder: str, dataset_dir: str, config: dict,
 # copies are invisible to the gallery yet fully addressable by the normal editor
 # (get_safe_path/thumb/file/metadata all resolve any rel_path under MEDIA_DIR).
 # Editing, adding, or removing boxes on a set image therefore only ever mutates
-# the copy — the gallery original is never touched.
+# the copy - the gallery original is never touched.
 
 TRAIN_SETS_DIR = ".training_sets"   # under MEDIA_DIR
 
@@ -186,7 +186,7 @@ def _set_safe(set_name):
 
 
 def _is_debug(r):
-    """Model output stored by validation (cim:Debug). Never ground truth."""
+    """! @brief Model output stored by validation (cim:Debug). Never ground truth."""
     return bool(r.get("debug"))
 
 
@@ -196,7 +196,7 @@ def _run_dirs():
 
 
 def _list_runs(set_name):
-    """Every training run of this set, oldest first: the legacy unnumbered
+    """! @brief Every training run of this set, oldest first: the legacy unnumbered
     set_<safe> run (n=0) and each set_<safe>_train_<n>. Each carries its
     cim_run.json (what it was trained on) and validation.json (last score)."""
     import re
@@ -232,7 +232,7 @@ def _next_run_name(set_name):
 
 
 def trainer_runs():
-    """GET ?set= -> this set's runs (progression), newest last."""
+    """! @brief GET ?set= -> this set's runs (progression), newest last."""
     set_name = (request.args.get("set") or "").strip()
     if not set_name:
         return jsonify({"success": False, "error": "set name required"}), 400
@@ -248,7 +248,7 @@ def _set_work_reldir(set_name):
 
 
 def _copy_into_set(set_name, src_rel):
-    """Copy a gallery image (its .jxl + sidecar .txt/.xmp if present) into the
+    """! @brief Copy a gallery image (its .jxl + sidecar .txt/.xmp if present) into the
     set's isolated input folder. Returns the work rel_path (under MEDIA_DIR), or
     None if the source can't be resolved. Idempotent: re-copying overwrites."""
     src_abs = get_safe_path(MEDIA_DIR, src_rel)
@@ -281,7 +281,7 @@ def _remove_set_workdir(set_name):
 
 
 def _member_entry_for_record(rec, want=None):
-    """Status entry for ONE member record. `want` is a set of in-scope class
+    """! @brief Status entry for ONE member record. `want` is a set of in-scope class
     names (or None = all). Reads metadata for this one file only."""
     rp = rec["rel_path"]
     wp = rec["work_path"] or rp
@@ -303,7 +303,7 @@ def _member_entry_for_record(rec, want=None):
     else:
         color = "none"
     return {
-        "rel_path": wp,          # the editable copy — clicking edits THIS
+        "rel_path": wp,          # the editable copy - clicking edits THIS
         "src_path": rp,          # gallery source (provenance)
         "thumb": f"/api/thumb/{wp}",
         "checked": rec["checked"],
@@ -319,7 +319,7 @@ def _member_entries(set_name, want_classes=None):
 
 
 def _sel_paths_to_entries(rel_paths):
-    """Legacy simple entries (thumb + has_label) for ad-hoc lists."""
+    """! @brief Legacy simple entries (thumb + has_label) for ad-hoc lists."""
     db = _db()
     out = []
     for rp in rel_paths:
@@ -332,7 +332,7 @@ def _sel_paths_to_entries(rel_paths):
 
 
 def trainer_devices():
-    """Report the compute devices torch can see, so the UI never offers a GPU
+    """! @brief Report the compute devices torch can see, so the UI never offers a GPU
     index or an MPS option that doesn't exist on this machine. Backed by the
     model registry, which imports torch once at module load and caches the
     device list, so this route never re-imports torch per request."""
@@ -416,7 +416,7 @@ def trainer_checked():
 
 
 def trainer_select():
-    """Pick N images by strategy, COPY each into the set's isolated input folder
+    """! @brief Pick N images by strategy, COPY each into the set's isolated input folder
     (media/.training_sets/<set>/input/), and store both source and work paths.
     Editing the set never touches the gallery original."""
     d = request.json or {}
@@ -453,7 +453,7 @@ def trainer_select():
 
 
 def trainer_keep():
-    """Add rel_paths to an existing set (used when editing a set during review)."""
+    """! @brief Add rel_paths to an existing set (used when editing a set during review)."""
     d = request.json or {}
     set_name = (d.get("set") or "").strip()
     if not set_name:
@@ -464,7 +464,7 @@ def trainer_keep():
 
 
 def trainer_clear():
-    """Empty a set. Never touches the gallery/library."""
+    """! @brief Empty a set. Never touches the gallery/library."""
     d = request.json or {}
     set_name = (d.get("set") or "").strip()
     if not set_name:
@@ -474,7 +474,7 @@ def trainer_clear():
 
 
 def trainer_remove():
-    """Drop specific rel_paths from a set (does not touch gallery)."""
+    """! @brief Drop specific rel_paths from a set (does not touch gallery)."""
     d = request.json or {}
     set_name = (d.get("set") or "").strip()
     if not set_name:
@@ -485,7 +485,7 @@ def trainer_remove():
 
 
 def trainer_labels():
-    """Label suggestions for the trainer box editor: the global box-label pool
+    """! @brief Label suggestions for the trainer box editor: the global box-label pool
     plus any class names already used on the given set's members."""
     labels = set(l for l in (state.get("classes") or []) if l and l != "object")
     for extra in HOST.emit("labels.pool"):
@@ -507,7 +507,7 @@ def trainer_labels():
 
 
 def trainer_boxes():
-    """Read or write boxes for one trainer-set member.
+    """! @brief Read or write boxes for one trainer-set member.
 
     Body: {action:'read'|'write', filename, regions?}
       - filename is the member's WORK copy rel_path (under
@@ -546,7 +546,7 @@ def trainer_boxes():
                 row["debug"] = True
                 row["region_description"] = r.get("region_description", "")
             clean.append(row)
-        ok = write_metadata(fp, meta.get("tags", []), meta.get("description", ""), clean)
+        ok = update_file(fp, set={"regions": clean}, meta=meta).get("success")
         if not ok:
             return jsonify({"success": False, "error": "write failed"}), 500
         return jsonify({"success": True, "count": len(clean)})
@@ -555,7 +555,7 @@ def trainer_boxes():
 
 
 def trainer_validate():
-    """Run one of the set's trained models over its members, diff predictions
+    """! @brief Run one of the set's trained models over its members, diff predictions
     against the stored ground-truth boxes, and report per-image and aggregate
     accuracy. Optionally stores the predictions on each image as debug regions
     (cim:Debug) and always saves the score beside that run's weights."""
@@ -573,7 +573,7 @@ def trainer_validate():
                                           or state.get("trainer_last_weights"))
     if not weights or not os.path.exists(weights):
         return jsonify({"success": False,
-                        "error": "No trained model for this set yet — train first."}), 400
+                        "error": "No trained model for this set yet - train first."}), 400
     if not run:
         run = next((r for r in runs if os.path.abspath(r["weights"]) == os.path.abspath(weights)), None)
     run_name = run["run"] if run else os.path.basename(os.path.dirname(os.path.dirname(weights)))
@@ -637,7 +637,7 @@ def trainer_validate():
         regions = meta.get("regions", []) or []
         if is_new:
             # New image: no ground truth to compare against. Run the model and
-            # store its predictions for human review — do NOT score it (an
+            # store its predictions for human review - do NOT score it (an
             # empty-GT diff would read as all-false-positives and drag F1 to 0).
             diff = tv.propose_image(pred)
         else:
@@ -666,8 +666,7 @@ def trainer_validate():
                                                   f"verdict={note}; conf={float(p.get('conf') or 0):.3f}"})
             kept = [r for r in regions
                     if not (_is_debug(r) and tag in (r.get("region_description") or ""))]
-            write_metadata(fp, meta.get("tags", []) or [], meta.get("description", "") or "", kept + dbg)
-            _meta_cache_drop(rp)
+            update_file(fp, set={"regions": kept + dbg}, meta=meta)
         results.append({
             "rel_path": rp, "thumb": f"/api/thumb/{rp}",
             "is_new": is_new,
@@ -699,7 +698,7 @@ def trainer_validate():
                                        "mean_iou": r["mean_iou"]} for r in results]}, f)
         except OSError as e:
             training_logger.warning(f"validation.json for {run_name}: {e}")
-    # Worst images first: most dropped/added, then lowest IoU — that's where the
+    # Worst images first: most dropped/added, then lowest IoU - that's where the
     # user's confirm/deny attention is best spent. New rows have mean_iou None
     # (unscored); sort them after scored rows by treating None as worst.
     results.sort(key=lambda r: (-(r["counts"]["dropped"] + r["counts"]["added"]
@@ -730,16 +729,14 @@ def trainer_apply_prediction():
                  if _is_debug(r) or (r.get("class_name") or "").strip() not in scope_set]
     accepted = [{k: v for k, v in r.items() if k not in ("conf", "debug")} for r in accepted]
     merged = preserved + accepted
-    ok = write_metadata(fp, cur.get("tags", []) or [],
-                        cur.get("description", "") or "", merged)
-    _meta_cache_drop(fn)
+    ok = update_file(fp, set={"regions": merged}, meta=cur).get("success")
     return jsonify({"success": bool(ok), "count": len(merged),
                     "preserved": len(preserved), "replaced_scope": sorted(scope_set)})
 
 
 def _write_run_info(run_dir, set_name, run_name, backend, base_model, n_train, n_val,
                     names, cfg, n_dup_skipped, aug_made=0):
-    """cim_run.json beside the weights: what this run was trained on."""
+    """! @brief cim_run.json beside the weights: what this run was trained on."""
     try:
         os.makedirs(run_dir, exist_ok=True)
         with open(os.path.join(run_dir, "cim_run.json"), "w", encoding="utf-8") as f:
@@ -794,10 +791,10 @@ def train():
     shutil.rmtree(dset_dir, ignore_errors=True)
     for sub in ("images/train", "images/val", "labels/train", "labels/val"):
         os.makedirs(os.path.join(dset_dir, sub), exist_ok=True)
-    state["status_text"] = "Preparing dataset…"
+    HOST.set_status("Preparing dataset...")
 
     # Which box classes to train on. When the caller passes a non-empty list, we
-    # train on ONLY those classes and every other box on the image is ignored —
+    # train on ONLY those classes and every other box on the image is ignored -
     # crucially WITHOUT editing the image's stored regions or the sidecar .txt.
     # We build fresh, locally-indexed labels straight from metadata, so unrelated
     # boxes you don't want to train on are never disturbed. Empty/omitted => all
@@ -837,12 +834,12 @@ def train():
             labelled.append((base, os.path.basename(base), keep))
 
     if not labelled:
-        state["status_text"] = "No matching labelled images in this set!"
+        HOST.set_status("No matching labelled images in this set!")
         msg = ("No boxes of the selected class(es) in this set."
                if want_set else "No labelled still images in this set. Draw boxes first.")
         return jsonify({"success": False, "error": msg}), 400
 
-    # Local, contiguous class indexing for THIS dataset only — independent of the
+    # Local, contiguous class indexing for THIS dataset only - independent of the
     # app-wide state["classes"], so training a subset can't renumber anything.
     names = sorted(want_set) if want_set else sorted(present_classes)
     cls_id = {n: i for i, n in enumerate(names)}
@@ -860,7 +857,7 @@ def train():
                     continue
 
     def _crop_jpg_to_boxes(jpg_path, regions, margin=0.10):
-        """Crop the decoded jpg in place to the union of `regions` (normalised
+        """! @brief Crop the decoded jpg in place to the union of `regions` (normalised
         cx,cy,w,h) expanded by `margin` of the union size, and return regions
         re-normalised to the crop. On any failure, leave the file and return the
         original regions unchanged."""
@@ -904,7 +901,7 @@ def train():
     val_n = max(val_n, 1 if (val_frac > 0 and len(labelled) > 1) else 0)
     val_set, tr_set = labelled[:val_n], labelled[val_n:]
 
-    # ── Mayaku backend: COCO-format dataset + Mayaku training worker ──────────
+    # -- Mayaku backend: COCO-format dataset + Mayaku training worker ----------
     # Mayaku expects each split's images and its _annotations.coco.json in the
     # SAME directory (Roboflow layout), so we decode jpgs into {train,val}/ and
     # write the COCO json alongside. Region gathering, class indexing (`cls_id`)
@@ -940,7 +937,7 @@ def train():
         weights = os.path.join(os.path.abspath(MODELS_DIR), "runs", "mayaku",
                                run_name, "best.pt")
         ts.set_meta(_db(), set_name, weights=weights)
-        state["status_text"] = f"Training (Mayaku)… ({len(tr_pairs)} train | {len(va_pairs)} val)"
+        HOST.set_status(f"Training (Mayaku)... ({len(tr_pairs)} train | {len(va_pairs)} val)")
         threading.Thread(
             target=_mayaku_training().mayaku_train_worker, daemon=True,
             args=(dset_dir, base_model, cfg, run_name, MODELS_DIR,
@@ -949,9 +946,9 @@ def train():
                         "weights": weights, "run": run_name,
                         "train": len(tr_pairs), "val": len(va_pairs)})
 
-    # ── YOLO backend (default, unchanged) ─────────────────────────────────────
+    # -- YOLO backend (default, unchanged) -------------------------------------
     def _augment_into(dset_dir, split_dir_img, split_dir_lbl, bn, regions):
-        """Read the just-written train jpg and emit up to n_aug box-safe variants
+        """! @brief Read the just-written train jpg and emit up to n_aug box-safe variants
         into the same train dirs. Skips a variant if no transform fired."""
         src = os.path.join(dset_dir, split_dir_img, bn + ".jpg")
         img = cv2.imread(src)
@@ -1002,7 +999,7 @@ def train():
     run_name = _next_run_name(set_name)
     cfg["_run_name"] = run_name
     aug_note = f" +{aug_made} augmented" if aug_on else ""
-    state["status_text"] = f"Training… ({len(tr_b)} train{aug_note} | {len(val_b)} val)"
+    HOST.set_status(f"Training... ({len(tr_b)} train{aug_note} | {len(val_b)} val)")
     # Where best.pt will land (mirrors what the worker pins).
     run_dir = os.path.join(os.path.abspath(MODELS_DIR), "runs", "detect", run_name)
     weights = os.path.join(run_dir, "weights", "best.pt")
@@ -1017,7 +1014,7 @@ def train():
 
 def get_training_log():
     if not os.path.exists('logs/training.log'):
-        return jsonify({"log":"Awaiting start…"})
+        return jsonify({"log":"Awaiting start..."})
     # Ultralytics writes UTF-8 (progress bars, box-drawing glyphs); read with an
     # explicit encoding and tolerate stray bytes so a Windows cp1252 default
     # locale can't 500 the poller.

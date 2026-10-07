@@ -20,7 +20,7 @@
   }).then(r => r.json());
   const enc = s => encodeURIComponent(s);
 
-  // ── sets ──────────────────────────────────────────────────────────────────
+  // -- sets ------------------------------------------------------------------
   async function loadSets(preferred) {
     const sel = $('tr_set_select');
     if (!sel) { console.warn('[trainer] pane not in DOM yet'); return; }
@@ -30,7 +30,7 @@
     if (!d || d.success === false) { trStatus('Could not load sets' + (d && d.error ? ': ' + d.error : '')); return; }
     const sets = d.sets || [];
     if (!sets.length) {
-      sel.innerHTML = '<option value="">— no sets yet —</option>';
+      sel.innerHTML = '<option value="">- no sets yet -</option>';
       currentSet = null; items = []; renderCounts(); renderGrid();
       return;
     }
@@ -80,7 +80,7 @@
   async function trBuildSet() {
     const n = parseInt($('tr_n').value, 10) || 0;
     if (n < 1) { alert('Set a count of 1 or more.'); return; }
-    trStatus('Building set…');
+    trStatus('Building set...');
     const d = await jpost('/api/trainer/select', {
       strategy: $('tr_strategy').value, n,
       exclude_all_sets: $('tr_exclude_sets').checked,
@@ -111,10 +111,10 @@
     if (build) build.open = !currentSet;
   }
 
-  // ── grid (same masonry/.gallery-item as the gallery; click → real editor) ──
+  // -- grid (same masonry/.gallery-item as the gallery; click -> real editor) --
   let curIdx = -1;
   let trPage = 0;
-  // Follow the gallery's page size so both tabs paginate consistently.
+  /** @brief Follow the gallery's page size so both tabs paginate consistently. */
   const trPageSize = () => (typeof PAGE !== 'undefined' && PAGE > 0) ? PAGE : 200;
 
   function trPageCount() { return Math.max(1, Math.ceil(items.length / trPageSize())); }
@@ -169,9 +169,10 @@
     renderGrid();
   }
 
-  // Select tile i: mark it current, scroll it into view, and open it in the
-  // shared editor (the SAME path the gallery uses - box drawing/naming/saving
-  // all happen there, not here).
+  /** @brief Select tile i: mark it current, scroll it into view, and open it in the
+   *  shared editor (the SAME path the gallery uses - box drawing/naming/saving
+   *  all happen there, not here).
+   */
   function trPick(i) {
     if (i < 0 || i >= items.length) return;
     // If the target tile is on another page, flip to it first so the tile exists.
@@ -197,8 +198,9 @@
     if (i >= 0) trPick(i); else if (typeof selectFile === 'function') selectFile(rel);
   }
 
-  // Arrow keys page through the set grid when the Trainer pane is active and the
-  // user isn't typing in a field. Left/Right (and Up/Down) move one tile.
+  /** @brief Arrow keys page through the set grid when the Trainer pane is active and the
+   *  user isn't typing in a field. Left/Right (and Up/Down) move one tile.
+   */
   function trKeyNav(e) {
     const pane = document.getElementById('trainer_pane');
     if (!pane || pane.classList.contains('hidden')) return;
@@ -241,14 +243,15 @@
     renderCounts();
   }
 
-  // ── training ────────────────────────────────────────────────────────────────
+  // -- training ----------------------------------------------------------------
   const num = id => { const el = $(id); if (!el) return null; const v = el.value; return v === '' ? null : Number(v); };
 
   function trBackend() { const el = $('tr_backend'); return el ? el.value : 'yolo'; }
 
-  // Swap the Base-model option group to match the selected backend, and pick a
-  // sensible default model so the two never mismatch (e.g. a YOLO .pt name left
-  // selected while Mayaku is chosen).
+  /** @brief Swap the Base-model option group to match the selected backend, and pick a
+   *  sensible default model so the two never mismatch (e.g. a YOLO .pt name left
+   *  selected while Mayaku is chosen).
+   */
   function trBackendChange() {
     const backend = trBackend();
     const yg = $('tr_base_yolo'), mg = $('tr_base_mayaku'), sel = $('tr_base_model');
@@ -308,10 +311,11 @@
     startLogPoll();
   }
 
-  // ── box-class filter ───────────────────────────────────────────────────────
-  // Checked classes scope training/validation to ONLY those box types; none
-  // checked = all classes. This never edits stored regions - it just filters
-  // what the generated dataset/diff includes.
+  // -- box-class filter -------------------------------------------------------
+  /** @brief Checked classes scope training/validation to ONLY those box types; none
+   *  checked = all classes. This never edits stored regions - it just filters
+   *  what the generated dataset/diff includes.
+   */
   async function loadClasses() {
     const box = $('tr_classes');
     if (!box) return;
@@ -321,13 +325,13 @@
     if (!labels.length) { box.innerHTML = '<span class="text-xs text-gray-600">No labels yet.</span>'; return; }
     const prev = new Set(selectedClasses());
     box.innerHTML = labels.map(l =>
-      `<label class="trck"><input type="checkbox" class="tr-cls accent-purple-500" value="${l.replace(/"/g, '&quot;')}"
+      `<label class="trck"><input type="checkbox" class="tr-cls accent-indigo-500" value="${l.replace(/"/g, '&quot;')}"
         ${prev.has(l) ? 'checked' : ''} onchange="trClassChanged()"> ${l}</label>`).join('');
   }
   function selectedClasses() {
     return [...document.querySelectorAll('#tr_classes .tr-cls:checked')].map(c => c.value);
   }
-  // Re-scope the grid colours (yellow/blue depend on which classes are checked).
+  /** @brief Re-scope the grid colours (yellow/blue depend on which classes are checked). */
   function trClassChanged() { if (currentSet) loadMembers(); }
 
   function trStatus(t) { const el = $('tr_status'); if (el) el.innerText = t; }
@@ -342,7 +346,7 @@
     }, 2000);
   }
 
-  // ── validation ──────────────────────────────────────────────────────────────
+  // -- validation --------------------------------------------------------------
   // vres[rel_path] = the server's diff for that image; used for confirm/deny.
   let vres = {};
   const VERDICT_COLOR = {
@@ -352,9 +356,10 @@
   };
   const VERDICT_LABEL = { dup_gt: 'your dup', dup_pred: 'model dup' };
 
-  // ── runs (progression) ──────────────────────────────────────────────────────
-  // Each Train makes set_<set>_train_<n>; nothing is overwritten. The dropdown
-  // picks which run Validate uses; the table compares their last scores.
+  // -- runs (progression) ------------------------------------------------------
+  /** @brief Each Train makes set_<set>_train_<n>; nothing is overwritten. The dropdown
+   *  picks which run Validate uses; the table compares their last scores.
+   */
   async function trLoadRuns(prefer) {
     const sel = $('tr_val_run'), tbl = $('tr_runs');
     if (!sel || !currentSet) { if (sel) sel.innerHTML = ''; if (tbl) tbl.innerHTML = ''; return; }
@@ -363,21 +368,21 @@
     const runs = (d && d.runs) || [];
     const prev = prefer || sel.value;
     sel.innerHTML = runs.length
-      ? runs.slice().reverse().map(r => `<option value="${r.run}">${r.run}${r.exists ? '' : ' (training…)'}</option>`).join('')
-      : '<option value="">— no runs yet —</option>';
+      ? runs.slice().reverse().map(r => `<option value="${r.run}">${r.run}${r.exists ? '' : ' (training...)'}</option>`).join('')
+      : '<option value="">- no runs yet -</option>';
     if (runs.some(r => r.run === prev)) sel.value = prev;
     if (!tbl) return;
     if (!runs.length) { tbl.innerHTML = ''; return; }
-    const when = t => t ? new Date(t * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
+    const when = t => t ? new Date(t * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '-';
     tbl.innerHTML = `<table class="w-full text-[11px]"><thead class="text-gray-500"><tr>
-        <th class="text-left">Run</th><th>Trained</th><th>Imgs</th><th>F1</th><th>P</th><th>R</th><th>IoU</th><th title="added / wrong class / model dup / your dup">+ / ≠ / dup</th></tr></thead><tbody>` +
+        <th class="text-left">Run</th><th>Trained</th><th>Imgs</th><th>F1</th><th>P</th><th>R</th><th>IoU</th><th title="added / wrong class / model dup / your dup">+ / != / dup</th></tr></thead><tbody>` +
       runs.slice().reverse().map(r => {
         const v = (r.validation || {}).summary || {}, c = v.counts || {}, info = r.info || {};
         return `<tr class="text-center ${r.run === sel.value ? 'text-amber-300' : 'text-gray-300'}">
           <td class="text-left truncate" title="${r.run}">${r.n ? '#' + r.n : 'legacy'}</td>
-          <td>${when(info.created)}</td><td>${info.train ?? '—'}</td>
+          <td>${when(info.created)}</td><td>${info.train ?? '-'}</td>
           <td>${fmt(v.f1)}</td><td>${fmt(v.precision)}</td><td>${fmt(v.recall)}</td><td>${fmt(v.mean_iou)}</td>
-          <td>${v.counts ? `${c.added || 0} / ${v.added_wrong_class || 0} / ${c.dup_pred || 0} / ${c.dup_gt || 0}` : '—'}</td></tr>`;
+          <td>${v.counts ? `${c.added || 0} / ${v.added_wrong_class || 0} / ${c.dup_pred || 0} / ${c.dup_gt || 0}` : '-'}</td></tr>`;
       }).join('') + '</tbody></table>';
   }
 
@@ -393,7 +398,7 @@
       run: $('tr_val_run') ? $('tr_val_run').value : '',
       store_debug: !!($('tr_val_debug') && $('tr_val_debug').checked),
     };
-    $('tr_val_summary').innerHTML = '<span class="text-gray-400">Running the model over the set…</span>';
+    $('tr_val_summary').innerHTML = '<span class="text-gray-400">Running the model over the set...</span>';
     $('tr_val_list').innerHTML = '';
     const d = await jpost('/api/trainer/validate', body);
     if (!d.success) { $('tr_val_summary').innerHTML = `<span class="text-red-400">${d.error || 'validation failed'}</span>`; return; }
@@ -412,7 +417,7 @@
     $('tr_val_summary').innerHTML =
       `<div class="text-gray-500">${d.run || ''}</div>` +
       `<div>Accuracy: <b class="${below ? 'text-red-400' : 'text-green-400'}">F1 ${fmt(s.f1)}</b>` +
-      ` · mean IoU ${fmt(s.mean_iou)} · P ${fmt(s.precision)} / R ${fmt(s.recall)}</div>` +
+      ` | mean IoU ${fmt(s.mean_iou)} | P ${fmt(s.precision)} / R ${fmt(s.recall)}</div>` +
       `<div class="text-gray-400 mt-0.5">` +
       chip('correct', c.correct) + chip('tightened', c.tightened) + chip('loosened', c.loosened) +
       chip('shifted', c.shifted) + chip('dropped', c.dropped) + chip('added', c.added) +
@@ -437,8 +442,8 @@
         </div>
         ${im.is_new ? '' : `<button class="text-xs bg-sky-700 hover:bg-sky-600 px-2 py-1 rounded"
           onclick="event.stopPropagation();trSnap('${im.rel_path.replace(/'/g, "\\'")}')"
-          title="Keep YOUR boxes, but move each to the model's box where they overlap ≥ Snap IoU, and drop your duplicate boxes. Model-only boxes are not added.">Snap</button>`}
-        <button class="text-xs bg-emerald-700 hover:bg-emerald-600 px-2 py-1 rounded"
+          title="Keep YOUR boxes, but move each to the model's box where they overlap >= Snap IoU, and drop your duplicate boxes. Model-only boxes are not added.">Snap</button>`}
+        <button class="text-xs bg-green-700 hover:bg-green-600 px-2 py-1 rounded"
           onclick="event.stopPropagation();trAccept('${im.rel_path.replace(/'/g, "\\'")}')"
           title="Write the model's predicted boxes as this image's new label">Accept</button>
       </div>`;
@@ -449,7 +454,7 @@
     const rt = $('tr_val_retrain');
     if (rt) rt.classList.toggle('hidden', !below);
     const accEl = $('tr_acc');
-    if (accEl && scored) accEl.innerHTML = ` · <span class="${below ? 'text-red-400' : 'text-green-400'}">F1 ${fmt(s.f1)}</span>`;
+    if (accEl && scored) accEl.innerHTML = ` | <span class="${below ? 'text-red-400' : 'text-green-400'}">F1 ${fmt(s.f1)}</span>`;
     if (!scored) {
       trStatus(`Stored proposals for ${(d.added_new || []).length} new image(s) - review and Accept, then they become labelled training data.`);
     } else {
@@ -463,12 +468,13 @@
     if (!n) return '';
     return `<span class="tr-chip" style="background:${VERDICT_COLOR[kind]}22;color:${VERDICT_COLOR[kind]}">${VERDICT_LABEL[kind] || kind} ${n}</span> `;
   }
-  function fmt(x) { return x == null ? '—' : Number(x).toFixed(2); }
+  function fmt(x) { return x == null ? '-' : Number(x).toFixed(2); }
 
-  // ── GT vs prediction overlay ────────────────────────────────────────────────
-  // Draws the model's boxes from the last validation run on top of the editor's
-  // own (blue, = your GT) boxes for the open image. Prediction boxes are dashed
-  // in their verdict colour; a missed GT box gets a thick red outline.
+  // -- GT vs prediction overlay ------------------------------------------------
+  /** @brief Draws the model's boxes from the last validation run on top of the editor's
+   *  own (blue, = your GT) boxes for the open image. Prediction boxes are dashed
+   *  in their verdict colour; a missed GT box gets a thick red outline.
+   */
   function trRedraw() {
     if (typeof drawCanvas === 'function') drawCanvas();
     if (typeof popoutOpen !== 'undefined' && popoutOpen && typeof drawPopout === 'function') drawPopout();
@@ -499,7 +505,7 @@
       if (b.verdict === 'dup_pred') {
         label = `DUP ${b.class_name}${conf}`;
       } else if (b.verdict === 'added' && b.confused_with) {
-        col = '#ec4899'; label = `${b.class_name}${conf} ≠ ${b.confused_with}`;
+        col = '#ec4899'; label = `${b.class_name}${conf} != ${b.confused_with}`;
       } else if (b.verdict === 'added') {
         label = `+ ${b.class_name}${conf}`;
       } else {
@@ -511,7 +517,7 @@
   }
   if (window.registerCanvasOverlay) registerCanvasOverlay(drawValOverlay);
 
-  // Clicking a validation row opens that image in the editor for hand-correction.
+  /** @brief Clicking a validation row opens that image in the editor for hand-correction. */
   function trPickByPath(rel) {
     const i = items.findIndex(x => x.rel_path === rel);
     if (i >= 0) trPick(i); else if (typeof selectFile === 'function') selectFile(rel);
@@ -521,9 +527,10 @@
     if (row) row.classList.add('tr-current');
   }
 
-  // Accept = write the model's PREDICTED boxes as this image's new ground truth.
-  // Predicted boxes are the matched pred + any 'added'; we keep GT for 'dropped'
-  // (the model missed them, so the truth stays).
+  /** @brief Accept = write the model's PREDICTED boxes as this image's new ground truth.
+   *  Predicted boxes are the matched pred + any 'added'; we keep GT for 'dropped'
+   *  (the model missed them, so the truth stays).
+   */
   async function trAccept(rel) {
     const im = vres[rel];
     if (!im) return;
@@ -550,10 +557,11 @@
     const last = row.querySelector('button:last-of-type'); if (last) last.textContent = text;
   }
 
-  // Snap = keep the user's boxes (class, uuid, tags) but take the model's
-  // geometry where they agree (IoU >= snap), and drop double-tagged duplicates.
-  // The model's box is the average of every label it learned from, so snapping
-  // pulls lazy one-off boxes toward the consensus. Model-only boxes are ignored.
+  /** @brief Snap = keep the user's boxes (class, uuid, tags) but take the model's
+   *  geometry where they agree (IoU >= snap), and drop double-tagged duplicates.
+   *  The model's box is the average of every label it learned from, so snapping
+   *  pulls lazy one-off boxes toward the consensus. Model-only boxes are ignored.
+   */
   function snappedRegions(im, thr) {
     const out = [];
     let changed = false;
@@ -586,15 +594,16 @@
   async function trSnapAll() {
     const rels = Object.keys(vres).filter(r => !vres[r].is_new && snappedRegions(vres[r], snapThr()));
     if (!rels.length) { alert('Nothing to snap at this IoU.'); return; }
-    if (!confirm(`Snap boxes on ${rels.length} image(s) to the model (IoU ≥ ${snapThr()}) and remove your duplicate boxes?`)) return;
+    if (!confirm(`Snap boxes on ${rels.length} image(s) to the model (IoU >= ${snapThr()}) and remove your duplicate boxes?`)) return;
     let n = 0;
-    for (const r of rels) { if (await trSnap(r, true)) n++; trStatus(`Snapped ${n} / ${rels.length}…`); }
+    for (const r of rels) { if (await trSnap(r, true)) n++; trStatus(`Snapped ${n} / ${rels.length}...`); }
     trStatus(`Snapped ${n} image(s). Retrain to make a new run, then validate it to compare.`);
     loadMembers();
   }
 
-  // Populate the Device dropdown from the devices torch actually reports, so we
-  // never offer a GPU index or MPS that doesn't exist on this machine.
+  /** @brief Populate the Device dropdown from the devices torch actually reports, so we
+   *  never offer a GPU index or MPS that doesn't exist on this machine.
+   */
   async function loadDevices() {
     const sel = $('tr_device');
     if (!sel) return;
@@ -608,7 +617,7 @@
     if (devs.some(x => x.value === prev)) sel.value = prev;
   }
 
-  // ── presets ───────────────────────────────────────────────────────────────
+  // -- presets ---------------------------------------------------------------
   // A preset is a named snapshot of the training-settings fields below. It maps
   // field id -> value. Presets are stored SERVER-SIDE (library.db) via
   // /api/trainer/presets, so they survive restarts and are shared across
@@ -638,7 +647,7 @@
     'tr_aug_hsv_v_p', 'tr_aug_hsv_v',
   ];
 
-  // Read the current value of a settings field (checkbox → bool, else string).
+  /** @brief Read the current value of a settings field (checkbox -> bool, else string). */
   function readField(id) {
     const el = $(id); if (!el) return null;
     return el.type === 'checkbox' ? !!el.checked : el.value;
@@ -648,14 +657,15 @@
     if (el.type === 'checkbox') el.checked = !!v; else el.value = v;
   }
 
-  // The current on-screen settings, as a preset object.
+  /** @brief The current on-screen settings, as a preset object. */
   function snapshotSettings() {
     const o = {};
     PRESET_FIELDS.forEach(id => { const v = readField(id); if (v !== null) o[id] = v; });
     return o;
   }
-  // Apply a preset: start from the markup defaults (so a partial preset is
-  // complete) then overlay the preset's stored values.
+  /** @brief Apply a preset: start from the markup defaults (so a partial preset is
+   *  complete) then overlay the preset's stored values.
+   */
   function applyPreset(preset) {
     const base = defaultFieldValues();
     const merged = Object.assign({}, base, preset || {});
@@ -705,7 +715,7 @@
     return want;
   }
 
-  // Fetch presets from the server into the local cache.
+  /** @brief Fetch presets from the server into the local cache. */
   async function refreshPresets() {
     let d;
     try { d = await jget('/api/trainer/presets'); }
@@ -717,7 +727,7 @@
     return true;
   }
 
-  // Called once on init: load defaults, fetch presets, apply last-selected.
+  /** @brief Called once on init: load defaults, fetch presets, apply last-selected. */
   async function initPresets() {
     defaultFieldValues();               // capture markup defaults first
     const ok = await refreshPresets();
@@ -734,7 +744,7 @@
     trStatus(`Loaded preset "${name}".`);
   }
 
-  // Reload = re-apply the selected preset, discarding any unsaved field edits.
+  /** @brief Reload = re-apply the selected preset, discarding any unsaved field edits. */
   function trPresetReload() {
     const name = currentPresetName();
     if (!name || !(name in _presets)) return;
@@ -742,7 +752,7 @@
     trStatus(`Reloaded preset "${name}".`);
   }
 
-  // Overwrite = save the current field values back into the selected preset.
+  /** @brief Overwrite = save the current field values back into the selected preset. */
   async function trPresetOverwrite() {
     const name = currentPresetName();
     if (!name) return;
@@ -754,7 +764,7 @@
     trStatus(`Saved current settings into "${name}".`);
   }
 
-  // New = capture current settings under a new name.
+  /** @brief New = capture current settings under a new name. */
   async function trPresetNew() {
     const name = (prompt('Name for the new preset:') || '').trim();
     if (!name) return;
@@ -781,7 +791,7 @@
     trStatus(`Deleted preset "${name}".`);
   }
 
-  // ── init (called by setPane whenever the pane opens) ────────────────────────
+  // -- init (called by setPane whenever the pane opens) ------------------------
   let _inited = false;
   function trInit() {
     if (!_inited) initPresets();   // seed defaults + apply last-selected, once
@@ -845,7 +855,7 @@
   });
 })();
 
-// ── registration with the core UI ───────────────────────────────────────────
+// -- registration with the core UI -------------------------------------------
 (function () {
   function init() {
     if (window.registerControlsTab)
@@ -854,9 +864,8 @@
       registerLeftTab({ id: "trainer", label: "Trainer", feature: "tab.trainer",
                         paneId: "trainer_pane", controlsTab: "trainer", onShow: trInit });
     if (window.registerControlButton) {
-      registerControlButton("ai_tooling_links",
-        '<button type="button" onclick="setPane(\'trainer\')" data-feature="tab.trainer" ' +
-        'class="text-xs text-purple-300 bg-gray-700 px-2 py-1 rounded hover:bg-gray-600 border border-purple-800">Trainer</button>');
+      registerControlButton("ai_tooling_links", {label: "Trainer", onclick: "setPane('trainer')",
+        feature: "tab.trainer", variant: "neutral"});
     }
   }
   if (document.readyState === "loading") window.addEventListener("DOMContentLoaded", init);

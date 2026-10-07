@@ -1,7 +1,8 @@
-"""export module — Save As / Export.
+"""! @file
+@brief export module - Save As / Export.
 
-POST /api/export {files:[rel,…] | album:name, format:"jpg"|"png"|"original"|"jxl"}
-→ one file download, or a .zip when there is more than one item (or format is
+POST /api/export {files:[rel,...] | album:name, format:"jpg"|"png"|"original"|"jxl"}
+-> one file download, or a .zip when there is more than one item (or format is
 jxl, which always ships the .jxl + its .xmp sidecar).
 
 jpg/png: pixels via the core converter, then the resolved XMP packet is embedded
@@ -41,7 +42,7 @@ FORMATS = ("jpg", "png", "original", "jxl")
 
 
 def _embed_xmp(src, out, log):
-    """Write the file's resolved XMP (minus our private mm:* blobs) into `out`."""
+    """! @brief Write the file's resolved XMP (minus our private mm:* blobs) into `out`."""
     if not _HAVE_PYEXIV2:
         return
     _, _, xml = xmp_import.resolve_xmp(src)
@@ -56,7 +57,7 @@ def _embed_xmp(src, out, log):
 
 
 def _export_one(host, fp, fmt, tmp):
-    """Produce the export of `fp` in `tmp`. Returns [(arcname, abs_path), …]."""
+    """! @brief Produce the export of `fp` in `tmp`. Returns [(arcname, abs_path), ...]."""
     base = os.path.splitext(os.path.basename(fp))[0]
     ext = os.path.splitext(fp)[1].lower()
     is_jxl = ext == ".jxl"

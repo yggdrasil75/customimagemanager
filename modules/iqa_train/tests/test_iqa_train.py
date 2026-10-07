@@ -1,4 +1,5 @@
-"""iqa_train: dataset/label parsing, size table, and a build through a fake
+"""! @file
+@brief iqa_train: dataset/label parsing, size table, and a build through a fake
 personal_iqa service (no torch needed for the parsing parts).
     python -m pytest -q tests/test_iqa_train.py
 """
@@ -92,7 +93,7 @@ def test_mediapipe_provider_owns_its_conversion():
 
 
 def _fake_service(tmp):
-    """Stand-in for personal_iqa: constant features, records fits, writes files."""
+    """! @brief Stand-in for personal_iqa: constant features, records fits, writes files."""
     saved = []
     def features(db, key, mtime):
         # every third image has no face -> must be skipped and counted
@@ -117,7 +118,10 @@ def test_build_with_fake_service(tmp_path):
     _imgs(str(tmp_path), [f"{i}.jpg" for i in range(30)])
     (tmp_path / "labels.csv").write_text("".join(f"{i}.jpg,{(i % 10) + 1}\n" for i in range(30)))
     svc, saved = _fake_service(str(tmp_path))
-    host = types.SimpleNamespace(config={}, logger=logging.getLogger("t"),
+    cfg = {}
+    host = types.SimpleNamespace(config=cfg, logger=logging.getLogger("t"),
+                                 set_status=lambda t: cfg.__setitem__("status_text", t),
+                                 set_config=lambda k, v, save=True: cfg.__setitem__(k, v),
                                  get_service=lambda n: svc if n == "personal_iqa" else None,
                                  db=lambda: types.SimpleNamespace(execute=lambda *a: types.SimpleNamespace(fetchone=lambda: None, fetchall=lambda: []), commit=lambda: None),
                                  core=types.SimpleNamespace(db_close=lambda: None))

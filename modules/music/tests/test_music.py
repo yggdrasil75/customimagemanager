@@ -1,4 +1,5 @@
-"""Music module: an uploaded mp3 is indexed from its tags, streamable, editable."""
+"""! @file
+@brief Music module: an uploaded mp3 is indexed from its tags, streamable, editable."""
 import time
 import pytest
 
@@ -15,7 +16,7 @@ def _song(client, rel, tries=30):
 
 @pytest.fixture
 def mp3(upload):
-    """The fixture must carry ID3 title+artist; without them there is nothing
+    """! @brief The fixture must carry ID3 title+artist; without them there is nothing
     for the indexer to read and the test would be about the file, not the code."""
     from cimtest import fixture as fixture_path
     path = fixture_path("song.mp3")
@@ -23,7 +24,7 @@ def mp3(upload):
         import mutagen
         tags = mutagen.File(path, easy=True) or {}
         if not (tags.get("title") and tags.get("artist")):
-            pytest.skip(f"{path} has no ID3 title/artist — tag it (see tests/fixtures/README.md)")
+            pytest.skip(f"{path} has no ID3 title/artist - tag it (see tests/fixtures/README.md)")
     except ImportError:
         pass
     return upload.media("song.mp3")

@@ -1,4 +1,5 @@
-"""Theming core: registry and /api/theme. Per-user picks, role / account
+"""! @file
+@brief Theming core: registry and /api/theme. Per-user picks, role / account
 defaults and permissions are covered in tests/test_settings_perms.py."""
 import pytest
 

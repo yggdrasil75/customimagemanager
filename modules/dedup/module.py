@@ -1,5 +1,5 @@
-"""
-Dedup module — naive backbone + pair-scorer registry.
+"""! @file
+@brief Dedup module - naive backbone + pair-scorer registry.
 ======================================================================
 Owns the deduplication surface: the naive sha256 + perceptual-hash
 pipeline is the forced backbone, and this module exposes a PAIR-SCORER
@@ -18,7 +18,7 @@ Pipeline (as designed):
      naive) rated >0.99.
 
 A pair-scorer registers:
-    id            "heuristic" | "cnn" | …
+    id            "heuristic" | "cnn" | ...
     label
     available()   -> bool
     priority      int (higher first; CNN over heuristic)
@@ -45,7 +45,7 @@ CONFIRM_THRESHOLD = 0.99
 
 
 def _naive(naive_score, ctx):
-    """naive_score is a constant or a callable(ctx) -> prob (pixel compare)."""
+    """! @brief naive_score is a constant or a callable(ctx) -> prob (pixel compare)."""
     if callable(naive_score):
         try:
             return float(naive_score(ctx))
@@ -69,7 +69,7 @@ class ScorerRegistry:
         self.logger = None
 
     def _fail(self, s, e):
-        """A scorer raised: remember why (dedup reports it) and log each new reason once."""
+        """! @brief A scorer raised: remember why (dedup reports it) and log each new reason once."""
         sid = self._attr(s, "id")
         msg = f"{type(e).__name__}: {e}"
         if self._errors.get(sid) != msg and self.logger is not None:
@@ -77,7 +77,7 @@ class ScorerRegistry:
         self._errors[sid] = msg
 
     def errors(self):
-        """{scorer id: last failure reason} since clear_errors()."""
+        """! @brief {scorer id: last failure reason} since clear_errors()."""
         return dict(self._errors)
 
     def clear_errors(self):
@@ -117,7 +117,7 @@ class ScorerRegistry:
         return tuple(self._attr(s, "kinds") or _DEFAULT_KINDS)
 
     def tag_for(self, kind):
-        """tag() restricted to scorers that judge `kind` ("naive" when none)."""
+        """! @brief tag() restricted to scorers that judge `kind` ("naive" when none)."""
         for s in self._scorers:
             if kind not in self._kinds(s):
                 continue
@@ -135,13 +135,13 @@ class ScorerRegistry:
         return "naive"
 
     def tag(self):
-        """Identity of the scorer that would answer an IMAGE pair now
+        """! @brief Identity of the scorer that would answer an IMAGE pair now
         ("cnn:medium"), the key the image verdict cache is stored under.
         Scorers for other kinds only (HEURDUV, HEARDU) never count here."""
         return self.tag_for("image")
 
     def score_group(self, imgs, naive_score=1.0):
-        """NxN matrix of pair scores for a group of decoded BGR images. The
+        """! @brief NxN matrix of pair scores for a group of decoded BGR images. The
         first available scorer offering score_group(imgs) -> matrix answers;
         otherwise every pair goes through score_pairs. Diagonal = 1.
         Returns (matrix, who): who is the id of the scorer that produced
@@ -173,7 +173,7 @@ class ScorerRegistry:
         return m, who
 
     def score_pairs(self, ctxs, naive_score=None):
-        """Batched score_pair: scorers offering score_batch(ctxs) -> [prob|None]
+        """! @brief Batched score_pair: scorers offering score_batch(ctxs) -> [prob|None]
         take the whole list at once; the rest are asked one by one. Returns
         [(prob, scorer_id)] aligned with ctxs. naive_score is a float or a
         callable(ctx) -> prob used for pairs no scorer answered."""
@@ -213,7 +213,7 @@ class ScorerRegistry:
                 for p, w, c in zip(out, who, ctxs)]
 
     def score_pair(self, ctx, naive_score=None):
-        """Run scorers in priority order; first non-None prob wins. Falls back
+        """! @brief Run scorers in priority order; first non-None prob wins. Falls back
         to naive_score when no scorer answers. Returns (prob, scorer_id)."""
         for s in self._scorers:
             if ctx_kind(ctx) not in self._kinds(s):
@@ -342,7 +342,7 @@ CREATE TABLE IF NOT EXISTS dedup_media_sig (
 
 
 def _migrate_scores(db):
-    """Older DBs predate the scores column on dedup_groups."""
+    """! @brief Older DBs predate the scores column on dedup_groups."""
     try:
         db.execute("ALTER TABLE dedup_groups ADD COLUMN scores TEXT NOT NULL DEFAULT '[]'")
         db.commit()

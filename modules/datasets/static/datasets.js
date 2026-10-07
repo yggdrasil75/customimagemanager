@@ -1,7 +1,7 @@
-/* Settings › Datasets — one-click zoo downloads + a link box for open hosts.
+/* Settings > Datasets - one-click zoo downloads + a link box for open hosts.
  *
  * Zoos (pyiqa IQA mirror, installed ultralytics YAMLs) come from
- * /api/datasets/zoo; every download is a "dataset:…" target on the shared
+ * /api/datasets/zoo; every download is a "dataset:..." target on the shared
  * fetch queue (/api/fetch/add). Queue rows reuse fetch.js's row renderer.
  * Pane element: #settings_pane_module_datasets (created by static/modules.js);
  * the credential fields render into its #module_settings_fields_datasets mount. */
@@ -23,7 +23,7 @@
     const el = $("ds_status");
     if (!el) return;
     el.textContent = msg || "";
-    el.className = "text-xs " + (kind === "err" ? "text-rose-400" : kind === "ok" ? "text-emerald-400" : "text-gray-400");
+    el.className = "text-xs " + (kind === "err" ? "text-red-400" : kind === "ok" ? "text-green-400" : "text-gray-400");
   }
 
   function shell() {
@@ -76,7 +76,7 @@
           ${z.items.map((it) => `
             <div class="flex items-center gap-2 px-1 py-0.5 hover:bg-gray-800 rounded">
               <span class="flex-1 truncate text-gray-300" title="${esc(it.target)}">${esc(it.label)}</span>
-              ${have.has(it.name) ? '<span class="text-emerald-400 text-[10px]">downloaded</span>' : ""}
+              ${have.has(it.name) ? '<span class="text-green-400 text-[10px]">downloaded</span>' : ""}
               <button data-target="${esc(it.target)}" class="text-sky-400 hover:text-sky-300 font-bold">
                 ${have.has(it.name) ? "Re-fetch" : "Download"}</button>
             </div>`).join("")}

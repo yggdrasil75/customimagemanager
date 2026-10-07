@@ -1,5 +1,5 @@
-"""
-Theming — the core theme registry and per-user theme selection.
+"""! @file
+@brief Theming - the core theme registry and per-user theme selection.
 
 A theme is one of two kinds:
 
@@ -13,10 +13,10 @@ front end (theming.js) sets body[data-layout="<id>"] and
 body[data-palette="<id>"]; a theme's CSS/JS keys off those attributes.
 
 Which theme a user gets
-  palette  their own pick (User settings) > the admin default (Settings →
+  palette  their own pick (User settings) > the admin default (Settings ->
            General) > the palette registered with default=True.
   layout   their own pick > what an admin set on their account > on their
-           group (Settings → Users) > the layout registered for their role
+           group (Settings -> Users) > the layout registered for their role
            (roles=[...]) > the layout registered with default=True.
 Picking one's own needs the theme.choose permission at write.
 
@@ -45,16 +45,16 @@ _ID_OK = set("abcdefghijklmnopqrstuvwxyz0123456789_-")
 
 
 class ThemeRegistry:
-    """What theme modules register into; published as the `theming` service."""
+    """! @brief What theme modules register into; published as the `theming` service."""
 
     def __init__(self, host):
         self._host = host
         self._themes = {k: {} for k in KINDS}     # kind -> id -> spec
 
     def register(self, kind, theme_id, label, *, description="", default=False, roles=()):
-        """Declare a theme. kind is "layout" or "palette"; theme_id is the value
+        """! @brief Declare a theme. kind is "layout" or "palette"; theme_id is the value
         the body attribute takes (lowercase letters, digits, _ -). default=True
-        makes it the last-resort fallback; roles=("viewer", …) makes it the
+        makes it the last-resort fallback; roles=("viewer", ...) makes it the
         default for accounts with those roles (layouts; "admin" = admins)."""
         if kind not in KINDS:
             raise ValueError(f"theme kind must be one of {KINDS}")
@@ -83,7 +83,7 @@ class ThemeRegistry:
         return ""
 
     def fallback(self, kind):
-        """The flagged default, else the first registered, else '' (no theme ->
+        """! @brief The flagged default, else the first registered, else '' (no theme ->
         the body attribute is left unset)."""
         ts = list(self._themes[kind].values())
         for t in ts:

@@ -1,5 +1,5 @@
-"""
-ComicInfo.xml — the metadata standard inside comic archives (ComicRack /
+"""! @file
+@brief ComicInfo.xml - the metadata standard inside comic archives (ComicRack /
 Anansi schema v2.1, read by every mainstream reader). Same shape as the
 metadata module's field schemas so the editor renders it the same way:
 groups -> fields with name / dtype / writable / multiline / values / note.
@@ -7,7 +7,7 @@ groups -> fields with name / dtype / writable / multiline / values / note.
 read(abs_path, fmt)         -> {values, source}   (missing file: empty values)
 write(abs_path, fmt, patch) -> {"written": [...], "skipped": [...]}
   cbz (zip) and cbt (tar) are rewritten in place; cb7 via py7zr; cbr (RAR)
-  is read-only — RAR cannot be written by any Python library.
+  is read-only - RAR cannot be written by any Python library.
 
 Folder comics keep their metadata in comic.json; the module maps the common
 fields (Title / Writer / Summary / Tags / Characters) both ways so one
@@ -49,7 +49,7 @@ GROUPS = [
                 _f("Summary", multiline=True), _f("Notes", multiline=True)]},
     {"name": "date", "title": "Publication", "description": "When and by whom it was published.",
      "fields": [_f("Year", "int"), _f("Month", "int"), _f("Day", "int"), _f("Publisher"),
-                _f("Imprint"), _f("Format", note="TPB, Hardcover, Digital…"), _f("Web"),
+                _f("Imprint"), _f("Format", note="TPB, Hardcover, Digital..."), _f("Web"),
                 _f("PageCount", "int", writable=False, generated=True, note="From the archive"),
                 _f("LanguageISO", note="ISO 639 code, e.g. en, ja"),
                 _f("BlackAndWhite", "enum", values=YES_NO), _f("Manga", "enum", values=MANGA),
@@ -71,7 +71,7 @@ def schema_dict():
     return {"groups": GROUPS, "filename": FILENAME}
 
 
-# ── archive access ────────────────────────────────────────────────────────────
+# -- archive access ------------------------------------------------------------
 def _find_member(names):
     for n in names:
         if os.path.basename(n).lower() == FILENAME.lower():
@@ -105,7 +105,7 @@ def _read_xml_bytes(abs_path, fmt):
 
 
 def parse(xml_bytes):
-    """ComicInfo.xml bytes -> {field: str}. Unknown elements are kept too, so
+    """! @brief ComicInfo.xml bytes -> {field: str}. Unknown elements are kept too, so
     nothing a stricter reader wrote is lost on round-trip."""
     out = {}
     if not xml_bytes:
@@ -123,7 +123,7 @@ def parse(xml_bytes):
 
 
 def build(values, existing_bytes=None):
-    """{field: value} -> ComicInfo.xml bytes. Starts from the existing document
+    """! @brief {field: value} -> ComicInfo.xml bytes. Starts from the existing document
     when there is one so <Pages> and unknown elements survive."""
     root = None
     if existing_bytes:
@@ -158,7 +158,7 @@ def can_write(fmt):
 
 
 def _rewrite(abs_path, fmt, member_name, xml_bytes):
-    """Replace/add ComicInfo.xml, rewriting the archive next to the original
+    """! @brief Replace/add ComicInfo.xml, rewriting the archive next to the original
     and swapping atomically. Page bytes are copied verbatim."""
     tmp = tempfile.mktemp(prefix=".comicinfo-", suffix=os.path.splitext(abs_path)[1],
                           dir=os.path.dirname(abs_path))
@@ -198,7 +198,7 @@ def _rewrite(abs_path, fmt, member_name, xml_bytes):
 
 
 def write(abs_path, fmt, patch):
-    """Merge `patch` ({field: value}) into the archive's ComicInfo.xml."""
+    """! @brief Merge `patch` ({field: value}) into the archive's ComicInfo.xml."""
     if not can_write(fmt):
         return {"written": [], "skipped": [{"tag": k, "reason": f"{fmt} is read-only"} for k in patch]}
     existing = _read_xml_bytes(abs_path, fmt)

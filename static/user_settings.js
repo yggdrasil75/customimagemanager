@@ -1,8 +1,8 @@
-/* user_settings.js — Settings → User settings.
+/* user_settings.js - Settings -> User settings.
  *
  * Per-account settings declared with host.add_user_setting (core: search
  * quick-filters; theming: layout, palette; any module can add more). Every
- * signed-in user can save their own — no settings.* permission involved; a
+ * signed-in user can save their own - no settings.* permission involved; a
  * setting that names a feature (theme.choose) is read-only without WRITE on it,
  * and the server enforces the same.
  *
@@ -26,7 +26,7 @@
       const d = await fetch("/api/user/settings").then(r => r.json());
       fields = (d && d.success && d.fields) || [];
     } catch (e) {
-      mount.innerHTML = '<p class="text-xs text-rose-400">Could not load your settings.</p>';
+      mount.innerHTML = '<p class="text-xs text-red-400">Could not load your settings.</p>';
       return;
     }
     pending = {};
@@ -61,7 +61,7 @@
         if (f.is_set) {
           const reset = document.createElement("button");
           reset.type = "button"; reset.textContent = "Reset to default";
-          reset.className = "text-cyan-400 hover:text-cyan-300";
+          reset.className = "text-sky-400 hover:text-sky-300";
           reset.addEventListener("click", () => {
             pending[f.key] = null; markDirty();
             foot.innerHTML = "<span>Will use the default after Save.</span>";
@@ -76,7 +76,7 @@
 
   function markDirty() {
     const b = document.getElementById("user_settings_dirty");
-    if (b) b.textContent = Object.keys(pending).length ? "Unsaved changes — click Save below." : "";
+    if (b) b.textContent = Object.keys(pending).length ? "Unsaved changes - click Save below." : "";
   }
 
   async function persistUserSettings() {

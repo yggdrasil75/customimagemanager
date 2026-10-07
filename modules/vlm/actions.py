@@ -1,5 +1,5 @@
-"""
-AI actions — named prompts the user runs against an image (or many).
+"""! @file
+@brief AI actions - named prompts the user runs against an image (or many).
 ======================================================================
 Each action is {id, name, prompt, target}; the target decides how the
 model's answer lands in the file: description (append), tags (merge as
@@ -26,7 +26,7 @@ DEFAULT_ACTIONS = [
 
 
 def all_actions():
-    """The user's action list (editable in the module tab)."""
+    """! @brief The user's action list (editable in the module tab)."""
     return list(HOST.config.get("oai_actions", []) or [])
 
 
@@ -35,7 +35,7 @@ def _action(action_id):
 
 
 def apply_body(rel, bgr, action):
-    """Fill the fixed body-description slots for each identified person in an
+    """! @brief Fill the fixed body-description slots for each identified person in an
     image (people module's BODY_FIELDS) from one JSON answer."""
     people = HOST.get_service("people")
     if not people:
@@ -57,7 +57,7 @@ def apply_body(rel, bgr, action):
 
 
 def apply(fp, action):
-    """Run one action against a file and merge the result into its metadata.
+    """! @brief Run one action against a file and merge the result into its metadata.
     Returns the regions it added (list), or True/False."""
     c = HOST.core
     target = action.get("target", "description")
@@ -71,8 +71,8 @@ def apply(fp, action):
         res = client.call(prompt + '\n\nRespond ONLY as JSON: {"delete": true|false, "reason": "short reason"}',
                           bgr, "json") or {}
         delete = bool(res.get("delete"))
-        c.write_metadata(fp, meta["tags"], meta["description"], meta["regions"],
-                         flag={"delete": delete, "reason": str(res.get("reason", ""))[:300]})
+        c.update_file(fp, set={"flag": {"delete": delete, "reason": str(res.get("reason", ""))[:300]}},
+                      meta=meta)
         return True
     if target == "body":
         return apply_body(c.rel(fp), bgr, action)
@@ -88,29 +88,23 @@ def apply(fp, action):
                 if n["class_name"] not in classes:
                     classes.append(n["class_name"])
             c.save_classes()
-            c.write_metadata(fp, meta["tags"], meta["description"], meta["regions"] + new)
+            c.update_file(fp, add={"regions": new}, meta=meta)
         return new
     if target == "tags":
         tags = client.call(prompt, bgr, "tags") or []
-        merged = list(meta["tags"])
-        seen = {common.tag_name(t).lower() for t in meta["tags"]}
-        for t in tags:
-            nm = common.tag_name(t)
-            if nm and nm.lower() not in seen:
-                merged.append(common.make_tag(nm, confirmed=False))   # AI suggestion → unconfirmed
-                seen.add(nm.lower())
-        c.write_metadata(fp, merged, meta["description"], meta["regions"])
+        # AI suggestions arrive unconfirmed; names already present are kept as they are.
+        c.update_file(fp, add={"tags": [common.make_tag(common.tag_name(t), confirmed=False)
+                                        for t in tags if common.tag_name(t)]}, meta=meta)
         return tags
     text = (client.call(prompt, bgr, "text") or "").strip()     # description
     if text:
-        desc = (meta["description"] + "\n\n" + text).strip() if meta["description"].strip() else text
-        c.write_metadata(fp, meta["tags"], desc, meta["regions"])
+        c.update_file(fp, add={"description": text}, meta=meta)
     return text
 
 
 def run_one(action, fp, bgr, meta=None):
-    """Run one action on one decoded image; return the editor-apply dict
-    ({regions} | {tags} | {description} | {flag}) — the core AI picker's
+    """! @brief Run one action on one decoded image; return the editor-apply dict
+    ({regions} | {tags} | {description} | {flag}) - the core AI picker's
     contract. Nothing is written except the flag (it lives in the sidecar,
     not the editor's autosave)."""
     c = HOST.core
@@ -120,8 +114,7 @@ def run_one(action, fp, bgr, meta=None):
                           bgr, "json") or {}
         delete, reason = bool(res.get("delete")), str(res.get("reason", ""))[:300]
         meta = meta or c.read_metadata(fp)
-        c.write_metadata(fp, meta["tags"], meta["description"], meta["regions"],
-                         flag={"delete": delete, "reason": reason})
+        c.update_file(fp, set={"flag": {"delete": delete, "reason": reason}}, meta=meta)
         return {"flag": {"delete": delete, "reason": reason},
                 "note": ("🚩 Flagged for deletion: " + reason) if delete else "AI says keep."}
     if t == "body" or t in HOST.action_targets:
@@ -142,16 +135,16 @@ def run_one(action, fp, bgr, meta=None):
 
 
 def picker_run(action_id, fp, bgr, meta):
-    """host.register_ai_actions run_fn: the "Vision LLM" class."""
+    """! @brief host.register_ai_actions run_fn: the "Vision LLM" class."""
     action = _action(action_id)
     if not action:
         raise RuntimeError("Unknown AI action.")
     return run_one(action, fp, bgr, meta)
 
 
-# ── routes ────────────────────────────────────────────────────────────────────
+# -- routes --------------------------------------------------------------------
 def run_llm():
-    """Run one action on one file and return the raw result for the editor to
+    """! @brief Run one action on one file and return the raw result for the editor to
     apply live (it is NOT written here; the editor's autosave does that).
     Kept for the bulk / comic bars; the editor itself uses /api/ai/run."""
     c = HOST.core
@@ -178,7 +171,7 @@ def run_llm():
 
 
 def bulk_llm():
-    """Run an action on many files, writing the result into each."""
+    """! @brief Run an action on many files, writing the result into each."""
     filenames = request.json.get("filenames", [])
     action = _action(request.json.get("action_id", ""))
     if not action:
@@ -193,9 +186,9 @@ def bulk_llm():
             if apply(fp, action):
                 applied += 1
             done += 1
-            HOST.config["status_text"] = f"AI ({action.get('name', 'action')}): {done}/{total}"
+            HOST.set_status(f"AI ({action.get('name', 'action')}): {done}/{total}")
         except Exception as e:
             errors.append(fn)
             HOST.logger.error(f"bulk_llm {fn}: {e}")
-    HOST.config["status_text"] = "Ready."
+    HOST.set_status("Ready.")
     return jsonify({"success": True, "done": done, "applied": applied, "errors": errors})

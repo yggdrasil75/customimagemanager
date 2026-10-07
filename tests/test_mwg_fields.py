@@ -1,4 +1,5 @@
-"""mwg-rs region XML: write → parse round trip, and the type==class rule."""
+"""! @file
+@brief mwg-rs region XML: write -> parse round trip, and the type==class rule."""
 import json
 from xml.sax.saxutils import escape
 from modules.metadata import mwg_fields as m

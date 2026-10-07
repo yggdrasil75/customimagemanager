@@ -1,18 +1,18 @@
-"""
-Helpers for fetchers that import whole photo libraries (Immich, Google
+"""! @file
+@brief Helpers for fetchers that import whole photo libraries (Immich, Google
 Takeout, Apple / iCloud). The queue, worker, watches (periodic runs), ledger
 and ingest are the fetch module's; this file only has what those importers
 share on top:
 
-  * Tree — one merged view over export folders and .zip archives (Takeout and
+  * Tree - one merged view over export folders and .zip archives (Takeout and
     Apple split an export over many zips and put a photo in one archive and
     its sidecar in another; paths inside the zips line up, so they merge);
-  * is_media / is_video — what the upload pipeline accepts as photo/video;
-  * packet() — the upload-metadata dict for one photo: tags (incl.
+  * is_media / is_video - what the upload pipeline accepts as photo/video;
+  * packet() - the upload-metadata dict for one photo: tags (incl.
     favourite / archived / hidden flags and people's names), description,
     named face regions, albums, and capture date + GPS as XMP, the last two
     only where the file carries none of its own (a camera's EXIF wins);
-  * layout_meta() — the {year}/{month}/{folder} keys the folder template uses.
+  * layout_meta() - the {year}/{month}/{folder} keys the folder template uses.
 """
 
 import os
@@ -29,7 +29,7 @@ _BAD = re.compile(r"[\\/:*?\"<>|\x00-\x1f]+")
 
 
 def is_media(name):
-    """Photos and videos the upload pipeline accepts (not sidecars, CSVs, HTML)."""
+    """! @brief Photos and videos the upload pipeline accepts (not sidecars, CSVs, HTML)."""
     return os.path.splitext(name)[1].lower() in _MEDIA_EXTS
 
 
@@ -43,7 +43,7 @@ def safe_name(name, fallback="imported"):
 
 
 def embedded_facts(path):
-    """(has capture date, has GPS) in the file's own EXIF (HEIC and raws too)."""
+    """! @brief (has capture date, has GPS) in the file's own EXIF (HEIC and raws too)."""
     try:
         facts = mt.capture_xmp(path)
     except Exception:
@@ -53,7 +53,7 @@ def embedded_facts(path):
 
 def packet(path, *, taken=None, gps=None, description="", tags=(), albums=(), favorite=False,
            archived=False, hidden=False, faces=(), people=(), opts=None):
-    """Upload metadata for one imported file. `opts` carries the user's
+    """! @brief Upload metadata for one imported file. `opts` carries the user's
     choices: favorite_tag / archived_tag / hidden_tag ('' = don't tag),
     people_prefix, source_tag, overwrite_dates."""
     o = opts or {}
@@ -85,13 +85,13 @@ def packet(path, *, taken=None, gps=None, description="", tags=(), albums=(), fa
 
 
 def layout_meta(taken, folder=""):
-    """Keys for the job's folder template, e.g. 'immich/{year}'."""
+    """! @brief Keys for the job's folder template, e.g. 'immich/{year}'."""
     folder = "/".join(safe_name(p) for p in str(folder or "").replace("\\", "/").split("/") if p.strip())
     return {"year": f"{taken.year:04d}" if taken else "unknown-date",
             "month": f"{taken.month:02d}" if taken else "00", "folder": folder}
 
 
-# ── merged view over folders and zips ───────────────────────────────────────
+# -- merged view over folders and zips ---------------------------------------
 class Entry:
     __slots__ = ("vpath", "size", "crc", "mtime", "_open")
 
@@ -120,7 +120,7 @@ class Entry:
         return dst
 
     def content_key(self):
-        """Same bytes -> same key without reading them: zip members carry a
+        """! @brief Same bytes -> same key without reading them: zip members carry a
         CRC32; loose files fall back to size + name (album copies keep it)."""
         if self.crc is not None:
             return f"c{self.crc:08x}:{self.size}"
@@ -181,8 +181,8 @@ class Tree:
 
 
 def export_sets(folder, settle_s=600):
-    """Group an import folder's contents into export sets: Takeout parts
-    'takeout-<stamp>-001.zip…' form one set; any other zip or sub-folder is its
+    """! @brief Group an import folder's contents into export sets: Takeout parts
+    'takeout-<stamp>-001.zip...' form one set; any other zip or sub-folder is its
     own set. Anything modified in the last `settle_s` seconds (still being
     copied or synced in) is left for a later run. -> [(set_id, [paths], signature)]"""
     import time
@@ -214,11 +214,11 @@ def export_sets(folder, settle_s=600):
     return out
 
 
-# ── importer sources + the standard importer routes ─────────────────────────
+# -- importer sources + the standard importer routes -------------------------
 # A SOURCE is one thing an importer pulls from: an Immich account, a Takeout
 # folder, an iCloud login. Its job target is "<fetcher>:<source id>", so
 # "import now" is a fetch-queue row and "every N hours" is a fetch watch on
-# that target — no importer has its own queue, worker or scheduler.
+# that target - no importer has its own queue, worker or scheduler.
 
 SOURCES_DDL = """
 CREATE TABLE IF NOT EXISTS import_sources (
@@ -238,7 +238,7 @@ def import_root(host):
 
 
 def resolve_in_root(host, rel):
-    """A path chosen in the UI, confined to the import folder."""
+    """! @brief A path chosen in the UI, confined to the import folder."""
     root = import_root(host)
     p = os.path.abspath(os.path.join(root, str(rel or "")))
     if p != root and not p.startswith(root + os.sep):
@@ -249,7 +249,7 @@ def resolve_in_root(host, rel):
 
 
 def folder_template(tpl, default):
-    """The fetch module reads a placeholder in a template's LAST segment as the
+    """! @brief The fetch module reads a placeholder in a template's LAST segment as the
     file name (gallery-dl style: '{category}/{id}'). Importer templates are
     folders ('immich/{year}'), so the original name is appended unless the
     user already names the file."""
@@ -261,7 +261,7 @@ def folder_template(tpl, default):
 
 
 class Importer:
-    """The server half of one importer's settings tab. The module supplies:
+    """! @brief The server half of one importer's settings tab. The module supplies:
 
       fetcher_id     the id it registers with the fetch registry
       validate(cfg, secrets, source_id) -> (cfg, secrets, label, prompt|None)
@@ -296,7 +296,7 @@ class Importer:
         if file_source:
             host.add_route(base + "/browse", self.api_browse, endpoint=ep + "_browse", feature="import")
 
-    # helpers used by the fetcher
+    ## @brief helpers used by the fetcher
     def target(self, source_id):
         return f"{self.fid}:{int(source_id)}"
 
@@ -330,7 +330,7 @@ class Importer:
         d["has_secrets"] = bool(self._json.loads(d.pop("secrets") or "{}"))
         return d
 
-    # routes
+    ## @brief routes
     def api_state(self):
         f = self._fetch()
         try:
@@ -462,7 +462,7 @@ _shared_done = set()
 
 
 def _register_shared(host):
-    """Registered once however many importers are enabled."""
+    """! @brief Registered once however many importers are enabled."""
     if id(host) in _shared_done:
         return
     _shared_done.add(id(host))
@@ -477,11 +477,11 @@ def _register_shared(host):
                                  "absolute). In Docker, ./imports is mounted there.")
 
 
-# ── items and the one delivery loop every importer uses ────────────────────
+# -- items and the one delivery loop every importer uses --------------------
 class Item:
-    """One photo/video an importer found.
+    """! @brief One photo/video an importer found.
 
-    key       the source's stable id (asset id, content key) — the ledger key
+    key       the source's stable id (asset id, content key) - the ledger key
     opener    fn(tmpdir) -> local path of the file (download / extract)
     taken     aware capture datetime or None; gps (lat, lon[, alt]) or None
     faces     [{"name", "cx", "cy", "w", "h"}]; people: names without boxes
@@ -520,7 +520,7 @@ def _inherit(comp, parent):
 
 
 def deliver(ctx, items, tmpdir, on_file, opts):
-    """Hand Items to the fetch module's ingest: skip what the ledger already
+    """! @brief Hand Items to the fetch module's ingest: skip what the ledger already
     has, record skips and failures, fetch each file through its opener, attach
     its metadata packet, and let companions follow their still. Yields
     (path, meta) per file so the fetch worker can pace itself, wait for disk
@@ -557,12 +557,12 @@ def _deliver_one(ctx, it, tmpdir, on_file, opts):
 
 
 def map_meta(meta):
-    """fetch map_meta for importers: the prepared upload metadata packet."""
+    """! @brief fetch map_meta for importers: the prepared upload metadata packet."""
     return dict((meta or {}).get("packet") or {})
 
 
 def run_export_folder(ctx, imp, src, tmpdir, on_file, items_of):
-    """Shared by the Takeout and Apple-export importers: the source is a zip
+    """! @brief Shared by the Takeout and Apple-export importers: the source is a zip
     or a folder in the import folder. A folder is split into export sets
     (all parts of one Takeout, one Apple export, or any other zip / sub-
     folder); a set already delivered whole is skipped until it changes, so a
@@ -586,7 +586,7 @@ def run_export_folder(ctx, imp, src, tmpdir, on_file, items_of):
             continue
         tree = Tree(paths)
         try:
-            ctx.message(f"reading {sid}…")
+            ctx.message(f"reading {sid}...")
             items = list(items_of(tree))
             ctx.total((ctx._total or 0) + len(items))
             ctx.message("")

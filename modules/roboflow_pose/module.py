@@ -1,5 +1,5 @@
-"""
-Roboflow pose providers (RF-DETR keypoints + DETRPose), 17 COCO keypoints.
+"""! @file
+@brief Roboflow pose providers (RF-DETR keypoints + DETRPose), 17 COCO keypoints.
 ======================================================================
 Two one-stage (no person detector needed) transformer pose providers:
 
@@ -44,7 +44,7 @@ _DP_SIZES = ["n", "s", "m", "l", "x"]
 _DP_URL = "https://github.com/SebastianJanampa/DETRPose/releases/download/model_weights/detrpose_hgnetv2_{}.pth"
 
 
-# ── RF-DETR ──────────────────────────────────────────────────────────────────
+# -- RF-DETR ------------------------------------------------------------------
 def _rf_build():
     m = RFDETRKeypointPreview()
     try:
@@ -79,9 +79,9 @@ def _rf_people(img_bgr, conf=0.25):
              "conf": float(dc[i])} for i in range(len(xy))]
 
 
-# ── DETRPose (torch, official release .pth) ──────────────────────────────────
+# -- DETRPose (torch, official release .pth) ----------------------------------
 def _dp_weights(size):
-    """Official COCO checkpoint for `size`, downloaded once into models/detrpose/pose/."""
+    """! @brief Official COCO checkpoint for `size`, downloaded once into models/detrpose/pose/."""
     name = f"detrpose_hgnetv2_{size}"
     return common.fetch_file(_DP_URL.format(size),
                              os.path.join(model_registry.model_dir("detrpose", "pose"), name + ".pth"))
@@ -126,7 +126,7 @@ def _dp_people(img_bgr, size, conf=0.25):
 
 
 def register(host):
-    types17 = [{"value": "body", "label": "Body · 17 pts"}]
+    types17 = [{"value": "body", "label": "Body | 17 pts"}]
 
     host.provide_model(
         "pose", "rfdetr", label="RF-DETR keypoints", family="Roboflow", sizes=[],

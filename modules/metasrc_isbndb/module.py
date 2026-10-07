@@ -1,4 +1,5 @@
-"""ISBNdb — book metadata source (API key required)."""
+"""! @file
+@brief ISBNdb - book metadata source (API key required)."""
 MANIFEST = {
     "id": "metasrc_isbndb", "name": "ISBNdb (books)", "version": "1.0.0",
     "description": "Book metadata from isbndb.com. Needs an ISBNdb API key.",
@@ -17,7 +18,7 @@ def register(host):
     def _cand(b):
         return {"id": b.get("isbn13") or b.get("isbn", ""), "title": b.get("title", ""),
                 "subtitle": ", ".join(b.get("authors") or []) +
-                            (f" · {b['date_published'][:4]}" if b.get("date_published") else ""),
+                            (f" | {b['date_published'][:4]}" if b.get("date_published") else ""),
                 "thumb": b.get("image"),
                 "fields": {"title": b.get("title", ""), "authors": b.get("authors") or [],
                            "publisher": b.get("publisher", ""), "published": str(b.get("date_published") or ""),

@@ -1,5 +1,5 @@
-"""
-Temporal and audio media for dedup: decode, phash signatures, naive scores.
+"""! @file
+@brief Temporal and audio media for dedup: decode, phash signatures, naive scores.
 ======================================================================
 Stills keep the existing pipeline (phash8 / phash32 in `files`, HEURDU
 change net, naive cell compare). This file is everything a timeline needs:
@@ -83,7 +83,7 @@ _POP8 = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).sum(1).as
 
 
 def _popcount_u8(x: np.ndarray) -> np.ndarray:
-    """Hamming weight along the last axis of a uint8 array (int32)."""
+    """! @brief Hamming weight along the last axis of a uint8 array (int32)."""
     if hasattr(np, "bitwise_count"):
         return np.bitwise_count(x).sum(axis=-1, dtype=np.int32)
     return _POP8[x].sum(axis=-1, dtype=np.int32)
@@ -93,7 +93,7 @@ def _have(tool: str) -> bool:
     return shutil.which(tool) is not None
 
 
-# ── detection ────────────────────────────────────────────────────────────────
+# -- detection ----------------------------------------------------------------
 def is_video(path: str) -> bool:
     return bool(mt and mt.is_video(path))
 
@@ -103,7 +103,7 @@ def is_audio(path: str) -> bool:
 
 
 def is_animated_jxl(path: str) -> bool:
-    """Animated JXL without decoding when possible: upload writes the frame
+    """! @brief Animated JXL without decoding when possible: upload writes the frame
     delays into the sidecar (<mm:animDelays>); no sidecar -> header decode."""
     if not path.lower().endswith(".jxl"):
         return False
@@ -120,7 +120,7 @@ def is_animated_jxl(path: str) -> bool:
 
 
 def media_kind(path: str) -> str:
-    """'video' | 'anim' | 'audio' | 'still' for dedup routing (anim/video by
+    """! @brief 'video' | 'anim' | 'audio' | 'still' for dedup routing (anim/video by
     source frame count is refined by the signature: a 20-frame mp4 is 'anim')."""
     if is_audio(path):
         return "audio"
@@ -131,7 +131,7 @@ def media_kind(path: str) -> str:
     return "still"
 
 
-# ── video / animation decode ─────────────────────────────────────────────────
+# -- video / animation decode -------------------------------------------------
 def probe(path: str) -> "dict | None":
     if mt is None:
         return None
@@ -142,7 +142,7 @@ def probe(path: str) -> "dict | None":
 
 
 def source_frames(path: str, meta: "dict | None" = None) -> int:
-    """Source frame count of a video (container count, else duration x fps)."""
+    """! @brief Source frame count of a video (container count, else duration x fps)."""
     meta = meta if meta is not None else (probe(path) or {})
     n = meta.get("nb_frames")
     if n:
@@ -167,7 +167,7 @@ def _resize(f: np.ndarray, fit=None, square=None) -> np.ndarray:
 
 
 def _ffmpeg_frames(path, w, h, fps=None, max_frames=MAX_STEPS, timeout=600):
-    """RGB uint8 [n, h, w, 3] from one ffmpeg pipe; fps None = every frame."""
+    """! @brief RGB uint8 [n, h, w, 3] from one ffmpeg pipe; fps None = every frame."""
     vf = (f"fps={fps:.6f}," if fps else "") + f"scale={w}:{h}:flags=area"
     cmd = ["ffmpeg", "-v", "error", "-i", path, "-an", "-sn", "-vf", vf]
     if not fps:
@@ -233,20 +233,20 @@ def decode_frames(path: str, *, fit: "int | None" = SMALL_SIDE, square: "int | N
 
 
 def _ahash(gray: np.ndarray, size: int) -> np.ndarray:
-    """[n, h, w] uint8 -> [n, size*size/8] packed aHash (manager._ahash_bytes per frame)."""
+    """! @brief [n, h, w] uint8 -> [n, size*size/8] packed aHash (manager._ahash_bytes per frame)."""
     small = np.stack([cv2.resize(g, (size, size), interpolation=cv2.INTER_AREA) for g in gray])
     bits = small >= small.reshape(len(small), -1).mean(axis=1)[:, None, None]
     return np.packbits(bits.reshape(len(small), -1), axis=1)
 
 
 def frame_hashes(frames: np.ndarray) -> "tuple[np.ndarray, np.ndarray]":
-    """(h64 [n,8], h1024 [n,128]) for RGB frames."""
+    """! @brief (h64 [n,8], h1024 [n,128]) for RGB frames."""
     gray = np.stack([cv2.cvtColor(f, cv2.COLOR_RGB2GRAY) for f in frames])
     return _ahash(gray, 8), _ahash(gray, 32)
 
 
 def compute_seq_sig(path: str) -> "dict | None":
-    """Signature of an animation / video, or None when it cannot be decoded."""
+    """! @brief Signature of an animation / video, or None when it cannot be decoded."""
     r = decode_frames(path, fit=SMALL_SIDE)
     if r is None:
         return None
@@ -257,9 +257,9 @@ def compute_seq_sig(path: str) -> "dict | None":
             "h64": h64, "h1024": h1024}
 
 
-# ── sequence phash: candidates + compare ─────────────────────────────────────
+# -- sequence phash: candidates + compare -------------------------------------
 def seq_phash_cost(h1024_a: np.ndarray, h1024_b: np.ndarray) -> np.ndarray:
-    """Per-step cost [na, nb] 0..1 from 1024-bit Hamming distance."""
+    """! @brief Per-step cost [na, nb] 0..1 from 1024-bit Hamming distance."""
     a, b = np.asarray(h1024_a, np.uint8), np.asarray(h1024_b, np.uint8)
     d = np.empty((len(a), len(b)), np.int32)
     step = max(1, (32 << 20) // max(1, len(b) * a.shape[1]))
@@ -269,12 +269,12 @@ def seq_phash_cost(h1024_a: np.ndarray, h1024_b: np.ndarray) -> np.ndarray:
 
 
 def seq_phash_score(sig_a: dict, sig_b: dict) -> float:
-    """Video / animation phash similarity 0..1 (DTW over per-step 1024-bit cost)."""
+    """! @brief Video / animation phash similarity 0..1 (DTW over per-step 1024-bit cost)."""
     return seq_align.dtw_score(seq_phash_cost(sig_a["h1024"], sig_b["h1024"]))
 
 
 def _index_steps(h64: np.ndarray) -> np.ndarray:
-    """Steps worth indexing: not flat (black / white frames match everything)
+    """! @brief Steps worth indexing: not flat (black / white frames match everything)
     and not a near-repeat of the previous kept step (static scenes)."""
     pc = _popcount_u8(h64)
     keep, last = [], None
@@ -340,9 +340,9 @@ def naive_seq_score(frames_a: np.ndarray, frames_b: np.ndarray, h1024_a, h1024_b
     return seq_align.path_score(path, cost, na, nb)
 
 
-# ── audio decode + fingerprint ───────────────────────────────────────────────
+# -- audio decode + fingerprint -----------------------------------------------
 def decode_audio(path: str, sr: int = AUDIO_SR, max_s: float = AUDIO_MAX_S) -> "np.ndarray | None":
-    """Mono float32 PCM at `sr` (first max_s seconds), or None."""
+    """! @brief Mono float32 PCM at `sr` (first max_s seconds), or None."""
     if not _have("ffmpeg"):
         return None
     cmd = ["ffmpeg", "-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", str(int(sr)),
@@ -362,7 +362,7 @@ def _band_edges(sr: int, n_fft: int) -> np.ndarray:
 
 
 def audio_fingerprint(pcm: np.ndarray, sr: int = AUDIO_SR) -> np.ndarray:
-    """Haitsma-Kalker sub-fingerprints: uint32 [n] (one per AUDIO_HOP samples)."""
+    """! @brief Haitsma-Kalker sub-fingerprints: uint32 [n] (one per AUDIO_HOP samples)."""
     x = np.asarray(pcm, np.float32)
     if len(x) < AUDIO_FRAME + AUDIO_HOP:
         return np.zeros(0, np.uint32)
@@ -398,7 +398,7 @@ def compute_audio_sig(path: str) -> "dict | None":
 
 
 def _sampled(fp: np.ndarray):
-    """Content-defined subsample: (positions, values) whose value hash % AUDIO_SAMPLE == 0."""
+    """! @brief Content-defined subsample: (positions, values) whose value hash % AUDIO_SAMPLE == 0."""
     v = fp.astype(np.uint64)
     good = (fp != 0) & (fp != 0xFFFFFFFF)
     h = ((v * np.uint64(2654435761)) >> np.uint64(16)) & np.uint64(0xFFFF)
@@ -407,7 +407,7 @@ def _sampled(fp: np.ndarray):
 
 
 def audio_offset(fa: np.ndarray, fb: np.ndarray) -> "int | None":
-    """Most voted offset (pos_b - pos_a) from exact sub-fingerprint matches, or None."""
+    """! @brief Most voted offset (pos_b - pos_a) from exact sub-fingerprint matches, or None."""
     good_b = (fb != 0) & (fb != 0xFFFFFFFF)
     pos_b = {}
     for p in np.nonzero(good_b)[0].tolist():
@@ -427,7 +427,7 @@ def audio_offset(fa: np.ndarray, fb: np.ndarray) -> "int | None":
 
 
 def audio_block_profile(fa: np.ndarray, fb: np.ndarray, off: int) -> "list[tuple[int, int, float]]":
-    """Per block of A's overlap with B at offset `off`: (start_a, length, BER)."""
+    """! @brief Per block of A's overlap with B at offset `off`: (start_a, length, BER)."""
     a0, a1 = max(0, -off), min(len(fa), len(fb) - off)
     out = []
     for s in range(a0, a1, AUDIO_BLOCK):
@@ -440,7 +440,7 @@ def audio_block_profile(fa: np.ndarray, fb: np.ndarray, off: int) -> "list[tuple
 
 
 def audio_phash_score(sig_a: dict, sig_b: dict, off: "int | None" = None) -> "tuple[float, int | None]":
-    """(score 0..1, offset in sub-fingerprints) — matched blocks / longer track."""
+    """! @brief (score 0..1, offset in sub-fingerprints) - matched blocks / longer track."""
     fa, fb = sig_a["fp"], sig_b["fp"]
     off = audio_offset(fa, fb) if off is None else off
     if off is None:
@@ -455,7 +455,7 @@ def audio_phash_score(sig_a: dict, sig_b: dict, off: "int | None" = None) -> "tu
 
 
 def audio_candidates(fps: "list[np.ndarray]", min_votes: int = 3, max_run: int = 32) -> "list[tuple[int, int]]":
-    """Candidate track pairs from exact matches of content-sampled sub-fingerprints
+    """! @brief Candidate track pairs from exact matches of content-sampled sub-fingerprints
     voting for one offset (bucketed by 4 steps)."""
     vals, own, pos = [], [], []
     for k, fp in enumerate(fps):
@@ -494,7 +494,7 @@ def audio_candidates(fps: "list[np.ndarray]", min_votes: int = 3, max_run: int =
 
 
 def _log_spec_seconds(pcm: np.ndarray, sr: int, bands: int = 64) -> np.ndarray:
-    """[seconds, bands] log power (dB) of 1 s windows."""
+    """! @brief [seconds, bands] log power (dB) of 1 s windows."""
     n = len(pcm) // sr
     if n == 0:
         return np.zeros((0, bands), np.float32)
@@ -508,7 +508,7 @@ def _log_spec_seconds(pcm: np.ndarray, sr: int, bands: int = 64) -> np.ndarray:
 
 def naive_audio_score(pcm_a: np.ndarray, pcm_b: np.ndarray, offset_s: float = 0.0,
                       sr: int = NAIVE_AUDIO_SR) -> float:
-    """Naive audio: per-second log spectra at the given offset (b = a shifted by
+    """! @brief Naive audio: per-second log spectra at the given offset (b = a shifted by
     offset_s), gain-normalised; a second is unchanged when the mean |dB| gap is
     under NAIVE_AUDIO_TOL_DB. Unchanged seconds / longer track."""
     shift = int(round(offset_s * sr))           # sample-exact: b[k + shift] ~ a[k]
@@ -527,12 +527,12 @@ def naive_audio_score(pcm_a: np.ndarray, pcm_b: np.ndarray, offset_s: float = 0.
 
 
 def audio_quality(path: str) -> str:
-    """'Lossless' or the lossy codec family, for the dedup card."""
+    """! @brief 'Lossless' or the lossy codec family, for the dedup card."""
     e = os.path.splitext(path)[1].lower()
     return "Lossless" if e in LOSSLESS_AUDIO else (e.lstrip(".").upper() or "?")
 
 
-# ── signature (de)serialisation ──────────────────────────────────────────────
+# -- signature (de)serialisation ----------------------------------------------
 _ARRAYS = ("h64", "h1024", "fp")
 
 
@@ -562,7 +562,7 @@ def sha256_file(path: str) -> str:
 
 
 def decode_window(path: str, start_s: float, n_frames: int, fit: "int | None" = None) -> "np.ndarray | None":
-    """`n_frames` CONSECUTIVE source frames from `start_s` (native resolution,
+    """! @brief `n_frames` CONSECUTIVE source frames from `start_s` (native resolution,
     or long side `fit`), RGB uint8 [n, h, w, 3]; for the HEURDU animation
     trainer. Animated JXL: a run of its frames (start_s is a frame index)."""
     if path.lower().endswith(".jxl"):

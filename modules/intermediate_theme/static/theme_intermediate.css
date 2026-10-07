@@ -1,4 +1,4 @@
-/* theme_intermediate.css — the "intermediate" functional theme: one
+/* theme_intermediate.css - the "intermediate" functional theme: one
    full-screen pane with Timeline / Albums / People / Music tabs down the
    left. Keyed on body[data-functional="intermediate"]; hides and lays out
    only, never un-hides a gated element. */

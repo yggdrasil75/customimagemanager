@@ -1,5 +1,5 @@
-"""
-Pipeline graph — node-based editor for the Smart Tag pipeline.
+"""! @file
+@brief Pipeline graph - node-based editor for the Smart Tag pipeline.
 ======================================================================
 A ComfyUI-style canvas for the pipeline tree, built on Drawflow (MIT,
 github.com/jerosoler/Drawflow; 46 KB JS + 2 KB CSS, no dependencies).

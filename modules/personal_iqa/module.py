@@ -1,5 +1,5 @@
-"""
-Personal IQA — learns the user's own taste from their star ratings.
+"""! @file
+@brief Personal IQA - learns the user's own taste from their star ratings.
 ======================================================================
 Tokens per image (see net.py):
   embed     whole image through the encoder            (encoder picked below)
@@ -38,10 +38,10 @@ An image is trained on when the required models RAN on it (face/pose
             on its foreground and a detailed one on the small stuff too.
             personal_iqa_mode = auto (by detail level) | simple | vigorous.
 All of these are derived from passes that already ran (detector, segmenter,
-depth, the encoder) or from file metadata — see extra.py.
+depth, the encoder) or from file metadata - see extra.py.
 
 Source of truth stays where the app keeps it: tags in files/XMP, pose in the
-sidecar, faces in face_regions — all read live at train and score time. The
+sidecar, faces in face_regions - all read live at train and score time. The
 only thing cached here is the encoder + base-IQA output, keyed on file mtime
 and the encoder/base ids, because those are the expensive, image-only parts.
 
@@ -115,7 +115,7 @@ DETAIL_SPLIT = 0.5          # auto mode: detail level at or above this = vigorou
 
 
 def missing_parts(feats, required):
-    """Which required parts were NOT produced. For face/pose this means the model
+    """! @brief Which required parts were NOT produced. For face/pose this means the model
     did not run on the image (a landscape with zero faces still counts as done),
     so non-human photos train too; embed/iqa/tags must simply be present."""
     proc = feats.get("_processed") or {}
@@ -136,7 +136,7 @@ def register(host):
     core = host.core
 
     host.add_asset("personal_iqa.js")
-    host.add_settings_tab("personal_iqa", "Personal IQA", icon="🎯")
+    host.add_settings_tab("personal_iqa", "Personal IQA")
     host.add_table(_DDL)
     host.add_config_key("personal_iqa_base", default="nima")
     host.add_config_key("personal_iqa_encoder", default="")       # "" = the selected embed provider
@@ -184,7 +184,7 @@ def register(host):
 
     @functools.lru_cache(maxsize=20000)
     def _text_vec(text, _provider):
-        """embed.text of one tag, memoised per provider (tags repeat across the library)."""
+        """! @brief embed.text of one tag, memoised per provider (tags repeat across the library)."""
         fn = _cap("embed.text")
         try:
             v = fn(text) if fn else None
@@ -200,7 +200,7 @@ def register(host):
         return [list(v) for v in vs if v]
 
     def _box_tags(box_texts):
-        """[(text, cx, cy, w, h, confirmed)] -> box_tag rows: text embed ++ geometry."""
+        """! @brief [(text, cx, cy, w, h, confirmed)] -> box_tag rows: text embed ++ geometry."""
         pid = host.broker.selected_id("embed.text") or ""
         out = []
         for text, *geo in (box_texts or [])[:TAG_CAP]:
@@ -209,9 +209,9 @@ def register(host):
                 out.append(list(v) + [float(x) for x in geo])
         return out
 
-    # ── expensive, image-only parts (cached on mtime+key) ────────────────
+    # -- expensive, image-only parts (cached on mtime+key) ----------------
     def _encode(img, fp=None):
-        """Every image-only part: whole/tile/object/region embeddings, base IQA,
+        """! @brief Every image-only part: whole/tile/object/region embeddings, base IQA,
         depth/style/comp/exif vectors. Returns a dict; all lists are token rows."""
         enc = _cap("embed", host.config.get("personal_iqa_encoder"))
         cap = core.object_grouping.downscale_to_cap
@@ -356,7 +356,7 @@ def register(host):
              "mode", "names", "proc", "box_texts")
 
     def _cached(db, rel_path, mtime):
-        """Encoder/detector/depth/base outputs for one file; on miss decodes at FULL
+        """! @brief Encoder/detector/depth/base outputs for one file; on miss decodes at FULL
         resolution, computes and stores. Returns the _encode dict."""
         key = _cache_key()
         row = db.execute("SELECT * FROM personal_iqa_cache WHERE rel_path=?", (rel_path,)).fetchone()
@@ -366,15 +366,15 @@ def register(host):
                      tile=json.loads(row["tiles"]), base_iqa=row["base_iqa"])
             return o
         o = _encode(_decode(rel_path), _path(rel_path))
-        db.execute("INSERT INTO personal_iqa_cache(rel_path,mtime,key,embed,tiles,base_iqa,more,trained) "
-                   "VALUES(?,?,?,?,?,?,?,0) ON CONFLICT(rel_path) DO UPDATE SET mtime=excluded.mtime, "
-                   "key=excluded.key, embed=excluded.embed, tiles=excluded.tiles, base_iqa=excluded.base_iqa, "
-                   "more=excluded.more",
-                   (rel_path, mtime, key, json.dumps(o["embed"][0] if o["embed"] else []), json.dumps(o["tile"]),
-                    o["base_iqa"], json.dumps({k: o[k] for k in _MORE})))
+        host.update_file(rel_path, table="personal_iqa_cache", dont_write=True, commit=False,
+                         defaults={"trained": 0},
+                         set={"mtime": mtime, "key": key,
+                              "embed": json.dumps(o["embed"][0] if o["embed"] else []),
+                              "tiles": json.dumps(o["tile"]), "base_iqa": o["base_iqa"],
+                              "more": json.dumps({k: o[k] for k in _MORE})})
         return o
 
-    # ── live parts (tags / faces / pose from where the app stores them) ──
+    ## @brief -- live parts (tags / faces / pose from where the app stores them) --
     def _live(db, rel_path, img=None):
         out = {k: [] for k in TOKEN_DIMS if k != "iqa"}
         out["tags"] = net.hash_tags([])
@@ -437,9 +437,11 @@ def register(host):
                 except Exception:
                     pass
             if ext:
-                db.execute("UPDATE personal_iqa_cache SET extra=? WHERE rel_path=?",
-                           (json.dumps({"face": out["face"], "face_raw": out["face_raw"], "pose": pose,
-                                        "face_done": proc["face"], "pose_done": proc["pose"]}), rel_path))
+                host.update_file(table="personal_iqa_cache", where=("rel_path=?", (rel_path,)),
+                                 dont_write=True, commit=False,
+                                 set={"extra": json.dumps({"face": out["face"], "face_raw": out["face_raw"],
+                                                           "pose": pose, "face_done": proc["face"],
+                                                           "pose_done": proc["pose"]})})
         # Normalisation belongs to the pose side: pose.tokens dispatches to the
         # provider that made the skeleton (or the COCO default), so a new pose
         # model with an odd topology only has to ship its own tokens function.
@@ -453,7 +455,7 @@ def register(host):
         return out
 
     def features(db, rel_path, mtime=None, img=None):
-        """All tokens for one image. With rel_path: stored tags/faces/pose + cached encoder output;
+        """! @brief All tokens for one image. With rel_path: stored tags/faces/pose + cached encoder output;
         img (may be downscaled) only serves as a fallback for missing faces/pose."""
         o = _cached(db, rel_path, mtime) if rel_path else _encode(img)
         base_q = o["base_iqa"]
@@ -472,7 +474,7 @@ def register(host):
         s["_missing"] = missing_parts(s, required())
         return s
 
-    # ── checkpoint ───────────────────────────────────────────────────────
+    # -- checkpoint -------------------------------------------------------
     def _ckpt():
         return torch.load(ckpt_path, map_location="cpu") if os.path.exists(ckpt_path) else None
 
@@ -499,9 +501,9 @@ def register(host):
         mt = _metrics()
         return bool(mt) and mt.get("val_spearman", 0) > mt.get("base_spearman", 0)
 
-    # ── training pass (background thread) ────────────────────────────────
+    # -- training pass (background thread) --------------------------------
     def _mode_aug(feats, p=MODE_AUG_P):
-        """Every vigorous sample is also shown as its simple-mode view some of the
+        """! @brief Every vigorous sample is also shown as its simple-mode view some of the
         time, so the gate learns both modes from one extraction."""
         return net.simplify(feats) if (feats.get("mode") or [[0, 0]])[0][1] and random.random() < p else feats
 
@@ -570,7 +572,7 @@ def register(host):
                 # off; a pretrained (iqa_train) model larger than the tier is kept as is.
                 rebuild = model is None or (d, depth) > (model.d, model.depth) and not host.config.get("personal_iqa_grow")
                 if not rebuild and set(dims) - set(model.dims):      # new token types since the checkpoint
-                    state["text"] = "[Personal IQA] new token types — adding projections"
+                    state["text"] = "[Personal IQA] new token types - adding projections"
                     model = model.grow(model.d, model.depth, dims=dims).to(dev)
             if rebuild is True:
                 model = net.Scorer(dims, d, depth).to(dev)
@@ -598,23 +600,23 @@ def register(host):
             metrics.update(n_train=len(batch), n_ratings=len(rows), d=model.d, depth=model.depth, size=size,
                            rebuilt=rebuild, trained_at=time.time(), skipped=skipped)
             _save(model, metrics)
-            db.execute("UPDATE personal_iqa_cache SET trained=1 WHERE rel_path IN (%s)"
-                       % ",".join("?" * len(batch)), [s["rel"] for s in batch])
-            db.commit()
+            host.update_file(table="personal_iqa_cache", dont_write=True, set={"trained": 1},
+                             where=("rel_path IN (%s)" % ",".join("?" * len(batch)),
+                                    [s["rel"] for s in batch]))
             state["last"] = time.time()
             ok = metrics["val_spearman"] > metrics["base_spearman"]
             state["text"] = (f"Personal IQA: val spearman {metrics['val_spearman']:.3f} vs base "
-                             f"{metrics['base_spearman']:.3f}, val mse {metrics['val_mse']:.4f} — "
+                             f"{metrics['base_spearman']:.3f}, val mse {metrics['val_mse']:.4f} - "
                              + ("enabled" if ok else "NOT better than base yet; provider stays disabled"))
         except Exception as e:
             host.logger.error(f"personal_iqa train: {e}")
-            state["text"] = f"Personal IQA: training failed — {e}"
+            state["text"] = f"Personal IQA: training failed - {e}"
         finally:
             core.db_close(); state["busy"] = False
 
-    # ── service for iqa_train (pretraining from dataset folders) ────────
+    # -- service for iqa_train (pretraining from dataset folders) --------
     def _fit(train, val, d, depth, epochs=10, batch=BATCH, lr=LR, say=None, stop=None, size=None):
-        """Fresh Scorer(d, depth) fitted on samples [{feats, y}], evaluated on val.
+        """! @brief Fresh Scorer(d, depth) fitted on samples [{feats, y}], evaluated on val.
         Returns (model, metrics)."""
         dev = model_registry.device()
         model = net.Scorer(net.infer_dims(train, TOKEN_DIMS), d, depth).to(dev)
@@ -650,7 +652,7 @@ def register(host):
         "count_params": net.count_params, "Scorer": net.Scorer, "batch": net.batch,
     })
 
-    # ── iqa provider ─────────────────────────────────────────────────────
+    # -- iqa provider -----------------------------------------------------
     model_registry.register(_KEY, _load_model, cost_mb=400, gpu=model_registry.on_gpu())
 
     def _scorer():
@@ -682,9 +684,9 @@ def register(host):
     host.provide_model(
         "iqa", "personal", label="Personal (learned from my ratings)", family="personal_iqa",
         speed="balanced",
-        note="Predicts YOUR taste. Rate ≥50 images, Retrain in Settings ▸ Personal IQA; enabled once it beats the base model on validation.",
+        note="Predicts YOUR taste. Rate >=50 images, Retrain in Settings > Personal IQA; enabled once it beats the base model on validation.",
         loader=_scorer, available=_available,
-        reason="not trained yet, or not better than the base IQA on validation — see Settings ▸ Personal IQA",
+        reason="not trained yet, or not better than the base IQA on validation - see Settings > Personal IQA",
         settings=[{"key": "personal_iqa_base", "label": "Base IQA model (feature)", "kind": "select", "options": _iqa_options},
                   {"key": "personal_iqa_encoder", "label": "Encoder for image/tiles", "kind": "select", "options": _enc_options},
                   {"key": "personal_iqa_grow", "label": "Grow (Net2Net) instead of rebuild on tier change (only when no pretrained size exists)", "kind": "toggle"},
@@ -694,13 +696,13 @@ def register(host):
                                        {"value": "vigorous", "label": "Vigorous: 5x5 tiles, 16 objects, 10 regions"}]}],
         cost_mb=400, gpu=model_registry.on_gpu())
 
-    # ── endpoints ────────────────────────────────────────────────────────
+    # -- endpoints --------------------------------------------------------
     def api_train():
         if not _HAVE_TORCH:
             return jsonify({"success": False, "error": "torch not installed"})
         if state["busy"]:
             return jsonify({"success": False, "error": "training already running"})
-        state["busy"] = True; state["text"] = "[Personal IQA] starting…"
+        state["busy"] = True; state["text"] = "[Personal IQA] starting..."
         threading.Thread(target=_train, daemon=True).start()
         return jsonify({"success": True})
 
@@ -718,11 +720,6 @@ def register(host):
     host.add_route("/api/personal_iqa/status", api_status)
     host.add_route("/api/personal_iqa/train", api_train, methods=["POST"], feature="ai.iqa", level="write")
     def _file_deleted(rel_path):
-        db = host.db()
-        try:
-            db.execute("DELETE FROM personal_iqa_cache WHERE rel_path=?", (rel_path,))
-            db.commit()
-        except Exception:
-            pass
+        host.update_file(rel_path, table="personal_iqa_cache", remove=True, dont_write=True)
     host.on("file.deleted", _file_deleted)
     host.logger.info("personal_iqa: registered iqa provider 'personal'")

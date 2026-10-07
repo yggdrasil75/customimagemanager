@@ -1,1 +1,2 @@
-"""auth module."""
+"""! @file
+@brief auth module."""

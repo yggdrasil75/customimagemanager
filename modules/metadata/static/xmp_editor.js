@@ -2,7 +2,7 @@
  *
  * Fetches the merged schema+values structure from /api/xmp/read and renders each
  * namespace's fields. Because the acdsee set is retrieval-only in this project,
- * every input is rendered read-only — this is an inspector, not a writer. Lang-alt
+ * every input is rendered read-only - this is an inspector, not a writer. Lang-alt
  * blocks (DPP/RPP) and bag/seq lists (Keywords/Snapshots) get formatted display.
  * Fields the file didn't carry are dimmed and hidden unless "Show empty fields" is
  * on. Fields that fold into our own description/tags/rating are badged so it's
@@ -31,14 +31,15 @@
       .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
-  // ── State ────────────────────────────────────────────────────────────────
+  // -- State ----------------------------------------------------------------
   let current = null;        // last-loaded data structure
   let showEmpty = false;
   let showUnmapped = false;
 
-  // ── Value formatting ───────────────────────────────────────────────────────
-  // XMP lang-alt comes back from pyexiv2 as either a plain string or a dict of
-  // {lang: text} (e.g. {"x-default": "..."}); lists come back as arrays.
+  // -- Value formatting -------------------------------------------------------
+  /** @brief XMP lang-alt comes back from pyexiv2 as either a plain string or a dict of
+   *  {lang: text} (e.g. {"x-default": "..."}); lists come back as arrays.
+   */
   function fmtRaw(v) {
     if (v == null) return "";
     if (Array.isArray(v)) return v.join(", ");
@@ -51,7 +52,7 @@
     return String(v);
   }
 
-  // ── Render helpers ─────────────────────────────────────────────────────────
+  // -- Render helpers ---------------------------------------------------------
   function renderFieldInput(f) {
     const wrap = document.createElement("div");
     wrap.className = "xmp-field-input";
@@ -95,7 +96,7 @@
     const inputHolder = $(".xmp-field-input", node);
     inputHolder.replaceWith(renderFieldInput(f));
 
-    const type = f.dtype + (f.is_list ? "[]" : "") + (f.writable ? "" : " · read-only");
+    const type = f.dtype + (f.is_list ? "[]" : "") + (f.writable ? "" : " | read-only");
     $(".xmp-field-type", node).textContent = type;
 
     const feeds = $(".xmp-field-feeds", node);
@@ -158,7 +159,7 @@
       div.className = "xmp-empty";
       div.textContent = showEmpty
         ? "No fields."
-        : "No populated fields (toggle “Show empty fields”).";
+        : "No populated fields (toggle 'Show empty fields').";
       fieldsHolder.appendChild(div);
     }
 
@@ -175,7 +176,7 @@
       (n.unknown && n.unknown.length));
     if (!nss.length) {
       nsEl.innerHTML =
-        `<div class="xmp-empty">No namespaces to show. Toggle “Show unmapped namespaces”.</div>`;
+        `<div class="xmp-empty">No namespaces to show. Toggle "Show unmapped namespaces".</div>`;
     } else {
       nss.forEach((n) => nsEl.appendChild(renderNamespace(n)));
     }
@@ -192,11 +193,11 @@
     if (src) src.textContent = current.source ? `← ${current.source}` : "(no XMP found)";
   }
 
-  // ── Load ───────────────────────────────────────────────────────────────────
+  // -- Load -------------------------------------------------------------------
   async function load(filename) {
     if (!filename) { setStatus("no file", "err"); return; }
     root().dataset.filename = filename;
-    setStatus("loading…");
+    setStatus("loading...");
     try {
       const r = await fetch("/api/xmp/read", {
         method: "POST",
@@ -217,7 +218,7 @@
     }
   }
 
-  // ── Wiring ──────────────────────────────────────────────────────────────────
+  // -- Wiring ------------------------------------------------------------------
   function init() {
     if (!root()) return;
     const se = $("#xmp-show-empty");

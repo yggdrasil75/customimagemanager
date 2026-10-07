@@ -1,4 +1,5 @@
-"""video_tracks.py: sidecar save/load + keyframe interpolation."""
+"""! @file
+@brief video_tracks.py: sidecar save/load + keyframe interpolation."""
 import os
 import video_tracks as vt
 

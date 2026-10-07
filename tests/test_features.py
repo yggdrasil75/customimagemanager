@@ -1,4 +1,5 @@
-"""features.py: permission levels and role resolution."""
+"""! @file
+@brief features.py: permission levels and role resolution."""
 import features as f
 
 

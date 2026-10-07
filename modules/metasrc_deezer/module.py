@@ -1,4 +1,5 @@
-"""Deezer — music metadata source (no key)."""
+"""! @file
+@brief Deezer - music metadata source (no key)."""
 MANIFEST = {
     "id": "metasrc_deezer", "name": "Deezer (music)", "version": "1.0.0",
     "description": "Track metadata from api.deezer.com: title, artist, album, track/disc "
@@ -15,7 +16,7 @@ def register(host):
         out = []
         for t in reg.http_json(f"{_API}/search", {"q": q["q"], "limit": 8}).get("data", []):
             out.append({"id": t["id"], "title": t.get("title", ""),
-                        "subtitle": " · ".join(x for x in ((t.get("artist") or {}).get("name"),
+                        "subtitle": " | ".join(x for x in ((t.get("artist") or {}).get("name"),
                                                           (t.get("album") or {}).get("title")) if x),
                         "thumb": (t.get("album") or {}).get("cover_medium"),
                         "fields": {"title": t.get("title", ""), "artist": (t.get("artist") or {}).get("name", ""),

@@ -1,5 +1,5 @@
-"""
-modules package — the module system + the app's core building blocks.
+"""! @file
+@brief modules package - the module system + the app's core building blocks.
 ======================================================================
 
 This package does TWO distinct things, kept deliberately separate:
@@ -9,20 +9,20 @@ This package does TWO distinct things, kept deliberately separate:
    function. At startup the loader discovers them, orders them by their
    declared dependencies, and calls register(host) on the enabled ones so
    they wire themselves into the app through the Host surface. Publish a
-   folder, drop it in modules/, restart — it integrates. See
+   folder, drop it in modules/, restart - it integrates. See
    modules/example_hello/ for a working, self-contained example, and
    modules/README.md for the authoring contract.
 
 2. HOUSING THE CORE BUILDING BLOCKS. auth, capabilities, metadata, and
    threading were moved here into subfolders as plain filesystem tidying.
-   These are NOT yet loaded through the plugin system — manager.py still
+   These are NOT yet loaded through the plugin system - manager.py still
    imports them directly. To avoid rewriting hundreds of call sites in the
    same commit as the move, importing this package aliases each moved file
    back to its old flat name in sys.modules, so `import auth` /
    `import exif_import` keep resolving. This aliasing is a migration
    convenience for the core files ONLY; it is not how plugins load.
    Converting a core building block to load via register(host) is a later
-   section — the seam for it now exists.
+   section - the seam for it now exists.
 
 cimlogger.py never moved (many non-core files import it, no optional deps);
 it is aliased in place and listed as a core module in the UI.
@@ -43,7 +43,7 @@ declare_core_capabilities(broker)
 
 
 def _alias(dotted, legacy):
-    """Import `dotted` and also register it under the flat `legacy` name.
+    """! @brief Import `dotted` and also register it under the flat `legacy` name.
 
     After this, both `import modules.metadata.exif_import` and the legacy
     `import exif_import` return the same module object.
@@ -51,7 +51,7 @@ def _alias(dotted, legacy):
     mod = importlib.import_module(dotted)
     sys.modules.setdefault(legacy, mod)
     # setdefault: if something already imported the legacy name first (e.g. a
-    # test), don't clobber it — the first bound object wins and stays identical.
+    # test), don't clobber it - the first bound object wins and stays identical.
     return mod
 
 
@@ -72,7 +72,7 @@ from . import theming  # noqa: F401,E402
 _alias("modules.auth.auth", "auth")
 
 # This imports each plugin folder's manifest (module.py / __init__.py) but does
-# NOT call register() yet — manager.py does that after it has built the Host.
+# NOT call register() yet - manager.py does that after it has built the Host.
 # Import failures are recorded per-module, never raised, so one broken plugin
 # can't stop the app. See modules/loader.py.
 registry.discover()

@@ -1,5 +1,5 @@
-"""
-Shared glue for the SAM provider modules (sam2 / sam3).
+"""! @file
+@brief Shared glue for the SAM provider modules (sam2 / sam3).
 ======================================================================
 Each SAM module ships an identical copy of this file and publishes it as the
 "sam_common" service with priority=VERSION, so the newest copy serves all of
@@ -34,7 +34,7 @@ MAX_SIDE = 2048
 
 
 def bounded(img, max_side=MAX_SIDE):
-    """img downscaled so its long side is <= max_side (never upscaled)."""
+    """! @brief img downscaled so its long side is <= max_side (never upscaled)."""
     h, w = img.shape[:2]
     s = max(h, w)
     if s <= max_side:
@@ -58,7 +58,7 @@ def to_bgr_u8(img):
 
 
 def boxes_px(boxes, W, H):
-    """Normalised centre-form dicts -> [[x1,y1,x2,y2]] pixel boxes."""
+    """! @brief Normalised centre-form dicts -> [[x1,y1,x2,y2]] pixel boxes."""
     out = []
     for b in boxes:
         cx, cy, w, h = b["cx"] * W, b["cy"] * H, b["w"] * W, b["h"] * H
@@ -68,7 +68,7 @@ def boxes_px(boxes, W, H):
 
 
 def polys_from_result(res, W, H, labels=None):
-    """ultralytics result -> [{class_name, mask:[(x,y)…] norm 0..1, conf}].
+    """! @brief ultralytics result -> [{class_name, mask:[(x,y)...] norm 0..1, conf}].
     Uses masks.xy (polygons already mapped to original pixels); falls back to
     the largest contour of the resized bitmask."""
     out = []
@@ -111,8 +111,8 @@ def polys_from_result(res, W, H, labels=None):
 
 
 def prompted_detector_id(host):
-    """id of an available *prompted* 'detect' provider (the vision LLM), or
-    None — what SAM 2 needs to turn a text prompt into seed boxes."""
+    """! @brief id of an available *prompted* 'detect' provider (the vision LLM), or
+    None - what SAM 2 needs to turn a text prompt into seed boxes."""
     try:
         for p in host.broker.providers_for("detect"):
             if p.get("prompted") and p.get("available"):
@@ -127,7 +127,7 @@ def vlm_available(host):
 
 
 def prompt_via_vlm(host, img_bgr, prompt, segment_box):
-    """Text prompt -> rough boxes from the vision LLM -> masks from a box-
+    """! @brief Text prompt -> rough boxes from the vision LLM -> masks from a box-
     prompted segmenter. Labels every mask with the prompt."""
     pid = prompted_detector_id(host)
     if pid is None:
@@ -146,14 +146,14 @@ def prompt_via_vlm(host, img_bgr, prompt, segment_box):
 def register_sam(host, *, pid, label, family, build, weights, text_mode="vlm",
                  sizes=None, types=None, settings=None, note="", speed="balanced",
                  cost_mb=2600, available=None, reason=""):
-    """Register one SAM-family model as both 'segment.box' and 'segment'.
+    """! @brief Register one SAM-family model as both 'segment.box' and 'segment'.
 
     build(path)        -> loaded ultralytics model (SAM / FastSAM / SAM3 predictor)
     weights(cap)       -> checkpoint path for the pick in effect (host.model_variant)
     text_mode          "vlm"   no text head: prompt -> VLM seed boxes -> box masks
                        "clip"  FastSAM CLIP grounding: model(img, texts=[...])
                        "native" SAM 3: set_image + model(text=[...])
-    Handle semantics (the 'segment' contract): run(img, prompt="") — prompt
+    Handle semantics (the 'segment' contract): run(img, prompt="") - prompt
     given -> segment that; empty -> segment everything.
     """
     def _model(cap):

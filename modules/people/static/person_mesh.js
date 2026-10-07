@@ -19,9 +19,10 @@
 
   function container() { return document.getElementById("person_mesh_container"); }
 
-  // Lazily build the renderer the first time we show a person. Three is loaded
-  // globally (static/vendor/three.min.js); guard so a missing bundle degrades
-  // to the "no mesh" placeholder rather than throwing.
+  /** @brief Lazily build the renderer the first time we show a person. Three is loaded
+   *  globally (static/vendor/three.min.js); guard so a missing bundle degrades
+   *  to the "no mesh" placeholder rather than throwing.
+   */
   function ensureScene() {
     if (renderer) return true;
     if (typeof THREE === "undefined") return false;
@@ -88,8 +89,9 @@
     if (current) { scene.remove(current); current = null; }
   }
 
-  // Frame the camera/orbit target on a freshly added object's bounds so meshes
-  // of any scale (metres, arbitrary units) sit centred and fully in view.
+  /** @brief Frame the camera/orbit target on a freshly added object's bounds so meshes
+   *  of any scale (metres, arbitrary units) sit centred and fully in view.
+   */
   function frame(obj) {
     const box = new THREE.Box3().setFromObject(obj);
     if (box.isEmpty()) return;
@@ -109,9 +111,10 @@
     if (e) e.classList.toggle("hidden", !on);
   }
 
-  // Build a simple line skeleton from stored T-pose keypoints as a fallback when
-  // no mesh has been estimated. Points are {name:[x,y,z]} or an array of joints;
-  // we just connect what edges we can and drop a small sphere at each joint.
+  /** @brief Build a simple line skeleton from stored T-pose keypoints as a fallback when
+   *  no mesh has been estimated. Points are {name:[x,y,z]} or an array of joints;
+   *  we just connect what edges we can and drop a small sphere at each joint.
+   */
   function buildSkeleton(tpose) {
     const g = new THREE.Group();
     let pts = tpose && (tpose.keypoints || tpose.points || tpose.joints || tpose);
@@ -137,7 +140,7 @@
     }
     if (!any) return null;
 
-    // Draw bones for any provided edge list (tpose.skeleton = [[a,b],…]).
+    // Draw bones for any provided edge list (tpose.skeleton = [[a,b],...]).
     const edges = tpose.skeleton || tpose.edges;
     if (Array.isArray(edges)) {
       const lmat = new THREE.LineBasicMaterial({ color: 0x0ea5e9 });
@@ -206,7 +209,7 @@
     setEmpty(true);
   }
 
-  // Reflect the active view in the toggle buttons and the empty-state hint.
+  /** @brief Reflect the active view in the toggle buttons and the empty-state hint. */
   function syncToggle() {
     const wrap = document.getElementById("person_view_toggle");
     if (wrap) wrap.classList.remove("hidden");
@@ -217,8 +220,8 @@
     if (b) b.className = "text-[11px] px-2 py-0.5 " + (state.view === "body" ? on : off);
     const e = document.getElementById("person_mesh_empty");
     if (e) e.textContent = state.view === "face"
-      ? "No face mesh for this appearance yet — estimate one in the Person tab."
-      : "No mesh or T-pose for this appearance yet — estimate one in the Person tab.";
+      ? "No face mesh for this appearance yet - estimate one in the Person tab."
+      : "No mesh or T-pose for this appearance yet - estimate one in the Person tab.";
   }
 
   function setView(v) {
@@ -274,14 +277,15 @@
     }).join("");
   }
 
-  // Public: take over the centre pane for this person.
+  /** @brief Public: take over the centre pane for this person. */
   function open(cid, person) {
-    // Appearances are built in chronological rank order on the server and given
-    // ids "era0", "era1", … where the number IS the time rank (0 = earliest).
-    // Sort by that number so scrubbing moves through time. A plain string sort
-    // would order "era12" before "era5" (lexicographic), and date_span is often
-    // empty (eras form from embedding drift, not dates), so neither is reliable
-    // — the rank in the id is the authoritative key.
+    /** @brief Appearances are built in chronological rank order on the server and given
+     *  ids "era0", "era1", ... where the number IS the time rank (0 = earliest).
+     *  Sort by that number so scrubbing moves through time. A plain string sort
+     *  would order "era12" before "era5" (lexicographic), and date_span is often
+     *  empty (eras form from embedding drift, not dates), so neither is reliable
+     *  - the rank in the id is the authoritative key.
+     */
     const rank = e => {
       const m = /(\d+)/.exec(e.id || "");
       if (m) return parseInt(m[1], 10);

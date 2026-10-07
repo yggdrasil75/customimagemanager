@@ -1,5 +1,5 @@
-"""
-Jina omni module — one model for image, text and audio embeddings.
+"""! @file
+@brief Jina omni module - one model for image, text and audio embeddings.
 ======================================================================
 Provides `embed` (images), `embed.text` (passages / queries) and
 `embed.audio` (tracks) from a single jina-embeddings-v5-omni checkpoint, so
@@ -70,7 +70,7 @@ def _normalise(v, dims=0):
 
 
 def _first(out):
-    """One vector from whatever the remote code returns (tensor, list, array)."""
+    """! @brief One vector from whatever the remote code returns (tensor, list, array)."""
     if hasattr(out, "detach"):
         out = out.detach().float().cpu().numpy()
     if isinstance(out, (list, tuple)):

@@ -1,56 +1,31 @@
-"""
-Model capability broker.
-======================================================================
-A capability broker, not a model catalogue. The unit is a *capability*
-("detect", "segment", "pose"), not a model. Several modules may each
-provide a model that satisfies the same capability — YOLO today, Mayuki
-tomorrow — and the user picks which provider serves each capability. A
-consumer never asks for a model by name; it asks the broker for a
-capability and gets back the selected provider's ready-to-use handle, or a
-typed error if nothing satisfies it.
+"""! @file
+@brief The model capability broker.
 
-    consumer:   handle = broker.request("detect")
-                boxes  = handle(image)          # normalized boxes, always
-    module:     broker.provide("detect", "yolo11", loader=..., ...)
+Consumers ask for a capability ("detect", "segment", "pose"), never a model:
 
-Because two providers for one capability may speak different native
-formats (YOLO .txt boxes vs Mayuki COCO), each provider registers a
-`transform` that maps its raw model output to the capability's CANONICAL
-shape. The consumer gets the same shape no matter which provider ran; the
-provider is responsible for handing data back in the default form.
+    handle = broker.request("detect")
+    boxes = handle(image)                  # the capability's canonical shape
+    broker.provide("detect", "yolo11", loader=..., transform=...)
 
-Contracts
----------
-A capability has a contract: a human description of the canonical input
-and output shape every provider must honour. The core declares an initial
-set (see modules/model_contracts.py). A module may declare a NEW
-capability; the first declarer owns its contract. Re-declaring an existing
-capability id is rejected unless the contract matches.
-
-This module holds no torch/ML imports and does not know about YOLO. The
-YOLO providers live in their own module (modules/yolo/) and register here.
-Everything ML-specific is on the provider side of the seam.
+Modules provide models for capabilities; the user picks which provider serves
+each one. A provider's transform turns its native output into the contract's
+canonical shape (contracts: model_contracts.py). No ML imports here.
 """
 
 import threading
 
-# Which run is being served: "fg" (the manual button / pipeline) or "bg" (the
-# on-every-image sweep). Set by request(role=...) while binding, so a provider
-# loader that asks variant(cap) gets the pick for the run it's serving.
+# "fg" (button / pipeline) or "bg" (background sweep), set while request() binds,
+# so a loader reading variant() gets the pick of the run it serves.
 _ROLE = threading.local()
 
 
 class BrokerError(Exception):
-    """Base for broker errors."""
+    """! @brief Base of broker errors."""
 
 
 class NoProviderError(BrokerError):
-    """Raised by request() when a capability has no usable provider.
-
-    Consumers are expected to catch this and degrade (skip the step, show a
-    'configure a model' hint, etc.) rather than crash. Carries the
-    capability id and a machine-readable `reason` in {"unknown_capability",
-    "no_providers", "selected_unavailable", "none_available"}.
+    """! @brief No usable provider for a capability; consumers catch it and degrade.
+    `reason`: unknown_capability | no_providers | selected_unavailable | none_available.
     """
     def __init__(self, capability, reason, message):
         super().__init__(message)
@@ -59,20 +34,18 @@ class NoProviderError(BrokerError):
 
 
 class Capability:
-    """A named slot with a canonical I/O contract that providers satisfy."""
+    """! @brief A named slot with a canonical input / output contract."""
     def __init__(self, cap_id, *, summary, input, output, owner, label=None,
                  hidden=False, background=False):
         self.id = cap_id
         self.label = label or cap_id  # picker heading
-        self.hidden = bool(hidden)    # internal capability: kept out of the picker
-        # background=True: output is region-shaped and useful unprompted, so
-        # the picker offers "run on every image" + a class whitelist. Caps
-        # whose output is gibberish without a topic (classify, depth) stay off.
+        self.hidden = bool(hidden)  # kept out of the picker
+        # output is region-shaped and useful unprompted: offer "run on every image"
         self.background = bool(background)
-        self.summary = summary        # one line: what it does
-        self.input = input            # human description of canonical input
-        self.output = output          # human description of canonical output
-        self.owner = owner            # module id that declared it ('core' for built-ins)
+        self.summary = summary
+        self.input = input
+        self.output = output
+        self.owner = owner  # declaring module ('core' for built-ins)
 
     def contract(self):
         return {"input": self.input, "output": self.output}
@@ -84,56 +57,43 @@ class Capability:
 
 
 class Provider:
-    """One module's model registered against one capability."""
+    """! @brief One module's model registered for one capability."""
     def __init__(self, cap_id, provider_id, *, label, loader, transform=None,
                  available=None, reason="", cost_mb=0, gpu=False, module_id=None,
                  handles=None, family=None, sizes=None, types=None, settings=None,
                  classes=None, prompted=False, note="", speed="", supports_conf=None,
                  resource=None, concurrency=1):
         self.capability = cap_id
-        # resource: shared backend this model runs on (an external endpoint);
-        # providers naming the same resource share its parallel budget in the
-        # background sweep. concurrency: that budget (int, or a callable read
-        # when needed so a setting can drive it). None = local, no cap.
+        # providers on the same external backend share its parallel budget
+        # (concurrency: int or callable); None = local, no cap
         self.resource = resource
         self.concurrency = concurrency
-        # note: one-liner on when to use this model (shown under the picker);
-        # speed: rough cost class "fast" | "balanced" | "accurate".
+        # note: shown under the picker; speed: fast | balanced | accurate
         self.note = note or ""
         self.speed = speed or ""
-        # supports_conf: the handle honours conf=<0..1>; the picker then offers
-        # a min-confidence input. Defaults on for region-producing caps.
+        # the handle accepts conf=0..1 (default for region capabilities)
         self.supports_conf = (cap_id.split(".")[0] in ("detect", "segment", "pose")
                               if supports_conf is None else bool(supports_conf))
-        # prompted=True: the handle needs a text prompt (vision LLM, open-vocab
-        # detector); such a provider is a foreground-only choice — a background
-        # sweep has no prompt to give it.
+        # needs a text prompt: foreground only
         self.prompted = bool(prompted)
-        # classes() -> ordered list of class names the model emits (may load
-        # weights). Feeds the background-processing whitelist; None = unknown.
+        # fn() -> class names the model emits, for the background whitelist
         self._classes = classes
-        self.id = provider_id                 # unique within the capability
-        self.label = label                    # human label for the picker
-        # Variant axes the picker shows for this provider. sizes: list of
-        # size ids ("n","s",…); types: list of {value,label} (e.g. pose 17 vs
-        # whole-body); either empty => that select is greyed out. settings:
-        # extra widgets [{key,label,kind,options?,help?}] bound to config keys
-        # the module declared (same kinds as host.add_settings_field).
+        self.id = provider_id  # unique within the capability
+        self.label = label
+        # variant axes for the picker: sizes, types [{value, label}], extra settings widgets
         self.family = family or label
         self.sizes = list(sizes or [])
         self.types = [t if isinstance(t, dict) else {"value": t, "label": t}
                       for t in (types or [])]
         self.settings = list(settings or [])
-        self._loader = loader                 # () -> raw model handle (cached upstream)
-        self._transform = transform           # raw_output -> canonical output
-        self._available = available           # () -> bool, or None => always available
-        self._reason = reason                 # why unavailable, for the UI
+        self._loader = loader  # fn() -> raw model handle (cached upstream)
+        self._transform = transform  # raw output -> canonical output
+        self._available = available  # fn() -> bool; None = always available
+        self._reason = reason  # why unavailable, for the UI
         self.cost_mb = cost_mb
         self.gpu = gpu
         self.module_id = module_id
-        # Optional predicate handles(model_path)->bool. For path-parameterized
-        # capabilities like 'box', where several providers coexist and the right
-        # one is chosen by which model file it can run (YOLO .pt vs Mayaku).
+        # fn(model_path) -> bool, for path-parameterised capabilities ('box')
         self._handles = handles
 
     def classes(self):
@@ -164,7 +124,7 @@ class Provider:
         if self.available():
             return ""
         r = self._reason
-        if callable(r):                      # computed: say what actually went wrong
+        if callable(r):  # say what actually went wrong
             try:
                 r = r()
             except Exception:
@@ -176,7 +136,7 @@ class Provider:
         return f"{self.capability}:{self.id}"
 
     def limit(self):
-        """Parallel budget on this provider's resource (>= 1)."""
+        """! @brief Parallel budget of this provider's resource (at least 1)."""
         try:
             c = self.concurrency() if callable(self.concurrency) else self.concurrency
             return max(1, int(c or 1))
@@ -194,20 +154,13 @@ class Provider:
                 "cost_mb": self.cost_mb, "gpu": self.gpu,
                 "module_id": self.module_id}
 
-    # ── the handle a consumer actually calls ─────────────────────────────
     def bind(self):
-        """Return a callable handle that runs the model and normalizes output.
-
-        The loader is expected to be cheap-on-repeat (the YOLO providers back
-        it with the runtime model_registry LRU), so bind() can be called per
-        request. The returned callable applies the provider's transform so the
-        consumer always receives the capability's canonical shape.
+        """! @brief A callable that runs the model and returns the canonical shape.
+        Cheap to call per request: loaders cache in model_registry.
         """
         model = self._loader()
         if model is None:
-            # Never let a missing model masquerade as an empty result: the
-            # transform would turn None into [] and the consumer would report
-            # "nothing found" for a model that never existed.
+            # A missing model must not look like an empty result.
             raise RuntimeError(f"{self.capability}:{self.id} has no model to run "
                                f"(its loader returned None)")
         transform = self._transform
@@ -215,11 +168,9 @@ class Provider:
         def run(*args, **kwargs):
             raw = model(*args, **kwargs) if callable(model) else model
             return transform(raw, *args, **kwargs) if transform else raw
-        run.model = model            # escape hatch: raw handle if a caller needs it
+        run.model = model  # raw handle, for callers that need it
         run.provider = self
-        # A provider-shaped handle may offer a batched entry point and name its
-        # weights; consumers look for these on the bound handle (people_core's
-        # `run.batch(imgs)`), so carry them over.
+        # keep a provider's extra entry points (batch, model_path, registry_key)
         for k in ("batch", "model_path", "registry_key"):
             if hasattr(model, k):
                 setattr(run, k, getattr(model, k))
@@ -227,29 +178,23 @@ class Provider:
 
 
 class ModelBroker:
-    """Registry of capabilities + providers, with per-capability selection."""
+    """! @brief Capabilities, their providers and the user's pick per capability."""
 
     def __init__(self):
         self._lock = threading.RLock()
-        self._caps = {}                       # cap_id -> Capability
-        self._providers = {}                  # cap_id -> {provider_id -> Provider}
-        self._selection = {}                  # cap_id -> provider_id (user choice)
-        self._variant = {}                    # cap_id -> {"size","type",...} (user choice)
-        # Optional separate pick for the background sweep: cap_id ->
-        # {"provider","size","type"}. Absent = same model as foreground.
+        self._caps = {}  # cap_id -> Capability
+        self._providers = {}  # cap_id -> {provider_id -> Provider}
+        self._selection = {}  # cap_id -> provider_id
+        self._variant = {}  # cap_id -> {"size", "type", ...}
+        # cap_id -> {"provider", "size", "type"} for the background sweep; absent = same as foreground
         self._bg = {}
-        self._on_select = []                  # fns(cap_id) run after a selection changes
-        self._current_module = None           # set by loader during register()
+        self._on_select = []  # fn(cap_id) after a selection change
+        self._current_module = None  # set by the loader while a module registers
 
-    # ── capability declaration ───────────────────────────────────────────
     def declare(self, cap_id, *, summary, input, output, owner=None, label=None,
                 hidden=False, background=False):
-        """Declare a capability contract. First declarer wins.
-
-        Re-declaring an existing id is allowed only if the contract matches
-        (same input/output text); a conflicting redeclare raises. This lets
-        the core and a module both name the same capability without fighting,
-        while catching two modules that disagree on the shape.
+        """! @brief Declare a capability contract; the first declarer owns it.
+        @throws ValueError when a re-declaration's contract differs.
         """
         owner = owner or self._current_module or "core"
         with self._lock:
@@ -270,20 +215,13 @@ class ModelBroker:
     def has_capability(self, cap_id):
         return cap_id in self._caps
 
-    # ── provider registration ────────────────────────────────────────────
     def provide(self, cap_id, provider_id, *, label, loader, transform=None,
                 available=None, reason="", cost_mb=0, gpu=False, handles=None,
                 family=None, sizes=None, types=None, settings=None, classes=None,
                 prompted=False, note="", speed="", supports_conf=None,
                 resource=None, concurrency=1, module_id=None):
-        """Register a provider for a capability. Dedup by (cap_id, provider_id).
-
-        The predefined capabilities (model_contracts) exist so providers of the
-        same job stay interchangeable; a module may still provide for an
-        arbitrary capability id, which is declared on the fly with a generic
-        contract owned by that module (declare it explicitly to document I/O).
-        Re-providing the same id replaces the earlier registration (last
-        writer wins), which is what you want when a module is reloaded.
+        """! @brief Register (or replace) a provider for a capability. An undeclared
+        capability is declared with a generic contract owned by the module.
         """
         module_id = module_id or self._current_module
         with self._lock:
@@ -292,7 +230,7 @@ class ModelBroker:
                     cap_id, summary=f"Module-defined capability '{cap_id}'.",
                     input="see the providing module", output="see the providing module",
                     owner=module_id or "module",
-                    label=cap_id.replace(".", " · ").replace("_", " ").title())
+                    label=cap_id.replace(".", " | ").replace("_", " ").title())
                 self._providers.setdefault(cap_id, {})
             p = Provider(cap_id, provider_id, label=label, loader=loader,
                          transform=transform, available=available, reason=reason,
@@ -304,21 +242,17 @@ class ModelBroker:
                 resource=resource, concurrency=concurrency)
             self._providers[cap_id][provider_id] = p
             tm = getattr(self, "thread_manager", None)
-            if tm is not None:          # sign the model up: what it runs on, how many at once
+            if tm is not None:  # tell the thread manager what it runs on and how many at once
                 tm.register_model(p.key, gpu=gpu, resource=resource, concurrency=concurrency,
                                   cost_mb=cost_mb)
             return p
 
-    # ── selection ────────────────────────────────────────────────────────
     def select(self, cap_id, provider_id, size=None, type=None,
                background=None, classes=None, bg=None, conf=None):
-        """Set the user's chosen provider (+ size/type variant) for a
-        capability. Returns (ok, err).
-
-        Selecting an unknown capability or provider fails; a size/type the
-        provider doesn't declare is dropped (falls back to its first). Selecting
-        a currently-unavailable provider is ALLOWED (the weights may appear
-        later); request() will surface the unavailability at call time.
+        """! @brief Pick the provider (and size / type) of a capability. An unavailable
+        provider may be picked; an undeclared size / type falls back to the first.
+        @param bg  {"provider", "size", "type"} for a separate background model.
+        @return (ok, error).
         """
         with self._lock:
             if cap_id not in self._caps:
@@ -342,11 +276,9 @@ class ModelBroker:
                 except (TypeError, ValueError):
                     pass
             self._variant[cap_id] = v
-            # bg: {"provider","size","type"} for a different background model;
-            # {} / None / a provider not registered => same as foreground.
             bp = (bg or {}).get("provider") if isinstance(bg, dict) else None
             pb = self._providers[cap_id].get(bp) if bp else None
-            if pb is None or pb.prompted:      # a prompted model can't run unprompted
+            if pb is None or pb.prompted:  # a prompted model can't run unprompted
                 self._bg.pop(cap_id, None)
             else:
                 b = {"provider": bp}
@@ -363,23 +295,16 @@ class ModelBroker:
         return True, None
 
     def on_select(self, fn):
-        """Register fn(cap_id) to run after any selection change (a module can
-        keep a side-effect, e.g. a checkpoint path, in sync with the pick)."""
+        """! @brief Run fn(cap_id) after every selection change."""
         self._on_select.append(fn)
 
     def selected_id(self, cap_id, role=None):
-        """The chosen provider id for a capability (role "bg" = the background
-        sweep's own pick when set), or the default.
-
-        Default = first-registered provider that is currently available; if
-        none is available, the first registered at all (so the UI shows a
-        sensible pre-selection even when weights are missing).
+        """! @brief The picked provider id (role "bg": the background pick when set).
+        Default: the first available unprompted provider, else the first registered.
         """
         with self._lock:
-            # While request() binds a provider, its loader asks variant(cap) /
-            # selected_id(cap); answer with the provider being bound, not the
-            # user's pick, or request(cap, provider=X) hands X the selected
-            # model's size/type (e.g. vitpose getting mediapipe's "lite").
+            # While binding, answer with the provider being bound so request(cap, provider=X)
+            # gets X's own size / type.
             bound = getattr(_ROLE, "binding", None)
             if bound and bound[0] == cap_id:
                 return bound[1]
@@ -390,8 +315,7 @@ class ModelBroker:
             provs = self._providers.get(cap_id, {})
             if sel and sel in provs:
                 return sel
-            # Default: an available UNPROMPTED provider first (a vision LLM is
-            # never a sensible default — it needs a prompt and costs a call).
+            # default: an available unprompted provider (a vision LLM is never a sensible default)
             for pid, p in provs.items():
                 if p.available() and not p.prompted:
                     return pid
@@ -401,13 +325,11 @@ class ModelBroker:
             return next(iter(provs), None)
 
     def variant(self, cap_id, role=None, provider=None):
-        """{"size","type","background","classes"} in effect for a capability
-        (role "bg" = the background sweep's own model when one is set): the
-        user's choice when the selected provider declares it, else the
-        provider's first option, else None. Providers read this in their
-        loaders; inside request() the role is implied. provider=<id> resolves
-        the choice against that provider instead of the selected one (its
-        available() asking about the size/type it would run)."""
+        """! @brief {"size", "type", "background", "classes"} in effect: the user's choice when
+        the provider declares it, else its first option.
+        @param role      "bg" for the background model.
+        @param provider  resolve against this provider instead of the picked one.
+        """
         with self._lock:
             role = role or getattr(_ROLE, "value", None)
             pid = provider or self.selected_id(cap_id, role)
@@ -429,14 +351,12 @@ class ModelBroker:
                     "conf": float(base.get("conf", 0.25))}
 
     def provider_for(self, cap_id, role="fg"):
-        """The Provider object currently picked for a capability (role "bg" =
-        the background sweep's pick), or None."""
+        """! @brief The picked Provider (role "bg": the background pick), or None."""
         with self._lock:
             return self._providers.get(cap_id, {}).get(self.selected_id(cap_id, role))
 
     def background_capabilities(self):
-        """[cap_id] whose background run is switched on and whose background
-        provider (own pick, else the foreground one) is unprompted."""
+        """! @brief Capabilities with background run on and an unprompted background provider."""
         with self._lock:
             out = []
             for c, cap in self._caps.items():
@@ -448,20 +368,15 @@ class ModelBroker:
             return out
 
     def provider_classes(self, cap_id):
-        """Class names the *background* provider for cap_id emits ([] if
-        unknown) — the whitelist filters the unprompted run, so it lists what
-        that model was trained on."""
+        """! @brief Class names the background provider emits ([] when unknown)."""
         with self._lock:
             p = self._providers.get(cap_id, {}).get(self.selected_id(cap_id, "bg"))
         return p.classes() if p else []
 
     def init_selection(self, persisted):
-        """Seed selections from persisted config.
-
-        Accepts {cap_id: provider_id} (legacy) or {cap_id: {provider, size,
-        type}}. Unknown capabilities / providers are dropped, so removing a
-        module doesn't leave a dangling selection. Returns the cleaned map to
-        write back.
+        """! @brief Load saved picks ({cap: provider} or {cap: {provider, size, type}});
+        unknown capabilities and providers are dropped.
+        @return the cleaned map to save back.
         """
         persisted = persisted or {}
         with self._lock:
@@ -477,33 +392,21 @@ class ModelBroker:
             return self.current_selection()
 
     def current_selection(self):
-        """{cap_id: {provider, size, type}} to persist — explicit choices only."""
+        """! @brief The explicit picks to save: {cap_id: {provider, size, type}}."""
         with self._lock:
             return {c: {"provider": pid, **self._variant.get(c, {}),
                         **({"bg": self._bg[c]} if c in self._bg else {})}
                     for c, pid in self._selection.items()}
 
-    # ── the consumer entry point ─────────────────────────────────────────
     def request(self, cap_id, role="fg", provider=None):
-        """Return a ready callable handle for the selected provider. role "bg"
-        serves the background sweep, which may have its own model pick.
-        provider=<id> bypasses the selection (a consumer that needs a specific
-        kind, e.g. SAM 2 needing a prompted detector for seed boxes).
-
-        Raises NoProviderError (a typed error the consumer handles) when:
-          - the capability was never declared        (unknown_capability)
-          - no provider is registered for it          (no_providers)
-          - a provider is selected but unavailable     (selected_unavailable)
-          - nothing registered is available            (none_available)
-        The returned handle normalizes output to the capability's canonical
-        shape via the provider's transform.
+        """! @brief A ready handle for a capability's picked provider.
+        @param role      "bg" serves the background sweep.
+        @param provider  use this provider instead of the pick.
+        @throws NoProviderError (unknown_capability, no_providers,
+                selected_unavailable, none_available).
         """
-        # Resolve the pick under the lock, but LOAD outside it: bind() runs the
-        # loader (a weights download, a multi-second model load), and holding
-        # the broker lock across that stalls status() — i.e. the Models tab and
-        # the whole settings modal — for as long as a background sweep is
-        # loading something. Loaders back themselves with model_registry, which
-        # has its own per-key load lock, so concurrent binds stay safe.
+        # Resolve under the lock, load outside it: a slow model load must not stall
+        # status() (the Models tab). model_registry has its own per-key load lock.
         with self._lock:
             if cap_id not in self._caps:
                 raise NoProviderError(cap_id, "unknown_capability",
@@ -521,15 +424,13 @@ class ModelBroker:
                         f"selected model '{p.label}' for '{cap_id}' is "
                         f"unavailable: {p.reason()}")
             else:
-                # no explicit selection: the same default selected_id() shows
-                # (available and unprompted first, then any available)
                 p = provs.get(self.selected_id(cap_id, role))
                 if p is None or not p.available():
                     raise NoProviderError(cap_id, "none_available",
                         f"no available model for '{cap_id}'")
         prev = getattr(_ROLE, "value", None)
         prev_bind = getattr(_ROLE, "binding", None)
-        _ROLE.value = role          # loaders resolve variant() for this run
+        _ROLE.value = role  # loaders resolve variant() for this run
         _ROLE.binding = (cap_id, p.id)
         try:
             return p.bind()
@@ -538,13 +439,9 @@ class ModelBroker:
             _ROLE.binding = prev_bind
 
     def detector_for(self, cap_id, model_path):
-        """Pick the provider that can run `model_path` for a path-parameterized
-        capability (e.g. 'box'). Returns a bound detect handle or None.
-
-        Providers declare handles(model_path); the first available one whose
-        predicate matches wins, with the user-selected provider preferred when
-        it also matches. Returns None when nothing handles the path, so the
-        caller can fall back to its legacy path (keeps the migration safe).
+        """! @brief A detect handle for `model_path` from the provider that handles it (the
+        picked provider preferred).
+        @return the handle, or None when nothing handles the path.
         """
         with self._lock:
             provs = self._providers.get(cap_id, {})
@@ -555,9 +452,7 @@ class ModelBroker:
                     [p for pid, p in provs.items() if pid != sel]
             for p in order:
                 if p.available() and p.handles(model_path):
-                    # Return the loader's detect fn directly (not bind()'s
-                    # wrapper) so attributes like .batch survive; box providers
-                    # already return the canonical shape, so no transform wrap.
+                    # the loader's own function, so .batch survives
                     try:
                         return p._loader()
                     except Exception:
@@ -565,20 +460,18 @@ class ModelBroker:
         return None
 
     def try_request(self, cap_id):
-        """request() that returns None instead of raising. For callers that
-        genuinely want to probe-and-skip without a try/except."""
+        """! @brief request(), but None instead of raising."""
         try:
             return self.request(cap_id)
         except NoProviderError:
             return None
 
-    # ── introspection for the settings UI ────────────────────────────────
     def providers_for(self, cap_id):
         with self._lock:
             return [p.as_dict() for p in self._providers.get(cap_id, {}).values()]
 
     def status(self):
-        """Full snapshot: every capability, its providers, and the selection."""
+        """! @brief Every capability with its providers and picks."""
         with self._lock:
             out = []
             for cap_id, cap in self._caps.items():
@@ -586,7 +479,7 @@ class ModelBroker:
                     **cap.as_dict(),
                     "selected": self.selected_id(cap_id, "fg"),
                     "variant": self.variant(cap_id, "fg"),
-                    # background sweep's own pick, or None (= same as foreground)
+                    # background pick, or None (= foreground)
                     "bg": ({"provider": self._bg[cap_id]["provider"],
                             **{k: v for k, v in self.variant(cap_id, "bg").items()
                                if k in ("size", "type")}}
@@ -597,5 +490,4 @@ class ModelBroker:
             return out
 
 
-# process-wide singleton; modules/__init__.py exposes it, manager wires it in
 broker = ModelBroker()

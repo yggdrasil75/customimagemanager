@@ -90,12 +90,12 @@ def associate_faces_bodies(faces: list[dict], bodies: list[dict]) -> list[tuple[
         used_bodies.add(bi)
     return pairs
 
-# ── SMPLest-X body mesh ───────────────────────────────────────────────────────
+# -- SMPLest-X body mesh -------------------------------------------------------
 @functools.lru_cache(maxsize=1)
 def fuse_shape(crops: list, infer, pose_neutral, min_views: int = 3,
                min_confidence: float = 0.3):
     """! @brief Fuse many per-crop body fits into one canonical, outlier-robust mesh.
-    Estimator-agnostic: every shape module (ANNY, SHAPY, ATLAS, SMPLest-X …) hands
+    Estimator-agnostic: every shape module (ANNY, SHAPY, ATLAS, SMPLest-X ...) hands
     in its own two callables and gets the same fusion.
     @param crops   List of (img_bgr, box) for a person's reasonably-sized regions.
     @param infer   infer(img_bgr, box) -> {betas, faces, vertices?, confidence} or None.

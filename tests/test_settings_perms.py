@@ -1,4 +1,5 @@
-"""Settings permissions per tab, per-user settings, account fields.
+"""! @file
+@brief Settings permissions per tab, per-user settings, account fields.
 
 Auth is off in the test app (every request is an admin), so `as_user` swaps
 g.user for a non-admin with a given role / permission overrides / account

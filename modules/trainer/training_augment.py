@@ -1,4 +1,5 @@
-"""training_augment.py — our own box-safe augmentation, replacing Ultralytics'
+"""! @file
+@brief training_augment.py - our own box-safe augmentation, replacing Ultralytics'
 built-in augments (which we disable at train time).
 
 Why this exists: Ultralytics fuses scale/translate/shear/degrees/perspective
@@ -6,16 +7,16 @@ into one affine warp applied to (nearly) every image, with no per-transform
 probability, and mosaic (default 1.0) stacks four images on top. Even small
 slider values compound into severe distortion on every tile. Here each
 transform has a real, independent CHANCE (probability it fires per image) and
-AMOUNT (its magnitude), so "5% chance to shear up to 10°" means exactly that.
+AMOUNT (its magnitude), so "5% chance to shear up to 10 deg" means exactly that.
 
 Scope (v1): affine (rotate/scale/translate/shear), flips (lr/ud), and HSV
-(hue/sat/val) jitter. Multi-image augments (mosaic/mixup/copy_paste) are out —
+(hue/sat/val) jitter. Multi-image augments (mosaic/mixup/copy_paste) are out -
 they need multi-image box merging and are deferred.
 
 Coordinates are YOLO-normalised center boxes {cx,cy,w,h} in [0,1]. Every
 geometric transform maps the four corners of each box and takes the axis-aligned
 bounding box of the result, then clips to the frame; boxes that fall (almost)
-entirely outside are dropped. Nothing here reads or writes files or metadata —
+entirely outside are dropped. Nothing here reads or writes files or metadata -
 it takes an image array + regions and returns a new image array + regions.
 """
 
@@ -28,17 +29,17 @@ import numpy as np
 
 # Field ids the trainer UI/preset use. Each geometric/colour transform has a
 # `<name>_p` (chance, 0..1) and `<name>` (amount) pair. Defaults are deliberately
-# gentle — augmentation should be the exception, not applied to every image.
+# gentle - augmentation should be the exception, not applied to every image.
 DEFAULTS = {
-    # affine — amounts are the +/- bound sampled uniformly when the roll fires
+    # affine - amounts are the +/- bound sampled uniformly when the roll fires
     "aug_rotate_p": 0.0,  "aug_rotate": 10.0,      # degrees
     "aug_scale_p": 0.0,   "aug_scale": 0.20,       # fraction (1 +/- x)
     "aug_translate_p": 0.0, "aug_translate": 0.10, # fraction of side
     "aug_shear_p": 0.0,   "aug_shear": 10.0,       # degrees
-    # flips — amount is meaningless (a flip is a flip); chance only
+    # flips - amount is meaningless (a flip is a flip); chance only
     "aug_fliplr_p": 0.0,
     "aug_flipud_p": 0.0,
-    # hsv — amounts are +/- bounds; h in [0,1] of hue circle, s/v as fractions
+    # hsv - amounts are +/- bounds; h in [0,1] of hue circle, s/v as fractions
     "aug_hsv_h_p": 0.0,   "aug_hsv_h": 0.015,
     "aug_hsv_s_p": 0.0,   "aug_hsv_s": 0.40,
     "aug_hsv_v_p": 0.0,   "aug_hsv_v": 0.40,
@@ -67,7 +68,7 @@ def _roll(p):
 
 
 def _boxes_to_corners(regions, W, H):
-    """[{cx,cy,w,h}] normalised -> Nx4x2 pixel corner array (+ carry class)."""
+    """! @brief [{cx,cy,w,h}] normalised -> Nx4x2 pixel corner array (+ carry class)."""
     corners = []
     for r in regions:
         cx, cy = r["cx"] * W, r["cy"] * H
@@ -78,7 +79,7 @@ def _boxes_to_corners(regions, W, H):
 
 
 def _corners_to_boxes(corners, regions, W, H, min_visible=0.15):
-    """Nx4x2 pixel corners -> re-normalised {cx,cy,w,h}, clipped to frame.
+    """! @brief Nx4x2 pixel corners -> re-normalised {cx,cy,w,h}, clipped to frame.
     Drops a box if less than `min_visible` of its (pre-clip) area survives."""
     out = []
     for quad, r in zip(corners, regions):
@@ -101,7 +102,7 @@ def _corners_to_boxes(corners, regions, W, H, min_visible=0.15):
 
 
 def _affine_matrix(cfg, W, H):
-    """Build a single 2x3 affine from whichever affine transforms rolled true.
+    """! @brief Build a single 2x3 affine from whichever affine transforms rolled true.
     Returns (M, changed). Rotation/shear pivot on the image centre."""
     cx, cy = W / 2.0, H / 2.0
     M = np.eye(3, dtype=np.float32)
@@ -156,10 +157,10 @@ def _apply_hsv(img_bgr, cfg):
 
 
 def augment_once(img_bgr, regions, cfg):
-    """Produce ONE augmented (image, regions) from an image and its boxes.
+    """! @brief Produce ONE augmented (image, regions) from an image and its boxes.
 
     Each transform rolls independently against its chance. Returns
-    (new_img, new_regions, changed) — `changed` is False when no transform fired
+    (new_img, new_regions, changed) - `changed` is False when no transform fired
     (caller can skip writing a pointless duplicate). Boxes are transformed with
     the image; boxes warped out of frame are dropped.
     """
@@ -198,7 +199,7 @@ def augment_once(img_bgr, regions, cfg):
 
 
 def any_enabled(cfg):
-    """True if at least one transform has a non-zero chance — lets the caller
+    """! @brief True if at least one transform has a non-zero chance - lets the caller
     skip the whole pipeline (and re-enable native augments) when unused."""
     return any(_f(cfg, k, 0) > 0 for k in (
         "aug_rotate_p", "aug_scale_p", "aug_translate_p", "aug_shear_p",

@@ -1,8 +1,9 @@
-"""SauceNAO — reverse image search for photos (API key required)."""
+"""! @file
+@brief SauceNAO - reverse image search for photos (API key required)."""
 MANIFEST = {
     "id": "metasrc_saucenao", "name": "SauceNAO (photos)", "version": "1.0.0",
     "description": "Reverse image search: finds where an image came from (Pixiv, Danbooru, "
-                   "Twitter, …) and fills artist / source / title. Needs a SauceNAO API key.",
+                   "Twitter, ...) and fills artist / source / title. Needs a SauceNAO API key.",
     "core": False, "requires": ["metasrc"], "pip": [], "assets": [],
 }
 
@@ -30,10 +31,10 @@ def register(host):
             artist = ", ".join(artist) if isinstance(artist, list) else artist
             title = d.get("title") or d.get("source") or d.get("eng_name") or h.get("index_name", "")
             out.append({"id": h.get("index_id"), "title": str(title),
-                        "subtitle": f"{h.get('similarity')}% · {h.get('index_name', '')}" + (f" · {artist}" if artist else ""),
+                        "subtitle": f"{h.get('similarity')}% | {h.get('index_name', '')}" + (f" | {artist}" if artist else ""),
                         "thumb": h.get("thumbnail"),
                         "fields": {"artist": artist, "source_url": urls[0] if urls else "",
-                                   "description": f"{title} — {urls[0]}" if urls else "",
+                                   "description": f"{title} - {urls[0]}" if urls else "",
                                    "tags": [str(d["material"])] if d.get("material") else []}})
         return out
 

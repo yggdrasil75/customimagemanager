@@ -8,7 +8,7 @@
 </head>
 <body class="bg-gray-900 text-white h-screen flex flex-col overflow-hidden">
 <div class="p-3 bg-gray-800 border-b border-gray-700 flex justify-between items-center flex-shrink-0">
-  <h1 class="text-lg font-bold text-purple-400">Trainer — Box Model</h1>
+  <h1 class="text-lg font-bold text-indigo-400">Trainer - Box Model</h1>
   <div class="flex items-center gap-3">
     <span id="app_status" class="text-xs text-gray-400"></span>
     <a href="/" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm">← Back</a>
@@ -21,11 +21,11 @@
 
     <!-- Sets -->
     <div class="bg-gray-900 p-3 rounded border border-gray-700" data-feature="ai.trainer">
-      <label class="text-xs font-bold text-purple-300 block mb-1">Dataset</label>
+      <label class="text-xs font-bold text-indigo-300 block mb-1">Dataset</label>
       <select id="set_select" onchange="onSetChange()"
         class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white"></select>
       <div class="flex justify-between items-center mt-1">
-        <span class="text-xs text-gray-500"><span id="set_count" class="text-purple-300">0</span> images · saved</span>
+        <span class="text-xs text-gray-500"><span id="set_count" class="text-indigo-300">0</span> images | saved</span>
         <button onclick="deleteSet()" data-feature="ai.trainer.keep"
           class="text-xs text-red-400 hover:text-red-300">Delete set</button>
       </div>
@@ -43,13 +43,13 @@
         <label class="text-xs text-gray-400 block mb-1">Priority</label>
         <select id="sel_strategy"
           class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-white text-sm">
-          <option value="recent">Recent (semi-random over last n×2)</option>
+          <option value="recent">Recent (semi-random over last nx2)</option>
           <option value="random">Fully random</option>
           <option value="diverse">Most diverse (distinct embeddings)</option>
         </select>
       </div>
       <label class="flex items-center gap-2 text-xs text-gray-300">
-        <input id="sel_exclude_sets" type="checkbox" checked class="accent-purple-500">
+        <input id="sel_exclude_sets" type="checkbox" checked class="accent-indigo-500">
         Exclude images already in a set
       </label>
       <div>
@@ -74,9 +74,9 @@
     <!-- Train -->
     <div class="space-y-2 pt-2 border-t border-gray-700" data-feature="ai.trainer.run">
       <div class="flex justify-between items-center">
-        <label class="text-xs font-bold text-purple-300">Training settings</label>
+        <label class="text-xs font-bold text-indigo-300">Training settings</label>
         <button onclick="toggleAdvanced()" id="adv_toggle"
-          class="text-xs text-purple-300 hover:text-purple-200">Show advanced ▾</button>
+          class="text-xs text-indigo-300 hover:text-indigo-200">Show advanced ▾</button>
       </div>
 
       <div class="grid grid-cols-2 gap-2">
@@ -120,9 +120,9 @@
           <div><label class="lbl">Close mosaic</label><input id="close_mosaic" type="number" value="10" class="inp"></div>
         </div>
         <div class="grid grid-cols-2 gap-x-3 gap-y-1 pt-1">
-          <label class="ck"><input type="checkbox" id="cos_lr" class="accent-purple-500"> Cosine LR</label>
-          <label class="ck"><input type="checkbox" id="rect" class="accent-purple-500"> Rect batches</label>
-          <label class="ck"><input type="checkbox" id="single_cls" class="accent-purple-500"> Single class</label>
+          <label class="ck"><input type="checkbox" id="cos_lr" class="accent-indigo-500"> Cosine LR</label>
+          <label class="ck"><input type="checkbox" id="rect" class="accent-indigo-500"> Rect batches</label>
+          <label class="ck"><input type="checkbox" id="single_cls" class="accent-indigo-500"> Single class</label>
         </div>
         <label class="lbl pt-1">Augmentation</label>
         <div class="grid grid-cols-2 gap-2">
@@ -142,9 +142,9 @@
         </div>
       </div>
 
-      <p class="text-xs text-yellow-500">Only images in this set that already have boxes are used.</p>
+      <p class="text-xs text-amber-500">Only images in this set that already have boxes are used.</p>
       <button onclick="startTraining()"
-        class="w-full bg-purple-600 hover:bg-purple-700 py-2 rounded font-bold">Start training</button>
+        class="w-full bg-indigo-600 hover:bg-indigo-700 py-2 rounded font-bold">Start training</button>
     </div>
   </div>
 
@@ -152,7 +152,7 @@
   <div class="flex-1 flex flex-col min-w-0">
     <div class="flex items-center justify-between px-4 py-2 border-b border-gray-700 bg-gray-800/50">
       <span id="grid_title" class="text-sm font-bold text-gray-200">No set selected</span>
-      <span class="text-xs text-gray-500"><span class="text-green-400">green</span> = has boxes · click to review</span>
+      <span class="text-xs text-gray-500"><span class="text-green-400">green</span> = has boxes | click to review</span>
     </div>
     <div class="flex-1 overflow-y-auto px-4 py-3" id="grid_scroll">
       <div id="grid" class="masonry"></div>
@@ -183,19 +183,19 @@
       {{ media_viewer(p='rv_', chrome=False, pane_class='w-full h-full flex flex-col', pane_id='reviewer_viewer') }}
       <button onclick="revStep(1)" class="absolute right-2 top-1/2 -translate-y-1/2 z-40 bg-gray-800/70 hover:bg-gray-700 px-3 py-2 rounded text-2xl">›</button>
     </div>
-    <!-- right: minimal box editor — boxes + names only -->
+    <!-- right: minimal box editor - boxes + names only -->
     <div class="w-72 bg-gray-850 border-l border-gray-700 p-3 flex flex-col gap-2 flex-shrink-0" data-feature="ai.trainer.keep">
       <div class="flex items-center justify-between">
         <span class="text-sm font-bold text-amber-300">Boxes</span>
-        <span id="rev_dirty" class="text-xs text-yellow-500"></span>
+        <span id="rev_dirty" class="text-xs text-amber-500"></span>
       </div>
       <p class="text-[11px] text-gray-500">Drag on the image to add a box. Right-click a box to delete.</p>
       <div id="rev_boxlist" class="flex-1 overflow-y-auto space-y-1"></div>
       <button onclick="revSaveBoxes()" id="rev_save"
-        class="w-full bg-emerald-700 hover:bg-emerald-600 py-1.5 rounded font-bold text-sm">Save boxes</button>
+        class="w-full bg-green-700 hover:bg-green-600 py-1.5 rounded font-bold text-sm">Save boxes</button>
     </div>
   </div>
-  <div class="p-2 text-center text-xs text-gray-500 flex-shrink-0">← / → navigate · drag = add box · right-click box = delete · Del = remove image from set · Esc = close</div>
+  <div class="p-2 text-center text-xs text-gray-500 flex-shrink-0">← / → navigate | drag = add box | right-click box = delete | Del = remove image from set | Esc = close</div>
   <!-- shared datalist of existing labels for the searchable name inputs -->
   <datalist id="rev_labels"></datalist>
 </div>

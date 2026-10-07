@@ -1,5 +1,5 @@
-"""
-Video dataset for HEURDUV (and HEURDU 1.0 animation) training.
+"""! @file
+@brief Video dataset for HEURDUV (and HEURDU 1.0 animation) training.
 ======================================================================
 Source: the library's videos and animations plus dataset folders. Each
 clip is decoded ONCE into a cache (models/dedup_train/video/<sha1>.npy:
@@ -59,7 +59,7 @@ def cache_dir(host):
 
 
 def cache_clip(host, path, side=SIDE, min_steps=4):
-    """Decode (once) to the cache; returns the .npy path or None."""
+    """! @brief Decode (once) to the cache; returns the .npy path or None."""
     cp = os.path.join(cache_dir(host), hashlib.sha1(f"{path}|{side}|v1".encode()).hexdigest()[:16] + ".npy")
     if os.path.exists(cp):
         return cp
@@ -71,7 +71,7 @@ def cache_clip(host, path, side=SIDE, min_steps=4):
     return cp
 
 
-# ── per-frame transforms ──────────────────────────────────────────────────────
+# -- per-frame transforms ------------------------------------------------------
 def _per_frame(frames, fn):
     return np.stack([fn(f) for f in frames])
 
@@ -115,14 +115,14 @@ def _letterbox(frames, rng):
 
 
 def _fps(frames, rng):
-    """Resample the timeline; returns (frames, map into the original)."""
+    """! @brief Resample the timeline; returns (frames, map into the original)."""
     f = float(np.exp(rng.uniform(np.log(0.5), np.log(2.0))))
     idx = np.clip(np.round(np.arange(0, len(frames), 1.0 / f)).astype(int), 0, len(frames) - 1)
     return frames[idx], idx
 
 
 def dup_pair(a, rng, kinds=DUP_KINDS, n_ops=None):
-    """a [T,...] -> (b, map, kind) duplicate with 1-3 random transforms."""
+    """! @brief a [T,...] -> (b, map, kind) duplicate with 1-3 random transforms."""
     mp = np.arange(len(a))
     b = a
     ops = list(rng.choice(kinds, size=min(len(kinds), int(n_ops or rng.integers(1, 4))), replace=False))
@@ -158,7 +158,7 @@ def _window(clip, T, rng, avoid=None):
 
 
 def synth_pairs(clips, rng, per_clip=4, T=32):
-    """clips: list of uint8 [N, S, S, 3] -> [(a, b, map, kind)]; half duplicates."""
+    """! @brief clips: list of uint8 [N, S, S, 3] -> [(a, b, map, kind)]; half duplicates."""
     pairs = []
     for i, clip in enumerate(clips):
         if clip is None or len(clip) < 4:
@@ -199,14 +199,14 @@ def synth_pairs(clips, rng, per_clip=4, T=32):
 
 
 def is_dup(mp, min_cover=0.5):
-    """Pair label from its map: duplicate when half or more of b maps into a."""
+    """! @brief Pair label from its map: duplicate when half or more of b maps into a."""
     mp = np.asarray(mp)
     return float((mp >= 0).mean()) >= min_cover if len(mp) else False
 
 
-# ── HEURDU 1.0 animation clips (native resolution, per-cell targets) ─────────
+# -- HEURDU 1.0 animation clips (native resolution, per-cell targets) ---------
 def anim_pairs(paths, rng, side=128, T=8, per_path=2, max_frames=media_sig.ANIM_MAX_FRAMES):
-    """[(a [T,S,S,3], b [T,S,S,3], m [T,S/8,S/8])] uint8 BGR runs of consecutive
+    """! @brief [(a [T,S,S,3], b [T,S,S,3], m [T,S/8,S/8])] uint8 BGR runs of consecutive
     native-resolution frames; b per the image synth (duplicate: m 0; local
     edit on 1..T frames: measured mask; unrelated run: m 1)."""
     from modules.dedup_cnn import dup_cnn as dc

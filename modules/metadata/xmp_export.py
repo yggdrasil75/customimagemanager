@@ -1,11 +1,12 @@
-"""Write arbitrary XMP properties to a file (or its .xmp sidecar).
+"""! @file
+@brief Write arbitrary XMP properties to a file (or its .xmp sidecar).
 
 The app has always *read* the full XMP schema (xmp_fields.py: dc, xmp, iptcCore,
-prism, cc, …) but only ever *wrote* the handful of properties baked into
+prism, cc, ...) but only ever *wrote* the handful of properties baked into
 manager.write_metadata's hand-built packet (dc:subject, dc:description, MWG
 regions/collections). This module adds a general writer, mirroring
 exif_export.write_exif: give it a {token: value} patch and it validates each
-token against the schema, coerces by declared type, and writes via pyexiv2 —
+token against the schema, coerces by declared type, and writes via pyexiv2 -
 MERGING into whatever XMP already exists rather than replacing it.
 
 Merging matters: manager.write_metadata rewrites the entire sidecar from
@@ -21,7 +22,7 @@ inject garbage.
 Note on the schema's `writable` flag: it was set for the metadata *editor*
 (which is conservative about what a user edits by hand) and marks most editorial
 fields non-writable even though pyexiv2 can write them. Ingest is a different
-context — we're populating a fresh file from a trusted source — so this writer
+context - we're populating a fresh file from a trusted source - so this writer
 does NOT gate on that flag; it gates on the token existing in the schema at all.
 """
 import os
@@ -37,10 +38,24 @@ except Exception:                        # pragma: no cover - env without pyexiv
 # {"Xmp.dc.creator": ("seq", True), "Xmp.dc.rights": ("lang-alt", False), ...}
 _SCHEMA = None
 
+def _register_namespaces(namespaces):
+    """! @brief Teach exiv2 every namespace the schema knows, so a write to a
+    prefix exiv2 has no built-in table for (prism, mwg-coll, ...) works."""
+    if pyexiv2 is None:
+        return
+    for ns in namespaces:
+        if ns.get("uri") and ns.get("ns"):
+            try:
+                pyexiv2.registerNs(ns["uri"], ns["ns"])
+            except Exception:
+                pass                            # already known to exiv2
+
+
 def _schema():
     global _SCHEMA
     if _SCHEMA is None:
         _SCHEMA = {}
+        _register_namespaces(xfields.schema_dict().get("namespaces", []))
         for ns in xfields.schema_dict().get("namespaces", []):
             for f in ns.get("fields", []):
                 token = f"Xmp.{ns['ns']}.{f['name']}"
@@ -48,11 +63,11 @@ def _schema():
     return _SCHEMA
 
 def known_tokens():
-    """All XMP tokens the schema defines (for the UI's target picker)."""
+    """! @brief All XMP tokens the schema defines (for the UI's target picker)."""
     return sorted(_schema().keys())
 
 def _normalize_token(tok):
-    """Accept 'Xmp.dc.creator', 'dc.creator', or 'dc:creator' → the pyexiv2
+    """! @brief Accept 'Xmp.dc.creator', 'dc.creator', or 'dc:creator' -> the pyexiv2
     'Xmp.ns.Name' form, or None if it doesn't resolve to a known token."""
     if not tok:
         return None
@@ -62,11 +77,11 @@ def _normalize_token(tok):
     return t if t in _schema() else None
 
 def _coerce(value, dtype, is_list):
-    """Shape a raw value for pyexiv2's modify_xmp.
+    """! @brief Shape a raw value for pyexiv2's modify_xmp.
 
     pyexiv2 wants a list for bag/seq properties and a scalar (string) for the
     rest; it handles the lang-alt wrapping itself. We keep this deliberately
-    forgiving — a booru field is usually already a string or a list of strings —
+    forgiving - a booru field is usually already a string or a list of strings -
     and stringify anything exotic rather than reject it."""
     if is_list or dtype in ("bag", "seq"):
         if isinstance(value, (list, tuple)):
@@ -83,11 +98,11 @@ def _coerce(value, dtype, is_list):
     return str(value)
 
 def write_xmp(filepath, patch):
-    """Apply a {token: value} XMP patch to `filepath`, writing to its .xmp
+    """! @brief Apply a {token: value} XMP patch to `filepath`, writing to its .xmp
     sidecar when one exists (the app's source of truth) else to the file itself.
 
     Returns {"success", "written": [...], "skipped": [{token, reason}], "target"}.
-    Never raises for a bad token — it's collected in `skipped`.
+    Never raises for a bad token - it's collected in `skipped`.
     """
     result = {"success": False, "written": [], "skipped": [], "target": None}
     if pyexiv2 is None:
@@ -136,7 +151,7 @@ if __name__ == "__main__":
     assert _normalize_token("dc.not_a_real_field") is None
     assert _normalize_token("") is None
 
-    # seq/bag → list of strings; scalar → string; delimited scalar → list
+    # seq/bag -> list of strings; scalar -> string; delimited scalar -> list
     assert _coerce(["a", "b"], "seq", True) == ["a", "b"]
     assert _coerce("a, b c", "bag", True) == ["a", "b", "c"]
     assert _coerce(["x", "y"], "lang-alt", False) == "x y"

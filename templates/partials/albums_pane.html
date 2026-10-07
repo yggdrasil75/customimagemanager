@@ -4,7 +4,7 @@
 
       <!-- toolbar -->
       <div class="px-4 py-2 bg-gray-800 border-b border-gray-700 flex gap-2 flex-shrink-0">
-        <input id="album_search" type="text" placeholder="Filter albums…"
+        <input id="album_search" type="text" placeholder="Filter albums..."
           oninput="renderImageAlbums()"
           class="flex-1 p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
         <button onclick="createAlbumPrompt()" data-feature="tab.albums.edit"
@@ -16,7 +16,7 @@
         <div id="albums_list" class="flex flex-col gap-2"></div>
         <div id="albums_empty" class="hidden text-center text-gray-500 text-sm py-10">
           <p class="font-bold mb-1">No albums yet</p>
-          <p class="text-xs">Select images in the Gallery tab and use “Add to album”,<br>
+          <p class="text-xs">Select images in the Gallery tab and use "Add to album",<br>
             or create an empty album above.</p>
         </div>
       </div>

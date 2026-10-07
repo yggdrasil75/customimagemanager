@@ -1,4 +1,5 @@
-"""Music: the audio embedding pick, similar / sem: search and radio rounds.
+"""! @file
+@brief Music: the audio embedding pick, similar / sem: search and radio rounds.
 
 No audio is decoded: a fake `embed.audio` provider returns a fixed vector per
 path (with a .embed_text tower), and tracks are inserted straight into the
@@ -78,7 +79,7 @@ def test_radio_round_is_a_smooth_walk_without_seasonal(client, library):
     order = [s["rel_path"] for s in d["songs"]]
     assert not any(p.startswith("xmas/") for p in order), "genre 'Christmas' should be left out"
     assert set(order) == {p for p in library if not p.startswith("xmas/")}
-    # a walk: most consecutive pairs share a genre (8 genres of 6 → ≥ 5 same-genre
+    # a walk: most consecutive pairs share a genre (8 genres of 6 -> >= 5 same-genre
     # steps per genre if the route is coherent; random order would give ~1/7)
     same = sum(a.split("/")[0] == b.split("/")[0] for a, b in zip(order, order[1:]))
     assert same >= 0.7 * (len(order) - 1), same
@@ -121,6 +122,6 @@ def test_radio_played_log_defers_recent(client, library, app):
     d = client.post("/api/music/radio/next", json={"seed": 5}).get_json()
     order = [s["rel_path"] for s in d["songs"]]
     assert d["success"]
-    # every just-played jazz track is pushed at least 4 h of playback in (60 × 4-min tracks)
+    # every just-played jazz track is pushed at least 4 h of playback in (60 x 4-min tracks)
     first_jazz = min(i for i, p in enumerate(order) if p.startswith("jazz/"))
     assert first_jazz * 240.0 >= 4 * 3600 - 240.0 or len(order) * 240.0 < 4 * 3600

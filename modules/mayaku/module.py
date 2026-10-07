@@ -1,5 +1,5 @@
-"""
-Mayaku model provider.
+"""! @file
+@brief Mayaku model provider.
 ======================================================================
 Mayaku (github.com/datamarkin/mayaku) trains and runs detection, instance
 segmentation and keypoint models on a ConvNeXt backbone with a UniQuery
@@ -68,7 +68,7 @@ def _available():
 
 
 def _handles(model_path):
-    """True for model files Mayaku owns. YOLO keeps .pt."""
+    """! @brief True for model files Mayaku owns. YOLO keeps .pt."""
     if not model_path:
         return False
     p = str(model_path)
@@ -79,9 +79,9 @@ def _weights_key(cap):
     return "mayaku_weights_" + cap
 
 
-# ── model loading (cached in the runtime LRU) ────────────────────────────────
+# -- model loading (cached in the runtime LRU) --------------------------------
 def _resolve(source, chore="detect"):
-    """Zoo name -> models/mayaku/<chore>/<name>.pth (fetched there on a miss,
+    """! @brief Zoo name -> models/mayaku/<chore>/<name>.pth (fetched there on a miss,
     never into the cwd); explicit paths pass through."""
     if os.path.exists(str(source)) or os.path.dirname(str(source)):
         return str(source)
@@ -89,7 +89,7 @@ def _resolve(source, chore="detect"):
 
 
 def _predictor(source, chore="detect"):
-    """source: zoo name ('mayaku-n-det') or a .pth / exported artifact path."""
+    """! @brief source: zoo name ('mayaku-n-det') or a .pth / exported artifact path."""
     local = _resolve(source, chore)
     key = f"mayaku:{os.path.abspath(local)}"
     model_registry.register(          # idempotent; keeps a measured cost
@@ -126,7 +126,7 @@ def _class_name(names, cid):
 
 
 def _run(source, img_bgr, chore="detect"):
-    """(Instances, names, W, H) or None."""
+    """! @brief (Instances, names, W, H) or None."""
     if img_bgr is None:
         return None
     pred = _predictor(source, chore)
@@ -143,9 +143,9 @@ def _run(source, img_bgr, chore="detect"):
     return inst, names, W, H
 
 
-# ── transforms: Instances (COCO px) -> canonical normalised shapes ──────────
+# -- transforms: Instances (COCO px) -> canonical normalised shapes ----------
 def _rows(inst, conf):
-    """Indices of instances at/above conf, with scores & classes arrays."""
+    """! @brief Indices of instances at/above conf, with scores & classes arrays."""
     scores = _np(inst.scores) if inst.has("scores") else None
     classes = _np(inst.pred_classes) if inst.has("pred_classes") else None
     n = len(inst)
@@ -173,7 +173,7 @@ def _tf_boxes(res, *a, conf=0.25, keep_classes=None, **k):
 
 
 def _tf_masks(res, *a, conf=0.25, **k):
-    """BitMasks (N,H,W) -> polygon points normalised 0..1 (largest contour)."""
+    """! @brief BitMasks (N,H,W) -> polygon points normalised 0..1 (largest contour)."""
     if res is None or not res[0].has("pred_masks") or not _HAVE_CV2:
         return []
     inst, names, W, H = res
@@ -194,12 +194,12 @@ def _tf_masks(res, *a, conf=0.25, **k):
 
 
 def _tf_pose(res, *a, conf=0.25, **k):
-    """pred_keypoints (N,K,3) x,y,score px -> [{keypoints:[{x,y,v}], conf}]."""
+    """! @brief pred_keypoints (N,K,3) x,y,score px -> [{keypoints:[{x,y,v}], conf}]."""
     if res is None:
         return []
     if not res[0].has("pred_keypoints"):
         log.error("mayaku pose: the loaded model returned no pred_keypoints "
-                    "(%d instances) — are these pose weights, or detect weights "
+                    "(%d instances) - are these pose weights, or detect weights "
                     "resolved into the pose slot?", len(res[0]))
         return []
     inst, names, W, H = res
@@ -214,7 +214,7 @@ def _tf_pose(res, *a, conf=0.25, **k):
             for i in keep]
 
 
-# ── registration ─────────────────────────────────────────────────────────────
+# -- registration -------------------------------------------------------------
 def register(host):
 
     def _source(cap):
@@ -295,7 +295,7 @@ def register(host):
         return _pose_broken.get(src) or ("" if src else _ZOO_POSE_MSG)
 
     def _loader(cap):
-        # The handle runs the model; the transform normalises. conf /
+        ## @brief The handle runs the model; the transform normalises. conf /
         # keep_classes ride through kwargs like the YOLO provider's.
         # resolve the pick at bind time (inside request()'s role context)
         def bind():
@@ -322,7 +322,7 @@ def register(host):
             note="ConvNeXt + UniQuery head, Objects365-pretrained (365 classes vs "
                  "COCO's 80). Slower than YOLO; better on long-tail objects.",
             types=[{"value": "objects365", "label": "Objects365 head"}]
-                  if cap != "pose" else [{"value": "body", "label": "Body · 17 pts"}],
+                  if cap != "pose" else [{"value": "body", "label": "Body | 17 pts"}],
             classes=(lambda c=cap: list(_predictor(_source(c), c).class_names or []))
                     if cap != "pose" else None,
             settings=[{"key": key, "label": "Custom weights (.pth)", "kind": "select",
@@ -333,7 +333,7 @@ def register(host):
             reason=_pose_reason if cap == "pose" else "pip install mayaku",
             cost_mb=cost, gpu=model_registry.on_gpu())
 
-    # Path-parameterised box detection for Mayaku model files.
+    ## @brief Path-parameterised box detection for Mayaku model files.
     def _box_detect(img_bgr, model_path, keep_classes=None, conf=0.25, as_obb=False):
         return [{k: b[k] for k in ("class_name", "cx", "cy", "w", "h")}
                 for b in _tf_boxes(_run(model_path, img_bgr), conf=conf,

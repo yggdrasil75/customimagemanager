@@ -1,5 +1,5 @@
-"""
-KoboldCpp module.
+"""! @file
+@brief KoboldCpp module.
 ======================================================================
 Runs a local koboldcpp (github.com/LostRuins/koboldcpp) server from inside
 the app and points the vlm module at it. The model field takes:
@@ -20,7 +20,7 @@ No koboldcpp installed? The tab downloads the official Linux build for the
 selected GPU flavour (koboldai.org short links) into models/kobold/bin/ and
 points the executable setting at it.
 
-Routes (Settings → Kobold tab, kobold.js): /api/kobold/status, /start,
+Routes (Settings -> Kobold tab, kobold.js): /api/kobold/status, /start,
 /stop, /download.
 """
 
@@ -58,10 +58,10 @@ _DL = {"busy": False}
 
 # Official builds (koboldai.org short links, always the latest release).
 _BUILDS = {
-    "cu12":  ("https://koboldai.org/cpplinuxcu12", "Linux · Nvidia (CUDA 12)"),
-    "cu11":  ("https://koboldai.org/cpplinux",     "Linux · Nvidia legacy (CUDA 9-11)"),
-    "nocu":  ("https://koboldai.org/cpplinuxnocu", "Linux · no Nvidia (Vulkan/CPU)"),
-    "rocm":  ("https://koboldai.org/cpplinuxrocm", "Linux · AMD (ROCm)"),
+    "cu12":  ("https://koboldai.org/cpplinuxcu12", "Linux | Nvidia (CUDA 12)"),
+    "cu11":  ("https://koboldai.org/cpplinux",     "Linux | Nvidia legacy (CUDA 9-11)"),
+    "nocu":  ("https://koboldai.org/cpplinuxnocu", "Linux | no Nvidia (Vulkan/CPU)"),
+    "rocm":  ("https://koboldai.org/cpplinuxrocm", "Linux | AMD (ROCm)"),
 }
 RELEASES_URL = "https://koboldai.org/cpp"
 
@@ -71,7 +71,7 @@ def _bin_dir():
 
 
 def download(variant, cfg, save):
-    """Fetch the chosen build to models/kobold/bin/koboldcpp-<variant>, make it
+    """! @brief Fetch the chosen build to models/kobold/bin/koboldcpp-<variant>, make it
     executable and set it as the executable. Runs on a thread; logs progress."""
     url, label = _BUILDS[variant]
     dest = os.path.join(_bin_dir(), f"koboldcpp-{variant}")
@@ -106,7 +106,7 @@ def download(variant, cfg, save):
 
 
 def _hf(path: str) -> str:
-    """owner/repo/file.gguf -> https://huggingface.co/owner/repo/resolve/main/file.gguf;
+    """! @brief owner/repo/file.gguf -> https://huggingface.co/owner/repo/resolve/main/file.gguf;
     URLs and local paths pass through."""
     p = (path or "").strip()
     if not p or p.startswith(("http://", "https://")) or os.path.exists(p):
@@ -198,14 +198,14 @@ def register(host):
         return cmd
 
     def _apply():
-        """Write the vlm settings from koboldcpp's own model list."""
+        """! @brief Write the vlm settings from koboldcpp's own model list."""
         llm = host.get_service("llm") or {}
-        cfg["oai_endpoint"] = _url(cfg, "/v1/chat/completions")
+        host.set_config("oai_endpoint", _url(cfg, "/v1/chat/completions"), save=False)
         ids = llm["list_models"](cfg["oai_endpoint"], "", ttl=0, wait=True) if llm.get("list_models") else []
         if ids:
-            cfg["oai_model"] = ids[0]
+            host.set_config("oai_model", ids[0], save=False)
         elif not cfg.get("oai_model"):
-            cfg["oai_model"] = "koboldcpp"     # old backends: kobold ignores the name anyway
+            host.set_config("oai_model", "koboldcpp", save=False)  # old backends: kobold ignores the name anyway
         host.save_config()
 
     def start():
@@ -273,7 +273,7 @@ def register(host):
                    level="write", action="kobold_start")
     host.add_route("/api/kobold/stop", api_stop, methods=["POST"], feature="settings.kobold",
                    level="write", action="kobold_stop")
-    host.add_settings_tab("kobold", "Kobold", icon="🐲", admin_only=True)
+    host.add_settings_tab("kobold", "Kobold", admin_only=True)
     host.add_asset("kobold.js")
     host.provide_service("kobold", {"start": start, "stop": stop, "status": _status})
 

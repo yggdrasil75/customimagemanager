@@ -1,4 +1,4 @@
-// ── State ──────────────────────────────────────────────────────────────────
+// -- State ------------------------------------------------------------------
 window.currentFile=null;
 let currentRegions=[], currentRegionsFile=null, hasSettings=false;
 let autosaveTO=null, drawing=false, startX=0,startY=0,curX=0,curY=0;
@@ -15,7 +15,7 @@ let currentTags=[];
 let PAGE=200;
 let _brandClearLogo = false;
 
-// ── Canvas overlay hooks ─────────────────────────────────────────────────────
+// -- Canvas overlay hooks -----------------------------------------------------
 // Modules register a draw function here to paint on top of the image canvas
 // (e.g. the pose module's skeleton). The core render loop (viewer.js, editor.js
 // popout) calls runCanvasOverlays after drawing regions. When a module is
@@ -32,7 +32,7 @@ function runCanvasOverlays(ctx,dw,dh,scale){
   }
 }
 
-// ── File-metadata hooks ──────────────────────────────────────────────────────
+// -- File-metadata hooks ------------------------------------------------------
 // Modules register fn(meta, filename) here to pick their own fields out of the
 // metadata packet each time the viewer loads a file (e.g. the pose module reads
 // meta.pose). Called by selectFile before drawCanvas, so overlays see fresh state.
@@ -47,16 +47,17 @@ function runFileMetaHooks(meta, fn){
   }
 }
 
-// ── Control-button extension areas ───────────────────────────────────────────
+// -- Control-button extension areas -------------------------------------------
 // Named regions in the UI that modules can append buttons to, instead of the
 // core template reserving a slot per feature. An area is any element carrying
 // data-ext-area="<name>" (there can be several with the same name, e.g. the
 // gallery bulk bar exists in both the pane and the modal). A module calls
-//   registerControlButton('ai_tools', '<button ...>…</button>')
+//   registerControlButton('ai_tools', {label: 'Pose', onclick: 'runPose()', variant: 'tertiary'})
+// (a cimButton spec; raw HTML is still accepted for non-button controls)
 // and the HTML is appended to every current AND future element of that area.
 // Registrations are remembered so areas rendered later (or re-rendered) still
 // receive them; data-feature on the injected markup is honoured.
-window._extButtons = window._extButtons || {};   // area -> [html, …]
+window._extButtons = window._extButtons || {};   // area -> [html, ...]
 function _applyExtButtonsTo(el){
   const area = el.getAttribute('data-ext-area');
   const htmls = window._extButtons[area] || [];
@@ -76,25 +77,50 @@ function _extKey(html){
   let h=0; for(let i=0;i<html.length;i++){ h=(h*31+html.charCodeAt(i))|0; }
   return 'e'+(h>>>0);
 }
+// The core button. Every module button is built here so a palette, a size or a
+// style change reaches all of them at once (colours: theming.css, cim-btn-*).
+//   cimButton({label, onclick, variant, size, id, feature, title, cls, attrs, hidden})
+//   variant: primary | secondary | tertiary | ok | warn | danger | neutral
+//            (accent / accent2 / accent3 / green / amber / red / gray)
+//   size:    block (full-width panel button) | sm (bar button) | xs (inline chip)
+// registerControlButton(area, {...}) takes the same object and picks the size
+// that suits the area.
+const _CIM_AREA_SIZE = {ai_tools: 'block', gallery_bulk: 'sm', gallery_tools: 'sm', comic_tools: 'sm',
+                        viewer_toggles: 'sm', review_actions: 'xs', description_tools: 'xs',
+                        book_tools: 'xs', music_tools: 'xs', ai_tooling_links: 'sm'};
+function cimButton(o){
+  o = o || {};
+  const a = [`type="button"`, `class="cim-btn cim-btn-${o.variant || 'primary'} cim-btn-${o.size || 'sm'}${o.cls ? ' ' + o.cls : ''}"`];
+  if(o.id) a.push(`id="${_esc(o.id)}"`);
+  if(o.onclick) a.push(`onclick="${_esc(o.onclick)}"`);
+  if(o.feature) a.push(`data-feature="${_esc(o.feature)}"`);
+  if(o.title) a.push(`title="${_esc(o.title)}"`);
+  if(o.hidden) a.push(`style="display:none"`);
+  for(const [k, v] of Object.entries(o.attrs || {})) a.push(`${k}="${_esc(v)}"`);
+  return `<button ${a.join(' ')}>${o.html != null ? o.html : _esc(o.label || '')}</button>`;
+}
 function registerControlButton(area, html){
+  if(html && typeof html === 'object') html = cimButton({size: _CIM_AREA_SIZE[area] || 'sm', ...html});
   (window._extButtons[area] = window._extButtons[area] || []).push(html);
   document.querySelectorAll(`[data-ext-area="${area}"]`).forEach(_applyExtButtonsTo);
 }
-// Re-apply all registrations to every area now in the DOM. Call after markup
-// that contains extension areas is (re)rendered — e.g. opening the gallery modal.
+/** @brief Re-apply all registrations to every area now in the DOM. Call after markup
+ *  that contains extension areas is (re)rendered - e.g. opening the gallery modal.
+ */
 function refreshControlButtons(){
   document.querySelectorAll('[data-ext-area]').forEach(_applyExtButtonsTo);
 }
 
-// ── Tags list box ────────────────────────────────────────────────────────────
+// -- Tags list box ------------------------------------------------------------
 function syncTagMirror(){
   const m=document.getElementById('meta_tags');
   if(m) m.value=currentTags.join(', ');
 }
-// A tag prefixed with '?' is an unconfirmed (AI/auto) suggestion.
-// HTML-escape for innerHTML templates. Core-owned: gallery.js/globals.js use it,
-// so it must not depend on a module script (books/fetch/pipeline redefine it
-// identically for their own files).
+/** @brief A tag prefixed with '?' is an unconfirmed (AI/auto) suggestion.
+ *  HTML-escape for innerHTML templates. Core-owned: gallery.js/globals.js use it,
+ *  so it must not depend on a module script (books/fetch/pipeline redefine it
+ *  identically for their own files).
+ */
 function _esc(s){ return String(s ?? '').replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function tagIsConfirmed(t){ return !String(t).startsWith('?'); }
@@ -129,11 +155,11 @@ function renderTags(){
       const name=rtagName(t), conf=rtagIsConfirmed(t), pending=rtagIsPending(t);
       const dot=conf?'#3B82F6':(pending?'#F59E0B':'#6B7280');
       regionRows.push(`<div class="rrow tag-row flex items-center gap-1 opacity-90 cursor-pointer"
-          title="Region tag on “${_esc(b.class_name||'region')}” — click to edit"
+          title="Region tag on '${_esc(b.class_name||'region')}' - click to edit"
           onclick="selectRegion(${ri})">
         <span class="inline-block w-2 h-2 rounded-full flex-shrink-0" style="background:${dot}"></span>
         <span class="flex-1 min-w-0 truncate">${_esc(name)}</span>
-        <span class="text-[9px] text-purple-400 flex-shrink-0">▢ ${_esc(b.class_name||'region')}</span>
+        <span class="text-[9px] text-indigo-400 flex-shrink-0">${_esc(b.class_name||'region')}</span>
       </div>`);
     });
   });
@@ -152,7 +178,7 @@ function renderTags(){
     if(total) parts.push(`${total} image`);
     if(rtCount) parts.push(`${rtCount} region`);
     let txt=parts.join(' + ');
-    if(unconf) txt+=` · ${unconf} unconfirmed`;
+    if(unconf) txt+=` | ${unconf} unconfirmed`;
     c.textContent=txt;
   }
   const btn=document.getElementById('btn_confirm_all_tags');
@@ -160,7 +186,7 @@ function renderTags(){
   syncTagMirror();
   if(window.CIMFeatures) window.CIMFeatures.apply(box);
 }
-// Edit a tag's text in place, preserving its confirmed/unconfirmed state.
+/** @brief Edit a tag's text in place, preserving its confirmed/unconfirmed state. */
 function renameTag(i,name){
   if(i<0||i>=currentTags.length) return;
   const nm=tagName((name||'').trim());
@@ -177,17 +203,17 @@ function renameTag(i,name){
   }
   renderTags(); triggerAutosave();
 }
-// Confirm one suggested tag (strip the '?' sentinel) and persist.
+/** @brief Confirm one suggested tag (strip the '?' sentinel) and persist. */
 function acceptTag(i){
   if(i<0||i>=currentTags.length) return;
   currentTags[i]=tagName(currentTags[i]);
   renderTags(); triggerAutosave();
 }
-// Reject one suggested tag: remove it and persist.
+/** @brief Reject one suggested tag: remove it and persist. */
 function rejectTag(i){
   currentTags.splice(i,1); renderTags(); triggerAutosave();
 }
-// Confirm every suggested tag on the current file at once.
+/** @brief Confirm every suggested tag on the current file at once. */
 function confirmAllTags(){
   currentTags=currentTags.map(tagName);
   renderTags(); triggerAutosave();
@@ -219,8 +245,9 @@ function addTagsFromInput(){
   inp.value='';
   if(changed){ renderTags(); triggerAutosave(); }
 }
-// Adopt whatever legacy code wrote into the hidden mirror (#meta_tags) back into
-// the list box. Call after AI/auto-tag flows that set meta_tags.value directly.
+/** @brief Adopt whatever legacy code wrote into the hidden mirror (#meta_tags) back into
+ *  the list box. Call after AI/auto-tag flows that set meta_tags.value directly.
+ */
 function adoptMirrorTags(){
   const m=document.getElementById('meta_tags');
   if(!m) return;
@@ -228,7 +255,7 @@ function adoptMirrorTags(){
 }
 
 // window.* (not `let`) so module scripts can read it as window.selectedFiles
-// as well as bare selectedFiles. Never reassigned — mutate in place.
+// as well as bare selectedFiles. Never reassigned - mutate in place.
 window.selectedFiles = new Set();   // rel_paths currently selected
 let lastClickedFile = null;      // for shift-range selection
 let galleryFiles = [];           // current page's file list, in render order
@@ -247,10 +274,11 @@ const io=new IntersectionObserver(entries=>{
   });
 },{rootMargin:'300px'});
 
-// ── Sync with disk ──────────────────────────────────────────────────────────
-// Purge DB rows for files deleted on disk and trigger a re-index (which re-reads
-// externally edited files via their changed mtime). Fixes blank tiles left behind
-// when a file is removed or edited outside the app.
+// -- Sync with disk ----------------------------------------------------------
+/** @brief Purge DB rows for files deleted on disk and trigger a re-index (which re-reads
+ *  externally edited files via their changed mtime). Fixes blank tiles left behind
+ *  when a file is removed or edited outside the app.
+ */
 async function reconcileLibrary(){
   const btn=document.getElementById('btn_reconcile');
   if(btn){btn.disabled=true;btn.classList.add('opacity-50');}
@@ -259,7 +287,7 @@ async function reconcileLibrary(){
       headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json());
     if(d&&d.success){
       const st=document.getElementById('status_text');
-      if(st) st.innerText=`Synced — purged ${d.purged} deleted; re-indexing…`;
+      if(st) st.innerText=`Synced - purged ${d.purged} deleted; re-indexing...`;
       if(typeof loadGallery==='function') loadGallery();
     }
   }catch(e){
@@ -270,7 +298,7 @@ async function reconcileLibrary(){
   }
 }
 
-// ── Polling ────────────────────────────────────────────────────────────────
+// -- Polling ----------------------------------------------------------------
 async function fetchState(){
   try{
     const s=await fetch('/api/state').then(r=>r.json());
@@ -278,7 +306,7 @@ async function fetchState(){
     applyBranding(s);
     // While the settings modal is open we FREEZE its working copy: the 2.5s poll
     // must not touch the quick-filter cache/editor or re-render anything the user
-    // is editing — not even if another user saves settings meanwhile. The modal
+    // is editing - not even if another user saves settings meanwhile. The modal
     // took a fresh snapshot on open; it's released on save/close. The chips under
     // the search box are only refreshed when settings are closed (they mirror the
     // live cache, which is frozen while editing anyway).
@@ -314,7 +342,7 @@ function populateSettingsForm(s){
 }
 setInterval(fetchState,2500); fetchState();
 
-// ── Toast ──────────────────────────────────────────────────────────────────
+// -- Toast ------------------------------------------------------------------
 function showToast(msg){
   let t=document.getElementById('toast');
   if(!t){
@@ -328,12 +356,12 @@ function showToast(msg){
   t._to=setTimeout(()=>t.style.opacity='0', 2500);
 }
 
-// ── Global keyboard shortcuts ──────────────────────────────────────────────
+// -- Global keyboard shortcuts ----------------------------------------------
 document.addEventListener('keydown', async e=>{
   const tag=document.activeElement.tagName;
   const inInput = tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT';
 
-  // Ctrl+V on gallery (no input focused) → paste clipboard as bulk tag
+  // Ctrl+V on gallery (no input focused) -> paste clipboard as bulk tag
   if((e.ctrlKey||e.metaKey) && e.key==='v' && !inInput && selectedFiles.size>0){
     e.preventDefault();
     try{
@@ -342,7 +370,7 @@ document.addEventListener('keydown', async e=>{
         document.getElementById('bulk_tag_input').value=text;
         applyBulkTag();
       }
-    }catch(_){ showToast('Clipboard access denied — type tags in the bar instead.'); }
+    }catch(_){ showToast('Clipboard access denied - type tags in the bar instead.'); }
     return;
   }
 

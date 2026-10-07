@@ -1,4 +1,5 @@
-"""Map module: GPS parsing, the geo cache, the map routes and the gps:/near:/bbox:
+"""! @file
+@brief Map module: GPS parsing, the geo cache, the map routes and the gps:/near:/bbox:
 search tokens."""
 import os
 
@@ -8,7 +9,7 @@ from cimtest import media_path
 from modules.map import geo
 
 
-# ── pure parsing ───────────────────────────────────────────────────────────
+# -- pure parsing -----------------------------------------------------------
 def test_exif_rational():
     assert geo.exif_rational("37/1 46/1 1629/100", "N") == pytest.approx(37.771192, abs=1e-5)
     assert geo.exif_rational("122/1 25/1 0/1", "W") == pytest.approx(-122.4167, abs=1e-4)
@@ -66,7 +67,7 @@ def test_box_around_and_antimeridian():
     assert (w, e) == (-180.0, 180.0)
 
 
-# ── app integration ────────────────────────────────────────────────────────
+# -- app integration --------------------------------------------------------
 def _set_gps(host, fn, lat, lon):
     host.get_service("xmp")["write"](media_path(fn), host.media.gps_xmp(lat, lon))
 

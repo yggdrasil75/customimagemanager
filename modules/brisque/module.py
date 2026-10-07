@@ -1,5 +1,5 @@
-"""
-BRISQUE IQA provider (legacy, opencv, no torch).
+"""! @file
+@brief BRISQUE IQA provider (legacy, opencv, no torch).
 ======================================================================
 Self-contained. Owns the opencv-contrib BRISQUE model end to end: its
 weights (bundled in models/), building the scorer, running it, and
@@ -74,7 +74,7 @@ def _build():
 
 
 def _normalize(raw):
-    """0..1, higher = better. Own copy (providers are self-contained)."""
+    """! @brief 0..1, higher = better. Own copy (providers are self-contained)."""
     if raw is None or _HI == _LO:
         return None
     x = max(0.0, min(1.0, (float(raw) - _LO) / (_HI - _LO)))
@@ -82,7 +82,7 @@ def _normalize(raw):
 
 
 def _scorer():
-    """Cached callable(img_bgr) -> {raw, quality}, backed by model_registry."""
+    """! @brief Cached callable(img_bgr) -> {raw, quality}, backed by model_registry."""
     key = "iqa:brisque"
     model_registry.register(key, _build, cost_mb=0, gpu=False)
 
@@ -97,7 +97,7 @@ def register(host):
     host.provide_model(
         "iqa", "brisque",
         label="BRISQUE (legacy, CPU)", family="OpenCV", speed="fast",
-        note="2012 hand-crafted NSS baseline. No deps, CPU-only, distortion only — "
+        note="2012 hand-crafted NSS baseline. No deps, CPU-only, distortion only - "
              "no sense of aesthetics. Kept as the fallback.",
         loader=_scorer,
         available=_have_brisque,

@@ -1,4 +1,5 @@
-"""dedup_train: CNN size series, benchmark, and an end-to-end build.
+"""! @file
+@brief dedup_train: CNN size series, benchmark, and an end-to-end build.
 
 Torch-dependent parts skip when torch is missing. Run with:
     python -m pytest -q tests/test_dedup_train.py
@@ -39,7 +40,10 @@ def _feedback(paths, n=6):
 
 
 def _host(tmp):
-    return types.SimpleNamespace(config={}, logger=logging.getLogger("t"),
+    cfg = {}
+    return types.SimpleNamespace(config=cfg, logger=logging.getLogger("t"),
+                                 set_status=lambda t: cfg.__setitem__("status_text", t),
+                                 set_config=lambda k, v, save=True: cfg.__setitem__(k, v),
                                  core=types.SimpleNamespace(models_dir=os.path.join(tmp, "models")))
 
 
@@ -153,7 +157,7 @@ def test_compare_many_matches_one_at_a_time():
 
 @needs_torch
 def test_score_group_handles_odd_sizes_with_overlap():
-    """Regression: aligned members of a non-multiple-of-8 reference crashed
+    """! @brief Regression: aligned members of a non-multiple-of-8 reference crashed
     cell_mask, which turned every group into a naive fallback."""
     rng = np.random.default_rng(4)
     a = np.full((701, 903, 3), 40, np.uint8)

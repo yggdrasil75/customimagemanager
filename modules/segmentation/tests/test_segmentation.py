@@ -1,4 +1,5 @@
-"""Segmentation module: /api/segment and /api/bulk_segment with masks, and
+"""! @file
+@brief Segmentation module: /api/segment and /api/bulk_segment with masks, and
 merging a mask onto an existing box instead of stacking a second one."""
 import pytest
 from cimtest import post_json, picked_model, picked_name, read_meta, write_meta, box
@@ -57,5 +58,5 @@ def test_real_segment_person(client, upload, app):
     j = post_json(client, "/api/segment", {"filename": fn, "classes": []})
     assert j["success"], j
     assert j["regions"], (f"{picked_name(app, 'segment')} produced no masks for "
-                          f"person_single.jpg — see tests/test_fixtures.py before blaming "
+                          f"person_single.jpg - see tests/test_fixtures.py before blaming "
                           f"the model")

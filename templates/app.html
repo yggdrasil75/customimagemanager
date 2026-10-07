@@ -27,7 +27,7 @@
     {# Module centre panes (a reader, a person's mesh) share this slot and are
        swapped in by the media-mode registry (panes.js). #}
     {% for _c in module_centre_panes %}{% include _c.template ignore missing %}{% endfor %}
-    {# Book mode swaps this in for the image viewer — same slot, same geometry. #}
+    {# Book mode swaps this in for the image viewer - same slot, same geometry. #}
     {# Person mode swaps in a 3D body-mesh viewer with an appearance scrub bar. #}
     <!-- Drag splitter between the media viewer and the controls pane. -->
     <div id="controls_splitter" class="pane-splitter" data-resize="controls"></div>
@@ -38,7 +38,7 @@
   {% include 'partials/region_modal.html' %}
   {% include 'partials/settings_modal.html' %}
   {% include 'partials/popout_modal.html' %}
-  <!-- Module-contributed top-level modals (dedup, …), server-rendered. -->
+  <!-- Module-contributed top-level modals (dedup, ...), server-rendered. -->
   {% for _m in module_app_modals %}{% include _m.template ignore missing %}{% endfor %}
   {% include 'partials/review_modal.html' %}
 

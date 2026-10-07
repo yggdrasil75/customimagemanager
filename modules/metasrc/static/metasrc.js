@@ -1,14 +1,13 @@
-/* Metadata sources — "Lookup" buttons + candidate picker.
+/* Metadata sources - "Lookup" buttons + candidate picker.
  * One modal serves all three kinds; the kind decides which file it asks
  * about and how the app reloads afterwards. Source modules are invisible
  * here: the hub merges their candidates and labels each with its source. */
 (function () {
-  const BTN = (kind, title) =>
-    `<button onclick="metasrcOpen('${kind}')" title="${title}" data-feature="metasrc"
-       class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded">🔎 Lookup</button>`;
+  const BTN = (kind, title) => ({label: '🔎 Lookup', onclick: `metasrcOpen('${kind}')`, title,
+                                 feature: 'metasrc', variant: 'neutral'});
   registerControlButton('description_tools', BTN('photo', 'Look up tags / description from online sources'));
-  registerControlButton('book_tools', BTN('book', 'Look up book metadata (Open Library, Google Books, …)'));
-  registerControlButton('music_tools', BTN('music', 'Look up track metadata (MusicBrainz, Discogs, …)'));
+  registerControlButton('book_tools', BTN('book', 'Look up book metadata (Open Library, Google Books, ...)'));
+  registerControlButton('music_tools', BTN('music', 'Look up track metadata (MusicBrainz, Discogs, ...)'));
 
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   let state = { kind: '', rel: '', cands: [] };
@@ -34,7 +33,7 @@
           <button onclick="metasrcClose()" class="text-gray-400 hover:text-white">✕</button>
         </div>
         <div class="flex items-center gap-2 px-3 py-2 border-b border-gray-800">
-          <input id="metasrc_q" type="text" placeholder="search…" onkeydown="if(event.key==='Enter')metasrcSearch()"
+          <input id="metasrc_q" type="text" placeholder="search..." onkeydown="if(event.key==='Enter')metasrcSearch()"
             class="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm">
           <select id="metasrc_src" class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"></select>
           <button onclick="metasrcSearch()" class="bg-blue-600 hover:bg-blue-500 rounded px-3 py-1 text-sm font-bold">Search</button>
@@ -72,7 +71,7 @@
 
   window.metasrcSearch = async function () {
     const list = document.getElementById('metasrc_list');
-    list.innerHTML = '<div class="text-gray-500 p-2">Searching…</div>';
+    list.innerHTML = '<div class="text-gray-500 p-2">Searching...</div>';
     const body = { kind: state.kind, rel_path: state.rel, q: document.getElementById('metasrc_q').value,
                    source: document.getElementById('metasrc_src').value };
     const d = await fetch('/api/metasrc/search', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -91,7 +90,7 @@
           <div class="text-xs text-gray-400 truncate">${esc(c.subtitle || '')}</div>
           <div class="text-[11px] text-gray-500 mt-1 line-clamp-3">${esc(fieldsPreview(c.fields))}</div>
         </div>
-        <button onclick="metasrcApply(${i})" class="self-start bg-emerald-700 hover:bg-emerald-600 rounded px-3 py-1 text-xs font-bold">Use</button>
+        <button onclick="metasrcApply(${i})" class="self-start bg-green-700 hover:bg-green-600 rounded px-3 py-1 text-xs font-bold">Use</button>
       </div>`).join('');
   };
 
@@ -99,7 +98,7 @@
     if (!f) return '';
     return Object.entries(f).filter(([, v]) => v !== null && v !== '' && !(Array.isArray(v) && !v.length))
       .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.slice(0, 12).join(', ') : typeof v === 'object' ? JSON.stringify(v) : v}`)
-      .join(' · ');
+      .join(' | ');
   }
 
   window.metasrcApply = async function (i) {

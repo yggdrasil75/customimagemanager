@@ -1,8 +1,8 @@
-/* reader.js — the centre-pane reader.
+/* reader.js - the centre-pane reader.
  *
  * Two readers, one shell:
  *
- *   FLOW  (epub / txt / html / fb2 / mobi / docx / rtf / …)
+ *   FLOW  (epub / txt / html / fb2 / mobi / docx / rtf / ...)
  *     Sections arrive as sanitized HTML and go into a CSS-columns box. Paging
  *     is a horizontal scroll of exactly one viewport width, which is what makes
  *     it feel like a page turn instead of a scroll. Font size, measure, leading,
@@ -16,9 +16,9 @@
  *
  * POSITION MODEL
  * A `locator` is a string so both readers can share one progress table:
- *     flow   →  "s<section>:<scrollFraction>"   e.g. "s12:0.42"
- *     paged  →  "p<page>"                        e.g. "p137"
- * Progress is saved on a debounce, not on every scroll event — a 900-page PDF
+ *     flow   ->  "s<section>:<scrollFraction>"   e.g. "s12:0.42"
+ *     paged  ->  "p<page>"                        e.g. "p137"
+ * Progress is saved on a debounce, not on every scroll event - a 900-page PDF
  * would otherwise write to SQLite a few hundred times a minute.
  */
 
@@ -33,9 +33,9 @@ let readerToc = [];
 
 const _rd = id => document.getElementById(id);
 
-/* ══════════════════════════════════════════════════════════════════════════
+/* ==========================================================================
  * OPEN / CLOSE
- * ══════════════════════════════════════════════════════════════════════════ */
+ * ========================================================================== */
 
 async function openReader(book, jumpSection) {
   readerBook = book;
@@ -43,7 +43,7 @@ async function openReader(book, jumpSection) {
 
   _rd('reader_title').textContent = book.title || book.rel_path;
   _rd('reader_sub').textContent =
-    [(book.authors || []).join(', '), book.series, book.fmt].filter(Boolean).join(' · ');
+    [(book.authors || []).join(', '), book.series, book.fmt].filter(Boolean).join(' | ');
 
   _rd('reader_empty').classList.add('hidden');
   _rd('reader_flow').classList.add('hidden');
@@ -72,7 +72,7 @@ async function openReader(book, jumpSection) {
   readerSectionCount = readerToc.length;
 
   if (!readerSectionCount) {
-    // No sections yet — either not extracted, or extraction failed. Say which.
+    // No sections yet - either not extracted, or extraction failed. Say which.
     if (book.text_status === 'needs_backend' || book.text_status === 'failed') {
       showReaderEmpty(book.text_error || 'Text could not be extracted.', null);
     } else {
@@ -98,7 +98,7 @@ function closeReader() {
   _rd('reader_toc').classList.add('hidden');
   _rd('reader_empty').classList.remove('hidden');
   _rd('reader_title').textContent = 'No book open';
-  _rd('reader_sub').textContent = '—';
+  _rd('reader_sub').textContent = '-';
 }
 
 function showReaderEmpty(msg, actionLabel) {
@@ -114,9 +114,9 @@ function readerEmptyAction() {
   if (typeof booksExtractCurrent === 'function') booksExtractCurrent();
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
+/* ==========================================================================
  * FLOW READER
- * ══════════════════════════════════════════════════════════════════════════ */
+ * ========================================================================== */
 
 async function showSection(idx, fraction) {
   if (!readerBook) return;
@@ -154,7 +154,7 @@ async function showSection(idx, fraction) {
   updateReaderPosition();
 }
 
-/* One "page turn" = exactly one viewport. With CSS columns that's a horizontal
+/** @brief One "page turn" = exactly one viewport. With CSS columns that's a horizontal
  * scroll; with a single column it's a vertical one. Snapping to a whole
  * viewport is what stops a turn from orphaning half a line. */
 function readerNudge(dir) {
@@ -180,9 +180,9 @@ function readerNudge(dir) {
   updateReaderPosition();
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
+/* ==========================================================================
  * PAGED READER
- * ══════════════════════════════════════════════════════════════════════════ */
+ * ========================================================================== */
 
 function _spreadStep() {
   const v = _rd('rs_spread')?.value || '1';
@@ -222,14 +222,14 @@ async function showPage(n) {
   reloadPageAnalysis();
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
+/* ==========================================================================
  * PANEL OVERLAY
  *
  * Draws stored panel boxes over the page and binds each one's OCR text to it.
  * Boxes are normalised, so they're positioned in percentages and stay correct
  * under fit-width, fit-height, actual size and two-up spreads without the
  * overlay ever needing to know the rendered size of the image.
- * ══════════════════════════════════════════════════════════════════════════ */
+ * ========================================================================== */
 
 const _analysisCache = new Map();     // "rel|page" -> analysis
 
@@ -250,7 +250,7 @@ async function _pageAnalysis(page) {
   } catch (e) { return null; }
 }
 
-/** Re-draw overlays for whatever pages are on screen. Called after a page turn
+/** @brief Re-draw overlays for whatever pages are on screen. Called after a page turn
  *  and after an analysis run finishes. */
 async function reloadPageAnalysis(force) {
   if (!readerBook || readerMode !== 'paged') return;
@@ -283,23 +283,23 @@ function _drawPanels(box, d) {
     const h = (p.h * 100).toFixed(3);
     const text = (byPanel[i] || []).join(' ');
     const title = text ? `Panel ${p.order + 1}\n${text}` : `Panel ${p.order + 1}`;
-    return `<div class="absolute border-2 border-teal-400/80 rounded-sm
-                        hover:bg-teal-400/20 transition-colors group"
+    return `<div class="absolute border-2 border-sky-400/80 rounded-sm
+                        hover:bg-sky-400/20 transition-colors group"
                  style="left:${left}%;top:${top}%;width:${w}%;height:${h}%"
                  title="${_escAttr(title)}">
-              <span class="absolute -top-0.5 -left-0.5 bg-teal-400 text-black
+              <span class="absolute -top-0.5 -left-0.5 bg-sky-400 text-black
                            text-[10px] font-bold px-1 rounded-sm leading-tight">
                 ${p.order + 1}</span>
-              ${text ? `<div class="absolute inset-x-0 bottom-0 bg-black/80 text-teal-100
+              ${text ? `<div class="absolute inset-x-0 bottom-0 bg-black/80 text-sky-100
                                      text-[10px] leading-tight p-1 opacity-0
                                      group-hover:opacity-100 transition-opacity
                                      max-h-full overflow-hidden pointer-events-none">
                           ${_escAttr(text)}</div>` : ''}
             </div>`;
   }).join('')
-  + `<div class="absolute right-1 top-1 text-[10px] bg-black/70 text-teal-300
+  + `<div class="absolute right-1 top-1 text-[10px] bg-black/70 text-sky-300
                  px-1.5 py-0.5 rounded pointer-events-none">
-       ${d.panels.length} panels${d.engine ? ' · ' + d.engine : ''}${d.rtl ? ' · RTL' : ''}
+       ${d.panels.length} panels${d.engine ? ' | ' + d.engine : ''}${d.rtl ? ' | RTL' : ''}
      </div>`;
 }
 
@@ -315,12 +315,12 @@ function _pageFitStyle() {
   return 'max-width:none;height:auto';
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
+/* ==========================================================================
  * POSITION / SEEK
- * ══════════════════════════════════════════════════════════════════════════ */
+ * ========================================================================== */
 
 function updateReaderPosition() {
-  let pct = 0, label = '—';
+  let pct = 0, label = '-';
   if (readerMode === 'paged') {
     pct = readerPageCount ? (readerPage / (readerPageCount - 1 || 1)) * 100 : 0;
     label = `page ${readerPage + 1} / ${readerPageCount}`;
@@ -333,7 +333,7 @@ function updateReaderPosition() {
       : (box.scrollHeight > box.clientHeight
          ? box.scrollTop / (box.scrollHeight - box.clientHeight) : 0);
     pct = ((readerSection + within) / Math.max(1, readerSectionCount)) * 100;
-    label = `${readerSection + 1} / ${readerSectionCount} · ${Math.round(pct)}%`;
+    label = `${readerSection + 1} / ${readerSectionCount} | ${Math.round(pct)}%`;
   }
   const seek = _rd('reader_seek');
   if (seek && document.activeElement !== seek) seek.value = Math.round(pct * 10);
@@ -386,7 +386,7 @@ function _locatorPage(loc) {
   return m ? parseInt(m[1], 10) : null;
 }
 
-/* Debounced: a scroll fires dozens of times a second and each save is a write
+/** @brief Debounced: a scroll fires dozens of times a second and each save is a write
  * plus a commit. 1.5s of quiet is plenty to capture "where they stopped". */
 function saveReaderPosition(immediate) {
   if (!readerBook) return;
@@ -404,9 +404,9 @@ function saveReaderPosition(immediate) {
   if (immediate) doSave(); else readerSaveTimer = setTimeout(doSave, 1500);
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
+/* ==========================================================================
  * TOC / BOOKMARKS / SETTINGS
- * ══════════════════════════════════════════════════════════════════════════ */
+ * ========================================================================== */
 
 function toggleToc() {
   _rd('reader_toc').classList.toggle('hidden');
@@ -459,7 +459,7 @@ function applyReaderStyle() {
   const theme = READER_THEMES[_rd('rs_theme')?.value] || READER_THEMES.dark;
 
   // Reader-mode-specific settings hide themselves rather than sitting there
-  // greyed out — a font-size slider on a scanned CBZ is noise.
+  // greyed out - a font-size slider on a scanned CBZ is noise.
   document.querySelectorAll('#reader_settings [data-reader]').forEach(el =>
     el.classList.toggle('hidden', el.dataset.reader !== readerMode));
 
@@ -492,7 +492,7 @@ function applyReaderStyle() {
   saveReaderPrefs();
 }
 
-/* Prefs are per-browser, not per-library — they describe the reader's eyes, not
+/* Prefs are per-browser, not per-library - they describe the reader's eyes, not
  * the book. Kept in memory + a cookie-free localStorage-less shim so this file
  * stays usable in the artifact sandbox too. */
 let _readerPrefs = {};
@@ -504,7 +504,7 @@ function saveReaderPrefs() {
     if (el) _readerPrefs[id] = el.value;
   });
   try { window.localStorage?.setItem('readerPrefs', JSON.stringify(_readerPrefs)); }
-  catch (e) { /* storage unavailable — prefs stay in-memory for this session */ }
+  catch (e) { /* storage unavailable - prefs stay in-memory for this session */ }
 }
 
 function loadReaderPrefs() {
@@ -518,9 +518,9 @@ function loadReaderPrefs() {
   });
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
+/* ==========================================================================
  * KEYBOARD
- * ══════════════════════════════════════════════════════════════════════════ */
+ * ========================================================================== */
 
 document.addEventListener('keydown', e => {
   if (typeof mediaMode !== 'undefined' && mediaMode !== 'book') return;

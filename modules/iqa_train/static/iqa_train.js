@@ -4,7 +4,7 @@
   const $ = id => document.getElementById(id);
   let _timer = null, _sizes = {}, _bench = {}, _installed = [], _sizesKey = '', _reqInit = false;
 
-  // Inline SVG loss chart: one polyline per size, x = step, y = loss. No deps.
+  /** @brief Inline SVG loss chart: one polyline per size, x = step, y = loss. No deps. */
   function drawLoss(svgId, hist, label) {
     const svg = $(svgId); if (!svg) return;
     if (!hist || hist.length < 2) { svg.innerHTML = ''; svg.style.display = 'none'; return; }
@@ -45,7 +45,7 @@
       const picked = new Set(pickedSizes());
       _sizesKey = key;
       box.innerHTML = Object.entries(_sizes).map(([z, sp]) =>
-        `<label class="trck" title="d ${sp.d} x depth ${sp.depth}"><input type="checkbox" data-size="${z}" class="accent-purple-500"${picked.has(z) ? ' checked' : ''}> ${z} <span class="text-gray-500" data-params="${z}"></span></label>`).join('');
+        `<label class="trck" title="d ${sp.d} x depth ${sp.depth}"><input type="checkbox" data-size="${z}" class="accent-indigo-500"${picked.has(z) ? ' checked' : ''}> ${z} <span class="text-gray-500" data-params="${z}"></span></label>`).join('');
       const act = $('iqt_active').value;
       $('iqt_active').innerHTML = Object.keys(_sizes).map(z => `<option value="${z}">${z}</option>`).join('');
       $('iqt_active').value = _sizes[act] ? act : (s.active_size && _sizes[s.active_size] ? s.active_size : Object.keys(_sizes)[0]);
@@ -72,7 +72,7 @@
       const b = _bench[z] || {}, r = (last && last.sizes && last.sizes[z]) || {};
       if (!b.params && !r.params) continue;
       const act = _installed.includes(z)
-        ? `<button onclick="iqtActivate('${z}')" class="text-purple-300 hover:text-purple-200" title="Make this trained size the live personal scorer (copies scorer_${z}.pt over scorer.pt and reloads the provider).">activate</button>` : '';
+        ? `<button onclick="iqtActivate('${z}')" class="text-indigo-300 hover:text-indigo-200" title="Make this trained size the live personal scorer (copies scorer_${z}.pt over scorer.pt and reloads the provider).">activate</button>` : '';
       rows.push(`<tr><td>${z}</td><td class="text-right">${fmtN(r.params || b.params)}</td>` +
         `<td class="text-right">${r.ms_per_image_cpu ?? b.ms_per_image_cpu ?? '-'}</td>` +
         `<td class="text-right">${r.ms_per_image_gpu ?? b.ms_per_image_gpu ?? '-'}</td>` +

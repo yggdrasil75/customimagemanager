@@ -1,5 +1,5 @@
-"""
-Ownership & sharing (the Immich model on a path-based library).
+"""! @file
+@brief Ownership & sharing (the Immich model on a path-based library).
 ======================================================================
 Who owns a file is its path: anything under  users/<username>/  belongs to
 that account; everything else is the shared "public" library every account
@@ -19,7 +19,7 @@ album first seen on a rescan of a file in users/<name>/ becomes that user's.
 
 Wired through host.register_access_policy: core joins files_clause() into
 every gallery / folder / review query and asks check_path() inside its path
-resolver, so a hidden file is also unreachable by name — thumb, bytes,
+resolver, so a hidden file is also unreachable by name - thumb, bytes,
 metadata, every module route resolving a path through host.safe_path.
 Upload: form field scope=personal|public (default personal when logged in)
 chooses users/<me>/<folder> or <folder>.
@@ -52,7 +52,7 @@ _LIKE_ESC = re.compile(r"([\\%_])")
 
 
 def owner_of(rel_path):
-    """Username owning rel_path (users/<name>/...), or None for the public
+    """! @brief Username owning rel_path (users/<name>/...), or None for the public
     library. Case-insensitive on the root so a case-folding filesystem can't
     be used to slip past the guard."""
     parts = str(rel_path or "").replace("\\", "/").strip("/").split("/")
@@ -75,16 +75,16 @@ def _same_user(a, b):
 
 
 class Policy:
-    """The access policy core consults (see host.register_access_policy)."""
+    """! @brief The access policy core consults (see host.register_access_policy)."""
 
     def __init__(self, host):
         self.host = host
         self.db = host.db
 
-    # ── who is asking ────────────────────────────────────────────────────
+    # -- who is asking ----------------------------------------------------
     @staticmethod
     def user():
-        """The restricted requester, or None when unrestricted (admin, auth
+        """! @brief The restricted requester, or None when unrestricted (admin, auth
         off, a worker outside a request)."""
         if not has_request_context():
             return None
@@ -94,7 +94,7 @@ class Policy:
         return u
 
     def partners(self, user):
-        """{owner_username: level} for libraries shared with `user`."""
+        """! @brief {owner_username: level} for libraries shared with `user`."""
         rows = self.db().execute(
             "SELECT u.username, s.level FROM library_shares s "
             "JOIN auth_users u ON u.id=s.owner_id WHERE s.user_id=?", (user["id"],)).fetchall()
@@ -104,7 +104,7 @@ class Policy:
         r = self.db().execute("SELECT id FROM auth_users WHERE username=?", (username,)).fetchone()
         return r["id"] if r else None
 
-    # ── files ────────────────────────────────────────────────────────────
+    # -- files ------------------------------------------------------------
     def _visible_albums_sql(self, user):
         return ("(SELECT album FROM album_owners WHERE visibility='public' OR owner_id=? "
                 "UNION SELECT album FROM album_shares WHERE user_id=?)",
@@ -160,7 +160,7 @@ class Policy:
     def check_path(self, rel_path, write=False):
         return self.can_write(rel_path) if write else self.can_read(rel_path)
 
-    # ── albums ───────────────────────────────────────────────────────────
+    # -- albums -----------------------------------------------------------
     def _album_row(self, name):
         return self.db().execute(
             "SELECT owner_id, visibility FROM album_owners WHERE album=?", (name,)).fetchone()
@@ -217,7 +217,7 @@ class Policy:
             db.execute("UPDATE album_shares SET album=? WHERE album=?", (kw["new"], kw["old"]))
         db.commit()
 
-    # ── upload ───────────────────────────────────────────────────────────
+    # -- upload -----------------------------------------------------------
     def upload_folder(self, folder, form):
         u = g.get("user") if has_request_context() else None
         if u and u.get("id") and ((form.get("scope") or "").strip().lower() != "public"

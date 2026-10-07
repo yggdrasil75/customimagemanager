@@ -1,5 +1,5 @@
-"""
-exif_import.py
+"""! @file
+@brief exif_import.py
 ==============
 
 Reads EXIF/TIFF metadata from an image (or its sidecar) and returns it merged
@@ -28,7 +28,7 @@ imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
 log = logging.getLogger("exif_import")
 
 def _jxl_exif_blob(path):
-    """The TIFF payload of a container JXL's Exif box (plain `Exif`, or
+    """! @brief The TIFF payload of a container JXL's Exif box (plain `Exif`, or
     brotli-packed inside a `brob` box, which is how cjxl stores it), or None.
     Used when Exiv2's own BMFF reader refuses the file ("invalid memory
     allocation request" on some jbrd-carrying JPEG transcodes)."""
@@ -54,7 +54,7 @@ def _jxl_exif_blob(path):
     return None
 
 def _candidate_paths(filepath):
-    """Yield the paths worth trying for EXIF data, most-specific first.
+    """! @brief Yield the paths worth trying for EXIF data, most-specific first.
     A sidecar with the same stem takes priority for formats pyexiv2 chokes on."""
     stem = os.path.splitext(filepath)[0]
     seen = []
@@ -64,7 +64,7 @@ def _candidate_paths(filepath):
             yield p
 
 def _read_raw_exif(filepath):
-    """Return the raw {tag_string: value} EXIF dict from the first readable
+    """! @brief Return the raw {tag_string: value} EXIF dict from the first readable
     candidate path, or ({}, None) if none. tag_string looks like
     'Exif.Image.ImageWidth'."""
     if pyexiv2 is None:
@@ -97,7 +97,7 @@ def _read_raw_exif(filepath):
     return merged, src
 
 def _split_tag(tag_string):
-    """'Exif.Image.ImageWidth' -> ('Image','ImageWidth').
+    """! @brief 'Exif.Image.ImageWidth' -> ('Image','ImageWidth').
     Applies exiv2->schema group aliases. Returns (None, None) for anything that
     doesn't fit the pattern."""
     parts = tag_string.split(".")
@@ -107,7 +107,7 @@ def _split_tag(tag_string):
     return None, None
 
 def read_exif(filepath):
-    """Read EXIF and return a structure organized by group:
+    """! @brief Read EXIF and return a structure organized by group:
 
     {
       "source": "/path/that/had/the/exif" | None,
@@ -191,7 +191,7 @@ def read_exif(filepath):
     return {"source": source, "groups": groups_out}
 
 def summarize(filepath):
-    """Compact counts for logging / list views: how many known fields carry a
+    """! @brief Compact counts for logging / list views: how many known fields carry a
     value, and how many unknown tags were seen."""
     data = read_exif(filepath)
     present = sum(1 for g in data["groups"] for f in g["fields"] if f.get("present"))

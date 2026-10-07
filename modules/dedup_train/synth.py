@@ -1,5 +1,5 @@
-"""
-Synthetic duplicate / non-duplicate pairs for the dedup pretrain build.
+"""! @file
+@brief Synthetic duplicate / non-duplicate pairs for the dedup pretrain build.
 ======================================================================
 Given a chunk of decoded BGR images, make pairs (a, b, change-mask, kind):
 
@@ -7,10 +7,10 @@ Given a chunk of decoded BGR images, make pairs (a, b, change-mask, kind):
     reencode  same image through JPEG/WebP at a random quality
     resize    downscaled (and sometimes back up), so the two differ in size
     nudge     shifted a few pixels + slight brightness/contrast change
-    crop      a small (≤ 8 %) border trimmed off
+    crop      a small (<= 8 %) border trimmed off
   not / partly duplicates (per-pixel change mask)
     localedit one region changed (box, translucent watermark / text, a patch
-              of another picture, or the same region warped — the "slightly
+              of another picture, or the same region warped - the "slightly
               different smile"); mask = the pixels that visibly changed, so
               the net learns WHERE and how much, not a scalar
     hardcrop  a big crop stretched to the frame: a framing alignment failed on (all 1)
@@ -43,7 +43,7 @@ def _resize(img, rng):
     h, w = img.shape[:2]
     s = float(rng.uniform(0.3, 0.9))
     small = cv2.resize(img, (max(16, int(w * s)), max(16, int(h * s))), interpolation=cv2.INTER_AREA)
-    # A lower-resolution copy, warped back onto the original's frame — what the
+    # A lower-resolution copy, warped back onto the original's frame - what the
     # scan's alignment produces for a downscaled duplicate.
     return cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
 
@@ -58,7 +58,7 @@ def _nudge(img, rng):
 
 
 def _crop(img, rng, lo, hi):
-    """Keep a random sub-rectangle covering lo..hi of each side."""
+    """! @brief Keep a random sub-rectangle covering lo..hi of each side."""
     h, w = img.shape[:2]
     cw = max(16, int(w * float(rng.uniform(lo, hi))))
     ch = max(16, int(h * float(rng.uniform(lo, hi))))
@@ -68,13 +68,13 @@ def _crop(img, rng, lo, hi):
 
 
 def _changed(a, b, thresh=12):
-    """Per-pixel mask of visible change (max channel delta > thresh), float32 0/1."""
+    """! @brief Per-pixel mask of visible change (max channel delta > thresh), float32 0/1."""
     d = np.abs(a.astype(np.int16) - b.astype(np.int16)).max(axis=2)
     return (d > thresh).astype(np.float32)
 
 
 def _localedit(img, others, rng):
-    """Same image with ONE region changed; returns the per-pixel mask of
+    """! @brief Same image with ONE region changed; returns the per-pixel mask of
     what visibly changed, measured, not assumed. Area is log-uniform in
     0.5..50 %, so the graded middle is well covered: a faint watermark in a
     corner ~2 %, a caption ~10 %, a pasted-in patch ~30 %, a box over the
@@ -121,7 +121,7 @@ def _dup(img, rng):
 
 
 def _non(img, others, rng):
-    """-> (b, mask, kind); mask is per-pixel change: all 1 for a different
+    """! @brief -> (b, mask, kind); mask is per-pixel change: all 1 for a different
     picture, measured for a local edit. b is always img's size."""
     h, w = img.shape[:2]
     kind = NON_KINDS[int(rng.integers(len(NON_KINDS)))]
@@ -137,7 +137,7 @@ def _non(img, others, rng):
 
 
 def synth_pairs(imgs, rng, per_image=6):
-    """imgs: list of BGR uint8 arrays -> list of (a, b, mask, kind); b is
+    """! @brief imgs: list of BGR uint8 arrays -> list of (a, b, mask, kind); b is
     aligned to a and the same size, mask is float32 [h,w] per-pixel change
     (0 for a duplicate). Half of each image's pairs are duplicates."""
     pairs = []

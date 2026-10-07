@@ -12,10 +12,10 @@
   --xmp-text:      #e5e7eb;
   --xmp-muted:     #9ca3af;
   --xmp-faint:     #6b7280;
-  --xmp-accent:    #3b82f6;
-  --xmp-accent-2:  #60a5fa;
-  --xmp-warn:      #f59e0b;
-  --xmp-purple:    #a78bfa;
+  --xmp-accent:    var(--cim-accent-500, #3b82f6);
+  --xmp-accent-2:  var(--cim-accent-400, #60a5fa);
+  --xmp-warn:      var(--cim-warn-500, #f59e0b);
+  --xmp-purple:    var(--cim-accent2-400, #818cf8);
 
   color: var(--xmp-text);
   font-size: 13px;
@@ -29,7 +29,7 @@
   gap: 12px;
 }
 
-/* ── Header ─────────────────────────────────────────────────────────────── */
+/* -- Header --------------------------------------------------------------- */
 #xmp-editor .xmp-head {
   display: flex;
   justify-content: space-between;
@@ -65,17 +65,17 @@
 #xmp-editor .xmp-btn:hover { background: var(--xmp-border); }
 
 #xmp-editor .xmp-status { font-size: 11px; color: var(--xmp-muted); min-width: 60px; }
-#xmp-editor .xmp-status.ok   { color: #34d399; }
-#xmp-editor .xmp-status.err  { color: #f87171; }
+#xmp-editor .xmp-status.ok   { color: var(--cim-ok-400, #4ade80); }
+#xmp-editor .xmp-status.err  { color: var(--cim-danger-400, #f87171); }
 
-/* ── Summary ────────────────────────────────────────────────────────────── */
+/* -- Summary -------------------------------------------------------------- */
 #xmp-editor .xmp-summary {
   font-size: 12px; color: var(--xmp-muted);
   display: flex; gap: 16px; flex-wrap: wrap;
 }
 #xmp-editor .xmp-summary b { color: var(--xmp-text); font-weight: 600; }
 
-/* ── Records ────────────────────────────────────────────────────────────── */
+/* -- Records -------------------------------------------------------------- */
 #xmp-editor .xmp-records { display: flex; flex-direction: column; gap: 10px; }
 #xmp-editor .xmp-empty { color: var(--xmp-faint); font-style: italic; padding: 8px; }
 #xmp-editor .xmp-empty code,
@@ -104,8 +104,8 @@
   font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
   padding: 2px 7px; border-radius: 999px;
 }
-#xmp-editor .xmp-record-badge.mapped   { background: #14304a; color: var(--xmp-accent-2); }
-#xmp-editor .xmp-record-badge.unmapped { background: #3a2a12; color: var(--xmp-warn); }
+#xmp-editor .xmp-record-badge.mapped   { background: color-mix(in srgb, var(--cim-accent-800, #1e40af) 35%, transparent); color: var(--xmp-accent-2); }
+#xmp-editor .xmp-record-badge.unmapped { background: color-mix(in srgb, var(--cim-warn-800, #92400e) 35%, transparent); color: var(--xmp-warn); }
 
 #xmp-editor .xmp-record-desc {
   font-size: 12px; color: var(--xmp-muted); margin: 6px 0 8px;
@@ -114,7 +114,7 @@
 #xmp-editor .xmp-record.collapsed .xmp-record-fields,
 #xmp-editor .xmp-record.collapsed .xmp-record-unknown { display: none; }
 
-/* ── Fields ─────────────────────────────────────────────────────────────── */
+/* -- Fields --------------------------------------------------------------- */
 #xmp-editor .xmp-record-fields {
   display: flex; flex-direction: column; gap: 2px;
 }
@@ -124,7 +124,7 @@
 }
 #xmp-editor .xmp-field:hover { background: var(--xmp-panel-2); }
 #xmp-editor .xmp-field.is-empty { opacity: 0.55; }
-#xmp-editor .xmp-field.is-present { border-color: #1e3a5f; }
+#xmp-editor .xmp-field.is-present { border-color: color-mix(in srgb, var(--cim-accent-700, #1d4ed8) 45%, transparent); }
 
 #xmp-editor .xmp-field-main {
   display: grid; grid-template-columns: 200px 1fr; gap: 10px; align-items: center;
@@ -162,7 +162,7 @@
 }
 #xmp-editor .xmp-field-note { font-style: italic; }
 
-/* ── Unknown tags ───────────────────────────────────────────────────────── */
+/* -- Unknown tags --------------------------------------------------------- */
 #xmp-editor .xmp-record-unknown:not(:empty) {
   margin-top: 8px; padding-top: 8px;
   border-top: 1px dashed var(--xmp-border);

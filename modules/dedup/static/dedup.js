@@ -1,4 +1,4 @@
-// ── Upload ─────────────────────────────────────────────────────────────────
+// -- Upload -----------------------------------------------------------------
 const dz=document.getElementById('dropzone');
 ['dragenter','dragover','dragleave','drop'].forEach(n=>
   dz.addEventListener(n,e=>{e.preventDefault();e.stopPropagation();},false));
@@ -11,7 +11,7 @@ async function handleFiles(files){
   const arr=Array.from(files); let done=0;
   for(let i=0;i<arr.length;i+=4){
     const slice=arr.slice(i,i+4);
-    dz.innerHTML=`<p class="text-blue-400 font-bold animate-pulse">Uploading ${done}/${arr.length}…</p>`;
+    dz.innerHTML=`<p class="text-blue-400 font-bold animate-pulse">Uploading ${done}/${arr.length}...</p>`;
     await Promise.all(slice.map(f=>{
       const fd=new FormData(); fd.append('file',f); fd.append('folder',folder);
       return fetch('/api/upload',{method:'POST',body:fd}).then(()=>done++);
@@ -20,7 +20,7 @@ async function handleFiles(files){
   dz.innerHTML=og; loadGallery();
 }
 
-// ── Dedup ──────────────────────────────────────────────────────────────────
+// -- Dedup ------------------------------------------------------------------
 async function fetchDedupStatus(){
   try{
     const d=await fetch('/api/dedup_status').then(r=>r.json());
@@ -28,7 +28,7 @@ async function fetchDedupStatus(){
     if(d.has_cache&&d.group_count>0){
       const age=Math.round((Date.now()/1000-d.created)/60);
       const ageStr=age<60?`${age}m ago`:`${Math.round(age/60)}h ago`;
-      badge.innerText=`cached ${ageStr} · ${d.group_count} groups`;
+      badge.innerText=`cached ${ageStr} | ${d.group_count} groups`;
       badge.classList.remove('hidden');
     } else { badge.classList.add('hidden'); }
   }catch(e){}
@@ -49,18 +49,18 @@ function renderDedupProgress(p){
   const box=document.getElementById('dedup_progress');
   const pct=p.total?Math.min(100,100*p.done/p.total):null;
   const btn=document.getElementById('btn_dedup');
-  if(btn&&p.running) btn.innerHTML=`⏳ ${p.stage||0}/${p.stages||7}`+(pct!=null?` · ${Math.floor(pct)}%`:'');
+  if(btn&&p.running) btn.innerHTML=`⏳ ${p.stage||0}/${p.stages||7}`+(pct!=null?` | ${Math.floor(pct)}%`:'');
   if(!box) return;
   box.classList.toggle('hidden',!p.running);
   const bar=document.getElementById('dedup_prog_bar');
   bar.style.width=(pct==null?100:pct)+'%';
   bar.classList.toggle('animate-pulse',pct==null);
-  document.getElementById('dedup_prog_label').innerText=`Stage ${p.stage||0}/${p.stages||7} · ${p.label||''}`;
+  document.getElementById('dedup_prog_label').innerText=`Stage ${p.stage||0}/${p.stages||7} | ${p.label||''}`;
   document.getElementById('dedup_prog_eta').innerText=
-    `${_fmtDur(p.elapsed_s)} elapsed`+(p.eta_s!=null?` · ~${_fmtDur(p.eta_s)} left in stage`:'');
+    `${_fmtDur(p.elapsed_s)} elapsed`+(p.eta_s!=null?` | ~${_fmtDur(p.eta_s)} left in stage`:'');
   let counts=p.total?`${p.done.toLocaleString()} / ${p.total.toLocaleString()} (${pct.toFixed(1)}%)`:'';
   if(p.stage===7&&p.groups_total)
-    counts=`${p.groups_done.toLocaleString()} / ${p.groups_total.toLocaleString()} candidate groups · `+
+    counts=`${p.groups_done.toLocaleString()} / ${p.groups_total.toLocaleString()} candidate groups | `+
            `${p.done.toLocaleString()} / ${p.total.toLocaleString()} images (${pct.toFixed(1)}%)`;
   document.getElementById('dedup_prog_counts').innerText=counts;
   document.getElementById('dedup_prog_found').innerText=`${(p.groups||0).toLocaleString()} groups found`;
@@ -71,7 +71,7 @@ function startDedupPoll(){
   dedupRunning=true;
   const btn=document.getElementById('btn_dedup');
   if(_dedupBtnLabel===null) _dedupBtnLabel=btn.innerHTML;
-  btn.title='Scan running — click to view progress and groups found so far';
+  btn.title='Scan running - click to view progress and groups found so far';
   _dedupPoll=setInterval(pollDedup,1000);
   pollDedup();
 }
@@ -116,9 +116,9 @@ async function finishDedup(d){
   } else {
     dedupTotalGroups=d.total_groups;
     document.getElementById('dedup_cache_info').innerText=(d.from_cache
-      ?'Cached results — click ↺ Rescan to recompute.'
-      :`Fresh scan — ${d.total_groups} group(s) found.`)+(d.scorer?` Scored by ${d.scorer}.`:'');
-    if(modal.classList.contains('hidden')) showToast(`Dedup finished — ${d.total_groups} group(s).`);
+      ?'Cached results - click ↺ Rescan to recompute.'
+      :`Fresh scan - ${d.total_groups} group(s) found.`)+(d.scorer?` Scored by ${d.scorer}.`:'');
+    if(modal.classList.contains('hidden')) showToast(`Dedup finished - ${d.total_groups} group(s).`);
     else await loadDedupPage(dedupPage);
   }
   fetchDedupStatus();
@@ -134,7 +134,7 @@ async function runDedup(force=false){
     return;
   }
   _dedupSeenGroups=0; dedupPage=0;
-  document.getElementById('dedup_cache_info').innerText='Scanning — groups appear below as they are verified.';
+  document.getElementById('dedup_cache_info').innerText='Scanning - groups appear below as they are verified.';
   document.getElementById('dedup_content').innerHTML='';
   modal.classList.remove('hidden');
   try{
@@ -156,14 +156,14 @@ async function closeDedup(){
 async function loadDedupPage(page){
   dedupPage=page;
   const c=document.getElementById('dedup_content');
-  c.innerHTML='<p class="text-gray-400 text-sm animate-pulse p-4">Loading…</p>';
+  c.innerHTML='<p class="text-gray-400 text-sm animate-pulse p-4">Loading...</p>';
   const d=await fetch(`/api/dedup_groups?page=${page}&page_size=${DEDUP_PAGE_SIZE}&sort=${dedupSort}`).then(r=>r.json());
   if(!d.success){ c.innerHTML='<p class="text-red-400 p-4">Failed.</p>'; return; }
   dedupTotalGroups=d.total;
   c.innerHTML='';
   if(!d.groups.length){
     if(dedupRunning){
-      c.innerHTML='<p class="text-gray-400 text-sm animate-pulse p-4">Scanning… groups appear here as they are verified.</p>';
+      c.innerHTML='<p class="text-gray-400 text-sm animate-pulse p-4">Scanning... groups appear here as they are verified.</p>';
       updateDedupPager(page,d.total);
       return;
     }
@@ -189,7 +189,7 @@ function updateDedupPager(page,total){
   p.innerHTML=`
     <button onclick="loadDedupPage(${page-1})" ${page===0?'disabled':''}
       class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded disabled:opacity-30">◀ Prev</button>
-    <span>Page ${page+1}/${pages} · ${total} groups remaining</span>
+    <span>Page ${page+1}/${pages} | ${total} groups remaining</span>
     <button onclick="loadDedupPage(${page+1})" ${page>=pages-1?'disabled':''}
       class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded disabled:opacity-30">Next ▶</button>
     <span class="flex items-center gap-2">
@@ -203,14 +203,14 @@ function updateDedupPager(page,total){
       </select>
     </span>
     <span class="ml-auto flex items-center gap-2">
-      <label class="text-gray-500">Auto-resolve ≥</label>
+      <label class="text-gray-500">Auto-resolve >=</label>
       <input id="autoresolve_threshold" type="number" min="0" max="100" value="100" step="5"
         class="w-16 bg-gray-800 border border-gray-600 rounded px-2 py-0.5 text-white text-center"
         title="Only auto-resolve groups where all duplicates score at or above this similarity %">
       <label class="text-gray-500">%</label>
       <button onclick="bulkResolveAll()"
         class="bg-green-800 hover:bg-green-700 px-3 py-1 rounded font-bold text-green-300">
-        ⚡ Auto-resolve</button>
+        Auto-resolve</button>
     </span>`;
 }
 
@@ -221,7 +221,7 @@ function renderDedupGroup(group){
   div.id=`dg_${group.db_id}`;
   const badge=group.kind==='exact'
     ?'<span class="text-[9px] bg-red-900 text-red-300 px-1.5 py-0.5 rounded font-bold ml-2">EXACT</span>'
-    :'<span class="text-[9px] bg-yellow-900 text-yellow-300 px-1.5 py-0.5 rounded font-bold ml-2">SIMILAR</span>';
+    :'<span class="text-[9px] bg-amber-900 text-amber-300 px-1.5 py-0.5 rounded font-bold ml-2">SIMILAR</span>';
   let inner=`<div class="flex items-center justify-between mb-2">
       <p class="text-xs font-bold text-gray-400">${group.items.length} files${badge}</p>
       <button onclick="highlightDiff(${group.db_id})"
@@ -255,10 +255,10 @@ function renderDedupGroup(group){
         : `<img src="/api/thumb/${encodeURIComponent(f)}"
         class="w-full h-28 object-cover rounded mb-1 bg-black">`}
       ${item.kind==='anim'||item.kind==='video'
-        ? `<span class="text-[9px] bg-purple-900 text-purple-300 px-1 rounded">${item.kind==='anim'?'ANIM':'VIDEO'}</span>` : ''}
+        ? `<span class="text-[9px] bg-indigo-900 text-indigo-300 px-1 rounded">${item.kind==='anim'?'ANIM':'VIDEO'}</span>` : ''}
       <p class="text-[10px] truncate text-blue-300 font-mono mb-1" title="${f}">${f.split('/').pop()}</p>
       <p class="text-[10px] text-gray-400 mb-1">${item.resolution}
-        <span class="${item.quality==='Lossless'?'text-green-400':'text-yellow-400'}" title="Source the stored JXL was made from: JPEG = lossy origin (bit-exact transcode); Lossless = PNG/RAW/HEIF source">${item.quality}</span>
+        <span class="${item.quality==='Lossless'?'text-green-400':'text-amber-400'}" title="Source the stored JXL was made from: JPEG = lossy origin (bit-exact transcode); Lossless = PNG/RAW/HEIF source">${item.quality}</span>
         ${item.size_h ? `<span class="text-gray-500">${item.size_h}</span>` : ''}</p>
       ${scoreBadge ? `<p class="mb-1">${scoreBadge}</p>` : ''}
       <button class="w-full bg-green-700 hover:bg-green-600 text-xs font-bold py-1 rounded mb-1"
@@ -382,24 +382,24 @@ function _escHtml(x){
 
 async function loadMetaDiff(fa,fb){
   _metaDiff=null;
-  document.getElementById('diff_meta_summary').innerText='loading…';
+  document.getElementById('diff_meta_summary').innerText='loading...';
   document.getElementById('diff_meta_tags').innerHTML='';
   document.getElementById('diff_meta_body').innerHTML='';
-  document.getElementById('diff_meta_ha').innerText='A · '+fa.split('/').pop();
-  document.getElementById('diff_meta_hb').innerText='B · '+fb.split('/').pop();
+  document.getElementById('diff_meta_ha').innerText='A | '+fa.split('/').pop();
+  document.getElementById('diff_meta_hb').innerText='B | '+fb.split('/').pop();
   const sum=document.getElementById('diff_meta_summary');
   let r;
   try{
     r=await fetch('/api/dedup_compare_meta',{method:'POST',headers:{'Content-Type':'application/json'},
                   body:JSON.stringify({a:fa,b:fb})});
-  }catch(e){ sum.innerText='unavailable — network error: '+e.message; return; }
+  }catch(e){ sum.innerText='unavailable - network error: '+e.message; return; }
   let d=null;
   try{ d=await r.json(); }catch(e){}
   if(!d){
-    sum.innerText=`unavailable — HTTP ${r.status} from /api/dedup_compare_meta`;
+    sum.innerText=`unavailable - HTTP ${r.status} from /api/dedup_compare_meta`;
     return;
   }
-  if(!d.success){ sum.innerText=`unavailable — ${d.error||('HTTP '+r.status)}`; return; }
+  if(!d.success){ sum.innerText=`unavailable - ${d.error||('HTTP '+r.status)}`; return; }
   _metaDiff=d; renderMetaDiff();
 }
 
@@ -407,7 +407,7 @@ function renderMetaDiff(){
   const d=_metaDiff; if(!d) return;
   const only=document.getElementById('diff_meta_only').checked;
   document.getElementById('diff_meta_summary').innerText=`${d.differ} of ${d.total} fields differ`+
-    ((d.errors&&d.errors.length)?`  ·  ⚠ ${d.errors.join('; ')}`:'');
+    ((d.errors&&d.errors.length)?`  |  ⚠ ${d.errors.join('; ')}`:'');
   const chip=(t,cls)=>`<span class="inline-block px-1.5 py-0.5 rounded mr-1 mb-1 ${cls}">${_escHtml(t)}</span>`;
   const tg=d.tags; let th='';
   if(tg.only_a.length) th+=`<div><span class="text-gray-500 mr-1">tags only in A:</span>${tg.only_a.map(t=>chip(t,'bg-blue-900 text-blue-200')).join('')}</div>`;
@@ -421,10 +421,10 @@ function renderMetaDiff(){
       sect=r.section;
       html+=`<tr><td colspan="3" class="pt-2 pb-1 text-indigo-300 font-bold">${_escHtml(sect)}</td></tr>`;
     }
-    const miss='<span class="text-gray-600">—</span>';
-    const cls=r.same?'text-gray-400':'text-yellow-200';
-    const fld=r.field.includes(' ▸ ')?r.field.split(' ▸ ').slice(1).join(' ▸ '):r.field;
-    html+=`<tr class="border-t border-gray-700/50 align-top ${r.same?'':'bg-yellow-900/10'}">
+    const miss='<span class="text-gray-600">-</span>';
+    const cls=r.same?'text-gray-400':'text-amber-200';
+    const fld=r.field.includes(' > ')?r.field.split(' > ').slice(1).join(' > '):r.field;
+    html+=`<tr class="border-t border-gray-700/50 align-top ${r.same?'':'bg-amber-900/10'}">
       <td class="py-0.5 pr-3 text-gray-400" title="${_escHtml(r.field)}">${_escHtml(fld)}</td>
       <td class="py-0.5 pr-3 break-all ${cls}">${r.a==null?miss:_escHtml(r.a)}</td>
       <td class="py-0.5 break-all ${cls}">${r.b==null?miss:_escHtml(r.b)}</td></tr>`;
@@ -437,7 +437,7 @@ async function highlightDiff(gid){
   let picks=[...document.querySelectorAll(`#dg_${gid} .dg-pick:checked`)];
   if(picks.length!==2){
     // If the group only holds two images, they're unambiguously the pair to
-    // compare — no need to make the user tick both boxes.
+    // compare - no need to make the user tick both boxes.
     const all=[...document.querySelectorAll(`#dg_${gid} .dg-pick`)];
     if(all.length===2) picks=all;
     else{ showToast('Pick exactly 2 items to compare.'); return; }
@@ -462,7 +462,7 @@ async function highlightDiff(gid){
       const [ia,ib,ih]=await Promise.all([d.a,d.b,d.heat].map(x=>_loadImage('data:image/png;base64,'+x)));
       _diffImgA=ia; _diffImgB=ib; _diffHeat=ih;
       document.getElementById('diff_label_b').innerText=fb.split('/').pop()+
-        `  —  HEURDU ${(d.score*100).toFixed(1)}% similar, ${(d.changed*100).toFixed(1)}% of cells changed, ${(d.overlap*100).toFixed(0)}% overlap`;
+        `  -  HEURDU ${(d.score*100).toFixed(1)}% similar, ${(d.changed*100).toFixed(1)}% of cells changed, ${(d.overlap*100).toFixed(0)}% overlap`;
       renderDiffOverlay(); return;
     }
   }catch(e){ /* fall through to the pixel diff */ }
@@ -541,7 +541,7 @@ async function highlightDiffVideo(gid,fa,fb){
   document.getElementById('diff_label_b').innerText=fb.split('/').pop();
   const bar=document.getElementById('diff_video_bar');
   bar.classList.remove('hidden');
-  document.getElementById('diff_video_verdict').innerText='Comparing videos…';
+  document.getElementById('diff_video_verdict').innerText='Comparing videos...';
   document.getElementById('diff_video_meta').innerText='';
   document.getElementById('dedup_diff_modal').classList.remove('hidden');
   let d;
@@ -559,9 +559,9 @@ async function highlightDiffVideo(gid,fa,fb){
   }
   _vdiff=d;
   const ma=d.meta.a, mb=d.meta.b;
-  const fmt=m=>`${m.width||'?'}×${m.height||'?'}  ${m.duration!=null?m.duration.toFixed(1)+'s':'?'}  ${m.fps!=null?m.fps.toFixed(2)+'fps':'?'}  ${m.codec||'?'}${m.nb_frames!=null?'  '+m.nb_frames+'f':''}`;
+  const fmt=m=>`${m.width||'?'}x${m.height||'?'}  ${m.duration!=null?m.duration.toFixed(1)+'s':'?'}  ${m.fps!=null?m.fps.toFixed(2)+'fps':'?'}  ${m.codec||'?'}${m.nb_frames!=null?'  '+m.nb_frames+'f':''}`;
   document.getElementById('diff_video_verdict').innerText=
-    `${d.verdict}   ·   mean diff ${d.mean_diff}, peak ${d.max_diff} (sampled ${d.sampled_span.toFixed(1)}s)`;
+    `${d.verdict}   |   mean diff ${d.mean_diff}, peak ${d.max_diff} (sampled ${d.sampled_span.toFixed(1)}s)`;
   document.getElementById('diff_video_meta').innerText=`A  ${fmt(ma)}\nB  ${fmt(mb)}`;
   const scrub=document.getElementById('diff_video_scrub');
   scrub.max=Math.max(0,d.profile.length-1); scrub.value=0;
@@ -586,7 +586,7 @@ async function renderVideoDiffFrame(i){
   if(!_vdiff) return;
   const p=_vdiff.profile[i]||{};
   document.getElementById('diff_video_ts').innerText=
-    (p.t!=null?p.t.toFixed(2)+'s':'—')+(p.diff!=null?'  Δ'+p.diff:'');
+    (p.t!=null?p.t.toFixed(2)+'s':'-')+(p.diff!=null?'  delta'+p.diff:'');
   const [ia,ib]=await Promise.all([_imgFromB64(_vdiff.frames_a[i]),_imgFromB64(_vdiff.frames_b[i])]);
   if(ia&&ib){ _diffImgA=ia; _diffImgB=ib; renderDiffOverlay(); }
 }
@@ -620,7 +620,7 @@ async function bulkResolveAll() {
     }
     if(!anyMerged) page++;
     if(page*PAGE>=d.total) break;
-    showToast(`Auto-resolve: page ${page+1}/${Math.ceil(d.total/PAGE)} · ${resolved} merged, ${skipped} skipped…`);
+    showToast(`Auto-resolve: page ${page+1}/${Math.ceil(d.total/PAGE)} | ${resolved} merged, ${skipped} skipped...`);
   }
   if(resolved>0) await fetch('/api/dedup_retrain',{method:'POST'});
   const msg=skipped>0
@@ -635,13 +635,14 @@ fetchDedupStatus();   // initial badge, once this script is in
 // A scan started before a page reload keeps running server-side: re-attach.
 fetch('/api/dedup_progress').then(r=>r.json()).then(p=>{ if(p.running) startDedupPoll(); }).catch(()=>{});
 
-// Audio pair: fingerprint offset + per-block bit-error profile (a cut or an
-// edit shows as a run of red blocks), naive and learned (HEARDU) scores.
+/** @brief Audio pair: fingerprint offset + per-block bit-error profile (a cut or an
+ *  edit shows as a run of red blocks), naive and learned (HEARDU) scores.
+ */
 async function highlightDiffAudio(gid,fa,fb){
   document.getElementById('diff_label_a').innerText=fa.split('/').pop();
   document.getElementById('diff_label_b').innerText=fb.split('/').pop();
   document.getElementById('diff_video_bar').classList.remove('hidden'); _vdiff=null;
-  document.getElementById('diff_video_verdict').innerText='Comparing tracks…';
+  document.getElementById('diff_video_verdict').innerText='Comparing tracks...';
   document.getElementById('diff_video_meta').innerText='';
   document.getElementById('dedup_diff_modal').classList.remove('hidden');
   let d;
@@ -655,8 +656,8 @@ async function highlightDiffAudio(gid,fa,fb){
   if(!d||!d.success){ document.getElementById('diff_video_verdict').innerText='Could not compare: '+((d&&d.error)||'unknown error'); return; }
   const pct=x=>x==null?'-':(x*100).toFixed(1)+'%';
   document.getElementById('diff_video_verdict').innerText=
-    `${d.verdict}   ·   phash ${pct(d.phash)}, naive ${pct(d.naive)}`+(d.learned!=null?`, ${d.scorer} ${pct(d.learned)}`:'')+
-    (d.offset_s!=null?`   ·   B is offset ${d.offset_s.toFixed(2)}s`:'');
+    `${d.verdict}   |   phash ${pct(d.phash)}, naive ${pct(d.naive)}`+(d.learned!=null?`, ${d.scorer} ${pct(d.learned)}`:'')+
+    (d.offset_s!=null?`   |   B is offset ${d.offset_s.toFixed(2)}s`:'');
   const m=d.meta;
   document.getElementById('diff_video_meta').innerText=
     `A  ${m.a.duration.toFixed(1)}s  ${m.a.quality}\nB  ${m.b.duration.toFixed(1)}s  ${m.b.quality}`;

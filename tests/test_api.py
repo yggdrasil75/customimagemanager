@@ -1,4 +1,5 @@
-"""HTTP surface through the Flask test client. Every test uploads its own
+"""! @file
+@brief HTTP surface through the Flask test client. Every test uploads its own
 files via the `upload` fixture, which deletes them afterwards."""
 import io, os
 import pytest

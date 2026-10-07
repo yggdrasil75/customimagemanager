@@ -3,7 +3,7 @@
  * The tab BUTTONS are registered here; the PANES are server-rendered partials
  * the module contributes via host.register_controls_pane (so no client fetch).
  * onShow wires each tab to its editor object's .load(filename). The module owns
- * the tabs, panes, and editors — core just places them. */
+ * the tabs, panes, and editors - core just places them. */
 (function () {
   function reg() {
     if (!window.registerControlsTab) { setTimeout(reg, 100); return; }

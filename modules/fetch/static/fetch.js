@@ -10,7 +10,7 @@ let _gdlTargetOpts = null;  // cached <option> HTML for the target dropdowns
 let _gdlXmpTokens  = [];    // all XMP tokens, for the per-row datalist typeahead
 
 // Base targets every field can go to. EXIF tags are appended (grouped) and an
-// "XMP property…" sentinel is added; picking it reveals a token typeahead.
+// "XMP property..." sentinel is added; picking it reveals a token typeahead.
 const _GDL_TARGETS = [
   ['ignore', 'Ignore'],
   ['tags', 'Tags'],
@@ -19,9 +19,10 @@ const _GDL_TARGETS = [
 ];
 const _GDL_XMP_SENTINEL = '__xmp__';
 
-// Build (and cache) the shared <option> markup for a target <select>: the base
-// targets, an <optgroup> of writable EXIF tags ("exif:<Tag>"), and an "XMP
-// property…" sentinel. Also caches the flat XMP token list for the datalist.
+/** @brief Build (and cache) the shared <option> markup for a target <select>: the base
+ *  targets, an <optgroup> of writable EXIF tags ("exif:<Tag>"), and an "XMP
+ *  property..." sentinel. Also caches the flat XMP token list for the datalist.
+ */
 async function _gdlTargetOptionsHTML() {
   if (_gdlTargetOpts !== null) return _gdlTargetOpts;
   let base = _GDL_TARGETS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
@@ -31,7 +32,7 @@ async function _gdlTargetOptionsHTML() {
     for (const g of (t?.exif_groups || [])) {
       const opts = g.tags.map(tag =>
         `<option value="exif:${tag}">${tag}</option>`).join('');
-      exif += `<optgroup label="EXIF · ${g.group}">${opts}</optgroup>`;
+      exif += `<optgroup label="EXIF | ${g.group}">${opts}</optgroup>`;
     }
     for (const g of (t?.xmp_groups || [])) _gdlXmpTokens.push(...(g.tokens || []));
     // one shared datalist for every row's XMP token input
@@ -43,7 +44,7 @@ async function _gdlTargetOptionsHTML() {
     }
   } catch (_) { /* EXIF/XMP targets are optional; base targets still work */ }
   const xmpOpt = _gdlXmpTokens.length
-    ? `<option value="${_GDL_XMP_SENTINEL}">XMP property…</option>` : '';
+    ? `<option value="${_GDL_XMP_SENTINEL}">XMP property...</option>` : '';
   _gdlTargetOpts = base + exif + xmpOpt;
   return _gdlTargetOpts;
 }
@@ -52,8 +53,8 @@ function _gdlStatus(msg, kind) {
   const el = document.getElementById('gdl_status');
   if (!el) return;
   el.textContent = msg || '';
-  el.className = 'text-xs ' + (kind === 'err' ? 'text-rose-400'
-    : kind === 'ok' ? 'text-emerald-400' : 'text-gray-400');
+  el.className = 'text-xs ' + (kind === 'err' ? 'text-red-400'
+    : kind === 'ok' ? 'text-green-400' : 'text-gray-400');
 }
 
 async function gdlOpen() {
@@ -66,7 +67,7 @@ async function gdlOpen() {
   gdlQueueStartPolling();
 }
 
-// Jump to a fetch settings tab (default: Fetch sites — per-site mapping/login/options).
+/** @brief Jump to a fetch settings tab (default: Fetch sites - per-site mapping/login/options). */
 async function gdlOpenSettings(tab = 'module_gdl_sites') {
   document.getElementById('gdl_modal').classList.add('hidden');
   await openSettings(tab);
@@ -74,7 +75,7 @@ async function gdlOpenSettings(tab = 'module_gdl_sites') {
   document.querySelector(`[data-settings-tab="${tab}"]`)?.click();
 }
 
-// Guess a sensible default target for a field the first time a site is seen.
+/** @brief Guess a sensible default target for a field the first time a site is seen. */
 function _gdlGuessTarget(field) {
   const f = field.toLowerCase();
   if (/(^|[._])notes?$/.test(f)) return 'regions';         // e621-style boxes
@@ -83,11 +84,12 @@ function _gdlGuessTarget(field) {
   return 'ignore';
 }
 
-// One mapping row: "<field>  ->  [target dropdown] [xmp token | tag prefix]".
-// `chosen` is the saved target. A target of "xmp:<Token>" selects the "XMP
-// property…" sentinel and pre-fills the token input; on save the input's
-// value is re-prefixed with "xmp:". Shared by the fetch modal and the
-// Settings › Fetch sites tab (gdl_sites.js).
+/** @brief One mapping row: "<field>  ->  [target dropdown] [xmp token | tag prefix]".
+ *  `chosen` is the saved target. A target of "xmp:<Token>" selects the "XMP
+ *  property..." sentinel and pre-fills the token input; on save the input's
+ *  value is re-prefixed with "xmp:". Shared by the fetch modal and the
+ *  Settings > Fetch sites tab (gdl_sites.js).
+ */
 function _gdlFieldRow(field, chosen, optsHTML) {
   const isXmp = typeof chosen === 'string' && chosen.startsWith('xmp:');
   const isTags = chosen === 'tags' || (typeof chosen === 'string' && chosen.startsWith('tags:'));
@@ -126,15 +128,16 @@ function _gdlFieldRow(field, chosen, optsHTML) {
   return row;
 }
 
-// Target to show for a field: its saved one; for a site with no mapping yet,
-// a guess. A site that HAS a mapping keeps unmapped fields ignored (they were
-// ignored on purpose — don't re-guess them every time).
+/** @brief Target to show for a field: its saved one; for a site with no mapping yet,
+ *  a guess. A site that HAS a mapping keeps unmapped fields ignored (they were
+ *  ignored on purpose - don't re-guess them every time).
+ */
 function _gdlTargetFor(field, saved) {
   if (saved[field]) return saved[field];
   return Object.keys(saved).length ? 'ignore' : _gdlGuessTarget(field);
 }
 
-// Build the modal's rows for the current site, skipping hidden fields.
+/** @brief Build the modal's rows for the current site, skipping hidden fields. */
 async function _gdlRenderRows(saved, hidden) {
   const wrap = document.getElementById('gdl_rows');
   wrap.innerHTML = '';
@@ -147,7 +150,7 @@ async function _gdlRenderRows(saved, hidden) {
 async function gdlDiscover() {
   const url = document.getElementById('gdl_url').value.trim();
   if (!url) { _gdlStatus('Enter a URL first.', 'err'); return; }
-  _gdlStatus('Checking fields…');
+  _gdlStatus('Checking fields...');
   const r = await fetch('/api/gdl/fields', { method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url }) }).then(r => r.json()).catch(() => null);
@@ -165,11 +168,11 @@ async function gdlDiscover() {
   document.getElementById('gdl_mapping').classList.remove('hidden');
   const hiddenN = (r.hidden || []).length;
   _gdlStatus(`${_gdlFields.length} fields known` +
-    (hiddenN ? ` (${hiddenN} hidden — see Settings › Fetch sites)` : '') + '.', 'ok');
+    (hiddenN ? ` (${hiddenN} hidden - see Settings › Fetch sites)` : '') + '.', 'ok');
 }
 
-// ── auth UI ─────────────────────────────────────────────────────────────────
-// Show only the fields for the chosen method.
+// -- auth UI -----------------------------------------------------------------
+/** @brief Show only the fields for the chosen method. */
 function gdlAuthMethodChange() {
   const m = document.getElementById('gdl_auth_method').value;
   document.getElementById('gdl_auth_userpass').classList.toggle('hidden', m !== 'userpass');
@@ -177,16 +180,17 @@ function gdlAuthMethodChange() {
   document.getElementById('gdl_auth_browser').classList.toggle('hidden', m !== 'cookies_browser');
 }
 
-// Populate from the redacted auth the server returned. Secrets aren't sent
-// back, so we show a note that they're on file instead of prefilling them.
+/** @brief Populate from the redacted auth the server returned. Secrets aren't sent
+ *  back, so we show a note that they're on file instead of prefilling them.
+ */
 function _gdlLoadAuth(a) {
   document.getElementById('gdl_auth_method').value = a.method || 'none';
   document.getElementById('gdl_auth_user').value = a.username || '';
   document.getElementById('gdl_auth_pass').value = '';
-  document.getElementById('gdl_auth_pass').placeholder = a.has_password ? 'password (on file — leave blank to keep)' : 'password';
+  document.getElementById('gdl_auth_pass').placeholder = a.has_password ? 'password (on file - leave blank to keep)' : 'password';
   document.getElementById('gdl_auth_cookies_text').value = '';
   document.getElementById('gdl_auth_cookies_state').textContent =
-    a.has_cookies ? 'Cookies on file — paste again to replace.' : '';
+    a.has_cookies ? 'Cookies on file - paste again to replace.' : '';
   if (a.browser) document.getElementById('gdl_auth_browser_sel').value = a.browser;
   gdlAuthMethodChange();
 }
@@ -201,15 +205,16 @@ async function gdlPasteCookies() {
     }
   } catch (e) {
     document.getElementById('gdl_auth_cookies_state').textContent =
-      'Clipboard blocked by browser — paste into the box manually.';
+      'Clipboard blocked by browser - paste into the box manually.';
   }
 }
 
-// Resolve the URL's site without a network fetch/discovery, so login can be
-// saved before the first field check (required for login-only sites). Caches
-// onto _gdlSite and pre-loads any saved auth for that site.
-// Called on URL blur: resolve the site (no network) and prefill any saved
-// login for it, so a login-only site shows its auth before Check fields.
+/** @brief Resolve the URL's site without a network fetch/discovery, so login can be
+ *  saved before the first field check (required for login-only sites). Caches
+ *  onto _gdlSite and pre-loads any saved auth for that site.
+ *  Called on URL blur: resolve the site (no network) and prefill any saved
+ *  login for it, so a login-only site shows its auth before Check fields.
+ */
 async function gdlUrlChanged() {
   _gdlSite = '';                                   // force re-resolve for new URL
   const url = document.getElementById('gdl_url').value.trim();
@@ -222,7 +227,7 @@ async function gdlUrlChanged() {
     const siteEl = document.getElementById('gdl_site');
     if (siteEl) siteEl.textContent = r.site || '(unknown)';
     const authSiteEl = document.getElementById('gdl_auth_site');
-    if (authSiteEl) authSiteEl.textContent = r.site ? '— ' + r.site : '';
+    if (authSiteEl) authSiteEl.textContent = r.site ? '- ' + r.site : '';
     _gdlLoadAuth(r.auth || { method: 'none' });
     const optsEl = document.getElementById('gdl_opts');
     if (optsEl && (r.opts || []).length) optsEl.value = (r.opts || []).join('\n');
@@ -247,7 +252,7 @@ async function _gdlResolveSite() {
 
 async function gdlSaveAuth() {
   if (!_gdlSite) {
-    // No successful check yet — resolve the site straight from the URL so an
+    // No successful check yet - resolve the site straight from the URL so an
     // API/login-only site can have credentials saved first, then checked.
     await _gdlResolveSite();
   }
@@ -278,9 +283,10 @@ async function gdlSaveAuth() {
              r?.success ? 'ok' : 'err');
 }
 
-// Read {field: target} from the rows under `root` (default: the modal).
-// "ignore" is sent explicitly: the server MERGES mappings, so a field that
-// isn't mentioned keeps its saved target.
+/** @brief Read {field: target} from the rows under `root` (default: the modal).
+ *  "ignore" is sent explicitly: the server MERGES mappings, so a field that
+ *  isn't mentioned keeps its saved target.
+ */
 function _gdlCurrentMapping(root) {
   const out = {};
   (root || document.getElementById('gdl_rows')).querySelectorAll('.gdl-map-sel').forEach(sel => {
@@ -322,7 +328,7 @@ async function gdlFetch() {
   try { localStorage.setItem('gdl_folder', folder); } catch (_) {}
   // If a mapping is on screen, persist it so this fetch uses the latest
   // choice. Without rows (URL pasted, Check fields skipped) there is nothing
-  // to save — saving here used to wipe the site's stored mapping.
+  // to save - saving here used to wipe the site's stored mapping.
   if (_gdlSite && document.querySelector('#gdl_rows .gdl-map-sel')) await gdlSaveMapping();
 
   const btn = document.getElementById('gdl_fetch_btn');
@@ -347,7 +353,7 @@ async function gdlFetch() {
   gdlQueueRefresh();
 }
 
-// ── download queue ──────────────────────────────────────────────────────────
+// -- download queue ----------------------------------------------------------
 let _gdlQueueTimer = null;
 
 function gdlQueueStartPolling() {
@@ -369,7 +375,7 @@ async function gdlQueueRefresh() {
   (r.queue||[]).forEach(it => { counts[it.status]=(counts[it.status]||0)+1; });
   document.getElementById('gdl_q_counts').textContent =
     Object.keys(counts).length
-      ? '· ' + Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(', ')
+      ? '| ' + Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(', ')
       : '';
   const wrap = document.getElementById('gdl_queue');
   const _items = r.queue || [];
@@ -382,7 +388,7 @@ async function gdlQueueRefresh() {
 
 const _GDL_STATUS_COLOR = {
   pending: 'text-gray-400', downloading: 'text-amber-400',
-  done: 'text-emerald-400', error: 'text-rose-400', canceled: 'text-gray-500',
+  done: 'text-green-400', error: 'text-red-400', canceled: 'text-gray-500',
 };
 
 function _gdlQueueRow(it) {
@@ -392,7 +398,7 @@ function _gdlQueueRow(it) {
              : (it.downloaded ? `${it.downloaded}` : '');
   const stopabble = it.status === 'pending' || it.status === 'downloading';
   const rerunnable = it.status === 'done' || it.status === 'error' || it.status === 'canceled';
-  const err = it.error ? `<div class="text-[10px] text-rose-400 truncate" title="${_esc(it.error)}">${_esc(it.error)}</div>` : '';
+  const err = it.error ? `<div class="text-[10px] text-red-400 truncate" title="${_esc(it.error)}">${_esc(it.error)}</div>` : '';
   const where = it.folder ? `<div class="text-[10px] text-gray-500 truncate" title="${_esc(it.folder)}">→ ${_esc(it.folder)}</div>` : '';
   return `<div class="flex items-center gap-2 bg-gray-900/40 rounded px-2 py-1">
     <div class="flex-1 min-w-0">
@@ -402,7 +408,7 @@ function _gdlQueueRow(it) {
     <span class="${color} whitespace-nowrap">${it.status}</span>
     <span class="text-gray-500 whitespace-nowrap w-16 text-right">${prog}</span>
     ${stopabble ? `<button onclick="gdlQueueCancel(${it.id})"
-       class="text-[10px] text-gray-500 hover:text-rose-400">cancel</button>`
+       class="text-[10px] text-gray-500 hover:text-red-400">cancel</button>`
      : rerunnable ? `<button onclick="gdlQueueRetry(${it.id})"
        class="text-[10px] text-gray-500 hover:text-sky-400">retry</button>`
      : '<span class="w-10"></span>'}
@@ -429,7 +435,7 @@ async function gdlQueueClear() {
   gdlQueueRefresh();
 }
 
-// ── Settings › Watched fetches ──────────────────────────────────────────────
+// -- Settings > Watched fetches ----------------------------------------------
 // Pane element: #settings_pane_module_fetch_watch (created by static/modules.js).
 (function () {
   const $ = (id) => document.getElementById(id);
@@ -455,18 +461,18 @@ async function gdlQueueClear() {
 ${ws.length ? '' : '<p class="text-xs text-gray-600">No watched fetches.</p>'}
 <div class="space-y-1 text-xs">${ws.map(w => `
 <div class="flex items-center gap-2 bg-gray-900/40 rounded px-2 py-1" data-id="${w.id}">
-  <input type="checkbox" class="fw-on accent-emerald-600" ${w.enabled ? 'checked' : ''} title="enabled">
+  <input type="checkbox" class="fw-on accent-green-600" ${w.enabled ? 'checked' : ''} title="enabled">
   <div class="flex-1 min-w-0">
     <div class="truncate text-gray-300" title="${_esc(w.target)}">${_esc(w.target)}</div>
-    <div class="text-[10px] text-gray-500 truncate">${w.folder ? '→ ' + _esc(w.folder) + ' · ' : ''}
-      last ${when(w.last_run)} · next ${w.enabled ? when(w.last_run + w.every_h * 3600) : '—'}</div>
+    <div class="text-[10px] text-gray-500 truncate">${w.folder ? '→ ' + _esc(w.folder) + ' | ' : ''}
+      last ${when(w.last_run)} | next ${w.enabled ? when(w.last_run + w.every_h * 3600) : '-'}</div>
   </div>
   <span class="text-gray-500">every</span>
   <input type="number" min="1" step="1" value="${w.every_h}"
     class="fw-h w-16 p-1 bg-gray-700 rounded border border-gray-600 text-xs text-white">
   <span class="text-gray-500">h</span>
   <button class="fw-run text-[10px] text-gray-500 hover:text-sky-400">run now</button>
-  <button class="fw-del text-[10px] text-gray-500 hover:text-rose-400">delete</button>
+  <button class="fw-del text-[10px] text-gray-500 hover:text-red-400">delete</button>
 </div>`).join('')}</div>`;
     pane.querySelectorAll('[data-id]').forEach(row => {
       const id = +row.dataset.id;

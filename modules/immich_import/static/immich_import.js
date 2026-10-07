@@ -1,4 +1,4 @@
-/* Immich import — settings tab. Shared UI: fetch_importers.js. */
+/* Immich import - settings tab. Shared UI: fetch_importers.js. */
 (function () {
   if (!window.ImportKit) return;
   ImportKit.mount({

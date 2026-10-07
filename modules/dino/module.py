@@ -1,12 +1,12 @@
-"""
-DINO module — DINOv2 / DINOv3 self-supervised ViT backbones (HuggingFace).
+"""! @file
+@brief DINO module - DINOv2 / DINOv3 self-supervised ViT backbones (HuggingFace).
 ======================================================================
 One backbone, two jobs:
   embed          whole-image embedding (CLS token) for similarity search
   embed.bodies   per-person-box embedding for body re-id (the bodies module
                  binds these to faces; DINO has no detector, it embeds the
                  crops it is handed)
-Families: DINOv2 (public, the default) and DINOv3 (gated on HF — accept the
+Families: DINOv2 (public, the default) and DINOv3 (gated on HF - accept the
 licence and log in with huggingface-cli). Sizes s/b/l/g; weights land under
 models/dino/embed/ via the HF cache_dir.
 """
@@ -68,7 +68,7 @@ def registry_key(model_id):
 
 
 def load(model_id):
-    """(model, processor) via the runtime registry (LRU-evicted), or None."""
+    """! @brief (model, processor) via the runtime registry (LRU-evicted), or None."""
     key = registry_key(model_id)
     with _lock:
         if key not in _registered:
@@ -85,7 +85,7 @@ def _normalise(v):
 
 
 def embed_crops(model, proc, crops_rgb):
-    """RGB crops -> list of unit vectors (CLS token, or pooler when present)."""
+    """! @brief RGB crops -> list of unit vectors (CLS token, or pooler when present)."""
     if not crops_rgb:
         return []
     inputs = proc(images=crops_rgb, return_tensors="pt").to(model.device)
@@ -147,7 +147,7 @@ def register(host):
         return lambda img, *a, **k: (embed_crops(model, proc, [cv2.cvtColor(og.as_bgr(img), cv2.COLOR_BGR2RGB)]) or [None])[0]
 
     def _v3_ok():
-        """DINOv3 weights are gated: loading needs an HF token (accepted
+        """! @brief DINOv3 weights are gated: loading needs an HF token (accepted
         licence) or an already-cached snapshot. Without either, say so
         instead of failing at use time."""
         if _hf_token is not None:

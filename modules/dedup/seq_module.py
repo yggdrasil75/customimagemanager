@@ -1,5 +1,5 @@
-"""
-Shared module plumbing for the sequence scorers (HEURDUV, HEARDU).
+"""! @file
+@brief Shared module plumbing for the sequence scorers (HEURDUV, HEARDU).
 ======================================================================
 dedup_cnn_video and dedup_cnn_audio are the same shape as dedup_cnn: a model
 capability picked in Settings > Models (sizes downloaded from HuggingFace
@@ -14,8 +14,8 @@ Checkpoint lookup per size, first hit wins:
     models/<prefix>/<prefix>_<size>.pt       (previous HF download)
     https://huggingface.co/<repo>/resolve/main/<FAMILY>_<size>.pt
 A size with no checkpoint anywhere makes the scorer unavailable for 10
-minutes (the reason is logged once), so the next scorer — the legacy model
-or the naive score — answers meanwhile.
+minutes (the reason is logged once), so the next scorer - the legacy model
+or the naive score - answers meanwhile.
 """
 
 import os
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS {table} (
 
 
 def path_to_map(path, n_b: int):
-    """DTW path [(i, j)] -> map [n_b]: the first a-step aligned to each b-step."""
+    """! @brief DTW path [(i, j)] -> map [n_b]: the first a-step aligned to each b-step."""
     import numpy as np
     mp = np.full(n_b, -1, np.int64)
     for i, j in path:
@@ -50,7 +50,7 @@ def path_to_map(path, n_b: int):
 def register_seq_module(host, *, cls, kind, cap, cap_label, cap_summary, cap_input, prefix,
                         hf_repo, hf_sizes, sample_table, module_dir, label, note,
                         map_fn, priority=30, cost_mb=32):
-    """Register a sequence scorer module. `map_fn(steps_a, steps_b, abs_a, abs_b)`
+    """! @brief Register a sequence scorer module. `map_fn(steps_a, steps_b, abs_a, abs_b)`
     -> step map for a merged (duplicate) feedback pair."""
     scorers = host.get_service("dedup_scorers")
     if scorers is None:
@@ -151,7 +151,7 @@ def register_seq_module(host, *, cls, kind, cap, cap_label, cap_summary, cap_inp
         return f"{prefix}:{size}:{_stamp(size)}"
 
     def _embed(m, path, tag):
-        """Embedding of one file, cached (a group of N scores N-1 pairs per member)."""
+        """! @brief Embedding of one file, cached (a group of N scores N-1 pairs per member)."""
         try:
             key = (path, os.path.getmtime(path), tag)
         except OSError:
@@ -200,9 +200,8 @@ def register_seq_module(host, *, cls, kind, cap, cap_label, cap_summary, cap_inp
         if active:
             ok, err = host.broker.select(cap, prefix, str(active))
             if ok:
-                host.config["model_selection"] = host.broker.current_selection()
                 try:
-                    host.save_config()
+                    host.persist_model_selection()
                 except Exception as e:
                     host.logger.warning(f"{prefix}: save selection: {e}")
             else:
@@ -216,7 +215,7 @@ def register_seq_module(host, *, cls, kind, cap, cap_label, cap_summary, cap_inp
                 "error": failed.get(size, (0, ""))[1], "size": size, "params": m.params if m else 0}
 
     def _record(abs_a, abs_b, label):
-        """Store a merge (1) / not-a-duplicate (0) decision as a training sample."""
+        """! @brief Store a merge (1) / not-a-duplicate (0) decision as a training sample."""
         try:
             sa, sb = cls.steps_from_path(abs_a), cls.steps_from_path(abs_b)
             if sa is None or sb is None or not len(sa) or not len(sb):

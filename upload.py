@@ -1,10 +1,8 @@
-"""
-Bulk uploader for the AI Media & Asset Manager.
+"""! @file
+@brief Command-line bulk uploader.
 
-Exit codes:
-  0  All files uploaded successfully (or skipped as expected duplicates).
-  1  Some files failed after all retries.
-  2  All files failed (likely a connectivity or configuration problem).
+Exit codes: 0 all uploaded (or expected duplicates), 1 some failed after
+retries, 2 all failed (connection or configuration).
 """
 
 import os
@@ -21,47 +19,28 @@ from typing import Optional
 
 import requests
 
-# Must match auth.COOKIE_NAME on the server.
+# same as auth.COOKIE_NAME on the server
 COOKIE_NAME = "cim_session"
 
-# Streaming multipart: passing a file handle to requests' files= reads the WHOLE
-# file into memory to build the request body, which OOMs on large videos (a 13GB
-# camcorder clip is loaded fully, sometimes alongside the server's copy on the
-# same box). MultipartEncoder streams the body straight off disk with O(1) peak
-# memory. It ships with requests-toolbelt; if that isn't installed we fall back
-# to a tiny hand-rolled streaming encoder so large uploads still don't buffer.
+# Stream uploads from disk: requests' files= reads a whole file into memory
+# (a 13 GB video would). requests-toolbelt's encoder, else the fallback below.
 try:
     from requests_toolbelt.multipart.encoder import MultipartEncoder  # type: ignore
     _HAVE_TOOLBELT = True
-except Exception:                              # pragma: no cover
-    MultipartEncoder = None                    # type: ignore
+except Exception:  # pragma: no cover
+    MultipartEncoder = None  # type: ignore
     _HAVE_TOOLBELT = False
 
 class AuthError(Exception):
-    """Raised when the uploader cannot obtain or refresh a server session."""
+    """! @brief The uploader could not get or refresh a server session."""
 
 class Session:
-    """Holds the uploader's authenticated connection to the server.
+    """! @brief The uploader's authenticated connection: session cookie plus the CSRF
+    token every POST must echo.
 
-    The server (auth.py) uses cookie-based server-side sessions plus a CSRF
-    token that every non-GET request must echo in `X-CSRF-Token`. Uploads are
-    POSTs, so both are mandatory once auth is enabled.
-
-    Three things this has to get right:
-
-    * ONE session shared by all worker threads. requests.Session is documented
-      as not fully thread-safe, but our use is narrow (concurrent POSTs reading
-      an already-populated cookie jar), and sharing is what lets every worker
-      reuse the connection pool. All *mutation* (login / re-login) is done under
-      a lock, so workers never observe a half-updated jar.
-
-    * Re-login on expiry. A big bulk run can outlive the session (default 14
-      days is generous, but an admin can revoke, or the server can restart and
-      drop its session table). A 401 mid-run must not fail thousands of files,
-      so a worker that sees one triggers a single re-login and retries.
-
-    * Auth being OFF must still work. If the server reports auth disabled we
-      never send credentials and behave exactly like the old uploader.
+    One requests.Session is shared by all workers; login and re-login happen under
+    a lock. A 401 mid-run triggers one re-login and a retry. With auth off on the
+    server, no credentials are sent.
     """
 
     def __init__(self, base_url: str, username: str = "", password: str = "",
@@ -74,18 +53,13 @@ class Session:
         self.csrf = ""
         self.auth_enabled = False
         self.user = None
-        # Guards login/re-login. Workers hold it only briefly.
         self._lock = threading.Lock()
-        # Bumped on every successful login. A worker records the value it used;
-        # if a re-login already happened while it was in flight, its 401 is
-        # stale and it just retries instead of logging in a second time.
+        # Bumped per login, so a 401 from a request sent before someone else's
+        # re-login just retries.
         self._generation = 0
 
-    # -- server capability ---------------------------------------------------
     def probe(self) -> dict:
-        """Ask the server whether auth is on. Public endpoint, no session
-        needed. A server too old to have /api/auth/config (404) is treated as
-        auth-disabled, so this uploader still works against older deployments."""
+        """! @brief Ask whether the server has auth on (an old server without the endpoint counts as off)."""
         url = f"{self.base_url}/api/auth/config"
         try:
             r = self.http.get(url, timeout=30)
@@ -103,9 +77,8 @@ class Session:
         self.auth_enabled = bool(cfg.get("enabled"))
         return cfg
 
-    # -- login ---------------------------------------------------------------
     def login(self) -> None:
-        """Authenticate and store the session cookie + CSRF token."""
+        """! @brief Log in; store the session cookie and CSRF token."""
         with self._lock:
             self._login_locked()
 
@@ -146,16 +119,13 @@ class Session:
         self._generation += 1
 
     def relogin(self, seen_generation: int) -> bool:
-        """Re-authenticate after a 401, unless another thread already did.
-
-        Returns True if a usable session exists afterwards. `seen_generation` is
-        the value the caller captured before its request; if the current
-        generation has moved past it, someone else already refreshed and the
-        caller should simply retry.
+        """! @brief Log in again after a 401, unless another worker already did.
+        @param seen_generation  the generation the caller's request used.
+        @return True when a usable session exists.
         """
         with self._lock:
             if self._generation != seen_generation:
-                return True          # already refreshed by another worker
+                return True
             try:
                 self._login_locked()
                 return True
@@ -163,17 +133,16 @@ class Session:
                 log_error(f"re-authentication failed: {e}")
                 return False
 
-    # -- request helpers -----------------------------------------------------
     @property
     def generation(self) -> int:
         return self._generation
 
     def headers(self) -> dict:
-        """Headers for a state-changing request (adds CSRF when authenticated)."""
+        """! @brief Headers for a POST (CSRF when signed in)."""
         return {"X-CSRF-Token": self.csrf} if self.csrf else {}
 
     def logout(self) -> None:
-        """Best-effort session teardown so we don't leave rows in auth_sessions."""
+        """! @brief End the server-side session (best effort)."""
         if not self.csrf:
             return
         try:
@@ -186,12 +155,9 @@ def log_error(msg: str) -> None:
     print(f"  [!] {msg}", file=sys.stderr)
 
 class _StreamingMultipart:
-    """Minimal streaming multipart/form-data body (fallback for when
-    requests-toolbelt is absent). Yields the preamble, then the file in fixed
-    chunks read lazily from disk, then the epilogue — so the file is never fully
-    held in memory. requests accepts any iterable as `data=` and streams it."""
+    """! @brief Fallback streaming multipart body: preamble, the file in 1 MiB chunks, epilogue."""
 
-    _CHUNK = 1024 * 1024  # 1 MiB
+    _CHUNK = 1024 * 1024
 
     def __init__(self, fields: dict, file_field: str, filepath: str, filename: str):
         self.boundary = "----cimuploader" + os.urandom(16).hex()
@@ -227,11 +193,7 @@ class _StreamingMultipart:
         yield self._epilogue
 
 def _post_streaming(session, endpoint, filepath, fname, form_data, timeout):
-    """POST a file as a streamed multipart body without loading it into memory.
-
-    Goes through the Session's requests.Session so the auth cookie rides along,
-    and merges in the CSRF header the server demands on non-GET requests.
-    """
+    """! @brief POST a file as a streamed multipart body, with the session cookie and CSRF header."""
     http = session.http
     if _HAVE_TOOLBELT:
         fh = open(filepath, "rb")
@@ -284,10 +246,10 @@ TEMPORARY_ERROR_CODES = {
 AUTH_STATUS_CODES = {401, 403}
 class Outcome(Enum):
     SUCCESS   = "success"
-    QUEUED    = "queued"       # server spooled it; no final verdict yet
-    DUPLICATE = "duplicate"    # exact_duplicate or filename_exists
-    SKIPPED   = "skipped"      # other permanent rejection
-    FAILED    = "failed"       # gave up after retries
+    QUEUED    = "queued"  # spooled by the server, no verdict yet
+    DUPLICATE = "duplicate"  # exact_duplicate or filename_exists
+    SKIPPED   = "skipped"  # other permanent rejection
+    FAILED    = "failed"  # gave up after retries
 
 @dataclass
 class UploadResult:
@@ -298,7 +260,6 @@ class UploadResult:
     existing_file: Optional[str] = None
     attempts:      int = 1
 
-# ── Sidecar parsing ───────────────────────────────────────────────────────────
 
 def load_classes(source_dir: str) -> list[str]:
     p = os.path.join(source_dir, "classes.txt")
@@ -308,23 +269,15 @@ def load_classes(source_dir: str) -> list[str]:
     return []
 
 def parse_sidecar(filepath: str, classes_map: list[str]) -> tuple:
-    """
-    Returns (regions, description, tags).
-    Supports three sidecar formats:
-      1. Pipe-separated tags:  tag1|tag2|description: some text
-      2. YOLO label format:    <class_id> <cx> <cy> <w> <h>
-      3. Fallback:             entire file content as description
+    """! @brief Read a file's .txt sidecar: "tag|tag|description: text", YOLO label
+    lines, or plain text as the description.
+    @return (regions, description, tags).
     """
     sidecar = os.path.splitext(filepath)[0] + ".txt"
-    # A .txt book is its own "sidecar" by this naming rule — `moby.txt` would
-    # have the entire novel read in as its description, and a YOLO-format parse
-    # attempt on 200 KB of prose on top. Never let a file be its own sidecar.
+    # A .txt book would be its own sidecar.
     if os.path.abspath(sidecar) == os.path.abspath(filepath):
         return [], "", []
-    # Books carry their own metadata (epub OPF, ComicInfo.xml, MOBI EXTH, PDF
-    # info dict), which the server reads on ingest. A .txt beside a .epub is far
-    # more likely to be a stray note than tags for that book, and letting it
-    # through would overwrite real publisher metadata with a filename dump.
+    # Books carry their own metadata; a .txt beside one is a stray note.
     if os.path.splitext(filepath)[1].lower() in BOOK_EXTENSIONS:
         return [], "", []
     if not os.path.exists(sidecar):
@@ -337,7 +290,7 @@ def parse_sidecar(filepath: str, classes_map: list[str]) -> tuple:
     if not content:
         return [], "", []
 
-    # Format 1: pipe-separated
+    # pipe-separated tags
     if content.count('|') > 1:
         tags, desc_parts = [], []
         for t in [x.strip() for x in content.split('|') if x.strip()]:
@@ -351,7 +304,7 @@ def parse_sidecar(filepath: str, classes_map: list[str]) -> tuple:
                 tags.append(t)
         return [], "; ".join(desc_parts), tags
 
-    # Format 2: YOLO
+    # YOLO labels
     lines = [l.strip() for l in content.split('\n') if l.strip()]
     regions = []
     is_yolo = True
@@ -371,10 +324,9 @@ def parse_sidecar(filepath: str, classes_map: list[str]) -> tuple:
     if is_yolo and regions:
         return regions, "", []
 
-    # Format 3: description fallback
+    # plain description
     return [], content, []
 
-# ── Upload logic ──────────────────────────────────────────────────────────────
 
 def upload_file(
     filepath:        str,
@@ -406,25 +358,18 @@ def upload_file(
             form_data = {'folder': folder, 'mode': mode}
             if metadata:
                 form_data['metadata'] = json.dumps(metadata)
-            # Stream the file off disk instead of buffering it — a 13GB video
-            # uploads with ~1 MiB peak memory instead of loading fully (twice,
-            # counting the server's copy on a shared box).
-            # Capture the session generation BEFORE sending, so a 401 can be
-            # told apart from "another thread already re-logged in".
+            # Remember the session generation before sending, to tell a stale 401 apart.
             gen = session.generation
             resp = _post_streaming(session, endpoint, filepath, fname,
                                    form_data, timeout=180)
 
-            # Parse response
             try:
                 body = resp.json()
             except Exception:
                 body = {}
 
             if resp.status_code == 200 and body.get('success'):
-                # A body that came back as a duplicate on a 200 is a duplicate,
-                # not a fresh store — the server reports pre-existing files this
-                # way. Surface it as such so the summary counts are honest.
+                # The server reports a pre-existing file as a duplicate on a 200.
                 if body.get('duplicate'):
                     existing = body.get('existing_file') or body.get('filename')
                     return UploadResult(
@@ -433,8 +378,7 @@ def upload_file(
                                 else "duplicate",
                         error_code=body.get('error_code'),
                         existing_file=existing, attempts=attempt)
-                # The server may have corrected a mislabeled extension; surface
-                # that rather than silently reporting a plain success.
+                # The server fixed a wrong extension: report it.
                 corrected = body.get('corrected_extension') or {}
                 note = ""
                 if corrected:
@@ -467,17 +411,13 @@ def upload_file(
             detail     = body.get('detail', '')
             existing   = body.get('existing_file')
 
-            # Session expired / revoked / CSRF rejected. Re-authenticate once
-            # and retry — otherwise a long run that outlives its session would
-            # fail every remaining file. This MUST be checked before the generic
-            # 4xx branch below, which would otherwise mark it permanently
-            # skipped and silently drop the file.
+            # Expired or revoked session: log in again and retry. Checked before the
+            # generic 4xx branch, which would drop the file as permanently skipped.
             if resp.status_code in AUTH_STATUS_CODES and session.auth_enabled:
                 if session.relogin(gen):
                     last_error = f"session expired; re-authenticated ({error_msg})"
                     last_code  = "auth_retry"
-                    # Retry immediately: this isn't server load, it's a
-                    # credential refresh, so backoff would just waste time.
+                    # no backoff: a credential refresh, not server load
                     continue
                 return UploadResult(
                     filepath=filepath,
@@ -487,7 +427,6 @@ def upload_file(
                     attempts=attempt,
                 )
 
-            # Duplicate — permanent, specific outcome
             if error_code in ('exact_duplicate', 'filename_exists'):
                 msg = f"duplicate of {existing}" if existing else error_msg
                 return UploadResult(
@@ -499,7 +438,7 @@ def upload_file(
                     attempts=attempt,
                 )
 
-            # Other permanent errors — no retry
+            # permanent: no retry
             if error_code in PERMANENT_ERROR_CODES or (
                 400 <= resp.status_code < 500 and resp.status_code != 408
             ):
@@ -514,7 +453,7 @@ def upload_file(
                     attempts=attempt,
                 )
 
-            # Temporary — will retry
+            # temporary: retry
             last_error  = error_msg
             last_code   = error_code
             last_detail = detail
@@ -529,12 +468,10 @@ def upload_file(
             last_error = str(e)
             last_code  = "client_error"
 
-        # Backoff before retry (not after last attempt)
         if attempt < max_attempts:
             backoff = initial_backoff * (2 ** (attempt - 1))
             time.sleep(backoff)
 
-    # Exhausted retries
     msg = f"gave up after {max_attempts} attempt(s): {last_error}"
     if last_detail:
         msg += f" ({last_detail})"
@@ -546,7 +483,6 @@ def upload_file(
         attempts=max_attempts,
     )
 
-# ── Summary printing ──────────────────────────────────────────────────────────
 
 def print_summary(results: list[UploadResult], verbose_duplicates: bool) -> None:
     by_outcome: dict[Outcome, list[UploadResult]] = {o: [] for o in Outcome}
@@ -560,15 +496,15 @@ def print_summary(results: list[UploadResult], verbose_duplicates: bool) -> None
     skipped   = len(by_outcome[Outcome.SKIPPED])
     failed    = len(by_outcome[Outcome.FAILED])
 
-    print("\n" + "─" * 60)
+    print("\n" + "-" * 60)
     print(f"  Total:      {total}")
     print(f"  Uploaded:   {succeeded}")
     if queued:
         print(f"  Queued:     {queued}  (spooled on server; converts later)")
-    print(f"  Duplicates: {dupes}  (skipped — already on server)")
+    print(f"  Duplicates: {dupes}  (skipped - already on server)")
     print(f"  Skipped:    {skipped}  (permanent rejection)")
     print(f"  Failed:     {failed}  (gave up after retries)")
-    print("─" * 60)
+    print("-" * 60)
 
     if verbose_duplicates and by_outcome[Outcome.DUPLICATE]:
         print("\nDuplicate files:")
@@ -589,14 +525,11 @@ def print_summary(results: list[UploadResult], verbose_duplicates: bool) -> None
         for r in by_outcome[Outcome.FAILED]:
             print(f"  {os.path.basename(r.filepath)}: {r.message}")
 
-# ── Entry point ───────────────────────────────────────────────────────────────
 
 def _should_upload(fname: str, aggressive: bool) -> bool:
     ext = os.path.splitext(fname)[1].lower()
     if aggressive:
-        # Upload anything that isn't obviously a sidecar / bookkeeping file, even
-        # if it has no extension or a wrong one — the server will try to convert
-        # it and reject cleanly (conversion_failed) if it truly can't.
+        # Anything that isn't a sidecar goes up; the server rejects what it can't convert.
         if fname == "classes.txt":
             return False
         return ext not in NON_MEDIA_EXTENSIONS
@@ -635,7 +568,7 @@ def bulk_upload(
 
     if session.auth_enabled:
         if cfg.get("needs_bootstrap"):
-            print("[*] Server has no users yet — this login will create the "
+            print("[*] Server has no users yet - this login will create the "
                   "initial admin account.")
         if not session.username:
             print("Error: server requires authentication. Pass --username "
@@ -650,8 +583,7 @@ def bulk_upload(
         admin = " (admin)" if (session.user or {}).get("is_admin") else ""
         print(f"[*] Authenticated as {who}{admin} (mode: {cfg.get('mode','?')}).")
     elif username:
-        # Credentials supplied but the server doesn't want them. Say so rather
-        # than silently ignoring the flag — it usually means --url is wrong.
+        # Credentials the server doesn't want usually mean a wrong --url.
         print("[*] Server has authentication disabled; ignoring --username.")
 
     classes_map = load_classes(source_dir)
@@ -698,13 +630,11 @@ def bulk_upload(
             r = future.result()
             results.append(r)
 
-            # Per-file status line
-            icon = {"success":"✓","queued":"⋯","duplicate":"=","skipped":"!","failed":"✗"}[r.outcome.value]
+            icon = {"success":"✓","queued":"...","duplicate":"=","skipped":"!","failed":"✗"}[r.outcome.value]
             fname = os.path.basename(r.filepath)
             atts  = f" (attempt {r.attempts})" if r.attempts > 1 else ""
             print(f"  [{completed:>{len(str(total))}}/{total}] {icon} {fname}{atts}  {r.message}")
 
-    # Release the server-side session instead of leaving it to expire.
     session.logout()
 
     print_summary(results, verbose_dupes)
@@ -750,7 +680,7 @@ def main() -> None:
         help="Username for servers with authentication enabled. "
              "Defaults to $CIM_USERNAME.")
     auth_group.add_argument("--password", default=None,
-        help="Password. Prefer $CIM_PASSWORD or the interactive prompt — a "
+        help="Password. Prefer $CIM_PASSWORD or the interactive prompt - a "
              "password passed here is visible in ps output and shell history.")
     auth_group.add_argument("--password-file", default=None,
         help="Read the password from this file (first line). Safer than "
@@ -759,10 +689,8 @@ def main() -> None:
         help="Skip TLS certificate verification (self-signed https servers).")
     args = parser.parse_args()
 
-    # Password resolution, most to least secure:
-    #   --password-file  ->  $CIM_PASSWORD  ->  --password  ->  interactive
-    # Only prompt when we have a username, a tty, and nothing else supplied;
-    # otherwise a cron job would hang forever waiting on stdin.
+    # Password: --password-file, then $CIM_PASSWORD, then --password, then a prompt
+    # (only with a tty, so cron never hangs).
     password = ""
     if args.password_file:
         try:
@@ -783,7 +711,7 @@ def main() -> None:
             sys.exit(2)
 
     if args.no_verify_tls:
-        # Silence the per-request InsecureRequestWarning spam; the user opted in.
+        # the user chose --insecure
         try:
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)

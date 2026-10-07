@@ -26,9 +26,9 @@ data class MediaItem(val id: Long, val uri: Uri, val name: String, val bucketId:
 
 data class Bucket(val id: String, val name: String, val count: Int, val uploaded: Int)
 
-/** Reads the phone's photo library through MediaStore (no raw file paths needed). */
+/** @brief Reads the phone's photo library through MediaStore (no raw file paths needed). */
 object Scanner {
-    /** The ORIGINAL bytes. Without ACCESS_MEDIA_LOCATION + setRequireOriginal,
+    /** @brief The ORIGINAL bytes. Without ACCESS_MEDIA_LOCATION + setRequireOriginal,
      *  Android serves a copy with location metadata zeroed in place, which
      *  strips GPS from backups and corrupts raw files (Samsung DNG). */
     fun hasOriginalAccess(ctx: Context): Boolean = Build.VERSION.SDK_INT < 29 ||
@@ -76,11 +76,11 @@ object Scanner {
 }
 
 /**
- * The auto-upload job. Runs on a content-change trigger (a new photo lands),
+ * @brief The auto-upload job. Runs on a content-change trigger (a new photo lands),
  * a 15-minute periodic fallback, and on demand from the UI. For every item in
  * a bucket whose policy is keep/purge: hash it, ask the server which hashes it
  * already holds (batched), push the rest sealed, record success. Purging is
- * NOT done here — Android requires the user to confirm deletion of media the
+ * NOT done here - Android requires the user to confirm deletion of media the
  * app didn't create, so the UI offers "Free up space" instead.
  */
 class UploadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
@@ -143,7 +143,7 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
         }
     }
 
-    /** Uploads made by earlier versions read Android's redacted copy. Hash the
+    /** @brief Uploads made by earlier versions read Android's redacted copy. Hash the
      *  original; if it differs, send it with replaces=[old sha] so the server
      *  swaps the damaged copy for it (keeping tags/albums set on the server). */
     private fun reverify(ctx: Context, db: Db, api: Api, prefs: Prefs) {
@@ -193,7 +193,7 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
                 OneTimeWorkRequestBuilder<UploadWorker>().build())
         }
 
-        /** Android 11+: the system asks the user once for the whole batch. Older: direct delete. */
+        /** @brief Android 11+: the system asks the user once for the whole batch. Older: direct delete. */
         fun purgeIntent(ctx: Context, ids: List<Long>): PendingIntent? {
             if (ids.isEmpty()) return null
             val uris = ids.map { ContentUris.withAppendedId(MediaStore.Files.getContentUri("external"), it) }

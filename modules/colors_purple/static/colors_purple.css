@@ -1,24 +1,6 @@
-/* colors_purple: the "purple" palette. Variables: modules/theming/static/theming.css. */
+/* colors_purple: the "purple" palette (violet, fuchsia, teal). Contract: modules/theming/gen_theming_css.py. */
 body[data-palette="purple"] {
-  --cim-accent-200: #ddd6fe;
-  --cim-accent-300: #c4b5fd;
-  --cim-accent-400: #a78bfa;
-  --cim-accent-500: #8b5cf6;
-  --cim-accent-600: #7c3aed;
-  --cim-accent-700: #6d28d9;
-  --cim-accent-800: #5b21b6;
-  --cim-accent-900: #4c1d95;
-  --cim-accent2-200: #f5d0fe;
-  --cim-accent2-300: #f0abfc;
-  --cim-accent2-400: #e879f9;
-  --cim-accent2-500: #d946ef;
-  --cim-accent2-600: #c026d3;
-  --cim-accent2-700: #a21caf;
-  --cim-accent2-800: #86198f;
-  --cim-accent3-300: #5eead4;
-  --cim-accent3-400: #2dd4bf;
-  --cim-accent3-500: #14b8a6;
-  --cim-accent3-600: #0d9488;
-  --cim-accent3-700: #0f766e;
-  --cim-accent3-800: #115e59;
+  --cim-accent-50: #f5f3ff; --cim-accent-100: #ede9fe; --cim-accent-200: #ddd6fe; --cim-accent-300: #c4b5fd; --cim-accent-400: #a78bfa; --cim-accent-500: #8b5cf6; --cim-accent-600: #7c3aed; --cim-accent-700: #6d28d9; --cim-accent-800: #5b21b6; --cim-accent-900: #4c1d95; --cim-accent-950: #2e1065;
+  --cim-accent2-50: #fdf4ff; --cim-accent2-100: #fae8ff; --cim-accent2-200: #f5d0fe; --cim-accent2-300: #f0abfc; --cim-accent2-400: #e879f9; --cim-accent2-500: #d946ef; --cim-accent2-600: #c026d3; --cim-accent2-700: #a21caf; --cim-accent2-800: #86198f; --cim-accent2-900: #701a75; --cim-accent2-950: #4a044e;
+  --cim-accent3-50: #f0fdfa; --cim-accent3-100: #ccfbf1; --cim-accent3-200: #99f6e4; --cim-accent3-300: #5eead4; --cim-accent3-400: #2dd4bf; --cim-accent3-500: #14b8a6; --cim-accent3-600: #0d9488; --cim-accent3-700: #0f766e; --cim-accent3-800: #115e59; --cim-accent3-900: #134e4a; --cim-accent3-950: #042f2e;
 }

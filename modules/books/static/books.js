@@ -1,4 +1,4 @@
-/* books.js — the Books tab and the book metadata editor.
+/* books.js - the Books tab and the book metadata editor.
  *
  *   1. The left-pane browser (shelf / authors / series / comics + search).
  *   2. The book metadata editor that lives in the controls pane.
@@ -36,8 +36,8 @@ function _fmtBytes(n) {
 
 // Centre-pane mode for books: the reader replaces the image viewer and the
 // "Book" controls tab appears (core registry in panes.js).
-// Controls tabs are the module's: Book (editable DB copy — all a plain-text
-// book has) and the format tab (EPUB/MOBI/PDF/…: what the file itself carries,
+// Controls tabs are the module's: Book (editable DB copy - all a plain-text
+// book has) and the format tab (EPUB/MOBI/PDF/...: what the file itself carries,
 // read-only), shown only when the open book has any.
 let _bookFmtAvailable = false;
 if (window.registerControlsTab) {
@@ -47,9 +47,9 @@ if (window.registerControlsTab) {
 registerMediaMode({ id: 'book', centreId: 'book_reader', controlsTab: 'book',
                     tabs: () => _bookFmtAvailable ? ['book_fmt'] : [] });
 
-/* ══════════════════════════════════════════════════════════════════════════
+/* ==========================================================================
  * STATUS + WORKERS
- * ══════════════════════════════════════════════════════════════════════════ */
+ * ========================================================================== */
 
 async function booksRefreshStatus() {
   try {
@@ -58,11 +58,11 @@ async function booksRefreshStatus() {
     if (!d.success) return;
 
     const s = d.state || {};
-    let txt = `${d.books} books · ${d.comics} comics · ${d.authors} authors`;
-    if (s.indexing) txt = `Scanning… ${s.indexed}/${s.total}`;
-    else if (s.extracting) txt = `Extracting text… ${s.ext_done}/${s.ext_total}`;
-    else if (s.embedding) txt = `Embedding passages… ${s.emb_done}/${s.emb_total}`;
-    else if (s.comic) txt = `Comic ${s.comic_stage}… ${s.comic_done}/${s.comic_total}`;
+    let txt = `${d.books} books | ${d.comics} comics | ${d.authors} authors`;
+    if (s.indexing) txt = `Scanning... ${s.indexed}/${s.total}`;
+    else if (s.extracting) txt = `Extracting text... ${s.ext_done}/${s.ext_total}`;
+    else if (s.embedding) txt = `Embedding passages... ${s.emb_done}/${s.emb_total}`;
+    else if (s.comic) txt = `Comic ${s.comic_stage}... ${s.comic_done}/${s.comic_total}`;
     const stat = _bq('books_stat');
     if (stat) stat.textContent = txt;
 
@@ -70,9 +70,9 @@ async function booksRefreshStatus() {
     const warns = [];
     if (d.blocked) warns.push(`${d.blocked} need a backend`);
     if (!d.calibre) warns.push('no Calibre (lit/chm/azw/kfx unreadable)');
-    if (!d.search_ready) warns.push('no embedding model — passage search off');
+    if (!d.search_ready) warns.push('no embedding model - passage search off');
     const w = _bq('books_warn');
-    if (w) w.textContent = warns.length ? '⚠ ' + warns.join(' · ') : '';
+    if (w) w.textContent = warns.length ? '⚠ ' + warns.join(' | ') : '';
 
     const tbtn = _bq('btn_book_triage');
     if (tbtn) {
@@ -114,9 +114,9 @@ async function booksEmbed() {
   booksRefreshStatus();
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
+/* ==========================================================================
  * BROWSING
- * ══════════════════════════════════════════════════════════════════════════ */
+ * ========================================================================== */
 
 function booksView(view) {
   booksCurrentView = view;
@@ -161,7 +161,7 @@ async function booksLoadShelf(q) {
   Object.entries(booksFilter).forEach(([k, v]) => p.set(k, v));
 
   const list = _bq('books_list');
-  list.innerHTML = '<div class="text-gray-500 text-sm p-4">Loading…</div>';
+  list.innerHTML = '<div class="text-gray-500 text-sm p-4">Loading...</div>';
   const r = await fetch('/api/books/list?' + p);
   const d = await r.json();
   if (!d.success) { list.innerHTML = '<div class="text-red-400 p-4">Failed.</div>'; return; }
@@ -187,7 +187,7 @@ async function booksLoadShelf(q) {
     const pages = Math.ceil(booksTotal / BOOKS_PER_PAGE);
     pager.classList.toggle('hidden', pages <= 1);
     const lbl = _bq('books_page_label');
-    if (lbl) lbl.textContent = `Page ${booksPageNum + 1} / ${pages} · ${booksTotal} books`;
+    if (lbl) lbl.textContent = `Page ${booksPageNum + 1} / ${pages} | ${booksTotal} books`;
   }
 }
 
@@ -200,14 +200,14 @@ function bookCard(b) {
              text-[9px] leading-tight text-gray-300"
            style="background:${_spineColor(b.title)}">${_esc(b.title.slice(0, 60))}</div>`;
   const badge = b.kind === 'comic'
-    ? '<span class="absolute top-1 right-1 text-[8px] bg-fuchsia-700 px-1 rounded">CBZ</span>'
+    ? '<span class="absolute top-1 right-1 text-[8px] bg-indigo-700 px-1 rounded">CBZ</span>'
     : `<span class="absolute top-1 right-1 text-[8px] bg-black/70 px-1 rounded uppercase">${_esc(b.fmt)}</span>`;
   const warn = b.text_status === 'needs_backend' || b.text_status === 'failed'
     ? '<span class="absolute bottom-1 left-1 text-[9px] bg-amber-700 px-1 rounded" title="Text unavailable">⚠</span>'
     : '';
   return `
     <div onclick="openBook('${_esc(b.rel_path).replace(/'/g, "\\'")}')"
-         class="cursor-pointer group" title="${_esc(b.title)}${authors ? ' — ' + _esc(authors) : ''}">
+         class="cursor-pointer group" title="${_esc(b.title)}${authors ? ' - ' + _esc(authors) : ''}">
       <div class="relative aspect-[2/3] bg-gray-800 rounded overflow-hidden
                   border border-gray-700 group-hover:border-blue-500 transition">
         ${cover}${badge}${warn}
@@ -217,7 +217,7 @@ function bookCard(b) {
     </div>`;
 }
 
-/* Deterministic colour from the title, so the same book always gets the same
+/** @brief Deterministic colour from the title, so the same book always gets the same
  * spine and the shelf is visually stable across reloads. */
 function _spineColor(title) {
   let h = 0;
@@ -269,11 +269,11 @@ function booksFilterBy(key, value) {
   booksLoadShelf('');
 }
 
-/* Passage search: results are PASSAGES, so show the matched text and jump
+/** @brief Passage search: results are PASSAGES, so show the matched text and jump
  * straight to that section rather than dumping the reader at page 1. */
 async function booksSemanticSearch(q) {
   const list = _bq('books_list');
-  list.innerHTML = '<div class="text-gray-500 text-sm p-4">Searching passages…</div>';
+  list.innerHTML = '<div class="text-gray-500 text-sm p-4">Searching passages...</div>';
   const r = await fetch('/api/books/search', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ q, limit: 40 })
@@ -292,25 +292,26 @@ async function booksSemanticSearch(q) {
       <div onclick="openBook('${_esc(b.rel_path).replace(/'/g, "\\'")}')"
            class="px-3 py-2 bg-gray-800 hover:bg-gray-750 cursor-pointer flex items-center gap-2">
         <span class="text-sm font-bold truncate flex-1">${_esc(b.title)}</span>
-        <span class="text-[10px] text-purple-300">${(b.score * 100).toFixed(0)}%</span>
+        <span class="text-[10px] text-indigo-300">${(b.score * 100).toFixed(0)}%</span>
       </div>
       ${(b.passages || []).map(p => `
         <div onclick="openBook('${_esc(b.rel_path).replace(/'/g, "\\'")}', ${p.section})"
              class="px-3 py-2 text-[11px] text-gray-400 leading-relaxed border-t border-gray-800
                     hover:bg-gray-850 cursor-pointer">
-          …${_esc(p.text)}…
+          ...${_esc(p.text)}...
         </div>`).join('')}
     </div>`).join('');
   _bq('books_pager')?.classList.add('hidden');
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
+/* ==========================================================================
  * OPENING A BOOK
- * ══════════════════════════════════════════════════════════════════════════ */
+ * ========================================================================== */
 
-// Fill the Book tab (and, in book mode, the format tab) for a book. Shared
-// with the comics module, which calls booksShowFor(archive) so a cbz opened in
-// its reader gets the same Book tab. Returns false when relPath isn't a book.
+/** @brief Fill the Book tab (and, in book mode, the format tab) for a book. Shared
+ *  with the comics module, which calls booksShowFor(archive) so a cbz opened in
+ *  its reader gets the same Book tab. Returns false when relPath isn't a book.
+ */
 async function booksShowFor(relPath, withFormat) {
   const r = await fetch('/api/books/detail?rel_path=' + encodeURIComponent(relPath));
   const d = await r.json();
@@ -379,12 +380,12 @@ function closeBook() {
   else { window.currentFile = null; if (typeof refreshSelectionUI === 'function') refreshSelectionUI(); }
 }
 
-/* Delete the open book (the Delete key in book mode routes here). Removes the
- * file by default — same as deleting an image — so confirm first, then close
+/** @brief Delete the open book (the Delete key in book mode routes here). Removes the
+ * file by default - same as deleting an image - so confirm first, then close
  * the reader and refresh the shelf so the gone book drops out of the list. */
 async function deleteCurrentBook() {
   if (!currentBook) return;
-  // UX guard only — the server enforces tab.books.delete regardless. This just
+  // UX guard only - the server enforces tab.books.delete regardless. This just
   // avoids firing a request that would 403 and gives a clear reason instead.
   if (window.CIMFeatures && !window.CIMFeatures.allowed('tab.books.delete')) {
     if (typeof showToast === 'function') showToast("You don't have permission to delete books.");
@@ -403,9 +404,9 @@ async function deleteCurrentBook() {
   if (typeof booksReload === 'function') booksReload();
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
+/* ==========================================================================
  * METADATA EDITOR (controls pane, book mode)
- * ══════════════════════════════════════════════════════════════════════════ */
+ * ========================================================================== */
 
 function fillBookControls(b) {
   _bq('book_title').value = b.title || '';
@@ -418,17 +419,17 @@ function fillBookControls(b) {
   _bq('book_isbn').value = b.isbn || '';
   _bq('book_description').value = b.description || '';
 
-  _bq('book_fmt_badge').textContent = b.fmt || '—';
-  _bq('book_kind_badge').textContent = b.kind || '—';
+  _bq('book_fmt_badge').textContent = b.fmt || '-';
+  _bq('book_kind_badge').textContent = b.kind || '-';
   _bq('book_size_badge').textContent =
     [_fmtBytes(b.size), b.page_count ? `${b.page_count} pp` : '',
      b.word_count ? `${(b.word_count / 1000).toFixed(0)}k words` : '']
-      .filter(Boolean).join(' · ');
+      .filter(Boolean).join(' | ');
 
   const dl = _bq('book_download');
   if (dl) dl.href = '/api/books/download/' + encodeURI(b.rel_path);
 
-  // Text status — the one thing worth shouting about, because a book you can't
+  // Text status - the one thing worth shouting about, because a book you can't
   // read is the failure mode that matters.
   const badge = _bq('book_text_badge');
   const warn = _bq('book_text_warn');
@@ -440,7 +441,7 @@ function fillBookControls(b) {
     b.text_error || 'Text has not been extracted yet.';
 
   // Panel/OCR tools apply to anything with page images, which is `reader ===
-  // 'paged'` — a scanned PDF qualifies even when it wasn't classified as a
+  // 'paged'` - a scanned PDF qualifies even when it wasn't classified as a
   // comic, and gating on kind alone would hide the tools on exactly those.
   const paged = b.reader === 'paged';
   _bq('book_comic_tools').classList.toggle('hidden', !paged);
@@ -517,7 +518,7 @@ function booksRemoveTag(i) {
   booksAutosave();
 }
 
-/* Publisher-supplied subjects are shown separately and read-only — they're
+/** @brief Publisher-supplied subjects are shown separately and read-only - they're
  * useful signal but they aren't the user's taxonomy, and merging the two makes
  * both useless. Clicking one promotes it into your own tags. */
 function renderSubjects(subjects) {
@@ -568,7 +569,7 @@ async function booksSave() {
     tags: booksCurrentTags(),
   };
   const st = _bq('book_status_text');
-  if (st) st.textContent = 'Saving…';
+  if (st) st.textContent = 'Saving...';
   try {
     const r = await fetch('/api/books/meta', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -585,7 +586,7 @@ async function booksSave() {
 async function booksExtractCurrent() {
   if (!currentBook) return;
   const st = _bq('book_status_text');
-  if (st) st.textContent = 'Extracting…';
+  if (st) st.textContent = 'Extracting...';
   const r = await fetch('/api/books/extract', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ rel_path: currentBook.rel_path })
@@ -619,8 +620,8 @@ async function booksFindSimilar() {
 async function booksSummarize() {
   if (!currentBook) return;
   const st = _bq('book_status_text');
-  if (st) st.textContent = 'Asking the LLM…';
-  // NOT /api/run_llm — that one decodes the file as an image first, which is
+  if (st) st.textContent = 'Asking the LLM...';
+  // NOT /api/run_llm - that one decodes the file as an image first, which is
   // exactly wrong for an epub. /api/books/summarize sends sampled TEXT instead.
   try {
     const r = await fetch('/api/books/summarize', {
@@ -640,14 +641,14 @@ async function booksSummarize() {
   }
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
- * COMIC TOOLS — panel detection & OCR over a paged book
+/* ==========================================================================
+ * COMIC TOOLS - panel detection & OCR over a paged book
  *
  * The work happens server-side, one page at a time, and results are stored per
  * page. Everything here is either "start a job", "poll it", or "show what came
  * back". The reader draws the overlay itself (reader.js) from the same stored
  * data, so a page analysed once needs no further round-trip to display.
- * ══════════════════════════════════════════════════════════════════════════ */
+ * ========================================================================== */
 
 let comicPollTimer = null;
 
@@ -689,14 +690,14 @@ async function _comicRun(mode) {
     body: JSON.stringify(body)
   }).then(r => r.json()).catch(() => ({ success: false, error: 'request failed' }));
   if (!d.success) { _comicStatus(d.error || 'Could not start.'); return; }
-  _comicStatus('Started…');
+  _comicStatus('Started...');
   booksRefreshStatus();
   _comicPoll();
 }
 
 async function booksComicCancel() {
   await fetch('/api/books/comic/cancel', { method: 'POST' });
-  _comicStatus('Cancelling…');
+  _comicStatus('Cancelling...');
 }
 
 function _comicStatus(msg) {
@@ -725,7 +726,7 @@ function _comicPoll() {
     ]);
     const s = st?.state || {};
     if (s.comic) {
-      _comicStatus(`${s.comic_stage}… page ${s.comic_done} / ${s.comic_total}`);
+      _comicStatus(`${s.comic_stage}... page ${s.comic_done} / ${s.comic_total}`);
       _comicPoll();
     } else {
       renderComicSummary(sum);
@@ -756,13 +757,13 @@ function renderComicSummary(s) {
   if (rtlBox && s.with_panels) rtlBox.checked = !!s.rtl;
   const pct = n => Math.round((n / s.page_count) * 100);
   el.innerHTML =
-    `<span class="${s.with_panels ? 'text-teal-400' : 'text-gray-600'}">`
-    + `▦ panels ${s.with_panels}/${s.page_count} (${pct(s.with_panels)}%)</span> · `
+    `<span class="${s.with_panels ? 'text-sky-400' : 'text-gray-600'}">`
+    + `▦ panels ${s.with_panels}/${s.page_count} (${pct(s.with_panels)}%)</span> | `
     + `<span class="${s.with_ocr ? 'text-sky-400' : 'text-gray-600'}">`
-    + `🔤 ocr ${s.with_ocr}/${s.page_count} (${pct(s.with_ocr)}%)</span>`;
+    + `ocr ${s.with_ocr}/${s.page_count} (${pct(s.with_ocr)}%)</span>`;
   if (!s.ocr_available) {
     el.innerHTML += '<div class="text-amber-400 mt-0.5">No OCR engine on the '
-                  + 'server — install rapidocr or easyocr.</div>';
+                  + 'server - install rapidocr or easyocr.</div>';
   }
   const tbtn = _bq('comic_transcript_btn');
   if (tbtn) tbtn.classList.toggle('hidden', !s.with_text);
@@ -776,7 +777,7 @@ async function booksComicTranscript() {
   if (!txt.trim()) { _comicStatus('No text stored yet.'); return; }
   const w = window.open('', '_blank');
   if (w) {
-    w.document.title = (currentBook.title || 'transcript') + ' — transcript';
+    w.document.title = (currentBook.title || 'transcript') + ' - transcript';
     const pre = w.document.createElement('pre');
     pre.style.cssText = 'white-space:pre-wrap;font:13px/1.5 ui-monospace,monospace;'
                       + 'padding:24px;background:#111;color:#ddd;margin:0;min-height:100vh';
@@ -785,13 +786,13 @@ async function booksComicTranscript() {
     w.document.body.appendChild(pre);
   } else {
     navigator.clipboard?.writeText(txt);
-    _comicStatus('Popup blocked — transcript copied to clipboard.');
+    _comicStatus('Popup blocked - transcript copied to clipboard.');
   }
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
+/* ==========================================================================
  * BOOKMARKS
- * ══════════════════════════════════════════════════════════════════════════ */
+ * ========================================================================== */
 
 async function loadBookmarks() {
   if (!currentBook) return;
@@ -817,9 +818,9 @@ async function deleteBookmark(id) {
   loadBookmarks();
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
+/* ==========================================================================
  * TRIAGE
- * ══════════════════════════════════════════════════════════════════════════ */
+ * ========================================================================== */
 
 async function openTriageModal() {
   _bq('book_triage_modal').classList.remove('hidden');
@@ -829,7 +830,7 @@ async function openTriageModal() {
   if (!d.success) { list.innerHTML = '<div class="text-red-400">Failed.</div>'; return; }
   _bq('triage_count').textContent = `${d.items.length} pending`;
   if (!d.items.length) {
-    list.innerHTML = '<div class="text-gray-500 p-4 text-sm">Nothing to triage. 🎉</div>';
+    list.innerHTML = '<div class="text-gray-500 p-4 text-sm">Nothing to triage. </div>';
     return;
   }
   list.innerHTML = d.items.map(it => `
@@ -844,13 +845,13 @@ async function openTriageModal() {
                   max-h-16 overflow-hidden">${_esc(it.preview || '(no text preview)')}</div>
       <div class="flex gap-1 flex-wrap">
         <button onclick="triageDecide('${_esc(it.rel_path).replace(/'/g, "\\'")}','book')"
-          class="text-[10px] bg-emerald-700 hover:bg-emerald-600 px-2 py-1 rounded font-bold">
+          class="text-[10px] bg-green-700 hover:bg-green-600 px-2 py-1 rounded font-bold">
           It's a book</button>
         <button onclick="triageDecide('${_esc(it.rel_path).replace(/'/g, "\\'")}','not_book')"
           class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Not a book</button>
         <span class="flex-1"></span>
         <button onclick="triageDecideAll('${_esc(it.ext)}','${_esc(it.reason).replace(/'/g, "\\'")}','book')"
-          class="text-[10px] bg-emerald-900 hover:bg-emerald-800 px-2 py-1 rounded"
+          class="text-[10px] bg-green-900 hover:bg-green-800 px-2 py-1 rounded"
           title="Apply 'book' to every pending file with this extension and reason">
           All like this → book</button>
         <button onclick="triageDecideAll('${_esc(it.ext)}','${_esc(it.reason).replace(/'/g, "\\'")}','not_book')"

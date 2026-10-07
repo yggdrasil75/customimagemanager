@@ -1,4 +1,5 @@
-"""Faces module: its model listing route and the identity embedder on the
+"""! @file
+@brief Faces module: its model listing route and the identity embedder on the
 fixtures. (Per-provider contracts run in tests/test_providers.py.)"""
 import numpy as np
 import pytest
@@ -17,7 +18,7 @@ def _faces(app, img):
 
 
 def test_picked_models_separate_people(app):
-    """Picked detect.faces + embed.faces: same person closer than another person."""
+    """! @brief Picked detect.faces + embed.faces: same person closer than another person."""
     from cimtest import picked_model
     emb = picked_model(app, "embed.faces")
     vecs = []
@@ -34,6 +35,6 @@ def test_picked_models_separate_people(app):
 
 
 def test_no_face_on_no_person(app):
-    """The picked face detector (with the faces module's filters) finds nothing
+    """! @brief The picked face detector (with the faces module's filters) finds nothing
     on a photo with no people."""
     assert _faces(app, load_image("no_person.jpg")) == []

@@ -1,9 +1,9 @@
-"""
-OCR module — read text in images and land it as regions + description.
+"""! @file
+@brief OCR module - read text in images and land it as regions + description.
 ======================================================================
 Engine-agnostic: the `ocr` capability is served by whichever provider is
 picked in the Models tab (RapidOCR, EasyOCR, or the vision LLM). This
-module owns the feature around it: the 🔤 OCR button, /api/ocr, the
+module owns the feature around it: the OCR button, /api/ocr, the
 pipeline's `ocr` node, the "ocr" AI-action target, and the line helper
 engines use to normalise their boxes.
 """
@@ -28,7 +28,7 @@ MANIFEST = {
 
 
 def line(text, score, x1, y1, x2, y2, W, H):
-    """One detection: pixel box -> clamped, normalised center-form line dict."""
+    """! @brief One detection: pixel box -> clamped, normalised center-form line dict."""
     x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
     x1, x2 = max(0.0, min(W, x1)), max(0.0, min(W, x2))
     y1, y2 = max(0.0, min(H, y1)), max(0.0, min(H, y2))
@@ -46,7 +46,7 @@ def register(host):
     host.provide_service("ocr", {"line": line})
 
     def run(img_bgr):
-        """{engine, text, lines} via the picked provider; a 'note' when none."""
+        """! @brief {engine, text, lines} via the picked provider; a 'note' when none."""
         try:
             fn = host.request_model("ocr")
         except NoProviderError as e:
@@ -69,11 +69,10 @@ def register(host):
         new = [{"class_name": ("text: " + l["text"])[:48], "cx": l["cx"], "cy": l["cy"],
                 "w": l["w"], "h": l["h"], "confirmed": False, "region_tags": [],
                 "region_description": ""} for l in res.get("lines", []) if l.get("w")]
-        desc = meta["description"]
-        if res.get("text"):
-            desc = (desc + "\n\nDetected text: " + res["text"]).strip()
         if new or res.get("text"):
-            core.write_metadata(fp, meta["tags"], desc, core.merge_regions(meta["regions"], new))
+            core.update_file(fp, set={"regions": core.merge_regions(meta["regions"], new)},
+                             add={"description": "Detected text: " + res["text"]} if res.get("text") else None,
+                             meta=meta)
         return new
     host.register_action_target("ocr", _action)
 
@@ -100,9 +99,9 @@ def register(host):
         img = core.read_image(fp)
         if img is None:
             return jsonify({"success": False, "error": "Decode failed."})
-        host.config["status_text"] = "Reading text…"
+        host.set_status("Reading text...")
         res = run(core.to_bgr(img))
-        host.config["status_text"] = "Ready."
+        host.set_status("Ready.")
         return jsonify({"success": True, **res})
     host.add_route("/api/ocr", api_ocr, methods=["POST"], feature="ai.ocr", level="write")
     host.logger.info("ocr module: registered /api/ocr, pipeline stage, action target")

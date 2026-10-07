@@ -1,4 +1,5 @@
-"""Google Takeout import through the fetch module: sidecars across split zips,
+"""! @file
+@brief Google Takeout import through the fetch module: sidecars across split zips,
 truncated/renamed sidecars, album copies imported once, edited copies, live
 photos, trash, dates/GPS where the file has none; a watched folder imports a
 new Takeout by itself and re-runs import nothing twice."""
@@ -19,7 +20,7 @@ def _side(title, ts, **kw):
 
 
 def write_takeout(root, stamp="20260101T000000Z", seed0=500):
-    """Two zips; photos and their sidecars deliberately split across them."""
+    """! @brief Two zips; photos and their sidecars deliberately split across them."""
     b = lambda i: png_bytes(seed=seed0 + i)
     y = G + "Photos from 2019/"
     z1 = {y + "beach.png": b(1), y + "family.png": b(2), y + "cake.png": b(4), y + "cake-edited.png": b(3),
@@ -129,7 +130,7 @@ def test_edited_mode_original_then_both(client, app, imports):
 
 
 def test_later_edits_keep_imported_date_and_gps(client, app, imports):
-    """Regression: editing tags or albums rewrote the sidecar from scratch and
+    """! @brief Regression: editing tags or albums rewrote the sidecar from scratch and
     erased the imported capture date and GPS."""
     from cimtest import write_meta
     write_takeout(str(imports))

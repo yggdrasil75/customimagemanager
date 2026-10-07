@@ -1,7 +1,7 @@
-"""
-family_share: rule evaluation and outbox planning.
+"""! @file
+@brief family_share: rule evaluation and outbox planning.
 ======================================================================
-Pure logic over a sqlite connection — no Flask, no HTTP, no host — so it is
+Pure logic over a sqlite connection - no Flask, no HTTP, no host - so it is
 testable on its own and the module.py stays thin.
 
 The question this file answers, for every (file, peer) pair:
@@ -120,7 +120,7 @@ def norm_folder(v):
 
 
 def norm_rule(r):
-    """Validate/normalise a rule dict from the UI. Raises ValueError."""
+    """! @brief Validate/normalise a rule dict from the UI. Raises ValueError."""
     mode = str(r.get("mode") or "share").strip().lower()
     kind = str(r.get("kind") or "").strip().lower()
     if mode not in RULE_MODES:
@@ -164,10 +164,10 @@ def load_peers(db, enabled_only=True):
     return [dict(r) for r in db.execute(q).fetchall()]
 
 
-# ── matching ────────────────────────────────────────────────────────────────
+# -- matching ----------------------------------------------------------------
 
 class FileFacts:
-    """What the rules look at for one file."""
+    """! @brief What the rules look at for one file."""
     __slots__ = ("rel_path", "folder", "tags", "albums", "sha", "description", "received")
 
     def __init__(self, rel_path, tags, albums, sha="", description="", received=False):
@@ -207,9 +207,9 @@ def rule_matches(rule, facts, match_unconfirmed=False):
 
 
 def peers_for_file(facts, rules, *, reshare_received=False, match_unconfirmed=False):
-    """-> {peer_id: [reason strings]} for the peers that should get this file.
+    """! @brief -> {peer_id: [reason strings]} for the peers that should get this file.
 
-    Also returns the reasons a peer was vetoed under negative ids? No — vetoes
+    Also returns the reasons a peer was vetoed under negative ids? No - vetoes
     are reported through explain(); this returns only the positive answer."""
     if facts.received and not reshare_received:
         return {}
@@ -232,7 +232,7 @@ def peers_for_file(facts, rules, *, reshare_received=False, match_unconfirmed=Fa
 
 
 def explain(facts, rules, peers, *, reshare_received=False, match_unconfirmed=False):
-    """Per-peer verdict with reasons, for the UI's "who sees this?"."""
+    """! @brief Per-peer verdict with reasons, for the UI's "who sees this?"."""
     out = []
     matched = [r for r in rules if r.get("enabled", 1) and rule_matches(r, facts, match_unconfirmed)]
     positive = peers_for_file(facts, rules, reshare_received=reshare_received,
@@ -252,7 +252,7 @@ def explain(facts, rules, peers, *, reshare_received=False, match_unconfirmed=Fa
 
 
 def signature(facts, albums_sent):
-    """What the peer currently holds for this file. Any change re-sends."""
+    """! @brief What the peer currently holds for this file. Any change re-sends."""
     h = hashlib.sha1()
     h.update(facts.sha.encode()); h.update(b"\0")
     h.update(json.dumps(sorted(facts.tags)).encode()); h.update(b"\0")
@@ -263,8 +263,8 @@ def signature(facts, albums_sent):
 
 
 def albums_to_send(facts, rules, peer_id, share_all_albums=False):
-    """Album names the peer is told about. By default only albums that a
-    share rule for that peer names — an album's name is metadata too."""
+    """! @brief Album names the peer is told about. By default only albums that a
+    share rule for that peer names - an album's name is metadata too."""
     if share_all_albums:
         return sorted(facts.albums)
     named = {r["value"] for r in rules
@@ -273,10 +273,10 @@ def albums_to_send(facts, rules, peer_id, share_all_albums=False):
     return sorted(a for a in facts.albums if a in named)
 
 
-# ── candidate scan ──────────────────────────────────────────────────────────
+# -- candidate scan ----------------------------------------------------------
 
 def _coarse_sql(rules):
-    """A cheap WHERE that over-approximates every enabled share rule, so the
+    """! @brief A cheap WHERE that over-approximates every enabled share rule, so the
     planner doesn't walk a 200k-file library in Python on every pass. Block
     rules never widen the scan (they only remove). Returns (clause, params)
     or ("0", []) when no share rule is enabled."""
@@ -309,7 +309,7 @@ def _like(s):
 
 
 def received_paths(db):
-    """Files that came from another FAMILY instance (kind='peer'). Uploads from
+    """! @brief Files that came from another FAMILY instance (kind='peer'). Uploads from
     the user's own devices (kind='device') are the user's own photos and are
     governed by the rules like anything else."""
     return {r["rel_path"] for r in db.execute(
@@ -318,7 +318,7 @@ def received_paths(db):
 
 
 def iter_candidates(db, rules):
-    """Yield FileFacts for every file some share rule might apply to."""
+    """! @brief Yield FileFacts for every file some share rule might apply to."""
     clause, params = _coarse_sql(rules)
     if clause == "0":
         return
@@ -339,10 +339,10 @@ def facts_for(db, rel_path):
     return FileFacts.from_row(row, received=got is not None)
 
 
-# ── planning ────────────────────────────────────────────────────────────────
+# -- planning ----------------------------------------------------------------
 
 def desired(db, cfg, rel_paths=None):
-    """-> {(rel_path, peer_id): (sig, sha, albums, reasons)} — the complete
+    """! @brief -> {(rel_path, peer_id): (sig, sha, albums, reasons)} - the complete
     current answer for either the whole library or a few paths."""
     rules = load_rules(db)
     peers = {p["id"] for p in load_peers(db)}
@@ -365,7 +365,7 @@ def desired(db, cfg, rel_paths=None):
 
 
 def plan(db, cfg, rel_paths=None):
-    """Reconcile fs_outbox with desired(). Returns counts.
+    """! @brief Reconcile fs_outbox with desired(). Returns counts.
 
     rel_paths=None does the whole library; a list limits the pass to those
     files (what upload/index events do). A pair that stops being desired
@@ -417,8 +417,8 @@ def plan(db, cfg, rel_paths=None):
 
 
 def preview(db, cfg, peer_id, limit=500):
-    """What a peer would see right now, with the rule that lets each file
-    through — the check the user runs before trusting a rule set."""
+    """! @brief What a peer would see right now, with the rule that lets each file
+    through - the check the user runs before trusting a rule set."""
     out = []
     for (rp, pid), (_sig, _sha, albums, why) in sorted(desired(db, cfg).items()):
         if pid != peer_id:

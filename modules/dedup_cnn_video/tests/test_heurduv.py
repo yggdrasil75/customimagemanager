@@ -1,4 +1,5 @@
-"""HEURDUV: model builds per size, learns a toy video dup task, saves / loads,
+"""! @file
+@brief HEURDUV: model builds per size, learns a toy video dup task, saves / loads,
 and the dedup registry routes 'video' pairs to it when a checkpoint exists."""
 import numpy as np
 import pytest

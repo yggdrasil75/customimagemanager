@@ -2,8 +2,8 @@
 
          Both the Gallery tab and the Albums tab drive this same modal, so there
          is exactly ONE gallery grid in the DOM (#gallery_grid). That matters:
-         every existing feature — tile rendering, lazy-load IntersectionObserver,
-         multi-select, bulk actions, pagination, comics — keeps addressing the
+         every existing feature - tile rendering, lazy-load IntersectionObserver,
+         multi-select, bulk actions, pagination, comics - keeps addressing the
          same element it always did, so none of it needed rewriting.
 
          In "gallery" mode the folder picker and upload dropzone are shown, as
@@ -25,11 +25,11 @@
 
         <!-- album-mode header: only shown when the modal was opened from an album -->
         <div id="gallery_album_bar"
-          class="hidden items-center gap-2 px-4 py-2 bg-purple-900/40 border-b border-purple-800 flex-shrink-0 text-xs">
-          <span class="text-purple-200">Viewing album</span>
+          class="hidden items-center gap-2 px-4 py-2 bg-indigo-900/40 border-b border-indigo-800 flex-shrink-0 text-xs">
+          <span class="text-indigo-200">Viewing album</span>
           <span id="gallery_album_name" class="font-bold text-white"></span>
           <button onclick="albumRemoveSelected()" title="Remove the selected images from this album"
-            class="ml-auto bg-rose-700 hover:bg-rose-600 px-2 py-1 rounded font-bold text-white">Remove selected from
+            class="ml-auto bg-red-700 hover:bg-red-600 px-2 py-1 rounded font-bold text-white">Remove selected from
             album</button>
           <button onclick="albumSetCoverSelected()" title="Use the selected image as this album's cover"
             class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded font-bold text-white">Set as cover</button>
@@ -42,12 +42,12 @@
             <option value="">All folders</option>
           </select>
           <input id="search_input" type="text"
-            placeholder="Search…  try: height:<512  is:untagged  ·  sem:red car at night (semantic)"
+            placeholder="Search...  try: height:<512  is:untagged  |  sem:red car at night (semantic)"
             class="flex-1 p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
           <span data-ext-area="gallery_tools" class="contents"></span>
         </div>
 
-        <!-- Bulk action bar — shown only when items are selected -->
+        <!-- Bulk action bar - shown only when items are selected -->
         <div id="bulk_bar"
           class="hidden px-4 py-2 bg-gray-750 border-b border-gray-600 flex items-center gap-2 flex-shrink-0 flex-wrap">
           <span id="bulk_count" class="text-xs font-bold text-blue-300 mr-1"></span>
@@ -58,16 +58,16 @@
             class="text-xs bg-blue-600 hover:bg-blue-500 px-3 py-1.5 rounded font-bold">Tag</button>
           <!-- Album membership for the current selection -->
           <button onclick="addSelectedToAlbum()" title="Add every selected image to an album" data-feature="tab.albums.edit"
-            class="text-xs bg-fuchsia-700 hover:bg-fuchsia-600 px-3 py-1.5 rounded font-bold">📁 Add to album</button>
+            class="text-xs bg-indigo-700 hover:bg-indigo-600 px-3 py-1.5 rounded font-bold">📁 Add to album</button>
           <button onclick="bulkDelete()" data-feature="data.delete" class="text-xs bg-red-700 hover:bg-red-600 px-3 py-1.5 rounded font-bold">🗑
             Delete</button>
           <button onclick="bulkBox()" data-feature="ai.autotag" title="Run AI box detection on every selected image"
-            class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1.5 rounded font-bold">🤖 AI Box</button>
+            class="text-xs bg-sky-700 hover:bg-sky-600 px-3 py-1.5 rounded font-bold">AI Box</button>
           <!-- Extension region: modules append bulk buttons here via
                registerControlButton('gallery_bulk', html). -->
           <span data-ext-area="gallery_bulk" class="contents"></span>
           <button onclick="bulkEmbed()" title="Generate/regenerate embeddings for every selected image (OAI endpoint if configured, else local)"
-            class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">🧬 Embed selected</button>
+            class="text-xs bg-indigo-700 hover:bg-indigo-600 px-3 py-1.5 rounded font-bold">Embed selected</button>
           <button onclick="clearSelection()"
             class="text-xs bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded ml-auto">✕
             Deselect</button>

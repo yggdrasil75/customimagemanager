@@ -1,4 +1,4 @@
-<!-- Tab 1: the gallery. The image list IS the left pane — folder dropdown,
+<!-- Tab 1: the gallery. The image list IS the left pane - folder dropdown,
      search, upload, bulk bar, pager and grid all inline. Picking a folder
      filters the grid in place; clicking a tile loads it into the right-hand
      editor. No modal: you browse and mark up side by side. -->
@@ -11,19 +11,19 @@
         </select>
         <div class="relative flex-1">
           <input id="search_input" type="text" autocomplete="off"
-            placeholder="Search or pick a filter…"
+            placeholder="Search or pick a filter..."
             onfocus="showQuickFilters()"
             class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
           <!-- Quick-filter dropdown: appears on focus, lists the configurable
-               chips plus a Date… entry. Clicking a chip drops its query into the
+               chips plus a Date... entry. Clicking a chip drops its query into the
                box; the user can also just keep typing a raw query. -->
           <div id="quick_filters_pop"
             class="hidden absolute left-0 right-0 top-full mt-1 z-20 bg-gray-800 border border-gray-600 rounded p-2 shadow-lg">
             <div class="flex flex-wrap gap-1.5" id="quick_filters_list"></div>
             <div class="mt-2 pt-2 border-t border-gray-700 flex items-center justify-between">
               <button type="button" onclick="toggleDatePicker()"
-                class="text-xs bg-gray-700 hover:bg-gray-600 rounded px-2 py-1">📅 Date…</button>
-              <span class="text-[11px] text-gray-500">or type: min:&lt;512 · tag:cat · person:3 · is:untagged · sem:…</span>
+                class="text-xs bg-gray-700 hover:bg-gray-600 rounded px-2 py-1">📅 Date...</button>
+              <span class="text-[11px] text-gray-500">or type: min:&lt;512 | tag:cat | person:3 | is:untagged | sem:...</span>
             </div>
             <!-- Date range popover, nested inside the quick-filter dropdown. -->
             <div id="date_picker_pop"
@@ -61,7 +61,7 @@
         </div>
         <span data-ext-area="gallery_tools" class="contents"></span>
         <!-- View switcher: Grid is built in; modules add views with
-             registerGalleryView (timeline, …). Hidden while only Grid exists. -->
+             registerGalleryView (timeline, ...). Hidden while only Grid exists. -->
         <div id="gallery_view_switch"
           class="hidden flex rounded border border-gray-600 overflow-hidden flex-shrink-0 text-sm">
           <button type="button" data-gview="grid" onclick="setGalleryView('grid')" title="Grid"
@@ -71,11 +71,11 @@
 
       <!-- album-mode banner: shown when the Albums tab scoped the grid to one album -->
       <div id="gallery_album_bar"
-        class="hidden items-center gap-2 px-4 py-2 bg-purple-900/40 border-b border-purple-800 flex-shrink-0 text-xs">
-        <span class="text-purple-200">Album</span>
+        class="hidden items-center gap-2 px-4 py-2 bg-indigo-900/40 border-b border-indigo-800 flex-shrink-0 text-xs">
+        <span class="text-indigo-200">Album</span>
         <span id="gallery_album_name" class="font-bold text-white truncate"></span>
         <button onclick="albumRemoveSelected()" title="Remove the selected images from this album"
-          class="ml-auto bg-rose-700 hover:bg-rose-600 px-2 py-1 rounded font-bold text-white whitespace-nowrap">Remove
+          class="ml-auto bg-red-700 hover:bg-red-600 px-2 py-1 rounded font-bold text-white whitespace-nowrap">Remove
           selected</button>
         <button onclick="albumSetCoverSelected()" title="Use the selected image as this album's cover"
           class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded font-bold text-white whitespace-nowrap">Set
@@ -84,7 +84,7 @@
           class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded font-bold text-white">✕</button>
       </div>
 
-      <!-- Bulk action bar — shown only when items are selected -->
+      <!-- Bulk action bar - shown only when items are selected -->
       <div id="bulk_bar"
         class="hidden px-4 py-2 bg-gray-750 border-b border-gray-600 flex items-center gap-2 flex-shrink-0 flex-wrap">
         <span id="bulk_count" class="text-xs font-bold text-blue-300 mr-1"></span>
@@ -94,21 +94,21 @@
         <button onclick="applyBulkTag()" data-feature="annot.tags"
           class="text-xs bg-blue-600 hover:bg-blue-500 px-3 py-1.5 rounded font-bold">Tag</button>
         <input id="bulk_untag_input" type="text" placeholder="Remove tag(s), comma-separated"
-          class="flex-1 min-w-[140px] bg-gray-700 text-xs px-2 py-1.5 rounded border border-gray-600 text-white focus:border-orange-400"
+          class="flex-1 min-w-[140px] bg-gray-700 text-xs px-2 py-1.5 rounded border border-gray-600 text-white focus:border-amber-400"
           onkeydown="if(event.key==='Enter') applyBulkUntag()">
         <button onclick="applyBulkUntag()" data-feature="annot.tags"
-          class="text-xs bg-orange-700 hover:bg-orange-600 px-3 py-1.5 rounded font-bold">Untag</button>
+          class="text-xs bg-amber-700 hover:bg-amber-600 px-3 py-1.5 rounded font-bold">Untag</button>
         <button onclick="addSelectedToAlbum()" title="Add every selected image to an album" data-feature="tab.albums.edit"
-          class="text-xs bg-fuchsia-700 hover:bg-fuchsia-600 px-3 py-1.5 rounded font-bold">📁 Add to album</button>
+          class="text-xs bg-indigo-700 hover:bg-indigo-600 px-3 py-1.5 rounded font-bold">📁 Add to album</button>
         <button onclick="bulkDelete()" data-feature="data.delete" class="text-xs bg-red-700 hover:bg-red-600 px-3 py-1.5 rounded font-bold">🗑
           Delete</button>
         <button onclick="bulkBox()" data-feature="ai.autotag" title="Run AI box detection on every selected image"
-          class="text-xs bg-teal-700 hover:bg-teal-600 px-3 py-1.5 rounded font-bold">🤖 AI Box</button>
+          class="text-xs bg-sky-700 hover:bg-sky-600 px-3 py-1.5 rounded font-bold">AI Box</button>
         <!-- Extension region: modules append bulk buttons here via
              registerControlButton('gallery_bulk', html). -->
         <span data-ext-area="gallery_bulk" class="contents"></span>
         <button onclick="bulkEmbed()" title="Generate/regenerate embeddings for every selected image (OAI endpoint if configured, else local)"
-          class="text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">🧬 Embed selected</button>
+          class="text-xs bg-indigo-700 hover:bg-indigo-600 px-3 py-1.5 rounded font-bold">Embed selected</button>
         <button onclick="clearSelection()" class="text-xs bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded ml-auto">✕
           Deselect</button>
       </div>

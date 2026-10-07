@@ -1,6 +1,6 @@
-<!-- Tab: Trainer. Builds workable, persistent numbered subsets ("Set 1", …) so
+<!-- Tab: Trainer. Builds workable, persistent numbered subsets ("Set 1", ...) so
      you can curate a few hundred images instead of ten thousand, review each in
-     the SAME editor pane the gallery uses (click a tile → selectFile → real
+     the SAME editor pane the gallery uses (click a tile -> selectFile -> real
      canvas box drawing, region_modal, autosave - no duplicate box UI here), and
      train a YOLO box model on just that subset. This pane only owns what's new:
      set building, the media filter, and the train controls. -->
@@ -25,12 +25,12 @@
           class="text-xs text-red-400 hover:text-red-300 whitespace-nowrap">Delete</button>
       </div>
       <p class="text-xs text-gray-500 mt-1">
-        <span id="tr_set_count" class="text-purple-300">0</span> keep ·
-        <span id="tr_withdata" class="text-blue-400">0</span> with data ·
+        <span id="tr_set_count" class="text-indigo-300">0</span> keep |
+        <span id="tr_withdata" class="text-blue-400">0</span> with data |
         <span id="tr_checked" class="text-green-400">0</span> checked<span id="tr_acc"></span></p>
       <label class="flex items-center gap-2 text-xs text-gray-300 mt-1" data-feature="ai.trainer.keep"
              title="Gallery-safe: this set only adds boxes, so nothing the gallery relies on is lost. Unsafe: boxes may be removed/replaced - edits stay in the set's isolated copy and are not mirrored back.">
-        <input id="tr_gallery_safe" type="checkbox" class="accent-emerald-500" onchange="trSetGallerySafe()">
+        <input id="tr_gallery_safe" type="checkbox" class="accent-green-500" onchange="trSetGallerySafe()">
         <span id="tr_gsafe_label">Gallery-unsafe (isolated copy)</span>
       </label>
     </div>
@@ -63,17 +63,17 @@
           </div>
         </div>
         <label class="flex items-center gap-2 text-xs text-gray-300">
-          <input id="tr_exclude_sets" type="checkbox" checked class="accent-purple-500">
+          <input id="tr_exclude_sets" type="checkbox" checked class="accent-indigo-500">
           Exclude images already in a set
         </label>
         <label class="flex items-center gap-2 text-xs text-gray-300">
-          <input id="tr_build_gsafe" type="checkbox" class="accent-emerald-500">
+          <input id="tr_build_gsafe" type="checkbox" class="accent-green-500">
           Gallery-safe (only adding boxes)
         </label>
         <button onclick="trBuildSet()"
           class="w-full bg-indigo-600 hover:bg-indigo-500 py-2 rounded font-bold text-sm">Create set</button>
         <p class="text-xs text-gray-500">Images are copied into the set's own folder, so editing, adding, or
-          removing boxes never changes your gallery. Recent = latest n×2; diverse = most distinct embeddings.
+          removing boxes never changes your gallery. Recent = latest nx2; diverse = most distinct embeddings.
           YOLO can't use audio.</p>
       </div>
     </details>

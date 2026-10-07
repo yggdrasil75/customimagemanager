@@ -1,4 +1,5 @@
-"""OCR module: /api/ocr through the picked provider."""
+"""! @file
+@brief OCR module: /api/ocr through the picked provider."""
 import pytest
 from cimtest import post_json, picked_model, picked_name, expected, text_matches
 

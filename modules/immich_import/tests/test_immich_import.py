@@ -1,4 +1,5 @@
-"""Immich import against a fake Immich: albums, tags, named face boxes,
+"""! @file
+@brief Immich import against a fake Immich: albums, tags, named face boxes,
 favourites, archived (via the new 'visibility' filter; the server rejects the
 old 'withArchived'), trash skipped, live-photo video, capture time zone,
 checksum-verified downloads; a periodic re-run asks only for changes and adds

@@ -1,5 +1,5 @@
-"""
-Advanced dedup scorer — learned CNN (images + video).
+"""! @file
+@brief Advanced dedup scorer - learned CNN (images + video).
 ======================================================================
 Registers a higher-priority pair-scorer that uses small learned CNNs to
 judge whether two images (DupCNN) or two videos (DupVideoCNN) are the same
@@ -87,7 +87,7 @@ def register(host):
                 os.path.join(models_dir, "heurdu", f"heurdu1_{size}.pt")]
 
     def _local_paths(size):
-        """Where a trained checkpoint for `size` can live, in priority order:
+        """! @brief Where a trained checkpoint for `size` can live, in priority order:
         Trainer > Dedup install (models/), then its "Ship" output (pretrained/),
         then a previous HEURDU download."""
         return [os.path.join(models_dir, f"dup_cnn_{size}.pt"),
@@ -109,7 +109,7 @@ def register(host):
         return out
 
     def _all_sizes():
-        """HEURDU sizes + the trainer's size table + anything trained on disk,
+        """! @brief HEURDU sizes + the trainer's size table + anything trained on disk,
         so a size trained here (xl, xxl, a custom name) is selectable."""
         table = list(_cnn_mod.parse_sizes(host.config.get("dup_cnn_sizes")))
         return list(dict.fromkeys(HF_SIZES + table + _local_sizes()))
@@ -180,7 +180,7 @@ def register(host):
                             "huggingface.co/" + HF_REPO + " on first use.")
 
     def _img_model():
-        """The DupCNN for the selected size (loaded through the broker).
+        """! @brief The DupCNN for the selected size (loaded through the broker).
         Raises with the reason when there is none, so dedup can say why."""
         size = _size()
         until, why = failed.get(size, (0, ""))
@@ -208,7 +208,7 @@ def register(host):
         return _score_batch([ctx])[0]
 
     def _ckpt_stamp(size):
-        """mtime of the checkpoint a size loads from, so the verdict cache key
+        """! @brief mtime of the checkpoint a size loads from, so the verdict cache key
         changes when the weights are retrained (same size, new file)."""
         for p in (_v1_paths(size) if _release() == "1.0" else []) + _local_paths(size):
             if os.path.exists(p):
@@ -225,11 +225,11 @@ def register(host):
         return int(host.config.get("dup_cnn_max_mp", 16)) * 1_000_000
 
     def _score_group(imgs):
-        """NxN matrix for a group of BGR images: encode once, compare many, native resolution."""
+        """! @brief NxN matrix for a group of BGR images: encode once, compare many, native resolution."""
         return _img_model().score_group(imgs, _device(), _max_px())[0]
 
     def _score_batch(ctxs):
-        """Pairwise contract: image pairs one at a time (align + encode +
+        """! @brief Pairwise contract: image pairs one at a time (align + encode +
         compare); video pairs through the clip model. Groups should use
         score_group instead, this is the fallback."""
         out = [None] * len(ctxs)
@@ -276,7 +276,7 @@ def register(host):
         return out
 
     def _change_map(a, b):
-        """For the UI: (score, change map [H/8,W/8] 0..1 in a's frame, b warped
+        """! @brief For the UI: (score, change map [H/8,W/8] 0..1 in a's frame, b warped
         onto a, overlap mask) or None when there is no model / no alignment."""
         try:
             m = _img_model()
@@ -299,7 +299,7 @@ def register(host):
     })
 
     def _reload(active=None):
-        """Forget loaded checkpoints so the next pair picks up a size the
+        """! @brief Forget loaded checkpoints so the next pair picks up a size the
         user just trained (Trainer > Dedup) or re-picked in Settings. Newly
         trained sizes become selectable; `active` (the trainer's active size)
         becomes the live pick and is persisted."""
@@ -314,9 +314,8 @@ def register(host):
         if active:
             ok, err = host.broker.select("dedup.pair", "heurdu", str(active))
             if ok:
-                host.config["model_selection"] = host.broker.current_selection()
                 try:
-                    host.save_config()
+                    host.persist_model_selection()
                 except Exception as e:
                     host.logger.warning(f"dedup_cnn: save selection: {e}")
                 host.logger.info(f"dedup_cnn: live size is now '{active}'")

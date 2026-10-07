@@ -1,5 +1,5 @@
-"""
-comic_pages.py — panel detection and OCR for comic pages.
+"""! @file
+@brief comic_pages.py - panel detection and OCR for comic pages.
 =========================================================
 
 The books side stores comics as containers (cbz/cbr/cb7/cbt/pdf) and renders
@@ -14,7 +14,7 @@ WHY THERE IS A CV FALLBACK
 manager.py's `_run_panels` asks for a YOLO model named by `state['panel_model']`.
 Nothing in the settings UI ever sets that key, so in practice it returns []
 every time. A model path stays the preferred route when someone configures one,
-but the default path has to work with no model at all — so panels fall back to
+but the default path has to work with no model at all - so panels fall back to
 classical CV, which for comics is not a consolation prize: pages are ink on a
 flat gutter, which is close to the ideal case for thresholding.
 
@@ -27,7 +27,7 @@ Two detectors, tried in order:
 
   xycut    Recursive projection cut: find full-width/full-height runs of gutter
            and split on the widest one. Used when contours come back with poor
-           page coverage — typically pages where panels share borders and the
+           page coverage - typically pages where panels share borders and the
            whole grid fuses into one blob. Also used *inside* any single contour
            that swallowed most of the page.
 
@@ -37,7 +37,7 @@ actually consumes.
 
 READING ORDER
 Panels are grouped into rows by vertical overlap, then ordered within a row by
-x — reversed when `rtl` is set, which is what manga needs. Order is stored on
+x - reversed when `rtl` is set, which is what manga needs. Order is stored on
 the panel, so the reader and the transcript agree without recomputing it.
 
 COORDINATES
@@ -60,7 +60,7 @@ Image, _HAVE_PIL = optional_import("PIL.Image")
 imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
 
 
-# ── tunables ─────────────────────────────────────────────────────────────────
+# -- tunables -----------------------------------------------------------------
 # Fractions of the page unless noted. These are deliberately loose: a missed
 # panel is worse than a slightly baggy one, because a missed panel silently
 # drops every OCR line inside it into the "unplaced" bucket.
@@ -68,7 +68,7 @@ WORK_MAX   = 1400     # px; long edge the detectors run at (speed, not accuracy)
 MIN_AREA   = 0.008    # a panel must cover at least 0.8% of the page
 MIN_SIDE   = 0.045    # ...and be at least 4.5% of the page on both sides
 MAX_PANELS = 60       # a page with more "panels" than this is a failed detect
-FILL_MIN   = 0.55     # contour area / bbox area — rejects ragged, L-shaped ink
+FILL_MIN   = 0.55     # contour area / bbox area - rejects ragged, L-shaped ink
 COVER_MIN  = 0.40     # if contours cover less of the page than this, try xycut
 SPLIT_AREA = 0.30     # a blob bigger than this may be several fused panels
 GUTTER_PCT = 0.985    # a row/col is gutter if this fraction of it is background
@@ -76,12 +76,12 @@ GUTTER_MIN = 0.012    # a gutter run must be this wide to count as a cut
 LINE_PCT   = 0.90     # a row/col is a border if this fraction of it is one line
 XY_DEPTH   = 5        # recursion limit for xycut
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # Page decoding
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def decode_bytes(data: bytes) -> np.ndarray | None:
-    """Bytes from an archive entry -> BGR ndarray.
+    """! @brief Bytes from an archive entry -> BGR ndarray.
 
     Comic archives are mostly JPEG/PNG/WebP, which cv2 reads directly. The
     stragglers (JXL, AVIF, the occasional exotic PNG) go to PIL and then
@@ -115,7 +115,7 @@ def _rgb_to_bgr(a: np.ndarray) -> np.ndarray:
     return a[:, :, ::-1].copy() if a.ndim == 3 and a.shape[2] >= 3 else a
 
 def _norm_array(a: np.ndarray) -> np.ndarray | None:
-    """Whatever imagecodecs handed back -> 3-channel uint8 BGR."""
+    """! @brief Whatever imagecodecs handed back -> 3-channel uint8 BGR."""
     if a is None:
         return None
     if a.dtype != np.uint8:
@@ -136,8 +136,8 @@ def _norm_array(a: np.ndarray) -> np.ndarray | None:
 
 def page_bgr(abs_path: str, fmt: str, n: int, dpi: int = 150,
              page_names: list[str] | None = None) -> np.ndarray | None:
-    """Decode page `n` of a comic container. `page_names` is the cached result
-    of book_index.comic_page_names — pass it when looping, otherwise every page
+    """! @brief Decode page `n` of a comic container. `page_names` is the cached result
+    of book_index.comic_page_names - pass it when looping, otherwise every page
     reopens and relists the archive, which on a 300-page cbr is the whole cost
     of the job.
     """
@@ -148,19 +148,19 @@ def page_bgr(abs_path: str, fmt: str, n: int, dpi: int = 150,
         return None
     return decode_bytes(BOOKS["comic_page_bytes"](abs_path, fmt, names[n]))
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # Geometry helpers
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def _norm_box(x, y, w, h, W, H) -> dict:
-    """Pixel rect -> normalised MWG-style centre box, clamped to the page."""
+    """! @brief Pixel rect -> normalised MWG-style centre box, clamped to the page."""
     x = max(0, min(W, x)); y = max(0, min(H, y))
     w = max(1, min(W - x, w)); h = max(1, min(H - y, h))
     return {"cx": round((x + w / 2) / W, 5), "cy": round((y + h / 2) / H, 5),
             "w":  round(w / W, 5),           "h":  round(h / H, 5)}
 
 def _px(box: dict, W: int, H: int) -> tuple[int, int, int, int]:
-    """Normalised box -> (x0, y0, x1, y1) in pixels."""
+    """! @brief Normalised box -> (x0, y0, x1, y1) in pixels."""
     w = box["w"] * W; h = box["h"] * H
     x0 = box["cx"] * W - w / 2; y0 = box["cy"] * H - h / 2
     return (int(round(x0)), int(round(y0)),
@@ -186,10 +186,10 @@ def _contains(outer: dict, inner: dict, slack: float = 0.02) -> bool:
             and ix1 <= ox1 + slack and iy1 <= oy1 + slack)
 
 def _dedupe(boxes: list[dict], iou_thresh: float = 0.55) -> list[dict]:
-    """Drop near-duplicates and fully-contained boxes, keeping the larger.
+    """! @brief Drop near-duplicates and fully-contained boxes, keeping the larger.
 
-    Both detectors can emit a panel twice — a contour and its xycut refinement,
-    say — and a nested box would double-count every OCR line inside it.
+    Both detectors can emit a panel twice - a contour and its xycut refinement,
+    say - and a nested box would double-count every OCR line inside it.
     """
     out: list[dict] = []
     for b in sorted(boxes, key=lambda z: -(z["w"] * z["h"])):
@@ -198,12 +198,12 @@ def _dedupe(boxes: list[dict], iou_thresh: float = 0.55) -> list[dict]:
         out.append(b)
     return out
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # Background / gutter analysis
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def _gutter_mask(gray: np.ndarray) -> tuple[np.ndarray, str]:
-    """True where the pixel looks like gutter (page background).
+    """! @brief True where the pixel looks like gutter (page background).
 
     The border of a comic page is nearly always gutter, so it tells us whether
     we're looking at white gutters (the usual) or black (common in horror,
@@ -224,14 +224,14 @@ def _gutter_mask(gray: np.ndarray) -> tuple[np.ndarray, str]:
     if med >= 128:
         # Tolerance follows the margin's own value so slightly grey or
         # scanned-newsprint stock still reads as background. With no margin to
-        # measure, only near-white counts — panel fills must stay content.
+        # measure, only near-white counts - panel fills must stay content.
         cut = max(170.0, min(245.0, med - 12)) if margin else 243.0
         return gray >= cut, "light"
     cut = min(90.0, max(12.0, med + 12)) if margin else 14.0
     return gray <= cut, "dark"
 
 def _prep(bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
-    """Downscale, grayscale, gutter mask, ink mask.
+    """! @brief Downscale, grayscale, gutter mask, ink mask.
 
     The ink mask is strictly stronger than "not gutter": it's the high-contrast
     line work only, so panel *borders* land in it while panel interiors and
@@ -249,18 +249,18 @@ def _prep(bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
     ink = (gray <= 100) if kind == "light" else (gray >= 160)
     return gray, gutter, ink, kind
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Detector 1 — contours
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# Detector 1 - contours
+# ==============================================================================
 
 def _content_mask(gutter: np.ndarray, erode_px: int = 0) -> np.ndarray:
-    """Solid blobs from the non-gutter mask.
+    """! @brief Solid blobs from the non-gutter mask.
 
     The close step is what makes this work on real pages: panel interiors are
     mostly background too (a white speech balloon is the same white as the
     gutter), so the raw content mask is a mesh of ink, not a solid rectangle.
     Closing with a kernel a little wider than the line art fuses each panel's
-    ink into one blob while leaving the gutters — which are much wider — open.
+    ink into one blob while leaving the gutters - which are much wider - open.
 
     `erode_px` shaves the blobs afterwards. That's how art bleeding across a
     gutter gets handled: the bleed is a thin bridge between two fat panels, so
@@ -282,9 +282,9 @@ def _content_mask(gutter: np.ndarray, erode_px: int = 0) -> np.ndarray:
 
 def _boxes_from_mask(mask: np.ndarray, W: int, H: int,
                      ox: int = 0, oy: int = 0, grow: int = 0) -> list[dict]:
-    """External contours of `mask` -> normalised boxes, filtered to panel shapes.
+    """! @brief External contours of `mask` -> normalised boxes, filtered to panel shapes.
 
-    `W`/`H` are the *page* dimensions, not the mask's — the size filters have to
+    `W`/`H` are the *page* dimensions, not the mask's - the size filters have to
     stay relative to the page or a sub-region search would accept slivers.
     `grow` restores the margin lost to an erode pass.
     """
@@ -310,12 +310,12 @@ def _detect_contours(gutter: np.ndarray) -> list[dict]:
     h, w = gutter.shape
     return _boxes_from_mask(_content_mask(gutter), w, h)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Detector 2 — recursive projection cut
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# Detector 2 - recursive projection cut
+# ==============================================================================
 
 def _runs(ok: np.ndarray, span: int, min_run: int) -> list[tuple[int, int]]:
-    """Maximal True runs of at least `min_run`, excluding any that touch an end.
+    """! @brief Maximal True runs of at least `min_run`, excluding any that touch an end.
 
     An end-touching run is the page margin, not a separator between two panels,
     and cutting there just trims whitespace `_trim` already removed.
@@ -333,9 +333,9 @@ def _runs(ok: np.ndarray, span: int, min_run: int) -> list[tuple[int, int]]:
 
 def _cut_runs(gut_prof: np.ndarray, line_prof: np.ndarray | None,
               span: int, min_wide: int) -> list[tuple[int, int]]:
-    """Candidate cut positions, from two different kinds of separator.
+    """! @brief Candidate cut positions, from two different kinds of separator.
 
-    A whitespace gutter has to be *wide* to count — thin near-white bands turn
+    A whitespace gutter has to be *wide* to count - thin near-white bands turn
     up inside panels all the time (a sky, a big speech balloon) and cutting on
     one would slice a panel in half. A drawn border line is the opposite: only
     a few pixels thick, but unambiguous, because nothing inside a panel draws a
@@ -347,7 +347,7 @@ def _cut_runs(gut_prof: np.ndarray, line_prof: np.ndarray | None,
     return runs
 
 def _trim(gutter: np.ndarray, x0: int, y0: int, x1: int, y1: int):
-    """Shrink a region to hug its content, so panel boxes don't carry margin."""
+    """! @brief Shrink a region to hug its content, so panel boxes don't carry margin."""
     sub = ~gutter[y0:y1, x0:x1]
     if not sub.any():
         return None
@@ -357,7 +357,7 @@ def _trim(gutter: np.ndarray, x0: int, y0: int, x1: int, y1: int):
             x0 + int(cols[-1]) + 1, y0 + int(rows[-1]) + 1)
 
 def _line_masks(ink_sub: np.ndarray, frac: float = 0.6):
-    """Long straight horizontal / vertical ink runs — i.e. panel borders.
+    """! @brief Long straight horizontal / vertical ink runs - i.e. panel borders.
 
     Two panels that share a drawn border have no gutter between them at all;
     the separator *is* the ink. Opening the ink mask with a kernel most of the
@@ -369,7 +369,7 @@ def _line_masks(ink_sub: np.ndarray, frac: float = 0.6):
     hline = vline = None
     # Close short gaps first. A border between two panels is usually two
     # parallel lines with a hairline of paper between them, and art crossing a
-    # border breaks it too — either would destroy the line under a long opening
+    # border breaks it too - either would destroy the line under a long opening
     # and lose the cut entirely.
     hgap = max(3, int(w * 0.02))
     vgap = max(3, int(h * 0.02))
@@ -391,7 +391,7 @@ def _line_masks(ink_sub: np.ndarray, frac: float = 0.6):
 
 def _xycut(gutter: np.ndarray, region, depth: int, out: list,
            ink: np.ndarray | None = None):
-    """Split `region` on its widest full separator, recurse, collect the leaves."""
+    """! @brief Split `region` on its widest full separator, recurse, collect the leaves."""
     trimmed = _trim(gutter, *region)
     if trimmed is None:
         return
@@ -452,10 +452,10 @@ def _detect_xycut(gutter: np.ndarray, ink: np.ndarray | None = None,
             if (x1 - x0) * (y1 - y0) >= MIN_AREA * page_area]
 
 def _refine(gutter: np.ndarray, ink: np.ndarray, box: dict) -> list[dict]:
-    """Try to break one oversized blob into real panels.
+    """! @brief Try to break one oversized blob into real panels.
 
     A contour covering a third of the page is nearly always several panels that
-    got joined — by a shared border, or by art bleeding over the gutter. Two
+    got joined - by a shared border, or by art bleeding over the gutter. Two
     different failures, so two different remedies, tried cheapest first.
     """
     H, W = gutter.shape
@@ -479,10 +479,10 @@ def _refine(gutter: np.ndarray, ink: np.ndarray, box: dict) -> list[dict]:
 
 def _drop_empty(panels: list[dict], gutter: np.ndarray,
                 min_content: float = 0.06) -> list[dict]:
-    """Reject boxes that are almost entirely background.
+    """! @brief Reject boxes that are almost entirely background.
 
     Splitting a fused blob can leave the gutter strip itself behind as a
-    "panel" — tall, thin, and holding nothing but the smear of art that caused
+    "panel" - tall, thin, and holding nothing but the smear of art that caused
     the fusion in the first place. It clears the size filters (it isn't small,
     just empty), so it needs a check of its own.
 
@@ -504,16 +504,16 @@ def _drop_empty(panels: list[dict], gutter: np.ndarray,
     floor = max(min_content, 0.35 * float(np.median(fracs)))
     return [p for p, f in zip(panels, fracs) if f >= floor]
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # Reading order
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def order_panels(panels: list[dict], rtl: bool = False) -> list[dict]:
-    """Group panels into rows, then order within each row.
+    """! @brief Group panels into rows, then order within each row.
 
     A plain sort by (y, x) breaks on the layout comics use constantly: a tall
     panel on the left beside two stacked panels on the right. Row grouping by
-    vertical overlap handles it — the tall panel and both short ones land in
+    vertical overlap handles it - the tall panel and both short ones land in
     one row and order left-to-right, which is how a reader takes them.
     """
     if not panels:
@@ -543,12 +543,12 @@ def order_panels(panels: list[dict], rtl: bool = False) -> list[dict]:
         p["order"] = i
     return ordered
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Panel detection — the entry point
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# Panel detection - the entry point
+# ==============================================================================
 
 def detect_panels(bgr: np.ndarray, panel_fn=None, rtl: bool = False) -> dict:
-    """Find comic panels. Returns {panels, source}.
+    """! @brief Find comic panels. Returns {panels, source}.
 
     `panel_fn` is manager.py's model-backed detector. It wins when it returns
     anything; it returns [] whenever no panel model is configured, which is the
@@ -608,22 +608,22 @@ def detect_panels(bgr: np.ndarray, panel_fn=None, rtl: bool = False) -> dict:
     panels = _drop_empty(_dedupe(panels), gutter)
 
     # A splash page is one panel, and saying so is more useful than saying
-    # nothing — the OCR binding downstream needs somewhere to put its lines.
+    # nothing - the OCR binding downstream needs somewhere to put its lines.
     if not panels:
         panels = [{"cx": 0.5, "cy": 0.5, "w": 1.0, "h": 1.0}]
         source = "page"
 
     return {"panels": order_panels(panels, rtl), "source": source}
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # OCR
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def _line_centre(ln: dict) -> tuple[float, float]:
     return float(ln.get("cx", 0.5)), float(ln.get("cy", 0.5))
 
 def _assign_panel(ln: dict, panels: list[dict]) -> int:
-    """Index of the panel holding this line's centre, else the best overlap,
+    """! @brief Index of the panel holding this line's centre, else the best overlap,
     else -1. Lines that land in a gutter (captions between panels, page
     furniture, sound effects that break the frame) legitimately get -1."""
     cx, cy = _line_centre(ln)
@@ -638,10 +638,10 @@ def _assign_panel(ln: dict, panels: list[dict]) -> int:
     return best if best_ov > 0.05 else -1
 
 def _group_blocks(lines: list[dict], rtl: bool) -> list[list[dict]]:
-    """Cluster OCR lines into balloons/captions.
+    """! @brief Cluster OCR lines into balloons/captions.
 
     Two lines belong together when they're horizontally overlapping and
-    vertically adjacent — which is what stacked lines inside one balloon look
+    vertically adjacent - which is what stacked lines inside one balloon look
     like. Without this, a balloon's second line can sort after a neighbouring
     balloon's first, and the transcript reads as interleaved nonsense.
     """
@@ -675,7 +675,7 @@ def _group_blocks(lines: list[dict], rtl: bool) -> list[list[dict]]:
 
 def ocr_page(bgr: np.ndarray, panels: list[dict], ocr_fn,
              rtl: bool = False, per_panel: bool = False) -> dict:
-    """OCR a page and bind each line to a panel.
+    """! @brief OCR a page and bind each line to a panel.
 
     per_panel crops each panel and OCRs it separately, upscaling small ones.
     It's several times slower but noticeably better on dense lettering, because
@@ -727,9 +727,9 @@ def ocr_page(bgr: np.ndarray, panels: list[dict], ocr_fn,
     return {"engine": engine, "lines": lines, "text": text}
 
 def build_text(panels: list[dict], lines: list[dict], rtl: bool = False) -> str:
-    """Flatten lines into a reading-order transcript, one block per line of
+    """! @brief Flatten lines into a reading-order transcript, one block per line of
     output and a blank line between panels. Unplaced lines go last under their
-    own heading rather than being dropped — a sound effect straddling a gutter
+    own heading rather than being dropped - a sound effect straddling a gutter
     is still content someone may search for."""
     by_panel: dict[int, list[dict]] = {}
     for ln in lines:
@@ -755,15 +755,15 @@ def build_text(panels: list[dict], lines: list[dict], rtl: bool = False) -> str:
             chunks.append(f"[unplaced]\n{body}")
     return "\n\n".join(chunks)
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # One page, both passes
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def analyze_page(bgr: np.ndarray, panel_fn=None, ocr_fn=None,
                  do_panels: bool = True, do_ocr: bool = True,
                  rtl: bool = False, per_panel: bool = False,
                  known_panels: list[dict] | None = None) -> dict:
-    """Analyse one decoded page. Returns a dict shaped for the `book_pages`
+    """! @brief Analyse one decoded page. Returns a dict shaped for the `book_pages`
     row. `known_panels` lets an OCR-only re-run reuse panels detected earlier
     instead of paying for detection twice."""
     H, W = (bgr.shape[:2] if bgr is not None and bgr.size else (0, 0))

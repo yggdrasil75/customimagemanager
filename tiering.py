@@ -1,67 +1,18 @@
-"""
-Automatic tiered storage
-========================
-Keeps the logical library layout under MEDIA_DIR untouched. A file that has
-been "tiered" is replaced by a symlink at its usual rel_path; the bytes live
-in an object store on one of the configured tier drives:
+"""! @file
+@brief Tiered storage: library files move between drives by speed and value.
 
-    <tier_root>/cim-objects/<aa>/<uuid><ext>
+A tiered file is a symlink at its usual rel_path pointing at
+<tier>/cim-objects/<aa>/<DocumentID><ext>; everything that opens it follows
+the link. Each tier has a path, a share of the library (ratio) and a read
+speed. Videos sit on the slowest tier fast enough for their bitrate times
+`video_headroom`, promoted only when that tier is over budget. Images fill the
+remaining budget best first (IQA stars, then bytes per pixel). A hysteresis
+margin stops small imbalances from moving files.
 
-Because every consumer of the library (Flask send_file, cv2, pyexiv2, os.walk,
-ffmpeg) transparently follows symlinks, no other code path needs to know
-tiering exists. MEDIA_DIR itself (symlinks + SQLite DB + .thumbs cache) should
-live on the fastest drive — that automatically satisfies "thumbs on NVMe".
-
-Placement policy
-----------------
-The user configures N tiers ordered fastest → slowest, each with:
-    name        display name ("nvme", "ssd", ...)
-    path        directory on that drive
-    ratio       share of total library bytes the tier should hold (percent;
-                normalised, so 5/50/45 and 1/10/9 mean the same thing)
-    speed_mbps  sustained sequential read the drive can actually deliver
-
-Every indexed file gets a byte budget assignment:
-
-  * Videos have a *floor tier*: the slowest tier whose speed_mbps still covers
-    bitrate_mbps * video_headroom (default 4x, so seeking/other IO can't cause
-    buffering). A 1080p30 ~8 Mbps file happily lands on a 150 MB/s HDD; an
-    80 Mbps UHD master is forced up to SSD. Videos *prefer* their floor tier
-    (fast flash is wasted on sequential streaming) and are only promoted when
-    the floor tier is over budget — highest bitrate promoted first.
-
-  * Images are sorted best-first: higher IQA stars win, ties broken by lower
-    bytes-per-pixel (better compressed first). The sorted list fills whatever
-    budget the videos left, fastest tier downward. So the best compressed
-    images end up on NVMe, the rest on SSD, exactly as budgets allow.
-
-A hysteresis margin (default 5% of a tier's budget) suppresses churn: a file
-already sitting in an acceptable tier is not moved just to fix a small
-imbalance.
-
-Where did this object come from?
---------------------------------
-Every library file has an XMP identity, xmpMM:DocumentID in its .xmp sidecar
-(the sidecar is the app's source of truth and stays at the file's rel_path
-when the bytes are tiered). A tier object is named by that id:
-<tier>/cim-objects/<aa>/<DocumentID><ext>. The symlink is the live pointer,
-the sidecar the durable one: when symlinks are lost (a media dir rebuilt, a
-volume remounted, a DB dropped and the store walked by a scan)
-restore_orphans() walks the sidecars whose media is missing, finds the object
-carrying their DocumentID and relinks it at its original rel_path — so the
-indexer sees the file where it always lived, never as
-cim-objects/<aa>/<uuid>. adopt_ids() gives objects moved before this a
-DocumentID (the uuid they were already stored under) so they are covered too.
-The host injects the two sidecar helpers (read / ensure the id) via start().
-
-Execution
----------
-A daemon thread wakes every `interval_sec`, builds a plan, then executes it
-only while the server is idle (same trick as the auto-tagger). Each move:
-copy to a temp file on the destination tier → fsync → verify size → atomically
-swap the symlink → delete the old copy. Throttled to `throttle_mbps`.
-An orphan GC removes tier objects no symlink references any more (covers
-deletes/moves that bypassed safe_remove, e.g. cross-device shutil.move).
+The sidecar keeps the file's DocumentID, which names the object, so lost
+symlinks are rebuilt by restore_orphans(). Moves run in a daemon thread while
+the server is idle: copy, fsync, verify, swap the symlink, delete the old copy,
+throttled to `throttle_mbps`. gc_orphans() removes objects nothing points at.
 """
 
 import os, io, json, time, uuid, shutil, threading, logging
@@ -78,36 +29,34 @@ if not log.handlers:
         log.addHandler(logging.StreamHandler())
 
 CFG_FILE   = "tiers_config.json"
-OBJECT_DIR = "cim-objects"          # subdir created inside every tier path
+OBJECT_DIR = "cim-objects"
 
 DEFAULT_CFG = {
     "enabled": False,
-    "tiers": [],                    # [{name,path,ratio,speed_mbps}, ...] fastest first
-    "video_headroom": 4.0,          # tier speed must be >= headroom * bitrate
-    "hysteresis": 0.05,             # tolerated budget deviation before moving
-    "interval_sec": 3600,           # planner cadence
-    "throttle_mbps": 200,           # copy bandwidth cap during rebalance
-    "idle_sec": 120,                # only move when server idle this long
+    "tiers": [],  # [{name, path, ratio, speed_mbps}], fastest first
+    "video_headroom": 4.0,  # tier MB/s must cover bitrate x headroom
+    "hysteresis": 0.05,  # budget deviation tolerated before moving
+    "interval_sec": 3600,
+    "throttle_mbps": 200,  # copy bandwidth while rebalancing
+    "idle_sec": 120,  # seconds of HTTP silence before moving
 }
 
 _state = {
     "media_dir": None,
-    "db_factory": None,             # returns a sqlite3 connection (thread-local)
-    "get_last_activity": None,      # returns epoch seconds of last HTTP request
-    "load_stored_cfg": None,        # () -> dict|None : read persisted cfg from host
-    "store_cfg": None,              # (dict) -> None  : persist cfg via host
+    "db_factory": None,  # fn() -> sqlite3 connection
+    "get_last_activity": None,  # fn() -> epoch of the last HTTP request
+    "load_stored_cfg": None,  # fn() -> saved config or None
+    "store_cfg": None,  # fn(cfg): save config
     "cfg": None,
     "lock": threading.Lock(),
-    "run": {                        # progress of the current/last rebalance
+    "run": {  # progress of the current / last rebalance
         "active": False, "phase": "idle", "planned": 0, "done": 0,
         "moved_bytes": 0, "errors": 0, "last_run": None, "cancel": False,
     },
 }
 
-# ── config ────────────────────────────────────────────────────────────────────
 def _read_legacy_file():
-    """Read the old standalone tiers_config.json, if it still exists. Used only to
-    migrate a pre-existing config into the host app_config.json on first load."""
+    """! @brief The legacy tiers_config.json, read once to migrate it."""
     try:
         with open(CFG_FILE) as f:
             return json.load(f)
@@ -115,9 +64,7 @@ def _read_legacy_file():
         return None
 
 def load_cfg():
-    """Load tier config. Prefers the host-persisted copy (app_config.json via the
-    injected load_stored_cfg callback); falls back to the legacy standalone file
-    and, when found there, migrates it into the host store immediately."""
+    """! @brief Tier config from app_config.json; a legacy file is migrated on first read."""
     cfg = dict(DEFAULT_CFG)
     stored = None
     loader = _state.get("load_stored_cfg")
@@ -135,8 +82,6 @@ def load_cfg():
     if stored:
         cfg.update({k: stored[k] for k in stored if k in DEFAULT_CFG})
     _state["cfg"] = cfg
-    # Persist a freshly-migrated legacy config into the host store so subsequent
-    # loads come from app_config.json and the old file becomes irrelevant.
     if migrated_from_legacy and _state.get("store_cfg"):
         try:
             _state["store_cfg"](cfg)
@@ -145,7 +90,7 @@ def load_cfg():
     return cfg
 
 def _sanitize_cfg(cfg):
-    """Coerce an incoming cfg dict to the known schema (same rules as before)."""
+    """! @brief Coerce a config dict to the known schema."""
     clean = dict(DEFAULT_CFG)
     clean.update({k: cfg[k] for k in cfg if k in DEFAULT_CFG})
     tiers = []
@@ -163,20 +108,17 @@ def _sanitize_cfg(cfg):
     return clean
 
 def save_cfg(cfg):
-    """Validate and persist tier config through the host store (app_config.json).
-    Falls back to the legacy standalone file only if no host store is wired."""
+    """! @brief Validate and save the tier config (legacy file only when no host store is wired)."""
     clean = _sanitize_cfg(cfg)
     _state["cfg"] = clean
     storer = _state.get("store_cfg")
     if storer:
         storer(clean)
     else:
-        # No host wired (e.g. standalone/testing) — keep the old behavior.
         with open(CFG_FILE, "w") as f:
             json.dump(clean, f, indent=2)
     return clean
 
-# ── path helpers ──────────────────────────────────────────────────────────────
 def _tier_roots(cfg):
     return [os.path.abspath(t["path"]) for t in cfg["tiers"]]
 
@@ -184,8 +126,7 @@ def _object_root(tier_path):
     return os.path.join(os.path.abspath(tier_path), OBJECT_DIR)
 
 def current_tier_of(abs_path, cfg):
-    """Index of the tier a library path currently lives on, or None if the
-    file is an untiered regular file inside MEDIA_DIR."""
+    """! @brief Index of the tier holding a library path, or None for an untiered file."""
     if not os.path.islink(abs_path):
         return None
     target = os.path.realpath(abs_path)
@@ -195,8 +136,7 @@ def current_tier_of(abs_path, cfg):
     return None
 
 def safe_remove(path):
-    """Drop-in replacement for os.remove that also deletes the tier object a
-    symlink points at."""
+    """! @brief os.remove that also deletes the tier object a symlink points at."""
     if os.path.islink(path):
         target = os.path.realpath(path)
         try:
@@ -211,9 +151,8 @@ def safe_remove(path):
         return
     os.remove(path)
 
-# ── inventory ─────────────────────────────────────────────────────────────────
 def _collect_files(db, media_dir, cfg):
-    """One record per indexed media file, with size/bitrate/quality info."""
+    """! @brief One record per indexed media file: size, bitrate, quality."""
     out = []
     rows = db.execute(
         "SELECT rel_path, media_kind, duration, iqa_score, width, height FROM files"
@@ -222,8 +161,7 @@ def _collect_files(db, media_dir, cfg):
         rel = r["rel_path"]
         ap  = os.path.join(media_dir, rel)
         try:
-            # Bill the logical content size, not the inode: a packed file has
-            # no disk file, and even before packing os.stat would miss it.
+            # Bill the logical size: the symlink's own inode is not the file.
             size = os.stat(ap).st_size
         except OSError:
             continue
@@ -242,24 +180,25 @@ def _collect_files(db, media_dir, cfg):
         })
     return out
 
-# ── planner ───────────────────────────────────────────────────────────────────
 def _video_floor_tier(bitrate_mbps, cfg):
-    """Slowest tier index that can still stream this video comfortably."""
+    """! @brief The slowest tier fast enough to stream this video."""
     tiers = cfg["tiers"]
-    need = (bitrate_mbps or 8.0) * cfg["video_headroom"] / 8.0   # MB/s needed
+    need = (bitrate_mbps or 8.0) * cfg["video_headroom"] / 8.0  # MB/s
     floor = 0
     for i, t in enumerate(tiers):
         if t["speed_mbps"] >= need:
             floor = i
-    # ensure at least one adequate tier; if even tier 0 is too slow, use 0
+    # if even the fastest tier is too slow, use it anyway
     for i in range(len(tiers) - 1, -1, -1):
         if tiers[i]["speed_mbps"] >= need:
             return i
     return 0
 
 def plan(db=None, aggressive=False):
-    """Return (moves, tier_stats). moves = [{rel, from, to, size}].
-    aggressive=True ignores hysteresis: every file not on its target tier moves."""
+    """! @brief Plan moves.
+    @param aggressive  ignore hysteresis: every file off its target tier moves.
+    @return (moves [{rel, from, to, size}], tier stats).
+    """
     cfg = _state["cfg"] or load_cfg()
     tiers = cfg["tiers"]
     if not cfg["enabled"] or not tiers:
@@ -271,26 +210,23 @@ def plan(db=None, aggressive=False):
     total = sum(f["size"] for f in files) or 1
     rsum  = sum(t["ratio"] for t in tiers) or 1
     budget = [total * t["ratio"] / rsum for t in tiers]
-    used   = [0.0] * len(tiers)         # bytes assigned so far (planned)
+    used   = [0.0] * len(tiers)  # bytes planned per tier
 
-    assign = {}                          # rel -> target tier idx
+    assign = {}  # rel -> target tier
 
-    # 1) videos → floor tier
+    # 1) videos to their floor tier
     videos = [f for f in files if f["kind"] == "video"]
     images = [f for f in files if f["kind"] != "video"]
     for v in videos:
         v["floor"] = _video_floor_tier(v["bitrate"], cfg)
-    # place at floor, then promote highest-bitrate videos off over-budget tiers
     by_tier = {}
     for v in videos:
         by_tier.setdefault(v["floor"], []).append(v)
-    for i in sorted(by_tier.keys(), reverse=True):          # slowest first
+    for i in sorted(by_tier.keys(), reverse=True):  # slowest first
         vs = sorted(by_tier[i], key=lambda v: (v["bitrate"] or 0))
         for v in vs:
-            # prefer the floor tier; if it's over budget, promote to the
-            # slowest *faster* tier that actually has room. If nothing has
-            # room, stay at the floor and overflow there — ratios are soft
-            # targets, "won't buffer" is the hard constraint.
+            # Over budget: promote to the slowest faster tier with room, else overflow
+            # at the floor. Ratios are soft; "won't buffer" is hard.
             t = i
             if used[t] + v["size"] > budget[t]:
                 for cand in range(i - 1, -1, -1):
@@ -300,7 +236,7 @@ def plan(db=None, aggressive=False):
             assign[v["rel"]] = t
             used[t] += v["size"]
 
-    # 2) images best-first into remaining budget, fastest tier downward
+    # 2) images best first into the remaining budget
     images.sort(key=lambda f: (-f["iqa"], f["bpp"]))
     ti = 0
     for f in images:
@@ -309,16 +245,15 @@ def plan(db=None, aggressive=False):
         assign[f["rel"]] = ti
         used[ti] += f["size"]
 
-    # 3) diff against reality, with hysteresis
+    # 3) compare with where files are, with hysteresis
     hyst = cfg["hysteresis"]
     moves = []
     for f in files:
         tgt, cur = assign[f["rel"]], f["cur"]
         if cur == tgt:
             continue
-        # untiered files (cur None) always get placed; tiered files only move
-        # if the correction is worth it (their tier is meaningfully off-budget
-        # or a video sits on a tier too slow for it)
+        # An untiered file is always placed; a tiered one moves only when its tier is
+        # meaningfully off budget or too slow for it.
         if cur is not None and not aggressive:
             too_slow = (f["kind"] == "video" and cur > _video_floor_tier(f["bitrate"], cfg))
             actual_used = _tier_usage_bytes(cur, cfg)
@@ -344,7 +279,7 @@ def _tier_usage_bytes(idx, cfg):
     return _walk_usage(_object_root(cfg["tiers"][idx]["path"]))[1]
 
 def _walk_usage(root):
-    """(file_count, total_bytes) under root; (0, 0) if it doesn't exist."""
+    """! @brief (file count, bytes) under root; (0, 0) when missing."""
     count = total = 0
     for dirpath, _, names in os.walk(root):
         for n in names:
@@ -356,8 +291,7 @@ def _walk_usage(root):
     return count, total
 
 def _media_usage(cfg):
-    """Bytes/files living directly under media/, excluding any tier object
-    roots that happen to sit inside it (so tiers aren't double-counted)."""
+    """! @brief Files and bytes stored directly in media/ (tier roots inside it excluded)."""
     media_dir = _state["media_dir"]
     if not media_dir:
         return 0, 0
@@ -370,7 +304,7 @@ def _media_usage(cfg):
         for n in names:
             p = os.path.join(dirpath, n)
             try:
-                # symlinks into tiers cost ~nothing here; count real bytes only
+                # symlinks into tiers cost nothing here
                 st = os.lstat(p)
                 if not os.path.islink(p):
                     total += st.st_size
@@ -379,15 +313,12 @@ def _media_usage(cfg):
                 pass
     return count, total
 
-# ── executor ──────────────────────────────────────────────────────────────────
 def _key(doc_id):
-    """Filesystem / comparison form of an XMP DocumentID ("xmp.did:AB-12" and
-    "ab12" agree): alphanumerics only, lower-case."""
+    """! @brief A DocumentID in comparable form: alphanumerics, lower case ("xmp.did:AB-12" == "ab12")."""
     return "".join(ch for ch in str(doc_id or "") if ch.isalnum()).lower()
 
 def _dest_object_path(tier_path, rel):
-    """Object path for a library file: named by its sidecar's DocumentID so
-    the object can always be traced back to its sidecar (and so to its path)."""
+    """! @brief The object path for a library file, named by its DocumentID."""
     ext = os.path.splitext(rel)[1].lower()
     ensure = _state.get("ensure_document_id")
     name = _key(ensure(os.path.join(_state["media_dir"], rel))) if ensure else ""
@@ -397,12 +328,11 @@ def _dest_object_path(tier_path, rel):
     return os.path.join(d, name + ext)
 
 def is_object_path(rel):
-    """Is this library rel_path actually inside an object store (the symptom
-    of a tier dir living under MEDIA_DIR, or a store walked by a scan)?"""
+    """! @brief True when a library rel_path is inside an object store (a misplaced tier dir)."""
     return str(rel or "").replace("\\", "/").lstrip("/").startswith(OBJECT_DIR + "/")
 
 def _store_objects(cfg):
-    """Every object file (not temp files) in every tier store."""
+    """! @brief Every object file in every tier store (temp files excluded)."""
     for t in cfg["tiers"]:
         root = _object_root(t["path"])
         for dirpath, _, names in os.walk(root):
@@ -412,7 +342,7 @@ def _store_objects(cfg):
                 yield os.path.join(dirpath, n)
 
 def _referenced_objects(media_dir):
-    """{realpath(object): rel_path} for every symlink in the library."""
+    """! @brief {realpath(object): rel_path} for every symlink in the library."""
     out = {}
     for dirpath, dirs, names in os.walk(media_dir):
         dirs[:] = [d for d in dirs if d != OBJECT_DIR and not d.startswith(".")]
@@ -423,7 +353,7 @@ def _referenced_objects(media_dir):
     return out
 
 def _homeless_sidecars(media_dir):
-    """{DocumentID key: sidecar stem rel} for every sidecar whose media is gone."""
+    """! @brief {DocumentID key: sidecar stem} for sidecars whose media is missing."""
     read_id = _state.get("read_document_id")
     if not read_id:
         return {}
@@ -435,10 +365,10 @@ def _homeless_sidecars(media_dir):
     return out
 
 def adopt_ids(cfg=None):
-    """Objects moved before DocumentIDs: give the sidecar the uuid the object
-    is already stored under (when it has no id), or rename the object to the
-    sidecar's id (when it has one). Either way object name == DocumentID
-    afterwards. Returns how many were fixed."""
+    """! @brief Make object names and DocumentIDs agree for objects stored before ids:
+    the sidecar takes the object's uuid, or the object is renamed to the id.
+    @return how many were fixed.
+    """
     cfg = cfg or _state["cfg"] or load_cfg()
     read_id, ensure = _state.get("read_document_id"), _state.get("ensure_document_id")
     if not (read_id and ensure):
@@ -453,7 +383,7 @@ def adopt_ids(cfg=None):
         have = _key(read_id(link))
         try:
             if not have:
-                ensure(link, stem)                      # adopt the object's name as the id
+                ensure(link, stem)
                 n += 1
             elif have != stem:
                 new = os.path.join(os.path.dirname(os.path.dirname(obj)), have[:2], have + ext)
@@ -469,8 +399,7 @@ def adopt_ids(cfg=None):
     return n
 
 def unidentified_objects(cfg=None):
-    """Objects no symlink references and no sidecar claims by DocumentID:
-    the files lost before ids existed. [(obj_path, ext)]"""
+    """! @brief Objects no symlink and no sidecar claim. @return [(path, ext)]."""
     cfg = cfg or _state["cfg"] or load_cfg()
     media_dir = _state["media_dir"]
     referenced = _referenced_objects(media_dir)
@@ -480,8 +409,7 @@ def unidentified_objects(cfg=None):
             and _key(os.path.splitext(os.path.basename(p))[0]) not in homes]
 
 def homeless_media(media_dir=None):
-    """rel_paths (stem + the original extension is unknown, so just the stem)
-    of sidecars whose media file is gone — where lost objects belong."""
+    """! @brief Stems of sidecars whose media is missing (where lost objects belong)."""
     media_dir = media_dir or _state["media_dir"]
     out = []
     for dirpath, dirs, names in os.walk(media_dir):
@@ -494,8 +422,9 @@ def homeless_media(media_dir=None):
     return out
 
 def restore_orphans(cfg=None):
-    """Relink every object no symlink references at the rel_path of the
-    sidecar carrying its DocumentID. Returns the restored rel_paths."""
+    """! @brief Relink every unreferenced object at its sidecar's rel_path.
+    @return the restored rel_paths.
+    """
     cfg = cfg or _state["cfg"] or load_cfg()
     media_dir = _state["media_dir"]
     referenced = _referenced_objects(media_dir)
@@ -514,7 +443,7 @@ def restore_orphans(cfg=None):
         link = os.path.join(media_dir, rel)
         if os.path.lexists(link):
             if os.path.islink(link) and not os.path.exists(link):
-                os.remove(link)                         # a dangling link from an older move
+                os.remove(link)  # dangling link
             else:
                 continue
         try:
@@ -558,10 +487,10 @@ def _execute_move(mv, cfg, mbps=None):
         if os.stat(tmp).st_size != os.stat(src_real).st_size:
             raise IOError("size mismatch after copy")
         os.replace(tmp, dst)
-        # atomic symlink swap: build the new link next to the old one
+        # atomic swap: build the new link beside the old one
         ltmp = link_path + f".tierswap-{uuid.uuid4().hex[:8]}"
         os.symlink(dst, ltmp)
-        os.replace(ltmp, link_path)          # replaces file OR old symlink
+        os.replace(ltmp, link_path)
         if src_real != dst and os.path.abspath(src_real) != os.path.abspath(link_path):
             try: os.remove(src_real)
             except OSError: pass
@@ -574,7 +503,7 @@ def _execute_move(mv, cfg, mbps=None):
         return False
 
 def gc_orphans():
-    """Delete tier objects that no library symlink references (age > 1h)."""
+    """! @brief Delete unreferenced tier objects older than an hour."""
     cfg = _state["cfg"] or load_cfg()
     media_dir = _state["media_dir"]
     referenced = _referenced_objects(media_dir)
@@ -585,8 +514,7 @@ def gc_orphans():
         try:
             if os.path.realpath(p) in referenced or os.stat(p).st_mtime >= cutoff:
                 continue
-            # An object whose sidecar still exists is never garbage: the file
-            # was lost from the library, not deleted. restore_orphans relinks it.
+            # An object with a sidecar was lost, not deleted: restore_orphans relinks it.
             if _key(os.path.splitext(os.path.basename(p))[0]) in homes:
                 continue
             os.remove(p); removed += 1
@@ -596,16 +524,16 @@ def gc_orphans():
         log.info(f"gc: removed {removed} orphaned tier objects")
     return removed
 
-# ── background worker ────────────────────────────────────────────────────────
 def _idle():
     cfg = _state["cfg"]
     ga = _state["get_last_activity"]
     return (time.time() - ga()) >= cfg.get("idle_sec", 120) if ga else True
 
 def rebalance(block=False, aggressive=False):
-    """Kick a rebalance. Returns immediately unless block=True.
-    aggressive=True: no hysteresis, no idle wait, no bandwidth throttle —
-    used at boot so the library is on the right tiers before anything else runs."""
+    """! @brief Start a rebalance.
+    @param block       wait for it to finish.
+    @param aggressive  no hysteresis, idle wait or throttle (used at boot).
+    """
     def work():
         run = _state["run"]
         with _state["lock"]:
@@ -616,9 +544,7 @@ def rebalance(block=False, aggressive=False):
         try:
             cfg = load_cfg()
             if cfg["tiers"]:
-                # Objects first: relink anything that lost its library symlink
-                # and make sure every object knows its home. Runs even with
-                # tiering switched off — the objects still exist.
+                # Relink lost objects first, even with tiering off: the objects exist.
                 run["phase"] = "restore"
                 adopt_ids(cfg)
                 restore_orphans(cfg)
@@ -626,7 +552,7 @@ def rebalance(block=False, aggressive=False):
                 run["phase"] = "disabled"; return
             for t in cfg["tiers"]:
                 os.makedirs(_object_root(t["path"]), exist_ok=True)
-            # verify symlink support once (matters on Windows)
+            # symlink support (Windows)
             probe = os.path.join(_object_root(cfg["tiers"][0]["path"]),
                                  ".linktest-" + uuid.uuid4().hex[:8])
             try:
@@ -674,9 +600,10 @@ def _loop():
 def start(media_dir, db_factory, get_last_activity,
           load_stored_cfg=None, store_cfg=None,
           read_document_id=None, ensure_document_id=None):
-    """read_document_id(path) -> the file's xmpMM:DocumentID (path: media or sidecar) or None;
-    ensure_document_id(abs_media_path, id=None) -> the file's DocumentID,
-    creating the sidecar / id (optionally the given one) when missing."""
+    """! @brief Start the tiering thread.
+    @param read_document_id    fn(path) -> the file's DocumentID or None.
+    @param ensure_document_id  fn(abs_path, id=None) -> its DocumentID, created if missing.
+    """
     _state["read_document_id"] = read_document_id
     _state["ensure_document_id"] = ensure_document_id
     _state["media_dir"] = os.path.abspath(media_dir)

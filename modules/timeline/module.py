@@ -1,5 +1,5 @@
-"""
-Timeline module — the gallery as a zoomable timeline.
+"""! @file
+@brief Timeline module - the gallery as a zoomable timeline.
 
 A gallery view (registerGalleryView, see static/gallery.js) with three zoom
 levels over the same search / folder / album scope the grid uses:
@@ -16,7 +16,7 @@ modified. Files with none are "Undated" and sort last.
 Routes
   GET /api/timeline/buckets?level=year|month|day&scope=YYYY[-MM]&samples=N
                            &q=&folder=&album=&order=desc|asc
-      -> {buckets: [{key, count, samples: [rel_path…]}], total}
+      -> {buckets: [{key, count, samples: [rel_path...]}], total}
   GET /api/timeline/files?period=YYYY[-MM[-DD]]|undated&offset=&limit=
                          &q=&folder=&album=&order=
       -> {files: [{filename, width, height, kind, date}], total, offset}
@@ -62,8 +62,8 @@ def register(host):
     files_where = host.core.files_where
 
     def _scope_sql():
-        """(where_sql, params) for the request's q / folder / album, images and
-        videos only — the same set the grid lists."""
+        """! @brief (where_sql, params) for the request's q / folder / album, images and
+        videos only - the same set the grid lists."""
         where_sql, params, _text, _structured = files_where(
             (request.args.get("q") or "").strip(),
             (request.args.get("folder") or "").strip(),

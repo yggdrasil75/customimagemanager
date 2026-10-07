@@ -1,5 +1,5 @@
-"""
-Comics — a comic is a folder of ordered page images plus comic-level
+"""! @file
+@brief Comics - a comic is a folder of ordered page images plus comic-level
 metadata (comic.json is the portable source of truth; the `comics` table
 and files.comic_folder are caches rebuilt from it on index). Moved out of
 manager.py; core names are bound in register() (see _bind).
@@ -18,7 +18,7 @@ from . import comicinfo
 COMIC_SCHEMA = "mm.comic/1"
 HOST = None
 _db = state = MEDIA_DIR = get_safe_path = read_jxl = _to_bgr = read_metadata = None
-write_metadata = access_logger = _rel = mt = _llm_call = _run_pipeline_on = None
+update_file = access_logger = _rel = mt = _llm_call = _run_pipeline_on = None
 _apply_pipeline_result = DEFAULT_PIPELINE = None
 
 
@@ -34,7 +34,7 @@ def _bind(host):
     globals().update({
         "HOST": host, "_db": host.db, "state": host.config, "MEDIA_DIR": host.media_dir,
         "get_safe_path": host.safe_path, "read_jxl": c.read_image, "_to_bgr": c.to_bgr,
-        "read_metadata": c.read_metadata, "write_metadata": c.write_metadata,
+        "read_metadata": c.read_metadata, "update_file": c.update_file,
         "access_logger": host.logger, "_rel": c.rel, "mt": host.media, "_llm_call": lambda *a, **k: (host.get_service("llm") or {"call": lambda *x, **y: None})["call"](*a, **k),
         "_run_pipeline_on": lambda *a, **k: _pipe()["run"](*a, **k),
         "_apply_pipeline_result": lambda *a, **k: _pipe()["apply"](*a, **k),
@@ -87,10 +87,8 @@ def _set_comic_membership(folder: str) -> None:
     """! @brief Flag a folder's page files as comic members so they leave the flat gallery."""
     if not folder:
         return
-    _db().execute(
-        "UPDATE files SET comic_folder=? WHERE rel_path LIKE ? AND rel_path NOT LIKE ?",
-        (folder, folder + '/%', folder + '/%/%'))
-    _db().commit()
+    update_file(where=("rel_path LIKE ? AND rel_path NOT LIKE ?", (folder + '/%', folder + '/%/%')),
+                db={"comic_folder": folder}, dont_write=True)
 
 def _write_comic_page_count(folder: str, data: dict) -> None:
     """!
@@ -106,9 +104,7 @@ def _write_comic_page_count(folder: str, data: dict) -> None:
         fp = get_safe_path(MEDIA_DIR, cover_rel)
         if not fp or not os.path.exists(fp):
             return
-        meta = read_metadata(fp)
-        write_metadata(fp, meta.get("tags", []), meta.get("description", ""),
-                       meta.get("regions", []), page_count=len(pages))
+        update_file(fp, set={"page_count": len(pages)})
     except Exception as e:
         access_logger.warning(f"_write_comic_page_count {folder}: {e}")
 
@@ -128,7 +124,7 @@ def _upsert_comic_row(folder, data):
     _db().commit()
 
 def _comic_ordered_pages(folder, data=None):
-    """Declared order, dropping missing files and appending any new ones."""
+    """! @brief Declared order, dropping missing files and appending any new ones."""
     data = data or _load_comic_json(folder) or {}
     declared = data.get("pages") or []
     auto = _auto_pages(folder)
@@ -153,7 +149,8 @@ def _scan_comics() -> None:
         _set_comic_membership(folder)
     for gone in existing - set(found):
         _db().execute("DELETE FROM comics WHERE folder=?", (gone,))
-        _db().execute("UPDATE files SET comic_folder='' WHERE comic_folder=?", (gone,))
+        update_file(where=("comic_folder=?", (gone,)), db={"comic_folder": ""},
+                    dont_write=True, commit=False)
     _db().commit()
     access_logger.info(f"Comic scan: {len(found)} comic(s)")
 
@@ -163,7 +160,7 @@ def _comic_folder_set() -> set:
 
 
 def _merge_comic_analyses(folder, page_analyses, summarize=True):
-    """Aggregate per-page pipeline analyses into comic-level metadata.
+    """! @brief Aggregate per-page pipeline analyses into comic-level metadata.
 
     - tags: union across all pages (order-preserving, deduped)
     - characters: distinct subject labels across pages, each with the longest
@@ -269,18 +266,17 @@ def api_comic_update():
     return jsonify({"success": True})
 
 def api_comic_delete():
-    """Unpackage a comic (keeps all images, just removes comic status)."""
+    """! @brief Unpackage a comic (keeps all images, just removes comic status)."""
     folder = (request.json.get("folder", "") or "").strip().strip('/')
     p = _comic_json_path(folder)
     if p and os.path.exists(p):
         os.remove(p)
     _db().execute("DELETE FROM comics WHERE folder=?", (folder,))
-    _db().execute("UPDATE files SET comic_folder='' WHERE comic_folder=?", (folder,))
-    _db().commit()
+    update_file(where=("comic_folder=?", (folder,)), db={"comic_folder": ""}, dont_write=True)
     return jsonify({"success": True})
 
 def comic_pipeline_route():
-    """Run the pipeline across every page of a comic IN ORDER, store each page's
+    """! @brief Run the pipeline across every page of a comic IN ORDER, store each page's
     result, then merge tags / characters / description up to the comic level.
     Expects {"folder": "<comic folder rel path>"}. Uses the comic pipeline tree
     if configured (state['comic_pipeline_tree']), else the default tree."""
@@ -304,17 +300,17 @@ def comic_pipeline_route():
             img = read_jxl(fp)
             if img is None:
                 errors.append(page); continue
-            def _prog(msg, i=i): state["status_text"] = f"Comic {i+1}/{total}: {msg}"
+            def _prog(msg, i=i): HOST.set_status(f"Comic {i+1}/{total}: {msg}")
             analysis = _run_pipeline_on(_to_bgr(img), fp, tree, _prog)
             _apply_pipeline_result(fp, analysis)      # store per-page result too
             page_analyses.append((page, analysis))
         except Exception as e:
             errors.append(page)
             access_logger.error(f"comic_pipeline {rel}: {e}")
-    state["status_text"] = "Merging comic…"
+    HOST.set_status("Merging comic...")
     merged = _merge_comic_analyses(folder, page_analyses,
                                    summarize=request.json.get("summarize", True))
-    state["status_text"] = "Ready."
+    HOST.set_status("Ready.")
     return jsonify({"success": True, "pages_done": len(page_analyses),
                     "errors": errors, "comic": {
                         "tags": merged.get("tags", []),
@@ -322,7 +318,7 @@ def comic_pipeline_route():
                         "description": merged.get("description", "")}})
 
 
-# ── unified viewer/editor API: folder comics and archive comics look the same ──
+# -- unified viewer/editor API: folder comics and archive comics look the same --
 # ComicInfo field <-> comic.json key, so one editor serves both kinds.
 _FOLDER_MAP = {"Title": "title", "Writer": "author", "Summary": "description",
                "Tags": "tags", "Characters": "characters"}
@@ -347,7 +343,7 @@ def api_comics_schema():
 
 
 def api_comics_open():
-    """Everything the viewer + editor need for one comic: kind, title, page
+    """! @brief Everything the viewer + editor need for one comic: kind, title, page
     image URLs, ComicInfo-shaped values, and whether metadata is writable."""
     target = request.args.get("target", "").strip()
     row = _archive_row(target)
@@ -392,8 +388,9 @@ def api_comics_write():
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 500
         if "Title" in patch and patch["Title"]:
-            _db().execute("UPDATE books SET title=? WHERE rel_path=?", (patch["Title"], target))
-            _db().commit()
+            # ComicInfo is in the archive now; mirror the title into the book row
+            # (DB only - the file was just written by comicinfo).
+            update_file(target, set={"title": patch["Title"]}, dont_write=True)
         return jsonify({"success": True, **res})
     data = _load_comic_json(target)
     if data is None:

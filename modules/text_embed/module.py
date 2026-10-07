@@ -1,9 +1,9 @@
-"""
-Text embedding module — text ↔ text retrieval models (sentence-transformers).
+"""! @file
+@brief Text embedding module - text <-> text retrieval models (sentence-transformers).
 ======================================================================
 Provides `embed.text` with dedicated text retrieval models. These are the
 pick for books / passages: long context (8k-32k tokens), trained on
-query→passage pairs, and cheap per chunk. The handle embeds a document;
+query->passage pairs, and cheap per chunk. The handle embeds a document;
 .embed_query(text) embeds a search query with the model's query instruction
 (Qwen3 / nomic are asymmetric); .space tags the vector space.
 

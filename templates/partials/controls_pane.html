@@ -4,7 +4,7 @@
         <button data-tab="main" onclick="setControlsTab('main')"
           class="controls-tab px-3 py-2 text-white border-b-2 border-blue-500">Editor</button>
         <!-- Modules register their controls tabs here (metadata: EXIF/IPTC/XMP)
-             via window.registerControlsTab — core places them, the module
+             via window.registerControlsTab - core places them, the module
              doesn't hard-code a slot. -->
         <span data-ext-area="controls_tabs" class="contents"></span>
       </div>
@@ -19,8 +19,8 @@
           <span class="text-sm font-bold text-gray-300">Editor</span>
           <div class="flex items-center gap-1">
             <button onclick="findSimilarToCurrent()"
-              title="Find visually similar images (needs embeddings — run pipeline step 2)"
-              class="text-[10px] bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded text-white uppercase font-bold">Similar</button>
+              title="Find visually similar images (needs embeddings - run pipeline step 2)"
+              class="text-[10px] bg-indigo-700 hover:bg-indigo-600 px-2 py-1 rounded text-white uppercase font-bold">Similar</button>
             <button onclick="moveCurrentFile()" data-feature="data.move"
               class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded uppercase font-bold">Move</button>
             <button onclick="confirmAllRegions()" title="Confirm every unconfirmed box" data-annot-edit="annot.boxes"
@@ -37,7 +37,7 @@
             <span class="text-[10px] text-gray-500 uppercase tracking-wider font-bold">Albums</span>
             <span id="album_chip_count" class="text-[10px] text-gray-600"></span>
             <button id="btn_add_to_album" onclick="addCurrentToAlbum()" title="Add this image to an album" data-feature="tab.albums.edit"
-              class="ml-auto text-[10px] bg-fuchsia-700 hover:bg-fuchsia-600 px-2 py-1 rounded text-white uppercase font-bold">+ Add to album</button>
+              class="ml-auto text-[10px] bg-indigo-700 hover:bg-indigo-600 px-2 py-1 rounded text-white uppercase font-bold">+ Add to album</button>
           </div>
           <div id="album_chips" class="flex flex-wrap gap-1"></div>
         </div>
@@ -92,7 +92,7 @@
           <div class="flex gap-2" data-annot-edit="annot.boxes">
             <div class="flex-1">
               <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1"
-                title="The individual's name — mwg-rs:Name (e.g. 'jill'). The class ('girl') is the region label above.">Name</label>
+                title="The individual's name - mwg-rs:Name (e.g. 'jill'). The class ('girl') is the region label above.">Name</label>
               <input id="region_name" type="text" placeholder="e.g. jill"
                 oninput="onRegionNameInput()"
                 class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
@@ -100,7 +100,7 @@
             <div class="flex-1">
               <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1"
                 title="mwg-rs:Type. Pick a preset or type your own.">Type</label>
-              <input id="region_type" list="region_type_options" placeholder="type…"
+              <input id="region_type" list="region_type_options" placeholder="type..."
                 oninput="onRegionTypeInput()"
                 class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white focus:border-blue-500">
               <datalist id="region_type_options">
@@ -159,14 +159,14 @@
       <!-- AI Tools -->
       <div class="p-3 flex flex-col gap-2 border-t border-gray-700" data-feature="ai_tooling">
         <div class="flex justify-between items-center">
-          <h3 class="font-bold text-purple-400 text-sm">AI Tooling</h3>
+          <h3 class="font-bold text-indigo-400 text-sm">AI Tooling</h3>
           <div class="flex gap-2" data-ext-area="ai_tooling_links"></div>
         </div>
         <!-- AI picker: target (Description / Tags / Boxes / Segment / Flag /
-             Body / OCR …) → the actions every module offers for it
+             Body / OCR ...) -> the actions every module offers for it
              (host.register_ai_actions; the action dropdown only shows when
-             there is more than one) → Run on the open image. Which MODEL
-             runs an action is picked in Settings → Models. -->
+             there is more than one) -> Run on the open image. Which MODEL
+             runs an action is picked in Settings -> Models. -->
         <div id="ai_picker" class="opacity-50 pointer-events-none flex flex-col gap-1">
           <div class="flex gap-1">
             <select id="ai_group" onchange="aiGroupChanged()" title="What to produce"
@@ -182,14 +182,14 @@
 
         <button onclick="reconcileLibrary()" id="btn_reconcile" data-feature="library.reconcile"
           title="Purge DB entries for files deleted on disk and re-read externally edited files"
-          class="w-full bg-gray-700 hover:bg-gray-600 py-1.5 rounded font-bold text-sm border border-teal-700 text-teal-300">🔄
+          class="w-full bg-gray-700 hover:bg-gray-600 py-1.5 rounded font-bold text-sm border border-sky-700 text-sky-300">🔄
           Sync with disk</button>
-        <p class="text-xs text-gray-400">Status: <span id="status_text" class="text-yellow-400">Ready.</span></p>
+        <p class="text-xs text-gray-400">Status: <span id="status_text" class="text-amber-400">Ready.</span></p>
       </div>
       </div><!-- /#controls_pane_main -->
 
-      <!-- Module-registered controls panes (metadata EXIF/IPTC/XMP, …) render
-           here server-side — each module ships its own partial; core doesn't
+      <!-- Module-registered controls panes (metadata EXIF/IPTC/XMP, ...) render
+           here server-side - each module ships its own partial; core doesn't
            hard-code them. Registered via host.register_controls_pane. -->
       {% for p in module_controls_panes %}
       <div id="controls_pane_{{ p.tab_id }}" class="controls-tab-pane hidden h-full overflow-y-auto p-3"{% if p.feature %} data-feature="{{ p.feature }}"{% endif %}>

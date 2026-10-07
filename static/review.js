@@ -1,4 +1,4 @@
-// ── Deletion flags + AI review queue ────────────────────────────────────────
+// -- Deletion flags + AI review queue ----------------------------------------
 function renderFlagBanner(){
   const b=document.getElementById('flag_banner'); if(!b) return;
   if(currentFlag && currentFlag.delete){
@@ -36,9 +36,9 @@ async function refreshReviewCount(){
 // Library embeddings moved to embedding module (modules/embedding/static/embedding.js)
 // Use window.EmbeddingUI.refreshEmbedStatus() and window.EmbeddingUI.embedLibrary()
 
-// ── Grouped review PANE (Review tab) ─────────────────────────────────────────
+// -- Grouped review PANE (Review tab) -----------------------------------------
 // A cleaner home for the review queue than a single flat modal: the queue is
-// split into the three kinds of pending work — delete / box / tag — each shown
+// split into the three kinds of pending work - delete / box / tag - each shown
 // as its own thumbnail group (mirroring the Faces tab layout). Clicking a
 // thumbnail opens the existing full review modal positioned on that item.
 const REVIEW_GROUPS=[
@@ -47,7 +47,7 @@ const REVIEW_GROUPS=[
   {key:'box',    title:'Box queue',    hint:'Images with unconfirmed detection boxes',
    accent:'text-amber-300', border:'border-amber-800'},
   {key:'tag',    title:'Tag queue',    hint:'Images with unconfirmed tags',
-   accent:'text-emerald-300', border:'border-emerald-800'},
+   accent:'text-green-300', border:'border-green-800'},
 ];
 const REVIEW_PANE_PER_GROUP=120;   // thumbnails shown before the "+N more" tile
 
@@ -59,7 +59,7 @@ function _reviewStatus(t){
 async function loadReviewPane(){
   const list=document.getElementById('review_pane_list');
   if(!list) return;
-  list.innerHTML='<div class="text-xs text-gray-500 p-2">Loading…</div>';
+  list.innerHTML='<div class="text-xs text-gray-500 p-2">Loading...</div>';
   _reviewStatus('');
   let counts={delete:0,box:0,tag:0}, total=0, rel=[];
   try{
@@ -75,7 +75,7 @@ async function loadReviewPane(){
   }catch(e){}
   refreshReviewCount();
   if(!total && !rel.length){
-    list.innerHTML='<div class="text-xs text-gray-500 p-3">Nothing to review — no delete flags, unconfirmed boxes, unconfirmed tags, or relationship mismatches.</div>';
+    list.innerHTML='<div class="text-xs text-gray-500 p-3">Nothing to review - no delete flags, unconfirmed boxes, unconfirmed tags, or relationship mismatches.</div>';
     _reviewStatus('0 pending');
     return;
   }
@@ -89,17 +89,18 @@ async function loadReviewPane(){
     _renderReviewGroup(g, pages[i].items||[], counts[g.key]||0)).join('') || '');
 }
 
-// One-sided relationship edges (A links B, B has no back-link). Surfaced for the
-// user to reconcile; never auto-repaired, since a corrupt half is ambiguous.
+/** @brief One-sided relationship edges (A links B, B has no back-link). Surfaced for the
+ *  user to reconcile; never auto-repaired, since a corrupt half is ambiguous.
+ */
 function _renderRelationshipReview(problems){
   if(!problems.length) return '';
   const rows=problems.map(pr=>
     `<div class="text-[11px] text-amber-200 py-0.5">
-       <b>${(pr.other_name||pr.other).replace(/</g,'&lt;')}</b> —
+       <b>${(pr.other_name||pr.other).replace(/</g,'&lt;')}</b> -
        one-sided <b>${pr.line}</b> link (open the person in People to fix)</div>`).join('');
   return `<div class="mb-3 p-2 bg-amber-900/30 border border-amber-700 rounded">
       <div class="text-xs text-amber-300 font-bold mb-1">
-        Relationships linked on only one side · ${problems.length}</div>${rows}</div>`;
+        Relationships linked on only one side | ${problems.length}</div>${rows}</div>`;
 }
 
 function _reviewThumb(it, queue){
@@ -145,9 +146,10 @@ function _renderReviewGroup(g, items, total){
     </div>`;
 }
 
-// Open the modal scoped to one queue (delete/box/tag). Reuses the modal's
-// paging machinery but seeds it from the queue-filtered endpoint so the user
-// only steps through that bucket.
+/** @brief Open the modal scoped to one queue (delete/box/tag). Reuses the modal's
+ *  paging machinery but seeds it from the queue-filtered endpoint so the user
+ *  only steps through that bucket.
+ */
 async function openReviewQueue(queue){
   reviewQueueFilter=queue||'';
   reviewOffset=0;
@@ -166,7 +168,7 @@ let reviewItems=[], reviewIdx=0, reviewTotal=0, reviewOffset=0;
 let reviewQueueFilter='';
 const REVIEW_PAGE=500;
 
-// Counter cap that climbs 1k → 10k → 100k → 1M … so the badge never lies.
+/** @brief Counter cap that climbs 1k -> 10k -> 100k -> 1M ... so the badge never lies. */
 function _scaleCap(n){
   let cap=1000;
   while(n>cap) cap*=10;
@@ -197,7 +199,7 @@ function closeReview(){
      && typeof loadReviewPane==='function') keepScroll('review_pane_list', loadReviewPane);
 }
 
-// Pull the next page when the cursor nears the end of the loaded slice.
+/** @brief Pull the next page when the cursor nears the end of the loaded slice. */
 async function _maybePageReview(){
   if(reviewItems.length>=reviewTotal) return;
   if(reviewIdx < reviewItems.length-50) return;
@@ -224,7 +226,7 @@ async function showReviewItem(i){
   await loadReviewBoxes(it);
 }
 
-// ── in-place box review ──────────────────────────────────────────────────────
+// -- in-place box review ------------------------------------------------------
 // The review flow now renders through the SHARED media viewer (reviewViewer,
 // prefix 'rv_') instead of a bespoke <canvas id="review_canvas">. _rvRegions /
 // _rvDecisions stay the source of truth for the box-decision panel; we hand
@@ -250,8 +252,9 @@ async function loadReviewBoxes(it){
   renderReviewBoxPanel();
 }
 
-// Thin shim: keep the old name working for callers, delegating the draw to the
-// shared viewer (it reads _rvRegions/_rvDecisions we pushed in).
+/** @brief Thin shim: keep the old name working for callers, delegating the draw to the
+ *  shared viewer (it reads _rvRegions/_rvDecisions we pushed in).
+ */
 function drawReviewCanvas(){ reviewViewer.setRegions(_rvRegions, _rvDecisions); }
 
 function renderReviewBoxPanel(){
@@ -261,13 +264,13 @@ function renderReviewBoxPanel(){
   el.innerHTML=_rvRegions.map((r,idx)=>{
     const dec=_rvDecisions[idx];
     const badge=dec==='deny'?'✕ deny':dec==='accept'?'✓ accept':dec==='keep'?'kept':'pending';
-    const bcol=dec==='deny'?'text-red-400':dec==='accept'?'text-emerald-400':dec==='keep'?'text-blue-400':'text-amber-400';
+    const bcol=dec==='deny'?'text-red-400':dec==='accept'?'text-green-400':dec==='keep'?'text-blue-400':'text-amber-400';
     return `<div class="flex items-center gap-1 mb-1">
       <span class="text-[10px] w-4 text-gray-500">${idx+1}</span>
       <input value="${_esc(r.class_name||'')}" oninput="rvName(${idx},this.value)"
         class="text-[11px] bg-gray-900 border border-gray-700 rounded px-1 py-0.5 flex-1 min-w-0">
       <button onclick="rvDecide(${idx},'accept')" title="accept"
-        class="text-[11px] bg-emerald-800 hover:bg-emerald-700 px-1.5 rounded">✓</button>
+        class="text-[11px] bg-green-800 hover:bg-green-700 px-1.5 rounded">✓</button>
       <button onclick="rvDecide(${idx},'deny')" title="deny"
         class="text-[11px] bg-red-800 hover:bg-red-700 px-1.5 rounded">✕</button>
       <span class="text-[10px] ${bcol} w-12 text-right">${badge}</span>

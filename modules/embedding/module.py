@@ -1,5 +1,5 @@
-"""
-Embedding module — image embeddings, clustering, semantic search.
+"""! @file
+@brief Embedding module - image embeddings, clustering, semantic search.
 ======================================================================
 
 Provides whole-image embeddings (local CNN or OAI), clustering,

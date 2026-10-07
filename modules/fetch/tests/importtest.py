@@ -1,6 +1,7 @@
-"""Shared test helpers for importer fetchers (Immich, Google Takeout, Apple):
+"""! @file
+@brief Shared test helpers for importer fetchers (Immich, Google Takeout, Apple):
 drive a source's run the way the UI does, synchronously, through the real
-fetch job → ledger → upload queue → ingest → reconcile path."""
+fetch job -> ledger -> upload queue -> ingest -> reconcile path."""
 import pytest
 
 
@@ -30,7 +31,7 @@ def ledger(app, fetcher, name):
 
 @pytest.fixture
 def imports(app, client, tmp_path):
-    """An empty import folder, and a clean slate for fetch/import tables after."""
+    """! @brief An empty import folder, and a clean slate for fetch/import tables after."""
     root = tmp_path / "imports"; root.mkdir()
     old = app.state.get("import_root")
     app.state["import_root"] = str(root)

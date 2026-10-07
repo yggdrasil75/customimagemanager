@@ -1,11 +1,11 @@
-"""
-Audio dataset for HEARDU training.
+"""! @file
+@brief Audio dataset for HEARDU training.
 ======================================================================
 Source: the library's tracks (music module) plus dataset folders. Each
 track is decoded ONCE into a cache (models/dedup_train/audio/<sha1>.npz):
 the log-mel spectrogram (heardu.log_mel, float16) of the original AND of
 `VARIANTS` real transcodes made with ffmpeg (MP3 128k, Opus 48k, AAC 96k,
-a 22 kHz resample) — codec artefacts are real, not simulated. Epochs draw
+a 22 kHz resample) - codec artefacts are real, not simulated. Epochs draw
 pairs from the cache with fresh random parameters:
 
   duplicates (map = which 0.5 s step of a each step of b is)
@@ -56,7 +56,7 @@ def cache_dir(host):
 
 
 def cache_track(host, path, max_s=120.0, variants=VARIANTS):
-    """Decode (once) the original + transcoded variants to log-mel; .npz path or None."""
+    """! @brief Decode (once) the original + transcoded variants to log-mel; .npz path or None."""
     cp = os.path.join(cache_dir(host), hashlib.sha1(f"{path}|{max_s}|v1".encode()).hexdigest()[:16] + ".npz")
     if os.path.exists(cp):
         return cp
@@ -81,12 +81,12 @@ def cache_track(host, path, max_s=120.0, variants=VARIANTS):
 
 
 def load_track(cp):
-    """{variant: log-mel float32 [frames, N_MELS]}"""
+    """! @brief {variant: log-mel float32 [frames, N_MELS]}"""
     d = np.load(cp)
     return {k: d[k].astype(np.float32) for k in d.files}
 
 
-# ── log-mel domain transforms ────────────────────────────────────────────────
+# -- log-mel domain transforms ------------------------------------------------
 def _eq(m, rng):
     x = np.linspace(-1, 1, m.shape[1])
     tilt = float(rng.uniform(-6, 6)) * x
@@ -106,7 +106,7 @@ def _noise(m, rng):
 
 
 def dup_pair(a, variants, rng, kinds=DUP_KINDS, n_ops=None):
-    """a: log-mel window [F, M] of the original (frames [s0, s0+F) of track);
+    """! @brief a: log-mel window [F, M] of the original (frames [s0, s0+F) of track);
     variants: {name: full log-mel}; s0: a's start frame -> (b [F', M], map over STEPS, kind)."""
     frames, (mel, s0) = a, variants
     ops = list(rng.choice(kinds, size=min(len(kinds), int(n_ops or rng.integers(1, 4))), replace=False))
@@ -148,7 +148,7 @@ def _window(n, F, rng, avoid=None):
 
 
 def synth_pairs(tracks, rng, per_track=4, T=40):
-    """tracks: [{variant: log-mel}] -> [(a_steps, b_steps, map, kind)]; half duplicates.
+    """! @brief tracks: [{variant: log-mel}] -> [(a_steps, b_steps, map, kind)]; half duplicates.
     T = steps of 0.5 s per window (T=40 -> 20 s)."""
     F = heardu.WIN + (T - 1) * heardu.STEP
     pairs = []

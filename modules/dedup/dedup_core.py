@@ -1,5 +1,5 @@
-"""
-Dedup core logic — checkpoint, groups, exclusions, feedback.
+"""! @file
+@brief Dedup core logic - checkpoint, groups, exclusions, feedback.
 ======================================================================
 The dedup-specific state logic that used to sit in manager.py, moved into
 the dedup module. These operate on the dedup_* tables and are called by the
@@ -25,13 +25,13 @@ def _host():
     return HOST
 
 
-# ── checkpoint ───────────────────────────────────────────────────────────────
+# -- checkpoint ---------------------------------------------------------------
 def checkpoint_get():
     return HOST.db().execute("SELECT * FROM dedup_checkpoint WHERE id=1").fetchone()
 
 
 def checkpoint_set(file_count, hashed_count, stage, scorer=None):
-    """scorer: tag of the model whose verdicts the stored groups carry
+    """! @brief scorer: tag of the model whose verdicts the stored groups carry
     ("cnn:medium:<mtime>"), or "fallback:<tag>" when it did not answer."""
     db = HOST.db()
     db.execute("""
@@ -61,7 +61,7 @@ def is_stale(disk_count):
     return (disk_count - stored) / stored > 0.01
 
 
-# ── groups ───────────────────────────────────────────────────────────────────
+# -- groups -------------------------------------------------------------------
 def _pair(members, scores):
     if len(scores) == len(members):
         return list(zip(members, scores))
@@ -80,7 +80,7 @@ def save_groups(groups_by_kind):
 
 
 def append_groups(groups_by_kind):
-    """Add groups without clearing (streamed results during a scan)."""
+    """! @brief Add groups without clearing (streamed results during a scan)."""
     db = HOST.db()
     now = time.time()
     db.executemany(
@@ -91,7 +91,7 @@ def append_groups(groups_by_kind):
 
 
 def drop_pending():
-    """Remove the unverified perceptual candidates once scoring is done."""
+    """! @brief Remove the unverified perceptual candidates once scoring is done."""
     db = HOST.db()
     db.execute("DELETE FROM dedup_groups WHERE kind='pending'")
     db.commit()
@@ -113,13 +113,11 @@ def load_groups():
 
 
 def remove_file(rel_path):
-    """Prune a deleted/merged file from every stored group. Core's delete path
+    """! @brief Prune a deleted/merged file from every stored group. Core's delete path
     calls this via the dedup service."""
     db = HOST.db()
-    try:
-        db.execute("DELETE FROM dedup_media_sig WHERE rel_path=?", (rel_path,))
-    except Exception:
-        pass                                  # table predates this DB: nothing to prune
+    # A missing table (predates this DB) just reports failure: nothing to prune.
+    HOST.update_file(rel_path, table="dedup_media_sig", remove=True, dont_write=True, commit=False)
     rows = db.execute("SELECT id, members, scores FROM dedup_groups").fetchall()
     for row in rows:
         members = json.loads(row["members"])
@@ -136,7 +134,7 @@ def remove_file(rel_path):
     db.commit()
 
 
-# ── exclusions ───────────────────────────────────────────────────────────────
+# -- exclusions ---------------------------------------------------------------
 def excl_key(a, b):
     return (a, b) if a < b else (b, a)
 
@@ -159,13 +157,13 @@ def load_exclusion_set():
     return {(r["a"], r["b"]) for r in rows}
 
 
-# ── verdict cache ────────────────────────────────────────────────────────────
+# -- verdict cache ------------------------------------------------------------
 def verdict_key(sha_a, sha_b):
     return (sha_a, sha_b) if sha_a <= sha_b else (sha_b, sha_a)
 
 
 def verdicts_get(model, keys):
-    """{(a,b): prob} for the given normalised sha pairs the cache knows."""
+    """! @brief {(a,b): prob} for the given normalised sha pairs the cache knows."""
     out = {}
     keys = list(keys)
     db = HOST.db()
@@ -179,7 +177,7 @@ def verdicts_get(model, keys):
 
 
 def verdicts_put(model, items):
-    """items: iterable of ((a, b), prob)."""
+    """! @brief items: iterable of ((a, b), prob)."""
     db = HOST.db()
     db.executemany("INSERT OR REPLACE INTO dedup_verdicts(model, a, b, prob) VALUES (?,?,?,?)",
                    [(model, k[0], k[1], float(p)) for k, p in items])
@@ -192,7 +190,7 @@ def verdicts_clear():
     db.commit()
 
 
-# ── feedback samples (routed to the scorer modules' sample tables) ───────────
+# -- feedback samples (routed to the scorer modules' sample tables) -----------
 def record_sample(img_a, img_b, label):
     host = HOST
     try:
@@ -248,9 +246,9 @@ def retrain(min_samples=8):
         HOST.logger.error(f"dedup retrain: {e}")
     return ok_h
 
-# ── temporal / audio signatures (dedup_media_sig) ────────────────────────────
+# -- temporal / audio signatures (dedup_media_sig) ----------------------------
 def sigs_get(paths=None):
-    """{rel_path: row} of stored signatures (all, or just `paths`)."""
+    """! @brief {rel_path: row} of stored signatures (all, or just `paths`)."""
     db = HOST.db()
     if paths is None:
         return {r["rel_path"]: r for r in db.execute("SELECT * FROM dedup_media_sig").fetchall()}
@@ -263,21 +261,21 @@ def sigs_get(paths=None):
 
 
 def sigs_put(rows):
-    """rows: iterable of (rel_path, mtime, kind, n_src, duration, sha256, sig_blob)."""
+    """! @brief rows: iterable of (rel_path, mtime, kind, n_src, duration, sha256, sig_blob)."""
     db = HOST.db()
-    db.executemany("INSERT OR REPLACE INTO dedup_media_sig(rel_path,mtime,kind,n_src,duration,sha256,sig) "
-                   "VALUES(?,?,?,?,?,?,?)", list(rows))
+    for rel, mtime, kind, n_src, duration, sha, sig in rows:
+        HOST.update_file(rel, table="dedup_media_sig", dont_write=True, commit=False,
+                         set={"mtime": mtime, "kind": kind, "n_src": n_src, "duration": duration,
+                              "sha256": sha, "sig": sig})
     db.commit()
 
 
 def sigs_drop(rel_path):
-    db = HOST.db()
-    db.execute("DELETE FROM dedup_media_sig WHERE rel_path=?", (rel_path,))
-    db.commit()
+    HOST.update_file(rel_path, table="dedup_media_sig", remove=True, dont_write=True)
 
 
 def record_seq_sample(rel_a, rel_b, label):
-    """Merge / not-a-duplicate on two videos or two tracks -> the HEURDUV /
+    """! @brief Merge / not-a-duplicate on two videos or two tracks -> the HEURDUV /
     HEARDU module's sample table (whichever handles the pair's kind)."""
     host = HOST
     try:

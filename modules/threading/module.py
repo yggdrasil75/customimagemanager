@@ -1,5 +1,5 @@
-"""
-Thread Manager module — registration side of modules/threading.
+"""! @file
+@brief Thread Manager module - registration side of modules/threading.
 ======================================================================
 The core still constructs the ThreadManager itself (manager.py imports it
 first, before any plugin loads); this register(host) is where the module

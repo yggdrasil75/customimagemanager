@@ -1,4 +1,5 @@
-"""datasets: target parsing, archive + parquet normalisation, labels.csv, and
+"""! @file
+@brief datasets: target parsing, archive + parquet normalisation, labels.csv, and
 the fetcher end to end against a local HTTP server (no network).
     python -m pytest -q modules/datasets/tests/test_datasets.py
 """
@@ -111,6 +112,7 @@ def test_fetcher_end_to_end(tmp_path, monkeypatch):
         host = types.SimpleNamespace(
             config={"dedup_train_folders": "/old"}, media_dir=str(media),
             logger=logging.getLogger("t"), save_config=lambda: None,
+            set_status=lambda t: None, set_config=lambda k, v, save=True: host.config.__setitem__(k, v),
             get_service=lambda n: types.SimpleNamespace(register=lambda f: reg.update(f)),
             add_config_key=lambda *a, **k: None, add_settings_field=lambda **k: None,
             add_settings_tab=lambda *a, **k: None, add_asset=lambda *a: None, add_route=lambda *a, **k: None)

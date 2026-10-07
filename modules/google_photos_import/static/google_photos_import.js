@@ -1,4 +1,4 @@
-/* Google Photos import (Takeout) — settings tab. Shared UI: fetch_importers.js. */
+/* Google Photos import (Takeout) - settings tab. Shared UI: fetch_importers.js. */
 (function () {
   if (!window.ImportKit) return;
   ImportKit.mount({

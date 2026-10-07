@@ -2,12 +2,12 @@
  *
  * Owns the embedding ACTIONS and buttons. The small display primitives
  * (refreshEmbedStatus) stay in core and just render whatever embedding data
- * the backend provides — they no-op when the module is off. This file provides:
+ * the backend provides - they no-op when the module is off. This file provides:
  *   - window.embedLibrary: the write called by the core embed button;
  *   - bulkEmbed: embed the current selection (gallery bulk bar);
  *   - injected buttons in the gallery bulk area and the review pane. */
 (function () {
-  // ── Embedding status display ────────────────────────────────────────────────
+  // -- Embedding status display ------------------------------------------------
   let _embedBusy = false;
 
   async function refreshEmbedStatus() {
@@ -16,23 +16,23 @@
       const badge = document.getElementById('embed_backend_badge');
       if (badge) {
         badge.textContent = `${d.provider || '?'}: ${d.space || ''}` +
-          (d.text_search ? ' · text search' : ' (no text search)') +
-          ` · ${d.total || 0}/${d.images || 0} embedded` +
-          (d.background ? ' · background on' : '');
+          (d.text_search ? ' | text search' : ' (no text search)') +
+          ` | ${d.total || 0}/${d.images || 0} embedded` +
+          (d.background ? ' | background on' : '');
         badge.title = (d.note ? d.note + ' ' : '') +
           'Library embedding runs in the background: Settings → Models → Embeddings → Run in background.';
       }
     } catch (e) {}
   }
 
-  // Embed the current selection.
+  /** @brief Embed the current selection. */
   async function bulkEmbed() {
     const files = [...(selectedFiles || [])];
     if (!files.length) return;
     const btn = document.querySelector('.embedding-bulk-btn');
     const orig = btn ? btn.innerHTML : "";
-    if (btn) { btn.disabled = true; btn.innerHTML = '🧬 …'; }
-    showToast(`Embedding ${files.length} image(s)…`);
+    if (btn) { btn.disabled = true; btn.innerHTML = 'Embedding...'; }
+    showToast(`Embedding ${files.length} image(s)...`);
     try {
       const d = await fetch('/api/embedding/bulk', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -40,8 +40,8 @@
       }).then(r => r.json());
       if (!d.success) { alert('Embed failed: ' + (d.error || '')); }
       else {
-        const ts = d.text_search ? ' · text search enabled' : '';
-        showToast(`Embeddings (${d.backend}) — ${d.embedded_now} new, ${d.total_embeddings} total${ts}.` +
+        const ts = d.text_search ? ' | text search enabled' : '';
+        showToast(`Embeddings (${d.backend}) - ${d.embedded_now} new, ${d.total_embeddings} total${ts}.` +
                   (d.note ? ' ' + d.note : ''));
         if (window.currentFile && files.includes(window.currentFile)) selectFile(window.currentFile);
         loadGallery(); refreshReviewCount();
@@ -51,9 +51,10 @@
   }
   window.bulkEmbed = bulkEmbed;
 
-  // The editor's "Similar" button: rank the library against the current file.
-  // The backend dispatches on media kind (image/video → image space, audio →
-  // the music module's audio space); the grid shows what comes back.
+  /** @brief The editor's "Similar" button: rank the library against the current file.
+   *  The backend dispatches on media kind (image/video -> image space, audio ->
+   *  the music module's audio space); the grid shows what comes back.
+   */
   async function findSimilarToCurrent(topK) {
     const fn = window.currentFile;
     if (!fn) { showToast('Select a file first.'); return; }
@@ -73,24 +74,23 @@
     if (typeof totalFiles !== 'undefined') totalFiles = files.length;
     renderGallery(files);
     if (typeof updatePager === 'function') updatePager();
-    showToast(files.length ? `${files.length} similar item(s) — best first.` : 'No similar items.');
+    showToast(files.length ? `${files.length} similar item(s) - best first.` : 'No similar items.');
   }
   window.findSimilarToCurrent = findSimilarToCurrent;
 
   // Export for use by review.js
   window.EmbeddingUI = { refreshEmbedStatus };
 
-  // Inject buttons into the general extension areas.
+  /** @brief Inject buttons into the general extension areas. */
   function buildButtons() {
     if (!window.registerControlButton) return;
     // Per-image embed button in the AI tools area (optional, for future use)
     // registerControlButton("ai_tools", ...);
 
     // Gallery bulk actions: "Embed selected" button
-    registerControlButton("gallery_bulk",
-      '<button onclick="bulkEmbed()" data-feature="ai.embedding" ' +
-      'title="Generate/regenerate embeddings for every selected image (OAI endpoint if configured, else local)" ' +
-      'class="embedding-bulk-btn text-xs bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded font-bold">🧬 Embed selected</button>');
+    registerControlButton("gallery_bulk", {label: "Embed selected", onclick: "bulkEmbed()", feature: "ai.embedding",
+      variant: "secondary", cls: "embedding-bulk-btn",
+      title: "Generate/regenerate embeddings for every selected image (OAI endpoint if configured, else local)"});
   }
   if (document.readyState === "loading")
     window.addEventListener("DOMContentLoaded", buildButtons);

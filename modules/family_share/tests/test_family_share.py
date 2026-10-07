@@ -1,4 +1,5 @@
-"""family_share: rules decide per (file, peer); inbound is peer-key gated and
+"""! @file
+@brief family_share: rules decide per (file, peer); inbound is peer-key gated and
 lands under the incoming folder; outbound goes through the worker; revoke
 removes the copy on the other side."""
 import io, json, os, sqlite3, time
@@ -12,7 +13,7 @@ from modules.family_share import crypto as fc
 MOD = "family_share"
 
 
-# ── pure rule logic (no app) ──────────────────────────────────────────────
+# -- pure rule logic (no app) ----------------------------------------------
 def _mem_db():
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
@@ -127,7 +128,7 @@ def test_norm_rule_validation():
     assert sc.norm_rule({"mode": "share", "kind": "folder", "value": "/a/b/", "peers": [2, 1]})["value"] == "a/b"
 
 
-# ── crypto (no app) ───────────────────────────────────────────────────────
+# -- crypto (no app) -------------------------------------------------------
 def test_seal_open_roundtrip(tmp_path):
     a, b = fc.generate_private_key(), fc.generate_private_key()
     src = tmp_path / "in.bin"; src.write_bytes(os.urandom(fc.CHUNK * 2 + 12345))
@@ -188,10 +189,10 @@ def test_pairing_code_roundtrip():
         fc.parse_pairing_code("nope")
 
 
-# ── app integration ───────────────────────────────────────────────────────
+# -- app integration -------------------------------------------------------
 @pytest.fixture(autouse=True)
 def _no_network_polls(monkeypatch):
-    """The worker polls every peer with a URL for mailbox items; tests have no
+    """! @brief The worker polls every peer with a URL for mailbox items; tests have no
     network, so by default every mailbox is empty."""
     monkeypatch.setattr(pc, "mailbox_list", lambda *a, **k: [])
 
@@ -204,7 +205,7 @@ def _j(client, url, body=None, **kw):
 
 @pytest.fixture
 def peer(client, app):
-    """A peer row ("sister") paired both ways: we pin her public key, and the
+    """! @brief A peer row ("sister") paired both ways: we pin her public key, and the
     fixture hands back her private key + headers so a test can act as her."""
     sister_priv = fc.generate_private_key()
     j = _j(client, "/api/family_share/peers/save", {"name": "sister", "url": "http://sister.test:5000",
@@ -221,7 +222,7 @@ def peer(client, app):
 
 
 def _sealed(peer, inner, file_bytes=None, tmp=None):
-    """Build the multipart form sister would send: envelope + sealed metadata (+ sealed file)."""
+    """! @brief Build the multipart form sister would send: envelope + sealed metadata (+ sealed file)."""
     sealer = fc.Sealer(peer["priv"], peer["my_pub"])
     inner = {"ts": time.time(), "to": peer["my_id"], **inner}
     data = {"env": json.dumps(sealer.header), "meta": sealer.seal_meta(inner)}
@@ -256,7 +257,7 @@ def test_state_and_rule_api(client, peer, upload):
 
 
 def test_pairing_code_carries_row_name_and_outbound_uses_it(client, app, peer, monkeypatch):
-    """Sister's row here is 'sister'; her instance has ME under 'kiddo'. Her pairing
+    """! @brief Sister's row here is 'sister'; her instance has ME under 'kiddo'. Her pairing
     code says so, and every request to her must present 'kiddo', not my global name."""
     her_code = fc.make_pairing_code("sister", "http://sister.test:5000", fc.public_key(peer["priv"]), "sisters-secret",
                                     "sis-id", peer_name="kiddo")
@@ -358,7 +359,7 @@ def test_inbound_declined_after_local_delete(client, app, peer, tmp_path):
 
 
 def test_outbound_refuses_unpinned_peer(client, app, peer, upload, monkeypatch):
-    """No public key pinned for a peer -> nothing leaves, ever."""
+    """! @brief No public key pinned for a peer -> nothing leaves, ever."""
     sent = []
     monkeypatch.setattr(pc.requests, "post", lambda *a, **k: sent.append(1))
     pid = _j(client, "/api/family_share/peers/save", {"name": "unpaired", "url": "http://u:1", "key_out": "k"})["id"]
@@ -375,7 +376,7 @@ def test_outbound_refuses_unpinned_peer(client, app, peer, upload, monkeypatch):
 
 
 def test_outbound_wire_is_ciphertext(client, app, peer, upload, monkeypatch, tmp_path):
-    """Capture the real HTTP body the worker builds and confirm nothing readable is in it,
+    """! @brief Capture the real HTTP body the worker builds and confirm nothing readable is in it,
     then open it with sister's private key to confirm she can."""
     captured = {}
     class R:
@@ -479,7 +480,7 @@ def test_delete_revokes(client, app, peer, upload, monkeypatch):
     _j(client, "/api/family_share/rules/delete", {"id": rid})
 
 
-# ── phone (device peer): sealed reads + own-photo semantics ───────────────
+# -- phone (device peer): sealed reads + own-photo semantics ---------------
 @pytest.fixture
 def phone(client, app):
     priv = fc.generate_private_key()
@@ -558,9 +559,9 @@ def test_device_sealed_timeline_thumb_media(client, app, phone, upload):
     assert client.get("/api/family_share/inbound/thumb?p=../etc/passwd", headers=phone["headers"]).status_code == 404
 
 
-# ── gateway: relay through a hub, mailbox pickup ──────────────────────────
+# -- gateway: relay through a hub, mailbox pickup --------------------------
 def _keypeer(client, name, url="", **extra):
-    """A peer row on THIS instance backed by a real key pair the test holds."""
+    """! @brief A peer row on THIS instance backed by a real key pair the test holds."""
     priv = fc.generate_private_key()
     pid = _j(client, "/api/family_share/peers/save", {"name": name, "url": url, "pub_key": fc.public_key(priv),
                                                        "key_out": name + "-secret", **extra})["id"]
@@ -572,7 +573,7 @@ def _keypeer(client, name, url="", **extra):
 
 @pytest.fixture
 def hub_pair(client, app):
-    """This app acts as the hub; 'sis' and 'cuz' are two peers with no URL."""
+    """! @brief This app acts as the hub; 'sis' and 'cuz' are two peers with no URL."""
     app.state["family_share_relay"] = True
     a = _keypeer(client, "sis", route="mailbox")
     b = _keypeer(client, "cuz", route="mailbox")
@@ -642,7 +643,7 @@ def test_relay_refused_when_off_or_unknown_recipient(client, app, hub_pair):
 
 
 def test_outbound_mailbox_route_for_peer_without_url(client, app, hub_pair, upload):
-    """This instance has the URL; 'cuz' doesn't: pushes wait in our mailbox for cuz to poll."""
+    """! @brief This instance has the URL; 'cuz' doesn't: pushes wait in our mailbox for cuz to poll."""
     sis, cuz = hub_pair
     fn = upload(seed=921); write_meta(client, fn, tags=["family"], desc="for cuz")
     rid = _j(client, "/api/family_share/rules/save", {"mode": "share", "kind": "tag", "value": "family", "peers": [cuz["id"]]})["id"]
@@ -663,7 +664,7 @@ def test_outbound_mailbox_route_for_peer_without_url(client, app, hub_pair, uplo
 
 
 def test_poller_applies_relayed_item_once(client, app, hub_pair, peer, tmp_path, monkeypatch):
-    """This instance polls 'sister' (a hub with a URL) and finds an item that
+    """! @brief This instance polls 'sister' (a hub with a URL) and finds an item that
     'cuz' sealed to us. It is ingested once; a replay and a stale item are not."""
     sis, cuz = hub_pair
     me = {"pub_key": cuz["my_pub"], "instance_id": cuz["my_id"]}          # this instance, as cuz sees it
@@ -695,7 +696,7 @@ def test_poller_applies_relayed_item_once(client, app, hub_pair, peer, tmp_path,
 
 
 def test_same_name_different_photo_is_not_a_duplicate(client, app, phone, tmp_path):
-    """Two different photos with the same filename must both land."""
+    """! @brief Two different photos with the same filename must both land."""
     got = []
     for seed, sha in ((927, "n1"), (928, "n2")):
         r = client.post("/api/family_share/inbound/push", headers=phone["headers"], content_type="multipart/form-data",
@@ -720,7 +721,7 @@ def test_content_hash_mismatch_rejected(client, app, peer, tmp_path):
 
 
 def test_device_reupload_replaces_redacted_copy(client, app, phone, tmp_path):
-    """The app re-sends an original it had uploaded redacted: the new copy
+    """! @brief The app re-sends an original it had uploaded redacted: the new copy
     takes over the old one's tags/albums, and the old copy is removed."""
     import hashlib
     old_bytes, new_bytes = png_bytes(seed=925), png_bytes(seed=926)

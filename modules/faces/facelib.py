@@ -1,5 +1,5 @@
-"""
-faces.py
+"""! @file
+@brief faces.py
 ========
 Face detection, identity embedding, and cross-image clustering.
 
@@ -8,7 +8,7 @@ DESIGN
 Detection  : a YOLO face model from ./models (community weights, auto-fetched).
 Embedding  : insightface (ArcFace-family recognition head) when available.
              Falls back to object_grouping's CNN/cv2 embedder, which clusters by
-             *appearance* rather than *identity* — noticeably weaker, so we mark
+             *appearance* rather than *identity* - noticeably weaker, so we mark
              the degraded mode in the cluster payload so the UI can say so.
 Clustering : reuses object_grouping.group_embeddings_streaming (HNSW + greedy
              fallback). No second clustering implementation.
@@ -67,15 +67,15 @@ _lock = threading.Lock()
 # reported "all caught up" over an empty table.
 _face_model_error = {"v": ""}
 
-# ── model discovery ───────────────────────────────────────────────────────────
+# -- model discovery -----------------------------------------------------------
 def ensure_models_dir():
     os.makedirs(MODELS_DIR, exist_ok=True)
     return MODELS_DIR
 
 def list_models():
-    """Every selectable detector, grouped by origin.
+    """! @brief Every selectable detector, grouped by origin.
 
-    common : stock COCO YOLO (person class) — auto-downloaded by ultralytics
+    common : stock COCO YOLO (person class) - auto-downloaded by ultralytics
     face   : face detectors in ./models
     custom : anything else the user dropped in ./models
     trained: our own models/ours/**/*.pt (filled in by manager)
@@ -92,12 +92,12 @@ def list_models():
     return out
 
 def face_model_error():
-    """Last download failure, for the UI to surface. '' when healthy."""
+    """! @brief Last download failure, for the UI to surface. '' when healthy."""
     return _face_model_error["v"]
 
 def device_desc():
-    """Short description of the inference device, for logs. Uses the registry's
-    existing GPU state rather than importing torch — a CPU fallback is the usual
+    """! @brief Short description of the inference device, for logs. Uses the registry's
+    existing GPU state rather than importing torch - a CPU fallback is the usual
     reason a scan crawls, so it's worth stating plainly."""
     try:
         return model_registry.backend_reason()
@@ -105,8 +105,8 @@ def device_desc():
         return f"unknown ({e})"
 
 def ensure_face_detector(detector_id=None):
-    """Return a path to the selected face DETECTOR, downloading a built-in on first
-    use. Returns '' when unavailable (offline / bad id) — caller falls back.
+    """! @brief Return a path to the selected face DETECTOR, downloading a built-in on first
+    use. Returns '' when unavailable (offline / bad id) - caller falls back.
 
     Resolution goes through face_models: a custom/discovered file is used from disk;
     a built-in is fetched by its bare name from the akanametov release into
@@ -155,7 +155,7 @@ def ensure_face_detector(detector_id=None):
 DRAWN_THRESH = 0.55
 
 def _crop_box(img_bgr, b):
-    """Pixel crop for a normalised center-form box, clamped to the frame."""
+    """! @brief Pixel crop for a normalised center-form box, clamped to the frame."""
     H, W = img_bgr.shape[:2]
     x1 = int(max(0, (b["cx"] - b["w"] / 2) * W))
     y1 = int(max(0, (b["cy"] - b["h"] / 2) * H))
@@ -166,7 +166,7 @@ def _crop_box(img_bgr, b):
     return img_bgr[y1:y2, x1:x2]
 
 def drawn_score(img_bgr, box):
-    """Estimate how illustration-like one face crop is, in 0..1 (higher = drawn).
+    """! @brief Estimate how illustration-like one face crop is, in 0..1 (higher = drawn).
 
     Blends three cheap, medium-revealing statistics of the crop:
       palette    : fraction of the 4-bit-per-channel color cube actually used.
@@ -222,22 +222,22 @@ def drawn_score(img_bgr, box):
         return 0.0
 
 def is_drawn(img_bgr, box, thresh=None):
-    """True when a face crop is illustration-like enough to keep out of the people
+    """! @brief True when a face crop is illustration-like enough to keep out of the people
     pipeline. `thresh` overrides DRAWN_THRESH (caller passes the setting)."""
     t = DRAWN_THRESH if thresh is None else float(thresh)
     if t >= 1.0:
         return False          # rejection disabled
     return drawn_score(img_bgr, box) >= t
 
-# ── identity embedding ────────────────────────────────────────────────────────
+# -- identity embedding --------------------------------------------------------
 # Which insightface pack the recognition head uses. buffalo_l is the default and
 # what every existing embedding was built with; manager sets this from the
 # face_recognition setting. Changing it invalidates cached embeddings (different
-# training), so the caller triggers a rescan — we just build whatever is set.
+# training), so the caller triggers a rescan - we just build whatever is set.
 _recog_model = {"v": facemodels.INSIGHT_DEFAULT}
 
 def set_recognition_model(model_id):
-    """Set the insightface pack name and drop any loaded app so the next embed call
+    """! @brief Set the insightface pack name and drop any loaded app so the next embed call
     rebuilds with the new pack. No-op if unchanged."""
     new = facemodels.resolve_recognition_id(model_id)
     if new == _recog_model["v"]:
@@ -252,12 +252,12 @@ def recognition_model():
     return _recog_model["v"]
 
 def _insight_providers():
-    """ONNX providers for insightface specifically.
+    """! @brief ONNX providers for insightface specifically.
     """
     return model_registry.onnx_providers()
 
 def _flatten_pack(name):
-    """insightface extracts antelopev2.zip into models/antelopev2/antelopev2/,
+    """! @brief insightface extracts antelopev2.zip into models/antelopev2/antelopev2/,
     a nesting FaceAnalysis doesn't look into, so the pack downloads fine and
     then loads nothing. Move the .onnx files up one level when that happened."""
     top = os.path.join(INSIGHT_DIR, "models", name)
@@ -269,7 +269,7 @@ def _flatten_pack(name):
 
 
 def _build_insight():
-    """Construct insightface's FaceAnalysis app, or None on any failure (the
+    """! @brief Construct insightface's FaceAnalysis app, or None on any failure (the
     reason lands in face_model_error() instead of being swallowed)."""
     if not _HAVE_INSIGHT_APP:
         _face_model_error["v"] = "insightface not installed"
@@ -303,7 +303,7 @@ model_registry.register("faces:insight", _build_insight,
                            cost_mb=1100, gpu=og.has_gpu())
 
 def _load_insight():
-    """Lazily bring up insightface via the central registry (load-on-demand, so
+    """! @brief Lazily bring up insightface via the central registry (load-on-demand, so
     it's evicted when other models need the memory). Cheap after first call."""
     return model_registry.acquire("faces:insight")
 
@@ -320,7 +320,7 @@ def have_identity_embedder():
 _as_bgr = og.as_bgr   # shared coercion (object_grouping)
 
 def _iou(a, b):
-    """IoU between two normalised center-form boxes."""
+    """! @brief IoU between two normalised center-form boxes."""
     ax1, ay1 = a["cx"] - a["w"] / 2, a["cy"] - a["h"] / 2
     ax2, ay2 = a["cx"] + a["w"] / 2, a["cy"] + a["h"] / 2
     bx1, by1 = b["cx"] - b["w"] / 2, b["cy"] - b["h"] / 2
@@ -332,7 +332,7 @@ def _iou(a, b):
     return inter / union if union > 0 else 0.0
 
 def face_shape(f):
-    """106 2-D landmarks aligned to a canonical frame (eye midpoint at origin,
+    """! @brief 106 2-D landmarks aligned to a canonical frame (eye midpoint at origin,
     unit inter-ocular distance, eye line horizontal) + head pose (pitch,yaw,roll).
     Pure facial geometry, deliberately NOT identity-invariant. 215 floats, or None."""
     lm = getattr(f, "landmark_2d_106", None)
@@ -354,7 +354,7 @@ def face_shape(f):
 FACE_SHAPE_DIM = 215
 
 def embed_faces(img_bgr, boxes, want_shape=False):
-    """Embed each face crop. `boxes` are normalised center-form dicts.
+    """! @brief Embed each face crop. `boxes` are normalised center-form dicts.
 
     Returns (vectors, mode), or (vectors, mode, shapes) with want_shape (shapes
     from face_shape(), one per box, None where unmatched). Vectors are
@@ -423,7 +423,7 @@ def embed_faces(img_bgr, boxes, want_shape=False):
 
 
 def embed_faces_appearance(img_bgr, boxes, want_shape=False):
-    """Appearance-only face vectors (cv2 colour/shape) — the degraded path when
+    """! @brief Appearance-only face vectors (cv2 colour/shape) - the degraded path when
     no ArcFace pack loads, and the 'appearance' embed.faces provider. Clusters
     WILL split the same person across pose/lighting; the UI surfaces this."""
     def _ret(vecs, mode, shapes=None):
@@ -445,9 +445,9 @@ def embed_faces_appearance(img_bgr, boxes, want_shape=False):
         return _ret([], "none")
 
 
-# ── clustering ────────────────────────────────────────────────────────────────
+# -- clustering ----------------------------------------------------------------
 def cluster(vectors, mode="arcface", min_cluster=2, eps=None):
-    """Cluster face vectors -> label per vector (-1 = noise/singleton)."""
+    """! @brief Cluster face vectors -> label per vector (-1 = noise/singleton)."""
     keep = [(i, v) for i, v in enumerate(vectors) if v is not None]
     if len(keep) < min_cluster:
         return [-1] * len(vectors)
@@ -471,7 +471,7 @@ def cluster(vectors, mode="arcface", min_cluster=2, eps=None):
     labels = None
     # object_grouping's KD-tree fallback degrades badly on 512-d face vectors
     # (its PCA reduction only engages above 1000 points, and its DBSCAN branch is
-    # gated to <=30 dims) — so for modest N do the exact cosine union-find here.
+    # gated to <=30 dims) - so for modest N do the exact cosine union-find here.
     # Above that, hand off to the scalable HNSW path.
     if len(X) <= SMALL_N or not getattr(og, "_HAVE_HNSW", False):
         labels = _cosine_union_find(X, eps, min_cluster)
@@ -492,7 +492,7 @@ def cluster(vectors, mode="arcface", min_cluster=2, eps=None):
 
 SMALL_N = 20000   # exact O(n^2) cosine is fine (and better) below this
 def _cosine_union_find(X, eps, min_cluster):
-    """Exact cosine-radius union-find on unit vectors. Chunked so it never
+    """! @brief Exact cosine-radius union-find on unit vectors. Chunked so it never
     allocates a full n x n matrix."""
     n = len(X)
     parent = list(range(n))

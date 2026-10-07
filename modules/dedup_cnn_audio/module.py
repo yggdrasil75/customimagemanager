@@ -1,5 +1,5 @@
-"""
-HEARDU — learned audio duplicate scorer (dedup_cnn_audio).
+"""! @file
+@brief HEARDU - learned audio duplicate scorer (dedup_cnn_audio).
 ======================================================================
 Scores pairs of kind "audio" (the music module's tracks) with the HEARDU
 sequence model (heardu.py): a FLAC and the MP3 made from it, a 96k
@@ -36,7 +36,7 @@ HF_SIZES = ["nano", "small", "medium", "large"]
 
 
 def _map(sa, sb, abs_a, abs_b):
-    """Step map for a merged pair: the fingerprint offset, as a step shift."""
+    """! @brief Step map for a merged pair: the fingerprint offset, as a step shift."""
     ga, gb = media_sig.compute_audio_sig(abs_a), media_sig.compute_audio_sig(abs_b)
     off = media_sig.audio_offset(ga["fp"], gb["fp"]) if ga and gb else 0
     shift = int(round((off or 0) * media_sig.AUDIO_HOP / media_sig.AUDIO_SR / (heardu.STEP * heardu.HOP / heardu.SR)))

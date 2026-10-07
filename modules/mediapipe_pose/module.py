@@ -1,5 +1,5 @@
-"""
-MediaPipe pose provider (BlazePose 33 / Holistic 543).
+"""! @file
+@brief MediaPipe pose provider (BlazePose 33 / Holistic 543).
 ======================================================================
 Registers Google MediaPipe's Tasks landmarkers as 'pose' providers:
 
@@ -53,7 +53,7 @@ def _mp_image(crop_bgr):
 
 
 def _lm(landmarks, n):
-    """[(x, y, v)] from a NormalizedLandmark list, padded to n when missing."""
+    """! @brief [(x, y, v)] from a NormalizedLandmark list, padded to n when missing."""
     out = [(l.x, l.y, l.visibility if l.visibility is not None else
             (l.presence if l.presence is not None else 1.0)) for l in (landmarks or [])]
     return out + [(0.0, 0.0, 0.0)] * (n - len(out))
@@ -113,7 +113,7 @@ def _load(kind, size):
     return model_registry.acquire(key)
 
 
-# ── MediaPipe -> COCO conversion (this provider's business, nobody else's) ──
+# -- MediaPipe -> COCO conversion (this provider's business, nobody else's) --
 # BlazePose-33 index for each COCO-17 point.
 BLAZE_TO_COCO17 = [0, 2, 5, 7, 8, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]
 # COCO-WholeBody feet (l_big_toe, l_small_toe, l_heel, r_big_toe, r_small_toe,
@@ -131,7 +131,7 @@ _HOL_FACE, _HOL_LHAND, _HOL_RHAND = 33, 501, 522
 
 
 def to_coco(keypoints):
-    """33 (BlazePose) -> 17 COCO; 543 (Holistic) -> 133 COCO-WholeBody; other
+    """! @brief 33 (BlazePose) -> 17 COCO; 543 (Holistic) -> 133 COCO-WholeBody; other
     counts (already converted, or empty) pass through. Same {x,y,v} dicts."""
     n = len(keypoints)
     if n == 33:
@@ -188,7 +188,7 @@ def register(host):
     host.provide_model(
         "pose", "mp_blazepose", label="BlazePose", family="MediaPipe",
         sizes=["lite", "full", "heavy"],
-        types=[{"value": "blazepose", "label": "BlazePose · 33 pts (17 when downsampled)"}],
+        types=[{"value": "blazepose", "label": "BlazePose | 33 pts (17 when downsampled)"}],
         note="Google BlazePose landmarker: 33 body points incl. face outline, hands and feet. "
              "Runs on CPU; per-person crops when a person detector is picked.",
         speed="fast",
@@ -200,7 +200,7 @@ def register(host):
 
     host.provide_model(
         "pose", "mp_holistic", label="Holistic", family="MediaPipe", sizes=[],
-        types=[{"value": "holistic", "label": "Holistic · 543 (133 whole-body when downsampled)"}],
+        types=[{"value": "holistic", "label": "Holistic | 543 (133 whole-body when downsampled)"}],
         note="MediaPipe Holistic: BlazePose 33 + 468-point face mesh + two 21-point hands.",
         speed="balanced",
         loader=lambda: (lambda img, *a, **k: _people(img, "holistic", "", _persons())),

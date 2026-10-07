@@ -1,4 +1,5 @@
-"""Tier objects know their home through XMP: a file's sidecar carries
+"""! @file
+@brief Tier objects know their home through XMP: a file's sidecar carries
 xmpMM:DocumentID, the object is stored under that id, a lost symlink is
 relinked at the sidecar's path, the object store is never indexed as library
 content, and GC never eats an object whose sidecar still exists."""
@@ -29,12 +30,12 @@ def test_object_store_restore(app, client, upload, tmp_path):
                                             "description": "", "regions": []})
         assert app._document_id(xmp) == doc_id
 
-        # lose the symlink (a rebuilt media dir): the object is an orphan …
+        # lose the symlink (a rebuilt media dir): the object is an orphan ...
         os.remove(link)
-        # … GC leaves it alone, even when old enough to collect …
+        # ... GC leaves it alone, even when old enough to collect ...
         os.utime(obj, (time.time() - 7200, time.time() - 7200))
         assert tiering.gc_orphans() == 0 and os.path.exists(obj)
-        # … and restore puts the link back where the sidecar is.
+        # ... and restore puts the link back where the sidecar is.
         assert tiering.restore_orphans() == [fn]
         assert os.path.islink(link) and os.path.realpath(link) == obj
         assert tiering.restore_orphans() == []           # idempotent

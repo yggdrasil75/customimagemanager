@@ -1,4 +1,5 @@
-"""gallery-dl integration — uses the gallery-dl *library* directly.
+"""! @file
+@brief gallery-dl integration - uses the gallery-dl *library* directly.
 
 gallery-dl is a Python package, so we import it and drive its Job classes
 in-process rather than shelling out to a `gallery-dl` binary and parsing stdout.
@@ -26,7 +27,7 @@ each call we clear it and load nothing, so the user's own
 ~/.config/gallery-dl/config.json can't narrow the metadata we collect (a
 `metadata.include`/`fields`/`exclude` there would silently trim fields and break
 discovery). Anything a site genuinely needs to auth (API key, cookies) is passed
-explicitly by the caller via `opts` — a list of "path.key=value" strings applied
+explicitly by the caller via `opts` - a list of "path.key=value" strings applied
 for the duration of the call and then restored. Because that config is global, a
 module lock serialises gdl calls so concurrent requests don't clobber each
 other's settings.
@@ -69,7 +70,7 @@ _site_locks = {}
 _site_locks_guard = threading.Lock()
 
 def _lock_for_site(site):
-    """Return the (shared) lock for a site, creating it on first use."""
+    """! @brief Return the (shared) lock for a site, creating it on first use."""
     key = site or ""
     with _site_locks_guard:
         lk = _site_locks.get(key)
@@ -85,13 +86,13 @@ class GdlError(RuntimeError):
     pass
 
 def available():
-    """True if the gallery-dl library is importable. This module now imports
+    """! @brief True if the gallery-dl library is importable. This module now imports
     cleanly even when gallery-dl is absent (optional dep), so callers/UI must
     check this rather than assume presence."""
     return _HAVE_GDL
 
 def _opts_to_kvlist(opts):
-    """Turn ["extractor.danbooru.username=me", ...] into the (path, key, value)
+    """! @brief Turn ["extractor.danbooru.username=me", ...] into the (path, key, value)
     tuples config.apply() wants. A bare "key=value" targets the ("extractor",)
     section; a dotted "a.b.key=value" nests under ("a","b")."""
     kvlist = []
@@ -111,14 +112,14 @@ def _opts_to_kvlist(opts):
     return kvlist
 
 def _fresh_config(opts):
-    """Clear any loaded user config and return the scoped-options context
+    """! @brief Clear any loaded user config and return the scoped-options context
     manager to apply `opts` for the call. Caller uses it as a `with` block."""
     _gconfig.clear()
     return _gconfig.apply(_DEFAULT_INCLUDES + _opts_to_kvlist(opts))
 
 # Ask extractors that gate extra metadata behind an "includes" list to hand it
-# over — most importantly `notes` (translation/annotation boxes on e621,
-# danbooru, gelbooru, …), which is what the "regions" mapping target consumes.
+# over - most importantly `notes` (translation/annotation boxes on e621,
+# danbooru, gelbooru, ...), which is what the "regions" mapping target consumes.
 # Without this the field never appears in discovery and is never populated at
 # fetch, so a regions mapping would silently produce nothing. Set before user
 # opts so a site that names a different include, or a user who wants to turn it
@@ -128,7 +129,7 @@ _DEFAULT_INCLUDES = [
 ]
 
 class _ErrorCapture(logging.Handler):
-    """Grabs the first ERROR-level record an extractor logs. gallery-dl swallows
+    """! @brief Grabs the first ERROR-level record an extractor logs. gallery-dl swallows
     extractor exceptions and only logs them, so this is how we recover a real
     message (e.g. reddit's authorization failure) to show the user."""
     def __init__(self):
@@ -151,7 +152,7 @@ def _looks_like_auth(x):
     return any(h in s for h in _AUTH_HINTS)
 
 def _flatten(obj, prefix=""):
-    """Flatten nested dicts into dotted keys, so a booru's
+    """! @brief Flatten nested dicts into dotted keys, so a booru's
     `{"tags": [...], "user": {"name": ...}}` surfaces both `tags` and
     `user.name` as selectable fields. Lists and scalars are leaves."""
     out = {}
@@ -164,11 +165,11 @@ def _flatten(obj, prefix=""):
     return out
 
 def discover_fields(url, opts=None, resolve=2):
-    """Return the metadata fields available for `url` as
+    """! @brief Return the metadata fields available for `url` as
     {"site": category, "fields": sorted([...])}.
 
     Uses a DataJob with `resolve` so a queue-style URL (search/user page)
-    descends into actual per-post metadata instead of stopping at the parent —
+    descends into actual per-post metadata instead of stopping at the parent -
     the fields returned are the real ones a download would expose. `opts` passes
     site credentials explicitly (see module docstring)."""
     if not _HAVE_GDL:
@@ -188,13 +189,13 @@ def discover_fields(url, opts=None, resolve=2):
 
     expected = site_of(url) or ""
 
-    # A nonzero status means the extractor failed — treat any dicts it produced
+    # A nonzero status means the extractor failed - treat any dicts it produced
     # as untrustworthy (they're the interstitial page) and surface the real
     # error instead of the CSS blob.
     if status:
         msg = captured.message or f"gallery-dl could not read that URL (status {status})."
         if _looks_like_auth(msg) or _looks_like_auth(status):
-            msg = (msg + "  This site requires login — set an auth method below "
+            msg = (msg + "  This site requires login - set an auth method below "
                    "and press Check fields again.").strip()
         raise GdlError(msg)
 
@@ -210,14 +211,14 @@ def discover_fields(url, opts=None, resolve=2):
         site = site or cat
 
     if not fields:
-        hint = ("  This site may require login — set an auth method below and "
+        hint = ("  This site may require login - set an auth method below and "
                 "retry.") if expected else ""
         raise GdlError(f"gallery-dl found no metadata for that URL.{hint}")
     return {"site": site or expected, "fields": sorted(fields)}
 
 def site_of(url, opts=None):
-    """The extractor category for a URL (e.g. 'danbooru'), from the extractor
-    class itself — no network needed."""
+    """! @brief The extractor category for a URL (e.g. 'danbooru'), from the extractor
+    class itself - no network needed."""
     extr = _find_extractor(url)
     return getattr(extr, "category", "") if extr else ""
 
@@ -242,12 +243,12 @@ def download(url, dest, opts=None, on_file=None):
     # Run the (synchronous, blocking) DownloadJob on a background thread and
     # watch `dest` for finished files from this one. gallery-dl writes each
     # media file and its .json sidecar as it goes, so a media file whose sidecar
-    # already exists is complete and safe to hand off — no gallery-dl internals
+    # already exists is complete and safe to hand off - no gallery-dl internals
     # or per-version hook APIs involved, just the filesystem it's producing.
     err_box = {}
 
     class _PausableJob(DownloadJob):
-        # gallery-dl dispatches every file through handle_url; blocking here
+        ## @brief gallery-dl dispatches every file through handle_url; blocking here
         # pauses the download (not the job) until the disk has room again.
         def handle_url(self, url, kwdict):
             wait_for_space(dest)
@@ -301,7 +302,7 @@ def download(url, dest, opts=None, on_file=None):
         raise GdlError(str(err) if err else "gallery-dl downloaded nothing.")
 
 def _ready_files(dest, seen, final=False):
-    """Yield (media_path, metadata) for media files in `dest` not yet in `seen`.
+    """! @brief Yield (media_path, metadata) for media files in `dest` not yet in `seen`.
     Normally a file is 'ready' only once its .json sidecar exists (so we don't
     grab a half-written download); on the `final` sweep we take remaining media
     regardless, reading an empty sidecar if none was written."""
@@ -314,7 +315,7 @@ def _ready_files(dest, seen, final=False):
             yield mpath, _read_sidecar(mpath)
 
 def _pair_media(root):
-    """All downloaded media files under root (recursive), excluding sidecars."""
+    """! @brief All downloaded media files under root (recursive), excluding sidecars."""
     found = []
     for dirpath, _, names in os.walk(root):
         for n in names:
@@ -324,8 +325,8 @@ def _pair_media(root):
     return sorted(found)
 
 def _read_sidecar(media_path):
-    """gallery-dl writes `<media>.json` next to each file. Return it flattened,
-    or {} if absent/unreadable — a missing sidecar shouldn't drop the image."""
+    """! @brief gallery-dl writes `<media>.json` next to each file. Return it flattened,
+    or {} if absent/unreadable - a missing sidecar shouldn't drop the image."""
     side = media_path + ".json"
     try:
         with open(side) as f:
@@ -334,7 +335,7 @@ def _read_sidecar(media_path):
         return {}
 
 def apply_mapping(meta, mapping):
-    """Turn a gallery-dl metadata dict into the library's ingest packet using a
+    """! @brief Turn a gallery-dl metadata dict into the library's ingest packet using a
     saved per-site mapping of {source_field: target}.
 
     `target` is one of:
@@ -367,7 +368,7 @@ def apply_mapping(meta, mapping):
                       xmp_export.write_xmp(), which validates against the schema,
                       coerces by type, and MERGES into the sidecar the core
                       write already produced. Opens up ~all of the XMP schema
-                      (dc, iptcCore, iptcExt, cc, prism, …) as targets.
+                      (dc, iptcCore, iptcExt, cc, prism, ...) as targets.
                       (iptc: is reserved for when an IPTC writer exists.)
       anything else - passthrough: stored under that key in the packet verbatim,
                       so extra booru fields can ride along untouched.
@@ -382,7 +383,7 @@ def apply_mapping(meta, mapping):
             continue
         val = meta[src]
         if target == "tags" or target.startswith("tags:"):
-            # "tags" → no prefix; "tags:<pfx>" → literal prefix on each tag.
+            # "tags" -> no prefix; "tags:<pfx>" -> literal prefix on each tag.
             prefix = target[len("tags:"):] if target.startswith("tags:") else ""
             out["tags"] += [prefix + t for t in _as_tags(val)]
         elif target == "description":
@@ -425,13 +426,13 @@ def apply_mapping(meta, mapping):
     return out
 
 def _as_tags(val):
-    """A source value → list of tag strings."""
+    """! @brief A source value -> list of tag strings."""
     if isinstance(val, list):
         return [str(t).strip() for t in val if str(t).strip()]
     return [t for t in str(val).replace(",", " ").split() if t]
 
 def _notes_to_regions(notes, meta):
-    """Convert a list of booru note/translation dicts into region boxes.
+    """! @brief Convert a list of booru note/translation dicts into region boxes.
 
     Booru notes give pixel coords {x, y, width, height, body} against the full
     image; the app's regions are normalized center-form (cx, cy, w, h in 0..1)
@@ -497,7 +498,7 @@ if __name__ == "__main__":
     assert apply_mapping({}, {"nope": "tags"})["tags"] == []
     assert apply_mapping({"x": "1"}, {"x": "ignore"}) == {"tags": [], "description": ""}
 
-    # multiple sources → tags: concatenated + deduped, order preserved
+    # multiple sources -> tags: concatenated + deduped, order preserved
     multi = apply_mapping(
         {"a": "1girl solo", "b": ["solo", "sky"]},
         {"a": "tags", "b": "tags"})
@@ -514,7 +515,7 @@ if __name__ == "__main__":
                          {"a": "tags", "b": "tags:src:"})
     assert coex["tags"] == ["x", "src:x"], coex
 
-    # multiple sources → description: newline-joined
+    # multiple sources -> description: newline-joined
     dd = apply_mapping({"c": "char note", "d": "artist note"},
                        {"c": "description", "d": "description"})
     assert dd["description"] == "char note\nartist note", dd
@@ -536,7 +537,7 @@ if __name__ == "__main__":
     assert xm["xmp"] == {"Xmp.dc.creator": "bob", "dc.subject": ["a", "b"]}, xm
     assert "xmp" not in apply_mapping({"a": "1"}, {"a": "tags"})
 
-    # notes → regions: e621-style {x,y,width,height,body} normalized to cx/cy/w/h
+    # notes -> regions: e621-style {x,y,width,height,body} normalized to cx/cy/w/h
     notes_meta = {
         "width": 100, "height": 200,
         "notes": [{"x": 10, "y": 20, "width": 30, "height": 40, "body": "hi"},

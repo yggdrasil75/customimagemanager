@@ -1,5 +1,5 @@
-"""
-OpenAI-compatible vision chat client (the vlm module's "llm" service).
+"""! @file
+@brief OpenAI-compatible vision chat client (the vlm module's "llm" service).
 ======================================================================
 The core keeps thin wrappers (_llm_call / _llm_request / _encode_for_llm)
 that delegate here, so the pipeline, AI actions, comics and books all talk
@@ -29,7 +29,7 @@ _BUSY = (429, 502, 503, 504)
 
 
 def _post(url, *, json, headers, timeout):
-    """POST to the endpoint. An interactive call (not on a worker thread)
+    """! @brief POST to the endpoint. An interactive call (not on a worker thread)
     marks the resource busy so the sweep hands out no new background slot
     while it waits; a busy/overloaded reply is retried with backoff instead
     of failing the job."""
@@ -51,7 +51,7 @@ def _cfg():
 
 
 def clamp_box(b: dict):
-    """Clamp a normalised center-form box to the image bounds; None if malformed."""
+    """! @brief Clamp a normalised center-form box to the image bounds; None if malformed."""
     try:
         cx, cy, w, h = float(b["cx"]), float(b["cy"]), float(b["w"]), float(b["h"])
     except (KeyError, TypeError, ValueError):
@@ -67,7 +67,7 @@ def clamp_box(b: dict):
 
 
 def v1_base(endpoint):
-    """Reduce any OpenAI-compatible URL to its `.../v1` base (no trailing
+    """! @brief Reduce any OpenAI-compatible URL to its `.../v1` base (no trailing
     slash), stripping a known operation suffix if present. '' -> ''."""
     base = (endpoint or "").strip().rstrip('/')
     if not base:
@@ -78,7 +78,7 @@ def v1_base(endpoint):
     return base
 
 def chat_url(endpoint):
-    """Auto-complete a base URL to the OpenAI chat-completions path."""
+    """! @brief Auto-complete a base URL to the OpenAI chat-completions path."""
     base = v1_base(endpoint)
     if not base:
         return ""
@@ -106,8 +106,8 @@ def _fetch_models(base, key, ttl):
     return ids
 
 def list_models(endpoint=None, key=None, ttl=20, wait=False):
-    """Model ids the endpoint reports on GET /v1/models (OpenAI, koboldcpp,
-    llama.cpp, vLLM, Ollama…). [] when the server has no list (older backends)
+    """! @brief Model ids the endpoint reports on GET /v1/models (OpenAI, koboldcpp,
+    llama.cpp, vLLM, Ollama...). [] when the server has no list (older backends)
     or is down, so the settings field falls back to manual entry.
 
     Never blocks the caller on the network unless wait=True: a stale/missing
@@ -130,7 +130,7 @@ def list_models(endpoint=None, key=None, ttl=20, wait=False):
 
 
 def request(messages, tools=None, tool_choice=None, timeout=600, endpoint=None):
-    """Low-level OpenAI-compatible chat call. Returns the message dict or raises.
+    """! @brief Low-level OpenAI-compatible chat call. Returns the message dict or raises.
     `endpoint` overrides the configured one (used to spread load across several
     model instances during a parallel pipeline run)."""
     endpoint = chat_url(endpoint or _cfg().get("oai_endpoint", ""))
@@ -158,7 +158,7 @@ BOX_TOOL = [{"type": "function", "function": {
         "required": ["class_name", "cx", "cy", "w", "h"]}}}, "required": ["boxes"]}}}]
 
 def encode_image(image_bgr, quality=85):
-    """JPEG-encode a BGR image to a data-URL: the single chokepoint for every
+    """! @brief JPEG-encode a BGR image to a data-URL: the single chokepoint for every
     image sent to the vision LLM (pipeline, prompted detection, AI actions).
     Modules subscribed to `llm.image` (llm_preprocess: compress/pad) transform
     it first. Returns the data-URL string, or None if encoding fails."""
@@ -174,7 +174,7 @@ def encode_image(image_bgr, quality=85):
     return f"data:image/jpeg;base64,{b64}"
 
 def call(prompt, image_bgr, want="text", choices=None, endpoint=None):
-    """Typed single-turn call used by the pipeline engine. `want` controls parsing.
+    """! @brief Typed single-turn call used by the pipeline engine. `want` controls parsing.
     `endpoint` (optional) pins this call to a specific model instance."""
     content = [{"type": "text", "text": prompt}]
     if image_bgr is not None:
@@ -225,7 +225,7 @@ def call(prompt, image_bgr, want="text", choices=None, endpoint=None):
     return text
 
 
-# ── embeddings (OpenAI-compatible /v1/embeddings) ────────────────────────────
+# -- embeddings (OpenAI-compatible /v1/embeddings) ----------------------------
 def embed_url(endpoint=None):
     base = v1_base(endpoint or _cfg().get("oai_endpoint", ""))
     if not base:
@@ -242,7 +242,7 @@ def embed_configured():
 
 
 def embed_tag():
-    """Which space the vectors live in — stored with each embedding row."""
+    """! @brief Which space the vectors live in - stored with each embedding row."""
     return "oai:" + embed_model()
 
 
@@ -267,7 +267,7 @@ def embed_request(inputs, timeout=120, model=None):
 
 
 def embed_image(img_bgr, timeout=120):
-    """Image -> L2-normalised vector via the embeddings endpoint (multimodal
+    """! @brief Image -> L2-normalised vector via the embeddings endpoint (multimodal
     embedding models such as CLIP-style servers accept data-URL inputs)."""
     url = encode_image(img_bgr)
     if not url:
@@ -277,7 +277,7 @@ def embed_image(img_bgr, timeout=120):
 
 
 def embed_text(text, timeout=60, model=None):
-    """Text -> vector in the same space as embed_image (what semantic search
+    """! @brief Text -> vector in the same space as embed_image (what semantic search
     needs); None on failure. `model` overrides the configured embedding model
     (the text-only pick for passages)."""
     text = (text or "").strip()

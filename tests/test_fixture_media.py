@@ -1,4 +1,5 @@
-"""Real-media ingest through the core upload chain: every fixture that exists
+"""! @file
+@brief Real-media ingest through the core upload chain: every fixture that exists
 is converted, indexed, thumbnailed and read back. Model-free."""
 import os
 import shutil
@@ -53,7 +54,7 @@ def test_video_ingest_and_tracks(client, upload):
 
 
 def test_foreign_xmp_regions_import(client, app, upload):
-    """A sidecar written by another tool: its regions come through as ours
+    """! @brief A sidecar written by another tool: its regions come through as ours
     (class from Type/Name, type==class, normalized boxes)."""
     xmp = fixture("photo_with_xmp.xmp")
     fn = upload.media("photo_with_xmp.jpg")

@@ -1,5 +1,5 @@
-"""
-SAM 2 / 2.1 provider (Meta Segment Anything 2, via ultralytics).
+"""! @file
+@brief SAM 2 / 2.1 provider (Meta Segment Anything 2, via ultralytics).
 ======================================================================
 Class-agnostic, promptable by boxes/points; no text head in either 2.0 or
 2.1 (2.1 is a better-trained model, same interface). So:
@@ -61,5 +61,5 @@ def register(host):
         host, pid="sam2", label="SAM 2", family="SAM 2", build=_SAM, weights=_weights,
         text_mode="vlm", sizes=_SIZES, types=_TYPES, settings=widget, speed="balanced",
         note="Meta's promptable masker: best mask quality from a box, and segment-"
-             "everything with no prompt. No text head — text goes via the vision LLM.")
+             "everything with no prompt. No text head - text goes via the vision LLM.")
     host.logger.info("sam2 module: registered segment.box / segment")

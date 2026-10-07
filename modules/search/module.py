@@ -1,11 +1,11 @@
-"""
-Search & sort: extra gallery search tokens and `sort:` keys.
+"""! @file
+@brief Search & sort: extra gallery search tokens and `sort:` keys.
 
 Filters (prefix any with '-' to negate):
   tags:+female,-male     all '+'/bare terms required, '-' terms excluded
   tags:cat|dog           any of; '*' is a wildcard (tags:hair*)
   tagcount:>5            number of tags
-  ratio:16:9             aspect ratio, approximate (±5%); also 16/9, 16x9, 1.78
+  ratio:16:9             aspect ratio, approximate (+/-5%); also 16/9, 16x9, 1.78
   ratio:16:9~0.1         custom relative tolerance
   ratio:>1  ratio:1.3..1.8  ratio:portrait|landscape|square|wide|ultrawide|tall
   orient:portrait        alias of ratio:<named>
@@ -17,7 +17,7 @@ Filters (prefix any with '-' to negate):
   ext:png|jpg  path:holiday  desc:beach  artist:ann  event:wedding  lang:en
 
 Numbers take < <= > >= = != or a range a..b.
-Sort: sort:<key> / sort:-<key>, chainable — see SORT_KEYS.
+Sort: sort:<key> / sort:-<key>, chainable - see SORT_KEYS.
 """
 import re
 
@@ -50,7 +50,7 @@ _OPS = {"<", "<=", ">", ">=", "=", "!="}
 
 
 def _like(term):
-    """Glob term -> (sql op, param): '*' wildcards become LIKE, else equality."""
+    """! @brief Glob term -> (sql op, param): '*' wildcards become LIKE, else equality."""
     term = term.lower()
     if "*" in term:
         return "LIKE", term.replace("%", r"\%").replace("_", r"\_").replace("*", "%")
@@ -58,7 +58,7 @@ def _like(term):
 
 
 def _num_clause(expr, value, conv=float):
-    """`expr` against '<op>N' or 'a..b'. Returns (clause, params) or ('', [])."""
+    """! @brief `expr` against '<op>N' or 'a..b'. Returns (clause, params) or ('', [])."""
     try:
         if ".." in value:
             lo, hi = value.split("..", 1)
@@ -72,7 +72,7 @@ def _num_clause(expr, value, conv=float):
 
 
 def _parse_ratio(s):
-    """'16:9' / '16/9' / '16x9' / '1.78' -> float, or None."""
+    """! @brief '16:9' / '16/9' / '16x9' / '1.78' -> float, or None."""
     m = re.match(r"^(\d+(?:\.\d+)?)\s*[:/x]\s*(\d+(?:\.\d+)?)$", s)
     try:
         if m:
@@ -116,7 +116,7 @@ def ratio_clause(value):
 
 
 def _terms_clause(value, one):
-    """Split 'a,+b,-c|d' into AND of terms; each term an OR of '|' alternatives.
+    """! @brief Split 'a,+b,-c|d' into AND of terms; each term an OR of '|' alternatives.
     `one(alt)` -> (clause, params) for a single positive alternative."""
     clauses, params = [], []
     for term in filter(None, value.split(",")):
@@ -144,7 +144,7 @@ def tags_clause(value):
 
 
 def _negatable(fn):
-    """Register-ready handler pair: (positive, negated)."""
+    """! @brief Register-ready handler pair: (positive, negated)."""
     def pos(tok, value):
         return fn(value)
 
@@ -212,27 +212,27 @@ def register(host):
                 [f"%.{e}" for e in exts])
 
     filters = {
-        "tags":     (tags_clause, "tags:+female,-male · tags:cat|dog · tags:hair* — "
+        "tags":     (tags_clause, "tags:+female,-male | tags:cat|dog | tags:hair* - "
                                   "required/excluded/any-of/wildcard tags"),
         "tagcount": (lambda v: _num_clause("json_array_length(COALESCE(NULLIF(files.tags,''),'[]'))", v, int),
-                     "tagcount:>5 · tagcount:0..3 — number of tags"),
-        "ratio":    (ratio_clause, "ratio:16:9 (±5%) · ratio:16:9~0.1 · ratio:>1 · "
-                                   "ratio:1.3..1.8 · ratio:portrait|square|landscape|wide|ultrawide|tall"),
-        "orient":   (ratio_clause, "orient:portrait|landscape|square — orientation"),
+                     "tagcount:>5 | tagcount:0..3 - number of tags"),
+        "ratio":    (ratio_clause, "ratio:16:9 (+/-5%) | ratio:16:9~0.1 | ratio:>1 | "
+                                   "ratio:1.3..1.8 | ratio:portrait|square|landscape|wide|ultrawide|tall"),
+        "orient":   (ratio_clause, "orient:portrait|landscape|square - orientation"),
         "mp":       (lambda v: _num_clause("(files.width*files.height/1000000.0)", v),
-                     "mp:>2 — megapixels"),
+                     "mp:>2 - megapixels"),
         "pixels":   (lambda v: _num_clause("(files.width*files.height)", v, int),
-                     "pixels:<500000 — pixel count"),
-        "name":     (name_clause, "name:alice · name:al* · name:alice,bob (both) · "
-                                  "name:alice|bob (either) — named person in the image"),
-        "people":   (count_or_none(people_count), "people:>=2 · people:0 — detected faces"),
-        "rating":   (count_or_none(rating_expr), "rating:>=4 — stars (user, else IQA)"),
-        "ext":      (ext_clause, "ext:png|jpg — file extension"),
-        "path":     (text_col("rel_path"), "path:holiday — path contains"),
-        "desc":     (text_col("description"), "desc:beach — description contains"),
-        "artist":   (text_col("artist"), "artist:ann — artist contains"),
-        "event":    (text_col("event"), "event:wedding — event contains"),
-        "lang":     (text_col("language"), "lang:en — language contains"),
+                     "pixels:<500000 - pixel count"),
+        "name":     (name_clause, "name:alice | name:al* | name:alice,bob (both) | "
+                                  "name:alice|bob (either) - named person in the image"),
+        "people":   (count_or_none(people_count), "people:>=2 | people:0 - detected faces"),
+        "rating":   (count_or_none(rating_expr), "rating:>=4 - stars (user, else IQA)"),
+        "ext":      (ext_clause, "ext:png|jpg - file extension"),
+        "path":     (text_col("rel_path"), "path:holiday - path contains"),
+        "desc":     (text_col("description"), "desc:beach - description contains"),
+        "artist":   (text_col("artist"), "artist:ann - artist contains"),
+        "event":    (text_col("event"), "event:wedding - event contains"),
+        "lang":     (text_col("language"), "lang:en - language contains"),
     }
     for prefix, (fn, help_) in filters.items():
         pos, neg = _negatable(fn)

@@ -1,5 +1,5 @@
-"""
-Family share.
+"""! @file
+@brief Family share.
 ======================================================================
 Push selected photos to the instances of people you trust, with hard checks
 on WHAT leaves and WHERE it goes.
@@ -16,9 +16,9 @@ on WHAT leaves and WHERE it goes.
     everyone", "block tag 'sister' for cousins".
   * PREVIEW lists exactly what a peer would get before anything is sent.
   * A file that STOPS matching (rule edited, tag removed, moved out of a
-    folder) is revoked on the peer, and a deleted file is revoked too — both
+    folder) is revoked on the peer, and a deleted file is revoked too - both
     optional, both default on.
-  * Received files land under <incoming folder>/<peer name>/…, get a
+  * Received files land under <incoming folder>/<peer name>/..., get a
     "from:<peer>" tag, keep the sender's tags/description/regions/albums,
     and are never re-shared onward unless you opt in (no loops, no leaks
     through a cousin's instance).
@@ -82,7 +82,7 @@ def register(host):
     core = host.core
     log = host.logger
 
-    # ── tables ─────────────────────────────────────────────────────────────
+    # -- tables -------------------------------------------------------------
     def _migrate(db):
         cols = {r["name"] for r in db.execute("PRAGMA table_info(fs_received)").fetchall()}
         if "duplicate" not in cols:
@@ -108,7 +108,7 @@ def register(host):
         db.commit()
     host.add_table(sc.DDL, check=_migrate)
 
-    # ── settings ───────────────────────────────────────────────────────────
+    # -- settings -----------------------------------------------------------
     def _bool(v):
         return bool(v) if not isinstance(v, str) else v.strip().lower() in ("1", "true", "yes", "on")
 
@@ -155,9 +155,8 @@ def register(host):
         iid = host.config.get("family_share_instance_id") or ""
         if not iid:
             iid = uuid.uuid4().hex
-            host.config["family_share_instance_id"] = iid
             try:
-                host.save_config()
+                host.set_config("family_share_instance_id", iid)
             except Exception as e:
                 log.error(f"family_share: could not persist instance id: {e}")
         return iid
@@ -169,9 +168,8 @@ def register(host):
         k = host.config.get("family_share_private_key") or ""
         if not k:
             k = crypto.generate_private_key()
-            host.config["family_share_private_key"] = k
             try:
-                host.save_config()
+                host.set_config("family_share_private_key", k)
             except Exception as e:
                 log.error(f"family_share: could not persist private key: {e}")
         return k
@@ -192,7 +190,7 @@ def register(host):
     MAILBOX_DIR = os.path.abspath(os.path.join(os.path.dirname(core.upload_spool_dir), ".family_mailbox"))
 
     def _route(peer):
-        """-> ('direct', None) | ('mailbox', None) | ('via', hub_row)."""
+        """! @brief -> ('direct', None) | ('mailbox', None) | ('via', hub_row)."""
         r = (peer.get("route") or "").strip()
         if r == "via":
             hub = _peer(int(peer.get("via_peer") or 0))
@@ -203,7 +201,7 @@ def register(host):
             return "mailbox", None
         return "direct", None
 
-    # ── dirty tracking / planning ──────────────────────────────────────────
+    # -- dirty tracking / planning ------------------------------------------
     _lock = threading.Lock()
     _dirty = {"paths": set(), "full": False, "since": 0.0}
     _last_plan = {"t": 0.0, "running": False, "result": None}
@@ -242,7 +240,7 @@ def register(host):
             log.info(f"family_share plan: {res}")
         return res
 
-    # ── events ─────────────────────────────────────────────────────────────
+    # -- events -------------------------------------------------------------
     def _on_stored(rel_path=None, filename=None, **_):
         if rel_path:
             mark_dirty([rel_path])
@@ -294,7 +292,7 @@ def register(host):
               "share_regions", "revoke_on_unshare"):
         host.on_setting_change(k, lambda new, old=None: mark_dirty(full=True))
 
-    # ── file-row enricher: who has this ────────────────────────────────────
+    # -- file-row enricher: who has this ------------------------------------
     def _enrich(db, rel_paths):
         if not rel_paths:
             return {}
@@ -315,7 +313,7 @@ def register(host):
         return out
     host.register_file_enricher(_enrich)
 
-    # ── outbound worker ────────────────────────────────────────────────────
+    # -- outbound worker ----------------------------------------------------
     def _claim():
         if _last_plan["running"]:
             return None
@@ -355,7 +353,7 @@ def register(host):
     _pruned = {"t": 0.0}
 
     def _claim_poll():
-        """Every poll interval, ask each peer that has a URL whether its
+        """! @brief Every poll interval, ask each peer that has a URL whether its
         mailbox holds anything for us (items relayed through it, or sent by it
         while we have no reachable URL). Also prunes our own mailbox daily."""
         now = time.time()
@@ -502,7 +500,7 @@ def register(host):
         core.audit("family_share_revoke", f"file={rel!r} peer={peer['name']!r} removed={body.get('removed')}")
 
     def _send_async(peer, route, hub, kind, inner, file_path):
-        """Seal to `peer` and leave it where it will poll: our own mailbox
+        """! @brief Seal to `peer` and leave it where it will poll: our own mailbox
         (route=mailbox) or the hub's (route=via)."""
         header, meta, enc = pc.seal_item(peer, _my_id(), _my_priv(), inner, file_path,
                                          core.upload_spool_dir)
@@ -542,7 +540,7 @@ def register(host):
                                                    key_of=lambda j: j["key"]))
     host.on_startup(lambda: mark_dirty(full=True))
 
-    # ── inbound: deferred ingests finishing later ──────────────────────────
+    # -- inbound: deferred ingests finishing later --------------------------
     def _reconcile_deferred():
         db = host.db()
         rows = db.execute("SELECT origin_sha, peer_id, queue_id, albums, replaces FROM fs_received "
@@ -582,9 +580,9 @@ def register(host):
             except Exception as e:
                 log.error(f"family_share: albums on {rel_path}: {e}")
 
-    # ── inbound HTTP (peer-key authenticated, no browser session) ──────────
+    # -- inbound HTTP (peer-key authenticated, no browser session) ----------
     def _auth_peer():
-        """-> peer dict or None. Constant-time key compare; unknown name and
+        """! @brief -> peer dict or None. Constant-time key compare; unknown name and
         wrong key look identical to the caller."""
         name = request.headers.get(pc.HEADER_PEER, "").strip()
         key = request.headers.get(pc.HEADER_KEY, "").strip()
@@ -632,7 +630,7 @@ def register(host):
         return pat.replace("{peer}", peer["name"]).strip() if pat else ""
 
     def _open_envelope(peer, env_raw, meta_b64, max_age=crypto.MAX_SKEW):
-        """-> (Opener, inner dict, header dict) or raises CryptoError. Refuses
+        """! @brief -> (Opener, inner dict, header dict) or raises CryptoError. Refuses
         anything that isn't sealed to us by the pinned key of this peer."""
         if not peer.get("pub_key"):
             raise crypto.CryptoError("no public key pinned for this peer here; paste their pairing code")
@@ -654,7 +652,7 @@ def register(host):
         return float(_cfg().get("family_share_mailbox_days") or 30) * 86400 + crypto.MAX_SKEW
 
     def _seen_before(env):
-        """Replay guard for mailbox items (they are valid for days, so the
+        """! @brief Replay guard for mailbox items (they are valid for days, so the
         15-minute freshness window can't protect them). True = already seen."""
         salt = str(env.get("salt") or "")
         if not salt:
@@ -666,9 +664,9 @@ def register(host):
             return cur.rowcount == 0
         return _write(_do)
 
-    # ── receiving (shared by direct HTTP, mailbox pickup, relayed items) ──
+    # -- receiving (shared by direct HTTP, mailbox pickup, relayed items) --
     def _merge_into(old_rel, new_rel):
-        """Carry what the user did to the old copy (tags, caption, albums)
+        """! @brief Carry what the user did to the old copy (tags, caption, albums)
         onto its replacement before the old copy goes."""
         ofp = host.safe_path(host.media_dir, old_rel)
         nfp = host.safe_path(host.media_dir, new_rel)
@@ -680,13 +678,15 @@ def register(host):
         desc = new.get("description") or old.get("description") or ""
         albums = core.file_albums(new_rel)
         albums += [a for a in core.file_albums(old_rel) if a not in albums]
-        core.write_metadata(nfp, tags, desc, new.get("regions") or old.get("regions") or [],
-                            analysis=new.get("analysis"), flag=new.get("flag") or old.get("flag"),
-                            pose=new.get("pose"), page_count=new.get("page_count"), albums=albums)
+        merged = {"tags": tags, "description": desc, "albums": albums,
+                  "regions": new.get("regions") or old.get("regions") or []}
+        if new.get("flag") or old.get("flag"):
+            merged["flag"] = new.get("flag") or old.get("flag")
+        core.update_file(nfp, set=merged, meta=new)
         core.index_file(new_rel, force=True)
 
     def _retire_copy(pid, old_sha, new_rel):
-        """A device re-sent a photo it had uploaded in a damaged form (Android
+        """! @brief A device re-sent a photo it had uploaded in a damaged form (Android
         redaction): merge the old copy's metadata into the new one, then remove
         the old copy. Only the device's own earlier uploads can be retired."""
         peer = _peer(pid)
@@ -708,7 +708,7 @@ def register(host):
         _write(_do)
 
     def _receive_push(peer, opener, inner, file_stream):
-        """Apply one opened push. -> (json body, http code). file_stream is a
+        """! @brief Apply one opened push. -> (json body, http code). file_stream is a
         readable of the sealed file, or None for a metadata-only push."""
         origin_sha = str(inner.get("origin_sha") or "").strip()[:128]
         origin_id = str(inner.get("origin_id") or "").strip()[:64]
@@ -742,13 +742,9 @@ def register(host):
             if fp and os.path.exists(fp):
                 # Metadata update in place: never touch albums we didn't get.
                 try:
-                    cur = core.read_metadata(fp)
-                    cur_albums = core.file_albums(row["rel_path"])
-                    new_albums = cur_albums + [a for a in albums if a not in cur_albums]
-                    core.write_metadata(fp, tags, ingest_meta["description"], ingest_meta["regions"],
-                                        analysis=cur.get("analysis"), flag=cur.get("flag"),
-                                        pose=cur.get("pose"), page_count=cur.get("page_count"),
-                                        albums=new_albums)
+                    core.update_file(fp, set={"tags": tags, "description": ingest_meta["description"],
+                                              "regions": ingest_meta["regions"]},
+                                     add={"albums": list(albums)} if albums else None)
                     core.index_file(row["rel_path"], force=True)
                 except Exception as e:
                     log.error(f"family_share: metadata update on {row['rel_path']}: {e}")
@@ -784,8 +780,8 @@ def register(host):
             if got != content_sha:
                 try: os.remove(spool)
                 except OSError: pass
-                log.warning(f"family_share: {orig_name} from {peer['name']!r} hashes to {got[:12]}…, "
-                            f"sender said {content_sha[:12]}… — rejected")
+                log.warning(f"family_share: {orig_name} from {peer['name']!r} hashes to {got[:12]}..., "
+                            f"sender said {content_sha[:12]}... - rejected")
                 return {"ok": False, "error": "content hash mismatch: the file changed while it was being "
                                               "read or sent; it will be retried"}, 422
         meta_json = json.dumps(ingest_meta)
@@ -849,7 +845,7 @@ def register(host):
             core.audit("family_share_revoked", f"peer={peer['name']!r} file={row['rel_path']!r} removed={removed}")
         return {"ok": True, "removed": removed}, 200
 
-    # ── direct HTTP ────────────────────────────────────────────────────────
+    # -- direct HTTP --------------------------------------------------------
     def inbound_push():
         peer = _auth_peer()
         if not peer:
@@ -880,13 +876,13 @@ def register(host):
         return jsonify(body), code
     host.add_route(INBOUND_PREFIX + "revoke", inbound_revoke, methods=["POST"])
 
-    # ── mailbox: items waiting for a peer that polls (hub / gateway side) ──
+    ## @brief -- mailbox: items waiting for a peer that polls (hub / gateway side) --
     def _mailbox_used(pid):
         r = host.db().execute("SELECT COALESCE(SUM(size),0) s FROM fs_mailbox WHERE to_peer=?", (pid,)).fetchone()
         return int(r["s"] or 0)
 
     def _mailbox_deposit(recipient, from_pub, kind, header, meta, enc_path):
-        """Store a sealed item for `recipient`. Takes ownership of enc_path."""
+        """! @brief Store a sealed item for `recipient`. Takes ownership of enc_path."""
         size = os.path.getsize(enc_path) if enc_path else 0
         quota = int(_cfg().get("family_share_mailbox_gb") or 20) << 30
         if _mailbox_used(recipient["id"]) + size > quota:
@@ -933,7 +929,7 @@ def register(host):
         _write(_do)
 
     def inbound_relay():
-        """A peer hands us an item sealed to ANOTHER of our peers. We check the
+        """! @brief A peer hands us an item sealed to ANOTHER of our peers. We check the
         outer ticket (sealed to us: proves who sent it and names the recipient
         by public key), then store the inner item untouched."""
         peer = _auth_peer()
@@ -1015,7 +1011,7 @@ def register(host):
         return jsonify({"ok": True, "acked": len(ids)})
     host.add_route(INBOUND_PREFIX + "mailbox/ack", inbound_mailbox_ack, methods=["POST"])
 
-    # ── poller: fetch what a hub holds for us ──────────────────────────────
+    # -- poller: fetch what a hub holds for us ------------------------------
     def _handle_poll(job):
         hub = _peer(job["peer_id"])
         if not hub or not hub.get("enabled"):
@@ -1047,7 +1043,7 @@ def register(host):
             _polled[hub["id"]] = 0              # more waiting: poll again right away
 
     def _process_mailbox_item(hub, it):
-        """-> True when the item is finished with (applied, or permanently
+        """! @brief -> True when the item is finished with (applied, or permanently
         unusable) and may be acked; False to leave it for a retry."""
         sender = host.db().execute("SELECT * FROM fs_peers WHERE pub_key=? AND enabled=1",
                                    (str(it.get("from_pub") or ""),)).fetchone()
@@ -1086,15 +1082,15 @@ def register(host):
                 try: os.remove(tmp)
                 except OSError: pass
         if code >= 500 or (code == 422 and "hash mismatch" in str(body.get("error"))):
-            # transient: forget we saw it so the retry isn't treated as a replay
+            ## @brief transient: forget we saw it so the retry isn't treated as a replay
             def _undo():
                 d = host.db(); d.execute("DELETE FROM fs_seen WHERE salt=?", (str(env.get("salt")),)); d.commit()
             _write(_undo)
             return False
         return True
 
-    # ── sealed reads: a paired phone browses the library ───────────────────
-    # The phone authenticates like any peer; every response body is sealed to
+    # -- sealed reads: a paired phone browses the library -------------------
+    ## @brief The phone authenticates like any peer; every response body is sealed to
     # its pinned key with this instance as the sender (X-Family-Env carries
     # the envelope header), so thumbnails and listings are as private on the
     # wire as uploads are.
@@ -1114,7 +1110,7 @@ def register(host):
         return resp
 
     def _sealed_request(peer):
-        """A sealed JSON request body (env + meta) -> inner dict, or raises."""
+        """! @brief A sealed JSON request body (env + meta) -> inner dict, or raises."""
         data = request.get_json(silent=True) or {}
         if not data.get("env") or not data.get("meta"):
             raise crypto.CryptoError("plaintext requests are not accepted")
@@ -1184,7 +1180,7 @@ def register(host):
     host.add_route(INBOUND_PREFIX + "media", inbound_media, methods=["GET"])
 
     def inbound_have():
-        """Sealed {shas:[...]} -> sealed {have:[...]}: which of the phone's
+        """! @brief Sealed {shas:[...]} -> sealed {have:[...]}: which of the phone's
         originals this instance already holds, so a first sync of thousands of
         photos doesn't need one round-trip each."""
         peer = _auth_peer()
@@ -1206,7 +1202,7 @@ def register(host):
         return _sealed_response(peer, json.dumps({"ok": True, "have": sorted(have)}).encode(), "application/json")
     host.add_route(INBOUND_PREFIX + "have", inbound_have, methods=["POST"])
 
-    # ── admin API (browser session, admin feature) ─────────────────────────
+    # -- admin API (browser session, admin feature) -------------------------
     def _peer_public(p):
         d = dict(p)
         d["has_key_out"] = bool(d.get("key_out"))
@@ -1333,7 +1329,7 @@ def register(host):
                    feature=FEATURE, level="write")
 
     def api_peer_key():
-        """The pairing code for this peer: my name, my URL, my public key and
+        """! @brief The pairing code for this peer: my name, my URL, my public key and
         the secret they must send me. Paste it on their instance."""
         d = request.get_json(silent=True) or {}
         pid = int(d.get("id") or 0)
@@ -1383,7 +1379,7 @@ def register(host):
                 ago = int(time.time() - p["last_ok"])
                 return jsonify({"ok": True, "device": True, "last_seen": p["last_ok"],
                                 "message": f"{p['name']} last reached this instance {ago // 60} min ago"
-                                           + (" — key pinned" if p.get("pub_key") else " — NO KEY PINNED: paste its pairing code")})
+                                           + (" - key pinned" if p.get("pub_key") else " - NO KEY PINNED: paste its pairing code")})
             return jsonify({"ok": False, "device": True,
                             "error": f"{p['name']} has not reached this instance yet"
                                      + (": open the app, Settings → Test connection"

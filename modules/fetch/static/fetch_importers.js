@@ -1,4 +1,4 @@
-/* Library importers (Immich, Google Takeout, Apple / iCloud) — the settings-tab
+/* Library importers (Immich, Google Takeout, Apple / iCloud) - the settings-tab
  * UI they share. It belongs to the fetch module because importers ARE fetchers:
  * "Import now" queues a fetch job and "every N hours" is a fetch watch.
  *
@@ -46,7 +46,7 @@
     } else if (f.kind === "toggle") {
       ctl = `<input type="checkbox" data-k="${f.key}" ${v ? "checked" : ""}>`;
     } else if (f.kind === "path") {
-      ctl = `<select data-k="${f.key}" class="ik-path"><option value="${esc(v || "")}">${esc(v || "— choose —")}</option></select>`;
+      ctl = `<select data-k="${f.key}" class="ik-path"><option value="${esc(v || "")}">${esc(v || "- choose -")}</option></select>`;
     } else {
       const secret = f.secret;
       ctl = `<input type="${secret ? "password" : f.kind === "number" ? "number" : "text"}" data-k="${f.key}"
@@ -73,7 +73,7 @@
     return `<span class="ik-st ik-st-${esc(st)}">${esc(st)}</span>
       <span class="ik-dim">${esc(when(j.updated))}</span>
       ${pct !== null && (j.status === "downloading") ? `<div class="ik-bar"><div style="width:${pct}%"></div></div>` : ""}
-      <div class="ik-dim">${j.downloaded}${j.total ? " / " + j.total : ""} handed to ingest${j.message ? " · " + esc(j.message) : ""}</div>
+      <div class="ik-dim">${j.downloaded}${j.total ? " / " + j.total : ""} handed to ingest${j.message ? " | " + esc(j.message) : ""}</div>
       ${j.error ? `<div class="ik-err">${esc(j.error)}</div>` : ""}`;
   }
 
@@ -117,7 +117,7 @@
         const d = await call(api + "/browse");
         box.querySelectorAll(".ik-path").forEach((sel) => {
           const cur = cfg[sel.dataset.k] || "";
-          sel.innerHTML = `<option value="">${d.exists ? "— choose —" : "import folder missing: " + esc(d.root)}</option>` +
+          sel.innerHTML = `<option value="">${d.exists ? "- choose -" : "import folder missing: " + esc(d.root)}</option>` +
             d.entries.map((e) => `<option value="${esc(e.name)}" ${e.name === cur ? "selected" : ""}>
               ${e.kind === "zip" ? "🗜" : "📁"} ${esc(e.name)}${e.size ? " (" + mb(e.size) + ")" : ""}</option>`).join("");
         });
@@ -168,7 +168,7 @@
         return `<div class="ik-src" data-id="${s.id}">
           <div><b>${esc(s.label)}</b> ${s.status ? `<span class="ik-st ik-st-error">${esc(s.status)}</span>` : ""}
             <span class="ik-dim">${w && w.enabled ? "every " + w.every_h + " h" : "manual"}
-            · ${led.done || 0} imported${led.failed ? `, <span class="ik-err">${led.failed} failed</span>` : ""}
+            | ${led.done || 0} imported${led.failed ? `, <span class="ik-err">${led.failed} failed</span>` : ""}
             ${led.queued ? ", " + led.queued + " ingesting" : ""}</span></div>
           ${jobLine(j)}
           ${spec.sourceExtra ? spec.sourceExtra(s) : ""}
@@ -181,7 +181,7 @@
             <button class="ik-btn ik-btn-sm ik-btn-ghost" data-act="edit">Edit</button>
             <button class="ik-btn ik-btn-sm ik-btn-ghost" data-act="delete">Remove</button></div>
           <div class="ik-failures" hidden></div></div>`;
-      }).join("") : `<div class="ik-dim">None yet — add one below.</div>`;
+      }).join("") : `<div class="ik-dim">None yet - add one below.</div>`;
       const live = state.sources.some((s) => s.jobs[0] && ["pending", "downloading"].includes(s.jobs[0].status));
       if (p.offsetParent !== null) timer = setTimeout(refresh, live ? 2500 : 15000);
     }
@@ -205,7 +205,7 @@
           const d = await call(api + "/failures?id=" + id);
           box.hidden = false;
           box.innerHTML = d.rows.map((r) => `<div class="ik-fail"><b>${esc(r.name || r.item_key)}</b>
-            <span class="ik-dim">×${r.attempts}</span> ${esc(r.error)}</div>`).join("") || "<i>none</i>";
+            <span class="ik-dim">x${r.attempts}</span> ${esc(r.error)}</div>`).join("") || "<i>none</i>";
           return;
         }
         refresh();

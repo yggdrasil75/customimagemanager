@@ -1,11 +1,12 @@
-"""encoding module — HOW uploads are encoded into the container Settings → Media
+"""! @file
+@brief encoding module - HOW uploads are encoded into the container Settings -> Media
 picks: lossless or lossy, quality, effort, video codec / CRF / preset, audio
 bitrate.
 
-media_types.py decides the container (jxl / webp / mp4 / webm …) and runs the
+media_types.py decides the container (jxl / webp / mp4 / webm ...) and runs the
 conversion; every codec argument it passes to cjxl, Pillow or ffmpeg comes
 from here, read from the settings this module declares with add_config_key /
-add_settings_field(pane="media") — core renders them in the Media pane's
+add_settings_field(pane="media") - core renders them in the Media pane's
 module mount. A core module: imported and registered by manager.py, not
 discovered by the loader.
 """
@@ -19,7 +20,7 @@ MANIFEST = {
     "pip":         [],
 }
 
-# ── settings ─────────────────────────────────────────────────────────────────
+# -- settings -----------------------------------------------------------------
 DEFAULTS = {
     "enc_image_mode":     "lossless",   # lossless | lossy
     "enc_image_quality":  90,           # 1..100, lossy only
@@ -32,7 +33,7 @@ DEFAULTS = {
 }
 PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium",
            "slow", "slower", "veryslow"]
-# codec → (ffmpeg encoder, containers it may go in)
+# codec -> (ffmpeg encoder, containers it may go in)
 CODECS = {
     "h264": ("libx264",     {".mp4", ".mkv"}),
     "h265": ("libx265",     {".mp4", ".mkv"}),
@@ -54,9 +55,9 @@ def _int(lo, hi):
     return lambda v: max(lo, min(hi, int(float(v))))
 
 
-# ── image ────────────────────────────────────────────────────────────────────
+# -- image --------------------------------------------------------------------
 def cjxl_args(jpeg_source=False):
-    """cjxl options after `cjxl SRC OUT`. Lossless keeps a JPEG bit-exact
+    """! @brief cjxl options after `cjxl SRC OUT`. Lossless keeps a JPEG bit-exact
     (and containered, which the jbrd box needs); everything else is a bare
     codestream."""
     lossy = _get("enc_image_mode") == "lossy"
@@ -71,7 +72,7 @@ def cjxl_args(jpeg_source=False):
 
 
 def pillow_kwargs(fmt):
-    """save() kwargs for a non-JXL image target (WEBP / AVIF / JPEG / PNG)."""
+    """! @brief save() kwargs for a non-JXL image target (WEBP / AVIF / JPEG / PNG)."""
     lossy = _get("enc_image_mode") == "lossy"
     q, e = int(_get("enc_image_quality")), int(_get("enc_image_effort"))
     if fmt == "WEBP":
@@ -86,27 +87,27 @@ def pillow_kwargs(fmt):
     return {}
 
 
-# ── video / audio ────────────────────────────────────────────────────────────
+# -- video / audio ------------------------------------------------------------
 def video_codec(ext):
-    """The configured codec, or the container's native fallback when it can't
+    """! @brief The configured codec, or the container's native fallback when it can't
     carry it (h265 in .webm, vp9 in .mp4)."""
     c = _get("enc_video_codec")
     return c if ext in CODECS.get(c, ("", set()))[1] else _CONTAINER_FALLBACK.get(ext, "h264")
 
 
 def video_args(ext):
-    """ffmpeg video-encoder options for the target container."""
+    """! @brief ffmpeg video-encoder options for the target container."""
     codec = video_codec(ext)
     enc = CODECS[codec][0]
     crf, preset = int(_get("enc_video_crf")), str(_get("enc_video_preset"))
-    speed = PRESETS.index(preset) if preset in PRESETS else 5       # 0 slowest … 8 fastest
+    speed = PRESETS.index(preset) if preset in PRESETS else 5       # 0 slowest ... 8 fastest
     args = ["-c:v", enc, "-crf", str(min(crf, 51 if codec in ("h264", "h265") else 63)),
             "-pix_fmt", "yuv420p"]
     if codec in ("h264", "h265"):
         args += ["-preset", preset]
     elif codec == "vp9":
         args += ["-b:v", "0", "-deadline", "good", "-cpu-used", str(speed)]
-    else:                                                            # svt-av1: 0 slowest … 13 fastest
+    else:                                                            # svt-av1: 0 slowest ... 13 fastest
         args += ["-preset", str(min(13, 4 + speed))]
     if codec == "h265" and ext == ".mp4":
         args += ["-tag:v", "hvc1"]                                   # Apple/browser-friendly tag
@@ -114,7 +115,7 @@ def video_args(ext):
 
 
 def audio_args(ext, for_video=False):
-    """ffmpeg audio-encoder options: lossless targets stay lossless, lossy
+    """! @brief ffmpeg audio-encoder options: lossless targets stay lossless, lossy
     ones take the configured bitrate. for_video picks the container's codec."""
     kb = f"{int(_get('enc_audio_bitrate'))}k"
     if for_video:
@@ -128,7 +129,7 @@ def audio_args(ext, for_video=False):
 
 
 def av_args(ext):
-    """Full ffmpeg encoder argument list for a video or audio container."""
+    """! @brief Full ffmpeg encoder argument list for a video or audio container."""
     if ext in (".mp4", ".webm", ".mkv"):
         args = ["-map", "0:v:0", "-map", "0:a?", *video_args(ext), *audio_args(ext, for_video=True)]
         if ext == ".mp4":
@@ -137,7 +138,7 @@ def av_args(ext):
     return audio_args(ext)
 
 
-# ── registration ─────────────────────────────────────────────────────────────
+# -- registration -------------------------------------------------------------
 def register(host):
     _cfg["_host"] = host
     fields = [
@@ -147,7 +148,7 @@ def register(host):
         ("enc_image_quality", "Image quality (lossy)", "number", _int(1, 100), None,
          "1-100, applied to JXL / WebP / AVIF / JPEG when lossy."),
         ("enc_image_effort", "Image effort", "number", _int(1, 9), None,
-         "1 fastest … 9 smallest. cjxl -e; WebP method / AVIF speed / PNG level follow it."),
+         "1 fastest ... 9 smallest. cjxl -e; WebP method / AVIF speed / PNG level follow it."),
         ("enc_jpeg_transcode", "Keep JPEGs bit-exact in JXL", "toggle", bool, None,
          "Lossless JPEG→JXL transcode (reversible, ~20% smaller). Off = re-encode pixels."),
         ("enc_video_codec", "Video codec", "select", None,
@@ -155,7 +156,7 @@ def register(host):
           {"value": "vp9", "label": "VP9 (webm/mkv)"}, {"value": "av1", "label": "AV1 (mp4/webm/mkv)"}],
          "Falls back to the container's native codec when it can't carry this one."),
         ("enc_video_crf", "Video CRF", "number", _int(0, 63), None,
-         "Lower = better. x264/x265 18 ≈ visually lossless; VP9/AV1 use 30-ish."),
+         "Lower = better. x264/x265 18 ~ visually lossless; VP9/AV1 use 30-ish."),
         ("enc_video_preset", "Video preset", "select", None,
          [{"value": p, "label": p} for p in PRESETS],
          "Encoder speed vs size (x264/x265 names; mapped to VP9 cpu-used / AV1 preset)."),

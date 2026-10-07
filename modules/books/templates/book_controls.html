@@ -5,17 +5,17 @@
      body and setMediaMode() hides the tabs that can't apply.
 
      What's gone, and why:
-       EXIF / IPTC / XMP tabs  — those are image container formats. An epub has
+       EXIF / IPTC / XMP tabs  - those are image container formats. An epub has
                                  no EXIF. (An OPF has metadata, which is what
                                  the Book tab below is.)
-       Regions / boxes / pose  — nothing to draw a bounding box on in a text
+       Regions / boxes / pose  - nothing to draw a bounding box on in a text
                                  flow. Comics DO get panel boxes eventually, but
                                  that belongs to the image pipeline on extracted
                                  pages, not here.
-       YOLO / auto-tag / OCR   — same reason. OCR is offered for scanned PDFs
+       YOLO / auto-tag / OCR   - same reason. OCR is offered for scanned PDFs
                                  and comics only (see the Comic block).
-       Faces, quality stars    — no faces in a text file; IQA is a pixel metric.
-       Albums                  — books use Series + Shelves instead.
+       Faces, quality stars    - no faces in a text file; IQA is a pixel metric.
+       Albums                  - books use Series + Shelves instead.
 
      What replaces them: bibliographic metadata, reading state, and text tools.
 
@@ -29,7 +29,7 @@
       <span class="text-sm font-bold text-gray-300">Book</span>
       <div class="flex items-center gap-1">
         <button onclick="booksFindSimilar()" title="Find books that read like this one"
-          class="text-[10px] bg-purple-700 hover:bg-purple-600 px-2 py-1 rounded text-white uppercase font-bold">Similar</button>
+          class="text-[10px] bg-indigo-700 hover:bg-indigo-600 px-2 py-1 rounded text-white uppercase font-bold">Similar</button>
         <a id="book_download" href="#" download
           class="text-[10px] bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded uppercase font-bold">Download</a>
       </div>
@@ -37,8 +37,8 @@
 
     <!-- format / status strip -->
     <div class="flex items-center gap-2 text-[10px] flex-wrap">
-      <span id="book_fmt_badge" class="px-1.5 py-0.5 rounded bg-gray-700 text-gray-200 font-mono uppercase">—</span>
-      <span id="book_kind_badge" class="px-1.5 py-0.5 rounded bg-gray-700 text-gray-300">—</span>
+      <span id="book_fmt_badge" class="px-1.5 py-0.5 rounded bg-gray-700 text-gray-200 font-mono uppercase">-</span>
+      <span id="book_kind_badge" class="px-1.5 py-0.5 rounded bg-gray-700 text-gray-300">-</span>
       <span id="book_size_badge" class="text-gray-500"></span>
       <span id="book_text_badge" class="ml-auto"></span>
     </div>
@@ -56,10 +56,10 @@
     <div class="border-t border-gray-800 pt-2">
       <div class="flex justify-between items-center mb-1">
         <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Progress</label>
-        <span id="book_progress_label" class="text-[10px] text-gray-500">—</span>
+        <span id="book_progress_label" class="text-[10px] text-gray-500">-</span>
       </div>
       <div class="h-1.5 bg-gray-900 rounded overflow-hidden border border-gray-700">
-        <div id="book_progress_bar" class="h-full bg-emerald-600" style="width:0%"></div>
+        <div id="book_progress_bar" class="h-full bg-green-600" style="width:0%"></div>
       </div>
       <div class="flex gap-1 mt-1">
         <button onclick="booksMarkUnread()"
@@ -158,7 +158,7 @@
         <label class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Description</label>
         <button onclick="booksSummarize()" id="btn_book_summarize"
           title="Summarise this book with the configured LLM"
-          class="text-xs bg-yellow-600 hover:bg-yellow-500 px-2 py-0.5 rounded font-bold">✨ AI</button>
+          class="text-xs bg-amber-600 hover:bg-amber-500 px-2 py-0.5 rounded font-bold">AI</button>
       </div>
       <textarea id="book_description" rows="5" oninput="booksAutosave()"
         class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white resize-y"></textarea>
@@ -179,7 +179,7 @@
          them, so detection order is what makes the transcript readable rather
          than one undifferentiated block of text per page. -->
     <div id="book_comic_tools" class="hidden border-t border-gray-700 pt-2 flex flex-col gap-2">
-      <h3 class="font-bold text-purple-400 text-sm">Comic tools</h3>
+      <h3 class="font-bold text-indigo-400 text-sm">Comic tools</h3>
       <p class="text-[10px] text-gray-500">
         Pages are images, so the image pipeline can run over them. Results are
         stored per page against the book, not against loose files.
@@ -190,32 +190,32 @@
       <div class="flex flex-col gap-1 text-[10px] text-gray-400">
         <label class="flex items-center gap-1.5 cursor-pointer" title="Manga and
           other right-to-left comics: reverses panel order within each row.">
-          <input type="checkbox" id="comic_rtl" class="accent-purple-500">
+          <input type="checkbox" id="comic_rtl" class="accent-indigo-500">
           Right-to-left (manga)
         </label>
         <label class="flex items-center gap-1.5 cursor-pointer" title="Crops and
           upscales each panel before reading it. Several times slower, but comic
           lettering is small and full-page OCR often misses it.">
-          <input type="checkbox" id="comic_per_panel" class="accent-purple-500">
+          <input type="checkbox" id="comic_per_panel" class="accent-indigo-500">
           OCR per panel (slower, more accurate)
         </label>
         <label class="flex items-center gap-1.5 cursor-pointer" title="Redo pages
           that already have results instead of skipping them.">
-          <input type="checkbox" id="comic_force" class="accent-purple-500">
+          <input type="checkbox" id="comic_force" class="accent-indigo-500">
           Redo pages already done
         </label>
       </div>
 
       <button id="btn_comic_both" onclick="booksComicBoth()"
-        class="w-full bg-purple-700 hover:bg-purple-600 py-1.5 rounded font-bold text-sm">
-        ▦🔤 Detect panels + OCR</button>
+        class="w-full bg-indigo-700 hover:bg-indigo-600 py-1.5 rounded font-bold text-sm">
+        ▦Detect panels + OCR</button>
       <div class="flex gap-1">
         <button id="btn_comic_panels" onclick="booksComicPanels()"
-          class="flex-1 bg-teal-600 hover:bg-teal-500 py-1.5 rounded font-bold text-xs">
+          class="flex-1 bg-sky-600 hover:bg-sky-500 py-1.5 rounded font-bold text-xs">
           ▦ Panels only</button>
         <button id="btn_comic_ocr" onclick="booksComicOCR()"
           class="flex-1 bg-sky-700 hover:bg-sky-600 py-1.5 rounded font-bold text-xs">
-          🔤 OCR only</button>
+          OCR only</button>
       </div>
 
       <button id="comic_cancel" onclick="booksComicCancel()"
@@ -227,11 +227,11 @@
 
       <label class="flex items-center gap-1.5 text-[10px] text-gray-400 cursor-pointer">
         <input type="checkbox" id="comic_show_panels" onchange="togglePanelOverlay()"
-          class="accent-teal-500">
+          class="accent-sky-500">
         Show panel overlay in reader
       </label>
-      <p id="comic_status" class="text-[10px] text-yellow-400">Ready.</p>
+      <p id="comic_status" class="text-[10px] text-amber-400">Ready.</p>
     </div>
 
-    <p class="text-xs text-gray-400">Status: <span id="book_status_text" class="text-yellow-400">Ready.</span></p>
+    <p class="text-xs text-gray-400">Status: <span id="book_status_text" class="text-amber-400">Ready.</span></p>
   </div>

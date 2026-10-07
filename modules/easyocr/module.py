@@ -1,5 +1,5 @@
-"""
-EasyOCR provider — CRAFT + CRNN, 80+ languages, models download on first use.
+"""! @file
+@brief EasyOCR provider - CRAFT + CRNN, 80+ languages, models download on first use.
 """
 import model_registry
 from optional_deps import optional_import

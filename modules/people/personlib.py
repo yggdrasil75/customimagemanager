@@ -6,7 +6,7 @@ a zip container. Its structure has two tiers because one person is not one body:
 an 18-year-old and the same person at 60 are genuinely different shapes, and
 averaging across them would blend two real bodies into one that matches neither.
 
-  descriptor.json : the person (stable for life) — uuid, name, off-image bio
+  descriptor.json : the person (stable for life) - uuid, name, off-image bio
                     (birthday, relationships), and a list of APPEARANCES.
                     Each appearance is one stable era of the person's look:
                     its own body-description fields (hair greys, physique
@@ -17,7 +17,7 @@ averaging across them would blend two real bodies into one that matches neither.
   mesh_<id>.obj   : one appearance's canonical body mesh (optional).
 
 Appearances are formed from face-embedding drift (a physical, monotonic process),
-NOT from capture dates — scanned family photos routinely carry the scan date, not
+NOT from capture dates - scanned family photos routinely carry the scan date, not
 the shot date, so a date is only ever validated against the embedding era and
 flagged when it disagrees; it never moves a photo between eras.
 
@@ -26,7 +26,7 @@ rebuilt by scanning `.persons/`, so a lost DB costs only recompute, never the
 descriptor/mesh/relationships that live nowhere else.
 
 Body fields are filled by a secondary pipeline or an LLM action through the SAME
-per-field store, into the SAME appearance the pipeline uses — that is the unification.
+per-field store, into the SAME appearance the pipeline uses - that is the unification.
 """
 
 import io
@@ -76,7 +76,7 @@ LIST_FIELDS: tuple[str, ...] = ("aliases", "tags")
 BIO_CHOICES: dict[str, tuple[str, ...]] = {"gender": ("", "male", "female")}
 
 ## Relationship lines split into single-entry and multi-entry. mother/father/spouse
-## hold at most one person (a person has one of each at a time — an ex goes under
+## hold at most one person (a person has one of each at a time - an ex goes under
 ## ex_spouses). The rest are lists. Each edge links a known person (uuid) or names
 ## an external person (uuid None) with no record.
 SINGLE_RELATIONS: tuple[str, ...] = ("mother", "father", "spouse")
@@ -99,7 +99,7 @@ def blank_appearance(appearance_id: str) -> dict[str, Any]:
     """! @brief An empty time-scoped appearance (one stable era of a person's look).
     @return A record holding this era's own body fields, identity centroids, image
             membership and date span, so nothing is ever averaged across eras. The
-            date span is descriptive only — appearances are formed from embedding
+            date span is descriptive only - appearances are formed from embedding
             drift, not dates, so a wrong scan-date can't move a photo between eras.
     """
     return {
@@ -330,7 +330,7 @@ def reciprocal_line(line: str, target_is_female: Optional[bool]) -> Optional[str
 def check_reciprocity(media_dir: str) -> list[dict[str, Any]]:
     """! @brief Find relationship edges present on one person but missing on the other.
     @return One entry per one-sided edge: {person, line, other, other_name}. Reads
-            never auto-repair — mismatches surface in the review tab so a corrupt or
+            never auto-repair - mismatches surface in the review tab so a corrupt or
             half-written edge is shown, not silently reconciled by overwriting.
     """
     people = {d["uuid"]: d for d in list_all(media_dir)}

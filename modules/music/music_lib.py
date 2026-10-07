@@ -1,5 +1,5 @@
-"""
-music_lib.py — the music module's library.
+"""! @file
+@brief music_lib.py - the music module's library.
 ==========================================
 Tables, tag read/write (mutagen), offline audio embeddings (librosa),
 k-means clustering and shuffle-by. The routes, indexer and UI wiring are in
@@ -22,7 +22,7 @@ EMB_DIM = 62          # MFCC(20*2) + chroma(12) + contrast(7) + tempo(1) + zcr(1
 EMB_SIG = "librosa-v1"  # bump to invalidate every cached embedding
 
 
-# ── schema ────────────────────────────────────────────────────────────────────
+# -- schema --------------------------------------------------------------------
 DDL = """
         CREATE TABLE IF NOT EXISTS music (
             rel_path     TEXT PRIMARY KEY,
@@ -63,7 +63,7 @@ DDL = """
         );
     """
 
-# ── metadata (mutagen) ─────────────────────────────────────────────────────────
+# -- metadata (mutagen) ---------------------------------------------------------
 def _first(d, *keys):
     for k in keys:
         v = d.get(k)
@@ -74,7 +74,7 @@ def _first(d, *keys):
     return ""
 
 def _split_num(s):
-    """'3/12' -> 3 ; '7' -> 7 ; '' -> None"""
+    """! @brief '3/12' -> 3 ; '7' -> 7 ; '' -> None"""
     if s is None:
         return None
     s = str(s).split('/')[0].strip()
@@ -84,7 +84,7 @@ def _split_num(s):
         return None
 
 def read_audio_metadata(abs_path: str) -> dict:
-    """Normalise tags from any container into one flat dict. Never raises."""
+    """! @brief Normalise tags from any container into one flat dict. Never raises."""
     out = {
         "title": "", "artist": "", "album": "", "albumartist": "",
         "track": None, "disc": None, "year": "", "genre": "",
@@ -126,7 +126,7 @@ _EASY_KEYS = {
 }
 
 def write_audio_metadata(abs_path: str, meta: dict) -> bool:
-    """Write editable fields back into the file. Returns True on success."""
+    """! @brief Write editable fields back into the file. Returns True on success."""
     try:
         mf = MutagenFile(abs_path, easy=True)
         if mf is None:
@@ -155,7 +155,7 @@ def write_audio_metadata(abs_path: str, meta: dict) -> bool:
     except Exception:
         return False
 
-# ── embedding ──────────────────────────────────────────────────────────────────
+# -- embedding ------------------------------------------------------------------
 def _pack_emb(vec: np.ndarray) -> bytes:
     v = np.asarray(vec, dtype=np.float32).ravel()
     return struct.pack("<I", v.size) + v.tobytes()
@@ -170,7 +170,7 @@ def unpack_emb(blob) -> np.ndarray | None:
         return None
 
 def compute_embedding(abs_path: str, max_seconds: float = 90.0) -> np.ndarray | None:
-    """Deterministic offline audio fingerprint suitable for similarity/clustering.
+    """! @brief Deterministic offline audio fingerprint suitable for similarity/clustering.
 
     Loads up to `max_seconds` (mono, 22.05 kHz), takes summary statistics of
     timbral + harmonic + rhythmic features, and concatenates them into a single
@@ -206,7 +206,7 @@ def compute_embedding(abs_path: str, max_seconds: float = 90.0) -> np.ndarray | 
         return None
 
 def normalize_matrix(M: np.ndarray, zscore: bool = True) -> np.ndarray:
-    """Rows L2-normalised -> cosine == dot product. zscore=True first z-scores
+    """! @brief Rows L2-normalised -> cosine == dot product. zscore=True first z-scores
     each column: right for the hand-crafted librosa fingerprint (features on
     wildly different scales), wrong for a model space (CLAP, MuQ) where text
     queries must stay comparable to the stored vectors."""
@@ -221,9 +221,9 @@ def normalize_matrix(M: np.ndarray, zscore: bool = True) -> np.ndarray:
 def is_fingerprint_space(space) -> bool:
     return str(space or "") == EMB_SIG
 
-# ── clustering ──────────────────────────────────────────────────────────────────
+# -- clustering ------------------------------------------------------------------
 def _kmeans_np(X, k, iters=25, seed=0):
-    """Plain numpy k-means (cosine rows): the no-sklearn fallback."""
+    """! @brief Plain numpy k-means (cosine rows): the no-sklearn fallback."""
     rng = np.random.default_rng(seed)
     C = X[rng.choice(len(X), size=k, replace=False)].copy()
     labels = np.zeros(len(X), dtype=int)
@@ -244,7 +244,7 @@ def kmeans_labels(X, k, seed=0):
     return _kmeans_np(X, k, seed=seed)
 
 def cluster_embeddings(paths, embs, k=None, zscore=True):
-    """KMeans over a list of embeddings. Returns {rel_path: cluster_id} and k."""
+    """! @brief KMeans over a list of embeddings. Returns {rel_path: cluster_id} and k."""
     X = normalize_matrix(np.vstack(embs), zscore=zscore)
     n = len(paths)
     if k is None:
@@ -253,9 +253,9 @@ def cluster_embeddings(paths, embs, k=None, zscore=True):
     labels = kmeans_labels(X, k)
     return {p: int(c) for p, c in zip(paths, labels)}, k
 
-# ── similarity / shuffle ────────────────────────────────────────────────────────
+# -- similarity / shuffle --------------------------------------------------------
 def shuffle_by(seed_vecs, all_paths, all_embs, temperature=0.25, limit=500, zscore=True):
-    """Order tracks by similarity to the seed centroid, with controlled noise.
+    """! @brief Order tracks by similarity to the seed centroid, with controlled noise.
 
     seed_vecs : list of embeddings defining the seed (one song, or every song by
                 an artist). Their mean is the centroid.
@@ -273,9 +273,9 @@ def shuffle_by(seed_vecs, all_paths, all_embs, temperature=0.25, limit=500, zsco
     score = sims + noise
     order = np.argsort(-score)
     return [all_paths[i] for i in order[:limit]]
-# ── radio: one route through the whole library ─────────────────────────────────
+# -- radio: one route through the whole library ---------------------------------
 def _nn_tour(X, start=0):
-    """Greedy nearest-unvisited tour over rows of X (cosine). O(n²) time, O(n)
+    """! @brief Greedy nearest-unvisited tour over rows of X (cosine). O(n^2) time, O(n)
     memory. Returns index order."""
     n = len(X)
     visited = np.zeros(n, dtype=bool)
@@ -289,7 +289,7 @@ def _nn_tour(X, start=0):
     return order
 
 def _two_opt(X, order, rounds=3):
-    """Cheap 2-opt on a short tour (cluster centroids): uncross edges."""
+    """! @brief Cheap 2-opt on a short tour (cluster centroids): uncross edges."""
     D = 1.0 - X @ X.T
     o = list(order); n = len(o)
     if n < 4:
@@ -306,10 +306,10 @@ def _two_opt(X, order, rounds=3):
     return o
 
 def route_playlist(paths, embs, start_vec=None, zscore=True, seed=None):
-    """Every track once, ordered as one smooth walk through embedding space:
-    rock → blues → jazz → classical, each step to a near neighbour.
+    """! @brief Every track once, ordered as one smooth walk through embedding space:
+    rock -> blues -> jazz -> classical, each step to a near neighbour.
 
-    Cluster (k ≈ √(n/2)), tour the centroids (greedy + 2-opt), then walk each
+    Cluster (k ~ sqrt(n/2)), tour the centroids (greedy + 2-opt), then walk each
     cluster greedily from the member nearest the previous cluster's last
     track. `start_vec` picks the first track (the one nearest it), so a new
     round can begin where the previous one ended; otherwise a random track.

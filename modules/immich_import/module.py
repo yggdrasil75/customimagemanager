@@ -1,12 +1,12 @@
-"""
-Immich importer.
+"""! @file
+@brief Immich importer.
 ======================================================================
 Pulls a user's whole Immich library over the Immich REST API with an API key
-(Immich → Account settings → API keys). What comes along:
+(Immich -> Account settings -> API keys). What comes along:
 
   * originals, byte for byte, each checked against Immich's own SHA-1
     checksum after download (a truncated transfer is retried, not ingested);
-  * capture date with its time zone, GPS, description — written only where
+  * capture date with its time zone, GPS, description - written only where
     the file itself carries none, so the camera's EXIF always wins;
   * albums (owned and shared-with-you) as albums, tags as tags;
   * named people with their face boxes as confirmed face regions;
@@ -18,8 +18,8 @@ ledger remembers every asset id, and periodic runs only ask Immich for
 assets changed since the last complete run (updatedAfter). Album membership
 is re-applied to already-imported photos, since adding an old photo to an
 album doesn't make it "new".
-Immich's API has moved between releases (archived → visibility, a few
-singular → plural paths); the client tries the current form and falls back.
+Immich's API has moved between releases (archived -> visibility, a few
+singular -> plural paths); the client tries the current form and falls back.
 """
 
 import base64
@@ -46,7 +46,7 @@ PAGE = 250
 
 
 class ImportAbort(Exception):
-    """A run-level failure (unreachable server, bad key)."""
+    """! @brief A run-level failure (unreachable server, bad key)."""
 
 
 class Immich:
@@ -70,7 +70,7 @@ class Immich:
         return r
 
     def _json(self, method, paths, **kw):
-        """First path that isn't a 404 wins (plural/singular across versions)."""
+        """! @brief First path that isn't a 404 wins (plural/singular across versions)."""
         last = None
         for p in paths:
             r = self._req(method, p, **kw)
@@ -92,8 +92,8 @@ class Immich:
             return {}
 
     def search(self, extra=None, droppable=()):
-        """All assets matching `extra`, page by page. Keys this server doesn't
-        know (400 'property … should not exist') are dropped and retried; a
+        """! @brief All assets matching `extra`, page by page. Keys this server doesn't
+        know (400 'property ... should not exist') are dropped and retried; a
         pass whose own filter is unknown yields nothing."""
         base = {"withExif": True, "withPeople": True}
         body_extra = dict(extra or {})
@@ -130,7 +130,7 @@ class Immich:
             page = int(nxt)
 
     def album_map(self):
-        """asset id -> [album names], owned and shared-with-me."""
+        """! @brief asset id -> [album names], owned and shared-with-me."""
         seen, out = set(), {}
         for q in ({}, {"shared": "true"}):
             try:
@@ -152,7 +152,7 @@ class Immich:
         return out
 
     def tag_map(self):
-        """asset id -> [tag values] (hierarchical tags keep their 'a/b' path)."""
+        """! @brief asset id -> [tag values] (hierarchical tags keep their 'a/b' path)."""
         try:
             tags = self._json("GET", ["/tags", "/tag"])
         except ApiError:
@@ -198,7 +198,7 @@ def _err(r):
         return (r.text or "")[:300]
 
 
-# ── mapping one Immich asset to an Item ──────────────────────────────────────
+# -- mapping one Immich asset to an Item --------------------------------------
 def _parse_iso(s):
     if not s:
         return None
@@ -209,7 +209,7 @@ def _parse_iso(s):
 
 
 def capture_time(a):
-    """Aware capture time. Immich stores the instant in UTC and the wall-clock
+    """! @brief Aware capture time. Immich stores the instant in UTC and the wall-clock
     time as `localDateTime` (a fake-UTC timestamp); their difference is the
     offset the photo was taken at."""
     exif = a.get("exifInfo") or {}
@@ -257,7 +257,7 @@ def _source_folder(a):
 
 
 def _verify(path, checksum):
-    """Immich's checksum is base64(SHA-1) of the original."""
+    """! @brief Immich's checksum is base64(SHA-1) of the original."""
     if not checksum:
         return
     try:
@@ -273,7 +273,7 @@ def _verify(path, checksum):
 
 
 def _downloader(client, asset_id, name, checksum):
-    """Item opener: download the original into the job's scratch dir and
+    """! @brief Item opener: download the original into the job's scratch dir and
     check it against Immich's checksum."""
     def opener(tmp):
         dst = os.path.join(tmp, "dl-" + os.path.basename(name))
@@ -341,7 +341,7 @@ def register(host):
         ctx.scope = f"{src['id']}:{cfg.get('user_id', '')}"
         client = Immich(cfg["url"], src["secrets"].get("api_key"))
         started = datetime.now(timezone.utc)
-        ctx.message("listing albums and tags…")
+        ctx.message("listing albums and tags...")
         albums = client.album_map()
         tags = client.tag_map() if cfg.get("include_tags", True) else {}
         _sync_albums(ctx, albums)
@@ -387,7 +387,7 @@ def register(host):
             imp.update_source(src["id"], config=cfg)
 
     def _sync_albums(ctx, albums):
-        """Add Immich album membership to photos imported earlier."""
+        """! @brief Add Immich album membership to photos imported earlier."""
         for aid, names in albums.items():
             row = ctx.row(aid)
             if row and row["status"] == "done" and row["rel_path"]:

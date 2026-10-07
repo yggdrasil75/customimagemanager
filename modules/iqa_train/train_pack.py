@@ -1,5 +1,5 @@
-"""
-Train Personal IQA scorer sizes from a feature pack, with nothing but torch.
+"""! @file
+@brief Train Personal IQA scorer sizes from a feature pack, with nothing but torch.
 ======================================================================
     python modules/iqa_train/train_pack.py PACK.pt [PACK2.pt ...] --out DIR
         [--sizes "name d depth" ...] [--epochs 20] [--batch 256] [--lr 1e-3]
@@ -116,7 +116,7 @@ def bench_ms(model, val, dev, batch):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__.split("@brief", 1)[-1].strip(), formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("packs", nargs="+")
     ap.add_argument("--out", required=True)
     ap.add_argument("--sizes", nargs="*", default=None, help='"name d depth" per entry; default: net.SIZES')

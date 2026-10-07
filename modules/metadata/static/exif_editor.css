@@ -14,10 +14,10 @@
   --exif-text:      #e5e7eb;
   --exif-muted:     #9ca3af;
   --exif-faint:     #6b7280;
-  --exif-accent:    #3b82f6;
-  --exif-accent-2:  #60a5fa;
-  --exif-warn:      #f59e0b;
-  --exif-purple:    #a78bfa;
+  --exif-accent:    var(--cim-accent-500, #3b82f6);
+  --exif-accent-2:  var(--cim-accent-400, #60a5fa);
+  --exif-warn:      var(--cim-warn-500, #f59e0b);
+  --exif-purple:    var(--cim-accent2-400, #818cf8);
 
   color: var(--exif-text);
   font-size: 13px;
@@ -31,7 +31,7 @@
   gap: 12px;
 }
 
-/* ── Header ─────────────────────────────────────────────────────────────── */
+/* -- Header --------------------------------------------------------------- */
 #exif-editor .exif-head {
   display: flex;
   justify-content: space-between;
@@ -73,17 +73,17 @@
 #exif-editor .exif-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
 #exif-editor .exif-status { font-size: 11px; color: var(--exif-muted); min-width: 60px; }
-#exif-editor .exif-status.ok   { color: #34d399; }
-#exif-editor .exif-status.err  { color: #f87171; }
+#exif-editor .exif-status.ok   { color: var(--cim-ok-400, #4ade80); }
+#exif-editor .exif-status.err  { color: var(--cim-danger-400, #f87171); }
 
-/* ── Summary ────────────────────────────────────────────────────────────── */
+/* -- Summary -------------------------------------------------------------- */
 #exif-editor .exif-summary {
   font-size: 12px; color: var(--exif-muted);
   display: flex; gap: 16px; flex-wrap: wrap;
 }
 #exif-editor .exif-summary b { color: var(--exif-text); font-weight: 600; }
 
-/* ── Groups ─────────────────────────────────────────────────────────────── */
+/* -- Groups --------------------------------------------------------------- */
 #exif-editor .exif-groups { display: flex; flex-direction: column; gap: 10px; }
 #exif-editor .exif-empty { color: var(--exif-faint); font-style: italic; padding: 8px; }
 #exif-editor .exif-empty code,
@@ -112,8 +112,8 @@
   font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
   padding: 2px 7px; border-radius: 999px;
 }
-#exif-editor .exif-group-badge.mapped   { background: #14304a; color: var(--exif-accent-2); }
-#exif-editor .exif-group-badge.unmapped { background: #3a2a12; color: var(--exif-warn); }
+#exif-editor .exif-group-badge.mapped   { background: color-mix(in srgb, var(--cim-accent-800, #1e40af) 35%, transparent); color: var(--exif-accent-2); }
+#exif-editor .exif-group-badge.unmapped { background: color-mix(in srgb, var(--cim-warn-800, #92400e) 35%, transparent); color: var(--exif-warn); }
 
 #exif-editor .exif-group-desc {
   font-size: 12px; color: var(--exif-muted); margin: 6px 0 8px;
@@ -122,7 +122,7 @@
 #exif-editor .exif-group.collapsed .exif-group-fields,
 #exif-editor .exif-group.collapsed .exif-group-unknown { display: none; }
 
-/* ── Fields ─────────────────────────────────────────────────────────────── */
+/* -- Fields --------------------------------------------------------------- */
 #exif-editor .exif-group-fields {
   display: flex; flex-direction: column; gap: 2px;
 }
@@ -132,7 +132,7 @@
 }
 #exif-editor .exif-field:hover { background: var(--exif-panel-2); }
 #exif-editor .exif-field.is-empty { opacity: 0.55; }
-#exif-editor .exif-field.is-present { border-color: #1e3a5f; }
+#exif-editor .exif-field.is-present { border-color: color-mix(in srgb, var(--cim-accent-700, #1d4ed8) 45%, transparent); }
 #exif-editor .exif-field.is-readonly .exif-field-name { color: var(--exif-muted); }
 
 #exif-editor .exif-field-main {
@@ -181,7 +181,7 @@
 #exif-editor .exif-field-ro.is-generated { color: var(--exif-accent-2); }
 #exif-editor .exif-field-note { font-style: italic; }
 
-/* ── Unknown tags ───────────────────────────────────────────────────────── */
+/* -- Unknown tags --------------------------------------------------------- */
 #exif-editor .exif-group-unknown:not(:empty) {
   margin-top: 8px; padding-top: 8px;
   border-top: 1px dashed var(--exif-border);

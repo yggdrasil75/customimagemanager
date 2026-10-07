@@ -1,4 +1,5 @@
-"""Comic Vine — comic/volume metadata source (API key required)."""
+"""! @file
+@brief Comic Vine - comic/volume metadata source (API key required)."""
 import re
 
 MANIFEST = {
@@ -23,7 +24,7 @@ def register(host):
         for v in r.get("results", []):
             pub = (v.get("publisher") or {}).get("name", "")
             out.append({"id": v.get("id"), "title": v.get("name", ""),
-                        "subtitle": " · ".join(x for x in (pub, str(v.get("start_year") or ""),
+                        "subtitle": " | ".join(x for x in (pub, str(v.get("start_year") or ""),
                                                           f"{v.get('count_of_issues')} issues") if x),
                         "thumb": (v.get("image") or {}).get("small_url"),
                         "fields": {"title": v.get("name", ""), "series": v.get("name", ""), "publisher": pub,

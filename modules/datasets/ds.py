@@ -1,14 +1,14 @@
-"""
-Dataset download + normalisation (no app state; module.py wires it in).
+"""! @file
+@brief Dataset download + normalisation (no app state; module.py wires it in).
 ======================================================================
 Targets (queued through the fetch module like any URL). Closed zoos get a
 one-click entry in Settings > Datasets; open-ended hosts take a link:
 
     dataset:pyiqa:<name>                   IQA benchmark sets pyiqa mirrors (PYIQA below), MOS labelled
     dataset:ultralytics:<name>             any dataset YAML shipped with the installed ultralytics
-    dataset:hf:<owner>/<name>              Hugging Face dataset repo      (or its https://huggingface.co/datasets/… link)
-    dataset:kaggle:<owner>/<name>          Kaggle dataset                 (or its https://www.kaggle.com/datasets/… link)
-    dataset:zenodo:<record id>             Zenodo record, every file      (or its https://zenodo.org/records/… link)
+    dataset:hf:<owner>/<name>              Hugging Face dataset repo      (or its https://huggingface.co/datasets/... link)
+    dataset:kaggle:<owner>/<name>          Kaggle dataset                 (or its https://www.kaggle.com/datasets/... link)
+    dataset:zenodo:<record id>             Zenodo record, every file      (or its https://zenodo.org/records/... link)
     dataset:<url>                          zip / tar(.gz|.bz2|.xz) / 7z / parquet / csv / image
 
 followed by optional space-separated key=value options:
@@ -91,7 +91,7 @@ class DatasetError(RuntimeError):
     pass
 
 
-# ── zoos ────────────────────────────────────────────────────────────────────
+# -- zoos --------------------------------------------------------------------
 
 def _ultra_dir():
     try:
@@ -104,7 +104,7 @@ def _ultra_dir():
 
 
 def ultralytics_zoo():
-    """{name: {"label", "download", "data"}} for every YAML in the installed ultralytics
+    """! @brief {name: {"label", "download", "data"}} for every YAML in the installed ultralytics
     whose `download` is a URL or an inline python script (read, not imported)."""
     d = _ultra_dir()
     if not d or not HAVE_YAML:
@@ -130,7 +130,7 @@ def ultralytics_zoo():
 
 
 def zoo():
-    """What Settings > Datasets offers as one-click downloads."""
+    """! @brief What Settings > Datasets offers as one-click downloads."""
     return [
         {"id": "pyiqa", "label": "IQA benchmarks (pyiqa mirror on Hugging Face)", "labelled": True,
          "items": [{"target": f"{PREFIX}pyiqa:{k}", "name": k, "label": v[0]} for k, v in PYIQA.items()]},
@@ -141,14 +141,14 @@ def zoo():
 
 
 def dest_name(u):
-    """Folder an ultralytics dataset lands in: its YAML `path` (the name its zips/scripts use)."""
+    """! @brief Folder an ultralytics dataset lands in: its YAML `path` (the name its zips/scripts use)."""
     return os.path.basename(str(u["data"].get("path") or "").rstrip("/\\")) or "dataset"
 
 
-# ── target parsing ──────────────────────────────────────────────────────────
+# -- target parsing ----------------------------------------------------------
 
 def parse_target(t):
-    """'dataset:<src> k=v ...' -> {"kind", "src", "name", **opts}."""
+    """! @brief 'dataset:<src> k=v ...' -> {"kind", "src", "name", **opts}."""
     body = (t or "").strip()
     if not body.lower().startswith(PREFIX):
         raise DatasetError("not a dataset target")
@@ -198,7 +198,7 @@ def parse_target(t):
 
 
 def host_of(spec):
-    """Concurrency bucket: the host the bytes come from."""
+    """! @brief Concurrency bucket: the host the bytes come from."""
     k = spec["kind"]
     if k in ("hf", "pyiqa"):
         return "huggingface.co"
@@ -212,7 +212,7 @@ def host_of(spec):
     return urllib.parse.urlparse(spec["src"]).netloc
 
 
-# ── downloading (generators: yield per chunk so the caller can cancel) ──────
+# -- downloading (generators: yield per chunk so the caller can cancel) ------
 
 def _auth_header(url, creds):
     creds = creds or {}
@@ -249,7 +249,7 @@ def _json(url, creds=None):
 
 
 def download(url, path, creds=None, size=None):
-    """Stream url -> path (via .part). Skips when path exists with the expected size."""
+    """! @brief Stream url -> path (via .part). Skips when path exists with the expected size."""
     if os.path.exists(path) and (size is None or os.path.getsize(path) == size):
         return
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -265,7 +265,7 @@ def download(url, path, creds=None, size=None):
 
 
 def hf_files(repo, rev="main", creds=None):
-    """[(path, size)] of every file in a HF dataset repo (follows the tree API's paging)."""
+    """! @brief [(path, size)] of every file in a HF dataset repo (follows the tree API's paging)."""
     url = (f"https://huggingface.co/api/datasets/{repo}/tree/{urllib.parse.quote(rev, safe='')}"
            "?recursive=true&expand=false")
     out = []
@@ -283,7 +283,7 @@ def hf_url(repo, path, rev="main"):
 
 
 def zenodo_files(record, creds=None):
-    """[(name, url, size)] of a Zenodo record's files."""
+    """! @brief [(name, url, size)] of a Zenodo record's files."""
     rec, _ = _json(f"https://zenodo.org/api/records/{record}", creds)
     files = rec.get("files") or []
     if isinstance(files, dict):                          # some API versions nest {"entries": {...}}
@@ -292,7 +292,7 @@ def zenodo_files(record, creds=None):
             for f in files]
 
 
-# ── normalisation ───────────────────────────────────────────────────────────
+# -- normalisation -----------------------------------------------------------
 
 def _inside(root, path):
     root = os.path.realpath(root)
@@ -300,7 +300,7 @@ def _inside(root, path):
 
 
 def _extract(path):
-    """Extract one archive next to itself; refuse members that escape the folder."""
+    """! @brief Extract one archive next to itself; refuse members that escape the folder."""
     d, low = os.path.dirname(path), path.lower()
     if low.endswith(".zip"):
         with zipfile.ZipFile(path) as z:
@@ -323,7 +323,7 @@ def _extract(path):
 
 
 def extract_all(root):
-    """Extract every archive under root (repeat for archives inside archives), deleting each after."""
+    """! @brief Extract every archive under root (repeat for archives inside archives), deleting each after."""
     done = set()
     while True:
         todo = [os.path.join(dp, f) for dp, _dn, fns in os.walk(root) for f in fns
@@ -367,7 +367,7 @@ def _score_col(names, want=None):
 
 
 def parquet_to_images(root, image=None, score=None):
-    """Write every parquet's image column out as files under root/images/, append
+    """! @brief Write every parquet's image column out as files under root/images/, append
     (name, raw score) to root/_parquet_labels.csv, then delete the parquet."""
     files = sorted(os.path.join(dp, f) for dp, _dn, fns in os.walk(root) for f in fns
                    if f.lower().endswith(".parquet"))
@@ -420,7 +420,7 @@ def index_images(root):
 
 
 def _csv_rows(path, idx, score=None):
-    """{image basename: raw score} from one CSV/TSV with a header, or {}."""
+    """! @brief {image basename: raw score} from one CSV/TSV with a header, or {}."""
     try:
         with open(path, encoding="utf-8", errors="replace", newline="") as f:
             first = f.readline(); f.seek(0)
@@ -460,7 +460,7 @@ def _csv_rows(path, idx, score=None):
 
 
 def build_labels(root, score=None):
-    """Write root/labels.csv (name, score 0..1) from every labelled CSV/TSV under root.
+    """! @brief Write root/labels.csv (name, score 0..1) from every labelled CSV/TSV under root.
     Returns its path, or None when nothing carried labels."""
     idx = index_images(root)
     ours = os.path.join(root, LABELS)
@@ -491,7 +491,7 @@ def find_ava(root):
 
 
 def normalise(root, spec):
-    """Extract, unpack parquet, build labels. Generator (yields for cancel); returns labels path|None."""
+    """! @brief Extract, unpack parquet, build labels. Generator (yields for cancel); returns labels path|None."""
     yield from extract_all(root)
     yield from parquet_to_images(root, spec.get("image"), spec.get("score"))
     return build_labels(root, spec.get("score")) or find_ava(root)
@@ -499,7 +499,7 @@ def normalise(root, spec):
 
 
 def pyiqa_labels(root, name, meta_path):
-    """root/labels.csv from a pyiqa meta_info CSV: paths relative to root, MOS
+    """! @brief root/labels.csv from a pyiqa meta_info CSV: paths relative to root, MOS
     mapped to 0..1 with the published range (flipped when lower is better).
     Returns the labels path or None."""
     _label, _arc, _meta, fr, img_root, rng, lower = PYIQA[name]
@@ -533,7 +533,7 @@ def pyiqa_labels(root, name, meta_path):
 
 
 def _run_ultralytics_script(script, data, root):
-    """Run a YAML's inline download script exactly as ultralytics' check_det_dataset
+    """! @brief Run a YAML's inline download script exactly as ultralytics' check_det_dataset
     does (exec with `yaml` = the parsed YAML, path = our folder). Its downloads
     already unzip, so leftover archives it drops (in root or root's parent) are removed.
     Generator (one yield at the end): the script itself can't be cancelled mid-way."""
@@ -551,7 +551,7 @@ def _run_ultralytics_script(script, data, root):
 
 
 def _once(root, key, gen):
-    """Run a download generator unless the marker for key exists (archives are deleted
+    """! @brief Run a download generator unless the marker for key exists (archives are deleted
     after extraction, so their absence can't mean 'not fetched')."""
     mark = os.path.join(root, ".fetched_" + re.sub(r"[^\w.-]", "_", key) + ".done")
     if os.path.exists(mark):
@@ -561,7 +561,7 @@ def _once(root, key, gen):
 
 
 def fetch(spec, root, creds=None):
-    """Download spec into root, then normalise. Generator; returns labels path|None."""
+    """! @brief Download spec into root, then normalise. Generator; returns labels path|None."""
     os.makedirs(root, exist_ok=True)
     kind, src = spec["kind"], spec["src"]
     if kind == "pyiqa":

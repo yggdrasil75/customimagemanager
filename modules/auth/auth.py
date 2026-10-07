@@ -1,5 +1,5 @@
-"""
-Authentication: local (SQLite + werkzeug pbkdf2) and/or LDAP/AD backends,
+"""! @file
+@brief Authentication: local (SQLite + werkzeug pbkdf2) and/or LDAP/AD backends,
 server-side cookie sessions, CSRF, and per-feature permission gates.
 
 Configuration lives in app_config.json under "auth": enabled, mode
@@ -38,7 +38,7 @@ _LOGIN_MAX, _LOGIN_WINDOW = 10, 900
 _UNSET = object()
 
 def require_feature(feature_key, action=None, fields=(), level="read"):
-    """@brief Decorator: 403 unless g.user has >= `level` on feature_key.
+    """! @brief @brief Decorator: 403 unless g.user has >= `level` on feature_key.
 
     level defaults to "read" (may see/open). Write-guarded endpoints pass
     level="write". @param action optional audit action; fields are body keys
@@ -66,7 +66,7 @@ def require_feature(feature_key, action=None, fields=(), level="read"):
                         if f in body:
                             v = body[f]
                             if isinstance(v, (list, dict)) and len(str(v)) > 300:
-                                v = str(v)[:300] + "…"
+                                v = str(v)[:300] + "..."
                             parts.append(f"{f}={v!r}")
                     audit(action, " ".join(parts))
                 except Exception:
@@ -87,25 +87,25 @@ _PUBLIC_PREFIXES = ["/static/"]
 
 
 def add_public_prefix(prefix):
-    """Let a module open a URL prefix to the login gate (host.add_public_prefix).
+    """! @brief Let a module open a URL prefix to the login gate (host.add_public_prefix).
     The module MUST authenticate those requests itself (an API key, a peer
     secret); the core only stops redirecting them to /login. Prefixes must be
     absolute ("/api/x/inbound/") so a module can't open more than its own routes."""
     prefix = str(prefix or "")
     if not prefix.startswith("/api/") or not prefix.endswith("/"):
-        raise ValueError("public prefix must look like '/api/<module>/…/'")
+        raise ValueError("public prefix must look like '/api/<module>/.../'")
     if prefix not in _PUBLIC_PREFIXES:
         _PUBLIC_PREFIXES.append(prefix)
 
 # Per-account fields modules add to the user / group editors (a default
-# layout, …): key -> {label, options (list or callable -> [{value,label}]),
+# layout, ...): key -> {label, options (list or callable -> [{value,label}]),
 # scopes ("user","group"), help}. Values live in the `extra` JSON column of
 # auth_users / auth_groups; a user's value wins over their group's.
 _ACCOUNT_FIELDS = {}
 
 
 def register_account_field(key, label, *, options=None, scopes=("user", "group"), help=None):
-    """Add a field to the account (user / group) editor (host.add_account_field)."""
+    """! @brief Add a field to the account (user / group) editor (host.add_account_field)."""
     key = str(key or "").strip()
     if not key or not key.replace("_", "").isalnum():
         raise ValueError("account field key: letters, digits and _ only")
@@ -116,7 +116,7 @@ def register_account_field(key, label, *, options=None, scopes=("user", "group")
 
 
 def account_fields():
-    """Registered account fields with option lists resolved (JSON-safe)."""
+    """! @brief Registered account fields with option lists resolved (JSON-safe)."""
     out = []
     for f in _ACCOUNT_FIELDS.values():
         opts = f["options"]
@@ -131,7 +131,7 @@ def account_fields():
 
 
 def _clean_extra(raw, scope):
-    """Validate an `extra` dict from the account editor: registered keys for
+    """! @brief Validate an `extra` dict from the account editor: registered keys for
     this scope only; with an option list the value must be one of them; ""
     clears the key."""
     if not isinstance(raw, dict):
@@ -173,7 +173,7 @@ _DEFAULT_CFG = {
 }
 
 class Auth:
-    """@brief Wires authentication into an existing Flask app."""
+    """! @brief @brief Wires authentication into an existing Flask app."""
 
     def __init__(self, app, db_factory, get_cfg, save_cfg=None):
         self.app = app
@@ -270,7 +270,7 @@ class Auth:
                 for r in rows]
 
     def effective_perms_for(self, user_row):
-        """@brief Resolve effective feature map: group role/perms, then user's own on top."""
+        """! @brief @brief Resolve effective feature map: group role/perms, then user's own on top."""
         perms = self._resolve_perms(user_row)
         return capabilities.apply_machine_limits(perms)
 
@@ -312,7 +312,7 @@ class Auth:
         }
         u["features"] = self.effective_perms_for(r)
         # Resolved account fields (user value, else the group's) and the role
-        # the permissions were resolved with — what modules read off g.user.
+        # the permissions were resolved with - what modules read off g.user.
         grp = self.get_group(u["group_id"])
         gextra = self._load_perms(grp["extra"] if grp is not None and "extra" in grp.keys() else None)
         u["account"] = {k: v for k, v in {**gextra, **u["extra"]}.items() if v}
@@ -460,7 +460,7 @@ class Auth:
         db.commit()
 
     def authenticate(self, username, password):
-        """@brief Return a user Row on success, else None. Honors the configured mode."""
+        """! @brief @brief Return a user Row on success, else None. Honors the configured mode."""
         mode = self.cfg().get("mode", "local")
         username = (username or "").strip()
         if not _USERNAME_RE.match(username) or password is None:
@@ -650,7 +650,7 @@ class Auth:
         self._db().commit()
 
     def _load_current(self):
-        """@brief Populate g.user / g.session from the request cookie."""
+        """! @brief @brief Populate g.user / g.session from the request cookie."""
         g.user = None
         g.session = None
         g.api_key = None
@@ -678,7 +678,7 @@ class Auth:
         return any(path.startswith(p) for p in _PUBLIC_PREFIXES)
 
     def _gate(self):
-        """@brief before_request hook: enforce login + CSRF on protected paths."""
+        """! @brief @brief before_request hook: enforce login + CSRF on protected paths."""
         if not self.enabled():
             g.user = {"username": "anonymous", "is_admin": True,
                       "id": 0, "source": "disabled", "role": "admin",
@@ -803,7 +803,7 @@ class Auth:
             return jsonify({"ok": True})
 
         def require_admin(fn=None, *, level="write"):
-            """Account management: admins, or a user granted the Users settings
+            """! @brief Account management: admins, or a user granted the Users settings
             tab (settings.users) at `level`. Non-admin managers are further
             limited inside the views (no admin flag, no admin accounts)."""
             def deco(fn):
@@ -821,7 +821,7 @@ class Auth:
             return deco(fn) if fn else deco
 
         def _manager_limit(target_id=None, d=None):
-            """For a non-admin account manager: refuse touching admin accounts or
+            """! @brief For a non-admin account manager: refuse touching admin accounts or
             the admin flag. Returns an error response, or None when allowed."""
             if g.user.get("is_admin"):
                 return None

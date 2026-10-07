@@ -1,4 +1,5 @@
-"""Palette: Orange. Sets the accent variables of the core palette contract."""
+"""! @file
+@brief Palette: Orange. Sets the accent variables of the core palette contract."""
 
 MANIFEST = {
     "id":          "colors_orange",

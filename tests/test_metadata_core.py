@@ -1,4 +1,5 @@
-"""manager.py core (no HTTP): path safety, region merge, XMP write/read,
+"""! @file
+@brief manager.py core (no HTTP): path safety, region merge, XMP write/read,
 indexing, search parsing. Uses the shared app fixture (temp cwd)."""
 import os
 import numpy as np
@@ -134,7 +135,7 @@ def test_region_desc_json_roundtrip(app):
     desc, tags, cls = app._region_desc_from_json(raw)
     assert desc == "d" and cls == "girl"
     assert [t["tag"] for t in tags] == ["a", "?b"] and not tags[0]["generated"]
-    # type==class → class not duplicated in the JSON
+    # type==class -> class not duplicated in the JSON
     assert app._region_desc_from_json(app._region_desc_to_json(_box(region_type="person")))[2] == ""
     assert app._region_desc_from_json("not json")[0] == "not json"
     assert app._region_desc_from_json("") == ("", [], "")

@@ -1,5 +1,5 @@
-"""
-Personal aesthetic scorer: typed feature tokens -> Transformer encoder -> [CLS] -> score.
+"""! @file
+@brief Personal aesthetic scorer: typed feature tokens -> Transformer encoder -> [CLS] -> score.
 
 Input per image is a variable-length set of tokens, each of a declared type
 (global embed, N image tiles, one per face, one per person pose, base-IQA,
@@ -27,7 +27,7 @@ TIERS = [(500, "nano"), (2000, "small"), (5000, "medium"), (20000, "large"), (50
 
 
 def tier_for(n_ratings, sizes=None):
-    """-> (size name, d, depth) for this many ratings. Unknown names in a custom
+    """! @brief -> (size name, d, depth) for this many ratings. Unknown names in a custom
     size table fall back to the last size listed."""
     sizes = sizes or SIZES
     name = next(nm for cap, nm in TIERS if n_ratings < cap)
@@ -40,7 +40,7 @@ SIMPLE_CAPS = {"tile": 4, "object": 3, "region": 3}   # simple mode keeps this m
 
 
 def simplify(feats):
-    """Simple-mode view of a sample: flag 0, token lists cut to SIMPLE_CAPS
+    """! @brief Simple-mode view of a sample: flag 0, token lists cut to SIMPLE_CAPS
     (tiles are first-N of the grid, ponytail: not a re-tiling)."""
     out = dict(feats)
     for k, n in SIMPLE_CAPS.items():
@@ -60,7 +60,7 @@ SIZES = {"nano": {"d": 64, "depth": 1}, "small": {"d": 128, "depth": 2},
 
 
 def parse_sizes(text):
-    """"name d depth" lines -> {name: {d, depth}}; empty/invalid -> SIZES."""
+    """! @brief "name d depth" lines -> {name: {d, depth}}; empty/invalid -> SIZES."""
     out = {}
     for line in str(text or "").splitlines():
         p = [x for x in line.replace(",", " ").replace(":", " ").split() if x]
@@ -80,7 +80,7 @@ def sizes_text(sizes=None):
 
 
 def count_params(dims, d, depth):
-    """Parameter count without building the net (tags + typed projections + blocks + head)."""
+    """! @brief Parameter count without building the net (tags + typed projections + blocks + head)."""
     n = sum((v + 1) * d + d for v in dims.values())            # proj + type_emb per token type
     n += (TAG_BUCKETS + 1) * d + d + (MODE_DIM + 1) * len(dims)  # tag_emb + cls + mode gate
     per_block = 4 * d * d + 4 * d + 2 * (4 * d * d) + 4 * d + d + 4 * d   # attn + ffn + 2 layernorms
@@ -89,7 +89,7 @@ def count_params(dims, d, depth):
 
 class Scorer(nn.Module):
     def __init__(self, dims, d=128, depth=2):
-        """dims: {token_type: input_dim}."""
+        """! @brief dims: {token_type: input_dim}."""
         super().__init__()
         self.dims, self.d, self.depth = dict(dims), d, depth
         self.proj = nn.ModuleDict({k: nn.Linear(v, d) for k, v in sorted(dims.items())})
@@ -108,7 +108,7 @@ class Scorer(nn.Module):
                                           dropout=0.1, batch_first=True, norm_first=True)
 
     def forward(self, feats, masks, tags):
-        """feats: {type: [B, N, dim]}, masks: {type: [B, N] bool valid}, tags: [B, T] long (0=pad).
+        """! @brief feats: {type: [B, N, dim]}, masks: {type: [B, N] bool valid}, tags: [B, T] long (0=pad).
         -> [B] logits."""
         B = tags.shape[0]
         toks = [self.cls.expand(B, -1, -1)]
@@ -128,9 +128,9 @@ class Scorer(nn.Module):
             x = blk(x, src_key_padding_mask=pad)
         return self.head(self.norm(x[:, 0])).squeeze(-1)
 
-    # ── Net2Net ──────────────────────────────────────────────────────────
+    # -- Net2Net ----------------------------------------------------------
     def grow(self, d, depth, dims=None):
-        """New Scorer(d, depth) initialised from self (d, depth >= current).
+        """! @brief New Scorer(d, depth) initialised from self (d, depth >= current).
         dims: a superset of self.dims; token types new to the checkpoint start fresh."""
         new = Scorer({**self.dims, **(dims or {})}, d, depth)
         with torch.no_grad():
@@ -143,7 +143,7 @@ class Scorer(nn.Module):
 
 
 def _copy_slice(dst, src):
-    """Copy every src tensor into the top-left corner of the same-named dst tensor.
+    """! @brief Copy every src tensor into the top-left corner of the same-named dst tensor.
     ponytail: exact function preservation through LayerNorm isn't possible with a
     plain slice copy; new dims start small-random and train in."""
     sd = src.state_dict()
@@ -166,7 +166,7 @@ VAR_DIMS = {"embed": "embed", "tile": "embed", "object": "embed", "region": "emb
 
 
 def infer_dims(samples, fixed):
-    """{token_type: dim} for Scorer: fixed dims plus the encoder-sized types
+    """! @brief {token_type: dim} for Scorer: fixed dims plus the encoder-sized types
     (embed/tile/object/region share the image encoder's width, tag_text the
     text encoder's), read from the first sample that has each; 1 if none."""
     found = {}
@@ -181,7 +181,7 @@ def infer_dims(samples, fixed):
 
 
 def hash_tags(tag_names, max_len=None):
-    """Tag names -> stable bucket ids (1..TAG_BUCKETS). All of them: the scorer has
+    """! @brief Tag names -> stable bucket ids (1..TAG_BUCKETS). All of them: the scorer has
     no positional encoding, so order never matters, and batch() pads per batch.
     max_len only pads/cuts to a fixed width when a caller needs one."""
     ids = [1 + zlib.crc32(t.lower().encode()) % TAG_BUCKETS for t in tag_names]
@@ -189,7 +189,7 @@ def hash_tags(tag_names, max_len=None):
 
 
 def batch(samples, dims, device):
-    """samples: [{type: [[floats], ...], "tags": [ids]}] -> (feats, masks, tags) padded tensors."""
+    """! @brief samples: [{type: [[floats], ...], "tags": [ids]}] -> (feats, masks, tags) padded tensors."""
     feats, masks = {}, {}
     for k, n in dims.items():
         rows = [s.get(k) or [] for s in samples]

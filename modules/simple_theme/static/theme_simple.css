@@ -1,4 +1,4 @@
-/* theme_simple.css — the "simple" layout. One screen = the timeline
+/* theme_simple.css - the "simple" layout. One screen = the timeline
    (albums on top). Everything here is keyed on body[data-layout="simple"];
    it hides and enlarges, and never un-hides a gated element with !important. */
 body[data-layout="simple"] #editor_region,

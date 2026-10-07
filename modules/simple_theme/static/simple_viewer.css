@@ -1,4 +1,4 @@
-/* simple_viewer.css — the shared full-screen viewer (CIMSimpleViewer). Its
+/* simple_viewer.css - the shared full-screen viewer (CIMSimpleViewer). Its
    chrome only appears while #popout_modal has .sv-active. Rules here hide and
    lay out; they never force an element visible with !important, so feature
    gating (.cim-feature-hidden) always wins. */

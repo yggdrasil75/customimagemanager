@@ -1,9 +1,9 @@
-/* Barcodes module front-end: the ▥ Scan barcodes button (controls panel). */
+/* Barcodes module front-end: the Scan barcodes button (controls panel). */
 (function () {
   async function runBarcodes() {
     if (!window.currentFile) { alert("Select an image first."); return; }
     const btn = document.getElementById("btn_barcodes"); const og = btn.innerText;
-    btn.innerText = "▥ …"; btn.disabled = true;
+    btn.innerText = "Scanning..."; btn.disabled = true;
     try {
       const d = await fetch("/api/barcodes", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -25,7 +25,7 @@
           const undec = d.detected - d.decoded;
           showToast(`Barcodes: ${d.detected} found, ${d.decoded} decoded`
             + (undec ? ` (${undec} not readable)` : "")
-            + (d.detector ? ` · ${d.detector}` : "") + ".");
+            + (d.detector ? ` | ${d.detector}` : "") + ".");
         }
         if (d.note) console.info("barcodes:", d.note);
       } else alert("Barcode scan failed: " + (d.error || ""));
@@ -36,11 +36,10 @@
 
   function buildButtons() {
     if (!window.registerControlButton) return;
-    registerControlButton("ai_tools",
-      '<button onclick="runBarcodes()" id="btn_barcodes" data-feature="ai.barcodes" ' +
-      'title="Detect barcodes and QR codes with the configured YOLO model, then decode each one. ' +
-      'Codes that are found but can\'t be read are still marked, so you keep a note of where they are." ' +
-      'class="w-full bg-amber-700 hover:bg-amber-600 py-1.5 rounded font-bold text-sm">▥ Scan barcodes</button>');
+    registerControlButton("ai_tools", {label: "Scan barcodes", onclick: "runBarcodes()", id: "btn_barcodes",
+      feature: "ai.barcodes", variant: "warn",
+      title: "Detect barcodes and QR codes with the configured YOLO model, then decode each one. " +
+             "Codes that are found but can't be read are still marked, so you keep a note of where they are."});
   }
   if (document.readyState === "loading") window.addEventListener("DOMContentLoaded", buildButtons);
   else buildButtons();

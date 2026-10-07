@@ -1,4 +1,5 @@
-"""Timeline module: date buckets, per-period file lists, scope, sort:taken."""
+"""! @file
+@brief Timeline module: date buckets, per-period file lists, scope, sort:taken."""
 from datetime import datetime, timezone
 
 import pytest

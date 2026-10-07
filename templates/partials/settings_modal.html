@@ -6,12 +6,12 @@
       {# Vertical tab rail: core tabs, then the module-contributed ones under a
          divider. It scrolls on its own, so any number of modules fits. #}
       {# Vertical tab rail. Buttons carry a data-settings-group; tiers.js
-         (organizeSettingsRail) folds them into collapsible groups — You, Server,
-         Admin, Modules — so long lists can be collapsed. Each tab carries its
+         (organizeSettingsRail) folds them into collapsible groups - You, Server,
+         Admin, Modules - so long lists can be collapsed. Each tab carries its
          permission (settings.<tab>): read shows it, write makes it saveable. #}
       <nav id="settings_tab_rail" class="w-48 flex-shrink-0 overflow-y-auto flex flex-col gap-1 pr-2 border-r border-gray-700">
         <button data-settings-tab="user" data-settings-group="you" onclick="settingsTab('user')"
-          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">🙂 User settings</button>
+          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">User settings</button>
         <button data-settings-tab="general" data-settings-group="server" data-feature="settings.general" onclick="settingsTab('general')"
           class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">⚙ General</button>
         <button data-settings-tab="media" data-settings-group="server" data-feature="settings.media" onclick="settingsTab('media')"
@@ -19,13 +19,13 @@
         <button data-settings-tab="storage" data-settings-group="server" data-feature="settings.storage" onclick="settingsTab('storage')"
           class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">🗄 Storage</button>
         <button data-settings-tab="models" data-settings-group="server" data-feature="settings.models" onclick="settingsTab('models')"
-          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">🧩 Models</button>
+          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">Models</button>
         <button data-settings-tab="info" data-settings-group="server" data-feature="settings.info" onclick="settingsTab('info')"
           class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">ℹ Info</button>
         <button data-settings-tab="users" data-settings-group="admin" data-feature="settings.users" onclick="settingsTab('users')"
           class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">👤 Users</button>
         <button data-settings-tab="modules" data-settings-group="admin" data-feature="settings.modules" onclick="settingsTab('modules')"
-          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">🧩 Modules</button>
+          class="settings-tab px-3 py-1.5 rounded text-sm font-bold text-left">Modules</button>
         <!-- Pluggable modules inject their own tab buttons here (static/modules.js). -->
         <div id="module_settings_tabs" class="contents"></div>
       </nav>
@@ -58,14 +58,14 @@
                 accept="image/png,image/jpeg,image/svg+xml,image/webp,image/gif"
                 class="text-xs text-gray-300">
               <button type="button" onclick="clearBrandLogo()"
-                class="text-[10px] text-rose-400 hover:text-rose-300">clear</button>
+                class="text-[10px] text-red-400 hover:text-red-300">clear</button>
             </div>
           </div>
         </div>
         <p id="cfg_brand_status" class="text-[10px] text-gray-500 mt-1"></p>
       </div>
       <!-- Defaults for users: fields with section="defaults" (default palette,
-           search quick-filters, …). -->
+           search quick-filters, ...). -->
       <div class="mb-4">
         <label class="text-xs text-amber-300 font-bold block mb-2">Defaults for users</label>
         <div id="module_settings_fields_general_defaults" class="space-y-3"></div>
@@ -100,7 +100,7 @@
         <button onclick="addTierRow()"
           class="text-xs bg-indigo-600 hover:bg-indigo-500 px-2 py-1 rounded font-bold mb-3">+ Add tier</button>
         <div class="grid grid-cols-3 gap-2 mb-3">
-          <div><label class="text-[10px] text-gray-500 block mb-0.5">Video headroom ×</label>
+          <div><label class="text-[10px] text-gray-500 block mb-0.5">Video headroom x</label>
             <input id="tiers_headroom" type="number" step="0.5" min="1"
               class="w-full p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white">
           </div>
@@ -115,7 +115,7 @@
         </div>
         <div class="border-t border-gray-700 pt-3 mt-3">
           <h3 class="font-bold text-amber-300 mb-1">📊 Storage usage</h3>
-          <p class="text-[11px] text-gray-500 mb-2">Live totals for <code>media/</code> and each tier —
+          <p class="text-[11px] text-gray-500 mb-2">Live totals for <code>media/</code> and each tier -
             files and GB on disk, whether or not a rebalance is running.</p>
           <div id="tiers_status" class="text-xs text-gray-300"></div>
         </div>
@@ -124,7 +124,7 @@
     <div data-settings-pane="media" data-feature="settings.media" data-write-gate="settings.media" class="hidden overflow-y-auto flex-1 pr-1">
       <h3 class="font-bold text-amber-300 mb-1">Storage formats</h3>
       <p class="text-[11px] text-gray-500 mb-2">Applied to new uploads. <b>Unsafe</b> = formats most
-        browsers can't show (jxl, heic, mkv, avi, wma, aiff, epub, mobi, cbr…).
+        browsers can't show (jxl, heic, mkv, avi, wma, aiff, epub, mobi, cbr...).
         Camera raws are always converted.</p>
       <div id="media_storage_rows" class="space-y-2 mb-4"></div>
       <div class="border-t border-gray-700 pt-3">
@@ -161,7 +161,7 @@
         <span class="text-amber-300">Core modules</span> back the whole runtime and can't be disabled.
         Changes take effect immediately and persist across restarts.</p>
       <div id="modules_rows" class="space-y-2">
-        <p class="text-xs text-gray-500">Loading…</p>
+        <p class="text-xs text-gray-500">Loading...</p>
       </div>
     </div>
 

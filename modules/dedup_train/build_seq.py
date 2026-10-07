@@ -1,5 +1,5 @@
-"""
-Train HEURDUV (video), HEARDU (audio) and HEURDU 1.0 (animation).
+"""! @file
+@brief Train HEURDUV (video), HEARDU (audio) and HEURDU 1.0 (animation).
 ======================================================================
 The sibling of build.py for the timeline models. One build trains one
 family's size series on the same stream of synthetic pairs:
@@ -47,7 +47,7 @@ progress = {"running": False, "kind": "", "phase": "", "items_total": 0, "items_
 
 
 def _say(host, msg):
-    host.config["status_text"] = "Dedup train: " + msg
+    host.set_status("Dedup train: " + msg)
     host.logger.info("dedup_train(seq): " + msg)
     progress["log"] = (progress["log"] + [f"{time.strftime('%H:%M:%S')} {msg}"])[-200:]
 
@@ -71,7 +71,7 @@ def default_sizes(kind):
 
 
 def _heurdu09(host, size):
-    """A HEURDU 0.9 checkpoint for `size` (local first, then HF) -> DupCNN, or an untrained one."""
+    """! @brief A HEURDU 0.9 checkpoint for `size` (local first, then HF) -> DupCNN, or an untrained one."""
     svc = host.get_service("dedup_cnn") or {}
     for p in (os.path.join(host.core.models_dir, f"dup_cnn_{size}.pt"),
               os.path.join(_HERE, "..", "dedup_cnn", "pretrained", f"dup_cnn_{size}.pt"),
@@ -115,7 +115,7 @@ def _feedback_pairs(host, kind):
 
 
 def _eval(models, pairs, devs, kind):
-    """{size: {pair kind: accuracy, all}} — whole-pair score >= 0.5 vs label."""
+    """! @brief {size: {pair kind: accuracy, all}} - whole-pair score >= 0.5 vs label."""
     is_dup = video_dataset.is_dup if kind != "audio" else audio_dataset.is_dup
     out = {}
     for z, m in models.items():
@@ -152,7 +152,7 @@ def _eval_anim(models, pairs, devs):
 def build(host, kind, paths, sizes=None, active=None, max_items=20_000, per_item=4, epochs=3, chunk=64,
           batch=8, lr=1e-3, workers=4, holdout=0.05, seed=0, install=True, ship=False, device="",
           steps=32, use_feedback=True, on_installed=None):
-    """Blocking build of one family (`kind` in KINDS). Returns the summary."""
+    """! @brief Blocking build of one family (`kind` in KINDS). Returns the summary."""
     if kind not in KINDS:
         return {"ok": False, "error": f"unknown kind {kind!r}"}
     if not bd._lock.acquire(blocking=False):
@@ -175,7 +175,7 @@ def build(host, kind, paths, sizes=None, active=None, max_items=20_000, per_item
         paths = paths[:int(max_items)]
         rng = np.random.default_rng(seed)
         devs = bd.devices(device, {z: {"width": 1, "depth": 1} for z in sizes})
-        # ── cache ──────────────────────────────────────────────────────────
+        # -- cache ----------------------------------------------------------
         if kind == "anim":
             items = paths                                   # decoded per pair (consecutive native frames)
         else:
@@ -196,7 +196,7 @@ def build(host, kind, paths, sizes=None, active=None, max_items=20_000, per_item
         n_hold = max(4, int(len(items) * holdout)) if len(items) >= 20 else 0
         hold, train = items[:n_hold], items[n_hold:]
         summary["items"] = len(train)
-        # ── models ─────────────────────────────────────────────────────────
+        # -- models ---------------------------------------------------------
         cls = _model_cls(kind)
         models, opts, src = {}, {z: {} for z in sizes}, {}
         for z in sizes:

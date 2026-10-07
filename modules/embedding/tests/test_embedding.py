@@ -1,4 +1,5 @@
-"""Embedding module: library embeddings through the picked embed model, and
+"""! @file
+@brief Embedding module: library embeddings through the picked embed model, and
 image-to-image search finding the near-duplicate first."""
 import numpy as np
 import pytest
@@ -43,7 +44,7 @@ def test_search_image_finds_near_dup(client, upload, app):
 
 
 def test_search_survives_mixed_dimensions(app):
-    """Rows embedded by a previous model with another vector size must not
+    """! @brief Rows embedded by a previous model with another vector size must not
     break search (regression: 'buffer is smaller than requested size')."""
     import numpy as np, time
     db = app._db()
@@ -68,7 +69,7 @@ def test_search_survives_mixed_dimensions(app):
 
 
 def test_multiple_models_coexist(app, client):
-    """Switching models must not throw away the previous model's vectors:
+    """! @brief Switching models must not throw away the previous model's vectors:
     rows are keyed by (image, model) and every read is scoped to the picked model."""
     import numpy as np, time
     db = app._db(); svc = app.module_host.get_service("embedding")
@@ -92,7 +93,7 @@ def test_multiple_models_coexist(app, client):
 
 
 def test_semantic_list_ranks_by_score_cuts_tail_and_honours_negatives(app, monkeypatch):
-    """Regression: results were ordered by filename, so the best match could be
+    """! @brief Regression: results were ordered by filename, so the best match could be
     on page 5. Also: the relevance cutoff drops the tail; '-term' demotes."""
     import numpy as np, time
     db = app._db(); svc = app.module_host.get_service("embedding")

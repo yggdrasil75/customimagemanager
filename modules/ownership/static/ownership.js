@@ -1,17 +1,17 @@
-/* ownership.js — front-end of the ownership & sharing module.
+/* ownership.js - front-end of the ownership & sharing module.
  *
  * Three touch points, all additive:
- *   • upload box: a Personal / Public selector next to the folder field,
+ *   - upload box: a Personal / Public selector next to the folder field,
  *     posted as the `scope` form field;
- *   • album rows (core fires 'cim:album-row'): owner / visibility badge, a
+ *   - album rows (core fires 'cim:album-row'): owner / visibility badge, a
  *     share button for the owner, rename/delete hidden for everyone else;
- *   • Settings → Sharing (the module's settings tab): partner sharing of your
+ *   - Settings -> Sharing (the module's settings tab): partner sharing of your
  *     whole personal library, and who shared theirs with you. */
 (function () {
   "use strict";
   const esc = s => (window.escapeHtml ? escapeHtml(s) : String(s));
 
-  // ── upload scope ────────────────────────────────────────────────────────
+  // -- upload scope --------------------------------------------------------
   function addScopeSelects() {
     document.querySelectorAll('#upload_folder, [id="upload_folder"]').forEach(inp => {
       if (inp.nextElementSibling && inp.nextElementSibling.classList.contains('upload-scope')) return;
@@ -36,14 +36,14 @@
     }
   }
 
-  // ── album rows ──────────────────────────────────────────────────────────
+  // -- album rows ----------------------------------------------------------
   document.addEventListener('cim:album-row', ev => {
     const { text, actions, album: a } = ev.detail;
     if (!a.owner) return;                        // legacy album: nothing to show
     const mine = a.level === 'owner';
     const label = a.visibility === 'public' ? '🌐 public'
       : mine ? ((a.shares || []).length ? `🔗 shared with ${a.shares.length}` : '🔒 private')
-      : `👤 ${esc(a.owner)} · ${a.level === 'write' ? 'can edit' : 'view only'}`;
+      : `👤 ${esc(a.owner)} | ${a.level === 'write' ? 'can edit' : 'view only'}`;
     const title = text.querySelector('div');
     if (title) title.insertAdjacentHTML('beforeend', ` <span class="text-[10px] text-gray-500 font-normal">${label}</span>`);
     if (mine) {
@@ -67,13 +67,13 @@
     box.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/60';
     box.onclick = e => { if (e.target === box) box.remove(); };
     const opts = lv => ['', 'read', 'write'].map(v =>
-      `<option value="${v}" ${v === (lv || '') ? 'selected' : ''}>${v === '' ? '—' : v === 'read' ? 'can view' : 'can edit'}</option>`).join('');
+      `<option value="${v}" ${v === (lv || '') ? 'selected' : ''}>${v === '' ? '-' : v === 'read' ? 'can view' : 'can edit'}</option>`).join('');
     box.innerHTML =
       `<div class="bg-gray-800 border border-gray-700 rounded-lg p-4 w-80 max-h-[80vh] flex flex-col gap-3 text-sm">
-        <div class="font-bold">Share “${esc(a.name)}”</div>
+        <div class="font-bold">Share "${esc(a.name)}"</div>
         <label class="flex items-center gap-2 text-xs">
           <input type="checkbox" id="album_share_public" ${a.visibility === 'public' ? 'checked' : ''}>
-          Public — everyone on this server can view it
+          Public - everyone on this server can view it
         </label>
         <div class="text-xs text-gray-400">Share with specific people:</div>
         <div class="flex-1 overflow-y-auto flex flex-col gap-1">
@@ -108,7 +108,7 @@
     };
   }
 
-  // ── Settings → Sharing ──────────────────────────────────────────────────
+  // -- Settings -> Sharing --------------------------------------------------
   async function renderSharingPane() {
     const pane = document.getElementById('settings_pane_module_ownership');
     if (!pane) return;
@@ -124,7 +124,7 @@
     pane.innerHTML =
       `<p class="text-[11px] text-gray-500 mb-2">Your personal uploads live in
         <code class="text-gray-300">${esc(d.personal_folder)}/</code>. Share that whole library with another
-        account (view, or edit) — a partner, as in Immich. Public uploads are visible to everyone.</p>
+        account (view, or edit) - a partner, as in Immich. Public uploads are visible to everyone.</p>
       <div id="library_sharing_rows" class="space-y-1"></div>
       <div id="library_sharing_with_me" class="text-[11px] text-gray-400 mt-3"></div>`;
     const rows = pane.querySelector('#library_sharing_rows');
@@ -137,7 +137,7 @@
       name.className = 'truncate'; name.textContent = u.display_name || u.username;
       const sel = document.createElement('select');
       sel.className = 'bg-gray-700 rounded px-1 py-0.5 text-xs';
-      for (const [v, label] of [['', '—'], ['read', 'can view'], ['write', 'can edit']]) {
+      for (const [v, label] of [['', '-'], ['read', 'can view'], ['write', 'can edit']]) {
         const o = document.createElement('option');
         o.value = v; o.textContent = label; o.selected = (cur[u.id] || '') === v;
         sel.appendChild(o);

@@ -8,7 +8,7 @@
  * listed under each record so nothing is silently dropped.
  *
  * Standalone for now (exposes window.iptcEditor); ready to be embedded in the
- * main index. Editing/writeback is intentionally not wired yet — this first pass
+ * main index. Editing/writeback is intentionally not wired yet - this first pass
  * is import + display. Inputs are left enabled so the write path can hook in
  * later without a markup change.
  */
@@ -31,12 +31,12 @@
       .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
 
-  // ── State ────────────────────────────────────────────────────────────────
+  // -- State ----------------------------------------------------------------
   let current = null;        // last-loaded data structure
   let showEmpty = false;
   let showUnmapped = false;
 
-  // ── Render helpers ─────────────────────────────────────────────────────────
+  // -- Render helpers ---------------------------------------------------------
   function renderFieldInput(f) {
     const wrap = document.createElement("div");
     wrap.className = "iptc-field-input";
@@ -55,7 +55,7 @@
       const sel = document.createElement("select");
       sel.disabled = !f.writable;
       const blank = document.createElement("option");
-      blank.value = ""; blank.textContent = "— unset —";
+      blank.value = ""; blank.textContent = "- unset -";
       sel.appendChild(blank);
       const rawStr = f.raw == null ? "" : String(f.raw);
       let matched = false;
@@ -157,7 +157,7 @@
     if (!shown && rec.mapped) {
       const div = document.createElement("div");
       div.className = "iptc-empty";
-      div.textContent = showEmpty ? "No fields." : "No populated fields (toggle “Show empty fields”).";
+      div.textContent = showEmpty ? "No fields." : "No populated fields (toggle 'Show empty fields').";
       fieldsHolder.appendChild(div);
     }
 
@@ -173,7 +173,7 @@
     const recs = current.records.filter((r) => showUnmapped || r.mapped ||
       (r.unknown && r.unknown.length));
     if (!recs.length) {
-      recEl.innerHTML = `<div class="iptc-empty">No records to show. Toggle “Show unmapped records”.</div>`;
+      recEl.innerHTML = `<div class="iptc-empty">No records to show. Toggle "Show unmapped records".</div>`;
     } else {
       recs.forEach((r) => recEl.appendChild(renderRecord(r)));
     }
@@ -189,11 +189,11 @@
     if (src) src.textContent = current.source ? `← ${current.source}` : "(no IPTC found)";
   }
 
-  // ── Load ───────────────────────────────────────────────────────────────────
+  // -- Load -------------------------------------------------------------------
   async function load(filename) {
     if (!filename) { setStatus("no file", "err"); return; }
     root().dataset.filename = filename;
-    setStatus("loading…");
+    setStatus("loading...");
     try {
       const r = await fetch("/api/iptc/read", {
         method: "POST",
@@ -214,7 +214,7 @@
     }
   }
 
-  // ── Wiring ──────────────────────────────────────────────────────────────────
+  // -- Wiring ------------------------------------------------------------------
   function init() {
     if (!root()) return;
     const se = $("#iptc-show-empty");

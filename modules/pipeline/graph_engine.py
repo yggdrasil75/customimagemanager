@@ -1,5 +1,5 @@
-"""
-graph_engine.py — dataflow runner for the Smart Tag pipeline (schema graph/1).
+"""! @file
+@brief graph_engine.py - dataflow runner for the Smart Tag pipeline (schema graph/1).
 ==============================================================================
 The tree runner (engine.py) walks a single `next` chain and threads one
 mutable context. This runner is a typed dataflow graph instead: every node
@@ -21,14 +21,14 @@ its outputs are pulled (memoised, so shared upstream work runs once).
 
 `in` maps an input port to one wire [node_id, out_port]; ports declared
 multi=True take a LIST of wires and receive the list of values (End.tags,
-End.metadata, text_join.parts …). A node whose required input is None (its
+End.metadata, text_join.parts ...). A node whose required input is None (its
 producer had nothing, or a gate closed) yields None on every output, and
-End ignores None — that is how conditional branches work in a dataflow
+End ignores None - that is how conditional branches work in a dataflow
 graph: a `gate` (value, run) or the `run` port most nodes carry.
 
 Sub-graphs: `for_each` carries its own `graph` with an implicit inner start
 (item / crop / index / metadata / known) and inner end whose inputs are the
-fields written onto each item (name, appearance, tags, boxes, …).
+fields written onto each item (name, appearance, tags, boxes, ...).
 
 Node catalogue (ports + params) is data in CATALOG so the editor can draw
 it; module stages are appended by the host at run time.
@@ -43,7 +43,7 @@ from .engine import (SCHEMA, crop_box, match_pose_boxes, _clamp, _dedup,
 
 GRAPH_SCHEMA = "graph/1"
 
-# ── port types (the editor colours wires and refuses mismatches) ─────────────
+# -- port types (the editor colours wires and refuses mismatches) -------------
 # image, boxes, subjects, text, tags, bool, json, metadata, any
 P = lambda name, type_, multi=False, opt=False: {"name": name, "type": type_, "multi": multi, "optional": opt}
 
@@ -98,7 +98,7 @@ CATALOG = {
               "inputs": [P("metadata", "metadata")],
               "outputs": [P("value", "text"), P("is_set", "bool"), P("missing", "bool")],
               "params": {"field": "text"},
-              "help": "field = EXIF/XMP name (DateTimeOriginal, Artist, Rating, …) or tags/description/filename."},
+              "help": "field = EXIF/XMP name (DateTimeOriginal, Artist, Rating, ...) or tags/description/filename."},
     "meta_set": {"label": "Metadata: set field", "kind": "meta",
               "inputs": [P("value", "any"), P("run", "bool", opt=True)],
               "outputs": [P("metadata", "metadata")], "params": {"field": "text"},
@@ -148,7 +148,7 @@ INNER_END = {"label": "Item end (write fields)", "kind": "io", "outputs": [],
 
 
 def catalog(stage_labels=None):
-    """CATALOG + one entry per module stage, for the editor and validation."""
+    """! @brief CATALOG + one entry per module stage, for the editor and validation."""
     out = {k: dict(v) for k, v in CATALOG.items()}
     for name, label in (stage_labels or {}).items():
         if name not in out:
@@ -162,9 +162,9 @@ def is_graph(tree):
     return isinstance(tree, dict) and tree.get("schema") == GRAPH_SCHEMA
 
 
-# ── helpers ──────────────────────────────────────────────────────────────────
+# -- helpers ------------------------------------------------------------------
 def _s(v):
-    """Stringify a wire value for prompts/templates."""
+    """! @brief Stringify a wire value for prompts/templates."""
     if v is None:
         return ""
     if isinstance(v, (list, tuple)):
@@ -181,7 +181,7 @@ def _truthy(v):
 
 
 def _empty(v):
-    """None / '' / [] / {} — never touches numpy truthiness."""
+    """! @brief None / '' / [] / {} - never touches numpy truthiness."""
     if v is None:
         return True
     if isinstance(v, (str, list, tuple, dict)):
@@ -190,16 +190,16 @@ def _empty(v):
 
 
 class _Null:
-    """Marker for 'this node did not run' (distinct from a legitimate None)."""
+    """! @brief Marker for 'this node did not run' (distinct from a legitimate None)."""
 _NULL = _Null()
 
 
-# ── runner ───────────────────────────────────────────────────────────────────
+# -- runner -------------------------------------------------------------------
 def run_graph(graph, image_bgr, llm, *, known=None, metadata=None, progress=None,
               pose_fn=None, ocr_fn=None, person_fn=None, panel_fn=None, seg_fn=None,
               stage_fns=None, endpoints=None, max_boxes=12, crop_pad=0.04,
               _inner=None):
-    """Evaluate a graph/1 pipeline. Returns the analysis dict engine.run_pipeline
+    """! @brief Evaluate a graph/1 pipeline. Returns the analysis dict engine.run_pipeline
     returns, plus analysis["metadata"] = {field: value} for End.metadata wires."""
     nodes = {n["id"]: n for n in graph.get("nodes", []) if n.get("id")}
     stage_fns = stage_fns or {}
@@ -235,7 +235,7 @@ def run_graph(graph, image_bgr, llm, *, known=None, metadata=None, progress=None
         return w if (w and isinstance(w[0], (list, tuple))) else [w]
 
     def pull(node, port, spec):
-        """Value on an input port: single wire -> value, multi -> list of non-null values."""
+        """! @brief Value on an input port: single wire -> value, multi -> list of non-null values."""
         ws = wires(node, port)
         vals = []
         for w in ws:
@@ -487,7 +487,7 @@ def run_graph(graph, image_bgr, llm, *, known=None, metadata=None, progress=None
             tags_all.extend(it.get("tags") or [])
         return {"items": done, "tags": _dedup(tags_all)}
 
-    # ── collect the End (or inner End) ───────────────────────────────────────
+    # -- collect the End (or inner End) ---------------------------------------
     end_type = "_inner_end" if _inner is not None else "end"
     ends = [n for n in nodes.values() if n.get("type") == end_type]
     ins = {}
@@ -536,9 +536,9 @@ def _crop_rect_for(img, box, pad):
     return _crop_rect(h, w, box, pad)
 
 
-# ── legacy tree -> graph conversion (what the editor opens for old configs) ──
+# -- legacy tree -> graph conversion (what the editor opens for old configs) --
 def tree_to_graph(tree):
-    """Convert a `next`-chain tree into an equivalent graph/1: every node takes
+    """! @brief Convert a `next`-chain tree into an equivalent graph/1: every node takes
     the Start image, the chain order is kept as run-gates only where a branch
     existed, and for_each steps become a sub-graph chained through Item start."""
     nodes = [{"id": "start", "type": "start", "ui": {"x": 20, "y": 40}}]

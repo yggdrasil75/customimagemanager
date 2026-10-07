@@ -1,12 +1,12 @@
-"""
-ANNY module — Naver's age-generic parametric body model + ANNY-Fit.
+"""! @file
+@brief ANNY module - Naver's age-generic parametric body model + ANNY-Fit.
 ======================================================================
 ANNY (github.com/naver/anny) models bodies from infant to adult in one
 parameter space, which is why it is the default shape estimator for a
 family album: SMPL-derived models are adult-anchored. Two providers on
 `body.shape`:
 
-  anny_fit   ANNY-Fit — image -> ANNY parameters (any age)
+  anny_fit   ANNY-Fit - image -> ANNY parameters (any age)
   anny       the plain model with a landmark-based fit (rougher)
 
 and `body.mesh` (parameters -> mesh). The `anny` package is not on pip:
@@ -65,7 +65,7 @@ def _model():
 
 
 def _mesh(m, betas):
-    """betas -> (vertices, faces). Anny's shape space is a handful of named
+    """! @brief betas -> (vertices, faces). Anny's shape space is a handful of named
     phenotype sliders in 0..1, not a PCA vector, so the leading betas are
     mapped onto those sliders in _PHENOTYPES order (sigmoid keeps any real
     vector valid); the rest are ignored."""

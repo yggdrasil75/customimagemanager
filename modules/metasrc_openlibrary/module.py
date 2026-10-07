@@ -1,4 +1,5 @@
-"""Open Library — book metadata source (no key)."""
+"""! @file
+@brief Open Library - book metadata source (no key)."""
 MANIFEST = {
     "id": "metasrc_openlibrary", "name": "Open Library (books)", "version": "1.0.0",
     "description": "Book metadata from openlibrary.org: title, authors, ISBN, publisher, "
@@ -20,7 +21,7 @@ def register(host):
             isbns = d.get("isbn") or []
             out.append({"id": d["key"], "title": d.get("title", ""),
                         "subtitle": ", ".join(d.get("author_name") or []) +
-                                    (f" · {d['first_publish_year']}" if d.get("first_publish_year") else ""),
+                                    (f" | {d['first_publish_year']}" if d.get("first_publish_year") else ""),
                         "thumb": f"https://covers.openlibrary.org/b/id/{d['cover_i']}-M.jpg" if d.get("cover_i") else None,
                         "fields": {"title": d.get("title", ""), "authors": d.get("author_name") or [],
                                    "published": str(d.get("first_publish_year") or ""),
@@ -31,7 +32,7 @@ def register(host):
                                    "identifiers": {"openlibrary": d["key"].rsplit("/", 1)[-1]}}})
         return out
 
-    def detail(key):                       # works/OL…W → description
+    def detail(key):                       # works/OL...W → description
         w = reg.http_json(f"{_API}{key}.json")
         desc = w.get("description", "")
         return {"description": desc.get("value", "") if isinstance(desc, dict) else desc}

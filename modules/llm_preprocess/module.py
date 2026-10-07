@@ -1,5 +1,5 @@
-"""
-LLM image preprocessing module.
+"""! @file
+@brief LLM image preprocessing module.
 ======================================================================
 Downscale and/or letterbox every image before it is handed to a vision
 LLM (Smart Tag pipeline, prompted detection, AI actions). Small or older
@@ -9,7 +9,7 @@ both configurable and keeps the transform out of the core.
 Hooks the core's `llm.image` event: the core emits the BGR image it is
 about to encode and uses whatever this handler returns.
 
-Settings live behind this module's ⚙ Settings button (Modules tab).
+Settings live behind this module's Settings button (Modules tab).
 """
 from . import preprocess as pp
 
@@ -70,11 +70,12 @@ def register(host):
         if not isinstance(old, dict):
             return
         cmp_, pad = old.get("compress") or {}, old.get("pad") or {}
-        host.config.update({"llm_pp_compress": bool(cmp_.get("enabled")),
-                            "llm_pp_max_side": int(cmp_.get("max_side") or 1024),
-                            "llm_pp_interp": cmp_.get("interp") or "area",
-                            "llm_pp_pad": bool(pad.get("enabled")), "llm_pp_fill": pad.get("fill") or "black",
-                            "llm_pp_ratios": ",".join(pad.get("ratios") or [])})
+        for k, v in {"llm_pp_compress": bool(cmp_.get("enabled")),
+                     "llm_pp_max_side": int(cmp_.get("max_side") or 1024),
+                     "llm_pp_interp": cmp_.get("interp") or "area",
+                     "llm_pp_pad": bool(pad.get("enabled")), "llm_pp_fill": pad.get("fill") or "black",
+                     "llm_pp_ratios": ",".join(pad.get("ratios") or [])}.items():
+            host.set_config(k, v, save=False)
         host.save_config()
     host.on_startup(_migrate)
     host.logger.info("llm_preprocess module: hooked llm.image")

@@ -1,5 +1,5 @@
-"""
-Bodies module — face↔body binding, body re-id clustering knobs, the cv2
+"""! @file
+@brief Bodies module - face<->body binding, body re-id clustering knobs, the cv2
 appearance fallback, and the shape-fit fusion the estimator modules share.
 The DINO backbones that actually do body re-id live in the dino module.
 ======================================================================
@@ -9,7 +9,7 @@ small: a face box contained in a person box binds the two, and the body
 cluster then carries the name to face-less images. Body and face vectors
 live in separate spaces and are never compared directly.
 
-Model picks (Settings → Models):
+Model picks (Settings -> Models):
   embed.bodies   the dino module's DINOv2 / DINOv3 (or the cv2 appearance
                  fallback registered here).
   body.shape     provided by the estimator modules (anny / shapy / atlas /
@@ -37,9 +37,9 @@ MANIFEST = {
 
 
 def register(host):
-    # ── settings this module owns ─────────────────────────────────────────
-    # Bodies run as the Person detection background sweep (Models tab →
-    # Person detection → "Run in background"), not a toggle of their own.
+    # -- settings this module owns -----------------------------------------
+    # Bodies run as the Person detection background sweep (Models tab ->
+    # Person detection -> "Run in background"), not a toggle of their own.
     # The legacy body_enabled toggle folds into that switch once.
     host.add_config_key("body_cluster_eps", default=0.0,
                         validate=lambda v: max(0.0, min(1.0, float(v or 0))))
@@ -51,15 +51,15 @@ def register(host):
             sel = host.broker.current_selection().get("detect.persons") or {}
             host.broker.select("detect.persons", sel.get("provider") or host.broker.selected_id("detect.persons"),
                                sel.get("size"), sel.get("type"), True, sel.get("classes"))
-            host.config["model_selection"] = host.broker.current_selection()
+            host.persist_model_selection()
     host.on_startup(_migrate_toggle)
 
-    # ── capabilities ──────────────────────────────────────────────────────
+    # -- capabilities ------------------------------------------------------
     host.declare_capability(
         "embed.bodies", label="Body identity",
         summary="Identity embedding per person box, robust to outfit and viewpoint; "
                 "binds to the face found inside the same box.",
-        input="embed(img_bgr, boxes) — normalized center-form person boxes",
+        input="embed(img_bgr, boxes) - normalized center-form person boxes",
         output="(vectors: list[np.ndarray|None], mode: backbone id | 'appearance')")
     host.declare_capability(
         "body.shape", label="Body 3D shape",
@@ -71,7 +71,7 @@ def register(host):
         "body.mesh", label="Body mesh (from parameters)",
         summary="Parametric body model: shape parameters -> neutral-pose mesh "
                 "(SMPL-X, ANNY).",
-        input="mesh(betas: ndarray) — the model's shape vector",
+        input="mesh(betas: ndarray) - the model's shape vector",
         output="(vertices, faces)")
 
     host.provide_model(
@@ -96,11 +96,11 @@ def register(host):
         if first:
             return
         try:
-            db = host.db()
-            db.execute("UPDATE files SET body_done=0 WHERE rel_path IN "
-                       "(SELECT rel_path FROM body_regions WHERE COALESCE(confirmed,0)=0)")
-            db.execute("DELETE FROM body_regions WHERE COALESCE(confirmed,0)=0")
-            db.commit()
+            host.update_file(where=("rel_path IN (SELECT rel_path FROM body_regions "
+                                    "WHERE COALESCE(confirmed,0)=0)", ()),
+                             db={"body_done": 0}, dont_write=True, commit=False)
+            host.update_file(table="body_regions", where=("COALESCE(confirmed,0)=0", ()),
+                             remove=True, dont_write=True)
         except Exception as e:
             host.logger.warning(f"bodies: backbone change cleanup: {e}")
     host.broker.on_select(_on_select)
@@ -109,11 +109,11 @@ def register(host):
         size = (host.config.pop("body_size", "") or "").strip().lower()
         if size in ("s", "b", "l", "g") and not host.broker.current_selection().get("embed.bodies"):
             host.broker.select("embed.bodies", "dinov2", size, None)
-            host.config["model_selection"] = host.broker.current_selection()
+            host.persist_model_selection()
         _on_select("embed.bodies")
     host.on_startup(_migrate)
 
-    # ── service for the core's people machinery ───────────────────────────
+    # -- service for the core's people machinery ---------------------------
     def embed_bodies(img, boxes):
         try:
             return host.request_model("embed.bodies")(img, boxes)
@@ -121,7 +121,7 @@ def register(host):
             return bodylib.embed_bodies_appearance(img, boxes)
 
     def reid_registry_key():
-        """Registry key of the picked backbone (for batch leases), or None."""
+        """! @brief Registry key of the picked backbone (for batch leases), or None."""
         try:
             return getattr(host.request_model("embed.bodies"), "registry_key", None)
         except NoProviderError:
