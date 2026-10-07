@@ -181,6 +181,10 @@ class Auth:
         self._get_cfg = get_cfg
         self._save_cfg = save_cfg
         self._init_db()
+        # Request authenticators registered by modules (host.register_authenticator):
+        # each is called before the cookie and returns None (not mine), False
+        # (mine, but refused: the request stays anonymous) or (user, info).
+        self.authenticators = []
 
     def cfg(self):
         raw = self._get_cfg() or {}
@@ -649,6 +653,13 @@ class Auth:
         """@brief Populate g.user / g.session from the request cookie."""
         g.user = None
         g.session = None
+        g.api_key = None
+        for authn in self.authenticators:
+            hit = authn()
+            if hit is not None:                     # that authenticator decides
+                if hit:
+                    g.user, g.api_key = hit
+                return
         tok = request.cookies.get(COOKIE_NAME)
         sess = self._session(tok)
         if not sess:
@@ -681,7 +692,7 @@ class Auth:
             if request.path.startswith("/api/"):
                 return jsonify({"error": "authentication required"}), 401
             return redirect("/login")
-        if request.method not in ("GET", "HEAD", "OPTIONS"):
+        if request.method not in ("GET", "HEAD", "OPTIONS") and not g.api_key:
             sent = request.headers.get("X-CSRF-Token", "")
             if not g.session or sent != g.session["csrf"]:
                 return jsonify({"error": "bad or missing CSRF token"}), 403

@@ -24,6 +24,10 @@ metadata, every module route resolving a path through host.safe_path.
 Upload: form field scope=personal|public (default personal when logged in)
 chooses users/<me>/<folder> or <folder>.
 
+An API key with scope 'personal' (g.api_key, see auth/api_keys.py) is
+confined to its owner's own tree: nothing public or shared, uploads always
+land under users/<me>/.
+
 Disable the module and everything is public again, exactly as before.
 """
 import re
@@ -106,10 +110,16 @@ class Policy:
                 "UNION SELECT album FROM album_shares WHERE user_id=?)",
                 [user["id"], user["id"]])
 
+    @staticmethod
+    def personal_only():
+        return bool(has_request_context() and (g.get("api_key") or {}).get("scope") == "personal")
+
     def files_clause(self, column="rel_path"):
         u = self.user()
         if u is None:
             return [], []
+        if self.personal_only():
+            return [f"{column} LIKE ? ESCAPE '\\'"], [_like_prefix(u["username"])]
         alts = [f"{column} NOT LIKE ? ESCAPE '\\'", f"{column} LIKE ? ESCAPE '\\'"]
         params = [USER_ROOT + "/%", _like_prefix(u["username"])]
         for name in self.partners(u):
@@ -126,6 +136,8 @@ class Policy:
         if u is None:
             return True
         owner = owner_of(rel_path)
+        if self.personal_only():
+            return _same_user(owner, u["username"])
         if owner is None or _same_user(owner, u["username"]) \
                 or any(_same_user(owner, p) for p in self.partners(u)):
             return True
@@ -139,6 +151,8 @@ class Policy:
         if u is None:
             return True
         owner = owner_of(rel_path)
+        if self.personal_only():
+            return _same_user(owner, u["username"])
         if owner is None or _same_user(owner, u["username"]):
             return True
         return any(_same_user(owner, p) and lv == "write" for p, lv in self.partners(u).items())
@@ -206,7 +220,8 @@ class Policy:
     # ── upload ───────────────────────────────────────────────────────────
     def upload_folder(self, folder, form):
         u = g.get("user") if has_request_context() else None
-        if u and u.get("id") and (form.get("scope") or "").strip().lower() != "public":
+        if u and u.get("id") and ((form.get("scope") or "").strip().lower() != "public"
+                                  or self.personal_only()):
             return personal_folder(u["username"], folder)
         return folder
 

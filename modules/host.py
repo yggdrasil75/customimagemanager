@@ -632,6 +632,15 @@ class Host:
         """
         return self.broker.request(cap_id, role, provider)
 
+    def register_authenticator(self, fn):
+        """Add a way to authenticate a request besides the session cookie
+        (an API key module, a reverse-proxy header…). fn() runs before the
+        cookie on every request and returns None (nothing of mine on this
+        request), False (mine, but refused — the request stays anonymous) or
+        (user, info): user as core.authmgr._row_to_user builds it, info any
+        dict stored on g.api_key for policies to read."""
+        self.core.authmgr.authenticators.append(fn)
+        
     def register_access_policy(self, policy):
         """Add an object deciding, per request, what the current user may see
         and change. Every method is optional (duck-typed):

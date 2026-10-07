@@ -6553,7 +6553,7 @@ def _inject_tailwind():
 _core_api = SimpleNamespace(
     detect_boxes=_detect_obb_or_box, refresh_model_groups=populate_model_selector,
     meta_cache_drop=_meta_cache_drop, folder_scope_clause=_folder_scope_clause,
-    api_upload=api_upload, auth=_auth, features=features, save_classes=save_classes,
+    api_upload=api_upload, auth=_auth, authmgr=_authmgr, features=features, save_classes=save_classes,
     model_key=_yolo_key, merge_regions=_merge_regions,
     read_image=read_jxl, to_bgr=_to_bgr, resolve_media=_resolve_media, rel=_rel,
     db_retry=_db_retry, db_close=_db_close, db_release_pool=_db_release_pool,
