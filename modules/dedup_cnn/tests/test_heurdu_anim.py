@@ -55,7 +55,8 @@ def test_train_clips_and_score_animation():
     c = np.stack(runs[4:]); m1 = np.ones((4, 4, 8, 8), np.float32)
     # dups and non-dups in ONE batch (BatchNorm sees both at once)
     batch = (np.concatenate([a, a]), np.concatenate([b, c]), np.concatenate([m0, m1]))
-    losses = [m.fit_batches([batch], lr=1e-3) for _ in range(100)]
+    opt = {}
+    losses = [m.fit_batches([batch], lr=3e-3, _opt_holder=opt) for _ in range(100)]
     assert losses[-1] < losses[0] / 3
     same = m.score_animation(list(runs[0]), list(b[0]))
     other = m.score_animation(list(runs[0]), list(runs[4]))

@@ -152,7 +152,8 @@ if _HAVE_TORCH:
                 nn.Linear(d * 2, d), nn.ReLU(inplace=True), nn.Linear(d, 1))
 
         def forward(self, a: "torch.Tensor", b: "torch.Tensor") -> "torch.Tensor":
-            ea, eb = self.enc(a), self.enc(b)
+            e = self.enc(torch.cat([a, b], 0))
+            ea, eb = e[:a.shape[0]], e[a.shape[0]:]
             pair = torch.cat([(ea - eb).abs(), ea * eb], dim=1)
             return self.head(pair).squeeze(1)
 

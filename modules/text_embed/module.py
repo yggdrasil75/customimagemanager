@@ -5,12 +5,15 @@ Provides `embed.text` with dedicated text retrieval models. These are the
 pick for books / passages: long context (8k-32k tokens), trained on
 query->passage pairs, and cheap per chunk. The handle embeds a document;
 .embed_query(text) embeds a search query with the model's query instruction
-(Qwen3 / nomic are asymmetric); .space tags the vector space.
+(Qwen3 is asymmetric); .space tags the vector space.
 
   qwen3_embed  Qwen/Qwen3-Embedding 0.6B (1024-d), 4B (2560-d), 8B (4096-d).
                MRL: vectors may be truncated (setting) and stay comparable.
   bge_m3       BAAI/bge-m3 (1024-d, 8k tokens, multilingual, symmetric).
-  nomic        nomic-ai/nomic-embed-text-v1.5 (768-d, 8k tokens, MRL).
+
+Only models whose architecture ships in transformers itself: nothing is
+loaded with trust_remote_code (code pulled from a model repo runs with the
+app's full privileges).
 
 Weights land under models/st/embedtext/ via the sentence-transformers cache.
 """
@@ -33,8 +36,8 @@ MANIFEST = {
     "id":          "text_embed",
     "name":        "Text embeddings",
     "version":     "1.0.0",
-    "description": "Text-to-text embedding models (Qwen3-Embedding, bge-m3, "
-                   "nomic-embed-text) for passage search over books and notes.",
+    "description": "Text-to-text embedding models (Qwen3-Embedding, bge-m3) "
+                   "for passage search over books and notes.",
     "core":        False,
     "requires":    [],
     "pip":         ["torch", "sentence-transformers:sentence_transformers"],
@@ -47,10 +50,8 @@ QWEN_MODELS = {"0.6b": ("Qwen/Qwen3-Embedding-0.6B", 1300),
                "8b":   ("Qwen/Qwen3-Embedding-8B", 17000)}
 QWEN_SIZES = ["0.6b", "4b", "8b"]
 BGE_ID, BGE_COST = "BAAI/bge-m3", 2300
-NOMIC_ID, NOMIC_COST = "nomic-ai/nomic-embed-text-v1.5", 550
 
 QWEN_QUERY = "Instruct: Given a search query, retrieve relevant passages that answer it\nQuery: "
-NOMIC_DOC, NOMIC_QUERY = "search_document: ", "search_query: "
 _CACHE = model_registry.model_dir("st", "embed.text")
 _lock = threading.Lock()
 _registered: set = set()
@@ -65,13 +66,11 @@ def _normalise(v, dims=0):
 
 
 class _Embedder:
-    def __init__(self, model_id, doc_prefix="", query_prefix="", max_length=8192,
-                 trust_remote_code=False):
+    def __init__(self, model_id, doc_prefix="", query_prefix="", max_length=8192):
         dev = "cuda" if og.has_gpu() else "cpu"
         kw = {"device": dev} if dev == "cpu" else \
              {"device": dev, "model_kwargs": {"torch_dtype": torch.bfloat16}}
-        self.model = SentenceTransformer(model_id, cache_folder=_CACHE,
-                                         trust_remote_code=trust_remote_code, **kw)
+        self.model = SentenceTransformer(model_id, cache_folder=_CACHE, trust_remote_code=False, **kw)
         self.model.max_seq_length = max_length
         self.doc_prefix, self.query_prefix = doc_prefix, query_prefix
 
@@ -103,7 +102,7 @@ def register(host):
     host.add_config_key("text_embed_max_tokens", default=8192,
                         validate=lambda v: max(256, min(32768, int(v or 8192))))
     dims_setting = {"key": "text_embed_dims", "label": "Vector dims (MRL)", "kind": "number",
-                    "help": "0 = native. Qwen3 and nomic vectors may be truncated and stay "
+                    "help": "0 = native. Qwen3 vectors may be truncated and stay "
                             "comparable; changing it means re-embedding."}
     len_setting = {"key": "text_embed_max_tokens", "label": "Max tokens per passage",
                    "kind": "number",
@@ -139,15 +138,6 @@ def register(host):
             raise RuntimeError("bge-m3 failed to load")
         return _handle(emb, "bge-m3", key, mrl=False)
 
-    def _nomic_loader():
-        key = f"st:{NOMIC_ID}"
-        emb = _load(key, (lambda: _Embedder(NOMIC_ID, doc_prefix=NOMIC_DOC,
-                                            query_prefix=NOMIC_QUERY, max_length=_max_len(),
-                                            trust_remote_code=True)), NOMIC_COST)
-        if not emb:
-            raise RuntimeError("nomic-embed-text failed to load")
-        return _handle(emb, "nomic-embed-text:v1.5", key, mrl=True)
-
     common = dict(transform=None, available=lambda: AVAILABLE, reason=UNAVAILABLE_REASON,
                   gpu=og.has_gpu(), supports_conf=False)
     host.provide_model("embed.text", "qwen3_embed", label="Qwen3-Embedding", family="Qwen3-Embedding",
@@ -161,8 +151,4 @@ def register(host):
         note="Multilingual, 8k context, symmetric (no query instruction). Solid "
              "middle ground on CPU.",
         settings=[len_setting], **common)
-    host.provide_model("embed.text", "nomic", label="nomic-embed-text v1.5", family="Nomic",
-        loader=_nomic_loader, cost_mb=NOMIC_COST, speed="fast",
-        note="Small and fast (137M), 8k context, MRL. The CPU pick for big libraries.",
-        settings=[dims_setting, len_setting], **common)
-    host.logger.info("text_embed module: registered embed.text (qwen3_embed, bge_m3, nomic)")
+    host.logger.info("text_embed module: registered embed.text (qwen3_embed, bge_m3)")

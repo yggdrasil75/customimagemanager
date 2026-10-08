@@ -313,15 +313,23 @@ if _HAVE_TORCH:
             if temporal:
                 self.temporal = _Temporal(self.enc.dim)
 
+        def _encode_pair(self, a, b):
+            """! @brief Encode both sides in ONE encoder pass. In training BatchNorm
+            normalises with the batch's statistics: encoded separately, a and b
+            would each get their own, a difference the head learns to read and
+            that does not exist at inference (one running statistic for every
+            image), so a net trained that way scores unrelated pairs as alike."""
+            f = self.enc(torch.cat([a, b], 0).contiguous(memory_format=torch.channels_last))
+            return f[:a.shape[0]], f[a.shape[0]:]
+
         def forward(self, a, b):
-            return self.head(self.enc(a), self.enc(b))
+            return self.head(*self._encode_pair(a, b))
 
         def forward_clips(self, a, b):
             """! @brief a, b [N, T, 3, S, S] frame-aligned clips -> change logits [N, T, S/8, S/8]."""
             N, T = a.shape[:2]
-            fa = self.enc(a.flatten(0, 1).contiguous(memory_format=torch.channels_last))
-            fb = self.enc(b.flatten(0, 1).contiguous(memory_format=torch.channels_last))
-            fa, fb = fa.view(N, T, *fa.shape[1:]), fb.view(N, T, *fb.shape[1:])
+            fa, fb = self._encode_pair(a.flatten(0, 1), b.flatten(0, 1))
+            fa, fb = fa.reshape(N, T, *fa.shape[1:]), fb.reshape(N, T, *fb.shape[1:])
             if hasattr(self, "temporal"):
                 fa, fb = self.temporal(fa), self.temporal(fb)
             out = self.head(fa.flatten(0, 1), fb.flatten(0, 1))

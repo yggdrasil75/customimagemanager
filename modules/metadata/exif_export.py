@@ -111,15 +111,13 @@ def _remove_xmp_properties(target, keys):
             desc.remove(ch)
         left = left or len(desc) > 0 or any(a != _RDF + "about" for a in desc.attrib)
     if not left:
-        # exiv2 never saves an empty packet (it keeps the old one): write it ourselves
-        tmp = target + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(_EMPTY_XMP)
-        os.replace(tmp, target)
-        return
-    with pyexiv2.Image(target) as img:
-        img.clear_exif()
-        img.modify_raw_xmp(ET.tostring(root, encoding="unicode"))
+        packet = _EMPTY_XMP
+    else:
+        packet = raw[:start] + ET.tostring(root, encoding="unicode") + raw[end + len("</x:xmpmeta>"):]
+    tmp = target + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(packet)
+    os.replace(tmp, target)
 
 
 def _writable_target(filepath):
