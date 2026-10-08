@@ -17,12 +17,28 @@ def test_alternatives_none_installed():
     assert not loader._dep_installed(dep)
     assert loader._dep_problem(dep) == "pip dependency 'no-such-a (or no-such-b)' not installed"
 
-
 def test_pip_install_picks_first_alternative(monkeypatch):
     calls = []
     monkeypatch.setattr(loader.subprocess, "call", lambda argv: calls.append(argv) or 0)
     got = loader._pip_install(["ai-edge-litert:ai_edge_litert|tflite-runtime:tflite_runtime"], loader._log)
-    assert got == ["ai-edge-litert"] and calls[0][-1] == "ai-edge-litert"
+    assert got == ["ai-edge-litert"] and [c[-1] for c in calls] == ["ai-edge-litert"]
+
+
+def test_pip_install_falls_back_to_next_alternative(monkeypatch):
+    """! @brief No wheel for the preferred package (platform / Python version): the
+    next alternative is installed instead of giving up."""
+    calls = _fake_pip(monkeypatch, {"tensorflow"})
+    got = loader._pip_install(
+        ["ai-edge-litert:ai_edge_litert|tflite-runtime:tflite_runtime|tensorflow"], loader._log)
+    assert got == ["tensorflow"]
+    assert [c[-1] for c in calls] == ["ai-edge-litert", "tflite-runtime", "tensorflow"]
+
+
+def test_pip_install_one_bad_package_does_not_block_the_rest(monkeypatch):
+    calls = _fake_pip(monkeypatch, {"good-a", "good-b"})
+    got = loader._pip_install(["good-a", "no-wheel-pkg", "good-b"], loader._log)
+    assert got == ["good-a", "good-b"]
+    assert calls[0][-3:] == ["good-a", "no-wheel-pkg", "good-b"]       # tried together first
 
 
 def test_import_failure_reported_as_missing_pip(tmp_path):

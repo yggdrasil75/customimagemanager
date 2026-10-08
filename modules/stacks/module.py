@@ -12,10 +12,12 @@ Kinds
           crs:RawFileName, the raws table), guarded by the capture time. Runs
           on every indexed file (so a raw + JPEG upload pairs at upload) and as
           a library rescan (retroactive). Always on: the module's core job.
-  burst   optional (Settings -> Modules -> Stacks): dedup's similar groups,
-          members over a similarity floor, in the same folder or album, whose
-          capture times chain with gaps no larger than the max drift. Rerun
-          after every finished dedup scan.
+  burst   optional (Settings -> Modules -> Stacks), and only while the dedup
+          module is enabled: dedup's similar groups, members over a similarity
+          floor, in the same folder or album, whose capture times chain with
+          gaps no larger than the max drift. Rerun after every finished dedup
+          scan. Without dedup every other kind works as usual and existing
+          burst stacks are left as they are.
   manual  stacked by hand from the gallery selection.
   split   the frames of an animation split into stills.
 
@@ -61,10 +63,10 @@ MANIFEST = {
     "name":        "Stacks",
     "version":     "1.0.0",
     "description": "Groups a raw with its camera JPEG (at upload and retroactively), "
-                   "optionally stacks burst shots from dedup results, shows a stack as one "
+                   "optionally stacks burst shots from dedup results (when dedup is on), shows a stack as one "
                    "gallery tile, and merges / splits stacks and animations.",
     "core":        False,
-    "requires":    ["dedup"],
+    "requires":    [],
     "pip":         ["numpy", "Pillow:PIL"],
     "assets":      ["stacks.js", "stacks.css"],
 }
@@ -155,7 +157,8 @@ def register(host):
                         validate=lambda v: max(50, min(100, int(round(float(v))))))
     host.add_settings_field(key="stacks_burst", label="Stack burst shots", kind="toggle", pane="module",
                             help="Group near-identical shots taken in quick succession, from the "
-                                 "dedup scan's similar groups. Runs after every dedup scan.")
+                                 "dedup scan's similar groups. Needs the Dedup module enabled; runs "
+                                 "after every dedup scan.")
     host.add_settings_field(key="stacks_burst_drift", label="Burst max drift (seconds)", kind="number",
                             pane="module",
                             help="Largest gap between two consecutive shots of one burst.")
@@ -163,8 +166,11 @@ def register(host):
                             pane="module",
                             help="Shots less similar than this to the dedup reference stay out of the burst.")
 
-    def _cfg_burst():
+    def _dedup_on():
+        """! @brief Whether the dedup module is enabled (it publishes dedup_scorers)."""
+        return host.has_service("dedup_scorers")
 
+    def _cfg_burst():
         """! @brief (enabled, max drift in seconds, min similarity 0..1) of burst stacking."""
         return (bool(host.config.get("stacks_burst")),
                 float(host.config.get("stacks_burst_drift") or 2.0),
@@ -197,13 +203,11 @@ def register(host):
             "SELECT rel_path FROM stack_members WHERE stack_id=? ORDER BY position, rel_path", (sid,))]
 
     def _stack_row(sid):
-
         """! @brief A stack's row as a dict, or None."""
         r = host.db().execute("SELECT * FROM stacks WHERE id=?", (sid,)).fetchone()
         return dict(r) if r else None
 
     def _stack_of(rel):
-
         """! @brief The id of the stack a file is in, or None."""
         r = host.db().execute("SELECT stack_id FROM stack_members WHERE rel_path=?", (rel,)).fetchone()
         return r[0] if r else None
@@ -287,7 +291,6 @@ def register(host):
             host.db().commit()
 
     def _optouts():
-
         """! @brief Files a user took out of an automatic stack."""
         return {r[0] for r in host.db().execute("SELECT rel_path FROM stack_optout")}
 
@@ -431,6 +434,10 @@ def register(host):
     def scan_burst():
         """! @brief Rebuild the automatic burst stacks from dedup's similar groups."""
         enabled, drift, sim = _cfg_burst()
+        if enabled and not _dedup_on():
+            # nothing to rebuild from: keep the burst stacks made while dedup was on
+            log.info("stacks: burst stacking needs the dedup module; skipped")
+            return 0
         db = host.db()
         for (sid,) in db.execute("SELECT id FROM stacks WHERE kind='burst' AND auto=1").fetchall():
             host.update_file(table="stack_members", where=("stack_id=?", (sid,)), remove=True,
@@ -470,7 +477,6 @@ def register(host):
     _job_lock = threading.Lock()
 
     def _dedup_stamp():
-
         """! @brief When dedup last finished a verified scan, or None."""
         try:
             r = host.db().execute("SELECT created, stage FROM dedup_checkpoint WHERE id=1").fetchone()
@@ -499,12 +505,11 @@ def register(host):
         return out
 
     def _claim():
-
         """! @brief Worker source: a rescan job when one was asked for or dedup finished a scan."""
         if _job["running"]:
             return None
         now = time.time()
-        if now - _job["polled"] >= _DEDUP_POLL_S:
+        if now - _job["polled"] >= _DEDUP_POLL_S and _dedup_on():
             _job["polled"] = now
             stamp = _dedup_stamp()
             if stamp is not None and stamp != _job["last_dedup"]:
@@ -519,7 +524,6 @@ def register(host):
         return job
 
     def _handle(job):
-
         """! @brief Worker source: run a claimed rescan."""
         try:
             run_scans(job["raw"], job["burst"])
@@ -528,7 +532,6 @@ def register(host):
             host.thread_manager.wake()
 
     def _startup():
-
         """! @brief First run pairs the existing library; then register the worker source."""
         try:
             if host.db().execute("SELECT COUNT(*) FROM stacks").fetchone()[0] == 0:
@@ -551,13 +554,11 @@ def register(host):
         return None
 
     def _on_deleted(rel_path):
-
         """! @brief file.deleted: drop the file from its stack and the opt-out list."""
         _detach([rel_path], commit=False)
         host.update_file(rel_path, table="stack_optout", remove=True, dont_write=True)
 
     def _on_renamed(old_rel, new_rel):
-
         """! @brief file.renamed: repoint the stack rows."""
         for t in ("stack_members", "stack_optout"):
             host.update_file(table=t, where=("rel_path=?", (old_rel,)), set={"rel_path": new_rel},
@@ -585,7 +586,6 @@ def register(host):
     host.register_file_enricher(_enrich)
 
     def _search(token, value):
-
         """! @brief stack:<kind> token: covers of stacks of that kind."""
         v = (value or "").strip().lower()
         if v in ("", "any", "all", "yes"):
@@ -611,7 +611,6 @@ def register(host):
         return rel
 
     def _payload(sid):
-
         """! @brief A stack for the client: kind, cover, members with size, capture time and raw link."""
         row = _stack_row(sid)
         if row is None:
@@ -637,7 +636,6 @@ def register(host):
                 "count": len(mem), "members": out}
 
     def _bad(msg, code=400):
-
         """! @brief A JSON error reply."""
         return jsonify({"success": False, "error": msg}), code
 
@@ -692,7 +690,6 @@ def register(host):
         return jsonify({"success": True, "stack": _payload(sid) if sid else None, "animated": animated})
 
     def api_get(sid):
-
         """! @brief GET /api/stacks/<id>: one stack."""
         p = _payload(sid)
         if p is None:
@@ -700,7 +697,6 @@ def register(host):
         return jsonify({"success": True, "stack": p})
 
     def api_status():
-
         """! @brief GET /api/stacks/status: rescan state, counts per kind, burst settings."""
         counts = {k: 0 for k in KINDS}
         for r in host.db().execute("SELECT kind, COUNT(*) FROM stacks GROUP BY kind"):
@@ -708,10 +704,10 @@ def register(host):
         enabled, drift, sim = _cfg_burst()
         return jsonify({"success": True, "running": _job["running"], "last": _job["last"],
                         "error": _job["error"], "counts": counts,
-                        "burst": {"enabled": enabled, "drift": drift, "similarity": sim}})
+                        "burst": {"enabled": enabled, "drift": drift, "similarity": sim,
+                                  "dedup": _dedup_on()}})
 
     def api_create():
-
         """! @brief POST /api/stacks/create: stack the given files by hand."""
         d = request.get_json(silent=True) or {}
         rels = [_rel_of(f) for f in (d.get("filenames") or [])]
@@ -725,7 +721,6 @@ def register(host):
         return jsonify({"success": True, "stack": _payload(sid)})
 
     def api_cover(sid):
-
         """! @brief POST /api/stacks/<id>/cover: pick the tile the gallery shows."""
         if _stack_row(sid) is None:
             return _bad("no such stack", 404)
@@ -739,7 +734,6 @@ def register(host):
         return jsonify({"success": True, "stack": _payload(sid)})
 
     def api_remove(sid):
-
         """! @brief POST /api/stacks/<id>/remove: take files out of a stack."""
         if _stack_row(sid) is None:
             return _bad("no such stack", 404)
@@ -751,7 +745,6 @@ def register(host):
         return jsonify({"success": True, "stack": _payload(sid)})
 
     def api_unstack(sid):
-
         """! @brief POST /api/stacks/<id>/unstack: dissolve a stack."""
         if _stack_row(sid) is None:
             return _bad("no such stack", 404)
@@ -759,7 +752,6 @@ def register(host):
         return jsonify({"success": True})
 
     def api_merge(sid):
-
         """! @brief POST /api/stacks/<id>/merge: store the stack as one animation."""
         row = _stack_row(sid)
         if row is None:
@@ -843,7 +835,6 @@ def register(host):
                         "removed": removed})
 
     def api_split():
-
         """! @brief POST /api/stacks/split: store an animation's frames as stills and stack them."""
         d = request.get_json(silent=True) or {}
         rel = _rel_of(d.get("filename"))
@@ -880,7 +871,6 @@ def register(host):
                         **({} if sid else {"error": "fewer than two distinct frames were stored"})})
 
     def api_rescan():
-
         """! @brief POST /api/stacks/rescan: raw pairing and / or burst stacking, queued or inline (wait)."""
         d = request.get_json(silent=True) or {}
         raw = bool(d.get("raw", True))
@@ -889,6 +879,10 @@ def register(host):
             burst = False
             if not raw:
                 return _bad("burst stacking is off (Settings -> Modules -> Stacks)")
+        if burst and not _dedup_on():
+            burst = False
+            if not raw:
+                return _bad("burst stacking needs the Dedup module (Settings -> Modules)")
         if d.get("wait"):
             if _job["running"]:
                 return _bad("a rescan is already running", 409)

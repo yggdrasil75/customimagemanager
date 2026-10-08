@@ -124,23 +124,49 @@ def _import_failure(manifest, exc):
     return None
 
 
+def _pip(pkgs, logger):
+    """! @brief One `pip install` in a subprocess (pip has no library API).
+    @return True on success; the import caches are refreshed either way, so a
+            package pip just placed is found by the next find_spec.
+    """
+    logger.info("installing module deps: %s" % " ".join(pkgs))
+    ok = subprocess.call([sys.executable, "-m", "pip", "install", *pkgs]) == 0
+    importlib.invalidate_caches()
+    if not ok:
+        logger.warning("pip install failed for: %s" % " ".join(pkgs))
+    return ok
+
+
 def _pip_install(deps, logger):
-    """! @brief pip-install deps in a subprocess (pip has no library API).
+    """! @brief pip-install deps. 
     @return the packages installed; a failure is logged, not raised.
     """
-    want = [_split_dep(_alternatives(d)[0])[0].strip() for d in deps]
-    skip = [p for p in want if p in _BACKEND_PIP]
-    want = [p for p in want if p not in _BACKEND_PIP]
+    plain, choices, skip = [], [], []
+    for d in deps:
+        alts = [_split_dep(a)[0].strip() for a in _alternatives(d)]
+        usable = [a for a in alts if a not in _BACKEND_PIP]
+        skip += [a for a in alts if a in _BACKEND_PIP]
+        if len(alts) > 1 and usable:
+            choices.append([(p, a) for p, a in zip(alts, _alternatives(d)) if p in usable])
+        elif usable:
+            plain.append(usable[0])
     if skip:
         logger.info("module deps %s come from requirements-<backend>.txt; "
-                    "run ./install.sh cpu|cuda|rocm" % ", ".join(skip))
-    if not want:
-        return []
-    logger.info("installing module deps: %s" % " ".join(want))
-    if subprocess.call([sys.executable, "-m", "pip", "install", *want]):
-        logger.warning("pip install failed for: %s" % " ".join(want))
-        return []
-    return want
+                    "run ./install.sh cpu|cuda|rocm" % ", ".join(sorted(set(skip))))
+    done = []
+    if plain:
+        if _pip(plain, logger):
+            done += plain
+        elif len(plain) > 1:
+            done += [p for p in plain if _pip([p], logger)]
+    for options in choices:
+        for i, (pkg, spec) in enumerate(options):
+            if _pip([pkg], logger) and _one_installed(spec):
+                done.append(pkg)
+                break
+            if i + 1 < len(options):
+                logger.info("trying the next alternative: %s" % options[i + 1][0])
+    return done
 
 
 # -- built-in core parts manager imports directly; listed so Settings shows them --

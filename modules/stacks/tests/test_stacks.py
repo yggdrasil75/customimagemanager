@@ -314,3 +314,33 @@ def test_status_and_assets(client):
     assert j["success"] and set(j["counts"]) == {"raw", "burst", "manual", "split"}
     assets = client.get("/api/module_assets").get_json()["assets"]
     assert any(a["module_id"] == "stacks" and a["url"].endswith("/stacks.js") for a in assets)
+
+
+def test_works_without_dedup(client, host, upload, monkeypatch):
+    """! @brief Dedup is optional: with it off, raw pairing and manual stacks work, a
+    burst rescan says why it can't run, and burst stacks already made are kept."""
+    folder = FOLDER + "_nodedup"
+    real = host.has_service
+    monkeypatch.setattr(host, "has_service", lambda name: False if name == "dedup_scorers" else real(name))
+    old = host.config.get("stacks_burst")
+    host.set_config("stacks_burst", True, save=False)
+    try:
+        fns = [upload(name=f"nd_{i}.png", seed=5000 + i, folder=folder) for i in range(2)]
+        sid = _post(client, "/api/stacks/create", {"filenames": fns})["stack"]["id"]
+        host.db().execute("UPDATE stacks SET kind='burst', auto=1 WHERE id=?", (sid,))
+        host.db().commit()
+        j = _post(client, "/api/stacks/rescan", {"raw": False, "burst": True, "wait": True})
+        assert not j["success"] and "Dedup" in j["error"]
+        j = _post(client, "/api/stacks/rescan", {"raw": True, "burst": True, "wait": True})
+        assert j["success"] and j["result"]["burst"] == 0, j
+        assert _stack_of(client, fns[0])["stack"]["id"] == sid          # not dissolved
+        assert client.get("/api/stacks/status").get_json()["burst"]["dedup"] is False
+        jpg = upload(name="NODD_1.png", seed=5010, folder=folder)
+        dev = upload(name="NODD_1_1.png", seed=5011, folder=folder)
+        _mark_developed(host, dev, "NODD_1.CR2")
+        host.core.index_file(dev, force=True)
+        assert _stack_of(client, jpg)["stack"]["kind"] == "raw"
+        _drop_raws(host, [dev])
+    finally:
+        host.set_config("stacks_burst", bool(old), save=False)
+        _post(client, f"/api/stacks/{sid}/unstack")
