@@ -56,6 +56,7 @@ def test_jxl_keyframe_indices_monotone():
 
 
 def test_media_prefs_target_ext():
+    saved_book = mt._MEDIA_TYPES.get("book")  # the books module's registration, put back after
     try:
         assert mt.target_ext("a.png") == ".jxl"                 # default: always jxl
         assert mt.target_ext("a.mkv") == ".mkv"                 # default: video as-is
@@ -77,7 +78,10 @@ def test_media_prefs_target_ext():
         assert mt.target_ext("a.cbr") == ".cbz" and mt.target_ext("a.epub") == ".epub"
     finally:
         mt.set_media_prefs(mt.DEFAULT_MEDIA_PREFS)
-        mt.unregister_media_type("book")
+        if saved_book is None:
+            mt.unregister_media_type("book")
+        else:
+            mt._MEDIA_TYPES["book"] = saved_book
 
 
 def test_clean_filename():

@@ -38,6 +38,7 @@ that reports available() but fails to load FAILS: available() is lying.
 import json
 import os
 
+import cv2
 import numpy as np
 import pytest
 
@@ -76,6 +77,7 @@ def expectation(cap, pid, test_name=None):
 
 SPEEDS = {"", "fast", "balanced", "accurate"}
 PROMPT = "person"
+PASSAGE = "A person in a red coat walks a dog along the beach at sunset."
 
 
 # -- parametrization --------------------------------------------------------
@@ -290,6 +292,15 @@ def _call(p, h, img, **kw):
         return h(img, kw.pop("boxes", [CENTER_BOX]), **kw)
     if cap in ("face.shape", "body.shape"):
         return h(kw.pop("crops", [(img, CENTER_BOX)]))
+    if cap == "embed.text":
+        # a passage, not an image; a blank frame stands for an empty passage
+        return h("" if img.max() == img.min() else PASSAGE, **kw)
+    if cap == "dedup.pair":
+        # two BGR images -> one score; a resized copy is a real near-duplicate pair
+        hh, ww = img.shape[:2]
+        return h(img, cv2.resize(img, (max(8, ww * 4 // 5), max(8, hh * 4 // 5))), **kw)
+    if cap in ("dedup.audio", "dedup.video"):
+        pytest.skip(f"{cap} scores two media paths, not an image - ship a test in the providing module")
     if p.prompted:
         return h(img, kw.pop("prompt", PROMPT), **kw)
     return h(img, **kw)
@@ -300,7 +311,6 @@ def std_image():
     if has_fixture("person_single.jpg"):
         return load_image("person_single.jpg")
     rng = np.random.default_rng(0)
-    import cv2
     return cv2.GaussianBlur(rng.integers(0, 255, (240, 320, 3), dtype=np.uint8), (9, 9), 0)
 
 
@@ -396,7 +406,7 @@ def v_ocr(out, cap):
 
 def v_embed(out, cap, allow_none):
     if out is None:
-        assert allow_none, "embed returned None on a normal image"
+        assert allow_none, f"{cap} returned None on a normal input"
         return
     v = np.asarray(out)
     assert v.ndim == 1 and v.size > 0, f"embedding must be 1-D, got {v.shape}"
@@ -438,6 +448,13 @@ def v_mesh(out, cap):
         assert faces.ndim == 2 and faces.shape[1] == 3 and faces.max() < len(verts)
 
 
+def v_score(out, cap, blank=False):
+    if out is None:
+        assert blank, f"{cap} returned None for a normal pair (it must score it or raise)"
+        return
+    _num01(out, "score")
+
+
 # Outputs that routes hand straight to jsonify must be plain Python types
 # (numpy scalars in a box make the whole response a 500).
 JSON_CAPS = ("detect", "segment", "pose", "classify", "tag", "describe", "ocr", "iqa")
@@ -473,7 +490,7 @@ def validate(p, out, img, n_boxes=1, blank=False):
         return
     if cap == "ocr":
         return v_ocr(out, cap)
-    if cap == "embed":
+    if cap in ("embed", "embed.text"):
         return v_embed(out, cap, allow_none=blank)
     if cap in ("embed.faces", "embed.bodies"):
         return v_embed_boxes(out, cap, n_boxes)
@@ -481,6 +498,8 @@ def validate(p, out, img, n_boxes=1, blank=False):
         return v_iqa(out, cap, blank=blank)
     if cap in ("face.shape", "body.shape", "body.mesh"):
         return v_mesh(out, cap)
+    if cap == "dedup.pair":
+        return v_score(out, cap, blank=blank)
     pytest.skip(f"no generic validator for capability '{cap}' - ship a test in the providing module")
 
 
@@ -761,7 +780,6 @@ def test_face_identity(P, app):
 @for_caps("iqa")
 def test_iqa_prefers_sharp(P):
     p, h = P
-    import cv2
     img = load_image("person_single.jpg")
     sharp = call(p, h, img)["quality"]
     blurred = call(p, h, cv2.GaussianBlur(img, (0, 0), 6))["quality"]

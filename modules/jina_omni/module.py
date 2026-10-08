@@ -30,6 +30,9 @@ librosa, _HAVE_LIBROSA = optional_import("librosa")
 cv2, _HAVE_CV2 = optional_import("cv2")
 Image, _HAVE_PIL = optional_import("PIL", attr="Image")
 AutoModel, _HAVE_TF = optional_import("transformers", attr="AutoModel")
+AutoConfig, _ = optional_import("transformers", attr="AutoConfig")
+get_class_from_dynamic_module, _ = optional_import("transformers.dynamic_module_utils",
+                                                   attr="get_class_from_dynamic_module")
 
 AVAILABLE = bool(_HAVE_TORCH and _HAVE_TF and _HAVE_PIL)
 UNAVAILABLE_REASON = "pip install torch pillow 'transformers>=4.51' peft"
@@ -59,6 +62,29 @@ _CACHE = model_registry.model_dir("jina", "omni")
 _lock = threading.Lock()
 _registered: set = set()
 _probe: dict = {}          # model_id -> {modality: bool} after first load
+
+
+def _class_probe(model_id):
+    """! @brief Which modality methods the checkpoint's remote code defines, read from
+    the downloaded code alone (no weights, no network).
+    @return {modality: bool}, or None while unknown (not downloaded yet).
+    """
+    if model_id in _probe:
+        return _probe[model_id]
+    if AutoConfig is None or get_class_from_dynamic_module is None:
+        return None
+    try:
+        cfg = AutoConfig.from_pretrained(model_id, cache_dir=_CACHE, trust_remote_code=True,
+                                         local_files_only=True)
+        ref = (getattr(cfg, "auto_map", None) or {}).get("AutoModel")
+        if not ref:
+            return None
+        cls = get_class_from_dynamic_module(ref, model_id, cache_dir=_CACHE, local_files_only=True)
+    except Exception:
+        return None
+    found = {m: any(callable(getattr(cls, n, None)) for n in names) for m, names in _METHODS.items()}
+    _probe[model_id] = found
+    return found
 
 
 def _normalise(v, dims=0):
@@ -165,8 +191,31 @@ def register(host):
     def _space(size, dims):
         return f"jina-omni:{size}" + (f":{dims}" if dims else "")
 
+    def _model_id(cap):
+        size = host.model_variant(cap, provider="jina_omni")["size"] or "small"
+        return MODELS.get(size, MODELS["small"])
+
+    def _has(cap, modality):
+        """! @brief Unknown until the code is on disk; once probed, honest."""
+        if not AVAILABLE:
+            return False
+        p = _class_probe(_model_id(cap))
+        return p is None or p.get(modality, False)
+
+    def _why(cap, modality):
+        if not AVAILABLE:
+            return UNAVAILABLE_REASON
+        return (f"{_model_id(cap)}: its remote code has no {modality} encoder method "
+                f"(looked for {', '.join(_METHODS[modality])}; see _METHODS in modules/jina_omni)")
+
+    def _need(emb, modality):
+        if emb.fn[modality] is None:
+            raise RuntimeError(f"this jina omni checkpoint's remote code has no {modality} "
+                               f"encoder method (see _METHODS in modules/jina_omni)")
+
     def _image_loader():
         emb, size, dims = _get("embed")
+        _need(emb, "image")
 
         def run(img, *a, **k):
             return emb.embed_image(og.as_bgr(img), dims)
@@ -177,6 +226,7 @@ def register(host):
 
     def _text_loader():
         emb, size, dims = _get("embed.text")
+        _need(emb, "text")
 
         def run(text, *a, **k):
             return emb.embed_text(text, dims, task="retrieval")
@@ -187,9 +237,7 @@ def register(host):
 
     def _audio_loader():
         emb, size, dims = _get("embed.audio")
-        if emb.fn["audio"] is None:
-            raise RuntimeError("this jina omni checkpoint's remote code has no audio "
-                               "encoder method (see _METHODS in modules/jina_omni)")
+        _need(emb, "audio")
         secs = int(host.config.get("jina_omni_max_seconds") or 90)
 
         def run(abs_path, *a, **k):
@@ -199,27 +247,24 @@ def register(host):
         run.registry_key = registry_key(MODELS[size])
         return run
 
-    def _audio_available():
-        # unknown until first load; once probed, honest
-        p = next(iter(_probe.values()), None)
-        return AVAILABLE and (p is None or p.get("audio", False))
-
     common = dict(sizes=_SIZES, transform=None, gpu=og.has_gpu(), speed="balanced",
                   supports_conf=False, cost_mb=_COST_MB["small"], settings=[dims_setting])
     host.provide_model(
         "embed", "jina_omni", label="Jina v5 omni", family="Jina",
-        loader=_image_loader, available=lambda: AVAILABLE, reason=UNAVAILABLE_REASON,
+        loader=_image_loader, available=lambda: _has("embed", "image"),
+        reason=lambda: _why("embed", "image"),
         note="One model for images, text and audio in one space. Pick it in all three "
              "to cross-search (a picture for a song); a specialist beats it per modality.",
         **common)
     host.provide_model("embed.text", "jina_omni", label="Jina v5 omni", family="Jina",
-        loader=_text_loader, available=lambda: AVAILABLE, reason=UNAVAILABLE_REASON,
+        loader=_text_loader, available=lambda: _has("embed.text", "text"),
+        reason=lambda: _why("embed.text", "text"),
         note="Same model as the image/audio picks. Fine for passages; Qwen3-Embedding "
              "is the stronger text-only choice.",
         **common)
     host.provide_model("embed.audio", "jina_omni", label="Jina v5 omni", family="Jina",
-        loader=_audio_loader, available=_audio_available,
-        reason=UNAVAILABLE_REASON + " (and an audio encoder in the checkpoint)",
+        loader=_audio_loader, available=lambda: _has("embed.audio", "audio"),
+        reason=lambda: _why("embed.audio", "audio"),
         note="Same model as the image/text picks; text ↔ audio search works. "
              "MuQ-MuLan is stronger for music mood/genre.",
         settings=[dims_setting, {"key": "jina_omni_max_seconds", "label": "Seconds per track",

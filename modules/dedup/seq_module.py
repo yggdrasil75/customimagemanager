@@ -21,6 +21,8 @@ or the naive score - answers meanwhile.
 import os
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import OrderedDict
 
 import common
@@ -90,11 +92,48 @@ def register_seq_module(host, *, cls, kind, cap, cap_label, cap_summary, cap_inp
                 return p
         if size not in hf_sizes:
             raise RuntimeError(f"no trained {cls.FAMILY} checkpoint for size '{size}'; train it in Trainer > Dedup")
-        url = f"https://huggingface.co/{hf_repo}/resolve/main/{cls.FAMILY}_{size}.pt"
-        return common.fetch_file(url, _local_paths(size)[2], min_bytes=1024)
+        return common.fetch_file(_url(size), _local_paths(size)[2], min_bytes=1024)
 
     def _size():
         return str(host.model_variant(cap)["size"] or "medium")
+
+    remote = {}  # size -> (ok, why, checked_at): HEAD probe of the download URL
+
+    def _url(size):
+        return f"https://huggingface.co/{hf_repo}/resolve/main/{cls.FAMILY}_{size}.pt"
+
+    def _remote_ok(size):
+        """! @brief True when the size's download URL answers (a success is kept, a miss retried after 10 min)."""
+        ok, why, at = remote.get(size, (None, "", 0.0))
+        if ok or (ok is False and time.time() - at < 600):
+            return ok
+        try:
+            req = urllib.request.Request(_url(size), method="HEAD")
+            with urllib.request.urlopen(req, timeout=10) as r:
+                ok, why = 200 <= r.status < 400, f"HTTP {r.status}"
+        except urllib.error.HTTPError as e:
+            ok, why = False, f"HTTP {e.code} {e.reason}"
+        except Exception as e:
+            ok, why = False, f"{type(e).__name__}: {e}"
+        remote[size] = (ok, why, time.time())
+        return ok
+
+    def _available():
+        if not seq_models._HAVE_TORCH:
+            return False
+        size = _size()
+        if any(os.path.exists(p) for p in _local_paths(size)):
+            return True
+        return size in hf_sizes and _remote_ok(size)
+
+    def _reason():
+        if not seq_models._HAVE_TORCH:
+            return "needs torch"
+        size = _size()
+        if size not in hf_sizes:
+            return f"no trained {cls.FAMILY} checkpoint for size '{size}'; train it in Trainer > Dedup"
+        return (f"{cls.FAMILY} {size}: no local checkpoint and the download failed "
+                f"({remote.get(size, (None, 'not checked', 0))[1]}): {_url(size)}")
 
     def _device():
         return "cuda" if seq_models._HAVE_TORCH and seq_models.torch.cuda.is_available() else "cpu"
@@ -112,7 +151,7 @@ def register_seq_module(host, *, cls, kind, cap, cap_label, cap_summary, cap_inp
         return lambda a, b: m.score_paths(a, b, _device())
 
     host.provide_model(cap, prefix, label=cls.FAMILY, family=cls.FAMILY, sizes=_all_sizes(), loader=_loader,
-                       available=lambda: bool(seq_models._HAVE_TORCH), reason="needs torch",
+                       available=_available, reason=_reason,
                        cost_mb=cost_mb, gpu=False, supports_conf=False, note=note)
 
     def _model():

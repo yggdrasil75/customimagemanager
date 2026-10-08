@@ -54,9 +54,31 @@ def test_features_fit_grow(tmp_path, monkeypatch):
     class Broker:
         def selected_id(self, c, role=None): return c if c in caps else None
         def providers_for(self, c): return []
+    def update_file(target=None, *, table=None, set=None, defaults=None, key=None, where=None,
+                    remove=False, dont_write=False, commit=True, **_):
+        # host.update_file for module tables: DB-only upsert / update / delete
+        assert table and dont_write, "module tables are DB-only (dont_write=True)"
+        vals = dict(set or {})
+        if where is None:
+            ident = {"rel_path": target, **(key or {})}
+            clause = " AND ".join(f"{k}=?" for k in ident)
+            params = list(ident.values())
+        else:
+            clause, params = where[0], list(where[1])
+        if remove:
+            db.execute(f"DELETE FROM {table} WHERE {clause}", params)
+        elif where is None and not db.execute(f"SELECT 1 FROM {table} WHERE {clause}", params).fetchone():
+            row = {**ident, **(defaults or {}), **vals}
+            db.execute(f"INSERT INTO {table} ({','.join(row)}) VALUES ({','.join('?' * len(row))})",
+                       list(row.values()))
+        elif vals:
+            db.execute(f"UPDATE {table} SET {','.join(f'{k}=?' for k in vals)} WHERE {clause}",
+                       [*vals.values(), *params])
+        if commit:
+            db.commit()
     svc = {}; startup = []
     host = types.SimpleNamespace(core=core, config={"personal_iqa_base": "brisque", "personal_iqa_encoder": ""},
-        db=lambda: db, broker=Broker(), request_model=request_model, logger=logging.getLogger("t"),
+        db=lambda: db, update_file=update_file, broker=Broker(), request_model=request_model, logger=logging.getLogger("t"),
         media_dir=f"{d}/media", safe_path=lambda d, r: os.path.join(d, r),
         get_service=lambda n: None, provide_service=lambda n, s: svc.update(s), provide_model=lambda *a, **k: None,
         add_asset=lambda *a: None, add_settings_tab=lambda *a, **k: None, add_table=lambda d: db.executescript(d),

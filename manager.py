@@ -1377,7 +1377,7 @@ def populate_model_selector():
     "model_groups" (common / ours / face / custom) for the settings UI.
     """
     trained = sorted(
-        glob.glob(os.path.join(MODELS_DIR, "**", "*.pt"), recursive=True),
+        glob.glob(os.path.join(MODELS_DIR, "runs", "detect", "**", "*.pt"), recursive=True),
         key=os.path.getmtime)
     groups = {"common": [], "face": [], "custom": []}
     for p in sorted(glob.glob(os.path.join(MODELS_DIR, "*.pt"))):

@@ -58,7 +58,7 @@ def test_train_clips_and_score_animation():
     losses = [m.fit_batches([batch], lr=1e-3) for _ in range(100)]
     assert losses[-1] < losses[0] / 3
     same = m.score_animation(list(runs[0]), list(b[0]))
-    other = m.score_animation(list(runs[0]), list(runs[5]))
+    other = m.score_animation(list(runs[0]), list(runs[4]))
     assert same > 0.7 and other < 0.5, (same, other)
     trim = m.score_animation(list(runs[0]), list(b[0][:2]))
     assert 0.3 < trim < same, trim

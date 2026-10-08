@@ -111,6 +111,7 @@ class ThreadManager:
         self._active = 0  # live tasks sharing the spares
         self._get_last_activity = None  # set by set_activity_source()
         self._foreground = None
+        self._inflight = set()  # running futures, for slot accounting
 
     def max_slots(self):
         """! @brief Total slots: the CPU count, at least 2."""
@@ -235,7 +236,6 @@ class ThreadManager:
             return
         self._proc_started = True
         self._wake = threading.Event()
-        self._inflight = set()  # running futures, for slot accounting
         self._ex = ThreadPoolExecutor(max_workers=self.max_slots(),
                                       thread_name_prefix="bg", initializer=_nice_worker)
         threading.Thread(target=self._process_loop, daemon=True,

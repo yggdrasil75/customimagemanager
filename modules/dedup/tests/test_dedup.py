@@ -109,7 +109,7 @@ def test_background_scan_reports_progress_and_result(client, upload):
 
 # -- metadata compare ----------------------------------------------------------
 def test_compare_meta_rows(client, upload):
-    a, b = upload(seed=41), upload(seed=42)
+    a, b = upload("cmp_a.png", seed=41), upload("cmp_b.png", seed=42)
     r = client.post("/api/dedup_compare_meta", json={"a": a, "b": b})
     if r.status_code == 503:
         pytest.skip("machine gate")
