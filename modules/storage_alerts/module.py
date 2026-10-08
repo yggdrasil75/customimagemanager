@@ -13,17 +13,16 @@ measures three things and mails the admins when one crosses its line:
 
 An alert is sent once when it trips and again after the cooldown while it
 stays tripped; a recovery mail goes out when it clears. State lives in the
-module's own table so a restart does not re-send. Settings -> Storage alerts
-holds the SMTP account, the recipients and the limits, plus a "Send test
-email" button and the last check's readings.
+module's own table so a restart does not re-send. Mail goes through the
+`email` module's service (Settings -> Email holds the SMTP account and the
+admin recipients); Settings -> Storage alerts holds extra recipients and the
+limits, plus a "Send test email" button and the last check's readings.
 """
 
 import os
 import shutil
-import smtplib
 import threading
 import time
-from email.message import EmailMessage
 from email.utils import formatdate
 
 from flask import jsonify, request
@@ -37,29 +36,27 @@ MANIFEST = {
     "description": "Email notifications when a disk runs low, the library passes a size cap, "
                    "or a storage tier is over its budget.",
     "core":        False,
-    "requires":    [],
+    "requires":    ["email"],
     "pip":         [],
     "assets":      ["storage_alerts.js"],
 }
 
 TAB = "storage_alerts"
 GB = float(1 << 30)
-TLS_MODES = [
-    {"value": "starttls", "label": "STARTTLS (port 587)"},
-    {"value": "ssl", "label": "SSL / TLS (port 465)"},
-    {"value": "none", "label": "None (plain, local relay)"},
-]
+# settings this module held before the email module owned the SMTP account:
+# carried over once into the email module's keys when those are still blank
+_LEGACY_SMTP_KEYS = {
+    "storage_alerts_smtp_host": "email_smtp_host",
+    "storage_alerts_smtp_port": "email_smtp_port",
+    "storage_alerts_smtp_user": "email_smtp_user",
+    "storage_alerts_smtp_password": "email_smtp_password",
+    "storage_alerts_smtp_tls": "email_smtp_tls",
+    "storage_alerts_from": "email_from",
+}
 
 DEFAULTS = {
     "storage_alerts_enabled": False,
-    "storage_alerts_smtp_host": "",
-    "storage_alerts_smtp_port": 587,
-    "storage_alerts_smtp_user": "",
-    "storage_alerts_smtp_password": "",
-    "storage_alerts_smtp_tls": "starttls",
-    "storage_alerts_from": "",
     "storage_alerts_to": "",
-    "storage_alerts_notify_admins": True,
     "storage_alerts_min_free_gb": 0.0,
     "storage_alerts_library_max_gb": 0.0,
     "storage_alerts_tier_over_pct": 10.0,
@@ -82,17 +79,6 @@ def _num(lo, hi, cast=float):
 
 def _text(v):
     return str(v or "").strip()
-
-
-def _one_of(options):
-    allowed = {o["value"] for o in options}
-
-    def check(v):
-        v = str(v or "")
-        if v not in allowed:
-            raise ValueError("unknown value %r" % v)
-        return v
-    return check
 
 
 def parse_recipients(text):
@@ -242,45 +228,6 @@ def compose(brand, send, recovered, readings):
     return subject, "\n".join(lines)
 
 
-def send_mail(cfg, recipients, subject, body, smtp_factory=None):
-    """! @brief Send one plain-text mail with the configured SMTP account.
-    @param smtp_factory  fn(host, port, mode) -> SMTP-like object (tests inject one).
-    @return the recipients it went to; raises on failure.
-    """
-    host = _text(cfg.get("storage_alerts_smtp_host"))
-    if not host:
-        raise ValueError("SMTP host is not set")
-    if not recipients:
-        raise ValueError("no recipients: add addresses or give the admin accounts an email")
-    port = int(cfg.get("storage_alerts_smtp_port") or (465 if cfg.get("storage_alerts_smtp_tls") == "ssl" else 587))
-    mode = cfg.get("storage_alerts_smtp_tls") or "starttls"
-    sender = _text(cfg.get("storage_alerts_from")) or _text(cfg.get("storage_alerts_smtp_user")) or ("alerts@" + host)
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = sender
-    msg["To"] = ", ".join(recipients)
-    msg["Date"] = formatdate(localtime=True)
-    msg.set_content(body)
-    factory = smtp_factory or _smtp
-    with factory(host, port, mode) as s:
-        if mode == "starttls":
-            s.starttls()
-        user, pw = _text(cfg.get("storage_alerts_smtp_user")), str(cfg.get("storage_alerts_smtp_password") or "")
-        if user:
-            s.login(user, pw)
-        s.send_message(msg, from_addr=sender, to_addrs=recipients)
-    return recipients
-
-
-def _smtp(host, port, mode):
-    if mode == "ssl":
-        return smtplib.SMTP_SSL(host, port, timeout=30)
-    s = smtplib.SMTP(host, port, timeout=30)
-    if mode == "starttls":
-        s.ehlo()
-    return s
-
-
 def register(host):
     """! @brief Settings tab, state table, the periodic check and the test / status routes."""
     core = host.core
@@ -289,14 +236,7 @@ def register(host):
     host.add_settings_tab(TAB, "Storage alerts", icon="", admin_only=True, group="server")
     validators = {
         "storage_alerts_enabled": lambda v: bool(v),
-        "storage_alerts_smtp_host": _text,
-        "storage_alerts_smtp_port": _num(1, 65535, int),
-        "storage_alerts_smtp_user": _text,
-        "storage_alerts_smtp_password": lambda v: str(v or ""),
-        "storage_alerts_smtp_tls": _one_of(TLS_MODES),
-        "storage_alerts_from": _text,
         "storage_alerts_to": lambda v: str(v or "").strip(),
-        "storage_alerts_notify_admins": lambda v: bool(v),
         "storage_alerts_min_free_gb": _num(0, 1e6),
         "storage_alerts_library_max_gb": _num(0, 1e9),
         "storage_alerts_tier_over_pct": _num(0, 1000),
@@ -308,15 +248,10 @@ def register(host):
         host.add_config_key(key, default=dflt, validate=validators[key], tab=TAB)
 
     fields = [
-        ("storage_alerts_enabled", "Send storage alerts", "toggle", {}),
-        ("storage_alerts_smtp_host", "SMTP server", "text", {"help": "smtp.example.com"}),
-        ("storage_alerts_smtp_port", "SMTP port", "number", {}),
-        ("storage_alerts_smtp_tls", "Encryption", "select", {"options": TLS_MODES}),
-        ("storage_alerts_smtp_user", "SMTP user", "text", {"help": "Blank for a relay that needs no login."}),
-        ("storage_alerts_smtp_password", "SMTP password", "text", {"help": "An app password for Gmail / Outlook accounts."}),
-        ("storage_alerts_from", "From address", "text", {"help": "Blank uses the SMTP user."}),
-        ("storage_alerts_to", "Recipients", "textarea", {"help": "One address per line (or comma separated)."}),
-        ("storage_alerts_notify_admins", "Also mail every admin account that has an email address", "toggle", {}),
+        ("storage_alerts_enabled", "Send storage alerts", "toggle",
+         {"help": "Mail goes through the account in Settings -> Email."}),
+        ("storage_alerts_to", "Extra recipients", "textarea",
+         {"help": "One address per line (or comma separated), on top of the admin recipients in Settings -> Email."}),
         ("storage_alerts_min_free_gb", "Low disk alert below (GB free)", "number",
          {"help": "0 uses the server's own floor (the one uploads wait on: 10 GB on disks over 1 TB, else 1 GB). "
                   "Checked for the media folder, every storage tier, the models folder and the extra paths."}),
@@ -354,18 +289,45 @@ def register(host):
     def cfg():
         return {k: host.config.get(k, d) for k, d in DEFAULTS.items()}
 
+    def mail():
+        m = host.get_service("email")
+        if m is None:
+            raise RuntimeError("the email module is off: enable it and set the SMTP account in Settings -> Email")
+        return m
+
     def recipients(c=None):
         c = c or cfg()
-        out = parse_recipients(c["storage_alerts_to"])
-        if c["storage_alerts_notify_admins"]:
-            try:
-                for u in core.authmgr.list_users():
-                    e = _text(u.get("email"))
-                    if u.get("is_admin") and not u.get("disabled") and e and e not in out:
-                        out.append(e)
-            except Exception as e:
-                log.error("storage_alerts: listing admins failed: %s" % e)
+        out = []
+        try:
+            out = list(mail()["admin_recipients"]())
+        except RuntimeError as e:
+            log.error("storage_alerts: %s" % e)
+        for r in parse_recipients(c["storage_alerts_to"]):
+            if r not in out:
+                out.append(r)
         return out
+
+    def send_mail(subject, body, c=None):
+        """! @brief Through the email service, to this module's recipients. @return recipients."""
+        return mail()["send"](subject, body, to=recipients(c))
+
+    def migrate_smtp():
+        """! @brief Carry a saved SMTP account from this module's old keys into the email
+        module's, once, when the email module has none yet."""
+        if _text(host.config.get("email_smtp_host")) or not _text(host.config.get("storage_alerts_smtp_host")):
+            return
+        moved = []
+        for old, new in _LEGACY_SMTP_KEYS.items():
+            v = host.config.get(old)
+            if v not in (None, ""):
+                try:
+                    host.set_config(new, v, save=False)
+                    moved.append(new)
+                except ValueError as e:
+                    log.error("storage_alerts: could not carry %s over to %s: %s" % (old, new, e))
+        if moved:
+            host.save_config()
+            log.info("storage_alerts: SMTP account moved to Settings -> Email (%s)" % ", ".join(moved))
 
     def watched_paths(c):
         paths = [("media folder", host.media_dir), ("models folder", getattr(core, "models_dir", "") or "")]
@@ -429,7 +391,7 @@ def register(host):
             if send and (to_send or recovered):
                 subject, body = compose(host.config.get("brand_name"), to_send, recovered, res["readings"])
                 try:
-                    rcpts = send_mail(c, recipients(c), subject, body)
+                    rcpts = send_mail(subject, body, c)
                     sent = "sent to %s" % ", ".join(rcpts)
                     log_mail("alert", subject, body)
                 except Exception as e:
@@ -472,6 +434,7 @@ def register(host):
         run_check(send=True)
 
     def _start():
+        migrate_smtp()
         tick["next"] = time.time() + 120.0      # first check two minutes after boot
         host.add_worker_source("storage_alerts", _claim, _handle)
     host.on_startup(_start)
@@ -498,9 +461,8 @@ def register(host):
 
     def api_test():
         """! @brief Send a test mail with the settings as they are saved."""
-        c = cfg()
         try:
-            rcpts = send_mail(c, recipients(c), "[%s] Storage alerts test" % (host.config.get("brand_name") or "Image manager"),
+            rcpts = send_mail("[%s] Storage alerts test" % (host.config.get("brand_name") or "Image manager"),
                               "This is a test message from the storage alerts module. Alerts will reach this address.")
         except Exception as e:
             log_mail("error", "test", str(e))
@@ -512,5 +474,5 @@ def register(host):
     host.add_route("/api/storage_alerts/check", api_check, methods=["POST"], feature="settings." + TAB, level="write")
     host.add_route("/api/storage_alerts/test", api_test, methods=["POST"], feature="settings." + TAB, level="write")
     host.add_asset("storage_alerts.js")
-    host.provide_service("storage_alerts", {"run_check": run_check, "send_mail": lambda subject, body: send_mail(cfg(), recipients(), subject, body)})
+    host.provide_service("storage_alerts", {"run_check": run_check, "send_mail": send_mail})
     log.info("storage_alerts module registered")

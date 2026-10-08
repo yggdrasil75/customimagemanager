@@ -70,44 +70,22 @@ def test_compose():
     assert "ALERT: Low disk space: media" in body and "RECOVERED: tier:fast" in body and "library: 3.0 GB" in body
 
 
-class FakeSMTP:
+def test_send_goes_through_email_service(host, monkeypatch):
+    """! @brief storage_alerts never speaks SMTP: its mail is the email service's send(),
+    to the email module's admin recipients plus its own extra list."""
     sent = []
-
-    def __init__(self, host, port, mode):
-        self.host, self.port, self.mode, self.tls, self.auth = host, port, mode, False, None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-    def starttls(self):
-        self.tls = True
-
-    def login(self, u, p):
-        self.auth = (u, p)
-
-    def send_message(self, msg, from_addr=None, to_addrs=None):
-        FakeSMTP.sent.append((self, msg, from_addr, to_addrs))
+    fake = {"send": lambda subject, body, to=None, html=None: (sent.append((subject, body, to)), list(to))[1],
+            "configured": lambda: True, "admin_recipients": lambda: ["admin@x"]}
+    monkeypatch.setattr(host, "get_service", lambda name: fake if name == "email" else None)
+    host.config["storage_alerts_to"] = "extra@x\nadmin@x"
+    svc = host.services["storage_alerts"]["obj"]
+    assert svc["send_mail"]("S", "B") == ["admin@x", "extra@x"]
+    assert sent == [("S", "B", ["admin@x", "extra@x"])]
 
 
-def test_send_mail_with_injected_transport():
-    FakeSMTP.sent = []
-    cfg = dict(sam.DEFAULTS, storage_alerts_smtp_host="smtp.x", storage_alerts_smtp_user="u@x", storage_alerts_smtp_password="p")
-    out = sam.send_mail(cfg, ["a@x", "b@x"], "S", "B", smtp_factory=FakeSMTP)
-    assert out == ["a@x", "b@x"]
-    s, msg, frm, to = FakeSMTP.sent[0]
-    assert s.tls and s.auth == ("u@x", "p") and s.port == 587
-    assert msg["Subject"] == "S" and msg["From"] == "u@x" and frm == "u@x" and to == ["a@x", "b@x"]
-    with pytest.raises(ValueError):
-        sam.send_mail(dict(cfg, storage_alerts_smtp_host=""), ["a@x"], "S", "B", smtp_factory=FakeSMTP)
-    with pytest.raises(ValueError):
-        sam.send_mail(cfg, [], "S", "B", smtp_factory=FakeSMTP)
-    cfg2 = dict(cfg, storage_alerts_smtp_tls="ssl", storage_alerts_smtp_port=0, storage_alerts_from="alerts@x")
-    sam.send_mail(cfg2, ["a@x"], "S", "B", smtp_factory=FakeSMTP)
-    s, msg, frm, _ = FakeSMTP.sent[-1]
-    assert s.port == 465 and not s.tls and frm == "alerts@x"
+def test_legacy_smtp_keys_are_not_declared():
+    assert not any(k.startswith("storage_alerts_smtp") for k in sam.DEFAULTS)
+    assert "storage_alerts_from" not in sam.DEFAULTS and "storage_alerts_notify_admins" not in sam.DEFAULTS
 
 
 def test_routes(client, host):
