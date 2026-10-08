@@ -17,9 +17,24 @@ def test_alternatives_none_installed():
     assert not loader._dep_installed(dep)
     assert loader._dep_problem(dep) == "pip dependency 'no-such-a (or no-such-b)' not installed"
 
+def _fake_pip(monkeypatch, installable):
+    """! @brief pip that "installs" only the given packages; returns the argv log."""
+    calls, placed = [], set()
+    def call(argv):
+        calls.append(argv)
+        pkgs = argv[argv.index("install") + 1:]
+        if all(p in installable for p in pkgs):
+            placed.update(pkgs)
+            return 0
+        return 1
+    monkeypatch.setattr(loader.subprocess, "call", call)
+    monkeypatch.setattr(loader, "_one_installed",
+                        lambda spec: loader._split_dep(spec)[0].strip() in placed)
+    return calls
+
+
 def test_pip_install_picks_first_alternative(monkeypatch):
-    calls = []
-    monkeypatch.setattr(loader.subprocess, "call", lambda argv: calls.append(argv) or 0)
+    calls = _fake_pip(monkeypatch, {"ai-edge-litert", "tflite-runtime"})
     got = loader._pip_install(["ai-edge-litert:ai_edge_litert|tflite-runtime:tflite_runtime"], loader._log)
     assert got == ["ai-edge-litert"] and [c[-1] for c in calls] == ["ai-edge-litert"]
 

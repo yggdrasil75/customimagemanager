@@ -887,3 +887,4 @@ gpu_job_headroom_mb = MANAGER.gpu_job_headroom_mb
 try_acquire_slot = MANAGER.try_acquire_slot
 foreground_use = MANAGER.foreground_use
 in_worker = MANAGER.in_worker
+inflight = MANAGER.inflight

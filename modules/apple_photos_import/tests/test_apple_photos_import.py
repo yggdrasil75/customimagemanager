@@ -10,7 +10,8 @@ from cimtest import png_bytes, read_meta
 from modules.fetch.tests.importtest import imports, ledger, run_source  # noqa: F401
 
 import modules.apple_photos_import.module as apple_mod
-from pyicloud import exceptions as E
+# the module needs pyicloud; without it there is nothing here to test
+E = pytest.importorskip("pyicloud.exceptions")
 
 MOV = b"\x00\x00\x00\x14ftypqt  " + b"\x00" * 64
 

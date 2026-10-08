@@ -33,6 +33,7 @@ import numpy as np
 from optional_deps import optional_import
 torch, _HAVE_TORCH = optional_import("torch")
 nn = torch.nn if _HAVE_TORCH else None
+conv_block = None  # defined below with torch; the scorers import it either way
 
 from . import seq_align
 
