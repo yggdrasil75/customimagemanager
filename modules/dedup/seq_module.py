@@ -95,7 +95,7 @@ def register_seq_module(host, *, cls, kind, cap, cap_label, cap_summary, cap_inp
         return common.fetch_file(_url(size), _local_paths(size)[2], min_bytes=1024)
 
     def _size():
-        return str(host.model_variant(cap)["size"] or "medium")
+        return str(host.model_variant(cap, provider=prefix)["size"] or "medium")
 
     remote = {}  # size -> (ok, why, checked_at): HEAD probe of the download URL
 
