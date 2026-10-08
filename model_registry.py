@@ -7,10 +7,12 @@ import threading
 import contextlib
 import sys
 
+_TORCH_IMPORT_ERROR = ""
 try:
     import torch
-except Exception:
+except Exception as _e:
     torch = None
+    _TORCH_IMPORT_ERROR = str(_e)
 
 VRAM_BUDGET_FRAC = 0.85
 

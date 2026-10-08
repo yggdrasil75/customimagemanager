@@ -32,7 +32,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         [],
-    "assets":      ["search_sort.js"],
+    "assets":      ["search_sort.js", "search_sort.css"],
 }
 
 RATIO_TOL = 0.05
@@ -264,3 +264,4 @@ def register(host):
     for k, e in sort_keys.items():
         host.register_sort_key(k, e)
     host.add_asset("search_sort.js")
+    host.add_asset("search_sort.css", kind="css")

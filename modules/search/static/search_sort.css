@@ -1,0 +1,6 @@
+/* Sort picker inside the search box (search_sort.js). Role colours only. */
+#ss_sort_btn.ss-sort-on { color: var(--cim-accent-400, #60a5fa) }
+.ss-sort-row { text-align: left; padding: 3px 8px; border-radius: 4px; color: #d1d5db; width: 100% }
+.ss-sort-row:hover { background: rgba(255,255,255,.08) }
+.ss-sort-row-on { color: var(--cim-accent-300, #93c5fd); font-weight: 600 }
+.ss-sort-dir { color: #9ca3af }

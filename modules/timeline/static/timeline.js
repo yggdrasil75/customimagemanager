@@ -375,7 +375,7 @@
   // -- view contract -----------------------------------------------------
   const view = {
     id: "timeline",
-    label: "🕑",
+    label: "Timeline",
     title: "Timeline (zoom from years down to days)",
     feature: "tab.gallery",
     mount(host, ctx) {

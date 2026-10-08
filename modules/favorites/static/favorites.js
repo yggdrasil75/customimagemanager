@@ -236,7 +236,7 @@
 
   const view = {
     id: "favorites",
-    label: "♥",
+    label: "Favorites",
     title: "Favorites (your favorite files)",
     feature: FEATURE,
     mount(host, ctx) {

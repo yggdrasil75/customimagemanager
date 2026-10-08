@@ -125,13 +125,32 @@ function clearDateFilter(){
   si.dispatchEvent(new Event('input',{bubbles:true}));
 }
 
-// Close the whole dropdown when clicking outside the search area.
+/** @brief Open / close the toolbar's "more" menu (module toolbar buttons). */
+function toggleGalleryMore(force){
+  const pop=document.getElementById('gallery_more_pop'); if(!pop) return;
+  const open=force!==undefined ? !!force : pop.classList.contains('hidden');
+  pop.classList.toggle('hidden', !open);
+  pop.classList.toggle('flex', open);
+  document.getElementById('gallery_more_btn')?.classList.toggle('gview-on', open);
+}
+window.toggleGalleryMore=toggleGalleryMore;
+
+// Close the dropdowns when clicking outside them. The "more" menu also closes
+// after one of its buttons was used.
 document.addEventListener('click',e=>{
   const pop=document.getElementById('quick_filters_pop');
   const si=document.getElementById('search_input');
+  const tools=si && si.parentElement && si.parentElement.querySelector('[data-ext-area="search_tools"]');
   if(pop && !pop.classList.contains('hidden') &&
-     !pop.contains(e.target) && e.target!==si){
+     !pop.contains(e.target) && e.target!==si && !(tools && tools.contains(e.target))){
     hideQuickFilters();
+  }
+  const more=document.getElementById('gallery_more_pop');
+  const moreBtn=document.getElementById('gallery_more_btn');
+  if(more && !more.classList.contains('hidden')){
+    const inside=more.contains(e.target);
+    if(!inside && e.target!==moreBtn && !(moreBtn && moreBtn.contains(e.target))) toggleGalleryMore(false);
+    else if(inside && e.target.closest('button')) setTimeout(()=>toggleGalleryMore(false), 0);
   }
 });
 
@@ -157,25 +176,42 @@ function galleryQuery(){
 
 function _renderGalleryViewSwitch(){
   const sw=document.getElementById('gallery_view_switch');
-  if(!sw) return;
+  const menu=document.getElementById('gallery_view_menu');
+  if(!sw || !menu) return;
   for(const id in window._galleryViews){
-    if(sw.querySelector(`[data-gview="${id}"]`)) continue;
+    if(menu.querySelector(`[data-gview="${id}"]`)) continue;
     const v=window._galleryViews[id];
     const b=document.createElement('button');
-    b.type='button'; b.dataset.gview=id; b.className='gview-btn px-2';
+    b.type='button'; b.dataset.gview=id; b.className='gview-item';
     b.title=v.title||v.label||id; b.textContent=v.label||id;
     if(v.feature) b.setAttribute('data-feature', v.feature);
     b.addEventListener('click',()=>setGalleryView(id));
-    sw.appendChild(b);
+    menu.appendChild(b);
   }
   sw.classList.toggle('hidden', Object.keys(window._galleryViews).length===0);
-  sw.querySelectorAll('[data-gview]').forEach(b=>{
-    const on=b.dataset.gview===galleryView;
-    b.classList.toggle('bg-blue-600', on); b.classList.toggle('text-white', on);
-    b.classList.toggle('bg-gray-700', !on); b.classList.toggle('text-gray-300', !on);
-  });
+  menu.querySelectorAll('[data-gview]').forEach(b=>b.classList.toggle('gview-item-on', b.dataset.gview===galleryView));
+  const cur=menu.querySelector(`[data-gview="${galleryView}"]`);
+  const btn=document.getElementById('gallery_view_btn');
+  if(btn && cur) btn.innerHTML=_esc(cur.textContent)+' &#9662;';
   if(window.applyFeatureVisibility) applyFeatureVisibility(sw);
 }
+
+/** @brief Open / close the view switcher's menu. */
+function toggleGalleryViewMenu(force){
+  const menu=document.getElementById('gallery_view_menu'); if(!menu) return;
+  const open=force!==undefined ? !!force : menu.classList.contains('hidden');
+  menu.classList.toggle('hidden', !open);
+  menu.classList.toggle('flex', open);
+  document.getElementById('gallery_view_btn')?.classList.toggle('gview-on', open);
+}
+window.toggleGalleryViewMenu=toggleGalleryViewMenu;
+document.addEventListener('click',e=>{
+  const menu=document.getElementById('gallery_view_menu');
+  const btn=document.getElementById('gallery_view_btn');
+  if(!menu || menu.classList.contains('hidden')) return;
+  if(menu.contains(e.target)){ setTimeout(()=>toggleGalleryViewMenu(false),0); return; }
+  if(!(btn && btn.contains(e.target))) toggleGalleryViewMenu(false);
+});
 
 function registerGalleryView(spec){
   if(!spec || !spec.id || spec.id==='grid') return;

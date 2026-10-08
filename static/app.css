@@ -420,6 +420,21 @@ canvas {
 .gview-btn:first-child {
   border-left: 0
 }
+.gview-btn.gview-on { background: var(--cim-accent-600, #2563eb); color: #fff }
+.gview-item { text-align: left; padding: 3px 8px; border-radius: 4px; font-size: 12px; color: #d1d5db; white-space: nowrap }
+.gview-item:hover { background: rgba(255,255,255,.08) }
+.gview-item-on { color: var(--cim-accent-300, #93c5fd); font-weight: 600 }
+
+/* The toolbar's "more" menu: module buttons stack as full-width menu rows,
+   and the whole thing stays hidden while no module registered anything. */
+.gallery-more:has(#gallery_more_pop:empty) { display: none }
+#gallery_more_pop .cim-btn { width: 100%; justify-content: flex-start; text-align: left; background: transparent; border: 0; color: #d1d5db; font-weight: 500 }
+#gallery_more_pop .cim-btn:hover { background: rgba(255,255,255,.08); color: #fff }
+#gallery_more_pop > * { width: 100% }
+
+/* Tools inside the search box (sort, ...): small icon buttons. */
+[data-ext-area="search_tools"] .cim-btn { padding: 0 4px; line-height: 1.4; background: transparent; border: 0 }
+[data-ext-area="search_tools"] .cim-btn:hover { background: rgba(255,255,255,.08) }
 /* Settings: a compact one-line strip of small fields (section="system"). */
 .settings-compact { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; font-size: 11px; color: #9ca3af; }
 .settings-compact-field { display: inline-flex; align-items: center; gap: 6px; cursor: default; }

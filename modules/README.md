@@ -414,9 +414,7 @@ Assets are served at `/modules/<id>/static/<file>` and injected on page load.
   this). Write with `postSettings({key: value})`, the one client path to
   `/api/update_settings`; a pane with no buffer of its own hands single values
   to `queueSetting(key, value)` and the core writes them on Save.
-- **Ext areas** for injected controls: `ai_tools`, `viewer_toggles`,
-  `gallery_bulk`, `gallery_tools`, `description_tools`, `comic_tools`,
-  `ai_tooling_links`, `controls_tabs`.
+- **Ext areas** for injected controls: `ai_tools`, `viewer_toggles`, `gallery_bulk`, `gallery_tools`, `search_tools`, `description_tools`, `comic_tools`, `ai_tooling_links`, `controls_tabs`.
 
 ## Themes
 

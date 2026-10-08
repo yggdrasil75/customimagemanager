@@ -103,7 +103,7 @@ function _extKey(html){
 //   size:    block (full-width panel button) | sm (bar button) | xs (inline chip)
 // registerControlButton(area, {...}) takes the same object and picks the size
 // that suits the area.
-const _CIM_AREA_SIZE = {ai_tools: 'block', gallery_bulk: 'sm', gallery_tools: 'sm', comic_tools: 'sm',
+const _CIM_AREA_SIZE = {ai_tools: 'block', gallery_bulk: 'sm', gallery_tools: 'sm', search_tools: 'xs', comic_tools: 'sm',
                         viewer_toggles: 'sm', review_actions: 'xs', description_tools: 'xs',
                         book_tools: 'xs', music_tools: 'xs', ai_tooling_links: 'sm'};
 function cimButton(o){

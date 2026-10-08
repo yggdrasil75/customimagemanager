@@ -362,7 +362,7 @@
       label: "Slideshow", id: "ss_btn_viewer", variant: "secondary", feature: FEATURE,
       onclick: "CIMSlideshow.startQuery()", title: "Slideshow from this picture over the gallery (search / folder / album)" });
     registerControlButton("gallery_tools", {
-      label: "Slideshow", id: "ss_btn_gallery", variant: "secondary", feature: FEATURE,
+      label: "Slideshow", id: "ss_btn_gallery", variant: "neutral", feature: FEATURE,
       onclick: "CIMSlideshow.startSelection()", title: "Slideshow of the selection, or of everything listed" });
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", registerButtons);
