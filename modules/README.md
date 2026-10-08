@@ -204,6 +204,7 @@ The core emits, modules react; the core never names a module.
 |---|---|---|
 | `library.reconcile` | - | after the image index scan |
 | `file.index` | `rel_path, abs_path, force` -> truthy if handled | index a file of a kind you own; core skips its image path |
+| `upload.check` | `folder, filename, size` -> a reason string to refuse | veto an upload before it is written (quotas); the client gets 413 |
 | `upload.duplicate_check` | `sha, filename` -> existing rel_path or None | veto an upload as a duplicate |
 | `upload.stored` | `rel_path, filename` | index a file you own after upload |
 | `file.renamed` | `old_rel, new_rel` | repoint your tables |
@@ -414,7 +415,11 @@ Assets are served at `/modules/<id>/static/<file>` and injected on page load.
   this). Write with `postSettings({key: value})`, the one client path to
   `/api/update_settings`; a pane with no buffer of its own hands single values
   to `queueSetting(key, value)` and the core writes them on Save.
-- **Ext areas** for injected controls: `ai_tools`, `viewer_toggles`, `gallery_bulk`, `gallery_tools`, `search_tools`, `description_tools`, `comic_tools`, `ai_tooling_links`, `controls_tabs`.
+- **Ext areas** for injected controls: `ai_tools`, `viewer_toggles`,
+  `gallery_bulk`, `gallery_tools` (the gallery toolbar's "more" menu: every
+  registration is a menu row, so the toolbar never grows), `search_tools`
+  (small icon buttons inside the search box; the sort picker lives there),
+  `description_tools`, `comic_tools`, `ai_tooling_links`, `controls_tabs`.
 
 ## Themes
 

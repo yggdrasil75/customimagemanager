@@ -1,0 +1,27 @@
+/* ownership.css - avatars drawn by the ownership module.
+ * .cim-avatar: round picture; 20 px in the header badge and the sharing rows,
+ * .cim-avatar-lg (64 px) in Settings -> Account & sharing. */
+.cim-avatar {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex: 0 0 auto;
+  background: var(--cim-accent-900, #1e3a8a);
+  vertical-align: middle;
+}
+.cim-avatar-lg {
+  width: 64px;
+  height: 64px;
+}
+#cim-user-badge .cim-avatar {
+  margin-right: -2px;
+}
+.cim-profile-section {
+  border-bottom: 1px solid #374151;
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+}
+.cim-profile-section input[type="password"] {
+  width: 100%;
+}

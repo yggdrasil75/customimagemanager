@@ -4202,6 +4202,13 @@ def api_upload():
     metadata  = request.form.get("metadata", "{}") or "{}"
     pred      = _predicted_rel(tdir, orig_name)
 
+    # a module may refuse the upload before anything is written (storage quotas):
+    # a handler answers with the reason as a string
+    size = request.content_length or 0
+    for reason in module_host.emit("upload.check", folder=folder, filename=orig_name, size=size):
+        if reason:
+            return jsonify({"success": False, "error_code": "refused", "error": str(reason)}), 413
+
     # already on disk under this name (same content under another name is caught by SHA later);
     # a raw and its camera JPEG share the name but are two files, stored side by side
     existing = _existing_upload(pred, orig_name)

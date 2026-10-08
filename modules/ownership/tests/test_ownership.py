@@ -8,6 +8,7 @@ import io
 import os
 import pytest
 from flask import g
+from PIL import Image
 import features
 from cimtest import png_bytes
 
@@ -32,6 +33,20 @@ def as_(app, acct):
         if getattr(g, "user", None) is not None:
             g.user = {**acct, "is_admin": False, "features": features.effective_permissions(
                 "custom", {"tab.albums": "write", "data.delete": "write", "data.upload": "write"})}
+    app.app.before_request_funcs.setdefault(None, []).append(_swap)
+    try:
+        yield
+    finally:
+        app.app.before_request_funcs[None].remove(_swap)
+
+
+@contextlib.contextmanager
+def as_admin(app, acct):
+    """! @brief Like as_, but the account is an admin (a real id, unlike the test
+    app's anonymous admin)."""
+    def _swap():
+        if getattr(g, "user", None) is not None:
+            g.user = {**acct, "is_admin": True, "features": features.effective_permissions("admin", {})}
     app.app.before_request_funcs.setdefault(None, []).append(_swap)
     try:
         yield
@@ -126,3 +141,84 @@ def test_ownership_end_to_end(app, client, upload, accounts, host):
 
     # admin sees everything
     assert {pub, mine} <= _names(client)
+
+
+def _jpeg_size(data):
+    """! @brief (w, h) of JPEG bytes."""
+    img = Image.open(io.BytesIO(data))
+    assert img.format == "JPEG"
+    return img.size
+
+
+def test_profile_pictures(app, client, accounts, host):
+    alice, bob = accounts["own_alice"], accounts["own_bob"]
+    pic_dir = os.path.join(host.media_dir, ".profiles")
+    try:
+        with as_(app, alice):
+            # a 400x300 PNG -> stored as a 256x256 JPEG
+            r = client.post("/api/profile/picture",
+                            data={"file": (io.BytesIO(png_bytes(400, 300, seed=21)), "me.png")},
+                            content_type="multipart/form-data")
+            assert r.status_code == 200, r.get_data(as_text=True)
+            j = r.get_json()
+            assert j["success"] and j["has_picture"] and j["url"].startswith(f"/api/profile/picture/{alice['id']}.jpg?v=")
+            assert os.path.isfile(os.path.join(pic_dir, f"{alice['id']}.jpg"))
+            r = client.get(f"/api/profile/picture/{alice['id']}.jpg")
+            assert r.status_code == 200 and r.mimetype == "image/jpeg"
+            assert _jpeg_size(r.data) == (256, 256)
+            etag = r.headers.get("ETag")
+            assert etag and r.headers.get("Cache-Control")
+            uploaded = r.data
+            assert client.get(f"/api/profile/picture/{alice['id']}.jpg",
+                              headers={"If-None-Match": etag}).status_code == 304
+            # the library response carries avatars for the people listed
+            lib = client.get("/api/share/library").get_json()
+            assert lib["me"]["has_picture"] and lib["me"]["picture_url"] == j["url"]
+            row = next(u for u in lib["users"] if u["id"] == bob["id"])
+            assert row["has_picture"] is False and row["picture_url"].startswith(f"/api/profile/picture/{bob['id']}.jpg")
+            # garbage is refused
+            r = client.post("/api/profile/picture", data={"file": (io.BytesIO(b"not an image"), "x.png")},
+                            content_type="multipart/form-data")
+            assert r.status_code == 400
+            # non-admin cannot touch someone else's picture
+            r = client.post(f"/api/profile/picture?user_id={bob['id']}",
+                            data={"file": (io.BytesIO(png_bytes(seed=22)), "x.png")},
+                            content_type="multipart/form-data")
+            assert r.status_code == 403
+            assert client.post(f"/api/profile/picture/delete?user_id={bob['id']}").status_code == 403
+            # delete -> the generated initials avatar is served instead
+            r = client.post("/api/profile/picture/delete")
+            assert r.status_code == 200 and r.get_json()["has_picture"] is False
+            assert not os.path.exists(os.path.join(pic_dir, f"{alice['id']}.jpg"))
+            r = client.get(f"/api/profile/picture/{alice['id']}.jpg")
+            assert r.status_code == 200 and r.mimetype == "image/jpeg"
+            assert _jpeg_size(r.data) == (256, 256) and r.data != uploaded
+            assert r.headers.get("ETag") and r.headers["ETag"] != etag
+            # any signed-in user may fetch any user's picture
+            assert client.get(f"/api/profile/picture/{bob['id']}.jpg").status_code == 200
+            assert client.get("/api/profile/picture/999999.jpg").status_code == 404
+
+        # the admin (auth off: the anonymous admin has no account of its own, so
+        # it must name a target) sets bob's picture
+        r = client.post("/api/profile/picture",
+                        data={"file": (io.BytesIO(png_bytes(seed=23)), "x.png")},
+                        content_type="multipart/form-data")
+        assert r.status_code == 401
+        with as_admin(app, alice):
+            r = client.post(f"/api/profile/picture?user_id={bob['id']}",
+                            data={"file": (io.BytesIO(png_bytes(seed=23)), "x.png")},
+                            content_type="multipart/form-data")
+            assert r.status_code == 200, r.get_data(as_text=True)
+            assert r.get_json()["user_id"] == bob["id"]
+        assert os.path.isfile(os.path.join(pic_dir, f"{bob['id']}.jpg"))
+        with as_(app, bob):
+            assert client.get("/api/share/library").get_json()["me"]["has_picture"] is True
+        with as_admin(app, alice):
+            assert client.post(f"/api/profile/picture/delete?user_id={bob['id']}").status_code == 200
+        assert not os.path.exists(os.path.join(pic_dir, f"{bob['id']}.jpg"))
+    finally:
+        for u in (alice, bob):
+            try:
+                os.remove(os.path.join(pic_dir, f"{u['id']}.jpg"))
+            except OSError:
+                pass

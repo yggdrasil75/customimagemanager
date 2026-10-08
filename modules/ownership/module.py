@@ -28,27 +28,119 @@ An API key with scope 'personal' (g.api_key, see auth/api_keys.py) is
 confined to its owner's own tree: nothing public or shared, uploads always
 land under users/<me>/.
 
+Account features live here too (Settings -> Account & sharing):
+  - profile pictures: <media_dir>/.profiles/<user_id>.jpg (a dot folder the
+    library scan skips), uploaded as png / jpg / webp / heic, centre-cropped
+    to a 256 px square JPEG; a user without one is served a generated
+    initials avatar. Shown in the header badge, next to names in the
+    sharing rows and in Settings -> Users. Feature "account.profile".
+  - change password: a form posting to the core's /api/auth/password (local
+    accounts only; LDAP accounts see a note instead).
+
 Disable the module and everything is public again, exactly as before.
 """
+import hashlib
+import io
+import os
 import re
 
-from flask import g, has_request_context, jsonify, request
+from flask import g, has_request_context, jsonify, request, Response
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 MANIFEST = {
     "id":          "ownership",
     "name":        "Ownership & sharing",
     "version":     "1.0.0",
     "description": "Personal (users/<name>/) vs public library, partner sharing, "
-                   "private / public / shared albums.",
+                   "private / public / shared albums; profile pictures and "
+                   "change-password in Settings -> Account & sharing.",
     "core":        False,
     "requires":    ["auth"],
     "pip":         [],
-    "assets":      ["ownership.js"],
+    "assets":      ["ownership.js", "ownership.css"],
 }
 
 USER_ROOT = "users"
 LEVELS = ("read", "write")
 _LIKE_ESC = re.compile(r"([\\%_])")
+
+PROFILE_DIR = ".profiles"
+PROFILE_SIZE = 256
+PROFILE_FEATURE = "account.profile"
+# Mid shades of the palette roles (accent, accent2, accent3, ok, warn, danger).
+_AVATAR_COLOURS = ("#2563eb", "#4f46e5", "#0284c7", "#16a34a", "#d97706", "#dc2626",
+                   "#1d4ed8", "#4338ca", "#0369a1", "#15803d", "#b45309", "#b91c1c")
+
+
+def _initials(name):
+    """! @brief Up to two upper-case letters for an initials avatar ("jane doe" -> "JD")."""
+    words = [w for w in re.split(r"[\s._\-]+", str(name or "").strip()) if w]
+    if not words:
+        return "?"
+    if len(words) >= 2:
+        return (words[0][0] + words[1][0]).upper()
+    return words[0][:2].upper()
+
+
+def _avatar_font(size):
+    """! @brief A font for the initials: Pillow's bundled one, else a DejaVu file, else bitmap."""
+    try:
+        return ImageFont.load_default(size=size)
+    except Exception:
+        pass
+    for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+              "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"):
+        if os.path.exists(p):
+            try:
+                return ImageFont.truetype(p, size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
+
+
+def initials_avatar(username, display_name=None, size=PROFILE_SIZE):
+    """! @brief JPEG bytes of a generated avatar: coloured disc (hashed from the
+    username) with white initials of the display name."""
+    h = hashlib.sha1(str(username or "").casefold().encode("utf-8")).digest()
+    colour = _AVATAR_COLOURS[h[0] % len(_AVATAR_COLOURS)]
+    img = Image.new("RGB", (size, size), colour)
+    draw = ImageDraw.Draw(img)
+    text = _initials(display_name or username)
+    font = _avatar_font(int(size * (0.46 if len(text) > 1 else 0.56)))
+    try:
+        l, t, r, b = draw.textbbox((0, 0), text, font=font)
+        draw.text(((size - (r - l)) / 2 - l, (size - (b - t)) / 2 - t), text,
+                  fill="white", font=font)
+    except Exception:
+        draw.text((size * 0.3, size * 0.4), text, fill="white")
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=85)
+    return buf.getvalue()
+
+
+def square_jpeg(data, size=PROFILE_SIZE):
+    """! @brief Decode an uploaded image (png / jpg / webp / heic via PIL), centre-crop
+    to a square, resize to `size` and encode as JPEG q85.
+    @return the JPEG bytes.
+    @throws ValueError when the data is not a decodable image.
+    """
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.load()
+    except Exception as e:
+        raise ValueError(f"not a supported image: {e}")
+    img = ImageOps.exif_transpose(img)
+    if img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGBA")
+        bg = Image.new("RGB", img.size, "#111827")
+        bg.paste(img, mask=img.getchannel("A"))
+        img = bg
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+    img = ImageOps.fit(img, (size, size), method=Image.LANCZOS, centering=(0.5, 0.5))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=85)
+    return buf.getvalue()
 
 
 def owner_of(rel_path):
@@ -74,12 +166,62 @@ def _same_user(a, b):
     return (a or "").casefold() == (b or "").casefold()
 
 
+class Pictures:
+    """! @brief Where profile pictures live: <media_dir>/.profiles/<user_id>.jpg."""
+
+    def __init__(self, media_dir):
+        self.root = os.path.join(media_dir, PROFILE_DIR)
+
+    def path(self, user_id):
+        """! @brief Absolute path of a user's picture file (whether or not it exists)."""
+        return os.path.join(self.root, f"{int(user_id)}.jpg")
+
+    def has(self, user_id):
+        """! @brief True when the user uploaded a picture."""
+        return os.path.isfile(self.path(user_id))
+
+    def url(self, user_id):
+        """! @brief The picture URL, cache-busted with the file's mtime (0 for the initials avatar)."""
+        try:
+            v = int(os.stat(self.path(user_id)).st_mtime)
+        except OSError:
+            v = 0
+        return f"/api/profile/picture/{int(user_id)}.jpg?v={v}"
+
+    def save(self, user_id, jpeg):
+        """! @brief Store the (already square 256 px) JPEG bytes for a user."""
+        os.makedirs(self.root, exist_ok=True)
+        tmp = self.path(user_id) + ".tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(jpeg)
+        os.replace(tmp, self.path(user_id))
+
+    def remove(self, user_id):
+        """! @brief Delete a user's picture; True when there was one."""
+        try:
+            os.remove(self.path(user_id))
+            return True
+        except OSError:
+            return False
+
+    def with_pictures(self, rows, key="id"):
+        """! @brief Add has_picture / picture_url to user rows (in place) and return them.
+        @param key  the row key holding the user id."""
+        for r in rows:
+            uid = r.get(key)
+            if uid is not None:
+                r["has_picture"] = self.has(uid)
+                r["picture_url"] = self.url(uid)
+        return rows
+
+
 class Policy:
     """! @brief The access policy core consults (see host.register_access_policy)."""
 
     def __init__(self, host):
         self.host = host
         self.db = host.db
+        self.pictures = Pictures(host.media_dir)
 
     # -- who is asking ----------------------------------------------------
     @staticmethod
@@ -193,10 +335,11 @@ class Policy:
         info = {"owner": o["username"] if o else None, "visibility": row["visibility"],
                 "level": self.album_level(name)}
         if info["level"] == "owner":
-            info["shares"] = [dict(r) for r in self.db().execute(
-                "SELECT s.user_id, u.username, u.display_name, s.level FROM album_shares s "
-                "JOIN auth_users u ON u.id=s.user_id WHERE s.album=? ORDER BY u.username",
-                (name,)).fetchall()]
+            info["shares"] = self.pictures.with_pictures(
+                [dict(r) for r in self.db().execute(
+                    "SELECT s.user_id, u.username, u.display_name, s.level FROM album_shares s "
+                    "JOIN auth_users u ON u.id=s.user_id WHERE s.album=? ORDER BY u.username",
+                    (name,)).fetchall()], "user_id")
         return info
 
     def album_event(self, event, **kw):
@@ -252,16 +395,91 @@ def register(host):
                                        "can_read": policy.can_read, "can_write": policy.can_write,
                                        "files_clause": policy.files_clause})
     host.add_asset("ownership.js")
-    host.add_settings_tab("ownership", "Sharing", icon="🔗", group="you")
+    host.add_asset("ownership.css")
+    host.add_settings_tab("ownership", "Account & sharing", icon="🔗", group="you")
+    host.register_feature(PROFILE_FEATURE, "Profile picture", section="account",
+                          section_label="Account", default="write",
+                          role_defaults={"viewer": "write"})
     db = host.db
+    pictures = policy.pictures
 
     def _me():
         return g.get("user") if g.get("user") and g.user.get("id") else None
 
     def _users_except(uid):
-        return [dict(r) for r in db().execute(
+        return pictures.with_pictures([dict(r) for r in db().execute(
             "SELECT id, username, display_name FROM auth_users "
-            "WHERE disabled=0 AND id<>? ORDER BY username", (uid,)).fetchall()]
+            "WHERE disabled=0 AND id<>? ORDER BY username", (uid,)).fetchall()])
+
+    def _user_row(uid):
+        return db().execute("SELECT id, username, display_name FROM auth_users WHERE id=?",
+                            (uid,)).fetchone()
+
+    def _picture_target():
+        """! @brief (user row, error response) for a profile-picture write: the caller,
+        or ?user_id= when the caller is an admin."""
+        u = _me()
+        if not u:
+            return None, (jsonify({"success": False, "error": "a signed-in account is required"}), 401)
+        raw = request.args.get("user_id") or request.form.get("user_id")
+        if raw in (None, ""):
+            return _user_row(u["id"]), None
+        try:
+            target = int(raw)
+        except ValueError:
+            return None, (jsonify({"success": False, "error": "user_id must be an integer"}), 400)
+        if target != u["id"] and not u.get("is_admin"):
+            return None, (jsonify({"success": False,
+                                   "error": "only an admin can change another user's picture"}), 403)
+        row = _user_row(target)
+        if row is None:
+            return None, (jsonify({"success": False, "error": "user not found"}), 404)
+        return row, None
+
+    @host.route("/api/profile/picture", methods=["POST"], feature=PROFILE_FEATURE, level="write")
+    def profile_picture_set():
+        row, err = _picture_target()
+        if err:
+            return err
+        f = request.files.get("file")
+        if f is None:
+            return jsonify({"success": False, "error": "multipart field 'file' required"}), 400
+        try:
+            jpeg = square_jpeg(f.read())
+        except ValueError as e:
+            return jsonify({"success": False, "error": str(e)}), 400
+        pictures.save(row["id"], jpeg)
+        return jsonify({"success": True, "user_id": row["id"], "has_picture": True,
+                        "url": pictures.url(row["id"])})
+
+    @host.route("/api/profile/picture/delete", methods=["POST"], feature=PROFILE_FEATURE, level="write")
+    def profile_picture_delete():
+        row, err = _picture_target()
+        if err:
+            return err
+        pictures.remove(row["id"])
+        return jsonify({"success": True, "user_id": row["id"], "has_picture": False,
+                        "url": pictures.url(row["id"])})
+
+    @host.route("/api/profile/picture/<int:user_id>.jpg")
+    def profile_picture_get(user_id):
+        """! @brief The user's picture, or a generated initials avatar; any signed-in
+        user may fetch any user's (they appear next to usernames)."""
+        row = _user_row(user_id)
+        if row is None:
+            return jsonify({"success": False, "error": "user not found"}), 404
+        p = pictures.path(user_id)
+        try:
+            with open(p, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            data = initials_avatar(row["username"], row["display_name"])
+        etag = '"' + hashlib.md5(data).hexdigest() + '"'
+        headers = {"ETag": etag, "Cache-Control": "private, max-age=300",
+                   "Content-Length": str(len(data))}
+        if etag in [t.strip() for t in request.headers.get("If-None-Match", "").split(",")]:
+            return Response(status=304, headers={"ETag": etag, "Cache-Control": headers["Cache-Control"]})
+        return Response(data, mimetype="image/jpeg", headers=headers)
 
     @host.route("/api/share/users")
     def share_users():
@@ -283,8 +501,14 @@ def register(host):
         with_me = [dict(r) for r in db().execute(
             "SELECT s.owner_id, u.username, u.display_name, s.level FROM library_shares s "
             "JOIN auth_users u ON u.id=s.owner_id WHERE s.user_id=? ORDER BY u.username", (uid,))]
-        return jsonify({"success": True, "partners": mine, "shared_with_me": with_me,
+        return jsonify({"success": True,
+                        "partners": pictures.with_pictures(mine, "user_id"),
+                        "shared_with_me": pictures.with_pictures(with_me, "owner_id"),
                         "users": _users_except(uid),
+                        "me": {"id": uid, "username": u["username"],
+                               "display_name": u.get("display_name"),
+                               "has_picture": pictures.has(uid), "picture_url": pictures.url(uid),
+                               "password_local": u.get("source") == "local"},
                         "personal_folder": personal_folder(u["username"])})
 
     @host.route("/api/share/library", methods=["POST"])
