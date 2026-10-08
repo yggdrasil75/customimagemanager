@@ -753,10 +753,63 @@ def _raw_uid_for_image(rel_path):
         pass
     return None
 
+def _raw_name_for_image(rel_path):
+    """! @brief The name of the raw a library image was developed from (the DB link,
+    else its EXIF OriginalRawFileName), or None for an image that is not a developed raw.
+    """
+    r = _db().execute(
+        "SELECT orig_name FROM raws WHERE derived_rel=? ORDER BY added DESC LIMIT 1",
+        (rel_path,)).fetchone()
+    if r and r["orig_name"]:
+        return r["orig_name"]
+    fp = os.path.join(MEDIA_DIR, rel_path)
+    try:
+        edata = exif_import.read_exif(fp)
+        for g in edata.get("groups", []):
+            for f in g.get("fields", []):
+                if f.get("name") == "OriginalRawFileName" and f.get("present"):
+                    return str(f.get("raw")).strip() or None
+    except Exception:
+        pass
+    try:
+        xmp = xmp_import.resolve_xmp(fp)[0] or {}
+        name = xmp.get("Xmp.crs.RawFileName") or xmp.get("Xmp.crd.RawFileName")
+        return (str(name).strip() or None) if name else None
+    except Exception:
+        return None
+
+def _same_source_upload(existing_rel, orig_name):
+    """! @brief Whether the file stored under an upload's predicted name came from the
+    same kind of source as the upload. A camera raw and the camera's JPEG of the same
+    shot share a stem, so they predict the same stored name, yet they are two files:
+    only a re-sent raw of that name (or a re-sent rendering) is the same upload.
+    """
+    existing_raw = _raw_name_for_image(existing_rel)
+    if mt.is_raw(orig_name):
+        return bool(existing_raw) and existing_raw.strip().lower() == orig_name.strip().lower()
+    return not existing_raw
+
+def _existing_upload(pred_rel, orig_name):
+    """! @brief The library file an upload is a re-send of: the one stored under its
+    predicted name, or under the '<base>_<n>' the upload took because a different
+    source (a raw beside its JPEG) held the name. None when this is a new file.
+    """
+    base, ext = os.path.splitext(pred_rel)
+    cand = pred_rel
+    for n in range(1, 1000):
+        if not os.path.exists(os.path.join(MEDIA_DIR, cand)):
+            return None
+        if _same_source_upload(cand, orig_name):
+            return cand
+        cand = f"{base}_{n}{ext}"
+    return None
+
 def _link_raw_to_image(raw_src_path, orig_name, derived_rel, derived_abs):
     """! @brief Write the raw link into a derived image's EXIF: OriginalRawFileName
     (only when absent), and with keep_raws the RawDataUniqueID of the stored raw.
-    Never raises into the upload.
+    The raw's name also goes into XMP crs:RawFileName: a JXL's EXIF lands in its
+    XMP sidecar, which has no slot for OriginalRawFileName, so without it the link
+    would not survive there. Never raises into the upload.
     """
     try:
         patch = {}
@@ -780,6 +833,8 @@ def _link_raw_to_image(raw_src_path, orig_name, derived_rel, derived_abs):
 
         if patch:
             update_file(derived_abs, exif=patch, history=False)
+        if not existing_name:
+            update_file(derived_abs, xmp={"Xmp.crs.RawFileName": orig_name})
     except Exception as e:
         access_logger.warning(f"_link_raw_to_image {orig_name}: {e}")
 
@@ -4147,10 +4202,12 @@ def api_upload():
     metadata  = request.form.get("metadata", "{}") or "{}"
     pred      = _predicted_rel(tdir, orig_name)
 
-    # already on disk under this name (same content under another name is caught by SHA later)
-    if os.path.exists(os.path.join(MEDIA_DIR, pred)):
+    # already on disk under this name (same content under another name is caught by SHA later);
+    # a raw and its camera JPEG share the name but are two files, stored side by side
+    existing = _existing_upload(pred, orig_name)
+    if existing:
         return jsonify({"success": True, "queued": False, "duplicate": True,
-                        "filename": pred, "existing_file": pred}), 200
+                        "filename": existing, "existing_file": existing}), 200
 
     mode = (request.form.get("mode", "auto") or "auto").strip().lower()
     if mode not in ("auto", "sync", "spool"):
@@ -4419,10 +4476,6 @@ def _run_upload():
                                                    "to": in_ext}
                 return jsonify(resp), 200
 
-            # link the derived image to its raw (and keep the raw when keep_raws is on)
-            if is_raw_src:
-                _link_raw_to_image(orig, fname, rel_path, store_path)
-
             meta = _form_metadata(rel_path)
             try:
                 up = {"tags": meta.get("tags", []), "description": meta.get("description", ""),
@@ -4454,6 +4507,10 @@ def _run_upload():
                         update_file(store_path, xmp=carry)
                 except Exception as e:
                     access_logger.warning(f"upload: carrying capture metadata for {rel_path}: {e}")
+            # link the derived image to its raw (and keep the raw when keep_raws is on);
+            # after the sidecar write above, which rewrites the whole sidecar
+            if is_raw_src:
+                _link_raw_to_image(orig, fname, rel_path, store_path)
 
             exif_patch = meta.get("exif")
             if exif_patch:

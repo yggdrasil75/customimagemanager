@@ -1,0 +1,113 @@
+/* Stacks module: the layered stack tile and the stack window. Colours go through
+   the palette variables so every palette reaches them. */
+
+/* A stack's cover: two cards peek out behind the picture, top-right, drawn as
+   box-shadows so they sit under the tile (border, selection ring and picture
+   stay on top) and never get clipped by the tile's rounded overflow. Each card
+   is an edge shadow plus a slightly smaller fill shadow. */
+.gallery-item.cim-stack {
+  --cim-stack-d1: 5px;
+  --cim-stack-d2: 10px;
+  margin-top: 10px;
+  margin-right: 10px;
+  width: calc(100% - 10px);
+  box-shadow:
+    var(--cim-stack-d1) calc(-1 * var(--cim-stack-d1)) 0 -1px var(--cim-accent-900, #1e3a8a),
+    var(--cim-stack-d1) calc(-1 * var(--cim-stack-d1)) 0 0 var(--cim-accent-500, #3b82f6),
+    var(--cim-stack-d2) calc(-1 * var(--cim-stack-d2)) 0 -3px var(--cim-accent-950, #172554),
+    var(--cim-stack-d2) calc(-1 * var(--cim-stack-d2)) 0 -2px var(--cim-accent-700, #1d4ed8);
+  transition: transform .1s, border-color .1s, box-shadow .18s ease-out;
+}
+
+/* hover fans the cards further out so the stack reads at a glance */
+.gallery-item.cim-stack:hover {
+  --cim-stack-d1: 8px;
+  --cim-stack-d2: 16px;
+}
+
+/* keep the grid's selection rings on a stack tile, outside the cards */
+.gallery-item.cim-stack.selected-item {
+  box-shadow:
+    0 0 0 2px var(--cim-accent-500, #3b82f6),
+    var(--cim-stack-d1) calc(-1 * var(--cim-stack-d1)) 0 -1px var(--cim-accent-900, #1e3a8a),
+    var(--cim-stack-d1) calc(-1 * var(--cim-stack-d1)) 0 0 var(--cim-accent-500, #3b82f6),
+    var(--cim-stack-d2) calc(-1 * var(--cim-stack-d2)) 0 -3px var(--cim-accent-950, #172554),
+    var(--cim-stack-d2) calc(-1 * var(--cim-stack-d2)) 0 -2px var(--cim-accent-700, #1d4ed8);
+}
+
+.gallery-item.cim-stack.multi-selected {
+  box-shadow:
+    0 0 0 2px var(--cim-ok-500, #22c55e),
+    var(--cim-stack-d1) calc(-1 * var(--cim-stack-d1)) 0 -1px var(--cim-accent-900, #1e3a8a),
+    var(--cim-stack-d1) calc(-1 * var(--cim-stack-d1)) 0 0 var(--cim-ok-500, #22c55e),
+    var(--cim-stack-d2) calc(-1 * var(--cim-stack-d2)) 0 -3px var(--cim-accent-950, #172554),
+    var(--cim-stack-d2) calc(-1 * var(--cim-stack-d2)) 0 -2px var(--cim-ok-700, #15803d);
+}
+
+.cim-stack-badge {
+  position: absolute;
+  top: 20px;
+  right: 3px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--cim-accent-600, #2563eb);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 99px;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.cim-stack-badge:hover {
+  background: var(--cim-accent-500, #3b82f6);
+}
+
+/* the stack window */
+.cim-stacks-panel {
+  width: min(960px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+}
+
+.cim-stacks-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+  align-content: start;
+}
+
+.cim-stacks-grid .gallery-item {
+  margin: 0;
+}
+
+.cim-stack-cover-mark,
+.cim-stack-raw {
+  position: absolute;
+  top: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 99px;
+  color: #fff;
+  text-decoration: none;
+}
+
+.cim-stack-cover-mark {
+  right: 3px;
+  background: var(--cim-ok-600, #16a34a);
+}
+
+.cim-stack-raw {
+  left: 22px;
+  background: var(--cim-accent2-600, #4f46e5);
+}
+
+a.cim-stack-raw:hover {
+  background: var(--cim-accent2-500, #6366f1);
+}
+
+.gallery-item.cim-stack-cover {
+  border-color: var(--cim-ok-500, #22c55e);
+}

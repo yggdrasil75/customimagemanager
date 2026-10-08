@@ -224,14 +224,7 @@ later registration. Consumers `get_service(name)` and must handle `None` (the
 provider is off). Current services (`comicinfo` - ComicInfo.xml read / write from the comics
 module - is used by books for comic archives; the metadata ones - `metadata_write`, `exif.write`, `xmp.write`,
 `music.write_meta`, `books.update_meta` - are thin wrappers over `update_file`;
-new code calls `host.update_file` directly): `metadata_write`, `exif` (`read`/`write`),
-`metadata_schema`, `embedding`, `dedup_scorers`, `barcodes`, `pose.tpose`,
-`sam_common`, `fetch`, `faces`, `bodies`, `people`, `segmentation`, `music`
-(`write_meta`), `books` (`update_meta`), `xmp` (`write`), `metasrc` (metadata
-source registry: `register(source)`, `http_json`, `http_multipart` - see
-`metasrc/module.py` for the source contract; each site is its own
-`metasrc_<site>` module),
-`llm` (the vlm module's OpenAI-compatible client: `call`, `request`, `encode_image`).
+new code calls `host.update_file` directly): `metadata_write`, `exif` (`read`/`write`), `metadata_schema`, `embedding`, `dedup_scorers`, `barcodes`, `pose.tpose`, `sam_common`, `fetch`, `faces`, `bodies`, `people`, `segmentation`, `music` (`write_meta`), `books` (`update_meta`), `xmp` (`write`), `metasrc` (metadata source registry: `register(source)`, `http_json`, `http_multipart` - see `metasrc/module.py` for the source contract; each site is its own `metasrc_<site>` module), `llm` (the vlm module's OpenAI-compatible client: `call`, `request`, `encode_image`), `stacks` (`stack_of(rel)`, `create(kind, members, cover=, auto=)`, `match_raw_for(rel)`, `rescan(raw, burst)`).
 
 ### Writing metadata and per-file rows: `update_file`
 
@@ -404,6 +397,10 @@ Assets are served at `/modules/<id>/static/<file>` and injected on page load.
   share the grid's selection, bulk bar and current-file ring; set
   `galleryFiles` to what's on screen for shift-range. `?view=<id>` restores it
   on load. See `timeline/`.
+- **Gallery tiles**: `registerGalleryTileHook((tile, item) => ...)` runs on every
+  image tile the grid renders, with the row your file enricher filled - mark or
+  badge the tile from your own fields (the stacks module draws a stack's cover
+  as a layered card this way).
 - **Canvas overlays**: `registerCanvasOverlay(fn)`.
 - **Per-file state**: `registerFileMetaHook((meta, filename) => ...)` runs
   every time the viewer loads a file - keep your state in your own module

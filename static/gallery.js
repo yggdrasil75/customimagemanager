@@ -315,6 +315,7 @@ function renderGallery(files){
       ${typeof starBadge==='function'?starBadge(item):''}
       <span class="label">${f.split('/').pop()}</span>
       <span class="sel-check hidden absolute top-1 left-1 w-4 h-4 rounded-full bg-blue-500 border-2 border-white flex items-center justify-center text-[8px] font-bold text-white">✓</span>`;
+    if(typeof runGalleryTileHooks==='function') runGalleryTileHooks(div, item);
     grid.appendChild(div);
     io.observe(div);
   });

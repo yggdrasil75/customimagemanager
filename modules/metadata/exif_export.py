@@ -6,7 +6,9 @@ result lists what was written, deleted, skipped and rejected.
 """
 
 import os
+import re
 import logging
+import xml.etree.ElementTree as ET
 
 try:
     import pyexiv2
@@ -14,6 +16,8 @@ except Exception:  # pragma: no cover
     pyexiv2 = None
 
 from . import exif_fields as efields
+from . import exiv2_keys
+from . import exif_import
 import shutil
 import subprocess
 import tempfile
@@ -35,68 +39,87 @@ _EMPTY_XMP = (
     '<?xpacket end="w"?>\n'
 )
 
-_PROBE = "__cim_probe__"
-_EMPTY_PACKET = ('<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>'
-                 '<x:xmpmeta xmlns:x="adobe:ns:meta/">'
-                 '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
-                 '<rdf:Description rdf:about=""/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>')
-_XMP_KEYS = {}  # 'Exif.Image.Artist' -> ['Xmp.dc.creator']
-
-
-def _xmp_keys_for(tag):
-    """! @brief The XMP properties exiv2 stores an Exif tag as in a sidecar.
-    In a sidecar modify_exif only works for a tag not stored yet (later writes and
-    deletes are ignored), so edits go through modify_xmp on the mapped key. pyexiv2
-    doesn't expose exiv2's mapping table, so each tag is learned once from a
-    scratch sidecar.
-    """
-    if tag in _XMP_KEYS:
-        return _XMP_KEYS[tag]
-    keys = []
-    try:
-        with tempfile.TemporaryDirectory() as d:
-            probe = os.path.join(d, "probe.xmp")
-            with open(probe, "w", encoding="utf-8") as fh:
-                fh.write(_EMPTY_PACKET)
-            with pyexiv2.Image(probe) as img:
-                img.modify_exif({tag: _PROBE})
-            with pyexiv2.Image(probe) as img:
-                for k, v in (img.read_xmp() or {}).items():
-                    if _PROBE in str(v):
-                        keys.append(k)
-    except Exception as e:
-        log.warning(f"could not map {tag} to XMP: {e}")
-    _XMP_KEYS[tag] = keys
-    return keys
-
-
-def _write_sidecar(target, to_set, to_del):
-    """! @brief Apply Exif sets / deletes to an XMP sidecar: a new tag as Exif (creates
-    the mapped property), everything else on the mapped XMP property.
+def _write_sidecar(target, to_set, to_del, only_present=False):
+    """! @brief Apply Exif sets / deletes to an XMP sidecar. A tag goes where exiv2's own
+    EXIF -> XMP conversion puts it (Rating -> xmp:Rating, Artist -> dc:creator); a tag
+    exiv2 has no mapping for is kept under its own name (tiff:OriginalRawFileName,
+    exif:ImageHistory), which the reader folds back. Nothing is dropped.
+    @param to_set  {exiv2 key: (group, field, schema value)}
+    @param to_del  {exiv2 key: (group, field)}
+    @param only_present  update only tags the sidecar already holds (syncing a copy)
     """
     with pyexiv2.Image(target) as img:
         have = img.read_xmp() or {}
 
-    exif_new, xmp_edit = {}, {}
-    for tag, value in to_set.items():
-        keys = [k for k in _xmp_keys_for(tag) if k in have]
-        if not keys:
-            exif_new[tag] = str(value)  # not in the sidecar yet
+    patch, drop = {}, set()
+    for key, (group, field, value) in to_set.items():
+        homes = exiv2_keys.xmp_keys(group, field) + [exiv2_keys.own_xmp_key(group, field)]
+        if only_present and not any(k in have for k in homes):
             continue
-        for k in keys:
-            xmp_edit[k] = [str(value)] if isinstance(have.get(k), list) else str(value)
-    for tag in to_del:
-        for k in _xmp_keys_for(tag):
-            if k in have:
-                # "" clears the property; exiv2 ignores None
-                xmp_edit[k] = [] if isinstance(have.get(k), list) else ""
+        conv = exiv2_keys.to_xmp({key: exiv2_keys.encode(field, value)})
+        if conv:
+            patch.update(conv)
+        else:
+            patch[exiv2_keys.own_xmp_key(group, field)] = str(value)
+        # a tag stored the other way before (an older write) must not shadow this one
+        drop.update(k for k in homes if k in have and k not in patch)
+    for key, (group, field) in to_del.items():
+        drop.update(k for k in exiv2_keys.xmp_keys(group, field) + [exiv2_keys.own_xmp_key(group, field)]
+                    if k in have)
 
-    with pyexiv2.Image(target) as img:
-        if exif_new:
-            img.modify_exif(exif_new)
-        if xmp_edit:
+    if patch:
+        with pyexiv2.Image(target) as img:
+            # the sidecar's converted Exif view would be synced back over the edit
             img.clear_exif()
-            img.modify_xmp(xmp_edit)
+            img.modify_xmp(patch)
+    if drop:
+        _remove_xmp_properties(target, drop)
+
+
+_RDF = "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}"
+
+
+def _remove_xmp_properties(target, keys):
+    """! @brief Remove top-level properties ("Xmp.xmp.Rating") from a sidecar's packet.
+    exiv2 re-adds a mapped property from the sidecar's own converted Exif view on
+    every save, so neither modify_xmp(None) nor modify_exif(None) deletes it; the
+    property is cut from the raw packet instead, leaving every other property
+    (structs, arrays, regions) exactly as it was.
+    """
+    with pyexiv2.Image(target) as img:
+        raw = img.read_raw_xmp() or ""
+    start, end = raw.find("<x:xmpmeta"), raw.rfind("</x:xmpmeta>")
+    if start < 0 or end < 0:
+        return
+    body = raw[start:end + len("</x:xmpmeta>")]
+    uris = dict(re.findall(r'xmlns:([\w.-]+)="([^"]+)"', body))
+    for prefix, uri in uris.items():
+        ET.register_namespace(prefix, uri)
+    names = set()
+    for k in keys:
+        parts = k.split(".", 2)
+        if len(parts) == 3 and parts[1] in uris and "/" not in parts[2]:
+            names.add("{%s}%s" % (uris[parts[1]], parts[2]))
+    if not names:
+        return
+    root = ET.fromstring(body)
+    left = False
+    for desc in root.iter(_RDF + "Description"):
+        for a in [a for a in desc.attrib if a in names]:
+            del desc.attrib[a]
+        for ch in [ch for ch in desc if ch.tag in names]:
+            desc.remove(ch)
+        left = left or len(desc) > 0 or any(a != _RDF + "about" for a in desc.attrib)
+    if not left:
+        # exiv2 never saves an empty packet (it keeps the old one): write it ourselves
+        tmp = target + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(_EMPTY_XMP)
+        os.replace(tmp, target)
+        return
+    with pyexiv2.Image(target) as img:
+        img.clear_exif()
+        img.modify_raw_xmp(ET.tostring(root, encoding="unicode"))
 
 
 def _writable_target(filepath):
@@ -154,6 +177,14 @@ def _coerce(field, value):
             return f"{int(round(float(value)))}/1", None
         except (ValueError, TypeError):
             return None, f"expected rational, got {value!r}"
+
+    # byte tags shown as text (hex id, raw file name)
+    err = exiv2_keys.valid(field, value)
+    if err:
+        return None, err
+    if getattr(field, "encoding", None) == "hex":
+        h = str(value).strip()
+        return (h[2:] if h.lower().startswith("0x") else h).lower(), None
 
     # text: enum and length rules apply
     sv = str(value)
@@ -238,8 +269,8 @@ def write_exif(filepath, patch, allow_repackage=False):
         result["error"] = "pyexiv2 unavailable; cannot write EXIF"
         return result
 
-    to_set = {}  # 'Exif.Group.Tag' -> value
-    to_del = []
+    to_set = {}  # exiv2 key ('Exif.Group.Tag', by tag id) -> (group, field, value)
+    to_del = {}  # exiv2 key -> (group, field)
 
     for tag_name, value in (patch or {}).items():
         grp_name, fld = efields.field_by_tagname(tag_name)
@@ -261,11 +292,11 @@ def write_exif(filepath, patch, allow_repackage=False):
             if not skip:
                 result["db"][fld.db_field] = db_val
 
-        full = f"Exif.{grp_name}.{fld.name}"
+        full = exiv2_keys.exiv2_key(grp_name, fld)
         if coerced is None:
-            to_del.append(full)
+            to_del[full] = (grp_name, fld)
         else:
-            to_set[full] = coerced
+            to_set[full] = (grp_name, fld, coerced)
 
     target = _writable_target(filepath)
     result["target"] = target
@@ -274,34 +305,51 @@ def write_exif(filepath, patch, allow_repackage=False):
         result["success"] = True  # nothing to do
         return result
 
-    def _apply(path, sets, dels):
-        if path.lower().endswith((".xmp", ".exv")):
-            return _write_sidecar(path, sets, dels)
+    def _apply(path, sets, dels, only_present=False):
+        """! @brief Write sets / deletes into one file: an XMP sidecar, else embedded EXIF."""
+        if path.lower().endswith(".xmp"):
+            return _write_sidecar(path, sets, dels, only_present=only_present)
         with pyexiv2.Image(path) as img:
+            if only_present:
+                have = img.read_exif() or {}
+                sets = {k: v for k, v in sets.items() if k in have}
             if sets:
-                # pyexiv2 wants strings
-                img.modify_exif({k: str(v) for k, v in sets.items()})
+                # pyexiv2 wants strings; byte tags go in as byte lists
+                img.modify_exif({k: str(exiv2_keys.encode(f, v)) for k, (_g, f, v) in sets.items()})
             if dels:
-                # pyexiv2 deletes with an empty string
-                img.modify_exif({k: "" for k in dels})
+                # pyexiv2 deletes with None ("" would leave the tag, empty)
+                img.modify_exif({k: None for k in dels})
+
+    def _verify():
+        """! @brief Tags the format did not keep (exiv2 strips some, e.g. pixel-layout
+        tags of a JPEG) move from written to rejected instead of passing silently."""
+        kept = exif_import.read_values(filepath)
+        for k, (_g, f, _v) in list(to_set.items()):
+            if f.name not in kept:
+                result["rejected"].append({"tag": f.name, "reason": "not kept by this file format"})
+                if f.db_field:
+                    result["db"].pop(f.db_field, None)
+                del to_set[k]
 
     def _do_write():
+        """! @brief Write the target, verify it, then sync any copy in the other candidates."""
         _apply(target, to_set, to_del)
-        if not to_del:
-            return
-        # The reader merges image and sidecar: delete the tag from both, or it comes back.
+        _verify()
+        # The reader merges image and sidecar (the sidecar wins): a copy of the tag in
+        # the other one is deleted with it, or updated with it, never left to shadow it.
         stem = os.path.splitext(filepath)[0]
         for other in (filepath, stem + ".xmp", stem + ".exv"):
-            if other == target or not os.path.exists(other):
+            # exiv2 cannot write a JXL; its own Exif is read-only here
+            if other == target or not os.path.exists(other) or other.lower().endswith(".jxl"):
                 continue
             try:
-                _apply(other, {}, to_del)
+                _apply(other, to_set, to_del, only_present=True)
             except Exception as e:
-                log.warning(f"could not clear {to_del} from {other}: {e}")
+                log.warning(f"could not sync {list(to_set) + list(to_del)} into {other}: {e}")
 
     try:
         _do_write()
-        result["written"] = [{"tag": k, "value": v} for k, v in to_set.items()]
+        result["written"] = [{"tag": k, "value": v} for k, (_g, _f, v) in to_set.items()]
         result["deleted"] = list(to_del)
         result["success"] = True
     except Exception as e:
@@ -312,7 +360,7 @@ def write_exif(filepath, patch, allow_repackage=False):
                 and _repackage_jxl_bare(target)):
             try:
                 _do_write()
-                result["written"] = [{"tag": k, "value": v} for k, v in to_set.items()]
+                result["written"] = [{"tag": k, "value": v} for k, (_g, _f, v) in to_set.items()]
                 result["deleted"] = list(to_del)
                 result["success"] = True
                 result["repackaged"] = True

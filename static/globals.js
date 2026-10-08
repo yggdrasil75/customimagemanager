@@ -47,6 +47,24 @@ function runFileMetaHooks(meta, fn){
   }
 }
 
+// -- Gallery tile hooks -------------------------------------------------------
+// Modules register fn(tile, item) here to decorate an image tile of the grid
+// from the fields their file enricher attached to the row (e.g. the stacks
+// module marks a stack's cover). Called by renderGallery after the tile is
+// built; a disabled module never registers, so its marks simply vanish.
+window.galleryTileHooks = window.galleryTileHooks || [];
+/** @brief Add fn(tile, item) to run on every image tile the grid renders. */
+function registerGalleryTileHook(fn){
+  if(typeof fn==='function' && !window.galleryTileHooks.includes(fn))
+    window.galleryTileHooks.push(fn);
+}
+/** @brief Run every gallery tile hook on one tile; one bad hook does not break the grid. */
+function runGalleryTileHooks(tile, item){
+  for(const h of window.galleryTileHooks){
+    try{ h(tile, item); }catch(e){ console.error(e); }
+  }
+}
+
 // -- Control-button extension areas -------------------------------------------
 // Named regions in the UI that modules can append buttons to, instead of the
 // core template reserving a slot per feature. An area is any element carrying

@@ -13,6 +13,7 @@ except Exception:  # pragma: no cover
 
 from optional_deps import optional_import
 from . import exif_fields as efields
+from . import exiv2_keys
 imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
 
 log = logging.getLogger("exif_import")
@@ -63,6 +64,9 @@ def _read_raw_exif(filepath):
         try:
             with pyexiv2.Image(p) as img:
                 raw = img.read_exif()
+                if p.lower().endswith(".xmp"):
+                    # tags exiv2 can't map to XMP are kept under their own name there
+                    raw = {**(raw or {}), **exiv2_keys.fold_own_keys(img.read_xmp())}
         except Exception as e:
             # Exiv2 refused it: hand the container's Exif box over as bare TIFF
             try:
@@ -89,6 +93,18 @@ def _split_tag(tag_string):
         return grp, ".".join(parts[2:])
     return None, None
 
+
+def read_values(filepath):
+    """! @brief {schema tag name: value} of the EXIF a file carries (image and sidecar),
+    matched by tag id, byte tags decoded. For callers that need one value."""
+    raw, _ = _read_raw_exif(filepath)
+    out = {}
+    for key, value in raw.items():
+        _g, f = exiv2_keys.field_for_key(key)
+        if f is not None:
+            out[f.name] = exiv2_keys.decode(f, value)
+    return out
+
 def read_exif(filepath):
     """! @brief EXIF by group, every schema field included:
     {"source", "groups": [{name, title, ifd, mapped, fields: [{tag_id, tag_hex,
@@ -97,26 +113,25 @@ def read_exif(filepath):
     """
     raw, source = _read_raw_exif(filepath)
 
-    by_group = {}
+    # schema fields matched by tag id (exiv2 names many tags unlike ExifTool)
+    by_group, by_field = {}, {}
     for tag_string, value in raw.items():
         grp_name, tag_name = _split_tag(tag_string)
         if grp_name is None:
             continue
-        by_group.setdefault(grp_name, {})[tag_name] = value
+        g, f = exiv2_keys.field_for_key(tag_string)
+        if f is not None:
+            by_field[(g, f.tag_id)] = exiv2_keys.decode(f, value)
+        else:
+            by_group.setdefault(grp_name, {})[tag_name] = value
 
     groups_out = []
     for grp in efields.EXIF_GROUPS:
         raw_for_grp = dict(by_group.get(grp.name, {}))
         fields_out = []
         for f in grp.fields:
-            present = f.name in raw_for_grp
-            rawval = raw_for_grp.pop(f.name, None)
-            if not present:
-                for alias in getattr(f, "aliases", ()) or ():
-                    if alias in raw_for_grp:
-                        present = True
-                        rawval = raw_for_grp.pop(alias)
-                        break
+            present = (grp.name, f.tag_id) in by_field
+            rawval = by_field.get((grp.name, f.tag_id))
             d = f.to_dict()
             d["raw"] = rawval
             d["present"] = present

@@ -37,6 +37,7 @@ class EXIFField:
     generated: bool = False  # computed by the app (implies writable)
     note: str = ""  # hint shown in the editor
     aliases: tuple = ()  # other names of this tag id (exiv2 'DateTimeDigitized' = ExifTool 'CreateDate')
+    encoding: Optional[str] = None  # byte tag shown as text: "hex" (digits) or "ascii" (NUL-terminated)
 
     def __post_init__(self):
         if self.generated:
@@ -69,6 +70,7 @@ class EXIFField:
             "db_transform": self.db_transform,
             "generated": self.generated,
             "note": self.note,
+            "encoding": self.encoding,
         }
         if self.values is not None:
             # JSON keys must be strings
@@ -1005,15 +1007,15 @@ IMAGE_FIELDS = [
               note="DNG SubIFD; read-only"),
 
     # links a derived image to its stored raw (`raws` table); app-managed
-    EXIFField(0xc65d, "RawDataUniqueID", TYPE_STRING, generated=True,
-              note="16-byte raw data unique ID. Used as the key to look up a "
-                   "stored (hidden) original raw; app-managed"),
+    EXIFField(0xc65d, "RawDataUniqueID", TYPE_STRING, generated=True, count=16, encoding="hex",
+              note="16-byte raw data unique ID (int8u[16], shown as 32 hex digits). Used "
+                   "as the key to look up a stored (hidden) original raw; app-managed"),
 
     EXIFField(0xc660, "AliasLayerMetadata", TYPE_BINARY, writable=False,
               note="Alias Sketchbook Pro; read-only"),
 
     # set on raw -> image conversion only when absent
-    EXIFField(0xc68b, "OriginalRawFileName", TYPE_STRING, generated=True,
+    EXIFField(0xc68b, "OriginalRawFileName", TYPE_STRING, generated=True, encoding="ascii",
               note="Filename of the source raw. Set on conversion only if not "
                    "already defined (never overwritten); app-generated"),
     EXIFField(0xc68c, "OriginalRawFileData", TYPE_UNDEF, writable=False,
