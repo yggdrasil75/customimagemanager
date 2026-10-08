@@ -6,7 +6,7 @@ import inspect
 
 import numpy as np
 
-from modules.embeddinggemma import module as eg
+from modules.gemmaembed2 import module as eg
 
 
 def test_no_remote_code_anywhere():
