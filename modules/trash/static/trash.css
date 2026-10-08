@@ -1,0 +1,32 @@
+/* Trash bin gallery view (modules/trash). */
+.trash-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 16px; background: #1f2937; border-bottom: 1px solid #374151;
+  font-size: 12px; color: #d1d5db; flex-shrink: 0;
+}
+.trash-totals { font-weight: 600; }
+.trash-sel { color: #9ca3af; }
+.trash-bar button:disabled { opacity: .4; cursor: default; }
+
+.trash-grid {
+  flex: 1; min-height: 0; overflow-y: auto; padding: 10px 16px 16px;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px; align-content: start;
+}
+.trash-empty { grid-column: 1 / -1; padding: 24px; text-align: center; color: #9ca3af; font-size: 13px; }
+
+.trash-tile {
+  display: flex; flex-direction: column; gap: 4px; padding: 6px; border-radius: 8px;
+  background: #1f2937; border: 2px solid transparent; cursor: pointer; user-select: none;
+}
+.trash-tile:hover { border-color: #4b5563; }
+.trash-tile.on { border-color: var(--cim-accent-500, #3b82f6); background: #111827; }
+.trash-thumb {
+  aspect-ratio: 1; background: #111827; border-radius: 4px; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+}
+.trash-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; opacity: .85; }
+.trash-nothumb { font-size: 10px; color: #6b7280; }
+.trash-name { font-size: 11px; color: #e5e7eb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.trash-meta { font-size: 10px; color: #9ca3af; }
+.trash-actions { display: flex; gap: 4px; flex-wrap: wrap; }

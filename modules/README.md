@@ -207,6 +207,7 @@ The core emits, modules react; the core never names a module.
 | `upload.duplicate_check` | `sha, filename` -> existing rel_path or None | veto an upload as a duplicate |
 | `upload.stored` | `rel_path, filename` | index a file you own after upload |
 | `file.renamed` | `old_rel, new_rel` | repoint your tables |
+| `file.trash` | `rel_path, abs_path, members` -> truthy if moved away | claim a delete: move the file and its sidecars (`members`) out of the library instead of the core removing them (the trash module); DB rows are purged after it either way |
 | `file.deleted` | `rel_path` | drop your rows |
 | `regions.cached` | `rel_path` -> region dicts | supply cached regions for an image with no sidecar |
 | `labels.pool` | - -> class names | extend the trainer's label pool |

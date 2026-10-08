@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title or "Shared photos" }}</title>
+<style>
+  :root { --bg: #0f1115; --panel: #171a21; --line: #2a2f3a; --fg: #e5e7eb; --muted: #9ca3af; --accent: #2563eb; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  a { color: #93c5fd; }
+  header { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 18px; margin: 0; flex: 1 1 auto; min-width: 0; }
+  header .desc { flex-basis: 100%; color: var(--muted); font-size: 13px; white-space: pre-wrap; }
+  header .count { color: var(--muted); font-size: 12px; }
+  .btn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: #1f2430; color: var(--fg); padding: 6px 12px; border-radius: 8px; font-size: 13px; cursor: pointer; text-decoration: none; }
+  .btn:hover { background: #262c3a; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 6px; padding: 12px; }
+  @media (max-width: 480px) { .grid { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 4px; padding: 6px; } }
+  .tile { position: relative; aspect-ratio: 1; background: #1c2029; border-radius: 6px; overflow: hidden; cursor: pointer; }
+  .tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .tile .vid { position: absolute; right: 6px; top: 6px; background: rgba(0,0,0,.6); color: #fff; font-size: 11px; padding: 2px 6px; border-radius: 4px; }
+  .tile .dl { position: absolute; right: 6px; bottom: 6px; background: rgba(0,0,0,.65); color: #fff; font-size: 12px; padding: 3px 7px; border-radius: 4px; text-decoration: none; opacity: 0; transition: opacity .15s; }
+  .tile:hover .dl, .tile:focus-within .dl { opacity: 1; }
+  .empty, .gone { padding: 60px 20px; text-align: center; color: var(--muted); }
+  .gone h1 { color: var(--fg); font-size: 20px; }
+  .card { max-width: 380px; margin: 80px auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 24px; }
+  .card h1 { font-size: 18px; margin: 0 0 6px; }
+  .card p { color: var(--muted); margin: 0 0 16px; }
+  .card input { width: 100%; padding: 9px 10px; border-radius: 8px; border: 1px solid var(--line); background: #0f1115; color: var(--fg); font-size: 14px; margin-bottom: 10px; }
+  .err { color: #fca5a5; font-size: 13px; min-height: 18px; }
+  /* lightbox */
+  .lb { position: fixed; inset: 0; background: rgba(0,0,0,.95); display: none; z-index: 20; }
+  .lb.on { display: block; }
+  .lb .stage { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+  .lb img, .lb video { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .lb .nav { position: absolute; top: 0; bottom: 0; width: 18%; cursor: pointer; }
+  .lb .nav.prev { left: 0; } .lb .nav.next { right: 0; }
+  .lb .top { position: absolute; top: 0; left: 0; right: 0; display: flex; gap: 8px; justify-content: flex-end; padding: 10px; background: linear-gradient(rgba(0,0,0,.6), transparent); }
+  .lb .top .name { flex: 1; align-self: center; color: #d1d5db; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lb.meta-on .stage { right: 300px; }
+  .lb .meta { position: absolute; top: 0; right: 0; bottom: 0; width: 300px; background: var(--panel); border-left: 1px solid var(--line); padding: 54px 16px 16px; overflow: auto; display: none; }
+  .lb.meta-on .meta { display: block; }
+  .lb .meta dt { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin-top: 12px; }
+  .lb .meta dd { margin: 2px 0 0; word-break: break-word; }
+  .lb .meta .tag { display: inline-block; background: #1f2430; border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; font-size: 12px; margin: 2px 4px 0 0; }
+  @media (max-width: 700px) { .lb.meta-on .stage { right: 0; bottom: 40%; } .lb .meta { top: auto; width: 100%; height: 40%; padding-top: 12px; border-left: 0; border-top: 1px solid var(--line); } }
+  /* upload */
+  .up { margin: 0 12px 24px; padding: 14px; border: 1px dashed var(--line); border-radius: 10px; background: var(--panel); }
+  .up .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .up progress { width: 100%; margin-top: 10px; }
+  .up .log { font-size: 12px; color: var(--muted); margin-top: 6px; white-space: pre-wrap; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+{% if state == "gone" %}
+<div class="gone"><h1>This link has expired or does not exist.</h1><p>Ask whoever shared it with you for a new one.</p></div>
+{% elif state == "locked" %}
+<div class="card">
+  <h1>{{ title or "Shared photos" }}</h1>
+  <p>This link is protected. Enter the password to view it.</p>
+  <form id="unlock">
+    <input id="pw" type="password" placeholder="Password" autofocus autocomplete="current-password">
+    <div class="err" id="err"></div>
+    <button class="btn primary" type="submit">Open</button>
+  </form>
+</div>
+<script>
+(function () {
+  "use strict";
+  var TOKEN = {{ token|tojson }};
+  var API = "/api/shared_links/pub/" + TOKEN;
+  document.getElementById("unlock").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var err = document.getElementById("err"); err.textContent = "";
+    fetch(API + "/unlock", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: document.getElementById("pw").value }), credentials: "same-origin" })
+      .then(function (r) { return r.json().then(function (j) { return [r.status, j]; }); })
+      .then(function (x) { if (x[1].success) location.reload(); else err.textContent = x[1].error || "Wrong password."; })
+      .catch(function () { err.textContent = "Could not reach the server."; });
+  });
+})();
+</script>
+{% else %}
+<header>
+  <h1 id="title">{{ title or "Shared photos" }}</h1>
+  <span class="count" id="count"></span>
+  <a class="btn hidden" id="dl_all" href="#">Download all</a>
+  {% if description %}<div class="desc">{{ description }}</div>{% endif %}
+</header>
+<div class="grid" id="grid"></div>
+<div class="empty hidden" id="empty">Nothing here yet.</div>
+<div class="up hidden" id="up">
+  <div class="row">
+    <strong>Add your photos</strong>
+    <input type="file" id="up_files" multiple accept="image/*,video/*">
+    <button class="btn primary" id="up_btn" type="button">Upload</button>
+  </div>
+  <progress id="up_prog" class="hidden" max="100" value="0"></progress>
+  <div class="log" id="up_log"></div>
+</div>
+
+<div class="lb" id="lb">
+  <div class="top">
+    <span class="name" id="lb_name"></span>
+    <button class="btn hidden" id="lb_meta_btn" type="button">Info</button>
+    <a class="btn hidden" id="lb_dl" href="#">Download</a>
+    <button class="btn" id="lb_close" type="button">Close</button>
+  </div>
+  <div class="stage" id="lb_stage"></div>
+  <div class="nav prev" id="lb_prev" title="Previous"></div>
+  <div class="nav next" id="lb_next" title="Next"></div>
+  <dl class="meta" id="lb_metapane"></dl>
+</div>
+
+<script>
+/* Public viewer for modules/shared_links. No login: the token in the URL admits
+ * the visitor; the server only serves the files that belong to this link. */
+(function () {
+  "use strict";
+  var TOKEN = {{ token|tojson }};
+  var API = "/api/shared_links/pub/" + TOKEN;
+  var $ = function (id) { return document.getElementById(id); };
+  var S = { info: null, files: [], index: -1, meta: false };
+
+  function enc(rel) { return encodeURIComponent(rel).replace(/%2F/g, "/"); }
+  function thumbUrl(f) { return API + "/thumb/" + enc(f.filename); }
+  function fileUrl(f) { return API + "/file/" + enc(f.filename); }
+  function dlUrl(f) { return API + "/download/" + enc(f.filename); }
+
+  function load() {
+    return fetch(API + "/info", { credentials: "same-origin" }).then(function (r) {
+      if (r.status === 401) { location.reload(); return null; }
+      return r.json();
+    }).then(function (j) {
+      if (!j) return;
+      if (!j.success) { $("grid").innerHTML = ""; $("empty").textContent = j.error || "Unavailable."; $("empty").classList.remove("hidden"); return; }
+      S.info = j; S.files = j.files || [];
+      render();
+    });
+  }
+
+  function render() {
+    var j = S.info, grid = $("grid");
+    $("count").textContent = j.count + (j.count === 1 ? " item" : " items");
+    $("dl_all").classList.toggle("hidden", !(j.allow_download && j.count));
+    $("dl_all").href = API + "/download.zip";
+    $("up").classList.toggle("hidden", !j.allow_upload);
+    $("empty").classList.toggle("hidden", S.files.length > 0);
+    grid.innerHTML = "";
+    S.files.forEach(function (f, i) {
+      var t = document.createElement("div"); t.className = "tile"; t.tabIndex = 0;
+      var img = document.createElement("img"); img.loading = "lazy"; img.src = thumbUrl(f); img.alt = f.name;
+      t.appendChild(img);
+      if (f.kind === "video") { var v = document.createElement("span"); v.className = "vid"; v.textContent = "video"; t.appendChild(v); }
+      if (j.allow_download) {
+        var a = document.createElement("a"); a.className = "dl"; a.href = dlUrl(f); a.textContent = "Download"; a.title = "Download " + f.name;
+        a.addEventListener("click", function (ev) { ev.stopPropagation(); });
+        t.appendChild(a);
+      }
+      t.addEventListener("click", function () { open(i); });
+      t.addEventListener("keydown", function (ev) { if (ev.key === "Enter") open(i); });
+      grid.appendChild(t);
+    });
+  }
+
+  // -- lightbox --------------------------------------------------------------
+  function open(i) {
+    if (i < 0 || i >= S.files.length) return;
+    S.index = i;
+    var f = S.files[i], stage = $("lb_stage");
+    stage.innerHTML = "";
+    if (f.kind === "video") {
+      var v = document.createElement("video"); v.src = fileUrl(f); v.controls = true; v.autoplay = true; v.playsInline = true;
+      stage.appendChild(v);
+    } else {
+      var img = document.createElement("img"); img.src = fileUrl(f); img.alt = f.name;
+      stage.appendChild(img);
+    }
+    $("lb_name").textContent = f.name + "  (" + (i + 1) + "/" + S.files.length + ")";
+    $("lb_dl").classList.toggle("hidden", !S.info.allow_download);
+    $("lb_dl").href = dlUrl(f);
+    $("lb_meta_btn").classList.toggle("hidden", !S.info.show_metadata);
+    renderMeta(f);
+    $("lb").classList.add("on");
+    $("lb").classList.toggle("meta-on", S.meta && S.info.show_metadata);
+    document.body.style.overflow = "hidden";
+  }
+  function close() {
+    $("lb").classList.remove("on"); $("lb_stage").innerHTML = ""; S.index = -1;
+    document.body.style.overflow = "";
+  }
+  function step(d) { if (S.index < 0) return; open((S.index + d + S.files.length) % S.files.length); }
+  function renderMeta(f) {
+    var dl = $("lb_metapane"); dl.innerHTML = "";
+    if (!S.info.show_metadata) return;
+    function row(k, v) { if (!v) return; var dt = document.createElement("dt"); dt.textContent = k; var dd = document.createElement("dd"); if (typeof v === "string") dd.textContent = v; else dd.appendChild(v); dl.appendChild(dt); dl.appendChild(dd); }
+    row("File", f.name);
+    row("Taken", f.date || "");
+    row("Dimensions", (f.width && f.height) ? f.width + " x " + f.height : "");
+    row("Description", f.description || "");
+    if (f.tags && f.tags.length) {
+      var span = document.createElement("span");
+      f.tags.forEach(function (t) { var s = document.createElement("span"); s.className = "tag"; s.textContent = t; span.appendChild(s); });
+      row("Tags", span);
+    }
+  }
+  $("lb_close").addEventListener("click", close);
+  $("lb_prev").addEventListener("click", function () { step(-1); });
+  $("lb_next").addEventListener("click", function () { step(1); });
+  $("lb_meta_btn").addEventListener("click", function () { S.meta = !S.meta; $("lb").classList.toggle("meta-on", S.meta); });
+  document.addEventListener("keydown", function (ev) {
+    if (S.index < 0) return;
+    if (ev.key === "Escape") close();
+    else if (ev.key === "ArrowLeft") step(-1);
+    else if (ev.key === "ArrowRight" || ev.key === " ") { ev.preventDefault(); step(1); }
+    else if (ev.key === "i") $("lb_meta_btn").click();
+  });
+
+  // -- upload ----------------------------------------------------------------
+  $("up_btn").addEventListener("click", function () {
+    var files = $("up_files").files;
+    if (!files || !files.length) { $("up_log").textContent = "Pick some files first."; return; }
+    var fd = new FormData();
+    for (var i = 0; i < files.length; i++) fd.append("files", files[i], files[i].name);
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", API + "/upload");
+    xhr.withCredentials = true;
+    $("up_prog").classList.remove("hidden"); $("up_prog").value = 0; $("up_btn").disabled = true; $("up_log").textContent = "";
+    xhr.upload.onprogress = function (ev) { if (ev.lengthComputable) $("up_prog").value = Math.round(100 * ev.loaded / ev.total); };
+    xhr.onload = function () {
+      $("up_btn").disabled = false; $("up_prog").classList.add("hidden");
+      var j = {}; try { j = JSON.parse(xhr.responseText); } catch (e) {}
+      var lines = (j.results || []).map(function (r) { return r.name + ": " + (r.success ? (r.queued ? "queued" : "uploaded") : (r.error || "failed")); });
+      $("up_log").textContent = lines.join("\n") || (j.error || "Upload failed.");
+      $("up_files").value = "";
+      load();
+    };
+    xhr.onerror = function () { $("up_btn").disabled = false; $("up_prog").classList.add("hidden"); $("up_log").textContent = "Upload failed."; };
+    xhr.send(fd);
+  });
+
+  load();
+})();
+</script>
+{% endif %}
+</body>
+</html>

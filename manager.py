@@ -5644,16 +5644,23 @@ def api_tiers_cancel():
 @app.route("/api/delete", methods=["POST"])
 @_auth.require_feature("data.delete", level="write")
 def api_delete():
-    fn = request.json.get("filename","")
-    existed = _delete_file(fn)
+    body = request.json or {}
+    fn = body.get("filename","")
+    permanent = bool(body.get("permanent"))
+    existed = _delete_file(fn, permanent=permanent)
     if existed is None:
         audit("delete_file_rejected", f"file={fn!r} (unsafe path)")
     else:
-        audit("delete_file", f"file={fn!r} existed={existed}")
+        audit("delete_file", f"file={fn!r} existed={existed} permanent={permanent}")
     return jsonify({"success":True})
 
-def _delete_file(rel_path):
+def _delete_file(rel_path, permanent=False):
     """! @brief Delete a library file with its sidecars, thumbnail and DB rows.
+
+    Unless `permanent`, the `file.trash` event runs first: a module (the trash
+    bin) that moves the file and its sidecars out of the library answers truthy
+    and the core skips the physical removal. The DB rows and thumbnail are
+    purged either way; a restore re-indexes the file from its sidecar.
     @return whether it existed; None for an unsafe path.
     """
     fp = get_safe_path(MEDIA_DIR, rel_path)
@@ -5661,9 +5668,13 @@ def _delete_file(rel_path):
         return None
     existed = os.path.exists(fp)
     base = os.path.splitext(fp)[0]
-    for ext in mt.related_exts(fp):
-        member = base + ext
-        if os.path.exists(member): tiering.safe_remove(member)
+    members = [base + ext for ext in mt.related_exts(fp) if os.path.exists(base + ext)]
+    trashed = (not permanent and existed
+               and any(module_host.emit("file.trash", rel_path=rel_path, abs_path=fp,
+                                        members=members)))
+    if not trashed:
+        for member in members:
+            if os.path.exists(member): tiering.safe_remove(member)
     _thumb_drop(rel_path)
     _purge_file_everywhere(rel_path)
     return existed
@@ -5771,26 +5782,21 @@ def bulk_untag():
 @app.route("/api/bulk_delete", methods=["POST"])
 @_auth.require_feature("data.delete", level="write")
 def bulk_delete():
-    filenames = request.json.get("filenames", [])
+    body = request.json or {}
+    filenames = body.get("filenames", [])
+    permanent = bool(body.get("permanent"))
     deleted, errors = 0, []
     for fn in filenames:
-        fp = get_safe_path(MEDIA_DIR, fn)
-        if not fp:
-            errors.append(fn); continue
         try:
-            base = os.path.splitext(fp)[0]
-            for ext in mt.related_exts(fp):
-                member = base + ext
-                if os.path.exists(member): tiering.safe_remove(member)
-            _thumb_drop(fn)
-            _purge_file_everywhere(fn)
+            if _delete_file(fn, permanent=permanent) is None:
+                errors.append(fn); continue
             deleted += 1
         except Exception as e:
             errors.append(fn)
             access_logger.error(f"bulk_delete {fn}: {e}")
     # audit the full list (inline list cut at 50)
     shown = filenames if len(filenames) <= 50 else filenames[:50] + ["...(+%d more)" % (len(filenames) - 50)]
-    audit("bulk_delete", f"deleted={deleted} errors={len(errors)} files={shown}")
+    audit("bulk_delete", f"deleted={deleted} errors={len(errors)} permanent={permanent} files={shown}")
     return jsonify({"success": True, "deleted": deleted, "errors": errors})
 
 @app.route("/api/audit_log")

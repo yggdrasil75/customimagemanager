@@ -87,8 +87,13 @@ def add_public_prefix(prefix):
     The module authenticates those requests itself; prefixes must be absolute.
     """
     prefix = str(prefix or "")
-    if not prefix.startswith("/api/") or not prefix.endswith("/"):
-        raise ValueError("public prefix must look like '/api/<module>/.../'")
+    # /api/<module>/.../ for machine calls, or one short top-level segment such as
+    # /s/ for a page a visitor opens from a link; never a core path.
+    ok_api = prefix.startswith("/api/") and prefix.endswith("/")
+    ok_page = bool(re.fullmatch(r"/[a-z][a-z0-9_-]{0,15}/", prefix)) and \
+        prefix not in ("/api/", "/static/", "/modules/", "/web/", "/login/")
+    if not (ok_api or ok_page):
+        raise ValueError("public prefix must look like '/api/<module>/.../' or '/<segment>/'")
     if prefix not in _PUBLIC_PREFIXES:
         _PUBLIC_PREFIXES.append(prefix)
 

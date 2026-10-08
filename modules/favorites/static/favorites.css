@@ -1,0 +1,65 @@
+/* Favorites module: the heart badge on a favorite tile, the viewer toggle and
+   the Favorites gallery view. Colours go through the palette variables so every
+   palette reaches them. */
+
+.gallery-item .cim-fav-badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 16px;
+  height: 16px;
+  color: var(--cim-danger-500, #ef4444);
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, .8));
+  pointer-events: none;
+  z-index: 2;
+}
+.gallery-item .cim-fav-badge svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* the viewer toggle: a filled heart when the file is a favorite */
+#fav_toggle_btn .cim-fav-on { display: none; }
+#fav_toggle_btn.cim-fav-active .cim-fav-on { display: inline; }
+#fav_toggle_btn.cim-fav-active .cim-fav-off { display: none; }
+#fav_toggle_btn.cim-fav-active { color: var(--cim-danger-500, #ef4444); }
+
+/* the Favorites gallery view */
+.cim-fav-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.cim-fav-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--cim-fg-muted, #9ca3af);
+}
+.cim-fav-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+.cim-fav-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 8px;
+}
+.cim-fav-grid .gallery-item {
+  aspect-ratio: 1 / 1;
+}
+.cim-fav-empty {
+  padding: 32px;
+  text-align: center;
+  color: var(--cim-fg-muted, #9ca3af);
+}
+.cim-fav-more {
+  display: block;
+  margin: 12px auto;
+}
