@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Slideshow</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #e5e7eb; font: 14px system-ui, sans-serif; overflow: hidden; }
+  .stage { position: fixed; inset: 0; }
+  .layer { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; opacity: 0; transition: opacity 0.7s ease; }
+  .layer.on { opacity: 1; }
+  .cut .layer { transition: none; }
+  .kenburns .layer.kb { animation: kb var(--dur, 6s) linear forwards; }
+  @keyframes kb { from { transform: scale(1); } to { transform: scale(1.08) translate(var(--kx, 0), var(--ky, 0)); } }
+  .msg { position: fixed; left: 0; right: 0; top: 45%; text-align: center; font-size: 22px; color: #9ca3af; padding: 0 24px; }
+  .msg small { display: block; font-size: 14px; margin-top: 10px; color: #6b7280; }
+  .hint { position: fixed; right: 16px; bottom: 16px; font-size: 12px; color: #6b7280; background: rgba(17,24,39,0.7); padding: 6px 10px; border-radius: 8px; cursor: pointer; }
+  .hidden { display: none !important; }
+  .caption { position: fixed; left: 0; right: 0; bottom: 14px; text-align: center; font-size: 13px; color: #9ca3af; text-shadow: 0 1px 3px #000; opacity: 0; transition: opacity 0.4s; }
+  .caption.on { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+  <img class="layer" id="img0" alt="" draggable="false">
+  <img class="layer" id="img1" alt="" draggable="false">
+  <video class="layer" id="video" playsinline preload="auto"></video>
+</div>
+<div class="caption" id="caption"></div>
+<div class="msg" id="msg">{% if expired %}This cast link has expired.<small>Start the slideshow again and cast it from there.</small>{% else %}Waiting for the slideshow...<small>Start it on the device that opened this link.</small>{% endif %}</div>
+<div class="hint" id="hint">Tap for full screen</div>
+<script>
+/* Receiver for modules/slideshow_cast. Long-polls the session state and shows
+ * the same slide as the controller (mode "mirror"), or runs the show itself
+ * from the playlist it was given (mode "auto"). No login: the token in the URL
+ * admits it, and only the playlist's files are served under it. */
+(function () {
+  "use strict";
+  var TOKEN = {{ token|tojson }};
+  var BASE = location.pathname.replace(/\/$/, "");
+  var $ = function (id) { return document.getElementById(id); };
+  var S = { version: 0, state: null, layer: 0, timer: null, index: -1, files: [], muted: true, started: false };
+
+  function fileUrl(f) { return BASE + "/file/" + encodeURIComponent(f).replace(/%2F/g, "/"); }
+  function msg(t, sub) { var m = $("msg"); if (!t) { m.classList.add("hidden"); return; } m.classList.remove("hidden"); m.innerHTML = ""; m.appendChild(document.createTextNode(t)); if (sub) { var s = document.createElement("small"); s.textContent = sub; m.appendChild(s); } }
+
+  function showSlide(i) {
+    var f = S.files[i]; if (!f) return;
+    S.index = i;
+    var v = $("video");
+    if (f.kind === "video") {
+      $("img0").classList.remove("on"); $("img1").classList.remove("on");
+      v.src = fileUrl(f.filename); v.muted = S.muted; v.classList.add("on");
+      var p = v.play(); if (p && p.catch) p.catch(function () { v.muted = true; v.play().catch(function () {}); });
+    } else {
+      v.pause(); v.removeAttribute("src"); v.load(); v.classList.remove("on");
+      S.layer = 1 - S.layer;
+      var img = $("img" + S.layer), other = $("img" + (1 - S.layer));
+      img.onload = function () {
+        img.onload = null; img.classList.add("on"); other.classList.remove("on");
+        if (document.body.classList.contains("kenburns")) {
+          img.classList.remove("kb"); void img.offsetWidth;
+          img.style.setProperty("--kx", (Math.random() * 6 - 3).toFixed(1) + "%");
+          img.style.setProperty("--ky", (Math.random() * 6 - 3).toFixed(1) + "%");
+          img.style.setProperty("--dur", ((S.state.prefs && S.state.prefs.interval || 5) + 1) + "s");
+          img.classList.add("kb");
+        }
+      };
+      img.src = fileUrl(f.filename);
+    }
+    var cap = $("caption"); cap.textContent = f.filename.split("/").pop(); cap.classList.add("on");
+    setTimeout(function () { cap.classList.remove("on"); }, 2500);
+    var j = (i + 1) % S.files.length; if (S.files[j] && S.files[j].kind !== "video") { var pre = new Image(); pre.src = fileUrl(S.files[j].filename); }
+  }
+
+  // "auto" mode: the receiver keeps time itself
+  function armAuto() {
+    clearTimeout(S.timer); S.timer = null;
+    var st = S.state; if (!st || !st.running || st.paused || st.mode !== "auto") return;
+    var cur = S.files[S.index];
+    if (cur && cur.kind === "video" && (st.prefs.videos || "play") === "play") return;   // advances on ended
+    S.timer = setTimeout(autoNext, Math.max(1000, (st.prefs.interval || 5) * 1000));
+  }
+  function autoNext() {
+    var st = S.state; if (!st || !st.running) return;
+    var j = S.index + 1;
+    if (j >= S.files.length) { if (st.loop === false || (st.prefs && st.prefs.loop === false)) { msg("Slideshow ended"); return; } j = 0; }
+    showSlide(j); armAuto();
+  }
+  $("video").addEventListener("ended", function () { if (S.state && S.state.mode === "auto") autoNext(); });
+
+  function apply(state, prev) {
+    S.state = state;
+    if (state.closed) { msg("Cast ended", "Close this window."); clearTimeout(S.timer); return; }
+    if (Array.isArray(state.files) && state.files.length) S.files = state.files;
+    var tr = (state.prefs && state.prefs.transition) || "fade";
+    document.body.classList.toggle("kenburns", tr === "kenburns");
+    document.body.classList.toggle("cut", tr === "none");
+    if (!state.running) { msg("Slideshow stopped", "It will resume here when it is started again."); clearTimeout(S.timer); return; }
+    msg(null);
+    if (state.mode === "auto") {
+      var restart = !prev || prev.mode !== "auto" || !prev.running || prev.playlistId !== state.playlistId;
+      if (restart) showSlide(Math.max(0, Math.min(S.files.length - 1, state.index || 0)));
+      if (state.paused) { clearTimeout(S.timer); $("video").pause(); } else { if (prev && prev.paused) $("video").play().catch(function () {}); armAuto(); }
+    } else {
+      clearTimeout(S.timer);
+      var i = typeof state.index === "number" ? state.index : 0;
+      if (i !== S.index || !prev || !prev.running || prev.playlistId !== state.playlistId) showSlide(i);
+      var v = $("video");
+      if (v.classList.contains("on")) { if (state.paused) v.pause(); else v.play().catch(function () {}); }
+    }
+  }
+
+  function poll() {
+    if (!TOKEN) return;
+    var x = new XMLHttpRequest();
+    x.open("GET", BASE + "/state?v=" + S.version, true);
+    x.timeout = 40000;
+    x.onload = function () {
+      if (x.status === 410) { msg("This cast link has expired.", "Start the slideshow again and cast it from there."); return; }
+      try {
+        var d = JSON.parse(x.responseText);
+        if (d && d.success) { var prev = S.state; if (d.version !== S.version) { S.version = d.version; apply(d.state, prev); } }
+      } catch (e) { /* retry */ }
+      setTimeout(poll, 100);
+    };
+    x.onerror = x.ontimeout = function () { setTimeout(poll, 3000); };
+    x.send();
+  }
+
+  function goFull() {
+    var el = document.documentElement;
+    try { var p = el.requestFullscreen && el.requestFullscreen(); if (p && p.catch) p.catch(function () {}); } catch (e) {}
+    S.muted = false; var v = $("video"); v.muted = false;
+    $("hint").classList.add("hidden");
+  }
+  $("hint").addEventListener("click", goFull);
+  document.addEventListener("click", function () { if (!document.fullscreenElement) goFull(); });
+  document.addEventListener("keydown", function (e) { if (e.key === "f" || e.key === "F") goFull(); });
+  document.addEventListener("fullscreenchange", function () { $("hint").classList.toggle("hidden", !!document.fullscreenElement); });
+  // A Presentation API receiver has no user gesture: try once, then show the hint.
+  if (navigator.presentation && navigator.presentation.receiver) goFull();
+  poll();
+})();
+</script>
+</body>
+</html>

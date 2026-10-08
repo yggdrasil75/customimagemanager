@@ -1,0 +1,53 @@
+/* slideshow.css - the full-screen slideshow overlay (modules/slideshow). */
+.ss-overlay {
+  position: fixed; inset: 0; z-index: 10000; background: #000; color: #e5e7eb;
+  cursor: none; user-select: none; overflow: hidden;
+}
+.ss-overlay.ss-show-ui { cursor: default; }
+.ss-stage { position: absolute; inset: 0; }
+.ss-layer {
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
+  opacity: 0; transition: opacity 0.7s ease; will-change: opacity, transform;
+}
+.ss-overlay.ss-cut .ss-layer { transition: none; }
+.ss-layer.ss-on { opacity: 1; }
+.ss-video { background: #000; }
+.ss-video.ss-on { opacity: 1; }
+/* Ken Burns: a slow drift the picture starts on every slide */
+.ss-overlay.ss-kenburns .ss-layer.ss-kb {
+  animation: ss-kenburns var(--ss-kb-dur, 6s) linear forwards;
+}
+@keyframes ss-kenburns {
+  from { transform: scale(1) translate(0, 0); }
+  to   { transform: scale(1.08) translate(var(--ss-kb-x, 0), var(--ss-kb-y, 0)); }
+}
+.ss-progress { position: absolute; left: 0; right: 0; top: 0; height: 3px; background: rgba(255,255,255,0.08); }
+.ss-progress-bar { height: 100%; width: 0; background: var(--cim-accent-500, #3b82f6); }
+.ss-caption {
+  position: absolute; left: 0; right: 0; bottom: 64px; text-align: center; font-size: 13px;
+  color: #d1d5db; text-shadow: 0 1px 3px #000; opacity: 0; transition: opacity 0.3s;
+  pointer-events: none; padding: 0 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ss-controls {
+  position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 10px;
+  background: rgba(17, 24, 39, 0.85); border: 1px solid rgba(255,255,255,0.1);
+  opacity: 0; transition: opacity 0.3s; pointer-events: none; max-width: calc(100vw - 32px); flex-wrap: wrap; justify-content: center;
+}
+.ss-overlay.ss-show-ui .ss-controls, .ss-overlay.ss-show-ui .ss-caption { opacity: 1; pointer-events: auto; }
+.ss-overlay:not(.ss-show-ui) .ss-progress { opacity: 0.6; }
+.ss-btn {
+  background: #374151; color: #f3f4f6; border: 0; border-radius: 6px; padding: 6px 12px;
+  font-size: 14px; line-height: 1; cursor: pointer;
+}
+.ss-btn:hover { background: #4b5563; }
+.ss-btn-main { background: var(--cim-accent-600, #2563eb); min-width: 44px; }
+.ss-btn-main:hover { background: var(--cim-accent-500, #3b82f6); }
+.ss-btn-sm { font-size: 12px; padding: 5px 9px; }
+.ss-btn-on { background: var(--cim-accent3-700, #0369a1); }
+.ss-btn-close { background: var(--cim-danger-700, #b91c1c); }
+.ss-btn-close:hover { background: var(--cim-danger-600, #dc2626); }
+.ss-counter, .ss-interval { font-size: 12px; color: #9ca3af; font-variant-numeric: tabular-nums; min-width: 2.5em; text-align: center; }
+.ss-sep { width: 1px; height: 18px; background: rgba(255,255,255,0.15); margin: 0 2px; }
+.ss-controls .cim-btn { font-size: 12px; }
+body.ss-active { overflow: hidden; }

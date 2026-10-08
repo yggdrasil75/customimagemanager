@@ -1,0 +1,27 @@
+<!-- 360 viewer - the centre-pane swap for panoramas (modules/panorama).
+     setMediaMode('pano') hides #image_pane and shows this: a three.js sphere
+     the picture (or 360 video) is mapped onto. The controls pane keeps the
+     image tabs, so the editor still edits the file. -->
+<div id="pano_viewer" class="hidden flex-1 flex flex-col bg-black min-w-0 relative" data-feature="panorama">
+  <div class="px-3 py-1.5 bg-gray-800 border-b border-gray-700 flex items-center gap-2 flex-shrink-0 text-xs">
+    <p id="pano_title" class="font-bold text-blue-400 truncate flex-1 min-w-0">360</p>
+    <span id="pano_info" class="text-[10px] text-gray-500 truncate"></span>
+    <button type="button" onclick="CIMPanorama.step(-1)" title="Previous (Left)" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">&#9664;</button>
+    <button type="button" onclick="CIMPanorama.step(1)" title="Next (Right)" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">&#9654;</button>
+    <button type="button" id="pano_rotate" onclick="CIMPanorama.toggleRotate()" title="Auto-rotate (R)" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Rotate</button>
+    <button type="button" id="pano_gyro" onclick="CIMPanorama.toggleGyro()" title="Look around by moving the device (G)" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded hidden">Gyro</button>
+    <button type="button" onclick="CIMPanorama.resetView()" title="Reset the view (0)" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Reset</button>
+    <button type="button" onclick="CIMPanorama.fullscreen()" title="Fullscreen (F)" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">Fullscreen</button>
+    <button type="button" onclick="CIMPanorama.close()" title="Back to the flat view (Esc)" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded">&#10005; Flat</button>
+  </div>
+  <div id="pano_stage" class="flex-1 min-h-0 relative overflow-hidden cursor-grab">
+    <video id="pano_video" class="hidden" playsinline loop muted crossorigin="anonymous"></video>
+    <div id="pano_msg" class="absolute inset-0 flex items-center justify-center text-gray-400 text-sm pointer-events-none hidden"></div>
+    <div id="pano_videobar" class="absolute left-2 bottom-2 hidden flex items-center gap-2 text-xs bg-gray-900/80 rounded px-2 py-1">
+      <button type="button" id="pano_vplay" onclick="CIMPanorama.toggleVideo()" class="bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded">Pause</button>
+      <button type="button" id="pano_vmute" onclick="CIMPanorama.toggleMute()" class="bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded">Unmute</button>
+      <input id="pano_vseek" type="range" min="0" max="1000" value="0" class="w-40 accent-blue-500">
+    </div>
+    <div class="absolute right-2 bottom-2 text-[10px] text-gray-500 pointer-events-none">drag to look, wheel to zoom</div>
+  </div>
+</div>

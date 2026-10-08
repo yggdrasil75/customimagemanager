@@ -1,0 +1,19 @@
+/* slideshow_cast.css - the Cast panel inside the slideshow overlay. */
+.ssc-panel {
+  position: absolute; right: 16px; bottom: 72px; width: 420px; max-width: calc(100vw - 32px);
+  background: rgba(17, 24, 39, 0.95); border: 1px solid rgba(255,255,255,0.12); border-radius: 10px;
+  padding: 10px 12px; color: #e5e7eb; font-size: 13px; cursor: default; z-index: 2;
+}
+.ssc-title { font-weight: 600; display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.ssc-x { background: none; border: 0; color: #9ca3af; cursor: pointer; font-size: 13px; }
+.ssc-x:hover { color: #fff; }
+.ssc-row { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 6px 0; }
+.ssc-row label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+.ssc-actions .ss-btn { flex: 1 1 auto; }
+.ssc-link { align-items: flex-start; }
+.ssc-qr { width: 120px; height: 120px; background: #fff; border-radius: 6px; flex-shrink: 0; }
+.ssc-linkbox { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.ssc-url { flex: 1; min-width: 0; background: #111827; color: #d1d5db; border: 1px solid #374151; border-radius: 6px; padding: 5px 8px; font-size: 12px; }
+.ssc-help { flex-basis: 100%; font-size: 11px; color: #9ca3af; }
+.ssc-status { font-size: 12px; color: var(--cim-accent3-300, #7dd3fc); margin-top: 4px; }
+.ssc-note { font-size: 11px; color: #9ca3af; margin-top: 2px; min-height: 1em; }
