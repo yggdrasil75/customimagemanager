@@ -15,6 +15,23 @@ from optional_deps import optional_import
 
 pyexiv2, _HAVE_PYEXIV2 = optional_import("pyexiv2")
 
+## @brief host.get_service, set by bind(host) at register: files are read through the
+# metadata module's "exiv2" service (survives malformed XMP), else pyexiv2 directly.
+_get_service = None
+
+
+def bind(host):
+    """! @brief Read files through `host`'s services (call from register)."""
+    global _get_service
+    _get_service = host.get_service
+
+
+def _exiv2(path):
+    """! @brief `with _exiv2(p) as img:` - a pyexiv2.Image to read from."""
+    svc = _get_service("exiv2") if _get_service else None
+    return svc["open"](path) if svc else pyexiv2.Image(path)
+
+
 ## @brief The EXIF tags a location write sets (and a clear deletes).
 GPS_TAGS = ("GPSLatitudeRef", "GPSLatitude", "GPSLongitudeRef", "GPSLongitude")
 
@@ -201,7 +218,7 @@ def read_location(path):
         if not os.path.exists(p):
             continue
         try:
-            with pyexiv2.Image(p) as img:
+            with _exiv2(p) as img:
                 exif = {} if p == side else (img.read_exif() or {})
                 try:
                     xmp = img.read_xmp() or {}

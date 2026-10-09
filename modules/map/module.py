@@ -127,6 +127,7 @@ def _floats(value, n_min, n_max):
 
 def register(host):
     """! @brief Wire the geo / places caches, the Map tab, the Places view and the search tokens."""
+    geo.bind(host)
     host.add_table(_DDL, kind="cache")  # GPS read from the files' EXIF / XMP
     host.add_table(_PLACES_DDL, kind="cache")  # from the positions + the files' place fields
     host.add_table(_APPROX_DDL, kind="cache")  # typed place names -> the offline city table

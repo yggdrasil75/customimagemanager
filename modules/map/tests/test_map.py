@@ -69,7 +69,8 @@ def test_box_around_and_antimeridian():
 
 # -- app integration --------------------------------------------------------
 def _set_gps(host, fn, lat, lon):
-    host.get_service("xmp")["write"](media_path(fn), host.media.gps_xmp(lat, lon))
+    xmp = host.get_service("xmp")
+    xmp["write"](media_path(fn), xmp["gps"](lat, lon))
 
 
 def _list(client, q):

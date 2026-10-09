@@ -38,6 +38,23 @@ _RE_BOX_TYPE = re.compile(rb"^[A-Za-z0-9 _\-\xa9]{4}$")
 _CHUNK = 1 << 16
 
 
+
+## @brief host.get_service, set by bind(host) at register: files are read through the
+# metadata module's "exiv2" service (survives malformed XMP), else pyexiv2 directly.
+_get_service = None
+
+
+def bind(host):
+    """! @brief Read files through `host`'s services (call from register)."""
+    global _get_service
+    _get_service = host.get_service
+
+
+def _exiv2(path):
+    """! @brief `with _exiv2(p) as img:` - a pyexiv2.Image to read from."""
+    svc = _get_service("exiv2") if _get_service else None
+    return svc["open"](path) if svc else pyexiv2.Image(path)
+
 def _motion_item_length(head):
     """! @brief The `Item:Length` of the MotionPhoto item in a Container:Directory, or None."""
     start = head.find(b"Container:Directory")
@@ -186,11 +203,8 @@ def still_content_id(path):
     if not _HAVE_EXIV2 or os.path.splitext(path)[1].lower() not in EMBED_EXTS:
         return None
     try:
-        img = pyexiv2.Image(path)
-        try:
+        with _exiv2(path) as img:
             exif = img.read_exif()
-        finally:
-            img.close()
     except Exception:
         return None
     for k, v in (exif or {}).items():

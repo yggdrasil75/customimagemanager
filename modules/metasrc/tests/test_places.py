@@ -37,7 +37,8 @@ def nominatim(request, host, monkeypatch):
 
 
 def _geotag(host, fn, lat, lon):
-    host.get_service("xmp")["write"](media_path(fn), host.media.gps_xmp(lat, lon))
+    xmp = host.get_service("xmp")
+    xmp["write"](media_path(fn), xmp["gps"](lat, lon))
 
 
 def _side(fn):

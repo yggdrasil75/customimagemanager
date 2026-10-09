@@ -3225,6 +3225,10 @@ def update_file(target=None, *, set=None, add=None, remove=None, exif=None, xmp=
             raise ValueError("update_file: exif / xmp patches are file writes")
         if (fields or force) and (not _present(fp)):
             return {"success": False, "changed": [], "error": "file not found"}
+        if not dont_write and (fields or force or exif or xmp):
+            # a sidecar another tool left malformed is repaired (or at least backed
+            # up) first, so the merge below carries its other fields, not drops them
+            xmp_export.repair_sidecar(os.path.splitext(fp)[0] + '.xmp')
 
         if fields or (force and not dont_write):
             cur = meta if meta is not None else read_metadata(fp)
@@ -5195,7 +5199,7 @@ def _run_upload():
             if is_raw_src or is_heif_src or (in_ext != store_ext and mt.is_image(store_name)
                                              and media_encoding.strips_metadata()):
                 try:
-                    carry = mt.capture_xmp(orig)
+                    carry = exif_import.capture_xmp(orig)
                     if carry:
                         update_file(store_path, xmp=carry)
                 except Exception as e:

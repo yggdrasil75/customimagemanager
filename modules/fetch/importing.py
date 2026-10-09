@@ -42,20 +42,24 @@ def safe_name(name, fallback="imported"):
     return n[:180] or fallback
 
 
-def embedded_facts(path):
-    """! @brief (has capture date, has GPS) in the file's own EXIF (HEIC and raws too)."""
+def embedded_facts(path, xmp_svc):
+    """! @brief (has capture date, has GPS) in the file's own EXIF (HEIC and raws too).
+    @param xmp_svc  the metadata module's "xmp" service (None: nothing known)."""
+    if not xmp_svc:
+        return False, False
     try:
-        facts = mt.capture_xmp(path)
+        facts = xmp_svc["capture"](path)
     except Exception:
         return False, False
     return "exif:DateTimeOriginal" in facts, "exif:GPSLatitude" in facts
 
 
 def packet(path, *, taken=None, gps=None, description="", tags=(), albums=(), favorite=False,
-           archived=False, hidden=False, faces=(), people=(), opts=None):
+           archived=False, hidden=False, faces=(), people=(), opts=None, xmp_svc=None):
     """! @brief Upload metadata for one imported file. `opts` carries the user's
     choices: favorite_tag / archived_tag / hidden_tag ('' = don't tag),
-    people_prefix, source_tag, overwrite_dates."""
+    people_prefix, source_tag, overwrite_dates. `xmp_svc` is the metadata
+    module's "xmp" service, which formats the date / GPS (None: neither is set)."""
     o = opts or {}
     out_tags = [t for t in tags if t]
     for flag, key, default in ((favorite, "favorite_tag", "favorite"), (archived, "archived_tag", "archived"),
@@ -73,12 +77,12 @@ def packet(path, *, taken=None, gps=None, description="", tags=(), albums=(), fa
     meta = {"tags": list(dict.fromkeys(out_tags)), "description": description or "", "regions": regions}
     if albums:
         meta["albums"] = list(dict.fromkeys(a for a in albums if a))
-    has_date, has_gps = embedded_facts(path)
+    has_date, has_gps = embedded_facts(path, xmp_svc)
     xmp = {}
-    if taken is not None and (not has_date or o.get("overwrite_dates")):
-        xmp["exif:DateTimeOriginal"] = mt.xmp_date(taken)
-    if gps and (not has_gps or o.get("overwrite_gps")):
-        xmp.update(mt.gps_xmp(*(list(gps) + [None, None])[:3]))
+    if xmp_svc and taken is not None and (not has_date or o.get("overwrite_dates")):
+        xmp["exif:DateTimeOriginal"] = xmp_svc["date"](taken)
+    if xmp_svc and gps and (not has_gps or o.get("overwrite_gps")):
+        xmp.update(xmp_svc["gps"](*(list(gps) + [None, None])[:3]))
     if xmp:
         meta["xmp"] = xmp
     return meta
@@ -545,7 +549,8 @@ def _deliver_one(ctx, it, tmpdir, on_file, opts):
         meta = {"filename": safe_name(it.name), "_move": True, **layout_meta(it.taken, it.folder),
                 "packet": packet(path, taken=it.taken, gps=it.gps, description=it.description, tags=it.tags,
                                  albums=it.albums, favorite=it.favorite, archived=it.archived, hidden=it.hidden,
-                                 faces=it.faces, people=it.people, opts=opts)}
+                                 faces=it.faces, people=it.people, opts=opts,
+                                 xmp_svc=ctx.service("xmp"))}
     except Exception as e:
         ctx.fail(it.key, f"{type(e).__name__}: {e}", it.name)
         return

@@ -117,6 +117,17 @@ def _md5(path):
     return h.hexdigest()
 
 
+
+## @brief host.get_service, set at register: files are read through the
+# metadata module's "exiv2" service (survives malformed XMP), else pyexiv2 directly.
+_get_service = None
+
+
+def _exiv2(path):
+    """! @brief `with _exiv2(p) as img:` - a pyexiv2.Image to read from."""
+    svc = _get_service("exiv2") if _get_service else None
+    return svc["open"](path) if svc else pyexiv2.Image(path)
+
 def _first_text(v):
     """! @brief A metadata value (list, lang-alt or text) as one stripped string."""
     if isinstance(v, (list, tuple)):
@@ -137,7 +148,7 @@ def file_places(path):
     for p in ([side] if side != path and os.path.exists(side) else []) + \
              ([path] if os.path.exists(path) else []):
         try:
-            with pyexiv2.Image(p) as img:
+            with _exiv2(p) as img:
                 xmp = img.read_xmp() or {}
                 try:
                     iptc = {} if p == side else (img.read_iptc() or {})
@@ -213,6 +224,8 @@ class Registry:
 
 
 def register(host):
+    global _get_service
+    _get_service = host.get_service
     reg = Registry()
     host.provide_service("metasrc", reg)
     host.add_asset("metasrc.js")
@@ -260,8 +273,9 @@ def register(host):
                     gps = geo["refresh"](rel)
                 except Exception as e:
                     log.warning(f"metasrc: geo lookup {rel}: {e}")
-            if gps is None and ap and os.path.exists(ap):
-                gps = host.media.read_gps(ap)   # sidecar, EXIF, embedded XMP
+            xmp_svc = host.get_service("xmp")
+            if gps is None and ap and os.path.exists(ap) and xmp_svc:
+                gps = xmp_svc["read_gps"](ap)   # sidecar, EXIF, embedded XMP
             query.update(md5=_md5(ap) if ap and os.path.exists(ap) else "",
                          lat=gps[0] if gps else None, lon=gps[1] if gps else None)
             query["q"] = query["q"] or stem

@@ -136,6 +136,7 @@ def turn_region(b, op):
 
 def register(host):
     core = host.core
+    geo_rw.bind(host)
     host.register_feature(FEATURE, "Location, dates, rotation, crop (write=edit)",
                           section="annotations", section_label="Image annotations",
                           default="write")

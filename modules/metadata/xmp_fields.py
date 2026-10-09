@@ -7,6 +7,7 @@ MWG namespaces are built from iptc_fields.py and mwg_fields.py.
 """
 
 from dataclasses import dataclass, field
+from datetime import timezone
 from typing import Optional
 
 # IPTC and MWG tables are built by their own modules' factories (XMPField passed in)
@@ -1303,3 +1304,57 @@ def schema_dict():
             for n in XMP_NAMESPACES
         ]
     }
+
+
+# -- value formats ---------------------------------------------------------
+
+def xmp_date(dt):
+    """! @brief A datetime as an XMP date with offset ('Z' for UTC; naive = UTC), or None."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    if not dt.utcoffset():
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return dt.isoformat(timespec="seconds")
+
+
+def xmp_gps(value, pos, neg):
+    """! @brief Signed degrees as an XMP GPSCoordinate "DDD,MM.mmmmmmR"."""
+    ref = pos if value >= 0 else neg
+    v = abs(float(value))
+    d = int(v)
+    return f"{d},{(v - d) * 60:.6f}{ref}"
+
+
+def parse_xmp_gps(text):
+    """! @brief An XMP GPSCoordinate ("DDD,MM.mmmR", "DDD,MM,SSR" or signed decimal)
+    as signed degrees, or None."""
+    t = str(text or "").strip()
+    if not t:
+        return None
+    ref = t[-1].upper() if t[-1].isalpha() else ""
+    body = t[:-1] if ref else t
+    try:
+        parts = [float(p) for p in body.split(",")]
+    except ValueError:
+        return None
+    v = sum(p / (60 ** i) for i, p in enumerate(parts[:3]))
+    return -v if ref in ("S", "W") else v
+
+
+def gps_xmp(lat, lon, alt=None):
+    """! @brief XMP tokens for a position; {} when missing, out of range or (0, 0)."""
+    try:
+        lat, lon = float(lat), float(lon)
+    except (TypeError, ValueError):
+        return {}
+    if (abs(lat) < 1e-9 and abs(lon) < 1e-9) or abs(lat) > 90 or abs(lon) > 180:
+        return {}
+    out = {"exif:GPSLatitude": xmp_gps(lat, "N", "S"), "exif:GPSLongitude": xmp_gps(lon, "E", "W")}
+    try:
+        if alt not in (None, ""):
+            out["exif:GPSAltitude"] = float(alt)
+    except (TypeError, ValueError):
+        pass
+    return out

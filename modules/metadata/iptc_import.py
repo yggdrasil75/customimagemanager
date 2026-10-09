@@ -12,6 +12,7 @@ except Exception:  # pragma: no cover
     pyexiv2 = None
 
 from . import iptc_fields as ifields
+from . import xmp_import
 
 log = logging.getLogger("iptc_import")
 
@@ -38,7 +39,7 @@ def _read_raw_iptc(filepath):
         return {}, None
     for p in _candidate_paths(filepath):
         try:
-            with pyexiv2.Image(p) as img:
+            with xmp_import.open_image(p) as img:
                 raw = img.read_iptc()
             if raw:
                 return raw, p

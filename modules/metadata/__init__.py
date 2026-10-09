@@ -95,7 +95,16 @@ def register(host):
         return write
     host.provide_service("exif", {"read": exif_import.read_exif,
                                   "write": _patch_writer("exif")})
-    host.provide_service("xmp", {"write": _patch_writer("xmp")})
+    host.provide_service("xmp", {"write": _patch_writer("xmp"),
+                                 # (lat, lon) from sidecar / EXIF / embedded XMP, or None
+                                 "read_gps": xmp_import.read_gps,
+                                 # value -> XMP tokens / text, for building write patches
+                                 "gps": xmp_fields.gps_xmp, "date": xmp_fields.xmp_date,
+                                 # a source file's capture date + GPS as XMP tokens
+                                 "capture": exif_import.capture_xmp})
+    # read a file through exiv2 surviving malformed XMP: `with open(p) as img:`
+    # gives a pyexiv2.Image (read-only stand-in when its XMP had to be cleaned)
+    host.provide_service("exiv2", {"open": xmp_import.open_image})
     # field schemas, for modules mapping external fields (gallery-dl)
     host.provide_service("metadata_schema", {"exif": exif_fields.schema_dict,
                                              "iptc": iptc_fields.schema_dict,

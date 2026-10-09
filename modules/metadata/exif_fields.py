@@ -1717,3 +1717,19 @@ def schema_dict():
             for g in EXIF_GROUPS
         ]
     }
+
+
+def exif_degrees(value, ref=""):
+    """! @brief An EXIF GPS rational triple ("d/1 m/1 s/100") and its hemisphere ref
+    as signed decimal degrees, or None when unparseable."""
+    try:
+        parts = [p for p in str(value).split() if p]
+        if not parts:
+            return None
+        out = 0.0
+        for i, p in enumerate(parts[:3]):
+            n, _, d = p.partition("/")
+            out += float(n) / (float(d) if d else 1.0) / (60 ** i)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    return -out if str(ref or "").strip().upper()[:1] in ("S", "W") else out

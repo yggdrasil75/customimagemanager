@@ -4,6 +4,7 @@ schema for the editor. Never raises: an unreadable file has no EXIF.
 """
 
 import os
+import re
 import logging
 
 try:
@@ -14,6 +15,8 @@ except Exception:  # pragma: no cover
 from optional_deps import optional_import
 from . import exif_fields as efields
 from . import exiv2_keys
+from . import xmp_fields as xfields
+from . import xmp_import
 imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
 
 log = logging.getLogger("exif_import")
@@ -62,7 +65,7 @@ def _read_raw_exif(filepath):
     merged, src = {}, None
     for p in _candidate_paths(filepath):
         try:
-            with pyexiv2.Image(p) as img:
+            with xmp_import.open_image(p) as img:
                 raw = img.read_exif()
                 if p.lower().endswith(".xmp"):
                     # tags exiv2 can't map to XMP are kept under their own name there
@@ -174,3 +177,36 @@ def summarize(filepath):
     present = sum(1 for g in data["groups"] for f in g["fields"] if f.get("present"))
     unknown = sum(len(g["unknown"]) for g in data["groups"])
     return {"present": present, "unknown": unknown, "source": data["source"]}
+
+
+def capture_xmp(path):
+    """! @brief Capture date and GPS from a source file's own EXIF, as XMP tokens.
+    Written to the sidecar when conversion drops EXIF (raws, HEIF). {} when none.
+    """
+    if pyexiv2 is None:
+        return {}
+    try:
+        if hasattr(pyexiv2, "enableBMFF"):
+            try:
+                pyexiv2.enableBMFF(True)
+            except Exception:
+                pass
+        with xmp_import.open_image(path) as img:
+            exif = img.read_exif() or {}
+    except Exception:
+        exif = {}
+    out = {}
+    dto = exif.get("Exif.Photo.DateTimeOriginal") or exif.get("Exif.Image.DateTimeOriginal")
+    if dto:
+        m = re.match(r"(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})", str(dto).strip())
+        if m and m.group(1) != "0000":
+            iso = "{}-{}-{}T{}:{}:{}".format(*m.groups())
+            off = str(exif.get("Exif.Photo.OffsetTimeOriginal") or "").strip()
+            if re.fullmatch(r"[+-]\d{2}:\d{2}", off):
+                iso += off
+            out["exif:DateTimeOriginal"] = iso
+    lat = efields.exif_degrees(exif.get("Exif.GPSInfo.GPSLatitude"), exif.get("Exif.GPSInfo.GPSLatitudeRef", "N"))
+    lon = efields.exif_degrees(exif.get("Exif.GPSInfo.GPSLongitude"), exif.get("Exif.GPSInfo.GPSLongitudeRef", "E"))
+    if lat is not None and lon is not None:
+        out.update(xfields.gps_xmp(lat, lon))
+    return out

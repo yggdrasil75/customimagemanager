@@ -3,10 +3,16 @@
 what is there. Tokens are 'Xmp.ns.Prop' (or 'ns.Prop', 'ns:Prop'); tokens not
 in the schema are skipped. The schema's `writable` flag (an editor rule) is not
 applied here. Run after write_metadata, which rewrites the whole sidecar.
+repair_sidecar() makes a sidecar exiv2 can't parse writable first (core
+update_file calls it before any write), keeping the original.
 """
 import os
+import shutil
+import tempfile
+import time
 
 from . import xmp_fields as xfields
+from . import xmp_import
 from . import exif_export
 
 try:
@@ -56,6 +62,71 @@ def _normalize_token(tok):
     if not t.startswith("Xmp."):
         t = "Xmp." + t
     return t if t in _schema() else None
+
+def _backup_path(path):
+    """! @brief Where a sidecar's original goes before it's repaired or rewritten:
+    <root>/.cim/xmp-backup/<path under root>.<time>, root being the nearest
+    directory up with a .cim folder (the media folder), else the sidecar's own."""
+    here = os.path.dirname(os.path.abspath(path))
+    root, cur = None, here
+    while True:
+        if os.path.isdir(os.path.join(cur, ".cim")):
+            root = cur
+            break
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    root = root or here
+    rel = os.path.relpath(os.path.abspath(path), root)
+    return os.path.join(root, ".cim", "xmp-backup", f"{rel}.{time.strftime('%Y%m%d-%H%M%S')}")
+
+def repair_sidecar(path, backup_unrepairable=True):
+    """! @brief Make a malformed XMP sidecar well-formed in place (xmp_import.clean_xmp_text),
+    keeping the original under .cim/xmp-backup/. Well-formed sidecars, other files
+    and missing ones are left alone.
+    @param backup_unrepairable  still back up a sidecar cleaning can't fix, so a
+                                rewrite of it loses nothing.
+    @return the backup path when the sidecar was repaired / backed up, else None.
+    """
+    if not path or not path.lower().endswith(".xmp") or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    if xmp_import.xmp_well_formed(data):
+        return None
+    text = xmp_import.clean_xmp_text(data)
+    fixed = xmp_import.xmp_well_formed(text)
+    if not fixed and not backup_unrepairable:
+        return None
+    bak = _backup_path(path)
+    try:
+        os.makedirs(os.path.dirname(bak), exist_ok=True)
+        shutil.copy2(path, bak)
+        if fixed:
+            fd, tmp = tempfile.mkstemp(suffix=".xmp.tmp", dir=os.path.dirname(os.path.abspath(path)))
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                shutil.copymode(path, tmp)
+                os.replace(tmp, path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+    except OSError as e:
+        xmp_import.log.warning(f"malformed XMP sidecar {path}: can't back up / repair ({e})")
+        return None
+    if fixed:
+        xmp_import.log.warning(f"repaired malformed XMP sidecar {path} (original kept at {bak})")
+    else:
+        xmp_import.log.warning(f"malformed XMP sidecar {path} can't be repaired; original kept at {bak}")
+    return bak
 
 def _coerce(value, dtype, is_list):
     """! @brief A value shaped for modify_xmp: a list for bag / seq, else a string."""

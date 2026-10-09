@@ -84,6 +84,7 @@ def _visible_companion(still_abs):
 
 def register(host):
     """! @brief Settings, the motion table, upload / index / delete hooks, routes and assets."""
+    detect.bind(host)
     core = host.core
     media = host.media
     pending = {}               # rel_path being uploaded -> extracted temp video

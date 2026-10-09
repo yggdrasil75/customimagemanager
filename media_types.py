@@ -21,7 +21,6 @@ import subprocess
 import threading
 import unicodedata
 import zlib
-from datetime import timezone
 
 import numpy as np
 
@@ -33,7 +32,6 @@ ImageSequence, _ = optional_import("PIL.ImageSequence")
 imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
 rawpy, _HAVE_RAWPY = optional_import("rawpy", quiet=True)
 pillow_heif, _HAVE_PILLOW_HEIF = optional_import("pillow_heif", quiet=True)
-pyexiv2, _HAVE_PYEXIV2 = optional_import("pyexiv2")
 if _HAVE_PILLOW_HEIF:  # lets Pillow open .heic
     pillow_heif.register_heif_opener()
 
@@ -743,142 +741,6 @@ def develop_heif(heif_path: str, out_png_path: str) -> bool:
         return True
     except Exception:
         return False
-
-def _exif_decimal(v, ref):
-    """! @brief EXIF rational degrees + hemisphere -> signed decimal degrees."""
-    try:
-        parts = [p for p in str(v).split() if p]
-        vals = []
-        for p in parts[:3]:
-            n, _, d = p.partition('/')
-            vals.append(float(n) / (float(d) if d else 1.0))
-        while len(vals) < 3:
-            vals.append(0.0)
-        dec = vals[0] + vals[1] / 60 + vals[2] / 3600
-        return -dec if str(ref).strip().upper()[:1] in ('S', 'W') else dec
-    except Exception:
-        return None
-
-def xmp_date(dt) -> str | None:
-    """! @brief Aware datetime -> XMP date with offset ('Z' for UTC)."""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    if not dt.utcoffset():
-        return dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    return dt.isoformat(timespec='seconds')
-
-def xmp_gps(value: float, pos: str, neg: str) -> str:
-    """! @brief Signed degrees -> XMP GPSCoordinate "DDD,MM.mmmmmmR"."""
-    ref = pos if value >= 0 else neg
-    v = abs(float(value)); d = int(v)
-    return f'{d},{(v - d) * 60:.6f}{ref}'
-
-def parse_xmp_gps(text) -> float | None:
-    """! @brief An XMP GPSCoordinate ("DDD,MM.mmmR", "DDD,MM,SSR" or signed decimal) as
-    signed degrees, or None."""
-    t = str(text or '').strip()
-    if not t:
-        return None
-    ref = t[-1].upper() if t[-1].isalpha() else ''
-    body = t[:-1] if ref else t
-    try:
-        parts = [float(p) for p in body.split(',')]
-    except ValueError:
-        return None
-    v = sum(p / (60 ** i) for i, p in enumerate(parts[:3]))
-    return -v if ref in ('S', 'W') else v
-
-
-def _exif_deg(s) -> float:
-    """! @brief An EXIF rational triple "d/1 m/1 s/100" as degrees."""
-    out = 0.0
-    for i, part in enumerate(str(s).split()[:3]):
-        n, _, d = part.partition('/')
-        out += float(n) / float(d or 1) / (60 ** i)
-    return out
-
-
-def read_gps(path: str):
-    """! @brief A file's position as (lat, lon), or None: the XMP sidecar first (where
-    the app writes), then the file's EXIF GPS, then its embedded XMP. A primitive
-    for code that can't count on the map module's geo cache."""
-    if not path or not os.path.exists(path):
-        return None
-    side = os.path.splitext(path)[0] + '.xmp'
-    sources = [(side, 'xmp')] if os.path.exists(side) else []
-    sources += [(path, 'exif'), (path, 'xmp')]
-    for src, kind in sources:
-        try:
-            with pyexiv2.Image(src) as img:
-                data = img.read_exif() if kind == 'exif' else img.read_xmp()
-        except Exception:
-            continue
-        try:
-            if kind == 'exif':
-                lat = _exif_deg(data['Exif.GPSInfo.GPSLatitude'])
-                lon = _exif_deg(data['Exif.GPSInfo.GPSLongitude'])
-                if str(data.get('Exif.GPSInfo.GPSLatitudeRef', 'N')).startswith('S'):
-                    lat = -lat
-                if str(data.get('Exif.GPSInfo.GPSLongitudeRef', 'E')).startswith('W'):
-                    lon = -lon
-            else:
-                lat = parse_xmp_gps(data.get('Xmp.exif.GPSLatitude'))
-                lon = parse_xmp_gps(data.get('Xmp.exif.GPSLongitude'))
-        except (KeyError, ValueError, ZeroDivisionError):
-            continue
-        if lat is not None and lon is not None and not (abs(lat) < 1e-9 and abs(lon) < 1e-9):
-            return lat, lon
-    return None
-
-
-def gps_xmp(lat, lon, alt=None) -> dict:
-    """! @brief XMP tokens for a position; {} when missing or (0, 0)."""
-    try:
-        lat, lon = float(lat), float(lon)
-    except (TypeError, ValueError):
-        return {}
-    if (abs(lat) < 1e-9 and abs(lon) < 1e-9) or abs(lat) > 90 or abs(lon) > 180:
-        return {}
-    out = {'exif:GPSLatitude': xmp_gps(lat, 'N', 'S'), 'exif:GPSLongitude': xmp_gps(lon, 'E', 'W')}
-    try:
-        if alt not in (None, ''):
-            out['exif:GPSAltitude'] = float(alt)
-    except (TypeError, ValueError):
-        pass
-    return out
-
-def capture_xmp(path: str) -> dict:
-    """! @brief Capture date and GPS from a source file's own EXIF, as XMP tokens.
-    Written to the sidecar when conversion drops EXIF (raws, HEIF).
-    """
-    exif = {}
-    try:
-        if hasattr(pyexiv2, 'enableBMFF'):
-            try: pyexiv2.enableBMFF(True)
-            except Exception: pass
-        with pyexiv2.Image(path) as img:
-            exif = img.read_exif() or {}
-    except Exception:
-        exif = {}
-    out = {}
-    dto = exif.get('Exif.Photo.DateTimeOriginal') or exif.get('Exif.Image.DateTimeOriginal')
-    if dto:
-        m = re.match(r'(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})', str(dto).strip())
-        if m and m.group(1) != '0000':
-            iso = '{}-{}-{}T{}:{}:{}'.format(*m.groups())
-            off = str(exif.get('Exif.Photo.OffsetTimeOriginal') or '').strip()
-            if re.fullmatch(r'[+-]\d{2}:\d{2}', off):
-                iso += off
-            out['exif:DateTimeOriginal'] = iso
-    lat = _exif_decimal(exif.get('Exif.GPSInfo.GPSLatitude'), exif.get('Exif.GPSInfo.GPSLatitudeRef', 'N')) \
-        if exif.get('Exif.GPSInfo.GPSLatitude') else None
-    lon = _exif_decimal(exif.get('Exif.GPSInfo.GPSLongitude'), exif.get('Exif.GPSInfo.GPSLongitudeRef', 'E')) \
-        if exif.get('Exif.GPSInfo.GPSLongitude') else None
-    if lat is not None and lon is not None:
-        out.update(gps_xmp(lat, lon))
-    return out
 
 def video_duration(path: str) -> float | None:
     """! @brief Duration in seconds via ffprobe, or None."""

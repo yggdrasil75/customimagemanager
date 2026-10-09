@@ -3,10 +3,22 @@
 xmp_fields.py schema for the editor (by namespace, unknown properties listed).
 Also extracts the values that fold into the app's own fields at ingest
 (description, tags, rating, artist, regions, crop). Never raises.
+
+open_image() is how anything reads a file through exiv2: exiv2 refuses a whole
+file when its XMP isn't well-formed XML ("XMP Toolkit error 201": control
+characters, a bare "&", Latin-1 bytes in a UTF-8 packet - common in sidecars
+other tools wrote), which would make its EXIF, IPTC and XMP all read as nothing.
+Such a file is read from a cleaned copy instead; reading never modifies it
+(xmp_export.repair_sidecar fixes a sidecar before the app writes to it).
 """
 
+import codecs
 import os
 import logging
+import re
+import threading
+import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 
 try:
     import pyexiv2
@@ -15,10 +27,208 @@ except Exception:  # pragma: no cover
 
 from . import xmp_fields as xfields
 from . import iptc_fields as ifields
+from . import exif_fields as efields
 from . import hierarchy
-import re
 
 log = logging.getLogger("xmp_import")
+
+if pyexiv2 is not None and hasattr(pyexiv2, "set_log_level"):
+    # exiv2's own "[warn] Failed to decode XMP metadata." names no file;
+    # open_image logs one line per file instead
+    try:
+        pyexiv2.set_log_level(3)
+    except Exception:
+        pass
+
+# -- malformed XMP -----------------------------------------------------------
+
+_warned = set()
+_warned_lock = threading.Lock()
+# characters XML 1.0 forbids
+_XML_BAD_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+_BARE_AMP = r"&(?!(?:[A-Za-z_][\w.\-]*|#[0-9]+|#x[0-9A-Fa-f]+);)"
+_XML_BARE_AMP = re.compile(_BARE_AMP)
+_PACKET = re.compile(rb"<x:x[am]pmeta\b.*?</x:x[am]pmeta\s*>|<rdf:RDF\b.*?</rdf:RDF\s*>", re.S)
+_BAD_BYTES = re.compile(rb"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_BARE_AMP_B = re.compile(_BARE_AMP.encode("ascii"))
+_LONE_BYTE = re.compile("[\udc80-\udcff]")
+_XPACKET_HEAD = '<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>'
+# a file bigger than this isn't copied into memory for a lenient read
+_LENIENT_MAX = 512 * 1024 * 1024
+
+
+def warn_once(path, msg):
+    """! @brief Log `msg` the first time `path` comes up (a malformed file is re-read often)."""
+    with _warned_lock:
+        if path in _warned:
+            return
+        _warned.add(path)
+    log.warning(msg)
+
+
+def _cp1252_fallback(err):
+    """! @brief codecs error handler: a byte that isn't UTF-8 is read as Windows-1252."""
+    return err.object[err.start:err.end].decode("cp1252", errors="replace"), err.end
+
+
+codecs.register_error("cim_cp1252", _cp1252_fallback)
+
+
+def clean_xmp_text(data):
+    """! @brief XMP text made well-formed where that is mechanical: decoded as UTF-8
+    (UTF-16 by BOM; stray non-UTF-8 bytes as Windows-1252), characters XML forbids
+    dropped, a bare "&" escaped. Values are otherwise unchanged.
+    @param data  bytes or str.
+    """
+    if isinstance(data, (bytes, bytearray)):
+        data = bytes(data)
+        if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+            text = data.decode("utf-16", errors="replace")
+        else:
+            text = data.decode("utf-8", errors="cim_cp1252")
+    else:
+        text = str(data)
+    return _XML_BARE_AMP.sub("&amp;", _XML_BAD_CHARS.sub("", text))
+
+
+def xmp_well_formed(data):
+    """! @brief Whether XMP text / bytes parse as XML."""
+    try:
+        ET.fromstring(data.encode("utf-8") if isinstance(data, str) else data)
+        return True
+    except ET.ParseError:
+        return False
+
+
+def _neutralize(data):
+    """! @brief `data` with each XMP packet made parseable without changing any length
+    (offsets in the container stay valid): forbidden characters become spaces, a
+    bare "&" a "+", a byte that isn't UTF-8 a "?". For EXIF / IPTC only."""
+    def fix(m):
+        b = _BARE_AMP_B.sub(b"+", _BAD_BYTES.sub(b" ", m.group(0)))
+        return _LONE_BYTE.sub("?", b.decode("utf-8", errors="surrogateescape")).encode("utf-8")
+    return _PACKET.sub(fix, data)
+
+
+class _LenientImage:
+    """! @brief Read-only stand-in for a pyexiv2.Image whose XMP exiv2 rejected: EXIF /
+    IPTC from a length-preserving cleaned copy, XMP from the properly cleaned packet.
+    Writing raises: the file itself is never touched."""
+
+    def __init__(self, path, body, xmp):
+        self.filename = path
+        self._d, self._x = body, xmp
+
+    def _xmp(self, name, empty):
+        src = self._x or self._d
+        return (lambda *a, **k: getattr(src, name)(*a, **k)) if src else (lambda *a, **k: empty)
+
+    def __getattr__(self, name):
+        if name.startswith(("modify_", "clear_", "copy_to")):
+            raise RuntimeError(f"{self.filename}: its XMP is malformed, opened read-only")
+        if name in ("read_xmp", "read_xmp_detail"):
+            return self._xmp(name, {})
+        if name == "read_raw_xmp":
+            return self._xmp(name, "")
+        d = self.__dict__.get("_d")
+        if d is None:
+            if name.startswith("read_"):
+                return lambda *a, **k: {}
+            raise AttributeError(name)
+        return getattr(d, name)
+
+    def close(self):
+        for o in (self._d, self._x):
+            if o is not None:
+                try:
+                    o.close()
+                except Exception:
+                    pass
+
+
+def _lenient_image(path):
+    """! @brief A _LenientImage for `path`, or None when nothing in it can be read."""
+    try:
+        if os.path.getsize(path) > _LENIENT_MAX:
+            return None
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    is_side = path.lower().endswith(".xmp")
+    m = None if is_side else _PACKET.search(data)
+    packet = clean_xmp_text(data) if is_side else (clean_xmp_text(m.group(0)) if m else None)
+    xmp = body = None
+    if packet and xmp_well_formed(packet):
+        if not packet.lstrip().startswith("<?xpacket"):
+            packet = _XPACKET_HEAD + packet + '<?xpacket end="w"?>'
+        try:
+            xmp = pyexiv2.ImageData(packet.encode("utf-8"))
+        except Exception:
+            xmp = None
+    if is_side:
+        body = xmp
+    else:
+        try:
+            body = pyexiv2.ImageData(_neutralize(data))
+        except Exception:
+            body = None
+    if body is None and xmp is None:
+        return None
+    return _LenientImage(path, body, xmp)
+
+
+@contextmanager
+def open_image(path):
+    """! @brief `with open_image(p) as img:` - pyexiv2.Image(p) for reading, surviving
+    malformed XMP (read from a cleaned copy; the file is not modified, and writing
+    through the handle raises). Other errors propagate."""
+    try:
+        img = pyexiv2.Image(path)
+    except Exception as e:
+        if "XMP Toolkit" not in str(e):
+            raise
+        img = _lenient_image(path)
+        if img is None:
+            warn_once(path, f"malformed XMP in {path} ({str(e).strip()}); unreadable")
+            raise
+        warn_once(path, f"malformed XMP in {path} ({str(e).strip()}); read from a cleaned copy")
+    try:
+        yield img
+    finally:
+        try:
+            img.close()
+        except Exception:
+            pass
+
+
+def read_gps(path):
+    """! @brief A file's position as (lat, lon), or None: the XMP sidecar first (where
+    the app writes), then the file's EXIF GPS, then its embedded XMP."""
+    if pyexiv2 is None or not path or not os.path.exists(path):
+        return None
+    side = os.path.splitext(path)[0] + ".xmp"
+    sources = [(side, "xmp")] if os.path.exists(side) else []
+    sources += [(path, "exif"), (path, "xmp")]
+    for src, kind in sources:
+        try:
+            with open_image(src) as img:
+                data = (img.read_exif() if kind == "exif" else img.read_xmp()) or {}
+        except Exception:
+            continue
+        if kind == "exif":
+            lat = efields.exif_degrees(data.get("Exif.GPSInfo.GPSLatitude"),
+                                       data.get("Exif.GPSInfo.GPSLatitudeRef", "N"))
+            lon = efields.exif_degrees(data.get("Exif.GPSInfo.GPSLongitude"),
+                                       data.get("Exif.GPSInfo.GPSLongitudeRef", "E"))
+        else:
+            lat = xfields.parse_xmp_gps(data.get("Xmp.exif.GPSLatitude"))
+            lon = xfields.parse_xmp_gps(data.get("Xmp.exif.GPSLongitude"))
+        if lat is not None and lon is not None and not (abs(lat) < 1e-9 and abs(lon) < 1e-9):
+            return lat, lon
+    return None
+
+# -- reading -----------------------------------------------------------------
 
 def _candidate_paths(filepath):
     """! @brief Paths to read XMP from: the sidecar first (the app writes there), then the
@@ -51,7 +261,7 @@ def resolve_xmp(filepath):
         return {}, None, ""
     for p in _candidate_paths(filepath):
         try:
-            with pyexiv2.Image(p) as img:
+            with open_image(p) as img:
                 raw = img.read_xmp()
                 xml = ""
                 try:

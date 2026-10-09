@@ -207,6 +207,10 @@ class FetchContext:
         self._total = 0
         self._counts = {"new": 0, "known": 0, "skipped": 0, "failed": 0}
 
+    def service(self, name):
+        """! @brief A module service (host.get_service), or None."""
+        return self._host.get_service(name)
+
     ## @brief ledger
     def _row(self, key):
         return self._host.db().execute("SELECT * FROM fetch_items WHERE fetcher=? AND scope=? AND item_key=?",
