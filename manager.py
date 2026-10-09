@@ -89,7 +89,7 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 shutil.rmtree(os.path.join(MEDIA_DIR, ".thumbs"), ignore_errors=True)  # old loose thumbnail cache
 os.makedirs("logs",     exist_ok=True)
 
-from cimlogger import access_logger, audit, training_logger as cimlogger_training_logger
+from cimlogger import access_logger, audit, training_logger as cimlogger_training_logger, enable_crash_log
 
 state = {
     "classes": ["object"], "available_models": [],
@@ -7796,6 +7796,7 @@ def api_module_assets():
 
 if __name__=='__main__':
     from waitress import serve
+    enable_crash_log()
     thread_manager.set_activity_source(lambda: _last_activity)
     model_registry.set_memory_hook(lambda cost_mb, gpu: thread_manager.reserve_model(cost_mb, gpu))
     model_registry.log_backend(access_logger)

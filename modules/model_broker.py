@@ -10,6 +10,13 @@ Consumers ask for a capability ("detect", "segment", "pose"), never a model:
 Modules provide models for capabilities; the user picks which provider serves
 each one. A provider's transform turns its native output into the contract's
 canonical shape (contracts: model_contracts.py). No ML imports here.
+
+A provider runs one call at a time: background sweeps and foreground requests
+share its cached model across worker threads, and many native runtimes (TFLite
+interpreters, MediaPipe graphs, Ultralytics predictors, cv2.dnn nets) crash the
+process - a segfault, no Python error - when two threads call the same
+instance. Different providers still run in parallel; providers on a remote
+backend (`resource`) aren't serialized.
 """
 
 import threading
@@ -31,6 +38,27 @@ class NoProviderError(BrokerError):
         super().__init__(message)
         self.capability = capability
         self.reason = reason
+
+
+class Guarded:
+    """! @brief A model handle whose calls (and .batch) hold `lock`; every other
+    attribute is the model's own."""
+
+    def __init__(self, model, lock):
+        object.__setattr__(self, "_model", model)
+        object.__setattr__(self, "_lock", lock)
+        if hasattr(model, "batch"):
+            def batch(*args, **kwargs):
+                with lock:
+                    return model.batch(*args, **kwargs)
+            object.__setattr__(self, "batch", batch)
+
+    def __call__(self, *args, **kwargs):
+        with self._lock:
+            return self._model(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._model, name)
 
 
 class Capability:
@@ -95,6 +123,8 @@ class Provider:
         self.module_id = module_id
         # fn(model_path) -> bool, for path-parameterised capabilities ('box')
         self._handles = handles
+        # one call at a time into this provider's models (see the module note)
+        self._call_lock = threading.RLock()
 
     def classes(self):
         if self._classes is None:
@@ -164,17 +194,31 @@ class Provider:
             raise RuntimeError(f"{self.capability}:{self.id} has no model to run "
                                f"(its loader returned None)")
         transform = self._transform
+        lock = None if self.resource is not None else self._call_lock
 
         def run(*args, **kwargs):
-            raw = model(*args, **kwargs) if callable(model) else model
+            if lock is None:
+                raw = model(*args, **kwargs) if callable(model) else model
+            else:
+                with lock:
+                    raw = model(*args, **kwargs) if callable(model) else model
             return transform(raw, *args, **kwargs) if transform else raw
         run.model = model  # raw handle, for callers that need it
         run.provider = self
         # keep a provider's extra entry points (batch, model_path, registry_key)
-        for k in ("batch", "model_path", "registry_key"):
+        for k in ("model_path", "registry_key"):
             if hasattr(model, k):
                 setattr(run, k, getattr(model, k))
+        if hasattr(model, "batch"):
+            run.batch = model.batch if lock is None else Guarded(model, lock).batch
         return run
+
+    def guard(self, model):
+        """! @brief `model` with its calls serialized (see the module note), or as is for a
+        remote backend or no model."""
+        if model is None or self.resource is not None:
+            return model
+        return Guarded(model, self._call_lock)
 
 
 class ModelBroker:

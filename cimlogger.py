@@ -2,13 +2,18 @@
 @brief The app's loggers and the audit trail.
 
 error.log (errors from every logger), training.log, access.log (rotating),
-audit.log (rotating, one line per user action). Flask is imported lazily so
-CLI tools and workers can import this; outside a request the actor is
-'system'.
+audit.log (rotating, one line per user action), crash.log (the Python stack of
+every thread when the process dies in native code: a segfault, an abort).
+Flask is imported lazily so CLI tools and workers can import this; outside a
+request the actor is 'system'.
 """
 
 import os
+import sys
+import time
+import signal
 import functools
+import faulthandler
 import logging
 from logging.handlers import RotatingFileHandler
 
@@ -51,6 +56,46 @@ access_logger = _make('access', 'logs/access.log', backups=5)
 audit_logger = _make('audit', 'logs/audit.log', backups=20,
                      fmt=logging.Formatter('%(asctime)s %(message)s'),
                      share_errors=False)
+
+CRASH_LOG = os.path.join("logs", "crash.log")
+_crash_fh = None  # kept open: faulthandler writes to its fd when the process dies
+
+
+def enable_crash_log(path=CRASH_LOG, keep=5):
+    """! @brief On a segfault / abort / fatal signal, write every thread's Python stack
+    to `path` (SIGUSR1 dumps them too, for a hang). A previous run's dump is
+    reported at startup and kept as crash-<time>.log (the newest `keep`).
+    """
+    global _crash_fh
+    try:
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                prev = fh.read()
+            if "Fatal Python error" in prev:
+                stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(os.path.getmtime(path)))
+                kept = os.path.join(os.path.dirname(path), f"crash-{stamp}.log")
+                os.replace(path, kept)
+                old = sorted(f for f in os.listdir(os.path.dirname(path) or ".")
+                             if f.startswith("crash-") and f.endswith(".log"))
+                for f in old[:-keep]:
+                    try:
+                        os.remove(os.path.join(os.path.dirname(path), f))
+                    except OSError:
+                        pass
+                tail = prev[-4000:]
+                msg = f"the previous run crashed in native code; thread stacks in {kept}"
+                logging.getLogger("access").error(msg)
+                print(f"\n==> {msg}\n{tail}\n", file=sys.stderr, flush=True)
+        _crash_fh = open(path, "w", encoding="utf-8")
+        _crash_fh.write(f"cim pid {os.getpid()} started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        _crash_fh.flush()
+        faulthandler.enable(file=_crash_fh, all_threads=True)
+        if hasattr(signal, "SIGUSR1"):
+            faulthandler.register(signal.SIGUSR1, file=_crash_fh, all_threads=True)
+    except Exception as e:  # never stop the app over diagnostics
+        faulthandler.enable(all_threads=True)
+        print(f"crash log unavailable ({e}); fatal errors go to stderr", file=sys.stderr)
+
 
 def _current_actor():
     """! @brief The user behind the current request.
