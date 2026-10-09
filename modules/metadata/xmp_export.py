@@ -7,6 +7,7 @@ applied here. Run after write_metadata, which rewrites the whole sidecar.
 import os
 
 from . import xmp_fields as xfields
+from . import exif_export
 
 try:
     import pyexiv2
@@ -73,21 +74,26 @@ def _coerce(value, dtype, is_list):
 
 def write_xmp(filepath, patch):
     """! @brief Apply a {token: value} patch, to the sidecar when there is one, else the file.
-    @return {"success", "written", "skipped": [{token, reason}], "target"}.
+    A None value deletes the property; "" / [] are skipped.
+    @return {"success", "written", "deleted", "skipped": [{token, reason}], "target"}.
     """
     result = {"success": False, "written": [], "skipped": [], "target": None}
     if pyexiv2 is None:
         result["skipped"].append({"token": "*", "reason": "pyexiv2 unavailable"})
         return result
 
-    to_set = {}
+    to_set, to_del = {}, []
     for tok, value in (patch or {}).items():
         full = _normalize_token(tok)
         if full is None:
             result["skipped"].append({"token": tok, "reason": "unknown token"})
             continue
         dtype, is_list = _schema()[full]
-        if value is None or value == "" or value == []:
+        if value is None:
+            # None deletes the property
+            to_del.append(full)
+            continue
+        if value == "" or value == []:
             result["skipped"].append({"token": tok, "reason": "empty value"})
             continue
         to_set[full] = _coerce(value, dtype, is_list)
@@ -97,16 +103,25 @@ def write_xmp(filepath, patch):
     target = sidecar if os.path.exists(sidecar) else filepath
     result["target"] = target
 
-    if not to_set:
+    if not to_set and not to_del:
         result["success"] = True  # nothing to do
         return result
 
     try:
-        with pyexiv2.Image(target) as img:
+        if to_set:
+            with pyexiv2.Image(target) as img:
+                if target == sidecar:
+                    img.clear_exif()
+                img.modify_xmp(to_set)
+        if to_del:
             if target == sidecar:
-                img.clear_exif()
-            img.modify_xmp(to_set)
+                # cut from the packet: exiv2 would re-add an Exif-mapped property
+                exif_export._remove_xmp_properties(target, to_del)
+            else:
+                with pyexiv2.Image(target) as img:
+                    img.modify_xmp({k: None for k in to_del})
         result["written"] = list(to_set.keys())
+        result["deleted"] = list(to_del)
         result["success"] = True
     except Exception as e:
         result["skipped"].append({"token": "*", "reason": str(e)})

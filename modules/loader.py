@@ -131,6 +131,10 @@ def _pip(pkgs, logger):
     """
     logger.info("installing module deps: %s" % " ".join(pkgs))
     ok = subprocess.call([sys.executable, "-m", "pip", "install", *pkgs]) == 0
+    if not ok:
+        # sdist-only packages with an old setup.py (reverse_geocoder) fail the legacy
+        # build on current setuptools / distro pythons; the PEP 517 build works
+        ok = subprocess.call([sys.executable, "-m", "pip", "install", "--use-pep517", *pkgs]) == 0
     importlib.invalidate_caches()
     if not ok:
         logger.warning("pip install failed for: %s" % " ".join(pkgs))

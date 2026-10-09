@@ -7,11 +7,17 @@ levels over the same search / folder / album scope the grid uses:
   years   one collage card per year
   months  one collage card per month, under year headings
   days    every file, in day groups, one continuous scroll across months
-          (each month's files load as it nears the viewport) with a year rail
+          (each month's files load as it nears the viewport) with a scrubber
+          (ticks spaced by file count, drag to jump), month / day select,
+          PageUp / PageDown per month and "On this day" links (memories)
 
 When a file was taken is the first populated date bucket the core indexes, in
 this order: original (EXIF DateTimeOriginal), capture, actual, digitized,
 modified. Files with none are "Undated" and sort last.
+
+The scope is any ordinary gallery query, including the embedding module's
+about:<text> semantic filter; a ranked sem: / ~ search is refused (it has its
+own order).
 
 Routes
   GET /api/timeline/buckets?level=year|month|day&scope=YYYY[-MM]&samples=N
@@ -54,6 +60,8 @@ MAX_LIMIT = 2000
 
 
 def _is_semantic(q):
+    """! @brief A ranked semantic query (sem: / ~): it has its own order, so the timeline
+    refuses it. The about: filter is an ordinary token and passes."""
     q = (q or "").strip()
     return q.lower().startswith("sem:") or q.startswith("~")
 
@@ -83,7 +91,8 @@ def register(host):
 
     def _semantic_refused():
         return jsonify({"success": False,
-                        "error": "The timeline can't show a semantic (sem:/~) search; switch to the grid."}), 400
+                        "error": "The timeline can't show a ranked semantic search (sem:/~); use the "
+                                 "about: filter instead (about:red_car), or switch to the grid."}), 400
 
     def api_buckets():
         if _is_semantic(request.args.get("q")):

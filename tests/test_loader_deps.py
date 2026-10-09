@@ -17,13 +17,16 @@ def test_alternatives_none_installed():
     assert not loader._dep_installed(dep)
     assert loader._dep_problem(dep) == "pip dependency 'no-such-a (or no-such-b)' not installed"
 
-def _fake_pip(monkeypatch, installable):
-    """! @brief pip that "installs" only the given packages; returns the argv log."""
+def _fake_pip(monkeypatch, installable, pep517_only=()):
+    """! @brief pip that "installs" only the given packages; returns the argv log.
+    @param pep517_only  packages that only build with --use-pep517 (old setup.py sdists).
+    """
     calls, placed = [], set()
     def call(argv):
         calls.append(argv)
-        pkgs = argv[argv.index("install") + 1:]
-        if all(p in installable for p in pkgs):
+        pkgs = [a for a in argv[argv.index("install") + 1:] if a != "--use-pep517"]
+        pep517 = "--use-pep517" in argv
+        if all(p in installable and (pep517 or p not in pep517_only) for p in pkgs):
             placed.update(pkgs)
             return 0
         return 1
@@ -46,7 +49,17 @@ def test_pip_install_falls_back_to_next_alternative(monkeypatch):
     got = loader._pip_install(
         ["ai-edge-litert:ai_edge_litert|tflite-runtime:tflite_runtime|tensorflow"], loader._log)
     assert got == ["tensorflow"]
-    assert [c[-1] for c in calls] == ["ai-edge-litert", "tflite-runtime", "tensorflow"]
+    # each alternative is tried once plainly (a failed one is retried with --use-pep517)
+    assert [c[-1] for c in calls if "--use-pep517" not in c] == ["ai-edge-litert", "tflite-runtime", "tensorflow"]
+
+
+def test_pip_retries_with_pep517_build(monkeypatch):
+    """! @brief An sdist whose legacy setup.py build fails (reverse_geocoder on current
+    distro pythons) is retried with --use-pep517 and installed."""
+    calls = _fake_pip(monkeypatch, {"reverse-geocoder"}, pep517_only={"reverse-geocoder"})
+    got = loader._pip_install(["reverse-geocoder:reverse_geocoder"], loader._log)
+    assert got == ["reverse-geocoder"]
+    assert any("--use-pep517" in c for c in calls)
 
 
 def test_pip_install_one_bad_package_does_not_block_the_rest(monkeypatch):

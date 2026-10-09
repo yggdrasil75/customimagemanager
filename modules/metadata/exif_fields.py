@@ -38,6 +38,7 @@ class EXIFField:
     note: str = ""  # hint shown in the editor
     aliases: tuple = ()  # other names of this tag id (exiv2 'DateTimeDigitized' = ExifTool 'CreateDate')
     encoding: Optional[str] = None  # byte tag shown as text: "hex" (digits) or "ascii" (NUL-terminated)
+    pattern: Optional[str] = None  # regex a text value must match (offsets "+HH:MM")
 
     def __post_init__(self):
         if self.generated:
@@ -1237,18 +1238,21 @@ PHOTO_FIELDS = [
     EXIFField(0x8835, "ISOSpeedLatitudezzz",  TYPE_INT32, writable=False, note="read-only"),
     EXIFField(0x9000, "ExifVersion", TYPE_UNDEF, writable=False,
               note="EXIF version; read-only"),
-    EXIFField(0x9003, "DateTimeOriginal", TYPE_STRING, writable=False,
-              note="When the original image was taken; read-only here"),
-    EXIFField(0x9004, "CreateDate", TYPE_STRING, writable=False,
+    EXIFField(0x9003, "DateTimeOriginal", TYPE_DATE, length=19,
+              note="When the original image was taken (YYYY:MM:DD HH:MM:SS, local time); "
+                   "the Date row in the editor writes it with its offset"),
+    EXIFField(0x9004, "CreateDate", TYPE_DATE, length=19,
               aliases=("DateTimeDigitized",),
-              note="DateTimeDigitized; read-only here"),
+              note="DateTimeDigitized (YYYY:MM:DD HH:MM:SS, local time)"),
     EXIFField(0x9009, "GooglePlusUploadCode", TYPE_UNDEF, writable=False, note="read-only"),
     EXIFField(0x9010, "OffsetTime",           TYPE_STRING, writable=False,
               note="Time zone for ModifyDate; read-only"),
-    EXIFField(0x9011, "OffsetTimeOriginal",   TYPE_STRING, writable=False,
-              note="Time zone for DateTimeOriginal; read-only"),
-    EXIFField(0x9012, "OffsetTimeDigitized",  TYPE_STRING, writable=False,
-              note="Time zone for CreateDate; read-only"),
+    EXIFField(0x9011, "OffsetTimeOriginal",   TYPE_STRING, length=6,
+              pattern=r"^[+-]\d{2}:\d{2}$",
+              note="Time zone of DateTimeOriginal, +HH:MM / -HH:MM"),
+    EXIFField(0x9012, "OffsetTimeDigitized",  TYPE_STRING, length=6,
+              pattern=r"^[+-]\d{2}:\d{2}$",
+              note="Time zone of CreateDate, +HH:MM / -HH:MM"),
     EXIFField(0x9101, "ComponentsConfiguration", TYPE_UNDEF, count=4, writable=False,
               note="Component ordering (Y/Cb/Cr/R/G/B); read-only"),
 
@@ -1610,6 +1614,19 @@ PHOTO_FIELDS = [
     EXIFField(0xfe58, "PSMoireFilter",  TYPE_STRING, writable=False, note="Photoshop CameraRaw; read-only"),
 ]
 
+## @brief The GPS position tags (the location editor writes these); coordinates are
+# three rationals "deg/1 min/1 sec/100" with the hemisphere in the matching Ref tag.
+GPS_FIELDS = [
+    EXIFField(0x0001, "GPSLatitudeRef",  TYPE_STRING, values={"N": "North", "S": "South"}),
+    EXIFField(0x0002, "GPSLatitude",     TYPE_RATIONAL, count=3,
+              note="degrees minutes seconds, e.g. 37/1 46/1 1629/100"),
+    EXIFField(0x0003, "GPSLongitudeRef", TYPE_STRING, values={"E": "East", "W": "West"}),
+    EXIFField(0x0004, "GPSLongitude",    TYPE_RATIONAL, count=3,
+              note="degrees minutes seconds, e.g. 122/1 25/1 919/100"),
+    EXIFField(0x0005, "GPSAltitudeRef",  TYPE_INT8, values={0: "Above sea level", 1: "Below sea level"}),
+    EXIFField(0x0006, "GPSAltitude",     TYPE_RATIONAL, note="metres"),
+]
+
 ## @brief One EXIF group; mapped=False groups are listed but not detailed yet.
 @dataclass
 class EXIFGroup:
@@ -1643,8 +1660,9 @@ EXIF_GROUPS = [
     ),
     EXIFGroup(
         "GPSInfo", "GPS IFD",
-        "GPS position and reference fields. To be detailed next.",
-        ifd="GPS", fields=[], mapped=False,
+        "GPS position and reference fields (position and altitude; the rest are "
+        "listed as unknown tags).",
+        ifd="GPS", fields=GPS_FIELDS, mapped=True,
     ),
 ]
 

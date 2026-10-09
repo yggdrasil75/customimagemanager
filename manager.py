@@ -450,6 +450,10 @@ def _init_db():
         "ALTER TABLE albums ADD COLUMN description TEXT DEFAULT ''",
         "ALTER TABLE albums ADD COLUMN cover TEXT DEFAULT ''",
         "ALTER TABLE albums ADD COLUMN created REAL",
+        # the album's grid order: a sort token ("taken", "-added", "manual", ...; '' = path)
+        "ALTER TABLE albums ADD COLUMN sort TEXT DEFAULT ''",
+        # manual album order (sort "manual"); mirrored from the member's cim:Data album_positions
+        "ALTER TABLE album_members ADD COLUMN position INTEGER DEFAULT NULL",
         # Capture dates as YYYY-MM-DD (plus *_epoch), resolved by _resolve_dates from
         # every date field in EXIF / IPTC / XMP and the file times, bucketed by the
         # field name: d_actual (plain date), d_original, d_capture, d_digitized (also
@@ -994,13 +998,17 @@ def _date_clause(cols: tuple, op: str | None, literal: str) -> tuple[str, list]:
     ors = " OR ".join(f"({c} IS NOT NULL AND {c} {cmp} ?)" for c in cols)
     return f"({ors})", [bound] * len(cols)
 
+## @brief One search token: a run of non-space text in which a "double-quoted" part
+# may hold spaces (location:"north carolina").
+_SEARCH_TOKEN_RE = re.compile(r'(?:[^\s"]+|"[^"]*"?)+')
+
 def _parse_search(search: str) -> tuple[str, list, list, list]:
     """! @brief Split structured tokens (width:, is:, date:, sort:, module tokens, ...)
-    from free text.
+    from free text. A token may quote a value with spaces: key:"a b".
     @return (free_text, where_clauses, params, structured).
     """
     text, where, params, structured = [], [], [], []
-    for tok in search.split():
+    for tok in _SEARCH_TOKEN_RE.findall(search or ""):
         m = _FILTER_RE.match(tok)
         if m:
             col, opx, val = m.group(1).lower(), m.group(2), int(m.group(3))
@@ -1075,11 +1083,15 @@ def _parse_search(search: str) -> tuple[str, list, list, list]:
             text.append(tok)
     return ' '.join(text).strip(), where, params, structured
 
-def _files_where(search: str, folder: str = '', album: str = ''):
+def _files_where(search: str, folder: str = '', album: str = '', recursive: bool | None = None):
     """! @brief The WHERE for a gallery query (tokens, gallery filters, access policies,
     album, folder, free text).
+    @param recursive  the folder scope includes subfolders; None = the request's
+                      `recursive=1` (so module routes forwarding it follow too).
     @return (where_sql, params, text, structured).
     """
+    if recursive is None:
+        recursive = _recursive_arg()
     text, where, params, structured = _parse_search(search)
     clauses, p = list(where), list(params)
     # modules hide container members (a comic's pages) from the flat gallery
@@ -1091,7 +1103,7 @@ def _files_where(search: str, folder: str = '', album: str = ''):
         clauses.append(
             "rel_path IN (SELECT rel_path FROM album_members WHERE album=?)")
         p.append(album)
-    fclauses, fp = _folder_scope_clause("rel_path", folder)
+    fclauses, fp = _folder_scope_clause("rel_path", folder, recursive)
     clauses += fclauses
     p += fp
     if text:
@@ -1113,6 +1125,10 @@ def _query_files(search: str, offset: int, limit: int,
     # sort tokens order images; search providers only get the filters
     filters = [s for s in structured if s[0] != "sort"]
     order = ", ".join(f"{s[1]} {'DESC' if s[2] else 'ASC'}" for s in structured if s[0] == "sort")
+    order_p = []
+    if album and not order:
+        # an open album uses its own sort unless the search names one
+        order, order_p = _album_order(album)
     order_sql = f"{order}, rel_path" if order else "rel_path"
     comic_entries = []
     if not album and 'module_host' in globals():
@@ -1136,7 +1152,7 @@ def _query_files(search: str, offset: int, limit: int,
         rows = _db().execute(
             f"SELECT rel_path, tags, description, width, height "
             f"FROM files{where_sql} "
-            f"ORDER BY {order_sql} LIMIT ? OFFSET ?", (*p, need, file_offset)).fetchall()
+            f"ORDER BY {order_sql} LIMIT ? OFFSET ?", (*p, *order_p, need, file_offset)).fetchall()
         batch = []
         for r in rows:
             batch.append({"kind": "image", "filename": r["rel_path"],
@@ -1182,6 +1198,9 @@ def read_jxl(path: str) -> np.ndarray | None:
         if mtime == 0.0 and not os.path.exists(path):
             access_logger.warning(f"read_jxl: file missing: {path}")
             return None
+        if path.lower().endswith(".jxl"):
+            # a JXL's Orientation lives in its sidecar: a rotate changes only that
+            mtime = max(mtime, _getmtime_loose(os.path.splitext(path)[0] + ".xmp"))
         return _decode_cached(path, mtime)
     except OSError:
         access_logger.warning(f"read_jxl: file missing: {path}")
@@ -1236,10 +1255,65 @@ def _decode_jxl_uncached(path: str) -> np.ndarray | None:
                 img = img[:, :, 0]  # (h, w, 1) or gray + alpha -> (h, w)
             elif c > 4:
                 img = img[:, :, :4]  # at most RGBA
+        if is_bare or is_container:
+            # libjxl applied the codestream's own orientation; the sidecar's turns it further
+            img = common.orient_array(img, _jxl_orientation(path))
         return img
     except Exception as e:
         access_logger.warning(f"read_jxl: {path}: {e}")
         return None
+
+
+def _jxl_orientation(path: str) -> int:
+    """! @brief The EXIF Orientation a JXL's sidecar adds (tiff:Orientation), 1 when none."""
+    side = os.path.splitext(path)[0] + ".xmp"
+    if not os.path.exists(side):
+        return 1
+    try:
+        vals, src, _xml = xmp_import.resolve_xmp(path)
+    except Exception:
+        return 1
+    if not (src and src.lower().endswith(".xmp")):
+        return 1
+    return common.norm_orientation((vals or {}).get("Xmp.tiff.Orientation"))
+
+
+def _image_adjust(path: str) -> dict:
+    """! @brief A still's non-destructive adjustments, read from its metadata.
+    @return {"orientation": the EXIF Orientation the decode applies (for a JXL the
+            sidecar's, on top of the codestream's own; else the file's EXIF),
+            "crop": {left, top, right, bottom} of the displayed frame (0..1) or None,
+            "crop_raw": the stored crs: crop of the unrotated frame, "angle"}.
+    The crop is Camera Raw's crs:HasCrop / CropTop / CropLeft / CropBottom / CropRight,
+    normalised to the frame before orientation (Adobe semantics).
+    """
+    out = {"orientation": 1, "crop": None, "crop_raw": None, "angle": 0.0}
+    try:
+        vals, src, _xml = xmp_import.resolve_xmp(path)
+    except Exception:
+        vals, src = {}, None
+    vals = vals or {}
+    if path.lower().endswith(".jxl"):
+        if src and src.lower().endswith(".xmp"):
+            out["orientation"] = common.norm_orientation(vals.get("Xmp.tiff.Orientation"))
+    elif mt.kind(path) == "image":
+        try:
+            with Image.open(path) as im:
+                out["orientation"] = common.norm_orientation(im.getexif().get(0x0112))
+        except Exception:
+            pass
+    if str(vals.get("Xmp.crs.HasCrop", "")).strip().lower() in ("true", "1"):
+        try:
+            raw = {"left": float(vals["Xmp.crs.CropLeft"]), "top": float(vals["Xmp.crs.CropTop"]),
+                   "right": float(vals["Xmp.crs.CropRight"]),
+                   "bottom": float(vals["Xmp.crs.CropBottom"])}
+            out["crop_raw"] = common.clean_crop(raw)
+            out["angle"] = float(vals.get("Xmp.crs.CropAngle") or 0.0)
+        except (KeyError, TypeError, ValueError):
+            pass
+    if out["crop_raw"]:
+        out["crop"] = common.orient_rect(out["orientation"], out["crop_raw"])
+    return out
 
 def _cvt_channels(img: np.ndarray, from3, from4, gray_code=None) -> np.ndarray:
     """! @brief Convert a decoded image to a colour space by its channel count.
@@ -2410,14 +2484,18 @@ def _sync_album_cache(rel_path: str, albums: list) -> None:
     db = _db()
     db.execute("UPDATE files SET albums=? WHERE rel_path=?",
                (json.dumps(names), rel_path))
+    # a re-index keeps when the file joined each album and its manual position
+    prev = {r["album"]: (r["added"], r["position"]) for r in db.execute(
+        "SELECT album, added, position FROM album_members WHERE rel_path=?", (rel_path,))}
     db.execute("DELETE FROM album_members WHERE rel_path=?", (rel_path,))
     now = time.time()
     for n in names:
         if db.execute("INSERT OR IGNORE INTO albums(name, description, cover, created) "
                       "VALUES (?,'','',?)", (n, now)).rowcount and 'module_host' in globals():
             module_host.album_event("created", name=n, rel_path=rel_path)
-        db.execute("INSERT OR IGNORE INTO album_members(album, rel_path, added) "
-                   "VALUES (?,?,?)", (n, rel_path, now))
+        added, pos = prev.get(n, (now, None))
+        db.execute("INSERT OR IGNORE INTO album_members(album, rel_path, added, position) "
+                   "VALUES (?,?,?,?)", (n, rel_path, added or now, pos))
 
 def _file_albums(rel_path: str) -> list:
     """! @brief One file's album names from the cache, or []."""
@@ -2455,27 +2533,200 @@ def _album_add(rel_paths: list, album: str) -> int:
     album = str(album).strip()
     if not album:
         return 0
+    old_cover = _album_cover(album)
     n = _album_apply(rel_paths, lambda cur: cur if album in cur else cur + [album])
     cur = _db().execute("INSERT OR IGNORE INTO albums(name, description, cover, created) "
                         "VALUES (?,'','',?)", (album, time.time()))
     _db().commit()
     if cur.rowcount:
         module_host.album_event("created", name=album)
+    if n and _album_cover(album) != old_cover:
+        _album_mirror(album, old_cover=old_cover)
     return n
 
 def _album_remove(rel_paths: list, album: str) -> int:
     """! @brief Remove files from an album. @return how many changed."""
     album = str(album).strip()
+    old_cover = _album_cover(album)
     n = _album_apply(rel_paths, lambda cur: [a for a in cur if a != album])
     _db().commit()
+    if n and _album_cover(album) != old_cover:
+        _album_mirror(album, old_cover=old_cover)
     return n
+
+# -- album-level data (description, sort, cover) lives in the albums table and is
+# mirrored into the cover file's cim:Data "album" entry, so a rebuilt DB gets it
+# back on a library.sync pull; manual positions go to each member's
+# cim:Data "album_positions" {album: n} --
+
+## @brief Album sort tokens: an optional "-" (descending) and a key.
+_ALBUM_SORT_RE = re.compile(r"^-?[a-z_]+$")
+## @brief Album-only sort keys (the rest are the search's sort: keys).
+_ALBUM_SORT_KEYS = ("added", "manual")
+
+def _album_sort_clean(token) -> str:
+    """! @brief Validate an album sort token.
+    @return the token ('' = default order).
+    @throws ValueError for an unknown key.
+    """
+    tok = str(token or "").strip().lower()
+    if not tok:
+        return ""
+    if not _ALBUM_SORT_RE.match(tok):
+        raise ValueError(f"bad sort {token!r}")
+    key = tok.lstrip("-")
+    if key == "manual":
+        return "manual"
+    if key in _ALBUM_SORT_KEYS or key in getattr(module_host, "sort_keys", {}):
+        return tok
+    raise ValueError(f"unknown sort key {key!r}")
+
+def _album_order(album: str, sort=None) -> tuple:
+    """! @brief The ORDER BY an album's sort token gives a query over files.
+    @param sort  the token; None reads it from the albums table.
+    @return (order_sql, params); ('', []) for the default order.
+    """
+    if sort is None:
+        row = _db().execute("SELECT sort FROM albums WHERE name=?", (album,)).fetchone()
+        sort = (row["sort"] if row else "") or ""
+    if not sort:
+        return "", []
+    desc = sort.startswith("-")
+    key = sort.lstrip("-")
+    w = "m.album=? AND m.rel_path=files.rel_path"
+    if key == "added":
+        return f"(SELECT m.added FROM album_members m WHERE {w}) {'DESC' if desc else 'ASC'}", [album]
+    if key == "manual":
+        # positioned members first, then the rest in the order they joined
+        return (f"(SELECT m.position IS NULL FROM album_members m WHERE {w}) ASC, "
+                f"(SELECT m.position FROM album_members m WHERE {w}) ASC, "
+                f"(SELECT m.added FROM album_members m WHERE {w}) ASC"), [album] * 3
+    st = [s for s in _parse_search("sort:" + sort)[3] if s[0] == "sort"]
+    return ", ".join(f"{s[1]} {'DESC' if s[2] else 'ASC'}" for s in st), []
+
+def _album_cover(name: str, cover=None) -> str:
+    """! @brief An album's effective cover: the chosen one while it is a member, else the
+    first member by path ('' for an empty album).
+    @param cover  the albums.cover value when the caller has it.
+    """
+    db = _db()
+    if cover is None:
+        row = db.execute("SELECT cover FROM albums WHERE name=?", (name,)).fetchone()
+        cover = (row["cover"] if row else "") or ""
+    if cover and db.execute("SELECT 1 FROM album_members WHERE album=? AND rel_path=?",
+                            (name, cover)).fetchone():
+        return cover
+    first = db.execute("SELECT rel_path FROM album_members WHERE album=? "
+                       "ORDER BY rel_path LIMIT 1", (name,)).fetchone()
+    return first["rel_path"] if first else ""
+
+def _album_entries(value) -> list:
+    """! @brief The album entries of a file's cim:Data "album" value (a dict, or a list
+    when the file is the cover of several albums)."""
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [e for e in value if isinstance(e, dict)]
+    return []
+
+def _album_put_entry(rel: str, name: str, entry, drop=()) -> None:
+    """! @brief Replace (entry None: remove) album `name`'s entry in a file's cim:Data,
+    also dropping entries named in `drop`; writes only on a change."""
+    cur = _album_entries(file_data(rel, "album"))
+    keep = [e for e in cur if e.get("name") != name and e.get("name") not in drop]
+    if entry:
+        keep.append(entry)
+    if keep == cur:
+        return
+    set_file_data(rel, "album", None if not keep else keep[0] if len(keep) == 1 else keep)
+
+def _album_mirror(name: str, old_cover: str = "", old_name: str = "") -> None:
+    """! @brief Mirror an album's description / sort / cover choice into its cover file.
+    @param old_cover  the previous carrier, cleared when the cover moved.
+    @param old_name   the album's previous name (rename), cleared too.
+    Failures are logged: the DB keeps the value either way.
+    """
+    try:
+        row = _db().execute("SELECT description, sort, cover FROM albums WHERE name=?",
+                            (name,)).fetchone()
+        cover = _album_cover(name, row["cover"] if row else "")
+        drop = (old_name,) if old_name else ()
+        if old_cover and old_cover != cover:
+            _album_put_entry(old_cover, name, None, drop)
+        if not cover or not row:
+            return
+        entry = None
+        if row["description"] or row["sort"] or row["cover"]:
+            entry = {"name": name, "description": row["description"] or "",
+                     "sort": row["sort"] or "", "cover": row["cover"] == cover}
+        _album_put_entry(cover, name, entry, drop)
+    except Exception as e:
+        access_logger.warning(f"album mirror {name!r}: {e}")
+
+def _album_set_position(rel: str, album: str, pos) -> None:
+    """! @brief Store a member's manual position (DB and its cim:Data album_positions)."""
+    _db().execute("UPDATE album_members SET position=? WHERE album=? AND rel_path=?",
+                  (pos, album, rel))
+    try:
+        cur = file_data(rel, "album_positions")
+        cur = dict(cur) if isinstance(cur, dict) else {}
+        if pos is None:
+            cur.pop(album, None)
+        else:
+            cur[album] = pos
+        set_file_data(rel, "album_positions", cur or None)
+    except Exception as e:
+        access_logger.warning(f"album position {album!r} {rel}: {e}")
+
+def _album_restore(direction=None, rel_paths=None, **_kw) -> None:
+    """! @brief library.sync pull: fill album description / sort / cover and manual
+    positions the DB lacks from the members' cim:Data (the first member carrying an
+    album's entry wins). Values already in the DB are kept."""
+    if direction != "pull":
+        return
+    db = _db()
+    rels = [r["rel_path"] for r in db.execute(
+        "SELECT DISTINCT rel_path FROM album_members ORDER BY rel_path")]
+    if rel_paths is not None:
+        want = set(rel_paths)
+        rels = [r for r in rels if r in want]
+    seen = set()
+    for rel in rels:
+        fd = file_data(rel) or {}
+        if not fd.get("album") and not fd.get("album_positions"):
+            continue
+        member_of = set(_file_albums(rel))
+        for e in _album_entries(fd.get("album")):
+            n = e.get("name")
+            if n not in member_of or n in seen:
+                continue
+            seen.add(n)
+            db.execute("INSERT OR IGNORE INTO albums(name, description, cover, created) "
+                       "VALUES (?,'','',?)", (n, time.time()))
+            try:
+                sort = _album_sort_clean(e.get("sort"))
+            except ValueError:
+                sort = ""
+            db.execute("UPDATE albums SET "
+                       "description=CASE WHEN COALESCE(description,'')='' THEN ? ELSE description END, "
+                       "sort=CASE WHEN COALESCE(sort,'')='' THEN ? ELSE sort END, "
+                       "cover=CASE WHEN COALESCE(cover,'')='' THEN ? ELSE cover END "
+                       "WHERE name=?",
+                       (str(e.get("description") or ""), sort,
+                        rel if e.get("cover") else "", n))
+        pos = fd.get("album_positions")
+        for n, p in (pos.items() if isinstance(pos, dict) else ()):
+            if n in member_of and isinstance(p, int):
+                db.execute("UPDATE album_members SET position=? WHERE album=? AND rel_path=? "
+                           "AND position IS NULL", (p, n, rel))
+    db.commit()
 
 def _album_list() -> list:
     """! @brief Every album with its count and cover (the first member when unset or stale)."""
     vclauses, vp = module_host.albums_clause("a")
     where = (" WHERE " + " AND ".join(vclauses)) if vclauses else ""
     rows = _db().execute(f"""
-        SELECT a.name, a.description, a.cover, a.created,
+        SELECT a.name, a.description, a.cover, a.created, a.sort,
                COUNT(m.rel_path) AS n
         FROM albums a
         LEFT JOIN album_members m ON m.album = a.name
@@ -2485,20 +2736,10 @@ def _album_list() -> list:
     """, vp).fetchall()
     out = []
     for r in rows:
-        cover = r["cover"] or ""
-        if cover:
-            ok = _db().execute(
-                "SELECT 1 FROM album_members WHERE album=? AND rel_path=?",
-                (r["name"], cover)).fetchone()
-            if not ok:
-                cover = ""
-        if not cover:
-            first = _db().execute(
-                "SELECT rel_path FROM album_members WHERE album=? "
-                "ORDER BY rel_path LIMIT 1", (r["name"],)).fetchone()
-            cover = first["rel_path"] if first else ""
+        cover = _album_cover(r["name"], r["cover"] or "")
         out.append({"name": r["name"], "description": r["description"] or "",
                     "cover": cover, "count": r["n"], "created": r["created"],
+                    "sort": r["sort"] or "",
                     **module_host.album_info(r["name"])})
     return out
 
@@ -3163,6 +3404,10 @@ def _thumb_drop(rel_path: str) -> None:
     except Exception:
         pass
     _thumb_lru_drop(rel_path)
+    # the full-size JPEG of a still (a rotate / crop changes it, maybe only in the sidecar)
+    with _FULLJPG_LRU_LOCK:
+        for key in [k for k in _FULLJPG_LRU if k[0] in (rel_path, rel_path + "#crop")]:
+            _FULLJPG_LRU.pop(key, None)
 
 def _thumb_from_array(img) -> bytes | None:
     """! @brief An image array as a thumbnail JPEG (long side 400 px), or None."""
@@ -3178,8 +3423,12 @@ def _thumb_from_array(img) -> bytes | None:
     return buf.tobytes() if ok else None
 
 def _make_thumb_bytes(abs_path: str) -> bytes | None:
-    """! @brief Decode a file and return its thumbnail JPEG."""
-    return _thumb_from_array(read_jxl(abs_path))
+    """! @brief Decode a file and return its thumbnail JPEG (oriented, and cropped
+    to its crs: crop when it has one)."""
+    img = read_jxl(abs_path)
+    if img is not None and mt.kind(abs_path) == "image":
+        img = common.crop_array(img, _image_adjust(abs_path)["crop"])
+    return _thumb_from_array(img)
 
 def serve_thumb(rel_path: str, abs_path: str, mtime: float | None = None):
     """! @brief A thumbnail response (LRU, cache, then generated); the file itself or 404 when none can be made."""
@@ -3423,16 +3672,54 @@ def _fold_background(insts, person_regions, out):
             reg["mask_svg"] = inst["mask_svg"]
         (person_regions if reg["class_name"] == "person" else out).append(reg)
 
-def _folder_scope_clause(column: str, folder: str) -> tuple[list, list]:
+def _folder_scope_clause(column: str, folder: str, recursive: bool = False) -> tuple[list, list]:
     """! @brief SQL limiting `column` to the direct children of a folder ('/' = top level).
+    @param recursive  also every subfolder's files ('/' then means everything).
     @return (clauses, params).
     """
     if folder == '/':
-        return [f"{column} NOT LIKE '%/%'"], []
+        return ([], []) if recursive else ([f"{column} NOT LIKE '%/%'"], [])
     if folder:
         f = folder.strip('/').replace('\\', '/')
+        if recursive:
+            return [f"{column} LIKE ?"], [f + '/%']
         return [f"({column} LIKE ? AND {column} NOT LIKE ?)"], [f + '/%', f + '/%/%']
     return [], []
+
+def _recursive_arg() -> bool:
+    """! @brief The request's `recursive=1` (folder scope includes subfolders); False outside a request."""
+    if not has_request_context():
+        return False
+    return request.args.get("recursive", "").strip().lower() in ("1", "true", "yes", "on")
+
+def _folder_tree(counts: dict) -> dict:
+    """! @brief Nest {folder_path: direct_count} into a tree.
+    @param counts  '/' holds the top-level files' count.
+    @return root {name: '', path: '', count, total, children}; every node has
+            name, path ('a/b'), count (direct files), total (recursive) and children
+            sorted by name. Folders with no direct files still appear (count 0).
+    """
+    root = {"name": "", "path": "", "count": counts.get('/', 0), "total": 0, "children": []}
+    index = {"": root}
+    for path in sorted(p for p in counts if p != '/'):
+        parent = root
+        parts = path.split('/')
+        for i in range(len(parts)):
+            sub = '/'.join(parts[:i + 1])
+            node = index.get(sub)
+            if node is None:
+                node = {"name": parts[i], "path": sub, "count": 0, "total": 0, "children": []}
+                index[sub] = node
+                parent["children"].append(node)
+            parent = node
+        parent["count"] = counts[path]
+
+    def _total(node):
+        node["children"].sort(key=lambda n: n["name"].lower())
+        node["total"] = node["count"] + sum(_total(c) for c in node["children"])
+        return node["total"]
+    _total(root)
+    return root
 
 # -- routes --
 # Polled endpoints don't count as activity, or an open tab would keep the
@@ -3980,6 +4267,8 @@ def api_folders():
         folder = rp.rsplit('/', 1)[0] if '/' in rp else '/'
         counts[folder] = counts.get(folder, 0) + 1
     folders = [{"path": k, "count": v} for k, v in sorted(counts.items())]
+    if request.args.get("tree", "") in ("1", "true", "yes"):
+        return jsonify({"success": True, "folders": folders, "tree": _folder_tree(counts)})
     return jsonify({"success": True, "folders": folders})
 
 @app.route("/api/list")
@@ -3990,7 +4279,8 @@ def api_list():
     album  = request.args.get("album","").strip()
     page   = max(0, int(request.args.get("page",0)))
 
-    # "sem:" or "~" ranks by text-to-image embedding similarity instead of keywords.
+    # "sem:" or "~" ranks by text-to-image embedding similarity instead of keywords;
+    # the embedding module's about: token is the same match as a filter (no ranking).
     sem = None
     if search.lower().startswith("sem:"):
         sem = search[4:].strip()
@@ -4016,7 +4306,8 @@ def api_list_all():
     """! @brief Every image rel_path a gallery query matches, unpaged (bulk "select all")."""
     search = request.args.get("q", "").strip()
     if search.lower().startswith("sem:") or search.startswith("~"):
-        return jsonify({"success": False, "error": "Select-all is not available for semantic search."})
+        return jsonify({"success": False, "error": "Select-all is not available for a ranked semantic "
+                        "search (sem:/~); switch it to a filter (about:) to select every match."})
     where_sql, p, _, _ = _files_where(search, request.args.get("folder", "").strip(),
                                       request.args.get("album", "").strip())
     rows = _db().execute(f"SELECT rel_path FROM files{where_sql} ORDER BY rel_path", p).fetchall()
@@ -4090,12 +4381,17 @@ def api_album_create():
     exists = _db().execute("SELECT 1 FROM albums WHERE name=?", (name,)).fetchone()
     if exists:
         return jsonify({"success": False, "error": "An album with that name already exists."}), 409
-    _db().execute("INSERT INTO albums(name, description, cover, created) VALUES (?,?,?,?)",
-                  (name, str(d.get("description", "")), "", time.time()))
+    try:
+        sort = _album_sort_clean(d.get("sort"))
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    _db().execute("INSERT INTO albums(name, description, cover, created, sort) VALUES (?,?,?,?,?)",
+                  (name, str(d.get("description", "") or "").strip(), "", time.time(), sort))
     _db().commit()
     module_host.album_event("created", name=name)
     files = d.get("files") or []
     added = _album_add(files, name) if files else 0
+    _album_mirror(name)
     return jsonify({"success": True, "name": name, "added": added})
 
 @app.route("/api/albums/delete", methods=["POST"])
@@ -4110,7 +4406,13 @@ def api_album_delete():
         return jsonify({"success": False, "error": "Only the album owner can delete it."}), 403
     members = [r["rel_path"] for r in _db().execute(
         "SELECT rel_path FROM album_members WHERE album=?", (name,)).fetchall()]
+    cover = _album_cover(name)
     _album_remove(members, name)
+    if cover:
+        try:
+            _album_put_entry(cover, name, None)
+        except Exception as e:
+            access_logger.warning(f"album mirror clear {name!r}: {e}")
     _db().execute("DELETE FROM album_members WHERE album=?", (name,))
     _db().execute("DELETE FROM albums WHERE name=?", (name,))
     _db().commit()
@@ -4134,6 +4436,10 @@ def api_album_rename():
         return jsonify({"success": False, "error": "An album with that name already exists."}), 409
     members = [r["rel_path"] for r in _db().execute(
         "SELECT rel_path FROM album_members WHERE album=?", (old,)).fetchall()]
+    # when each member joined and its manual position carry over to the new name
+    kept = {r["rel_path"]: (r["added"], r["position"]) for r in _db().execute(
+        "SELECT rel_path, added, position FROM album_members WHERE album=?", (old,))}
+    old_cover = _album_cover(old)
     # keep each member's album order
     changed = 0
     for rp in members:
@@ -4141,15 +4447,31 @@ def api_album_rename():
         nxt = [new if a == old else a for a in cur]
         if _set_file_albums(rp, nxt):
             changed += 1
-    row = _db().execute("SELECT description, cover, created FROM albums WHERE name=?",
+    row = _db().execute("SELECT description, cover, created, sort FROM albums WHERE name=?",
                         (old,)).fetchone()
     if row:
-        _db().execute("INSERT OR IGNORE INTO albums(name, description, cover, created) "
-                      "VALUES (?,?,?,?)",
-                      (new, row["description"], row["cover"], row["created"]))
+        # re-tagging the members already made a blank row for the new name
+        _db().execute("INSERT INTO albums(name, description, cover, created, sort) "
+                      "VALUES (?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
+                      "description=excluded.description, cover=excluded.cover, "
+                      "created=excluded.created, sort=excluded.sort",
+                      (new, row["description"], row["cover"], row["created"], row["sort"]))
     _db().execute("DELETE FROM albums WHERE name=?", (old,))
     _db().execute("DELETE FROM album_members WHERE album=?", (old,))
+    for rp, (added, pos) in kept.items():
+        _db().execute("UPDATE album_members SET added=?, position=? WHERE album=? AND rel_path=?",
+                      (added, pos, new, rp))
     _db().commit()
+    for rp, (_added, pos) in kept.items():
+        if pos is not None:
+            try:
+                cur = dict(file_data(rp, "album_positions") or {})
+                cur.pop(old, None)
+                cur[new] = pos
+                set_file_data(rp, "album_positions", cur)
+            except Exception as e:
+                access_logger.warning(f"album position rename {rp}: {e}")
+    _album_mirror(new, old_cover=old_cover, old_name=old)
     module_host.album_event("renamed", old=old, new=new)
     return jsonify({"success": True, "changed": changed})
 
@@ -4190,9 +4512,90 @@ def api_album_set_cover():
         return jsonify({"success": False, "error": "Album name required."}), 400
     if module_host.album_level(name) not in ("owner", "write"):
         return jsonify({"success": False, "error": "You cannot edit this album."}), 403
+    old_cover = _album_cover(name)
     _db().execute("UPDATE albums SET cover=? WHERE name=?", (cover, name))
     _db().commit()
+    _album_mirror(name, old_cover=old_cover)
     return jsonify({"success": True})
+
+def _album_edit_target(d):
+    """! @brief The album an edit route names, after the existence and level checks.
+    @return (name, None) or (None, error response).
+    """
+    name = str(d.get("album", "")).strip()
+    if not name:
+        return None, (jsonify({"success": False, "error": "Album name required."}), 400)
+    if not _db().execute("SELECT 1 FROM albums WHERE name=?", (name,)).fetchone():
+        return None, (jsonify({"success": False, "error": "No such album."}), 404)
+    if module_host.album_level(name) not in ("owner", "write"):
+        return None, (jsonify({"success": False, "error": "You cannot edit this album."}), 403)
+    return name, None
+
+@app.route("/api/albums/describe", methods=["POST"])
+@_auth.require_feature("tab.albums", level="write", action='album_describe', fields=('album',))
+def api_album_describe():
+    """! @brief Set an album's description {album, description} (mirrored into its cover file)."""
+    d = request.json or {}
+    name, err = _album_edit_target(d)
+    if err:
+        return err
+    desc = str(d.get("description", "") or "").strip()
+    _db().execute("UPDATE albums SET description=? WHERE name=?", (desc, name))
+    _db().commit()
+    _album_mirror(name)
+    return jsonify({"success": True, "description": desc})
+
+@app.route("/api/albums/sort", methods=["POST"])
+@_auth.require_feature("tab.albums", level="write", action='album_sort', fields=('album', 'sort'))
+def api_album_sort():
+    """! @brief Set an album's grid order {album, sort} (a sort token, '' = by path)."""
+    d = request.json or {}
+    name, err = _album_edit_target(d)
+    if err:
+        return err
+    try:
+        sort = _album_sort_clean(d.get("sort"))
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    _db().execute("UPDATE albums SET sort=? WHERE name=?", (sort, name))
+    _db().commit()
+    _album_mirror(name)
+    return jsonify({"success": True, "sort": sort})
+
+@app.route("/api/albums/order", methods=["POST"])
+@_auth.require_feature("tab.albums", level="write", action='album_order', fields=('album',))
+def api_album_order():
+    """! @brief Reorder album members by hand {album, rel_paths}: the listed members take
+    the slots they already hold in the album's current order, in the order given
+    (so one page of the grid can be reordered alone). The album's sort becomes "manual".
+    """
+    d = request.json or {}
+    name, err = _album_edit_target(d)
+    if err:
+        return err
+    order, op = _album_order(name)
+    members = [r["rel_path"] for r in _db().execute(
+        "SELECT m0.rel_path FROM album_members m0 JOIN files ON files.rel_path=m0.rel_path "
+        f"WHERE m0.album=? ORDER BY {order + ', ' if order else ''}files.rel_path",
+        (name, *op))]
+    index = {r: i for i, r in enumerate(members)}
+    rels = [r for r in dict.fromkeys(str(x) for x in (d.get("rel_paths") or [])) if r in index]
+    if not rels:
+        return jsonify({"success": False, "error": "No album members given."}), 400
+    new = list(members)
+    for slot, rp in zip(sorted(index[r] for r in rels), rels):
+        new[slot] = rp
+    cur = {r["rel_path"]: r["position"] for r in _db().execute(
+        "SELECT rel_path, position FROM album_members WHERE album=?", (name,))}
+    moved = 0
+    for i, rp in enumerate(new):
+        if cur.get(rp) != i:
+            _album_set_position(rp, name, i)
+            moved += 1
+    _db().execute("UPDATE albums SET sort='manual' WHERE name=?", (name,))
+    _db().commit()
+    _album_mirror(name)
+    return jsonify({"success": True, "moved": moved, "sort": "manual"})
 
 @app.route("/api/albums/of", methods=["POST"])
 @_auth.require_feature("tab.albums")
@@ -5240,11 +5643,14 @@ def _fulljpg_lru_put(rel_path: str, mtime: float, data: bytes) -> None:
         while len(_FULLJPG_LRU) > _FULLJPG_LRU_MAX:
             _FULLJPG_LRU.popitem(last=False)
 
-def _full_jpeg_bytes(abs_path: str) -> bytes | None:
-    """! @brief A still image as full-resolution JPEG bytes."""
+def _full_jpeg_bytes(abs_path: str, crop=None) -> bytes | None:
+    """! @brief A still image as full-resolution JPEG bytes (oriented).
+    @param crop  a {left, top, right, bottom} crop of the displayed frame to apply.
+    """
     img = read_jxl(abs_path)
     if img is None:
         return None
+    img = common.crop_array(img, crop)
     bgr = _to_bgr(img)
     ok, buf = cv2.imencode('.jpg', bgr,
                            [cv2.IMWRITE_JPEG_PROGRESSIVE, 1,
@@ -5265,15 +5671,21 @@ def api_file(filename):
     if os.path.exists(fp):
         # stills the browser can't show (JXL, HEIC) go out as JPEG
         _ext = os.path.splitext(fp)[1].lower()
-        if (mt.kind(fp) == 'image' and _ext not in mt.SAFE_EXTS['image']
-                and not (_ext == '.jxl' and _client_supports_jxl())
+        _still = mt.kind(fp) == 'image'
+        # ?crop=1: the still cropped to its crs: crop (the viewer itself loads the whole frame)
+        _crop = (_image_adjust(fp)["crop"]
+                 if _still and request.args.get("crop") in ("1", "true") else None)
+        # a JXL turned by its sidecar's Orientation: the browser would show it unturned
+        _raw_jxl_ok = (_ext == '.jxl' and _client_supports_jxl() and _jxl_orientation(fp) == 1)
+        if (_still and (_crop or (_ext not in mt.SAFE_EXTS['image'] and not _raw_jxl_ok))
                 and 'Range' not in request.headers):
             mtime = _getmtime_loose(fp)
-            data = _fulljpg_lru_get(filename, mtime)
+            _key = filename + ("#crop" if _crop else "")
+            data = _fulljpg_lru_get(_key, mtime)
             if data is None:
-                data = _full_jpeg_bytes(fp)
+                data = _full_jpeg_bytes(fp, crop=_crop)
                 if data is not None:
-                    _fulljpg_lru_put(filename, mtime, data)
+                    _fulljpg_lru_put(_key, mtime, data)
             if data is not None:
                 return send_file(io.BytesIO(data), mimetype='image/jpeg')
             # decode failed: serve the file as is
@@ -5696,6 +6108,9 @@ def api_metadata():
         meta = _meta_cache_get(fn, mt_)
         if meta is None:
             meta = _fast_metadata(fn, fp)
+            if mt.kind(fp) == "image":
+                # orientation and the crs: crop, for the viewer to show the crop
+                meta["adjust"] = _image_adjust(fp)
             _meta_cache_put(fn, mt_, meta)
         meta = dict(meta)  # per-request copy: enricher fields must not touch the cached dict
         # rating fields come from the rating module's enricher (absent when it is off)
@@ -6664,6 +7079,7 @@ _core_api = SimpleNamespace(
     user_setting=lambda key, username=None: _user_setting(key, username),
     file_data=file_data, set_file_data=set_file_data,
     start_sync=start_sync, sync_status=sync_status,
+    image_adjust=_image_adjust, jxl_orientation=_jxl_orientation,
 )
 
 module_host = modules.host.Host(
@@ -6726,7 +7142,8 @@ for _t, _k in (
         # entries exist only here
         ("file_history", "state"),
         # membership is mirrored (mwg-coll:Collections), but album description,
-        # cover and created exist only in the DB
+        # cover, sort and created live in the DB (description / sort / cover are
+        # mirrored into the cover file's cim:Data "album" entry for a rebuild)
         ("albums", "state"),
         ("album_members", "mirrored"),
         ("raws", "state"),                  # the hidden raw store's index
@@ -6735,6 +7152,8 @@ for _t, _k in (
     module_host.declare_table(_t, _k)
 for _t in ("auth_users", "auth_groups", "auth_sessions"):
     module_host.declare_table(_t, "state", module_id="auth")
+# album description / sort / cover and manual positions come back from the files on a pull
+module_host.on("library.sync", _album_restore)
 modules.config.declare("search_quick_filters", default=state["search_quick_filters"],
                        validate=_clean_quick_filters, owner="core")
 _QF_COLUMNS = [{"key": "label", "label": "Label", "placeholder": "Untagged"},

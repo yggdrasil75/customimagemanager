@@ -19,6 +19,14 @@ Core touchpoints are events and one service:
                                   file as Xmp.cim.Data "people":
                                   {"rejects": [{cx,cy,w,h}], "unknown": [...]}
   search "person:<cluster>"       -> photos of that person (face + body bridge)
+  search "person:fav"             -> photos of any of the viewer's favourite people
+
+One face can be moved to another person (/api/faces/assign) or taken off its
+person (/api/faces/unassign) from the viewer's region list or the People tab.
+Single-valued facts about a person live in the .person record: `hidden`
+(left out of people lists and pickers, photos stay searchable) and the admins'
+`favorites` (usernames); other users' favourites are DB state
+(person_favorites).
 """
 from . import people_core as pc
 from . import personlib
@@ -32,7 +40,7 @@ MANIFEST = {
     "core":        False,
     "requires":    ["faces"],
     "pip":         [],
-    "assets":      ["faces_pane.js", "person.js", "person_mesh.js"],
+    "assets":      ["people_pick.js", "faces_pane.js", "person.js", "person_mesh.js"],
 }
 
 _DDL = """
@@ -117,6 +125,8 @@ def register(host):
     # face / body regions and persons are caches (names live in the MWG regions, the
     # not-a-face / unknown flags in Xmp.cim.Data "people"); face_rejects is DB-only
     host.add_table(_DDL, kind="state", check=_migrate)
+    # non-admin users' favourite people (admins' are in the .person record)
+    host.add_table(pc.FAV_TABLE_DDL, kind="state")
     host.add_config_key("face_cluster_eps", default=0.0,
                         validate=lambda v: max(0.0, min(1.0, float(v or 0))))
     host.add_config_key("appearance_eps", default=0.35,
@@ -173,6 +183,12 @@ def register(host):
     host.add_route("/api/faces/unmark", pc.api_face_unmark, methods=["POST"], feature="tab.faces", level="write", action='face_unmark', fields=('ids',))
     host.add_route("/api/faces/merge", pc.api_face_merge, methods=["POST"], feature="tab.faces", level="write", action='face_merge', fields=('src', 'dst'))
     host.add_route("/api/bodies/split", pc.api_body_split, methods=["POST"], feature="tab.faces", level="write")
+    host.add_route("/api/faces/assign", pc.api_face_assign, methods=["POST"], feature="tab.faces", level="write", action='face_assign', fields=('filename', 'face_id', 'person_id', 'cluster_id', 'name'))
+    host.add_route("/api/faces/unassign", pc.api_face_unassign, methods=["POST"], feature="tab.faces", level="write", action='face_unassign', fields=('filename', 'face_id'))
+    host.add_route("/api/faces/in_file", pc.api_faces_in_file, feature="tab.faces")
+    # a favourite is the viewer's own preference: read access to the tab is enough
+    host.add_route("/api/persons/favorite", pc.api_person_favorite, methods=["POST"], feature="tab.faces")
+    host.add_route("/api/persons/hide", pc.api_person_hide, methods=["POST"], feature="tab.faces", level="write", action='person_hide', fields=('uuid', 'cluster_id', 'hidden'))
 
     # -- UI: People tab (left pane) + Person editor (controls pane) + mesh --
     for a in MANIFEST["assets"]:
@@ -234,6 +250,8 @@ def register(host):
     host.on("library.sync", pc.on_library_sync)
 
     def _person_search(tok, value):
+        if value.lower() in ("fav", "favorite", "favourite"):
+            return pc.person_fav_clause()
         if not value.lstrip("-").isdigit():
             return "", []
         cid = int(value)
@@ -246,7 +264,8 @@ def register(host):
             params += bcids
         return clause, params
     host.register_search_type("person:", _person_search,
-        help="person:<id> - photos of a person (face cluster id, plus body-bridged photos when bodies are on)")
+        help="person:<id> - photos of a person (face cluster id, plus body-bridged photos when bodies are on); "
+             "person:fav - photos of any of your favourite people")
 
     host.provide_service("people", {
         "person_for_cluster": pc.person_for_cluster,

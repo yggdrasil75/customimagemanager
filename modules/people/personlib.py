@@ -123,6 +123,8 @@ def _blank(person_uuid: str) -> dict[str, Any]:
         "relationships": {k: [] for k in RELATION_LINES},
         "clusters": {"face": [], "body": []},
         "appearances": [],
+        "hidden": False,
+        "favorites": [],
     }
 
 def _edge(uuid_or_none: Optional[str], name: str) -> dict[str, Any]:
@@ -149,6 +151,8 @@ def _migrate(desc: dict[str, Any]) -> dict[str, Any]:
         desc["relationships"].setdefault(k, [])
     desc.setdefault("clusters", {"face": [], "body": []})
     desc.setdefault("appearances", [])
+    desc["hidden"] = bool(desc.get("hidden", False))
+    desc["favorites"] = [u for u in desc.get("favorites") or [] if isinstance(u, str)]
     # Backfill flags added after some records were written, so an appearance saved
     # before face-mesh support still loads with the key present (default False).
     for a in desc["appearances"]:
@@ -283,6 +287,33 @@ def set_field(media_dir: str, person_uuid: str, section: str, key: str,
     else:
         return False
     write(media_dir, desc)
+    return True
+
+def set_hidden(media_dir: str, person_uuid: str, hidden: bool) -> bool:
+    """! @brief Hide or show a person in people lists and pickers (their photos stay searchable).
+    @return True if written, False when the record is missing.
+    """
+    desc = read(media_dir, person_uuid)
+    if desc is None:
+        return False
+    desc["hidden"] = bool(hidden)
+    write(media_dir, desc)
+    return True
+
+def set_favorite(media_dir: str, person_uuid: str, username: str, on: bool) -> bool:
+    """! @brief Add / remove a username in the record's `favorites` list (admins' favourites
+    live in the record; other users' in the DB, see people_core).
+    @return True if written, False when the record is missing.
+    """
+    desc = read(media_dir, person_uuid)
+    if desc is None:
+        return False
+    favs = [u for u in desc["favorites"] if u != username]
+    if on:
+        favs.append(username)
+    if favs != desc["favorites"]:
+        desc["favorites"] = favs
+        write(media_dir, desc)
     return True
 
 def set_relationship(media_dir: str, person_uuid: str, line: str,

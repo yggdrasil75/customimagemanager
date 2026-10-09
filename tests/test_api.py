@@ -162,6 +162,30 @@ def test_folders_move_delete(client, upload):
     assert client.post("/api/delete", json={"filename": "../../etc"}).get_json()["success"]  # rejected but 200
 
 
+def test_folder_tree_and_recursive_scope(client, upload):
+    a = upload("ft_a.png", seed=31, folder="ftree")
+    b = upload("ft_b.png", seed=32, folder="ftree/2026")
+    c = upload("ft_c.png", seed=33, folder="ftree/2026/trip")
+    flat = client.get("/api/folders").get_json()
+    assert flat["success"] and "tree" not in flat                       # flat form unchanged
+    j = client.get("/api/folders", query_string={"tree": 1}).get_json()
+    assert j["success"] and j["folders"]
+    root = j["tree"]
+    assert root["path"] == "" and root["total"] >= 3
+    node = next(n for n in root["children"] if n["name"] == "ftree")
+    assert (node["path"], node["count"], node["total"]) == ("ftree", 1, 3)
+    y = next(n for n in node["children"] if n["name"] == "2026")
+    assert (y["path"], y["count"], y["total"]) == ("ftree/2026", 1, 2)
+    t = y["children"][0]
+    assert (t["name"], t["path"], t["count"], t["total"], t["children"]) == ("trip", "ftree/2026/trip", 1, 1, [])
+    # direct children only by default; recursive=1 adds every subfolder
+    assert {f["filename"] for f in _lst(client, folder="ftree")["files"]} == {a}
+    assert {f["filename"] for f in _lst(client, folder="ftree", recursive=1)["files"]} == {a, b, c}
+    assert {f["filename"] for f in _lst(client, folder="ftree/2026", recursive=1)["files"]} == {b, c}
+    j = client.get("/api/list_all", query_string={"folder": "ftree", "recursive": 1}).get_json()
+    assert set(j["filenames"]) == {a, b, c}
+
+
 def test_serve_file_thumb_crop(client, upload):
     fn = upload("srv.png", seed=11)
     r = client.get(f"/api/thumb/{fn}")

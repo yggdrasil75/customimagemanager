@@ -430,6 +430,20 @@ document.addEventListener('keydown', async e=>{
     return;
   }
 
+  // Left / Right / Home / End: previous / next / first / last file in the gallery
+  // order (CIMNav crosses page edges). Not while typing or while a modal (the
+  // popout, where the Simple layout's viewer has its own arrows) owns the keys.
+  if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key) && !inInput && !e.defaultPrevented
+     && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && mode==='image' && window.CIMNav && galleryFiles.length
+     && !(document.activeElement && document.activeElement.isContentEditable) && !CIMNav.modalOpen()){
+    e.preventDefault();
+    if(e.key==='ArrowRight') CIMNav.next();
+    else if(e.key==='ArrowLeft') CIMNav.prev();
+    else if(e.key==='Home') CIMNav.first();
+    else CIMNav.last();
+    return;
+  }
+
   // Escape: clear selection or close popout
   if(e.key==='Escape'){
     if(!document.getElementById('popout_modal').classList.contains('hidden')){

@@ -284,8 +284,9 @@
     const pos = $("sv_pos");
     if (pos) pos.textContent = nav.n ? `${nav.i + 1} / ${nav.n}` : "";
     const pb = $("sv_arrow_prev"), nb = $("sv_arrow_next");
-    if (pb) pb.disabled = !nav.n || nav.i <= 0;
-    if (nb) nb.disabled = !nav.n || nav.i >= nav.n - 1;
+    const cn = window.CIMNav;
+    if (pb) pb.disabled = cn ? !cn.hasPrev() : (!nav.n || nav.i <= 0);
+    if (nb) nb.disabled = cn ? !cn.hasNext() : (!nav.n || nav.i >= nav.n - 1);
 
     if (S.metaMode === "simple") {
       const md = $("meta_desc");
@@ -322,6 +323,8 @@
   function navIndex() { const l = navList(); return { n: l.length, i: l.findIndex(f => f.filename === window.currentFile) }; }
   function step(dir) {
     if (!active()) return;
+    // The core navigator (gallery.js) crosses grid page edges; same order.
+    if (window.CIMNav) { window.CIMNav.step(dir); return; }
     const l = navList(), { i } = navIndex(), j = i + dir;
     if (i < 0 || j < 0 || j >= l.length) return;
     if (typeof selectFile === "function") selectFile(l[j].filename);

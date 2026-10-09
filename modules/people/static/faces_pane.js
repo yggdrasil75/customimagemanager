@@ -6,6 +6,7 @@
 
 let _faceClusters = [];
 let _faceShowDrawn = false;   // list drawn-looking clusters the server folded away
+let _faceShowHidden = false;  // list people hidden from people lists (Hide on a card)
 
 const _thumbObserver = ('IntersectionObserver' in window)
   ? new IntersectionObserver((entries, obs) => {
@@ -100,6 +101,12 @@ function faceChip(f, size = 56, pad = 1.6) {
               class="absolute top-7 -right-1 w-4 h-4 leading-none rounded-full
                      bg-amber-700 hover:bg-amber-600 text-white text-[10px] font-bold
                      opacity-0 group-hover:opacity-100 transition">?</button>
+      <button title="Change person - move this face to someone else (or remove it from this person)"
+              onclick="event.stopPropagation();changeFacePerson(${f.id}, this.dataset.rel)" data-rel="${relAttr}"
+              data-write-gate="tab.faces"
+              class="absolute top-11 -right-1 w-4 h-4 leading-none rounded-full
+                     bg-blue-700 hover:bg-blue-600 text-white text-[10px] font-bold
+                     opacity-0 group-hover:opacity-100 transition">⇄</button>
       <input type="checkbox" ${sel ? 'checked' : ''}
              title="Select - split these off as a separate person"
              onclick="event.stopPropagation();toggleFaceSel(${f.id})"
@@ -216,8 +223,11 @@ function _renderFaceCluster(c) {
   const { main, tail } = _splitConfidentOutliers(c);
   return `
       <div id="fcluster_${c.id}" class="bg-gray-800 rounded border ${c.confirmed
-          ? 'border-green-700' : 'border-gray-700'} p-2" data-name="${(c.name||'').replace(/"/g,'&quot;')}">
+          ? 'border-green-700' : 'border-gray-700'} p-2${c.hidden ? ' opacity-60' : ''}" data-name="${(c.name||'').replace(/"/g,'&quot;')}">
         <div class="flex items-center gap-2 mb-2">
+          <button onclick="toggleClusterFav(${c.id})" data-fav="${c.favorite ? 1 : 0}"
+            title="${c.favorite ? 'Favourite (yours) - click to unstar' : 'Mark as a favourite person (yours only)'}"
+            class="text-base leading-none ${c.favorite ? 'text-amber-400' : 'text-gray-500 hover:text-amber-300'}">${c.favorite ? '★' : '☆'}</button>
           <input value="${(c.name || '').replace(/"/g, '&quot;')}"
                  placeholder="Who is this?" id="fname_${c.id}"
                  onkeydown="if(event.key==='Enter')nameCluster(${c.id})"
@@ -242,6 +252,11 @@ function _renderFaceCluster(c) {
             title="Mark this whole person as unknown (a stranger / photobomber)"
             class="text-xs bg-amber-700 hover:bg-amber-600 px-2 py-1 rounded font-bold">
             Mark unknown
+          </button>
+          <button onclick="toggleClusterHidden(${c.id})" data-write-gate="tab.faces"
+            title="${c.hidden ? 'Show this person in people lists again' : 'Hide from people lists and pickers (photos stay searchable)'}"
+            class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded font-bold">
+            ${c.hidden ? 'Unhide' : 'Hide'}
           </button>
           <button onclick="markClusterNotReal(${c.id})"
             title="Not a real person (drawn character, statue, doll): drop every face and auto-reject look-alikes in future scans"
@@ -308,7 +323,8 @@ async function loadFaces() {
   if (!el) return;
   el.innerHTML = '<div class="text-xs text-gray-500 p-2">Loading...</div>';
   try {
-    const r = await fetch('/api/faces/clusters' + (_faceShowDrawn ? '?show_drawn=1' : ''));
+    const qs = [_faceShowDrawn ? 'show_drawn=1' : '', _faceShowHidden ? 'show_hidden=1' : ''].filter(Boolean).join('&');
+    const r = await fetch('/api/faces/clusters' + (qs ? '?' + qs : ''));
     const d = await r.json();
     _faceClusters = d.clusters || [];
 
@@ -334,6 +350,16 @@ async function loadFaces() {
         ? `Showing drawn-looking clusters too. <a href="#" onclick="toggleDrawnClusters();return false" class="underline">Hide them</a>`
         : `${n} drawn-looking cluster(s) hidden (score >= threshold in Settings → Modules → People). `
           + `<a href="#" onclick="toggleDrawnClusters();return false" class="underline">Show</a>`;
+    }
+
+    const hbar = document.getElementById('faces_hidden_bar');
+    if (hbar) {
+      const n = d.hidden_people || 0;
+      hbar.classList.toggle('hidden', !n && !_faceShowHidden);
+      hbar.innerHTML = `<label class="flex items-center gap-1 cursor-pointer select-none">
+          <input type="checkbox" id="faces_show_hidden" ${_faceShowHidden ? 'checked' : ''}
+                 onchange="toggleHiddenPeople(this.checked)" class="accent-blue-500">
+          Show hidden people (${n})</label>`;
     }
 
     if (!_faceClusters.length) {
@@ -504,6 +530,39 @@ async function markClusterUnknown(cid) {
   document.getElementById('faces_status').textContent =
     `Marked ${d.marked} face(s) unknown.`;
   keepScroll('faces_list', loadFaces);   // cluster is gone; full reload
+}
+
+function toggleHiddenPeople(on) {
+  _faceShowHidden = !!on;
+  keepScroll('faces_list', loadFaces);
+}
+
+/** @brief Star / unstar a person for the current user; favourites lead the list. */
+async function toggleClusterFav(cid) {
+  const c = _faceClusters.find(x => x.id === cid);
+  const on = !(c && c.favorite);
+  const d = await CIMPeople.setFavorite({ cluster_id: cid }, on).catch(() => null);
+  if (!d || !d.success) { document.getElementById('faces_status').textContent = 'Failed.'; return; }
+  keepScroll('faces_list', loadFaces);
+}
+
+/** @brief Hide a person from people lists and pickers, or show them again. */
+async function toggleClusterHidden(cid) {
+  const c = _faceClusters.find(x => x.id === cid);
+  const d = await CIMPeople.setHidden({ cluster_id: cid }, !(c && c.hidden)).catch(() => null);
+  if (!d || !d.success) { document.getElementById('faces_status').textContent = 'Failed.'; return; }
+  document.getElementById('faces_status').textContent = d.hidden ? 'Person hidden.' : 'Person shown.';
+  keepScroll('faces_list', loadFaces);
+}
+
+/** @brief Move one face to another person (or take it off its person) via the picker. */
+async function changeFacePerson(id, rel) {
+  const res = await CIMPeople.changeFace({ filename: rel, face_id: id });
+  if (res && res.success) {
+    _faceSel.delete(id);
+    document.getElementById('faces_status').textContent =
+      res.name ? `Face moved to ${res.name}.` : 'Face removed from the person.';
+  }
 }
 
 function toggleDrawnClusters() {
@@ -731,4 +790,9 @@ async function rescanFaces() {
   }
   if (document.readyState === "loading") window.addEventListener("DOMContentLoaded", init);
   else init();
+  // a face moved anywhere (viewer, this tab): refresh the list if it is showing
+  window.addEventListener("cim:people-changed", () => {
+    const l = document.getElementById("faces_list");
+    if (l && l.children.length) keepScroll("faces_list", loadFaces);
+  });
 })();

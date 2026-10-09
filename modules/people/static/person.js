@@ -141,7 +141,19 @@ function _renderPersonEditor(cid, d) {
       </div>`;
   }).join('');
 
-  el.innerHTML = `
+  _personFlags[cid] = { favorite: !!p.favorite, hidden: !!p.hidden };
+  const head = `<div class="flex items-center gap-2 mb-2">
+      <button id="person_fav_${cid}" onclick="togglePersonFav(${cid})"
+        title="${p.favorite ? 'Favourite (yours) - click to unstar' : 'Mark as a favourite person (yours only)'}"
+        class="text-lg leading-none ${p.favorite ? 'text-amber-400' : 'text-gray-500 hover:text-amber-300'}">${p.favorite ? '★' : '☆'}</button>
+      <span class="flex-1 truncate text-sm font-bold text-gray-100">${(p.name || 'Unnamed person').replace(/</g, '&lt;')}</span>
+      <label class="flex items-center gap-1 text-[11px] text-gray-400 cursor-pointer select-none" data-write-gate="tab.faces"
+             title="Hidden people leave people lists and pickers; their photos stay searchable">
+        <input type="checkbox" ${p.hidden ? 'checked' : ''} onchange="togglePersonHidden(${cid}, this.checked)"
+               class="accent-blue-500"> hidden</label>
+    </div>`;
+
+  el.innerHTML = `${head}
     <div class="grid grid-cols-2 gap-1.5">${bioRows}${listRows}</div>
     <div class="mt-2 pt-2 border-t border-gray-700">
       <div class="text-[11px] text-blue-300 font-bold mb-1">Relationships</div>
@@ -156,6 +168,34 @@ function _renderPersonEditor(cid, d) {
   // Paint the chip lists now the containers exist, then load tag suggestions.
   (d.list_fields || []).forEach(k => _renderPersonList(cid, k));
   _loadTagSuggestions(cid);
+  if (window.CIMFeatures) window.CIMFeatures.apply(el);
+}
+
+// Favourite / hidden state of each open person, as the editor last showed it.
+let _personFlags = {};
+
+/** @brief Star / unstar the open person for the current user (the star repaints in place). */
+async function togglePersonFav(cid) {
+  const f = _personFlags[cid] || (_personFlags[cid] = {});
+  const d = await CIMPeople.setFavorite({ cluster_id: cid }, !f.favorite).catch(() => null);
+  if (!d || !d.success) return;
+  f.favorite = d.favorite;
+  const b = document.getElementById('person_fav_' + cid);
+  if (b) {
+    b.textContent = f.favorite ? '★' : '☆';
+    b.classList.toggle('text-amber-400', f.favorite);
+    b.classList.toggle('text-gray-500', !f.favorite);
+  }
+  window.dispatchEvent(new CustomEvent('cim:people-changed', { detail: { cluster_id: cid } }));
+}
+
+/** @brief Hide / show the open person in people lists and pickers. */
+async function togglePersonHidden(cid, hidden) {
+  const d = await CIMPeople.setHidden({ cluster_id: cid }, hidden).catch(() => null);
+  if (!d || !d.success) return;
+  (_personFlags[cid] || (_personFlags[cid] = {})).hidden = d.hidden;
+  _peopleDirectory = [];          // the relationship typeahead follows
+  window.dispatchEvent(new CustomEvent('cim:people-changed', { detail: { cluster_id: cid } }));
 }
 
 // In-memory list fields (aliases, tags) per open person.

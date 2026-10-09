@@ -721,6 +721,32 @@ function drawCanvas() { return mainViewer.drawCanvas(); }
 const VIDEO_RE = /\.(mp4|webm|mkv|mov|avi|m4v|mpg|mpeg|wmv|flv|ts|ogv)$/i;
 function isVideoFile(fn) { return VIDEO_RE.test(fn || ''); }
 
+/** @brief Touch swipe on the viewers: left / right = next / previous file
+ *  (window.CIMNav; gallery.js calls this once it is defined).
+ *  - the main canvas is always drawn at fit, so only CIMNav's blockers (a box
+ *    drag, a module's box / crop tool, a pinch-zoomed page) stop it;
+ *  - the popout swipes only while it is the Simple layout's viewer and sits at
+ *    fit zoom (editor.js wheel zoom / pan: a swipe there is a pan).
+ */
+function attachViewerSwipe() {
+  if (!window.CIMNav) return;
+  const isImageMode = () => typeof mediaMode === 'undefined' || mediaMode === 'image';
+  window.CIMNav.attachSwipe(document.getElementById('canvas_container'), {
+    canSwipe: () => !!window.currentFile && isImageMode() && !window.CIMNav.modalOpen(),
+  });
+  window.CIMNav.attachSwipe(document.getElementById('popout_canvas_wrap'), {
+    canSwipe: () => {
+      if (!window.currentFile || !(window.CIMSimpleViewer && window.CIMSimpleViewer.active)) return false;
+      if (typeof pZoom === 'undefined' || typeof popoutImg === 'undefined') return true;
+      const wrap = document.getElementById('popout_canvas_wrap');
+      const iw = popoutImg.naturalWidth || popoutImg.width, ih = popoutImg.naturalHeight || popoutImg.height;
+      if (!wrap || !iw || !ih || !wrap.clientWidth) return true;
+      const fit = Math.min(wrap.clientWidth / iw, wrap.clientHeight / ih);
+      return pZoom <= fit * 1.01;
+    },
+  });
+}
+
 // Books. Deliberately only the UNAMBIGUOUS extensions - the same split the
 // server draws in media_types.UNAMBIGUOUS_BOOK_EXTS. A `.txt` or `.html` in the
 // library might be a book, but it might equally be this app's tag sidecar or a

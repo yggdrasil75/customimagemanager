@@ -165,6 +165,8 @@ def _sample(f, alt=False):
         return "2021:02:03 04:05:06" if alt else "2020:01:02 03:04:05"
     if f.dtype == ef.TYPE_TIME:
         return "05:06:07" if alt else "01:02:03"
+    if getattr(f, "pattern", None):  # offsets "+HH:MM"
+        return "-05:30" if alt else "+02:00"
     return "cimB" if alt else "cimA"
 
 

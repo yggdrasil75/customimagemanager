@@ -9,10 +9,23 @@
            icons, and a "more" menu that holds every module toolbar button
            (ext area "gallery_tools") so modules never widen this row. -->
       <div class="px-3 py-1.5 bg-gray-800 border-b border-gray-700 flex items-center gap-1.5 flex-shrink-0">
-        <select id="folder_select" onchange="onFolderChange()" title="Folder"
-          class="bg-gray-700 rounded border border-gray-600 text-xs text-gray-200 px-1.5 py-1 max-w-[9rem] truncate flex-shrink-0">
-          <option value="">All folders</option>
-        </select>
+        <!-- Folder: a breadcrumb (each segment goes up to that folder) that opens
+             a tree popover (filter, counts, "include subfolders"). #folder_select
+             stays as a hidden input mirroring currentFolder for older callers. -->
+        <div id="folder_picker" class="relative flex-shrink-0 min-w-0 max-w-[12rem]">
+          <input type="hidden" id="folder_select" value="" onchange="onFolderChange()">
+          <div id="folder_crumbs" title="Folder"
+            class="flex items-center min-w-0 bg-gray-700 rounded border border-gray-600 text-xs text-gray-200 px-1 py-0.5"></div>
+          <div id="folder_tree_pop"
+            class="hidden absolute left-0 top-full mt-1 z-30 bg-gray-800 border border-gray-600 rounded shadow-lg p-2 w-72 max-w-[85vw] flex-col gap-1.5">
+            <input id="folder_tree_filter" type="text" autocomplete="off" placeholder="Filter folders..."
+              class="w-full px-2 py-1 bg-gray-700 rounded border border-gray-600 text-xs text-white focus:border-blue-500">
+            <label class="flex items-center gap-1.5 text-xs text-gray-300 select-none">
+              <input id="folder_recursive" type="checkbox"> Include subfolders
+            </label>
+            <div id="folder_tree" class="max-h-80 overflow-y-auto text-xs"></div>
+          </div>
+        </div>
         <div class="relative flex-1 min-w-0">
           <input id="search_input" type="text" autocomplete="off"
             placeholder="Search..."
@@ -92,6 +105,13 @@
         class="hidden items-center gap-2 px-4 py-2 bg-indigo-900/40 border-b border-indigo-800 flex-shrink-0 text-xs">
         <span class="text-indigo-200">Album</span>
         <span id="gallery_album_name" class="font-bold text-white truncate"></span>
+        <!-- description (inline edit with the pencil) and the album's own sort order (albums.js) -->
+        <span id="gallery_album_desc" class="text-indigo-100 italic truncate min-w-0" title="Album description"></span>
+        <button id="gallery_album_desc_edit" onclick="albumEditDescription()" title="Edit the album description"
+          data-feature="tab.albums.edit" class="text-indigo-200 hover:text-white px-1">✏</button>
+        <select id="gallery_album_sort" onchange="albumSetSort(this.value)" title="Order of this album's images"
+          data-feature="tab.albums.edit"
+          class="bg-gray-800 border border-gray-600 rounded px-1 py-0.5 text-xs text-white"></select>
         <button onclick="albumRemoveSelected()" title="Remove the selected images from this album"
           class="ml-auto bg-red-700 hover:bg-red-600 px-2 py-1 rounded font-bold text-white whitespace-nowrap">Remove
           selected</button>

@@ -15,6 +15,7 @@ except Exception:  # pragma: no cover
 
 from . import xmp_fields as xfields
 from . import iptc_fields as ifields
+from . import hierarchy
 import re
 
 log = logging.getLogger("xmp_import")
@@ -200,8 +201,15 @@ def folded_values(filepath):
                 s = str(x).strip()
                 if not s:
                     continue
-                # digiKam TagsList holds A/B/C paths: keep the leaf
-                tags.append(_flatten_hierarchical_tag(s) if (ns, prop) == ("digiKam", "TagsList") else s)
+                # digiKam TagsList (A/B/C) and Lightroom hierarchicalSubject (A|B|C)
+                # hold paths: the flat tags keep the leaf (the tag tree keeps the path)
+                if (ns, prop) == ("digiKam", "TagsList"):
+                    s = _flatten_hierarchical_tag(s)
+                elif (ns, prop) == ("lr", "hierarchicalSubject"):
+                    segs = hierarchy.lr_segments(s)
+                    s = segs[-1] if segs else ""
+                if s:
+                    tags.append(s)
         elif target == "description":
             text = _langalt_text(value)
             if text and text.strip():

@@ -27,6 +27,7 @@ _FFPROBE = shutil.which("ffprobe")
 
 
 def _pyexiv2_version():
+    """! @brief pyexiv2's (major, minor)."""
     try:
         return tuple(int(x) for x in str(pyexiv2.__version__).split(".")[:2])
     except Exception:
@@ -118,6 +119,7 @@ def iso6709(value):
 ## @brief Attribute form  exif:GPSLatitude="37,46.27N"  or element form
 # <exif:GPSLatitude>37,46.27N</exif:GPSLatitude>, any prefix bound to the exif ns.
 def _xmp_text_value(text, local):
+    """! @brief One exif: property from raw XMP text (attribute or element form)."""
     m = re.search(r'\b[\w-]+:' + local + r'\s*=\s*"([^"]*)"', text)
     if m:
         return m.group(1)
@@ -137,6 +139,7 @@ def from_xmp_text(text):
 
 
 def _read_text(path):
+    """! @brief A file's first 4 MB as text ('' on error)."""
     try:
         with open(path, "rb") as fh:
             return fh.read(4 << 20).decode("utf-8", "replace")
@@ -145,10 +148,12 @@ def _read_text(path):
 
 
 def sidecar_path(path):
+    """! @brief The .xmp sidecar path beside a file."""
     return os.path.splitext(path)[0] + ".xmp"
 
 
 def _from_embedded(path):
+    """! @brief (lat, lon) from the EXIF GPS IFD or embedded XMP, or None."""
     if not _HAVE_PYEXIV2:
         return None
     try:
@@ -173,6 +178,7 @@ def _from_embedded(path):
 
 
 def _from_container(path):
+    """! @brief (lat, lon) from a video container's location tag (ffprobe), or None."""
     if not _FFPROBE:
         return None
     try:
@@ -214,6 +220,55 @@ def read_location(path, is_video=False):
         if got:
             best = got
     return best
+
+
+## @brief Place fields a file may already carry: (our key, XMP keys, IPTC IIM key).
+# Iptc4xmpCore is read under both prefixes exiv2 may report it with.
+_PLACE_KEYS = (
+    ("city",    ("Xmp.photoshop.City",),    "Iptc.Application2.City"),
+    ("state",   ("Xmp.photoshop.State",),   "Iptc.Application2.ProvinceState"),
+    ("country", ("Xmp.photoshop.Country",), "Iptc.Application2.CountryName"),
+    ("cc",      ("Xmp.iptcCore.CountryCode", "Xmp.iptc.CountryCode"), "Iptc.Application2.CountryCode"),
+)
+
+
+def _first_text(v):
+    """! @brief A metadata value (list, lang-alt or text) as one stripped string."""
+    if isinstance(v, (list, tuple)):
+        v = v[0] if v else ""
+    if isinstance(v, dict):  # lang-alt
+        v = next(iter(v.values()), "")
+    return str(v or "").strip()
+
+
+def read_places(path):
+    """! @brief Place names a file already has (sidecar XMP, embedded XMP, IPTC IIM).
+    @return {city, state, country, cc}: '' where the file has none.
+    """
+    out = {k: "" for k, _x, _i in _PLACE_KEYS}
+    if not _HAVE_PYEXIV2:
+        return out
+    side = sidecar_path(path)
+    for p in ([side] if side != path and os.path.exists(side) else []) + [path]:
+        try:
+            with pyexiv2.Image(p) as img:
+                xmp = img.read_xmp() or {}
+                try:
+                    iptc = {} if p == side else (img.read_iptc() or {})
+                except Exception:
+                    iptc = {}
+        except Exception:
+            continue
+        for key, xkeys, ikey in _PLACE_KEYS:
+            if out[key]:
+                continue
+            for xk in xkeys:
+                out[key] = _first_text(xmp.get(xk))
+                if out[key]:
+                    break
+            if not out[key]:
+                out[key] = _first_text(iptc.get(ikey))
+    return out
 
 
 def box_around(lat, lon, km):

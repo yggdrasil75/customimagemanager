@@ -222,3 +222,121 @@ def crop_keypoints(pts, x0, y0, w, h, W, H) -> list:
              "y": round(max(0.0, min(1.0, float(y0 + y * h) / H)), 4),
              # Some heatmap scores exceed 1; v is 0..1 by contract.
              "v": round(max(0.0, min(1.0, float(v))), 3)} for x, y, v in pts]
+
+# -- EXIF orientation and normalised crop rectangles -----------------------------------
+## @brief EXIF Orientation -> where a stored-frame point (x, y in 0..1) is displayed.
+_ORIENT_POINT = {
+    1: lambda x, y: (x, y),
+    2: lambda x, y: (1 - x, y),          # mirror horizontal
+    3: lambda x, y: (1 - x, 1 - y),      # rotate 180
+    4: lambda x, y: (x, 1 - y),          # mirror vertical
+    5: lambda x, y: (y, x),              # transpose
+    6: lambda x, y: (1 - y, x),          # rotate 90 CW
+    7: lambda x, y: (1 - y, 1 - x),      # transverse
+    8: lambda x, y: (y, 1 - x),          # rotate 270 CW
+}
+_ORIENT_PROBES = ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0))
+
+
+def norm_orientation(o) -> int:
+    """! @brief An EXIF Orientation value as 1..8 (anything else is 1)."""
+    try:
+        o = int(str(o).strip().split()[0])
+    except (TypeError, ValueError, IndexError):
+        return 1
+    return o if o in _ORIENT_POINT else 1
+
+
+def orient_point(o, x, y):
+    """! @brief Where the stored-frame point (x, y) shows under orientation `o`."""
+    return _ORIENT_POINT[norm_orientation(o)](x, y)
+
+
+def orient_swaps(o) -> bool:
+    """! @brief True when orientation `o` swaps width and height (5..8)."""
+    return norm_orientation(o) >= 5
+
+
+def _orient_find(fn) -> int:
+    """! @brief The orientation whose point map equals fn on the probe points."""
+    want = [fn(x, y) for x, y in _ORIENT_PROBES]
+    for o, f in _ORIENT_POINT.items():
+        if all(abs(a - c) < 1e-9 and abs(b - d) < 1e-9
+               for (a, b), (c, d) in zip((f(x, y) for x, y in _ORIENT_PROBES), want)):
+            return o
+    return 1
+
+
+def orient_inverse(o) -> int:
+    """! @brief The orientation that undoes `o`."""
+    return next(i for i in _ORIENT_POINT if orient_then(o, i) == 1)
+
+
+def orient_then(o, op) -> int:
+    """! @brief The orientation of a file displayed with `o` and then turned by `op`
+    (6 = a quarter turn clockwise, 8 = anticlockwise, 2 = mirror left-right)."""
+    f, g = _ORIENT_POINT[norm_orientation(o)], _ORIENT_POINT[norm_orientation(op)]
+    return _orient_find(lambda x, y: g(*f(x, y)))
+
+
+def orient_rect(o, rect):
+    """! @brief A {left, top, right, bottom} rectangle (0..1) of the stored frame as
+    the same rectangle of the displayed frame under orientation `o`."""
+    x0, y0 = orient_point(o, rect["left"], rect["top"])
+    x1, y1 = orient_point(o, rect["right"], rect["bottom"])
+    return {"left": min(x0, x1), "top": min(y0, y1),
+            "right": max(x0, x1), "bottom": max(y0, y1)}
+
+
+def orient_array(img, o):
+    """! @brief Pixels of the stored frame as displayed under orientation `o` (numpy)."""
+    o = norm_orientation(o)
+    if o == 1 or img is None:
+        return img
+    if o in (2, 7):
+        img = img[:, ::-1]
+    elif o == 4:
+        img = img[::-1]
+    elif o == 3:
+        img = img[::-1, ::-1]
+    if o in (5, 6, 7, 8):
+        # 5 / 7: transpose (after the mirror for 7); 6: rotate CW; 8: rotate CCW
+        if o == 6:
+            img = np.rot90(img, -1)
+        elif o == 8:
+            img = np.rot90(img, 1)
+        elif o == 5:
+            img = np.swapaxes(img, 0, 1)
+        else:
+            img = np.rot90(img, -1)
+    return np.ascontiguousarray(img)
+
+
+def clean_crop(crop):
+    """! @brief A crop {left, top, right, bottom} clamped to 0..1, or None when it is
+    missing, malformed, empty or the whole frame."""
+    if not crop:
+        return None
+    try:
+        l, t = float(crop["left"]), float(crop["top"])
+        r, b = float(crop["right"]), float(crop["bottom"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    l, t, r, b = (max(0.0, min(1.0, v)) for v in (l, t, r, b))
+    if r - l < 1e-3 or b - t < 1e-3:
+        return None
+    if l < 1e-4 and t < 1e-4 and r > 1 - 1e-4 and b > 1 - 1e-4:
+        return None
+    return {"left": l, "top": t, "right": r, "bottom": b}
+
+
+def crop_array(img, crop):
+    """! @brief The pixels inside a normalised crop of the displayed frame (numpy)."""
+    crop = clean_crop(crop)
+    if img is None or crop is None:
+        return img
+    h, w = img.shape[:2]
+    x0, x1 = int(round(crop["left"] * w)), int(round(crop["right"] * w))
+    y0, y1 = int(round(crop["top"] * h)), int(round(crop["bottom"] * h))
+    x1, y1 = max(x1, x0 + 1), max(y1, y0 + 1)
+    return np.ascontiguousarray(img[y0:y1, x0:x1])

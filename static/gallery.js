@@ -1,38 +1,195 @@
+// -- Folder scope: breadcrumb + tree ----------------------------------------
+// currentFolder is the single source of truth ('' = all, '/' = top level only,
+// 'a/b' = that folder). #folder_select is a hidden input mirroring it for older
+// callers; the toolbar shows a breadcrumb and a tree popover instead.
+let folderTree=null;                    // /api/folders?tree=1 root node
+let currentFolderRecursive=new URLSearchParams(location.search).get('recursive')==='1';
+const _folderOpen=new Set();            // expanded tree paths
+
 async function loadFolders(){
   try{
-    const d=await fetch('/api/folders').then(r=>r.json());
+    const d=await fetch('/api/folders?tree=1').then(r=>r.json());
     allFolders=d.folders||[];
-    const sel=document.getElementById('folder_select');
-    if(sel){
-      // Rebuild, then restore the selection from `currentFolder` - the app's
-      // single source of truth - NOT from the <select>'s own value. On a fresh
-      // load the options don't exist yet, so the old `prev = sel.value` read was
-      // always '' and, worse, assigning a value that isn't an <option> yet is a
-      // no-op: the picker fell out of sync with currentFolder and only righted
-      // itself once you manually picked a folder and picked "All folders" back.
-      sel.innerHTML='<option value="">All folders</option>';
-      allFolders.forEach(f=>{
-        const o=document.createElement('option');
-        o.value=f.path;
-        o.text=(f.path==='/'?'(root)':f.path)+`  (${f.count})`;
-        sel.appendChild(o);
-      });
-      // If the remembered folder disappeared from disk, fall back to All folders
-      // instead of leaving the select blank.
-      const has=(currentFolder==='')||allFolders.some(f=>f.path===currentFolder);
-      if(!has) currentFolder='';
-      sel.value=currentFolder;
-    }
-    // The Gallery tab's folder browser is fed by the same data.
-    if(typeof renderFolderList==='function') renderFolderList();
+    folderTree=d.tree||_folderTreeFromFlat(allFolders);
+    // If the remembered folder disappeared from disk, fall back to All folders.
+    const has=(currentFolder==='')||(currentFolder==='/'&&folderTree.count>0)||!!_folderNode(currentFolder);
+    if(!has) currentFolder='';
   }catch(e){}
+  renderFolderCrumbs();
+  renderFolderTree();
 }
+
+/** @brief Build a tree from the flat /api/folders list (a server without ?tree=1). */
+function _folderTreeFromFlat(flat){
+  const root={name:'',path:'',count:0,total:0,children:[]}, idx={'':root};
+  (flat||[]).forEach(f=>{
+    if(f.path==='/'){ root.count=f.count; return; }
+    let parent=root;
+    f.path.split('/').forEach((part,i,arr)=>{
+      const p=arr.slice(0,i+1).join('/');
+      if(!idx[p]){ idx[p]={name:part,path:p,count:0,total:0,children:[]}; parent.children.push(idx[p]); }
+      parent=idx[p];
+    });
+    parent.count=f.count;
+  });
+  const tot=n=>(n.total=n.count+n.children.reduce((s,c)=>s+tot(c),0));
+  tot(root);
+  return root;
+}
+
+/** @brief The tree node for a folder path, or null. */
+function _folderNode(path){
+  if(!folderTree) return null;
+  if(!path) return folderTree;
+  let node=folderTree;
+  for(const part of String(path).replace(/^\/+|\/+$/g,'').split('/')){
+    node=(node.children||[]).find(c=>c.name===part);
+    if(!node) return null;
+  }
+  return node;
+}
+
+/** @brief Scope the gallery to a folder ('' = all) and reload page 0. */
+function setFolder(path, opts){
+  opts=opts||{};
+  currentFolder=path||'';
+  if(opts.recursive!==undefined) currentFolderRecursive=!!opts.recursive;
+  const sel=document.getElementById('folder_select'); if(sel) sel.value=currentFolder;
+  toggleFolderTree(false);
+  currentPage=0; loadGallery();
+}
+window.setFolder=setFolder;
+
 function onFolderChange(){
   const sel=document.getElementById('folder_select');
   if(!sel) return;
-  currentFolder=sel.value;
-  currentPage=0; loadGallery();
+  setFolder(sel.value);
 }
+
+/** @brief Draw the toolbar breadcrumb for currentFolder: "All / 2026 / trip".
+ *  Every segment but the last goes up to that folder; the last one (and the
+ *  caret) opens the tree. Long paths collapse their middle into "...".
+ */
+function renderFolderCrumbs(){
+  const box=document.getElementById('folder_crumbs'); if(!box) return;
+  const sel=document.getElementById('folder_select'); if(sel) sel.value=currentFolder;
+  const segs=[{label:'All',path:''}];
+  if(currentFolder==='/') segs.push({label:'(top level)',path:'/'});
+  else if(currentFolder){
+    const parts=currentFolder.replace(/^\/+|\/+$/g,'').split('/');
+    parts.forEach((p,i)=>segs.push({label:p,path:parts.slice(0,i+1).join('/')}));
+  }
+  const shown=segs.length>3 ? [segs[0],{label:'...',path:null},...segs.slice(-2)] : segs;
+  const last=shown.length-1;
+  box.innerHTML=shown.map((s,i)=>{
+    const sep=i?'<span class="fcrumb-sep">/</span>':'';
+    if(s.path===null) return `${sep}<button type="button" class="fcrumb" data-crumb-open="1" title="${_esc(currentFolder)}">...</button>`;
+    const cur=i===last;
+    return `${sep}<button type="button" class="fcrumb${cur?' fcrumb-cur':''}" ${cur?'data-crumb-open="1"':`data-crumb="${_esc(s.path)}"`} title="${cur?'Choose folder':'Go to '+_esc(s.label)}">${_esc(s.label)}</button>`;
+  }).join('')
+    +(currentFolderRecursive&&currentFolder?'<span class="fcrumb-sub" title="Including subfolders">+sub</span>':'')
+    +'<button type="button" class="fcrumb" data-crumb-open="1" title="Choose folder">&#9662;</button>';
+  box.querySelectorAll('[data-crumb]').forEach(b=>b.addEventListener('click',e=>{
+    e.stopPropagation(); setFolder(b.dataset.crumb);
+  }));
+  box.querySelectorAll('[data-crumb-open]').forEach(b=>b.addEventListener('click',e=>{
+    e.stopPropagation(); toggleFolderTree();
+  }));
+  box.title=currentFolder ? `Folder: ${currentFolder==='/'?'(top level)':currentFolder}` : 'All folders';
+}
+
+/** @brief Render the folder tree into #folder_tree, honouring the filter box.
+ *  With a filter, only matching folders and their ancestors show, expanded.
+ */
+function renderFolderTree(){
+  const host=document.getElementById('folder_tree'); if(!host) return;
+  const rec=document.getElementById('folder_recursive'); if(rec) rec.checked=currentFolderRecursive;
+  if(!folderTree){ host.innerHTML='<div class="text-gray-500 px-1">Loading...</div>'; return; }
+  const q=(document.getElementById('folder_tree_filter')?.value||'').trim().toLowerCase();
+  const match=n=>!q || n.path.toLowerCase().includes(q);
+  const visible=n=>match(n) || (n.children||[]).some(visible);
+  const row=(n,depth,label,path,hasKids)=>{
+    const open=q ? true : _folderOpen.has(path);
+    const on=(path===currentFolder);
+    const n_=(n.count===n.total||!hasKids) ? `${n.count}` : `${n.count} / ${n.total}`;
+    return `<div class="ftree-row${on?' ftree-on':''}" data-fpath="${_esc(path)}" style="padding-left:${4+depth*12}px" title="${_esc(path||'All folders')}">`
+      +`<span class="ftree-tw" ${hasKids?`data-ftoggle="${_esc(path)}"`:''}>${hasKids?(open?'&#9662;':'&#9656;'):''}</span>`
+      +`<span class="ftree-name">${_esc(label)}</span><span class="ftree-n">${n_}</span></div>`;
+  };
+  const walk=(n,depth)=>{
+    let out='';
+    for(const c of n.children||[]){
+      if(!visible(c)) continue;
+      const kids=(c.children||[]).some(visible);
+      out+=row(c,depth,c.name,c.path,kids);
+      if(kids && (q || _folderOpen.has(c.path))) out+=walk(c,depth+1);
+    }
+    return out;
+  };
+  let html=row({count:folderTree.total,total:folderTree.total},0,'All folders','',false);
+  if(folderTree.count>0 && (folderTree.children||[]).length && (!q || '(top level)'.includes(q)))
+    html+=row({count:folderTree.count,total:folderTree.count},1,'(top level)','/',false);
+  html+=walk(folderTree,1);
+  host.innerHTML=html;
+  if(q && !host.querySelector('[data-fpath]:not([data-fpath=""])'))
+    host.insertAdjacentHTML('beforeend','<div class="text-gray-500 px-1 py-1">No folder matches.</div>');
+}
+
+/** @brief Open / close the folder tree popover. Opening expands the current folder's ancestors. */
+function toggleFolderTree(force){
+  const pop=document.getElementById('folder_tree_pop'); if(!pop) return;
+  const open=force!==undefined ? !!force : pop.classList.contains('hidden');
+  pop.classList.toggle('hidden', !open);
+  if(!open) return;
+  if(currentFolder && currentFolder!=='/'){
+    const parts=currentFolder.split('/');
+    for(let i=1;i<parts.length;i++) _folderOpen.add(parts.slice(0,i).join('/'));
+  }
+  renderFolderTree();
+  const f=document.getElementById('folder_tree_filter');
+  if(f && !('ontouchstart' in window)) f.focus();
+}
+window.toggleFolderTree=toggleFolderTree;
+
+(function wireFolderTree(){
+  const host=document.getElementById('folder_tree');
+  if(host) host.addEventListener('click',e=>{
+    const tw=e.target.closest('[data-ftoggle]');
+    if(tw){
+      e.stopPropagation();
+      const p=tw.dataset.ftoggle;
+      if(_folderOpen.has(p)) _folderOpen.delete(p); else _folderOpen.add(p);
+      renderFolderTree();
+      return;
+    }
+    const r=e.target.closest('[data-fpath]');
+    if(r) setFolder(r.dataset.fpath);
+  });
+  const f=document.getElementById('folder_tree_filter');
+  if(f){
+    f.addEventListener('input',renderFolderTree);
+    f.addEventListener('keydown',e=>{
+      if(e.key==='Escape'){ e.preventDefault(); toggleFolderTree(false); }
+      else if(e.key==='Enter'){
+        e.preventDefault();
+        const first=host && host.querySelector('[data-fpath]:not([data-fpath=""])');
+        if(first) setFolder(first.dataset.fpath);
+      }
+    });
+  }
+  const rec=document.getElementById('folder_recursive');
+  if(rec) rec.addEventListener('change',()=>{
+    currentFolderRecursive=rec.checked;
+    renderFolderCrumbs();
+    if(currentFolder){ currentPage=0; loadGallery(); }
+  });
+  document.addEventListener('click',e=>{
+    const pop=document.getElementById('folder_tree_pop');
+    const picker=document.getElementById('folder_picker');
+    if(pop && !pop.classList.contains('hidden') && !(picker && picker.contains(e.target))) toggleFolderTree(false);
+  });
+})();
+renderFolderCrumbs();
 
 // Multi-selection
 // -- Gallery ----------------------------------------------------------------
@@ -171,7 +328,7 @@ let _wantedGalleryView = new URLSearchParams(location.search).get('view') || 'gr
 
 function galleryQuery(){
   const album = (typeof galleryModalMode!=='undefined' && galleryModalMode==='album' && currentAlbum) ? currentAlbum : '';
-  return {q: currentSearch, folder: currentFolder, album};
+  return {q: currentSearch, folder: currentFolder, album, recursive: !!(currentFolder && currentFolderRecursive)};
 }
 
 function _renderGalleryViewSwitch(){
@@ -248,6 +405,7 @@ function syncUrl(){
   if(typeof galleryView!=='undefined' && galleryView!=='grid') p.set('view',galleryView);
   if(currentSearch) p.set('q',currentSearch);
   if(currentFolder) p.set('folder',currentFolder);
+  if(currentFolder && currentFolderRecursive) p.set('recursive','1');
   // Preserve ?tab= - this rebuild used to drop it, so a refresh always came
   // back to Gallery no matter which tab set it (panes.js:_syncPaneUrl).
   if(typeof currentPane!=='undefined' && currentPane && currentPane!=='gallery'){
@@ -259,6 +417,7 @@ function syncUrl(){
 
 async function loadGallery(){
   syncUrl();
+  renderFolderCrumbs();
   if(galleryView!=='grid'){
     // A module view owns the result set: hand it the new scope instead.
     const v=window._galleryViews[galleryView];
@@ -266,6 +425,7 @@ async function loadGallery(){
     return;
   }
   const params=new URLSearchParams({page:currentPage,q:currentSearch,folder:currentFolder});
+  if(currentFolder && currentFolderRecursive) params.set('recursive','1');
   // When the gallery modal was opened from an album, scope the listing to that
   // album's members. The server ANDs this with the normal search/folder terms,
   // so searching *within* an album still works.
@@ -375,6 +535,113 @@ function changePage(dir){
   loadGallery();
 }
 
+// -- Viewer navigation (window.CIMNav) ----------------------------------------
+// prev / next / first / last over the gallery's current order (galleryFiles).
+// At a page edge of the grid the neighbouring page is loaded and navigation
+// continues on it; a module view (timeline, ...) navigates what it shows.
+// Modules (slideshow, ...) reuse it: CIMNav.next(), CIMNav.prev(), ...
+window.CIMNav=(function(){
+  let busy=false;
+  const swipeBlockers=[];
+  const list=()=>Array.isArray(galleryFiles)?galleryFiles:[];
+  const idx=()=>list().findIndex(x=>x.filename===window.currentFile);
+  const paged=()=>typeof galleryView==='undefined' || galleryView==='grid';
+  const pages=()=>Math.max(1,Math.ceil((totalFiles||0)/PAGE));
+
+  /** @brief Open one file the way a plain tile click does, and keep its tile in view. */
+  function open(f){
+    if(!f) return false;
+    if(selectedFiles.size){ selectedFiles.clear(); refreshSelectionUI(); }
+    lastClickedFile=f;
+    window.selectFile(f);
+    const t=[...document.querySelectorAll('.gallery-item')].find(el=>el.dataset.filename===f);
+    if(t && typeof t.scrollIntoView==='function') t.scrollIntoView({block:'nearest'});
+    return true;
+  }
+  /** @brief Load grid page p, then open its first or last file. */
+  async function toPage(p, pick){
+    if(!paged() || p<0 || p>=pages()) return false;
+    busy=true;
+    try{
+      currentPage=p;
+      const sc=document.getElementById('gallery_scroll'); if(sc) sc.scrollTop=0;
+      await loadGallery();
+      const l=list();
+      return l.length ? open(pick==='last' ? l[l.length-1].filename : l[0].filename) : false;
+    }finally{ busy=false; }
+  }
+  /** @brief Move by dir (+1 / -1); crosses a page edge in the grid. @return a promise of whether it moved. */
+  async function step(dir){
+    if(busy) return false;
+    const l=list(), i=idx();
+    if(i<0) return l.length ? open((dir>0 ? l[0] : l[l.length-1]).filename) : false;
+    const j=i+dir;
+    if(j>=0 && j<l.length) return open(l[j].filename);
+    return toPage(currentPage+(dir>0?1:-1), dir>0?'first':'last');
+  }
+  async function first(){
+    if(busy) return false;
+    if(paged() && currentPage!==0) return toPage(0,'first');
+    const l=list(); return l.length ? open(l[0].filename) : false;
+  }
+  async function last(){
+    if(busy) return false;
+    if(paged() && currentPage!==pages()-1) return toPage(pages()-1,'last');
+    const l=list(); return l.length ? open(l[l.length-1].filename) : false;
+  }
+  /** @brief Is there a file before / after the current one (on this page or another)? */
+  function hasPrev(){ const i=idx(); return i>0 || (i===0 && paged() && currentPage>0); }
+  function hasNext(){
+    const l=list(), i=idx();
+    return (i>=0 && i<l.length-1) || (i===l.length-1 && i>=0 && paged() && currentPage<pages()-1);
+  }
+  /** @brief Is a modal (popout, settings, a module dialog) showing? Keys then belong to it. */
+  function modalOpen(){
+    const els=document.querySelectorAll('[id$="_modal"]:not(.hidden), [role="dialog"]:not(.hidden), .fixed.inset-0:not(.hidden)');
+    return [...els].some(el=>el.style.display!=='none' && !el.closest('.hidden') && !el.classList.contains('cim-feature-hidden'));
+  }
+  /** @brief Swipe direction for a gesture: +1 next (finger moved left), -1 prev, 0 none.
+   *  It counts when it is longer than 50 px and mostly horizontal.
+   */
+  function swipeDir(dx, dy){
+    if(Math.abs(dx)<=50 || Math.abs(dx)<2*Math.abs(dy)) return 0;
+    return dx<0 ? 1 : -1;
+  }
+  /** @brief Add fn() -> true while a swipe must not navigate (a box / crop tool is active). */
+  function addSwipeBlocker(fn){ if(typeof fn==='function') swipeBlockers.push(fn); }
+  function swipeBlocked(){
+    if(typeof drawing!=='undefined' && drawing) return true;
+    if(window.visualViewport && window.visualViewport.scale>1.01) return true;   // page pinch-zoomed
+    return swipeBlockers.some(fn=>{ try{ return !!fn(); }catch(e){ return false; } });
+  }
+  /** @brief Make el navigate on a touch swipe (pointer events).
+   *  @param opts.canSwipe  fn() -> false to ignore a gesture (zoomed in, ...).
+   *  @param opts.onSwipe   fn(dir) instead of step(dir).
+   */
+  function attachSwipe(el, opts){
+    if(!el || el.__cimSwipe) return;
+    el.__cimSwipe=true;
+    opts=opts||{};
+    el.style.touchAction='pan-y pinch-zoom';
+    let g=null;
+    el.addEventListener('pointerdown',e=>{
+      if(e.pointerType!=='touch') return;
+      g = (!e.isPrimary || g) ? null : {id:e.pointerId, x:e.clientX, y:e.clientY};
+    });
+    el.addEventListener('pointerup',e=>{
+      if(!g || e.pointerId!==g.id) return;
+      const dir=swipeDir(e.clientX-g.x, e.clientY-g.y); g=null;
+      if(!dir || swipeBlocked() || (opts.canSwipe && !opts.canSwipe())) return;
+      if(opts.onSwipe) opts.onSwipe(dir); else step(dir);
+    });
+    el.addEventListener('pointercancel',()=>{ g=null; });
+  }
+  return {next:()=>step(1), prev:()=>step(-1), first, last, step, hasPrev, hasNext,
+          modalOpen, swipeDir, attachSwipe, addSwipeBlocker, swipeBlocked,
+          get busy(){ return busy; }};
+})();
+if(typeof attachViewerSwipe==='function') attachViewerSwipe();
+
 // -- Selection --------------------------------------------------------------
 function handleGalleryClick(e, f){
   if(e.ctrlKey || e.metaKey){
@@ -454,6 +721,7 @@ function refreshSelectionUI(){
  */
 async function selectAllMatching(){
   const params=new URLSearchParams({q:currentSearch,folder:currentFolder});
+  if(currentFolder && currentFolderRecursive) params.set('recursive','1');
   if(typeof galleryModalMode!=='undefined' && galleryModalMode==='album' && currentAlbum)
     params.set('album', currentAlbum);
   const d=await fetch('/api/list_all?'+params).then(r=>r.json());

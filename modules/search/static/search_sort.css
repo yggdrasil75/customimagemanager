@@ -1,6 +1,11 @@
 /* Sort picker inside the search box (search_sort.js). Role colours only. */
 #ss_sort_btn.ss-sort-on { color: var(--cim-accent-400, #60a5fa) }
-.ss-sort-row { text-align: left; padding: 3px 8px; border-radius: 4px; color: #d1d5db; width: 100% }
-.ss-sort-row:hover { background: rgba(255,255,255,.08) }
+.ss-sort-row { text-align: left; padding: 3px 8px; border-radius: 4px; color: var(--cim-gray-300, #d1d5db); width: 100% }
+.ss-sort-row:hover { background: color-mix(in srgb, var(--cim-white, #fff) 8%, transparent) }
 .ss-sort-row-on { color: var(--cim-accent-300, #93c5fd); font-weight: 600 }
-.ss-sort-dir { color: #9ca3af }
+.ss-sort-dir { color: var(--cim-gray-400, #9ca3af) }
+/* Filter builder (search_filter.js). */
+#sf_btn.sf-on { color: var(--cim-accent-400, #60a5fa) }
+#sf_pop { max-height: 70vh; overflow-y: auto; max-width: calc(100vw - 24px) }
+.sf-row:not(.hidden) { display: grid; grid-template-columns: 4.5rem 1fr; gap: 6px; align-items: start }
+.sf-label { color: var(--cim-gray-400, #9ca3af); padding-top: 3px }

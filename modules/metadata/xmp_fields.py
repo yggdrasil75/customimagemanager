@@ -1021,6 +1021,36 @@ XMPMM_FIELDS = [
     XMPField("RenditionClass",     TYPE_STRING),
 ]
 
+## @brief Adobe Photoshop: the legacy IPTC place fields (City / State / Country) most
+# tools still read; the map module fills them from GPS when empty.
+PHOTOSHOP_FIELDS = [
+    XMPField("City",    TYPE_STRING, writable=True, note="City where the photo was taken."),
+    XMPField("State",   TYPE_STRING, writable=True, note="State / province / region."),
+    XMPField("Country", TYPE_STRING, writable=True, note="Country name."),
+    XMPField("DateCreated", TYPE_DATE, writable=True,
+             note="When the photo was taken (ISO 8601, with offset); written by the date editor."),
+]
+
+## @brief Lightroom: hierarchicalSubject holds keyword paths "A|B|C". The app keeps
+# the leaf in dc:subject (flat tags, search) and the full path here (tag tree).
+LR_FIELDS = [
+    XMPField("hierarchicalSubject", TYPE_BAG, writable=True, is_list=True, feeds="tags",
+             note="Keyword paths A|B|C; the leaf folds into tags, the path feeds the tag tree."),
+    XMPField("weightedFlatSubject", TYPE_BAG, is_list=True),
+    XMPField("privateRTKInfo",      TYPE_STRING),
+]
+
+## @brief xmp (XMP basic): CreateDate can be written by the date editor; the rest read only.
+XMP_BASIC_FIELDS = [
+    XMPField("CreateDate",   TYPE_DATE, writable=True,
+             note="When the resource was created (ISO 8601, with offset)."),
+    XMPField("CreatorTool",  TYPE_STRING),
+    XMPField("Label",        TYPE_STRING),
+    XMPField("MetadataDate", TYPE_DATE),
+    XMPField("ModifyDate",   TYPE_DATE),
+    XMPField("Rating",       TYPE_REAL),
+]
+
 ## @brief The app's own namespace: per-file module data that has no standard home.
 CIM_NS  = "cim"
 CIM_URI = "https://github.com/yggdrasil75/customimagemanager/ns/1.0/"
@@ -1180,6 +1210,20 @@ XMP_NAMESPACES = [
         fields=IPTCEXT_FIELDS, mapped=True,
     ),
     XMPNamespace(
+        "lr", "Lightroom",
+        "Adobe Lightroom keywords. hierarchicalSubject holds keyword paths "
+        "(A|B|C): the leaf folds into our tags and the path feeds the tag tree; "
+        "a tag typed as a path (a/b/c) is written here.",
+        uri="http://ns.adobe.com/lightroom/1.0/",
+        fields=LR_FIELDS, mapped=True,
+    ),
+    XMPNamespace(
+        "xmp", "XMP Basic",
+        "Basic resource properties (create / modify dates, creator tool, rating).",
+        uri="http://ns.adobe.com/xap/1.0/",
+        fields=XMP_BASIC_FIELDS, mapped=True,
+    ),
+    XMPNamespace(
         "prism", "PRISM (publishing)",
         "Publishing Requirements for Industry Standard Metadata 3.0. Mostly "
         "journal/magazine publishing fields, surfaced read-only. Genre feeds our "
@@ -1206,6 +1250,13 @@ XMP_NAMESPACES = [
         mwg_fields.MWG_KW_DESCRIPTION,
         uri=mwg_fields.MWG_KW_URI,
         fields=MWG_KW_FIELDS, mapped=True,
+    ),
+    XMPNamespace(
+        "photoshop", "Photoshop",
+        "Adobe Photoshop namespace; the place fields (City, State, Country) that "
+        "mirror IPTC IIM and are filled from GPS by the map module when empty.",
+        uri="http://ns.adobe.com/photoshop/1.0/",
+        fields=PHOTOSHOP_FIELDS, mapped=True,
     ),
     XMPNamespace(
         CIM_NS, "CIM (this app)",

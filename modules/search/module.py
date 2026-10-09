@@ -15,11 +15,18 @@ Filters (prefix any with '-' to negate):
   people:>=2             number of detected faces
   rating:>=4             stars (user rating, else IQA estimate)
   ext:png|jpg  path:holiday  desc:beach  artist:ann  event:wedding  lang:en
+  kind:photo|video|raw   media kind (raw = developed from a camera raw)
+
+The filter builder (search_filter.js, a funnel icon in the search box) writes
+these tokens from a form; GET /api/search_sort/values lists indexed metadata
+values (camera models) for its suggestions.
 
 Numbers take < <= > >= = != or a range a..b.
 Sort: sort:<key> / sort:-<key>, chainable - see SORT_KEYS.
 """
 import re
+
+from flask import jsonify, request
 
 from common import table_exists
 
@@ -32,7 +39,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         [],
-    "assets":      ["search_sort.js", "search_sort.css"],
+    "assets":      ["search_sort.js", "search_sort.css", "search_filter.js"],
 }
 
 RATIO_TOL = 0.05
@@ -143,6 +150,28 @@ def tags_clause(value):
     return _terms_clause(value, one)
 
 
+_KIND_ALIASES = {"photos": "photo", "images": "image", "videos": "video", "raws": "raw"}
+
+
+def kind_clause(value):
+    """! @brief kind:photo|video|raw|<media kind> -> (clause, params).
+    photo / image = still images, raw = images developed from a camera raw,
+    anything else matches files.media_kind (video, audio, book ...)."""
+    parts, params = [], []
+    for k in filter(None, value.lower().split("|")):
+        k = _KIND_ALIASES.get(k, k)
+        if k in ("photo", "image"):
+            parts.append("COALESCE(files.media_kind,'image')='image'")
+        elif k == "raw":
+            parts.append("files.rel_path IN (SELECT derived_rel FROM raws WHERE derived_rel IS NOT NULL)")
+        elif re.match(r"^[a-z0-9_]+$", k):
+            parts.append("COALESCE(files.media_kind,'image')=?")
+            params.append(k)
+    if not parts:
+        return "", []
+    return "(" + " OR ".join(parts) + ")", params
+
+
 def _negatable(fn):
     """! @brief Register-ready handler pair: (positive, negated)."""
     def pos(tok, value):
@@ -233,6 +262,7 @@ def register(host):
         "artist":   (text_col("artist"), "artist:ann - artist contains"),
         "event":    (text_col("event"), "event:wedding - event contains"),
         "lang":     (text_col("language"), "lang:en - language contains"),
+        "kind":     (kind_clause, "kind:photo|video|raw - media kind (raw = developed from a camera raw)"),
     }
     for prefix, (fn, help_) in filters.items():
         pos, neg = _negatable(fn)
@@ -263,5 +293,32 @@ def register(host):
     }
     for k, e in sort_keys.items():
         host.register_sort_key(k, e)
+    def api_values():
+        """! @brief GET ?ns=exif&tag=Model&q=can: the most common indexed values of one
+        metadata tag (the filter builder's camera suggestions), restricted to files the
+        requester may see. Empty when the metadata index is absent."""
+        tag = (request.args.get("tag") or "").strip()
+        ns = (request.args.get("ns") or "").strip().lower()
+        q = (request.args.get("q") or "").strip()
+        if not tag:
+            return jsonify({"success": False, "error": "tag required"}), 400
+        d = db()
+        if not has("metadata_index"):
+            return jsonify({"success": True, "values": []})
+        clauses, params = ["tag=? COLLATE NOCASE"], [tag]
+        if ns:
+            clauses.append("ns=?"); params.append(ns)
+        if q:
+            clauses.append("value LIKE ? COLLATE NOCASE"); params.append(f"%{q}%")
+        vc, vp = host.files_clause("rel_path")
+        clauses += vc; params += vp
+        rows = d.execute("SELECT value, COUNT(*) AS n FROM metadata_index WHERE "
+                         + " AND ".join(clauses)
+                         + " GROUP BY value COLLATE NOCASE ORDER BY n DESC, value LIMIT 50",
+                         params).fetchall()
+        return jsonify({"success": True, "values": [{"value": r[0], "count": r[1]} for r in rows]})
+    host.add_route("/api/search_sort/values", api_values, feature="tab.gallery")
+
     host.add_asset("search_sort.js")
     host.add_asset("search_sort.css", kind="css")
+    host.add_asset("search_filter.js")

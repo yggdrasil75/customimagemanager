@@ -38,3 +38,47 @@
   text-align: center;
   box-shadow: 0 0 2px rgba(0, 0, 0, 0.8);
 }
+
+/* Viewer minimap (editor panel). */
+.cim-minimap {
+  height: 140px;
+  border-radius: 6px;
+  overflow: hidden;
+  cursor: pointer;
+  background: var(--cim-gray-800, #1f2937);
+  border: 1px solid var(--cim-gray-700, #374151);
+}
+.cim-minimap .leaflet-container { background: var(--cim-gray-800, #1f2937); cursor: pointer; }
+
+/* Places gallery view. */
+.map-places { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.map-places-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px; font-size: 12px;
+  border-bottom: 1px solid var(--cim-gray-700, #374151);
+  background: var(--cim-gray-800, #1f2937);
+}
+.map-places-total { color: var(--cim-gray-400, #9ca3af); }
+.map-places-body { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 12px; font-size: 13px; }
+.map-places-empty { color: var(--cim-gray-500, #6b7280); padding: 24px 0; text-align: center; }
+.map-place-country { border-bottom: 1px solid var(--cim-gray-800, #1f2937); padding: 4px 0; }
+.map-place-country > summary { cursor: pointer; list-style-position: inside; }
+.map-place-row { display: flex; align-items: baseline; gap: 6px; padding: 2px 0; }
+.map-place-link {
+  background: none; border: 0; padding: 0; cursor: pointer; text-align: left;
+  color: var(--cim-gray-200, #e5e7eb);
+}
+.map-place-link:hover { color: var(--cim-accent-400, #60a5fa); text-decoration: underline; }
+.map-place-country-name { font-weight: 600; color: var(--cim-gray-100, #f3f4f6); }
+.map-place-count {
+  font-size: 11px; color: var(--cim-gray-500, #6b7280);
+  font-variant-numeric: tabular-nums;
+}
+.map-place-cont { margin-left: auto; font-size: 11px; color: var(--cim-gray-500, #6b7280); }
+.map-place-regions { margin: 2px 0 6px 18px; }
+.map-place-cities {
+  margin: 0 0 4px 14px;
+  display: flex; flex-wrap: wrap; gap: 2px 14px;
+}
+.map-place-cities li { display: flex; align-items: baseline; gap: 4px; }
+.map-place-city { color: var(--cim-gray-300, #d1d5db); }

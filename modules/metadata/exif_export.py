@@ -25,6 +25,7 @@ import tempfile
 log = logging.getLogger("exif_export")
 
 _JXL_REPACKAGE_EXTS = {".jxl"}
+_EXIF_DATE_RE = re.compile(r"^\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2}$")
 # marks the Exiv2 error a repackage can fix
 _BMFF_WRITE_ERR = "BMFF"
 
@@ -164,6 +165,25 @@ def _coerce(field, value):
             return None, f"{iv} is not a valid value for {field.name}"
         return iv, None
 
+    if dt == efields.TYPE_RATIONAL and (field.count or 0) > 1:
+        # an array: "n/d n/d n/d" (or plain numbers), exactly `count` of them
+        parts = value if isinstance(value, (list, tuple)) else str(value).replace(",", " ").split()
+        out = []
+        for p in parts:
+            p = str(p).strip()
+            try:
+                if "/" in p:
+                    num, den = p.split("/", 1)
+                    int(num); int(den)
+                    out.append(p)
+                else:
+                    out.append(f"{int(round(float(p) * 10000))}/10000")
+            except (ValueError, TypeError):
+                return None, f"expected rationals, got {value!r}"
+        if len(out) != field.count:
+            return None, f"expected {field.count} rationals, got {len(out)}"
+        return " ".join(out), None
+
     if dt == efields.TYPE_RATIONAL:
         # "num/den" or a plain number
         try:
@@ -175,6 +195,15 @@ def _coerce(field, value):
             return f"{int(round(float(value)))}/1", None
         except (ValueError, TypeError):
             return None, f"expected rational, got {value!r}"
+
+    if dt == efields.TYPE_DATE:
+        # EXIF dates are "YYYY:MM:DD HH:MM:SS" (local time, no zone)
+        sv = str(value).strip()
+        if not _EXIF_DATE_RE.match(sv):
+            return None, f"{field.name} must be YYYY:MM:DD HH:MM:SS, got {value!r}"
+        return sv, None
+    if getattr(field, "pattern", None) and not re.match(field.pattern, str(value).strip()):
+        return None, f"{value!r} is not a valid value for {field.name}"
 
     # byte tags shown as text (hex id, raw file name)
     err = exiv2_keys.valid(field, value)

@@ -1217,8 +1217,11 @@ def api_face_clusters():
     # How many faces are parked as "unknown", for the tab to show a count.
     unknown_n = _db().execute(
         "SELECT COUNT(*) FROM face_regions WHERE COALESCE(unknown,0)=1").fetchone()[0]
+    # Per-viewer favourites lead; hidden people only with ?show_hidden=1.
+    clusters, hidden_n = _people_filter_sort(_annotate(clusters, cluster_key="id"))
     return jsonify({"clusters": clusters, "unclustered": singles,
                     "unknown": unknown_n, "drawn_hidden": drawn_hidden,
+                    "hidden_people": hidden_n,
                     "bodies": _body_on(),
                     "identity": bool(_faces() and _faces()["have_identity_embedder"]())})
 
@@ -1423,6 +1426,9 @@ def api_person_get(cluster_id):
             MEDIA_DIR, person_uuid, personlib.mesh_member(app["id"])) is not None
         app["has_face_mesh"] = personlib.read_member(
             MEDIA_DIR, person_uuid, personlib.face_mesh_member(app["id"])) is not None
+    # who else starred this person is not the viewer's business: only their own flag
+    desc["favorite"] = person_uuid in _user_favs({person_uuid: desc})
+    desc.pop("favorites", None)
     return jsonify({"success": True, "person": desc,
                     "body_fields": list(personlib.BODY_FIELDS),
                     "bio_fields": list(personlib.BIO_FIELDS),
@@ -1489,7 +1495,10 @@ def api_persons_directory():
             continue
         seen_names.add(name.lower())
         out.append({"uuid": None, "name": name, "cluster_id": cid})
-    return jsonify({"success": True, "people": sorted(out, key=lambda p: p["name"].lower())})
+    out = _annotate(sorted(out, key=lambda p: p["name"].lower()), uuid_key="uuid")
+    # Per-viewer favourites first; hidden people only with ?show_hidden=1.
+    out, hidden_n = _people_filter_sort(out)
+    return jsonify({"success": True, "people": out, "hidden": hidden_n})
 
 def api_persons_review():
     """! @brief One-sided relationship edges for the review tab (never auto-repaired)."""
@@ -2046,3 +2055,320 @@ def api_body_split():
 
     _rows("body_regions", f"id IN ({ph})", ids, set={"cluster_id": -1}, commit=True)
     return jsonify({"success": True, "moved": len(ids)})
+
+# -- one face: reassign / unassign; per-user favourite people; hidden people ---
+## @brief Non-admin users' favourite people (admins' live in the .person file).
+FAV_TABLE_DDL = """
+CREATE TABLE IF NOT EXISTS person_favorites (
+    username   TEXT NOT NULL,
+    person_id  TEXT NOT NULL,      -- the person record's uuid
+    PRIMARY KEY (username, person_id)
+);
+"""
+
+
+def _viewer() -> str:
+    """! @brief The current username as stored in favourites ('anonymous' with auth off)."""
+    return HOST.current_user() or "anonymous"
+
+
+def _person_meta():
+    """! @brief Every person record and the face clusters that point at them.
+    @return ({uuid: descriptor}, {cluster_id: uuid}); the persons cache first, then
+            each record's own cluster list for clusters the cache lacks.
+    """
+    descs = {d["uuid"]: d for d in personlib.list_all(MEDIA_DIR)}
+    by_cluster = {}
+    for cid, uid in _db().execute("SELECT cluster_id, uuid FROM persons").fetchall():
+        if uid in descs:
+            by_cluster[int(cid)] = uid
+    for uid, d in descs.items():
+        for cid in d["clusters"].get("face", []):
+            by_cluster.setdefault(int(cid), uid)
+    return descs, by_cluster
+
+
+def _user_favs(descs) -> set:
+    """! @brief uuids of the people the current viewer marked favourite (record list + DB rows)."""
+    user = _viewer()
+    out = {u for u, d in descs.items() if user in d.get("favorites", [])}
+    out |= {r[0] for r in _db().execute(
+        "SELECT person_id FROM person_favorites WHERE username=?", (user,)).fetchall()}
+    return out
+
+
+def _person_uuid_from(d, create=True):
+    """! @brief A request's person: `uuid` / `person_id` (a record uuid) or `cluster_id`
+    (a face cluster, whose record is created on first use). @return uuid or None."""
+    pid = d.get("uuid") or d.get("person_id")
+    if pid not in (None, "") and not str(pid).lstrip("-").isdigit():
+        return str(pid) if personlib.read(MEDIA_DIR, str(pid)) is not None else None
+    try:
+        cid = int(d.get("cluster_id", pid))
+    except (TypeError, ValueError):
+        return None
+    return person_for_cluster(cid, create=create) if cid >= 0 else None
+
+
+def set_favorite(person_uuid: str, on: bool) -> None:
+    """! @brief Favourite / unfavourite a person for the current viewer: an admin's choice
+    goes into the .person record, anyone else's into person_favorites. Turning it off
+    clears both, so a role change never strands a favourite."""
+    user = _viewer()
+    db = _db()
+    if on and HOST.is_admin():
+        personlib.set_favorite(MEDIA_DIR, person_uuid, user, True)
+    elif on:
+        db.execute("INSERT OR IGNORE INTO person_favorites(username, person_id) VALUES (?,?)",
+                   (user, person_uuid))
+    else:
+        personlib.set_favorite(MEDIA_DIR, person_uuid, user, False)
+        db.execute("DELETE FROM person_favorites WHERE username=? AND person_id=?",
+                   (user, person_uuid))
+    db.commit()
+
+
+def api_person_favorite():
+    """! @brief POST {uuid | person_id | cluster_id, on}: star / unstar a person for this user."""
+    d = request.json or {}
+    uid = _person_uuid_from(d)
+    if not uid:
+        return jsonify({"success": False, "error": "no such person"})
+    on = bool(d.get("on", True))
+    set_favorite(uid, on)
+    return jsonify({"success": True, "uuid": uid, "favorite": on})
+
+
+def api_person_hide():
+    """! @brief POST {uuid | person_id | cluster_id, hidden}: hide a person from people lists
+    and pickers (stored in the .person record; their photos stay searchable)."""
+    d = request.json or {}
+    uid = _person_uuid_from(d)
+    if not uid:
+        return jsonify({"success": False, "error": "no such person"})
+    hidden = bool(d.get("hidden", True))
+    personlib.set_hidden(MEDIA_DIR, uid, hidden)
+    return jsonify({"success": True, "uuid": uid, "hidden": hidden})
+
+
+def person_fav_clause():
+    """! @brief `person:fav`: files showing any of the viewer's favourite people.
+    @return (sql, params); a never-true clause when the viewer has none."""
+    descs, by_cluster = _person_meta()
+    favs = _user_favs(descs)
+    cids = sorted(c for c, u in by_cluster.items() if u in favs)
+    if not cids:
+        return "0", []
+    return (f"rel_path IN (SELECT rel_path FROM face_regions WHERE cluster_id IN "
+            f"({','.join('?' * len(cids))}))", cids)
+
+
+def _annotate(items, cluster_key="cluster_id", uuid_key=None):
+    """! @brief Add uuid / favorite / hidden to people-list entries (in place).
+    @param cluster_key  the entry key holding its face cluster id.
+    @param uuid_key     the entry key holding a record uuid, when it has one.
+    """
+    descs, by_cluster = _person_meta()
+    favs = _user_favs(descs)
+    for it in items:
+        uid = (it.get(uuid_key) if uuid_key else None) or by_cluster.get(it.get(cluster_key))
+        it["uuid"] = uid
+        it["favorite"] = bool(uid and uid in favs)
+        it["hidden"] = bool(uid and descs.get(uid, {}).get("hidden"))
+    return items
+
+
+def _show_hidden() -> bool:
+    return request.args.get("show_hidden", "") in ("1", "true")
+
+
+def _people_filter_sort(items, name_key="name"):
+    """! @brief Drop hidden people unless ?show_hidden=1, then put favourites first
+    (stable, so each list keeps its own order otherwise). @return (items, hidden count)."""
+    keep = items if _show_hidden() else [i for i in items if not i.get("hidden")]
+    keep.sort(key=lambda i: not i.get("favorite"))
+    return keep, sum(1 for i in items if i.get("hidden"))
+
+
+def _face_row(rel, face_id=None, region=None):
+    """! @brief The face_regions row for one face: by id, else by the box in `rel`
+    (a box with no cached row, e.g. one drawn by hand, gets a row first).
+    @return (id, rel_path, cx, cy, w, h, cluster_id) or None."""
+    db = _db()
+    cols = "id, rel_path, cx, cy, w, h, cluster_id"
+    if face_id not in (None, ""):
+        row = db.execute(f"SELECT {cols} FROM face_regions WHERE id=?", (int(face_id),)).fetchone()
+        return row if row and (not rel or row[1] == rel) else None
+    if not rel or not isinstance(region, dict):
+        return None
+    try:
+        cx, cy = float(region["cx"]), float(region["cy"])
+        w, h = float(region.get("w") or 0), float(region.get("h") or 0)
+    except (KeyError, TypeError, ValueError):
+        return None
+    q = (f"SELECT {cols} FROM face_regions WHERE rel_path=? AND abs(cx-?)<1e-3 AND abs(cy-?)<1e-3 "
+         "ORDER BY abs(cx-?)+abs(cy-?) LIMIT 1")
+    row = db.execute(q, (rel, cx, cy, cx, cy)).fetchone()
+    if row or w <= 0 or h <= 0:
+        return row
+    update_file(rel, table="face_regions", key={"cx": round(cx, 5), "cy": round(cy, 5)},
+                set={"w": round(w, 5), "h": round(h, 5), "cluster_id": -1}, dont_write=True)
+    return db.execute(q, (rel, cx, cy, cx, cy)).fetchone()
+
+
+def _write_region_name(rel, cx, cy, w, h, name, confirm):
+    """! @brief Put a person's name on the face region at (cx, cy) in the file's metadata
+    (the source of truth), adding the face region when the file lacks it.
+    @return True when the file was written."""
+    abs_p = get_safe_path(MEDIA_DIR, rel)
+    if not abs_p or not os.path.exists(abs_p):
+        return False
+    meta = read_metadata(abs_p)
+    regions = meta.get("regions") or []
+    near = [r for r in regions if abs(float(r.get("cx", -9)) - cx) < 1e-3
+            and abs(float(r.get("cy", -9)) - cy) < 1e-3]
+    faces = [r for r in near if "face" in (str(r.get("class_name", "")).lower(),
+                                           str(r.get("region_type", "")).lower())]
+    hit = (faces or near or [None])[0]
+    if hit is None:
+        hit = {"class_name": "face", "region_type": "face", "cx": cx, "cy": cy, "w": w, "h": h,
+               "confirmed": True, "region_tags": [], "region_description": ""}
+        regions.append(hit)
+    hit["region_name"] = name
+    if confirm:
+        hit["confirmed"] = True
+    update_file(abs_p, set={"regions": regions}, meta=meta)
+    return True
+
+
+def _new_cluster_id(descs) -> int:
+    """! @brief A face cluster id nothing uses yet (rows, the persons cache, any record)."""
+    db = _db()
+    top = max(db.execute("SELECT COALESCE(MAX(cluster_id),-1) FROM face_regions").fetchone()[0],
+              db.execute("SELECT COALESCE(MAX(cluster_id),-1) FROM persons").fetchone()[0],
+              max((c for d in descs.values() for c in d["clusters"].get("face", [])), default=-1))
+    return int(top) + 1
+
+
+def _link_cluster(desc, cid):
+    """! @brief Point a person record (and the persons cache) at one more face cluster."""
+    if cid not in desc["clusters"]["face"]:
+        desc["clusters"]["face"].append(cid)
+        personlib.write(MEDIA_DIR, desc)
+    db = _db()
+    db.execute("INSERT OR REPLACE INTO persons(cluster_id, uuid) VALUES (?,?)", (cid, desc["uuid"]))
+    db.commit()
+
+
+def _assign_target(d):
+    """! @brief Where a face goes: {person_id|uuid} a record, {cluster_id} a cluster, or
+    {name} the person of that name (a new person when nobody has it).
+    @return (cluster_id, name, uuid) - cluster_id freshly allocated when the person
+            has none yet - or (None, error, None)."""
+    descs, by_cluster = _person_meta()
+    db = _db()
+    pid = d.get("person_id", d.get("uuid"))
+    cid = d.get("cluster_id")
+    name = (d.get("name") or "").strip()
+    if pid not in (None, "") and str(pid).lstrip("-").isdigit():
+        cid, pid = int(pid), None
+    if not pid and cid in (None, "") and name:
+        low = name.lower()
+        pid = next((u for u, x in descs.items() if (x.get("name") or "").strip().lower() == low), None)
+        if not pid:
+            row = db.execute("SELECT cluster_id FROM face_regions WHERE cluster_id>=0 AND "
+                             "lower(name)=? ORDER BY confirmed DESC LIMIT 1", (low,)).fetchone()
+            if row:
+                cid = row[0]
+    if pid:
+        desc = descs.get(str(pid))
+        if desc is None:
+            return None, "no such person", None
+        cids = desc["clusters"].get("face") or sorted(c for c, u in by_cluster.items() if u == desc["uuid"])
+        target = cids[0] if cids else _new_cluster_id(descs)
+        _link_cluster(desc, target)
+        return target, (desc.get("name") or "").strip(), desc["uuid"]
+    if cid not in (None, ""):
+        try:
+            cid = int(cid)
+        except (TypeError, ValueError):
+            return None, "bad cluster_id", None
+        if cid < 0:
+            return None, "bad cluster_id", None
+        uid = by_cluster.get(cid)
+        nm = (descs[uid].get("name") or "").strip() if uid else ""
+        if not nm:
+            row = db.execute("SELECT name FROM face_regions WHERE cluster_id=? AND name<>'' "
+                             "ORDER BY confirmed DESC LIMIT 1", (cid,)).fetchone()
+            nm = row[0] if row else ""
+        return cid, nm, uid
+    if not name:
+        return None, "person_id, cluster_id or name required", None
+    desc = personlib.create(MEDIA_DIR, name)       # nobody has this name: a new person
+    target = _new_cluster_id(descs)
+    _link_cluster(desc, target)
+    return target, name, desc["uuid"]
+
+
+def _face_request():
+    """! @brief The face a POST names: {filename, face_id} or {filename, region: {cx, cy, w, h}}.
+    @return (row, None) or (None, error response)."""
+    d = request.json or {}
+    rel = (d.get("filename") or "").strip()
+    if rel and not HOST.check_path(rel, True):
+        return None, (jsonify({"success": False, "error": "forbidden"}), 403)
+    row = _face_row(rel, d.get("face_id", d.get("id")), d.get("region"))
+    if row is None:
+        return None, jsonify({"success": False, "error": "face not found"})
+    if not HOST.check_path(row[1], True):
+        return None, (jsonify({"success": False, "error": "forbidden"}), 403)
+    return row, None
+
+
+def api_face_assign():
+    """! @brief Move ONE face to a person: the region's name in the file, its cached row
+    (cluster, name, confirmed) and so its cluster membership - it leaves its old cluster.
+    POST {filename, face_id | region, person_id | cluster_id | name}."""
+    row, err = _face_request()
+    if err is not None:
+        return err
+    fid, rel, cx, cy, w, h, old = row
+    target, name, uid = _assign_target(request.json or {})
+    if target is None:
+        return jsonify({"success": False, "error": name})
+    _write_region_name(rel, cx, cy, w, h, name, bool(name))
+    _rows("face_regions", "id=?", (fid,), commit=True,
+          set={"cluster_id": target, "name": name, "confirmed": 1 if name else 0,
+               "unknown": 0, "not_face": 0})
+    push_face_flags([rel])
+    return jsonify({"success": True, "face_id": fid, "cluster_id": target, "old_cluster_id": old,
+                    "name": name, "uuid": uid})
+
+
+def api_face_unassign():
+    """! @brief "Remove from person": the face loses its name and cluster and becomes an
+    unknown face (kept out of clustering, so it does not drift back).
+    POST {filename, face_id | region}."""
+    row, err = _face_request()
+    if err is not None:
+        return err
+    fid, rel, cx, cy, w, h, old = row
+    _write_region_name(rel, cx, cy, w, h, "", False)
+    _rows("face_regions", "id=?", (fid,), commit=True,
+          set={"cluster_id": -1, "name": "", "confirmed": 0, "unknown": 1, "not_face": 0})
+    push_face_flags([rel])
+    return jsonify({"success": True, "face_id": fid, "old_cluster_id": old})
+
+
+def api_faces_in_file():
+    """! @brief The faces of one picture with their person: GET ?filename=.
+    @return {faces: [{id, cx, cy, w, h, cluster_id, name, unknown, uuid, favorite, hidden}]}."""
+    rel = request.args.get("filename", "")
+    if not rel or not HOST.check_path(rel, False):
+        return jsonify({"success": False, "error": "filename required"})
+    faces = [{"id": r[0], "cx": r[1], "cy": r[2], "w": r[3], "h": r[4],
+              "cluster_id": r[5], "name": r[6] or "", "unknown": bool(r[7])}
+             for r in _db().execute(
+                 "SELECT id, cx, cy, w, h, cluster_id, name, COALESCE(unknown,0) FROM face_regions "
+                 "WHERE rel_path=? AND COALESCE(not_face,0)=0 ORDER BY cx", (rel,)).fetchall()]
+    return jsonify({"success": True, "faces": _annotate(faces)})

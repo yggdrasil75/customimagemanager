@@ -1,3 +1,3 @@
-/* embedding.css - Review tab styles */
-/* ======================================================================== */
-/* Styles are in the main app.css for now */
+/* Image search popover (image_search.js). */
+.is-drop:hover, .is-drop:focus, .is-drop.is-drag-over { border-color: var(--cim-accent-500, #3b82f6); color: var(--cim-gray-200, #e5e7eb) }
+#search_input.is-drag-over { border-color: var(--cim-accent-500, #3b82f6); background: var(--cim-gray-600, #4b5563) }

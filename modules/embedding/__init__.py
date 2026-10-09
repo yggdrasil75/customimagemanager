@@ -15,13 +15,15 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         [],
-    "assets":      ["embedding.js", "embedding.css"],
+    "assets":      ["embedding.js", "embedding.css", "semantic_filter.js", "image_search.js"],
 }
 
 import json
 import os
+import tempfile
+import threading
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 
 import numpy as np
 from flask import request, jsonify
@@ -44,6 +46,8 @@ def register(host):
     # -- assets -------------------------------------------------------------
     host.add_asset("embedding.js", kind="js", module_id="embedding")
     host.add_asset("embedding.css", kind="css", module_id="embedding")
+    host.add_asset("image_search.js", kind="js", module_id="embedding")
+    host.add_asset("semantic_filter.js", kind="js", module_id="embedding")
 
     # -- settings (shared OAI keys; the core AI pane renders them) ----------
 
@@ -62,6 +66,17 @@ def register(host):
     host.add_settings_field(key="semantic_negative_weight", label="Semantic search: weight of -negative terms",
                             kind="number", pane="module",
                             help="'sem:man -woman' subtracts this x the similarity to 'woman'.")
+    host.add_config_key("semantic_filter_threshold", default=0.0, validate=_clamp(-1.0, 1.0, 0.0))
+    host.add_config_key("semantic_filter_top", default=0,
+                        validate=lambda v: max(0, int(float(v if v not in (None, "") else 0))))
+    host.add_settings_field(key="semantic_filter_threshold", label="about: filter: minimum similarity",
+                            kind="number", pane="module",
+                            help="The about:<text> token keeps files scoring at least this (raw cosine). "
+                                 "0 = auto per query: within the relative cutoff of the best hit and at "
+                                 "least one standard deviation above the library's mean score.")
+    host.add_settings_field(key="semantic_filter_top", label="about: filter: keep at most N files",
+                            kind="number", pane="module",
+                            help="Cap on how many files about: keeps (the best scoring ones); 0 = no cap.")
 
     # -- database tables ----------------------------------------------------
     ## @brief One row per (image, model): switching embedding models keeps every
@@ -693,10 +708,11 @@ def register(host):
         host.enrich_file_rows(db, entries)
         return entries
 
-    def _score_library(db, qv, negs=(), top_k=5000):
-        """! @brief [(rel_path, score)] best first. score = cos(query) - w * max cos(negatives):
-        an image that matches a negative term strongly is pushed down, one that
-        doesn't is left alone."""
+    def _score_arrays(db, qv, negs=()):
+        """! @brief Every embedded file of the picked model scored against a text query.
+        score = cos(query) - w * max cos(negatives): an image that matches a negative
+        term strongly is pushed down, one that doesn't is left alone.
+        @return (names list, float32 score array), unordered."""
         q = _normalise(np.asarray(qv, np.float32).ravel())
         dim = int(q.shape[0])
         ns = [_normalise(np.asarray(v, np.float32).ravel()) for v in negs]
@@ -709,9 +725,13 @@ def register(host):
                 s_ = s_ - w * np.max(np.stack([mat @ v for v in ns]), axis=0)
             names.extend(nm)
             scores.append(s_)
+        return names, (np.concatenate(scores) if scores else np.empty(0, np.float32))
+
+    def _score_library(db, qv, negs=(), top_k=5000):
+        """! @brief [(rel_path, score)] best first (see _score_arrays)."""
+        names, sc = _score_arrays(db, qv, negs)
         if not names:
             return []
-        sc = np.concatenate(scores)
         order = np.argsort(-sc)[:top_k]
         return [(names[i], float(sc[i])) for i in order]
 
@@ -728,6 +748,103 @@ def register(host):
         cut = max(floor, top * ratio) if top > 0 else floor
         kept = [h for h in hits if h[1] >= cut]
         return kept or hits[:1]
+
+    # -- about:<text> - a semantic FILTER (no ranking) ------------------------
+    # sem: / ~ rank the whole library by similarity, so the result has its own
+    # order and can't compose with sort:, the timeline or select-all. about:
+    # is an ordinary search token instead: it keeps the files whose similarity
+    # to the text clears a threshold and leaves the order to the normal sort.
+    # The kept set is computed once per (text, model, settings, library state)
+    # and cached in memory (LRU), so paging, counts and the timeline's many
+    # bucket queries reuse it.
+    _ABOUT_CACHE_SIZE = 32
+    _about_cache = OrderedDict()
+    _about_lock = threading.Lock()
+
+    def _about_text(value):
+        """! @brief The token value to query text: words joined by '_' or '+' (a search
+        token can't hold a space), '-word' a negative term."""
+        return " ".join(value.replace("+", " ").replace("_", " ").split())
+
+    def _filter_cut(scores):
+        """! @brief The score a file needs to pass the about: filter.
+        A positive semantic_filter_threshold is an absolute cosine floor. 0 = auto,
+        from this query's score distribution over the picked model's vectors: within
+        semantic_relative_cutoff of the best hit (as sem: keeps), at least one
+        standard deviation above the mean (text->image cosines are compressed and
+        model-specific, so a fixed number doesn't carry), and semantic_min_score."""
+        thr = float(host.config.get("semantic_filter_threshold") or 0)
+        if thr > 0:
+            return thr
+        top = float(scores.max())
+        cut = max(float(host.config.get("semantic_min_score") or 0),
+                  float(scores.mean() + scores.std()))
+        ratio = float(host.config.get("semantic_relative_cutoff") or 0)
+        if top > 0 and ratio:
+            cut = max(cut, top * ratio)
+        return min(cut, top)                  # the best hit always passes
+
+    def _semantic_filter(text):
+        """! @brief rel_paths whose similarity to `text` clears the about: threshold.
+        @return (sorted list of rel_paths, error or None); cached per query."""
+        pos_text, neg_texts = _parse_semantic(text)
+        if not pos_text:
+            return [], "about: needs at least one positive term."
+        db = host.db()
+        model = _embed_tag()
+        n, last = db.execute("SELECT COUNT(*), MAX(updated) FROM image_embeddings WHERE model=?",
+                             (model,)).fetchone()
+        if not n:
+            return [], f"No embeddings for the current model '{model}'."
+        key = (pos_text, tuple(neg_texts), model, n, last,
+               *(host.config.get(k) for k in ("semantic_filter_threshold", "semantic_filter_top",
+                                              "semantic_relative_cutoff", "semantic_min_score",
+                                              "semantic_negative_weight")))
+        with _about_lock:
+            hit = _about_cache.get(key)
+            if hit is not None:
+                _about_cache.move_to_end(key)
+                return hit, None
+        embed_text = _text_embedder()
+        if embed_text is None:
+            return [], "The picked embedding model can't embed text."
+        qv = embed_text(pos_text)
+        if qv is None:
+            return [], "Failed to embed query."
+        negs = [v for v in (embed_text(t) for t in neg_texts) if v is not None]
+        names, sc = _score_arrays(db, qv, negs)
+        kept = []
+        if names:
+            idx = np.nonzero(sc >= _filter_cut(sc))[0]
+            cap = int(host.config.get("semantic_filter_top") or 0)
+            if cap and len(idx) > cap:
+                idx = idx[np.argsort(-sc[idx])[:cap]]
+            kept = sorted(names[i] for i in idx)
+        with _about_lock:
+            _about_cache[key] = kept
+            _about_cache.move_to_end(key)
+            while len(_about_cache) > _ABOUT_CACHE_SIZE:
+                _about_cache.popitem(last=False)
+        return kept, None
+
+    def _about_token(negate):
+        """! @brief The search-type handler for about: (or -about: when negate)."""
+        def handler(_tok, value):
+            kept, err = _semantic_filter(_about_text(value))
+            if err:
+                host.logger.info(f"about: {err}")
+            if not kept:
+                return ("1", []) if negate else ("0", [])
+            # one JSON parameter, not one per file: no SQLite variable limit
+            return (f"rel_path {'NOT ' if negate else ''}IN (SELECT value FROM json_each(?))",
+                    [json.dumps(kept)])
+        return handler
+    host.register_search_type("about:", _about_token(False),
+                              help="about:red_car - files similar to the text, words joined by _ "
+                                   "(a filter, not a ranking: combines with other tokens and sort:); "
+                                   "about:man_-woman excludes a term; -about: negates")
+    host.register_search_type("-about:", _about_token(True))
+    host.search_help.pop("-about:", None)
 
     # -- API endpoints ------------------------------------------------------
     @host.route("/api/embedding/status", feature="tab.review")
@@ -905,27 +1022,71 @@ def register(host):
             {"filename": n, "score": round(s, 4)} for n, s in hits
         ]})
 
+    def _uploaded_image(storage):
+        """! @brief Decode an uploaded picture (werkzeug FileStorage) with the core
+        decoder, through a temporary file so every stored format (JXL, HEIF, a video's
+        poster frame) works. @return BGR image or None."""
+        suffix = os.path.splitext(storage.filename or "")[1].lower()[:10] or ".png"
+        fd, tmp = tempfile.mkstemp(prefix="cim_imgsearch_", suffix=suffix)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                storage.save(fh)
+            img = host.core.read_image(tmp)
+            return og.downscale_to_cap(host.core.to_bgr(img)) if img is not None else None
+        except Exception as e:
+            host.logger.warning(f"image search: could not decode upload: {e}")
+            return None
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+    def _visible_hits(db, hits):
+        """! @brief Drop hits the requester may not see (the grid's access WHERE); order kept."""
+        where_sql, vparams, _t, _s = host.core.files_where("", "", "")
+        if not where_sql or not hits:
+            return hits
+        names = [n for n, _ in hits]
+        allowed = set()
+        for i in range(0, len(names), 500):
+            chunk = names[i:i + 500]
+            allowed.update(r[0] for r in db.execute(
+                f"SELECT rel_path FROM files{where_sql} AND rel_path IN ("
+                + ",".join("?" * len(chunk)) + ")", [*vparams, *chunk]))
+        return [h for h in hits if h[0] in allowed]
+
     @host.route("/api/embedding/search_image", methods=["POST"], feature="tab.review")
     def embedding_search_image():
-        body = request.json or {}
-        filename = body.get("filename", "")
-        top_k = min(200, int(body.get("top_k", 60)))
-        if not filename:
-            return jsonify({"success": False, "error": "filename required"})
-        fp, err = host.core.resolve_media(filename)
-        if err:
-            return err
-        img = _img_loader(filename)
+        """! @brief Rank the library against a picture: a library file (JSON
+        {filename, top_k}) or an uploaded one (multipart `file`, optional `top_k`).
+        @return {success, results: [{filename, score}], files: gallery entries}."""
+        up = request.files.get("file")
+        src = request.form if up else (request.get_json(silent=True) or {})
+        try:
+            top_k = max(1, min(200, int(src.get("top_k", 60))))
+        except (TypeError, ValueError):
+            top_k = 60
+        if up:
+            img = _uploaded_image(up)
+        else:
+            filename = src.get("filename", "")
+            if not filename:
+                return jsonify({"success": False, "error": "filename or file required"})
+            fp, err = host.core.resolve_media(filename)
+            if err:
+                return err
+            img = _img_loader(filename)
         if img is None:
             return jsonify({"success": False, "error": "could not read image"}), 400
         db = host.db()
         try:
-            hits = _search_by_image(db, img, top_k=top_k)
+            hits = _visible_hits(db, _search_by_image(db, img, top_k=top_k))
         except RuntimeError as e:
             return jsonify({"success": False, "error": str(e)})
         return jsonify({"success": True, "results": [
             {"filename": n, "score": round(s, 4)} for n, s in hits
-        ]})
+        ], "files": _entries_for(db, hits)})
 
     # kind -> fn(rel_path, top_k) -> (hits [(name, score)], entries, error). The
     # music module registers "audio"; images/videos are served here.
@@ -998,6 +1159,7 @@ def register(host):
         "text_embed_enabled": _text_search_enabled,
         "embed_text": lambda text: (lambda f: f(text) if f else None)(_text_embedder()),
         "semantic_list": _semantic_list,
+        "semantic_filter": _semantic_filter,
         "entries_for": _entries_for,
         "register_similar_finder": register_similar_finder,
         # text pick (embed.text capability): passages / queries, own space

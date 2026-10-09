@@ -119,3 +119,97 @@ test("server errors show in the view", { skip }, async () => {
   await b.tick(20);
   assert.match($(b, ".tl-empty").textContent, /semantic/);
 });
+/** @brief Boot, open the timeline and go to the days view. */
+async function days(b) {
+  b.run(`setGalleryView('timeline')`);
+  await b.tick(20);
+  b.run(`document.querySelector('[data-tl-level="days"]').click()`);
+  await b.tick(40);
+}
+const crumb = b => $(b, "#tl_crumb").textContent;
+
+test("days scrubber: ticks spaced by count, drag jumps and labels the month", { skip }, async () => {
+  const b = await boot();
+  await days(b);
+  assert.ok($(b, "#tl_rail").classList.contains("tl-rail-scrub"));
+  const ticks = $$(b, ".tl-scrub-track .tl-tick");
+  // 1 + 3 + 1 files: segments start at 0%, 20%, 80%
+  assert.deepEqual(ticks.map(t => t.dataset.tick), ["2023-07", "2021-03", "undated"]);
+  assert.deepEqual(ticks.map(t => parseFloat(t.style.top)), [0, 20, 80]);
+  assert.deepEqual(ticks.map(t => t.textContent), ["2023", "2021", "-"]);
+  const track = $(b, ".tl-scrub-track");
+  track.getBoundingClientRect = () => ({ top: 0, bottom: 100, height: 100, left: 0, right: 40, width: 40 });
+  track.dispatchEvent(new b.window.MouseEvent("pointerdown", { bubbles: true, clientY: 50, button: 0 }));
+  const lab = $(b, ".tl-scrub-label");
+  assert.equal(track.dataset.at, "2021-03");
+  assert.ok(!lab.classList.contains("hidden"));
+  assert.match(lab.textContent, /2021/);
+  assert.match(crumb(b), /2021/);
+  b.window.dispatchEvent(new b.window.MouseEvent("pointermove", { clientY: 95 }));
+  assert.equal(track.dataset.at, "undated");
+  assert.equal(lab.textContent, "Undated");
+  b.window.dispatchEvent(new b.window.MouseEvent("pointerup", { clientY: 95 }));
+  assert.ok(lab.classList.contains("hidden"));
+  b.window.dispatchEvent(new b.window.MouseEvent("pointermove", { clientY: 5 }));
+  assert.equal(track.dataset.at, "undated");                 // released: no more jumps
+  // years view keeps the plain year rail
+  b.run(`document.querySelector('[data-tl-level="years"]').click()`);
+  await b.tick(20);
+  assert.ok(!$(b, "#tl_rail").classList.contains("tl-rail-scrub"));
+  assert.ok($(b, '#tl_rail [data-year="2021"]'));
+});
+
+test("month select toggles every file of the month, loaded or not", { skip }, async () => {
+  const b = await boot();
+  await days(b);
+  $(b, '.tl-monthsel[data-month="2021-03"]').click();
+  await b.tick(10);
+  assert.deepEqual([...b.run("[...selectedFiles].sort()")], ["a.jxl", "b.jxl", "c.jxl"]);
+  $(b, '.tl-monthsel[data-month="2021-03"]').click();
+  await b.tick(10);
+  assert.equal(b.run("selectedFiles.size"), 0);
+  // a month whose section never loaded is fetched first
+  b.window.IntersectionObserver = class { observe() { } unobserve() { } disconnect() { } };
+  b.run(`document.querySelector('[data-tl-level="months"]').click()`);
+  await b.tick(20);
+  b.run(`document.querySelector('[data-tl-level="days"]').click()`);
+  await b.tick(20);
+  assert.equal($$(b, ".tl-tile").length, 0);
+  $(b, '.tl-monthsel[data-month="2023-07"]').click();
+  await b.tick(20);
+  assert.deepEqual([...b.run("[...selectedFiles]")], ["e.jxl"]);
+  assert.equal(b.api.last("/api/timeline/files").query.period, "2023-07");
+  b.run(`clearSelection()`);
+});
+
+test("PageDown / PageUp jump a month in the days view", { skip }, async () => {
+  const b = await boot();
+  await days(b);
+  const key = k => b.document.dispatchEvent(new b.window.KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+  key("PageDown");
+  assert.match(crumb(b), /2021/);
+  key("PageDown");
+  assert.match(crumb(b), /Undated/);
+  key("PageDown");                                         // stays on the last month
+  assert.match(crumb(b), /Undated/);
+  key("PageUp");
+  assert.match(crumb(b), /2021/);
+  key("PageUp");
+  assert.match(crumb(b), /2023/);
+});
+
+test("'On this day' per day header only with the memories module", { skip }, async () => {
+  const b = await boot();
+  await days(b);
+  assert.equal($$(b, ".tl-otd").length, 0);
+  let opened = null;
+  b.window.CIMMemories = { open: d => { opened = d; } };
+  b.run(`document.querySelector('[data-tl-level="months"]').click()`);
+  await b.tick(20);
+  b.run(`document.querySelector('[data-tl-level="days"]').click()`);
+  await b.tick(40);
+  assert.ok($(b, '.tl-day[data-key="2021-03-04"] .tl-otd'));
+  assert.ok(!$(b, '.tl-day[data-key="undated"] .tl-otd'));
+  $(b, '.tl-day[data-key="2021-03-04"] .tl-otd').click();
+  assert.equal(opened, "2021-03-04");
+});

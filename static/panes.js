@@ -250,6 +250,8 @@ function openAlbumGallery(album) {
   if (nm) nm.textContent = album;
   const bar = document.getElementById('gallery_album_bar');
   if (bar) { bar.classList.remove('hidden'); bar.classList.add('flex'); }
+  // description + sort select (albums.js)
+  if (typeof albumBannerSync === 'function') albumBannerSync(album);
 
   // The folder picker and comic packer are meaningless inside an album.
   toggleGalleryChrome(false);
@@ -282,7 +284,7 @@ function exitAlbumView(reload = true) {
 
 /** @brief Show/hide the bits of gallery chrome that are meaningless inside an album. */
 function toggleGalleryChrome(show) {
-  ['folder_select', 'btn_make_comic'].forEach(id => {
+  ['folder_picker', 'btn_make_comic'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.classList.toggle('hidden', !show);
   });

@@ -76,12 +76,15 @@ function albumRow(a) {
   // text
   const txt = document.createElement('div');
   txt.className = 'flex-1 min-w-0';
+  const sortLbl = a.sort ? albumSortLabel(a.sort) : '';
   txt.innerHTML =
     `<div class="text-sm font-bold truncate">${escapeHtml(a.name)}</div>` +
-    `<div class="text-xs text-gray-400">${a.count} image${a.count === 1 ? '' : 's'}</div>` +
     (a.description
-      ? `<div class="text-xs text-gray-500 truncate">${escapeHtml(a.description)}</div>`
-      : '');
+      ? `<div class="album-desc text-xs text-gray-300 truncate" title="${escapeHtml(a.description)}">${escapeHtml(a.description)}</div>`
+      : '') +
+    `<div class="text-xs text-gray-400">${a.count} image${a.count === 1 ? '' : 's'}` +
+    (sortLbl ? ` <span class="album-sort text-gray-500" title="Sort order">&middot; &#8645; ${escapeHtml(sortLbl)}</span>` : '') +
+    `</div>`;
 
   // actions - stopPropagation so they don't also open the album
   const acts = document.createElement('div');
@@ -113,10 +116,11 @@ async function createAlbumPrompt() {
   if (name === null) return;
   const n = name.trim();
   if (!n) return;
+  const desc = prompt(`Description for "${n}" (optional):`, '');
   try {
     const d = await fetch('/api/albums/create', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: n })
+      body: JSON.stringify({ name: n, description: (desc || '').trim() })
     }).then(r => r.json());
     if (!d.success) { alert(d.error || 'Could not create album.'); return; }
     await loadImageAlbums();
@@ -329,3 +333,186 @@ async function removeCurrentFromAlbum(name) {
     if (galleryModalMode === 'album' && currentAlbum === name) loadGallery();
   } catch (e) { alert('Network error removing from album.'); }
 }
+
+// -- Album banner: description, sort order, manual reorder --------------------
+// Description, sort and cover are album-level: the server keeps them in the
+// albums table and mirrors them into the cover file. The grid of an open album
+// follows its sort unless the search box carries its own sort: token.
+
+/** @brief The sort tokens an album offers, with their labels ('' = by path). */
+const ALBUM_SORTS = [
+  ['', 'Path (default)'],
+  ['taken', 'Date taken, oldest first'],
+  ['-taken', 'Date taken, newest first'],
+  ['added', 'Added, oldest first'],
+  ['-added', 'Added, newest first'],
+  ['-rating', 'Rating, highest first'],
+  ['rating', 'Rating, lowest first'],
+  ['-path', 'Path, reversed'],
+  ['manual', 'Manual (drag to reorder)'],
+];
+
+/** @brief A sort token's label (the token itself when unknown). */
+function albumSortLabel(tok) {
+  const hit = ALBUM_SORTS.find(s => s[0] === (tok || ''));
+  return hit ? hit[1] : String(tok || '');
+}
+
+/** @brief The album record from the loaded list, or null. */
+function albumInfo(name) {
+  return allAlbums.find(a => a.name === name) || null;
+}
+
+/** @brief May the viewer edit this album (permission and the album's own level)? */
+function albumCanEdit(name) {
+  if (window.CIMFeatures && !window.CIMFeatures.allowed('tab.albums.edit')) return false;
+  const a = albumInfo(name);
+  return !a || !a.level || a.level === 'owner' || a.level === 'write';
+}
+
+/** @brief Fill the album banner's description and sort select for `name`. */
+async function albumBannerSync(name) {
+  if (name && !albumInfo(name)) await loadImageAlbums();
+  if (name !== currentAlbum) return;          // the user moved on meanwhile
+  const a = albumInfo(name) || { name, description: '', sort: '' };
+  const edit = albumCanEdit(name);
+  const desc = document.getElementById('gallery_album_desc');
+  if (desc) {
+    desc.textContent = a.description || (edit ? 'Add a description' : '');
+    desc.classList.toggle('opacity-60', !a.description);
+    desc.title = a.description || 'Album description';
+  }
+  const pen = document.getElementById('gallery_album_desc_edit');
+  if (pen) pen.classList.toggle('hidden', !edit);
+  const sel = document.getElementById('gallery_album_sort');
+  if (sel) {
+    const opts = ALBUM_SORTS.slice();
+    if (a.sort && !opts.some(o => o[0] === a.sort)) opts.push([a.sort, a.sort]);
+    sel.innerHTML = opts.map(([v, l]) => `<option value="${escapeHtml(v)}">${escapeHtml(l)}</option>`).join('');
+    sel.value = a.sort || '';
+    sel.disabled = !edit;
+  }
+}
+
+/** @brief POST JSON to an album route; alerts and returns null on failure. */
+async function albumPost(url, body, what) {
+  try {
+    const d = await fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(r => r.json());
+    if (!d.success) { alert(d.error || `Could not ${what}.`); return null; }
+    return d;
+  } catch (e) { alert(`Network error: could not ${what}.`); return null; }
+}
+
+/** @brief Inline-edit the open album's description in the banner (Enter saves, Esc cancels). */
+function albumEditDescription() {
+  const name = currentAlbum;
+  const span = document.getElementById('gallery_album_desc');
+  if (!name || !span || !albumCanEdit(name)) return;
+  if (document.getElementById('gallery_album_desc_input')) return;
+  const a = albumInfo(name) || {};
+  const inp = document.createElement('input');
+  inp.id = 'gallery_album_desc_input';
+  inp.type = 'text';
+  inp.value = a.description || '';
+  inp.placeholder = 'Album description';
+  inp.className = 'flex-1 min-w-[10rem] bg-gray-800 border border-gray-600 rounded px-2 py-0.5 text-xs text-white';
+  span.classList.add('hidden');
+  span.insertAdjacentElement('afterend', inp);
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const val = inp.value.trim();
+    inp.remove();
+    span.classList.remove('hidden');
+    if (!save || val === (a.description || '')) return;
+    const d = await albumPost('/api/albums/describe', { album: name, description: val }, 'save the description');
+    if (!d) return;
+    const rec = albumInfo(name);
+    if (rec) rec.description = d.description;
+    renderImageAlbums();
+    albumBannerSync(name);
+  };
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  inp.addEventListener('blur', () => finish(true));
+  inp.focus();
+}
+
+/** @brief Store the open album's sort order and reload its grid. */
+async function albumSetSort(tok) {
+  const name = currentAlbum;
+  if (!name) return;
+  const d = await albumPost('/api/albums/sort', { album: name, sort: tok || '' }, 'change the sort order');
+  if (!d) { albumBannerSync(name); return; }
+  const rec = albumInfo(name);
+  if (rec) rec.sort = d.sort;
+  renderImageAlbums();
+  albumBannerSync(name);
+  currentPage = 0;
+  loadGallery();
+}
+
+/** @brief The new page order after moving `src` onto `dst` (before it when moving up,
+ *  after it when moving down). */
+function albumMovedOrder(order, src, dst) {
+  const from = order.indexOf(src), to = order.indexOf(dst);
+  if (from < 0 || to < 0 || from === to) return order.slice();
+  const out = order.slice();
+  out.splice(from, 1);
+  out.splice(to, 0, src);
+  return out;
+}
+
+/** @brief Send a reordered page of the open album and reload the grid. */
+async function albumSendOrder(relPaths) {
+  const name = currentAlbum;
+  if (!name || !relPaths.length) return;
+  const d = await albumPost('/api/albums/order', { album: name, rel_paths: relPaths }, 'reorder the album');
+  if (!d) return;
+  const rec = albumInfo(name);
+  if (rec) rec.sort = d.sort;
+  albumBannerSync(name);
+  renderImageAlbums();
+  loadGallery();
+}
+
+/** @brief Classes marking the tile a dragged one would land on. */
+const ALBUM_DROP_CLS = ['ring-2', 'ring-blue-400'];
+
+/** @brief The tile being dragged inside an open album, or ''. */
+let albumDragSrc = '';
+
+/** @brief Gallery tile hook: in an editable open album, tiles drag to reorder it. */
+function albumTileHook(tile, item) {
+  if (galleryModalMode !== 'album' || !currentAlbum || !albumCanEdit(currentAlbum)) return;
+  const f = item.filename;
+  tile.draggable = true;
+  tile.addEventListener('dragstart', e => {
+    albumDragSrc = f;
+    try { e.dataTransfer.setData('text/plain', f); e.dataTransfer.effectAllowed = 'move'; } catch (x) { /* old browsers */ }
+  });
+  tile.addEventListener('dragend', () => { albumDragSrc = ''; tile.classList.remove(...ALBUM_DROP_CLS); });
+  tile.addEventListener('dragover', e => {
+    if (!albumDragSrc || albumDragSrc === f) return;
+    e.preventDefault();
+    tile.classList.add(...ALBUM_DROP_CLS);
+  });
+  tile.addEventListener('dragleave', () => tile.classList.remove(...ALBUM_DROP_CLS));
+  tile.addEventListener('drop', e => {
+    tile.classList.remove(...ALBUM_DROP_CLS);
+    const src = albumDragSrc;
+    albumDragSrc = '';
+    if (!src || src === f) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const order = (galleryFiles || []).map(x => x.filename);
+    albumSendOrder(albumMovedOrder(order, src, f));
+  });
+}
+if (typeof registerGalleryTileHook === 'function') registerGalleryTileHook(albumTileHook);

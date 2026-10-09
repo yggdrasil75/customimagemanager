@@ -7,7 +7,10 @@ jxl, which always ships the .jxl + its .xmp sidecar).
 
 jpg/png: pixels via the core converter, then the resolved XMP packet is embedded
 with pyexiv2 (our private mm:* blobs are stripped; whatever else exiv2 can't
-take is simply dropped). original: non-JXL files are copied as-is; a JXL that
+take is simply dropped). The pixels come out upright and cropped: a still with a
+crs: crop, or a JXL turned by its sidecar's Orientation, is decoded by the core
+(which applies the orientation) and cut to the crop, so the embedded packet
+drops tiff:Orientation and the crs: crop that the pixels already carry out. original: non-JXL files are copied as-is; a JXL that
 carries JPEG-reconstruction data is turned back into the original JPEG by
 djxl, anything else becomes a lossless PNG.
 """
@@ -22,9 +25,11 @@ import zipfile
 
 from flask import request, jsonify, send_file
 
+import common
 from optional_deps import optional_import
 
 pyexiv2, _HAVE_PYEXIV2 = optional_import("pyexiv2")
+PILImage, _HAVE_PIL = optional_import("PIL.Image")
 from modules.metadata import xmp_import  # noqa: E402
 
 MANIFEST = {
@@ -40,20 +45,49 @@ MANIFEST = {
 
 FORMATS = ("jpg", "png", "original", "jxl")
 
+## @brief Properties the exported pixels already apply: an embedded copy would turn /
+# crop them a second time in a viewer that honours them.
+_APPLIED = re.compile(
+    r'\s(?:tiff:Orientation|crs:(?:HasCrop|CropTop|CropLeft|CropBottom|CropRight|CropAngle))="[^"]*"'
+    r'|<(tiff:Orientation|crs:(?:HasCrop|CropTop|CropLeft|CropBottom|CropRight|CropAngle))>[^<]*</\1>')
+
 
 def _embed_xmp(src, out, log):
-    """! @brief Write the file's resolved XMP (minus our private mm:* blobs) into `out`."""
+    """! @brief Write the file's resolved XMP into `out`, minus our private mm:* blobs and
+    the orientation / crop the exported pixels already apply."""
     if not _HAVE_PYEXIV2:
         return
     _, _, xml = xmp_import.resolve_xmp(src)
     if not xml:
         return
     xml = re.sub(r"<mm:(\w+)>.*?</mm:\1>", "", xml, flags=re.S)
+    xml = _APPLIED.sub("", xml)
     try:
         with pyexiv2.Image(out) as img:
             img.modify_raw_xmp(xml)
     except Exception as e:                      # unsupported bits: dropped, not fatal
         log.warning(f"export: xmp embed into {out}: {e}")
+
+
+def _export_adjusted(host, fp, out, fmt):
+    """! @brief Write a still that has a crop, or a JXL turned by its sidecar, upright
+    and cropped to `out` (jpg / png). @return False when it has neither (use the
+    plain converter)."""
+    if not _HAVE_PIL or host.media.kind(fp) != "image":
+        return False
+    adj = host.core.image_adjust(fp)
+    turned = fp.lower().endswith(".jxl") and adj["orientation"] != 1
+    if not (adj["crop"] or turned):
+        return False
+    img = host.core.read_image(fp)          # decoded with the orientation applied
+    if img is None:
+        raise RuntimeError(f"{os.path.basename(fp)}: could not decode")
+    im = PILImage.fromarray(common.crop_array(img, adj["crop"]))
+    if fmt == "jpg":
+        im.convert("RGB").save(out, format="JPEG", quality=95)
+    else:
+        im.save(out, format="PNG")
+    return True
 
 
 def _export_one(host, fp, fmt, tmp):
@@ -79,9 +113,10 @@ def _export_one(host, fp, fmt, tmp):
                 return [(base + ".jpg", out)]
         fmt = "png"
     out = os.path.join(tmp, base + "." + fmt)
-    err = host.media.convert_image(fp, out)
-    if err:
-        raise RuntimeError(f"{os.path.basename(fp)}: {err}")
+    if not _export_adjusted(host, fp, out, fmt):
+        err = host.media.convert_image(fp, out)
+        if err:
+            raise RuntimeError(f"{os.path.basename(fp)}: {err}")
     _embed_xmp(fp, out, host.logger)
     return [(base + "." + fmt, out)]
 

@@ -1,7 +1,9 @@
 """! @file
 @brief The metadata module (core): EXIF / IPTC / XMP readers and writers, the
 editors and their controls tabs, the meta.* permissions, the schema / read
-endpoints and the metadata search index. Writes go through core update_file.
+endpoints and the metadata search index, the taken-date editor (dates.py) and
+the hierarchical tags with their tag browser (tag_tree.py, hierarchy.py).
+Writes go through core update_file.
 """
 
 import threading
@@ -10,6 +12,7 @@ from flask import request, jsonify
 
 from . import (exif_fields, iptc_fields, xmp_fields,
                exif_import, iptc_import, xmp_import)
+from . import dates, tag_tree
 
 
 def register(host):
@@ -214,5 +217,10 @@ def register(host):
     host.register_search_type("iptc:", _meta_search("iptc"), help="iptc:<tag>:<value> - IPTC only, e.g. iptc:Keywords:beach")
     host.register_search_type("xmp:", _meta_search("xmp"), help="xmp:<ns:tag>:<value> - XMP only, e.g. xmp:dc:creator:ann")
     host.provide_service("metadata_index", {"index_file": index_file, "reindex_all": _reindex_all})
+
+    # date / time / time-zone editor (+ the metadata.set_date service) and the
+    # hierarchical tags (tag_tree index, tagpath:, tag browser view)
+    dates.register(host)
+    tag_tree.register(host)
 
     host.logger.info("metadata module: features + tabs + read/schema/write + search types registered")

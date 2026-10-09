@@ -1,0 +1,40 @@
+/* meta_editor: the small modal, the crop rectangle over the viewer canvas. */
+.me-modal {
+  position: fixed; inset: 0; z-index: 70;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--cim-scrim, rgba(0, 0, 0, .6));
+}
+.me-modal.hidden { display: none; }
+.me-modal-panel { width: min(460px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto;
+                  box-shadow: 0 10px 30px rgba(0, 0, 0, .5); }
+.me-modal label { display: block; color: var(--cim-gray-300, #d1d5db); }
+.me-modal label > input, .me-modal label > select { margin-top: 2px; }
+.me-map { height: 220px; border-radius: 4px; overflow: hidden; }
+
+/* crop editor: drawn over the photo, so the shade stays literal */
+.me-crop-layer { position: absolute; z-index: 5; touch-action: none; }
+.me-crop-rect {
+  position: absolute; cursor: move; box-sizing: border-box;
+  border: 1px solid #fff; outline: 1px solid rgba(0, 0, 0, .6);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, .55);
+  background-image:
+    linear-gradient(to right, transparent 33.2%, rgba(255, 255, 255, .35) 33.3%, transparent 33.4%,
+                    transparent 66.5%, rgba(255, 255, 255, .35) 66.6%, transparent 66.7%),
+    linear-gradient(to bottom, transparent 33.2%, rgba(255, 255, 255, .35) 33.3%, transparent 33.4%,
+                    transparent 66.5%, rgba(255, 255, 255, .35) 66.6%, transparent 66.7%);
+}
+.me-h { position: absolute; width: 12px; height: 12px; background: #fff; border: 1px solid rgba(0, 0, 0, .6);
+        border-radius: 2px; }
+.me-h-nw { left: -6px; top: -6px; cursor: nwse-resize; }
+.me-h-ne { right: -6px; top: -6px; cursor: nesw-resize; }
+.me-h-se { right: -6px; bottom: -6px; cursor: nwse-resize; }
+.me-h-sw { left: -6px; bottom: -6px; cursor: nesw-resize; }
+.me-h-n { left: calc(50% - 6px); top: -6px; cursor: ns-resize; }
+.me-h-s { left: calc(50% - 6px); bottom: -6px; cursor: ns-resize; }
+.me-h-e { right: -6px; top: calc(50% - 6px); cursor: ew-resize; }
+.me-h-w { left: -6px; top: calc(50% - 6px); cursor: ew-resize; }
+.me-crop-bar {
+  position: absolute; z-index: 6; left: 50%; bottom: 8px; transform: translateX(-50%);
+  display: flex; gap: 6px; align-items: center; padding: 4px 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .45);
+}

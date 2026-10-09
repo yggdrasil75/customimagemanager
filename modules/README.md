@@ -115,7 +115,9 @@ def register(host):
 Handles: `host.app`, `host.db()` (read it freely; write through `host.update_file`),
 `host.config` (the live settings dict: read it freely; write through `host.set_config`),
 `host.logger`, `host.thread_manager`, `host.media_dir`, `host.safe_path(root, rel)`,
-`host.save_config()`, `host.broker`, `host.current_user()`.
+`host.save_config()`, `host.broker`, `host.current_user()`,
+`host.is_admin(username=None)` (the requester, or a named account; True outside a
+request and while auth is off - the one admin check, never roll your own).
 
 `host.core` - a namespace of core helpers the app hands over before any
 module registers: `read_image`,
@@ -125,7 +127,16 @@ module registers: `read_image`,
 `detect_boxes`, `merge_regions`, `folder_scope_clause`, `save_classes`,
 `upload_spool_dir`, `upload_workers_wake`, `api_upload`, `auth`, `features`,
 `object_grouping`, `files_where` (the gallery's WHERE for a `q` / folder /
-album: `(where_sql, params, text, structured)`, so a view lists what the grid would). Pure helpers live in `common` (import it); an LLM call is
+album: `(where_sql, params, text, structured)`, so a view lists what the grid would),
+`file_data(rel, key=None)` / `set_file_data(rel, key, value)` (per-file module
+data in the file's XMP, see "Where data lives"), `start_sync(mode)` /
+`sync_status()` (the library sync job), `image_adjust(abs_path)` -> `{orientation,
+crop, crop_raw, angle}` (a still's EXIF Orientation and its Camera Raw crs: crop;
+`read_image` already returns the oriented frame - a JXL's sidecar
+tiff:Orientation included - and `crop` is a {left, top, right, bottom} 0..1 box
+of that frame; thumbnails, `/api/file/<rel>?crop=1` and export apply it).
+Pure helpers live in `common` (import it; `orient_*` / `crop_array` do the
+orientation and crop maths); an LLM call is
 the `llm` service, person detection the `people` service's `run_person`.
 
 `host.media` - the media-type registry (`kind(path)`, `is_video`, ...) plus
@@ -135,7 +146,7 @@ touching `media_types.py`.
 
 | helper | effect |
 |---|---|
-| `host.add_route(rule, view, **opts)` | register a Flask route (endpoint auto-namespaced) |
+| `host.add_route(rule, view, feature=, level=, admin=False, **opts)` | register a Flask route (endpoint auto-namespaced); `admin=True` answers 403 to non-admins |
 | `host.add_asset(filename, kind=None)` | inject a JS/CSS file from your `static/` |
 | `host.add_config_key(key, default=, save=, validate=, on_change=, tab=)` | own a persisted setting |
 | `host.on_setting_change(key, fn)` | side effect when a setting changes |
@@ -144,9 +155,10 @@ touching `media_types.py`.
 | `host.add_user_setting(key, label=, kind=, default=, validate=, options=, feature=)` / `host.user_setting(key)` | a per-user setting in Settings -> User settings / its value for the current user |
 | `host.add_account_field(key, label, options=, scopes=)` | a field an admin sets per account / group in Settings -> Users (`g.user["account"][key]`) |
 | `host.register_feature(key, label, section=, default=, role_defaults=)` | an auth permission; gate routes with `host.require_feature` / `core.auth.require_feature` |
-| `host.add_table(ddl, check=)` | own DB tables (created after all modules load; `check(db)` runs once) |
+| `host.add_table(ddl, kind=, check=)` | own DB tables (created after all modules load; `check(db)` runs once); `kind` is `"cache"`, `"mirrored"` or `"state"` (see "Where data lives") |
+| `host.table_kinds()` | `{table: {"kind", "module_id"}}` for the core tables and every `add_table` table |
 | `host.register_file_enricher(fn)` | attach per-file fields to gallery/list/detail rows |
-| `host.register_search_provider(fn)` / `register_search_type(prefix, handler, help=)` | add results / token handlers to gallery search (`help` shows in Settings -> Info) |
+| `host.register_search_provider(fn)` / `register_search_type(prefix, handler, help=)` | add results / token handlers to gallery search (`help` shows in Settings -> Info); a token may quote a value with spaces (`location:"north carolina"`), the handler gets it quotes and all |
 | `host.register_pipeline_stage(name, fn, label=)` | an AI-pipeline node type |
 | `host.register_action_target(name, fn)` | an AI-action target (`fn(fp, bgr, meta, action)`) |
 | `host.register_gallery_filter(clause)` | hide container members (comic pages) from the flat gallery |
@@ -203,7 +215,8 @@ The core emits, modules react; the core never names a module.
 
 | event | args | use |
 |---|---|---|
-| `library.reconcile` | - | after the image index scan |
+| `library.reconcile` | - | after the image index scan (and after every sync) |
+| `library.sync` | `direction, rel_paths` | a sync (Sync button, `/api/sync`): `"push"` = write what only your tables hold into the files (rel_paths None); `"pull"` = rebuild your mirrored tables from the files, for `rel_paths` (the re-indexed files) or every file when None (a full sync) |
 | `file.index` | `rel_path, abs_path, force` -> truthy if handled | index a file of a kind you own; core skips its image path |
 | `upload.check` | `folder, filename, size` -> a reason string to refuse | veto an upload before it is written (quotas); the client gets 413 |
 | `upload.duplicate_check` | `sha, filename` -> existing rel_path or None | veto an upload as a duplicate |
@@ -228,7 +241,9 @@ later registration. Consumers `get_service(name)` and must handle `None` (the
 provider is off). Current services (`comicinfo` - ComicInfo.xml read / write from the comics
 module - is used by books for comic archives; the metadata ones - `metadata_write`, `exif.write`, `xmp.write`,
 `music.write_meta`, `books.update_meta` - are thin wrappers over `update_file`;
-new code calls `host.update_file` directly): `metadata_write`, `exif` (`read`/`write`), `metadata_schema`, `embedding`, `dedup_scorers`, `barcodes`, `pose.tpose`, `sam_common`, `fetch`, `faces`, `bodies`, `people`, `segmentation`, `music` (`write_meta`), `books` (`update_meta`), `xmp` (`write`), `metasrc` (metadata source registry: `register(source)`, `http_json`, `http_multipart` - see `metasrc/module.py` for the source contract; each site is its own `metasrc_<site>` module), `llm` (the vlm module's OpenAI-compatible client: `call`, `request`, `encode_image`), `stacks` (`stack_of(rel)`, `create(kind, members, cover=, auto=)`, `match_raw_for(rel)`, `rescan(raw, burst)`).
+new code calls `host.update_file` directly): `metadata_write`, `exif` (`read`/`write`), `metadata_schema`, `embedding`, `dedup_scorers`, `barcodes`, `pose.tpose`, `sam_common`, `fetch`, `faces`, `bodies`, `people`, `segmentation`, `music` (`write_meta`), `books` (`update_meta`), `xmp` (`write`), `metasrc` (metadata source registry: `register(source)`, `http_json`, `http_multipart` - see `metasrc/module.py` for the source contract; each site is its own `metasrc_<site>` module), `llm` (the vlm module's OpenAI-compatible client: `call`, `request`, `encode_image`), `stacks` (`stack_of(rel)`, `create(kind, members, cover=, auto=)`, `match_raw_for(rel)`, `rescan(raw, burst)`), `metadata` (`set_date(rel, dt, offset, fields=None, tz_mode="keep_local", from_offset=None)` writes a taken date into EXIF DateTimeOriginal + OffsetTimeOriginal and the XMP date homes, then re-indexes the d_* buckets; `read_date(abs_path)`; `set_date` is also published alone as `metadata.set_date`), `meta_editor` (`write_location(rel, abs, (lat, lon) | None)`, `write_date(rel, abs, dt, offset)`, `turn(rel, abs, orientation_op)`, `write_crop(rel, abs, crop | None)`, `original_date(rel, abs)`), `geo` (the map module: `refresh(rel)` -> (lat, lon) or None, `rescan()`, `place_of(rel)` -> {city, admin2, admin1, cc, country, continent, source} or None, `resolve([(lat, lon)])` offline place names).
+
+Hierarchical tags: the flat `tags` (dc:subject) hold each keyword's leaf; the path lives in `lr:hierarchicalSubject` ("A|B|C", also read from `digiKam:TagsList` and `mwg-kw`). A tag set as `a/b/c` (or `a|b|c`) is split on save into the leaf tag + the path. The `tag_tree(path, rel_path)` table (mirrored) indexes the paths, `tagpath:a/b` searches a node and everything below it.
 
 ### Writing metadata and per-file rows: `update_file`
 
@@ -282,12 +297,66 @@ fields into the file's own metadata home: audio tags; for books the EPUB OPF,
 PDF Info + XMP, ComicInfo.xml, FB2 title-info, DOCX core properties or HTML
 `<head>`, and the XMP sidecar for formats with no slot of their own.
 
+### Where data lives
+
+The library DB is meant to be disposable: anything single-valued per file
+(tags, dates, description, regions, ratings, albums, ...) lives in the file or
+its XMP sidecar, and the DB indexes it. Every table says which of three kinds
+it is with `add_table(ddl, kind=...)`:
+
+- `"cache"` - rebuildable from the files or recomputable (embeddings, stats, usage counters, progress markers);
+- `"mirrored"` - an index of data whose source of truth is the file / sidecar (rebuilt by a sync's pull);
+- `"state"` - exists only in the DB (accounts, sessions, shares, logs); kept safe by the backup module's DB copies.
+
+A table holding both mirrored and DB-only rows is `"state"` (the stricter kind
+wins). Omitting `kind` logs a warning and counts as `"state"`.
+`host.table_kinds()` lists them all; `thumbs.db` is a separate cache file.
+
+Per-file data a module wants to survive a DB rebuild goes into the file itself,
+in the app's XMP namespace (`cim`, `https://github.com/yggdrasil75/customimagemanager/ns/1.0/`):
+`Xmp.cim.Data` holds one JSON object keyed by module id.
+
+```python
+host.core.set_file_data(rel, "my_module", {"score": 3})   # merges the key; None removes it
+host.core.file_data(rel, "my_module")                      # -> {"score": 3} (None when absent)
+host.core.file_data(rel)                                   # -> the whole object ({} when absent)
+```
+
+`set_file_data` writes through `update_file(rel, xmp={"Xmp.cim.Data": ...})`
+(a file without a sidecar gets one first), so history, caches and events
+behave as for any XMP write; `read_metadata` returns the decoded object as
+`file_data`. A mirrored table rebuilds itself from it on the `library.sync`
+event (`direction="pull"`).
+
+The core uses two keys itself: `album` on an album's cover file (`{name,
+description, sort, cover}`, a list when the file covers several albums) and
+`album_positions` (`{album: n}`) on each manually ordered member; a pull fills
+what the `albums` / `album_members` rows lack from them. An album's `sort`
+(`/api/albums/sort`) is a `sort:` key, `added` or `manual`, and orders `/api/list?album=`
+unless the query has its own `sort:`.
+
+**Sync.** `POST /api/sync {mode: "quick" | "full"}` (the Sync button;
+shift-click = full) runs one background job, followed with `GET /api/sync/status`:
+purge rows of deleted files; push (rewrite files whose last metadata write
+failed, then `library.sync` push); pull (quick: re-index files whose file or
+sidecar changed; full: every file; then `library.sync` pull). `/api/reconcile`
+is an alias of a quick sync.
+
+**Dirty DB.** The core keeps `cim_meta(key, value)` and a launch marker,
+`<media>/.cim/last_launch`. A DB whose `last_launch` is missing or older than
+the marker (a restored copy, or deleted and recreated) gets a full sync at
+startup; `cim_meta.dirty_reason` says why. To restore, the backup module
+writes a verified copy to `<library.db>.restore`; at the next start the core
+checks it (`PRAGMA integrity_check`), moves the live DB aside as
+`library.db.pre-restore-<stamp>` and puts the copy in place (a copy that fails
+the check becomes `.restore.bad`).
+
 ### Your own table + searchable field
 
 ```python
 def register(host):
     host.add_table("CREATE TABLE IF NOT EXISTS my_feature (rel_path TEXT PRIMARY KEY, val REAL)",
-                   check=lambda db: prune_missing(db))
+                   kind="cache", check=lambda db: prune_missing(db))
     def enrich(db, rel_paths):                       # batch, not per-row
         q = "SELECT rel_path, val FROM my_feature WHERE rel_path IN (%s)" % ",".join("?" * len(rel_paths))
         return {r["rel_path"]: {"my_val": r["val"]} for r in db.execute(q, rel_paths)}
@@ -405,6 +474,14 @@ Assets are served at `/modules/<id>/static/<file>` and injected on page load.
   image tile the grid renders, with the row your file enricher filled - mark or
   badge the tile from your own fields (the stacks module draws a stack's cover
   as a layered card this way).
+- **Viewer navigation**: `window.CIMNav` - `next()`, `prev()`, `first()`, `last()`
+  (promises) walk `galleryFiles` and cross grid page edges; `hasPrev()` /
+  `hasNext()`; `attachSwipe(el, {canSwipe, onSwipe})` gives an element touch-swipe
+  navigation; `addSwipeBlocker(fn)` (fn() -> true while your box / crop tool is
+  active) stops swipes on the viewer. Left / Right / Home / End use it.
+- **Folder scope**: `galleryQuery().recursive` is true when "include subfolders"
+  is on; forward it as `recursive=1` (`/api/list`, `/api/folders?tree=1` for the
+  nested tree) - `core.files_where` reads it from the request when not passed.
 - **Canvas overlays**: `registerCanvasOverlay(fn)`.
 - **Per-file state**: `registerFileMetaHook((meta, filename) => ...)` runs
   every time the viewer loads a file - keep your state in your own module
@@ -420,7 +497,9 @@ Assets are served at `/modules/<id>/static/<file>` and injected on page load.
 - **Ext areas** for injected controls: `ai_tools`, `viewer_toggles`,
   `gallery_bulk`, `gallery_tools` (the gallery toolbar's "more" menu: every
   registration is a menu row, so the toolbar never grows), `search_tools`
-  (small icon buttons inside the search box; the sort picker lives there),
+  (small icon buttons inside the search box; the sort picker, the filter
+  builder - which writes tokens into the box and parses them back - and
+  image search live there),
   `description_tools`, `comic_tools`, `ai_tooling_links`, `controls_tabs`.
 
 ## Themes
@@ -475,6 +554,14 @@ body[data-palette="forest"] {
 ```
 
 Module CSS that needs a colour uses the variables with a fallback (`var(--cim-accent-600, #2563eb)`, `var(--cim-danger-700, #b91c1c)`) rather than a bare hex, so every palette reaches it.
+
+The same goes for the colour scheme: grays, white and black are `--cim-gray-50..950`, `--cim-white`, `--cim-black` (`var(--cim-gray-800, #1f2937)`), in module CSS and in inline styles a module's JS builds, so a light scheme inverts them. Three exceptions keep fixed colours on purpose:
+
+- shadows (`box-shadow`, `text-shadow`) stay `rgba(0, 0, 0, .x)`;
+- anything drawn on top of a photo (a caption gradient on a tile, a canvas overlay, annotation and chart colours) stays literal;
+- white text on a solid role fill stays `#fff`.
+
+A full-screen modal backdrop is `var(--cim-scrim, rgba(0, 0, 0, .6))`.
 
 ### A layout
 

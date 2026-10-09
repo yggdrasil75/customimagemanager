@@ -9,7 +9,7 @@ let _comicSchema = null;
 async function makeComic(){
   const folder=currentFolder;
   if(!folder || folder==='/'){
-    alert('Open a specific folder first (folder dropdown or a 📁 subfolder chip), then Make comic.');
+    alert('Open a specific folder first (folder picker or a 📁 subfolder chip), then Make comic.');
     return;
   }
   if(!confirm(`Package folder "${folder}" as a comic? Its images group into one comic tile.`)) return;

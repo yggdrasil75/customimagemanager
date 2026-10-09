@@ -4,12 +4,14 @@
 Like Simple (one full-screen pane, pictures open full screen), but Timeline /
 Albums / People / Music are tabs down the left, and the viewer's Meta button
 shows the Editor and EXIF / IPTC / XMP tabs (the controls pane moves into the
-viewer while it is open). Reuses the Simple layout's viewer."""
+viewer while it is open). Reuses the Simple layout's viewer; its "people in
+this photo" chips become avatar chips that, with the People module on, show
+every photo of that person (person:<id>) and offer "Change person"."""
 
 MANIFEST = {
     "id":          "intermediate_theme",
     "name":        "Layout: Intermediate",
-    "version":     "1.1.0",
+    "version":     "1.1.1",
     "description": "Timeline / Albums / People / Music tabs down the left; pictures open "
                    "full screen with the editor and metadata tabs behind a Meta button.",
     "core":        False,

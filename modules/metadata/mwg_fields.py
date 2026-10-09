@@ -175,6 +175,9 @@ _MWG_COLL_FIELDS = [
 _MWG_KW_FIELDS = [
     ("KeywordInfo", "string", False, None, None,
      "Struct root (KeywordInfo; tag ID 'Keywords'). The keyword tree."),
+    ("Keywords", "string", False, None, None,
+     "The struct root as exiv2 names it (Xmp.mwg-kw.Keywords). A tag-tree rename "
+     "touching it moves its paths into lr:hierarchicalSubject and removes it."),
     ("HierarchicalKeywords", "string", True, None, None,
      "Top-level KeywordStruct list (KeywordsHierarchy)."),
 ]

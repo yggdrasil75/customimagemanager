@@ -1,7 +1,9 @@
 """! @file
 @brief Timeline module: date buckets, per-period file lists, scope, sort:taken."""
+import time
 from datetime import datetime, timezone
 
+import numpy as np
 import pytest
 
 FOLDER = "tl_test"
@@ -108,3 +110,35 @@ def test_bad_requests(client):
     assert client.get("/api/timeline/buckets", query_string={"scope": "21"}).status_code == 400
     assert client.get("/api/timeline/files", query_string={"period": "2021-3"}).status_code == 400
     assert client.get("/api/timeline/files", query_string={"q": "sem:cat"}).status_code == 400
+
+def test_about_filter_is_accepted_and_scopes(client, host, app, lib, fake_model, monkeypatch):
+    """! @brief The non-ranking semantic filter (about:) composes with the timeline;
+    the ranked sem: / ~ is refused with a pointer to it."""
+    if host.get_service("embedding") is None:
+        pytest.skip("embedding module off")
+    r = client.get("/api/timeline/buckets", query_string={"q": "sem:cat", "level": "year"})
+    assert r.status_code == 400 and "about:" in r.get_json()["error"]
+
+    def model(img, *a, **k):
+        return np.ones(2, np.float32) / np.sqrt(2)
+    model.space = "tl-about-space"
+    model.embed_text = lambda t: np.asarray([1, 0] if t == "cat" else [0, 1], np.float32)
+    fake_model("embed", model)
+    monkeypatch.setitem(app.state, "semantic_filter_threshold", 0.8)
+    monkeypatch.setitem(app.state, "semantic_filter_top", 0)
+    db, now = host.db(), time.time()
+    vecs = {"a.png": [1, 0], "d.png": [0.95, 0.31], "e.png": [0, 1]}   # a, d: cats
+    try:
+        for name in lib:
+            v = np.asarray(vecs.get(name, [0.2, 0.98]), np.float32)
+            v /= np.linalg.norm(v)
+            db.execute("INSERT OR REPLACE INTO image_embeddings(rel_path,dim,vec,model,mtime,updated) "
+                       "VALUES (?,?,?,?,?,?)", (lib[name], 2, v.tobytes(), model.space, now, now))
+        db.commit()
+        j = _buckets(client, level="month", q="about:cat")
+        assert [(b["key"], b["count"]) for b in j["buckets"]] == [("2021-11", 1), ("2021-03", 1)]
+        f = _files(client, period="2021", q="about:cat")
+        assert [x["filename"] for x in f["files"]] == [lib["d.png"], lib["a.png"]]
+    finally:
+        db.execute("DELETE FROM image_embeddings WHERE model=?", (model.space,))
+        db.commit()

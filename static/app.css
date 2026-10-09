@@ -425,6 +425,20 @@ canvas {
 .gview-item:hover { background: color-mix(in srgb, var(--cim-white, #fff) 8%, transparent) }
 .gview-item-on { color: var(--cim-accent-300, #93c5fd); font-weight: 600 }
 
+/* Folder breadcrumb + tree popover (gallery toolbar). */
+.fcrumb { padding: 1px 3px; border-radius: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 7rem; color: var(--cim-gray-300, #d1d5db) }
+.fcrumb:hover { background: color-mix(in srgb, var(--cim-white, #fff) 10%, transparent); color: var(--cim-white, #fff) }
+.fcrumb-cur { color: var(--cim-white, #fff); font-weight: 600 }
+.fcrumb-sep { color: var(--cim-gray-500, #6b7280); padding: 0 1px }
+.fcrumb-sub { color: var(--cim-accent-300, #93c5fd); font-size: 10px; padding: 0 2px }
+.ftree-row { display: flex; align-items: center; gap: 2px; padding: 2px 4px; border-radius: 4px; cursor: pointer; color: var(--cim-gray-300, #d1d5db); white-space: nowrap }
+.ftree-row:hover { background: color-mix(in srgb, var(--cim-white, #fff) 8%, transparent) }
+.ftree-row.ftree-on { color: var(--cim-accent-300, #93c5fd); font-weight: 600 }
+.ftree-tw { width: 14px; flex-shrink: 0; text-align: center; color: var(--cim-gray-500, #6b7280) }
+.ftree-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis }
+.ftree-n { color: var(--cim-gray-500, #6b7280); font-size: 10px; flex-shrink: 0 }
+#folder_tree_pop:not(.hidden) { display: flex }
+
 /* The toolbar's "more" menu: module buttons stack as full-width menu rows,
    and the whole thing stays hidden while no module registered anything. */
 .gallery-more:has(#gallery_more_pop:empty) { display: none }
