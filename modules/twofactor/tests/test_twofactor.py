@@ -112,7 +112,16 @@ def test_status_auth_off(client):
     assert j["success"] and j["enabled"] is False and j["available"] is False
 
 
-def test_login_flow(app, client, auth_on):
+@pytest.fixture
+def frozen_clock(monkeypatch):
+    """! @brief Pin the TOTP clock to the middle of a step: codes computed "a step
+    ahead / behind" stay exactly that, even if a 30 s boundary passes mid-test."""
+    t = (int(totp.time.time()) // totp.STEP) * totp.STEP + totp.STEP / 2
+    monkeypatch.setattr(totp, "now", lambda: t)
+    return t
+
+
+def test_login_flow(app, client, auth_on, frozen_clock):
     h, backup = _enrol(app, client, auth_on, "tf_user")
     secret = _secret_of(app, auth_on, "tf_user")
     client.post("/api/auth/logout", headers=h)
@@ -124,7 +133,7 @@ def test_login_flow(app, client, auth_on):
     r = _login(client, "tf_user", totp="000000")
     assert r.status_code == 401 and r.get_json()["second_factor"] == "totp"
     # the code used at enrolment was consumed; the next step's code may be needed
-    code = totp.totp(secret, at=totp.time.time() + 30)
+    code = totp.totp(secret, at=frozen_clock + 30)
     r = _login(client, "tf_user", totp=code)
     assert r.status_code == 200 and "csrf" in r.get_json()
     assert client.get("/api/auth/me").get_json()["user"]["username"] == "tf_user"
@@ -138,10 +147,10 @@ def test_login_flow(app, client, auth_on):
     client.post("/api/auth/logout", headers=_headers(r))
     assert _login(client, "tf_user", totp=backup[0]).status_code == 401
     # a code two steps ahead is outside the drift window
-    assert _login(client, "tf_user", totp=totp.totp(secret, at=totp.time.time() + 60)).status_code == 401
+    assert _login(client, "tf_user", totp=totp.totp(secret, at=frozen_clock + 60)).status_code == 401
     # regenerate backup codes (needs a fresh code), then disable with the password
     _rewind(auth_on, "tf_user")
-    r = _login(client, "tf_user", totp=totp.totp(secret, at=totp.time.time() - 30))
+    r = _login(client, "tf_user", totp=totp.totp(secret, at=frozen_clock - 30))
     assert r.status_code == 200
     h = _headers(r)
     assert client.post("/api/twofactor/backup/regenerate", json={"code": "000000"}, headers=h).status_code == 403

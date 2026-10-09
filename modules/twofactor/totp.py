@@ -51,9 +51,14 @@ def totp(secret, at=None, digits=DIGITS, step=STEP):
     return hotp(secret, counter_at(at, step), digits)
 
 
+def now():
+    """! @brief The clock TOTP counts with (a seam: tests pin it mid-step)."""
+    return time.time()
+
+
 def counter_at(at=None, step=STEP):
     """! @brief The TOTP counter (time step index) for epoch `at`."""
-    return int((time.time() if at is None else at) // step)
+    return int((now() if at is None else at) // step)
 
 
 def normalize_code(code):
