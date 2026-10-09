@@ -338,6 +338,7 @@ async function fetchState(){
     const s=await fetch('/api/state').then(r=>r.json());
     document.getElementById('status_text').innerText=s.status_text;
     applyBranding(s);
+    if(s.thumb_v) window.CIM_THUMB_V=s.thumb_v;  // thumbnail settings version (Settings > Media)
     // While the settings modal is open we FREEZE its working copy: the 2.5s poll
     // must not touch the quick-filter cache/editor or re-render anything the user
     // is editing - not even if another user saves settings meanwhile. The modal

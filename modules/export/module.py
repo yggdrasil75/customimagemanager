@@ -114,7 +114,8 @@ def _export_one(host, fp, fmt, tmp):
         fmt = "png"
     out = os.path.join(tmp, base + "." + fmt)
     if not _export_adjusted(host, fp, out, fmt):
-        err = host.media.convert_image(fp, out)
+        enc = host.get_service("encoding")
+        err = enc.convert_image(fp, out) if enc is not None else "the encoding module is not loaded"
         if err:
             raise RuntimeError(f"{os.path.basename(fp)}: {err}")
     _embed_xmp(fp, out, host.logger)

@@ -13,6 +13,9 @@ case-insensitively against every place column, after expanding user aliases,
 US postal codes and country codes / names.
 """
 
+import csv
+import math
+import os
 import threading
 
 from optional_deps import optional_import
@@ -44,6 +47,9 @@ DEFAULT_ALIASES = [
     {"alias": "Rio", "expansion": "Rio de Janeiro"},
     {"alias": "HK", "expansion": "Hong Kong"},
 ]
+
+## @brief Two candidate cities farther apart than this (km) make a name ambiguous.
+AMBIGUOUS_KM = 100.0
 
 ## @brief Columns of the places table a location: term is compared with.
 _TEXT_COLS = ("city", "admin2", "admin1", "country", "continent")
@@ -134,6 +140,78 @@ def fill_patch(auto, existing):
             "photoshop.Country": ("country", auto.get("country")),
             "iptcCore.CountryCode": ("cc", auto.get("cc"))}
     return {tok: val for tok, (key, val) in want.items() if val and not existing.get(key)}
+
+
+def _cities_csv():
+    """! @brief reverse_geocoder's bundled GeoNames table (lat, lon, name, admin1, admin2, cc), or ''."""
+    if not _HAVE_RG:
+        return ""
+    p = os.path.join(os.path.dirname(os.path.abspath(rg.__file__)), "rg_cities1000.csv")
+    return p if os.path.isfile(p) else ""
+
+
+def forward_available():
+    """! @brief True when the offline city table is there for forward lookups."""
+    return bool(_cities_csv())
+
+
+def _km(a, b):
+    """! @brief Rough great-circle distance in km between two (lat, lon)."""
+    la1, lo1, la2, lo2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+    h = math.sin((la2 - la1) / 2) ** 2 + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2
+    return 2 * 6371.0 * math.asin(min(1.0, math.sqrt(h)))
+
+
+def _state_names(state):
+    """! @brief Lower-case spellings a typed state / region may match ("NC" -> north carolina)."""
+    s = str(state or "").strip()
+    out = {s.lower()} if s else set()
+    if len(s) == 2 and s.upper() in continents.US_STATES:
+        out.add(continents.US_STATES[s.upper()].lower())
+    return out
+
+
+def forward(wants):
+    """! @brief Approximate positions for typed place names, offline (one pass over the table).
+    @param wants  [{city, state, country, cc}] as read from files (geo.read_places).
+    @return one entry per want: {lat, lon, city, admin2, admin1, cc, country, continent}
+            for an unambiguous city match (the country / state narrow it down), else None.
+    """
+    path = _cities_csv()
+    out = [None] * len(wants)
+    if not path or not wants:
+        return out
+    keys = []
+    for w in wants:
+        cc = str(w.get("cc") or "").strip().upper() or _country_code(str(w.get("country") or ""))
+        keys.append((str(w.get("city") or "").strip().lower(), cc, _state_names(w.get("state"))))
+    names = {k[0] for k in keys if k[0]}
+    if not names:
+        return out
+    found = {}
+    with open(path, encoding="utf-8", errors="replace", newline="") as fh:
+        for row in csv.DictReader(fh):
+            n = (row.get("name") or "").lower()
+            if n in names:
+                found.setdefault(n, []).append(row)
+    for i, (name, cc, states) in enumerate(keys):
+        cands = found.get(name) or []
+        if cc:
+            cands = [r for r in cands if (r.get("cc") or "").upper() == cc]
+        if states:
+            narrowed = [r for r in cands if (r.get("admin1") or "").lower() in states]
+            cands = narrowed or cands
+        if not cands:
+            continue
+        pts = [(float(r["lat"]), float(r["lon"])) for r in cands]
+        if any(_km(pts[0], p) > AMBIGUOUS_KM for p in pts[1:]):
+            continue  # Springfield: several far-apart cities, no way to tell
+        r = cands[0]
+        rcc = (r.get("cc") or "").upper()
+        out[i] = {"lat": pts[0][0], "lon": pts[0][1], "city": r.get("name") or "",
+                  "admin2": r.get("admin2") or "", "admin1": r.get("admin1") or "", "cc": rcc,
+                  "country": country_name(rcc), "continent": continents.continent(rcc)}
+    return out
 
 
 def clean_aliases(rows):

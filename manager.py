@@ -32,10 +32,6 @@ import object_grouping as og
 import model_registry
 import common
 import media_types as mt
-# Settings > Media: storage format per kind and filename cleanup.
-modules.config.declare("media_storage", default=mt.media_prefs(), owner="core",
-                       validate=mt.clean_media_prefs,
-                       on_change=lambda new, old: mt.set_media_prefs(new))
 modules.config.declare("filename_cleanup", default=dict(mt.DEFAULT_FILENAME_PREFS),
                        owner="core", validate=mt.clean_filename_prefs,
                        on_change=lambda new, old: mt.set_filename_prefs(new))
@@ -164,6 +160,13 @@ def _thumb_lru_drop(rel_path: str) -> None:
         old = _thumb_lru.pop(rel_path, None)
         if old is not None:
             _thumb_lru_bytes -= len(old[1])
+
+def _thumb_lru_clear() -> None:
+    """! @brief Empty the in-memory thumbnail LRU."""
+    global _thumb_lru_bytes
+    with _thumb_lock:
+        _thumb_lru.clear()
+        _thumb_lru_bytes = 0
 
 _meta_cache: "OrderedDict[str, tuple]" = OrderedDict()
 _meta_cache_lock = threading.Lock()
@@ -1417,9 +1420,10 @@ def _index_file(rel_path: str, force: bool = False,
         # Build the thumbnail from the decode already paid for, instead of decoding
         # again on the first view.
         try:
+            _tg = _thumb_sync()
             _t = _thumb_from_array(img)
-            if _t is not None:
-                _thumb_put(rel_path, _t, mtime)
+            if _t is not None and _tg == _thumb_gen[0]:
+                _thumb_put(rel_path, _t, mtime, _tg)
                 _thumb_lru_put(rel_path, mtime, _t)
         except Exception as e:
             access_logger.warning(f"thumb at index {rel_path}: {e}")
@@ -3368,11 +3372,74 @@ def _thumbdb() -> sqlite3.Connection:
         conn.execute("PRAGMA cache_size=-32000")
         conn.execute("CREATE TABLE IF NOT EXISTS thumbs("
                      "rel_path TEXT PRIMARY KEY, mtime REAL, data BLOB)")
+        # the thumbnail settings the cached rows were made with (see _thumb_sync)
+        conn.execute("CREATE TABLE IF NOT EXISTS thumbs_meta(key TEXT PRIMARY KEY, value TEXT)")
         conn.commit()
         _thumbdb_local.conn = conn
         with _all_conns_lock:
             _all_conns[id(conn)] = conn
     return conn
+
+# Thumbnail settings (Settings > Media > Thumbnails): the cache holds one size /
+# quality / format; a change empties thumbs.db and the LRU and thumbnails are
+# made again lazily. _thumb_gen guards against a thumbnail made with the old
+# settings landing in the cache after the clear.
+_thumb_sig = [None]
+_thumb_gen = [0]
+_thumb_sig_lock = threading.Lock()
+
+def _thumb_params():
+    """! @brief (long side px, quality, "jpeg" | "webp") from the encoding module."""
+    try:
+        return media_encoding.thumb_params()
+    except Exception:
+        return 256, 80, "jpeg"
+
+def _thumb_signature() -> str:
+    """! @brief The current thumbnail settings as one short string ("256:80:jpeg")."""
+    return "%d:%d:%s" % _thumb_params()
+
+def _thumb_clear(sig: str) -> None:
+    """! @brief Empty thumbs.db and the LRU, remember `sig` as the cache's settings."""
+    try:
+        db = _thumbdb()
+        db.execute("DELETE FROM thumbs")
+        db.execute("INSERT OR REPLACE INTO thumbs_meta(key, value) VALUES('params', ?)", (sig,))
+        db.commit()
+    except Exception as e:
+        access_logger.warning(f"thumbnail cache clear: {e}")
+    _thumb_lru_clear()
+
+def _thumb_sync() -> int:
+    """! @brief Invalidate the cache when the thumbnail settings changed (also across a
+    restart, via thumbs_meta). @return the cache generation to put thumbnails under.
+    """
+    sig = _thumb_signature()
+    if sig != _thumb_sig[0]:
+        with _thumb_sig_lock:
+            if sig != _thumb_sig[0]:
+                try:
+                    row = _thumbdb().execute(
+                        "SELECT value FROM thumbs_meta WHERE key='params'").fetchone()
+                except Exception:
+                    row = None
+                if row is None or row[0] != sig:
+                    _thumb_clear(sig)
+                _thumb_sig[0] = sig
+                _thumb_gen[0] += 1
+    return _thumb_gen[0]
+
+def _thumb_reset() -> None:
+    """! @brief Forget every thumbnail now (Settings > Media > Regenerate)."""
+    with _thumb_sig_lock:
+        sig = _thumb_signature()
+        _thumb_clear(sig)
+        _thumb_sig[0] = sig
+        _thumb_gen[0] += 1
+
+def _thumb_mime(data: bytes) -> str:
+    """! @brief Mimetype of a cached thumbnail (JPEG or WebP)."""
+    return 'image/webp' if data[:4] == b'RIFF' else 'image/jpeg'
 
 def _thumb_get(rel_path: str, mtime: float) -> bytes | None:
     """! @brief Cached thumbnail JPEG at least as new as `mtime`, or None."""
@@ -3384,8 +3451,12 @@ def _thumb_get(rel_path: str, mtime: float) -> bytes | None:
     except Exception:
         return None
 
-def _thumb_put(rel_path: str, data: bytes, mtime: float) -> None:
-    """! @brief Store a thumbnail (best effort)."""
+def _thumb_put(rel_path: str, data: bytes, mtime: float, gen: int | None = None) -> None:
+    """! @brief Store a thumbnail (best effort).
+    @param gen  the _thumb_sync() generation it was made under; stale ones are dropped.
+    """
+    if gen is not None and gen != _thumb_gen[0]:
+        return
     try:
         db = _thumbdb()
         db.execute("INSERT INTO thumbs(rel_path, mtime, data) VALUES(?,?,?) "
@@ -3410,16 +3481,21 @@ def _thumb_drop(rel_path: str) -> None:
             _FULLJPG_LRU.pop(key, None)
 
 def _thumb_from_array(img) -> bytes | None:
-    """! @brief An image array as a thumbnail JPEG (long side 400 px), or None."""
+    """! @brief An image array as a thumbnail (size / quality / JPEG or WebP per
+    Settings > Media > Thumbnails, default 256 px JPEG q80), or None."""
     if img is None:
         return None
+    size, quality, fmt = _thumb_params()
     h, w = img.shape[:2]
-    if max(h, w) > 400:
-        s = 400 / max(h, w)
-        img = cv2.resize(img, (int(w*s), int(h*s)), interpolation=cv2.INTER_AREA)
+    if max(h, w) > size:
+        s = size / max(h, w)
+        img = cv2.resize(img, (max(1, int(w*s)), max(1, int(h*s))), interpolation=cv2.INTER_AREA)
     bgr = _to_bgr(img)
-    ok, buf = cv2.imencode('.jpg', bgr,
-                           [cv2.IMWRITE_JPEG_PROGRESSIVE,1, cv2.IMWRITE_JPEG_QUALITY,80])
+    if fmt == "webp":
+        ok, buf = cv2.imencode('.webp', bgr, [cv2.IMWRITE_WEBP_QUALITY, quality])
+    else:
+        ok, buf = cv2.imencode('.jpg', bgr,
+                               [cv2.IMWRITE_JPEG_PROGRESSIVE, 1, cv2.IMWRITE_JPEG_QUALITY, quality])
     return buf.tobytes() if ok else None
 
 def _make_thumb_bytes(abs_path: str) -> bytes | None:
@@ -3436,14 +3512,17 @@ def serve_thumb(rel_path: str, abs_path: str, mtime: float | None = None):
         mtime = _getmtime_loose(abs_path)
 
     def _finish(data: bytes, mimetype: str):
-        etag = hashlib.md5(f"{rel_path}:{mtime}:{len(data)}".encode()).hexdigest()
+        etag = hashlib.md5(f"{rel_path}:{mtime}:{len(data)}:{_thumb_sig[0]}".encode()).hexdigest()
         # 304 when the browser has this version
         inm = request.headers.get("If-None-Match")
         if inm and etag in [t.strip().strip('"') for t in inm.split(",")]:
             resp = app.response_class(status=304)
         else:
             resp = send_file(io.BytesIO(data), mimetype=mimetype)
-        resp.headers["Cache-Control"] = "private, max-age=31536000"
+        # A URL carrying the settings version (?v=, the gallery adds it) is immutable;
+        # without it a settings change must show within the hour.
+        resp.headers["Cache-Control"] = ("private, max-age=31536000" if request.args.get("v")
+                                         else "private, max-age=3600")
         resp.headers["ETag"] = f'"{etag}"'
         if mtime:
             resp.last_modified = mtime
@@ -3462,21 +3541,23 @@ def thumb_bytes(rel_path: str, abs_path: str, mtime: float | None = None):
     """
     if mtime is None:
         mtime = _getmtime_loose(abs_path)
+    gen = _thumb_sync()
     data = _thumb_lru_get(rel_path, mtime)
     if data is not None:
-        return data, 'image/jpeg'
+        return data, _thumb_mime(data)
     data = _thumb_get(rel_path, mtime)
     if data:
         _thumb_lru_put(rel_path, mtime, data)
-        return data, 'image/jpeg'
+        return data, _thumb_mime(data)
     data = _make_thumb_bytes(abs_path)
     if data is None:
         raw = _read_bytes_loose(abs_path)
         if raw is None: return None
         return raw, mt.mime_for(abs_path) or 'application/octet-stream'
-    _thumb_put(rel_path, data, mtime)
-    _thumb_lru_put(rel_path, mtime, data)
-    return data, 'image/jpeg'
+    if gen == _thumb_gen[0]:
+        _thumb_put(rel_path, data, mtime, gen)
+        _thumb_lru_put(rel_path, mtime, data)
+    return data, _thumb_mime(data)
 
 
 _yolo_registered = set()
@@ -3925,7 +4006,8 @@ def api_state():
         ("classes","available_models","status_text","remote_ip",
          "model_groups","iqa_model","brand_name","brand_logo",
          "media_storage","filename_cleanup")}
-    out["media_targets"] = mt.MEDIA_TARGETS
+    out["media_targets"] = media_encoding.media_targets
+    out["thumb_v"] = _thumb_signature().replace(":", "")  # busts cached thumbnail URLs
     # per user: their own chips, else the admin default
     out["search_quick_filters"] = _user_setting("search_quick_filters") or []
     return jsonify(out)
@@ -4611,7 +4693,7 @@ def api_albums_of():
 def _predicted_rel(tdir, orig_name):
     """! @brief The rel_path an upload will probably get (the real one is known after conversion)."""
     try:
-        return os.path.relpath(os.path.join(tdir, mt.stored_name(orig_name)),
+        return os.path.relpath(os.path.join(tdir, media_encoding.stored_name(orig_name)),
                                MEDIA_DIR).replace('\\', '/')
     except Exception:
         return orig_name
@@ -4754,7 +4836,59 @@ def api_upload():
         return jsonify({"success": True, "queued": False, "duplicate": True,
                         "filename": existing, "existing_file": existing}), 200
 
-    mode = (request.form.get("mode", "auto") or "auto").strip().lower()
+    # always spool first: inline stays crash-safe and can fall back to the queue
+    try:
+        spool_path = _spool_upload_to_disk(file, orig_name)
+    except Exception as e:
+        access_logger.error(f"upload spool write failed for {orig_name}: {e}")
+        return jsonify({"success": False, "error_code": "server_error",
+                        "error": "Could not stage upload."}), 500
+
+    # optional end-to-end check: the client sent the sha256 of what it meant to send
+    want_sha = (request.headers.get("X-Content-SHA256") or "").strip().lower()
+    if want_sha:
+        bad = _spool_checksum_error(spool_path, want_sha)
+        if bad:
+            return bad
+    return _ingest_spooled(spool_path, orig_name, folder, metadata, pred,
+                           request.form.get("mode", "auto"))
+
+def _spool_checksum_error(path, want_sha):
+    """! @brief Compare a staged file with the sha256 the client computed.
+    @return None when it matches, else a 422 response (the staged bytes are removed:
+            the client sends the file again).
+    """
+    if not _SHA256_RE.match(want_sha):
+        try: os.remove(path)
+        except OSError: pass
+        return jsonify({"success": False, "error_code": "bad_checksum",
+                        "error": "sha256 must be 64 hex digits."}), 400
+    got = _file_sha256(path)
+    if got == want_sha:
+        return None
+    try: os.remove(path)
+    except OSError: pass
+    access_logger.warning(f"upload: sha256 mismatch for {os.path.basename(path)} "
+                          f"(client {want_sha}, server {got}); discarded")
+    return jsonify({"success": False, "error_code": "checksum_mismatch",
+                    "error": "The received file does not match its sha256; it was "
+                             "discarded, send it again.",
+                    "expected": want_sha, "received_sha256": got}), 422
+
+def _file_sha256(path):
+    """! @brief The hex sha256 of a file, read in 1 MiB pieces."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for piece in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(piece)
+    return h.hexdigest()
+
+def _ingest_spooled(spool_path, orig_name, folder, metadata, pred, mode="auto"):
+    """! @brief Convert a spooled upload inline or queue it, as /api/upload does.
+    @param mode  "sync", "spool" or "auto" (inline while the pool has room).
+    @return the response tuple (the receipt, a 202 queue ticket or an error).
+    """
+    mode = (mode or "auto").strip().lower()
     if mode not in ("auto", "sync", "spool"):
         mode = "auto"
     if mode == "auto":
@@ -4765,14 +4899,6 @@ def api_upload():
             inline = True
     else:
         inline = (mode == "sync")
-
-    # always spool first: inline stays crash-safe and can fall back to the queue
-    try:
-        spool_path = _spool_upload_to_disk(file, orig_name)
-    except Exception as e:
-        access_logger.error(f"upload spool write failed for {orig_name}: {e}")
-        return jsonify({"success": False, "error_code": "server_error",
-                        "error": "Could not stage upload."}), 500
 
     if not inline:
         return _enqueue_spooled_upload(spool_path, orig_name, folder,
@@ -4854,7 +4980,7 @@ def _run_upload():
                 orig = new_orig
 
         # name and format per Settings > Media
-        store_name = mt.stored_name(fname)
+        store_name = media_encoding.stored_name(fname)
         store_ext  = os.path.splitext(store_name)[1].lower()
         store_path = os.path.join(tdir, store_name)
         rel_path   = _rel(store_path)
@@ -4882,16 +5008,18 @@ def _run_upload():
                     anim_delays = {"delays_ms": [per] * n, "duration_ms": per * n,
                                    "n_frames": n, "estimated": True}
 
-        # too long to stay an animated JXL: transcode to a video
+        # an animation goes where Settings > Media > Animations says: a video (always, or
+        # when too long), its own format, or like a still (anim_ext None)
         transcode_to_video = False
+        anim_ext = None
         if anim_delays and not mt.is_video(fname):
             dur_s = (anim_delays.get("duration_ms") or 0) / 1000.0
-            if dur_s > mt.ANIM_VIDEO_CUTOFF_S:
-                transcode_to_video = True
+            anim_ext = media_encoding.animation_ext(in_ext, dur_s)
+            transcode_to_video = anim_ext == 'video'
 
-        if transcode_to_video:
+        if transcode_to_video or (anim_ext and anim_ext != store_ext):
             base = os.path.splitext(store_name)[0]
-            store_ext  = mt.anim_video_ext()
+            store_ext  = media_encoding.anim_video_ext() if transcode_to_video else anim_ext
             store_name = base + store_ext
             store_path = os.path.join(tdir, store_name)
             rel_path   = _rel(store_path)
@@ -4901,13 +5029,16 @@ def _run_upload():
                 store_name = os.path.basename(store_path)
                 rel_path   = _rel(store_path)
 
+        # the spooled original before conversion may drop parts of it (a motion photo's video)
+        module_host.emit("upload.before_convert", spool_path=orig, filename=fname, rel_path=rel_path)
+
         try:
             if transcode_to_video:
                 # animated JXL frames are piped raw to ffmpeg; GIF / APNG / WebP decode there
                 jxl_frames = None
                 if in_ext == '.jxl':
                     jxl_frames = mt.jxl_decode_frames(orig)
-                ok = mt.transcode_animation_to_video(
+                ok = media_encoding.transcode_animation_to_video(
                     orig, out, delays_ms=anim_delays.get("delays_ms"),
                     jxl_frames=jxl_frames)
                 if not ok:
@@ -4920,12 +5051,13 @@ def _run_upload():
                 anim_delays = None
             elif mt.is_video(fname) or mt.is_audio(fname) or mt.is_uploadable_book(fname):
                 # Video, audio and books: stored as uploaded or converted to the Settings > Media
-                # target; the music and books modules index them.
-                if in_ext == store_ext:
+                # target; the music and books modules index them. A video already in its
+                # container is still re-encoded / remuxed when the settings ask for it.
+                if in_ext == store_ext and not (mt.is_video(fname) and media_encoding.av_needs_work(orig, store_ext)):
                     shutil.copy(orig, out)
                 else:
-                    err = (mt.convert_book(orig, out) if mt.is_uploadable_book(fname)
-                           else mt.convert_av(orig, out))
+                    err = (media_encoding.convert_book(orig, out) if mt.is_uploadable_book(fname)
+                           else media_encoding.convert_av(orig, out))
                     if err:
                         return jsonify({
                             "success": False, "error_code": "conversion_failed",
@@ -4938,7 +5070,7 @@ def _run_upload():
                 cjxl_src = orig
                 if is_raw_src:
                     dev_png = os.path.join(tmp, "developed.png")
-                    if not mt.develop_raw(orig, dev_png):
+                    if not media_encoding.develop_raw(orig, dev_png):
                         return jsonify({
                             "success": False, "error_code": "conversion_failed",
                             "error": "RAW development failed.",
@@ -4962,7 +5094,7 @@ def _run_upload():
                         shutil.copy(cjxl_src, out)
                         err = None
                     else:
-                        err = mt.convert_image(
+                        err = media_encoding.convert_image(
                             cjxl_src, out,
                             delays_ms=(anim_delays or {}).get("delays_ms"))
                     if err:
@@ -4972,14 +5104,14 @@ def _run_upload():
                             "detail": err}), 422
                 else:
                     # --lossless_jpeg only for a real JPEG bitstream; codec arguments from the encoding module
+                    # (inputs cjxl can't read and downscaled images go through a PNG first)
                     jpeg_source = not is_raw_src and not is_heif_src and in_ext in ('.jpg', '.jpeg')
-                    cjxl_cmd = mt.cjxl_cmd(cjxl_src, out, jpeg_source, state["cjxl_threads"])
-                    result = subprocess.run(cjxl_cmd, capture_output=True, text=True)
-                    if result.returncode != 0:
+                    err = media_encoding.encode_jxl(cjxl_src, out, jpeg_source, state["cjxl_threads"])
+                    if err:
                         return jsonify({
                             "success": False, "error_code": "conversion_failed",
                             "error": "cjxl conversion failed.",
-                            "detail": result.stderr.strip()
+                            "detail": err
                         }), 422
 
             sha = _sha256(out)
@@ -5002,6 +5134,9 @@ def _run_upload():
                 }), 200
 
             shutil.move(out, store_path)
+            # `sha` is of the bytes as stored; an in-file metadata write below (an EXIF
+            # patch, a writer that embeds) changes them, and then the index must re-hash
+            stored_stat = os.stat(store_path)
 
             # books: index this one file now, not a whole-tree walk per upload
             module_host.emit("upload.stored", rel_path=rel_path, filename=fname)
@@ -5044,8 +5179,10 @@ def _run_upload():
                     access_logger.error(
                         f"upload: metadata write failed even when empty for "
                         f"{rel_path}: {e2}")
-            # a developed raw / decoded HEIF lost its EXIF: carry date and GPS into the sidecar
-            if is_raw_src or is_heif_src:
+            # a developed raw / decoded HEIF (or a conversion set to strip metadata) lost its
+            # EXIF: carry date and GPS into the sidecar
+            if is_raw_src or is_heif_src or (in_ext != store_ext and mt.is_image(store_name)
+                                             and media_encoding.strips_metadata()):
                 try:
                     carry = mt.capture_xmp(orig)
                     if carry:
@@ -5074,7 +5211,9 @@ def _run_upload():
                     access_logger.error(
                         f"upload: xmp patch failed for {rel_path}: {e}")
 
-            if not _index_file(rel_path, force=True, known_sha=sha):
+            st = os.stat(store_path)
+            unchanged = (st.st_size, st.st_mtime_ns) == (stored_stat.st_size, stored_stat.st_mtime_ns)
+            if not _index_file(rel_path, force=True, known_sha=sha if unchanged else None):
                 access_logger.error(f"upload: indexing failed for {rel_path}; "
                                     f"rolling back")
                 for p in (store_path, os.path.splitext(store_path)[0] + '.xmp'):
@@ -5106,6 +5245,8 @@ def _run_upload():
 # -- upload queue and worker pool: requests spool and queue, workers convert --
 _UPLOAD_SPOOL_DIR   = os.path.join(os.path.dirname(DB_PATH), ".upload_spool")
 _UPLOAD_STALE_SECS  = 300
+_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024  # chunk size offered to session clients
+_SHA256_RE          = re.compile(r"^[0-9a-f]{64}$")
 _upload_wake        = threading.Event()
 _upload_started     = threading.Event()  # one-time pool start
 
@@ -5302,19 +5443,148 @@ def _start_upload_workers():
     # ingest runs on the thread manager's pool
     _register_upload_source()
     _upload_workers_wake()
-    _start_spool_janitor()
+    _register_janitor_source()
+    _janitor_kick()  # one pass at boot, as soon as the pool is free
 
-# -- spool janitor (every 15 min) --
+# -- spool janitor (a thread-manager source, at most every upload_janitor_minutes) --
 # 1. errored jobs whose spool survives are requeued (up to _JANITOR_MAX_ATTEMPTS,
 #    then parked for /api/upload/discard);
 # 2. spool files without a job are re-ingested (the upload path dedups);
-# 3. spools of finished or duplicate uploads are deleted.
+# 3. spools of finished or duplicate uploads are deleted;
+# 4. chunked-upload sessions idle for upload_session_hours are dropped with their .part.
 # It uses the workers' _TERMINAL_UPLOAD_CODES, so it never drops a file they would keep.
-_JANITOR_INTERVAL_SECS = 15 * 60
+_JANITOR_SOURCE        = "spool_janitor"
 _JANITOR_MAX_ATTEMPTS  = 5
 _JANITOR_ORPHAN_MIN_AGE = 120  # younger spool files may still be in flight
-_janitor_started = threading.Event()
-_janitor_wake    = threading.Event()
+_janitor_wake    = threading.Event()  # set: run soon, whatever the interval
+_janitor_state   = {"last_run": 0.0, "running": False}
+
+def _janitor_interval_secs():
+    """! @brief Minimum seconds between two janitor passes (setting upload_janitor_minutes)."""
+    try:
+        return max(60.0, float(state.get("upload_janitor_minutes") or 60) * 60.0)
+    except (TypeError, ValueError):
+        return 3600.0
+
+def _session_max_age_secs():
+    """! @brief Seconds an idle upload session lives (setting upload_session_hours)."""
+    try:
+        return max(60.0, float(state.get("upload_session_hours") or 24) * 3600.0)
+    except (TypeError, ValueError):
+        return 24 * 3600.0
+
+def _janitor_kick():
+    """! @brief Ask for a janitor pass soon (an explicit wake skips the interval and the yield)."""
+    _janitor_wake.set()
+    thread_manager.wake()
+
+def _janitor_has_work(db, now=None):
+    """! @brief Cheap check for anything the janitor would do: a few indexed queries
+    and one os.scandir of the spool dir.
+    @return the first reason found ("sessions", "errors", "done", "orphans",
+            "parts") or "" when there is nothing.
+    """
+    now = time.time() if now is None else now
+    stale = now - _session_max_age_secs()
+    if db.execute("SELECT 1 FROM upload_sessions WHERE updated<? LIMIT 1",
+                  (stale,)).fetchone():
+        return "sessions"
+    if db.execute("SELECT 1 FROM upload_queue WHERE status='error' AND spool_path<>'' "
+                  "AND attempts<? LIMIT 1", (_JANITOR_MAX_ATTEMPTS,)).fetchone():
+        return "errors"
+    if db.execute("SELECT 1 FROM upload_queue WHERE status='done' AND spool_path<>'' "
+                  "LIMIT 1").fetchone():
+        return "done"
+    orphans, parts = [], False
+    try:
+        with os.scandir(_UPLOAD_SPOOL_DIR) as it:
+            for e in it:
+                try:
+                    mtime = e.stat().st_mtime
+                except OSError:
+                    continue
+                if e.name.startswith("up-") and now - mtime >= _JANITOR_ORPHAN_MIN_AGE:
+                    orphans.append(e.path)
+                elif e.name.endswith(".part") and mtime < stale:
+                    parts = True
+    except OSError:
+        return ""
+    if orphans:
+        referenced = {r["spool_path"] for r in db.execute(
+            "SELECT spool_path FROM upload_queue WHERE spool_path<>''").fetchall()}
+        if any(p not in referenced for p in orphans):
+            return "orphans"
+    return "parts" if parts else ""
+
+def _claim_janitor_job():
+    """! @brief Thread-manager claim: a janitor job only when due (or woken) and there is
+    work; it yields to every other background job, unless overdue by four intervals.
+    """
+    st = _janitor_state
+    if st["running"]:
+        return None
+    now = time.time()
+    woken = _janitor_wake.is_set()
+    if not woken:
+        interval = _janitor_interval_secs()
+        since = now - st["last_run"]
+        if since < interval:
+            return None
+        # low priority: uploads and AI work first
+        if thread_manager.inflight() > 0 and since < 4 * interval:
+            return None
+        try:
+            db = _db()
+            db.rollback()
+            reason = _janitor_has_work(db, now)
+        except Exception as e:
+            access_logger.error(f"spool janitor probe failed: {e}")
+            reason = ""
+        if not reason:
+            st["last_run"] = now  # nothing to do: look again next interval
+            return None
+    _janitor_wake.clear()
+    st["running"] = True
+    return {"key": _JANITOR_SOURCE, "woken": woken}
+
+def _handle_janitor_job(job):
+    """! @brief Run one janitor pass on the pool."""
+    try:
+        _janitor_sweep()
+    except Exception as e:
+        if not _exiting.is_set():  # DB closed at exit otherwise
+            access_logger.error(f"spool janitor sweep failed: {e}", exc_info=True)
+    finally:
+        _janitor_state["last_run"] = time.time()
+        _janitor_state["running"] = False
+
+def _register_janitor_source():
+    """! @brief Put the janitor on the thread manager (replaces the old 15-minute thread)."""
+    thread_manager.register_source(_JANITOR_SOURCE, _claim_janitor_job,
+                                   _handle_janitor_job, key_of=lambda j: j["key"])
+
+def _janitor_expire_sessions(db, now=None):
+    """! @brief Drop upload sessions idle longer than upload_session_hours, and stale
+    .part files no session refers to. @return how many sessions and parts went.
+    """
+    now = time.time() if now is None else now
+    stale = now - _session_max_age_secs()
+    rows = db.execute("SELECT id FROM upload_sessions WHERE updated<?", (stale,)).fetchall()
+    n = 0
+    for r in rows:
+        _session_drop(r["id"])
+        n += 1
+    live = {r["id"] for r in db.execute("SELECT id FROM upload_sessions").fetchall()}
+    for path in glob.glob(os.path.join(_UPLOAD_SPOOL_DIR, "*.part")):
+        sid = os.path.basename(path)[:-len(".part")]
+        if sid in live:
+            continue
+        try:
+            if os.stat(path).st_mtime < stale:
+                os.remove(path); n += 1
+        except OSError:
+            pass
+    return n
 
 def _janitor_requeue_errors(db):
     """! @brief Requeue errored jobs with a spool and attempts left. @return (requeued ids, parked ids)."""
@@ -5423,40 +5693,23 @@ def _janitor_reingest_orphans(db):
     return reingested, deleted, skipped
 
 def _janitor_sweep():
-    """! @brief Run the three janitor steps once. @return a summary."""
+    """! @brief Run the janitor steps once. @return a summary."""
     db = _db()
     db.rollback()
     requeued, parked = _janitor_requeue_errors(db)
     dropped_done      = _janitor_drop_done_spools(db)
     reingested, deleted, skipped = _janitor_reingest_orphans(db)
+    expired = _janitor_expire_sessions(db)
     if requeued or reingested:
         _upload_workers_wake()
     summary = {
         "requeued_errors": requeued, "parked_errors": parked,
         "dropped_done_spools": dropped_done, "reingested_orphans": reingested,
         "deleted_junk_orphans": deleted, "skipped_orphans": skipped,
+        "expired_sessions": expired,
     }
     access_logger.info(f"spool janitor sweep: {summary}")
     return summary
-
-def _janitor_loop():
-    while not _exiting.is_set():
-        try:
-            _janitor_sweep()
-        except Exception as e:
-            if _exiting.is_set():
-                return  # DB closed at exit
-            access_logger.error(f"spool janitor sweep failed: {e}", exc_info=True)
-        _janitor_wake.wait(timeout=_JANITOR_INTERVAL_SECS)
-        _janitor_wake.clear()
-
-def _start_spool_janitor():
-    """! @brief Start the janitor thread (once)."""
-    if _janitor_started.is_set():
-        return
-    _janitor_started.set()
-    threading.Thread(target=_janitor_loop, daemon=True, name="spool-janitor").start()
-    access_logger.info("spool janitor started")
 
 @app.route("/api/upload/clean", methods=["POST"])
 @_auth.require_feature("data.upload", level="write", action='upload_clean')
@@ -5550,11 +5803,261 @@ def api_upload_discard():
     _db_retry(_del)
     return jsonify({"success": True, "discarded": _id})
 
-def _move_file(rel_path: str, new_rel: str) -> tuple[bool, str]:
+# -- chunked / resumable uploads --------------------------------------------
+# POST /api/upload/session opens a session (quota check, folder policy) and an
+# empty <spool>/<id>.part; PUT ...?offset=N appends raw bytes at exactly the
+# received count (409 with the server's count otherwise, so a client resumes);
+# POST .../complete checks the size and the optional sha256, renames the part to
+# an ordinary up-* spool file and ingests it like /api/upload (inline or queued).
+# Idle sessions expire after upload_session_hours (the janitor drops them).
+_session_locks = {}
+_session_locks_guard = threading.Lock()
+
+def _upload_user():
+    """! @brief The requester's username ('' with auth off), the owner of a session."""
+    return (getattr(g, "user", None) or {}).get("username", "") if has_request_context() else ""
+
+def _session_lock(sid):
+    """! @brief The lock serialising writes to one session."""
+    with _session_locks_guard:
+        lk = _session_locks.get(sid)
+        if lk is None:
+            lk = _session_locks[sid] = threading.Lock()
+        return lk
+
+def _session_part(sid):
+    """! @brief The .part file of a session."""
+    return os.path.join(_UPLOAD_SPOOL_DIR, sid + ".part")
+
+def _session_drop(sid):
+    """! @brief Forget a session: its row, its .part and its lock."""
+    try: os.remove(_session_part(sid))
+    except OSError: pass
+    def _del():
+        d = _db(); d.execute("DELETE FROM upload_sessions WHERE id=?", (sid,)); d.commit()
+    try: _db_retry(_del)
+    except Exception as e: access_logger.error(f"upload session drop {sid}: {e}")
+    with _session_locks_guard:
+        _session_locks.pop(sid, None)
+
+def _session_get(sid):
+    """! @brief The current user's live session row, or (None, error response).
+    An expired session is dropped and answers 404 like an unknown one.
+    """
+    sid = str(sid or "")
+    row = None
+    if re.match(r"^[0-9a-f]{32}$", sid):
+        row = _db().execute("SELECT * FROM upload_sessions WHERE id=?", (sid,)).fetchone()
+    if row is not None and row["updated"] < time.time() - _session_max_age_secs():
+        _session_drop(sid)
+        _janitor_kick()  # others may have gone stale too
+        row = None
+    if row is None or (row["username"] or "") != (_upload_user() or ""):
+        return None, (jsonify({"success": False, "error_code": "no_session",
+                               "error": "Unknown or expired upload session."}), 404)
+    return dict(row), None
+
+def _session_received(sid):
+    """! @brief Bytes on disk for a session (the truth a client resumes from)."""
+    try:
+        return os.path.getsize(_session_part(sid))
+    except OSError:
+        return 0
+
+@app.route("/api/upload/config")
+@_auth.require_feature("data.upload")
+def api_upload_config():
+    """! @brief What an upload client needs: sessions offered, chunk size, validation."""
+    return jsonify({"success": True, "sessions": True, "chunk_size": _UPLOAD_CHUNK_BYTES,
+                    "chunked_over": _UPLOAD_CHUNK_BYTES,
+                    "validate": bool(state.get("upload_validate")),
+                    "session_hours": _session_max_age_secs() / 3600.0})
+
+@app.route("/api/upload/session", methods=["POST"])
+@_auth.require_feature("data.upload", level="write", action="upload_session", fields=("filename", "folder"))
+def api_upload_session_create():
+    """! @brief Open a chunked upload: {filename, size, folder?, metadata?, sha256?, scope?, mode?}.
+    @return {id, chunk_size, received: 0}; 413 when a quota refuses the full size;
+            a duplicate answers like /api/upload (no session).
+    """
+    d = request.get_json(silent=True) or {}
+    try:
+        size = int(d.get("size"))
+    except (TypeError, ValueError):
+        size = -1
+    if size < 0:
+        return jsonify({"success": False, "error_code": "bad_size",
+                        "error": "size (bytes) is required."}), 400
+    want_sha = str(d.get("sha256") or "").strip().lower()
+    if want_sha and not _SHA256_RE.match(want_sha):
+        return jsonify({"success": False, "error_code": "bad_checksum",
+                        "error": "sha256 must be 64 hex digits."}), 400
+    form = {"scope": str(d.get("scope") or ""), "folder": str(d.get("folder") or "")}
+    folder = module_host.upload_folder(form["folder"].strip(), form)
+    tdir = get_safe_path(MEDIA_DIR, folder) if folder else MEDIA_DIR
+    if not tdir:
+        return jsonify({"success": False, "error_code": "bad_folder",
+                        "error": "Folder path is outside media directory."}), 400
+    orig_name = mt.clean_filename(str(d.get("filename") or "")) or "upload.bin"
+    for reason in module_host.emit("upload.check", folder=folder, filename=orig_name, size=size):
+        if reason:
+            return jsonify({"success": False, "error_code": "refused", "error": str(reason)}), 413
+    pred = _predicted_rel(tdir, orig_name)
+    existing = _existing_upload(pred, orig_name)
+    if existing:
+        return jsonify({"success": True, "queued": False, "duplicate": True,
+                        "filename": existing, "existing_file": existing}), 200
+    meta = d.get("metadata")
+    meta = json.dumps(meta) if isinstance(meta, (dict, list)) else (str(meta or "") or "{}")
+    sid = uuid.uuid4().hex
+    now = time.time()
+    try:
+        os.makedirs(_UPLOAD_SPOOL_DIR, exist_ok=True)
+        open(_session_part(sid), "wb").close()
+        def _ins():
+            db = _db()
+            db.execute("INSERT INTO upload_sessions(id, orig_name, folder, metadata, mode, size, "
+                       "received, sha256, username, created, updated) VALUES(?,?,?,?,?,?,0,?,?,?,?)",
+                       (sid, orig_name, folder or "", meta, str(d.get("mode") or "auto"), size,
+                        want_sha, _upload_user() or "", now, now))
+            db.commit()
+        _db_retry(_ins)
+    except Exception as e:
+        try: os.remove(_session_part(sid))
+        except OSError: pass
+        access_logger.error(f"upload session create failed for {orig_name}: {e}")
+        return jsonify({"success": False, "error_code": "server_error",
+                        "error": "Could not open an upload session."}), 500
+    return jsonify({"success": True, "id": sid, "chunk_size": _UPLOAD_CHUNK_BYTES,
+                    "received": 0, "size": size, "filename": pred})
+
+@app.route("/api/upload/session/<sid>", methods=["GET"])
+@_auth.require_feature("data.upload")
+def api_upload_session_status(sid):
+    """! @brief Bytes received so far, to resume after a dropped connection or a reload."""
+    row, err = _session_get(sid)
+    if err:
+        return err
+    return jsonify({"success": True, "id": row["id"], "received": _session_received(row["id"]),
+                    "size": row["size"], "chunk_size": _UPLOAD_CHUNK_BYTES,
+                    "filename": row["orig_name"], "folder": row["folder"]})
+
+@app.route("/api/upload/session/<sid>", methods=["PUT"])
+@_auth.require_feature("data.upload", level="write")
+def api_upload_session_put(sid):
+    """! @brief Append the raw body at ?offset=N; 409 with the server's count on a wrong offset."""
+    row, err = _session_get(sid)
+    if err:
+        return err
+    try:
+        offset = int(request.args.get("offset", ""))
+    except ValueError:
+        offset = -1
+    part = _session_part(row["id"])
+    with _session_lock(row["id"]):
+        received = _session_received(row["id"])
+        if offset != received:
+            return jsonify({"success": False, "error_code": "offset_mismatch",
+                            "error": f"Expected offset {received}.",
+                            "received": received}), 409
+        length = request.content_length
+        if length is not None and offset + length > row["size"]:
+            return jsonify({"success": False, "error_code": "too_large",
+                            "error": "More bytes than the session's size.",
+                            "received": received}), 413
+        written = 0
+        try:
+            with open(part, "r+b" if os.path.exists(part) else "wb") as f:
+                f.seek(offset)
+                f.truncate()
+                while True:
+                    piece = request.stream.read(1024 * 1024)
+                    if not piece:
+                        break
+                    if offset + written + len(piece) > row["size"]:
+                        f.truncate(offset)
+                        return jsonify({"success": False, "error_code": "too_large",
+                                        "error": "More bytes than the session's size.",
+                                        "received": offset}), 413
+                    f.write(piece)
+                    written += len(piece)
+        except OSError as e:
+            access_logger.error(f"upload session {row['id']} write failed: {e}")
+            return jsonify({"success": False, "error_code": "server_error",
+                            "error": "Could not store the chunk.",
+                            "received": _session_received(row["id"])}), 500
+        received = offset + written
+        def _upd():
+            db = _db()
+            db.execute("UPDATE upload_sessions SET received=?, updated=? WHERE id=?",
+                       (received, time.time(), row["id"]))
+            db.commit()
+        _db_retry(_upd)
+    return jsonify({"success": True, "received": received, "size": row["size"]})
+
+@app.route("/api/upload/session/<sid>", methods=["DELETE"])
+@_auth.require_feature("data.upload", level="write")
+def api_upload_session_abort(sid):
+    """! @brief Abandon a session now (its bytes are deleted)."""
+    row, err = _session_get(sid)
+    if err:
+        return err
+    _session_drop(row["id"])
+    return jsonify({"success": True})
+
+@app.route("/api/upload/session/<sid>/complete", methods=["POST"])
+@_auth.require_feature("data.upload", level="write", action="upload")
+def api_upload_session_complete(sid):
+    """! @brief Finish a session: size check, optional sha256 check (422 and the bytes
+    are discarded on a mismatch), then ingest inline or queued like /api/upload.
+    """
+    row, err = _session_get(sid)
+    if err:
+        return err
+    d = request.get_json(silent=True) or {}
+    with _session_lock(row["id"]):
+        received = _session_received(row["id"])
+        if received != row["size"]:
+            return jsonify({"success": False, "error_code": "incomplete",
+                            "error": f"Received {received} of {row['size']} bytes.",
+                            "received": received}), 409
+        part = _session_part(row["id"])
+        if row["sha256"]:
+            bad = _spool_checksum_error(part, row["sha256"])
+            if bad:
+                _session_drop(row["id"])
+                return bad
+        folder, orig_name = row["folder"], row["orig_name"]
+        tdir = get_safe_path(MEDIA_DIR, folder) if folder else MEDIA_DIR
+        pred = _predicted_rel(tdir or MEDIA_DIR, orig_name)
+        existing = _existing_upload(pred, orig_name)
+        if existing:  # landed meanwhile
+            _session_drop(row["id"])
+            return jsonify({"success": True, "queued": False, "duplicate": True,
+                            "filename": existing, "existing_file": existing}), 200
+        # the part becomes an ordinary spool file (an orphan the janitor re-ingests
+        # if anything below dies), then the session goes
+        try:
+            fd, spool_path = tempfile.mkstemp(dir=_UPLOAD_SPOOL_DIR, prefix="up-",
+                                              suffix="-" + orig_name)
+            os.close(fd)
+            os.replace(part, spool_path)
+        except OSError as e:
+            access_logger.error(f"upload session {row['id']} hand-off failed: {e}")
+            return jsonify({"success": False, "error_code": "server_error",
+                            "error": "Could not stage upload."}), 500
+        _session_drop(row["id"])
+    return _ingest_spooled(spool_path, orig_name, folder, row["metadata"], pred,
+                           d.get("mode") or row["mode"])
+
+def _move_file(rel_path: str, new_rel: str, content: str | None = None) -> tuple[bool, str]:
     """! @brief Move a library file to a new rel_path (folder and/or name), taking its
     sidecars and same-stem relatives (mt.related_exts) along, and keep every
     record in step: the files row, album membership, the edit history, the old
-    thumbnail, and every module table (file.renamed). The extension never changes.
+    thumbnail, and every module table (file.renamed). The extension never changes,
+    except with `content`.
+    @param content  a file that replaces the media file (a re-encode): new_rel takes
+                    its extension, the old file is removed, sidecars move as usual.
     @return (ok, error) - ok with "" when the paths are the same.
     """
     old_path = get_safe_path(MEDIA_DIR, rel_path)
@@ -5564,9 +6067,19 @@ def _move_file(rel_path: str, new_rel: str) -> tuple[bool, str]:
     new_path = get_safe_path(MEDIA_DIR, new_rel) if new_rel else None
     if not new_path:
         return False, "rejected target"
-    if os.path.splitext(old_path)[1].lower() != os.path.splitext(new_path)[1].lower():
+    if content is not None:
+        if not os.path.isfile(content):
+            return False, "replacement missing"
+        if os.path.splitext(content)[1].lower() != os.path.splitext(new_path)[1].lower():
+            return False, "replacement extension differs from the target"
+    elif os.path.splitext(old_path)[1].lower() != os.path.splitext(new_path)[1].lower():
         return False, "extension must not change"
     if os.path.normcase(os.path.abspath(old_path)) == os.path.normcase(os.path.abspath(new_path)):
+        if content is not None:  # same name: swap the bytes and re-read the file
+            shutil.move(content, old_path)
+            _thumb_drop(rel_path)
+            _meta_cache_drop(rel_path)
+            _index_file(rel_path, force=True)
         return True, ""
     if os.path.exists(new_path):
         return False, "target exists"
@@ -5575,8 +6088,13 @@ def _move_file(rel_path: str, new_rel: str) -> tuple[bool, str]:
     nb = os.path.splitext(new_path)[0]
     for ext in mt.related_exts(old_path):
         src, dst = ob + ext, nb + ext
+        if content is not None and src == old_path:
+            continue
         if os.path.exists(src):
             shutil.move(src, dst)
+    if content is not None:
+        shutil.move(content, new_path)
+        os.remove(old_path)
     new_rel = _rel(new_path)
     db = _db()
     for sql in ("UPDATE OR IGNORE album_members SET rel_path=? WHERE rel_path=?",
@@ -7074,7 +7592,7 @@ _core_api = SimpleNamespace(
     ingest_inline=_process_spooled_inline, enqueue_spooled_upload=_enqueue_spooled_upload,
     file_albums=_file_albums, set_file_albums=_set_file_albums, delete_file=_delete_file,
     move_file=_move_file,
-    get_file_row=_get_file_row, thumb_bytes=thumb_bytes,
+    get_file_row=_get_file_row, thumb_bytes=thumb_bytes, thumb_reset=_thumb_reset,
     files_where=_files_where,
     user_setting=lambda key, username=None: _user_setting(key, username),
     file_data=file_data, set_file_data=set_file_data,
@@ -7124,6 +7642,7 @@ module_host._current_module = "metadata"
 modules.metadata.register(module_host)
 module_host._current_module = "encoding"
 modules.encoding.register(module_host)
+media_encoding = module_host.get_service("encoding")
 module_host._current_module = "threading"
 modules.threading.register(module_host)
 module_host._current_module = "theming"
@@ -7133,6 +7652,33 @@ module_host._current_module = None
 module_host.add_table("""CREATE TABLE IF NOT EXISTS user_prefs (
     username TEXT NOT NULL, key TEXT NOT NULL, value TEXT,
     PRIMARY KEY (username, key))""", kind="state")
+# chunked upload sessions in flight (bytes in <spool>/<id>.part; see /api/upload/session)
+module_host.add_table("""CREATE TABLE IF NOT EXISTS upload_sessions (
+    id TEXT PRIMARY KEY, orig_name TEXT NOT NULL, folder TEXT NOT NULL DEFAULT '',
+    metadata TEXT NOT NULL DEFAULT '{}', mode TEXT NOT NULL DEFAULT 'auto',
+    size INTEGER NOT NULL, received INTEGER NOT NULL DEFAULT 0, sha256 TEXT DEFAULT '',
+    username TEXT DEFAULT '', created REAL NOT NULL, updated REAL NOT NULL);
+    CREATE INDEX IF NOT EXISTS idx_upload_sessions_updated ON upload_sessions(updated)""",
+    kind="state")
+# uploads: validation, session lifetime, janitor frequency (General -> system strip)
+modules.config.declare("upload_validate", default=False, owner="core",
+                       validate=lambda v: str(v).strip().lower() in ("1", "true", "on", "yes"))
+modules.config.declare("upload_session_hours", default=24, owner="core",
+                       validate=lambda v: max(1, min(24 * 30, int(float(v)))))
+modules.config.declare("upload_janitor_minutes", default=60, owner="core",
+                       validate=lambda v: max(5, min(24 * 60, int(float(v)))))
+module_host.add_settings_field(
+    key="upload_validate", label="Verify uploads (sha256)", kind="toggle", section="system",
+    help="The web uploader and upload.py send each file's sha256 and the server refuses "
+         "a file whose bytes differ (the client sends it again).")
+module_host.add_settings_field(
+    key="upload_session_hours", label="Resume uploads for (hours)", kind="number", section="system",
+    help="An interrupted chunked upload can resume this long; then its partial bytes are deleted.")
+module_host.add_settings_field(
+    key="upload_janitor_minutes", label="Upload spool clean-up (minutes)", kind="number",
+    section="system",
+    help="At most this often (and only when there is something to do) the spool janitor "
+         "retries failed uploads, removes finished ones and drops expired sessions.")
 # where the core schema's data lives (see host.add_table kinds)
 for _t, _k in (
         # mirrored from the files; its DB-only columns (autotag_done, face_done,
@@ -7195,11 +7741,11 @@ def _inject_module_ui():
 # picks (providers are registered now, so removed ones are dropped).
 modules.config.seed_defaults(state, saved=_SAVED_CONFIG)
 try:
-    mt.set_media_prefs(state.get("media_storage"))
+    media_encoding.set_media_prefs(state.get("media_storage"))
     mt.set_filename_prefs(state.get("filename_cleanup"))
 except Exception as e:
     access_logger.error(f"media settings: {e}; using defaults")
-state["media_storage"] = mt.media_prefs()
+state["media_storage"] = media_encoding.media_prefs()
 state["filename_cleanup"] = dict(mt._FILENAME_PREFS)
 
 state["model_selection"] = modules.broker.init_selection(state.get("model_selection"))

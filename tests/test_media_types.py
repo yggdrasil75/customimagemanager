@@ -1,16 +1,11 @@
 """! @file
-@brief media_types.py: naming, content sniffing, extension reconciliation."""
+@brief media_types.py: predicates, content sniffing, extension reconciliation, filename
+cleanup. The storage policy and converters are tested in modules/encoding/tests/test_convert.py."""
 import os
 import numpy as np
 import pytest
 import media_types as mt
 from cimtest import png_bytes
-
-
-def test_stored_name():
-    assert mt.stored_name("a.png") == "a.jxl"
-    assert mt.stored_name("a.JPG") == "a.jxl"
-    assert mt.stored_name("clip.mp4") == "clip.mp4"
 
 
 def test_predicates():
@@ -55,35 +50,6 @@ def test_jxl_keyframe_indices_monotone():
     assert mt.jxl_keyframe_indices(1) == [0]
 
 
-def test_media_prefs_target_ext():
-    saved_book = mt._MEDIA_TYPES.get("book")  # the books module's registration, put back after
-    try:
-        assert mt.target_ext("a.png") == ".jxl"                 # default: always jxl
-        assert mt.target_ext("a.mkv") == ".mkv"                 # default: video as-is
-        mt.set_media_prefs({"image": {"target": ".webp", "mode": "unsafe"},
-                            "video": {"target": ".mp4", "mode": "unsafe"}})
-        assert mt.target_ext("a.png") == ".png"                 # safe: kept
-        assert mt.target_ext("a.heic") == ".webp"               # unsafe: converted
-        assert mt.target_ext("a.jxl") == ".webp"
-        assert mt.target_ext("a.cr2") == ".webp"                # raws always convert
-        assert mt.target_ext("a.mkv") == ".mp4" and mt.target_ext("a.webm") == ".webm"
-        assert mt.is_library_file("x.png") and mt.is_library_file("x.jxl")
-        mt.set_media_prefs({"image": {"target": ".jpg", "mode": "all"}})
-        assert mt.target_ext("a.jpeg") == ".jpeg" and mt.stored_name("a.gif") == "a.jpg"
-        assert mt.clean_media_prefs({"image": {"target": "exe", "mode": "x"}})["image"] == \
-            mt.DEFAULT_MEDIA_PREFS["image"]
-        mt.register_media_type("book", exts=[".epub"])
-        mt.extend_media_type("book", exts=[".cbr", ".cbz"], group="comic")
-        mt.set_media_prefs({"book": {"target": ".cbz", "mode": "all"}})
-        assert mt.target_ext("a.cbr") == ".cbz" and mt.target_ext("a.epub") == ".epub"
-    finally:
-        mt.set_media_prefs(mt.DEFAULT_MEDIA_PREFS)
-        if saved_book is None:
-            mt.unregister_media_type("book")
-        else:
-            mt._MEDIA_TYPES["book"] = saved_book
-
-
 def test_clean_filename():
     c = mt.clean_filename
     assert c("../../etc/passwd") == "passwd"
@@ -95,16 +61,3 @@ def test_clean_filename():
     assert c("..hidden.png", {}) == "hidden.png"
     long = c("x" * 300 + ".png", {"storage": "linux"})
     assert long.endswith(".png") and len(long) == 255
-
-
-def test_convert_image_roundtrip(tmp_path):
-    from PIL import Image
-    src = tmp_path / "a.gif"
-    frames = [Image.new("RGB", (8, 8), c) for c in ("red", "blue")]
-    frames[0].save(src, save_all=True, append_images=frames[1:], duration=[50, 70], loop=0)
-    out = tmp_path / "a.webp"
-    assert mt.convert_image(str(src), str(out)) is None
-    assert Image.open(out).n_frames == 2
-    assert mt.jxl_anim_info(str(out))["animated"] is False   # .webp not a library ext by default
-    png = tmp_path / "b.png"
-    assert mt.convert_image(str(src), str(png)) is None and Image.open(png).n_frames == 2

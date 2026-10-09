@@ -23,7 +23,7 @@
     loading: null,       // Promise for the lazy Leaflet load
     map: null,
     cluster: null,
-    points: [],          // [[rel, lat, lon, isVideo], ...]
+    points: [],          // [[rel, lat, lon, isVideo, approximate], ...]
     byRel: new Map(),    // rel -> L.Marker
     current: null,       // L.CircleMarker ring on the open file
     currentRel: null,
@@ -79,11 +79,11 @@
   }
 
   // -- markers -----------------------------------------------------------
-  /** @brief A file's thumbnail marker icon. */
-  function photoIcon(rel, video) {
+  /** @brief A file's thumbnail marker icon (dashed when placed from a typed city, no GPS). */
+  function photoIcon(rel, video, approx) {
     return L.divIcon({
       className: "cim-map-pin",
-      html: `<div class="cim-map-thumb${video ? " is-video" : ""}">` +
+      html: `<div class="cim-map-thumb${video ? " is-video" : ""}${approx ? " is-approx" : ""}">` +
             `<img loading="lazy" src="${esc(thumbUrl(rel))}" alt="">` +
             (video ? '<span class="cim-map-play">▶</span>' : "") + "</div>",
       iconSize: [48, 48],
@@ -117,8 +117,9 @@
     S.cluster.clearLayers();
     S.byRel.clear();
     const ms = [];
-    for (const [rel, lat, lon, video] of S.points) {
-      const m = L.marker([lat, lon], { icon: photoIcon(rel, !!video), cimRel: rel, title: rel });
+    for (const [rel, lat, lon, video, approx] of S.points) {
+      const m = L.marker([lat, lon], { icon: photoIcon(rel, !!video, !!approx), cimRel: rel,
+                                       title: approx ? rel + " (approximate: from its city, no GPS)" : rel });
       m.on("click", () => openFile(rel));
       S.byRel.set(rel, m);
       ms.push(m);

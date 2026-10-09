@@ -103,10 +103,14 @@ def test_changelog_parser():
 
 
 def test_real_changelog_parses():
-    with open(os.path.join(vm._root(), "CHANGELOG.md"), encoding="utf-8") as fh:
+    """! @brief The repo's own CHANGELOG.md (whatever it holds) parses without error."""
+    path = os.path.join(vm._root(), "CHANGELOG.md")
+    if not os.path.exists(path):
+        pytest.skip("no CHANGELOG.md")
+    with open(path, encoding="utf-8") as fh:
         rel = vm.parse_changelog(fh.read())
-    assert rel and rel[0]["version"] == "Unreleased"
-    assert rel[0]["sections"].get("Added")
+    assert isinstance(rel, list)
+    assert all(r.get("version") for r in rel)
 
 
 def test_compare():
@@ -169,10 +173,20 @@ def test_api_version_reads_version_file(client, fake_root):
     assert client.get("/api/version").get_json()["version"] == "3.1.4"
 
 
-def test_api_changelog(client):
+def test_api_changelog(client, fake_root):
+    (fake_root / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## [Unreleased]\n\n### Added\n- a thing\n\n"
+        "## [0.9.0] - 2026-10-01\n\n### Fixed\n- a bug\n")
     j = client.get("/api/version/changelog").get_json()
     assert j["success"] and j["releases"][0]["version"] == "Unreleased"
-    assert "raw" in j
+    assert j["releases"][1]["version"] == "0.9.0" and "raw" in j
+
+
+def test_api_changelog_without_releases(client, fake_root):
+    """! @brief A changelog with no release headings (a placeholder) is not an error."""
+    (fake_root / "CHANGELOG.md").write_text("Something will be here after 1.0.0 releases\n")
+    j = client.get("/api/version/changelog").get_json()
+    assert j["success"] and j["releases"] == [] and j["raw"].startswith("Something")
 
 
 def test_check_route_with_fake_github(client, monkeypatch, fake_root, clean_state):

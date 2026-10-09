@@ -188,16 +188,16 @@ def test_bad_input(client, upload):
 def test_native_jpeg_rotate_and_location(client, host, upload):
     """! @brief A JPEG kept as uploaded: EXIF Orientation and GPS go into the file itself."""
     import cv2
-    mt = host.media
-    prev = mt.media_prefs()
-    mt.set_media_prefs({"image": {"target": ".jxl", "mode": "unsafe"}})
+    enc = host.get_service("encoding")
+    prev = enc.media_prefs()
+    enc.set_media_prefs({"image": {"target": ".jxl", "mode": "unsafe"}})
     try:
         img = np.random.default_rng(4701).integers(0, 255, (32, 48, 3), dtype=np.uint8)
         ok, buf = cv2.imencode(".jpg", img)
         fn = upload._post({"file": (io.BytesIO(buf.tobytes()), "native.jpg"), "mode": "sync",
                            "folder": FOLDER}, "native.jpg")["filename"]
     finally:
-        mt.set_media_prefs(prev)
+        enc.set_media_prefs(prev)
     assert fn.endswith(".jpg"), fn
     assert _post(client, "/api/meta_editor/rotate", {"filenames": [fn], "direction": "left"})["success"]
     with Image.open(media_path(fn)) as im:

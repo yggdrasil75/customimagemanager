@@ -1,25 +1,3 @@
-// -- Upload -----------------------------------------------------------------
-const dz=document.getElementById('dropzone');
-['dragenter','dragover','dragleave','drop'].forEach(n=>
-  dz.addEventListener(n,e=>{e.preventDefault();e.stopPropagation();},false));
-['dragenter','dragover'].forEach(n=>dz.addEventListener(n,()=>dz.classList.add('border-blue-500'),false));
-['dragleave','drop'].forEach(n=>dz.addEventListener(n,()=>dz.classList.remove('border-blue-500'),false));
-dz.addEventListener('drop',e=>handleFiles(e.dataTransfer.files),false);
-document.getElementById('file_input').addEventListener('change',e=>handleFiles(e.target.files));
-async function handleFiles(files){
-  const og=dz.innerHTML, folder=document.getElementById('upload_folder').value.trim();
-  const arr=Array.from(files); let done=0;
-  for(let i=0;i<arr.length;i+=4){
-    const slice=arr.slice(i,i+4);
-    dz.innerHTML=`<p class="text-blue-400 font-bold animate-pulse">Uploading ${done}/${arr.length}...</p>`;
-    await Promise.all(slice.map(f=>{
-      const fd=new FormData(); fd.append('file',f); fd.append('folder',folder);
-      return fetch('/api/upload',{method:'POST',body:fd}).then(()=>done++);
-    }));
-  }
-  dz.innerHTML=og; loadGallery();
-}
-
 // -- Dedup ------------------------------------------------------------------
 async function fetchDedupStatus(){
   try{

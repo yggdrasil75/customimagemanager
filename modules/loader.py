@@ -191,7 +191,7 @@ _CORE = [
      "core": True, "requires": [], "pip": [], "assets": [],
      "description": "Read and write EXIF, IPTC and XMP (incl. MWG) metadata."},
     {"id": "encoding", "name": "Encoding", "version": "builtin", "core": True,
-     "requires": [], "pip": [], "assets": [],
+     "requires": [], "pip": [], "assets": ["media_settings.js"],
      "description": "Lossless/lossy, quality, effort, video codec and bitrate for "
                     "uploads converted to the Settings → Media formats."},
     {"id": "threading", "name": "Thread Manager", "version": "builtin", "core": True,

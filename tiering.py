@@ -51,7 +51,7 @@ _state = {
     "lock": threading.Lock(),
     "run": {  # progress of the current / last rebalance
         "active": False, "phase": "idle", "planned": 0, "done": 0,
-        "moved_bytes": 0, "errors": 0, "last_run": None, "cancel": False,
+        "moved_bytes": 0, "errors": 0, "last_run": None, "cancel": False, "current": None,
     },
 }
 
@@ -569,7 +569,12 @@ def rebalance(block=False, aggressive=False):
                     run["phase"] = "cancelled"; break
                 while not aggressive and not _idle() and not run["cancel"]:
                     time.sleep(5)
-                if _execute_move(mv, cfg, mbps=0 if aggressive else None):
+                run["current"] = mv["rel"]
+                try:
+                    moved = _execute_move(mv, cfg, mbps=0 if aggressive else None)
+                finally:
+                    run["current"] = None
+                if moved:
                     run["done"] += 1
                     run["moved_bytes"] += mv["size"]
                 else:
@@ -613,6 +618,14 @@ def start(media_dir, db_factory, get_last_activity,
     _state["store_cfg"] = store_cfg
     load_cfg()
     threading.Thread(target=_loop, daemon=True).start()
+
+def moving():
+    """! @brief What a rebalance is doing right now, cheaply (no disk walk).
+    @return {"active": bool, "rel": the library rel_path being copied / relinked, or None}.
+    """
+    run = _state["run"]
+    return {"active": bool(run.get("active")) and run.get("phase") == "moving",
+            "rel": run.get("current")}
 
 def status():
     cfg = _state["cfg"] or load_cfg()

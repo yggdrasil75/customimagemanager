@@ -160,8 +160,14 @@
             class="bg-gray-700 text-xs px-2 py-1 rounded border border-gray-600 w-28">
           <button onclick="document.getElementById('file_input').click()"
             class="bg-blue-600 hover:bg-blue-500 px-3 py-1 rounded text-xs font-bold">Browse</button>
+          <button onclick="document.getElementById('folder_input').click()"
+            title="Upload a whole folder; its subfolders are kept under the target folder"
+            class="bg-gray-600 hover:bg-gray-500 px-3 py-1 rounded text-xs font-bold">Folder</button>
         </div>
         <input id="file_input" type="file" multiple class="hidden">
+        <input id="folder_input" type="file" multiple webkitdirectory class="hidden">
+        <!-- progress and failed uploads (static/upload.js) -->
+        <div id="upload_status" class="hidden w-full mt-2 text-left"></div>
       </div>
 
       <!-- Pagination bar -->

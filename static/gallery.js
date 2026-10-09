@@ -462,7 +462,7 @@ function renderGallery(files){
       div.dataset.folder=item.folder;
       div.dataset.filename=item.folder;   // what currentFile holds while the comic is open
       const cover=item.cover;
-      if(cover) div.dataset.src=`/api/thumb/${encodeURIComponent(cover)}`;
+      if(cover) div.dataset.src=`/api/thumb/${encodeURIComponent(cover)}${window.CIM_THUMB_V?'?v='+window.CIM_THUMB_V:''}`;
       div.addEventListener('click',()=>{ if(window.openComic) openComic(item.folder); });
       div.style.aspectRatio=(item.width&&item.height)?`${item.width}/${item.height}`:'2/3';
       div.innerHTML=`<div class="skeleton"></div>
@@ -501,7 +501,7 @@ function renderGallery(files){
     div.id=`t_${sid}`;
     div.dataset.filename=f;
     div.dataset.kind=isVideoFile(f)?'video':'image';
-    div.dataset.src=`/api/thumb/${encodeURIComponent(f)}`;
+    div.dataset.src=`/api/thumb/${encodeURIComponent(f)}${window.CIM_THUMB_V?'?v='+window.CIM_THUMB_V:''}`;
     div.addEventListener('click', e => handleGalleryClick(e, f));
     div.style.aspectRatio=(item.width&&item.height)?`${item.width}/${item.height}`:'1/1';
     div.innerHTML=`<div class="skeleton"></div>

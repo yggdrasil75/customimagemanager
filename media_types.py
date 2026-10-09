@@ -1,10 +1,14 @@
 """! @file
-@brief What kinds of media the library holds and how inputs become stored files.
+@brief What kinds of media the library holds, and the primitives to read them.
 
-Stills (and GIF / APNG) are stored as .jxl; videos, audio and books keep their
-format unless Settings > Media says otherwise. A video's poster frame goes
-through the same path as a decoded image, so indexing, dedup, embeddings and
-thumbnails work on videos unchanged.
+The media-kind / extension registry, content sniffing and extension
+correction, mime types, sidecars, filename cleanup, tool probes and the
+decoders used to show and index files (JXL frames, video poster / sample
+frames, raw and HEIF develop). What an upload is stored as and every encoder
+run (Settings > Media) live in the encoding module (modules/encoding/convert.py,
+the `encoding` service), which builds on this file; this file never imports it.
+A video's poster frame goes through the same path as a decoded image, so
+indexing, dedup, embeddings and thumbnails work on videos unchanged.
 """
 from __future__ import annotations
 
@@ -14,10 +18,8 @@ import re
 import shutil
 import struct
 import subprocess
-import tarfile
 import threading
 import unicodedata
-import zipfile
 import zlib
 from datetime import timezone
 
@@ -27,14 +29,11 @@ from optional_deps import optional_import
 
 cv2, _HAVE_CV2 = optional_import("cv2")
 Image, _HAVE_PIL = optional_import("PIL.Image")
-ImageOps, _ = optional_import("PIL.ImageOps")
 ImageSequence, _ = optional_import("PIL.ImageSequence")
 imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
 rawpy, _HAVE_RAWPY = optional_import("rawpy", quiet=True)
 pillow_heif, _HAVE_PILLOW_HEIF = optional_import("pillow_heif", quiet=True)
 pyexiv2, _HAVE_PYEXIV2 = optional_import("pyexiv2")
-py7zr, _HAVE_PY7ZR = optional_import("py7zr", quiet=True)
-rarfile, _HAVE_RARFILE = optional_import("rarfile", quiet=True)
 if _HAVE_PILLOW_HEIF:  # lets Pillow open .heic
     pillow_heif.register_heif_opener()
 
@@ -359,23 +358,6 @@ def mime_for(path: str) -> str | None:
             return spec["mime_map"][e]
     return None
 
-def stored_name(input_filename: str) -> str:
-    """! @brief The name an upload is stored under (its extension per Settings > Media)."""
-    base, _ = os.path.splitext(input_filename)
-    return base + target_ext(input_filename)
-
-
-# Per kind: a storage target and a mode: "all" converts everything, "unsafe"
-# converts only what browsers can't show, "none" stores as uploaded. Raws are
-# always converted to the image target.
-MEDIA_KINDS = ('image', 'video', 'audio', 'book')
-MEDIA_MODES = ('all', 'unsafe', 'none')
-MEDIA_TARGETS = {
-    'image': ['.jxl', '.webp', '.avif', '.png', '.jpg'],
-    'video': ['.mp4', '.webm', '.mkv'],
-    'audio': ['.flac', '.opus', '.ogg', '.mp3'],
-    'book':  ['.epub', '.pdf', '.cbz'],
-}
 # what most browsers show natively
 SAFE_EXTS = {
     'image': {'.jpg', '.jpeg', '.png', '.apng', '.gif', '.webp', '.avif', '.bmp'},
@@ -383,37 +365,6 @@ SAFE_EXTS = {
     'audio': {'.mp3', '.wav', '.ogg', '.oga', '.opus', '.flac', '.aac', '.m4a'},
     'book':  {'.pdf', '.txt', '.htm', '.html'},
 }
-DEFAULT_MEDIA_PREFS = {
-    'image': {'target': '.jxl', 'mode': 'all'},
-    'video': {'target': '.mp4', 'mode': 'none'},
-    'audio': {'target': '.flac', 'mode': 'none'},
-    'book':  {'target': '.epub', 'mode': 'none'},
-}
-_MEDIA_PREFS = {k: dict(v) for k, v in DEFAULT_MEDIA_PREFS.items()}
-
-
-def clean_media_prefs(v):
-    """! @brief Validate a media_storage setting; missing parts take the defaults."""
-    if not isinstance(v, dict):
-        raise ValueError("media_storage must be an object")
-    out = {}
-    for k in MEDIA_KINDS:
-        d = v.get(k) if isinstance(v.get(k), dict) else {}
-        t = str(d.get('target') or '').lower()
-        t = t if t.startswith('.') else '.' + t
-        m = d.get('mode')
-        out[k] = {'target': t if t in MEDIA_TARGETS[k] else DEFAULT_MEDIA_PREFS[k]['target'],
-                  'mode': m if m in MEDIA_MODES else DEFAULT_MEDIA_PREFS[k]['mode']}
-    return out
-
-
-def set_media_prefs(v):
-    _MEDIA_PREFS.update(clean_media_prefs(v or {}))
-
-
-def media_prefs():
-    return {k: dict(v) for k, v in _MEDIA_PREFS.items()}
-
 
 def input_kind(path: str):
     """! @brief "image" | "video" | "audio" | "book" for an uploadable input, else None."""
@@ -429,33 +380,22 @@ def input_kind(path: str):
     return None
 
 
-def target_ext(path: str) -> str:
-    """! @brief The extension `path` is stored under."""
-    e = _ext(path)
-    k = input_kind(path)
-    if k is None:  # unknown: treated as an image
-        return _MEDIA_PREFS['image']['target']
-    p = _MEDIA_PREFS[k]
-    t, mode = p['target'], p['mode']
-    if k == 'book' and t == '.cbz' and e not in media_group('book', 'comic'):
-        return e  # only comics become a cbz
-    if e in RAW_INPUT_EXTS:
-        return t  # raws are never stored as is
-    convert = mode == 'all' or (mode == 'unsafe' and e not in SAFE_EXTS[k])
-    if not convert or e == t or {e, t} == {'.jpg', '.jpeg'}:
-        return e
-    return t
+# Stored image extensions depend on the storage settings, which the encoding
+# module owns: it installs its policy here (set_stored_image_exts). Until then
+# the default policy applies: every still and animation is stored as .jxl.
+_STORED_IMAGE_EXTS = [lambda: {'.jxl'}]
+
+
+def set_stored_image_exts(fn):
+    """! @brief Install the policy answering stored_image_exts().
+    @param fn  fn() -> set of extensions a stored image may have.
+    """
+    _STORED_IMAGE_EXTS[0] = fn
 
 
 def stored_image_exts():
-    """! @brief Image extensions a library file may have: .jxl always, plus the native
-    inputs when the image mode keeps some as uploaded.
-    """
-    p = _MEDIA_PREFS['image']
-    out = {'.jxl', p['target']}
-    if p['mode'] != 'all':
-        out |= IMAGE_EXTS
-    return out
+    """! @brief Image extensions a library file may have under the current settings."""
+    return set(_STORED_IMAGE_EXTS[0]())
 
 
 # Filename cleanup:
@@ -512,134 +452,6 @@ def clean_filename(name: str, prefs=None) -> str:
         name = _trim_name(name, lambda n: len(n.encode('utf-8')) <= 255)
     return name.strip().lstrip('.').strip()
 
-
-_PIL_FORMAT = {'.webp': 'WEBP', '.avif': 'AVIF', '.png': 'PNG', '.jpg': 'JPEG',
-               '.jpeg': 'JPEG', '.gif': 'GIF', '.bmp': 'BMP'}
-
-
-def _enc():
-    """! @brief The encoding module (codec arguments), imported on first use."""
-    import modules.encoding as enc
-    return enc
-
-
-def cjxl_cmd(src: str, out: str, jpeg_source: bool, threads: int) -> list:
-    """! @brief cjxl command line for image -> .jxl."""
-    return ['cjxl', src, out, f'--num_threads={threads}', *_enc().cjxl_args(jpeg_source)]
-
-
-def convert_image(src: str, out: str, delays_ms=None) -> str | None:
-    """! @brief Convert an image to `out`'s format with Pillow (lossless where possible);
-    JXL sources decode through imagecodecs.
-    @return None on success, else the error.
-    """
-    if not _HAVE_PIL:
-        return "Pillow not installed"
-    try:
-        fmt = _PIL_FORMAT[_ext(out)]
-        info = {}
-        if _ext(src) == '.jxl':
-            frames = [Image.fromarray(f) for f in jxl_decode_frames(src, rgba=True)]
-            if not frames:
-                return "could not decode JXL"
-            durs = list(delays_ms or [100] * len(frames))
-        else:
-            im = Image.open(src)
-            info = im.info
-            frames, durs = [], []
-            for f in ImageSequence.Iterator(im):
-                durs.append(int(f.info.get('duration', 100) or 100))
-                frames.append(f.copy())
-            if len(frames) == 1:
-                frames = [ImageOps.exif_transpose(frames[0])]
-        alpha = fmt not in ('JPEG', 'BMP') and any(
-            'A' in f.mode or 'transparency' in f.info for f in frames)
-        frames = [f.convert('RGBA' if alpha else 'RGB') for f in frames]
-        kw = _enc().pillow_kwargs(fmt)
-        if info.get('icc_profile'):
-            kw['icc_profile'] = info['icc_profile']
-        if len(frames) > 1 and fmt in ('WEBP', 'AVIF', 'PNG', 'GIF'):
-            kw.update(save_all=True, append_images=frames[1:],
-                      duration=durs[:len(frames)], loop=0)
-        frames[0].save(out, format=fmt, **kw)
-        return None
-    except Exception as e:
-        return str(e) or e.__class__.__name__
-
-
-_COVER_ARGS = ['-map', '0:v?', '-c:v', 'copy', '-disposition:v', 'attached_pic']
-
-
-def convert_av(src: str, out: str) -> str | None:
-    """! @brief ffmpeg transcode keeping tags; to MKV a lossless remux is tried first.
-    @return None on success, else the error.
-    """
-    if not _have('ffmpeg'):
-        return "ffmpeg not installed"
-    e = _ext(out)
-    base = ['ffmpeg', '-y', '-loglevel', 'error', '-i', src, '-map_metadata', '0']
-    enc = _enc().av_args(e)  # codec and quality from Settings > Media > Encoding
-    if e == '.mkv':
-        attempts = [['-map', '0', '-c', 'copy'], enc]
-    elif e in ('.flac', '.mp3'):
-        attempts = [['-map', '0:a'] + _COVER_ARGS + enc, ['-map', '0:a'] + enc]
-    elif e in ('.opus', '.ogg'):
-        attempts = [['-map', '0:a'] + enc]
-    elif enc:
-        attempts = [enc]
-    else:
-        attempts = []
-    err = "unsupported target"
-    for args in attempts:
-        try:
-            p = subprocess.run(base + args + [out], capture_output=True, text=True,
-                               timeout=6 * 3600)
-        except Exception as ex:
-            err = str(ex)
-            continue
-        if p.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0:
-            return None
-        err = (p.stderr or '').strip()[-500:] or f"ffmpeg exit {p.returncode}"
-    return err
-
-
-def convert_book(src: str, out: str) -> str | None:
-    """! @brief Comic archive -> .cbz by repacking; other books -> .epub / .pdf with
-    calibre's ebook-convert.
-    @return None on success, else the error.
-    """
-    e = _ext(out)
-    if e == '.cbz':
-        s = _ext(src)
-        try:
-            with zipfile.ZipFile(out, 'w', zipfile.ZIP_STORED) as z:
-                if s == '.cbt':
-                    with tarfile.open(src) as t:
-                        for m in t.getmembers():
-                            if m.isfile():
-                                z.writestr(m.name, t.extractfile(m).read())
-                elif s == '.cb7':
-                    with py7zr.SevenZipFile(src) as a:
-                        for n, bio in (a.readall() or {}).items():
-                            z.writestr(n, bio.read())
-                else:  # rar (.cbr / .cba)
-                    with rarfile.RarFile(src) as r:
-                        for n in r.namelist():
-                            if not n.endswith('/'):
-                                z.writestr(n, r.read(n))
-            return None
-        except Exception as ex:
-            return str(ex) or ex.__class__.__name__
-    if not _have('ebook-convert'):
-        return "calibre (ebook-convert) not installed"
-    try:
-        p = subprocess.run(['ebook-convert', src, out], capture_output=True,
-                           text=True, timeout=3600)
-    except Exception as ex:
-        return str(ex)
-    if p.returncode == 0 and os.path.exists(out):
-        return None
-    return (p.stderr or p.stdout or '').strip()[-500:] or "ebook-convert failed"
 
 def sniff_ext(path: str) -> str | None:
     """! @brief The supported extension the file's first bytes say it is, or None.
@@ -821,28 +633,29 @@ def video_sample_frames(path: str, n: int = 8, max_dim: int = 256) -> "list[np.n
             frames.append(f)
     return frames
 
-def develop_raw(raw_path: str, out_png_path: str) -> bool:
-    """! @brief Develop a raw with rawpy into a 16-bit PNG (camera white balance), which
-    then goes through the normal cjxl step.
+RAW_DEFAULT_OPTIONS = {'use_camera_wb': True, 'output_bps': 16, 'no_auto_bright': True}
+
+
+def develop_raw(raw_path: str, out_png_path: str, options=None) -> bool:
+    """! @brief Develop a raw with rawpy into a PNG (16-bit RGB unless `options` say
+    otherwise), Rec.709-like curve.
+    @param options  rawpy postprocess() options (the encoding module passes the
+                    Settings > Media ones); None = RAW_DEFAULT_OPTIONS.
     @return True on success. Never raises.
     """
     if not _HAVE_RAWPY or cv2 is None:
         return False
     try:
         with rawpy.imread(raw_path) as raw:
-            rgb = raw.postprocess(
-                use_camera_wb=True,
-                output_bps=16,
-                no_auto_bright=True,
-                gamma=(2.222, 4.5),  # Rec.709-like curve
-            )
+            rgb = raw.postprocess(gamma=(2.222, 4.5),
+                                  **(RAW_DEFAULT_OPTIONS if options is None else options))
         # cv2 writes 16-bit RGB PNGs (Pillow can't); it wants BGR.
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         return bool(cv2.imwrite(out_png_path, bgr))
     except Exception:
         return False
 
-def _png_insert_chunks(png_path: str, chunks) -> None:
+def png_insert_chunks(png_path: str, chunks) -> None:
     """! @brief Insert (type, data) chunks right after a PNG's IHDR."""
     with open(png_path, 'rb') as f:
         data = f.read()
@@ -873,7 +686,7 @@ def develop_heif(heif_path: str, out_png_path: str) -> bool:
             return False
         icc = (hf.info or {}).get("icc_profile")
         if icc:
-            _png_insert_chunks(out_png_path, [(b'iCCP', b'ICC profile\x00\x00' + zlib.compress(icc))])
+            png_insert_chunks(out_png_path, [(b'iCCP', b'ICC profile\x00\x00' + zlib.compress(icc))])
         return True
     except Exception:
         return False
@@ -968,52 +781,6 @@ def video_duration(path: str) -> float | None:
         return float(out) if out else None
     except Exception:
         return None
-
-# Animations longer than this become a real video at upload.
-ANIM_VIDEO_CUTOFF_S = 30.0
-## @brief Container for those transcodes: the video storage target, else .mkv.
-def anim_video_ext() -> str:
-    p = _MEDIA_PREFS['video']
-    return p['target'] if p['mode'] != 'none' else '.mkv'
-
-def transcode_animation_to_video(src_path: str, out_path: str,
-                                 delays_ms=None, jxl_frames=None) -> bool:
-    """! @brief Transcode an animation to a video (codec per Settings > Media > Encoding).
-    GIF / APNG / WebP decode in ffmpeg; animated JXL frames (from
-    jxl_decode_frames) are piped in raw.
-    @param delays_ms  frame delays; the mean sets the frame rate (default 12 fps).
-    @return True on success. Never raises.
-    """
-    if not _have('ffmpeg'):
-        return False
-    fps = 12.0
-    if delays_ms:
-        try:
-            mean_ms = sum(delays_ms) / max(1, len(delays_ms))
-            if mean_ms > 0:
-                fps = max(1.0, min(60.0, 1000.0 / mean_ms))
-        except Exception:
-            fps = 12.0
-    venc = _enc().video_args(_ext(out_path))
-    try:
-        if jxl_frames is not None:
-            # raw RGB pipe: every frame must share a shape
-            if not jxl_frames:
-                return False
-            h, w = jxl_frames[0].shape[:2]
-            cmd = ['ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
-                   '-s', f'{w}x{h}', '-r', f'{fps:.4f}', '-i', 'pipe:0',
-                   *venc, out_path]
-            buf = b''.join(np.ascontiguousarray(f[:, :, :3]).tobytes() for f in jxl_frames)
-            p = subprocess.run(cmd, input=buf, capture_output=True, timeout=600)
-            return p.returncode == 0 and os.path.exists(out_path)
-        else:
-            # ffmpeg decodes the source itself
-            cmd = ['ffmpeg', '-y', '-i', src_path, *venc, out_path]
-            p = subprocess.run(cmd, capture_output=True, timeout=600)
-            return p.returncode == 0 and os.path.exists(out_path)
-    except Exception:
-        return False
 
 def __getattr__(name):
     """! @brief Module-level names that change as modules register media kinds."""

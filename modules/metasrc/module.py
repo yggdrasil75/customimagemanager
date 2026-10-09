@@ -25,7 +25,10 @@ A source is a dict:
 
 A candidate is {"id", "title", "subtitle", "thumb", "fields"}; the hub adds
 "source". Fields are the kind's normalised keys:
-    photo  tags[], description, artist, source_url
+    photo  tags[], description, artist, source_url, and the place fields
+           city, state, country, country_code, location (written to
+           photoshop:City / State / Country, Iptc4xmpCore:CountryCode /
+           Location - the homes the map module fills - never as tags)
     music  title, artist, album, albumartist, track, disc, year, genre, composer
     book   title, authors[], series, series_index, publisher, published,
            language, isbn, description, subjects[], identifiers{}
@@ -62,6 +65,17 @@ USER_AGENT = "customimagemanager/1.0 (+https://github.com/yggdrasil75/customimag
 _MUSIC_KEYS = ("title", "artist", "album", "albumartist", "track", "disc", "year", "genre", "composer")
 _BOOK_KEYS = ("title", "authors", "series", "series_index", "publisher", "published",
               "language", "isbn", "description", "subjects", "identifiers")
+## @brief Photo place fields -> (XMP token written, XMP keys read, IPTC IIM key read).
+# Iptc4xmpCore is read under both prefixes exiv2 may report it with.
+PLACE_FIELDS = {
+    "city":         ("photoshop.City", ("Xmp.photoshop.City",), "Iptc.Application2.City"),
+    "state":        ("photoshop.State", ("Xmp.photoshop.State",), "Iptc.Application2.ProvinceState"),
+    "country":      ("photoshop.Country", ("Xmp.photoshop.Country",), "Iptc.Application2.CountryName"),
+    "country_code": ("iptcCore.CountryCode", ("Xmp.iptcCore.CountryCode", "Xmp.iptc.CountryCode"),
+                     "Iptc.Application2.CountryCode"),
+    "location":     ("iptcCore.Location", ("Xmp.iptcCore.Location", "Xmp.iptc.Location"),
+                     "Iptc.Application2.SubLocation"),
+}
 
 
 def http_json(url, params=None, headers=None, timeout=12, data=None, method=None):
@@ -127,6 +141,56 @@ def _gps(path):
     if ex.get("Exif.GPSInfo.GPSLongitudeRef", "E").startswith("W"):
         lon = -lon
     return lat, lon
+
+
+def _first_text(v):
+    """! @brief A metadata value (list, lang-alt or text) as one stripped string."""
+    if isinstance(v, (list, tuple)):
+        v = v[0] if v else ""
+    if isinstance(v, dict):  # lang-alt
+        v = next(iter(v.values()), "")
+    return str(v or "").strip()
+
+
+def file_places(path):
+    """! @brief The place fields a photo already carries (sidecar XMP, then embedded XMP / IPTC).
+    @return {city, state, country, country_code, location}: '' where the file has none.
+    """
+    out = {k: "" for k in PLACE_FIELDS}
+    if not _HAVE_EXIV or not path:
+        return out
+    side = os.path.splitext(path)[0] + ".xmp"
+    for p in ([side] if side != path and os.path.exists(side) else []) + \
+             ([path] if os.path.exists(path) else []):
+        try:
+            with pyexiv2.Image(p) as img:
+                xmp = img.read_xmp() or {}
+                try:
+                    iptc = {} if p == side else (img.read_iptc() or {})
+                except Exception:
+                    iptc = {}
+        except Exception:
+            continue
+        for key, (_tok, xkeys, ikey) in PLACE_FIELDS.items():
+            if out[key]:
+                continue
+            for xk in xkeys:
+                out[key] = _first_text(xmp.get(xk))
+                if out[key]:
+                    break
+            if not out[key]:
+                out[key] = _first_text(iptc.get(ikey))
+    return out
+
+
+def place_patch(fields):
+    """! @brief The XMP patch for the place fields among `fields` (country codes upper-cased)."""
+    out = {}
+    for key, (tok, _x, _i) in PLACE_FIELDS.items():
+        v = str(fields.get(key) or "").strip()
+        if v:
+            out[tok] = v.upper() if key == "country_code" else v
+    return out
 
 
 def merge_fields(kind, current, fields, overwrite):
@@ -196,9 +260,10 @@ def register(host):
             for k in ("authors", "subjects", "identifiers"):
                 cur[k] = json.loads(r[k] or ("{}" if k == "identifiers" else "[]"))
             return cur
-        m = core.read_metadata(host.safe_path(host.media_dir, rel))
+        fp = host.safe_path(host.media_dir, rel)
+        m = core.read_metadata(fp)
         return {"tags": m.get("tags") or [], "description": m.get("description") or "",
-                "artist": m.get("artist") or ""}
+                "artist": m.get("artist") or "", **file_places(fp)}
 
     def _query(kind, rel, q):
         ap = host.safe_path(host.media_dir, rel) if rel else None
@@ -214,7 +279,15 @@ def register(host):
                          isbn=(cur.get("isbn") or "").replace("-", ""))
             query["q"] = query["q"] or " ".join([query["title"]] + query["authors"][:1])
         else:
-            gps = _gps(ap) if ap and os.path.exists(ap) else None
+            gps = None
+            geo = host.get_service("geo")  # the map module: sidecar, embedded XMP, video tags
+            if geo is not None and rel:
+                try:
+                    gps = geo["refresh"](rel)
+                except Exception as e:
+                    log.warning(f"metasrc: geo lookup {rel}: {e}")
+            if gps is None and ap and os.path.exists(ap):
+                gps = _gps(ap)
             query.update(md5=_md5(ap) if ap and os.path.exists(ap) else "",
                          lat=gps[0] if gps else None, lon=gps[1] if gps else None)
             query["q"] = query["q"] or stem
@@ -236,8 +309,16 @@ def register(host):
             return res.get("success", False), res.get("error", "")
         xmp = {k: v for k, v in (("dc.creator", [fields["artist"]] if fields.get("artist") else None),
                                  ("dc.source", fields.get("source_url"))) if v}
-        res = core.update_file(rel, set={k: fields[k] for k in ("tags", "description") if k in fields},
-                               xmp=xmp or None)
+        xmp.update(place_patch(fields))
+        file_set = {k: fields[k] for k in ("tags", "description") if k in fields}
+        fp = host.safe_path(host.media_dir, rel)
+        if xmp and not file_set and fp and not os.path.exists(os.path.splitext(fp)[0] + ".xmp"):
+            # a sidecar first, so the XMP patch never rewrites the image itself
+            made = core.update_file(rel, force=True)
+            if not made.get("success"):
+                return False, made.get("error", "")
+        # the place fields reach the map module's places row through file.metadata_changed
+        res = core.update_file(rel, set=file_set, xmp=xmp or None)
         if not res.get("success"):
             log.warning(f"metasrc: write failed for {rel}: {res.get('error')}")
         return res.get("success", False), ""

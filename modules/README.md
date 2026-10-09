@@ -139,6 +139,8 @@ Pure helpers live in `common` (import it; `orient_*` / `crop_array` do the
 orientation and crop maths); an LLM call is
 the `llm` service, person detection the `people` service's `run_person`.
 
+Media storage and thumbnails: `move_file(rel, new_rel, content=None)` moves a file with its sidecars and rows; with `content` (a re-encoded file) the media file is replaced and the extension may change. `thumb_bytes(rel, abs)` / `thumb_drop(rel)` / `thumb_reset()` (forget every thumbnail). Thumbnail size, quality and format, and every codec option, are Settings -> Media, owned by the core `encoding` module (`modules/encoding/schema.py` holds the fields as data; `GET /api/encoding/schema` serves them to the module's own `static/media_settings.js`). What an upload is stored as and every encoder run (cjxl, Pillow, ffmpeg, calibre, raw develop) live in `modules/encoding/convert.py`, published as the `encoding` service; `media_types` keeps only the primitives (kinds, sniffing, decoders).
+
 `host.media` - the media-type registry (`kind(path)`, `is_video`, ...) plus
 `host.register_media_type(kind, exts=, mime_map=, ...)` so a module can teach
 the core a new file kind (books do this; QOI / CAD / 3D would too) without
@@ -218,8 +220,9 @@ The core emits, modules react; the core never names a module.
 | `library.reconcile` | - | after the image index scan (and after every sync) |
 | `library.sync` | `direction, rel_paths` | a sync (Sync button, `/api/sync`): `"push"` = write what only your tables hold into the files (rel_paths None); `"pull"` = rebuild your mirrored tables from the files, for `rel_paths` (the re-indexed files) or every file when None (a full sync) |
 | `file.index` | `rel_path, abs_path, force` -> truthy if handled | index a file of a kind you own; core skips its image path |
-| `upload.check` | `folder, filename, size` -> a reason string to refuse | veto an upload before it is written (quotas); the client gets 413 |
+| `upload.check` | `folder, filename, size` -> a reason string to refuse | veto an upload before it is written (quotas); the client gets 413. A chunked upload (`POST /api/upload/session`) asks once, with the full size, before any byte arrives |
 | `upload.duplicate_check` | `sha, filename` -> existing rel_path or None | veto an upload as a duplicate |
+| `upload.before_convert` | `spool_path, filename, rel_path` | the spooled original before it is converted (and `rel_path` it will be stored as); keep what conversion drops (motion photos extract their video) |
 | `upload.stored` | `rel_path, filename` | index a file you own after upload |
 | `file.renamed` | `old_rel, new_rel` | repoint your tables |
 | `file.trash` | `rel_path, abs_path, members` -> truthy if moved away | claim a delete: move the file and its sidecars (`members`) out of the library instead of the core removing them (the trash module); DB rows are purged after it either way |
@@ -241,7 +244,7 @@ later registration. Consumers `get_service(name)` and must handle `None` (the
 provider is off). Current services (`comicinfo` - ComicInfo.xml read / write from the comics
 module - is used by books for comic archives; the metadata ones - `metadata_write`, `exif.write`, `xmp.write`,
 `music.write_meta`, `books.update_meta` - are thin wrappers over `update_file`;
-new code calls `host.update_file` directly): `metadata_write`, `exif` (`read`/`write`), `metadata_schema`, `embedding`, `dedup_scorers`, `barcodes`, `pose.tpose`, `sam_common`, `fetch`, `faces`, `bodies`, `people`, `segmentation`, `music` (`write_meta`), `books` (`update_meta`), `xmp` (`write`), `metasrc` (metadata source registry: `register(source)`, `http_json`, `http_multipart` - see `metasrc/module.py` for the source contract; each site is its own `metasrc_<site>` module), `llm` (the vlm module's OpenAI-compatible client: `call`, `request`, `encode_image`), `stacks` (`stack_of(rel)`, `create(kind, members, cover=, auto=)`, `match_raw_for(rel)`, `rescan(raw, burst)`), `metadata` (`set_date(rel, dt, offset, fields=None, tz_mode="keep_local", from_offset=None)` writes a taken date into EXIF DateTimeOriginal + OffsetTimeOriginal and the XMP date homes, then re-indexes the d_* buckets; `read_date(abs_path)`; `set_date` is also published alone as `metadata.set_date`), `meta_editor` (`write_location(rel, abs, (lat, lon) | None)`, `write_date(rel, abs, dt, offset)`, `turn(rel, abs, orientation_op)`, `write_crop(rel, abs, crop | None)`, `original_date(rel, abs)`), `geo` (the map module: `refresh(rel)` -> (lat, lon) or None, `rescan()`, `place_of(rel)` -> {city, admin2, admin1, cc, country, continent, source} or None, `resolve([(lat, lon)])` offline place names).
+new code calls `host.update_file` directly): `metadata_write`, `exif` (`read`/`write`), `metadata_schema`, `embedding`, `dedup_scorers`, `barcodes`, `pose.tpose`, `sam_common`, `fetch`, `faces`, `bodies`, `people`, `segmentation`, `music` (`write_meta`), `books` (`update_meta`), `xmp` (`write`), `metasrc` (metadata source registry: `register(source)`, `http_json`, `http_multipart` - see `metasrc/module.py` for the source contract; each site is its own `metasrc_<site>` module), `llm` (the vlm module's OpenAI-compatible client: `call`, `request`, `encode_image`), `stacks` (`stack_of(rel)`, `create(kind, members, cover=, auto=)`, `match_raw_for(rel)`, `rescan(raw, burst)`), `metadata` (`set_date(rel, dt, offset, fields=None, tz_mode="keep_local", from_offset=None)` writes a taken date into EXIF DateTimeOriginal + OffsetTimeOriginal and the XMP date homes, then re-indexes the d_* buckets; `read_date(abs_path)`; `set_date` is also published alone as `metadata.set_date`), `meta_editor` (`write_location(rel, abs, (lat, lon) | None)`, `write_date(rel, abs, dt, offset)`, `turn(rel, abs, orientation_op)`, `write_crop(rel, abs, crop | None)`, `original_date(rel, abs)`), `geo` (the map module: `refresh(rel)` -> (lat, lon) or None, `rescan()`, `place_of(rel)` -> {city, admin2, admin1, cc, country, continent, source} or None (source "approx": placed from a typed city, no GPS), `resolve([(lat, lon)])` offline place names, `forward([{city, state, country, cc}])` offline approximate positions, `locate(rel)` refresh one file's position and place), `integrity` (`recheck(rel)`, `status()`), `encoding` (the core encoding module: `stored_name(filename)`, `target_ext`, `animation_ext`, `encode_jxl(src, out, jpeg_source, threads)`, `convert_image(src, out)`, `convert_av`, `convert_book`, `develop_raw`, `transcode_animation_to_video`, `cjxl_cmd`, `media_prefs()` / `set_media_prefs`, `thumb_params()`).
 
 Hierarchical tags: the flat `tags` (dc:subject) hold each keyword's leaf; the path lives in `lr:hierarchicalSubject` ("A|B|C", also read from `digiKam:TagsList` and `mwg-kw`). A tag set as `a/b/c` (or `a|b|c`) is split on save into the leaf tag + the path. The `tag_tree(path, rel_path)` table (mirrored) indexes the paths, `tagpath:a/b` searches a node and everything below it.
 
@@ -341,6 +344,15 @@ purge rows of deleted files; push (rewrite files whose last metadata write
 failed, then `library.sync` push); pull (quick: re-index files whose file or
 sidecar changed; full: every file; then `library.sync` pull). `/api/reconcile`
 is an alias of a quick sync.
+
+**Integrity checks.** Between syncs the `integrity` module walks the `files`
+rows in the background: a quick pass re-indexes files whose size, mtime or
+sidecar changed outside the app and reports missing ones (rows stay; purging is
+Sync's job); a deep pass, only while idle, re-hashes files against
+`files.sha256` (same size and mtime, different hash = corruption) and checks
+that images decode and sidecars parse. Results are in `integrity_issues`;
+broken sidecars are reported, never rewritten. It skips the file a tier
+rebalance is moving (`core.tiering.moving()` -> `{active, rel}`).
 
 **Dirty DB.** The core keeps `cim_meta(key, value)` and a launch marker,
 `<media>/.cim/last_launch`. A DB whose `last_launch` is missing or older than

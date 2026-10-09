@@ -122,11 +122,10 @@
     </div>
 
     <div data-settings-pane="media" data-feature="settings.media" data-write-gate="settings.media" class="hidden overflow-y-auto flex-1 pr-1">
-      <h3 class="font-bold text-amber-300 mb-1">Storage formats</h3>
-      <p class="text-[11px] text-gray-500 mb-2">Applied to new uploads. <b>Unsafe</b> = formats most
-        browsers can't show (jxl, heic, mkv, avi, wma, aiff, epub, mobi, cbr...).
-        Camera raws are always converted.</p>
-      <div id="media_storage_rows" class="space-y-2 mb-4"></div>
+      <!-- Filled by the encoding module (modules/encoding/static/media_settings.js, from
+           /api/encoding/schema): output format and codec options per media kind, simple /
+           expert view, thumbnails; it also loads and saves the filename cleanup below. -->
+      <div id="media_settings_root" class="mb-4"><p class="text-xs text-gray-500">Media settings are provided by the encoding module.</p></div>
       <div class="border-t border-gray-700 pt-3">
         <h3 class="font-bold text-amber-300 mb-1">Filename cleanup</h3>
         <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">

@@ -999,7 +999,10 @@ def register(host):
                 if fmt == "apng":
                     out = apng
                 elif fmt == "jxl":
-                    cmd = host.media.cjxl_cmd(apng, out, False, int(host.config.get("cjxl_threads") or 1))
+                    enc = host.get_service("encoding")
+                    if enc is None:
+                        return _bad("the encoding module is not loaded", 503)
+                    cmd = enc.cjxl_cmd(apng, out, False, int(host.config.get("cjxl_threads") or 1))
                     res = subprocess.run(cmd, capture_output=True, text=True)
                     if res.returncode != 0:
                         return _bad("cjxl failed: " + (res.stderr or "").strip()[-400:], 422)

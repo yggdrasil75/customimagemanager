@@ -12,6 +12,11 @@ place names.
     country, continent} from reverse_geocoder (GeoNames, no network) and
     pycountry; the empty place fields of the file (photoshop:City / State /
     Country, Iptc4xmpCore:CountryCode) are filled in, never overwritten;
+  * files that name a place (photoshop:City, ...) but carry no GPS get an
+    approximate position from the same offline city table (an unambiguous
+    city match only); they show on the map as approximate markers and are
+    found by location:, never by gps: / near: / bbox:, and the position is
+    never written into the file;
   * a Places gallery view: countries, regions and cities with counts, a click
     searches location:;
   * search tokens: gps:yes / gps:no, near:<lat>,<lon>[,<km>],
@@ -90,9 +95,21 @@ CREATE INDEX IF NOT EXISTS idx_places_admin1 ON places(admin1);
 CREATE INDEX IF NOT EXISTS idx_places_cc ON places(cc);
 """
 
+## @brief Approximate positions of files without GPS, from their typed place (NULL = none found).
+_APPROX_DDL = """
+CREATE TABLE IF NOT EXISTS geo_approx (
+    rel_path  TEXT PRIMARY KEY,
+    lat       REAL,
+    lon       REAL,
+    src_mtime REAL NOT NULL DEFAULT 0
+);
+"""
+
 _PLACE_COLS = ("city", "admin2", "admin1", "cc", "country", "continent")
 _DATE_ARG = re.compile(r"^\d{4}(?:-\d{1,2}){0,2}$")
 _PLACE_BATCH = 500
+## @brief Seconds to gather files before one pass over the offline city table.
+_APPROX_DEBOUNCE = 2.0
 _DEFAULT_TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 _DEFAULT_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 
@@ -112,6 +129,7 @@ def register(host):
     """! @brief Wire the geo / places caches, the Map tab, the Places view and the search tokens."""
     host.add_table(_DDL, kind="cache")  # GPS read from the files' EXIF / XMP
     host.add_table(_PLACES_DDL, kind="cache")  # from the positions + the files' place fields
+    host.add_table(_APPROX_DDL, kind="cache")  # typed place names -> the offline city table
     host.register_feature("tab.map", "Map tab", section="gallery_tabs",
                           section_label="Gallery tabs", default="read")
 
@@ -123,6 +141,9 @@ def register(host):
                         validate=lambda v: max(1, min(22, int(float(v)))))
     host.add_config_key("map_write_places", default=True,
                         validate=lambda v: str(v).strip().lower() not in ("0", "false", "no", "off", ""))
+    host.add_config_key("map_approx_places", default=True,
+                        validate=lambda v: str(v).strip().lower() not in ("0", "false", "no", "off", ""),
+                        on_change=lambda new, old: _approx_toggled(new))
     host.add_config_key("map_location_aliases", default=places.DEFAULT_ALIASES,
                         validate=places.clean_aliases)
     host.add_settings_tab("map", "Map")
@@ -136,6 +157,11 @@ def register(host):
                             help="Fill photoshop:City / State / Country and Iptc4xmpCore:CountryCode "
                                  "from GPS when the file leaves them empty. Values already in a "
                                  "file are never overwritten.")
+    host.add_settings_field(key="map_approx_places", label="Place files without GPS from their city",
+                            kind="toggle", pane="map",
+                            help="A file whose City (and State / Country) is filled in but that has no "
+                                 "GPS gets an approximate marker from the offline city table. Only "
+                                 "unambiguous matches; nothing is written into the file.")
     host.add_settings_field(key="map_location_aliases", label="location: aliases", kind="rows", pane="map",
                             columns=[{"key": "alias", "label": "Alias", "placeholder": "NYC"},
                                      {"key": "expansion", "label": "Means", "placeholder": "New York City"}],
@@ -215,8 +241,9 @@ def register(host):
                 if pending >= 200:
                     db.commit()
                     pending = 0
-            host.update_file(table="geo", where=("rel_path NOT IN (SELECT rel_path FROM files)", ()),
-                             remove=True, dont_write=True)
+            for t in ("geo", "geo_approx"):
+                host.update_file(table=t, where=("rel_path NOT IN (SELECT rel_path FROM files)", ()),
+                                 remove=True, dont_write=True)
         except Exception as e:
             host.logger.error(f"map: location scan failed: {e}")
         finally:
@@ -232,9 +259,10 @@ def register(host):
                          name="map-scan", daemon=True).start()
 
     def _scan_then_place(force=False):
-        """! @brief Thread body: the position scan, then the places sweep."""
+        """! @brief Thread body: the position scan, then the places sweep, then approximate positions."""
         if _scan_all(force=force):
             _places_sweep(force=force)
+            _approx_sweep(force=force)
 
     # -- places -------------------------------------------------------------
     pstate = {"running": False, "done": 0, "total": 0, "finished": 0.0,
@@ -316,6 +344,7 @@ def register(host):
                     pstate["done"] += _place_batch(db, rows[i:i + _PLACE_BATCH])
                 if rels is None:
                     host.update_file(table="places", where=(
+                        "COALESCE(source, '') != 'approx' AND "
                         "rel_path NOT IN (SELECT rel_path FROM geo WHERE lat IS NOT NULL)", ()),
                         remove=True, dont_write=True)
             except Exception as e:
@@ -325,14 +354,113 @@ def register(host):
                 pstate["finished"] = time.time()
         return True
 
-    def _locate(rel, abs_path=None, force=False, reread=False):
-        """! @brief Refresh one file's position and, when it has one, its place.
-        @param force   redo the place even when the position is unchanged.
-        @param reread  read the position from the file even when its mtime is unchanged.
+    # -- approximate positions (typed place, no GPS) ----------------------------
+    def _approx_on():
+        """! @brief The setting is on and the offline city table is there."""
+        return bool(host.config.get("map_approx_places", True)) and places.forward_available()
+
+    def _approx_toggled(on):
+        """! @brief Setting change: drop the approximate rows, or build them in the background."""
+        if on:
+            threading.Thread(target=_approx_sweep, name="map-approx", daemon=True).start()
+            return
+        host.update_file(table="places", where=("source = 'approx'", ()), remove=True,
+                         dont_write=True, commit=False)
+        host.update_file(table="geo_approx", where=("1=1", ()), remove=True, dont_write=True)
+
+    def _approx_sweep(rels=None, force=False):
+        """! @brief Approximate positions for files without GPS that name a city (all, or `rels`).
+        Files are re-read only when they (or their sidecar) changed since the last look.
+        @return how many files got a position.
+        """
+        if not _approx_on():
+            return 0
+        db = host.db()
+        sql = ("SELECT g.rel_path, a.src_mtime FROM geo g LEFT JOIN geo_approx a ON a.rel_path = g.rel_path "
+               "WHERE g.lat IS NULL")
+        if rels is None:
+            rows = [tuple(r) for r in db.execute(sql).fetchall()]
+        else:
+            rows, rels = [], list(rels)
+            for i in range(0, len(rels), 500):
+                part = rels[i:i + 500]
+                rows += [tuple(r) for r in db.execute(
+                    sql + f" AND g.rel_path IN ({','.join('?' * len(part))})", part).fetchall()]
+        todo = []
+        for rel, seen in rows:
+            fp = _abs(rel)
+            if not fp:
+                continue
+            mtime = geo.source_mtime(fp)
+            if force or seen is None or abs(seen - mtime) > 1e-6:
+                todo.append((rel, fp, mtime))
+        placed = 0
+        for i in range(0, len(todo), _PLACE_BATCH):
+            part = todo[i:i + _PLACE_BATCH]
+            haves = [geo.read_places(fp) for _rel, fp, _m in part]
+            hits = places.forward(haves)
+            for (rel, _fp, mtime), have, hit in zip(part, haves, hits):
+                host.update_file(rel, table="geo_approx", set={
+                    "lat": hit["lat"] if hit else None, "lon": hit["lon"] if hit else None,
+                    "src_mtime": mtime}, dont_write=True, commit=False)
+                if hit is None:
+                    host.update_file(table="places", where=("rel_path=? AND source='approx'", (rel,)),
+                                     remove=True, dont_write=True, commit=False)
+                    continue
+                row, _src = places.merge(hit, have)
+                vals = {c: row.get(c) or "" for c in _PLACE_COLS}
+                vals.update(lat=hit["lat"], lon=hit["lon"], source="approx")
+                host.update_file(rel, table="places", set=vals, dont_write=True, commit=False)
+                placed += 1
+            db.commit()
+        return placed
+
+    approx_q = {"rels": set(), "timer": None}
+    approx_lock = threading.Lock()
+
+    def _approx_later(rel):
+        """! @brief Queue one file for the approximate-position pass; a burst (a sync, a bulk
+        edit) is handled by one pass over the city table a moment later."""
+        with approx_lock:
+            approx_q["rels"].add(rel)
+            if approx_q["timer"] is None:
+                t = threading.Timer(_APPROX_DEBOUNCE, _approx_flush)
+                t.daemon = True
+                approx_q["timer"] = t
+                t.start()
+
+    def _approx_flush():
+        """! @brief Timer body: run the queued files through _approx_sweep."""
+        with approx_lock:
+            rels, approx_q["rels"], approx_q["timer"] = list(approx_q["rels"]), set(), None
+        try:
+            _approx_sweep(rels)
+        except Exception as e:
+            host.logger.warning(f"map: approximate positions: {e}")
+
+    def _approx_of(rel):
+        """! @brief One file's approximate position (lat, lon), or None."""
+        row = host.db().execute("SELECT a.lat, a.lon FROM geo_approx a JOIN geo g ON g.rel_path = a.rel_path "
+                                "WHERE a.rel_path=? AND a.lat IS NOT NULL AND g.lat IS NULL",
+                                (rel,)).fetchone()
+        return (row["lat"], row["lon"]) if row else None
+
+    def _locate(rel, abs_path=None, force=False, reread=False, approx_now=False):
+        """! @brief Refresh one file's position and, when it has one, its place; without
+        GPS, its approximate position from a typed place.
+        @param force       redo the place even when the position is unchanged.
+        @param reread      read the position from the file even when its mtime is unchanged.
+        @param approx_now  look the typed place up now instead of queueing it.
         """
         pos = refresh(rel, abs_path, force=reread)
         if pos is None:
-            host.update_file(rel, table="places", remove=True, dont_write=True)
+            host.update_file(table="places", where=("rel_path=? AND COALESCE(source, '') != 'approx'", (rel,)),
+                             remove=True, dont_write=True)
+            if _approx_on():
+                if approx_now:
+                    _approx_sweep([rel])
+                else:
+                    _approx_later(rel)
         elif places.available():
             # no sweep lock: a long sweep must not stall indexing; redoing one file is harmless
             db = host.db()
@@ -351,6 +479,7 @@ def register(host):
         if rels is None:
             _scan_all()
             _places_sweep(force=True)
+            _approx_sweep(force=True)
             return
         for rel in rels:
             try:
@@ -358,6 +487,7 @@ def register(host):
             except Exception as e:
                 host.logger.warning(f"map: {rel}: {e}")
         _places_sweep(rels=rels, force=True)
+        _approx_sweep(rels=rels, force=True)
 
     # -- events -----------------------------------------------------------
     def _on_indexed(rel_path, abs_path=None):
@@ -388,11 +518,12 @@ def register(host):
     def _on_deleted(rel_path):
         """! @brief file.deleted: drop the file's cache rows."""
         host.update_file(rel_path, table="geo", remove=True, dont_write=True, commit=False)
+        host.update_file(rel_path, table="geo_approx", remove=True, dont_write=True, commit=False)
         host.update_file(rel_path, table="places", remove=True, dont_write=True)
 
     def _on_renamed(old_rel, new_rel):
         """! @brief file.renamed: repoint the file's cache rows."""
-        for t in ("geo", "places"):
+        for t in ("geo", "geo_approx", "places"):
             host.update_file(new_rel, table=t, remove=True, dont_write=True, commit=False)
             host.update_file(table=t, where=("rel_path=?", (old_rel,)), set={"rel_path": new_rel},
                              dont_write=True)
@@ -476,15 +607,21 @@ def register(host):
         return f"(SELECT rel_path, media_kind FROM files{where_sql})", list(params)
 
     def api_points():
-        """! @brief GET /api/map/points: [rel, lat, lon, is_video] of the scoped files."""
+        """! @brief GET /api/map/points: [rel, lat, lon, is_video, approximate] of the scoped files
+        (approximate = placed from a typed city, no GPS)."""
         db = host.db()
         sub, params = _scope()
         rows = db.execute(
-            "SELECT g.rel_path, g.lat, g.lon, COALESCE(f.media_kind,'image') AS kind "
+            "SELECT g.rel_path, g.lat, g.lon, COALESCE(f.media_kind,'image') AS kind, 0 AS approx "
             f"FROM geo g JOIN {sub} f ON f.rel_path = g.rel_path "
             "WHERE g.lat IS NOT NULL", params).fetchall()
-        pts = [[r["rel_path"], round(r["lat"], 6), round(r["lon"], 6), 1 if r["kind"] == "video" else 0]
-               for r in rows]
+        if _approx_on():
+            rows += db.execute(
+                "SELECT a.rel_path, a.lat, a.lon, COALESCE(f.media_kind,'image') AS kind, 1 AS approx "
+                f"FROM geo_approx a JOIN geo g ON g.rel_path = a.rel_path JOIN {sub} f ON f.rel_path = a.rel_path "
+                "WHERE a.lat IS NOT NULL AND g.lat IS NULL", params).fetchall()
+        pts = [[r["rel_path"], round(r["lat"], 6), round(r["lon"], 6), 1 if r["kind"] == "video" else 0,
+                r["approx"]] for r in rows]
         return jsonify({"success": True, "points": pts, "scan": dict(scan),
                         "places": dict(pstate), "tiles": _tiles()})
 
@@ -527,10 +664,12 @@ def register(host):
             return jsonify({"success": False, "error": "filename required"}), 400
         if not _abs(rel) or not host.check_path(rel):
             return jsonify({"success": False, "error": "file not found"}), 404
-        pos = _locate(rel)
+        pos = _locate(rel, approx_now=True)
+        approx = None if pos or not _approx_on() else _approx_of(rel)
         return jsonify({"success": True, "filename": rel,
                         "lat": pos[0] if pos else None, "lon": pos[1] if pos else None,
-                        "place": _place_of(rel) if pos else None, "tiles": _tiles()})
+                        "approx": {"lat": approx[0], "lon": approx[1]} if approx else None,
+                        "place": _place_of(rel) if (pos or approx) else None, "tiles": _tiles()})
 
     def api_rescan():
         """! @brief POST /api/map/rescan {force}: re-read every position (and redo places)."""
@@ -563,7 +702,8 @@ def register(host):
     host.add_asset("map.css", kind="css")
     host.register_left_pane("map_pane.html")
     host.provide_service("geo", {"refresh": refresh, "rescan": _scan_async,
-                                 "place_of": _place_of, "resolve": places.resolve})
+                                 "place_of": _place_of, "resolve": places.resolve,
+                                 "locate": _locate, "forward": places.forward})
     host.logger.info("map module: geo + places caches, Map tab, Places view, "
                      "gps:/near:/bbox:/location: search registered"
                      + ("" if places.available() else " (place names unavailable)"))

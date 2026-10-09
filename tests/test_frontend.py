@@ -11,7 +11,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # GET endpoints the page calls while booting; their real responses become the
 # harness defaults so the frontend is exercised against the backend's shapes.
 SNAPSHOT = ["/api/state", "/api/modules", "/api/module_assets", "/api/auth/me",
-            "/api/auth/config", "/api/models", "/api/ai/actions", "/api/box_labels"]
+            "/api/auth/config", "/api/models", "/api/ai/actions", "/api/box_labels",
+            "/api/encoding/schema"]
 
 
 def test_js_suite(client, app):
