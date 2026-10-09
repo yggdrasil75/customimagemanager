@@ -182,6 +182,9 @@ class Auth:
         self._init_db()
         # module authenticators (host.register_authenticator), tried before the cookie
         self.authenticators = []
+        # fn(user_row, login_data) -> None to allow, or (json_dict, status) to stop the
+        # login (a second factor the module asks for; see host.register_login_check)
+        self.login_checks = []
 
     def cfg(self):
         raw = self._get_cfg() or {}
@@ -745,6 +748,14 @@ class Auth:
                 f[0] += 1
                 audit("login_failed", f"user={username!r} ip={request.remote_addr}")
                 return jsonify({"error": "invalid credentials"}), 401
+            for check in self.login_checks:
+                stop = check(u, data)
+                if stop:
+                    body, status = stop
+                    if status >= 400:
+                        f = _LOGIN_FAILS.setdefault(key, [0, time.time()])
+                        f[0] += 1
+                    return jsonify(body), status
             _LOGIN_FAILS.pop(key, None)
             token, csrf = self._new_session(u["id"])
             resp = jsonify({

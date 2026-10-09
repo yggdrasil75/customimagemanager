@@ -35,10 +35,10 @@
       ? fmt(r.used_bytes) + " / " + fmt(r.limit_bytes) + " (" + (r.percent || 0) + "%)"
       : fmt(r.used_bytes) + " used, no limit";
     return '<div style="display:flex;align-items:center;gap:8px;font-size:11px">' +
-      '<span style="color:#9ca3af;white-space:nowrap">Storage</span>' +
-      '<div style="flex:1;height:6px;border-radius:3px;background:#374151;overflow:hidden;min-width:60px">' +
+      '<span style="color:var(--cim-gray-400, #9ca3af);white-space:nowrap">Storage</span>' +
+      '<div style="flex:1;height:6px;border-radius:3px;background:var(--cim-gray-700, #374151);overflow:hidden;min-width:60px">' +
       '<div style="height:100%;width:' + pct + '%;background:' + colour + '"></div></div>' +
-      '<span style="white-space:nowrap;color:' + (hot ? "var(--cim-danger-400, #f87171)" : "#d1d5db") + '">' +
+      '<span style="white-space:nowrap;color:' + (hot ? "var(--cim-danger-400, #f87171)" : "var(--cim-gray-300, #d1d5db)") + '">' +
       esc(label) + '</span></div>';
   }
 
@@ -107,7 +107,7 @@
             const limited = u.limit_bytes != null;
             const hot = limited && (u.percent || 0) > WARN_PCT;
             cell.style.cssText = "font-size:11px;white-space:nowrap;color:" +
-              (hot ? "var(--cim-danger-400, #f87171)" : "#d1d5db");
+              (hot ? "var(--cim-danger-400, #f87171)" : "var(--cim-gray-300, #d1d5db)");
             cell.title = u.files + " file(s)";
             cell.textContent = u.is_admin ? fmt(u.used_bytes) + " (admin)"
               : limited ? fmt(u.used_bytes) + " / " + fmt(u.limit_bytes) : fmt(u.used_bytes);

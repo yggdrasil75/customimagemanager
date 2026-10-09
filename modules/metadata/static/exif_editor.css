@@ -6,14 +6,14 @@
    field treatment, and a textarea rule for multiline strings. */
 
 #exif-editor {
-  --exif-bg:        #111827;
-  --exif-panel:     #1f2937;
-  --exif-panel-2:   #0b1220;
-  --exif-border:    #374151;
-  --exif-border-2:  #4b5563;
-  --exif-text:      #e5e7eb;
-  --exif-muted:     #9ca3af;
-  --exif-faint:     #6b7280;
+  --exif-bg:        var(--cim-gray-900, #111827);
+  --exif-panel:     var(--cim-gray-800, #1f2937);
+  --exif-panel-2:   var(--cim-gray-900, #0b1220);
+  --exif-border:    var(--cim-gray-700, #374151);
+  --exif-border-2:  var(--cim-gray-600, #4b5563);
+  --exif-text:      var(--cim-gray-200, #e5e7eb);
+  --exif-muted:     var(--cim-gray-400, #9ca3af);
+  --exif-faint:     var(--cim-gray-500, #6b7280);
   --exif-accent:    var(--cim-accent-500, #3b82f6);
   --exif-accent-2:  var(--cim-accent-400, #60a5fa);
   --exif-warn:      var(--cim-warn-500, #f59e0b);
@@ -67,7 +67,7 @@
 #exif-editor .exif-btn:hover { background: var(--exif-border); }
 #exif-editor .exif-btn-primary {
   background: var(--exif-accent); border-color: var(--exif-accent);
-  color: #fff; font-weight: 600;
+  color: var(--cim-white, #fff); font-weight: 600;
 }
 #exif-editor .exif-btn-primary:hover:not(:disabled) { background: var(--exif-accent-2); }
 #exif-editor .exif-btn:disabled { opacity: 0.45; cursor: not-allowed; }
@@ -160,7 +160,7 @@
 #exif-editor .exif-field-input input[readonly],
 #exif-editor .exif-field-input textarea[readonly],
 #exif-editor .exif-field-input select:disabled {
-  color: var(--exif-muted); background: #0a0f1a; cursor: not-allowed;
+  color: var(--exif-muted); background: var(--cim-gray-950, #0a0f1a); cursor: not-allowed;
 }
 #exif-editor .exif-field-input .exif-binary {
   font-style: italic; color: var(--exif-faint); font-size: 11px;

@@ -56,13 +56,13 @@
     const b = document.createElement('div');
     b.id = 'cim-user-badge';
     b.style.cssText = 'position:fixed;top:6px;right:10px;z-index:9999;' +
-      'font:12px system-ui;color:#cbd5e1;display:flex;gap:8px;align-items:center';
+      'font:12px system-ui;color:var(--cim-gray-300, #cbd5e1);display:flex;gap:8px;align-items:center';
     const admin = '';
     b.innerHTML =
       '<span title="' + (state.user.source || '') + ' account">' +
       (state.user.display_name || state.user.username) +
       (state.user.is_admin ? ' \u2605' : '') + '</span>' + admin +
-      '<button id="cim-logout-btn" style="background:#4b5563;color:#e5e7eb;' +
+      '<button id="cim-logout-btn" style="background:var(--cim-gray-600, #4b5563);color:var(--cim-gray-200, #e5e7eb);' +
       'border:0;border-radius:6px;padding:3px 8px;cursor:pointer">Logout</button>';
     document.body.appendChild(b);
     document.getElementById('cim-logout-btn').onclick = state.logout;
@@ -84,42 +84,42 @@
       modal = document.createElement('div');
       modal.id = 'cim-user-modal';
       if (!mount) {
-        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);' +
+        modal.style.cssText = 'position:fixed;inset:0;background:var(--cim-scrim, rgba(0, 0, 0, .6));' +
           'z-index:10000;display:grid;place-items:center;font:13px system-ui';
       } else {
         modal.style.cssText = 'font:13px system-ui';
       }
       modal.innerHTML =
-        '<div style="background:#1f2937;color:#e5e7eb;border-radius:12px;' +
+        '<div style="background:var(--cim-gray-800, #1f2937);color:var(--cim-gray-200, #e5e7eb);border-radius:12px;' +
         'padding:20px;width:640px;max-width:92vw;max-height:86vh;overflow:auto">' +
         '<div style="display:flex;justify-content:space-between;align-items:center">' +
         '<h2 style="margin:0;font-size:16px">User management</h2>' +
-        '<button id="cim-um-close" style="background:none;border:0;color:#9ca3af;' +
+        '<button id="cim-um-close" style="background:none;border:0;color:var(--cim-gray-400, #9ca3af);' +
         'font-size:20px;cursor:pointer">&times;</button></div>' +
-        '<div id="cim-um-mode" style="color:#9ca3af;margin:4px 0 12px"></div>' +
+        '<div id="cim-um-mode" style="color:var(--cim-gray-400, #9ca3af);margin:4px 0 12px"></div>' +
         '<table style="width:100%;border-collapse:collapse" id="cim-um-table"></table>' +
         '<h3 style="font-size:13px;margin:18px 0 6px">Add local user</h3>' +
         '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
         '<input id="cim-nu" placeholder="username" style="flex:1;min-width:120px;' +
-        'padding:6px;border-radius:6px;border:1px solid #374151;background:#111827;color:#e5e7eb">' +
+        'padding:6px;border-radius:6px;border:1px solid var(--cim-gray-700, #374151);background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb)">' +
         '<input id="cim-np" placeholder="password" type="password" style="flex:1;min-width:120px;' +
-        'padding:6px;border-radius:6px;border:1px solid #374151;background:#111827;color:#e5e7eb">' +
+        'padding:6px;border-radius:6px;border:1px solid var(--cim-gray-700, #374151);background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb)">' +
         '<label style="display:flex;align-items:center;gap:4px"><input type="checkbox" id="cim-na">admin</label>' +
-        '<select id="cim-na-role" title="role" style="padding:6px;border-radius:6px;border:1px solid #374151;background:#111827;color:#e5e7eb"></select>' +
-        '<select id="cim-na-group" title="group" style="padding:6px;border-radius:6px;border:1px solid #374151;background:#111827;color:#e5e7eb"></select>' +
-        '<button id="cim-add" style="background:#4f7cff;color:#fff;border:0;border-radius:6px;' +
+        '<select id="cim-na-role" title="role" style="padding:6px;border-radius:6px;border:1px solid var(--cim-gray-700, #374151);background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb)"></select>' +
+        '<select id="cim-na-group" title="group" style="padding:6px;border-radius:6px;border:1px solid var(--cim-gray-700, #374151);background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb)"></select>' +
+        '<button id="cim-add" style="background:var(--cim-accent-500, #4f7cff);color:#fff;border:0;border-radius:6px;' +
         'padding:6px 12px;cursor:pointer">Add</button></div>' +
-        '<hr style="border:0;border-top:1px solid #374151;margin:18px 0">' +
+        '<hr style="border:0;border-top:1px solid var(--cim-gray-700, #374151);margin:18px 0">' +
         '<div style="display:flex;justify-content:space-between;align-items:center">' +
         '<h3 style="font-size:13px;margin:0">Groups</h3></div>' +
         '<table style="width:100%;border-collapse:collapse;margin-top:6px" id="cim-grp-table"></table>' +
         '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">' +
         '<input id="cim-ng" placeholder="new group name" style="flex:1;min-width:120px;' +
-        'padding:6px;border-radius:6px;border:1px solid #374151;background:#111827;color:#e5e7eb">' +
-        '<select id="cim-ng-role" style="padding:6px;border-radius:6px;border:1px solid #374151;background:#111827;color:#e5e7eb"></select>' +
-        '<button id="cim-grp-add" style="background:#4f7cff;color:#fff;border:0;border-radius:6px;' +
+        'padding:6px;border-radius:6px;border:1px solid var(--cim-gray-700, #374151);background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb)">' +
+        '<select id="cim-ng-role" style="padding:6px;border-radius:6px;border:1px solid var(--cim-gray-700, #374151);background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb)"></select>' +
+        '<button id="cim-grp-add" style="background:var(--cim-accent-500, #4f7cff);color:#fff;border:0;border-radius:6px;' +
         'padding:6px 12px;cursor:pointer">Add group</button></div>' +
-        '<div id="cim-um-err" style="color:#f87171;min-height:16px;margin-top:8px"></div>' +
+        '<div id="cim-um-err" style="color:var(--cim-danger-400, #f87171);min-height:16px;margin-top:8px"></div>' +
         '</div>';
       const inner = modal.firstElementChild;
       if (mount) {
@@ -157,20 +157,20 @@
     if (ngRole && !ngRole.options.length) ngRole.innerHTML = roleOptions('custom');
     const t = document.getElementById('cim-grp-table');
     if (!t) return;
-    t.innerHTML = '<tr style="text-align:left;color:#9ca3af"><th>Group</th><th>Role</th>' +
+    t.innerHTML = '<tr style="text-align:left;color:var(--cim-gray-400, #9ca3af)"><th>Group</th><th>Role</th>' +
       xfFor('group').map(f => '<th>' + esc(f.label) + '</th>').join('') + '<th></th></tr>';
     _groups.forEach(g => {
       const tr = document.createElement('tr');
-      tr.style.borderTop = '1px solid #374151';
+      tr.style.borderTop = '1px solid var(--cim-gray-700, #374151)';
       tr.innerHTML =
         '<td style="padding:5px 0">' + esc(g.name) + '</td>' +
-        '<td><select data-grole="' + g.id + '" style="background:#111827;color:#e5e7eb;' +
-        'border:1px solid #374151;border-radius:5px;padding:2px">' + roleOptions(g.role) + '</select></td>' +
+        '<td><select data-grole="' + g.id + '" style="background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb);' +
+        'border:1px solid var(--cim-gray-700, #374151);border-radius:5px;padding:2px">' + roleOptions(g.role) + '</select></td>' +
         xfFor('group').map(f => '<td>' + xfSelect(f, (g.extra || {})[f.key], 'data-gxf="' + f.key + '" data-gid="' + g.id + '"') + '</td>').join('') +
         '<td style="text-align:right;white-space:nowrap">' +
-        '<button data-gfeat="' + g.id + '" style="background:#3730a3;color:#e0e7ff;border:0;' +
+        '<button data-gfeat="' + g.id + '" style="background:var(--cim-accent2-800, #3730a3);color:var(--cim-accent2-100, #e0e7ff);border:0;' +
         'border-radius:5px;padding:3px 8px;cursor:pointer;margin-right:4px">features</button>' +
-        '<button data-gdel="' + g.id + '" style="background:#7f1d1d;color:#fecaca;border:0;' +
+        '<button data-gdel="' + g.id + '" style="background:var(--cim-danger-900, #7f1d1d);color:var(--cim-danger-200, #fecaca);border:0;' +
         'border-radius:5px;padding:3px 8px;cursor:pointer">del</button></td>';
       t.appendChild(tr); tr._grp = g;
     });
@@ -229,7 +229,7 @@
       '>' + esc(o.label) + '</option>').join('');
   }
   function xfSelect(f, sel, attrs) {
-    return '<select ' + attrs + ' title="' + esc(f.help || f.label) + '" style="background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:5px;padding:2px">' +
+    return '<select ' + attrs + ' title="' + esc(f.help || f.label) + '" style="background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb);border:1px solid var(--cim-gray-700, #374151);border-radius:5px;padding:2px">' +
       xfOptions(f, sel) + '</select>';
   }
   /** @brief The "add" rows get their selects once the field list is known. */
@@ -272,31 +272,31 @@
     if (naGrp) naGrp.innerHTML = groupOptions('');
 
     const t = document.getElementById('cim-um-table');
-    t.innerHTML = '<tr style="text-align:left;color:#9ca3af">' +
+    t.innerHTML = '<tr style="text-align:left;color:var(--cim-gray-400, #9ca3af)">' +
       '<th>User</th><th>Source</th><th>Admin</th><th>Role</th><th>Group</th>' +
       xfFor('user').map(f => '<th>' + esc(f.label) + '</th>').join('') +
       '<th>Disabled</th><th></th></tr>';
     d.users.forEach(u => {
       const tr = document.createElement('tr');
-      tr.style.borderTop = '1px solid #374151';
+      tr.style.borderTop = '1px solid var(--cim-gray-700, #374151)';
       tr.innerHTML =
         '<td style="padding:5px 0">' + esc(u.display_name || u.username) +
-        '<div style="color:#6b7280;font-size:11px">' + esc(u.username) + '</div></td>' +
+        '<div style="color:var(--cim-gray-500, #6b7280);font-size:11px">' + esc(u.username) + '</div></td>' +
         '<td>' + u.source + '</td>' +
         '<td><input type="checkbox" ' + (u.is_admin ? 'checked' : '') + ' data-a="' + u.id + '"></td>' +
         '<td><select data-role="' + u.id + '"' + (u.is_admin ? ' disabled' : '') +
-        ' style="background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:5px;padding:2px">' +
+        ' style="background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb);border:1px solid var(--cim-gray-700, #374151);border-radius:5px;padding:2px">' +
         roleOptions(u.role) + '</select></td>' +
         '<td><select data-grp="' + u.id + '"' + (u.is_admin ? ' disabled' : '') +
-        ' style="background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:5px;padding:2px">' +
+        ' style="background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb);border:1px solid var(--cim-gray-700, #374151);border-radius:5px;padding:2px">' +
         groupOptions(u.group_id) + '</select></td>' +
         xfFor('user').map(f => '<td>' + xfSelect(f, (u.extra || {})[f.key], 'data-uxf="' + f.key + '" data-uid="' + u.id + '"') + '</td>').join('') +
         '<td><input type="checkbox" ' + (u.disabled ? 'checked' : '') + ' data-d="' + u.id + '"></td>' +
         '<td style="text-align:right;white-space:nowrap">' +
         (u.is_admin ? '' : '<button data-feat="' + u.id + '" ' +
-          'style="background:#3730a3;color:#e0e7ff;border:0;border-radius:5px;padding:3px 8px;cursor:pointer;margin-right:4px">features</button>') +
+          'style="background:var(--cim-accent2-800, #3730a3);color:var(--cim-accent2-100, #e0e7ff);border:0;border-radius:5px;padding:3px 8px;cursor:pointer;margin-right:4px">features</button>') +
         '<button data-del="' + u.id + '" ' +
-        'style="background:#7f1d1d;color:#fecaca;border:0;border-radius:5px;padding:3px 8px;cursor:pointer">del</button></td>';
+        'style="background:var(--cim-danger-900, #7f1d1d);color:var(--cim-danger-200, #fecaca);border:0;border-radius:5px;padding:3px 8px;cursor:pointer">del</button></td>';
       t.appendChild(tr);
       tr._user = u;
     });
@@ -324,7 +324,7 @@
     if (m) m.remove();
     m = document.createElement('div');
     m.id = 'cim-feat-modal';
-    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);' +
+    m.style.cssText = 'position:fixed;inset:0;background:var(--cim-scrim, rgba(0, 0, 0, .6));' +
       'z-index:10001;display:grid;place-items:center;font:13px system-ui';
     const cur = Object.assign({}, perms);
     let rows = '';
@@ -333,16 +333,16 @@
       sec.features.forEach(f => { rows += featRow(f.key, f.label, cur[f.key], false); });
     });
     m.innerHTML =
-      '<div style="background:#1f2937;color:#e5e7eb;border-radius:12px;padding:20px;' +
+      '<div style="background:var(--cim-gray-800, #1f2937);color:var(--cim-gray-200, #e5e7eb);border-radius:12px;padding:20px;' +
       'width:460px;max-width:92vw;max-height:86vh;overflow:auto">' +
       '<div style="display:flex;justify-content:space-between;align-items:center">' +
       '<h2 style="margin:0;font-size:15px">Features | ' + esc(label) + '</h2>' +
-      '<button id="cim-feat-close" style="background:none;border:0;color:#9ca3af;font-size:20px;cursor:pointer">&times;</button></div>' +
-      '<p style="color:#9ca3af;margin:6px 0 12px">Per feature: default (role/group), inherit (feature default), or an explicit level - block &lt; read &lt; write.</p>' +
+      '<button id="cim-feat-close" style="background:none;border:0;color:var(--cim-gray-400, #9ca3af);font-size:20px;cursor:pointer">&times;</button></div>' +
+      '<p style="color:var(--cim-gray-400, #9ca3af);margin:6px 0 12px">Per feature: default (role/group), inherit (feature default), or an explicit level - block &lt; read &lt; write.</p>' +
       '<table style="width:100%;border-collapse:collapse">' + rows + '</table>' +
       '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">' +
-      '<button id="cim-feat-cancel" style="background:#4b5563;color:#e5e7eb;border:0;border-radius:6px;padding:6px 12px;cursor:pointer">Cancel</button>' +
-      '<button id="cim-feat-save" style="background:#4f7cff;color:#fff;border:0;border-radius:6px;padding:6px 12px;cursor:pointer">Save</button></div>' +
+      '<button id="cim-feat-cancel" style="background:var(--cim-gray-600, #4b5563);color:var(--cim-gray-200, #e5e7eb);border:0;border-radius:6px;padding:6px 12px;cursor:pointer">Cancel</button>' +
+      '<button id="cim-feat-save" style="background:var(--cim-accent-500, #4f7cff);color:#fff;border:0;border-radius:6px;padding:6px 12px;cursor:pointer">Save</button></div>' +
       '</div>';
     document.body.appendChild(m);
     m.querySelector('#cim-feat-close').onclick = () => m.remove();
@@ -373,10 +373,10 @@
     const weight = isSection ? 'font-weight:600;' : '';
     const opt = (o, lbl) => '<option value="' + o + '"' +
       (v === o ? ' selected' : '') + '>' + (lbl || o) + '</option>';
-    return '<tr style="border-top:1px solid #374151">' +
+    return '<tr style="border-top:1px solid var(--cim-gray-700, #374151)">' +
       '<td style="padding:5px 0;' + pad + weight + '">' + esc(label) + '</td>' +
       '<td style="text-align:right"><select data-fk="' + key + '" ' +
-      'style="background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:5px;padding:3px">' +
+      'style="background:var(--cim-gray-900, #111827);color:var(--cim-gray-200, #e5e7eb);border:1px solid var(--cim-gray-700, #374151);border-radius:5px;padding:3px">' +
       opt('default', 'default (role/group)') +
       opt('inherit', 'inherit (feature default)') +
       opt('block') + opt('read') + opt('write') +

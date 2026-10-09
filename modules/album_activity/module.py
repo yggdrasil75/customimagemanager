@@ -188,6 +188,7 @@ def register(host):
             "VALUES (?,?,?,?,?,?)", (album, rel, _user(), "comment", text, time.time()))
         db().commit()
         r = db().execute(f"SELECT * FROM {TABLE} WHERE id=?", (cur.lastrowid,)).fetchone()
+        host.emit("album_activity.posted", album=album, rel_path=rel, username=_user(), kind="comment", text=text)
         return jsonify({"success": True, "item": {**_row(r), "mine": True}})
 
     @host.route("/api/album_activity/like", methods=["POST"], feature=FEATURE,
@@ -227,6 +228,7 @@ def register(host):
                 db().execute(f"INSERT INTO {TABLE}(album, rel_path, username, kind, text, created) "
                              "VALUES (?,NULL,?,'like',NULL,?)", (album, me, time.time()))
             db().commit()
+        host.emit("album_activity.posted", album=album, rel_path=rel, username=me, kind="like" if like else "unlike", text=None)
         return jsonify({"success": True, "likes": _likes(album, rel, me)})
 
     @host.route("/api/album_activity/delete", methods=["POST"], feature=FEATURE,

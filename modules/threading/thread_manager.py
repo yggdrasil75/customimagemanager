@@ -4,6 +4,7 @@ processor that runs every durable queue, and memory / VRAM admission."""
 import os
 import time
 import threading
+import collections
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 
@@ -21,6 +22,8 @@ except Exception:
 
 RESERVED_SLOTS = 1
 IDLE_SECONDS = 60
+HISTORY_SIZE = 200  # finished jobs kept for the stats dashboard
+ERROR_MAX_CHARS = 300
 MEM_BUDGET_FRAC = 0.8
 VRAM_BUDGET_FRAC = 0.85
 MODEL_OVERHEAD = 1.05
@@ -112,6 +115,108 @@ class ThreadManager:
         self._get_last_activity = None  # set by set_activity_source()
         self._foreground = None
         self._inflight = set()  # running futures, for slot accounting
+        # -- instrumentation (read by the stats module) --
+        self._stats = {}       # source name -> counters (see _stat)
+        self._paused = set()   # source names the processor skips
+        self._running = {}     # future -> {"source", "key", "started"}
+        self._history = collections.deque(maxlen=HISTORY_SIZE)
+
+    def _stat(self, name):
+        """! @brief The counter record of a source (created on first use; call under the lock)."""
+        s = self._stats.get(name)
+        if s is None:
+            s = self._stats[name] = {
+                "started": 0, "done": 0, "failed": 0, "running": 0,
+                "total_seconds": 0.0, "last_seconds": None, "max_seconds": 0.0,
+                "last_started": None, "last_finished": None, "last_error": ""}
+        return s
+
+    def _record_start(self, name, fut, key, now):
+        """! @brief Count a dispatched job and remember it as running."""
+        with self._lock:
+            s = self._stat(name)
+            s["started"] += 1
+            s["running"] += 1
+            s["last_started"] = now
+            self._running[fut] = {"source": name, "key": key, "started": now}
+
+    def _record_finish(self, name, box, key, started, error):
+        """! @brief Count a finished job: duration, outcome, the history ring.
+        @param box  {"fut": future}, filled by _dispatch under the lock (so it is set
+                    by the time this acquires the lock, however fast the job was)."""
+        now = time.time()
+        secs = max(0.0, now - started)
+        err = ""
+        if error is not None:
+            err = f"{type(error).__name__}: {error}"[:ERROR_MAX_CHARS]
+        with self._lock:
+            fut = box.get("fut")
+            s = self._stat(name)
+            s["running"] = max(0, s["running"] - 1)
+            s["done" if error is None else "failed"] += 1
+            s["total_seconds"] += secs
+            s["last_seconds"] = round(secs, 4)
+            s["max_seconds"] = max(s["max_seconds"], secs)
+            s["last_finished"] = now
+            if error is not None:
+                s["last_error"] = err
+            self._running.pop(fut, None)
+            self._history.append({"source": name, "key": key, "started": started,
+                                  "seconds": round(secs, 4), "ok": error is None,
+                                  "error": err})
+
+    def pause_source(self, name):
+        """! @brief Stop dispatching a source's jobs (running ones finish); it stays registered.
+        @return True when the source exists."""
+        with self._lock:
+            known = name in getattr(self, "_sources", {})
+            if known:
+                self._paused.add(name)
+        return known
+
+    def resume_source(self, name):
+        """! @brief Dispatch a paused source again. @return True when it was paused."""
+        with self._lock:
+            was = name in self._paused
+            self._paused.discard(name)
+        if was:
+            self.wake()
+        return was
+
+    def paused_sources(self):
+        """! @brief The names of the paused sources."""
+        with self._lock:
+            return sorted(self._paused)
+
+    def source_stats(self):
+        """! @brief Per-source counters plus paused state and the running jobs:
+        {name: {started, done, failed, running, total_seconds, last_seconds, max_seconds,
+        last_started, last_finished, last_error, avg_seconds, paused,
+        running_jobs: [{key, started, seconds}]}}."""
+        now = time.time()
+        with self._lock:
+            names = set(getattr(self, "_sources", {})) | set(self._stats)
+            out = {}
+            for name in sorted(names):
+                s = dict(self._stat(name))
+                finished = s["done"] + s["failed"]
+                s["avg_seconds"] = round(s["total_seconds"] / finished, 4) if finished else None
+                s["total_seconds"] = round(s["total_seconds"], 4)
+                s["max_seconds"] = round(s["max_seconds"], 4)
+                s["paused"] = name in self._paused
+                s["running_jobs"] = [
+                    {"key": r["key"], "started": r["started"],
+                     "seconds": round(now - r["started"], 3)}
+                    for f, r in self._running.items() if r["source"] == name and not f.done()]
+                out[name] = s
+            return out
+
+    def history(self, n=None):
+        """! @brief The last finished jobs, newest first: [{source, key, started, seconds, ok, error}]."""
+        with self._lock:
+            items = list(self._history)
+        items.reverse()
+        return items if n is None else items[:max(0, int(n))]
 
     def max_slots(self):
         """! @brief Total slots: the CPU count, at least 2."""
@@ -264,12 +369,20 @@ class ThreadManager:
             except Exception:
                 cost = 0.0
         self._commit_mem(cost)
+        started = time.time()
+        box = {}  # holds the future once submitted, for the stats bookkeeping
         def _run(j=job, k=key, c=cost):
             _TLS.worker = True
+            error = None
             try:
-                handle(j)
+                try:
+                    handle(j)
+                except BaseException as e:  # record, then re-raise unchanged
+                    error = e
+                    raise
             finally:
                 _TLS.worker = False
+                self._record_finish(src_name, box, k, started, error)
                 self._uncommit_mem(c)
                 if k:
                     self.release_key(k)
@@ -285,6 +398,8 @@ class ThreadManager:
                 return False
             fut._src_name = src_name  # tag the source, for _foreground_idle
             self._inflight.add(fut)
+            box["fut"] = fut
+            self._record_start(src_name, fut, key, started)
         return True
 
     def _process_loop(self):
@@ -303,6 +418,7 @@ class ThreadManager:
         with self._lock:
             all_sources = dict(getattr(self, "_sources", {}))
             fg = self._foreground
+            paused = set(self._paused)
         if not all_sources:
             self._wake.wait(timeout=POLL); self._wake.clear(); return
 
@@ -312,6 +428,8 @@ class ThreadManager:
             src = all_sources.get(fg)
             if src is None:  # promoted source gone
                 self.clear_foreground(fg); return
+            if fg in paused:  # paused while promoted: wait, don't drop the promotion
+                self._wake.wait(timeout=POLL); self._wake.clear(); return
             started = 0
             while free > 0:
                 if self._dispatch(fg, src):
@@ -325,7 +443,7 @@ class ThreadManager:
                     self._wake.wait(timeout=POLL); self._wake.clear()
             return
 
-        ordered = self._rr_order(all_sources)
+        ordered = self._rr_order(all_sources, paused)
         started_any = False
         for i, (name, src) in enumerate(ordered):
             if free <= 0:
@@ -347,9 +465,10 @@ class ThreadManager:
         if not started_any:
             self._wake.wait(timeout=POLL); self._wake.clear()
 
-    def _rr_order(self, all_sources):
-        """! @brief Sources in service order, rotated so the cursor's source goes first."""
-        items = list(all_sources.items())
+    def _rr_order(self, all_sources, paused=()):
+        """! @brief Sources in service order, rotated so the cursor's source goes first;
+        paused sources are left out."""
+        items = [(n, s) for n, s in all_sources.items() if n not in paused]
         cur = getattr(self, "_rr_cursor", None)
         if cur is not None:
             idx = next((i for i, (n, _) in enumerate(items) if n == cur), 0)
@@ -888,3 +1007,9 @@ try_acquire_slot = MANAGER.try_acquire_slot
 foreground_use = MANAGER.foreground_use
 in_worker = MANAGER.in_worker
 inflight = MANAGER.inflight
+ingest_pressure = MANAGER.ingest_pressure
+source_stats = MANAGER.source_stats
+history = MANAGER.history
+pause_source = MANAGER.pause_source
+resume_source = MANAGER.resume_source
+paused_sources = MANAGER.paused_sources

@@ -4,14 +4,14 @@
    colliding with app.css. */
 
 #xmp-editor {
-  --xmp-bg:        #111827;
-  --xmp-panel:     #1f2937;
-  --xmp-panel-2:   #0b1220;
-  --xmp-border:    #374151;
-  --xmp-border-2:  #4b5563;
-  --xmp-text:      #e5e7eb;
-  --xmp-muted:     #9ca3af;
-  --xmp-faint:     #6b7280;
+  --xmp-bg:        var(--cim-gray-900, #111827);
+  --xmp-panel:     var(--cim-gray-800, #1f2937);
+  --xmp-panel-2:   var(--cim-gray-900, #0b1220);
+  --xmp-border:    var(--cim-gray-700, #374151);
+  --xmp-border-2:  var(--cim-gray-600, #4b5563);
+  --xmp-text:      var(--cim-gray-200, #e5e7eb);
+  --xmp-muted:     var(--cim-gray-400, #9ca3af);
+  --xmp-faint:     var(--cim-gray-500, #6b7280);
   --xmp-accent:    var(--cim-accent-500, #3b82f6);
   --xmp-accent-2:  var(--cim-accent-400, #60a5fa);
   --xmp-warn:      var(--cim-warn-500, #f59e0b);
@@ -146,7 +146,7 @@
   outline: none; border-color: var(--xmp-accent);
 }
 #xmp-editor .xmp-field-input input[readonly] {
-  color: var(--xmp-muted); background: #0a0f1a; cursor: not-allowed;
+  color: var(--xmp-muted); background: var(--cim-gray-950, #0a0f1a); cursor: not-allowed;
 }
 #xmp-editor .xmp-field-input .xmp-binary {
   font-style: italic; color: var(--xmp-faint); font-size: 11px;

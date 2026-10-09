@@ -50,7 +50,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 MANIFEST = {
     "id":          "ownership",
     "name":        "Ownership & sharing",
-    "version":     "1.0.0",
+    "version":     "1.1.0",
     "description": "Personal (users/<name>/) vs public library, partner sharing, "
                    "private / public / shared albums; profile pictures and "
                    "change-password in Settings -> Account & sharing.",

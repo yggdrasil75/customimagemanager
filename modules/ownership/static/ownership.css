@@ -18,7 +18,7 @@
   margin-right: -2px;
 }
 .cim-profile-section {
-  border-bottom: 1px solid #374151;
+  border-bottom: 1px solid var(--cim-gray-700, #374151);
   padding-bottom: 12px;
   margin-bottom: 12px;
 }

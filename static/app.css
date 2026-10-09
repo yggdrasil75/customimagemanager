@@ -19,7 +19,7 @@ body {
   break-inside: avoid;
   vertical-align: top;
   position: relative;
-  background: #111827;
+  background: var(--cim-gray-900, #111827);
   border-radius: 6px;
   overflow: hidden;
   border: 2px solid transparent;
@@ -64,7 +64,7 @@ body {
   bottom: 0;
   left: 0;
   right: 0;
-  background: rgba(0, 0, 0, .8);
+  background: color-mix(in srgb, var(--cim-black, #000) 80%, transparent);
   font-size: 10px;
   padding: 2px 5px;
   white-space: nowrap;
@@ -106,18 +106,18 @@ body {
 }
 
 .subchip {
-  background: #374151;
-  border: 1px solid #4b5563;
+  background: var(--cim-gray-700, #374151);
+  border: 1px solid var(--cim-gray-600, #4b5563);
   border-radius: 6px;
   padding: 2px 8px;
   font-size: 11px;
-  color: #d1d5db;
+  color: var(--cim-gray-300, #d1d5db);
   white-space: nowrap;
   cursor: pointer
 }
 
 .subchip:hover {
-  background: #4b5563
+  background: var(--cim-gray-600, #4b5563)
 }
 
 .cstrip {
@@ -127,7 +127,7 @@ body {
 .skeleton {
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, #1f2937 25%, #374151 50%, #1f2937 75%);
+  background: linear-gradient(90deg, var(--cim-gray-800, #1f2937) 25%, var(--cim-gray-700, #374151) 50%, var(--cim-gray-800, #1f2937) 75%);
   background-size: 200% 100%;
   animation: shimmer 1.4s infinite
 }
@@ -159,7 +159,7 @@ canvas {
   cursor: col-resize;
 }
 .pane-splitter:hover, .pane-splitter.dragging {
-  background: #374151;
+  background: var(--cim-gray-700, #374151);
 }
 .pane-splitter::after {
   content: '';
@@ -167,7 +167,7 @@ canvas {
   left: 2px; top: 50%;
   width: 2px; height: 28px;
   transform: translateY(-50%);
-  background: #4B5563;
+  background: var(--cim-gray-600, #4b5563);
   border-radius: 1px;
 }
 #editor_region.horizontal #controls_splitter {
@@ -196,7 +196,7 @@ canvas {
   right: 4px;
   bottom: 0;
   font-size: 18px;
-  color: #9CA3AF;
+  color: var(--cim-gray-400, #9ca3af);
   pointer-events: none;
   line-height: 1
 }
@@ -207,11 +207,11 @@ canvas {
 }
 
 ::-webkit-scrollbar-track {
-  background: #1f2937
+  background: var(--cim-gray-800, #1f2937)
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #4B5563;
+  background: var(--cim-gray-600, #4b5563);
   border-radius: 3px
 }
 
@@ -282,11 +282,11 @@ canvas {
 
 .reader-page {
   image-rendering: auto;
-  box-shadow: 0 0 18px rgba(0, 0, 0, .6);
+  box-shadow: 0 0 18px rgba(0, 0, 0, 0.6);
 }
 
 #controls_pane {
-  background: #161c27
+  background: var(--cim-gray-900, #161c27)
 }
 
 #editor_region.vertical #controls_pane {
@@ -294,14 +294,14 @@ canvas {
   min-width: 340px;
   max-width: 52%;
   height: 100%;
-  border-left: 1px solid #374151
+  border-left: 1px solid var(--cim-gray-700, #374151)
 }
 
 #editor_region.horizontal #controls_pane {
   width: 100%;
   height: 40%;
   min-height: 170px;
-  border-top: 1px solid #374151
+  border-top: 1px solid var(--cim-gray-700, #374151)
 }
 
 .tag-row {
@@ -309,21 +309,21 @@ canvas {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  background: #1f2937;
-  border: 1px solid #374151;
+  background: var(--cim-gray-800, #1f2937);
+  border: 1px solid var(--cim-gray-700, #374151);
   border-radius: 5px;
   padding: 3px 6px;
   font-size: 12px;
-  color: #e5e7eb
+  color: var(--cim-gray-200, #e5e7eb)
 }
 
 .tag-row:hover {
-  border-color: #4b5563
+  border-color: var(--cim-gray-600, #4b5563)
 }
 
 .tag-row .tag-x {
   cursor: pointer;
-  color: #9ca3af;
+  color: var(--cim-gray-400, #9ca3af);
   font-weight: 700;
   line-height: 1;
   padding: 0 2px;
@@ -341,7 +341,7 @@ canvas {
 }
 
 .tag-row .tag-edit {
-  color: #e5e7eb;
+  color: var(--cim-gray-200, #e5e7eb);
   font-size: 12px;
   padding: 0
 }
@@ -349,7 +349,7 @@ canvas {
 .tag-row.tag-unconfirmed {
   border-style: dashed;
   border-color: var(--cim-warn-700, #b45309);
-  background: color-mix(in srgb, var(--cim-warn-900, #78350f) 45%, #111827)
+  background: color-mix(in srgb, var(--cim-warn-900, #78350f) 45%, var(--cim-gray-900, #111827))
 }
 
 .tag-row.tag-unconfirmed .tag-edit {
@@ -372,7 +372,7 @@ canvas {
 
 #meta_stars .star {
   cursor: pointer;
-  color: #4b5563;
+  color: var(--cim-gray-600, #4b5563);
   transition: color .08s
 }
 
@@ -381,12 +381,12 @@ canvas {
 }
 
 #meta_stars:hover .star {
-  color: #4b5563
+  color: var(--cim-gray-600, #4b5563)
 }
 
 #meta_stars .star:hover,
 #meta_stars .star:hover~.star {
-  color: #4b5563
+  color: var(--cim-gray-600, #4b5563)
 }
 
 .iqa-stars {
@@ -414,29 +414,29 @@ canvas {
 .gview-btn {
   padding-top: 2px;
   padding-bottom: 2px;
-  border-left: 1px solid #4b5563
+  border-left: 1px solid var(--cim-gray-600, #4b5563)
 }
 
 .gview-btn:first-child {
   border-left: 0
 }
 .gview-btn.gview-on { background: var(--cim-accent-600, #2563eb); color: #fff }
-.gview-item { text-align: left; padding: 3px 8px; border-radius: 4px; font-size: 12px; color: #d1d5db; white-space: nowrap }
-.gview-item:hover { background: rgba(255,255,255,.08) }
+.gview-item { text-align: left; padding: 3px 8px; border-radius: 4px; font-size: 12px; color: var(--cim-gray-300, #d1d5db); white-space: nowrap }
+.gview-item:hover { background: color-mix(in srgb, var(--cim-white, #fff) 8%, transparent) }
 .gview-item-on { color: var(--cim-accent-300, #93c5fd); font-weight: 600 }
 
 /* The toolbar's "more" menu: module buttons stack as full-width menu rows,
    and the whole thing stays hidden while no module registered anything. */
 .gallery-more:has(#gallery_more_pop:empty) { display: none }
-#gallery_more_pop .cim-btn { width: 100%; justify-content: flex-start; text-align: left; background: transparent; border: 0; color: #d1d5db; font-weight: 500 }
-#gallery_more_pop .cim-btn:hover { background: rgba(255,255,255,.08); color: #fff }
+#gallery_more_pop .cim-btn { width: 100%; justify-content: flex-start; text-align: left; background: transparent; border: 0; color: var(--cim-gray-300, #d1d5db); font-weight: 500 }
+#gallery_more_pop .cim-btn:hover { background: color-mix(in srgb, var(--cim-white, #fff) 8%, transparent); color: var(--cim-white, #fff) }
 #gallery_more_pop > * { width: 100% }
 
 /* Tools inside the search box (sort, ...): small icon buttons. */
 [data-ext-area="search_tools"] .cim-btn { padding: 0 4px; line-height: 1.4; background: transparent; border: 0 }
-[data-ext-area="search_tools"] .cim-btn:hover { background: rgba(255,255,255,.08) }
+[data-ext-area="search_tools"] .cim-btn:hover { background: color-mix(in srgb, var(--cim-white, #fff) 8%, transparent) }
 /* Settings: a compact one-line strip of small fields (section="system"). */
-.settings-compact { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; font-size: 11px; color: #9ca3af; }
+.settings-compact { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; font-size: 11px; color: var(--cim-gray-400, #9ca3af); }
 .settings-compact-field { display: inline-flex; align-items: center; gap: 6px; cursor: default; }
 .settings-compact-input { width: 7rem !important; padding: 2px 6px !important; font-size: 11px; }
 .settings-compact-field input[type="text"].settings-compact-input { width: 14rem !important; }

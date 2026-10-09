@@ -17,7 +17,7 @@ body[data-layout="intermediate"] #left_pane > :first-child {
 }
 body[data-layout="intermediate"] #left_tabs_bar {
   grid-column: 1; grid-row: 2; flex-direction: column; border-bottom: 0;
-  border-right: 1px solid #374151; align-items: stretch; padding-top: 8px;
+  border-right: 1px solid var(--cim-gray-700, #374151); align-items: stretch; padding-top: 8px;
 }
 body[data-layout="intermediate"] #left_tabs_bar > button {
   flex: 0 0 auto; text-align: left; border-bottom: 0; border-left: 4px solid transparent;

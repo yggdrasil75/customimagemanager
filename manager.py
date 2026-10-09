@@ -3600,11 +3600,16 @@ def api_info():
     filters = [{"token": t, "help": h, "source": "core"} for t, h in _CORE_SEARCH_HELP]
     for prefix, meta in sorted(module_host.search_help.items()):
         filters.append({"token": prefix + "...", "help": meta["help"], "source": meta["module_id"] or "module"})
-    return jsonify({"success": True, "sections": [
+    sections = [
         {"id": "search", "title": "Search filters",
          "description": "Type these in the gallery search box; combine freely.",
          "rows": filters},
-    ]})
+    ]
+    # modules add their own sections (version, server stats, ...): a handler returns
+    # one {id, title, description?, rows: [{token|label, help|value}]} or a list of them
+    for extra in module_host.emit("info.sections"):
+        sections.extend(extra if isinstance(extra, list) else [extra])
+    return jsonify({"success": True, "sections": sections})
 
 @app.route("/api/models")
 def api_models():
@@ -5012,6 +5017,61 @@ def api_upload_discard():
     _db_retry(_del)
     return jsonify({"success": True, "discarded": _id})
 
+def _move_file(rel_path: str, new_rel: str) -> tuple[bool, str]:
+    """! @brief Move a library file to a new rel_path (folder and/or name), taking its
+    sidecars and same-stem relatives (mt.related_exts) along, and keep every
+    record in step: the files row, album membership, the edit history, the old
+    thumbnail, and every module table (file.renamed). The extension never changes.
+    @return (ok, error) - ok with "" when the paths are the same.
+    """
+    old_path = get_safe_path(MEDIA_DIR, rel_path)
+    if not old_path or not os.path.exists(old_path):
+        return False, "not found"
+    new_rel = str(new_rel or "").replace("\\", "/").strip("/")
+    new_path = get_safe_path(MEDIA_DIR, new_rel) if new_rel else None
+    if not new_path:
+        return False, "rejected target"
+    if os.path.splitext(old_path)[1].lower() != os.path.splitext(new_path)[1].lower():
+        return False, "extension must not change"
+    if os.path.normcase(os.path.abspath(old_path)) == os.path.normcase(os.path.abspath(new_path)):
+        return True, ""
+    if os.path.exists(new_path):
+        return False, "target exists"
+    os.makedirs(os.path.dirname(new_path), exist_ok=True)
+    ob = os.path.splitext(old_path)[0]
+    nb = os.path.splitext(new_path)[0]
+    for ext in mt.related_exts(old_path):
+        src, dst = ob + ext, nb + ext
+        if os.path.exists(src):
+            shutil.move(src, dst)
+    new_rel = _rel(new_path)
+    db = _db()
+    for sql in ("UPDATE OR IGNORE album_members SET rel_path=? WHERE rel_path=?",
+                "UPDATE OR IGNORE file_history SET rel_path=? WHERE rel_path=?"):
+        try:
+            db.execute(sql, (new_rel, rel_path))
+        except Exception as e:
+            access_logger.debug(f"_move_file {rel_path}: {e}")
+    db.commit()
+    _thumb_drop(rel_path)
+    _meta_cache_drop(rel_path)
+    # Modules key rows by rel_path (books: progress, bookmarks, text): repoint them.
+    module_host.emit("file.renamed", old_rel=rel_path, new_rel=new_rel)
+    if mt.is_book(old_path):
+        return True, ""
+    # Carry the row over (DB-only columns such as face_done survive), then re-read
+    # the file at its new place.
+    try:
+        db.execute("UPDATE OR REPLACE files SET rel_path=? WHERE rel_path=?", (new_rel, rel_path))
+        db.commit()
+    except Exception as e:
+        access_logger.debug(f"_move_file row {rel_path}: {e}")
+        _delete_file_row(rel_path)
+    if not _index_file(new_rel, force=True):
+        access_logger.warning(f"_move_file: re-index of {new_rel} failed")
+    module_host.emit("file.renamed", old_rel=rel_path, new_rel=new_rel)
+    return True, ""
+
 @app.route("/api/move", methods=["POST"])
 @_auth.require_feature("data.move", level="write", action="move_file",
                        fields=("filename", "filenames", "new_folder", "dest", "destination"))
@@ -5023,24 +5083,11 @@ def api_move():
         return jsonify({"success":False})
     tdir = get_safe_path(MEDIA_DIR, new_folder) if new_folder else MEDIA_DIR
     if not tdir: return jsonify({"success":False})
-    os.makedirs(tdir, exist_ok=True)
-    base     = os.path.basename(filename)
-    new_path = os.path.join(tdir, base)
-    if old_path != new_path:
-        ob = os.path.splitext(old_path)[0]
-        nb = os.path.splitext(new_path)[0]
-        for ext in mt.related_exts(old_path):
-            src, dst = ob + ext, nb + ext
-            if os.path.exists(src): shutil.move(src, dst)
-        new_rel = _rel(new_path)
-        # Modules key rows by rel_path (books: progress, bookmarks, text): repoint them.
-        module_host.emit("file.renamed", old_rel=filename, new_rel=new_rel)
-        if mt.is_book(old_path):
-            return jsonify({"success": True})
-        _delete_file_row(filename)
-        if not _index_file(new_rel, force=True):
-          print("move failed")
-        module_host.emit("file.renamed", old_rel=filename, new_rel=new_rel)
+    base = os.path.basename(filename)
+    new_rel = _rel(os.path.join(tdir, base))
+    ok, err = _move_file(filename, new_rel)
+    if not ok:
+        return jsonify({"success": False, "error": err})
     return jsonify({"success":True})
 
 _FULLJPG_LRU: "OrderedDict[tuple[str,float], bytes]" = OrderedDict()
@@ -6194,6 +6241,7 @@ def _build_tailwind():
     t0 = time.time()
     try:
         r = subprocess.run([_TAILWIND_CLI, "-i", src, "-o", _TAILWIND_CSS + ".tmp",
+                            "-c", os.path.join(here, "static", "tailwind.config.js"),
                             "--content", content, "--minify"],
                            capture_output=True, text=True, cwd=here, timeout=300)
         if r.returncode != 0 or not os.path.getsize(_TAILWIND_CSS + ".tmp"):
@@ -6245,6 +6293,7 @@ _core_api = SimpleNamespace(
     object_grouping=og,
     ingest_inline=_process_spooled_inline, enqueue_spooled_upload=_enqueue_spooled_upload,
     file_albums=_file_albums, set_file_albums=_set_file_albums, delete_file=_delete_file,
+    move_file=_move_file,
     get_file_row=_get_file_row, thumb_bytes=thumb_bytes,
     files_where=_files_where,
     user_setting=lambda key, username=None: _user_setting(key, username),

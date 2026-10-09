@@ -4,14 +4,14 @@
    colliding with app.css. */
 
 #iptc-editor {
-  --iptc-bg:        #111827;
-  --iptc-panel:     #1f2937;
-  --iptc-panel-2:   #0b1220;
-  --iptc-border:    #374151;
-  --iptc-border-2:  #4b5563;
-  --iptc-text:      #e5e7eb;
-  --iptc-muted:     #9ca3af;
-  --iptc-faint:     #6b7280;
+  --iptc-bg:        var(--cim-gray-900, #111827);
+  --iptc-panel:     var(--cim-gray-800, #1f2937);
+  --iptc-panel-2:   var(--cim-gray-900, #0b1220);
+  --iptc-border:    var(--cim-gray-700, #374151);
+  --iptc-border-2:  var(--cim-gray-600, #4b5563);
+  --iptc-text:      var(--cim-gray-200, #e5e7eb);
+  --iptc-muted:     var(--cim-gray-400, #9ca3af);
+  --iptc-faint:     var(--cim-gray-500, #6b7280);
   --iptc-accent:    var(--cim-accent-500, #3b82f6);
   --iptc-accent-2:  var(--cim-accent-400, #60a5fa);
   --iptc-warn:      var(--cim-warn-500, #f59e0b);
@@ -146,7 +146,7 @@
   outline: none; border-color: var(--iptc-accent);
 }
 #iptc-editor .iptc-field-input input[readonly] {
-  color: var(--iptc-muted); background: #0a0f1a; cursor: not-allowed;
+  color: var(--iptc-muted); background: var(--cim-gray-950, #0a0f1a); cursor: not-allowed;
 }
 #iptc-editor .iptc-field-input .iptc-binary {
   font-style: italic; color: var(--iptc-faint); font-size: 11px;

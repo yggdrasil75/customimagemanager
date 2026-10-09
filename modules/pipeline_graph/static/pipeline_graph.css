@@ -1,28 +1,28 @@
 /* pipeline_graph.css - dark theme for Drawflow inside the settings modal. */
 #plg_wrap { display: flex; gap: .5rem; height: 66vh; min-height: 420px; }
-#plg_canvas { flex: 1; min-width: 0; position: relative; border: 1px solid #374151; border-radius: .375rem;
-  background: #0b0f17 radial-gradient(#1f2937 1px, transparent 1px); background-size: 20px 20px; overflow: hidden; }
+#plg_canvas { flex: 1; min-width: 0; position: relative; border: 1px solid var(--cim-gray-700, #374151); border-radius: .375rem;
+  background: var(--cim-gray-950, #0b0f17) radial-gradient(var(--cim-gray-800, #1f2937) 1px, transparent 1px); background-size: 20px 20px; overflow: hidden; }
 #plg_inspector { width: 17rem; flex: none; overflow-y: auto; }
 
 #plg_canvas .drawflow { width: 100%; height: 100%; }
 #plg_canvas .drawflow .drawflow-node {
-  background: #1f2937; color: #e5e7eb; border: 1px solid #4b5563; border-radius: .375rem;
-  min-height: 0; width: 210px; padding: 0; font-size: 11px; box-shadow: 0 2px 8px #0008;
+  background: var(--cim-gray-800, #1f2937); color: var(--cim-gray-200, #e5e7eb); border: 1px solid var(--cim-gray-600, #4b5563); border-radius: .375rem;
+  min-height: 0; width: 210px; padding: 0; font-size: 11px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.53);
 }
 #plg_canvas .drawflow .drawflow-node.selected { border-color: var(--cim-accent3-400, #38bdf8); box-shadow: 0 0 0 2px color-mix(in srgb, var(--cim-accent3-400, #38bdf8) 33%, transparent); }
 #plg_canvas .drawflow .drawflow-node .drawflow_content_node { width: 100%; }
 #plg_canvas .drawflow .drawflow-node .input,
-#plg_canvas .drawflow .drawflow-node .output { background: #9ca3af; border: 2px solid #111827; width: 14px; height: 14px; }
+#plg_canvas .drawflow .drawflow-node .output { background: var(--cim-gray-400, #9ca3af); border: 2px solid var(--cim-gray-900, #111827); width: 14px; height: 14px; }
 #plg_canvas .drawflow .drawflow-node .output:hover,
 #plg_canvas .drawflow .drawflow-node .input:hover { background: var(--cim-accent3-400, #38bdf8); }
-#plg_canvas .drawflow .connection .main-path { stroke: #6b7280; stroke-width: 3px; }
+#plg_canvas .drawflow .connection .main-path { stroke: var(--cim-gray-500, #6b7280); stroke-width: 3px; }
 #plg_canvas .drawflow .connection .main-path:hover,
 #plg_canvas .drawflow .connection.selected .main-path { stroke: var(--cim-accent3-400, #38bdf8); }
 #plg_canvas .drawflow-delete { background: var(--cim-danger-700, #b91c1c); border: 2px solid var(--cim-danger-900, #7f1d1d); }
 
-.plg-title { padding: 5px 8px 2px; font-weight: 700; color: #f3f4f6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.plg-type { padding: 0 8px 4px; color: #9ca3af; font-size: 10px; }
-.plg-olabel, .plg-ilabel { position: absolute; top: -2px; white-space: nowrap; font-size: 10px; color: #cbd5e1;
+.plg-title { padding: 5px 8px 2px; font-weight: 700; color: var(--cim-gray-100, #f3f4f6); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plg-type { padding: 0 8px 4px; color: var(--cim-gray-400, #9ca3af); font-size: 10px; }
+.plg-olabel, .plg-ilabel { position: absolute; top: -2px; white-space: nowrap; font-size: 10px; color: var(--cim-gray-300, #cbd5e1);
   pointer-events: none; line-height: 14px; }
 .plg-olabel { right: 20px; }
 .plg-ilabel { left: 20px; }
@@ -30,11 +30,11 @@
 #plg_canvas .drawflow .drawflow-node .outputs, #plg_canvas .drawflow .drawflow-node .inputs { padding-top: 44px; }
 #plg_canvas .drawflow .drawflow-node .input, #plg_canvas .drawflow .drawflow-node .output { margin-bottom: 5px; }
 /* port type colours */
-#plg_canvas .plg-t-image { background: var(--cim-warn-500, #f59e0b); }  #plg_canvas .plg-t-text { background: #e5e7eb; }
+#plg_canvas .plg-t-image { background: var(--cim-warn-500, #f59e0b); }  #plg_canvas .plg-t-text { background: var(--cim-gray-200, #e5e7eb); }
 #plg_canvas .plg-t-tags { background: var(--cim-ok-400, #4ade80); }   #plg_canvas .plg-t-bool { background: var(--cim-accent2-400, #818cf8); }
 #plg_canvas .plg-t-boxes, #plg_canvas .plg-t-subjects { background: var(--cim-accent-400, #60a5fa); }
 #plg_canvas .plg-t-json { background: var(--cim-accent2-400, #818cf8); }   #plg_canvas .plg-t-metadata { background: var(--cim-danger-400, #f87171); }
-#plg_canvas .plg-t-any { background: #9ca3af; }
+#plg_canvas .plg-t-any { background: var(--cim-gray-400, #9ca3af); }
 /* node kind accents */
 #plg_canvas .drawflow .drawflow-node.plg-k-io { background: var(--cim-accent3-900, #0c4a6e); border-color: var(--cim-accent3-500, #0ea5e9); }
 #plg_canvas .drawflow .drawflow-node.plg-k-ai { border-color: var(--cim-warn-400, #fbbf24); }
@@ -43,9 +43,9 @@
 #plg_canvas .drawflow .drawflow-node.plg-k-vision { border-color: var(--cim-accent-400, #60a5fa); }
 #plg_canvas .drawflow .drawflow-node.plg-k-module { border-color: var(--cim-ok-400, #4ade80); }
 
-.plg-field label { display: block; font-size: 10px; color: #9ca3af; margin: 6px 0 2px; }
-.plg-field input, .plg-field select, .plg-field textarea { width: 100%; background: #111827; color: #e5e7eb;
-  border: 1px solid #374151; border-radius: .25rem; padding: 4px 6px; font-size: 11px; }
+.plg-field label { display: block; font-size: 10px; color: var(--cim-gray-400, #9ca3af); margin: 6px 0 2px; }
+.plg-field input, .plg-field select, .plg-field textarea { width: 100%; background: var(--cim-gray-900, #111827); color: var(--cim-gray-200, #e5e7eb);
+  border: 1px solid var(--cim-gray-700, #374151); border-radius: .25rem; padding: 4px 6px; font-size: 11px; }
 .plg-field textarea { min-height: 90px; font-family: ui-monospace, monospace; resize: vertical; }
 .plg-step { border: 1px solid var(--cim-accent2-900, #312e81); border-radius: .25rem; padding: 4px 6px; margin-top: 6px; background: color-mix(in srgb, var(--cim-accent2-950, #1e1b4b) 20%, transparent); }
 .plg-step summary { cursor: pointer; color: var(--cim-accent2-300, #a5b4fc); font-size: 11px; }

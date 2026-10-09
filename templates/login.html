@@ -6,10 +6,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sign in &middot; Media Library</title>
   <script src="/tailwind"></script>
+  <script src="/static/tailwind.config.js"></script>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 
 <body class="bg-gray-900 text-white h-screen flex items-center justify-center">
+  {# Pre-paint: the last colour scheme theming.js stored ("auto" follows the browser);
+     the server's pick replaces it once /api/theme loads. #}
+  <script>(function(){try{var s=localStorage.getItem("cim.scheme");
+    if(s!=="light"&&s!=="dark")s=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";
+    document.body.dataset.scheme=s;document.documentElement.style.colorScheme=s}catch(e){}})()</script>
   {% include 'partials/login_card.html' %}
   <script src="/static/login.js"></script>
 </body>

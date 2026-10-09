@@ -390,6 +390,9 @@ def register(host):
             sent = ""
             if send and (to_send or recovered):
                 subject, body = compose(host.config.get("brand_name"), to_send, recovered, res["readings"])
+                for key, a in to_send.items():  # in-app too, when the notifications module listens
+                    host.emit("notify", username="admins", title=a["title"], body=a["detail"],
+                              kind="storage", level="warn", dedupe_key="storage:" + key)
                 try:
                     rcpts = send_mail(subject, body, c)
                     sent = "sent to %s" % ", ".join(rcpts)

@@ -5,11 +5,14 @@
   <meta charset="UTF-8">
   <title>Media Library</title>
   {% if tailwind_css %}<link rel="stylesheet" href="/static/tailwind.css?v={{ tailwind_css }}">
-  {% else %}<script src="/tailwind"></script>{% endif %}
+  {% else %}<script src="/tailwind"></script><script src="/static/tailwind.config.js"></script>{% endif %}
   <link rel="stylesheet" href="/static/app.css">
 </head>
 
 <body class="bg-gray-900 text-white h-screen flex overflow-hidden">
+  {# Pre-paint: the last colour scheme theming.js stored ("auto" follows the browser);
+     the server's pick replaces it once /api/theme loads. #}
+  <script>(function(){try{var s=localStorage.getItem("cim.scheme");if(s!=="light"&&s!=="dark")s=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.body.dataset.scheme=s;document.documentElement.style.colorScheme=s}catch(e){}})()</script>
 
   <!-- Left column: its own header on top, then the search/gallery pane -->
   <div id="left_pane" class="flex flex-col h-full bg-gray-900 border-r border-gray-700 z-10"
@@ -59,6 +62,7 @@
   <script src="/static/ai_tools.js"></script>
   <script src="/static/review.js"></script>
   <script src="/static/tiers.js"></script>
+  <script src="/static/info.js"></script>
   <script src="/static/user_settings.js"></script>
   <script src="/static/media_settings.js"></script>
   <script src="/static/modules.js"></script>

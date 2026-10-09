@@ -502,6 +502,13 @@ class Host:
         """
         self.core.authmgr.authenticators.append(fn)
         
+    def register_login_check(self, fn):
+        """! @brief Add a step between a correct password and the session (a second factor).
+        @param fn  fn(user_row, login_data) -> None to allow, or (json_dict, status) to
+                   answer the login request instead; a 4xx counts as a failed attempt.
+        """
+        self.core.authmgr.login_checks.append(fn)
+
     def register_access_policy(self, policy):
         """! @brief Add a per-request access policy (all methods optional):
 
@@ -657,8 +664,10 @@ class Host:
         return self.media.extend_media_type(kind, **spec)
 
     def add_public_prefix(self, prefix):
-        """! @brief Let a URL prefix through the login gate (machine-to-machine calls).
-        Routes under it must check their own credential on every request.
+        """! @brief Let a URL prefix through the login gate (machine-to-machine calls,
+        or a page a visitor opens from a link). `/api/<module>/.../` or one short
+        top-level segment such as `/s/`. Routes under it must check their own
+        credential on every request.
         """
         return self.core.auth.add_public_prefix(prefix)
 

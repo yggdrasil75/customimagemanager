@@ -1,0 +1,51 @@
+/* notifications.css - the header bell, its unread badge and the dropdown. */
+.cim-notif-bell {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 22px; border: 0; border-radius: 6px; cursor: pointer;
+  background: var(--cim-gray-700, #374151); color: var(--cim-gray-200, #e5e7eb); padding: 0; vertical-align: middle;
+}
+.cim-notif-bell:hover { background: var(--cim-gray-600, #4b5563); }
+.cim-notif-bell svg { width: 15px; height: 15px; }
+.cim-notif-bell.cim-notif-floating { position: fixed; top: 6px; right: 10px; z-index: 9999; }
+.cim-notif-badge {
+  position: absolute; top: -5px; right: -6px; min-width: 15px; height: 15px; padding: 0 3px;
+  border-radius: 8px; font: 600 10px/15px system-ui; text-align: center; color: #fff;
+  background: var(--cim-danger-600, #dc2626);
+}
+.cim-notif-badge[hidden] { display: none; }
+
+.cim-notif-panel {
+  position: fixed; z-index: 10000; width: min(360px, calc(100vw - 16px)); max-height: min(70vh, 520px);
+  display: flex; flex-direction: column; background: var(--cim-gray-800, #1f2937); color: var(--cim-gray-200, #e5e7eb);
+  border: 1px solid var(--cim-gray-600, #4b5563); border-radius: 8px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  font: 13px system-ui;
+}
+.cim-notif-panel[hidden] { display: none; }
+.cim-notif-head {
+  display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--cim-gray-700, #374151);
+}
+.cim-notif-head strong { flex: 1; font-size: 13px; }
+.cim-notif-head button {
+  background: none; border: 0; cursor: pointer; font-size: 12px; padding: 2px 4px;
+  color: var(--cim-accent-400, #60a5fa);
+}
+.cim-notif-head button:hover { text-decoration: underline; }
+.cim-notif-list { overflow-y: auto; flex: 1; }
+.cim-notif-empty { padding: 18px 10px; text-align: center; color: var(--cim-gray-400, #9ca3af); }
+.cim-notif-item {
+  display: flex; gap: 8px; padding: 8px 10px; cursor: pointer; border-bottom: 1px solid var(--cim-gray-700, #374151);
+  border-left: 3px solid var(--cim-accent-500, #3b82f6);
+}
+.cim-notif-item:hover { background: var(--cim-gray-700, #374151); }
+.cim-notif-item.lv-warn { border-left-color: var(--cim-warn-500, #f59e0b); }
+.cim-notif-item.lv-error { border-left-color: var(--cim-danger-500, #ef4444); }
+.cim-notif-item.is-read { opacity: .65; }
+.cim-notif-dot {
+  flex: none; width: 8px; height: 8px; margin-top: 5px; border-radius: 50%;
+  background: var(--cim-accent-400, #60a5fa);
+}
+.cim-notif-item.is-read .cim-notif-dot { visibility: hidden; }
+.cim-notif-main { flex: 1; min-width: 0; }
+.cim-notif-title { font-weight: 600; overflow-wrap: anywhere; }
+.cim-notif-body { color: var(--cim-gray-300, #d1d5db); margin-top: 2px; overflow-wrap: anywhere; white-space: pre-line; }
+.cim-notif-time { color: var(--cim-gray-400, #9ca3af); font-size: 11px; margin-top: 3px; }

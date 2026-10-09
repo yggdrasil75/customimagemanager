@@ -325,7 +325,7 @@
     if (!last) return;
     const btn = document.createElement('button');
     btn.textContent = 'password'; btn.title = 'Set a new password (signs the user out everywhere)';
-    btn.style.cssText = 'background:#4b5563;color:#e5e7eb;border:0;border-radius:5px;padding:3px 8px;cursor:pointer;margin-right:4px';
+    btn.style.cssText = 'background:var(--cim-gray-600, #4b5563);color:var(--cim-gray-200, #e5e7eb);border:0;border-radius:5px;padding:3px 8px;cursor:pointer;margin-right:4px';
     btn.onclick = async () => {
       const pw = prompt('New password for ' + (u.display_name || u.username) + ':');
       if (!pw) return;

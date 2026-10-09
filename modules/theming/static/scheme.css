@@ -1,0 +1,48 @@
+/* scheme.css: the light colour scheme (body[data-scheme="light"], set by theming.js).
+   The dark scheme is the stock look and sets nothing: every gray / white / black
+   utility falls back to its Tailwind colour (static/tailwind.config.js), and so does
+   every module stylesheet and inline style written against the --cim-* variables
+   (`var(--cim-gray-800, #1f2937)`). The light scheme
+   inverts the gray ramp (panels become near-white, light text becomes dark),
+   swaps white and black, and partially inverts the role ramps (50<->950 ...
+   500 stays) so a shade picked for a dark background stays legible; palettes
+   ship their own light block (gen_palette_light.py), danger / ok / warn are
+   inverted here. The media stage ("dark islands", the same list as ISLANDS in
+   gen_palette_light.py) stays dark. */
+
+body[data-scheme="light"] {
+  color-scheme: light;
+  --cim-gray-50: #0b0f17; --cim-gray-100: #111827; --cim-gray-200: #1f2937; --cim-gray-300: #374151;
+  --cim-gray-400: #4b5563; --cim-gray-500: #868e9b; --cim-gray-600: #b3bac5; --cim-gray-700: #e2e6eb;
+  --cim-gray-800: #f1f3f6; --cim-gray-900: #f8f9fb; --cim-gray-950: #ffffff;
+  --cim-white: #111827; --cim-black: #ffffff;
+  --cim-scrim: rgb(15 23 42 / .4);
+  /* solid buttons keep a deep fill with white text: read the inverted ramps at 300 / 400 */
+  --cim-btn-primary: var(--cim-accent-300, #1d4ed8);   --cim-btn-primary-hover: var(--cim-accent-400, #2563eb);
+  --cim-btn-secondary: var(--cim-accent2-300, #4338ca); --cim-btn-secondary-hover: var(--cim-accent2-400, #4f46e5);
+  --cim-btn-tertiary: var(--cim-accent3-300, #0369a1);  --cim-btn-tertiary-hover: var(--cim-accent3-400, #0284c7);
+  --cim-btn-ok: var(--cim-ok-300, #15803d);             --cim-btn-ok-hover: var(--cim-ok-400, #16a34a);
+  --cim-btn-warn: var(--cim-warn-300, #b45309);         --cim-btn-warn-hover: var(--cim-warn-400, #d97706);
+  --cim-btn-danger: var(--cim-danger-300, #b91c1c);     --cim-btn-danger-hover: var(--cim-danger-400, #dc2626);
+  --cim-danger-50: #450a0a; --cim-danger-100: #7f1d1d; --cim-danger-200: #991b1b; --cim-danger-300: #b91c1c; --cim-danger-400: #dc2626; --cim-danger-500: #ef4444; --cim-danger-600: #f87171; --cim-danger-700: #fca5a5; --cim-danger-800: #fecaca; --cim-danger-900: #fee2e2; --cim-danger-950: #fef2f2;
+  --cim-ok-50: #052e16; --cim-ok-100: #14532d; --cim-ok-200: #166534; --cim-ok-300: #15803d; --cim-ok-400: #16a34a; --cim-ok-500: #22c55e; --cim-ok-600: #4ade80; --cim-ok-700: #86efac; --cim-ok-800: #bbf7d0; --cim-ok-900: #dcfce7; --cim-ok-950: #f0fdf4;
+  --cim-warn-50: #451a03; --cim-warn-100: #78350f; --cim-warn-200: #92400e; --cim-warn-300: #b45309; --cim-warn-400: #d97706; --cim-warn-500: #f59e0b; --cim-warn-600: #fbbf24; --cim-warn-700: #fcd34d; --cim-warn-800: #fde68a; --cim-warn-900: #fef3c7; --cim-warn-950: #fffbeb;
+}
+body[data-scheme="dark"] { color-scheme: dark; }
+
+/* -- dark islands: the media stage keeps the stock (dark) values -- */
+body[data-scheme="light"] .bg-black, body[data-scheme="light"] .inset-0.bg-black\/90,
+body[data-scheme="light"] [id$="canvas_container"], body[data-scheme="light"] #popout_canvas_wrap {
+  color-scheme: dark;
+  color: #fff;
+  --cim-gray-50: initial; --cim-gray-100: initial; --cim-gray-200: initial; --cim-gray-300: initial; --cim-gray-400: initial; --cim-gray-500: initial; --cim-gray-600: initial; --cim-gray-700: initial; --cim-gray-800: initial; --cim-gray-900: initial; --cim-gray-950: initial;
+  --cim-white: initial; --cim-black: initial;
+  --cim-danger-50: initial; --cim-danger-100: initial; --cim-danger-200: initial; --cim-danger-300: initial; --cim-danger-400: initial; --cim-danger-500: initial; --cim-danger-600: initial; --cim-danger-700: initial; --cim-danger-800: initial; --cim-danger-900: initial; --cim-danger-950: initial;
+  --cim-ok-50: initial; --cim-ok-100: initial; --cim-ok-200: initial; --cim-ok-300: initial; --cim-ok-400: initial; --cim-ok-500: initial; --cim-ok-600: initial; --cim-ok-700: initial; --cim-ok-800: initial; --cim-ok-900: initial; --cim-ok-950: initial;
+  --cim-warn-50: initial; --cim-warn-100: initial; --cim-warn-200: initial; --cim-warn-300: initial; --cim-warn-400: initial; --cim-warn-500: initial; --cim-warn-600: initial; --cim-warn-700: initial; --cim-warn-800: initial; --cim-warn-900: initial; --cim-warn-950: initial;
+}
+/* Tailwind-class modal scrims (bg-black/60..80 on a full-screen layer) use the scrim
+   colour; the /90 ones hold a picture and are islands (above). */
+body[data-scheme="light"] .inset-0.bg-black\/60,
+body[data-scheme="light"] .inset-0.bg-black\/70,
+body[data-scheme="light"] .inset-0.bg-black\/80 { background-color: var(--cim-scrim); }

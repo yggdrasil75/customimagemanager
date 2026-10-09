@@ -219,21 +219,21 @@
   .ik-root{display:flex;flex-direction:column;gap:12px;font-size:12px}
   .ik-root h3{font-size:15px;font-weight:700;margin:0}
   .ik-intro{opacity:.8;line-height:1.5}
-  .ik-card{border:1px solid rgba(128,128,128,.25);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:4px}
+  .ik-card{border:1px solid color-mix(in srgb, var(--cim-gray-500, #808080) 25%, transparent);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:4px}
   .ik-row{display:flex;justify-content:space-between;align-items:center;gap:10px}
   .ik-row>span{opacity:.85}
-  .ik-row input:not([type=checkbox]),.ik-row select{width:55%;background:rgba(255,255,255,.06);border:1px solid rgba(128,128,128,.3);border-radius:4px;padding:3px 6px;font-size:12px}
+  .ik-row input:not([type=checkbox]),.ik-row select{width:55%;background:color-mix(in srgb, var(--cim-white, #fff) 6%, transparent);border:1px solid color-mix(in srgb, var(--cim-gray-500, #808080) 30%, transparent);border-radius:4px;padding:3px 6px;font-size:12px}
   .ik-help{font-size:11px;opacity:.6;margin:-2px 0 4px}
   .ik-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
-  .ik-btn{background:#4f46e5;color:#fff;border:0;border-radius:4px;padding:4px 12px;font-size:12px;cursor:pointer}
-  .ik-btn-sm{padding:2px 8px;font-size:11px}.ik-btn-ghost{background:rgba(128,128,128,.2);color:inherit}
-  .ik-dim{opacity:.6;font-size:11px}.ik-err{color:#ef4444;font-size:11px}
-  .ik-src{border-top:1px solid rgba(128,128,128,.15);padding:8px 0;display:flex;flex-direction:column;gap:3px}
-  .ik-bar{height:5px;background:rgba(128,128,128,.2);border-radius:3px;overflow:hidden}.ik-bar>div{height:100%;background:#4f46e5}
-  .ik-st{font-size:10px;padding:0 6px;border-radius:3px;background:rgba(128,128,128,.3)}
-  .ik-st-running,.ik-st-queued{background:#1d4ed8;color:#fff}.ik-st-done{background:#166534;color:#fff}
-  .ik-st-error{background:#b91c1c;color:#fff}.ik-st-canceled{background:#b45309;color:#fff}
-  .ik-prompt{border-top:1px dashed rgba(128,128,128,.4);padding-top:6px;margin-top:4px}
+  .ik-btn{background:var(--cim-accent2-600, #4f46e5);color:#fff;border:0;border-radius:4px;padding:4px 12px;font-size:12px;cursor:pointer}
+  .ik-btn-sm{padding:2px 8px;font-size:11px}.ik-btn-ghost{background:color-mix(in srgb, var(--cim-gray-500, #808080) 20%, transparent);color:inherit}
+  .ik-dim{opacity:.6;font-size:11px}.ik-err{color:var(--cim-danger-500, #ef4444);font-size:11px}
+  .ik-src{border-top:1px solid color-mix(in srgb, var(--cim-gray-500, #808080) 15%, transparent);padding:8px 0;display:flex;flex-direction:column;gap:3px}
+  .ik-bar{height:5px;background:color-mix(in srgb, var(--cim-gray-500, #808080) 20%, transparent);border-radius:3px;overflow:hidden}.ik-bar>div{height:100%;background:var(--cim-accent2-600, #4f46e5)}
+  .ik-st{font-size:10px;padding:0 6px;border-radius:3px;background:color-mix(in srgb, var(--cim-gray-500, #808080) 30%, transparent)}
+  .ik-st-running,.ik-st-queued{background:var(--cim-accent-700, #1d4ed8);color:#fff}.ik-st-done{background:var(--cim-ok-800, #166534);color:#fff}
+  .ik-st-error{background:var(--cim-danger-700, #b91c1c);color:#fff}.ik-st-canceled{background:var(--cim-warn-700, #b45309);color:#fff}
+  .ik-prompt{border-top:1px dashed color-mix(in srgb, var(--cim-gray-500, #808080) 40%, transparent);padding-top:6px;margin-top:4px}
   .ik-failures{max-height:200px;overflow:auto;font-size:11px}.ik-fail{padding:2px 0;word-break:break-all}`;
   const st = document.createElement("style"); st.textContent = css; document.head.appendChild(st);
 

@@ -634,6 +634,8 @@ def register(host):
             if payload.get("success") and rel and row["kind"] == "files" and outcome == "done":
                 # a files link grows with what visitors add to it
                 links.add_file(row["token"], rel)
+            if payload.get("success") and rel:
+                host.emit("shared_link.uploaded", token=row["token"], created_by=row["created_by"], filename=orig, rel_path=rel)
             results.append({"name": orig, "success": bool(payload.get("success")),
                             "filename": rel, "queued": bool(payload.get("queued")),
                             "error": payload.get("error") or ""})

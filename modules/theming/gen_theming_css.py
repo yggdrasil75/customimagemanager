@@ -13,6 +13,12 @@ While a palette is active every bg / text / border / ring / accent class of
 those families (hover, focus, group-hover, common opacity steps) maps to its
 variable, stock colour as fallback. The cim-btn classes (cimButton() in
 static/globals.js) use the same variables.
+
+The gray ramp and white / black are the colour scheme's (scheme.css): while
+body[data-scheme] is set every gray-50..950 / white / black utility (bg, text,
+border, ring, divide, placeholder; hover, focus, group-hover; opacity steps)
+maps to --cim-gray-50..950 / --cim-white / --cim-black, stock as fallback, so
+the dark scheme (no variables) looks exactly like plain Tailwind.
 """
 import os
 
@@ -30,6 +36,10 @@ ROLES = {"blue": "accent", "indigo": "accent2", "sky": "accent3",
 BG_ALPHAS = [10, 20, 30, 40, 50, 60, 80]  # translucent fills: shades 400..950
 LINE_ALPHAS = [40, 60, 80]  # translucent text / borders: shades 200..900
 P = "body[data-palette]"
+GRAY = ["#f9fafb", "#f3f4f6", "#e5e7eb", "#d1d5db", "#9ca3af", "#6b7280", "#4b5563", "#374151", "#1f2937", "#111827", "#030712"]
+MONO = {"white": "#fff", "black": "#000"}
+NEUTRAL_ALPHAS = [5, 10, 20, 25, 30, 40, 50, 60, 70, 75, 80, 90, 95]  # Tailwind's opacity steps
+SCH = "body[data-scheme]"
 
 
 def var(fam, shade):
@@ -40,19 +50,49 @@ def esc(cls):
     return cls.replace(":", "\\:").replace("/", "\\/")
 
 
-def sel(cls, states):
-    out = [f"{P} .{esc(cls)}"]
+def sel(cls, states, pre=P):
+    """! @brief Selector list for a utility class and its state variants under `pre`."""
+    out = [f"{pre} .{esc(cls)}"]
     for st in states:
         if st == "group-hover":
-            out.append(f"{P} .group:hover .{esc('group-hover:' + cls)}")
+            out.append(f"{pre} .group:hover .{esc('group-hover:' + cls)}")
         else:
-            out.append(f"{P} .{esc(st + ':' + cls)}:{st}")
+            out.append(f"{pre} .{esc(st + ':' + cls)}:{st}")
     return ", ".join(out)
+
+
+def neutrals():
+    """! @brief (class suffix, css value) for gray-50..950, white and black."""
+    out = [(f"gray-{sh}", f"var(--cim-gray-{sh}, {GRAY[i]})") for i, sh in enumerate(SHADES)]
+    return out + [(k, f"var(--cim-{k}, {v})") for k, v in MONO.items()]
+
+
+def build_neutrals():
+    """! @brief Rules mapping gray / white / black utilities onto the scheme variables."""
+    L = ["/* -- gray / white / black utilities -> scheme variables (while body[data-scheme] is set) -- */"]
+    st = ["hover", "focus", "group-hover"]
+    for name, v in neutrals():
+        # body itself carries bg-gray-900 text-white: match it too (SCH.cls)
+        L.append(f"{SCH}.bg-{name}, {sel(f'bg-{name}', st, SCH)} {{ background-color: {v}; }}")
+        L.append(f"{SCH}.text-{name}, {sel(f'text-{name}', st, SCH)} {{ color: {v}; }}")
+        L.append(f"{sel(f'border-{name}', st, SCH)} {{ border-color: {v}; }}")
+        L.append(f"{sel(f'ring-{name}', ['focus'], SCH)} {{ --tw-ring-color: {v}; }}")
+        L.append(f"{SCH} .{esc(f'divide-{name}')} > :not([hidden]) ~ :not([hidden]) {{ border-color: {v}; }}")
+        L.append(f"{SCH} .{esc(f'placeholder-{name}')}::placeholder {{ color: {v}; }}")
+    for name, v in neutrals():
+        for a in NEUTRAL_ALPHAS:
+            mix = f"color-mix(in srgb, {v} {a}%, transparent)"
+            L.append(f"{sel(f'bg-{name}/{a}', ['hover'], SCH)} {{ background-color: {mix}; }}")
+            L.append(f"{sel(f'text-{name}/{a}', ['hover'], SCH)} {{ color: {mix}; }} "
+                     f"{SCH} .{esc(f'border-{name}/{a}')} {{ border-color: {mix}; }}")
+    return L
 
 
 def build():
     doc = __doc__.split("@brief", 1)[-1].strip()
     L = [doc.replace("*/", "* /").join(("/* ", " */")), ""]
+    # neutrals first: where markup stacks gray and a role colour the role wins, as in Tailwind
+    L += build_neutrals() + [""]
     L.append("/* -- utility classes -> palette variables (only while a palette is active) -- */")
     for fam in STOCK:
         for sh in SHADES:

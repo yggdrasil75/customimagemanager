@@ -13,6 +13,13 @@
   <input id="login_pass" type="password" autocomplete="current-password"
     class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
 
+  {# Second factor: hidden until the server answers {"second_factor": "totp"} #}
+  <div id="login_totp_box" class="hidden mt-3">
+    <label class="text-xs text-gray-400 block mb-1" for="login_totp">Authenticator code</label>
+    <input id="login_totp" inputmode="numeric" autocomplete="one-time-code" placeholder="123456 or a backup code"
+      class="w-full p-2 bg-gray-700 rounded border border-gray-600 text-sm text-white">
+  </div>
+
   <button id="login_go"
     class="mt-5 w-full py-2 bg-indigo-700 hover:bg-indigo-600 disabled:opacity-60
            rounded font-bold text-sm">Sign in</button>
