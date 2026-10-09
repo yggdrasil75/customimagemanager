@@ -141,7 +141,8 @@ def register(host):
         is them, else the auth tables; (None, None) for an unknown account."""
         u = _request_user()
         if u and u.get("username") == username and "account" in u:
-            return host.is_admin(), u.get("account") or {}
+            # an admin's narrowed credential (personal API key / phone) is still an admin account
+            return host.is_admin() or host.is_admin(username), u.get("account") or {}
         row = core.authmgr.get_user(username)
         if row is None:
             return None, None

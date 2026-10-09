@@ -172,6 +172,37 @@
     return v.startsWith("via:") ? { route: "via", via_peer: Number(v.slice(4)) } : { route: v };
   }
 
+  /** @brief Owner account + scope of a phone row: it acts as that account, seeing its
+   *  personal folder only or everything the account can see. */
+  function ownerBox(p) {
+    const users = state.users || [];
+    const uid = Number(p.user_id || 0);
+    const opts = users.map((u) => `<option value="${u.id}" ${u.id === uid ? "selected" : ""}>${esc(u.display_name || u.username)}${
+      u.display_name && u.display_name !== u.username ? " (" + esc(u.username) + ")" : ""}${u.disabled ? " - disabled" : ""}</option>`).join("");
+    const none = !uid || !users.some((u) => u.id === uid);
+    const sc = p.scope || "personal";
+    const warn = [];
+    if (p.owner_auto) warn.push(`assigned to <b>${esc(p.owner_display || p.owner)}</b> automatically when phones got owners - pick the owner and Save to confirm`);
+    if (p.owner_disabled) warn.push("owner account is disabled: this phone is refused until it is re-enabled");
+    if (p.owner_missing) warn.push("owner account no longer exists");
+    return `<div class="fs-p-ownerbox" ${p.kind === "device" ? "" : "hidden"}>
+      <select class="fs-p-owner" title="The account this phone acts as">${none ? `<option value="" selected>${users.length ? "owner: me" : "(sign-in off)"}</option>` : ""}${opts}</select>
+      <select class="fs-p-scope" title="What the phone sees and where its uploads may land">
+        <option value="personal" ${sc === "personal" ? "selected" : ""}>personal folder only</option>
+        <option value="all" ${sc === "all" ? "selected" : ""}>everything the owner sees</option></select>
+      ${warn.map((w) => `<div class="fs-err">${w}</div>`).join("")}</div>`;
+  }
+  /** @brief The save body of one peer row (owner and scope only for phones). */
+  function rowBody(q, id) {
+    const body = { id, name: q(".fs-p-name").value, url: q(".fs-p-url").value, enabled: q(".fs-p-en").checked,
+                   kind: q(".fs-p-kind").value, folder: q(".fs-p-folder").value, ...routeOf(q(".fs-p-route")) };
+    if (body.kind === "device") {
+      const o = q(".fs-p-owner"); if (o && o.value) body.user_id = Number(o.value);
+      const sc = q(".fs-p-scope"); if (sc) body.scope = sc.value;
+    }
+    return body;
+  }
+
   function renderPeers() {
     const el = document.getElementById("fs_peers");
     const kindSel = (k) => `<select class="fs-p-kind"><option value="peer" ${k !== "device" ? "selected" : ""}>family</option>
@@ -180,7 +211,8 @@
       <tr data-id="${p.id}">
         <td>${kindSel(p.kind)}</td>
         <td><input class="fs-p-name" value="${esc(p.name)}">
-            <input class="fs-p-folder" value="${esc(p.folder || "")}" placeholder="uploads land in (phone/${esc(p.name)})" ${p.kind === "device" ? "" : "hidden"}></td>
+            <input class="fs-p-folder" value="${esc(p.folder || "")}" placeholder="uploads land in (owner's phone/${esc(p.name)})" ${p.kind === "device" ? "" : "hidden"}>
+            ${ownerBox(p)}</td>
         <td><input class="fs-p-url" value="${esc(p.url)}" placeholder="${p.kind === "device" ? "(phones call in; no URL)" : "https://their-box:5000 (empty = no domain)"}" ${p.kind === "device" ? "disabled" : ""}>
             ${routeSel(p)}
             ${p.mailbox_items ? `<div class="fs-why">${p.mailbox_items} item(s), ${(p.mailbox_bytes / 1048576).toFixed(1)} MB waiting for them</div>` : ""}</td>
@@ -201,16 +233,20 @@
       <table class="fs-table"><thead><tr><th>Kind</th><th>Name</th><th>URL</th><th>Their pairing code / key</th><th>On</th><th>Status</th><th></th></tr></thead>
       <tbody>${rows}
         <tr class="fs-new"><td>${kindSel("peer")}</td>
-          <td><input class="fs-p-name" placeholder="mom / my-phone"><input class="fs-p-folder" placeholder="uploads land in" hidden></td>
+          <td><input class="fs-p-name" placeholder="mom / my-phone"><input class="fs-p-folder" placeholder="uploads land in" hidden>
+            ${ownerBox({ kind: "peer", user_id: 0, scope: "personal" })}</td>
           <td><input class="fs-p-url" placeholder="https://their-box:5000 (empty = no domain)">${routeSel({ kind: "peer", route: "", id: 0 })}</td>
           <td><input class="fs-p-key" placeholder="paste their pairing code (or add now, pair later)"></td>
           <td><input class="fs-p-en" type="checkbox" checked></td><td></td>
           <td class="fs-actions"><button class="fs-btn fs-btn-sm fs-p-save">Add</button></td></tr>
       </tbody></table>
       <p class="fs-help"><b>My phone</b> peers are your own devices running the CIM Family app
-      (<a href="/static/app/cim-family.apk" download>download APK</a>, built with the docker image). Their uploads are your own
-      photos: they land in the folder above, get no "from:" tag and flow to family through the rules like anything else.
-      Pair the same way - the app shows its pairing code, and you paste this instance's code into the app.</p>
+      (<a href="/static/app/cim-family.apk" download>download APK</a>, built with the docker image). A phone belongs to an
+      account and acts as it: it sees that account's personal folder only (or everything the account may see), its uploads
+      land in the account's personal folder (or the folder above, when the account may write there) and count against its
+      quota. Users pair their own phones in Settings -&gt; My devices; here you can pair one for anyone. Uploads get no
+      "from:" tag and flow to family through the rules like anything else. Pair the same way - the app shows its pairing
+      code, and you paste this instance's code into the app.</p>
       <p class="fs-help"><b>No domain?</b> Only one instance needs a public URL. Turn on <i>Act as a gateway</i> there;
       everyone else leaves their URL empty and pairs with it. Instances without a URL poll the gateway for waiting items.
       Two of them can still share with each other: pair them directly (exchange pairing codes) and set the route to
@@ -226,12 +262,11 @@
       const q = (c) => tr.querySelector(c);
       const kind = q(".fs-p-kind"); if (kind) kind.addEventListener("change", () => {
         q(".fs-p-folder").hidden = kind.value !== "device"; q(".fs-p-url").disabled = kind.value === "device";
-        q(".fs-p-route").hidden = kind.value === "device"; });
+        q(".fs-p-route").hidden = kind.value === "device"; q(".fs-p-ownerbox").hidden = kind.value !== "device"; });
       const save = q(".fs-p-save"); if (save) save.addEventListener("click", async () => {
         try {
           const raw = q(".fs-p-key").value.trim();
-          const body = { id, name: q(".fs-p-name").value, url: q(".fs-p-url").value, enabled: q(".fs-p-en").checked,
-                         kind: q(".fs-p-kind").value, folder: q(".fs-p-folder").value, ...routeOf(q(".fs-p-route")) };
+          const body = rowBody(q, id);
           if (raw.startsWith("fs1.")) body.pairing_code = raw; else if (raw) body.key_out = raw;
           await post("/peers/save", body);
           toast(id ? "Peer saved" : "Peer added"); await load();
@@ -265,10 +300,7 @@
       });
       const rot = q(".fs-p-rotate"); if (rot) rot.addEventListener("click", async () => {
         if (!confirm("Rotate the key this peer uses to reach me? They will need the new one.")) return;
-        try { await post("/peers/save", { id, name: q(".fs-p-name").value, url: q(".fs-p-url").value,
-          enabled: q(".fs-p-en").checked, kind: q(".fs-p-kind").value, folder: q(".fs-p-folder").value,
-          ...routeOf(q(".fs-p-route")),
-          rotate_key_in: true }); toast("Rotated"); await load(); }
+        try { await post("/peers/save", { ...rowBody(q, id), rotate_key_in: true }); toast("Rotated"); await load(); }
         catch (e) { toast(e.message); }
       });
       const del = q(".fs-p-del"); if (del) del.addEventListener("click", async () => {

@@ -50,6 +50,7 @@ def test_convert_image_roundtrip(tmp_path):
     out = tmp_path / "a.webp"
     assert C.convert_image(str(src), str(out)) is None
     assert Image.open(out).n_frames == 2
-    assert mt.jxl_anim_info(str(out))["animated"] is False   # .webp not a library ext by default
+    # a .webp on disk is a library file whatever uploads are stored as: its frames count
+    assert mt.jxl_anim_info(str(out))["animated"] is True
     png = tmp_path / "b.png"
     assert C.convert_image(str(src), str(png)) is None and Image.open(png).n_frames == 2

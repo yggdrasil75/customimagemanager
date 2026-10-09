@@ -1,6 +1,8 @@
 """! @file
 @brief Pure helpers of the integrity module: the scheduler rule, a throttled
-hash, the sidecar parse check, a video probe and the issue severity order.
+hash, the sidecar parse check, a video probe, the issue severity order and the
+rules the media-tree walk sorts stray files by (leftovers, orphan sidecars,
+reason codes and what auto purge may touch).
 Nothing here touches the app; module.py wires them to the DB and the host.
 """
 import hashlib
@@ -11,7 +13,7 @@ import time
 import xml.etree.ElementTree as ET
 
 ## @brief Issue kinds, most severe first: a file keeps only its worst open issue.
-KINDS = ("missing", "corrupt", "sidecar", "decode")
+KINDS = ("missing", "corrupt", "invalid", "sidecar", "decode", "invalid_row")
 ## @brief Seconds between two cheap-pass ticks of one cycle (the pool stays free for others).
 CHEAP_TICK_GAP = 2.0
 ## @brief Read size of the throttled hash.
@@ -140,3 +142,68 @@ def sidecar_needs_index(side_mtime, row_mtime, seen_side_mtime, last_sync):
     if not side_mtime or seen_side_mtime is None or side_mtime <= float(last_sync or 0):
         return False
     return side_mtime - float(seen_side_mtime) >= 0.01 and side_mtime > float(row_mtime or 0)
+
+
+## @brief Endings of partial downloads, temp files and editor / torrent leftovers.
+TEMP_SUFFIXES = (".part", ".partial", ".crdownload", ".download", ".opdownload", ".filepart",
+                 ".tmp", ".temp", ".!qb", ".!ut", ".dtapart", ".swp")
+## @brief Starts of Office / editor lock and temp files.
+TEMP_PREFIXES = ("~$", "~lock.")
+## @brief Extensions the walk ignores: notes, checksums, other tools' sidecars and data
+# files that are no media and nothing to report.
+BENIGN_EXTS = {".json", ".txt", ".log", ".ini", ".nfo", ".md5", ".sfv", ".sha1", ".sha256",
+               ".url", ".lnk", ".xml", ".db", ".db-wal", ".db-shm", ".db-journal",
+               ".pp3", ".dop", ".on1", ".aae", ".thm"}
+## @brief Reason codes auto purge may act on (anything else is report + manual purge).
+AUTO_PURGE_CODES = ("temp", "zero_byte", "orphan_sidecar")
+## @brief Days a file must be untouched before auto purge takes it.
+AUTO_PURGE_DAYS = 7
+## @brief Human labels of the reason codes (the issue detail starts with the code).
+REASONS = {"unsupported": "unsupported extension", "zero_byte": "zero-byte file",
+           "mislabeled": "extension contradicts content", "undecodable": "does not decode",
+           "temp": "partial / temporary leftover", "orphan_sidecar": "orphan sidecar",
+           "no_decoder": "no decoder installed", "not_library": "not a library kind any more",
+           "bad_dims": "impossible dimensions"}
+
+
+def temp_reason(name):
+    """! @brief Why a file name looks like a partial download / temp leftover, or ''."""
+    low = name.lower()
+    for p in TEMP_PREFIXES:
+        if low.startswith(p):
+            return "temporary file (%s...)" % p
+    for s in TEMP_SUFFIXES:
+        if low.endswith(s):
+            return "partial / temporary file (%s)" % s
+    return ""
+
+
+def is_orphan_sidecar(name, siblings, sidecar_exts=(".xmp", ".txt", ".tracks.json")):
+    """! @brief An .xmp no file in its folder belongs to.
+    @param siblings  every name in the same folder.
+    @note Owners are matched by stem (IMG_1.xmp -> IMG_1.jpg) and by full name
+          (IMG_1.jpg.xmp -> IMG_1.jpg); another sidecar never counts as an owner.
+    """
+    stem = os.path.splitext(name)[0]
+    for other in siblings:
+        if other == name or other.lower().endswith(tuple(sidecar_exts)):
+            continue
+        if other == stem or os.path.splitext(other)[0] == stem:
+            return False
+    return True
+
+
+def detail(code, text):
+    """! @brief An issue detail carrying its reason code: "code: text"."""
+    return "%s: %s" % (code, text)
+
+
+def reason_code(text):
+    """! @brief The reason code an issue detail starts with ('' when none)."""
+    head = str(text or "").split(":", 1)[0].strip()
+    return head if head in REASONS else ""
+
+
+def auto_purge_ok(code, mtime, now, days=AUTO_PURGE_DAYS):
+    """! @brief Auto purge may take this: a leftover kind nobody wants, untouched for `days`."""
+    return code in AUTO_PURGE_CODES and now - float(mtime or 0) >= days * 86400

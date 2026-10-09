@@ -22,13 +22,23 @@ What it does
   device backups.
 
 Pairing
-1. Server -> Settings -> Family share -> add a peer, kind **my phone**, name e.g.
-   `pixel`, choose the library folder its uploads land in.
-2. Click **Pairing code for them**, get the `fs1....` string to the phone (any
+1. Server, signed in as yourself -> Settings -> **My devices** -> add the phone
+   (name e.g. `ann-pixel`; optionally a folder; what it sees: your personal
+   folder only, or everything your account can see). An admin can also pair a
+   phone for any account in Settings -> Family share.
+2. Click **Code for the app**, get the `fs1....` string to the phone (any
    channel; it contains the secret the phone uses to reach the server, so not a
    public forum), paste it in the app, tap **Pair**.
-3. The app shows *its* pairing code (QR + text). Paste it into the peer's row on
+3. The app shows *its* pairing code (QR + text). Paste it into the phone's row on
    the server. Compare the fingerprints. Done.
+
+The phone acts as the account that paired it: the Library tab shows what that
+account may see, uploads land in its personal folder and count against its
+quota, and Settings shows "Paired as <account>". If the account is disabled the
+server refuses the phone and the app says so (backup pauses until it is
+re-enabled); if the account is deleted its phones are removed and must be paired
+again from another account. Phones paired before accounts existed were given to
+the server's first admin and keep working unchanged.
 
 Building
 ```

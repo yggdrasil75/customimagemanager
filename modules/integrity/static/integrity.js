@@ -1,7 +1,8 @@
 /* integrity.js - the Integrity checks settings tab (modules/integrity).
- * The setting fields render themselves; this adds the pass progress, the list of
- * open (or all) issues with Re-check / Open / Accept, "Check everything now" and a
- * link to the Database backups tab for a DB-level restore. */
+ * The setting fields render themselves; this adds the pass progress, the media walk
+ * (files adopted from disk), the list of open (or all) issues with Re-check / Open /
+ * Accept / Purge, "Check everything now", "Purge all invalid" and a link to the
+ * Database backups tab for a DB-level restore. */
 (function () {
   "use strict";
   const TAB = "integrity";
@@ -9,8 +10,11 @@
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const when = (t) => (t ? new Date(t * 1000).toLocaleString() : "never");
-  const KIND_LABEL = { missing: "missing", corrupt: "corrupt", sidecar: "broken sidecar", decode: "does not decode" };
-  const KIND_CLS = { missing: "text-amber-300", corrupt: "text-red-300", sidecar: "text-red-300", decode: "text-amber-300" };
+  const KIND_LABEL = { missing: "missing", corrupt: "corrupt", sidecar: "broken sidecar", decode: "does not decode",
+                       invalid: "invalid file", invalid_row: "invalid row" };
+  const KIND_CLS = { missing: "text-amber-300", corrupt: "text-red-300", sidecar: "text-red-300", decode: "text-amber-300",
+                     invalid: "text-amber-300", invalid_row: "text-amber-300" };
+  const PURGEABLE = { invalid: true, invalid_row: true };
   let showResolved = false;
 
   /** @brief A button through the core's cimButton, with a plain fallback. */
@@ -46,6 +50,8 @@
       '<div class="flex flex-wrap items-center gap-2 mb-2">' +
       btn({ id: "ig_all", label: "Check everything now", variant: "primary",
             title: "Start a quick cycle now and a deep cycle at the next idle moment" }) +
+      btn({ id: "ig_purge_all", label: "Purge all invalid", variant: "danger",
+            title: "Move every invalid file to the trash bin (or .cim/quarantine) and drop invalid rows" }) +
       btn({ id: "ig_backups", label: "Database backups", variant: "neutral",
             title: "Restore the database from a verified copy (Settings -> Database backups)",
             attrs: { "data-gate-keep": "1" } }) +
@@ -56,6 +62,7 @@
       '<div id="ig_list"></div>';
     pane.appendChild(box);
     $("ig_all").addEventListener("click", checkAll);
+    $("ig_purge_all").addEventListener("click", purgeAll);
     $("ig_backups").addEventListener("click", () => {
       if (window.settingsTab) window.settingsTab("module_backup");
       document.dispatchEvent(new CustomEvent("module-settings-tab", { detail: "backup" }));
@@ -83,7 +90,7 @@
     const c = s.counts || {};
     const open = Object.keys(c).map((k) => c[k] + " " + (KIND_LABEL[k] || k)).join(", ") || "none";
     st.innerHTML = passLine("Quick check", s.cheap, s.files) + passLine("Deep check", s.deep, s.files) +
-      "<div>Open issues: " + esc(open) + "</div>" +
+      "<div>Open issues: " + esc(open) + "</div>" + walkLine(s.walk) +
       (s.tier_moving ? '<div class="text-gray-500">A storage-tier move is running; the deep check waits.</div>' : "");
     const backups = !!document.querySelector('[data-settings-tab="module_backup"]');
     const bb = $("ig_backups");
@@ -97,7 +104,12 @@
       esc(when(i.first_seen)) + "</div></td>" +
       '<td class="py-1"><div class="flex gap-1 justify-end">' +
       btn({ label: "Re-check", variant: "neutral", attrs: { "data-act": "recheck" } }) +
-      (i.kind !== "missing" ? btn({ label: "Open", variant: "secondary", attrs: { "data-act": "open", "data-gate-keep": "1" } }) : "") +
+      (i.kind !== "missing" && i.kind !== "invalid" ? btn({ label: "Open", variant: "secondary", attrs: { "data-act": "open", "data-gate-keep": "1" } }) : "") +
+      (!i.resolved && PURGEABLE[i.kind]
+        ? btn({ label: "Purge", variant: "danger", attrs: { "data-act": "purge" },
+                title: i.kind === "invalid_row" ? "Drop the row (the file stays and is indexed again if valid)"
+                                                : "Move the file to the trash bin (or .cim/quarantine)" })
+        : "") +
       (!i.resolved && i.kind !== "missing"
         ? btn({ label: i.kind === "corrupt" ? "Accept" : "Dismiss", variant: "warn", attrs: { "data-act": "accept" },
                 title: i.kind === "corrupt" ? "The change was intentional: store the file's new hash"
@@ -110,6 +122,37 @@
         "</tr></thead><tbody>" + rows + "</tbody></table>"
       : '<p class="text-xs text-gray-500">No issues found.</p>';
     if (window.CIMFeatures) CIMFeatures.apply($("ig_tools"));
+  }
+
+  /** @brief The media walk's line: files adopted from disk, the last walk's counts. */
+  function walkLine(w) {
+    if (!w) return "";
+    const last = w.last || {};
+    let t = "Media walk: " + (w.in_cycle ? "running" + (w.dir ? " in " + w.dir : "") : "last finished " + when(last.finished)) +
+      "; adopted from disk " + (w.adopted_total || 0) + " (last walk " + (last.adopted || 0) + ")" +
+      (w.auto_purge ? ", auto purged " + (w.auto_purged_total || 0) : ", auto purge off");
+    const recent = (w.recent_adopted || []).slice(-5);
+    if (recent.length) t += ". Recently adopted: " + recent.join(", ");
+    return "<div>" + esc(t) + "</div>";
+  }
+
+  /** @brief Show what a purge did. */
+  function purgeMsg(d) {
+    if (!d.success && !(d.purged || []).length) return "Failed: " + (d.error || ((d.errors || [])[0] || {}).error || "error");
+    const to = (d.purged || []).map((p) => p.to);
+    const trash = to.filter((t) => t === "trash").length;
+    const q = to.filter((t) => t && t.indexOf(".cim/quarantine") === 0);
+    return "Purged " + to.length + (trash ? ", " + trash + " to the trash bin" : "") +
+      (q.length ? ", " + q.length + " to " + q[0].split("/").slice(0, 3).join("/") : "") +
+      ((d.errors || []).length ? ", " + d.errors.length + " failed" : "") + ".";
+  }
+
+  /** @brief "Purge all invalid". */
+  async function purgeAll() {
+    if (!confirm("Purge every open invalid file and invalid row?\n\nFiles go to the trash bin " +
+                 "(or .cim/quarantine without it); rows are dropped and valid files indexed again.")) return;
+    msg(purgeMsg(await post("/api/integrity/purge", { kind: "all" })));
+    refresh();
   }
 
   /** @brief Reload the tab's data. */
@@ -146,6 +189,9 @@
       if (window.closeSettings) window.closeSettings();
       if (window.selectFile) window.selectFile(rel);
       return;
+    } else if (act === "purge") {
+      if (!confirm("Purge " + rel + "?")) return;
+      msg(purgeMsg(await post("/api/integrity/purge", { rel_paths: [rel] })));
     } else if (act === "accept") {
       const kind = tr.getAttribute("data-kind");
       if (kind === "corrupt" && !confirm("Accept the current content of " + rel + "?\n\n" +

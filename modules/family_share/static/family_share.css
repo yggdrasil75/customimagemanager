@@ -30,7 +30,7 @@
 .fs-chk { display: inline-flex; align-items: center; gap: 3px; margin-right: 8px; white-space: nowrap; }
 .fs-r-peers { max-width: 260px; }
 .fs-r-reccell { margin-top: 3px; font-size: 11px; opacity: .8; }
-.fs-status .fs-ok { color: var(--cim-ok-600, #16a34a); }
+.fs-status .fs-ok, .fs-why .fs-ok { color: var(--cim-ok-600, #16a34a); }
 .fs-err { color: var(--cim-danger-500, #ef4444); }
 .fs-keybox { margin: 6px 0; padding: 8px; border: 1px dashed color-mix(in srgb, var(--cim-gray-500, #808080) 40%, transparent); border-radius: 6px;
   display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }

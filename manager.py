@@ -32,6 +32,8 @@ import object_grouping as og
 import model_registry
 import common
 import media_types as mt
+# Settings > Media: filename cleanup (the storage format per kind, media_storage,
+# is declared by the encoding module).
 modules.config.declare("filename_cleanup", default=dict(mt.DEFAULT_FILENAME_PREFS),
                        owner="core", validate=mt.clean_filename_prefs,
                        on_change=lambda new, old: mt.set_filename_prefs(new))
@@ -1224,6 +1226,12 @@ def _decode_jxl_uncached(path: str) -> np.ndarray | None:
         is_container = data[4:8] == b'JXL '
         if is_bare or is_container:
             img = imagecodecs.jpegxl_decode(data)
+        elif mt.is_raw(path):
+            # a camera raw found on disk is shown in place (indexed only with rawpy)
+            img = mt.decode_raw(path)
+            if img is None:
+                access_logger.warning(f"read_jxl: raw not decodable ({mt.missing_decoder(path) or 'rawpy failed'}): {path}")
+                return None
         else:
             # natively stored images (Settings > Media)
             try:
@@ -1504,7 +1512,10 @@ def _build_index_background():
     module_host.emit("library.reconcile")
 
 def _enumerate_library():
-    """! @brief Every library file's rel_path (sidecars, thumbnails and tier stores excluded)."""
+    """! @brief Every library file's rel_path (sidecars, thumbnails and tier stores excluded).
+    Any readable kind is listed (mt.is_library_file), also files put there outside the
+    app in a format uploads are not stored as: they are indexed in place, unconverted.
+    """
     seen = set()
     for root, dirs, filenames in os.walk(MEDIA_DIR):
         dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'runs'
@@ -7642,6 +7653,7 @@ module_host._current_module = "metadata"
 modules.metadata.register(module_host)
 module_host._current_module = "encoding"
 modules.encoding.register(module_host)
+## @brief Storage policy and encoders (Settings -> Media), from the core encoding module.
 media_encoding = module_host.get_service("encoding")
 module_host._current_module = "threading"
 modules.threading.register(module_host)

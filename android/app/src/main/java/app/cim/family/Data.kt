@@ -52,6 +52,9 @@ class Prefs(ctx: Context) {
     var serverPub: ByteArray? get() = p.getString("srv_pub", null)?.let { Crypto.b64d(it) }; set(v) = p.edit().putString("srv_pub", v?.let { Crypto.b64e(it) }).apply()
     var serverKey: String get() = p.getString("srv_key", "") ?: ""; set(v) = p.edit().putString("srv_key", v).apply()
     var serverId: String get() = p.getString("srv_id", "") ?: ""; set(v) = p.edit().putString("srv_id", v).apply()
+    // the server account this phone acts as (from /ping; empty on servers without accounts)
+    var accountName: String get() = p.getString("srv_account", "") ?: ""; set(v) = p.edit().putString("srv_account", v).apply()
+    var accountScope: String get() = p.getString("srv_scope", "") ?: ""; set(v) = p.edit().putString("srv_scope", v).apply()
     val paired: Boolean get() = serverUrl.isNotEmpty() && serverPub != null && serverKey.isNotEmpty()
 
     var wifiOnly: Boolean get() = p.getBoolean("wifi_only", true); set(v) = p.edit().putBoolean("wifi_only", v).apply()
@@ -71,7 +74,12 @@ class Prefs(ctx: Context) {
 
     fun myPairingCode(): String = Crypto.makePairingCode(deviceName, "", publicKey, keyIn, deviceId)
 
-    fun unpair() { p.edit().remove("srv_name").remove("srv_url").remove("srv_pub").remove("srv_key").remove("srv_id").apply() }
+    /** @brief "Paired as <account> (...)" for the Settings screen, or "" when unknown. */
+    fun accountLabel(): String = if (accountName.isEmpty()) "" else
+        "Paired as $accountName" + (if (accountScope == "all") " (sees everything that account can see)" else " (sees that account's personal folder only)")
+
+    fun unpair() { p.edit().remove("srv_name").remove("srv_url").remove("srv_pub").remove("srv_key").remove("srv_id")
+        .remove("srv_account").remove("srv_scope").apply() }
 }
 
 /** @brief Local bookkeeping: which MediaStore items are uploaded, and per-bucket policy. */
@@ -147,7 +155,13 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "cim_family.db", null, 2) {
     }
 }
 
-class ApiException(msg: String) : Exception(msg)
+open class ApiException(msg: String) : Exception(msg)
+
+/** @brief The server refuses this phone's account (disabled, deleted, no owner, not
+ *  permitted): retrying will not help until someone changes it on the server. */
+class AccountException(msg: String) : ApiException(msg)
+
+private val ACCOUNT_CODES = setOf("account_disabled", "account_deleted", "no_owner", "forbidden")
 
 /** @brief Talks to the paired server. Every push is sealed to the server's pinned
  *  key; every read comes back sealed to ours. */
@@ -167,6 +181,12 @@ class Api(private val prefs: Prefs) {
     private fun check(r: okhttp3.Response): okhttp3.Response {
         if (r.code == 401) throw ApiException("server rejected us as '${prefs.deviceName}': that name must match the peer row on the server and the key must be from the server's current pairing code - re-paste it")
         if (r.code == 404) throw ApiException("server has no family_share endpoint (module off?)")
+        if (r.code == 403) {
+            val j = try { JSONObject(r.body?.string() ?: "") } catch (e: Exception) { JSONObject() }
+            val msg = j.optString("error", "refused by the server")
+            if (j.optString("error_code") in ACCOUNT_CODES) throw AccountException(msg)
+            throw ApiException("server answered 403: $msg")
+        }
         if (r.code >= 400) {
             val body = try { JSONObject(r.body?.string() ?: "").optString("error") } catch (e: Exception) { "" }
             throw ApiException("server answered ${r.code}: $body")
@@ -181,8 +201,13 @@ class Api(private val prefs: Prefs) {
         return opener.openBytes(data) to (r.header("X-Family-Mime") ?: "application/octet-stream")
     }
 
+    /** @brief Reachability + key check; also records which account the server runs us as. */
     fun ping(): JSONObject = http.newCall(req("/ping").get().build()).execute().use { r ->
-        JSONObject(check(r).body!!.string())
+        JSONObject(check(r).body!!.string()).also { j ->
+            val a = j.optJSONObject("account")
+            prefs.accountName = if (a == null) "" else a.optString("display_name").ifEmpty { a.optString("username") }
+            prefs.accountScope = if (a == null) "" else a.optString("scope")
+        }
     }
 
     data class PushResult(val stored: Boolean, val updated: Boolean, val duplicate: Boolean, val declined: Boolean,

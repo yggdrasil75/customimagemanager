@@ -38,7 +38,7 @@ if _HAVE_PILLOW_HEIF:  # lets Pillow open .heic
     pillow_heif.register_heif_opener()
 
 # Stills cjxl turns into a single-frame .jxl.
-STILL_INPUT_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp'}
+STILL_INPUT_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.avif'}
 
 # Animated inputs cjxl turns into an animated .jxl.
 ANIMATED_INPUT_EXTS = {'.gif', '.apng'}
@@ -60,6 +60,16 @@ def is_raw(path: str) -> bool:
 # HEIF stills: decoded with pillow-heif to a 16-bit PNG (profile kept), then cjxl.
 HEIF_INPUT_EXTS = {'.heic', '.heif', '.hif'}
 HEIF_BRANDS = {b'heic', b'heix', b'hevc', b'hevx', b'heim', b'heis', b'hevm', b'hevs', b'mif1', b'msf1'}
+# AV1 still / sequence brands; checked before the generic mif1 / msf1 HEIF brands
+AVIF_BRANDS = {b'avif', b'avis'}
+
+
+def _ftyp_brands(head: bytes) -> list:
+    """! @brief The major and compatible brands of a leading ISO-BMFF 'ftyp' box."""
+    if len(head) < 16 or head[4:8] != b'ftyp':
+        return []
+    size = min(int.from_bytes(head[:4], 'big'), len(head))
+    return [head[8:12]] + [head[i:i + 4] for i in range(16, size - 3, 4)]
 
 def is_heif(path: str) -> bool:
     return _ext(path) in HEIF_INPUT_EXTS
@@ -153,9 +163,34 @@ def UPLOAD_EXTS_now():
 
 
 def LIBRARY_EXTS_now():
-    """! @brief Extensions of stored library files (core kinds plus module kinds)."""
-    return (stored_image_exts() | VIDEO_EXTS
+    """! @brief Extensions the library indexes (core kinds plus module kinds): every
+    readable kind found on disk, not only what an upload is stored as."""
+    return (library_image_exts() | VIDEO_EXTS
             | registered_exts("unambiguous_exts"))
+
+
+def library_image_exts():
+    """! @brief Image extensions the library indexes in place, whatever the storage
+    policy turns uploads into: every still and animation the app decodes, HEIF with
+    pillow-heif, camera raws with rawpy, plus the policy's own stored_image_exts()."""
+    out = stored_image_exts() | STILL_INPUT_EXTS | ANIMATED_INPUT_EXTS | {'.jxl'}
+    if _HAVE_PILLOW_HEIF:
+        out |= HEIF_INPUT_EXTS
+    if _HAVE_RAWPY:
+        out |= RAW_INPUT_EXTS
+    return out
+
+
+def missing_decoder(path: str):
+    """! @brief Why a known image file cannot be decoded on this install, or None.
+    @return "rawpy not installed" for a camera raw, "pillow-heif not installed" for
+            HEIF, None when its decoder is present (or it is not one of those).
+    """
+    if is_raw(path) and not _HAVE_RAWPY:
+        return "rawpy not installed"
+    if is_heif(path) and not _HAVE_PILLOW_HEIF:
+        return "pillow-heif not installed"
+    return None
 
 
 # Live names, recomputed through __getattr__ as modules register kinds.
@@ -198,7 +233,7 @@ def is_jxl(path: str) -> bool:
     return _ext(path) == '.jxl'
 
 def is_library_file(path: str) -> bool:
-    """! @brief True for a stored library file."""
+    """! @brief True for a file the library indexes (see LIBRARY_EXTS_now)."""
     return _ext(path) in LIBRARY_EXTS_now()
 
 def is_animated_input(path: str) -> bool:
@@ -219,7 +254,7 @@ def jxl_anim_info(path: str) -> dict:
     @return a still ({"animated": False}) on any error.
     """
     default = {'animated': False, 'duration': None, 'n_frames': None}
-    if _ext(path) not in stored_image_exts():
+    if _ext(path) not in library_image_exts() - RAW_INPUT_EXTS - HEIF_INPUT_EXTS:
         return dict(default)
     try:
         key = (path, os.path.getmtime(path))
@@ -459,7 +494,7 @@ def sniff_ext(path: str) -> str | None:
     """
     try:
         with open(path, 'rb') as f:
-            head = f.read(16)
+            head = f.read(64)
     except Exception:
         return None
     if len(head) < 4:
@@ -472,7 +507,10 @@ def sniff_ext(path: str) -> str | None:
     if head[:4] == b'RIFF' and head[8:12] == b'WEBP':    return '.webp'
     if head[:2] == b'\xff\x0a' or head[:12] == \
        b'\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a':          return '.jxl'
-    # HEIF shares MP4's 'ftyp' box; the brand tells them apart.
+    # AVIF and HEIF share MP4's 'ftyp' box; the brands tell them apart (an AVIF may
+    # carry the generic mif1 major brand with avif among its compatible brands)
+    brands = _ftyp_brands(head)
+    if AVIF_BRANDS & set(brands):                        return '.avif'
     if head[4:8] == b'ftyp' and head[8:12] in HEIF_BRANDS: return '.heic'
     if head[4:8] == b'ftyp':                             return '.mp4'
     if head[:4] == b'\x1a\x45\xdf\xa3':                  return '.mkv'  # also .webm
@@ -633,6 +671,8 @@ def video_sample_frames(path: str, n: int = 8, max_dim: int = 256) -> "list[np.n
             frames.append(f)
     return frames
 
+## @brief rawpy postprocess() options used when none are given: camera white
+# balance, 16 bits, no auto brightness.
 RAW_DEFAULT_OPTIONS = {'use_camera_wb': True, 'output_bps': 16, 'no_auto_bright': True}
 
 
@@ -654,6 +694,19 @@ def develop_raw(raw_path: str, out_png_path: str, options=None) -> bool:
         return bool(cv2.imwrite(out_png_path, bgr))
     except Exception:
         return False
+
+def decode_raw(path: str):
+    """! @brief A camera raw as 8-bit RGB for display and indexing (rawpy half-size
+    develop, camera white balance): a raw found on disk is shown in place.
+    @return the (h, w, 3) uint8 array, or None without rawpy or on failure. Never raises.
+    """
+    if not _HAVE_RAWPY:
+        return None
+    try:
+        with rawpy.imread(path) as raw:
+            return raw.postprocess(use_camera_wb=True, half_size=True, output_bps=8)
+    except Exception:
+        return None
 
 def png_insert_chunks(png_path: str, chunks) -> None:
     """! @brief Insert (type, data) chunks right after a PNG's IHDR."""

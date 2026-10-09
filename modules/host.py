@@ -48,6 +48,11 @@ class Host:
 
         self.config_registry = config_registry
         self.core = core
+        # account lifecycle from the auth core arrives as module events
+        # (user.deleted / user.disabled: user_id, username)
+        authmgr = getattr(core, "authmgr", None)
+        if authmgr is not None and hasattr(authmgr, "user_hooks"):
+            authmgr.user_hooks.append(lambda event, **kw: self.emit(event, **kw))
         self.media = media
 
         # -- contributions, read back by manager.py after loading --

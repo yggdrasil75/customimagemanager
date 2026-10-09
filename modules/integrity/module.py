@@ -1,33 +1,10 @@
 """! @file
 @brief Integrity checks: notice external changes and silent corruption without a Sync.
 
-Two background passes walk the `files` rows through the thread manager:
-
-  * the cheap pass (a batch of `integrity_cheap_batch` rows per tick, one full
-    cycle at most every `integrity_cheap_minutes`) stats each file and its
-    sidecar, following tier symlinks: a file gone from disk is marked
-    "missing" (its rows stay - purging is Sync's job), a changed size / mtime
-    re-indexes it through the core (`index_file`), and a sidecar edited
-    outside the app re-indexes it too. A sidecar that does not parse is
-    marked "sidecar" and the file is not re-indexed from it.
-  * the deep pass (only while the server is idle and no tier move runs, one
-    cycle every `integrity_deep_days`, reading at most
-    `integrity_deep_mb_per_s`) re-hashes each file and compares it with
-    `files.sha256`: a different hash with an unchanged size and mtime is
-    silent corruption ("corrupt"); at a lower rate it also decodes images /
-    ffprobes videos that decoded at index time ("decode") and parses the
-    sidecar ("sidecar"). Broken sidecars are reported, never rewritten.
-
-Both cursors live in the `integrity_meta` cache table, so a restart resumes
-where the pass stopped. Issues live in `integrity_issues` (state): one row per
-file with its worst open issue; a file that checks clean again gets its issue
-marked resolved. New issues raise an admin notification (one per kind and
-batch). Settings -> Integrity checks (Admin group) lists them with Re-check,
-Open, Accept (a corrupt file: store the new hash after the admin confirms the
-change was intentional; other kinds: dismiss) and a link to Database backups;
-Settings -> Info gets a summary section.
 """
+import json
 import os
+import shutil
 import threading
 import time
 
@@ -57,6 +34,19 @@ DEEP_JOB_SECONDS = 20.0
 DECODE_EVERY_CYCLES = 3
 ## @brief Resolved issues older than this many days are deleted.
 KEEP_RESOLVED_DAYS = 30
+## @brief Directory entries the media walk looks at per tick.
+WALK_ENTRIES = 1000
+## @brief Seconds one walk tick may run.
+WALK_SECONDS = 10.0
+## @brief Files modified less than this many seconds ago are left for the next cycle
+# (an upload or a copy still in progress).
+WALK_MIN_AGE = 60.0
+## @brief Where purged files go when no trash module claims them (under the media dir).
+QUARANTINE_DIR = os.path.join(".cim", "quarantine")
+## @brief Issue kinds the Purge action handles.
+PURGEABLE = ("invalid", "invalid_row")
+## @brief Adopted files remembered for the tab.
+RECENT_ADOPTED = 20
 
 DEFAULTS = {
     "integrity_enabled": True,
@@ -66,6 +56,7 @@ DEFAULTS = {
     "integrity_deep_days": 30,
     "integrity_deep_mb_per_s": 20,
     "integrity_notify": True,
+    "integrity_auto_purge": False,
 }
 
 _DDL_ISSUES = """
@@ -96,9 +87,11 @@ CREATE TABLE IF NOT EXISTS integrity_meta (
 );
 """
 
-_LEVEL = {"missing": "warn", "corrupt": "error", "sidecar": "error", "decode": "warn"}
+_LEVEL = {"missing": "warn", "corrupt": "error", "sidecar": "error", "decode": "warn",
+          "invalid": "warn", "invalid_row": "warn"}
 _TITLE = {"missing": "Files missing from disk", "corrupt": "Files changed without a new date (corruption?)",
-          "sidecar": "Broken XMP sidecars", "decode": "Files that no longer decode"}
+          "sidecar": "Broken XMP sidecars", "decode": "Files that no longer decode",
+          "invalid": "Invalid files in the media folder", "invalid_row": "Invalid library rows"}
 
 
 def _bool(v):
@@ -134,6 +127,7 @@ def register(host):
         "integrity_deep_days": _num(0.01, 3650, float),
         "integrity_deep_mb_per_s": _num(0, 10000, float),
         "integrity_notify": _bool,
+        "integrity_auto_purge": _bool,
     }
     for key, dflt in DEFAULTS.items():
         host.add_config_key(key, default=dflt, validate=validators[key], tab=TAB)
@@ -155,6 +149,11 @@ def register(host):
                             kind="number", pane=TAB)
     host.add_settings_field(key="integrity_notify", label="Notify admins about new issues",
                             kind="toggle", pane=TAB)
+    host.add_settings_field(key="integrity_auto_purge", label="Auto purge leftovers",
+                            kind="toggle", pane=TAB,
+                            help="Partial / temp downloads, empty files and orphan .xmp sidecars that "
+                                 "are not in the library and untouched for 7 days go to the trash bin "
+                                 "(or .cim/quarantine). Everything else is only reported.")
 
     def cfg(key):
         """! @brief A setting through its validator, falling back to the default."""
@@ -260,9 +259,308 @@ def register(host):
             return {"active": False, "rel": None}
 
     def files_row(rel):
-        """! @brief The files row's mtime / sha256 / width / media_kind, or None."""
-        return host.db().execute("SELECT rel_path, mtime, sha256, width, media_kind FROM files "
+        """! @brief The files row's mtime / sha256 / width / height / media_kind, or None."""
+        return host.db().execute("SELECT rel_path, mtime, sha256, width, height, media_kind FROM files "
                                  "WHERE rel_path=?", (rel,)).fetchone()
+
+    # -- invalid files and rows --------------------------------------------------------
+    def check_row(rel, fp, st, seen, new, now, fresh):
+        """! @brief DB-side invalid data of an indexed file: a row whose file is no library
+        kind any more, an empty file, an image indexed as 0x0 (decoded once per change:
+        it decodes = "invalid_row", it does not = "invalid").
+        @param fresh  the file was just re-indexed (decode the 0x0 row again).
+        """
+        media = host.media
+        r = files_row(rel)
+        if r is None:
+            return
+        ext = os.path.splitext(rel)[1].lower()
+        found = None
+        if not (media.is_library_file(rel) or ext in media.registered_exts("exts")):
+            why = media.missing_decoder(rel)
+            found = ("invalid_row", checks.detail(
+                "not_library", "%s files are not indexed on this install%s"
+                % (ext or "extension-less", " (%s)" % why if why else "")))
+        elif st.st_size == 0:
+            found = ("invalid", checks.detail("zero_byte", "the file is empty (0 bytes)"))
+        elif ((r["media_kind"] or media.kind(rel)) == "image" and media.is_image(rel)
+              and ((r["width"] or 0) <= 0 or (r["height"] or 0) <= 0)):
+            if not (fresh or not seen.get("decode_at")):
+                return  # tested since its last change: keep what was found then
+            remember(rel, decode_at=now)
+            try:
+                img = core.read_image(fp)
+            except Exception:
+                img = None
+            if img is not None:
+                found = ("invalid_row", checks.detail(
+                    "bad_dims", "indexed as %sx%s but the image decodes as %dx%d; purge the row "
+                    "to index it again" % (r["width"], r["height"], img.shape[1], img.shape[0])))
+            else:
+                found = ("invalid", checks.detail("undecodable", "indexed as a stub: the image "
+                                                                 "does not decode"))
+        if found:
+            if flag(rel, found[0], found[1], now):
+                new.setdefault(found[0], []).append(rel)
+        else:
+            clear(rel, ["invalid", "invalid_row"], now)
+
+    def own_sidecars(fp):
+        """! @brief The sidecars of an indexed file, when no other file shares its stem."""
+        media = host.media
+        d, name = os.path.split(fp)
+        stem = os.path.splitext(name)[0]
+        try:
+            names = os.listdir(d)
+        except OSError:
+            return []
+        side = tuple(media.SIDECAR_EXTS)
+        if any(n != name and os.path.splitext(n)[0] == stem and not n.lower().endswith(side)
+               for n in names):
+            return []
+        out = []
+        for e in media.SIDECAR_EXTS:
+            p = os.path.join(d, stem + e)
+            if p != fp and os.path.exists(p):
+                out.append(p)
+        return out
+
+    def quarantine(rel, members):
+        """! @brief Move `members` to <media>/.cim/quarantine/<date>/<rel folder>/ (names kept,
+        " (n)" added on a clash). @return the folder, relative to the media dir."""
+        sub = os.path.join(QUARANTINE_DIR, time.strftime("%Y-%m-%d"), os.path.dirname(rel))
+        dest_dir = os.path.join(host.media_dir, sub)
+        os.makedirs(dest_dir, exist_ok=True)
+        for m in members:
+            if not os.path.lexists(m):
+                continue
+            stem, ext = os.path.splitext(os.path.basename(m))
+            dest, n = os.path.join(dest_dir, stem + ext), 1
+            while os.path.lexists(dest):
+                dest = os.path.join(dest_dir, "%s (%d)%s" % (stem, n, ext))
+                n += 1
+            shutil.move(m, dest)
+        return sub.replace(os.sep, "/")
+
+    def purge_one(rel, now=None, why="manual"):
+        """! @brief Purge one invalid file or row.
+        An invalid row: its DB rows go (purge_file_everywhere); the file stays. An invalid
+        file: moved to the trash bin through the `file.trash` event (the trash module claims
+        it; unlike delete_file this never removes a file for good and never takes a
+        same-stem sibling along), else quarantined; an indexed file's rows are purged too.
+        @return (where, error): "trash", "rows", "gone" or the quarantine folder.
+        """
+        now = now or time.time()
+        issue = host.db().execute("SELECT kind, detail FROM integrity_issues WHERE rel_path=? "
+                                  "AND resolved IS NULL", (rel,)).fetchone()
+        row = files_row(rel)
+        fp = host.safe_path(host.media_dir, rel)
+        if not fp:
+            return None, "unsafe path"
+        if issue is not None and issue["kind"] == "invalid_row":
+            core.purge_file_everywhere(rel)
+            where = "rows"
+        elif not os.path.lexists(fp):
+            if row is not None:
+                core.purge_file_everywhere(rel)
+            where = "gone"
+        else:
+            members = [fp] + (own_sidecars(fp) if row is not None else [])
+            claimed = any(host.emit("file.trash", rel_path=rel, abs_path=fp, members=list(members)))
+            where = "trash" if claimed else quarantine(rel, members)
+            if row is not None:
+                core.thumb_drop(rel)
+                core.purge_file_everywhere(rel)  # file.deleted drops the issue rows
+        if issue is not None and row is None:
+            host.update_file(rel, table="integrity_issues",
+                             set={"resolved": now, "detail": "%s [purged (%s) to %s]"
+                                  % (issue["detail"], why, where)}, dont_write=True)
+        core.audit("integrity_purge", f"file={rel!r} to={where} ({why})")
+        return where, ""
+
+    def record_adopted(stats, rel):
+        """! @brief Count an adopted file in the cycle's stats."""
+        stats["adopted"] = stats.get("adopted", 0) + 1
+        recent = stats.setdefault("recent", [])
+        recent.append(rel)
+        del recent[:-RECENT_ADOPTED]
+
+    def examine_file(rel, fp, st, names, new, stats, now, auto):
+        """! @brief Sort out one file the walk found: adopt it, report it, or leave it.
+        @param names  every name in its folder (the orphan sidecar test).
+        @param auto   auto purge is on: eligible leftovers are purged instead of reported.
+        @return "adopted" | "invalid" | "purged" | "indexed" (it has a row) | "ignored".
+        """
+        media = host.media
+        name = os.path.basename(rel)
+        low = name.lower()
+        ext = os.path.splitext(low)[1]
+        if low.startswith(("library.db", "thumbs.db")):
+            return "ignored"
+        code, text = "", ""
+        temp = checks.temp_reason(name)
+        if temp:
+            code, text = "temp", temp
+        elif ext == ".xmp":
+            if not checks.is_orphan_sidecar(name, names, media.SIDECAR_EXTS):
+                return "ignored"
+            code, text = "orphan_sidecar", "no file named %s.* next to it" % os.path.splitext(name)[0]
+        elif low.endswith(tuple(media.SIDECAR_EXTS)) or ext in checks.BENIGN_EXTS:
+            return "ignored"
+        elif files_row(rel) is not None:
+            return "indexed"  # rows are the row pass's job
+        elif not (ext in media.IMAGE_EXTS or ext in media.VIDEO_EXTS or media.is_raw(name)):
+            if ext in media.registered_exts("exts"):
+                return "ignored"  # a module's kind (audio, books): its own scan
+            code, text = "unsupported", "unsupported extension %s" % (ext or "(none)")
+        elif st.st_size == 0:
+            code, text = "zero_byte", "the file is empty (0 bytes)"
+        elif media.missing_decoder(name):
+            code, text = "no_decoder", "%s: install it to index this file" % media.missing_decoder(name)
+        elif not media.is_library_file(name):
+            code, text = "unsupported", "%s files are not indexed on this install" % ext
+        else:
+            sniffed = None if media.is_raw(name) else media.sniff_ext(fp)
+            if sniffed and not media.ext_matches(ext, sniffed):
+                code, text = "mislabeled", "named %s but the content is %s" % (ext, sniffed)
+            else:
+                err = ""
+                if media.is_video(name):
+                    err = checks.video_error(fp)
+                else:
+                    try:
+                        if core.read_image(fp) is None:
+                            err = "the image does not decode"
+                    except Exception as e:
+                        err = "the image does not decode: %s" % e
+                if err:
+                    code, text = "undecodable", err
+                else:
+                    try:
+                        core.index_file(rel, force=True)
+                    except Exception as e:
+                        log.warning(f"integrity: adopt {rel}: {e}")
+                    if files_row(rel) is None:
+                        code, text = "undecodable", "the core could not index it"
+                    else:
+                        clear(rel, ["invalid"], now)
+                        record_adopted(stats, rel)
+                        log.info(f"integrity: adopted {rel} (found on disk, indexed in place)")
+                        return "adopted"
+        if auto and checks.auto_purge_ok(code, st.st_mtime, now):
+            where, err = purge_one(rel, now, why="auto")
+            if not err:
+                stats["auto_purged"] = stats.get("auto_purged", 0) + 1
+                log.info(f"integrity: auto purged {rel} ({code}) to {where}")
+                return "purged"
+        if flag(rel, "invalid", checks.detail(code, text), now):
+            new.setdefault("invalid", []).append(rel)
+        stats["invalid"] = stats.get("invalid", 0) + 1
+        return "invalid"
+
+    # -- the media walk ------------------------------------------------------------------
+    def skip_dir(parent, name):
+        """! @brief Folders the walk never enters (as the core's library walk)."""
+        tier_dir = getattr(getattr(core, "tiering", None), "OBJECT_DIR", None)
+        return (name.startswith(".") or name == "runs" or name == tier_dir
+                or (parent == "" and name == "branding"))
+
+    def walk_new(root=""):
+        """! @brief A fresh walk state for the tree under `root` (rel folder, "" = everything)."""
+        return {"root": root, "pending": [root], "dir": None, "after": "", "started": time.time(),
+                "stats": {}}
+
+    def walk_tick(ws, new, now, min_age=WALK_MIN_AGE, entries_max=WALK_ENTRIES, heavy_max=None):
+        """! @brief Walk on from the state's cursor until a budget runs out.
+        @return True when the tree is done.
+        """
+        heavy_max = heavy_max or cfg("integrity_cheap_batch")
+        auto = cfg("integrity_auto_purge")
+        entries = heavy = 0
+        stop_at = time.time() + WALK_SECONDS
+        while True:
+            if ws["dir"] is None:
+                if not ws["pending"]:
+                    return True
+                ws["dir"], ws["after"] = ws["pending"].pop(), ""
+            d = ws["dir"]
+            absd = host.safe_path(host.media_dir, d) if d else os.path.abspath(host.media_dir)
+            try:
+                ents = sorted(os.scandir(absd), key=lambda e: e.name) if absd else []
+            except OSError:
+                ents = []
+            names = {e.name for e in ents}
+            for e in ents:
+                if e.name <= ws["after"]:
+                    continue
+                if entries >= entries_max or heavy >= heavy_max or time.time() > stop_at:
+                    return False
+                entries += 1
+                ws["after"] = e.name
+                rel = (d + "/" + e.name) if d else e.name
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        if not skip_dir(d, e.name):
+                            ws["pending"].append(rel)
+                        continue
+                    if e.name.startswith(".") or not e.is_file():
+                        continue
+                    st = e.stat()  # follows a tier link to its object
+                except OSError:
+                    continue
+                if now - st.st_mtime < min_age:
+                    continue  # still being written / uploaded: next cycle
+                try:
+                    res = examine_file(rel, e.path, st, names, new, ws["stats"], now, auto)
+                except Exception as ex:
+                    log.warning(f"integrity: walk {rel}: {ex}")
+                    res = "invalid"
+                if res not in ("ignored", "indexed"):
+                    heavy += 1
+            ws["dir"] = None
+
+    def walk_finish(ws):
+        """! @brief A walk is done: resolve unindexed "invalid" issues it did not see again
+        (renamed, removed, fixed) and store the cycle's counts."""
+        root = ws.get("root") or ""
+        where = "kind='invalid' AND resolved IS NULL AND last_seen < ? " \
+                "AND rel_path NOT IN (SELECT rel_path FROM files)"
+        params = [ws["started"]]
+        if root:
+            where += " AND rel_path LIKE ? ESCAPE '\\'"
+            params.append(root.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "/%")
+        host.update_file(table="integrity_issues", where=(where, tuple(params)),
+                         set={"resolved": time.time()}, dont_write=True)
+        s = ws.get("stats") or {}
+        def total(k):
+            """! @brief A running total in integrity_meta."""
+            try:
+                return int(meta_get(k) or 0)
+            except ValueError:
+                return 0
+        recent = []
+        try:
+            recent = json.loads(meta_get("walk_recent") or "[]")
+        except ValueError:
+            pass
+        recent = (recent + s.get("recent", []))[-RECENT_ADOPTED:]
+        meta_set({"walk_adopted_total": total("walk_adopted_total") + s.get("adopted", 0),
+                  "walk_purged_total": total("walk_purged_total") + s.get("auto_purged", 0),
+                  "walk_last": json.dumps({"adopted": s.get("adopted", 0), "invalid": s.get("invalid", 0),
+                                           "auto_purged": s.get("auto_purged", 0), "root": root,
+                                           "finished": time.time()}),
+                  "walk_recent": json.dumps(recent)})
+        return s
+
+    def scan(folder="", min_age=0.0):
+        """! @brief Walk the tree under `folder` to the end now (tests, the Scan button).
+        @return the walk's counts {adopted, invalid, auto_purged, recent}.
+        """
+        ws, new = walk_new(str(folder or "").strip("/")), {}
+        while not walk_tick(ws, new, time.time(), min_age=min_age, entries_max=10 ** 9, heavy_max=10 ** 9):
+            pass
+        notify(new)
+        return walk_finish(ws)
 
     # -- the checks ----------------------------------------------------------------
     def check_cheap(rel, row, new, now, since):
@@ -317,6 +615,10 @@ def register(host):
                 pass
         if (seen.get("size"), seen.get("mtime"), seen.get("side_mtime")) != (st.st_size, st.st_mtime, side_m):
             remember(rel, size=st.st_size, mtime=st.st_mtime, side_mtime=side_m, cheap_at=now)
+        try:
+            check_row(rel, fp, st, seen, new, now, fresh=force is not None)
+        except Exception as e:
+            log.warning(f"integrity: row check {rel}: {e}")
         return result
 
     def check_deep(rel, new, now, mb_per_s=None, abort=None, decode=None):
@@ -398,7 +700,26 @@ def register(host):
         """! @brief One cheap-pass tick: the next batch of rows after the cursor."""
         now = time.time()
         if new_cycle:
-            meta_set({"cheap_cursor": "", "cheap_started": now})
+            meta_set({"cheap_cursor": "", "cheap_started": now, "walk_state": None})
+        raw = meta_get("walk_state")
+        if raw:  # the rows are done: walk the media tree for files with no row
+            try:
+                ws = json.loads(raw)
+            except ValueError:
+                ws = walk_new()
+            new = {}
+            try:
+                done = walk_tick(ws, new, now)
+            finally:
+                notify(new)
+            if done:
+                walk_finish(ws)
+                meta_set({"walk_state": None, "cheap_cursor": None, "cheap_tick": time.time(),
+                          "cheap_finished": time.time()})
+                prune_resolved()
+            else:
+                meta_set({"walk_state": json.dumps(ws), "cheap_tick": time.time()})
+            return
         cursor = meta_get("cheap_cursor") or ""
         rows = host.db().execute("SELECT rel_path, mtime FROM files WHERE rel_path > ? "
                                  "ORDER BY rel_path LIMIT ?",
@@ -411,8 +732,9 @@ def register(host):
                 log.warning(f"integrity: quick check {r['rel_path']}: {e}")
         notify(new)
         if len(rows) < cfg("integrity_cheap_batch"):
-            meta_set({"cheap_cursor": None, "cheap_tick": time.time(), "cheap_finished": time.time()})
-            prune_resolved()
+            # the cycle goes on with the walk (the row cursor stays: still in the cycle)
+            meta_set({"walk_state": json.dumps(walk_new()), "cheap_tick": time.time(),
+                      "cheap_cursor": rows[-1]["rel_path"] if rows else cursor})
         else:
             meta_set({"cheap_cursor": rows[-1]["rel_path"], "cheap_tick": time.time()})
 
@@ -554,7 +876,24 @@ def register(host):
                           "started": st["cheap_started"] or None, "finished": st["cheap_finished"] or None},
                 "deep": {"in_cycle": st["deep_cursor"] is not None, "done": done(st["deep_cursor"]),
                          "started": st["deep_started"] or None, "finished": st["deep_finished"] or None},
-                "idle": idle_now(), "tier_moving": tier_moving()["active"]}
+                "idle": idle_now(), "tier_moving": tier_moving()["active"], "walk": walk_status()}
+
+    def walk_status():
+        """! @brief The media walk: where it is, the last cycle's counts, adopted totals."""
+        ws, last, recent = None, {}, []
+        try:
+            ws = json.loads(meta_get("walk_state") or "null")
+            last = json.loads(meta_get("walk_last") or "{}")
+            recent = json.loads(meta_get("walk_recent") or "[]")
+        except ValueError:
+            pass
+        try:
+            adopted, purged = int(meta_get("walk_adopted_total") or 0), int(meta_get("walk_purged_total") or 0)
+        except ValueError:
+            adopted, purged = 0, 0
+        return {"in_cycle": ws is not None, "dir": (ws or {}).get("dir"),
+                "adopted_total": adopted, "auto_purged_total": purged, "last": last,
+                "recent_adopted": recent, "auto_purge": cfg("integrity_auto_purge")}
 
     def api_issues():
         """! @brief GET /api/integrity/issues?resolved=1: issues (open ones only by default) + status."""
@@ -568,9 +907,16 @@ def register(host):
     def recheck_one(rel):
         """! @brief Both checks on one file now (unthrottled, decode included). -> its issue row or None."""
         row = files_row(rel)
-        if row is None:
-            return None, "not in the library"
         new, now = {}, time.time()
+        if row is None:
+            fp = host.safe_path(host.media_dir, rel)
+            if not fp or not os.path.isfile(fp):
+                return None, "not in the library"
+            d = os.path.dirname(fp)
+            examine_file(rel, fp, os.stat(fp), set(os.listdir(d)), new, {}, now, False)
+            notify(new)
+            r = host.db().execute("SELECT * FROM integrity_issues WHERE rel_path=?", (rel,)).fetchone()
+            return (dict(r) if r else None), ""
         if check_cheap(rel, row, new, now, last_sync()) != "missing":
             check_deep(rel, new, now, mb_per_s=0, decode=True)
         r = host.db().execute("SELECT * FROM integrity_issues WHERE rel_path=?", (rel,)).fetchone()
@@ -612,7 +958,55 @@ def register(host):
         core.audit("integrity_accept", f"file={rel!r} kind={r['kind']}")
         return jsonify(out)
 
+    def api_purge():
+        """! @brief POST /api/integrity/purge {rel_paths: [...]} or {kind: "invalid" |
+        "invalid_row" | "all"}: purge open invalid issues (files to the trash bin or the
+        quarantine folder, invalid rows from the DB)."""
+        body = request.get_json(silent=True) or {}
+        rels = [str(r).strip() for r in (body.get("rel_paths") or []) if str(r).strip()]
+        kind = str(body.get("kind") or "").strip()
+        kinds = PURGEABLE if kind == "all" else tuple(k for k in PURGEABLE if k == kind)
+        if not rels and not kinds:
+            return jsonify({"success": False, "error": "rel_paths or kind (invalid, invalid_row, all)"}), 400
+        marks = ",".join("?" * len(PURGEABLE))
+        sql = f"SELECT rel_path FROM integrity_issues WHERE resolved IS NULL AND kind IN ({marks})"
+        params = list(PURGEABLE)
+        if rels:
+            sql += " AND rel_path IN (%s)" % ",".join("?" * len(rels))
+            params += rels
+        else:
+            sql += " AND kind IN (%s)" % ",".join("?" * len(kinds))
+            params += list(kinds)
+        todo = [r[0] for r in host.db().execute(sql, params).fetchall()]
+        done, errors = [], []
+        for rel in todo:
+            try:
+                where, err = purge_one(rel)
+            except Exception as e:
+                where, err = None, str(e)
+            if err:
+                errors.append({"rel_path": rel, "error": err})
+            else:
+                done.append({"rel_path": rel, "to": where})
+        skipped = sorted(set(rels) - set(todo))
+        return jsonify({"success": not errors, "purged": done, "errors": errors,
+                        "skipped": skipped})
+
+    def api_scan():
+        """! @brief POST /api/integrity/scan {folder}: walk a folder (or everything) now."""
+        body = request.get_json(silent=True) or {}
+        folder = str(body.get("folder") or "").strip().strip("/")
+        if folder and not host.safe_path(host.media_dir, folder):
+            return jsonify({"success": False, "error": "bad folder"}), 400
+        s = scan(folder, min_age=WALK_MIN_AGE)
+        return jsonify({"success": True, "adopted": s.get("adopted", 0), "invalid": s.get("invalid", 0),
+                        "auto_purged": s.get("auto_purged", 0), "recent": s.get("recent", [])})
+
     host.add_route("/api/integrity/issues", api_issues, feature=FEATURE, admin=True)
+    host.add_route("/api/integrity/purge", api_purge, methods=["POST"], feature=FEATURE,
+                   level="write", admin=True, action="integrity_purge", fields=("kind",))
+    host.add_route("/api/integrity/scan", api_scan, methods=["POST"], feature=FEATURE,
+                   level="write", admin=True)
     host.add_route("/api/integrity/recheck", api_recheck, methods=["POST"], feature=FEATURE,
                    level="write", admin=True)
     host.add_route("/api/integrity/accept", api_accept, methods=["POST"], feature=FEATURE,
@@ -631,6 +1025,9 @@ def register(host):
         rows = [{"label": "Open issues",
                  "value": ", ".join("%d %s" % (c[k], k) for k in checks.KINDS if c.get(k)) or "none"},
                 {"label": "Last quick check", "value": when(st["cheap_finished"])},
+                {"label": "Adopted from disk",
+                 "value": "%d (indexed in place: files put in the media folder outside the app)"
+                          % walk_status()["adopted_total"]},
                 {"label": "Last deep check", "value": when(st["deep_finished"])}]
         return {"id": "integrity", "title": "Integrity checks",
                 "description": "Details in Settings -> Integrity checks.", "rows": rows}
@@ -639,5 +1036,7 @@ def register(host):
     host.provide_service("integrity", {"plan_tick": checks.plan_tick, "check_cheap": check_cheap,
                                        "check_deep": check_deep, "recheck": recheck_one,
                                        "run_cheap": run_cheap, "run_deep": run_deep,
-                                       "status": status, "claim": _claim})
+                                       "status": status, "claim": _claim, "scan": scan,
+                                       "purge": purge_one, "walk_tick": walk_tick,
+                                       "walk_new": walk_new})
     log.info("integrity module registered")

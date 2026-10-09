@@ -49,7 +49,7 @@ import uuid
 
 import hmac
 
-from flask import jsonify, request, send_file
+from flask import g, has_request_context, jsonify, request, send_file
 
 from . import share_core as sc
 from . import peer_client as pc
@@ -64,10 +64,14 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         ["requests", "cryptography"],
-    "assets":      ["family_share.js", "family_share.css"],
+    "assets":      ["family_share.js", "family_devices.js", "family_share.css"],
 }
 
 FEATURE = "family_share"
+DEVICES_TAB = "family_devices"
+DEVICES_FEATURE = "settings." + DEVICES_TAB      # Settings -> My devices: pair your own phones
+SCOPES = ("personal", "all")                     # what a phone sees of its owner's library
+_EVERYONE = {"viewer": "write", "uploader": "write", "custom": "write"}
 INBOUND_PREFIX = "/api/family_share/inbound/"
 MAX_ATTEMPTS = 6
 PLAN_CHUNK = 500            # per-path plans bigger than this become a full pass
@@ -102,11 +106,68 @@ def register(host):
             db.execute("ALTER TABLE fs_peers ADD COLUMN route TEXT DEFAULT ''")
         if "via_peer" not in cols:
             db.execute("ALTER TABLE fs_peers ADD COLUMN via_peer INTEGER DEFAULT 0")
+        # a phone acts as its owner's account (0 = not assigned yet), with an API-key-like scope
+        if "user_id" not in cols:
+            db.execute("ALTER TABLE fs_peers ADD COLUMN user_id INTEGER DEFAULT 0")
+        if "scope" not in cols:
+            db.execute("ALTER TABLE fs_peers ADD COLUMN scope TEXT DEFAULT ''")
+        if "owner_auto" not in cols:
+            db.execute("ALTER TABLE fs_peers ADD COLUMN owner_auto INTEGER DEFAULT 0")
         rcols = {r["name"] for r in db.execute("PRAGMA table_info(fs_received)").fetchall()}
         if "replaces" not in rcols:
             db.execute("ALTER TABLE fs_received ADD COLUMN replaces TEXT DEFAULT '[]'")
         db.commit()
+        n = _assign_unowned(db)
+        if n:
+            log.warning(f"family_share: {n} phone(s) without an owner were assigned to the first admin; "
+                        "confirm or change the owner in Settings -> Family share")
+        _purge_orphans(db)
     host.add_table(sc.DDL, kind="state", check=_migrate)  # peers, rules and transfer ledgers
+
+    def _first_admin_id(db):
+        """! @brief The lowest-id enabled admin account, or 0 when there is none."""
+        try:
+            r = db.execute("SELECT id FROM auth_users WHERE is_admin=1 AND disabled=0 "
+                           "ORDER BY id LIMIT 1").fetchone()
+        except Exception:
+            return 0
+        return int(r["id"]) if r else 0
+
+    def _assign_unowned(db):
+        """! @brief Give every phone without an owner to the first admin, flagged
+        (owner_auto) until an admin confirms. It keeps where its uploads landed
+        (folder phone/<name>) and its whole-library view (scope all), so an app
+        paired before phones had owners keeps working unchanged.
+        @return the number of phones assigned."""
+        aid = _first_admin_id(db)
+        if not aid:
+            return 0
+        cur = db.execute(
+            "UPDATE fs_peers SET user_id=?, owner_auto=1, "
+            "scope=CASE WHEN COALESCE(scope,'')='' THEN 'all' ELSE scope END, "
+            "folder=CASE WHEN COALESCE(folder,'')='' THEN 'phone/' || name ELSE folder END "
+            "WHERE kind='device' AND COALESCE(user_id,0)=0", (aid,))
+        db.commit()
+        return cur.rowcount or 0
+
+    def _purge_orphans(db):
+        """! @brief Delete the phones of accounts that no longer exist (account ids are
+        never reused: auth_users is AUTOINCREMENT). A phone is its owner's
+        credential; the photos it uploaded stay in the library."""
+        try:
+            rows = db.execute("SELECT id, name FROM fs_peers WHERE kind='device' AND COALESCE(user_id,0)>0 "
+                              "AND user_id NOT IN (SELECT id FROM auth_users)").fetchall()
+        except Exception:
+            return 0
+        for r in rows:
+            _delete_peer(r["id"])
+            core.audit("family_share_peer_delete", f"id={r['id']} name={r['name']!r} why=owner account deleted")
+        return len(rows)
+
+    def _on_user_deleted(user_id=None, username=None, **_):
+        """! @brief An account was deleted: its phones go with it, right away."""
+        _purge_orphans(host.db())
+    host.on("user.deleted", _on_user_deleted)
 
     # -- settings -----------------------------------------------------------
     def _bool(v):
@@ -147,7 +208,14 @@ def register(host):
     host.register_feature(FEATURE, "Family share (peers, rules, preview, outbox)",
                           section="family_share", section_label="Family share",
                           default="block", role_defaults=_ADMIN_ONLY)
+    # Every role may pair its own phones (an admin can block it per user / group);
+    # the tab's feature gates the /api/family_share/devices routes.
+    host.add_settings_tab(DEVICES_TAB, "My devices", icon="\U0001f4f1", group="you")
+    host.register_feature(DEVICES_FEATURE, "Settings: My devices tab (pair your own phones)",
+                          section="settings", section_label="Settings", default="write",
+                          role_defaults=_EVERYONE)
     host.add_asset("family_share.js")
+    host.add_asset("family_devices.js")
     host.add_asset("family_share.css")
     host.add_public_prefix(INBOUND_PREFIX)
 
@@ -595,6 +663,18 @@ def register(host):
             return None
         if not hmac.compare_digest(sent, str(r["key_in"]).encode("utf-8", "replace")):
             return None
+        peer = dict(r)
+        g.peer = {"id": peer["id"], "name": peer["name"], "kind": _kind(peer), "scope": _scope_of(peer)}
+        if _kind(peer) == "device" and core.authmgr.enabled():
+            user, refusal = _account_for(peer)
+            if refusal is not None:
+                g.fs_refusal = refusal
+                return None
+            # Run as the owner: access policies, upload folder, quotas and
+            # is_admin all read g.user; ownership reads the scope off g.api_key.
+            g.user = user
+            g.api_key = {"id": None, "name": f"device:{peer['name']}", "scope": _scope_of(peer),
+                         "peer_id": peer["id"]}
         # A successful inbound call is the only "test" a phone can pass, so
         # stamp last-seen here (throttled to once a minute per peer).
         if (r["last_ok"] or 0) < time.time() - 60:
@@ -606,9 +686,78 @@ def register(host):
                 _write(_seen)
             except Exception:
                 pass
-        return dict(r)
+        return peer
+
+    def _kind(peer):
+        """! @brief "device" (a phone running the app) or "peer" (another instance)."""
+        return "device" if (peer.get("kind") or "peer") == "device" else "peer"
+
+    def _scope_of(peer):
+        """! @brief A phone's scope ("personal" | "all"); instances have none ("")."""
+        if _kind(peer) != "device":
+            return ""
+        s = str(peer.get("scope") or "")
+        return s if s in SCOPES else "personal"
+
+    def _refusal(code, error):
+        """! @brief A 403 body the app shows as is (error_code tells it to stop retrying)."""
+        return {"ok": False, "error": error, "error_code": code}, 403
+
+    def _account_for(peer):
+        """! @brief The account a phone acts as, built by the auth manager like any
+        session's g.user. A phone with scope "personal" is never an admin, so the
+        ownership policy confines it to the owner's tree as it does an API key.
+        @return (user dict, None), or (None, (body, status)) when it is refused."""
+        uid = int(peer.get("user_id") or 0)
+        if not uid and _write(lambda: _assign_unowned(host.db())):
+            uid = int((_peer(peer["id"]) or {}).get("user_id") or 0)
+            peer["user_id"] = uid
+        if not uid:
+            return None, _refusal("no_owner", f"this phone has no owner account on {_my_name()}; an admin must "
+                                              "assign one (Settings -> Family share)")
+        row = host.db().execute("SELECT * FROM auth_users WHERE id=?", (uid,)).fetchone()
+        if row is None:
+            _delete_peer(peer["id"])
+            core.audit("family_share_peer_delete", f"id={peer['id']} name={peer['name']!r} why=owner account deleted")
+            return None, _refusal("account_deleted", f"the account this phone was paired as no longer exists on "
+                                                     f"{_my_name()}; pair it again from your account")
+        if row["disabled"]:
+            return None, _refusal("account_disabled", f"the account '{row['username']}' this phone is paired as is "
+                                                      f"disabled on {_my_name()}; ask an admin to re-enable it")
+        user = core.authmgr._row_to_user(row)
+        user["is_admin"] = bool(user.get("is_admin")) and _scope_of(peer) == "all"
+        return user, None
+
+    def _may(key, level="read"):
+        """! @brief Does the account the request runs as hold `level` on feature `key`?
+        True for an admin, sign-in off, instances (they run as nobody) and workers."""
+        if not has_request_context():
+            return True
+        u = g.get("user")
+        if u is None or u.get("is_admin"):
+            return True
+        return core.features.has_level(u.get("features") or {}, key, level)
+
+    def _forbidden(what):
+        u = g.get("user") or {}
+        return jsonify({"ok": False, "error_code": "forbidden",
+                        "error": f"the account '{u.get('username', '')}' this phone is paired as may not {what} "
+                                 f"on {_my_name()}"}), 403
+
+    def _phones_only(peer):
+        """! @brief Browsing the library is for the owner's phones; family instances
+        only ever get what the rules push to them. -> a 403 response or None."""
+        if _kind(peer) == "device":
+            return None
+        return jsonify({"ok": False, "error": "only paired phones can browse this library",
+                        "error_code": "forbidden"}), 403
 
     def _denied():
+        refusal = g.get("fs_refusal")
+        if refusal is not None:
+            body, code = refusal
+            log.warning(f"family_share: refused phone {request.headers.get(pc.HEADER_PEER, '')!r}: {body['error']}")
+            return jsonify(body), code
         name = request.headers.get(pc.HEADER_PEER, "").strip()
         known = host.db().execute("SELECT 1 FROM fs_peers WHERE name=? AND enabled=1", (name,)).fetchone() if name else None
         log.warning(f"family_share: rejected inbound request presenting peer name {name!r} "
@@ -621,8 +770,14 @@ def register(host):
         peer = _auth_peer()
         if not peer:
             return _denied()
-        return jsonify({"ok": True, "name": _my_name(), "id": _my_id(), "version": MANIFEST["version"],
-                        "pub_key": _my_pub(), "fingerprint": crypto.fingerprint(_my_pub())})
+        body = {"ok": True, "name": _my_name(), "id": _my_id(), "version": MANIFEST["version"],
+                "pub_key": _my_pub(), "fingerprint": crypto.fingerprint(_my_pub())}
+        u = g.get("user")
+        if _kind(peer) == "device" and u and u.get("id"):
+            # who the phone acts as, so the app can show it (old apps ignore it)
+            body["account"] = {"username": u["username"], "display_name": u.get("display_name") or u["username"],
+                               "scope": _scope_of(peer), "is_admin": bool(u.get("is_admin"))}
+        return jsonify(body)
     host.add_route(INBOUND_PREFIX + "ping", inbound_ping, methods=["GET"])
 
     def _received_tag(peer):
@@ -698,14 +853,29 @@ def register(host):
             return
         old_rel = row["rel_path"]
         if old_rel and old_rel != new_rel and not row["duplicate"]:
-            _merge_into(old_rel, new_rel)
-            core.delete_file(old_rel)
-            core.audit("family_share_replaced", f"device={peer['name']!r} old={old_rel!r} new={new_rel!r}")
+            if _may("data.delete", "write") and host.check_path(old_rel, write=True):
+                _merge_into(old_rel, new_rel)
+                core.delete_file(old_rel)
+                core.audit("family_share_replaced", f"device={peer['name']!r} old={old_rel!r} new={new_rel!r}")
+            else:   # the owner may not delete: both copies stay
+                log.info(f"family_share: {peer['name']!r} re-sent {old_rel!r} as {new_rel!r}; the old copy stays "
+                         "(its owner may not delete files)")
         def _do():
             d = host.db()
             d.execute("DELETE FROM fs_received WHERE origin_sha=? AND peer_id=?", (old_sha, pid))
             d.commit()
         _write(_do)
+
+    def _device_dest(peer, sub):
+        """! @brief Where a phone's upload lands: the phone's configured folder when the
+        account it runs as may write there, else phone/<name>/ through the access
+        policies' upload folder (the owner's personal tree when ownership is on)."""
+        root = sc.norm_folder(peer.get("folder"))
+        if root:
+            dest = "/".join(p for p in (root, sub) if p)
+            if host.check_path(dest, write=True):
+                return dest
+        return host.upload_folder("/".join(p for p in ("phone", peer["name"], sub) if p), {"scope": "personal"})
 
     def _receive_push(peer, opener, inner, file_stream):
         """! @brief Apply one opened push. -> (json body, http code). file_stream is a
@@ -758,8 +928,7 @@ def register(host):
             return {"ok": True, "need_file": True}, 200
 
         if is_device:
-            root = sc.norm_folder(peer.get("folder")) or f"phone/{peer['name']}"
-            dest = "/".join(p for p in (root, folder) if p)
+            dest = _device_dest(peer, folder)
         else:
             dest = "/".join(p for p in (_cfg().get("family_share_incoming_folder") or "family",
                                         peer["name"], folder) if p)
@@ -784,6 +953,12 @@ def register(host):
                             f"sender said {content_sha[:12]}... - rejected")
                 return {"ok": False, "error": "content hash mismatch: the file changed while it was being "
                                               "read or sent; it will be retried"}, 422
+        # the same veto a browser upload gets (storage quotas of the folder's owner)
+        for reason in host.emit("upload.check", folder=dest, filename=orig_name, size=os.path.getsize(spool)):
+            if reason:
+                try: os.remove(spool)
+                except OSError: pass
+                return {"ok": False, "error": str(reason), "error_code": "refused"}, 413
         meta_json = json.dumps(ingest_meta)
         try:
             outcome, payload, code = core.ingest_inline(spool, orig_name, dest, meta_json)
@@ -850,6 +1025,8 @@ def register(host):
         peer = _auth_peer()
         if not peer:
             return _denied()
+        if _kind(peer) == "device" and not _may("data.upload", "write"):
+            return _forbidden("upload")
         if not request.form.get("env") or not request.form.get("meta"):
             return _rejected(peer, "plaintext pushes are not accepted")
         try:
@@ -865,6 +1042,8 @@ def register(host):
         peer = _auth_peer()
         if not peer:
             return _denied()
+        if _kind(peer) == "device" and not _may("data.delete", "write"):
+            return _forbidden("delete")
         data = request.get_json(silent=True) or {}
         if not data.get("env") or not data.get("meta"):
             return _rejected(peer, "plaintext revokes are not accepted")
@@ -1121,6 +1300,10 @@ def register(host):
         peer = _auth_peer()
         if not peer:
             return _denied()
+        if _phones_only(peer):
+            return _phones_only(peer)
+        if not _may("tab.gallery"):
+            return _forbidden("browse the library")
         try:
             offset = max(0, int(request.args.get("offset") or 0))
             limit = max(1, min(2000, int(request.args.get("limit") or 500)))
@@ -1128,9 +1311,10 @@ def register(host):
         except ValueError:
             return jsonify({"ok": False, "error": "bad paging"}), 400
         db = host.db()
-        filters = list(host.gallery_filters)
+        # what the owner may see (personal tree, partners, shared albums; scope)
+        clauses, params = host.files_clause("rel_path")
+        filters = list(host.gallery_filters) + clauses
         where = "WHERE sha256 IS NOT NULL AND sha256<>''" + (" AND " + " AND ".join(filters) if filters else "")
-        params = []
         if since:
             where += " AND mtime>?"; params.append(since)
         total = db.execute(f"SELECT COUNT(*) c FROM files {where}", params).fetchone()["c"]
@@ -1150,6 +1334,10 @@ def register(host):
         peer = _auth_peer()
         if not peer:
             return _denied()
+        if _phones_only(peer):
+            return _phones_only(peer)
+        if not _may("tab.gallery"):
+            return _forbidden("browse the library")
         rel = request.args.get("p") or ""
         fp = host.safe_path(host.media_dir, rel)
         if not fp or not os.path.exists(fp):
@@ -1164,6 +1352,10 @@ def register(host):
         peer = _auth_peer()
         if not peer:
             return _denied()
+        if _phones_only(peer):
+            return _phones_only(peer)
+        if not _may("tab.gallery"):
+            return _forbidden("browse the library")
         rel = request.args.get("p") or ""
         fp = host.safe_path(host.media_dir, rel)
         if not fp or not os.path.exists(fp):
@@ -1186,6 +1378,10 @@ def register(host):
         peer = _auth_peer()
         if not peer:
             return _denied()
+        if _phones_only(peer):
+            return _phones_only(peer)
+        if not _may("data.upload"):
+            return _forbidden("upload")
         try:
             inner = _sealed_request(peer)
         except crypto.CryptoError as e:
@@ -1203,7 +1399,33 @@ def register(host):
     host.add_route(INBOUND_PREFIX + "have", inbound_have, methods=["POST"])
 
     # -- admin API (browser session, admin feature) -------------------------
-    def _peer_public(p):
+    def _owner_rows(ids):
+        """! @brief {user_id: auth_users row} for these ids (missing ids are absent)."""
+        ids = sorted({int(i) for i in ids if i})
+        if not ids:
+            return {}
+        try:
+            return {r["id"]: r for r in host.db().execute(
+                f"SELECT id, username, display_name, disabled, is_admin FROM auth_users "
+                f"WHERE id IN ({','.join('?' * len(ids))})", ids).fetchall()}
+        except Exception:
+            return {}
+
+    def _owner_fields(d, owners):
+        """! @brief Add the owning account's name and state to a phone's public row."""
+        if _kind(d) != "device":
+            d["scope"] = ""
+            return d
+        d["scope"] = _scope_of(d)
+        o = owners.get(int(d.get("user_id") or 0))
+        d["owner"] = o["username"] if o else ""
+        d["owner_display"] = (o["display_name"] or o["username"]) if o else ""
+        d["owner_disabled"] = bool(o["disabled"]) if o else False
+        d["owner_missing"] = bool(d.get("user_id")) and o is None
+        d["owner_auto"] = bool(d.get("owner_auto"))
+        return d
+
+    def _peer_public(p, owners=None):
         d = dict(p)
         d["has_key_out"] = bool(d.get("key_out"))
         r = host.db().execute("SELECT COUNT(*) n, COALESCE(SUM(size),0) s FROM fs_mailbox WHERE to_peer=?",
@@ -1211,11 +1433,22 @@ def register(host):
         d["mailbox_items"], d["mailbox_bytes"] = r["n"], r["s"]
         d["fingerprint"] = crypto.fingerprint(d["pub_key"]) if d.get("pub_key") else ""
         d.pop("key_out", None)
-        return d
+        return _owner_fields(d, owners if owners is not None else _owner_rows([d.get("user_id")]))
+
+    def _accounts():
+        """! @brief Accounts a phone can belong to, for the admin's owner select."""
+        try:
+            return [dict(r) for r in host.db().execute(
+                "SELECT id, username, display_name, disabled, is_admin FROM auth_users ORDER BY username").fetchall()]
+        except Exception:
+            return []
 
     def api_state():
         db = host.db()
-        peers = [_peer_public(p) for p in sc.load_peers(db, enabled_only=False)]
+        _purge_orphans(host.db())
+        raw = sc.load_peers(db, enabled_only=False)
+        owners = _owner_rows(p.get("user_id") for p in raw)
+        peers = [_peer_public(p, owners) for p in raw]
         rules = sc.load_rules(db, enabled_only=False)
         counts = {r["status"]: r["c"] for r in db.execute(
             "SELECT status, COUNT(*) c FROM fs_outbox GROUP BY status").fetchall()}
@@ -1234,19 +1467,31 @@ def register(host):
                                                  "fingerprint": crypto.fingerprint(pub)},
                         "peers": peers, "rules": rules, "outbox": counts, "received": received,
                         "folders": folders[:2000], "albums": albums, "options": opts,
+                        "users": _accounts(), "auth": bool(core.authmgr.enabled()),
                         "last_plan": _last_plan["result"], "last_plan_at": _last_plan["t"],
                         "dirty": bool(_dirty["full"] or _dirty["paths"])})
     host.add_route("/api/family_share/state", api_state, feature=FEATURE)
 
-    def api_peer_save():
-        d = request.get_json(silent=True) or {}
+    def _me_id():
+        """! @brief The signed-in account's id (0 with sign-in off)."""
+        u = g.get("user") or {}
+        return int(u.get("id") or 0)
+
+    def _save_peer(d):
+        """! @brief Create or update a peer row from a request body (admin and My devices).
+        A phone gets an owner: d["user_id"] when given (the caller vetted it), else the
+        row's current one, else the requester. -> (body, status)."""
+        pid = int(d.get("id") or 0)
+        cur = _peer(pid) if pid else None
+        if pid and cur is None:
+            return {"ok": False, "error": "no such peer"}, 404
         if d.get("pairing_code"):
             try:
                 pc_ = crypto.parse_pairing_code(d["pairing_code"])
             except ValueError as e:
-                return jsonify({"ok": False, "error": str(e)}), 400
+                return {"ok": False, "error": str(e)}, 400
             if pc_["pub_key"] == _my_pub():
-                return jsonify({"ok": False, "error": "that is this instance's own pairing code"}), 400
+                return {"ok": False, "error": "that is this instance's own pairing code"}, 400
             d = {**d, "name": d.get("name") or pc_["name"], "url": d.get("url") or pc_["url"],
                  "key_out": pc_["key_out"], "pub_key": pc_["pub_key"], "instance_id": pc_["instance_id"],
                  "my_name": pc_["my_name"]}
@@ -1259,8 +1504,10 @@ def register(host):
         my_name = str(d.get("my_name") or "").strip()[:64]
         route = str(d.get("route") or "").strip()
         via_peer = int(d.get("via_peer") or 0)
+        if kind == "device":
+            url, route, via_peer = "", "", 0          # phones call in
         if route not in ("", "direct", "mailbox", "via"):
-            return jsonify({"ok": False, "error": "route must be direct, mailbox or via"}), 400
+            return {"ok": False, "error": "route must be direct, mailbox or via"}, 400
         if d.get("pairing_code") and not url and not route and kind == "peer":
             # They have no reachable URL. If I do, they poll me; if I don't
             # either, we both reach each other through a hub we share.
@@ -1274,26 +1521,45 @@ def register(host):
         if route == "via":
             hub = _peer(via_peer)
             if not hub or hub["id"] == pid or not hub.get("url"):
-                return jsonify({"ok": False, "error": "route 'via' needs a hub peer that has a URL"}), 400
+                return {"ok": False, "error": "route 'via' needs a hub peer that has a URL"}, 400
         if pub_key:
             try:
                 crypto.fingerprint(pub_key); crypto._pub(pub_key)
             except crypto.CryptoError as e:
-                return jsonify({"ok": False, "error": str(e)}), 400
+                return {"ok": False, "error": str(e)}, 400
         if not name:
-            return jsonify({"ok": False, "error": "name required"}), 400
+            return {"ok": False, "error": "name required"}, 400
         if "/" in name or "\\" in name or name.startswith("."):
-            return jsonify({"ok": False, "error": "name is used as a folder: no slashes or leading dot"}), 400
+            return {"ok": False, "error": "name is used as a folder: no slashes or leading dot"}, 400
         if url and not url.startswith(("http://", "https://")):
-            return jsonify({"ok": False, "error": "url must start with http:// or https://"}), 400
-        pid = int(d.get("id") or 0)
+            return {"ok": False, "error": "url must start with http:// or https://"}, 400
+        taken = host.db().execute("SELECT id FROM fs_peers WHERE name=? AND id<>?", (name, pid)).fetchone()
+        if taken:
+            return {"ok": False, "error": f"the name '{name}' is already used by another peer or phone; "
+                                          "pick another (it is how the phone identifies itself)"}, 400
+        # owner + scope (phones only)
+        if kind == "device":
+            owner_given = d.get("user_id") not in (None, "")
+            user_id = int(d.get("user_id") or 0) if owner_given else \
+                int((cur or {}).get("user_id") or 0) or _me_id()
+            scope = str(d.get("scope") or "") or (_scope_of(cur) if cur and _kind(cur) == "device" else "personal")
+            if scope not in SCOPES:
+                return {"ok": False, "error": "scope must be personal or all"}, 400
+            if owner_given and user_id != _me_id() and not host.is_admin():
+                return {"ok": False, "error": "only an admin can pair a phone for another account"}, 403
+            if user_id and not _owner_rows([user_id]):
+                return {"ok": False, "error": "no such account"}, 400
+            owner_auto = 0 if (owner_given or not cur) else int(cur.get("owner_auto") or 0)
+        else:
+            user_id, scope, owner_auto = 0, "", 0
         key_out = d.get("key_out")
         enabled = 1 if d.get("enabled", True) else 0
         def _do():
             db = host.db()
             if pid:
-                db.execute("UPDATE fs_peers SET name=?, url=?, enabled=?, kind=?, folder=? WHERE id=?",
-                           (name, url, enabled, kind, folder, pid))
+                db.execute("UPDATE fs_peers SET name=?, url=?, enabled=?, kind=?, folder=?, user_id=?, scope=?, "
+                           "owner_auto=? WHERE id=?",
+                           (name, url, enabled, kind, folder, user_id, scope, owner_auto, pid))
                 if key_out is not None and str(key_out) != "":
                     db.execute("UPDATE fs_peers SET key_out=? WHERE id=?", (str(key_out).strip(), pid))
                 if pub_key:
@@ -1302,49 +1568,58 @@ def register(host):
                     db.execute("UPDATE fs_peers SET instance_id=? WHERE id=?", (instance_id, pid))
                 if my_name:
                     db.execute("UPDATE fs_peers SET my_name=? WHERE id=?", (my_name, pid))
-                if route or "route" in d:
+                if route or "route" in d or kind == "device":
                     db.execute("UPDATE fs_peers SET route=?, via_peer=? WHERE id=?",
                                (route, via_peer if route == "via" else 0, pid))
                 if d.get("rotate_key_in"):
                     db.execute("UPDATE fs_peers SET key_in=? WHERE id=?", (secrets.token_urlsafe(32), pid))
                 pid_new = pid
             else:
-                cur = db.execute("INSERT INTO fs_peers(name, url, key_out, key_in, enabled, created, pub_key, "
-                                 "instance_id, kind, folder, my_name, route, via_peer) "
-                                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                                 (name, url, str(key_out or "").strip(), secrets.token_urlsafe(32),
-                                  enabled, time.time(), pub_key, instance_id, kind, folder, my_name,
-                                  route, via_peer if route == "via" else 0))
-                pid_new = cur.lastrowid
+                cur_ = db.execute("INSERT INTO fs_peers(name, url, key_out, key_in, enabled, created, pub_key, "
+                                  "instance_id, kind, folder, my_name, route, via_peer, user_id, scope, owner_auto) "
+                                  "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                  (name, url, str(key_out or "").strip(), secrets.token_urlsafe(32),
+                                   enabled, time.time(), pub_key, instance_id, kind, folder, my_name,
+                                   route, via_peer if route == "via" else 0, user_id, scope, owner_auto))
+                pid_new = cur_.lastrowid
             db.commit()
             return pid_new
         try:
             new_id = _write(_do)
         except Exception as e:
-            return jsonify({"ok": False, "error": f"could not save peer: {e}"}), 400
+            return {"ok": False, "error": f"could not save peer: {e}"}, 400
         mark_dirty(full=True)
-        core.audit("family_share_peer_save", f"peer={name!r} id={new_id}")
-        return jsonify({"ok": True, "id": new_id, "peer": _peer_public(_peer(new_id))})
+        core.audit("family_share_peer_save", f"peer={name!r} id={new_id} kind={kind}"
+                                             + (f" owner={user_id} scope={scope}" if kind == "device" else ""))
+        return {"ok": True, "id": new_id, "peer": _peer_public(_peer(new_id))}, 200
+
+    def api_peer_save():
+        body, code = _save_peer(request.get_json(silent=True) or {})
+        return jsonify(body), code
     host.add_route("/api/family_share/peers/save", api_peer_save, methods=["POST"],
                    feature=FEATURE, level="write")
+
+    def _pairing_code(p, my_url=""):
+        """! @brief My pairing code for peer row p: my name, my URL, my public key and the
+        secret they must send me."""
+        my_url = str(my_url or host.config.get("family_share_my_url") or "").strip()
+        code = crypto.make_pairing_code(_my_name(), my_url, _my_pub(), p["key_in"], _my_id(), peer_name=p["name"])
+        return {"ok": True, "key_in": p["key_in"], "name": _my_name(), "pairing_code": code,
+                "peer_name": p["name"], "fingerprint": crypto.fingerprint(_my_pub())}
 
     def api_peer_key():
         """! @brief The pairing code for this peer: my name, my URL, my public key and
         the secret they must send me. Paste it on their instance."""
         d = request.get_json(silent=True) or {}
-        pid = int(d.get("id") or 0)
-        p = _peer(pid)
+        p = _peer(int(d.get("id") or 0))
         if not p:
             return jsonify({"ok": False, "error": "no such peer"}), 404
-        my_url = str(d.get("my_url") or host.config.get("family_share_my_url") or "").strip()
-        code = crypto.make_pairing_code(_my_name(), my_url, _my_pub(), p["key_in"], _my_id(), peer_name=p["name"])
-        return jsonify({"ok": True, "key_in": p["key_in"], "name": _my_name(), "pairing_code": code,
-                        "peer_name": p["name"], "fingerprint": crypto.fingerprint(_my_pub())})
+        return jsonify(_pairing_code(p, d.get("my_url")))
     host.add_route("/api/family_share/peers/key", api_peer_key, methods=["POST"],
                    feature=FEATURE, level="write")
 
-    def api_peer_delete():
-        pid = int((request.get_json(silent=True) or {}).get("id") or 0)
+    def _delete_peer(pid):
+        """! @brief Remove a peer with its outbox and mailbox (received files stay)."""
         def _do():
             db = host.db()
             db.execute("DELETE FROM fs_peers WHERE id=?", (pid,))
@@ -1352,10 +1627,89 @@ def register(host):
             db.commit()
         _mailbox_delete(host.db().execute("SELECT id, blob FROM fs_mailbox WHERE to_peer=?", (pid,)).fetchall())
         _write(_do)
+
+    def api_peer_delete():
+        pid = int((request.get_json(silent=True) or {}).get("id") or 0)
+        _delete_peer(pid)
         core.audit("family_share_peer_delete", f"id={pid}")
         return jsonify({"ok": True})
     host.add_route("/api/family_share/peers/delete", api_peer_delete, methods=["POST"],
                    feature=FEATURE, level="write")
+
+    # -- My devices: any signed-in user pairs their own phones ---------------
+    def _device_public(p):
+        d = _peer_public(p)
+        return {k: d.get(k) for k in ("id", "name", "folder", "scope", "enabled", "last_ok", "last_error",
+                                      "fingerprint", "created", "owner", "owner_display")} | \
+            {"paired": bool(p.get("pub_key")), "has_key_out": bool(p.get("key_out"))}
+
+    def _own_device(pid):
+        """! @brief The requester's own phone row, or None (another user's, or not a phone)."""
+        p = _peer(pid)
+        if p is None or _kind(p) != "device" or int(p.get("user_id") or 0) != _me_id():
+            return None
+        return p
+
+    def _no_keys():
+        """! @brief A phone or an API key can't pair phones (credentials don't mint credentials)."""
+        if g.get("api_key"):
+            return jsonify({"ok": False, "error": "sign in to manage your devices"}), 403
+        return None
+
+    def api_devices():
+        if _no_keys():
+            return _no_keys()
+        _purge_orphans(host.db())
+        rows = host.db().execute("SELECT * FROM fs_peers WHERE kind='device' AND COALESCE(user_id,0)=? "
+                                 "ORDER BY name", (_me_id(),)).fetchall()
+        u = g.get("user") or {}
+        pub = _my_pub()
+        return jsonify({"ok": True, "devices": [_device_public(dict(r)) for r in rows], "scopes": list(SCOPES),
+                        "me": {"id": _me_id(), "username": u.get("username") or "",
+                               "display_name": u.get("display_name") or u.get("username") or ""},
+                        "server": {"name": _my_name(), "fingerprint": crypto.fingerprint(pub),
+                                   "my_url": host.config.get("family_share_my_url") or ""},
+                        "inbound": bool(_cfg().get("family_share_inbound", True))})
+    host.add_route("/api/family_share/devices", api_devices, feature=DEVICES_FEATURE)
+
+    def api_device_save():
+        if _no_keys():
+            return _no_keys()
+        d = request.get_json(silent=True) or {}
+        pid = int(d.get("id") or 0)
+        if pid and _own_device(pid) is None:
+            return jsonify({"ok": False, "error": "no such device of yours"}), 404
+        body = {k: d.get(k) for k in ("id", "name", "folder", "scope", "enabled", "pairing_code",
+                                      "rotate_key_in", "key_out") if k in d}
+        body.update(kind="device", user_id=_me_id() or None)
+        out, code = _save_peer(body)
+        if out.get("peer"):
+            out["peer"] = _device_public(_peer(out["id"]))
+        return jsonify(out), code
+    host.add_route("/api/family_share/devices/save", api_device_save, methods=["POST"],
+                   feature=DEVICES_FEATURE, level="write")
+
+    def api_device_key():
+        if _no_keys():
+            return _no_keys()
+        p = _own_device(int((request.get_json(silent=True) or {}).get("id") or 0))
+        if p is None:
+            return jsonify({"ok": False, "error": "no such device of yours"}), 404
+        return jsonify(_pairing_code(p))
+    host.add_route("/api/family_share/devices/key", api_device_key, methods=["POST"],
+                   feature=DEVICES_FEATURE, level="write")
+
+    def api_device_delete():
+        if _no_keys():
+            return _no_keys()
+        p = _own_device(int((request.get_json(silent=True) or {}).get("id") or 0))
+        if p is None:
+            return jsonify({"ok": False, "error": "no such device of yours"}), 404
+        _delete_peer(p["id"])
+        core.audit("family_share_peer_delete", f"id={p['id']} name={p['name']!r} by=owner")
+        return jsonify({"ok": True})
+    host.add_route("/api/family_share/devices/delete", api_device_delete, methods=["POST"],
+                   feature=DEVICES_FEATURE, level="write")
 
     def api_peer_test():
         pid = int((request.get_json(silent=True) or {}).get("id") or 0)

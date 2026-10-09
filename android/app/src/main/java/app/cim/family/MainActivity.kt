@@ -125,7 +125,7 @@ fun SetupScreen(prefs: Prefs, onPaired: () -> Unit) {
         Text("CIM Family", fontSize = 26.sp, fontWeight = FontWeight.Bold)
         Text("End-to-end encrypted backup of this phone's photos to your own image manager, and a gallery of everything on it.", color = Color.Gray)
         OutlinedTextField(name, { name = it.lowercase().replace(Regex("[^a-z0-9._-]"), "-") }, label = { Text("This phone's name (the server's pairing code overrides it)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        Text("1. On the server: Settings → Family share → add a peer of kind \"my phone\", then click \"Pairing code for them\" and paste it here. The code carries the name the server gave this phone.", color = Color.LightGray)
+        Text("1. On the server, signed in as yourself: Settings → My devices → add this phone, then click \"Code for the app\" and paste it here. The phone acts as that account. The code carries the name the server gave this phone.", color = Color.LightGray)
         OutlinedTextField(code, { code = it }, label = { Text("Server pairing code (fs1....)") }, modifier = Modifier.fillMaxWidth(), minLines = 3)
         if (err.isNotEmpty()) Text(err, color = MaterialTheme.colorScheme.error)
         Button({
@@ -305,7 +305,13 @@ fun SettingsScreen(prefs: Prefs, db: Db, onUnpair: () -> Unit) {
     var paused by remember { mutableStateOf(prefs.paused) }
     var tick by remember { mutableStateOf(0) }
     var pingMsg by remember { mutableStateOf("") }
+    var account by remember { mutableStateOf(prefs.accountLabel()) }
     val scope = rememberCoroutineScope()
+    LaunchedEffect(Unit) {
+        val err = withContext(Dispatchers.IO) { runCatching { Api(prefs).ping() }.exceptionOrNull() }
+        account = prefs.accountLabel()
+        if (err is AccountException) pingMsg = "Failed: ${err.message}"
+    }
     val counts = remember(tick) { db.counts() }
     val purgeable = remember(tick) { db.purgeCandidates() }
     var pendingPurge by remember { mutableStateOf<List<Long>>(emptyList()) }
@@ -316,6 +322,7 @@ fun SettingsScreen(prefs: Prefs, db: Db, onUnpair: () -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Server", fontSize = 18.sp, fontWeight = FontWeight.Bold)
         Text("${prefs.serverName} | ${prefs.serverUrl}\nThis phone is peer \"${prefs.deviceName}\" there", color = Color.LightGray)
+        if (account.isNotEmpty()) Text(account, color = Color.LightGray)
         Text("Server key ${Crypto.fingerprint(prefs.serverPub ?: ByteArray(32))}\nThis phone ${Crypto.fingerprint(prefs.publicKey)}", fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Color.Gray)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton({ scope.launch { pingMsg = withContext(Dispatchers.IO) { runCatching {
@@ -323,7 +330,7 @@ fun SettingsScreen(prefs: Prefs, db: Db, onUnpair: () -> Unit) {
                 val pub = j.optString("pub_key")
                 if (pub.isNotEmpty() && !Crypto.b64d(pub).contentEquals(prefs.serverPub ?: ByteArray(0))) "KEY MISMATCH: server at that URL has ${j.optString("fingerprint")}. Re-pair before trusting it."
                 else "Reached ${j.optString("name")} | key matches"
-            }.getOrElse { "Failed: ${it.message}" } } } }) { Text("Test connection") }
+            }.getOrElse { "Failed: ${it.message}" } }; account = prefs.accountLabel() } }) { Text("Test connection") }
             OutlinedButton(onUnpair, colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Unpair") }
         }
         if (pingMsg.isNotEmpty()) Text(pingMsg, color = if (pingMsg.startsWith("KEY") || pingMsg.startsWith("Failed")) MaterialTheme.colorScheme.error else Color(0xFF7BD88F), fontSize = 13.sp)

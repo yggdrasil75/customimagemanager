@@ -230,7 +230,7 @@ def test_cheap_pass_cursor_resumes(host, upload):
         st = svc["status"]()
         if total > 10:
             assert st["cheap"]["in_cycle"] and st["cheap"]["done"] == 10
-        for _ in range(total // 10 + 1):
+        for _ in range(total // 10 + 200):              # the rows, then the media walk
             if not svc["status"]()["cheap"]["in_cycle"]:
                 break
             svc["run_cheap"](False)

@@ -33,6 +33,30 @@ _USERNAME_RE = re.compile(r"^[\w.@+-]{1,128}$")
 # (ip, username) -> [failures, first failure time]
 _LOGIN_FAILS = {}
 _LOGIN_MAX, _LOGIN_WINDOW = 10, 900
+# ip -> [failures, first failure time, {usernames tried}]: a client guessing many
+# usernames (or failing a lot overall) is blocked as a client, never an account
+# for everyone. A success does not clear it, so one known password can't reset
+# an attack on other names.
+_CLIENT_FAILS = {}
+_CLIENT_MAX_FAILS, _CLIENT_MAX_USERS = 30, 5
+
+
+def _client_blocked(client, now):
+    """! @brief True while `client` is over the client-wide limits in the window."""
+    c = _CLIENT_FAILS.get(client)
+    if c and now - c[1] > _LOGIN_WINDOW:
+        _CLIENT_FAILS.pop(client, None)
+        return False
+    return bool(c) and (c[0] >= _CLIENT_MAX_FAILS or len(c[2]) >= _CLIENT_MAX_USERS)
+
+
+def _note_failure(client, username, now):
+    """! @brief Count a failed sign-in for (client, username) and for the client."""
+    f = _LOGIN_FAILS.setdefault((client, username.lower()), [0, now])
+    f[0] += 1
+    c = _CLIENT_FAILS.setdefault(client, [0, now, set()])
+    c[0] += 1
+    c[2].add(username.lower())
 _UNSET = object()
 
 def require_feature(feature_key, action=None, fields=(), level="read"):
@@ -182,6 +206,9 @@ class Auth:
         self._init_db()
         # module authenticators (host.register_authenticator), tried before the cookie
         self.authenticators = []
+        # fn(event, **kw) for account lifecycle: "user.deleted" (user_id, username) and
+        # "user.disabled" (user_id, username); the host forwards them as module events
+        self.user_hooks = []
         # fn(user_row, login_data) -> None to allow, or (json_dict, status) to stop the
         # login (a second factor the module asks for; see host.register_login_check)
         self.login_checks = []
@@ -450,11 +477,26 @@ class Auth:
         db.execute("DELETE FROM auth_groups WHERE id=?", (group_id,))
         db.commit()
 
+    def _user_event(self, event, user_id):
+        """! @brief Tell the user hooks about an account change; a failing hook is logged."""
+        r = self._db().execute("SELECT username FROM auth_users WHERE id=?", (user_id,)).fetchone()
+        for fn in self.user_hooks:
+            try:
+                fn(event, user_id=user_id, username=r["username"] if r else None)
+            except Exception as e:
+                log.error("user hook %s failed: %s", event, e)
+
     def delete_user(self, user_id):
+        name = self._db().execute("SELECT username FROM auth_users WHERE id=?", (user_id,)).fetchone()
         db = self._db()
         db.execute("DELETE FROM auth_sessions WHERE user_id=?", (user_id,))
         db.execute("DELETE FROM auth_users WHERE id=?", (user_id,))
         db.commit()
+        for fn in self.user_hooks:
+            try:
+                fn("user.deleted", user_id=user_id, username=name["username"] if name else None)
+            except Exception as e:
+                log.error("user hook user.deleted failed: %s", e)
 
     def authenticate(self, username, password):
         """! @brief Check credentials against the configured mode.
@@ -727,11 +769,13 @@ class Auth:
             username = str(data.get("username", ""))[:128]
             password = str(data.get("password", ""))[:1024]
 
-            key = (request.remote_addr, username.lower())
+            client = request.remote_addr
+            now = time.time()
+            key = (client, username.lower())
             fails = _LOGIN_FAILS.get(key)
-            if fails and time.time() - fails[1] > _LOGIN_WINDOW:
+            if fails and now - fails[1] > _LOGIN_WINDOW:
                 _LOGIN_FAILS.pop(key, None); fails = None
-            if fails and fails[0] >= _LOGIN_MAX:
+            if (fails and fails[0] >= _LOGIN_MAX) or _client_blocked(client, now):
                 return jsonify({"error": "too many failed attempts, try later"}), 429
 
             if (self.enabled() and self.user_count() == 0
@@ -744,17 +788,18 @@ class Auth:
 
             u = self.authenticate(username, password)
             if not u:
-                f = _LOGIN_FAILS.setdefault(key, [0, time.time()])
-                f[0] += 1
-                audit("login_failed", f"user={username!r} ip={request.remote_addr}")
+                _note_failure(client, username, now)
+                audit("login_failed", f"user={username!r} ip={client}")
                 return jsonify({"error": "invalid credentials"}), 401
             for check in self.login_checks:
                 stop = check(u, data)
                 if stop:
                     body, status = stop
-                    if status >= 400:
-                        f = _LOGIN_FAILS.setdefault(key, [0, time.time()])
-                        f[0] += 1
+                    # a wrong second factor counts; the first "code required" prompt
+                    # (no code sent yet) does not
+                    asked = status == 403 and (body or {}).get("second_factor") and not data.get("totp")
+                    if status >= 400 and not asked:
+                        _note_failure(client, username, now)
                     return jsonify(body), status
             _LOGIN_FAILS.pop(key, None)
             token, csrf = self._new_session(u["id"])
@@ -906,6 +951,8 @@ class Auth:
             # disabling or demoting signs the user out now
             if d.get("disabled") is True or d.get("is_admin") is False:
                 self.revoke_user_sessions(uid)
+            if d.get("disabled") is True:
+                self._user_event("user.disabled", uid)
             return jsonify({"ok": True})
 
         @app.route("/api/auth/features")

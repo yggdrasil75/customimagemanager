@@ -126,6 +126,8 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
                     if (r.declined) { db.markUploaded(item.id, sha, item.bucketId, item.name, item.size, ""); continue }
                     db.markUploaded(item.id, sha, item.bucketId, item.name, item.size, r.filename)
                     sent++
+                } catch (e: AccountException) {
+                    throw e                                     // stop the run, not this item
                 } catch (e: Exception) {
                     db.markFailed(item.id, e.message ?: e.toString())
                     prefs.lastError = "${item.name}: ${e.message}"
@@ -133,6 +135,10 @@ class UploadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
             }
             prefs.lastRun = System.currentTimeMillis()
             if (sent > 0) prefs.lastError = ""
+            return Result.success()
+        } catch (e: AccountException) {
+            // the account is disabled / gone / not allowed: say so and wait for the next trigger
+            prefs.lastError = e.message ?: e.toString()
             return Result.success()
         } catch (e: Exception) {
             prefs.lastError = e.message ?: e.toString()

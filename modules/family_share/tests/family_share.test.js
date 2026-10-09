@@ -39,3 +39,36 @@ test("family share options save through the modal's Save button", { skip: skipUn
   assert.equal(b.document.getElementById("fs_name").value, "kiddo");
   assert.equal(b.document.querySelector('[data-opt="revoke_on_delete"]').checked, false);
 });
+
+// Settings -> My devices: a user's own phones, paired as their account.
+test("my devices tab lists the account's phones and adds one", { skip: skipUnless("family_share") }, async () => {
+  const b = page({ modules: ["family_share"] });
+  assert.deepEqual(b.errors, []);
+  const server = { ok: true, scopes: ["personal", "all"], inbound: true,
+    me: { id: 7, username: "ann", display_name: "Ann" },
+    server: { name: "home", fingerprint: "ffff", my_url: "https://home.example" },
+    devices: [{ id: 3, name: "ann-pixel", folder: "", scope: "personal", enabled: 1, last_ok: 0, paired: true,
+                fingerprint: "abcd", owner: "ann", owner_display: "Ann" }] };
+  b.api.on("/api/family_share/devices", () => server);
+  b.api.on("POST /api/family_share/devices/save", (c) => {
+    server.devices.push({ id: 4, name: c.body.name, folder: "", scope: c.body.scope, enabled: 1, paired: false });
+    return { ok: true, id: 4, peer: { name: c.body.name } };
+  });
+  b.api.on("POST /api/family_share/devices/key", () => ({ ok: true, name: "home", pairing_code: "fs1.x", fingerprint: "ffff", peer_name: "ann-tab" }));
+  await b.run("openSettings()"); await b.tick(30);
+  const tabBtn = b.document.querySelector('[data-settings-tab="module_family_devices"]');
+  assert.ok(tabBtn, "My devices tab button rendered");
+  tabBtn.click(); await b.tick(30);
+  const pane = b.document.getElementById("settings_pane_module_family_devices");
+  assert.ok(pane.textContent.includes("paired as Ann"), "shows the account");
+  assert.equal(pane.querySelector('tr[data-id="3"] .fd-name').value, "ann-pixel");
+  b.run(`const tr = document.querySelector("#settings_pane_module_family_devices tr.fs-new");
+         tr.querySelector(".fd-name").value = "ann-tab"; tr.querySelector(".fd-scope").value = "all";
+         tr.querySelector(".fd-add").click();`);
+  await b.tick(60);
+  const posts = b.api.find("/api/family_share/devices/save", "POST").map(c => c.body);
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].name, "ann-tab"); assert.equal(posts[0].scope, "all");
+  assert.ok(!("user_id" in posts[0]), "the browser never picks the owner");
+  assert.ok(pane.querySelector(".fs-keybox input").value === "fs1.x", "pairing code for the app shown");
+});
