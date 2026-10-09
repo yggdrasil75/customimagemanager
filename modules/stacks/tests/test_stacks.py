@@ -344,3 +344,120 @@ def test_works_without_dedup(client, host, upload, monkeypatch):
     finally:
         host.set_config("stacks_burst", bool(old), save=False)
         _post(client, f"/api/stacks/{sid}/unstack")
+
+# -- file data: user-owned stacks and opt-outs survive a DB rebuild ------------------------
+def _fdata(host, rel):
+    return host.core.file_data(rel, "stacks")
+
+
+def _drop_stack_rows(host, sid=None):
+    db = host.db()
+    if sid:
+        db.execute("DELETE FROM stack_members WHERE stack_id=?", (sid,))
+        db.execute("DELETE FROM stacks WHERE id=?", (sid,))
+    db.commit()
+
+
+def test_manual_stack_file_data_round_trip(client, host, upload):
+    folder = FOLDER + "_fdata"
+    fns = [upload(name=f"fd_{i}.png", seed=5100 + i, folder=folder) for i in range(3)]
+    st = _post(client, "/api/stacks/create", {"filenames": fns, "cover": fns[1]})["stack"]
+    sid = st["id"]
+    try:
+        order = [m["filename"] for m in st["members"]]
+        for fn in fns:
+            d = _fdata(host, fn)["stack"]
+            assert d["id"] == sid and d["kind"] == "manual" and d["cover"] == fns[1]
+            assert d["members"] == order and isinstance(d["created"], float)
+        created = host.db().execute("SELECT created FROM stacks WHERE id=?", (sid,)).fetchone()[0]
+        # delete the rows, pull just one member: the whole stack comes back from the files
+        _drop_stack_rows(host, sid)
+        assert _stack_of(client, fns[0])["stack"] is None
+        host.emit("library.sync", direction="pull", rel_paths=[fns[2]])
+        back = _stack_of(client, fns[0])["stack"]
+        assert back and back["id"] == sid and back["kind"] == "manual" and back["cover"] == fns[1]
+        assert [m["filename"] for m in back["members"]] == order and back["auto"] is False
+        assert host.db().execute("SELECT created FROM stacks WHERE id=?", (sid,)).fetchone()[0] == created
+        assert [f["filename"] for f in _list(client, folder)] == [fns[1]]
+        # a full pull is idempotent
+        host.emit("library.sync", direction="pull", rel_paths=None)
+        assert _stack_of(client, fns[0])["stack"]["count"] == 3
+        # push restores a member whose file copy went missing
+        assert host.core.set_file_data(fns[0], "stacks", None)["success"]
+        host.emit("library.sync", direction="push", rel_paths=None)
+        assert _fdata(host, fns[0])["stack"]["members"] == order
+        # removing a member rewrites the others and clears it (manual: no opt-out)
+        j = _post(client, f"/api/stacks/{sid}/remove", {"filenames": [fns[0]]})
+        assert j["success"] and j["stack"]["count"] == 2
+        assert _fdata(host, fns[0]) is None
+        assert _fdata(host, fns[1])["stack"]["members"] == [m for m in order if m != fns[0]]
+    finally:
+        _post(client, f"/api/stacks/{sid}/unstack")
+    for fn in fns:
+        assert _fdata(host, fn) is None
+
+
+def test_stack_pull_conflict_takes_the_most_common_member_list(client, host, upload):
+    folder = FOLDER + "_fconf"
+    fns = [upload(name=f"fc_{i}.png", seed=5200 + i, folder=folder) for i in range(3)]
+    sid = _post(client, "/api/stacks/create", {"filenames": fns})["stack"]["id"]
+    try:
+        order = _fdata(host, fns[0])["stack"]["members"]
+        # one stale copy lists a different order and a stranger; two agree
+        stale = dict(_fdata(host, fns[2])["stack"], members=list(reversed(order)) + [folder + "/nope.png"])
+        assert host.core.set_file_data(fns[2], "stacks", {"stack": stale})["success"]
+        _drop_stack_rows(host, sid)
+        host.emit("library.sync", direction="pull", rel_paths=fns)
+        back = _stack_of(client, fns[0])["stack"]
+        assert back["id"] == sid and [m["filename"] for m in back["members"]] == order
+    finally:
+        _post(client, f"/api/stacks/{sid}/unstack")
+
+
+def test_optout_and_picked_cover_file_data_round_trip(client, host, upload):
+    folder = FOLDER + "_fopt"
+    fns = [upload(name=f"fo_{i}.png", seed=5300 + i, folder=folder) for i in range(3)]
+    svc = host.get_service("stacks")
+    sid = svc["create"]("raw", fns, auto=True)
+    try:
+        # an automatic stack is recomputed by a rescan: nothing in the files
+        assert all(_fdata(host, fn) is None for fn in fns)
+        assert _post(client, f"/api/stacks/{sid}/remove", {"filenames": [fns[2]]})["success"]
+        assert _fdata(host, fns[2]) == {"optout": ["raw"]}
+        # picking the cover by hand makes the stack the user's: it goes into the files
+        assert _post(client, f"/api/stacks/{sid}/cover", {"filename": fns[1]})["success"]
+        assert _fdata(host, fns[0])["stack"]["kind"] == "raw"
+        assert _fdata(host, fns[0])["stack"]["cover"] == fns[1]
+        db = host.db()
+        db.execute("DELETE FROM stack_optout WHERE rel_path IN (?,?,?)", fns)
+        db.commit()
+        _drop_stack_rows(host, sid)
+        host.emit("library.sync", direction="pull", rel_paths=None)
+        assert db.execute("SELECT kind FROM stack_optout WHERE rel_path=?", (fns[2],)).fetchone()[0] == "raw"
+        back = _stack_of(client, fns[0])["stack"]
+        assert back["id"] == sid and back["kind"] == "raw" and back["cover"] == fns[1] and not back["auto"]
+        assert _stack_of(client, fns[2])["stack"] is None
+    finally:
+        _post(client, f"/api/stacks/{sid}/unstack")
+        db = host.db()
+        db.execute("DELETE FROM stack_optout WHERE rel_path IN (?,?,?)", fns)
+        db.commit()
+
+
+def test_rename_repoints_member_file_data(client, host, upload):
+    folder = FOLDER + "_fren"
+    fns = [upload(name=f"fr_{i}.png", seed=5400 + i, folder=folder) for i in range(2)]
+    sid = _post(client, "/api/stacks/create", {"filenames": fns, "cover": fns[0]})["stack"]["id"]
+    moved = folder + "/sub/" + fns[0].rsplit("/", 1)[-1]
+    try:
+        assert client.post("/api/move", json={"filename": fns[0], "new_folder": folder + "/sub"}).get_json()["success"]
+        for fn in (moved, fns[1]):
+            d = _fdata(host, fn)["stack"]
+            assert d["id"] == sid and d["cover"] == moved and sorted(d["members"]) == sorted([moved, fns[1]])
+        _drop_stack_rows(host, sid)
+        host.emit("library.sync", direction="pull", rel_paths=[fns[1]])
+        back = _stack_of(client, moved)["stack"]
+        assert back["id"] == sid and back["cover"] == moved
+    finally:
+        _post(client, f"/api/stacks/{sid}/unstack")
+        _delete(client, moved)

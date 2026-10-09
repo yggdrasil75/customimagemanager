@@ -50,7 +50,7 @@ def register(host):
     db = host.db
     log = host.logger
     host.register_media_type("audio", exts=AUDIO_EXTS, mime_map=_MIME)
-    host.add_table(ml.DDL)
+    host.add_table(ml.DDL, kind="mirrored")  # audio tags mirror the file; emb / cluster recompute
     host.register_feature("tab.music", "Music tab (read=listen, write=edit tags)",
                           section="gallery_tabs", section_label="Gallery tabs", default="read")
     host.add_asset("music.js")
@@ -508,7 +508,7 @@ def register(host):
         CREATE TABLE IF NOT EXISTS music_radio (
             k TEXT PRIMARY KEY, v TEXT
         );
-    """)
+    """, kind="state")  # play history and radio state
     # inclusion odds per user star rating; None (unrated) always plays;
     # a second copy in the round for the ones people keep rating up
     _KEEP = {0: 0.15, 1: 0.25, 2: 0.5, 3: 0.8, 4: 1.0, 5: 1.0}

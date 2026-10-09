@@ -118,7 +118,7 @@ def register(host):
             ip          TEXT,
             user_agent  TEXT,
             label       TEXT
-        );""", check=prune)
+        );""", kind="state", check=prune)  # per-session device info beside auth_sessions
     host.add_asset("sessions.js")
     host.add_settings_tab("sessions", "Sessions & devices", icon="", group="you")
     host.register_feature(FEATURE, "Sessions & devices", section="account",
@@ -198,7 +198,7 @@ def register(host):
             return empty("Authentication is off: nobody is signed in, so there are no sessions.")
         cur = current_token()
         out = [public(r, cur) for r in rows_for(g.user["id"])]
-        resp = {"success": True, "sessions": out, "is_admin": bool(g.user.get("is_admin"))}
+        resp = {"success": True, "sessions": out, "is_admin": host.is_admin()}
         if cur is None:
             resp["note"] = "This request used an API key, which is not a session."
         if any(t.get("id") == "api_keys" for t in host.settings_tabs):
@@ -259,7 +259,7 @@ def register(host):
         """! @brief Admin: the sessions of one account (?user_id=), or of every account."""
         if not authmgr.enabled() or not signed_in():
             return empty("Authentication is off.")
-        if not g.user.get("is_admin"):
+        if not host.is_admin():
             return jsonify({"success": False, "error": "admin required"}), 403
         uid = request.args.get("user_id", type=int)
         conn = db()
@@ -281,7 +281,7 @@ def register(host):
         """! @brief Admin: log an account out of every device."""
         if not authmgr.enabled() or not signed_in():
             return empty("Authentication is off.")
-        if not g.user.get("is_admin"):
+        if not host.is_admin():
             return jsonify({"success": False, "error": "admin required"}), 403
         d = request.get_json(silent=True) or {}
         try:

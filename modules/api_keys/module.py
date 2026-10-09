@@ -73,7 +73,7 @@ def register(host):
             expires_at  REAL,
             last_used   REAL,
             FOREIGN KEY(user_id) REFERENCES auth_users(id) ON DELETE CASCADE
-        );""")
+        );""", kind="state")
     host.add_asset("api_keys.js")
     host.add_settings_tab("api_keys", "API keys", icon="🔑", group="you")
     db, authmgr = host.db, host.core.authmgr
@@ -112,7 +112,7 @@ def register(host):
         if not _signed_in():
             return jsonify({"error": "authentication required"}), 401
         uid = request.args.get("user_id", type=int)
-        if uid is not None and uid != g.user["id"] and not g.user["is_admin"]:
+        if uid is not None and uid != g.user["id"] and not host.is_admin():
             return jsonify({"error": "admin required"}), 403
         rows = db().execute("SELECT * FROM auth_api_keys WHERE user_id=? ORDER BY created_at",
                             (uid if uid is not None else g.user["id"],)).fetchall()
@@ -163,7 +163,7 @@ def register(host):
         row = db().execute("SELECT * FROM auth_api_keys WHERE id=?", (kid,)).fetchone()
         if row is None:
             return jsonify({"success": False, "error": "no such key"}), 404
-        if row["user_id"] != g.user["id"] and not g.user["is_admin"]:
+        if row["user_id"] != g.user["id"] and not host.is_admin():
             return jsonify({"error": "admin required"}), 403
         db().execute("DELETE FROM auth_api_keys WHERE id=?", (kid,))
         db().commit()

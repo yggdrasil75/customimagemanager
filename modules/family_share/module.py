@@ -106,7 +106,7 @@ def register(host):
         if "replaces" not in rcols:
             db.execute("ALTER TABLE fs_received ADD COLUMN replaces TEXT DEFAULT '[]'")
         db.commit()
-    host.add_table(sc.DDL, check=_migrate)
+    host.add_table(sc.DDL, kind="state", check=_migrate)  # peers, rules and transfer ledgers
 
     # -- settings -----------------------------------------------------------
     def _bool(v):

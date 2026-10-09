@@ -39,6 +39,10 @@ def _schema():
                 _SCHEMA[token] = (f.get("dtype"), bool(f.get("is_list")))
     return _SCHEMA
 
+def ensure_namespaces():
+    """! @brief Register the schema's namespaces with exiv2 now (before a read that needs them)."""
+    _schema()
+
 def known_tokens():
     """! @brief Every XMP token the schema defines."""
     return sorted(_schema().keys())

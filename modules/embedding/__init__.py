@@ -94,14 +94,14 @@ def register(host):
             mtime    REAL,
             updated  REAL,
             PRIMARY KEY (rel_path, model))
-    """, check=_migrate_embeddings)
+    """, kind="cache", check=_migrate_embeddings)
     host.add_table("""
         CREATE TABLE IF NOT EXISTS image_clusters(
             rel_path TEXT PRIMARY KEY,
             label    INTEGER NOT NULL,
             dist     REAL,
             updated  REAL)
-    """)
+    """, kind="cache")
     host.add_table("""
         CREATE TABLE IF NOT EXISTS image_cluster_meta(
             label     INTEGER PRIMARY KEY,
@@ -112,7 +112,7 @@ def register(host):
             spread    REAL,
             suggested TEXT,
             updated   REAL)
-    """)
+    """, kind="cache")
 
     # -- which embedder: the 'embed' capability's pick in the Models tab ------
     _CNN_ARCHS = ["efficientnet_b0", "efficientnet_b1", "efficientnet_b2", "mobilenet_v3"]

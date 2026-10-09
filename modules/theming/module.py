@@ -132,7 +132,8 @@ def register(host):
 
     def _can_choose():
         u = _user()
-        return bool(u.get("is_admin")) or host.core.features.has_level(
+        # no user (a public page with auth on) may not choose; host.is_admin() says True there
+        return (bool(u) and host.is_admin()) or host.core.features.has_level(
             u.get("features") or {}, "theme.choose", "write")
 
     def default_palette(_u=None):

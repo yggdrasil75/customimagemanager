@@ -58,7 +58,7 @@ def register_seq_module(host, *, cls, kind, cap, cap_label, cap_summary, cap_inp
     if scorers is None:
         host.logger.info(f"{prefix}: dedup registry unavailable; skipping")
         return None
-    host.add_table(_DDL.format(table=sample_table))
+    host.add_table(_DDL.format(table=sample_table), kind="state")  # labelled training samples
     models_dir = os.path.abspath(host.core.models_dir)
     pretrained = os.path.join(module_dir, "pretrained")
     sizes_key = f"{prefix}_sizes"

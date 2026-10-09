@@ -24,9 +24,18 @@ Kinds
 A stack can be merged into an animation (JXL, GIF, WebP or APNG, stored per
 Settings -> Media like any upload) and an animation split into a stack.
 
-Storage is DB-only (clustering): raw and burst stacks are rebuilt from file
-metadata and dedup results; stack_optout remembers files a user took out of
-an automatic stack so a rescan leaves them alone.
+Storage: the tables are an index ("mirrored"). Raw and burst stacks are
+recomputed (raw pairing from file metadata, bursts from dedup results), so
+nothing about them is written to the files. A stack the user owns (manual,
+split, or an automatic one whose cover was picked by hand: auto = 0) and the
+opt-outs (stack_optout: files a user took out of an automatic stack, so a
+rescan leaves them alone) are stored in each member file as per-file module
+data (Xmp.cim.Data, key "stacks"):
+  {"stack": {"id", "kind", "cover", "created", "members": [rel, ...]},
+   "optout": [kind]}
+library.sync push writes it where a file's copy is missing or differs; pull
+rebuilds the rows from the files (a stack from the members that name it, the
+most common member list winning).
 
 Routes (feature "stacks"; read views, write changes)
   GET  /api/stacks/of?filename=      the stack a file is in, and whether it is animated
@@ -51,6 +60,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import Counter
 
 import numpy as np
 from flask import jsonify, request
@@ -105,6 +115,8 @@ MAX_MERGE_FRAMES = 500
 _RAW_TAGS = (("exif", "OriginalRawFileName"), ("xmp", "crs:RawFileName"), ("xmp", "crd:RawFileName"))
 _EPOCH = "COALESCE(d_original_epoch, d_capture_epoch, d_actual_epoch, d_digitized_epoch)"
 _DEDUP_POLL_S = 30.0
+## @brief Key of this module's per-file data in Xmp.cim.Data.
+DATA_KEY = "stacks"
 
 
 def _glob_escape(s):
@@ -192,9 +204,154 @@ def register(host):
         except Exception as e:
             log.error(f"stacks consistency check: {e}")
 
-    host.add_table(_DDL, check=_check)
+    # user-owned stacks and opt-outs live in the member files (Xmp.cim.Data), automatic
+    # stacks are recomputed by a rescan: every row can be rebuilt without the DB
+    host.add_table(_DDL, kind="mirrored", check=_check)
     # the gallery shows a stack as its cover only
     host.register_gallery_filter("rel_path NOT IN (SELECT rel_path FROM stack_members WHERE hidden=1)")
+
+    # -- per-file data (user-owned stacks and opt-outs in Xmp.cim.Data) ----------
+    _dirty = set()
+    _dirty_lock = threading.Lock()
+    _tl = threading.local()
+
+    def _mark(rels):
+        """! @brief Remember files whose stored stack data may differ from the DB (not while pulling)."""
+        if getattr(_tl, "pulling", False):
+            return
+        with _dirty_lock:
+            _dirty.update(r for r in rels if r)
+
+    def _desired(rel):
+        """! @brief The file data a file should carry for the DB's current state, or None."""
+        db = host.db()
+        out = {}
+        r = db.execute("SELECT s.id, s.kind, s.cover, s.created FROM stack_members m "
+                       "JOIN stacks s ON s.id=m.stack_id WHERE m.rel_path=? AND s.auto=0", (rel,)).fetchone()
+        if r:
+            out["stack"] = {"id": r[0], "kind": r[1], "cover": r[2], "created": r[3],
+                            "members": _members(r[0])}
+        o = db.execute("SELECT kind FROM stack_optout WHERE rel_path=?", (rel,)).fetchone()
+        if o:
+            out["optout"] = [o[0] or ""]
+        return out or None
+
+    def _push_file(rel):
+        """! @brief Write a file's stack data when its copy is missing or differs. @return True if written."""
+        fp = host.safe_path(host.media_dir, rel)
+        if not fp or not os.path.exists(fp):
+            return False
+        want = _desired(rel)
+        if core.file_data(rel, DATA_KEY) == want:
+            return False
+        res = core.set_file_data(rel, DATA_KEY, want)
+        if not res.get("success"):
+            log.warning(f"stacks: writing file data of {rel} failed: {res.get('error')}")
+            return False
+        return True
+
+    def _flush():
+        """! @brief Write the stack data of every file marked since the last flush."""
+        with _dirty_lock:
+            rels = sorted(_dirty)
+            _dirty.clear()
+        for rel in rels:
+            try:
+                _push_file(rel)
+            except Exception as e:
+                log.warning(f"stacks: file data {rel}: {e}")
+
+    def _push_all():
+        """! @brief library.sync push: every file in a user-owned stack or opted out."""
+        rels = [r[0] for r in host.db().execute(
+            "SELECT m.rel_path FROM stack_members m JOIN stacks s ON s.id=m.stack_id WHERE s.auto=0 "
+            "UNION SELECT rel_path FROM stack_optout")]
+        n = 0
+        for rel in rels:
+            try:
+                n += int(_push_file(rel))
+            except Exception as e:
+                log.warning(f"stacks: file data {rel}: {e}")
+        return n
+
+    def _pull(rel_paths):
+        """! @brief library.sync pull: rebuild opt-outs and user-owned stacks from the files.
+        @param rel_paths  files to read (None = every file). A file without stack data
+                          keeps its rows; a stack is rebuilt from the members whose own
+                          data names it, in the order of the most common member list.
+        """
+        db = host.db()
+        if rel_paths is None:
+            rels = [r[0] for r in db.execute("SELECT rel_path FROM files")]
+        else:
+            rels = list(dict.fromkeys(rel_paths))
+        cache = {}
+
+        def data(rel):
+            """! @brief A file's stack data (cached for this pull), or None."""
+            if rel not in cache:
+                v = core.file_data(rel, DATA_KEY)
+                cache[rel] = v if isinstance(v, dict) else None
+            return cache[rel]
+
+        def claim(rel):
+            """! @brief The stack entry a file's own data holds, or None."""
+            st = (data(rel) or {}).get("stack")
+            return st if isinstance(st, dict) and st.get("id") else None
+
+        _tl.pulling = True
+        try:
+            cands = {}  # stack id -> files that name it or are listed by one that does
+            for rel in rels:
+                d = data(rel)
+                if d is None:
+                    continue
+                oo = d.get("optout")
+                if isinstance(oo, list) and oo:
+                    host.update_file(rel, table="stack_optout", set={"kind": str(oo[0] or "") or None},
+                                     dont_write=True, commit=False)
+                else:
+                    host.update_file(rel, table="stack_optout", remove=True, dont_write=True, commit=False)
+                st = claim(rel)
+                if st is not None:
+                    c = cands.setdefault(st["id"], set())
+                    c.add(rel)
+                    c.update(m for m in (st.get("members") or []) if isinstance(m, str))
+                    continue
+                sid = _stack_of(rel)
+                row = _stack_row(sid) if sid else None
+                if row is not None and not row["auto"]:
+                    _detach([rel], commit=False)  # the file says it left its stack
+            live = None
+            for sid, near in cands.items():
+                claimers = [m for m in sorted(near) if (claim(m) or {}).get("id") == sid]
+                votes = [claim(m) for m in claimers]
+                lists = Counter(tuple(v.get("members") or []) for v in votes)
+                best = max(lists.items(), key=lambda kv: (kv[1], len(kv[0])))[0]
+                ref = next(v for v in votes if tuple(v.get("members") or []) == best)
+                if live is None:
+                    live = {r[0] for r in db.execute("SELECT rel_path FROM files")}
+                members = [m for m in best if m in claimers] + [m for m in claimers if m not in best]
+                members = [m for m in dict.fromkeys(members) if m in live]
+                if len(members) < 2:
+                    continue
+                kind = ref.get("kind") if ref.get("kind") in KINDS else "manual"
+                _create(kind, members, cover=ref.get("cover"), auto=False, commit=False,
+                        sid=sid, created=ref.get("created"))
+            db.commit()
+        finally:
+            _tl.pulling = False
+
+    def _on_sync(direction, rel_paths=None):
+        """! @brief library.sync: push the file data the DB holds, or pull the rows from the files."""
+        if direction == "push":
+            n = _push_all()
+            if n:
+                log.info(f"stacks: wrote stack data into {n} file(s)")
+        elif direction == "pull":
+            _pull(rel_paths)
+
+    host.on("library.sync", _on_sync)
 
     # -- stack primitives -------------------------------------------------------
     def _members(sid):
@@ -218,12 +375,15 @@ def register(host):
         @return True when the stack still exists."""
         row = _stack_row(sid)
         mem = _members(sid)
+        if row is None or not row["auto"]:
+            _mark(mem)
         if row is None or len(mem) < 2:
             host.update_file(table="stack_members", where=("stack_id=?", (sid,)), remove=True,
                              dont_write=True, commit=False)
             host.update_file(table="stacks", key={"id": sid}, remove=True, dont_write=True, commit=False)
             if commit:
                 host.db().commit()
+                _flush()
             return False
         cover = row["cover"] if row["cover"] in mem else mem[0]
         if cover != row["cover"]:
@@ -234,6 +394,7 @@ def register(host):
                              dont_write=True, commit=False)
         if commit:
             host.db().commit()
+            _flush()
         return True
 
     def _detach(rels, optout=False, commit=True):
@@ -244,29 +405,46 @@ def register(host):
             sid = _stack_of(rel)
             if sid is None:
                 continue
-            if optout:
-                row = _stack_row(sid)
-                if row and row["auto"]:
-                    host.update_file(rel, table="stack_optout", set={"kind": row["kind"]},
-                                     dont_write=True, commit=False)
+            row = _stack_row(sid)
+            if row is None or not row["auto"]:
+                _mark([rel])
+            if optout and row and row["auto"]:
+                host.update_file(rel, table="stack_optout", set={"kind": row["kind"]},
+                                 dont_write=True, commit=False)
+                _mark([rel])
             host.update_file(rel, table="stack_members", remove=True, dont_write=True, commit=False)
             touched.add(sid)
         for sid in touched:
             _normalize(sid, commit=False)
         if commit:
             host.db().commit()
+            _flush()
 
-    def _create(kind, members, cover=None, auto=True, commit=True):
+    def _create(kind, members, cover=None, auto=True, commit=True, sid=None, created=None):
         """! @brief A new stack of `members` (taken out of any stack they were in).
+        @param sid      reuse this id (a pull rebuilding a stack from the files); its
+                        current members are replaced.
+        @param created  creation time to keep (default now).
         @return its id, or None with fewer than two members."""
         members = list(dict.fromkeys(m for m in members if m))
         if len(members) < 2:
             return None
-        _detach(members, commit=False)
-        sid = uuid.uuid4().hex
+        if sid:
+            host.update_file(table="stack_members", where=("stack_id=? AND rel_path NOT IN (%s)"
+                                                           % ",".join("?" * len(members)),
+                                                           (sid, *members)),
+                             remove=True, dont_write=True, commit=False)
+            _detach([m for m in members if _stack_of(m) not in (None, sid)], commit=False)
+        else:
+            _detach(members, commit=False)
+            sid = uuid.uuid4().hex
+        try:
+            created = float(created)
+        except (TypeError, ValueError):
+            created = time.time()
         host.update_file(table="stacks", key={"id": sid},
                          set={"kind": kind, "cover": cover if cover in members else members[0],
-                              "auto": int(bool(auto)), "created": time.time()},
+                              "auto": int(bool(auto)), "created": created},
                          dont_write=True, commit=False)
         for i, m in enumerate(members):
             host.update_file(m, table="stack_members", set={"stack_id": sid, "position": i, "hidden": 1},
@@ -274,6 +452,7 @@ def register(host):
         _normalize(sid, commit=False)
         if commit:
             host.db().commit()
+            _flush()
         return sid
 
     def _add(sid, rels, commit=True):
@@ -289,6 +468,7 @@ def register(host):
         _normalize(sid, commit=False)
         if commit:
             host.db().commit()
+            _flush()
 
     def _optouts():
         """! @brief Files a user took out of an automatic stack."""
@@ -364,6 +544,7 @@ def register(host):
         elif len(free) >= 2:
             _create("raw", free, cover=cover if cover in free else None, auto=True, commit=False)
         db.commit()
+        _flush()
 
     def match_raw_for(rel):
         """! @brief Pair one freshly indexed file with its raw / rendering partners in
@@ -469,6 +650,7 @@ def register(host):
             if _create("burst", members, cover=cover, auto=True, commit=False):
                 n += 1
         db.commit()
+        _flush()
         return n
 
     # -- background rescans -----------------------------------------------------------
@@ -539,6 +721,7 @@ def register(host):
         except Exception:
             pass
         host.add_worker_source("stacks", _claim, _handle)
+        _flush()  # file data the startup consistency check left pending
 
     host.on_startup(_startup)
 
@@ -554,17 +737,26 @@ def register(host):
         return None
 
     def _on_deleted(rel_path):
-        """! @brief file.deleted: drop the file from its stack and the opt-out list."""
+        """! @brief file.deleted: drop the file from its stack and the opt-out list
+        (the other members' file data follows)."""
         _detach([rel_path], commit=False)
         host.update_file(rel_path, table="stack_optout", remove=True, dont_write=True)
+        _flush()
 
     def _on_renamed(old_rel, new_rel):
-        """! @brief file.renamed: repoint the stack rows."""
+        """! @brief file.renamed: repoint the stack rows and the file data of every member
+        of a user-owned stack that names the old path."""
         for t in ("stack_members", "stack_optout"):
             host.update_file(table=t, where=("rel_path=?", (old_rel,)), set={"rel_path": new_rel},
                              dont_write=True, commit=False)
         host.update_file(table="stacks", where=("cover=?", (old_rel,)), set={"cover": new_rel},
                          dont_write=True)
+        sid = _stack_of(new_rel)
+        row = _stack_row(sid) if sid else None
+        _mark([new_rel] + (_members(sid) if row is not None and not row["auto"] else []))
+        # the core emits this before and after it moves the files row: write once the row is there
+        if host.db().execute("SELECT 1 FROM files WHERE rel_path=?", (new_rel,)).fetchone():
+            _flush()
 
     host.on("file.indexed", _on_indexed)
     host.on("file.deleted", _on_deleted)

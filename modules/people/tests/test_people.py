@@ -189,3 +189,34 @@ def test_drawn_clusters_fold_away_and_not_real_remembers_centroid(client, upload
         app.state["face_hide_drawn"] = 0.55
         db.execute("DELETE FROM face_regions WHERE cluster_id IN (9101, 9102) OR rel_path IN (?,?)", (a, b))
         db.execute("DELETE FROM face_rejects"); db.commit()
+
+def test_face_flags_file_data_round_trip(client, upload, app, ungated):
+    """! @brief "Not a face" and "unknown" are per-face user decisions: they are kept in
+    the file (Xmp.cim.Data "people") and a sync pull rebuilds them after the rows go."""
+    fn = upload("flags_rt.png", seed=110)
+    db = app._db()
+    db.execute("DELETE FROM face_regions WHERE rel_path=?", (fn,))
+    _fake_face_rows(db, fn, 9201, 3, 0.1, seed=4)
+    try:
+        ids = [r[0] for r in db.execute("SELECT id FROM face_regions WHERE rel_path=? ORDER BY cx", (fn,))]
+        assert client.post("/api/faces/not_face", json={"ids": [ids[0]]}).get_json()["success"]
+        assert client.post("/api/faces/unknown", json={"ids": [ids[1]]}).get_json()["success"]
+        d = app.file_data(fn, "people")
+        assert [round(b["cx"], 3) for b in d["rejects"]] == [0.1]
+        assert [round(b["cx"], 3) for b in d["unknown"]] == [0.15]
+        # the DB loses every row: a pull brings both decisions back as tombstone rows
+        db.execute("DELETE FROM face_regions WHERE rel_path=?", (fn,)); db.commit()
+        app.module_host.emit("library.sync", direction="pull", rel_paths=[fn])
+        got = {round(r[0], 3): (r[1], r[2], r[3]) for r in db.execute(
+            "SELECT cx, not_face, unknown, cluster_id FROM face_regions WHERE rel_path=?", (fn,))}
+        assert got == {0.1: (1, 0, -1), 0.15: (0, 1, -1)}
+        # push restores a missing file copy; unmark clears it
+        assert app.set_file_data(fn, "people", None)["success"]
+        app.module_host.emit("library.sync", direction="push", rel_paths=None)
+        assert app.file_data(fn, "people") == d
+        flagged = [r[0] for r in db.execute(
+            "SELECT id FROM face_regions WHERE rel_path=? AND (not_face=1 OR unknown=1)", (fn,))]
+        assert client.post("/api/faces/unmark", json={"ids": flagged}).get_json()["success"]
+        assert app.file_data(fn, "people") is None
+    finally:
+        db.execute("DELETE FROM face_regions WHERE rel_path=?", (fn,)); db.commit()

@@ -343,3 +343,36 @@ def test_cnn_module_offers_trained_sizes_and_reports_why(tmp_path, monkeypatch):
     assert st["selected"][-1] == ("dedup.pair", "heurdu", "brandnew") and st["saved"] == 1
     assert host.config["model_selection"]["dedup.pair"]["size"] == "brandnew"
     assert st["services"]["dedup_cnn"]["status"]()["size"] == "brandnew"
+
+# -- "not a duplicate" decisions live in both files ---------------------------------
+def test_exclusions_file_data_round_trip(client, host, upload):
+    from modules.dedup import dedup_core as dc
+    folder = "dedup_fdata"
+    a, b, c = (upload(f"nx_{i}.png", seed=7100 + i, folder=folder) for i in range(3))
+    db = host.db()
+    try:
+        dc.add_exclusions(a, [b, c])
+        assert host.core.file_data(a, "dedup") == {"not_dupe_of": sorted([b, c])}
+        assert host.core.file_data(b, "dedup") == {"not_dupe_of": [a]}
+        assert host.core.file_data(c, "dedup") == {"not_dupe_of": [a]}
+        # rows gone; one side alone is enough to rebuild a pair
+        assert host.core.set_file_data(c, "dedup", None)["success"]
+        db.execute("DELETE FROM dedup_exclusions WHERE a IN (?,?,?) OR b IN (?,?,?)", (a, b, c) * 2)
+        db.commit()
+        host.emit("library.sync", direction="pull", rel_paths=[b, c])
+        assert dc.is_excluded(a, b) and not dc.is_excluded(a, c)
+        host.emit("library.sync", direction="pull", rel_paths=None)
+        assert dc.is_excluded(a, b) and dc.is_excluded(a, c)
+        # push writes the side whose copy went missing
+        host.emit("library.sync", direction="push", rel_paths=None)
+        assert host.core.file_data(c, "dedup") == {"not_dupe_of": [a]}
+        # a rename repoints the rows and the partners' file data
+        assert client.post("/api/move", json={"filename": a, "new_folder": folder + "/sub"}).get_json()["success"]
+        moved = folder + "/sub/" + a.rsplit("/", 1)[-1]
+        assert dc.is_excluded(moved, b) and dc.is_excluded(moved, c) and not dc.is_excluded(a, b)
+        assert host.core.file_data(b, "dedup") == {"not_dupe_of": [moved]}
+        assert host.core.file_data(moved, "dedup") == {"not_dupe_of": sorted([b, c])}
+        a = moved
+    finally:
+        db.execute("DELETE FROM dedup_exclusions WHERE a IN (?,?,?) OR b IN (?,?,?)", (a, b, c) * 2)
+        db.commit()

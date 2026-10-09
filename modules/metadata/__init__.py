@@ -115,7 +115,7 @@ def register(host):
             PRIMARY KEY (rel_path, ns, tag)
         );
         CREATE INDEX IF NOT EXISTS idx_meta_tag ON metadata_index(tag COLLATE NOCASE, value COLLATE NOCASE);
-    """)
+    """, kind="cache")  # rebuilt from each file's EXIF / IPTC / XMP
 
     def _flatten(fp):
         rows = []

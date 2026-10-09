@@ -118,7 +118,7 @@ def register(host):
     core = host.core
     trash_dir = os.path.join(host.media_dir, TRASH_DIRNAME)
 
-    host.add_table(_DDL)
+    host.add_table(_DDL, kind="state")
     host.add_asset("trash.js")
     host.add_asset("trash.css", kind="css")
     host.register_feature("trash", "Trash bin", section="library",
@@ -167,9 +167,7 @@ def register(host):
     def viewer():
         """! @brief (username, is_admin) for the request; anonymous (auth off) is an admin."""
         u = g.get("user") if has_request_context() else None
-        if not u or not u.get("id") or u.get("is_admin"):
-            return (u or {}).get("username", ""), True
-        return u.get("username", ""), False
+        return (u or {}).get("username", ""), not u or not u.get("id") or host.is_admin()
 
     def scope_clause():
         """! @brief (sql, params) restricting trash rows to what the viewer may see."""

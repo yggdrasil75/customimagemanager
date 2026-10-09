@@ -32,7 +32,7 @@ import sys
 import threading
 import time
 
-from flask import g, has_request_context, jsonify, request
+from flask import jsonify, request
 
 import model_registry
 
@@ -127,30 +127,13 @@ def register(host):
             key     TEXT PRIMARY KEY,
             value   TEXT NOT NULL DEFAULT '{}',
             updated REAL NOT NULL DEFAULT 0
-        );""")
+        );""", kind="cache")
     host.add_asset("stats.js")
 
     measure_lock = threading.Lock()
     measuring = {"on": False}
 
     # -- helpers ---------------------------------------------------------------------
-    def _user():
-        """! @brief The signed-in user dict, or None (auth off / no request)."""
-        if not has_request_context():
-            return None
-        u = g.get("user")
-        return u if u and u.get("username") else None
-
-    def _is_admin():
-        """! @brief True for an admin, or for everyone while auth is off."""
-        u = _user()
-        return bool(u.get("is_admin")) if u else True
-
-    def _deny_non_admin():
-        if _is_admin():
-            return None
-        return jsonify({"success": False, "error": "admin only"}), 403
-
     def cache_get(key):
         """! @brief (value, updated) from stats_cache, or (None, 0)."""
         try:
@@ -288,7 +271,7 @@ def register(host):
         except Exception:
             out["count"] = None
         quotas = host.get_service("quotas")
-        if quotas is not None and _is_admin():
+        if quotas is not None and host.is_admin():
             rows = []
             d = db()
             used = {}
@@ -382,9 +365,6 @@ def register(host):
                         "now": time.time()})
 
     def _pause_or_resume(resume):
-        deny = _deny_non_admin()
-        if deny:
-            return deny
         body = request.get_json(silent=True) or {}
         name = str(body.get("source") or "").strip()
         if not name:
@@ -421,20 +401,20 @@ def register(host):
 
     def api_measure():
         """! @brief Re-measure the library size now, in the background (admin)."""
-        deny = _deny_non_admin()
-        if deny:
-            return deny
         if measuring["on"]:
             return jsonify({"success": True, "measuring": True})
         threading.Thread(target=_measure_quiet, name="stats-measure-now", daemon=True).start()
         return jsonify({"success": True, "measuring": True})
 
     host.add_route("/api/stats/jobs", api_jobs, feature=FEATURE)
-    host.add_route("/api/stats/jobs/pause", api_pause, methods=["POST"], feature=FEATURE, level="write")
-    host.add_route("/api/stats/jobs/resume", api_resume, methods=["POST"], feature=FEATURE, level="write")
+    host.add_route("/api/stats/jobs/pause", api_pause, methods=["POST"], feature=FEATURE, level="write",
+                   admin=True)
+    host.add_route("/api/stats/jobs/resume", api_resume, methods=["POST"], feature=FEATURE, level="write",
+                   admin=True)
     host.add_route("/api/stats/server", api_server, feature=FEATURE)
     host.add_route("/api/stats/slow", api_slow, feature=FEATURE)
-    host.add_route("/api/stats/measure", api_measure, methods=["POST"], feature=FEATURE, level="write")
+    host.add_route("/api/stats/measure", api_measure, methods=["POST"], feature=FEATURE, level="write",
+                   admin=True)
 
     # -- Settings -> Info ------------------------------------------------------------
     def _info_section():

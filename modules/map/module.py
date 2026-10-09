@@ -73,7 +73,7 @@ def _floats(value, n_min, n_max):
 
 
 def register(host):
-    host.add_table(_DDL)
+    host.add_table(_DDL, kind="cache")  # GPS read from the files' EXIF / XMP
     host.register_feature("tab.map", "Map tab", section="gallery_tabs",
                           section_label="Gallery tabs", default="read")
 

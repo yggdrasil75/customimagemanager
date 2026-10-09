@@ -23,7 +23,7 @@ import time
 import zipfile
 from datetime import datetime, timezone
 
-from flask import jsonify, request, render_template, send_file, abort, make_response, g
+from flask import jsonify, request, render_template, send_file, abort, make_response
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -281,7 +281,7 @@ def register(host):
     core = host.core
     links = Links(host)
 
-    host.add_table(DDL)
+    host.add_table(DDL, kind="state")
     host.register_feature(FEATURE, "Shared links", section="sharing", section_label="Sharing",
                           default="write", role_defaults={"viewer": "block"})
     host.add_config_key("shared_links_base", default="",
@@ -308,15 +308,9 @@ def register(host):
         """! @brief The signed-in username ('' when auth is off)."""
         return host.current_user() or ""
 
-    def _is_admin():
-
-        """! @brief Is the requester an admin (or auth off)?"""
-        u = getattr(g, "user", None)
-        return bool(u is None or u.get("is_admin"))
-
     def _may_manage(row):
         """! @brief The creator and admins may change or delete a link."""
-        return _is_admin() or row["created_by"] == _user()
+        return host.is_admin() or row["created_by"] == _user()
 
     def _public(row):
 
@@ -358,7 +352,7 @@ def register(host):
     def api_list():
         """! @brief GET /api/shared_links: my links (admins: all)."""
         db = host.db()
-        if _is_admin():
+        if host.is_admin():
             rows = db.execute("SELECT * FROM shared_links ORDER BY created DESC").fetchall()
         else:
             rows = db.execute("SELECT * FROM shared_links WHERE created_by=? ORDER BY created DESC",
@@ -625,7 +619,7 @@ def register(host):
                 outcome, payload, _code = core.ingest_inline(spool, orig, folder, metadata)
             except Exception as e:
                 host.logger.error(f"shared_links upload {orig}: {e}")
-                outcome, payload, _code = "retry", {"error": str(e)}, 503
+                outcome, payload = "retry", {"error": str(e)}
             if outcome == "retry":
                 resp = core.enqueue_spooled_upload(spool, orig, folder, metadata, orig)
                 body = resp[0] if isinstance(resp, tuple) else resp

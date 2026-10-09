@@ -5,8 +5,24 @@ Modules build against this object, never against manager.py. The host records
 what a module contributes (routes, assets, settings, tables, workers, hooks)
 and manager.py wires those in after loading. Nothing here imports manager.py.
 """
+import functools
 import os
+import re
 import time
+
+from flask import g, has_request_context, jsonify
+
+## @brief The kinds a table can be (see add_table): rebuildable, an index of the
+# files, or data that exists only in the DB.
+TABLE_KINDS = ("cache", "mirrored", "state")
+_SQL_COMMENT = re.compile(r"--[^\n]*")
+_CREATE_TABLE = re.compile(
+    r"CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[\"`\[]?([A-Za-z_][A-Za-z0-9_]*)",
+    re.IGNORECASE)
+
+def table_names(ddl):
+    """! @brief The table names a DDL script creates (SQL comments ignored)."""
+    return _CREATE_TABLE.findall(_SQL_COMMENT.sub("", ddl or ""))
 
 class Host:
     """! @brief The API handed to each module's register(host).
@@ -44,8 +60,10 @@ class Host:
         self.event_hooks = {}  # event -> [fn(**kw)]
         # name -> {"fn", "label", "editor"}
         self.pipeline_stages = {}
-        # {"ddl", "check", "module_id"}; created after all modules register
+        # {"ddl", "check", "module_id", "kind"}; created after all modules register
         self.db_tables = []
+        # tables created outside add_table (the core schema): name -> {"kind", "module_id"}
+        self.declared_tables = {}
         self.background_sweeps = {}  # cap_id -> {pending, run, module_id}
         self._sweep_rr, self._sweep_idle, self._sweep_skip, self._sweep_done = 0, {}, set(), {}
         self._sweep_inflight = 0
@@ -82,13 +100,22 @@ class Host:
         self._current_module = None
 
     def add_route(self, rule, view_func, *, feature=None, level="read",
-                  action=None, fields=(), **options):
+                  action=None, fields=(), admin=False, **options):
         """! @brief Register a Flask route, gated by a feature permission.
         @param feature  permission key; None = any signed-in user.
         @param level    "read" to view, "write" to change.
+        @param admin    also require an admin (is_admin()); others get 403.
         @param opts     passed to add_url_rule; action / fields feed the audit log.
         The endpoint name is namespaced by module, so two modules may both have `list`.
         """
+        if admin:
+            inner = view_func
+
+            @functools.wraps(inner)
+            def view_func(*a, **kw):
+                if not self.is_admin():
+                    return jsonify({"success": False, "error": "admin only"}), 403
+                return inner(*a, **kw)
         if feature:
             view_func = self.require_feature(feature, action=action,
                                              fields=fields, level=level)(view_func)
@@ -615,14 +642,45 @@ class Host:
             "editor": editor or {}, "module_id": self._current_module}
         return name
 
-    def add_table(self, ddl, *, check=None):
+    def add_table(self, ddl, *, kind=None, check=None):
         """! @brief Declare a table this module owns.
         @param ddl    CREATE TABLE IF NOT EXISTS statement(s).
+        @param kind   where its data lives: "cache" (rebuildable / recomputable),
+                      "mirrored" (an index of data whose source of truth is the file
+                      or sidecar) or "state" (exists only in the DB; kept by the
+                      backup module's DB copies). A table holding both mirrored and
+                      DB-only rows is "state". Every table in `ddl` gets this kind.
+                      Omitted or unknown: a warning is logged and it counts as "state".
         @param check  fn(db) run once at startup to repair a cache table that drifted
                       from its source of truth.
         """
-        self.db_tables.append({"ddl": ddl, "check": check,
-                               "module_id": self._current_module})
+        module_id = self._current_module or "core"
+        if kind not in TABLE_KINDS:
+            names = ", ".join(table_names(ddl)) or "?"
+            self.logger.warning(
+                f"module '{module_id}' add_table({names}) without a valid kind "
+                f"({kind!r}); treated as \"state\"")
+            kind = "state"
+        self.db_tables.append({"ddl": ddl, "check": check, "kind": kind,
+                               "module_id": module_id})
+
+    def declare_table(self, name, kind, module_id="core"):
+        """! @brief Record the kind of a table created outside add_table (the core schema).
+        @param kind  "cache" | "mirrored" | "state" (anything else counts as "state").
+        """
+        self.declared_tables[name] = {"kind": kind if kind in TABLE_KINDS else "state",
+                                      "module_id": module_id}
+
+    def table_kinds(self):
+        """! @brief Every known table and where its data lives.
+        @return {table_name: {"kind", "module_id"}}: core tables and every table
+                parsed from an add_table DDL.
+        """
+        out = {n: dict(v) for n, v in self.declared_tables.items()}
+        for t in self.db_tables:
+            for name in table_names(t["ddl"]):
+                out[name] = {"kind": t.get("kind") or "state", "module_id": t["module_id"]}
+        return out
 
     def register_file_enricher(self, fn):
         """! @brief Add per-file fields to gallery / list rows.
@@ -676,8 +734,29 @@ class Host:
         from_g = getattr(self.core, "current_user", None)
         return from_g() if from_g else ""
 
+    def is_admin(self, username=None):
+        """! @brief Admin check, the one every module uses.
+        @param username  None: the requester (True outside a request - a worker - and
+                         while auth is off, where every request is the anonymous admin);
+                         a name: that account ('' and 'anonymous' are the auth-off admin).
+        """
+        if username is None:
+            if not has_request_context():
+                return True
+            u = g.get("user")
+            return u is None or bool(u.get("is_admin"))
+        if username in ("", "anonymous"):
+            return True
+        try:
+            row = self.core.authmgr.get_user(username)
+        except Exception as e:  # an unreadable auth table: nobody is an admin by name
+            self.logger.error(f"is_admin({username!r}): {e}")
+            return False
+        return bool(row and row["is_admin"])
+
     def on(self, event, fn):
         """! @brief Subscribe fn(**kw) to a core event, e.g. library.reconcile,
+        library.sync(direction, rel_paths),
         upload.duplicate_check(sha, filename), upload.stored(rel_path, filename),
         file.renamed(old_rel, new_rel), file.deleted(rel_path),
         file.metadata_changed(rel_path, abs_path, fields).

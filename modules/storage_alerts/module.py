@@ -280,7 +280,7 @@ def register(host):
             kind    TEXT NOT NULL,
             subject TEXT NOT NULL,
             detail  TEXT NOT NULL DEFAULT ''
-        );""")
+        );""", kind="state")  # alert state (so a restart does not re-send) and log
 
     last = {"at": 0.0, "readings": [], "alerts": {}, "error": "", "sent": "", "running": False}
     tick = {"next": 0.0, "force": False}

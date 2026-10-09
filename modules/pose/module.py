@@ -147,7 +147,7 @@ def register(host):
     # what lets the background sweep find images not yet posed by a model
     # without opening every XMP.
     host.add_table("CREATE TABLE IF NOT EXISTS pose_runs("
-                   "rel_path TEXT PRIMARY KEY, model TEXT, people INTEGER, updated REAL)")
+                   "rel_path TEXT PRIMARY KEY, model TEXT, people INTEGER, updated REAL)", kind="cache")  # progress marker; the pose itself is in the sidecar
 
     def _mark(rel, pose_data, model=None):
         model = model or host.broker.selected_id("pose") or ""

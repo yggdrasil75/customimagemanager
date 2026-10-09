@@ -1,15 +1,26 @@
 """! @file
 @brief Album activity: Immich-style comments and likes on albums and their files.
 ======================================================================
-Comments and likes are social metadata: they belong to the people looking at
-an album, not to the picture, so they never go into a file's XMP. Every row
-lives in the module-owned `album_activity` table (album, optional rel_path,
-username, kind, text, created). A row with rel_path NULL is about the album
-itself; a row with a rel_path is about that file inside that album. Likes are
-unique per (album, rel_path, username) and toggle; comments accumulate.
+Comments and likes are social metadata. Every row lives in the module-owned
+`album_activity` table (album, optional rel_path, username, kind, text,
+created). A row with rel_path NULL is about the album itself; a row with a
+rel_path is about that file inside that album. Likes are unique per (album,
+rel_path, username) and toggle; comments accumulate.
+
+Where the data lives: an admin's comments and likes on a FILE are also written
+into that file, as the full list of the file's admin entries
+(`[{album, username, kind, text, created}, ...]`) under the module's key in the
+file's cim data (`core.set_file_data(rel, "album_activity", [...])`); that copy
+is the source of truth for admins, so a deleted / rebuilt DB gets them back on a
+sync pull (`library.sync` "pull" rebuilds the admin rows of the pulled files,
+"push" writes admin rows a file is missing). Album-level entries (rel_path
+NULL) have no file and non-admins' entries are per-user data that stays out of
+the files: both live in the DB only, kept by the backup module's DB copies,
+which is why the table is "state".
+
 Rows follow the library: `file.deleted` drops a file's rows, `file.renamed`
 repoints them, and a tiny access policy with only `album_event` cascades an
-album rename / delete. Reading needs the viewer to see the album
+album rename / delete (onto the admin entries in the files too). Reading needs the viewer to see the album
 (`host.album_level` not None), posting needs write on the `album_activity`
 feature, deleting a comment is for its author, the album owner or an admin.
 The front end adds an Activity toggle + Like heart to the album banner, a
@@ -17,7 +28,7 @@ per-file heart in the viewer, comment badges on tiles and album rows.
 """
 import time
 
-from flask import g, jsonify, request
+from flask import jsonify, request
 
 MANIFEST = {
     "id":          "album_activity",
@@ -35,6 +46,7 @@ FEATURE = "album_activity"
 TABLE = "album_activity"
 KINDS = ("comment", "like")
 ANON = "anonymous"
+DATA_KEY = "album_activity"
 
 # A partial unique index guards likes: COALESCE folds the album-level NULL
 # rel_path into '' so one person can like the album itself only once too
@@ -61,18 +73,29 @@ class ActivityPolicy:
     it is registered so the core's album_event("deleted" / "renamed") reaches
     this module's rows (there is no core event for album changes)."""
 
-    def __init__(self, host):
+    def __init__(self, host, edit_files=None):
         self.host = host
+        # fn(album, change) rewriting the admin entries of that album in the files
+        self.edit_files = edit_files
 
     def album_event(self, event, **kw):
-        """! @brief Cascade an album delete / rename onto the activity rows."""
+        """! @brief Cascade an album delete / rename onto the activity rows and the
+        admin entries kept in the files."""
         db = self.host.db()
         if event == "deleted":
-            db.execute(f"DELETE FROM {TABLE} WHERE album=?", (kw.get("name"),))
+            album = kw.get("name")
+            change = lambda e: None
         elif event == "renamed":
-            db.execute(f"UPDATE {TABLE} SET album=? WHERE album=?", (kw.get("new"), kw.get("old")))
+            album, new = kw.get("old"), kw.get("new")
+            change = lambda e: {**e, "album": new}
         else:
             return
+        if self.edit_files is not None:
+            self.edit_files(album, change)
+        if event == "deleted":
+            db.execute(f"DELETE FROM {TABLE} WHERE album=?", (album,))
+        else:
+            db.execute(f"UPDATE {TABLE} SET album=? WHERE album=?", (kw.get("new"), album))
         db.commit()
 
 
@@ -83,10 +106,29 @@ def _row(r):
             "created": r["created"]}
 
 
+def _entry(r):
+    """! @brief A row (or entry dict) as the entry stored in the file."""
+    return {"album": r["album"], "username": r["username"], "kind": r["kind"],
+            "text": r["text"], "created": r["created"]}
+
+
+def _ekey(e):
+    """! @brief The identity of an entry: album, username, kind, created, text."""
+    return (e.get("album"), e.get("username"), e.get("kind"), e.get("created"), e.get("text"))
+
+
+def _sorted_entries(entries):
+    """! @brief Entries in a stable order (created, then the rest of the key)."""
+    return sorted(entries, key=lambda e: (e.get("created") or 0, str(e.get("album")),
+                                          str(e.get("username")), str(e.get("kind")),
+                                          str(e.get("text") or "")))
+
+
 def register(host):
-    """! @brief Wire the table, the policy, the routes, the setting and the assets."""
-    host.add_table(_DDL)
-    host.register_access_policy(ActivityPolicy(host))
+    """! @brief Wire the table, the policy, the routes, the sync, the setting and the assets."""
+    # "state": album-level and non-admin rows are DB-only; admin file rows are
+    # mirrored in the files.
+    host.add_table(_DDL, kind="state")
     host.register_feature(FEATURE, "Album activity", section="sharing",
                           section_label="Sharing", default="write",
                           role_defaults={"viewer": "read"})
@@ -99,14 +141,113 @@ def register(host):
     host.add_asset("album_activity.css")
     db = host.db
 
+    # -- admins and the file copy ------------------------------------------------
+    def _file_entries(rel):
+        """! @brief The admin entries the file holds (well-formed ones only)."""
+        v = host.core.file_data(rel, DATA_KEY)
+        if not isinstance(v, list):
+            return []
+        return [_entry(e) for e in v if isinstance(e, dict) and e.get("album")
+                and e.get("username") and e.get("kind") in KINDS]
+
+    def _write_entries(rel, entries):
+        """! @brief Store the file's admin entries (None removes the key when empty)."""
+        host.core.set_file_data(rel, DATA_KEY, _sorted_entries(entries) or None)
+
+    def _edit_file(rel, fn):
+        """! @brief Rewrite a file's admin entries with fn(list) -> list, when it changes."""
+        cur = _file_entries(rel)
+        new = fn(list(cur))
+        if [_ekey(e) for e in _sorted_entries(new)] != [_ekey(e) for e in _sorted_entries(cur)]:
+            _write_entries(rel, new)
+
+    def _edit_album_files(album, change):
+        """! @brief Apply change(entry) -> entry or None to the album's admin entries in
+        every file that has DB rows for the album (album rename / delete)."""
+        rels = [r["rel_path"] for r in db().execute(
+            f"SELECT DISTINCT rel_path FROM {TABLE} WHERE album=? AND rel_path IS NOT NULL",
+            (album,)).fetchall()]
+        for rel in rels:
+            def fn(entries):
+                out = []
+                for e in entries:
+                    e = change(e) if e["album"] == album else e
+                    if e is not None:
+                        out.append(e)
+                return out
+            try:
+                _edit_file(rel, fn)
+            except Exception as ex:
+                host.logger.error(f"album_activity: file data of {rel}: {ex}")
+
+    host.register_access_policy(ActivityPolicy(host, _edit_album_files))
+
+    def _pull(rel_paths=None):
+        """! @brief Rebuild admin file rows from the files: insert entries the DB lacks
+        and drop admin rows of those files the file no longer lists; album-level and
+        non-admin rows are never touched.
+        @param rel_paths  files to pull; None = every indexed file.
+        @return the number of rows added or removed.
+        """
+        if rel_paths is None:
+            rel_paths = [r["rel_path"] for r in db().execute("SELECT rel_path FROM files").fetchall()]
+        changed = 0
+        for rel in rel_paths:
+            listed = {_ekey(e): e for e in _file_entries(rel)}
+            rows = db().execute(f"SELECT * FROM {TABLE} WHERE rel_path=?", (rel,)).fetchall()
+            have = {_ekey(_entry(r)) for r in rows}
+            for r in rows:
+                if host.is_admin(r["username"]) and _ekey(_entry(r)) not in listed:
+                    db().execute(f"DELETE FROM {TABLE} WHERE id=?", (r["id"],))
+                    changed += 1
+            for k, e in listed.items():
+                if k in have:
+                    continue
+                if e["kind"] == "like":  # one like per album / file / user
+                    db().execute(f"DELETE FROM {TABLE} WHERE album=? AND rel_path=? AND "
+                                 "username=? AND kind='like'", (e["album"], rel, e["username"]))
+                db().execute(f"INSERT INTO {TABLE}(album, rel_path, username, kind, text, created) "
+                             "VALUES (?,?,?,?,?,?)",
+                             (e["album"], rel, e["username"], e["kind"], e["text"], e["created"]))
+                changed += 1
+        db().commit()
+        return changed
+
+    def _push():
+        """! @brief Write into each file the admin entries its DB rows hold and it lacks.
+        @return the number of files written.
+        """
+        want = {}
+        for r in db().execute(f"SELECT * FROM {TABLE} WHERE rel_path IS NOT NULL").fetchall():
+            if host.is_admin(r["username"]):
+                want.setdefault(r["rel_path"], []).append(_entry(r))
+        written = 0
+        for rel, entries in want.items():
+            cur = _file_entries(rel)
+            keys = {_ekey(e) for e in cur}
+            missing = [e for e in entries if _ekey(e) not in keys]
+            if missing:
+                _write_entries(rel, cur + missing)
+                written += 1
+        return written
+
+    def _on_sync(direction=None, rel_paths=None, **_kw):
+        """! @brief library.sync: pull rebuilds admin file rows from the files, push
+        writes admin file rows into the files."""
+        if direction == "pull":
+            n = _pull(rel_paths)
+            if n:
+                host.logger.info(f"album_activity: sync pull changed {n} row(s)")
+        elif direction == "push":
+            n = _push()
+            if n:
+                host.logger.info(f"album_activity: sync push wrote {n} file(s)")
+
+    host.on("library.sync", _on_sync)
+
     def _user():
         """! @brief The acting username; '' (auth off) becomes "anonymous"."""
         return host.current_user() or ANON
-
-    def _is_admin():
-        """! @brief Admin, or the anonymous admin of an auth-off session."""
-        u = g.get("user")
-        return (not u) or bool(u.get("is_admin"))
 
     def _album_ok(name):
         """! @brief (level, error_response): the viewer's level on an existing album."""
@@ -188,6 +329,8 @@ def register(host):
             "VALUES (?,?,?,?,?,?)", (album, rel, _user(), "comment", text, time.time()))
         db().commit()
         r = db().execute(f"SELECT * FROM {TABLE} WHERE id=?", (cur.lastrowid,)).fetchone()
+        if rel is not None and host.is_admin():
+            _edit_file(rel, lambda es: es + [_entry(r)])
         host.emit("album_activity.posted", album=album, rel_path=rel, username=_user(), kind="comment", text=text)
         return jsonify({"success": True, "item": {**_row(r), "mine": True}})
 
@@ -213,11 +356,21 @@ def register(host):
             # A per-file row keyed by rel_path: update_file's table upsert fits
             # exactly (one like per album / file / user), and so does its delete.
             key = {"album": album, "username": me, "kind": "like"}
+            now = time.time()
             if like:
-                host.update_file(rel, table=TABLE, key=key, set={"created": time.time()},
+                host.update_file(rel, table=TABLE, key=key, set={"created": now},
                                  dont_write=True)
             else:
                 host.update_file(rel, table=TABLE, key=key, remove=True, dont_write=True)
+            if host.is_admin():
+                def fn(entries):
+                    out = [e for e in entries if not (e["album"] == album and e["username"] == me
+                                                      and e["kind"] == "like")]
+                    if like:
+                        out.append({"album": album, "username": me, "kind": "like",
+                                    "text": None, "created": now})
+                    return out
+                _edit_file(rel, fn)
         else:
             # The album-level like has no rel_path, and update_file keys every
             # table row by rel_path (NULL never matches a "=?" key), so this row
@@ -246,10 +399,13 @@ def register(host):
         level, err = _album_ok(r["album"])
         if err:
             return err
-        if not (r["username"] == _user() or level == "owner" or _is_admin()):
+        if not (r["username"] == _user() or level == "owner" or host.is_admin()):
             return jsonify({"success": False, "error": "Not your comment."}), 403
         db().execute(f"DELETE FROM {TABLE} WHERE id=?", (cid,))
         db().commit()
+        if r["rel_path"] is not None and host.is_admin(r["username"]):
+            gone = _ekey(_entry(r))
+            _edit_file(r["rel_path"], lambda es: [e for e in es if _ekey(e) != gone])
         return jsonify({"success": True})
 
     @host.route("/api/album_activity/summary", feature=FEATURE)

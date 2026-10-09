@@ -282,7 +282,7 @@ class Importer:
         self.actions, self.default_folder = actions or {}, default_folder
         self.file_source, self.state_extra = file_source, state_extra
         self._json, self._time, self._jsonify, self._request = _json, _time, jsonify, request
-        host.add_table(SOURCES_DDL)
+        host.add_table(SOURCES_DDL, kind="state")  # import accounts and their secrets
         _register_shared(host)
         base, ep = f"/api/import/{fetcher_id}", f"import_{fetcher_id}"
         for rule, fn, methods, level in (("/state", self.api_state, ["GET"], "read"),

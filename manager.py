@@ -394,6 +394,14 @@ def _init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_album_members_album ON album_members(album);
         CREATE INDEX IF NOT EXISTS idx_album_members_file  ON album_members(rel_path);
+
+        -- Facts about this DB itself: last_launch (the launch that last opened
+        -- it, compared with <media>/.cim/last_launch to spot a restored or
+        -- recreated DB), dirty_reason, last_sync.
+        CREATE TABLE IF NOT EXISTS cim_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        );
     """)
     db.commit()
     # Migrations for existing DBs
@@ -484,6 +492,68 @@ def _init_db():
     except Exception:
         pass
 
+def _apply_pending_restore(db_path: str) -> str | None:
+    """! @brief Put a verified DB copy the backup module left at `<db_path>.restore` in place.
+    Runs before the DB is opened. A copy that opens read-only with PRAGMA
+    integrity_check == "ok" replaces the live DB, which (with its -wal / -shm) is
+    moved to `<db_path>.pre-restore-<YYYYmmdd-HHMMSS>`; the restored DB gets
+    dirty_reason "restored" and no last_launch, so the launch check starts a full
+    sync. A copy that fails the check is renamed `<db_path>.restore.bad` and the
+    live DB is left alone.
+    @return "restored", "bad" or None (nothing to restore).
+    """
+    src = db_path + ".restore"
+    if not os.path.exists(src):
+        return None
+    ok, why = False, ""
+    try:
+        conn = sqlite3.connect("file:" + urllib.parse.quote(os.path.abspath(src)) + "?mode=ro",
+                               uri=True)
+        try:
+            res = conn.execute("PRAGMA integrity_check").fetchone()
+            ok = bool(res) and res[0] == "ok"
+            why = "" if ok else str(res[0] if res else "no result")
+        finally:
+            conn.close()
+    except Exception as e:
+        why = f"{type(e).__name__}: {e}"
+    if not ok:
+        try:
+            os.replace(src, src + ".bad")
+            for suf in ("-wal", "-shm"):
+                if os.path.exists(src + suf):
+                    os.replace(src + suf, src + ".bad" + suf)
+        except OSError as e:
+            access_logger.error(f"restore: can't set aside the bad copy {src}: {e}")
+        access_logger.error(f"restore: {src} failed its integrity check ({why}); "
+                            f"kept the live DB, renamed the copy to {src}.bad")
+        return "bad"
+    aside = f"{db_path}.pre-restore-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    if os.path.exists(db_path):
+        os.replace(db_path, aside)
+    for suf in ("-wal", "-shm"):
+        if os.path.exists(db_path + suf):
+            os.replace(db_path + suf, aside + suf)
+        # the read-only check may leave empty -wal / -shm beside the copy
+        if os.path.exists(src + suf):
+            os.replace(src + suf, db_path + suf)
+    os.replace(src, db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS cim_meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT OR REPLACE INTO cim_meta(key, value) VALUES ('dirty_reason', 'restored')")
+        conn.execute("DELETE FROM cim_meta WHERE key='last_launch'")
+        conn.commit()
+    finally:
+        conn.close()
+    access_logger.warning(f"restore: restored {db_path} from a backup copy; "
+                          f"the previous DB is {aside}")
+    return "restored"
+
+try:
+    _apply_pending_restore(DB_PATH)
+except Exception as _e:
+    access_logger.error(f"restore: {_e}")
 _init_db()
 
 def _upsert_file(rel_path, mtime, width, height, sha256, phash8, phash32, tags, description):
@@ -2095,9 +2165,68 @@ def _merge_regions(*sources: list) -> list:
                 merged.append(dict(r))
     return merged
 
+# -- per-file module data: one JSON object {module_id: value} in Xmp.cim.Data --
+CIM_DATA_TOKEN = "Xmp.cim.Data"
+_file_data_lock = threading.Lock()
+xmp_export.ensure_namespaces()  # the cim namespace must be known to exiv2 before a read
+
+def _decode_file_data(xmp: dict) -> dict:
+    """! @brief The decoded Xmp.cim.Data object of an XMP value dict; {} when absent or unreadable."""
+    raw = (xmp or {}).get(CIM_DATA_TOKEN)
+    if isinstance(raw, (list, tuple)):
+        raw = raw[0] if raw else ""
+    if not raw or not isinstance(raw, str):
+        return {}
+    try:
+        obj = json.loads(raw)
+    except ValueError:
+        access_logger.warning(f"{CIM_DATA_TOKEN}: not JSON, ignored")
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+def file_data(rel_path: str, key: str | None = None):
+    """! @brief Per-file module data kept in the file's XMP (Xmp.cim.Data).
+    @param key  a module id; None returns the whole object.
+    @return the object ({} when absent or unreadable), or obj.get(key) (None when absent).
+    """
+    try:
+        fp = _norm_target(rel_path)[1]
+        obj = _decode_file_data(xmp_import.resolve_xmp(fp)[0]) if fp else {}
+    except Exception as e:
+        access_logger.warning(f"file_data {rel_path}: {e}")
+        obj = {}
+    return obj if key is None else obj.get(key)
+
+def set_file_data(rel_path: str, key: str, value) -> dict:
+    """! @brief Merge `key` into a file's Xmp.cim.Data object (value None removes the key).
+    Goes through update_file(xmp=...), so history, caches and events behave as for any
+    XMP write; a file without a sidecar gets one first.
+    @return the update_file result.
+    """
+    if not key or not isinstance(key, str):
+        raise ValueError("set_file_data: key must be a non-empty string")
+    rel, fp = _norm_target(rel_path)
+    if not _present(fp):
+        return {"success": False, "changed": [], "error": "file not found"}
+    with _file_data_lock:
+        obj = file_data(rel)
+        if value is None:
+            if key not in obj:
+                return {"success": True, "changed": []}
+            obj.pop(key, None)
+        else:
+            obj[key] = value
+        if not os.path.exists(os.path.splitext(fp)[0] + ".xmp"):
+            made = update_file(rel, force=True)
+            if not made.get("success"):
+                return made
+        return update_file(rel, xmp={CIM_DATA_TOKEN: json.dumps(
+            obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)})
+
 def read_metadata(filepath: str) -> dict:
     """! @brief Everything known about a file: tags, description, rating, regions and
-    folded XMP / EXIF fields (EXIF only when there is no XMP).
+    folded XMP / EXIF fields (EXIF only when there is no XMP); `file_data` is the
+    decoded Xmp.cim.Data object (per-file module data).
     """
     try:
         tags, desc, regions = [], "", []
@@ -2112,7 +2241,7 @@ def read_metadata(filepath: str) -> dict:
                     "event": "", "catalog_sets": "",
                     "ai_generated": False, "model_age": None, "persons": "",
                     "genre": "", "alt_of": "", "page_count": None,
-                    "albums": [],
+                    "albums": [], "file_data": {},
                     "regions": [], "analysis": xprov, "flag": None, "pose": None}
 
         val  = xmp.get('Xmp.dc.subject', [])
@@ -2257,6 +2386,7 @@ def read_metadata(filepath: str) -> dict:
                 "persons": persons,
                 "genre": genre, "alt_of": alt_of, "page_count": page_count,
                 "albums": albums,
+                "file_data": _decode_file_data(xmp),
                 "analysis": analysis,
                 "flag": _read_flag_from_xmp(xmp_path),
                 "pose": _read_pose_from_xmp(xmp_path)}
@@ -2267,7 +2397,7 @@ def read_metadata(filepath: str) -> dict:
                 "event": "", "catalog_sets": "",
                 "ai_generated": False, "model_age": None, "persons": "",
                 "genre": "", "alt_of": "", "page_count": None,
-                "albums": [],
+                "albums": [], "file_data": {},
                 "analysis": None, "flag": None, "pose": None}
 
 # -- albums: many-to-many; the sidecar's mwg-coll:Collections is the source,
@@ -5733,15 +5863,250 @@ def _delete_file(rel_path, permanent=False):
     _purge_file_everywhere(rel_path)
     return existed
 
+# -- sync: the DB and the files agree again. One job at a time, in the background:
+# 1. deleted  purge rows of files gone from disk;
+# 2. push     DB -> files: rewrite files whose last metadata write failed, then
+#             library.sync(direction="push") for what only modules hold;
+# 3. pull     files -> DB: quick re-indexes changed files (file or sidecar mtime),
+#             full re-indexes everything; then library.sync(direction="pull"). --
+_sync_lock = threading.Lock()
+_sync_state = {"running": False, "mode": "", "phase": "", "done": 0, "total": 0,
+               "started": None, "finished": None, "result": None, "error": None}
+## @brief A sync the launch check asked for, started once the server is up: {"mode", "reason"}.
+_scheduled_sync = {"mode": None, "reason": ""}
+LAUNCH_MARKER = os.path.join(MEDIA_DIR, ".cim", "last_launch")
+
+def _meta_get(db, key):
+    """! @brief A cim_meta value, or None."""
+    row = db.execute("SELECT value FROM cim_meta WHERE key=?", (key,)).fetchone()
+    return row[0] if row else None
+
+def _meta_set(db, key, value):
+    """! @brief Set (or with None delete) a cim_meta value; no commit."""
+    if value is None:
+        db.execute("DELETE FROM cim_meta WHERE key=?", (key,))
+    else:
+        db.execute("INSERT OR REPLACE INTO cim_meta(key, value) VALUES (?, ?)", (key, str(value)))
+
+def sync_status() -> dict:
+    """! @brief A copy of the sync job's state (see /api/sync/status)."""
+    with _sync_lock:
+        return dict(_sync_state)
+
+def start_sync(mode: str = "quick") -> bool:
+    """! @brief Start a background sync unless one is running.
+    @param mode  "quick" (changed files) or "full" (every file).
+    @return True when a job was started.
+    """
+    if mode not in ("quick", "full"):
+        raise ValueError(f"sync mode must be quick or full, not {mode!r}")
+    with _sync_lock:
+        if _sync_state["running"]:
+            return False
+        _sync_state.update(running=True, mode=mode, phase="starting", done=0, total=0,
+                           started=time.time(), finished=None, result=None, error=None)
+    threading.Thread(target=_run_sync, args=(mode,), daemon=True, name="cim-sync").start()
+    return True
+
+def _sync_progress(phase=None, done=None, total=None):
+    """! @brief Update the job's progress and the header status line."""
+    with _sync_lock:
+        if phase is not None:
+            _sync_state["phase"] = phase
+        if done is not None:
+            _sync_state["done"] = done
+        if total is not None:
+            _sync_state["total"] = total
+        st = dict(_sync_state)
+    label = {"deleted": "purging deleted files", "push": "writing DB changes to files",
+             "pull": "reading files", "modules": "module data"}.get(st["phase"], st["phase"])
+    count = f" {st['done']}/{st['total']}" if st["total"] and st["phase"] != "modules" else ""
+    module_host.set_status(f"Sync ({st['mode']}): {label}...{count}")
+
+def _sync_push() -> dict:
+    """! @brief Rewrite the DB-held fields (tags, description, albums) of every file whose
+    last metadata write failed. @return {"pushed", "failed"}.
+    """
+    rows = _db().execute(
+        "SELECT rel_path, tags, description, albums FROM files "
+        "WHERE metadata_error IS NOT NULL AND metadata_error != ''").fetchall()
+    _sync_progress("push", 0, len(rows))
+    pushed = failed = 0
+    for i, r in enumerate(rows, 1):
+        try:
+            tags = json.loads(r["tags"] or "[]")
+        except ValueError:
+            tags = []
+        try:
+            albums = json.loads(r["albums"] or "[]")
+        except ValueError:
+            albums = []
+        res = update_file(r["rel_path"], set={"tags": tags, "description": r["description"] or "",
+                                              "albums": albums}, force=True)
+        if res.get("success"):
+            pushed += 1
+        else:
+            failed += 1
+        _sync_progress(done=i)
+    return {"pushed": pushed, "failed": failed}
+
+def _sync_needs_index(rel: str, since: float) -> bool:
+    """! @brief Quick pull: the file is new, its mtime differs from the row, or its
+    sidecar changed after both the row and the last sync.
+    """
+    fp = get_safe_path(MEDIA_DIR, rel)
+    if not fp:
+        return False
+    row = _db().execute("SELECT mtime FROM files WHERE rel_path=?", (rel,)).fetchone()
+    if row is None or row["mtime"] is None:
+        return True
+    if abs(row["mtime"] - _getmtime_loose(fp)) >= 0.01:
+        return True
+    side = _getmtime_loose(os.path.splitext(fp)[0] + ".xmp")
+    return side > max(row["mtime"], since)
+
+def _sync_pull(full: bool) -> list:
+    """! @brief Re-index changed files (quick) or every file (full).
+    @return the rel_paths re-indexed.
+    """
+    since = 0.0
+    try:
+        since = float(_meta_get(_db(), "last_sync") or 0)
+    except (TypeError, ValueError):
+        pass
+    rels = list(_enumerate_library())
+    if not full:
+        rels = [r for r in rels if _sync_needs_index(r, since)]
+    _sync_progress("pull", 0, len(rels))
+    done, updated = 0, []
+    with thread_manager.pool(want=8, name="sync") as ex:
+        for i in range(0, len(rels), 64):
+            batch = rels[i:i + 64]
+            for rel, ok in zip(batch, ex.map(lambda r: _index_file(r, force=True), batch)):
+                if ok:
+                    updated.append(rel)
+            done += len(batch)
+            _sync_progress(done=done)
+        _db_release_pool(ex, 8)
+    return updated
+
+def _run_sync(mode: str) -> None:
+    """! @brief The sync job body (see start_sync)."""
+    full = mode == "full"
+    result, error = {"mode": mode}, None
+    try:
+        _sync_progress("deleted")
+        result["purged"] = _reconcile_deleted()
+        result.update(_sync_push())
+        _sync_progress("modules")
+        module_host.emit("library.sync", direction="push", rel_paths=None)
+        updated = _sync_pull(full)
+        result["indexed"] = len(updated)
+        _sync_progress("modules")
+        module_host.emit("library.sync", direction="pull", rel_paths=None if full else updated)
+        module_host.emit("library.reconcile")
+        db = _db()
+        _meta_set(db, "last_sync", time.time())
+        db.commit()
+    except Exception as e:
+        access_logger.error(f"sync ({mode}) failed: {type(e).__name__}: {e}", exc_info=True)
+        error = f"{type(e).__name__}: {e}"
+    summary = (f"Sync ({mode}) failed: {error}" if error else
+               f"Sync ({mode}) done: purged {result.get('purged', 0)}, "
+               f"rewrote {result.get('pushed', 0)} file(s)"
+               + (f" ({result['failed']} still failing)" if result.get("failed") else "")
+               + f", re-indexed {result.get('indexed', 0)}.")
+    with _sync_lock:
+        _sync_state.update(running=False, phase="done" if not error else "error",
+                           finished=time.time(), result=result, error=error)
+    module_host.set_status(summary)
+    access_logger.info(summary)
+    try:
+        module_host.emit("notify", username="admins", kind="sync", title=summary.split(":")[0],
+                         body=summary, level="error" if error else "info")
+    finally:
+        _db_close()
+
+def _launch_check(db, marker_path: str, now: float | None = None) -> dict:
+    """! @brief Spot a DB that predates the last launch (restored, or deleted and recreated),
+    schedule a full sync for it, then record this launch in the DB and the marker file.
+    @param db           a connection to the library DB (cim_meta is created if missing).
+    @param marker_path  the launch marker file (<media>/.cim/last_launch).
+    @return {"dirty": bool, "reason": str}.
+    """
+    now = time.time() if now is None else now
+    db.execute("CREATE TABLE IF NOT EXISTS cim_meta (key TEXT PRIMARY KEY, value TEXT)")
+    last = _meta_get(db, "last_launch")
+    try:
+        last = float(last) if last is not None else None
+    except ValueError:
+        last = None
+    marker = None
+    try:
+        with open(marker_path, encoding="utf-8") as f:
+            marker = float(f.read().strip() or 0)
+    except (OSError, ValueError):
+        marker = None
+    reason = ""
+    if _meta_get(db, "dirty_reason") == "restored" and last is None:
+        reason = "restored"
+    elif marker is not None and last is None:
+        reason = "the DB has no launch record (deleted and recreated?)"
+    elif marker is not None and last < marker - 0.001:
+        reason = "the DB is older than the last launch (restored copy?)"
+    if reason:
+        _meta_set(db, "dirty_reason", reason)
+        _scheduled_sync.update(mode="full", reason=reason)
+        access_logger.warning(f"library DB is dirty: {reason}; a full sync will run")
+    _meta_set(db, "last_launch", now)
+    db.commit()
+    try:
+        os.makedirs(os.path.dirname(marker_path) or ".", exist_ok=True)
+        tmp = marker_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(repr(float(now)))
+        os.replace(tmp, marker_path)
+    except OSError as e:
+        access_logger.error(f"launch marker {marker_path}: {e}")
+    return {"dirty": bool(reason), "reason": reason}
+
+def _run_scheduled_sync() -> bool:
+    """! @brief Start the sync the launch check scheduled, if any. @return True when one started."""
+    mode = _scheduled_sync.get("mode")
+    if not mode:
+        return False
+    _scheduled_sync.update(mode=None)
+    return start_sync(mode)
+
+@app.route("/api/sync", methods=["POST"])
+@_auth.require_feature("library.reconcile", level="write")
+def api_sync():
+    """! @brief Start a background sync: {mode: "quick" | "full"} (default quick).
+    @return {"success", "started", "status"}; 409 while another sync runs.
+    """
+    mode = str((request.get_json(silent=True) or {}).get("mode") or "quick")
+    if mode not in ("quick", "full"):
+        return jsonify({"success": False, "error": "mode must be quick or full"}), 400
+    if not start_sync(mode):
+        return jsonify({"success": False, "started": False, "error": "a sync is already running",
+                        "status": sync_status()}), 409
+    return jsonify({"success": True, "started": True, "status": sync_status()})
+
+@app.route("/api/sync/status")
+@_auth.require_feature("library.reconcile", level="read")
+def api_sync_status():
+    """! @brief The sync job: {running, mode, phase, done, total, started, finished, result, error}."""
+    return jsonify({"success": True, **sync_status()})
+
 @app.route("/api/reconcile", methods=["POST"])
 @_auth.require_feature("library.reconcile", level="write")
 def api_reconcile():
-    """! @brief Purge rows of files deleted on disk and start a re-index (changed files).
-    @return how many rows were purged.
+    """! @brief Alias of a quick sync; also purges deleted rows at once (older clients
+    read `purged` from the reply).
+    @return {"success", "purged", "started"}.
     """
     removed = _reconcile_deleted()
-    threading.Thread(target=_build_index_background, daemon=True).start()
-    return jsonify({"success": True, "purged": removed})
+    return jsonify({"success": True, "purged": removed, "started": start_sync("quick")})
 
 @app.route("/api/tag_review", methods=["POST"])
 @_auth.require_feature("tab.review", level="write")
@@ -6297,6 +6662,8 @@ _core_api = SimpleNamespace(
     get_file_row=_get_file_row, thumb_bytes=thumb_bytes,
     files_where=_files_where,
     user_setting=lambda key, username=None: _user_setting(key, username),
+    file_data=file_data, set_file_data=set_file_data,
+    start_sync=start_sync, sync_status=sync_status,
 )
 
 module_host = modules.host.Host(
@@ -6349,7 +6716,25 @@ module_host._current_module = None
 # core tables: per-user settings
 module_host.add_table("""CREATE TABLE IF NOT EXISTS user_prefs (
     username TEXT NOT NULL, key TEXT NOT NULL, value TEXT,
-    PRIMARY KEY (username, key))""")
+    PRIMARY KEY (username, key))""", kind="state")
+# where the core schema's data lives (see host.add_table kinds)
+for _t, _k in (
+        # mirrored from the files; its DB-only columns (autotag_done, face_done,
+        # iqa_*, metadata_error, ...) are progress markers and caches, recomputable
+        ("files", "mirrored"),
+        # also written to EXIF ImageHistory, but the undone flags and non-EXIF
+        # entries exist only here
+        ("file_history", "state"),
+        # membership is mirrored (mwg-coll:Collections), but album description,
+        # cover and created exist only in the DB
+        ("albums", "state"),
+        ("album_members", "mirrored"),
+        ("raws", "state"),                  # the hidden raw store's index
+        ("upload_queue", "state"),          # ingest jobs in flight
+        ("cim_meta", "state")):
+    module_host.declare_table(_t, _k)
+for _t in ("auth_users", "auth_groups", "auth_sessions"):
+    module_host.declare_table(_t, "state", module_id="auth")
 modules.config.declare("search_quick_filters", default=state["search_quick_filters"],
                        validate=_clean_quick_filters, owner="core")
 _QF_COLUMNS = [{"key": "label", "label": "Label", "placeholder": "Untagged"},
@@ -6435,6 +6820,10 @@ if __name__=='__main__':
     model_registry.log_backend(access_logger)
     model_registry.standardize_onnx(access_logger)  # every onnxruntime session uses onnx_providers()
 
+    try:
+        _launch_check(_db(), LAUNCH_MARKER)
+    except Exception as e:
+        access_logger.error(f"launch check: {e}")
     access_logger.info("Compiling Tailwind stylesheet...")
     _build_tailwind()
     access_logger.info("Starting storage tiering worker...")
@@ -6457,8 +6846,11 @@ if __name__=='__main__':
         except Exception as e:
             access_logger.error(f"boot rebalance failed: {e}")
         access_logger.info(f"Boot rebalance done: {tiering._state['run']['phase']}")
-        access_logger.info("Starting background indexer...")
-        threading.Thread(target=_build_index_background, daemon=True).start()
+        if _run_scheduled_sync():
+            access_logger.info("Starting a full sync (the library DB predates the last launch)...")
+        else:
+            access_logger.info("Starting background indexer...")
+            threading.Thread(target=_build_index_background, daemon=True).start()
         access_logger.info("Registering background sources (autotag, face, upload)...")
         _start_upload_workers()
     threading.Thread(target=_boot_tiering_then_workers, daemon=True).start()

@@ -1,9 +1,45 @@
 """! @file
 @brief Favorites module: set / unset, list, count, the fav: token, the enricher
-flag on list rows, the tag mirror and row cleanup on delete."""
+flag on list rows, the tag mirror, row cleanup on delete, and the admin copy in
+the file (written on set, rebuilt by a sync pull, written by a sync push; a
+non-admin's favorite stays DB-only). `as_` swaps g.user for a real account."""
+import contextlib
+
+import pytest
+from flask import g
+
+import features
 from cimtest import read_meta, post_json
 
 FOLDER = "fav_test"
+
+
+@pytest.fixture(scope="module")
+def accounts(client):
+    """! @brief A real non-admin and a real admin account, removed afterwards."""
+    out = {}
+    for name, admin in (("fav_user", False), ("fav_admin", True)):
+        r = client.post("/api/auth/users/create", json={"username": name, "password": "pw",
+                                                        "role": "custom", "is_admin": admin})
+        assert r.status_code == 200, r.get_json()
+        out[name] = r.get_json()["user"]
+    yield out
+    for u in out.values():
+        client.post("/api/auth/users/delete", json={"id": u["id"]})
+
+
+@contextlib.contextmanager
+def as_(app, acct, admin=False):
+    """! @brief Run requests as `acct` (non-admin unless `admin`)."""
+    def _swap():
+        if getattr(g, "user", None) is not None:
+            g.user = {**acct, "is_admin": admin, "source": "local",
+                      "features": features.effective_permissions("admin" if admin else "custom", {})}
+    app.app.before_request_funcs.setdefault(None, []).append(_swap)
+    try:
+        yield
+    finally:
+        app.app.before_request_funcs[None].remove(_swap)
 
 
 def _set(client, files, favorite=True):
@@ -118,3 +154,96 @@ def test_startup_check_seeds_from_tag(client, host, upload):
     rows = _rows(host, a)
     assert len(rows) == 1 and rows[0]["username"] == ""
     assert read_meta(client, a)["favorite"] is True
+
+
+def _data(host, fn):
+    return host.core.file_data(fn, "favorites")
+
+
+def _users(host, fn):
+    return sorted(r["username"] for r in _rows(host, fn))
+
+
+def _drop_rows(host, fn):
+    host.db().execute("DELETE FROM favorites WHERE rel_path=?", (fn,))
+    host.db().commit()
+
+
+def test_admin_favorite_in_file_survives_db_loss(client, host, upload):
+    a = upload(seed=1371, name="fa_admin.png", folder=FOLDER)
+    _set(client, [a])
+    assert _data(host, a) == [""]                 # the anonymous admin
+    _drop_rows(host, a)
+    assert _rows(host, a) == []
+    host.emit("library.sync", direction="pull", rel_paths=[a])
+    assert _users(host, a) == [""]
+    assert read_meta(client, a)["favorite"] is True
+    _set(client, [a], favorite=False)
+    assert _data(host, a) is None and _rows(host, a) == []
+
+
+def test_real_admin_listed_by_name(app, client, host, upload, accounts):
+    adm = accounts["fav_admin"]
+    a = upload(seed=1372, name="fa_admin2.png", folder=FOLDER)
+    with as_(app, adm, admin=True):
+        _set(client, [a])
+    _set(client, [a])
+    assert _data(host, a) == ["", "fav_admin"]
+    _drop_rows(host, a)
+    host.emit("library.sync", direction="pull", rel_paths=[a])
+    assert _users(host, a) == ["", "fav_admin"]
+    with as_(app, adm, admin=True):
+        _set(client, [a], favorite=False)
+    assert _data(host, a) == [""]
+    assert "favorite" in read_meta(client, a)["tags"]     # another admin still favors it
+
+
+def test_non_admin_favorite_stays_in_db(app, client, host, upload, accounts):
+    u = accounts["fav_user"]
+    a = upload(seed=1373, name="fa_user.png", folder=FOLDER)
+    with as_(app, u):
+        _set(client, [a])
+    assert _users(host, a) == ["fav_user"]
+    assert _data(host, a) is None
+    assert "favorite" not in read_meta(client, a)["tags"]
+    # a pull never touches non-admin rows, a push never writes them
+    host.emit("library.sync", direction="pull", rel_paths=[a])
+    host.emit("library.sync", direction="push", rel_paths=None)
+    assert _users(host, a) == ["fav_user"] and _data(host, a) is None
+    with as_(app, u):
+        _set(client, [a], favorite=False)
+    assert _rows(host, a) == [] and _data(host, a) is None
+
+
+def test_push_writes_missing_and_pull_drops_unlisted(client, host, upload):
+    a = upload(seed=1374, name="fa_push.png", folder=FOLDER)
+    b = upload(seed=1375, name="fa_pull.png", folder=FOLDER)
+    host.update_file(a, table="favorites", key={"username": ""}, set={"added": 1.0}, dont_write=True)
+    assert _data(host, a) is None
+    host.emit("library.sync", direction="push", rel_paths=None)
+    assert _data(host, a) == [""]
+    # an admin row the file does not list goes on a pull; a non-admin row stays
+    host.update_file(b, table="favorites", key={"username": ""}, set={"added": 1.0}, dont_write=True)
+    host.update_file(b, table="favorites", key={"username": "fav_user"}, set={"added": 1.0},
+                     dont_write=True)
+    host.emit("library.sync", direction="pull", rel_paths=[b])
+    assert _users(host, b) == ["fav_user"]
+
+
+def test_full_pull_and_startup_seed_from_file_data(client, host, upload):
+    a = upload(seed=1376, name="fa_full.png", folder=FOLDER)
+    host.core.set_file_data(a, "favorites", [""])
+    host.emit("library.sync", direction="pull", rel_paths=None)
+    assert _users(host, a) == [""]
+    saved = host.db().execute("SELECT * FROM favorites").fetchall()
+    host.db().execute("DELETE FROM favorites")
+    host.db().commit()
+    try:
+        check = next(t["check"] for t in host.db_tables if t["module_id"] == "favorites")
+        check(host.db())
+        assert _users(host, a) == [""]
+    finally:
+        for r in saved:
+            host.db().execute("INSERT OR IGNORE INTO favorites(username, rel_path, added) VALUES (?,?,?)",
+                              (r["username"], r["rel_path"], r["added"]))
+        host.db().commit()

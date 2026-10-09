@@ -180,10 +180,10 @@
              registerControlButton('ai_tools', html). Not pose-specific. -->
         <div id="ext_ai_tools" data-ext-area="ai_tools" class="flex flex-col gap-2"></div>
 
-        <button onclick="reconcileLibrary()" id="btn_reconcile" data-feature="library.reconcile"
-          title="Purge DB entries for files deleted on disk and re-read externally edited files"
+        <button onclick="reconcileLibrary(event)" id="btn_reconcile" data-feature="library.reconcile"
+          title="Quick sync: purge entries of files deleted on disk, re-read files changed outside the app and rewrite files whose metadata write failed. Shift-click for a full sync, which re-reads every file (use after restoring the database)."
           class="w-full bg-gray-700 hover:bg-gray-600 py-1.5 rounded font-bold text-sm border border-sky-700 text-sky-300">🔄
-          Sync with disk</button>
+          Sync</button>
         <p class="text-xs text-gray-400">Status: <span id="status_text" class="text-amber-400">Ready.</span></p>
       </div>
       </div><!-- /#controls_pane_main -->

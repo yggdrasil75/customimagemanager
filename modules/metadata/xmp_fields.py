@@ -1021,6 +1021,15 @@ XMPMM_FIELDS = [
     XMPField("RenditionClass",     TYPE_STRING),
 ]
 
+## @brief The app's own namespace: per-file module data that has no standard home.
+CIM_NS  = "cim"
+CIM_URI = "https://github.com/yggdrasil75/customimagemanager/ns/1.0/"
+CIM_FIELDS = [
+    XMPField("Data", TYPE_STRING,
+             note="JSON object {module_id: value}: per-file module data "
+                  "(core.file_data / core.set_file_data). Not edited by hand."),
+]
+
 XMP_NAMESPACES = [
     XMPNamespace(
         "xmpMM", "XMP Media Management",
@@ -1197,6 +1206,13 @@ XMP_NAMESPACES = [
         mwg_fields.MWG_KW_DESCRIPTION,
         uri=mwg_fields.MWG_KW_URI,
         fields=MWG_KW_FIELDS, mapped=True,
+    ),
+    XMPNamespace(
+        CIM_NS, "CIM (this app)",
+        "Per-file data of this app's modules, so it survives a DB rebuild. "
+        "Data holds one JSON object keyed by module id.",
+        uri=CIM_URI,
+        fields=CIM_FIELDS, mapped=True,
     ),
 ]
 

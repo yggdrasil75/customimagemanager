@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 
-from flask import g, jsonify, request
+from flask import jsonify, request
 
 import common
 from . import template as tpl
@@ -101,12 +101,7 @@ def register(host):
             ts       REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_reorganize_log_run ON reorganize_log(run_id, ts);
-    """)
-
-    def _is_admin():
-        """! @brief The viewer is an admin (or auth is off)."""
-        u = getattr(g, "user", None)
-        return (not u) or bool(u.get("is_admin"))
+    """, kind="state")  # the undo log of moves
 
     def _template_for(kind, override=None):
         """! @brief The template for a media kind (a request may override for previews)."""
@@ -477,14 +472,10 @@ def register(host):
         return restored, skipped, run_id
 
     # -- routes --------------------------------------------------------------------
-    def _forbidden():
-        return jsonify({"success": False, "error": "admin only"}), 403
-
-    @host.route("/api/reorganize/preview", methods=["POST"], feature=FEATURE, level="read")
+    @host.route("/api/reorganize/preview", methods=["POST"], feature=FEATURE, level="read",
+                admin=True)
     def api_preview():
         """! @brief {filenames? | folder? | q?, limit?, templates?} -> {items: [{from, to, changed, reason?}]}."""
-        if not _is_admin():
-            return _forbidden()
         body = request.get_json(silent=True) or {}
         try:
             limit = max(1, min(MAX_PREVIEW, int(body.get("limit") or MAX_PREVIEW)))
@@ -496,11 +487,9 @@ def register(host):
                         "changed": sum(1 for i in items if i["changed"])})
 
     @host.route("/api/reorganize/run", methods=["POST"], feature=FEATURE, level="write",
-                action="reorganize_run", fields=("folder", "q", "dry_run"))
+                action="reorganize_run", fields=("folder", "q", "dry_run"), admin=True)
     def api_run():
         """! @brief {filenames? | folder? | q?, dry_run} -> queue a run (sync=true runs inline)."""
-        if not _is_admin():
-            return _forbidden()
         body = request.get_json(silent=True) or {}
         with lock:
             if job["running"] or job["want"]:
@@ -519,29 +508,25 @@ def register(host):
         host.thread_manager.wake()
         return jsonify({"success": True, "queued": len(rels), "dry_run": dry})
 
-    @host.route("/api/reorganize/status", methods=["GET"], feature=FEATURE, level="read")
+    @host.route("/api/reorganize/status", methods=["GET"], feature=FEATURE, level="read",
+                admin=True)
     def api_status():
         """! @brief {running, done, total, moved, skipped, errors, last_run, dry_run}."""
-        if not _is_admin():
-            return _forbidden()
         return jsonify(dict(_status(), success=True))
 
-    @host.route("/api/reorganize/cancel", methods=["POST"], feature=FEATURE, level="write")
+    @host.route("/api/reorganize/cancel", methods=["POST"], feature=FEATURE, level="write",
+                admin=True)
     def api_cancel():
         """! @brief Stop the running (or queued) run after the current file."""
-        if not _is_admin():
-            return _forbidden()
         with lock:
             job["cancel"] = True
             job["want"] = None
         return jsonify({"success": True})
 
     @host.route("/api/reorganize/undo", methods=["POST"], feature=FEATURE, level="write",
-                action="reorganize_undo")
+                action="reorganize_undo", admin=True)
     def api_undo():
         """! @brief Move the files of the last run back where they came from."""
-        if not _is_admin():
-            return _forbidden()
         with lock:
             if job["running"]:
                 return jsonify({"success": False, "error": "a run is in progress"}), 409

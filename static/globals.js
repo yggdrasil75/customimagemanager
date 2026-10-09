@@ -293,27 +293,43 @@ const io=new IntersectionObserver(entries=>{
 },{rootMargin:'300px'});
 
 // -- Sync with disk ----------------------------------------------------------
-/** @brief Purge DB rows for files deleted on disk and trigger a re-index (which re-reads
- *  externally edited files via their changed mtime). Fixes blank tiles left behind
- *  when a file is removed or edited outside the app.
+/** @brief Start a library sync and follow it until it ends: a quick sync re-reads
+ *  changed files, purges rows of deleted ones and rewrites files whose last metadata
+ *  write failed; shift-click runs a full sync (every file re-read). Progress shows in
+ *  #status_text; the gallery reloads when it is done.
+ *  @param ev  the click event (shiftKey picks a full sync).
  */
-async function reconcileLibrary(){
+async function reconcileLibrary(ev){
   const btn=document.getElementById('btn_reconcile');
+  const st=document.getElementById('status_text');
+  const say=t=>{ if(st) st.innerText=t; };
+  const mode=(ev&&ev.shiftKey)?'full':'quick';
+  const done=()=>{ if(btn){btn.disabled=false;btn.classList.remove('opacity-50');} };
   if(btn){btn.disabled=true;btn.classList.add('opacity-50');}
   try{
-    const d=await fetch('/api/reconcile',{method:'POST',
-      headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json());
-    if(d&&d.success){
-      const st=document.getElementById('status_text');
-      if(st) st.innerText=`Synced - purged ${d.purged} deleted; re-indexing...`;
-      if(typeof loadGallery==='function') loadGallery();
+    const r=await fetch('/api/sync',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
+    const d=await r.json();
+    if(!d.success && !(d.status&&d.status.running)){ say('Sync failed: '+(d.error||r.status)); done(); return; }
+    if(!d.success) say('A sync is already running; following it...');
+  }catch(e){ say('Sync failed: '+e); done(); return; }
+  const poll=async()=>{
+    let s=null;
+    try{ s=await fetch('/api/sync/status').then(r=>r.json()); }catch(e){ s=null; }
+    if(s && s.running){
+      say(`Sync (${s.mode}): ${s.phase}`+(s.total?` ${s.done}/${s.total}`:'')+'...');
+      setTimeout(poll,1500);
+      return;
     }
-  }catch(e){
-    const st=document.getElementById('status_text');
-    if(st) st.innerText='Sync failed: '+e;
-  }finally{
-    if(btn){btn.disabled=false;btn.classList.remove('opacity-50');}
-  }
+    if(s){
+      const res=s.result||{};
+      say(s.error?('Sync failed: '+s.error):
+        `Synced (${s.mode}): purged ${res.purged||0}, rewrote ${res.pushed||0}, re-indexed ${res.indexed||0}.`);
+    }
+    done();
+    if(typeof loadGallery==='function') loadGallery();
+  };
+  setTimeout(poll,300);
 }
 
 // -- Polling ----------------------------------------------------------------

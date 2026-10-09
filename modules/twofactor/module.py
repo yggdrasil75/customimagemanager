@@ -83,7 +83,7 @@ def register(host):
             last_counter  INTEGER,
             backup_hashes TEXT,
             created       REAL
-        );""")
+        );""", kind="state")
     host.add_asset("twofactor.js")
     host.add_settings_tab("twofactor", "Two-factor auth", icon="", group="you")
     host.register_feature(FEATURE, "Two-factor authentication", section="account",
@@ -175,7 +175,7 @@ def register(host):
         """! @brief True when the user's role is listed in twofactor_required_roles."""
         roles = parse_roles(host.config.get(REQUIRED_ROLES_KEY, ""))
         role = str(user.get("effective_role") or user.get("role") or "").lower()
-        if user.get("is_admin"):
+        if host.is_admin():  # only ever called for the requester (g.user)
             role = "admin"
         return role in roles
 
@@ -207,7 +207,7 @@ def register(host):
             "must_enrol": (not enabled) and must_enrol(g.user),
             "qr_available": HAVE_QRCODE,
             "source": g.user.get("source"),
-            "is_admin": bool(g.user.get("is_admin")),
+            "is_admin": host.is_admin(),
         })
 
     @host.route("/api/twofactor/setup", methods=["POST"], feature=FEATURE, level="write")
@@ -312,7 +312,7 @@ def register(host):
         """! @brief The error response for a non-admin caller, else None."""
         if not signed_in():
             return off()
-        if not g.user.get("is_admin"):
+        if not host.is_admin():
             return jsonify({"success": False, "error": "admin required"}), 403
         return None
 

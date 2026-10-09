@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS training_set_meta(
 
 def register(host):
     tc._bind(host)
-    host.add_table(_DDL, check=ts.ensure_tables)   # ensure_tables also runs its migrations
+    host.add_table(_DDL, kind="state", check=ts.ensure_tables)   # ensure_tables also runs its migrations; training sets are DB-only
     host.register_feature("tab.trainer", "Trainer tab", section="gallery_tabs",
                           section_label="Gallery tabs", default="write",
                           role_defaults={"viewer": "block"})

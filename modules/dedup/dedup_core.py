@@ -14,6 +14,7 @@ services.
 """
 
 import json
+import os
 import time
 
 
@@ -140,10 +141,130 @@ def excl_key(a, b):
 
 
 def add_exclusions(file, others):
+    """! @brief Record "not a duplicate" between `file` and each of `others`, in the DB
+    and in both files of every pair (Xmp.cim.Data "dedup")."""
     db = HOST.db()
     db.executemany("INSERT OR IGNORE INTO dedup_exclusions(a,b) VALUES(?,?)",
                    [excl_key(file, o) for o in others])
     db.commit()
+    push_exclusions([file] + list(others))
+
+
+# -- exclusions in the files (Xmp.cim.Data "dedup": {"not_dupe_of": [rel, ...]}) --
+## @brief Key of this module's per-file data in Xmp.cim.Data.
+DATA_KEY = "dedup"
+
+
+def _partners(rel):
+    """! @brief The files the DB says are not duplicates of rel."""
+    return {r[0] for r in HOST.db().execute(
+        "SELECT b FROM dedup_exclusions WHERE a=? UNION SELECT a FROM dedup_exclusions WHERE b=?",
+        (rel, rel)).fetchall()}
+
+
+def _on_disk(rel):
+    """! @brief Whether a library file exists on disk."""
+    fp = HOST.safe_path(HOST.media_dir, rel)
+    return bool(fp and os.path.exists(fp))
+
+
+def _write_not_dupe_of(rel, want, have_data):
+    """! @brief Store the sorted list `want` as rel's not_dupe_of, keeping its other dedup keys.
+    @return True when written."""
+    data = dict(have_data) if isinstance(have_data, dict) else {}
+    if want:
+        data["not_dupe_of"] = sorted(want)
+    else:
+        data.pop("not_dupe_of", None)
+    res = HOST.core.set_file_data(rel, DATA_KEY, data or None)
+    if not res.get("success"):
+        HOST.logger.warning(f"dedup: writing file data of {rel} failed: {res.get('error')}")
+        return False
+    return True
+
+
+def push_exclusions(rels):
+    """! @brief Make each file's not_dupe_of hold every partner the DB knows (a file's
+    own entries are kept: exclusions are never withdrawn). @return files written."""
+    n = 0
+    for rel in dict.fromkeys(r for r in rels if r):
+        if not _on_disk(rel):
+            continue
+        try:
+            data = HOST.core.file_data(rel, DATA_KEY)
+            have = (data or {}).get("not_dupe_of") if isinstance(data, dict) else None
+            have = [x for x in have if isinstance(x, str)] if isinstance(have, list) else []
+            want = set(have) | _partners(rel)
+            if sorted(want) != have and _write_not_dupe_of(rel, want, data):
+                n += 1
+        except Exception as e:
+            HOST.logger.warning(f"dedup: file data {rel}: {e}")
+    return n
+
+
+def push_all_exclusions():
+    """! @brief library.sync push: both files of every stored exclusion."""
+    rels = [r[0] for r in HOST.db().execute(
+        "SELECT a FROM dedup_exclusions UNION SELECT b FROM dedup_exclusions").fetchall()]
+    return push_exclusions(rels)
+
+
+def pull_exclusions(rel_paths=None):
+    """! @brief library.sync pull: rebuild exclusion rows from the files.
+    A pair is restored when EITHER file lists the other (an exclusion is a
+    one-click user decision that is never withdrawn, so one surviving copy is
+    enough; a write that reached only one file still counts), and only while
+    both files are in the library. @return pairs inserted."""
+    db = HOST.db()
+    live = {r[0] for r in db.execute("SELECT rel_path FROM files").fetchall()}
+    rels = live if rel_paths is None else rel_paths
+    pairs = set()
+    for rel in rels:
+        data = HOST.core.file_data(rel, DATA_KEY)
+        lst = data.get("not_dupe_of") if isinstance(data, dict) else None
+        if not isinstance(lst, list) or rel not in live:
+            continue
+        pairs.update(excl_key(rel, o) for o in lst if isinstance(o, str) and o != rel and o in live)
+    before = db.total_changes
+    db.executemany("INSERT OR IGNORE INTO dedup_exclusions(a,b) VALUES(?,?)", sorted(pairs))
+    db.commit()
+    return db.total_changes - before
+
+
+def on_library_sync(direction, rel_paths=None):
+    """! @brief library.sync: push the exclusions into the files, or pull them back."""
+    if direction == "push":
+        n = push_all_exclusions()
+        if n:
+            HOST.logger.info(f"dedup: wrote exclusions into {n} file(s)")
+    elif direction == "pull":
+        pull_exclusions(rel_paths)
+
+
+def rename_exclusions(old_rel, new_rel):
+    """! @brief file.renamed: repoint the exclusion rows and every partner file's
+    not_dupe_of entry naming the old path (the renamed file's own list names its
+    partners, which did not move)."""
+    db = HOST.db()
+    partners = _partners(old_rel) - {new_rel}
+    if not partners:
+        return
+    db.execute("DELETE FROM dedup_exclusions WHERE a=? OR b=?", (old_rel, old_rel))
+    db.executemany("INSERT OR IGNORE INTO dedup_exclusions(a,b) VALUES(?,?)",
+                   [excl_key(new_rel, p) for p in partners])
+    db.commit()
+    for p in sorted(partners):
+        if not _on_disk(p):
+            continue
+        try:
+            data = HOST.core.file_data(p, DATA_KEY)
+            have = (data or {}).get("not_dupe_of") if isinstance(data, dict) else None
+            have = [x for x in have if isinstance(x, str)] if isinstance(have, list) else []
+            want = ({new_rel if x == old_rel else x for x in have} | _partners(p)) - {old_rel}
+            if sorted(want) != have:
+                _write_not_dupe_of(p, want, data)
+        except Exception as e:
+            HOST.logger.warning(f"dedup: file data {p}: {e}")
 
 
 def is_excluded(a, b):

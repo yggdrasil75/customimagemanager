@@ -312,7 +312,7 @@ def register(host):
         if "message" not in cols:
             db.execute("ALTER TABLE fetch_queue ADD COLUMN message TEXT DEFAULT ''")
             db.commit()
-    host.add_table(_DDL, check=_migrate)
+    host.add_table(_DDL, kind="state", check=_migrate)  # fetch jobs, item ledger and watches
     host.add_asset("fetch_importers.js")
     host.add_settings_tab("fetch_watch", "Watched fetches", icon="\u23f0")
 

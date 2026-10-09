@@ -224,14 +224,13 @@ class Policy:
         self.pictures = Pictures(host.media_dir)
 
     # -- who is asking ----------------------------------------------------
-    @staticmethod
-    def user():
+    def user(self):
         """! @brief The restricted requester, or None when unrestricted (admin, auth
         off, a worker outside a request)."""
         if not has_request_context():
             return None
         u = g.get("user")
-        if not u or u.get("is_admin") or not u.get("id"):
+        if not u or not u.get("id") or self.host.is_admin():
             return None
         return u
 
@@ -388,7 +387,7 @@ def register(host):
             owner_id   INTEGER NOT NULL,
             visibility TEXT NOT NULL DEFAULT 'private'
         );
-    """)
+    """, kind="state")  # library / album shares and album owners
     policy = Policy(host)
     host.register_access_policy(policy)
     host.provide_service("ownership", {"owner_of": owner_of, "personal_folder": personal_folder,
@@ -428,7 +427,7 @@ def register(host):
             target = int(raw)
         except ValueError:
             return None, (jsonify({"success": False, "error": "user_id must be an integer"}), 400)
-        if target != u["id"] and not u.get("is_admin"):
+        if target != u["id"] and not host.is_admin():
             return None, (jsonify({"success": False,
                                    "error": "only an admin can change another user's picture"}), 403)
         row = _user_row(target)

@@ -219,7 +219,7 @@ def register(host):
     # (merged into the stored analysis, so the AI panel shows "Type: ...").
     # classify_runs remembers what was done so the model is never re-asked.
     host.add_table("CREATE TABLE IF NOT EXISTS classify_runs("
-                   "rel_path TEXT PRIMARY KEY, model TEXT, class_name TEXT, conf REAL, updated REAL)")
+                   "rel_path TEXT PRIMARY KEY, model TEXT, class_name TEXT, conf REAL, updated REAL)", kind="cache")  # progress marker; the class is in the sidecar's analysis
 
     def _cls_pending(db, n):
         model = host.broker.selected_id("classify", "bg") or ""

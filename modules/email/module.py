@@ -176,7 +176,7 @@ def register(host):
             kind    TEXT NOT NULL,
             subject TEXT NOT NULL,
             detail  TEXT NOT NULL DEFAULT ''
-        );""")
+        );""", kind="state")  # send log
 
     def cfg():
         return {k: host.config.get(k, d) for k, d in DEFAULTS.items()}

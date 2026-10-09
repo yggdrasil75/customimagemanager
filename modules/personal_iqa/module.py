@@ -137,7 +137,7 @@ def register(host):
 
     host.add_asset("personal_iqa.js")
     host.add_settings_tab("personal_iqa", "Personal IQA")
-    host.add_table(_DDL)
+    host.add_table(_DDL, kind="cache")
     host.add_config_key("personal_iqa_base", default="nima")
     host.add_config_key("personal_iqa_encoder", default="")       # "" = the selected embed provider
     host.add_config_key("personal_iqa_grow", default=False)       # tier change: grow (Net2Net) vs rebuild

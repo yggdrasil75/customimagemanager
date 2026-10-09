@@ -362,9 +362,13 @@ def register(host):
     registry = ScorerRegistry()
     registry.logger = host.logger
     host.provide_service("dedup_scorers", registry)
-    host.add_table(_DDL, check=_migrate_scores)
+    # labelled training samples (dup_*) exist only here; exclusions are also kept in both
+    # files of the pair (Xmp.cim.Data "dedup"); groups, verdicts and signatures recompute
+    host.add_table(_DDL, kind="state", check=_migrate_scores)
     # Core tells us when a file is gone; groups that referenced it shrink.
     host.on("file.deleted", lambda rel_path: core.remove_file(rel_path))
+    host.on("file.renamed", core.rename_exclusions)
+    host.on("library.sync", core.on_library_sync)
     host.add_asset("dedup.js")
     host.register_app_modal("dedup_modal.html")
     # The naive pipeline endpoints (/api/dedup + siblings) live in

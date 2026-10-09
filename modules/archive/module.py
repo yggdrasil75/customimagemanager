@@ -264,7 +264,7 @@ def register(host):
         d.commit()
         if rows or gone:
             host.logger.info(f"archive: seeded {len(rows)} rows from tags, pruned {gone}")
-    host.add_table(_DDL, check=_check)
+    host.add_table(_DDL, kind="state", check=_check)
 
     def _is_packed(rel):
         """! @brief Is the file in a pack (no live copy in the library)?"""

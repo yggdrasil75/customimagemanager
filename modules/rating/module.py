@@ -138,7 +138,7 @@ def register(host):
         except Exception as e:
             host.logger.error(f"rating consistency check: {e}")
 
-    host.add_table(_DDL, check=_consistency_check)
+    host.add_table(_DDL, kind="mirrored", check=_consistency_check)  # user_stars mirror the file's rating; iqa_* recompute
 
     # -- enrich core gallery/list rows from the cache ---------------------
     def _enricher(db, rel_paths):

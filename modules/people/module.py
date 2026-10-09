@@ -14,6 +14,10 @@ Core touchpoints are events and one service:
   event  regions.cached(rel_path) -> cached face/body regions for an image
   event  labels.pool()            -> class names for the trainer's label pool
   event  file.deleted(rel_path)   -> drop cached rows
+  event  library.sync(direction, rel_paths) -> push / pull the per-face
+                                  "not a face" / "unknown" flags, kept in the
+                                  file as Xmp.cim.Data "people":
+                                  {"rejects": [{cx,cy,w,h}], "unknown": [...]}
   search "person:<cluster>"       -> photos of that person (face + body bridge)
 """
 from . import people_core as pc
@@ -110,7 +114,9 @@ def _migrate(db):
 
 def register(host):
     pc._bind(host)
-    host.add_table(_DDL, check=_migrate)
+    # face / body regions and persons are caches (names live in the MWG regions, the
+    # not-a-face / unknown flags in Xmp.cim.Data "people"); face_rejects is DB-only
+    host.add_table(_DDL, kind="state", check=_migrate)
     host.add_config_key("face_cluster_eps", default=0.0,
                         validate=lambda v: max(0.0, min(1.0, float(v or 0))))
     host.add_config_key("appearance_eps", default=0.35,
@@ -224,6 +230,8 @@ def register(host):
         for tbl in ("face_regions", "body_regions"):
             host.update_file(rel_path, table=tbl, remove=True, dont_write=True)
     host.on("file.deleted", _file_deleted)
+    # the not-a-face / unknown decisions per face live in the file: push writes them, pull reads them back
+    host.on("library.sync", pc.on_library_sync)
 
     def _person_search(tok, value):
         if not value.lstrip("-").isdigit():

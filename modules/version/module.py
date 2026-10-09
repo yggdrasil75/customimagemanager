@@ -19,7 +19,7 @@ import subprocess
 import urllib.request
 import urllib.error
 
-from flask import jsonify, g
+from flask import jsonify
 
 MANIFEST = {
     "id":          "version",
@@ -211,7 +211,7 @@ def register(host):
                             pane="module")
     host.add_settings_field(key="version_repo", label="GitHub repository", kind="text",
                             pane="module", help="owner/name of the repository to check.")
-    host.add_table("CREATE TABLE IF NOT EXISTS version_state (key TEXT PRIMARY KEY, value TEXT)")
+    host.add_table("CREATE TABLE IF NOT EXISTS version_state (key TEXT PRIMARY KEY, value TEXT)", kind="state")
 
     def local_info():
         """! @brief The local version block: VERSION read live, the git hash / date once per process."""
@@ -284,16 +284,13 @@ def register(host):
 
     def api_check():
         """! @brief POST /api/version/check: run the update check now (admins only)."""
-        u = g.get("user")
-        if u and not u.get("is_admin"):
-            return jsonify({"success": False, "error": "admin only"}), 403
         check_now()
         return jsonify(payload())
 
     host.add_route("/api/version", api_version, feature=FEATURE)
     host.add_route("/api/version/changelog", api_changelog, feature=FEATURE)
     host.add_route("/api/version/check", api_check, methods=["POST"], feature=FEATURE,
-                   level="write", action="version_check")
+                   level="write", action="version_check", admin=True)
 
     # -- Settings -> Info -------------------------------------------------------------
     def _info_section():

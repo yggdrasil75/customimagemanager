@@ -1709,6 +1709,136 @@ def api_face_split():
     _rows("face_regions", f"id IN ({ph})", ids, set={"cluster_id": -1}, commit=True)
     return jsonify({"success": True, "moved": len(ids)})
 
+# -- per-region user decisions in the file (Xmp.cim.Data, key "people") -------
+## @brief Key of this module's per-file data in Xmp.cim.Data.
+DATA_KEY = "people"
+## @brief file data list -> face_regions flag column.
+_FLAG_LISTS = (("rejects", "not_face"), ("unknown", "unknown"))
+
+
+def _same_box(a, b) -> bool:
+    """! @brief Two boxes are the same detection (the tolerance a rescan's tombstone check uses)."""
+    return (abs(a["cx"] - b["cx"]) < 1e-2 and abs(a["cy"] - b["cy"]) < 1e-2
+            and abs(a["w"] - b["w"]) < 2e-2 and abs(a["h"] - b["h"]) < 2e-2)
+
+
+def _flag_data(rel: str):
+    """! @brief The file data a file should carry for its flagged face rows, or None.
+    @return {"rejects": [box], "unknown": [box]} (empty lists left out); a box is
+            {cx, cy, w, h} in the region's normalised coordinates."""
+    out = {}
+    for key, col in _FLAG_LISTS:
+        rows = _db().execute(
+            f"SELECT cx, cy, w, h FROM face_regions WHERE rel_path=? AND COALESCE({col},0)=1 "
+            "ORDER BY cx, cy, w, h", (rel,)).fetchall()
+        if rows:
+            out[key] = [{k: round(float(v), 5) for k, v in zip(("cx", "cy", "w", "h"), r)} for r in rows]
+    return out or None
+
+
+def push_face_flags(rels) -> int:
+    """! @brief Write the not-a-face / unknown decisions of these files into the files
+    where a file's copy is missing or differs. @return files written."""
+    n = 0
+    for rel in dict.fromkeys(r for r in rels if r):
+        abs_p = get_safe_path(MEDIA_DIR, rel)
+        if not abs_p or not os.path.exists(abs_p):
+            continue
+        try:
+            want = _flag_data(rel)
+            if HOST.core.file_data(rel, DATA_KEY) == want:
+                continue
+            res = HOST.core.set_file_data(rel, DATA_KEY, want)
+            if res.get("success"):
+                n += 1
+            else:
+                access_logger.warning(f"people: writing file data of {rel} failed: {res.get('error')}")
+        except Exception as e:
+            access_logger.warning(f"people: file data {rel}: {e}")
+    return n
+
+
+def push_all_face_flags() -> int:
+    """! @brief library.sync push: every file with a flagged face row."""
+    rels = [r[0] for r in _db().execute(
+        "SELECT DISTINCT rel_path FROM face_regions "
+        "WHERE COALESCE(not_face,0)=1 OR COALESCE(unknown,0)=1").fetchall()]
+    return push_face_flags(rels)
+
+
+def pull_face_flags(rel_paths=None) -> int:
+    """! @brief library.sync pull: set the face rows' flags from the files' data.
+    @param rel_paths  files to read (None = every file). A file without people data
+                      keeps its rows; one with data gets exactly the flags it lists. A
+                      listed box with no cached row gets a tombstone row (no embedding),
+                      so a rescan that finds the same box honours it.
+    @return files whose data was applied."""
+    db = _db()
+    if rel_paths is None:
+        rel_paths = [r[0] for r in db.execute("SELECT rel_path FROM files").fetchall()]
+    n = 0
+    for rel in dict.fromkeys(rel_paths):
+        d = HOST.core.file_data(rel, DATA_KEY)
+        if not isinstance(d, dict):
+            continue
+        rows = [dict(zip(("id", "cx", "cy", "w", "h"), r)) for r in db.execute(
+            "SELECT id, cx, cy, w, h FROM face_regions WHERE rel_path=?", (rel,)).fetchall()]
+        want = {}
+        for key, col in _FLAG_LISTS:
+            for b in d.get(key) or []:
+                try:
+                    box = {k: round(float(b[k]), 5) for k in ("cx", "cy", "w", "h")}
+                except (KeyError, TypeError, ValueError):
+                    continue
+                hit = next((r for r in rows if _same_box(r, box)), None)
+                if hit is None:
+                    update_file(rel, table="face_regions", key={"cx": box["cx"], "cy": box["cy"]},
+                                set={"w": box["w"], "h": box["h"], "cluster_id": -1},
+                                dont_write=True, commit=False)
+                    hit = dict(box, id=db.execute(
+                        "SELECT id FROM face_regions WHERE rel_path=? AND cx=? AND cy=?",
+                        (rel, box["cx"], box["cy"])).fetchone()[0])
+                    rows.append(hit)
+                want[hit["id"]] = col
+        for r in rows:
+            col = want.get(r["id"])
+            if col:
+                _rows("face_regions", "id=?", (r["id"],),
+                      set={"not_face": int(col == "not_face"), "unknown": int(col == "unknown"),
+                           "cluster_id": -1, "name": "", "confirmed": 0})
+            else:
+                _rows("face_regions", "id=? AND (COALESCE(not_face,0)=1 OR COALESCE(unknown,0)=1)",
+                      (r["id"],), set={"not_face": 0, "unknown": 0})
+        n += 1
+    db.commit()
+    return n
+
+
+def on_library_sync(direction, rel_paths=None):
+    """! @brief library.sync: push the face flags into the files, or pull them back."""
+    if direction == "push":
+        n = push_all_face_flags()
+        if n:
+            access_logger.info(f"people: wrote face flags into {n} file(s)")
+    elif direction == "pull":
+        pull_face_flags(rel_paths)
+
+
+def _rels_of_face_ids(ids) -> list:
+    """! @brief The files the given face rows belong to."""
+    if not ids:
+        return []
+    ph = ",".join("?" * len(ids))
+    return [r[0] for r in _db().execute(
+        f"SELECT DISTINCT rel_path FROM face_regions WHERE id IN ({ph})", [int(i) for i in ids]).fetchall()]
+
+
+def _rels_of_cluster(cluster_id) -> list:
+    """! @brief The files a face cluster's rows belong to."""
+    return [r[0] for r in _db().execute(
+        "SELECT DISTINCT rel_path FROM face_regions WHERE cluster_id=?", (int(cluster_id),)).fetchall()]
+
+
 def _face_rows_by_ids(ids):
     ph = ",".join("?" * len(ids))
     return _db().execute(
@@ -1750,6 +1880,7 @@ def api_face_not_face():
     ph = ",".join("?" * len(ids))
     _rows("face_regions", f"id IN ({ph})", [int(i) for i in ids], commit=True,
           set={"not_face": 1, "unknown": 0, "cluster_id": -1, "name": "", "confirmed": 0})
+    push_face_flags([r[1] for r in rows])
     return jsonify({"success": True, "marked": len(ids)})
 
 def api_face_unknown():
@@ -1771,6 +1902,7 @@ def api_face_unknown():
     ph = ",".join("?" * len(ids))
     _rows("face_regions", f"id IN ({ph})", [int(i) for i in ids], commit=True,
           set={"unknown": 1, "not_face": 0, "cluster_id": -1, "name": "", "confirmed": 0})
+    push_face_flags(_rels_of_face_ids(ids))
     return jsonify({"success": True, "marked": len(ids)})
 
 def api_face_unknown_cluster():
@@ -1789,8 +1921,10 @@ def api_face_unknown_cluster():
     if cluster_id < 0:
         return jsonify({"success": False, "error": "cluster_id required"})
     db = _db()
+    rels = _rels_of_cluster(cluster_id)
     n = _rows("face_regions", "cluster_id=?", (cluster_id,), commit=True,
               set={"unknown": 1, "not_face": 0, "cluster_id": -1, "name": "", "confirmed": 0})
+    push_face_flags(rels)
     return jsonify({"success": True, "marked": n})
 
 def api_face_not_real_cluster():
@@ -1829,6 +1963,7 @@ def api_face_not_real_cluster():
             access_logger.warning(f"not_real strip {rel}: {e}")
     n = _rows("face_regions", "cluster_id=?", (cluster_id,), commit=True,
               set={"not_face": 1, "unknown": 0, "cluster_id": -1, "name": "", "confirmed": 0})
+    push_face_flags([r[1] for r in rows])
     return jsonify({"success": True, "marked": n, "remembered": remembered})
 
 def api_face_unmark():
@@ -1845,6 +1980,7 @@ def api_face_unmark():
     ph = ",".join("?" * len(ids))
     _rows("face_regions", f"id IN ({ph})", [int(i) for i in ids],
           set={"unknown": 0, "not_face": 0}, commit=True)
+    push_face_flags(_rels_of_face_ids(ids))
     return jsonify({"success": True, "unmarked": len(ids)})
 
 def api_face_merge():

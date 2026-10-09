@@ -113,7 +113,7 @@ def register(host):
     host.add_config_key("quota_default_gb", default=0, validate=_valid_gb)
     host.add_settings_field(key="quota_default_gb", label="Default storage quota (GB)", kind="number",
                             pane="module", help="For accounts and groups with no quota of their own; 0 = unlimited.")
-    host.add_table(_DDL)
+    host.add_table(_DDL, kind="cache")  # usage counters, rebuilt by a rescan
     host.add_asset("quotas.js")
 
     # -- who owns what -------------------------------------------------------------
@@ -134,19 +134,18 @@ def register(host):
         if svc is not None:
             return svc["owner_of"](rel_path)
         u = _request_user()
-        return u["username"] if u and not u.get("is_admin") and u.get("id") else None
+        return u["username"] if u and u.get("id") and not host.is_admin() else None
 
     def _account_of(username):
         """! @brief (is_admin, account fields) for a username, from the request's user when it
         is them, else the auth tables; (None, None) for an unknown account."""
         u = _request_user()
         if u and u.get("username") == username and "account" in u:
-            return bool(u.get("is_admin")), u.get("account") or {}
+            return host.is_admin(), u.get("account") or {}
         row = core.authmgr.get_user(username)
         if row is None:
             return None, None
-        full = core.authmgr._row_to_user(row)
-        return bool(full.get("is_admin")), full.get("account") or {}
+        return host.is_admin(username), core.authmgr._row_to_user(row).get("account") or {}
 
     def limit_bytes(username):
         """! @brief The account's quota in bytes, or None when unlimited (admins, unknown
@@ -314,19 +313,10 @@ def register(host):
         """! @brief The signed-in account's usage against its quota."""
         u = _request_user() or {}
         name = u.get("username") or ""
-        return jsonify({"success": True, **_report(name, bool(u.get("is_admin")))})
-
-    def _admin_only():
-        u = _request_user() or {}
-        if not u.get("is_admin"):
-            return jsonify({"success": False, "error": "admin only"}), 403
-        return None
+        return jsonify({"success": True, **_report(name, host.is_admin())})
 
     def api_list():
         """! @brief Every account with its usage and limit (admin)."""
-        deny = _admin_only()
-        if deny:
-            return deny
         used = {r["username"]: r for r in db().execute("SELECT username, bytes, files FROM quota_usage")}
         out = []
         for acct in core.authmgr.list_users():
@@ -346,14 +336,12 @@ def register(host):
 
     def api_rescan():
         """! @brief Recompute every account's usage from disk (admin)."""
-        deny = _admin_only()
-        if deny:
-            return deny
         return jsonify({"success": True, **rescan()})
 
     host.add_route("/api/quotas/me", api_me, feature=FEATURE)
-    host.add_route("/api/quotas", api_list, feature=FEATURE, level="write")
-    host.add_route("/api/quotas/rescan", api_rescan, methods=["POST"], feature=FEATURE, level="write")
+    host.add_route("/api/quotas", api_list, feature=FEATURE, level="write", admin=True)
+    host.add_route("/api/quotas/rescan", api_rescan, methods=["POST"], feature=FEATURE, level="write",
+                   admin=True)
     host.provide_service("quotas", {"limit_bytes": limit_bytes, "usage": usage, "check": check,
                                     "rescan": rescan})
     log.info("quotas module registered")

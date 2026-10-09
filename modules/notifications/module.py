@@ -31,7 +31,7 @@ import json
 import threading
 import time
 
-from flask import g, jsonify, request
+from flask import jsonify, request
 
 MANIFEST = {
     "id":          "notifications",
@@ -258,7 +258,7 @@ class Notifier:
 def register(host):
     """! @brief Tables, the service and event, routes, settings, sweep, producers and assets."""
     notes = Notifier(host)
-    host.add_table(_DDL)
+    host.add_table(_DDL, kind="state")
     host.register_feature(FEATURE, "Notifications", section="account", section_label="Account",
                           default="write", role_defaults={"viewer": "write"})
 
@@ -399,12 +399,10 @@ def register(host):
         n = notes.delete(_user(), ids)
         return jsonify({"success": True, "changed": n, "unread": notes.unread(_user())[0]})
 
-    @host.route("/api/notifications/test", methods=["POST"], feature=FEATURE, level="write")
+    @host.route("/api/notifications/test", methods=["POST"], feature=FEATURE, level="write",
+                admin=True)
     def api_test():
         """! @brief Admin: post a sample notification to yourself."""
-        u = g.get("user")
-        if u and not u.get("is_admin"):
-            return jsonify({"success": False, "error": "admins only"}), 403
         ids = notes.notify(_user(), "Test notification",
                            body="Notifications work: this one was sent from the test button.",
                            kind="test")
