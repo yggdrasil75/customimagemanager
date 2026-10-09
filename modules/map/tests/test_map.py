@@ -142,16 +142,28 @@ def test_missing_file(client):
 # -- offline places -----------------------------------------------------------
 from modules.map import continents, places  # noqa: E402
 
-_needs_places = pytest.mark.skipif(not places.available(), reason="reverse_geocoder not installed")
+_needs_places = pytest.mark.skipif(not places.available(), reason="reverse_geocode not installed")
 
 
 def test_continent_table_covers_every_country():
-    pycountry = pytest.importorskip("pycountry")
-    codes = {c.alpha_2 for c in pycountry.countries}
-    assert codes <= set(continents.CONTINENT_OF)
+    codes = set(places.country_table())
+    if not codes:
+        pytest.skip("reverse_geocode country table not installed")
+    assert len(codes) >= 240 and codes <= set(continents.CONTINENT_OF)
     assert continents.continent("us") == "North America"
     assert continents.continent("JP") == "Asia"
     assert continents.continent("??") == ""
+
+
+def test_country_names_without_pycountry():
+    if not places.country_table():
+        pytest.skip("reverse_geocode country table not installed")
+    for term, cc in (("japan", "JP"), ("United States", "US"), ("south korea", "KR"),
+                     ("Korea, Republic of", "KR"), ("  united   kingdom ", "GB"), ("de", "DE")):
+        assert places.expand(term, [])[1] == {cc}, term
+    assert places.country_name("KR") == "South Korea" and places.country_name("FR") == "France"
+    assert places.expand("europe", [])[1] == set()          # a continent, not the csv's EU row
+    assert places.expand("usa", places.DEFAULT_ALIASES)[1] == {"US"}
 
 
 @_needs_places

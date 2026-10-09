@@ -200,8 +200,15 @@ def test_sidecar_rule_and_severity():
 
 
 def test_worker_claim_waits_after_boot(host):
-    # the first pass waits FIRST_DELAY after startup, so tests and boot are left alone
-    assert _svc(host)["claim"]() is None
+    # the first pass waits FIRST_DELAY after startup, so tests and boot are left alone;
+    # pin "startup" to now: a long suite run is past the real boot window by now
+    boot = _svc(host)["boot"]
+    saved = boot["at"]
+    boot["at"] = time.time()
+    try:
+        assert _svc(host)["claim"]() is None
+    finally:
+        boot["at"] = saved
 
 
 def test_outside_sidecar_edit_reindexes(host, upload):

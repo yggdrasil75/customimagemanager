@@ -8,6 +8,7 @@ A missing package logs one warning and returns (None, False), so a minimal
 install still serves the pages that don't need it.
 """
 
+import contextlib
 import importlib
 import logging
 import sys
@@ -16,6 +17,43 @@ _log = logging.getLogger("optional_deps")
 
 # Names already warned about (one warning per missing package).
 _reported = set()
+# > 0 while the module loader imports every module.py to read its manifest:
+# misses are recorded but not warned about, the loader reports them for the
+# enabled modules only (a disabled module's missing package is not news)
+_probing = [0]
+
+
+@contextlib.contextmanager
+def probing():
+    """! @brief Record misses without warning while the block runs (module discovery)."""
+    _probing[0] += 1
+    try:
+        yield
+    finally:
+        _probing[0] -= 1
+
+
+def discovering():
+    """! @brief True while module discovery imports manifests (see probing()); a module
+    that logs its own "unavailable" message checks this to stay quiet then."""
+    return _probing[0] > 0
+
+
+def warn_missing(caller_prefix):
+    """! @brief Warn now, once per package, about the misses recorded for importers
+    whose __name__ is `caller_prefix` or below it (one module's package).
+    @return the missing names.
+    """
+    names = []
+    for caller, missing in BY_CALLER.items():
+        if caller == caller_prefix or caller.startswith(caller_prefix + "."):
+            names += [n for n in missing if n not in names]
+    for n in names:
+        if n not in _reported:
+            _reported.add(n)
+            _log.warning("optional dependency %r unavailable (%s); related features disabled",
+                         n, ERRORS.get(n, "not installed"))
+    return names
 
 # What loaded, for capabilities.py and the debug endpoints.
 LOADED = {}
@@ -43,7 +81,7 @@ def optional_import(name, attr=None, quiet=False):
             BY_CALLER.setdefault(caller, []).append(name)
         except Exception:
             pass
-        if not quiet and name not in _reported:
+        if not quiet and not _probing[0] and name not in _reported:
             _reported.add(name)
             # A miss deep inside a package names the real missing module in e.name.
             culprit = e.name if isinstance(e, ModuleNotFoundError) else None

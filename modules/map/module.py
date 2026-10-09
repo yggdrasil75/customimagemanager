@@ -9,8 +9,8 @@ place names.
   * the open file is highlighted and centred when the Map tab is showing, and
     the editor panel shows a minimap of it (click: open the Map tab there);
   * offline places: every geotagged file gets {city, county, state / region,
-    country, continent} from reverse_geocoder (GeoNames, no network) and
-    pycountry; the empty place fields of the file (photoshop:City / State /
+    country, continent} from reverse_geocode (its bundled GeoNames cities and
+    country names, no network); the empty place fields of the file (photoshop:City / State /
     Country, Iptc4xmpCore:CountryCode) are filled in, never overwritten;
   * files that name a place (photoshop:City, ...) but carry no GPS get an
     approximate position from the same offline city table (an unambiguous
@@ -60,7 +60,7 @@ MANIFEST = {
     "requires":    [],
     "pip":         ["XStatic-Leaflet:xstatic.pkg.leaflet",
                     "XStatic-Leaflet-MarkerCluster:xstatic.pkg.leaflet_markercluster",
-                    "reverse_geocoder", "pycountry"],
+                    "reverse_geocode"],
     "assets":      ["map.js", "map.css"],
 }
 
@@ -583,7 +583,7 @@ def register(host):
              'or a US postal code; location:"north carolina" or location:north_carolina; '
              '"Raleigh, NC" narrows down; aliases in Settings -> Map'
              + ("" if places.available() else
-                " (unavailable: reverse_geocoder / pycountry not installed)"))
+                " (unavailable: reverse_geocode not installed)"))
 
     # -- routes -----------------------------------------------------------
     def _tiles():
@@ -629,8 +629,8 @@ def register(host):
         """! @brief Countries -> regions -> cities with file counts, scoped like the gallery."""
         if not places.available():
             return jsonify({"success": False, "available": False,
-                            "error": "Place names are unavailable: reverse_geocoder / pycountry "
-                                     "are not installed."})
+                            "error": "Place names are unavailable: reverse_geocode "
+                                     "is not installed."})
         sub, params = _scope()
         rows = host.db().execute(
             "SELECT p.cc, p.country, p.continent, p.admin1, p.city, COUNT(*) AS n "

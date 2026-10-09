@@ -132,7 +132,7 @@ def _pip(pkgs, logger):
     logger.info("installing module deps: %s" % " ".join(pkgs))
     ok = subprocess.call([sys.executable, "-m", "pip", "install", *pkgs]) == 0
     if not ok:
-        # sdist-only packages with an old setup.py (reverse_geocoder) fail the legacy
+        # sdist-only packages with an old setup.py fail the legacy
         # build on current setuptools / distro pythons; the PEP 517 build works
         ok = subprocess.call([sys.executable, "-m", "pip", "install", "--use-pep517", *pkgs]) == 0
     importlib.invalidate_caches()
@@ -250,7 +250,8 @@ class ModuleRegistry:
             if not entry:
                 continue
             try:
-                py = importlib.import_module(entry)
+                with optional_deps.probing():   # warned later, for enabled modules only
+                    py = importlib.import_module(entry)
                 manifest = getattr(py, "MANIFEST", None)
                 if not isinstance(manifest, dict) or "id" not in manifest:
                     continue  # not a module
@@ -288,6 +289,11 @@ class ModuleRegistry:
                 self._enabled[pid] = True
             else:
                 self._enabled[pid] = bool(persisted.get(pid, lm.manifest.get("default_enabled", True)))
+        # the probes discovery kept quiet: warn about the enabled modules' misses only
+        for pid, lm in self._plugins.items():
+            name = getattr(lm.py_module, "__name__", "") if self._enabled.get(pid) else ""
+            if name:
+                optional_deps.warn_missing(name[:-len(".module")] if name.endswith(".module") else name)
         return self.current_state()
 
     def is_core(self, module_id):

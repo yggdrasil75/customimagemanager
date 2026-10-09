@@ -35,8 +35,17 @@ _BY_CONTINENT = {
 CONTINENT_OF = {cc: CONTINENT_NAMES[k] for k, codes in _BY_CONTINENT.items()
                 for cc in codes.split()}
 
-## @brief Country names for codes a country table may not carry.
-EXTRA_COUNTRY_NAMES = {"XK": "Kosovo"}
+## @brief Everyday country names that win over the country table's formal ones
+# ("Korea, Republic of"), plus codes a table may not carry. Both spellings
+# match a location: search.
+EXTRA_COUNTRY_NAMES = {
+    "XK": "Kosovo", "KR": "South Korea", "KP": "North Korea", "RU": "Russia",
+    "IR": "Iran", "SY": "Syria", "LA": "Laos", "MD": "Moldova", "TZ": "Tanzania",
+    "BN": "Brunei", "FM": "Micronesia", "VA": "Vatican City", "CZ": "Czechia",
+    "MK": "North Macedonia", "SZ": "Eswatini", "PS": "Palestine",
+    "CD": "DR Congo", "CG": "Republic of the Congo", "CI": "Ivory Coast",
+    "VE": "Venezuela", "BO": "Bolivia",
+}
 
 ## @brief US postal codes -> state / district / territory name (GeoNames admin1).
 US_STATES = {

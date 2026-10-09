@@ -775,6 +775,64 @@ def xmp_gps(value: float, pos: str, neg: str) -> str:
     v = abs(float(value)); d = int(v)
     return f'{d},{(v - d) * 60:.6f}{ref}'
 
+def parse_xmp_gps(text) -> float | None:
+    """! @brief An XMP GPSCoordinate ("DDD,MM.mmmR", "DDD,MM,SSR" or signed decimal) as
+    signed degrees, or None."""
+    t = str(text or '').strip()
+    if not t:
+        return None
+    ref = t[-1].upper() if t[-1].isalpha() else ''
+    body = t[:-1] if ref else t
+    try:
+        parts = [float(p) for p in body.split(',')]
+    except ValueError:
+        return None
+    v = sum(p / (60 ** i) for i, p in enumerate(parts[:3]))
+    return -v if ref in ('S', 'W') else v
+
+
+def _exif_deg(s) -> float:
+    """! @brief An EXIF rational triple "d/1 m/1 s/100" as degrees."""
+    out = 0.0
+    for i, part in enumerate(str(s).split()[:3]):
+        n, _, d = part.partition('/')
+        out += float(n) / float(d or 1) / (60 ** i)
+    return out
+
+
+def read_gps(path: str):
+    """! @brief A file's position as (lat, lon), or None: the XMP sidecar first (where
+    the app writes), then the file's EXIF GPS, then its embedded XMP. A primitive
+    for code that can't count on the map module's geo cache."""
+    if not path or not os.path.exists(path):
+        return None
+    side = os.path.splitext(path)[0] + '.xmp'
+    sources = [(side, 'xmp')] if os.path.exists(side) else []
+    sources += [(path, 'exif'), (path, 'xmp')]
+    for src, kind in sources:
+        try:
+            with pyexiv2.Image(src) as img:
+                data = img.read_exif() if kind == 'exif' else img.read_xmp()
+        except Exception:
+            continue
+        try:
+            if kind == 'exif':
+                lat = _exif_deg(data['Exif.GPSInfo.GPSLatitude'])
+                lon = _exif_deg(data['Exif.GPSInfo.GPSLongitude'])
+                if str(data.get('Exif.GPSInfo.GPSLatitudeRef', 'N')).startswith('S'):
+                    lat = -lat
+                if str(data.get('Exif.GPSInfo.GPSLongitudeRef', 'E')).startswith('W'):
+                    lon = -lon
+            else:
+                lat = parse_xmp_gps(data.get('Xmp.exif.GPSLatitude'))
+                lon = parse_xmp_gps(data.get('Xmp.exif.GPSLongitude'))
+        except (KeyError, ValueError, ZeroDivisionError):
+            continue
+        if lat is not None and lon is not None and not (abs(lat) < 1e-9 and abs(lon) < 1e-9):
+            return lat, lon
+    return None
+
+
 def gps_xmp(lat, lon, alt=None) -> dict:
     """! @brief XMP tokens for a position; {} when missing or (0, 0)."""
     try:

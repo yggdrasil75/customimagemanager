@@ -2,9 +2,11 @@
 @brief Offline place names for GPS positions, and the location: search token.
 
 resolve() turns (lat, lon) pairs into {city, admin2, admin1, cc, country,
-continent} with reverse_geocoder (GeoNames cities with population > 1000, a
-k-d tree held in memory, no network) and pycountry for country names. Both are
-optional: without them available() is False and the module skips place work.
+continent} with reverse_geocode (GeoNames cities with population > 1000 bundled
+as reverse_geocode/geocode.gz, a scipy k-d tree held in memory, no network) and
+the package's countries.csv for country names. It is optional: without it, or
+without its data file (the package would download it), available() is False
+and the module skips place work. forward() reuses the same loaded city list.
 
 location_clause() builds the SQL for `location:<text>`: the text (quotes and
 underscores allowed for spaces; "city, region, country" or "city / region /
@@ -14,6 +16,9 @@ US postal codes and country codes / names.
 """
 
 import csv
+import functools
+import gzip
+import json
 import math
 import os
 import threading
@@ -22,9 +27,16 @@ from optional_deps import optional_import
 
 from . import continents
 
-rg, _HAVE_RG = optional_import("reverse_geocoder")
-pycountry, _HAVE_PYCOUNTRY = optional_import("pycountry")
+rgc, _HAVE_RGC = optional_import("reverse_geocode")
 
+## @brief The package folder holding its bundled data (geocode.gz, countries.csv).
+_DATA_DIR = os.path.dirname(os.path.abspath(rgc.__file__)) if _HAVE_RGC else ""
+_GEOCODE_GZ = os.path.join(_DATA_DIR, "geocode.gz") if _DATA_DIR else ""
+_COUNTRIES_CSV = os.path.join(_DATA_DIR, "countries.csv") if _DATA_DIR else ""
+## @brief countries.csv rows that are regions, not countries.
+_PSEUDO_CODES = {"AP", "EU"}
+
+# guards the package's lazily built singleton (and its query, which edits shared rows)
 _rg_lock = threading.Lock()
 
 ## @brief Aliases a fresh install starts with (alias -> expansion).
@@ -56,8 +68,34 @@ _TEXT_COLS = ("city", "admin2", "admin1", "country", "continent")
 
 
 def available():
-    """! @brief True when the offline geocoder is installed."""
-    return _HAVE_RG
+    """! @brief True when the offline geocoder and its bundled data file are installed."""
+    return bool(_HAVE_RGC and os.path.isfile(_GEOCODE_GZ))
+
+
+@functools.lru_cache(maxsize=1)
+def country_table():
+    """! @brief {alpha-2 code: name} from reverse_geocode's countries.csv ({} without it).
+    The region pseudo-codes (AP, EU) are left out. Shared: do not modify.
+    """
+    out = {}
+    if not (_COUNTRIES_CSV and os.path.isfile(_COUNTRIES_CSV)):
+        return out
+    with open(_COUNTRIES_CSV, encoding="utf-8", newline="") as fh:
+        for row in csv.reader(fh):
+            if len(row) < 2:
+                continue
+            cc = row[0].strip().upper()
+            if len(cc) == 2 and cc not in _PSEUDO_CODES and row[1].strip():
+                out[cc] = row[1].strip()
+    return out
+
+
+@functools.lru_cache(maxsize=1)
+def _code_by_name():
+    """! @brief Lower-case country name -> code: the table's names and the everyday ones."""
+    out = {name.lower(): cc for cc, name in country_table().items()}
+    out.update({name.lower(): cc for cc, name in continents.EXTRA_COUNTRY_NAMES.items()})
+    return out
 
 
 def country_name(cc):
@@ -67,11 +105,7 @@ def country_name(cc):
         return ""
     if cc in continents.EXTRA_COUNTRY_NAMES:
         return continents.EXTRA_COUNTRY_NAMES[cc]
-    if _HAVE_PYCOUNTRY:
-        c = pycountry.countries.get(alpha_2=cc)
-        if c is not None:
-            return getattr(c, "common_name", None) or c.name
-    return cc
+    return country_table().get(cc, cc)
 
 
 def _country_code(term):
@@ -81,12 +115,7 @@ def _country_code(term):
         return ""
     if len(t) == 2 and t.upper() in continents.CONTINENT_OF:
         return t.upper()
-    if not _HAVE_PYCOUNTRY:
-        return ""
-    try:
-        return pycountry.countries.lookup(t).alpha_2
-    except LookupError:
-        return ""
+    return _code_by_name().get(" ".join(t.lower().split()), "")
 
 
 def resolve(coords):
@@ -95,17 +124,19 @@ def resolve(coords):
             (empty strings when unknown); [] when the geocoder is missing.
     """
     coords = [(float(a), float(b)) for a, b in coords]
-    if not coords or not _HAVE_RG:
+    if not coords or not available():
         return []
     with _rg_lock:
-        hits = rg.search(coords, mode=1, verbose=False)
-    out = []
-    for h in hits:
-        cc = str(h.get("cc") or "").upper()
-        out.append({"city": h.get("name") or "", "admin2": h.get("admin2") or "",
-                    "admin1": h.get("admin1") or "", "cc": cc,
-                    "country": country_name(cc), "continent": continents.continent(cc)})
-    return out
+        hits = rgc.search(coords)
+    return [_place(h) for h in hits]
+
+
+def _place(loc):
+    """! @brief A reverse_geocode row as a place dict (state -> admin1, county -> admin2)."""
+    cc = str(loc.get("country_code") or "").upper()
+    return {"city": loc.get("city") or "", "admin2": loc.get("county") or "",
+            "admin1": loc.get("state") or "", "cc": cc,
+            "country": country_name(cc), "continent": continents.continent(cc)}
 
 
 def merge(auto, existing):
@@ -142,17 +173,24 @@ def fill_patch(auto, existing):
     return {tok: val for tok, (key, val) in want.items() if val and not existing.get(key)}
 
 
-def _cities_csv():
-    """! @brief reverse_geocoder's bundled GeoNames table (lat, lon, name, admin1, admin2, cc), or ''."""
-    if not _HAVE_RG:
-        return ""
-    p = os.path.join(os.path.dirname(os.path.abspath(rg.__file__)), "rg_cities1000.csv")
-    return p if os.path.isfile(p) else ""
+def _locations():
+    """! @brief The GeoNames city rows reverse_geocode holds in memory ({country_code, city,
+    latitude, longitude, population, state?, county?}); loads them on first use.
+    The rows are shared with the geocoder: read only.
+    """
+    with _rg_lock:
+        # GeocodeData(0) is the singleton instance search() builds and queries
+        data = rgc.GeocodeData(0)
+    locs = getattr(data, "_locations", None)
+    if locs is None:  # a release that no longer keeps them: read the same bundled file
+        with gzip.open(_GEOCODE_GZ) as gz:
+            locs = json.loads(gz.read())
+    return locs
 
 
 def forward_available():
     """! @brief True when the offline city table is there for forward lookups."""
-    return bool(_cities_csv())
+    return available()
 
 
 def _km(a, b):
@@ -177,9 +215,8 @@ def forward(wants):
     @return one entry per want: {lat, lon, city, admin2, admin1, cc, country, continent}
             for an unambiguous city match (the country / state narrow it down), else None.
     """
-    path = _cities_csv()
     out = [None] * len(wants)
-    if not path or not wants:
+    if not wants or not forward_available():
         return out
     keys = []
     for w in wants:
@@ -189,28 +226,23 @@ def forward(wants):
     if not names:
         return out
     found = {}
-    with open(path, encoding="utf-8", errors="replace", newline="") as fh:
-        for row in csv.DictReader(fh):
-            n = (row.get("name") or "").lower()
-            if n in names:
-                found.setdefault(n, []).append(row)
+    for loc in _locations():
+        n = (loc.get("city") or "").lower()
+        if n in names:
+            found.setdefault(n, []).append(loc)
     for i, (name, cc, states) in enumerate(keys):
         cands = found.get(name) or []
         if cc:
-            cands = [r for r in cands if (r.get("cc") or "").upper() == cc]
+            cands = [r for r in cands if (r.get("country_code") or "").upper() == cc]
         if states:
-            narrowed = [r for r in cands if (r.get("admin1") or "").lower() in states]
+            narrowed = [r for r in cands if (r.get("state") or "").lower() in states]
             cands = narrowed or cands
         if not cands:
             continue
-        pts = [(float(r["lat"]), float(r["lon"])) for r in cands]
+        pts = [(float(r["latitude"]), float(r["longitude"])) for r in cands]
         if any(_km(pts[0], p) > AMBIGUOUS_KM for p in pts[1:]):
             continue  # Springfield: several far-apart cities, no way to tell
-        r = cands[0]
-        rcc = (r.get("cc") or "").upper()
-        out[i] = {"lat": pts[0][0], "lon": pts[0][1], "city": r.get("name") or "",
-                  "admin2": r.get("admin2") or "", "admin1": r.get("admin1") or "", "cc": rcc,
-                  "country": country_name(rcc), "continent": continents.continent(rcc)}
+        out[i] = dict(_place(cands[0]), lat=pts[0][0], lon=pts[0][1])
     return out
 
 

@@ -7,7 +7,7 @@ imagecodecs
 rtmlib
 mediapipe
 rfdetr
-#ai-edge-litert #optional: MoveNet module (tflite-runtime also works)
+#ai-edge-litert #optional: MoveNet module (tflite-runtime is unmaintained: no wheels past Python 3.11)
 rapidocr
 easyocr
 mutagen

@@ -117,32 +117,6 @@ def _md5(path):
     return h.hexdigest()
 
 
-def _gps(path):
-    """! @brief (lat, lon) from EXIF GPS, or None."""
-    if not _HAVE_EXIV:
-        return None
-    try:
-        with pyexiv2.Image(path) as img:
-            ex = img.read_exif()
-    except Exception:
-        return None
-    def _deg(s):
-        out = 0.0
-        for i, part in enumerate(str(s).split()[:3]):
-            n, _, d = part.partition("/")
-            out += float(n) / float(d or 1) / (60 ** i)
-        return out
-    try:
-        lat = _deg(ex["Exif.GPSInfo.GPSLatitude"]); lon = _deg(ex["Exif.GPSInfo.GPSLongitude"])
-    except (KeyError, ValueError, ZeroDivisionError):
-        return None
-    if ex.get("Exif.GPSInfo.GPSLatitudeRef", "N").startswith("S"):
-        lat = -lat
-    if ex.get("Exif.GPSInfo.GPSLongitudeRef", "E").startswith("W"):
-        lon = -lon
-    return lat, lon
-
-
 def _first_text(v):
     """! @brief A metadata value (list, lang-alt or text) as one stripped string."""
     if isinstance(v, (list, tuple)):
@@ -287,7 +261,7 @@ def register(host):
                 except Exception as e:
                     log.warning(f"metasrc: geo lookup {rel}: {e}")
             if gps is None and ap and os.path.exists(ap):
-                gps = _gps(ap)
+                gps = host.media.read_gps(ap)   # sidecar, EXIF, embedded XMP
             query.update(md5=_md5(ap) if ap and os.path.exists(ap) else "",
                          lat=gps[0] if gps else None, lon=gps[1] if gps else None)
             query["q"] = query["q"] or stem

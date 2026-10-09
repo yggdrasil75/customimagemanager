@@ -81,7 +81,7 @@ def test_features_fit_grow(tmp_path, monkeypatch):
         db=lambda: db, update_file=update_file, broker=Broker(), request_model=request_model, logger=logging.getLogger("t"),
         media_dir=f"{d}/media", safe_path=lambda d, r: os.path.join(d, r),
         get_service=lambda n: None, provide_service=lambda n, s: svc.update(s), provide_model=lambda *a, **k: None,
-        add_asset=lambda *a: None, add_settings_tab=lambda *a, **k: None, add_table=lambda d: db.executescript(d),
+        add_asset=lambda *a: None, add_settings_tab=lambda *a, **k: None, add_table=lambda d, **kw: db.executescript(d),
         add_config_key=lambda k, default=None, **kw: host.config.setdefault(k, default), add_settings_field=lambda **k: None,
         on_startup=lambda f: startup.append(f), add_route=lambda *a, **k: None, on=lambda *a: None)
     piqa.register(host); [f() for f in startup]

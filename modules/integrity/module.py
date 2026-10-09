@@ -111,7 +111,7 @@ def register(host):
     core = host.core
     log = host.logger
     tm = host.thread_manager
-    started_at = time.time()
+    boot = {"at": time.time()}  # when this process registered; the first pass waits FIRST_DELAY
     run = {"running": None, "lock": threading.Lock(), "last": {}}
 
     host.add_table(_DDL_ISSUES, kind="state")
@@ -793,7 +793,7 @@ def register(host):
     def _claim():
         """! @brief Thread-manager claim: at most one pass at a time, per plan_tick."""
         now = time.time()
-        if now < started_at + FIRST_DELAY:
+        if now < boot["at"] + FIRST_DELAY:
             return None
         with run["lock"]:
             if run["running"]:
@@ -1038,5 +1038,5 @@ def register(host):
                                        "run_cheap": run_cheap, "run_deep": run_deep,
                                        "status": status, "claim": _claim, "scan": scan,
                                        "purge": purge_one, "walk_tick": walk_tick,
-                                       "walk_new": walk_new})
+                                       "walk_new": walk_new, "boot": boot})
     log.info("integrity module registered")

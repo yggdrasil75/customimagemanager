@@ -32,7 +32,7 @@ from typing import Optional
 import numpy as np
 import urllib.request
 
-from optional_deps import optional_import
+from optional_deps import discovering, optional_import
 
 _log = logging.getLogger(__name__)
 get_object, _HAVE_INSIGHT_DATA = optional_import("insightface.data", attr="get_object")
@@ -66,8 +66,9 @@ def _load_face3d():
         mm = importlib.import_module(base + ".morphable_model")
         return mm.MorphabelModel, mm.fit, True
     except Exception as e:
-        _log.warning("insightface face3d unavailable (%s); insight3d face shape disabled",
-                     getattr(e, "name", None) or e.__class__.__name__)
+        if not discovering():
+            _log.warning("insightface face3d unavailable (%s); insight3d face shape disabled",
+                         getattr(e, "name", None) or e.__class__.__name__)
         return None, None, False
 
 

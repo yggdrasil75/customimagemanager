@@ -54,11 +54,11 @@ def test_pip_install_falls_back_to_next_alternative(monkeypatch):
 
 
 def test_pip_retries_with_pep517_build(monkeypatch):
-    """! @brief An sdist whose legacy setup.py build fails (reverse_geocoder on current
-    distro pythons) is retried with --use-pep517 and installed."""
-    calls = _fake_pip(monkeypatch, {"reverse-geocoder"}, pep517_only={"reverse-geocoder"})
-    got = loader._pip_install(["reverse-geocoder:reverse_geocoder"], loader._log)
-    assert got == ["reverse-geocoder"]
+    """! @brief An sdist whose legacy setup.py build fails on current distro pythons is
+    retried with --use-pep517 and installed."""
+    calls = _fake_pip(monkeypatch, {"old-sdist"}, pep517_only={"old-sdist"})
+    got = loader._pip_install(["old-sdist:old_sdist"], loader._log)
+    assert got == ["old-sdist"]
     assert any("--use-pep517" in c for c in calls)
 
 
@@ -95,3 +95,22 @@ def test_theming_is_builtin_core():
     core = [m["id"] for m in loader.registry.status() if m["core"] and m["version"] == "builtin"]
     assert "theming" in core and ids.index("theming") < len(core)
     assert "theming" not in loader.registry._plugins
+
+def test_discovery_probes_warn_only_for_enabled_modules(caplog):
+    """! @brief Importing every module.py to read manifests doesn't warn about a disabled
+    module's missing packages; the loader warns for enabled modules afterwards."""
+    import logging
+    import optional_deps
+    optional_deps._reported.discard("no_such_pkg_disc_a")
+    optional_deps._reported.discard("no_such_pkg_disc_b")
+    caplog.set_level(logging.WARNING, logger="optional_deps")
+    with optional_deps.probing():
+        optional_deps.BY_CALLER.setdefault("modules.fake_on.module", [])
+        optional_deps.BY_CALLER.setdefault("modules.fake_off.module", [])
+        exec("from optional_deps import optional_import\noptional_import('no_such_pkg_disc_a')",
+             {"__name__": "modules.fake_on.module"})
+        exec("from optional_deps import optional_import\noptional_import('no_such_pkg_disc_b')",
+             {"__name__": "modules.fake_off.module"})
+    assert "no_such_pkg_disc" not in caplog.text
+    assert optional_deps.warn_missing("modules.fake_on") == ["no_such_pkg_disc_a"]
+    assert "no_such_pkg_disc_a" in caplog.text and "no_such_pkg_disc_b" not in caplog.text

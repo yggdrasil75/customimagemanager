@@ -12,7 +12,7 @@ from cimtest import media_path
 from modules.map import places
 
 pyexiv2 = pytest.importorskip("pyexiv2")
-_needs_places = pytest.mark.skipif(not places.available(), reason="reverse_geocoder not installed")
+_needs_places = pytest.mark.skipif(not places.available(), reason="reverse_geocode not installed")
 
 
 def _geotagged_jpeg(lat, lon, seed):
@@ -64,7 +64,7 @@ def _list(client, q):
 
 def test_forward_lookup_unambiguous_only():
     if not places.forward_available():
-        pytest.skip("reverse_geocoder city table not installed")
+        pytest.skip("reverse_geocode city table not installed")
     ral, spring, paris, none = places.forward([
         {"city": "Raleigh", "state": "NC"}, {"city": "Springfield"},
         {"city": "Paris", "country": "France"}, {"city": "Nowhereville"}])
@@ -77,7 +77,7 @@ def test_forward_lookup_unambiguous_only():
 @_needs_places
 def test_typed_city_without_gps_gets_approximate_marker(client, host, upload):
     if not places.forward_available():
-        pytest.skip("reverse_geocoder city table not installed")
+        pytest.skip("reverse_geocode city table not installed")
     host.set_config("map_approx_places", True, save=False)
     fn = upload(seed=932, name="typed_city.png")
     host.get_service("xmp")["write"](media_path(fn), {"photoshop.City": "Raleigh", "photoshop.State": "NC"})

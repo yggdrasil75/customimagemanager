@@ -18,8 +18,8 @@ def test_place_patch_tokens():
         "photoshop.City": "Raleigh", "iptcCore.CountryCode": "US", "iptcCore.Location": "Pullen Park"}
 
 
-@pytest.fixture
-def nominatim(host, monkeypatch):
+@pytest.fixture(params=["with_map", "without_map"])
+def nominatim(request, host, monkeypatch):
     if host.get_service("metasrc") is None or host.get_service("metasrc").get("nominatim") is None:
         pytest.skip("metasrc_nominatim is not loaded")
     reg = host.get_service("metasrc")
@@ -27,6 +27,11 @@ def nominatim(host, monkeypatch):
     monkeypatch.setattr(reg, "http_json", lambda url, params=None, **kw: calls.append(params) or _NOMINATIM)
     old = host.config.get("map_write_places")
     host.set_config("map_write_places", False, save=False)   # keep the offline fill out of the way
+    if request.param == "without_map":
+        # the map module (geo service) may be off: GPS must still come from the sidecar
+        real = host.get_service
+        monkeypatch.setattr(host, "get_service",
+                            lambda name, default=None: default if name == "geo" else real(name, default))
     yield calls
     host.set_config("map_write_places", True if old is None else old, save=False)
 

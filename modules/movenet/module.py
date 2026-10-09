@@ -10,8 +10,10 @@ Registers the official MoveNet TFLite models as a 'pose' provider:
   type multipose  up to 6 people in one pass (lightning only); ignores the
                   person detector
 
-Runs through whichever TFLite interpreter is installed (ai-edge-litert,
-tflite-runtime or tensorflow). Weights download on first use into
+Runs through whichever TFLite interpreter is installed: ai-edge-litert (Google's
+maintained LiteRT, wheels for current Pythons; the one enabling installs), an
+existing tflite-runtime (unmaintained, no wheels past Python 3.11; used when
+already present) or tensorflow (last resort). Weights download on first use into
 models/movenet/pose/.
 """
 
@@ -25,12 +27,14 @@ import common
 
 cv2, _ = optional_import("cv2")
 Interpreter = None
+# probed quietly: the module's own reason below is what the Modules tab shows,
+# instead of three "unavailable" lines at every start
 for _mod in ("ai_edge_litert.interpreter", "tflite_runtime.interpreter", "tensorflow.lite"):
-    Interpreter, ok = optional_import(_mod, attr="Interpreter")
+    Interpreter, ok = optional_import(_mod, attr="Interpreter", quiet=True)
     if ok:
         break
 AVAILABLE = Interpreter is not None
-UNAVAILABLE_REASON = "no TFLite interpreter (ai-edge-litert, tflite-runtime or tensorflow) imports"
+UNAVAILABLE_REASON = "no TFLite interpreter: pip install ai-edge-litert"
 
 MANIFEST = {
     "id":          "movenet",
@@ -40,7 +44,7 @@ MANIFEST = {
                    "body pose, 17 COCO keypoints. Tiny and CPU-fast.",
     "core":        False,
     "requires":    [],
-    "pip":         ["ai-edge-litert:ai_edge_litert|tflite-runtime:tflite_runtime|tensorflow"],  # any one TFLite interpreter
+    "pip":         ["ai-edge-litert:ai_edge_litert|tensorflow"],  # any one TFLite interpreter (tflite-runtime is dead)
     "assets":      [],
 }
 
