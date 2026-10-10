@@ -3709,11 +3709,14 @@ def _background_instances(img_bgr) -> list:
         return out
     H, W = c.shape[:2]
     for cap in modules.broker.background_capabilities():
-        if cap in module_host.background_sweeps:  # non-region capabilities have their own sweep
+        # region-shaped capabilities only: the others (embed, ...) have their own
+        # sweep, and never ride this pass even when that sweep's module is off
+        if cap in module_host.background_sweeps or cap.split(".")[0] not in ("detect", "segment"):
             continue
         try:
             run = modules.broker.request(cap, role="bg")  # the background model may differ from the foreground one
-        except modules.model_broker.NoProviderError as e:
+        except Exception as e:
+            # a background model that won't load must not sink the face / person pass
             access_logger.warning(f"background {cap}: {e}")
             continue
         v = modules.broker.variant(cap, "bg")
@@ -7796,7 +7799,6 @@ def api_module_assets():
 
 if __name__=='__main__':
     from waitress import serve
-    enable_crash_log()
     thread_manager.set_activity_source(lambda: _last_activity)
     model_registry.set_memory_hook(lambda cost_mb, gpu: thread_manager.reserve_model(cost_mb, gpu))
     model_registry.log_backend(access_logger)

@@ -45,6 +45,7 @@ MANIFEST = {
     "core":        False,
     "requires":    ["auth"],
     "pip":         [],
+    "pip_optional": ["qrcode"],
     "assets":      ["twofactor.js"],
 }
 

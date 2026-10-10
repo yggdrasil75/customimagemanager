@@ -30,6 +30,7 @@ MANIFEST = {
     "core":        False,          # False => user can toggle it off
     "requires":    [],             # ids of modules that must load before this
     "pip":         ["torch"],      # deps that must import or the module is OFF
+    "pip_optional": ["qrcode"],    # deps one feature needs; the module loads without them
     "assets":      ["my_module.js"],
 }
 ```
@@ -39,13 +40,18 @@ means your module is skipped, with the reason shown in the Modules tab.
 
 ## Availability: a module loads whole, or not at all
 
-There is no "feature X disabled because dep Y is missing" inside a module.
-Either everything you declare works, or the module is off with a reason:
+Either everything in `pip` works, or the module is off with a reason; only a
+feature declared through `pip_optional` may be missing while the module runs:
 
 - every entry in `pip` must import (`pip_name:import_name` when they differ,
-  e.g. `"opencv-contrib-python:cv2"`), or the loader disables the module;
+  e.g. `"opencv-contrib-python:cv2"`, plus a version specifier when the
+  module needs one: `"transformers>=5.19:transformers"`), or the loader
+  disables the module;
+- every package outside the core install (requirements-ultralight.txt) that
+  your files import is declared: unconditional imports in `pip`, guarded ones
+  (`optional_import`, `try`, inside a function) in `pip` or `pip_optional`
+  (tests/test_module_deps.py checks this);
 - an entry may list interchangeable packages separated by `|`, first = preferred: `"ai-edge-litert:ai_edge_litert|tflite-runtime:tflite_runtime|tensorflow"` is satisfied by any one of them, and enabling the module installs the first;
-- declare every package your files import at top level, even ones you probe: if `module.py` itself fails to import on a missing package, the loader reads `MANIFEST` from source and reports "pip dependency 'x' not installed" (and installs it when the module is enabled) only when `x` is in `pip`;
 - a module may probe something more specific at import time and declare
   `AVAILABLE = False` / `UNAVAILABLE_REASON = "..."` (SAM3 checks that the
   installed ultralytics ships `SAM3SemanticPredictor`);
@@ -636,4 +642,3 @@ threading, cimlogger) can't be disabled; `metadata` also exposes a
 
 - No sandboxing - a module runs with the app's full privileges.
 - No hot reload.
-- No automatic pip install.

@@ -57,6 +57,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         [],
+    "pip_optional": ["send2trash"],
     "assets":      ["trash.js", "trash.css"],
 }
 

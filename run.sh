@@ -8,15 +8,18 @@ if [ -z "${CIM_NO_AUTO_INSTALL:-}" ]; then
     echo "==> checking module deps"
     venv/bin/python - <<'PY' || echo "warn: module dep check failed; starting anyway" >&2
 import logging
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+logging.basicConfig(level=logging.WARNING, format="%(message)s")
+logging.getLogger("modules.loader").setLevel(logging.INFO)   # pip progress only
 from modules import registry
 got = registry.install_all_deps()
-miss = registry.missing_pip()
 for mid, pk in got.items():
     print(f"installed for {mid}: {' '.join(pk)}")
-for mid, pk in miss.items():
+for mid, pk in registry.missing_pip().items():
     if registry.is_enabled(mid):
-        print(f"warn: {mid} still missing {' '.join(pk)} (module will be off)")
+        print(f"warn: {mid} still missing {', '.join(pk)} (module will be off)")
+for mid, pk in registry.missing_pip(optional=True).items():
+    if registry.is_enabled(mid):
+        print(f"note: {mid} without optional {', '.join(pk)} (its features that need them are off)")
 PY
 fi
 exec venv/bin/python manager.py "$@"

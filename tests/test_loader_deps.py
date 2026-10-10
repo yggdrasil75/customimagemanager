@@ -114,3 +114,85 @@ def test_discovery_probes_warn_only_for_enabled_modules(caplog):
     assert "no_such_pkg_disc" not in caplog.text
     assert optional_deps.warn_missing("modules.fake_on") == ["no_such_pkg_disc_a"]
     assert "no_such_pkg_disc_a" in caplog.text and "no_such_pkg_disc_b" not in caplog.text
+
+
+def test_version_specifiers():
+    assert loader._version_ok("5.19.0", "transformers>=5.19")
+    assert not loader._version_ok("5.18.2", "transformers>=5.19")
+    assert loader._version_ok("6.1.0", "sentence-transformers>=6.1,<7")
+    assert not loader._version_ok("7.0", "x>=6.1,<7")
+    assert loader._version_ok("2.3.4", "x==2.3.*") and not loader._version_ok("2.4", "x==2.3.*")
+    assert loader._dist_name("sentence-transformers>=6.1:sentence_transformers") == "sentence-transformers"
+    assert loader._import_name("transformers>=5.19:transformers") == "transformers"
+    # installed, but too old: not installed for the loader, and the message says what's there
+    assert loader._one_installed("pytest>=1") and not loader._one_installed("pytest>=999")
+    assert "(have pytest " in loader._missing_message("pytest>=999")
+    assert "requirements-<backend>.txt" in loader._missing_message("torch:no_such_torch_xyz")
+
+
+def _fake_modules(tmp_path, monkeypatch, mods):
+    """! @brief A modules dir of fake plugins {name: (manifest dict, body)}; the package
+    path is extended so modules.<name> imports from it."""
+    import modules
+    for name, (man, body) in mods.items():
+        d = tmp_path / name
+        d.mkdir()
+        (d / "module.py").write_text(f"MANIFEST = {man!r}\n{body}\n")
+    monkeypatch.setattr(loader, "_MODULES_DIR", str(tmp_path))
+    monkeypatch.setattr(modules, "__path__", list(modules.__path__) + [str(tmp_path)])
+    reg = loader.ModuleRegistry()
+    reg.discover()
+    return reg
+
+
+class _Host:
+    def __init__(self):
+        import logging
+        self.logger = logging.getLogger("test.loader")
+        self.calls = []
+        self._current_module = None
+
+
+def test_each_enabled_module_goes_through_the_same_steps(tmp_path, monkeypatch, caplog):
+    import logging, sys
+    boom = "raise RuntimeError('module code ran')"
+    reg = _fake_modules(tmp_path, monkeypatch, {
+        "fk_off":  ({"id": "fk_off", "pip": []}, boom),                          # disabled
+        "fk_need": ({"id": "fk_need", "pip": ["no-such-pkg-q:no_such_pkg_q"]}, boom),  # required dep missing
+        "fk_old":  ({"id": "fk_old", "pip": ["pytest>=999"]}, boom),           # too old
+        "fk_opt":  ({"id": "fk_opt", "pip": [], "pip_optional": ["no-such-opt-q:no_such_opt_q"]},
+                    "def register(host):\n    host.calls.append('fk_opt')"),
+        "fk_ok":   ({"id": "fk_ok", "pip": ["pytest"]},
+                    "def register(host):\n    host.calls.append('fk_ok')"),
+    })
+    # discovery read every manifest and ran nothing
+    assert set(reg._plugins) == {"fk_off", "fk_need", "fk_old", "fk_opt", "fk_ok"}
+    assert all(lm.py_module is None for lm in reg._plugins.values())
+    reg.init_state({"fk_off": False})
+    host = _Host()
+    caplog.set_level(logging.INFO, logger="test.loader")
+    reg.register_all(host)
+    assert host.calls == ["fk_ok", "fk_opt"] or sorted(host.calls) == ["fk_ok", "fk_opt"]
+    assert "modules.fk_off.module" not in sys.modules            # disabled: never imported
+    assert reg._plugins["fk_need"].py_module is None             # missing dep: code never ran
+    assert reg._plugins["fk_need"].error == "pip dependency 'no-such-pkg-q' not installed"
+    assert "have pytest" in reg._plugins["fk_old"].error
+    assert "module 'fk_need' disabled: pip dependency 'no-such-pkg-q' not installed" in caplog.text
+    assert "module 'fk_opt': optional dependency 'no-such-opt-q' not installed" in caplog.text
+    assert "fk_off" not in caplog.text
+    # run.sh's lists: enabled or not, by kind
+    assert reg.missing_pip()["fk_need"] == ["no-such-pkg-q"]
+    assert reg.missing_pip(optional=True)["fk_opt"] == ["no-such-opt-q"]
+
+
+def test_install_covers_required_and_optional_of_enabled_modules_only(tmp_path, monkeypatch):
+    reg = _fake_modules(tmp_path, monkeypatch, {
+        "fk_a": ({"id": "fk_a", "pip": ["no-a-q:no_a_q"], "pip_optional": ["no-b-q:no_b_q"]}, ""),
+        "fk_c": ({"id": "fk_c", "pip": ["no-c-q:no_c_q"]}, ""),
+    })
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text('{"modules": {"fk_c": false}}')
+    asked = []
+    monkeypatch.setattr(loader, "_pip_install", lambda deps, log: asked.extend(deps) or [])
+    reg.install_all_deps(str(cfg))
+    assert asked == ["no-a-q:no_a_q", "no-b-q:no_b_q"]

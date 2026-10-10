@@ -40,7 +40,8 @@ MANIFEST = {
                    "bulk selection. Uses the selected 'pose' capability provider.",
     "core":        False,          # ultralight ships without it
     "requires":    [],             # soft-needs a 'pose' provider; degrades if none
-    "pip":         [],             # estimation deps come from the provider module
+    "pip":         [],
+    "pip_optional": ["rtmlib"],             # estimation deps come from the provider module
     "assets":      ["pose.js"],    # overlay + buttons
 }
 

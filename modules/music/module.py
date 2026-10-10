@@ -34,6 +34,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         ["mutagen"],
+    "pip_optional": ["librosa", "scikit-learn:sklearn"],
     "assets":      ["music.js"],
 }
 

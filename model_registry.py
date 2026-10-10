@@ -1,6 +1,7 @@
 """! @file
 @brief Model files, accelerator detection (CUDA / ROCm / CPU, ONNX providers) and
 the LRU cache that keeps heavy models within the memory budget."""
+import logging
 import os
 import gc
 import threading
@@ -478,7 +479,10 @@ class ModelRegistry:
                         try:
                             built = e["loader"]()
                         except Exception as ex:
-                            err = repr(ex)
+                            err = f"{type(ex).__name__}: {ex}"
+                            # the cause, once: callers only see None
+                            logging.getLogger("access").error(  # cimlogger: console + error.log
+                                f"model {key} failed to load: {err}", exc_info=True)
                         dev = _model_device(built)
                         if res is not None and dev is not None and hasattr(res, "retarget"):
                             res.retarget(dev)
@@ -507,6 +511,12 @@ class ModelRegistry:
         finally:
             with self._lock:
                 self._pinned.discard(key)
+
+    def error(self, key):
+        """! @brief Why the last load of `key` failed ("" when it didn't, or never ran)."""
+        with self._lock:
+            e = self._entries.get(key)
+            return (e or {}).get("err") or ""
 
     def touch(self, key):
         """! @brief Mark a key most recently used without loading it."""
@@ -625,6 +635,7 @@ REGISTRY = ModelRegistry()
 register = REGISTRY.register
 acquire = REGISTRY.acquire
 touch = REGISTRY.touch
+error = REGISTRY.error
 unload = REGISTRY.unload
 lease = REGISTRY.lease
 hold = REGISTRY.hold

@@ -22,6 +22,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         ["ultralytics"],
+    "pip_optional": ["opencv-python-headless:cv2"],
     "assets":      [],
 }
 
@@ -54,4 +55,4 @@ def register(host):
         cost_mb=300,
         note="One-pass everything masks (YOLOv8-seg) with CLIP text grounding: text "
              "prompts work without an LLM but are coarse. Fastest text-capable option.")
-    host.logger.info("fastsam module: registered segment.box / segment")
+    host.logger.info("fastsam module: registered segment.box / segment")

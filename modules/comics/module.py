@@ -23,6 +23,7 @@ MANIFEST = {
     "core":        False,
     "requires":    ["books"],
     "pip":         [],
+    "pip_optional": ["imagecodecs", "opencv-python-headless:cv2", "py7zr", "rarfile"],
     "assets":      ["comic.js"],
 }
 

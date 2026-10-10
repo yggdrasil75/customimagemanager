@@ -23,7 +23,7 @@ MANIFEST = {
                    "(AVA etc.). Project tooling; off by default.",
     "core":        False,
     "requires":    ["personal_iqa"],
-    "pip":         [],
+    "pip":         ["torch"],
     "assets":      ["iqa_train.js"],
     "default_enabled": False,
 }
@@ -158,4 +158,4 @@ def register(host):
     host.add_route("/api/iqa_train/stop", api_stop, methods=["POST"], feature="tab.iqa_train")
     host.add_asset("iqa_train.js")
     host.register_left_pane("iqa_train_pane.html")
-    host.logger.info("iqa_train: registered (Trainer > IQA sub-tab + build routes)")
+    host.logger.info("iqa_train: registered (Trainer > IQA sub-tab + build routes)")

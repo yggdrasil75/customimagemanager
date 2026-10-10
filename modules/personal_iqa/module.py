@@ -78,6 +78,7 @@ MANIFEST = {
     "core":        False,
     "requires":    ["rating"],
     "pip":         ["torch"],
+    "pip_optional": ["opencv-python-headless:cv2"],
     "assets":      ["personal_iqa.js"],
 }
 

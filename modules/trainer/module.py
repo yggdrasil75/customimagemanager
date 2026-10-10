@@ -20,7 +20,7 @@ MANIFEST = {
                    "models locally or on a remote worker.",
     "core":        False,
     "requires":    [],
-    "pip":         [],
+    "pip":         ["opencv-python-headless:cv2"],
     "assets":      ["trainer.js", "trainer.css"],
 }
 

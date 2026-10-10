@@ -45,6 +45,7 @@ MANIFEST = {
     "core":        False,
     "requires":    ["bodies"],
     "pip":         ["anny"],
+    "pip_optional": ["torch", "warp-lang:warp"],
     "assets":      [],
 }
 
@@ -101,4 +102,4 @@ def register(host):
         note="Parameters -> mesh with the age-generic ANNY model (data ships with the package).",
         loader=lambda: (lambda m: (lambda betas, *a, **k: _mesh(m, betas)))(_model()),
         transform=None, available=lambda: _HAVE_ANNY, reason=_REASON_MESH, cost_mb=600)
-    host.logger.info("anny module: registered body.mesh (anny); body.shape needs an estimator")
+    host.logger.info("anny module: registered body.mesh (anny); body.shape needs an estimator")

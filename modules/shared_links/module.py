@@ -41,6 +41,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         [],
+    "pip_optional": ["qrcode"],
     "assets":      ["shared_links.css", "shared_links.js"],
 }
 

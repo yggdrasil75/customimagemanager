@@ -30,6 +30,7 @@ MANIFEST = {
     "core":        False,
     "requires":    ["fetch"],
     "pip":         [],
+    "pip_optional": ["py7zr", "pyarrow"],
     "assets":      ["datasets.js"],
 }
 

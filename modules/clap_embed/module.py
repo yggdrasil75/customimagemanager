@@ -43,6 +43,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         ["torch", "librosa", "transformers"],
+    "pip_optional": ["msclap"],
     "assets":      [],
 }
 

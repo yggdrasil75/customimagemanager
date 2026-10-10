@@ -44,7 +44,8 @@ MANIFEST = {
                    "body pose, 17 COCO keypoints. Tiny and CPU-fast.",
     "core":        False,
     "requires":    [],
-    "pip":         ["ai-edge-litert:ai_edge_litert|tensorflow"],  # any one TFLite interpreter (tflite-runtime is dead)
+    "pip":         ["ai-edge-litert:ai_edge_litert|tensorflow"],
+    "pip_optional": ["opencv-python-headless:cv2"],  # any one TFLite interpreter (tflite-runtime is dead)
     "assets":      [],
 }
 
@@ -129,4 +130,4 @@ def register(host):
         loader=lambda: (lambda v: (lambda img, *a, **k: _people(img, v["type"], v["size"], _persons())))(
             host.model_variant("pose")),
         transform=None, available=lambda: AVAILABLE, reason=UNAVAILABLE_REASON, cost_mb=30)
-    host.logger.info("movenet module: registered movenet (17)")
+    host.logger.info("movenet module: registered movenet (17)")

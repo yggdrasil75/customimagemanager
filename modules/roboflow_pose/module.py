@@ -36,6 +36,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         ["detrpose @ git+https://github.com/SebastianJanampa/DETRPose.git@inference_only:detrpose"],
+    "pip_optional": ["opencv-python-headless:cv2", "rfdetr", "torch"],
     "assets":      [],
 }
 
@@ -151,4 +152,4 @@ def register(host):
         reason="pip install git+https://github.com/SebastianJanampa/DETRPose.git@inference_only",
         cost_mb=300, gpu=model_registry.on_gpu())
 
-    host.logger.info("roboflow_pose module: registered rfdetr and detrpose (17)")
+    host.logger.info("roboflow_pose module: registered rfdetr and detrpose (17)")

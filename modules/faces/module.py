@@ -29,7 +29,8 @@ MANIFEST = {
                    "insightface, 3D face shape and the drawn-face filter.",
     "core":        False,
     "requires":    [],
-    "pip":         [],          # insightface/ultralytics are optional per provider
+    "pip":         [],
+    "pip_optional": ["insightface", "opencv-python-headless:cv2", "scipy", "ultralytics"],          # insightface/ultralytics are optional per provider
     "assets":      [],
 }
 

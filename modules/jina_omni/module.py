@@ -46,6 +46,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         ["torch", "pillow:PIL", "transformers", "peft"],
+    "pip_optional": ["librosa", "opencv-python-headless:cv2"],
     "assets":      [],
 }
 

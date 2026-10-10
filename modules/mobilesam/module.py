@@ -23,6 +23,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         ["ultralytics"],
+    "pip_optional": ["opencv-python-headless:cv2"],
     "assets":      [],
 }
 
@@ -49,4 +50,4 @@ def register(host):
         weights=_weights, text_mode="vlm", settings=widget, speed="fast", cost_mb=200,
         note="Tiny distilled SAM. Runs fine on CPU; masks are rougher than SAM 2. "
              "Good choice for a background segment-everything sweep.")
-    host.logger.info("mobilesam module: registered segment.box / segment")
+    host.logger.info("mobilesam module: registered segment.box / segment")

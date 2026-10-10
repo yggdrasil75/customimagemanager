@@ -38,6 +38,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         ["torch", "transformers"],
+    "pip_optional": ["huggingface-hub:huggingface_hub", "opencv-python-headless:cv2"],
     "assets":      [],
 }
 
@@ -172,4 +173,4 @@ def register(host):
                       reason=why, cost_mb=1600, gpu=og.has_gpu())
         host.provide_model("embed.bodies", fam, loader=_bodies_loader, **common)
         host.provide_model("embed", fam, loader=_image_loader, **common)
-    host.logger.info("dino module: registered embed / embed.bodies (v2, v3)")
+    host.logger.info("dino module: registered embed / embed.bodies (v2, v3)")

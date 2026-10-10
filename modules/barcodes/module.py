@@ -26,7 +26,8 @@ MANIFEST = {
                    "an MWG BarCode region with its payload.",
     "core":        False,
     "requires":    [],
-    "pip":         [],              # zxing-cpp optional; OpenCV path always works
+    "pip":         [],
+    "pip_optional": ["opencv-python-headless:cv2", "zxing-cpp:zxingcpp"],              # zxing-cpp optional; OpenCV path always works
     "assets":      ["barcodes.js"],
 }
 

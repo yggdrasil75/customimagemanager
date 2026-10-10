@@ -35,6 +35,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         ["ultralytics"],
+    "pip_optional": ["opencv-python-headless:cv2"],
     "assets":      [],
 }
 
@@ -115,4 +116,4 @@ def register(host):
         settings=widget, speed="accurate", cost_mb=3000,
         note="Concept-prompted masker with a native text head: type what to segment, "
              "no LLM needed; segment-everything without a prompt. Heaviest; wants a GPU.")
-    host.logger.info("sam3 module: registered segment.box / segment")
+    host.logger.info("sam3 module: registered segment.box / segment")

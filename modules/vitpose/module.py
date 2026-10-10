@@ -40,6 +40,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         [],
+    "pip_optional": ["onnx", "onnxruntime", "opencv-python-headless:cv2", "torch", "transformers"],
     "assets":      [],
 }
 
@@ -317,4 +318,4 @@ def register(host):
         available=lambda: _needs()[0],
         reason=lambda: _needs()[1],
         cost_mb=400, gpu=model_registry.on_gpu())
-    host.logger.info("vitpose module: registered vitpose (17 / 133)")
+    host.logger.info("vitpose module: registered vitpose (17 / 133)")

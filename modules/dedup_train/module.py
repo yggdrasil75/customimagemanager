@@ -27,7 +27,8 @@ MANIFEST = {
                    "feedback, and optional dataset folders. Project tooling; off by default.",
     "core":        False,
     "requires":    [],
-    "pip":         [],
+    "pip":         ["opencv-python-headless:cv2"],
+    "pip_optional": ["imagecodecs"],
     "assets":      ["dedup_train.js"],
     "default_enabled": False,
 }

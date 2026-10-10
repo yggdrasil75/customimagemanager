@@ -52,6 +52,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         ["mayaku"],
+    "pip_optional": ["opencv-python-headless:cv2"],
     "assets":      [],
 }
 

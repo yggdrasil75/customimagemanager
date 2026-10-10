@@ -13,6 +13,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         [],
+    "pip_optional": ["opencv-python-headless:cv2", "vtracer"],
     "assets":      ["segmentation.js"],
 }
 
@@ -60,4 +61,4 @@ def register(host):
         "mask_to_svg_paths": sc.mask_svg.mask_to_svg_paths,
         "svg_d_to_points": sc.mask_svg.svg_d_to_points, "rasterize": sc.mask_svg.rasterize,
     })
-    host.logger.info("segmentation module: routes, pipeline stage, action target, masks hook")
+    host.logger.info("segmentation module: routes, pipeline stage, action target, masks hook")

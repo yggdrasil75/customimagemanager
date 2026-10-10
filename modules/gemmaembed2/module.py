@@ -6,22 +6,23 @@ Provides `embed` (images), `embed.text` (passages / queries) and
 768-d vector space and one download. Matryoshka: vectors may be truncated
 to 512 / 256 / 128 and stay comparable (re-normalised).
 
-The architecture (embedding_gemma2) ships in transformers itself and the
-model is driven through sentence-transformers: no trust_remote_code, nothing
-is executed from the model repo. Text goes in with the card's prompts
-(`Document` for passages, `SearchQuery` for queries); images and audio go
-in as sentence-transformers multimodal inputs ({"text": "<|image|>",
-"image": [...]}) with no prefix, as the card says.
+The architecture (embedding_gemma2) ships in transformers itself from 5.19
+and the model is driven through sentence-transformers (6.1+: the model's own
+requirement, for ordered multimodal inputs): no trust_remote_code, nothing is
+executed from the model repo. Text goes in with the card's prompts
+(`Document` for passages, `SearchQuery` for queries); an image goes in as a
+PIL image and audio as {"array", "sampling_rate"} (decoded here by ffmpeg to
+mono 16 kHz), both with no prefix, as the card says.
 
 The "Modalities" setting drops the vision / audio encoders at load time
 (config_kwargs vision_config / audio_config = None): text only is 270M,
 the full model 740M. A provider whose encoder is dropped reports itself
-unavailable with the reason instead of failing at embed time. Audio must be
-mono 16 kHz; the processor resamples what it decodes from the file path.
-Weights land under models/st/embeddinggemma/.
+unavailable with the reason instead of failing at embed time. A load that
+fails names its cause (model_registry.error). Weights land under
+models/st/embeddinggemma/.
 """
-import os
-import tempfile
+import shutil
+import subprocess
 import threading
 
 import numpy as np
@@ -37,7 +38,7 @@ SentenceTransformer, _HAVE_ST = optional_import("sentence_transformers",
                                                 attr="SentenceTransformer", quiet=True)
 
 AVAILABLE = bool(_HAVE_TORCH and _HAVE_ST and _HAVE_PIL and _HAVE_CV2)
-UNAVAILABLE_REASON = "pip install torch pillow 'transformers>=5' 'sentence-transformers>=6'"
+UNAVAILABLE_REASON = "needs torch, pillow, opencv, transformers>=5.19 and sentence-transformers>=6.1"
 
 MANIFEST = {
     "id":          "embeddinggemma",
@@ -47,8 +48,10 @@ MANIFEST = {
                    "space (740M, 768-d, MRL). No remote code.",
     "core":        False,
     "requires":    [],
-    "pip":         ["torch", "pillow:PIL", "opencv-python-headless:cv2", "transformers",
-                    "sentence-transformers:sentence_transformers"],
+    # embedding_gemma2 is in transformers from 5.19; the model needs
+    # sentence-transformers 6.1 (ordered multimodal dict inputs)
+    "pip":         ["torch", "pillow:PIL", "opencv-python-headless:cv2", "transformers>=5.19:transformers",
+                    "sentence-transformers>=6.1:sentence_transformers"],
     "assets":      [],
 }
 
@@ -68,6 +71,9 @@ _MODALITY_OPTIONS = [{"value": "all", "label": "Text, images and audio (740M)"},
                      {"value": "image", "label": "Text and images (440M)"},
                      {"value": "audio", "label": "Text and audio (570M)"}]
 _CACHE = model_registry.model_dir("st", "embeddinggemma")
+AUDIO_RATE = 16000
+# longest audio sent in: 25 tokens/s against the 8192-token budget
+AUDIO_MAX_S = 300
 _lock = threading.Lock()
 _registered: set = set()
 
@@ -131,23 +137,34 @@ class _Gemma:
     def embed_image(self, img_bgr, dims):
         if img_bgr is None or not _has(self.modalities, "image"):
             return None
-        pil = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-        try:
-            return self._encode({"text": "<|image|>", "image": [pil]}, dims)
-        except (TypeError, ValueError):
-            # the processor wants a path: hand it a temporary PNG
-            fd, tmp = tempfile.mkstemp(suffix=".png")
-            os.close(fd)
-            try:
-                pil.save(tmp)
-                return self._encode({"text": "<|image|>", "image": [tmp]}, dims)
-            finally:
-                os.remove(tmp)
+        if img_bgr.ndim == 2:
+            img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_GRAY2BGR)
+        elif img_bgr.shape[2] == 4:
+            img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_BGRA2BGR)
+        return self._encode(Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)), dims)
 
     def embed_audio(self, abs_path, dims):
         if not abs_path or not _has(self.modalities, "audio"):
             return None
-        return self._encode({"text": "<|audio|>", "audio": [abs_path]}, dims)
+        wave = decode_audio(abs_path)
+        if wave is None or not len(wave):
+            return None
+        return self._encode({"array": wave, "sampling_rate": AUDIO_RATE}, dims)
+
+
+def decode_audio(path, max_s=AUDIO_MAX_S):
+    """! @brief A file's audio as mono float32 at 16 kHz (the model's input), the first
+    `max_s` seconds; None without ffmpeg or audio."""
+    ff = shutil.which("ffmpeg")
+    if not ff:
+        return None
+    try:
+        out = subprocess.run([ff, "-v", "error", "-nostdin", "-i", path, "-t", str(max_s), "-vn",
+                              "-ac", "1", "-ar", str(AUDIO_RATE), "-f", "f32le", "-"],
+                             capture_output=True, timeout=120).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return np.frombuffer(out, np.float32).copy() if out else None
 
 
 def registry_key(modalities):
@@ -183,9 +200,11 @@ def register(host):
         return _clamp_modalities(host.config.get("embeddinggemma_modalities"))
 
     def _get():
-        emb = load(_modalities(), int(host.config.get("embeddinggemma_max_tokens") or 8192))
+        mods = _modalities()
+        emb = load(mods, int(host.config.get("embeddinggemma_max_tokens") or 8192))
         if not emb:
-            raise RuntimeError(f"{MODEL_ID} failed to load")
+            raise RuntimeError(f"{MODEL_ID} failed to load: "
+                               f"{model_registry.error(registry_key(mods)) or 'unknown error'}")
         return emb, _clamp_dims(host.config.get("embeddinggemma_dims"))
 
     def _space(dims):

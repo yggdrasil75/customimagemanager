@@ -22,6 +22,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         [],
+    "pip_optional": ["opencv-python-headless:cv2"],
     "assets":      [],
 }
 
@@ -78,4 +79,4 @@ def register(host):
             host.set_config(k, v, save=False)
         host.save_config()
     host.on_startup(_migrate)
-    host.logger.info("llm_preprocess module: hooked llm.image")
+    host.logger.info("llm_preprocess module: hooked llm.image")

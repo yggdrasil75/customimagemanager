@@ -31,6 +31,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         [],
+    "pip_optional": ["opencv-python-headless:cv2", "py7zr", "pymupdf:pymupdf|pymupdf:fitz", "python-docx:docx", "rarfile", "striprtf"],
     "assets":      ["books.js", "reader.js"],
 }
 

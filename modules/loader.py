@@ -4,12 +4,25 @@
 A module is a folder under modules/ whose module.py (or __init__.py) defines
 
     MANIFEST = {"id", "name", "version", "description", "core", "requires",
-                "pip", "assets", "default_enabled"}
+                "pip", "pip_optional", "assets", "default_enabled"}
     def register(host): ...
 
 Enable state lives in app_config.json under "modules"; core modules are always
-on. Every manifest is read so Settings > Modules lists disabled modules too;
-register() runs only for enabled ones, in dependency order.
+on. Every manifest is read from source (a literal dict; nothing is executed) so
+Settings > Modules lists disabled modules too. A disabled module is never
+imported, installed or reported on.
+
+Every enabled module goes through the same steps, in dependency order:
+  1. its "pip" deps (version specifiers honoured) are checked without importing
+     anything; a missing one disables it with one line naming the package -
+     run.sh / enabling it in Settings pip-installs "pip" and "pip_optional";
+  2. its code is imported;
+  3. a "pip_optional" dep that is missing is reported in one line (the module
+     loads without the features that need it);
+  4. register(host).
+Every package a module imports beyond the core install
+(requirements-ultralight.txt) is declared in "pip" or "pip_optional"
+(tests/test_module_deps.py checks this).
 """
 
 import ast
@@ -18,6 +31,7 @@ import logging
 import os
 import re
 import importlib
+import importlib.metadata
 import importlib.util
 import subprocess
 import sys
@@ -68,11 +82,69 @@ def _import_name(dep):
     return re.split(r"[\s<>=!~;\[@]", pip_name.strip(), maxsplit=1)[0].replace("-", "_")
 
 
-def _one_installed(dep):
+_SPEC_RE = re.compile(r"(==|!=|>=|<=|~=|>|<)\s*([0-9][0-9A-Za-z.\-+*]*)")
+
+
+def _vtuple(v):
+    """! @brief "5.19.0rc1" -> (5, 19, 0): the leading numeric release parts."""
+    out = []
+    for part in str(v).split("."):
+        m = re.match(r"\d+", part)
+        if not m:
+            break
+        out.append(int(m.group(0)))
+    return tuple(out)
+
+
+def _cmp(a, b):
+    n = max(len(a), len(b))
+    a, b = a + (0,) * (n - len(a)), b + (0,) * (n - len(b))
+    return (a > b) - (a < b)
+
+
+def _version_ok(have, spec):
+    """! @brief Whether version `have` meets every clause of a pip specifier ("transformers>=5.19,<6")."""
+    hv = _vtuple(have)
+    for op, want in _SPEC_RE.findall(spec.split(";")[0].split("@")[0]):
+        if want.endswith(".*"):
+            want = want[:-2]
+            c = _cmp(hv[:len(_vtuple(want))], _vtuple(want))
+            ok = (c == 0) if op == "==" else (c != 0)
+        else:
+            c = _cmp(hv, _vtuple(want))
+            ok = {"==": c == 0, "!=": c != 0, ">=": c >= 0, "<=": c <= 0, ">": c > 0, "<": c < 0,
+                  "~=": c >= 0 and hv[:max(1, len(_vtuple(want)) - 1)]
+                  == _vtuple(want)[:max(1, len(_vtuple(want)) - 1)]}[op]
+        if not ok:
+            return False
+    return True
+
+
+def _dist_name(dep):
+    """! @brief The distribution name of a dep spec ("sentence-transformers>=6.1" -> "sentence-transformers")."""
+    return re.split(r"[\s<>=!~;\[@]", _split_dep(dep)[0].strip(), maxsplit=1)[0]
+
+
+def _installed_version(dep):
+    """! @brief The installed version of the dep's distribution, or None when unknown."""
     try:
-        return importlib.util.find_spec(_import_name(dep)) is not None
+        return importlib.metadata.version(_dist_name(dep))
+    except Exception:
+        return None
+
+
+def _one_installed(dep):
+    """! @brief Importable, and at a version the spec allows (when it names one)."""
+    try:
+        if importlib.util.find_spec(_import_name(dep)) is None:
+            return False
     except (ImportError, ValueError):
         return False
+    pip_spec = _split_dep(dep)[0]
+    if not _SPEC_RE.search(pip_spec.split("@")[0]):
+        return True
+    have = _installed_version(dep)
+    return have is None or _version_ok(have, pip_spec)
 
 
 def _dep_installed(dep):
@@ -80,11 +152,22 @@ def _dep_installed(dep):
     return any(_one_installed(a) for a in _alternatives(dep))
 
 
+def _missing_message(dep, what="pip dependency"):
+    """! @brief One line on a dep that isn't installed (or is too old), with the fix."""
+    alts = _alternatives(dep)
+    olds = [f"{_dist_name(a)} {_installed_version(a)}" for a in alts
+            if _SPEC_RE.search(_split_dep(a)[0].split("@")[0]) and _installed_version(a)]
+    msg = f"{what} '{_dep_label(dep)}' not installed" + (f" (have {', '.join(olds)})" if olds else "")
+    if all(_dist_name(a) in _BACKEND_PIP for a in alts):
+        msg += "; it comes from requirements-<backend>.txt: ./install.sh cpu|cuda|rocm"
+    return msg
+
+
 def _dep_problem(dep):
     """! @brief None when the dep (or an alternative) imports, else why not."""
     alts = [a for a in _alternatives(dep) if _one_installed(a)]
     if not alts:
-        return f"pip dependency '{_dep_label(dep)}' not installed"
+        return _missing_message(dep)
     errors = []
     for a in alts:
         mod = _import_name(a)
@@ -97,7 +180,8 @@ def _dep_problem(dep):
 
 
 def _manifest_from_source(folder, entry_file):
-    """! @brief Read the MANIFEST literal of a module that failed to import, without running it."""
+    """! @brief A module's MANIFEST literal, read without running its code (None when absent
+    or not a literal)."""
     try:
         with open(os.path.join(folder, entry_file), encoding="utf-8") as f:
             tree = ast.parse(f.read())
@@ -117,9 +201,10 @@ def _import_failure(manifest, exc):
     """! @brief Why a module's import failed, phrased like a missing pip dep when that is the cause."""
     if isinstance(exc, ModuleNotFoundError) and exc.name:
         top = exc.name.split(".")[0]
-        for dep in (manifest or {}).get("pip", []):
+        man = manifest or {}
+        for dep in man.get("pip", []) + man.get("pip_optional", []):
             if any(_import_name(a).split(".")[0] == top for a in _alternatives(dep)):
-                return f"pip dependency '{_dep_label(dep)}' not installed"
+                return _missing_message(dep)
         return f"python package '{top}' not installed (and not declared in the manifest's pip list)"
     return None
 
@@ -148,8 +233,8 @@ def _pip_install(deps, logger):
     plain, choices, skip = [], [], []
     for d in deps:
         alts = [_split_dep(a)[0].strip() for a in _alternatives(d)]
-        usable = [a for a in alts if a not in _BACKEND_PIP]
-        skip += [a for a in alts if a in _BACKEND_PIP]
+        usable = [a for a in alts if _dist_name(a) not in _BACKEND_PIP]
+        skip += [_dist_name(a) for a in alts if _dist_name(a) in _BACKEND_PIP]
         if len(alts) > 1 and usable:
             choices.append([(p, a) for p, a in zip(alts, _alternatives(d)) if p in usable])
         elif usable:
@@ -212,12 +297,14 @@ _MODULES_DIR = os.path.dirname(os.path.abspath(__file__))
 
 class LoadedModule:
     """! @brief A discovered module and its runtime state."""
-    def __init__(self, manifest, py_module, path):
+    def __init__(self, manifest, py_module, path, entry=None):
         self.manifest = manifest
-        self.py_module = py_module
+        self.py_module = py_module  # imported when enabled, at register_all
         self.path = path
+        self.entry = entry  # dotted import path of module.py / __init__.py
         self.registered = False
-        self.error = None  # why register() failed, or None
+        self.error = None  # why it isn't loaded, or None
+        self.broken = False  # no readable manifest: never loadable
 
     @property
     def id(self):
@@ -233,8 +320,8 @@ class ModuleRegistry:
         self._enabled = {}  # id -> enabled (plugins only)
 
     def discover(self):
-        """! @brief Import every plugin folder's manifest. A module that fails to import
-        is recorded with its error; it never stops the others.
+        """! @brief Read every plugin folder's MANIFEST from source. Nothing is imported here:
+        a module's code runs only once it is enabled (register_all).
         """
         for name in sorted(os.listdir(_MODULES_DIR)):
             if name in _RESERVED_DIRS or name.startswith((".", "_")):
@@ -249,32 +336,41 @@ class ModuleRegistry:
                 entry, entry_file = f"modules.{name}", "__init__.py"
             if not entry:
                 continue
-            try:
-                with optional_deps.probing():   # warned later, for enabled modules only
-                    py = importlib.import_module(entry)
-                manifest = getattr(py, "MANIFEST", None)
-                if not isinstance(manifest, dict) or "id" not in manifest:
+            src = _manifest_from_source(folder, entry_file)
+            if src is None:
+                if "MANIFEST" not in open(os.path.join(folder, entry_file), encoding="utf-8",
+                                          errors="replace").read():
                     continue  # not a module
-                manifest.setdefault("id", name)
-                manifest.setdefault("name", name)
-                manifest.setdefault("version", "0")
-                manifest.setdefault("description", "")
-                manifest.setdefault("core", False)
-                manifest.setdefault("requires", [])
-                manifest.setdefault("pip", [])
-                manifest.setdefault("assets", [])
-                self._plugins[manifest["id"]] = LoadedModule(manifest, py, folder)
-            except Exception as e:
-                # Keep a stub with the manifest read from source, so the failure shows with
-                # the module's real id and missing deps.
-                src = _manifest_from_source(folder, entry_file) or {}
-                man = {"id": name, "name": name, "version": "?", "description": "failed to import",
-                       "core": False, "requires": [], "pip": [], "assets": []}
-                man.update({k: v for k, v in src.items() if k in man or k == "default_enabled"})
-                man["core"] = False
-                stub = LoadedModule(man, None, folder)
-                stub.error = _import_failure(man, e) or traceback.format_exc(limit=3)
-                self._plugins[man["id"]] = stub
+                stub = LoadedModule({"id": name, "name": name, "version": "?", "core": False,
+                                     "description": "MANIFEST is not a literal dict", "requires": [],
+                                     "pip": [], "pip_optional": [], "assets": []}, None, folder, entry)
+                stub.error, stub.broken = "MANIFEST is not a literal dict (it is read without running the module)", True
+                self._plugins[name] = stub
+                continue
+            manifest = dict(src)
+            manifest.setdefault("id", name)
+            manifest.setdefault("name", name)
+            manifest.setdefault("version", "0")
+            manifest.setdefault("description", "")
+            manifest.setdefault("core", False)
+            manifest.setdefault("requires", [])
+            manifest["pip"] = list(manifest.get("pip") or [])
+            manifest["pip_optional"] = list(manifest.get("pip_optional") or [])
+            manifest.setdefault("assets", [])
+            self._plugins[manifest["id"]] = LoadedModule(manifest, None, folder, entry)
+
+    def _import(self, lm):
+        """! @brief Import an enabled module's code. Its optional_import misses are quiet
+        (the loader reports deps itself). @return True when it imported."""
+        if lm.py_module is not None:
+            return True
+        try:
+            with optional_deps.probing():
+                lm.py_module = importlib.import_module(lm.entry)
+            return True
+        except Exception as e:
+            lm.error = _import_failure(lm.manifest, e) or "import failed: " + traceback.format_exc(limit=3)
+            return False
 
     def init_state(self, persisted):
         """! @brief Load enable state from the saved "modules" dict.
@@ -289,11 +385,6 @@ class ModuleRegistry:
                 self._enabled[pid] = True
             else:
                 self._enabled[pid] = bool(persisted.get(pid, lm.manifest.get("default_enabled", True)))
-        # the probes discovery kept quiet: warn about the enabled modules' misses only
-        for pid, lm in self._plugins.items():
-            name = getattr(lm.py_module, "__name__", "") if self._enabled.get(pid) else ""
-            if name:
-                optional_deps.warn_missing(name[:-len(".module")] if name.endswith(".module") else name)
         return self.current_state()
 
     def is_core(self, module_id):
@@ -332,8 +423,14 @@ class ModuleRegistry:
         lm = self._plugins.get(module_id)
         if not lm:
             return []
-        need = [d for d in lm.manifest.get("pip", []) if not _dep_installed(d)]
+        need = self._uninstalled(lm)
         return _pip_install(need, logger or _log) if need else []
+
+    @staticmethod
+    def _uninstalled(lm):
+        """! @brief A module's "pip" and "pip_optional" deps that aren't installed (or are too old)."""
+        return [d for d in lm.manifest.get("pip", []) + lm.manifest.get("pip_optional", [])
+                if not _dep_installed(d)]
 
     def install_all_deps(self, config_path="app_config.json", logger=None):
         """! @brief Before launch (run.sh): install missing deps of every enabled plugin.
@@ -350,9 +447,9 @@ class ModuleRegistry:
         self.init_state(persisted)
         done = {}
         for pid, lm in self._plugins.items():
-            if not self.is_enabled(pid) or lm.manifest.get("core"):
+            if not self.is_enabled(pid) or lm.manifest.get("core") or lm.broken:
                 continue
-            need = [d for d in lm.manifest.get("pip", []) if not _dep_installed(d)]
+            need = self._uninstalled(lm)
             if need:
                 got = _pip_install(need, log)
                 if got:
@@ -369,7 +466,7 @@ class ModuleRegistry:
         missing or disabled, or that sits in a cycle, is skipped with an error.
         """
         enabled = {pid: lm for pid, lm in self._plugins.items()
-                   if self.is_enabled(pid) and lm.py_module is not None}
+                   if self.is_enabled(pid) and not lm.broken}
         ordered, visiting, done = [], set(), set()
 
         def visit(pid):
@@ -410,17 +507,26 @@ class ModuleRegistry:
         self._register_all_done = True
 
         for lm in self._ordered_enabled_plugins():
-            reg = getattr(lm.py_module, "register", None)
-            if not callable(reg):
-                continue
             if lm.registered:
                 continue
-            # A module loads whole or not at all: its pip deps must import and its
-            # AVAILABLE flag (an import-time probe) must not be False.
-            why = self._unavailable_reason(lm)
+            # 1. required deps, checked before any of the module's code runs
+            why = next((_missing_message(d) for d in lm.manifest.get("pip", [])
+                        if not _dep_installed(d)), None)
+            # 2. its code
+            if not why and not self._import(lm):
+                why = lm.error
+            # 3. deps that are installed but won't import, and the module's own AVAILABLE probe
+            why = why or self._unavailable_reason(lm)
             if why:
                 lm.error = why
-                host.logger.info(f"module '{lm.id}' disabled: {why}")
+                host.logger.warning(f"module '{lm.id}' disabled: {why}")
+                continue
+            for dep in lm.manifest.get("pip_optional", []):
+                if not _dep_installed(dep):
+                    host.logger.warning(f"module '{lm.id}': {_missing_message(dep, 'optional dependency')}"
+                                        f"; the features that need it are off")
+            reg = getattr(lm.py_module, "register", None)
+            if not callable(reg):
                 continue
             host._current_module = lm.id
             try:
@@ -468,17 +574,20 @@ class ModuleRegistry:
                 "description": man["description"],
                 "requires": man.get("requires", []),
                 "pip": man.get("pip", []),
+                "pip_optional": man.get("pip_optional", []),
                 "registered": lm.registered,
                 "error": lm.error,
             })
         return out
 
-    def missing_pip(self):
-        """! @brief Declared pip deps that don't import (for the UI warning)."""
+    def missing_pip(self, optional=False):
+        """! @brief Declared deps that aren't installed (or are too old), for the UI and run.sh.
+        @param optional  the "pip_optional" ones instead of the required ones.
+        """
         missing = {}
         for pid, lm in self._plugins.items():
             miss = [_dep_label(dep)
-                    for dep in lm.manifest.get("pip", [])
+                    for dep in lm.manifest.get("pip_optional" if optional else "pip", [])
                     if not _dep_installed(dep)]
             if miss:
                 missing[pid] = miss
