@@ -141,7 +141,9 @@ def _fmt(s, ctx, subj=None):
 def _known_text(known):
     """! @brief Render the caller-supplied `known` dict into a compact prompt block.
     `known` may carry: names (list), tags (list), description (str),
-    filename (str), folder (str)."""
+    filename (str), folder (str), people (list: who the library already knows is
+    in it), context (str or list: what the library knows about the set the file
+    belongs to - a trip, an event, an album - from the library pipeline)."""
     if not known:
         return ""
     parts = []
@@ -157,6 +159,14 @@ def _known_text(known):
         parts.append("Filename: " + str(known["filename"]))
     if known.get("folder"):
         parts.append("Folder: " + str(known["folder"]))
+    people = [p for p in (known.get("people") or []) if p]
+    if people:
+        parts.append("People recognised in this image: " + ", ".join(people) + ".")
+    ctx = known.get("context")
+    if isinstance(ctx, (list, tuple)):
+        ctx = "\n".join(str(c) for c in ctx if c)
+    if ctx:
+        parts.append("Library context: " + str(ctx)[:1200])
     return "\n".join(parts)
 
 def _dedup(seq):

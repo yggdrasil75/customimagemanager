@@ -1,8 +1,13 @@
 /* pipeline_graph.css - dark theme for Drawflow inside the settings modal. */
-#plg_wrap { display: flex; gap: .5rem; height: 66vh; min-height: 420px; }
-#plg_canvas { flex: 1; min-width: 0; position: relative; border: 1px solid var(--cim-gray-700, #374151); border-radius: .375rem;
+/* The canvas takes the full width; the node inspector sits below it, its fields
+   flowing in columns so a node's settings fit in a short strip. */
+#plg_wrap { display: flex; flex-direction: column; gap: .5rem; }
+#plg_canvas { height: 52vh; min-height: 320px; min-width: 0; position: relative; border: 1px solid var(--cim-gray-700, #374151); border-radius: .375rem;
   background: var(--cim-gray-950, #0b0f17) radial-gradient(var(--cim-gray-800, #1f2937) 1px, transparent 1px); background-size: 20px 20px; overflow: hidden; }
-#plg_inspector { width: 17rem; flex: none; overflow-y: auto; }
+#plg_inspector { flex: none; max-height: 26vh; overflow-y: auto; border: 1px solid var(--cim-gray-700, #374151); border-radius: .375rem;
+  padding: 6px 8px; display: grid; grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); column-gap: .75rem; align-items: start; }
+#plg_inspector > :not(.plg-field) { grid-column: 1 / -1; }
+#plg_inspector > .plg-field:has(textarea) { grid-column: span 2; }
 
 #plg_canvas .drawflow { width: 100%; height: 100%; }
 #plg_canvas .drawflow .drawflow-node {
@@ -48,4 +53,5 @@
   border: 1px solid var(--cim-gray-700, #374151); border-radius: .25rem; padding: 4px 6px; font-size: 11px; }
 .plg-field textarea { min-height: 90px; font-family: ui-monospace, monospace; resize: vertical; }
 .plg-step { border: 1px solid var(--cim-accent2-900, #312e81); border-radius: .25rem; padding: 4px 6px; margin-top: 6px; background: color-mix(in srgb, var(--cim-accent2-950, #1e1b4b) 20%, transparent); }
-.plg-step summary { cursor: pointer; color: var(--cim-accent2-300, #a5b4fc); font-size: 11px; }
+.plg-step summary { cursor: pointer; color: var(--cim-accent2-300, #a5b4fc); font-size: 11px; }/* A graph with a panel under it (the library pipeline's plan) gives the canvas less height. */
+#plg_wrap:has(#plg_panel:not(.hidden)) #plg_canvas { height: 40vh; }

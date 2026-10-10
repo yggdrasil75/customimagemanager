@@ -4496,6 +4496,38 @@ def api_album_create():
     _album_mirror(name)
     return jsonify({"success": True, "name": name, "added": added})
 
+def _album_create(name: str, description: str = "", owner_hint: str = "") -> bool:
+    """! @brief Create an album if it doesn't exist (no request needed: the library
+    pipeline uses it from a background job).
+    @param owner_hint  a member rel_path; outside a request the access policies
+                       (ownership) take the owner from its folder.
+    @return True when it was created.
+    """
+    name = str(name or "").strip()
+    if not name:
+        return False
+    cur = _db().execute("INSERT OR IGNORE INTO albums(name, description, cover, created, sort) "
+                        "VALUES (?,?,?,?,?)", (name, str(description or "").strip(), "", time.time(), ""))
+    _db().commit()
+    if not cur.rowcount:
+        return False
+    module_host.album_event("created", name=name, rel_path=owner_hint or None)
+    _album_mirror(name)
+    return True
+
+def _album_set_cover(name: str, cover: str) -> None:
+    """! @brief Choose an album's cover (a member's rel_path; '' = the first member)."""
+    old_cover = _album_cover(name)
+    _db().execute("UPDATE albums SET cover=? WHERE name=?", (str(cover or ""), name))
+    _db().commit()
+    _album_mirror(name, old_cover=old_cover)
+
+def _album_set_description(name: str, description: str) -> None:
+    """! @brief Set an album's description (mirrored into its cover file)."""
+    _db().execute("UPDATE albums SET description=? WHERE name=?", (str(description or "").strip(), name))
+    _db().commit()
+    _album_mirror(name)
+
 @app.route("/api/albums/delete", methods=["POST"])
 @_auth.require_feature("tab.albums", level="write", action='album_delete', fields=('name',))
 def api_album_delete():

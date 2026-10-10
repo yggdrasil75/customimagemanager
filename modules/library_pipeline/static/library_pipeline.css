@@ -1,0 +1,11 @@
+/* library_pipeline.css - the plan under the Library graph (Settings -> Pipeline). */
+.lp-panel { border: 1px solid var(--cim-gray-700, #374151); border-radius: .375rem; padding: 6px 8px; }
+.lp-panel #lp_plan { max-height: 34vh; overflow-y: auto; }
+.lp-thumbs { display: flex; gap: 2px; }
+.lp-thumbs img { width: 40px; height: 40px; object-fit: cover; border-radius: 2px; background: var(--cim-gray-900, #111827); }
+.lp-op { display: inline-block; padding: 0 6px; border-radius: 9999px; font-size: 10px; font-weight: 700;
+  background: var(--cim-gray-700, #374151); color: var(--cim-gray-200, #e5e7eb); }
+.lp-op-album { background: var(--cim-accent-700, #1d4ed8); color: #fff; }
+.lp-op-tag { background: var(--cim-ok-700, #15803d); color: #fff; }
+.lp-op-move { background: var(--cim-warn-700, #b45309); color: #fff; }
+.lp-op-photo { background: var(--cim-accent2-700, #4338ca); color: #fff; }

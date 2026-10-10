@@ -15,9 +15,14 @@
       <!-- Tab 1: existing editor + AI tooling -->
       <div id="controls_pane_main" class="controls-tab-pane h-full overflow-y-auto">
       <div id="editor_panel" class="p-3 flex flex-col gap-3 opacity-50 pointer-events-none">
-        <div class="flex justify-between items-center gap-2">
-          <span class="text-sm font-bold text-gray-300">Editor</span>
-          <div class="flex items-center gap-1">
+        <!-- Editor header: the actions on the current file. The core's (Similar,
+             Move, Confirm all, Delete) and the ones modules add with
+             registerControlButton("editor_actions", ...) - favorite, rotate, crop,
+             location, export, share, archive, live, 360, stacks - share this row. -->
+        <div class="flex justify-between items-start gap-2">
+          <span class="text-sm font-bold text-gray-300 pt-1">Editor</span>
+          <div id="editor_actions" class="flex flex-wrap items-center justify-end gap-1">
+            <span data-ext-area="editor_actions" class="contents"></span>
             <button onclick="findSimilarToCurrent()"
               title="Find visually similar images (needs embeddings - run pipeline step 2)"
               class="text-[10px] bg-indigo-700 hover:bg-indigo-600 px-2 py-1 rounded text-white uppercase font-bold">Similar</button>
@@ -29,12 +34,6 @@
               class="hidden text-red-400 hover:text-red-300 text-xs px-1">Delete</button>
           </div>
         </div>
-
-        <!-- Actions on the current file that modules contribute (favorite, rotate,
-             crop, location, export, share, archive, live, 360, stacks...) via
-             registerControlButton("editor_actions", ...). -->
-        <div id="editor_actions" data-ext-area="editor_actions"
-          class="flex flex-wrap items-center gap-1 empty:hidden"></div>
 
         <!-- Albums this image belongs to. Chips are click-to-remove; the button
              opens a picker of existing albums (or creates a new one). -->

@@ -66,17 +66,21 @@ def _compose_description(analysis, existing=""):
 # every 2s would keep _last_activity permanently fresh and starve them forever.
 # (This is why an open Faces tab could sit at "queued" and never advance.)
 
-def _run_pipeline_on(bgr, fp=None, tree=None, progress=None):
+def _run_pipeline_on(bgr, fp=None, tree=None, progress=None, known_extra=None):
     """! @brief Run the Smart Tag pipeline on one image with every registered hook
     wired in (pose / ocr / segment stages from modules, person + panel
     detectors, LLM endpoints, known context from the file's metadata).
     A graph/1 config runs on graph_engine; the legacy `next`-chain tree on
-    engine.run_pipeline."""
+    engine.run_pipeline.
+    @param known_extra  merged into the known context: `people` and `context` from
+                        the library pipeline (the trip / event / album the file is in)."""
     tree = tree or state.get("pipeline_tree") or DEFAULT_PIPELINE
+    known = _known_context(fp) if fp else None
+    if known_extra:
+        known = dict(known or {}, **{k: v for k, v in known_extra.items() if v})
     hooks = dict(pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn(), stage_fns=_module_stage_fns(),
                  person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn(),
-                 endpoints=_pipeline_endpoints(), progress=progress,
-                 known=_known_context(fp) if fp else None)
+                 endpoints=_pipeline_endpoints(), progress=progress, known=known)
     if graph_engine.is_graph(tree):
         return graph_engine.run_graph(tree, bgr, _llm_call, metadata=_metadata_context(fp) if fp else {}, **hooks)
     return run_pipeline(tree, bgr, _llm_call, **hooks)

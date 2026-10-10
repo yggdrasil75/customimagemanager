@@ -1,10 +1,18 @@
-// pipeline_graph.js - node/port dataflow editor for the Smart Tag pipeline.
+// pipeline_graph.js - node/port dataflow editor for the pipelines.
 // ---------------------------------------------------------------------------
-// Edits the graph/1 format graph_engine.py runs: nodes with typed input and
-// output ports, wires in node.in = {port: [srcId, srcPort]} (or a list of
-// wires for multi ports), positions in node.ui, and for_each sub-graphs
-// opened in place with a breadcrumb. Save posts pipeline_tree through
-// /api/update_settings - the same key the raw-JSON box writes.
+// Edits graphs in the graph/1 wire format: nodes with typed input and output
+// ports, wires in node.in = {port: [srcId, srcPort]} (or a list of wires for
+// multi ports), positions in node.ui, and for_each sub-graphs opened in place
+// with a breadcrumb.
+//
+// One editor, several graphs ("sources"): the per-photo Smart Tag pipeline is
+// built in (saves pipeline_tree through /api/update_settings, the key the
+// raw-JSON box writes); other modules add theirs with
+//   CIMPipelineGraph.register({id, label, load() -> {graph, catalog},
+//                              save(graph) -> {ok, error}, panel(el, api)})
+// (or push the same object onto window.CIMPipelineGraphSources before this
+// file loads). A switch above the canvas picks the graph; `panel` fills the
+// strip under the inspector (the library pipeline's preview / apply).
 (function () {
   'use strict';
 
@@ -20,6 +28,8 @@
   let stack = [];               // [{graph, title}] - last is the graph on screen
   let editor = null, dfToTid = {}, tidToDf = {};
   let selected = null, dirty = false, mounted = false, rendering = false, addCount = 0;
+  const sources = {};           // id -> {id, label, load, save, panel}
+  let srcId = 'photo';
 
   const cur = () => stack[stack.length - 1].graph;
   const byId = tid => cur().nodes.find(n => n.id === tid);
@@ -192,8 +202,9 @@
     const box = $('plg_inspector'); if (!box) return;
     const n = tid ? byId(tid) : null;
     if (!n) {
-      box.innerHTML = `<p class="text-[11px] text-gray-500">Select a node to edit it. Drag from an output dot to an input dot to wire values; wire types must match (hover a dot). A node with a <b>run</b> input only runs when it receives true - wire yes/no, is_set/missing, found/missing there to branch.</p>
-        ${inner() ? '' : field('Unmatched box (global)', sel('plg_unmatched', (root.settings || {}).unmatched_box || 'keep', ['keep', 'drop', 'flag']))}`;
+      const hint = sources[srcId].hint || 'A node with a <b>run</b> input only runs when it receives true - wire yes/no, is_set/missing, found/missing there to branch.';
+      box.innerHTML = `<p class="text-[11px] text-gray-500">Select a node to edit it. Drag from an output dot to an input dot to wire values; wire types must match (hover a dot). ${hint}</p>
+        ${inner() || srcId !== 'photo' ? '' : field('Unmatched box (global)', sel('plg_unmatched', (root.settings || {}).unmatched_box || 'keep', ['keep', 'drop', 'flag']))}`;
       const u = $('plg_unmatched'); if (u) u.onchange = e => { root.settings = root.settings || {}; root.settings.unmatched_box = e.target.value; markDirty(); };
       return;
     }
@@ -259,40 +270,86 @@
     const p = (catalog[type] || {}).params || {};
     if (p.want) n.want = 'text';
     if (type === 'for_each') n.graph = { nodes: [] };
-    // convenience: auto-wire the image from Start / Item start
+    // convenience: auto-wire the first input Start / Item start has an output for
+    // (image -> image, files -> files; an item's image is its crop)
     const io = cur().nodes.find(x => x.type === (inner() ? '_inner_start' : 'start'));
-    if (io && inPorts(n).some(x => x.name === 'image')) n.in.image = [io.id, inner() ? 'crop' : 'image'];
+    if (io) {
+      const outs = outPorts(io).map(o => o.name);
+      const p = inPorts(n).find(x => !x.optional && (outs.includes(x.name) || (inner() && x.name === 'image')));
+      if (p) n.in[p.name] = [io.id, inner() && p.name === 'image' ? 'crop' : p.name];
+    }
     const z = editor.zoom || 1;
     n.ui = { x: (-editor.canvas_x) / z + 120 + (addCount % 6) * 30, y: (-editor.canvas_y) / z + 80 + (addCount % 6) * 30 }; addCount++;
     cur().nodes.push(n); selected = id; markDirty(); render();
   }
 
+  // -- graph sources ----------------------------------------------------------
+  sources.photo = {
+    id: 'photo', label: 'Per photo',
+    async load() {
+      const t = await fetch('/api/pipeline_tree?graph=1').then(r => r.json());
+      if (!t.success) throw new Error(t.error || 'load failed');
+      try { metaFields = (await fetch('/api/pipeline_meta_fields').then(r => r.json())).fields || []; } catch (_) { metaFields = []; }
+      return { graph: t.pipeline_tree, catalog: t.catalog, banner: !t.is_graph };
+    },
+    async save(graph) {
+      const r = await window.postSettings({ pipeline_tree: graph });
+      if (r.ok) { const ta = $('cfg_pipeline'); if (ta) ta.value = JSON.stringify(graph, null, 2); }
+      return r;
+    },
+  };
+  function register(src) {
+    if (!src || !src.id) return;
+    sources[src.id] = src;
+    if (mounted) renderSwitch();
+  }
+  window.CIMPipelineGraph = { register, graph: () => root, isDirty: () => dirty, current: () => srcId };
+  (window.CIMPipelineGraphSources || []).forEach(register);
+  window.CIMPipelineGraphSources = { push: register };
+
+  /** @brief The Per photo / Library switch above the canvas (hidden with a single graph). */
+  function renderSwitch() {
+    const el = $('plg_sources'); if (!el) return;
+    const ids = Object.keys(sources);
+    el.classList.toggle('hidden', ids.length < 2);
+    el.innerHTML = ids.map(id => `<button type="button" data-src="${esc(id)}" data-gate-keep
+      class="px-2 py-1 ${id === srcId ? 'bg-sky-700 text-white' : 'bg-gray-800 text-gray-400 hover:text-gray-200'}">${esc(sources[id].label)}</button>`).join('');
+    el.querySelectorAll('[data-src]').forEach(b => b.onclick = () => switchTo(b.dataset.src));
+  }
+  function switchTo(id) {
+    if (id === srcId || !sources[id]) return;
+    if (dirty && !confirm('Discard unsaved graph changes?')) return;
+    srcId = id; renderSwitch();
+    load().catch(e => { $('plg_inspector').innerHTML = `<p class="text-xs text-red-400">${esc(e.message)}</p>`; });
+  }
+
   async function save() {
     try {
-      const r = await window.postSettings({ pipeline_tree: root });
-      if (!r.ok) throw new Error(r.error || 'save failed');
+      const r = await sources[srcId].save(root);
+      if (!r || !r.ok) throw new Error((r && r.error) || 'save failed');
       dirty = false; const b = $('plg_save'); if (b) b.classList.remove('ring-2', 'ring-amber-400');
-      const ta = $('cfg_pipeline'); if (ta) ta.value = JSON.stringify(root, null, 2);
       const bn = $('plg_banner'); if (bn) bn.classList.add('hidden');
-      toast('Pipeline saved.');
+      toast(sources[srcId].label + ' pipeline saved.');
     } catch (e) { toast('Pipeline: ' + e.message); }
   }
 
   async function load() {
-    const t = await fetch('/api/pipeline_tree?graph=1').then(r => r.json());
-    if (!t.success) throw new Error(t.error || 'load failed');
-    root = t.pipeline_tree; root.nodes = root.nodes || []; root.settings = root.settings || {};
+    const src = sources[srcId];
+    const t = await src.load();
+    root = t.graph; root.nodes = root.nodes || []; root.settings = root.settings || {};
     catalog = t.catalog || {};
-    try { metaFields = (await fetch('/api/pipeline_meta_fields').then(r => r.json())).fields || []; } catch (_) { metaFields = []; }
-    $('plg_metafields').innerHTML = metaFields.map(f => `<option value="${esc(f)}">`).join('');
+    $('plg_metafields').innerHTML = (srcId === 'photo' ? metaFields : []).map(f => `<option value="${esc(f)}">`).join('');
+    const raw = $('plg_raw'); if (raw) raw.classList.toggle('hidden', srcId !== 'photo');
+    const panel = $('plg_panel');
+    if (panel) { panel.innerHTML = ''; panel.classList.toggle('hidden', !src.panel); if (src.panel) src.panel(panel, window.CIMPipelineGraph); }
     const add = $('plg_add');
     const groups = {};
     for (const [k, s] of Object.entries(catalog)) { if (k.startsWith('_') || k === 'start' || k === 'end') continue; (groups[s.kind || 'other'] = groups[s.kind || 'other'] || []).push([k, s.label]); }
     add.innerHTML = '<option value="">+ Add node...</option>' + Object.entries(groups).map(([g, items]) =>
       `<optgroup label="${esc(g)}">${items.map(([k, l]) => `<option value="${esc(k)}">${esc(l)}</option>`).join('')}</optgroup>`).join('');
     add.onchange = () => { if (add.value) addNode(add.value); add.value = ''; };
-    const bn = $('plg_banner'); if (bn) bn.classList.toggle('hidden', !!t.is_graph);
-    stack = [{ graph: root, title: 'Pipeline' }]; dirty = false; selected = null; render();
+    const bn = $('plg_banner'); if (bn) bn.classList.toggle('hidden', !t.banner);
+    stack = [{ graph: root, title: src.label }]; dirty = false; selected = null; render();
   }
 
   function mount(host) {
@@ -302,6 +359,7 @@
     const wrap = document.createElement('div');
     wrap.innerHTML = `
       <div class="flex items-center gap-2 mb-1 text-xs">
+        <span id="plg_sources" class="hidden inline-flex rounded border border-gray-600 overflow-hidden" role="group"></span>
         <span id="plg_crumbs" class="font-bold"></span>
         <select id="plg_add" class="bg-gray-900 border border-gray-700 rounded px-2 py-1"></select>
         <datalist id="plg_metafields"></datalist>
@@ -313,11 +371,11 @@
           <button id="plg_save" class="bg-green-700 hover:bg-green-600 px-3 py-1 rounded font-bold">Save pipeline</button>
         </div></div>
       <p id="plg_banner" class="hidden text-[10px] text-amber-300 mb-1">Converted from the older step-chain format - check the wiring, then Save to keep it as a graph.</p>
-      <div id="plg_wrap"><div id="plg_canvas"></div><div id="plg_inspector"></div></div>`;
+      <div id="plg_wrap"><div id="plg_canvas"></div><div id="plg_inspector"></div><div id="plg_panel" class="hidden"></div></div>`;
     host.prepend(wrap);
     const ta = host.querySelector('#cfg_pipeline'); const rawBox = ta && ta.closest('div');
     if (rawBox && rawBox !== host) {
-      const d = document.createElement('details'); d.className = 'mt-2';
+      const d = document.createElement('details'); d.className = 'mt-2'; d.id = 'plg_raw';
       d.innerHTML = '<summary class="text-[10px] text-gray-500 cursor-pointer">Raw JSON (advanced)</summary>';
       rawBox.parentNode.insertBefore(d, rawBox); d.appendChild(rawBox);
     }
@@ -328,17 +386,12 @@
     $('plg_fit').onclick = () => { editor.zoom_reset(); editor.canvas_x = 0; editor.canvas_y = 0; editor.precanvas.style.transform = 'translate(0px, 0px) scale(1)'; };
     $('plg_reload').onclick = () => { if (!dirty || confirm('Discard unsaved graph changes?')) load(); };
     $('plg_save').onclick = save;
+    renderSwitch();
     load().catch(e => { $('plg_inspector').innerHTML = `<p class="text-xs text-red-400">${esc(e.message)}</p>`; });
   }
 
-  function widen(on) {
-    const m = document.querySelector('#settings_modal > div'); if (!m) return;
-    m.style.width = on ? 'min(96vw, 1700px)' : ''; m.style.maxWidth = on ? '96vw' : '';
-  }
-  document.addEventListener('click', e => { const b = e.target.closest && e.target.closest('.settings-tab'); if (b) widen(b.dataset.settingsTab === 'pipeline'); });
   document.addEventListener('module-settings-tab', ev => {
     if (ev.detail !== 'pipeline') return;
-    widen(true);
     setTimeout(() => { const host = $('module_settings_fields_pipeline'); if (!host) return;
       if (!mounted) mount(host); else if (!dirty) load(); }, 0);
   });
