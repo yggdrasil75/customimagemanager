@@ -250,9 +250,23 @@
   }
 
   // -- Settings -> Account & sharing ---------------------------------------
+  /** @brief This module's section of the shared "sharing" tab (shared_links adds its own);
+   *  `first` puts it at the top. */
+  function sharingSection(id, first) {
+    const pane = document.getElementById('settings_pane_module_sharing');
+    if (!pane) return null;
+    let sec = document.getElementById('sharing_section_' + id);
+    if (!sec) {
+      sec = document.createElement('section');
+      sec.id = 'sharing_section_' + id;
+      sec.className = 'mb-4';
+      if (first) pane.insertBefore(sec, pane.firstChild); else pane.appendChild(sec);
+    }
+    return sec;
+  }
   /** @brief Fill the module's settings pane: profile block, then partner sharing. */
   async function renderSharingPane() {
-    const pane = document.getElementById('settings_pane_module_ownership');
+    const pane = sharingSection('ownership', true);
     if (!pane) return;
     let d;
     try { d = await fetch('/api/share/library').then(r => r.json()); } catch (e) { return; }
@@ -358,7 +372,7 @@
     scan();
   }
 
-  document.addEventListener('module-settings-tab', ev => { if (ev.detail === 'ownership') renderSharingPane(); });
+  document.addEventListener('module-settings-tab', ev => { if (ev.detail === 'sharing') renderSharingPane(); });
   function init() { addScopeSelects(); decorateBadge(); watchUsersTable(); }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

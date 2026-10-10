@@ -15,8 +15,9 @@ An alert is sent once when it trips and again after the cooldown while it
 stays tripped; a recovery mail goes out when it clears. State lives in the
 module's own table so a restart does not re-send. Mail goes through the
 `email` module's service (Settings -> Email holds the SMTP account and the
-admin recipients); Settings -> Storage alerts holds extra recipients and the
-limits, plus a "Send test email" button and the last check's readings.
+admin recipients); the Alerts section of Settings -> Storage holds extra
+recipients and the limits, plus a "Send test email" button and the last
+check's readings.
 """
 
 import os
@@ -41,7 +42,8 @@ MANIFEST = {
     "assets":      ["storage_alerts.js"],
 }
 
-TAB = "storage_alerts"
+TAB = "storage"          # the core Storage tab; the fields are its "alerts" section
+SECTION = "alerts"
 GB = float(1 << 30)
 # settings this module held before the email module owned the SMTP account:
 # carried over once into the email module's keys when those are still blank
@@ -79,6 +81,16 @@ def _num(lo, hi, cast=float):
 
 def _text(v):
     return str(v or "").strip()
+
+
+def split_paths(text):
+    """! @brief Extra paths from the setting: separated by ; or one per line."""
+    out = []
+    for part in str(text or "").replace(";", "\n").splitlines():
+        p = part.strip()
+        if p and p not in out:
+            out.append(p)
+    return out
 
 
 def parse_recipients(text):
@@ -233,7 +245,6 @@ def register(host):
     core = host.core
     log = host.logger
 
-    host.add_settings_tab(TAB, "Storage alerts", icon="", admin_only=True, group="server")
     validators = {
         "storage_alerts_enabled": lambda v: bool(v),
         "storage_alerts_to": lambda v: str(v or "").strip(),
@@ -242,30 +253,30 @@ def register(host):
         "storage_alerts_tier_over_pct": _num(0, 1000),
         "storage_alerts_interval_min": _num(1, 10080, int),
         "storage_alerts_cooldown_hours": _num(0, 8760),
-        "storage_alerts_extra_paths": lambda v: str(v or "").strip(),
+        "storage_alerts_extra_paths": lambda v: "\n".join(split_paths(v)),
     }
     for key, dflt in DEFAULTS.items():
         host.add_config_key(key, default=dflt, validate=validators[key], tab=TAB)
 
     fields = [
-        ("storage_alerts_enabled", "Send storage alerts", "toggle",
+        ("storage_alerts_enabled", "Send alerts", "toggle",
          {"help": "Mail goes through the account in Settings -> Email."}),
-        ("storage_alerts_to", "Extra recipients", "textarea",
-         {"help": "One address per line (or comma separated), on top of the admin recipients in Settings -> Email."}),
-        ("storage_alerts_min_free_gb", "Low disk alert below (GB free)", "number",
+        ("storage_alerts_to", "Extra recipients", "text",
+         {"help": "Comma separated, on top of the admin recipients in Settings -> Email."}),
+        ("storage_alerts_min_free_gb", "Low disk below (GB)", "number",
          {"help": "0 uses the server's own floor (the one uploads wait on: 10 GB on disks over 1 TB, else 1 GB). "
                   "Checked for the media folder, every storage tier, the models folder and the extra paths."}),
-        ("storage_alerts_library_max_gb", "Library size cap (GB)", "number", {"help": "0 = no cap."}),
-        ("storage_alerts_tier_over_pct", "Tier over budget by more than (%)", "number",
+        ("storage_alerts_library_max_gb", "Library cap (GB)", "number", {"help": "0 = no cap."}),
+        ("storage_alerts_tier_over_pct", "Tier over budget (%)", "number",
          {"help": "Budgets come from Settings -> Storage; only checked while tiering is enabled."}),
-        ("storage_alerts_extra_paths", "Extra paths to watch", "textarea",
-         {"help": "One per line: a backup drive, the docker volume."}),
-        ("storage_alerts_interval_min", "Check every (minutes)", "number", {}),
-        ("storage_alerts_cooldown_hours", "Repeat an unresolved alert after (hours)", "number",
-         {"help": "0 repeats on every check."}),
+        ("storage_alerts_extra_paths", "Extra paths", "text",
+         {"help": "Separated by ; - a backup drive, the docker volume."}),
+        ("storage_alerts_interval_min", "Check every (min)", "number", {}),
+        ("storage_alerts_cooldown_hours", "Repeat after (h)", "number",
+         {"help": "How long until an unresolved alert is sent again; 0 repeats on every check."}),
     ]
     for key, label, kind, extra in fields:
-        host.add_settings_field(key=key, label=label, kind=kind, pane=TAB, **extra)
+        host.add_settings_field(key=key, label=label, kind=kind, pane=TAB, section=SECTION, **extra)
 
     host.add_table("""
         CREATE TABLE IF NOT EXISTS storage_alerts_state (
@@ -338,9 +349,8 @@ def register(host):
                     paths.append(("tier %s" % t.get("name"), t["path"]))
         except Exception as e:
             log.error("storage_alerts: tier config unreadable: %s" % e)
-        for p in str(c["storage_alerts_extra_paths"] or "").splitlines():
-            if p.strip():
-                paths.append(("path %s" % p.strip(), p.strip()))
+        for p in split_paths(c["storage_alerts_extra_paths"]):
+            paths.append(("path %s" % p, p))
         return paths
 
     def load_state():

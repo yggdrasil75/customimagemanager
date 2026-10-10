@@ -4264,6 +4264,8 @@ def _user_settings_payload():
     for spec in sorted(module_host.user_settings.values(), key=lambda x: (x["order"], x["key"])):
         if spec["module_id"] and not module_registry.is_enabled(spec["module_id"]):
             continue
+        if not spec.get("listed", True):
+            continue
         opts = spec.get("options")
         if callable(opts):
             try:

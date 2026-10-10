@@ -292,7 +292,8 @@ def register(host):
                             pane="module",
                             help="Blank uses this page's address. Set it when visitors reach the "
                                  "server by another name (https://photos.example.com).")
-    host.add_settings_tab("shared_links", "Shared links", group="you")
+    # Shared with ownership: one "Account & sharing" tab, a section per module.
+    host.add_settings_tab("sharing", "Account & sharing", icon="🔗", group="you")
 
     def _base():
 

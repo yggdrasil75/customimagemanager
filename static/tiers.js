@@ -4,10 +4,10 @@ let _tiersLoaded = false;   // storage tab opened at least once this session?
 
 function tierRowHtml(t = {}) {
   return `<div class="grid grid-cols-[1fr_2fr_70px_90px_28px] gap-2 tier-row items-center">
-    <input class="t-name p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white" value="${t.name ?? ''}" placeholder="nvme">
-    <input class="t-path p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white font-mono" value="${t.path ?? ''}" placeholder="/mnt/nvme/cim">
-    <input class="t-ratio p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white" type="number" min="0" step="0.5" value="${t.ratio ?? 0}">
-    <input class="t-speed p-1.5 bg-gray-700 rounded border border-gray-600 text-sm text-white" type="number" min="1" value="${t.speed_mbps ?? 100}">
+    <input class="t-name px-1.5 py-0.5 bg-gray-700 rounded border border-gray-600 text-xs text-white" value="${t.name ?? ''}" placeholder="nvme">
+    <input class="t-path px-1.5 py-0.5 bg-gray-700 rounded border border-gray-600 text-xs text-white font-mono" value="${t.path ?? ''}" placeholder="/mnt/nvme/cim">
+    <input class="t-ratio px-1.5 py-0.5 bg-gray-700 rounded border border-gray-600 text-xs text-white" type="number" min="0" step="0.5" value="${t.ratio ?? 0}">
+    <input class="t-speed px-1.5 py-0.5 bg-gray-700 rounded border border-gray-600 text-xs text-white" type="number" min="1" value="${t.speed_mbps ?? 100}">
     <button onclick="this.closest('.tier-row').remove()" class="text-red-400 hover:text-red-300 text-lg leading-none" title="Remove tier">×</button>
   </div>`;
 }
@@ -126,6 +126,9 @@ function settingsTab(name) {
   if (name === 'media' && window.loadMediaSettings) loadMediaSettings();
   if (name === 'user' && window.loadUserSettings) loadUserSettings();
   applySettingsGates();
+  // Any tab, core or module: a module that adds a section to a core pane
+  // (storage_alerts in Storage) renders it on this.
+  document.dispatchEvent(new CustomEvent('cim:settings-tab', { detail: name }));
 }
 
 // Panes render asynchronously (models, users, module panes); re-gate whatever
@@ -141,10 +144,15 @@ function settingsTab(name) {
 })();
 
 /** @brief -- Modules tab -----------------------------------------------------------
-   Lists every declared module from /api/modules and renders an on/off toggle.
-   Core modules render locked (disabled checkbox + a "core" badge) because the
-   server refuses to disable them anyway. Toggling posts to /api/modules/toggle
-   and re-renders from the authoritative response. */
+   Lists every declared module from /api/modules as one compact table row (toggle,
+   name, version, state, a one-line description). Clicking a row shows the full
+   description, requirements, errors and the module's own settings (pane="module"
+   fields) on the right. Core modules render locked (the server refuses to
+   disable them anyway). Toggling posts to /api/modules/toggle and re-renders
+   from the authoritative response. */
+let _modules = [];
+let _moduleSel = null;
+
 async function loadModulesTab() {
   const mount = document.getElementById('modules_rows');
   if (!mount) return;
@@ -156,71 +164,104 @@ async function loadModulesTab() {
   }
 }
 
-function renderModules(modules) {
-  const mount = document.getElementById('modules_rows');
-  if (!mount) return;
-  mount.innerHTML = modules.map(m => {
-    const locked = m.core;
-    const coreBadge = locked
-      ? '<span class="text-[10px] uppercase tracking-wide bg-amber-900/60 text-amber-300 px-1.5 py-0.5 rounded ml-2">core</span>'
-      : '';
-    const ver = (m.version && m.version !== 'builtin')
-      ? `<span class="text-[10px] text-gray-500 ml-2">v${escapeHtml(m.version)}</span>` : '';
-    const checked = m.enabled ? 'checked' : '';
-    const disabled = locked ? 'disabled' : '';
-    const cursor = locked ? 'cursor-not-allowed opacity-70' : 'cursor-pointer';
-    const req = (m.requires && m.requires.length)
-      ? `<p class="text-[10px] text-gray-600 mt-1">requires: ${m.requires.map(escapeHtml).join(', ')}</p>` : '';
-    const err = m.error
-      ? `<p class="text-[10px] text-red-400 mt-1 font-mono whitespace-pre-wrap">${escapeHtml(m.error)}</p>` : '';
-    // A plugin whose enabled flag and registered flag disagree needs a restart.
-    const needsRestart = (!m.core && m.enabled && !m.registered && !m.error)
-      || (!m.core && !m.enabled && m.registered);
-    const restart = needsRestart
-      ? '<span class="text-[10px] text-amber-300 ml-2">restart to apply</span>' : '';
-    return `<div class="flex items-start gap-3 bg-gray-900/40 border border-gray-700 rounded p-3" data-module-row="${m.id}">
-      <label class="flex items-center ${cursor} pt-0.5">
-        <input type="checkbox" class="accent-indigo-500" ${checked} ${disabled}
-          onchange="toggleModule('${m.id}', this.checked, this)">
-      </label>
-      <div class="flex-1 min-w-0">
-        <div class="flex items-center flex-wrap">
-          <span class="text-sm font-bold text-gray-200">${escapeHtml(m.name)}</span>${coreBadge}${ver}${restart}
-          <span class="ml-auto" data-module-settings-btn="${m.id}"></span>
-        </div>
-        <p class="text-[11px] text-gray-500 mt-0.5">${escapeHtml(m.description || '')}</p>
-        ${req}${err}
-        <div class="hidden mt-2 pt-2 border-t border-gray-700 grid grid-cols-2 gap-x-4 gap-y-2"
-             data-module-settings="${m.id}"></div>
-      </div>
-    </div>`;
-  }).join('');
-  renderModuleSettingsButtons();
+/** @brief A module whose enabled flag and registered flag disagree needs a restart. */
+function _moduleNeedsRestart(m) {
+  return (!m.core && m.enabled && !m.registered && !m.error) || (!m.core && !m.enabled && m.registered);
 }
 
-/** @brief A module with pane="module" fields gets a Settings button on its row that
- *  unfolds those fields in place (they save through the normal settings path).
- */
-function renderModuleSettingsButtons() {
+/** @brief The short state cell: core / error / restart / on / off. */
+function _moduleState(m) {
+  if (m.core) return '<span class="text-amber-300">core</span>';
+  if (m.error) return '<span class="text-red-400" title="' + escapeHtml(m.error) + '">error</span>';
+  if (_moduleNeedsRestart(m)) return '<span class="text-amber-300">restart</span>';
+  return m.enabled ? '<span class="text-green-400">on</span>' : '<span class="text-gray-500">off</span>';
+}
+
+function renderModules(modules) {
+  _modules = modules;
+  const mount = document.getElementById('modules_rows');
+  if (!mount) return;
   const fields = window._moduleFields || {};
-  document.querySelectorAll('[data-module-settings-btn]').forEach(slot => {
-    const id = slot.dataset.moduleSettingsBtn;
-    const list = fields[id];
-    slot.innerHTML = '';
-    if (!list || !list.length) return;
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'text-[11px] bg-gray-700 hover:bg-gray-600 px-2 py-0.5 rounded';
-    btn.textContent = '⚙ Settings';
-    btn.addEventListener('click', () => {
-      const box = document.querySelector(`[data-module-settings="${id}"]`);
-      if (!box) return;
-      const open = box.classList.toggle('hidden');
-      if (!open && !box.children.length && window.moduleFieldEl)
-        for (const f of list) box.appendChild(moduleFieldEl(f));
-    });
-    slot.appendChild(btn);
+  const rows = modules.map(m => {
+    const locked = m.core ? 'disabled' : '';
+    const gear = (fields[m.id] || []).length ? '<span class="text-gray-500" title="Has settings">&#9881;</span>' : '';
+    return `<tr data-module-row="${escapeHtml(m.id)}" onclick="selectModule('${escapeHtml(m.id)}')"
+        class="module-row cursor-pointer border-b border-gray-800 hover:bg-gray-700/40">
+      <td class="py-1 pl-1 w-6" onclick="event.stopPropagation()">
+        <input type="checkbox" class="accent-indigo-500 ${m.core ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'}"
+          ${m.enabled ? 'checked' : ''} ${locked} onchange="toggleModule('${escapeHtml(m.id)}', this.checked, this)"></td>
+      <td class="py-1 pr-2 font-bold text-gray-200 whitespace-nowrap">${escapeHtml(m.name)}</td>
+      <td class="py-1 pr-2 text-[10px] whitespace-nowrap">${_moduleState(m)}</td>
+      <td class="py-1 pr-2 w-4">${gear}</td>
+      <td class="py-1 pr-1 text-gray-500 truncate max-w-0 w-full">${escapeHtml(m.description || '')}</td>
+    </tr>`;
+  }).join('');
+  mount.innerHTML = `<table class="w-full text-xs"><tbody>${rows}</tbody></table>`;
+  const on = modules.filter(m => m.enabled).length;
+  const cnt = document.getElementById('modules_count');
+  if (cnt) cnt.textContent = `${on} of ${modules.length} on`;
+  const f = document.getElementById('modules_filter');
+  if (f && f.value) filterModules(f.value);
+  if (_moduleSel && modules.some(m => m.id === _moduleSel)) selectModule(_moduleSel);
+  else renderModuleDetail(null);
+}
+
+/** @brief Hide rows whose id, name or description doesn't contain the text. */
+function filterModules(text) {
+  const q = String(text || '').trim().toLowerCase();
+  const byId = new Map(_modules.map(m => [m.id, m]));
+  document.querySelectorAll('#modules_rows [data-module-row]').forEach(tr => {
+    const m = byId.get(tr.dataset.moduleRow);
+    const hay = m ? (m.id + ' ' + m.name + ' ' + (m.description || '')).toLowerCase() : '';
+    tr.classList.toggle('hidden', !!q && !hay.includes(q));
   });
+}
+
+function selectModule(id) {
+  _moduleSel = id;
+  document.querySelectorAll('#modules_rows [data-module-row]').forEach(tr =>
+    tr.classList.toggle('bg-gray-700', tr.dataset.moduleRow === id));
+  renderModuleDetail(_modules.find(m => m.id === id) || null);
+}
+
+/** @brief The right pane: everything about one module, and its settings (they save
+ *  through the normal settings path, with the modal's Save). */
+function renderModuleDetail(m) {
+  const box = document.getElementById('modules_detail');
+  if (!box) return;
+  if (!m) {
+    box.innerHTML = '<p class="text-xs text-gray-500">Select a module to see what it does and its settings.</p>';
+    return;
+  }
+  const list = (label, items) => (items && items.length)
+    ? `<div class="text-[11px] text-gray-400 mt-1"><span class="text-gray-500">${label}:</span> ${items.map(escapeHtml).join(', ')}</div>` : '';
+  const restart = _moduleNeedsRestart(m)
+    ? '<p class="text-[11px] text-amber-300 mt-2">Restart the server to apply the change.</p>' : '';
+  box.innerHTML = `
+    <div class="flex items-baseline gap-2 flex-wrap">
+      <h3 class="text-sm font-bold text-gray-100">${escapeHtml(m.name)}</h3>
+      ${m.version && m.version !== 'builtin' ? `<span class="text-[10px] text-gray-500">v${escapeHtml(m.version)}</span>` : ''}
+      <span class="text-[10px]">${_moduleState(m)}</span>
+      <code class="text-[10px] text-gray-600 ml-auto">${escapeHtml(m.id)}</code>
+    </div>
+    <p class="text-xs text-gray-300 mt-2 whitespace-pre-wrap">${escapeHtml(m.description || '')}</p>
+    ${list('Requires', m.requires)}${list('Python packages', m.pip)}${list('Optional packages', m.pip_optional)}
+    ${restart}
+    ${m.error ? `<p class="text-[11px] text-red-400 mt-2 font-mono whitespace-pre-wrap">${escapeHtml(m.error)}</p>` : ''}
+    <div id="module_detail_settings" data-module-settings="${escapeHtml(m.id)}" class="mt-3 space-y-2"></div>`;
+  const fields = (window._moduleFields || {})[m.id] || [];
+  const host = box.querySelector('#module_detail_settings');
+  if (fields.length && window.moduleFieldEl) {
+    host.insertAdjacentHTML('beforeend', '<div class="text-xs font-bold text-amber-300 border-t border-gray-700 pt-2">Settings</div>');
+    for (const f of fields) host.appendChild(moduleFieldEl(f));
+  }
+  if (window.CIMFeatures) CIMFeatures.apply(box);
+}
+
+/** @brief Fields arrived (or changed): redraw the gear column and the open module. */
+function renderModuleSettingsButtons() {
+  if (!_modules.length) return;
+  renderModules(_modules);
 }
 
 async function toggleModule(id, enabled, el) {

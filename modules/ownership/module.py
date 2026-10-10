@@ -395,7 +395,8 @@ def register(host):
                                        "files_clause": policy.files_clause})
     host.add_asset("ownership.js")
     host.add_asset("ownership.css")
-    host.add_settings_tab("ownership", "Account & sharing", icon="🔗", group="you")
+    # Shared with shared_links: one "Account & sharing" tab, a section per module.
+    host.add_settings_tab("sharing", "Account & sharing", icon="🔗", group="you")
     host.register_feature(PROFILE_FEATURE, "Profile picture", section="account",
                           section_label="Account", default="write",
                           role_defaults={"viewer": "write"})

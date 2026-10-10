@@ -162,7 +162,11 @@ class Host:
         @param group       rail group: "you", "server", "admin" or "modules".
         @param admin_only  block the tab for every non-admin role by default.
         The tab gets the permission settings.<tab_id>: read shows it, write saves it.
+        Several modules may share one tab by passing the same id: the first
+        registration names it, and each module renders its own section in the pane.
         """
+        if any(t["id"] == tab_id for t in self.settings_tabs):
+            return
         feature = self.core.features.register_settings_tab(tab_id, label, admin_only=admin_only)
         self.settings_tabs.append({
             "id": tab_id, "label": label, "icon": icon,
@@ -234,18 +238,22 @@ class Host:
             "module_id": self._current_module})
 
     def add_user_setting(self, key, *, label, kind="text", default=None, validate=None,
-                         options=None, columns=None, feature=None, help=None, order=100):
+                         options=None, columns=None, feature=None, help=None, order=100,
+                         listed=True):
         """! @brief Declare a per-user setting (Settings > User settings).
         @param kind      as add_settings_field.
         @param default   value, or fn(user) evaluated per request.
         @param validate  fn(value) -> cleaned value; raise ValueError to reject.
         @param feature   permission needed at write to change it (read shows it).
+        @param listed    False keeps it out of Settings > User settings: a preference the
+                         module edits in its own UI (the slideshow's controls, Media's view)
+                         that is still saved per user through /api/user/settings.
         Read it with user_setting(key).
         """
         self.user_settings[key] = {
             "key": key, "label": label, "kind": kind, "default": default,
             "validate": validate, "options": options, "columns": columns,
-            "feature": feature, "help": help, "order": order,
+            "feature": feature, "help": help, "order": order, "listed": bool(listed),
             "module_id": self._current_module}
 
     def user_setting(self, key, username=None):

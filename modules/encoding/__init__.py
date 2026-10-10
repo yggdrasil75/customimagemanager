@@ -101,7 +101,7 @@ def register(host):
     host.add_user_setting(
         VIEW_KEY, label="Media settings view", kind="select", default="simple",
         options=[{"value": "simple", "label": "Simple"}, {"value": "expert", "label": "Expert"}],
-        validate=_clean_view,
+        validate=_clean_view, listed=False,
         help="Settings -> Media: simple shows output formats and one quality slider per kind; "
              "expert shows every codec option.", order=200)
 

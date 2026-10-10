@@ -4,13 +4,14 @@
 The popout shows one picture at a time; this module adds a timer, a playlist
 and a full-screen overlay on top of it:
 
-  * `Slideshow` in the viewer toggles starts at the current file over what the
+  * the play button in the popout starts at the current file over what the
     gallery lists (search / folder / album), and `Slideshow` in the gallery
     tools starts at the first file (or over the selection when there is one);
   * the playlist comes from /api/slideshow/list, the gallery's own WHERE, so
     the show plays every page of the query, not just the one on screen;
   * per-user settings (interval, shuffle, loop, transition, how videos play)
-    live in Settings -> User settings;
+    are set in the slideshow's own controls and saved per user (they are not
+    listed in Settings -> User settings);
   * window.CIMSlideshow is the API other modules use (slideshow_cast mirrors
     the show onto another screen through it) and `cim:slideshow` on window
     reports every state change.
@@ -102,19 +103,20 @@ def register(host):
                           section="slideshow", section_label="Slideshow", default="write",
                           role_defaults={"viewer": "write"})
 
+    # Set from the slideshow's own controls, so they stay out of User settings.
     host.add_user_setting("slideshow_interval", label="Slideshow: seconds per picture",
-                          kind="number", default=5, validate=_clamp_interval,
+                          kind="number", default=5, validate=_clamp_interval, listed=False,
                           help="How long a still picture stays on screen.")
     host.add_user_setting("slideshow_shuffle", label="Slideshow: shuffle",
-                          kind="toggle", default=False, validate=lambda v: bool(v))
+                          kind="toggle", default=False, validate=lambda v: bool(v), listed=False)
     host.add_user_setting("slideshow_loop", label="Slideshow: loop at the end",
-                          kind="toggle", default=True, validate=lambda v: bool(v))
+                          kind="toggle", default=True, validate=lambda v: bool(v), listed=False)
     host.add_user_setting("slideshow_transition", label="Slideshow: transition",
                           kind="select", default="fade", options=TRANSITIONS,
-                          validate=_one_of(TRANSITIONS))
+                          validate=_one_of(TRANSITIONS), listed=False)
     host.add_user_setting("slideshow_videos", label="Slideshow: videos",
                           kind="select", default="play", options=VIDEO_MODES,
-                          validate=_one_of(VIDEO_MODES))
+                          validate=_one_of(VIDEO_MODES), listed=False)
 
     def prefs():
         """! @brief The current user's slideshow settings, one call for the front-end."""

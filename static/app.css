@@ -454,6 +454,7 @@ canvas {
 .settings-compact-field { display: inline-flex; align-items: center; gap: 6px; cursor: default; }
 .settings-compact-input { width: 7rem !important; padding: 2px 6px !important; font-size: 11px; }
 .settings-compact-field input[type="text"].settings-compact-input { width: 14rem !important; }
+.settings-compact-field input[type="checkbox"].settings-compact-input { width: auto !important; }
 
 /* Settings: a pane the user may read but not save. */
 .cim-read-only[data-settings-pane]::before {

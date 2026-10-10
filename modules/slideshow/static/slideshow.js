@@ -13,6 +13,10 @@
  *
  * Keys while running: Space pause / resume, Left / Right step, Esc stop,
  * F fullscreen, + / - change the interval, S toggle shuffle.
+ *
+ * The show is started from the play button in the popout header (or the
+ * gallery tools). Interval, shuffle, loop, transition and how videos play are
+ * changed in the overlay's own controls and saved per user from there.
  */
 (function () {
   "use strict";
@@ -28,6 +32,11 @@
     timer: null, hideTimer: null, layer: 0, preload: null, lastFile: null, startedAt: 0,
   };
   const DEFAULT_PREFS = { interval: 5, shuffle: false, loop: true, transition: "fade", videos: "play" };
+  const TRANSITIONS = [["fade", "Cross-fade"], ["kenburns", "Ken Burns"], ["none", "Cut"]];
+  const VIDEO_MODES = [["play", "Play to the end"], ["interval", "On the interval"], ["skip", "Skip videos"]];
+  const PREF_KEYS = { interval: "slideshow_interval", shuffle: "slideshow_shuffle", loop: "slideshow_loop",
+                      transition: "slideshow_transition", videos: "slideshow_videos" };
+  const opts = list => list.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("");
 
   /** @brief Build the overlay once; it lives at the end of body and is hidden until a show starts. */
   function build() {
@@ -54,6 +63,9 @@
         <span class="ss-interval" id="ss_interval"></span>
         <button type="button" class="ss-btn ss-btn-sm" data-ss="faster" title="Shorter interval (+)">+</button>
         <button type="button" class="ss-btn ss-btn-sm" data-ss="shuffle" id="ss_shuffle" title="Shuffle (S)">Shuffle</button>
+        <button type="button" class="ss-btn ss-btn-sm" data-ss="loop" id="ss_loop" title="Loop at the end">Loop</button>
+        <select class="ss-select" id="ss_transition" title="Transition">${opts(TRANSITIONS)}</select>
+        <select class="ss-select" id="ss_videos" title="Videos">${opts(VIDEO_MODES)}</select>
         <span class="ss-sep"></span>
         <span data-ext-area="slideshow_tools" class="contents"></span>
         <button type="button" class="ss-btn ss-btn-sm" data-ss="fullscreen" title="Fullscreen (F)">Fullscreen</button>
@@ -64,6 +76,8 @@
     el.addEventListener("mousemove", showControls);
     el.addEventListener("touchstart", showControls, { passive: true });
     $("ss_video").addEventListener("ended", () => { if (S.running && !S.paused && S.prefs.videos === "play") next(); });
+    $("ss_transition").addEventListener("change", e => setTransition(e.target.value));
+    $("ss_videos").addEventListener("change", e => setVideos(e.target.value));
     if (typeof refreshControlButtons === "function") refreshControlButtons();
     if (window.CIMFeatures && window.CIMFeatures.apply) window.CIMFeatures.apply(el);
     return el;
@@ -81,6 +95,7 @@
     else if (a === "slower") setSlideInterval(S.prefs.interval + stepFor(S.prefs.interval, 1));
     else if (a === "faster") setSlideInterval(S.prefs.interval - stepFor(S.prefs.interval, -1));
     else if (a === "shuffle") toggleShuffle();
+    else if (a === "loop") toggleLoop();
     else if (a === "fullscreen") toggleFullscreen();
   }
   const stepFor = (v, dir) => (dir > 0 ? (v >= 10 ? 5 : 1) : (v > 10 ? 5 : 1));
@@ -92,6 +107,21 @@
       index: S.index, total: S.files.length, prefs: Object.assign({}, S.prefs || {}),
       paused: S.paused,
     } }));
+  }
+
+  // -- per-user prefs, saved from the overlay's controls ------------------------
+  let saveTimer = null;
+  /** @brief Save the changed prefs for this user (debounced; a burst of +/- is one request). */
+  function savePrefs(keys) {
+    S.dirtyPrefs = Object.assign(S.dirtyPrefs || {}, ...keys.map(k => ({ [PREF_KEYS[k]]: S.prefs[k] })));
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      const body = S.dirtyPrefs; S.dirtyPrefs = null;
+      if (!body) return;
+      fetch("/api/user/settings", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body) }).catch(() => {});
+    }, 600);
   }
 
   // -- playlist sources ---------------------------------------------------
@@ -287,6 +317,43 @@
     S.prefs.interval = Math.max(1, Math.min(3600, Math.round(sec)));
     if (S.running && !S.paused && S.timer) armTimer();
     syncControls();
+    savePrefs(["interval"]);
+    emit("interval");
+  }
+  function toggleLoop() {
+    if (!S.prefs) return;
+    S.prefs.loop = !S.prefs.loop;
+    syncControls();
+    savePrefs(["loop"]);
+    emit("interval");
+  }
+  /** @brief Change the transition; it applies from the next slide. */
+  function setTransition(v) {
+    if (!S.prefs || !TRANSITIONS.some(t => t[0] === v)) return;
+    S.prefs.transition = v;
+    const el = $("ss_overlay");
+    if (el) { el.classList.toggle("ss-kenburns", v === "kenburns"); el.classList.toggle("ss-cut", v === "none"); }
+    syncControls();
+    savePrefs(["transition"]);
+    emit("interval");
+  }
+  /** @brief Change how videos play; "skip" drops them from the running playlist. */
+  function setVideos(v) {
+    if (!S.prefs || !VIDEO_MODES.some(t => t[0] === v)) return;
+    S.prefs.videos = v;
+    if (S.running && v === "skip") {
+      const cur = S.files[S.index];
+      const kept = S.files.filter(f => f.kind !== "video");
+      if (kept.length) {
+        S.files = kept;
+        S.index = Math.max(0, kept.findIndex(f => f === cur));
+        if (cur && cur.kind === "video") show(Math.min(S.index, kept.length - 1));
+        $("ss_counter").textContent = (S.index + 1) + " / " + S.files.length;
+        preloadNext();
+      }
+    }
+    syncControls();
+    savePrefs(["videos"]);
     emit("interval");
   }
   function toggleShuffle() {
@@ -304,6 +371,7 @@
     $("ss_counter").textContent = (S.index + 1) + " / " + S.files.length;
     preloadNext();
     syncControls();
+    savePrefs(["shuffle"]);
     emit("interval");
   }
 
@@ -330,6 +398,9 @@
     const p = $("ss_play"); if (p) p.innerHTML = S.paused ? "&#9654;" : "&#10074;&#10074;";
     const iv = $("ss_interval"); if (iv && S.prefs) iv.textContent = S.prefs.interval + "s";
     const sh = $("ss_shuffle"); if (sh && S.prefs) sh.classList.toggle("ss-btn-on", !!S.prefs.shuffle);
+    const lp = $("ss_loop"); if (lp && S.prefs) lp.classList.toggle("ss-btn-on", !!S.prefs.loop);
+    const tr = $("ss_transition"); if (tr && S.prefs) tr.value = S.prefs.transition;
+    const vm = $("ss_videos"); if (vm && S.prefs) vm.value = S.prefs.videos;
   }
   function showControls() {
     const el = $("ss_overlay"); if (!el) return;
@@ -358,8 +429,8 @@
   // -- entry points --------------------------------------------------------
   function registerButtons() {
     if (typeof registerControlButton !== "function") return;
-    registerControlButton("viewer_toggles", {
-      label: "Slideshow", id: "ss_btn_viewer", variant: "secondary", feature: FEATURE,
+    registerControlButton("popout_tools", {
+      html: "&#9654; Play", id: "ss_btn_popout", variant: "secondary", feature: FEATURE,
       onclick: "CIMSlideshow.startQuery()", title: "Slideshow from this picture over the gallery (search / folder / album)" });
     registerControlButton("gallery_tools", {
       label: "Slideshow", id: "ss_btn_gallery", variant: "neutral", feature: FEATURE,
@@ -370,6 +441,7 @@
 
   window.CIMSlideshow = {
     start: start_, startQuery, startSelection, stop, next, prev, toggle, setInterval: setSlideInterval, toggleShuffle,
+    toggleLoop, setTransition, setVideos,
     get state() {
       const cur = S.files[S.index] || null;
       return { running: S.running, paused: S.paused, index: S.index, total: S.files.length,

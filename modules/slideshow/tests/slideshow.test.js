@@ -63,10 +63,28 @@ test("startQuery asks the server for the gallery playlist", { skip }, async () =
   SS.stop();
 });
 
-test("buttons are registered in the viewer and the gallery", { skip }, async () => {
+test("buttons are registered in the popout and the gallery", { skip }, async () => {
   const b = boot();
   await b.tick(20);                            // DOMContentLoaded: buttons register then
   const btns = b.window._extButtons || {};
-  assert.ok((btns.viewer_toggles || []).some(h => /ss_btn_viewer/.test(h)));
+  assert.ok((btns.popout_tools || []).some(h => /ss_btn_popout/.test(h)));
+  assert.ok(!(btns.viewer_toggles || []).some(h => /ss_btn/.test(h)), "no slideshow button under the viewer");
   assert.ok((btns.gallery_tools || []).some(h => /ss_btn_gallery/.test(h)));
+});
+
+test("prefs changed in the overlay are saved for the user", { skip }, async () => {
+  const b = boot();
+  const SS = b.window.CIMSlideshow;
+  b.api.on("POST /api/user/settings", { success: true, fields: [] });
+  SS.start({ files: ["a.jpg", "b.jpg"], prefs: { interval: 5, loop: true, transition: "fade" }, fullscreen: false });
+  SS.toggleLoop();
+  SS.setTransition("none");
+  SS.setInterval(7);
+  await b.tick(700);
+  const call = b.api.last("/api/user/settings", "POST");
+  assert.ok(call, "prefs posted");
+  const body = JSON.parse(JSON.stringify(call.body));
+  assert.deepEqual(body, { slideshow_loop: false, slideshow_transition: "none", slideshow_interval: 7 });
+  assert.ok(b.document.getElementById("ss_overlay").classList.contains("ss-cut"));
+  SS.stop();
 });

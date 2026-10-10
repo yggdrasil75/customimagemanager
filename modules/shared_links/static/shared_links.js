@@ -2,7 +2,7 @@
  *
  * "Share link" buttons in the gallery bulk bar (the selection) and the album
  * banner (the open album) open a small modal with the link options; on create
- * the modal shows the URL with Copy and a QR code. Settings -> Shared links
+ * the modal shows the URL with Copy and a QR code. Settings -> Account & sharing
  * lists the user's links with Copy / Edit / Delete. */
 (function () {
   "use strict";
@@ -165,13 +165,22 @@
 
   // -- Settings tab ----------------------------------------------------------------
   let links = [];
-  /** @brief Fill Settings -> Shared links with the user's links. */
+  /** @brief Fill the Shared links section of Settings -> Account & sharing (a tab
+   *  shared with ownership; each module renders its own section). */
   async function loadList() {
-    const pane = $('settings_pane_module_shared_links');
-    if (!pane) return;
+    const tab = $('settings_pane_module_sharing');
+    if (!tab) return;
+    let pane = $('sharing_section_shared_links');
+    if (!pane) {
+      pane = document.createElement('section');
+      pane.id = 'sharing_section_shared_links';
+      pane.className = 'mb-4 pt-3 border-t border-gray-700';
+      tab.appendChild(pane);
+    }
     if (!$('sl_list')) {
-      pane.innerHTML = `<p class="text-[11px] text-gray-500 mb-3">Links anyone can open without an account. Create one from the
-        gallery bulk bar (Share link) or an album's banner.</p><div id="sl_list" class="space-y-1"></div>`;
+      pane.innerHTML = `<div class="font-bold text-sm mb-1">Shared links</div>
+        <p class="text-[11px] text-gray-500 mb-2">Links anyone can open without an account. Create one from the
+        Editor tab, the gallery bulk bar (Share link) or an album's banner.</p><div id="sl_list" class="space-y-1"></div>`;
     }
     const list = $('sl_list');
     const d = await fetch('/api/shared_links').then(r => r.json()).catch(() => null);
@@ -203,13 +212,13 @@
   }
   /** @brief Edit the i-th link of the Settings list. */
   api.editAt = i => { if (links[i]) api.edit(links[i]); };
-  document.addEventListener('module-settings-tab', ev => { if (ev.detail === 'shared_links') loadList(); });
+  document.addEventListener('module-settings-tab', ev => { if (ev.detail === 'sharing') loadList(); });
 
   // -- buttons -------------------------------------------------------------------
   if (window.registerControlButton) {
     registerControlButton('gallery_bulk', { label: 'Share link', onclick: 'sharedLinks.shareSelection()',
                                             variant: 'secondary', feature: 'shared_links', title: 'Create a public link to the selected files' });
-    registerControlButton('viewer_toggles', { label: 'Share link', onclick: 'sharedLinks.shareCurrent()',
+    registerControlButton('editor_actions', { label: 'Share link', onclick: 'sharedLinks.shareCurrent()',
                                               variant: 'secondary', feature: 'shared_links', title: 'Create a public link to this file' });
   }
   const bar = $('gallery_album_bar');

@@ -1,4 +1,4 @@
-    <div id="controls_pane" class="flex flex-col flex-shrink-0 overflow-hidden">
+<div id="controls_pane" class="flex flex-col flex-shrink-0 overflow-hidden">
       <!-- Tab bar -->
       <div id="controls_tabs" class="flex flex-shrink-0 border-b border-gray-700 bg-gray-800 text-xs font-bold">
         <button data-tab="main" onclick="setControlsTab('main')"
@@ -29,6 +29,12 @@
               class="hidden text-red-400 hover:text-red-300 text-xs px-1">Delete</button>
           </div>
         </div>
+
+        <!-- Actions on the current file that modules contribute (favorite, rotate,
+             crop, location, export, share, archive, live, 360, stacks...) via
+             registerControlButton("editor_actions", ...). -->
+        <div id="editor_actions" data-ext-area="editor_actions"
+          class="flex flex-wrap items-center gap-1 empty:hidden"></div>
 
         <!-- Albums this image belongs to. Chips are click-to-remove; the button
              opens a picker of existing albums (or creates a new one). -->
