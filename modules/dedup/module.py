@@ -250,7 +250,6 @@ MANIFEST = {
     "core":        False,          # forced-on in practice; the backbone of dedup
     "requires":    [],
     "pip":         [],
-    "pip_optional": ["opencv-python-headless:cv2", "torch"],
     "assets":      ["dedup.js"],
 }
 

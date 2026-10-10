@@ -40,7 +40,6 @@ MANIFEST = {
     "core":        False,
     "requires":    ["dedup"],
     "pip":         ["torch"],
-    "pip_optional": ["opencv-python-headless:cv2"],
     "assets":      [],
 }
 

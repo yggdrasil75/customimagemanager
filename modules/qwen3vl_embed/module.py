@@ -38,7 +38,6 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         ["torch", "pillow:PIL", "transformers"],
-    "pip_optional": ["opencv-python-headless:cv2"],
     "assets":      [],
 }
 

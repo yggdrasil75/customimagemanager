@@ -35,16 +35,29 @@ import importlib.metadata
 import importlib.util
 import subprocess
 import sys
+import tempfile
 import traceback
 
 import optional_deps
 
 _log = logging.getLogger("modules.loader")
 
-# Backend wheels come from requirements-<backend>.txt, never from a manifest
-# (auto-installing them would pull a CUDA torch onto a CPU box).
-_BACKEND_PIP = {"torch", "torchvision", "torchaudio", "onnxruntime", "onnxruntime-gpu",
-                "onnxruntime-rocm", "onnxruntime-migraphx"}
+# The core install (install.sh: requirements-<backend>.txt + requirements.txt)
+# owns these: builds for the machine's GPU (CUDA / ROCm torch, onnxruntime-rocm,
+# an OpenCV built with CUDA) or versions the whole app shares. A module install
+# never installs, upgrades or replaces one - not as its own dep, and not as a
+# dependency pip would pull in for another package (ultralytics asking for
+# opencv-python, rfdetr for a newer torch). A module may still require one in
+# "pip" (gating, with a version), and is told to rerun install.sh / update.sh.
+_PROTECTED = re.compile(
+    r"^(torch|torchvision|torchaudio|triton|pytorch[-_]triton(-rocm)?|nvidia[-_].*|"
+    r"onnxruntime([-_].*)?|opencv([-_]contrib)?[-_]python([-_]headless)?|"
+    r"transformers|tokenizers|numpy|pillow)$", re.IGNORECASE)
+
+
+def _protected(dist):
+    """! @brief Whether a distribution belongs to the core install (see _PROTECTED)."""
+    return bool(_PROTECTED.match(str(dist).strip()))
 
 
 def _alternatives(dep):
@@ -158,8 +171,8 @@ def _missing_message(dep, what="pip dependency"):
     olds = [f"{_dist_name(a)} {_installed_version(a)}" for a in alts
             if _SPEC_RE.search(_split_dep(a)[0].split("@")[0]) and _installed_version(a)]
     msg = f"{what} '{_dep_label(dep)}' not installed" + (f" (have {', '.join(olds)})" if olds else "")
-    if all(_dist_name(a) in _BACKEND_PIP for a in alts):
-        msg += "; it comes from requirements-<backend>.txt: ./install.sh cpu|cuda|rocm"
+    if all(_protected(_dist_name(a)) for a in alts):
+        msg += "; it is part of the core install: rerun ./install.sh (or ./update.sh)"
     return msg
 
 
@@ -209,17 +222,92 @@ def _import_failure(manifest, exc):
     return None
 
 
+def _canon(name):
+    return re.sub(r"[-_.]+", "-", str(name)).lower()
+
+
+def _plan(pkgs, logger):
+    """! @brief What `pip install pkgs` would install (pip --dry-run --report), minus the
+    core install's packages (_PROTECTED): their installed builds stay.
+    @return the argument list for a `pip install --no-deps`, or None when pip can't
+            plan (pip < 22.2, a build failure), in which case _pip falls back to
+            pinning the core packages with a constraints file.
+    """
+    fd, report = tempfile.mkstemp(suffix=".json")
+    os.close(fd)
+    try:
+        if subprocess.call([sys.executable, "-m", "pip", "install", "--dry-run", "--quiet",
+                            "--report", report, *pkgs]) != 0:
+            return None
+        with open(report, encoding="utf-8") as fh:
+            items = (json.load(fh) or {}).get("install") or []
+    except (OSError, ValueError):
+        return None
+    finally:
+        try:
+            os.remove(report)
+        except OSError:
+            pass
+    asked = {_canon(_dist_name(p)): p for p in pkgs}
+    out, kept = [], []
+    for it in items:
+        meta = it.get("metadata") or {}
+        name, ver = meta.get("name", ""), meta.get("version", "")
+        if not name:
+            continue
+        if _protected(name) and _canon(name) not in asked:
+            have = _installed_version(name)
+            kept.append(f"{name} {have}" if have else f"{name} (not installed)")
+            continue
+        out.append(asked.get(_canon(name)) or f"{name}=={ver}")
+    if kept:
+        logger.warning("module deps: keeping the core install's %s (not replaced for %s); "
+                       "if a module needs a different version, update the core install"
+                       % (", ".join(kept), " ".join(pkgs)))
+    return out
+
+
+def _constraints():
+    """! @brief A pip constraints file pinning the installed core packages, or None."""
+    pins = []
+    for d in importlib.metadata.distributions():
+        name = (d.metadata or {}).get("Name") or ""
+        if name and _protected(name):
+            pins.append(f"{name}=={d.version}")
+    if not pins:
+        return None
+    fd, path = tempfile.mkstemp(suffix=".txt", prefix="cim-core-pins-")
+    with os.fdopen(fd, "w") as fh:
+        fh.write("\n".join(sorted(set(pins))) + "\n")
+    return path
+
+
 def _pip(pkgs, logger):
-    """! @brief One `pip install` in a subprocess (pip has no library API).
+    """! @brief One `pip install` in a subprocess (pip has no library API) that leaves the
+    core install's packages as they are (see _plan).
     @return True on success; the import caches are refreshed either way, so a
             package pip just placed is found by the next find_spec.
     """
     logger.info("installing module deps: %s" % " ".join(pkgs))
-    ok = subprocess.call([sys.executable, "-m", "pip", "install", *pkgs]) == 0
-    if not ok:
-        # sdist-only packages with an old setup.py fail the legacy
-        # build on current setuptools / distro pythons; the PEP 517 build works
-        ok = subprocess.call([sys.executable, "-m", "pip", "install", "--use-pep517", *pkgs]) == 0
+    plan = _plan(pkgs, logger)
+    pins = None
+    if plan is not None:
+        args = ["--no-deps", *plan] if plan else []
+    else:
+        pins = _constraints()
+        args = (["-c", pins] if pins else []) + list(pkgs)
+    try:
+        ok = not args or subprocess.call([sys.executable, "-m", "pip", "install", *args]) == 0
+        if not ok:
+            # sdist-only packages with an old setup.py fail the legacy
+            # build on current setuptools / distro pythons; the PEP 517 build works
+            ok = subprocess.call([sys.executable, "-m", "pip", "install", "--use-pep517", *args]) == 0
+    finally:
+        if pins:
+            try:
+                os.remove(pins)
+            except OSError:
+                pass
     importlib.invalidate_caches()
     if not ok:
         logger.warning("pip install failed for: %s" % " ".join(pkgs))
@@ -233,15 +321,15 @@ def _pip_install(deps, logger):
     plain, choices, skip = [], [], []
     for d in deps:
         alts = [_split_dep(a)[0].strip() for a in _alternatives(d)]
-        usable = [a for a in alts if _dist_name(a) not in _BACKEND_PIP]
-        skip += [_dist_name(a) for a in alts if _dist_name(a) in _BACKEND_PIP]
+        usable = [a for a in alts if not _protected(_dist_name(a))]
+        skip += [_dist_name(a) for a in alts if _protected(_dist_name(a))]
         if len(alts) > 1 and usable:
             choices.append([(p, a) for p, a in zip(alts, _alternatives(d)) if p in usable])
         elif usable:
             plain.append(usable[0])
     if skip:
-        logger.info("module deps %s come from requirements-<backend>.txt; "
-                    "run ./install.sh cpu|cuda|rocm" % ", ".join(sorted(set(skip))))
+        logger.info("module deps %s are part of the core install (never installed by a module); "
+                    "rerun ./install.sh or ./update.sh to change them" % ", ".join(sorted(set(skip))))
     done = []
     if plain:
         if _pip(plain, logger):

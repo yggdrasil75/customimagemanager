@@ -30,8 +30,8 @@ MANIFEST = {
                    "triage. Adds the Books tab.",
     "core":        False,
     "requires":    [],
-    "pip":         [],
-    "pip_optional": ["opencv-python-headless:cv2", "py7zr", "pymupdf:pymupdf|pymupdf:fitz", "python-docx:docx", "rarfile", "striprtf"],
+    "pip":         [],  # per format: PDF, DOCX, RTF; EPUB / CBZ / text need none
+    "pip_optional": ["pymupdf:pymupdf|pymupdf:fitz", "python-docx:docx", "striprtf"],
     "assets":      ["books.js", "reader.js"],
 }
 

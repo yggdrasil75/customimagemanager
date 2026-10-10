@@ -134,7 +134,9 @@ def register(host):
             return jsonify({"success": False, "error": f"scope must be one of {SCOPES}"}), 400
         wanted = d.get("perms")
         if wanted == "all":
-            wanted = g.user["features"]
+            # the user's own map may carry keys no loaded module registers (a
+            # capability gate whose module is off): "all" means the known ones
+            wanted = {k: v for k, v in g.user["features"].items() if k in features.ALL_KEYS}
         if not isinstance(wanted, dict):
             return jsonify({"success": False, "error": 'perms: {feature: level} or "all"'}), 400
         if any(k not in features.ALL_KEYS or features.level_of(v, None) is None

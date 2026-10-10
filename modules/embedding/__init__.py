@@ -15,7 +15,6 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         [],
-    "pip_optional": ["opencv-python-headless:cv2"],
     "assets":      ["embedding.js", "embedding.css", "semantic_filter.js", "image_search.js"],
 }
 

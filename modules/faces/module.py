@@ -29,8 +29,8 @@ MANIFEST = {
                    "insightface, 3D face shape and the drawn-face filter.",
     "core":        False,
     "requires":    [],
-    "pip":         [],
-    "pip_optional": ["insightface", "opencv-python-headless:cv2", "scipy", "ultralytics"],          # insightface/ultralytics are optional per provider
+    "pip":         ["insightface"],  # recognition is insightface; YOLO face detectors need ultralytics
+    "pip_optional": ["ultralytics", "scipy"],
     "assets":      [],
 }
 

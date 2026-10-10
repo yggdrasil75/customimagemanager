@@ -33,8 +33,8 @@ MANIFEST = {
                    "similarity (embeddings, clustering, shuffle-by).",
     "core":        False,
     "requires":    [],
-    "pip":         ["mutagen"],
-    "pip_optional": ["librosa", "scikit-learn:sklearn"],
+    "pip":         ["mutagen", "librosa"],
+    "pip_optional": ["scikit-learn:sklearn"],
     "assets":      ["music.js"],
 }
 

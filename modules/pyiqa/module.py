@@ -29,7 +29,6 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         ["pyiqa", "torch"],
-    "pip_optional": ["opencv-python-headless:cv2"],
     "assets":      [],
 }
 

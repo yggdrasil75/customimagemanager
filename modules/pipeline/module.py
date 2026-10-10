@@ -28,7 +28,6 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         [],
-    "pip_optional": ["opencv-python-headless:cv2"],
     "assets":      ["pipeline.js", "pipeline_editor.js"],
 }
 

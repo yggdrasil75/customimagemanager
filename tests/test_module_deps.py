@@ -1,8 +1,10 @@
 """! @file
 @brief Every package a module imports is declared in its manifest: "pip" when the
-import is unconditional (the module can't load without it), "pip_optional" when
-it is guarded (optional_import, try, if, inside a function). The core install
-(requirements-ultralight.txt) is the only exception. That is what makes run.sh
+import is unconditional (the module can't load without it), "pip" or
+"pip_optional" when it is guarded (optional_import, try, if, inside a function) -
+guarded is not the same as optional: a dep the module is useless without goes in
+"pip". The core install (torch, OpenCV, transformers, ... - never installed by a
+module) is the only exception. That is what makes run.sh
 install, and the loader report, every module's deps the same way."""
 import ast
 import os
@@ -14,9 +16,14 @@ from modules import loader
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODULES = os.path.join(ROOT, "modules")
-# requirements-ultralight.txt (+ what flask brings): always installed
+# the core install (install.sh): requirements-ultralight.txt, what flask brings, and
+# the backend / shared packages a module never installs (loader._PROTECTED) plus the
+# core's own media libraries
 CORE = {"flask", "werkzeug", "jinja2", "itsdangerous", "markupsafe", "click", "waitress",
-        "numpy", "requests", "yaml", "PIL", "pyexiv2", "ldap3"}
+        "numpy", "requests", "yaml", "PIL", "pyexiv2", "ldap3",
+        "torch", "torchvision", "torchaudio", "onnxruntime", "cv2", "transformers",
+        "tokenizers", "huggingface_hub",
+        "imagecodecs", "rawpy", "pillow_heif", "py7zr", "rarfile", "psutil"}
 # the app's own top-level files and the core packages' flat aliases
 LOCAL = ({f[:-3] for f in os.listdir(ROOT) if f.endswith(".py")} |
          {"modules", "exif_fields", "iptc_fields", "mwg_fields", "xmp_fields", "exif_import",

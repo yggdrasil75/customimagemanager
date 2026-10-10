@@ -22,7 +22,6 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         ["ultralytics"],
-    "pip_optional": ["opencv-python-headless:cv2"],
     "assets":      [],
 }
 

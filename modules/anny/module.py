@@ -44,8 +44,7 @@ MANIFEST = {
                    "parameters -> mesh.",
     "core":        False,
     "requires":    ["bodies"],
-    "pip":         ["anny"],
-    "pip_optional": ["torch", "warp-lang:warp"],
+    "pip":         ["anny", "torch", "warp-lang:warp"],
     "assets":      [],
 }
 

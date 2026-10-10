@@ -40,7 +40,7 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         [],
-    "pip_optional": ["onnx", "onnxruntime", "opencv-python-headless:cv2", "torch", "transformers"],
+    "pip_optional": ["onnx"],
     "assets":      [],
 }
 

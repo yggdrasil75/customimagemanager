@@ -38,7 +38,6 @@ MANIFEST = {
     "core":        False,
     "requires":    [],
     "pip":         ["torch", "transformers"],
-    "pip_optional": ["huggingface-hub:huggingface_hub", "opencv-python-headless:cv2"],
     "assets":      [],
 }
 

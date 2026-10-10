@@ -23,8 +23,12 @@ def _fake_pip(monkeypatch, installable, pep517_only=()):
     """
     calls, placed = [], set()
     def call(argv):
+        if "--dry-run" in argv:
+            return 1          # no planning: _pip falls back to a plain install with pins
         calls.append(argv)
-        pkgs = [a for a in argv[argv.index("install") + 1:] if a != "--use-pep517"]
+        rest = argv[argv.index("install") + 1:]
+        pkgs = [a for i, a in enumerate(rest)
+                if not a.startswith("-") and not (i and rest[i - 1] == "-c")]
         pep517 = "--use-pep517" in argv
         if all(p in installable and (pep517 or p not in pep517_only) for p in pkgs):
             placed.update(pkgs)
@@ -127,7 +131,7 @@ def test_version_specifiers():
     # installed, but too old: not installed for the loader, and the message says what's there
     assert loader._one_installed("pytest>=1") and not loader._one_installed("pytest>=999")
     assert "(have pytest " in loader._missing_message("pytest>=999")
-    assert "requirements-<backend>.txt" in loader._missing_message("torch:no_such_torch_xyz")
+    assert "core install" in loader._missing_message("torch:no_such_torch_xyz")
 
 
 def _fake_modules(tmp_path, monkeypatch, mods):
@@ -196,3 +200,35 @@ def test_install_covers_required_and_optional_of_enabled_modules_only(tmp_path, 
     monkeypatch.setattr(loader, "_pip_install", lambda deps, log: asked.extend(deps) or [])
     reg.install_all_deps(str(cfg))
     assert asked == ["no-a-q:no_a_q", "no-b-q:no_b_q"]
+
+
+def test_core_install_is_never_replaced(monkeypatch, caplog):
+    """! @brief A module package whose deps would pull a different torch / opencv /
+    transformers gets installed without them: the GPU builds stay."""
+    import json, logging
+    report = {"install": [
+        {"metadata": {"name": "rfdetr", "version": "1.3.0"}},
+        {"metadata": {"name": "torch", "version": "2.9.0"}},
+        {"metadata": {"name": "opencv-python", "version": "4.12.0.88"}},
+        {"metadata": {"name": "nvidia-cudnn-cu12", "version": "9.1"}},
+        {"metadata": {"name": "supervision", "version": "0.26.0"}}]}
+    calls = []
+
+    def call(argv):
+        calls.append(argv)
+        if "--dry-run" in argv:
+            with open(argv[argv.index("--report") + 1], "w") as fh:
+                json.dump(report, fh)
+        return 0
+    monkeypatch.setattr(loader.subprocess, "call", call)
+    caplog.set_level(logging.WARNING, logger="modules.loader")
+    assert loader._pip(["rfdetr"], loader._log)
+    final = calls[-1]
+    assert final[final.index("install") + 1:] == ["--no-deps", "rfdetr", "supervision==0.26.0"]
+    assert "keeping the core install's" in caplog.text and "torch" in caplog.text
+    # core packages named directly in a manifest are never installed by a module
+    calls.clear()
+    assert loader._pip_install(["torch", "opencv-python-headless:cv2", "transformers>=5.19"], loader._log) == []
+    assert calls == []
+    assert loader._protected("opencv-contrib-python-headless") and loader._protected("nvidia-cublas-cu12")
+    assert not loader._protected("sentence-transformers") and not loader._protected("opencv-extra")

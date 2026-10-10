@@ -12,8 +12,8 @@ MANIFEST = {
                    "the background sweep's masks.",
     "core":        False,
     "requires":    [],
-    "pip":         [],
-    "pip_optional": ["opencv-python-headless:cv2", "vtracer"],
+    "pip":         [],  # vtracer fits smoother SVG paths; OpenCV contours otherwise
+    "pip_optional": ["vtracer"],
     "assets":      ["segmentation.js"],
 }
 

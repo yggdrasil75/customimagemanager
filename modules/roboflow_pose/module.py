@@ -35,8 +35,7 @@ MANIFEST = {
                    "multi-person pose, 17 COCO keypoints, no separate person detector.",
     "core":        False,
     "requires":    [],
-    "pip":         ["detrpose @ git+https://github.com/SebastianJanampa/DETRPose.git@inference_only:detrpose"],
-    "pip_optional": ["opencv-python-headless:cv2", "rfdetr", "torch"],
+    "pip":         ["detrpose @ git+https://github.com/SebastianJanampa/DETRPose.git@inference_only:detrpose", "rfdetr"],
     "assets":      [],
 }
 

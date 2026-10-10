@@ -40,7 +40,6 @@ MANIFEST = {
     "core":        False,
     "requires":    [],          # soft-needs an 'iqa' provider; degrades if none
     "pip":         [],
-    "pip_optional": ["opencv-python-headless:cv2"],
     "assets":      ["rating.js"],
 }
 
