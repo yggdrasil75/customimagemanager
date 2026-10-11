@@ -180,8 +180,9 @@ class Runner:
             "SELECT album, group_id FROM library_pipeline_albums").fetchall()}
 
     # -- start -------------------------------------------------------------------------
-    def start(self, mode="preview", graph=None):
-        """! @brief Plan (and with mode "apply", apply) in the background. @return run id or None if busy."""
+    def start(self, mode="preview", graph=None, only=None):
+        """! @brief Plan (and with mode "apply", apply) in the background. @return run id or None if busy.
+        @param only  limit the run to these rel_paths (the gallery selection)."""
         with self.lock:
             if self.state["running"]:
                 return None
@@ -191,7 +192,7 @@ class Runner:
             db.commit()
             rid = cur.lastrowid
             self.state.update(running=True, run_id=rid, phase="planning", progress="", cancel=False)
-        threading.Thread(target=self._run, args=(rid, mode, graph), daemon=True,
+        threading.Thread(target=self._run, args=(rid, mode, graph, only), daemon=True,
                          name="library-pipeline").start()
         return rid
 
@@ -204,13 +205,13 @@ class Runner:
                          name="library-pipeline-apply").start()
         return True
 
-    def _run(self, rid, mode, graph):
+    def _run(self, rid, mode, graph, only=None):
         db = self.host.db()
         log, plan, status = [], [], "planned"
         try:
             saved = self.host.config.get("library_pipeline_graph") or engine.DEFAULT_GRAPH
             g = copy.deepcopy(graph or saved)
-            ctx = engine.Context(Library(self.host), llm=self._llm(),
+            ctx = engine.Context(Library(self.host, only=only), llm=self._llm(),
                                  collage=lambda rels: collage(self.host, rels),
                                  report=self._progress, auto_albums=self.auto_albums(db))
             out = engine.run_graph(g, ctx)
@@ -385,7 +386,8 @@ class Runner:
                 it = lib.item(rel) or {}
                 self._progress("photo pipeline %d/%d (%s)" % (i + 1, len(e["files"]), e["name"]))
                 analysis = svc["run"](core.to_bgr(img), abs_p, None, None,
-                                      known_extra={"context": e.get("context", ""), "people": it.get("people")})
+                                      known_extra={"context": e.get("context", ""), "people": it.get("people")},
+                                      pipeline_id=e.get("pipeline") or None)
                 svc["apply"](abs_p, analysis)
                 done += 1
             except engine.Cancelled:
@@ -430,7 +432,10 @@ def register(host):
         graph = d.get("graph")
         if graph is not None and not engine.is_graph(graph):
             return jsonify({"success": False, "error": "not a library/1 graph"}), 400
-        rid = runner.start(mode, graph)
+        only = d.get("files")
+        if only is not None and not (isinstance(only, list) and all(isinstance(f, str) for f in only)):
+            return jsonify({"success": False, "error": "files must be a list of paths"}), 400
+        rid = runner.start(mode, graph, only or None)
         if rid is None:
             return jsonify({"success": False, "error": "a run is already going"}), 409
         return jsonify({"success": True, "run_id": rid})

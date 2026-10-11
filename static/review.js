@@ -51,6 +51,28 @@ const REVIEW_GROUPS=[
 ];
 const REVIEW_PANE_PER_GROUP=120;   // thumbnails shown before the "+N more" tile
 
+/** @brief Module sections at the top of the Review pane (pending work that isn't a file
+ *  queue - the library pipeline's plan). fn(container) renders into the element it is
+ *  given and returns how many items it has pending (0 = nothing, the section is removed).
+ */
+window._reviewSections = window._reviewSections || [];
+function registerReviewSection(fn){
+  if(typeof fn==='function' && !window._reviewSections.includes(fn)) window._reviewSections.push(fn);
+}
+window.registerReviewSection = registerReviewSection;
+async function _renderModuleSections(list){
+  let pending=0;
+  for(const fn of window._reviewSections){
+    const box=document.createElement('section');
+    box.className='review-module-section';
+    list.appendChild(box);
+    let n=0;
+    try{ n=(await fn(box))||0; }catch(e){ n=0; }
+    if(n>0) pending+=n; else box.remove();
+  }
+  return pending;
+}
+
 function _reviewStatus(t){
   const el=document.getElementById('review_pane_status');
   if(el) el.textContent=t||'';
@@ -74,19 +96,24 @@ async function loadReviewPane(){
     if(r.success) rel=r.problems||[];
   }catch(e){}
   refreshReviewCount();
+  list.innerHTML='';
+  const mods=document.createElement('div');
+  list.appendChild(mods);
+  const modPending=await _renderModuleSections(mods);
   if(!total && !rel.length){
-    list.innerHTML='<div class="text-xs text-gray-500 p-3">Nothing to review - no delete flags, unconfirmed boxes, unconfirmed tags, or relationship mismatches.</div>';
-    _reviewStatus('0 pending');
+    if(!modPending)
+      list.innerHTML='<div class="text-xs text-gray-500 p-3">Nothing to review - no delete flags, unconfirmed boxes, unconfirmed tags, or relationship mismatches.</div>';
+    _reviewStatus(`${modPending} pending`);
     return;
   }
-  _reviewStatus(`${total+rel.length} item(s) pending`);
+  _reviewStatus(`${total+rel.length+modPending} item(s) pending`);
   // Fetch each non-empty group's first page in parallel.
   const wanted=REVIEW_GROUPS.filter(g=>(counts[g.key]||0)>0);
   const pages=await Promise.all(wanted.map(g=>
     fetch(`/api/review_list?queue=${g.key}&offset=0&limit=${REVIEW_PANE_PER_GROUP}`)
       .then(r=>r.json()).catch(()=>({items:[],total:0}))));
-  list.innerHTML=_renderRelationshipReview(rel) + (wanted.map((g,i)=>
-    _renderReviewGroup(g, pages[i].items||[], counts[g.key]||0)).join('') || '');
+  list.insertAdjacentHTML('beforeend', _renderRelationshipReview(rel) + (wanted.map((g,i)=>
+    _renderReviewGroup(g, pages[i].items||[], counts[g.key]||0)).join('') || ''));
 }
 
 /** @brief One-sided relationship edges (A links B, B has no back-link). Surfaced for the

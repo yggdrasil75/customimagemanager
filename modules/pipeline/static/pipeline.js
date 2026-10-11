@@ -23,7 +23,8 @@ async function runPipeline(){
       activeRegionIdx=-1;
       drawCanvas(); if(popoutOpen) drawPopout(); renderAnalysis(); renderRegionsList();
       refreshReviewCount();
-      showToast('Smart Tag complete - new boxes and tags are unconfirmed. Middle-click a box or ✓ a tag to confirm.');
+      const pl=(d.analysis&&d.analysis.pipeline)||null;
+      showToast(`Smart Tag complete${pl?` (${pl.name}${pl.mode!=='graph'?', agent':''})`:''} - new boxes and tags are unconfirmed. Middle-click a box or ✓ a tag to confirm.`);
     } else { alert('Pipeline error: '+(d.error||'unknown')); }
   }catch(e){ alert('Network error during pipeline.'); }
   btn.innerText=og; btn.disabled=false;
@@ -36,6 +37,9 @@ function renderAnalysis(){
   if(!hasContent){ panel.classList.add('hidden'); body.innerHTML=''; return; }
   panel.classList.remove('hidden');
   let html='';
+  if(a.pipeline) html+=`<div class="text-gray-400">Pipeline: <b class="text-gray-200">${_esc(a.pipeline.name)}</b>${a.pipeline.mode!=='graph'?' (agent)':''}</div>`;
+  if(a.agent_steps&&a.agent_steps.length) html+=`<details><summary class="text-gray-500 cursor-pointer">Agent steps (${a.agent_steps.length})</summary><ol class="list-decimal pl-5">${
+    a.agent_steps.map(st=>`<li><b>${_esc(st.tool)}</b>${st.why?` <span class="text-gray-500">- ${_esc(st.why)}</span>`:''}</li>`).join('')}</ol></details>`;
   if(a.image_type) html+=`<div class="text-sky-300 font-bold">Type: ${_esc(a.image_type)}</div>`;
   (a.subjects||[]).forEach(s=>{
     html+=`<div class="border-t border-gray-700 pt-1">
@@ -57,7 +61,8 @@ async function bulkPipeline(){
     const d=await fetch('/api/bulk_pipeline',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({filenames:files})}).then(r=>r.json());
     if(d.success){
-      showToast(`Smart Tag done: ${d.done}/${files.length}${d.errors.length?', '+d.errors.length+' errors':''}.`);
+      const per=Object.entries(d.by_pipeline||{}).map(([n,c])=>`${n} ${c}`).join(', ');
+      showToast(`Smart Tag done: ${d.done}/${files.length}${per?' ('+per+')':''}${d.errors.length?', '+d.errors.length+' errors':''}.`);
       if(window.currentFile && files.includes(window.currentFile)) selectFile(window.currentFile);
       loadGallery(); refreshReviewCount();
     } else alert('Smart Tag failed: '+(d.error||''));

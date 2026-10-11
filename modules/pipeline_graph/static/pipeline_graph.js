@@ -29,7 +29,7 @@
   let editor = null, dfToTid = {}, tidToDf = {};
   let selected = null, dirty = false, mounted = false, rendering = false, addCount = 0;
   const sources = {};           // id -> {id, label, load, save, panel}
-  let srcId = 'photo';
+  let srcId = 'photo:default';
 
   const cur = () => stack[stack.length - 1].graph;
   const byId = tid => cur().nodes.find(n => n.id === tid);
@@ -204,7 +204,7 @@
     if (!n) {
       const hint = sources[srcId].hint || 'A node with a <b>run</b> input only runs when it receives true - wire yes/no, is_set/missing, found/missing there to branch.';
       box.innerHTML = `<p class="text-[11px] text-gray-500">Select a node to edit it. Drag from an output dot to an input dot to wire values; wire types must match (hover a dot). ${hint}</p>
-        ${inner() || srcId !== 'photo' ? '' : field('Unmatched box (global)', sel('plg_unmatched', (root.settings || {}).unmatched_box || 'keep', ['keep', 'drop', 'flag']))}`;
+        ${inner() || srcId !== 'photo:default' ? '' : field('Unmatched box (global)', sel('plg_unmatched', (root.settings || {}).unmatched_box || 'keep', ['keep', 'drop', 'flag']))}`;
       const u = $('plg_unmatched'); if (u) u.onchange = e => { root.settings = root.settings || {}; root.settings.unmatched_box = e.target.value; markDirty(); };
       return;
     }
@@ -284,41 +284,76 @@
   }
 
   // -- graph sources ----------------------------------------------------------
-  sources.photo = {
-    id: 'photo', label: 'Per photo',
-    async load() {
-      const t = await fetch('/api/pipeline_tree?graph=1').then(r => r.json());
-      if (!t.success) throw new Error(t.error || 'load failed');
-      try { metaFields = (await fetch('/api/pipeline_meta_fields').then(r => r.json())).fields || []; } catch (_) { metaFields = []; }
-      return { graph: t.pipeline_tree, catalog: t.catalog, banner: !t.is_graph };
-    },
-    async save(graph) {
-      const r = await window.postSettings({ pipeline_tree: graph });
-      if (r.ok) { const ta = $('cfg_pipeline'); if (ta) ta.value = JSON.stringify(graph, null, 2); }
-      return r;
-    },
-  };
+  // The per-photo pipelines (one per entry of /api/pipelines: Default, Family
+  // trips, Work, ...) are built in; other modules register theirs (Library).
+  const DEFAULT_SRC = 'photo:default';
+  srcId = DEFAULT_SRC;
+  function photoSource(p) {
+    return {
+      id: 'photo:' + p.id, pid: p.id, label: p.name, photo: true, info: p,
+      async load() {
+        const t = await fetch('/api/pipelines/graph?id=' + encodeURIComponent(p.id)).then(r => r.json());
+        if (!t.success) throw new Error(t.error || 'load failed');
+        try { metaFields = (await fetch('/api/pipeline_meta_fields').then(r => r.json())).fields || []; } catch (_) { metaFields = []; }
+        return { graph: t.graph, catalog: t.catalog, banner: !t.is_graph };
+      },
+      async save(graph) {
+        const r = await fetch('/api/pipelines/graph/save', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: p.id, graph }) }).then(x => x.json()).catch(() => ({ success: false }));
+        if (r.success && p.id === 'default') { const ta = $('cfg_pipeline'); if (ta) ta.value = JSON.stringify(graph, null, 2); }
+        return { ok: !!r.success, error: r.error };
+      },
+      panel: window.CIMPipelines ? (el, api) => window.CIMPipelines.panel(el, api, p.id) : null,
+    };
+  }
+  /** @brief Rebuild the per-photo sources from the server (after create / rename / delete). */
+  async function reloadSources(selectId) {
+    let d = null;
+    try { d = await fetch('/api/pipelines').then(r => r.json()); } catch (_) { d = null; }
+    for (const k of Object.keys(sources)) if (sources[k].photo) delete sources[k];
+    const list = (d && d.success && d.pipelines) || [{ id: 'default', name: 'Default' }];
+    for (const p of list) sources['photo:' + p.id] = photoSource(p);
+    if (selectId && sources[selectId]) srcId = selectId;
+    if (!sources[srcId]) srcId = DEFAULT_SRC;
+    renderSwitch();
+  }
   function register(src) {
     if (!src || !src.id) return;
     sources[src.id] = src;
     if (mounted) renderSwitch();
   }
-  window.CIMPipelineGraph = { register, graph: () => root, isDirty: () => dirty, current: () => srcId };
+  window.CIMPipelineGraph = { register, reloadSources, graph: () => root, isDirty: () => dirty, current: () => srcId,
+                             select: id => { if (mounted) switchTo(id); else srcId = id; },
+                             open: async id => { await reloadSources(id); if (mounted) { dirty = false; return load(); } } };
   (window.CIMPipelineGraphSources || []).forEach(register);
   window.CIMPipelineGraphSources = { push: register };
 
-  /** @brief The Per photo / Library switch above the canvas (hidden with a single graph). */
+  /** @brief The graph picker above the canvas: every per-photo pipeline, then the other graphs. */
   function renderSwitch() {
     const el = $('plg_sources'); if (!el) return;
     const ids = Object.keys(sources);
-    el.classList.toggle('hidden', ids.length < 2);
-    el.innerHTML = ids.map(id => `<button type="button" data-src="${esc(id)}" data-gate-keep
-      class="px-2 py-1 ${id === srcId ? 'bg-sky-700 text-white' : 'bg-gray-800 text-gray-400 hover:text-gray-200'}">${esc(sources[id].label)}</button>`).join('');
-    el.querySelectorAll('[data-src]').forEach(b => b.onclick = () => switchTo(b.dataset.src));
+    const photo = ids.filter(id => sources[id].photo), other = ids.filter(id => !sources[id].photo);
+    const opt = id => `<option value="${esc(id)}"${id === srcId ? ' selected' : ''}>${esc(sources[id].label)}</option>`;
+    el.innerHTML = `<select id="plg_src_pick" data-gate-keep class="bg-gray-900 border border-sky-700 rounded px-2 py-1 text-sky-200 font-bold">
+        <optgroup label="Per-photo pipelines">${photo.map(opt).join('')}</optgroup>
+        ${other.length ? `<optgroup label="Other">${other.map(opt).join('')}</optgroup>` : ''}
+        ${window.CIMPipelines ? '<option value="__new">+ New per-photo pipeline...</option>' : ''}
+      </select>`;
+    el.classList.remove('hidden');
+    $('plg_src_pick').onchange = async e => {
+      const v = e.target.value;
+      if (v === '__new') {
+        e.target.value = srcId;
+        const id = await window.CIMPipelines.create();
+        if (id) { if (dirty && !confirm('Discard unsaved graph changes?')) return; dirty = false; await reloadSources(); switchTo('photo:' + id, true); }
+        return;
+      }
+      switchTo(v);
+    };
   }
-  function switchTo(id) {
-    if (id === srcId || !sources[id]) return;
-    if (dirty && !confirm('Discard unsaved graph changes?')) return;
+  function switchTo(id, force) {
+    if ((id === srcId && !force) || !sources[id]) return;
+    if (dirty && !force && !confirm('Discard unsaved graph changes?')) { renderSwitch(); return; }
     srcId = id; renderSwitch();
     load().catch(e => { $('plg_inspector').innerHTML = `<p class="text-xs text-red-400">${esc(e.message)}</p>`; });
   }
@@ -329,7 +364,7 @@
       if (!r || !r.ok) throw new Error((r && r.error) || 'save failed');
       dirty = false; const b = $('plg_save'); if (b) b.classList.remove('ring-2', 'ring-amber-400');
       const bn = $('plg_banner'); if (bn) bn.classList.add('hidden');
-      toast(sources[srcId].label + ' pipeline saved.');
+      toast(sources[srcId].label + ' saved.');
     } catch (e) { toast('Pipeline: ' + e.message); }
   }
 
@@ -338,8 +373,8 @@
     const t = await src.load();
     root = t.graph; root.nodes = root.nodes || []; root.settings = root.settings || {};
     catalog = t.catalog || {};
-    $('plg_metafields').innerHTML = (srcId === 'photo' ? metaFields : []).map(f => `<option value="${esc(f)}">`).join('');
-    const raw = $('plg_raw'); if (raw) raw.classList.toggle('hidden', srcId !== 'photo');
+    $('plg_metafields').innerHTML = (src.photo ? metaFields : []).map(f => `<option value="${esc(f)}">`).join('');
+    const raw = $('plg_raw'); if (raw) raw.classList.toggle('hidden', srcId !== 'photo:default');
     const panel = $('plg_panel');
     if (panel) { panel.innerHTML = ''; panel.classList.toggle('hidden', !src.panel); if (src.panel) src.panel(panel, window.CIMPipelineGraph); }
     const add = $('plg_add');
@@ -386,13 +421,12 @@
     $('plg_fit').onclick = () => { editor.zoom_reset(); editor.canvas_x = 0; editor.canvas_y = 0; editor.precanvas.style.transform = 'translate(0px, 0px) scale(1)'; };
     $('plg_reload').onclick = () => { if (!dirty || confirm('Discard unsaved graph changes?')) load(); };
     $('plg_save').onclick = save;
-    renderSwitch();
-    load().catch(e => { $('plg_inspector').innerHTML = `<p class="text-xs text-red-400">${esc(e.message)}</p>`; });
+    reloadSources().then(load).catch(e => { $('plg_inspector').innerHTML = `<p class="text-xs text-red-400">${esc(e.message)}</p>`; });
   }
 
   document.addEventListener('module-settings-tab', ev => {
     if (ev.detail !== 'pipeline') return;
     setTimeout(() => { const host = $('module_settings_fields_pipeline'); if (!host) return;
-      if (!mounted) mount(host); else if (!dirty) load(); }, 0);
+      if (!mounted) mount(host); else if (!dirty) reloadSources().then(load).catch(() => {}); }, 0);
   });
 })();

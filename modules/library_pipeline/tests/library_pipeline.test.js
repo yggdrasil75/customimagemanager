@@ -48,3 +48,23 @@ test("registers the Library graph and the plan panel previews and applies", { sk
   assert.ok(call, "apply posted");
   assert.deepEqual(JSON.parse(JSON.stringify(call.body)), { run_id: 7, ids: [0] });
 });
+
+test("Review and bulk-bar buttons run it; a pending plan is a Review section", { skip }, async () => {
+  const b = page({ modules: ["library_pipeline"] });
+  await b.tick(20);
+  const btns = b.window._extButtons || {};
+  assert.ok((btns.review_actions || []).some(h => /lp_btn_review/.test(h)), "Review action");
+  assert.ok((btns.gallery_bulk || []).some(h => /lp_btn_bulk/.test(h)), "bulk-bar action");
+  b.api.on("POST /api/library_pipeline/run", { success: true, run_id: 7 });
+  b.api.on("/api/library_pipeline/status", { success: true, llm: false, auto: "off", allow_moves: false,
+    state: { running: false, run_id: 7 }, run: PLAN });
+  b.run("selectedFiles.clear(); selectedFiles.add('a.jpg'); selectedFiles.add('b.jpg');");
+  await b.window.CIMLibraryPipeline.runSelection();
+  const call = b.api.last("/api/library_pipeline/run", "POST");
+  assert.deepEqual(JSON.parse(JSON.stringify(call.body)), { files: ["a.jpg", "b.jpg"] });
+  const box = b.document.createElement("section");
+  b.document.body.appendChild(box);
+  const n = await b.window.CIMLibraryPipeline.reviewSection(box);
+  assert.equal(n, 1, "one entry left to apply (the move is blocked)");
+  assert.match(box.textContent, /Library pipeline \| 1 proposed/);
+});

@@ -3,13 +3,17 @@
 description, boxes and flags. Moved out of manager.py; core names are bound
 in register(). engine.py is the tree runner (was pipeline.py).
 """
+import json
 import os
 import re
+import time
 
 from flask import request, jsonify
 
 from .engine import DEFAULT_PIPELINE, run_pipeline
+from . import agent
 from . import graph_engine
+from . import pipelines as pls
 import common
 
 HOST = None
@@ -66,24 +70,117 @@ def _compose_description(analysis, existing=""):
 # every 2s would keep _last_activity permanently fresh and starve them forever.
 # (This is why an open Faces tab could sit at "queued" and never advance.)
 
-def _run_pipeline_on(bgr, fp=None, tree=None, progress=None, known_extra=None):
-    """! @brief Run the Smart Tag pipeline on one image with every registered hook
+def _select_pipeline(fp=None, pipeline_id=None):
+    """! @brief The pipeline record a run uses: the named one, else the first whose scope
+    lists the file (pipelines.select), else the default."""
+    if pipeline_id:
+        p = pls.get(state, pipeline_id)
+        if p is not None:
+            return p
+    if fp:
+        return pls.select(state, HOST.core.files_where, _db(), _rel(fp))
+    return pls.listing(state)[-1]
+
+
+def _run_pipeline_on(bgr, fp=None, tree=None, progress=None, known_extra=None, pipeline_id=None):
+    """! @brief Run a Smart Tag pipeline on one image with every registered hook
     wired in (pose / ocr / segment stages from modules, person + panel
     detectors, LLM endpoints, known context from the file's metadata).
-    A graph/1 config runs on graph_engine; the legacy `next`-chain tree on
-    engine.run_pipeline.
+    Without `tree` the pipeline is chosen per file (pipelines.py): its graph runs
+    (graph/1 on graph_engine, a legacy tree on engine.run_pipeline), or, in the
+    semi / full modes, the pipeline agent builds the run tool by tool.
+    @param tree         run exactly this graph (no selection, no agent).
     @param known_extra  merged into the known context: `people` and `context` from
-                        the library pipeline (the trip / event / album the file is in)."""
-    tree = tree or state.get("pipeline_tree") or DEFAULT_PIPELINE
+                        the library pipeline (the trip / event / album the file is in).
+    @param pipeline_id  force a pipeline instead of selecting one by scope.
+    @return the analysis; analysis["pipeline"] = {id, name, mode} when one was selected."""
     known = _known_context(fp) if fp else None
     if known_extra:
         known = dict(known or {}, **{k: v for k, v in known_extra.items() if v})
     hooks = dict(pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn(), stage_fns=_module_stage_fns(),
                  person_fn=_person_fn, panel_fn=_panel_fn, seg_fn=_seg_fn(),
                  endpoints=_pipeline_endpoints(), progress=progress, known=known)
+    pipe = None
+    if tree is None:
+        pipe = _select_pipeline(fp, pipeline_id)
+        if pipe["mode"] in ("semi", "full"):
+            out = _run_agent(bgr, fp, pipe, hooks, progress)
+            out["pipeline"] = {"id": pipe["id"], "name": pipe["name"], "mode": pipe["mode"]}
+            return out
+        tree = pls.graph_of(state, pipe) or DEFAULT_PIPELINE
     if graph_engine.is_graph(tree):
-        return graph_engine.run_graph(tree, bgr, _llm_call, metadata=_metadata_context(fp) if fp else {}, **hooks)
-    return run_pipeline(tree, bgr, _llm_call, **hooks)
+        out = graph_engine.run_graph(tree, bgr, _llm_call, metadata=_metadata_context(fp) if fp else {}, **hooks)
+    else:
+        out = run_pipeline(tree, bgr, _llm_call, **hooks)
+    if pipe is not None:
+        out["pipeline"] = {"id": pipe["id"], "name": pipe["name"], "mode": pipe["mode"]}
+    return out
+
+
+# -- the pipeline agent (modes semi / full) -------------------------------------------
+AGENT_KEEP_RUNS = 200
+AGENT_MEMORY_RUNS = 50
+
+
+def _agent_runs(pid, limit=AGENT_MEMORY_RUNS):
+    """! @brief A pipeline's stored agent runs, newest first."""
+    out = []
+    for r in _db().execute("SELECT id, rel_path, at, tools, steps FROM pipeline_agent_runs WHERE pipeline_id=? "
+                           "ORDER BY id DESC LIMIT ?", (pid, limit)).fetchall():
+        try:
+            out.append({"id": r["id"], "rel_path": r["rel_path"], "at": r["at"],
+                        "tools": json.loads(r["tools"] or "[]"), "steps": json.loads(r["steps"] or "[]")})
+        except ValueError:
+            continue
+    return out
+
+
+def _agent_memory(pid):
+    runs = _agent_runs(pid)
+    return {"last_run": runs[0] if runs else None, "recurring": agent.recurring(runs)}
+
+
+def _run_agent(bgr, fp, pipe, hooks, progress):
+    """! @brief Let the agent analyse the photo, store the run, and in mode "full" make the
+    learned graph the pipeline's graph."""
+    hooks = dict(hooks, rel_path=_rel(fp) if fp else None)
+
+    def llm(prompt, img, want, choices=None):
+        return _llm_call(prompt, img, want, choices)
+    analysis, record = agent.run(bgr, pipe, hooks, llm, _agent_memory(pipe["id"]), progress=progress)
+    db = _db()
+    db.execute("INSERT INTO pipeline_agent_runs(pipeline_id, rel_path, at, tools, steps, history) "
+               "VALUES (?,?,?,?,?,?)",
+               (pipe["id"], _rel(fp) if fp else "", time.time(), json.dumps(record["tools"]),
+                json.dumps(record["steps"], default=str), json.dumps(record["history"], default=str)))
+    db.execute("DELETE FROM pipeline_agent_runs WHERE pipeline_id=? AND id NOT IN (SELECT id FROM "
+               "pipeline_agent_runs WHERE pipeline_id=? ORDER BY id DESC LIMIT ?)",
+               (pipe["id"], pipe["id"], AGENT_KEEP_RUNS))
+    db.commit()
+    if pipe["mode"] == "full":
+        _adopt_learned(pipe["id"])
+    # stored with the file's analysis: which tools ran and why (not their results)
+    analysis["agent_steps"] = [{"tool": h["tool"], "params": h.get("params") or {}, "why": h.get("why", "")}
+                               for h in record["history"]]
+    return analysis
+
+
+def _learned_graph(pid):
+    """! @brief The graph the agent's runs add up to, or None before its first run."""
+    steps = agent.learned_steps(_agent_runs(pid))
+    return agent.steps_to_graph(steps) if steps else None
+
+
+def _adopt_learned(pid):
+    """! @brief Make the learned graph the pipeline's graph. @return True when there was one."""
+    g = _learned_graph(pid)
+    if g is None:
+        return False
+    if pid == pls.DEFAULT_ID:
+        HOST.set_config("pipeline_tree", g)
+    else:
+        HOST.set_config("pipelines", pls.with_graph(state, pid, g))
+    return True
 
 
 def _metadata_context(fp):
@@ -125,7 +222,7 @@ def _pose_stage_fn():
     _pose_fn) means the pipeline's pose node becomes an inert no-op when the
     module is off, with no core code path to maintain.
     """
-    stage = HOST.pipeline_stages.get("pose") if 'module_host' in globals() else None
+    stage = HOST.pipeline_stages.get("pose") if HOST is not None else None
     return stage["fn"] if stage else None
 
 def _module_stage_fns():
@@ -133,7 +230,7 @@ def _module_stage_fns():
     pipeline already takes as dedicated kwargs (pose). Passed to run_pipeline's
     generic stage_fns so any module node type (e.g. rating's 'rate') dispatches
     without a per-type kwarg."""
-    if 'module_host' not in globals():
+    if HOST is None:
         return {}
     # Only enabled modules ever registered a stage, so no enabled-check here.
     return {name: s["fn"] for name, s in HOST.pipeline_stages.items()
@@ -142,7 +239,7 @@ def _module_stage_fns():
 def _ocr_fn():
     """! @brief The pipeline's OCR hook, registered by the ocr module as stage "ocr"
     (fn(image_bgr) -> {text, lines}); None when the module is off."""
-    stage = HOST.pipeline_stages.get("ocr") if 'module_host' in globals() else None
+    stage = HOST.pipeline_stages.get("ocr") if HOST is not None else None
     return stage["fn"] if stage else None
 
 def _person_fn(bgr):
@@ -155,7 +252,7 @@ def _seg_fn():
     """! @brief The pipeline's box-masking hook, registered by the segmentation module
     as stage "segment_boxes" (fn(image_bgr, boxes) -> instances with mask_svg);
     None when the module is off, and the pipeline's segment node is a no-op."""
-    stage = HOST.pipeline_stages.get("segment_boxes") if 'module_host' in globals() else None
+    stage = HOST.pipeline_stages.get("segment_boxes") if HOST is not None else None
     return stage["fn"] if stage else None
 
 def _pipeline_endpoints():
@@ -274,13 +371,13 @@ def run_pipeline_route():
     if img is None:
         return jsonify({"success": False, "error": "Decode failed."})
     bgr  = _to_bgr(img)
-    tree = state.get("pipeline_tree") or DEFAULT_PIPELINE
+    pid = str(request.json.get("pipeline") or "") or None
 
     def _progress(msg):
         HOST.set_status(f"Smart Tag: {msg}")
 
     try:
-        analysis = _run_pipeline_on(bgr, fp, tree, _progress)
+        analysis = _run_pipeline_on(bgr, fp, None, _progress, pipeline_id=pid)
     except Exception as e:
         HOST.set_status("Ready.")
         return jsonify({"success": False, "error": str(e)})
@@ -295,9 +392,9 @@ def bulk_pipeline():
     filenames = request.json.get("filenames", [])
     if not state.get("oai_endpoint") or not state.get("oai_model"):
         return jsonify({"success": False, "error": "LLM not configured."})
-    tree = state.get("pipeline_tree") or DEFAULT_PIPELINE
+    pid = str(request.json.get("pipeline") or "") or None
     total = len(filenames)
-    done, errors = 0, []
+    done, errors, by_pipeline = 0, [], {}
     for i, fn in enumerate(filenames):
         fp = get_safe_path(MEDIA_DIR, fn)
         if not fp or not os.path.exists(fp):
@@ -307,14 +404,16 @@ def bulk_pipeline():
             if img is None:
                 errors.append(fn); continue
             def _prog(msg, i=i): HOST.set_status(f"Smart Tag {i+1}/{total}: {msg}")
-            analysis = _run_pipeline_on(_to_bgr(img), fp, tree, _prog)
+            analysis = _run_pipeline_on(_to_bgr(img), fp, None, _prog, pipeline_id=pid)
             _apply_pipeline_result(fp, analysis)
             done += 1
+            name = (analysis.get("pipeline") or {}).get("name", "")
+            by_pipeline[name] = by_pipeline.get(name, 0) + 1
         except Exception as e:
             errors.append(fn)
             access_logger.error(f"bulk_pipeline {fn}: {e}")
     HOST.set_status("Ready.")
-    return jsonify({"success": True, "done": done, "errors": errors})
+    return jsonify({"success": True, "done": done, "errors": errors, "by_pipeline": by_pipeline})
 
 def autotag_toggle():
     HOST.set_config("autotag_enabled", bool(request.json.get("enabled", False)))

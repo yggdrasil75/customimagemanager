@@ -198,9 +198,12 @@ _NULL = _Null()
 def run_graph(graph, image_bgr, llm, *, known=None, metadata=None, progress=None,
               pose_fn=None, ocr_fn=None, person_fn=None, panel_fn=None, seg_fn=None,
               stage_fns=None, endpoints=None, max_boxes=12, crop_pad=0.04,
-              _inner=None):
+              _inner=None, collect=None):
     """! @brief Evaluate a graph/1 pipeline. Returns the analysis dict engine.run_pipeline
-    returns, plus analysis["metadata"] = {field: value} for End.metadata wires."""
+    returns, plus analysis["metadata"] = {field: value} for End.metadata wires.
+    @param collect  node ids whose raw outputs are also returned, as
+                    analysis["_outputs"] = {id: {port: value}} (the pipeline agent
+                    runs one tool at a time this way)."""
     nodes = {n["id"]: n for n in graph.get("nodes", []) if n.get("id")}
     stage_fns = stage_fns or {}
     endpoints = list(endpoints or [])
@@ -520,6 +523,7 @@ def run_graph(graph, image_bgr, llm, *, known=None, metadata=None, progress=None
         for k in list(s.keys()):
             if k == "tags" or k.endswith("_tags"):
                 s[k] = _dedup([str(x) for x in (s.get(k) or [])])
+    collected = {nid: outputs_of(nodes[nid]) for nid in (collect or []) if nid in nodes}
     meta_patch = {}
     for m in ins.get("metadata") or []:
         if isinstance(m, dict):
@@ -527,7 +531,8 @@ def run_graph(graph, image_bgr, llm, *, known=None, metadata=None, progress=None
     return {"schema": SCHEMA, "image_type": ins.get("image_type"),
             "summary": _s(ins.get("description")) or "", "tags": _dedup([str(t) for t in tags]),
             "subjects": subjects, "panels": ins.get("panels") or [],
-            "pose": ins.get("pose"), "ocr": ins.get("ocr"), "metadata": meta_patch}
+            "pose": ins.get("pose"), "ocr": ins.get("ocr"), "metadata": meta_patch,
+            **({"_outputs": collected} if collect else {})}
 
 
 def _crop_rect_for(img, box, pad):

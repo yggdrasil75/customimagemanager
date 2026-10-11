@@ -279,3 +279,19 @@ def test_graph_setting_validates(lp, client):
     assert d["success"] and engine.is_graph(d["graph"]) and "group_trips" in d["catalog"]
     r = client.post("/api/update_settings", json={"library_pipeline_graph": {"nodes": []}}).get_json()
     assert "library_pipeline_graph" in (r.get("errors") or {}) or r.get("success") is False
+
+
+def test_run_limited_to_selection(lp, client, upload):
+    host = lp
+    rels = [upload(seed=4300 + i, name="sel%d.png" % i, folder="lp_sel") for i in range(7)]
+    for i, rel in enumerate(rels):
+        _date(host, rel, T(12, 8 + i))
+    graph = {"schema": engine.SCHEMA, "nodes": [
+        {"id": "start", "type": "start", "folder": "lp_sel"},
+        {"id": "trips", "type": "group_trips", "min_files": 3, "in": {"files": ["start", "files"]}},
+        {"id": "albums", "type": "make_albums", "in": {"groups": ["trips", "groups"]}},
+        {"id": "end", "type": "end", "in": {"plan": [["albums", "plan"]]}}]}
+    r = client.post("/api/library_pipeline/run", json={"graph": graph, "files": rels[:4]}).get_json()
+    run = _wait(client, r["run_id"])
+    assert [sorted(e["files"]) for e in run["plan"]] == [sorted(rels[:4])]
+    assert client.post("/api/library_pipeline/run", json={"files": "x"}).status_code == 400

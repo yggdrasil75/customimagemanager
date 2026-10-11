@@ -40,8 +40,10 @@ def _list(v):
 class Library:
     """! @brief Bulk reads of everything the pipeline groups by. One per run (it caches)."""
 
-    def __init__(self, host, use_file_dates=False):
+    def __init__(self, host, use_file_dates=False, only=None):
+        """! @param only  rel_paths a run is limited to (the gallery selection), or None."""
         self.host = host
+        self.only = set(only) if only else None
         self.db = host.db()
         self.use_file_dates = bool(use_file_dates)
         self._items = {}
@@ -61,7 +63,8 @@ class Library:
         extra = "COALESCE(files.media_kind,'image') IN ('image','video')"
         sql = "SELECT files.rel_path FROM files%s%s%s ORDER BY files.rel_path" % (
             where, " AND " if where else " WHERE ", extra)
-        return [r[0] for r in self.db.execute(sql, list(params)).fetchall()]
+        rels = [r[0] for r in self.db.execute(sql, list(params)).fetchall()]
+        return [r for r in rels if r in self.only] if self.only is not None else rels
 
     # -- items ---------------------------------------------------------------
     def items(self, rels):

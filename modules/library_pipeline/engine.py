@@ -134,9 +134,10 @@ CATALOG = {
     "photo_pipeline": {"label": "Per-photo pipeline with group context", "kind": "act",
                        "inputs": [P("groups", "groups", opt=True), P("files", "files", opt=True)],
                        "outputs": [P("plan", "plan")],
-                       "params": {"only_undescribed": "bool", "context": "bool"},
-                       "help": "Runs the per-photo Smart Tag pipeline on the members, telling it what the library "
-                               "knows: the group's name, dates, places and the people in it."},
+                       "params": {"only_undescribed": "bool", "context": "bool", "pipeline": "text"},
+                       "help": "Runs a per-photo pipeline on the members, telling it what the library knows: the "
+                               "group's name, dates, places and the people in it. pipeline = a per-photo pipeline "
+                               "id (family_trips, ...); empty = the one each photo's scope picks."},
 }
 
 DEFAULT_GRAPH = {"schema": SCHEMA, "nodes": [
@@ -743,7 +744,8 @@ def n_photo_pipeline(n, ins, ctx, report):
                 context.append(g["description"])
             context.append(summary_text(dict(g, name=""), st))
         plan.append(_entry("photo", g, st, by, context=" ".join(context),
-                           only_undescribed=_flag(n, "only_undescribed", True)))
+                           only_undescribed=_flag(n, "only_undescribed", True),
+                           pipeline=str(n.get("pipeline") or "").strip()))
     return {"plan": plan}
 
 

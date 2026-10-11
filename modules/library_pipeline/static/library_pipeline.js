@@ -1,11 +1,15 @@
-/* library_pipeline.js - the Library graph in Settings -> Pipeline and its plan.
+/* library_pipeline.js - running the library pipeline, its plan, and its graph.
  *
- * Registers a "Library" graph with the pipeline graph editor (pipeline_graph.js):
- * load / save the library_pipeline_graph setting, and a panel under the canvas
- * to run it: Preview plans with the graph on screen, the plan lists every
- * proposed album / tag / move / per-photo run with its dates, places, people
- * and sample thumbnails, and Apply carries out the ticked entries. Without the
- * graph editor the panel still mounts at the end of the Pipeline tab.
+ * Running it: "Library pipeline" in the Review tab's actions plans over the whole
+ * library, "Auto albums" in the gallery bulk bar over the selection. The plan is
+ * pending work, so it shows as the first section of the Review tab until it is
+ * applied: every proposed album / tag / move / per-photo run with its dates,
+ * places, people and sample thumbnails, ticked entries applied with one click.
+ *
+ * Editing it: a "Library" graph registered with the pipeline graph editor
+ * (pipeline_graph.js) in Settings -> Pipeline, with the same plan panel under
+ * the canvas (Preview there runs the graph on screen, unsaved changes included).
+ * Without the graph editor the panel still mounts at the end of the Pipeline tab.
  */
 (function () {
   "use strict";
@@ -55,6 +59,7 @@
         ${btn({ id: "lp_cancel", label: "Cancel", variant: "neutral", size: "xs" })}
         <span id="lp_state" class="text-[11px] text-gray-400"></span>
         <span id="lp_flags" class="text-[11px] text-gray-500 ml-auto"></span>
+        ${api ? "" : btn({ id: "lp_edit", label: "Edit graph", variant: "neutral", size: "xs", title: "Settings -> Pipeline, Library graph", attrs: { "data-gate-keep": "1" } })}
       </div>
       <details id="lp_log_box" class="mt-1"><summary class="text-[11px] text-gray-500 cursor-pointer">Run log</summary>
         <pre id="lp_log" class="text-[10px] text-gray-400 whitespace-pre-wrap max-h-32 overflow-y-auto"></pre></details>
@@ -63,6 +68,7 @@
     $("lp_apply").addEventListener("click", () => apply([...S.picked]));
     $("lp_apply_all").addEventListener("click", () => apply(null));
     $("lp_cancel").addEventListener("click", async () => { await post("/api/library_pipeline/cancel"); refresh(); });
+    if ($("lp_edit")) $("lp_edit").addEventListener("click", open);
     $("lp_plan").addEventListener("change", ev => {
       const cb = ev.target.closest("[data-lp-pick]");
       if (cb) { if (cb.checked) S.picked.add(+cb.dataset.lpPick); else S.picked.delete(+cb.dataset.lpPick); }
@@ -111,6 +117,12 @@
     if (d.run) S.run = d.run;
     draw(d);
     if (S.state.running) S.timer = setTimeout(() => refresh(S.state.run_id || runId), POLL_MS);
+    else if (S.wasRunning) {
+      refreshCount();
+      // the Review section was mounted mid-run: redraw the pane with the finished plan
+      if (S.el.closest("#review_pane_list") && typeof loadReviewPane === "function") { S.wasRunning = false; loadReviewPane(); return; }
+    }
+    S.wasRunning = !!S.state.running;
   }
 
   function fmtDate(t) { return t ? new Date(t * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : ""; }
@@ -175,5 +187,63 @@
     }, 0);
   });
 
-  window.CIMLibraryPipeline = { refresh, source };
+  /** @brief Open Settings -> Pipeline on the Library graph (the gallery's "Organise library" entry). */
+  async function open() {
+    if (window.CIMPipelineGraph) window.CIMPipelineGraph.select("library");
+    if (typeof openSettings === "function") await openSettings("module_pipeline");
+    const tab = document.querySelector('.settings-tab[data-settings-tab="module_pipeline"]');
+    if (tab) tab.click();
+  }
+  /** @brief Plan over the whole library (Review) or the selection (bulk bar), then show
+   *  the plan where it is reviewed: the Review tab. */
+  async function runOn(files) {
+    const body = files ? { files } : {};
+    const d = await post("/api/library_pipeline/run", body);
+    if (!d.success) { toast(d.error || "Could not start the library pipeline"); return; }
+    toast(files ? `Planning auto albums for ${files.length} file(s)... the plan shows in Review.`
+                : "Planning the library... the plan shows in Review.");
+    if (typeof setPane === "function") setPane("review");
+    if (typeof loadReviewPane === "function") loadReviewPane();
+  }
+  function runLibrary() { return runOn(null); }
+  function runSelection() {
+    const sel = window.selectedFiles ? [...window.selectedFiles] : [];
+    if (!sel.length) { toast("Select some files first."); return; }
+    return runOn(sel);
+  }
+  function refreshCount() { if (typeof refreshReviewCount === "function") refreshReviewCount(); }
+
+  /** @brief The plan as a Review section: shown while a run goes or while it has entries left. */
+  async function reviewSection(box) {
+    let d;
+    try { d = await fetch("/api/library_pipeline/status").then(r => r.json()); } catch (e) { return 0; }
+    if (!d || !d.success) return 0;
+    const run = d.run, st = d.state || {};
+    const left = run ? (run.plan || []).filter(e => !e.blocked && !(run.applied || {})[String(e.id)]).length : 0;
+    if (!st.running && !(run && run.status === "planned" && left)) return 0;
+    box.className = "mb-3";
+    box.innerHTML = `<div class="text-xs text-sky-300 font-bold mb-1">Library pipeline | ${st.running ? "running" : left + " proposed"}</div>`;
+    const el = document.createElement("div");
+    box.appendChild(el);
+    mountPanel(el, null);
+    return st.running ? 1 : left;
+  }
+
+  function registerButtons() {
+    if (typeof registerControlButton !== "function") return;
+    registerControlButton("review_actions", {
+      label: "Library pipeline", id: "lp_btn_review", variant: "secondary", feature: "settings.pipeline",
+      onclick: "CIMLibraryPipeline.runLibrary()",
+      title: "Plan automatic albums, tags and folders for the whole library (nothing changes until you apply)" });
+    registerControlButton("gallery_bulk", {
+      label: "Auto albums", id: "lp_btn_bulk", variant: "secondary", feature: "settings.pipeline",
+      onclick: "CIMLibraryPipeline.runSelection()",
+      title: "Run the library pipeline on the selected files; the plan shows in Review" });
+  }
+  if (window.registerReviewSection) window.registerReviewSection(reviewSection);
+  else (window._reviewSections = window._reviewSections || []).push(reviewSection);
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", registerButtons);
+  else registerButtons();
+
+  window.CIMLibraryPipeline = { refresh, source, open, runLibrary, runSelection, reviewSection };
 })();
