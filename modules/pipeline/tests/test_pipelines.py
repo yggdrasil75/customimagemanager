@@ -79,6 +79,7 @@ def test_agent_runs_tools_and_finishes():
     # every step's prompt carries the goal, the tools and the WHOLE history so far
     assert 'pipeline "Family trips"' in llm.prompts[0] and "Name the family." in llm.prompts[0]
     assert "first run" in llm.prompts[0] and "This run so far: nothing yet." in llm.prompts[0]
+    assert "Tools used so far: 0 (at most 8)" in llm.prompts[0] and "there is no reward for using more" in llm.prompts[0]
     assert "step 1: detect_persons" in llm.prompts[2] and "step 2: each_subject" in llm.prompts[2]
     assert "Folder: trips" in llm.prompts[0]
     assert "  - segment" not in llm.prompts[0]                 # a missing hook = no tool
@@ -97,11 +98,39 @@ def test_agent_prompt_has_last_run_and_new_tools():
     assert "- ocr [NEW]:" in p and "- llm [NEW]" not in p
 
 
-def test_agent_survives_a_bad_answer_and_budget():
-    llm = Script([{"tool": "detect_boxes", "params": {"prompt": "the dog"}}] * 5)
-    analysis, record = agent.run(IMG, dict(PIPE, max_steps=3), HOOKS, llm, {})
-    assert len(record["history"]) == 3 and not record["finished"]
+def test_agent_max_tools_forces_finish():
+    llm = Script([{"tool": "detect_boxes", "params": {"prompt": "the dog"}}] * 3
+                 + [{"tool": "finish", "params": {"description": "A dog."}}])
+    analysis, record = agent.run(IMG, dict(PIPE, max_steps=2), HOOKS, llm, {})
+    tools = [(h["tool"], h["result"][:8]) for h in record["history"]]
+    assert tools == [("detect_boxes", "1 subjec"), ("detect_boxes", "1 subjec"), ("detect_boxes", "refused:"),
+                     ("finish", "done")]
+    assert record["finished"] and analysis["summary"] == "A dog."
+    assert "call finish now" in llm.prompts[2] and "  - detect_boxes" not in llm.prompts[2]   # only finish offered
     assert analysis["subjects"][0]["label"] == "dog"
+
+
+def test_agent_min_tools_refuses_an_early_finish():
+    llm = Script([{"tool": "finish", "params": {"description": "too soon"}},
+                  {"tool": "ocr", "params": {}},
+                  {"tool": "finish", "params": {"description": "Read the sign."}}])
+    analysis, record = agent.run(IMG, dict(PIPE, min_steps=1, max_steps=5), HOOKS, llm, {})
+    assert [h["tool"] for h in record["history"]] == ["finish", "ocr", "finish"]
+    assert record["history"][0]["result"].startswith("refused: use at least 1")
+    assert analysis["summary"] == "Read the sign."
+    assert "Use at least 1 more before finishing" in llm.prompts[0]
+    assert [s["tool"] for s in record["steps"]] == ["ocr", "finish"]   # the refused finish isn't kept
+
+
+def test_agent_never_loops_forever():
+    llm = Script([{"tool": "nope", "params": {}}] * 50)
+    _a, record = agent.run(IMG, dict(PIPE, min_steps=2, max_steps=3), HOOKS, llm, {})
+    assert len(record["history"]) == 3 + 2 + 4 and not record["finished"]
+
+
+def test_min_steps_setting_is_bounded():
+    assert pls.clean_one({"name": "x", "min_steps": 9, "max_steps": 4})["min_steps"] == 4
+    assert pls.clean_one({"name": "x"})["min_steps"] == 0
 
 
 def _runs(*seqs):
@@ -263,7 +292,8 @@ def test_pose_tool_and_postures_on_subjects():
 
 
 def test_barcodes_and_similar_tools():
-    hooks = dict(HOOKS, barcodes_fn=lambda img: {"codes": [{"type": "QRCODE", "data": "https://x.example"}]},
+    hooks = dict(HOOKS, barcodes_fn=lambda img: {"codes": [{"format": "QRCODE", "value": "https://x.example",
+                                                            "cx": .5, "cy": .5, "w": .2, "h": .2}]},
                  similar_fn=lambda img, n: [{"rel_path": "trip/a.jpg", "score": 0.93, "description": "Ana at the beach",
                                              "tags": ["beach"], "albums": ["Lisbon 2024"]}][:n])
     llm = Script([{"tool": "barcodes", "params": {}}, {"tool": "similar_photos", "params": {"count": 3}},
@@ -297,3 +327,37 @@ def test_agent_tools_route_and_library_context(client, upload, llm_on, ungated):
     assert known["taken"] == "2024-06-03"
     from modules.pipeline.engine import _known_text
     assert "Taken: 2024-06-03" in _known_text(known)
+
+
+
+# -- results reach the file -----------------------------------------------------------------
+def test_numpy_model_output_is_written_to_the_file(client, upload):
+    """! @brief Detector / pose / segmentation output carries numpy numbers; one of them used to
+    fail the whole sidecar write, so nothing the pipeline found was saved."""
+    from cimtest import read_meta, media_path
+    fn = upload(seed=5105)
+    f = np.float32
+    kp = [{"x": f(10), "y": f(20), "v": f(0.9)}]
+    a = {"tags": ["beach"], "summary": "A man waves.",
+         "pose": {"names": ["nose"], "people": [{"keypoints": kp, "conf": np.float64(0.8)}]},
+         "subjects": [{"label": "person", "box": {"cx": f(.5), "cy": f(.5), "w": f(.4), "h": f(.6)},
+                       "mask_svg": {"underscan": "M0 0L1 0L1 1Z"}, "posture": "standing, one arm raised",
+                       "tags": ["wave"]}],
+         "codes": [{"value": "https://x.example", "format": "QRCode", "cx": f(.2), "cy": f(.2), "w": f(.1), "h": f(.1)}]}
+    pc._apply_pipeline_result(media_path(fn), a)
+    m = read_meta(client, fn)
+    assert m["pose"] and m["pose"]["people"][0]["keypoints"][0]["x"] == 10
+    person = next(r for r in m["regions"] if r["class_name"] == "person")
+    assert person["mask_svg"]["underscan"] == "M0 0L1 0L1 1Z"
+    assert person["region_description"] == "Standing, one arm raised"
+    code = next(r for r in m["regions"] if r["class_name"] == "barcode")
+    assert code["barcode_value"] == "https://x.example"
+    assert "A man waves." in m["description"] and "?beach" in m["tags"]
+
+
+def test_a_failed_write_is_reported(client, upload, monkeypatch):
+    from cimtest import media_path
+    fn = upload(seed=5106)
+    monkeypatch.setattr(pc, "update_file", lambda *a, **k: {"success": False, "error": "metadata write failed"})
+    with pytest.raises(RuntimeError, match="writing the result to the file failed"):
+        pc._apply_pipeline_result(media_path(fn), {"tags": [], "summary": "x"})

@@ -209,8 +209,22 @@ def _subjects_line(subs):
     return "%d subjects: %s" % (len(subs), "; ".join(parts))
 
 
-def build_prompt(pipe, last_run, recurring, tools, new_tools, history, known_text, steps_left):
-    """! @brief The prompt of one step (everything the agent needs, every time)."""
+def budget_line(used, min_tools, max_tools):
+    """! @brief How many tools the agent may still use, in words that don't invite spending them all."""
+    if used >= max_tools:
+        return ("You have used %d tools, the most this pipeline allows: call finish now with the full "
+                "description and tags." % used)
+    parts = ["Tools used so far: %d (at most %d)." % (used, max_tools)]
+    if used < min_tools:
+        parts.append("Use at least %d more before finishing." % (min_tools - used))
+    parts.append("Only use tools this photo needs, and finish as soon as you can describe it fully - "
+                 "there is no reward for using more.")
+    return " ".join(parts)
+
+
+def build_prompt(pipe, last_run, recurring, tools, new_tools, history, known_text, budget):
+    """! @brief The prompt of one step (everything the agent needs, every time).
+    @param budget  the budget_line() text: tools used, the minimum and the maximum."""
     lines = ['You are the pipeline agent of the photo-library pipeline "%s".' % pipe.get("name", "")]
     lines.append("What it is for: " + (pipe.get("goal") or DEFAULT_GOAL))
     scope = " ".join(x for x in (pipe.get("q"), ("folder " + pipe["folder"]) if pipe.get("folder") else "",
@@ -245,7 +259,7 @@ def build_prompt(pipe, last_run, recurring, tools, new_tools, history, known_tex
     else:
         lines.append("This run so far: nothing yet.")
     lines.append("")
-    lines.append("You have %d step%s left (finish counts as one)." % (steps_left, "" if steps_left == 1 else "s"))
+    lines.append(budget)
     lines.append('Answer with JSON only: {"tool": "<name>", "params": {...}, "why": "short reason"}')
     return "\n".join(lines)
 
@@ -260,6 +274,7 @@ class State:
         self.ocr = None
         self.pose = None
         self.panels = []
+        self.codes = []
         self.image_type = None
         self.stages = {}
 
@@ -369,10 +384,13 @@ def execute(tool, params, img, st, hooks, llm, known_text):
         return "%d people. %s" % (len(words), line)
     if tool == "barcodes":
         res = hooks["barcodes_fn"](img) or {}
-        codes = [c for c in res.get("codes") or [] if c.get("data") or c.get("text")]
+        # the barcodes module answers {value, format, cx, cy, w, h}
+        codes = [c for c in res.get("codes") or [] if c.get("value") or c.get("data") or c.get("text")]
+        st.codes.extend(codes)
         if not codes:
             return res.get("note") or "no readable codes"
-        line = "; ".join("%s: %s" % (c.get("type") or c.get("format") or "code", c.get("data") or c.get("text"))
+        line = "; ".join("%s: %s" % (c.get("format") or c.get("type") or "code",
+                                     c.get("value") or c.get("data") or c.get("text"))
                          for c in codes[:10])
         st.texts.append(("codes", line))
         return line
@@ -414,7 +432,7 @@ def analysis_of(st, final):
         s["tags"] = _dedup([str(x) for x in (s.get("tags") or [])])
     return {"image_type": final.get("image_type") or st.image_type, "summary": summary,
             "tags": _dedup([t.strip() for t in tags if str(t).strip()]), "subjects": st.subjects,
-            "panels": st.panels, "pose": st.pose, "ocr": st.ocr, "metadata": {}}
+            "panels": st.panels, "pose": st.pose, "ocr": st.ocr, "codes": st.codes, "metadata": {}}
 
 
 def run(img, pipe, hooks, llm, memory, progress=None):
@@ -430,12 +448,17 @@ def run(img, pipe, hooks, llm, memory, progress=None):
     new_tools = set(tools) - set((last or {}).get("tools") or tools) if last else set()
     known_text = _known_text(hooks.get("known") or {})
     st, history, final = State(), [], {}
-    max_steps = int(pipe.get("max_steps") or 8)
-    for step in range(max_steps):
-        prompt = build_prompt(pipe, last, memory.get("recurring") or [], tools, new_tools, history,
-                              known_text, max_steps - step)
+    max_tools = max(1, int(pipe.get("max_steps") or 8))
+    min_tools = max(0, min(max_tools, int(pipe.get("min_steps") or 0)))
+    used = 0
+    # every tool use, finish, and a few refused / unknown picks; never an endless loop
+    for _call in range(max_tools + min_tools + 4):
+        over = used >= max_tools
+        shown = {"finish": tools["finish"]} if over else tools
+        prompt = build_prompt(pipe, last, memory.get("recurring") or [], shown, new_tools, history,
+                              known_text, budget_line(used, min_tools, max_tools))
         if progress:
-            progress("agent step %d/%d" % (step + 1, max_steps))
+            progress("agent: %d of at most %d tools%s" % (used, max_tools, ", finishing" if over else ""))
         try:
             ans = llm(prompt, img, "json") or {}
         except Exception as e:
@@ -445,10 +468,18 @@ def run(img, pipe, hooks, llm, memory, progress=None):
         params = ans.get("params") if isinstance(ans.get("params"), dict) else {}
         why = str(ans.get("why") or "")[:200]
         if tool == "finish":
+            if used < min_tools:
+                history.append({"tool": "finish", "params": {}, "why": why,
+                                "result": "refused: use at least %d tools before finishing (used %d)" % (min_tools, used)})
+                continue
             final = params
             history.append({"tool": "finish", "params": {k: v for k, v in params.items() if k != "description"},
                             "why": why, "result": "done"})
             break
+        if over:
+            history.append({"tool": tool or "?", "params": params, "why": why,
+                            "result": "refused: the tool budget (%d) is used up; call finish" % max_tools})
+            continue
         if tool not in tools:
             history.append({"tool": tool or "?", "params": params, "why": why,
                             "result": "error: no such tool; pick one of: " + ", ".join(tools)})
@@ -457,9 +488,11 @@ def run(img, pipe, hooks, llm, memory, progress=None):
             res = execute(tool, params, img, st, hooks, llm, known_text)
         except Exception as e:
             res = "error: %s" % e
+        used += 1
         history.append({"tool": tool, "params": params, "why": why, "result": res})
     analysis = analysis_of(st, final)
-    record = {"tools": sorted(tools), "steps": [h for h in history if h["tool"] in tools or h["tool"] == "finish"],
+    record = {"tools": sorted(tools),
+              "steps": [h for h in history if (h["tool"] in tools and not str(h.get("result", "")).startswith("refused"))],
               "history": history, "finished": bool(final)}
     analysis["agent_steps"] = history
     return analysis, record

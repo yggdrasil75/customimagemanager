@@ -404,10 +404,13 @@ def _apply_pipeline_result(fp, analysis):
             # name the naming step produced ("jill" or a descriptor like
             # "tall girl"). Keep them distinct so the class rides in the
             # Description JSON and Name carries the instance.
+            rdesc = s.get("description", "") or ""
+            if s.get("posture") and s["posture"] not in rdesc:
+                rdesc = (rdesc + " (" + s["posture"] + ")").strip() if rdesc else s["posture"].capitalize()
             reg = {"class_name": s.get("label", "subject"),
                    "region_name": s.get("name", ""),
                    "region_type": s.get("region_type", ""),
-                   "region_description": s.get("description", ""),
+                   "region_description": rdesc,
                    "region_tags": [{"tag": tag_name(t), "generated": True,
                                     "confirmed": False}
                                    for t in s.get("tags", []) if tag_name(t)],
@@ -426,6 +429,13 @@ def _apply_pipeline_result(fp, analysis):
                 regions.append({"class_name": sb.get("class_name", "part"),
                                 "cx": cbb["cx"], "cy": cbb["cy"], "w": cbb["w"], "h": cbb["h"],
                                 "confirmed": False})
+    for c in analysis.get("codes") or []:       # barcodes / QR codes the agent read
+        cbb = _clamp_box(c)
+        val = c.get("value") or c.get("data") or c.get("text")
+        if cbb and val:
+            regions.append({"class_name": "barcode", "region_type": "BarCode",
+                            "barcode_value": str(val), "barcode_format": str(c.get("format") or c.get("type") or ""),
+                            "cx": cbb["cx"], "cy": cbb["cy"], "w": cbb["w"], "h": cbb["h"], "confirmed": False})
     ocr = analysis.get("ocr")
     if ocr and ocr.get("lines"):
         for ln in ocr["lines"]:
@@ -448,7 +458,10 @@ def _apply_pipeline_result(fp, analysis):
     new = {"tags": tags, "description": desc, "regions": regions, "analysis": analysis}
     if pose and pose.get("people"):
         new["pose"] = pose
-    update_file(fp, set=new)
+    res = update_file(fp, set=new)
+    if not res.get("success"):
+        # used to fail silently: the run looked done but nothing reached the file
+        raise RuntimeError("writing the result to the file failed: %s (see error.log)" % (res.get("error") or "unknown"))
     _apply_metadata_patch(fp, analysis.get("metadata"))
     return tags, desc, regions
 
@@ -478,7 +491,11 @@ def run_pipeline_route():
         HOST.set_status("Ready.")
         return jsonify({"success": False, "error": str(e)})
 
-    tags, desc, regions = _apply_pipeline_result(fp, analysis)
+    try:
+        tags, desc, regions = _apply_pipeline_result(fp, analysis)
+    except RuntimeError as e:
+        HOST.set_status("Ready.")
+        return jsonify({"success": False, "error": str(e)})
     HOST.set_status("Ready.")
     return jsonify({"success": True, "analysis": analysis, "pose": analysis.get("pose"),
                     "tags": tags, "description": desc, "regions": regions})

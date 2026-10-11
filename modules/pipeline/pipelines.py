@@ -41,7 +41,7 @@ def slug(name):
 
 def default_entry():
     return {"id": DEFAULT_ID, "name": "Default", "q": "", "folder": "", "album": "", "enabled": True,
-            "mode": "graph", "goal": "", "max_steps": 8}
+            "mode": "graph", "goal": "", "min_steps": 0, "max_steps": 8}
 
 
 def clean_one(p):
@@ -54,7 +54,9 @@ def clean_one(p):
            "album": str(p.get("album") or "").strip()[:200], "enabled": bool(p.get("enabled", True)),
            "mode": p.get("mode") if p.get("mode") in MODES else "graph",
            "goal": str(p.get("goal") or "").strip()[:2000],
-           "max_steps": max(1, min(30, int(float(p.get("max_steps") or 8))))}
+           "max_steps": max(1, min(30, int(p.get("max_steps") or 8)))}
+    # the fewest tools the agent must use before it may finish (0 = none), never above the most
+    out["min_steps"] = max(0, min(out["max_steps"], int(float(p.get("min_steps") or 0))))
     if pid == DEFAULT_ID:
         out.update(q="", folder="", album="", enabled=True)     # the default catches everything
     elif p.get("graph") is not None:

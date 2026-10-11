@@ -98,7 +98,10 @@
       <div id="plp_agent_opts" class="plp-grid mt-1 ${p.mode === "graph" ? "hidden" : ""}">
         <label class="plp-wide">Agent goal: what this pipeline is for
           <textarea id="plp_goal" rows="2" class="${input}" placeholder="e.g. Family trips: name everyone, where we were, what we did.">${esc(p.goal)}</textarea></label>
-        <label>Steps per photo <input id="plp_steps" type="number" min="1" max="30" class="${input}" value="${p.max_steps}"></label>
+        <label title="The agent may not finish before it has used this many tools (0 = it decides)">Fewest tools per photo
+          <input id="plp_min_steps" type="number" min="0" max="30" class="${input}" value="${p.min_steps || 0}"></label>
+        <label title="After this many tools the agent has to finish">Most tools per photo
+          <input id="plp_steps" type="number" min="1" max="30" class="${input}" value="${p.max_steps}"></label>
       </div>
       <div class="text-[11px] text-gray-500 mt-1"><span id="plp_count"></span> <span id="plp_current"></span>
         <span class="ml-1">Order: pipelines are tried top to bottom (this is ${idx + 1} of ${all.length}); the first whose scope lists a photo runs on it.</span></div>
@@ -107,7 +110,7 @@
     $("plp_mode").addEventListener("change", () => $("plp_agent_opts").classList.toggle("hidden", val("plp_mode") === "graph"));
     // every field saves itself a moment after it changes (no button to forget)
     const collect = () => {
-      const body = { name: val("plp_name"), mode: val("plp_mode"), goal: val("plp_goal"), max_steps: val("plp_steps") };
+      const body = { name: val("plp_name"), mode: val("plp_mode"), goal: val("plp_goal"), max_steps: val("plp_steps"), min_steps: val("plp_min_steps") };
       if (!isDefault) Object.assign(body, { q: val("plp_q"), folder: val("plp_folder"), album: val("plp_album"), enabled: val("plp_enabled") });
       return body;
     };

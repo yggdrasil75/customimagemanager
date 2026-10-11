@@ -325,6 +325,10 @@ def build_region_list_xml(regions, esc, desc_to_json, see_also_link, new_uuid):
             ext_parts.append(f'<cim:BarCodeFormat>{esc(str(bc_fmt))}</cim:BarCodeFormat>')
         # only non-empty mask paths are written
         mask_svg = b.get("mask_svg") or {}
+        if isinstance(mask_svg, str):          # a bare path: the underscan mask
+            mask_svg = {"underscan": mask_svg}
+        elif not isinstance(mask_svg, dict):
+            mask_svg = {}
         for _meth, _tag in (("underscan", "MaskUnderscan"),
                             ("overscan", "MaskOverscan"),
                             ("centerline", "MaskCenterline")):

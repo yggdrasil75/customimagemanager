@@ -3140,6 +3140,20 @@ def _present(fp) -> bool:
     return bool(fp) and (os.path.exists(fp) or os.path.exists(os.path.splitext(fp)[0] + ".xmp"))
 
 
+def _plain(v):
+    """! @brief A value with numpy scalars / arrays (what detectors, pose and segmentation
+    models return) turned into plain Python, so it can be written as JSON. Recurses
+    into dicts, lists and tuples; anything else is returned as is."""
+    if isinstance(v, dict):
+        return {k: _plain(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_plain(x) for x in v]
+    if isinstance(v, np.generic):
+        return v.item()
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    return v
+
 def update_file(target=None, *, set=None, add=None, remove=None, exif=None, xmp=None,
                 db=None, table="files", key=None, where=None, defaults=None, dont_write=False,
                 history=True, meta=None, force=False, commit=True) -> dict:
@@ -3166,6 +3180,8 @@ def update_file(target=None, *, set=None, add=None, remove=None, exif=None, xmp=
     @return {"success", "changed": [...], "error"?, ...}.
     @throws ValueError on a malformed call (unknown field, missing dont_write).
     """
+    # model output carries numpy numbers; one of them used to fail the whole sidecar write
+    set, add = (_plain(set) if isinstance(set, dict) else set), (_plain(add) if isinstance(add, dict) else add)
     if isinstance(target, (list, tuple)):
         results = {t: update_file(t, set=set, add=add, remove=remove, exif=exif, xmp=xmp,
                                   db=db, table=table, key=key, dont_write=dont_write,
