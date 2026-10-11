@@ -63,14 +63,21 @@
   }
   function buildSettingsFields(fields) {
     window._moduleFields = {};
-    document.querySelectorAll('[id^="module_settings_fields_"]').forEach(m => { m.innerHTML = ""; });
+    // Drop only the widgets a previous build made: a mount also holds whatever a
+    // module rendered into it itself (the pipeline graph editor, the agent panel),
+    // and that must survive Settings being opened again.
+    document.querySelectorAll('[id^="module_settings_fields_"] > [data-settings-field]').forEach(el => el.remove());
     for (const f of fields) {
       if ((f.pane || "general") === "module") {
         (window._moduleFields[f.module_id] ||= []).push(f);
         continue;
       }
       const mount = fieldMount(f);
-      if (mount) mount.appendChild(fieldEl(f, saveSetting, mount.hasAttribute("data-compact")));
+      if (mount) {
+        const el = fieldEl(f, saveSetting, mount.hasAttribute("data-compact"));
+        el.setAttribute("data-settings-field", f.key);
+        mount.appendChild(el);
+      }
     }
     if (window.renderModuleSettingsButtons) renderModuleSettingsButtons();
     if (window.applyFeatureVisibility) applyFeatureVisibility();

@@ -388,7 +388,8 @@
   }
 
   function mount(host) {
-    if (mounted) return;
+    if (mounted && $('plg_canvas')) return;
+    mounted = false;
     if (typeof Drawflow === 'undefined') { host.insertAdjacentHTML('afterbegin', '<p class="text-xs text-red-400">drawflow.min.js missing: run ./install.sh to fetch static/vendor/.</p>'); return; }
     mounted = true;
     const wrap = document.createElement('div');
@@ -427,6 +428,8 @@
   document.addEventListener('module-settings-tab', ev => {
     if (ev.detail !== 'pipeline') return;
     setTimeout(() => { const host = $('module_settings_fields_pipeline'); if (!host) return;
-      if (!mounted) mount(host); else if (!dirty) reloadSources().then(load).catch(() => {}); }, 0);
+      // (re)mount when the editor isn't on the page any more, whatever removed it
+      if (!mounted || !$('plg_canvas') || !host.contains($('plg_canvas'))) mount(host);
+      else if (!dirty) reloadSources().then(load).catch(() => {}); }, 0);
   });
 })();
