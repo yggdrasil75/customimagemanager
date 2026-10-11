@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 
-from .convert import convert_av, convert_image, encode_jxl
+from .convert import convert_av, convert_image, encode_jxl, needs_browser_convert
 
 ## @brief Kinds the re-encode job handles (audio and books live in their modules' own indexes).
 REENCODE_KINDS = ("image", "video")
@@ -68,10 +68,15 @@ class Jobs:
             if kind == "image" and e not in STILL_EXTS:
                 skip += 1
                 continue
-            if mode == "unsafe" and e in safe:
-                skip += 1
-                continue
             same = e == t or {e, t} == _JPEG
+            if mode == "unsafe" and e in safe:
+                # a video in a "safe" container can still hold codecs no browser plays
+                # (HEVC, ProRes, 10-bit): those are re-encoded, probed at run time
+                if kind == "video":
+                    check.append(rel)
+                else:
+                    skip += 1
+                continue
             if not same:
                 convert.append(rel)
             elif kind == "video" and mode == "all":
@@ -224,7 +229,13 @@ class Jobs:
         e = os.path.splitext(rel)[1].lower()
         if kind == "image" and media.jxl_anim_info(ap).get("animated"):
             return False  # animations follow their own output setting
-        if same_container and not self.needs_av_work(ap, target):
+        if same_container and kind == "video" and e != target:
+            # "convert only what browsers can't show" kept this container (.mov): convert it
+            # to the target only when its codecs don't play
+            if not needs_browser_convert(ap):
+                return False
+            same_container = False
+        elif same_container and not (self.needs_av_work(ap, target) or needs_browser_convert(ap)):
             return False
         new_rel = os.path.splitext(rel)[0] + (e if same_container else target)
         if new_rel != rel and host.safe_path(host.media_dir, new_rel) and \

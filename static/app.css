@@ -461,3 +461,8 @@ canvas {
   content: "Read only - you can view these settings but not change them.";
   display: block; margin-bottom: 8px; font-size: 11px; color: var(--cim-warn-400, #fbbf24);
 }
+/* Over a video while its browser copy is made (CIMVideo in gallery.js). */
+.cim-video-notice { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 25;
+  max-width: 80%; padding: 10px 14px; border-radius: 8px; text-align: center; font-size: 12px; line-height: 1.5;
+  background: rgba(17, 24, 39, 0.9); color: #e5e7eb; }
+.cim-video-notice a { color: var(--cim-accent-300, #93c5fd); text-decoration: underline; }

@@ -76,6 +76,11 @@
     el.addEventListener("mousemove", showControls);
     el.addEventListener("touchstart", showControls, { passive: true });
     $("ss_video").addEventListener("ended", () => { if (S.running && !S.paused && S.prefs.videos === "play") next(); });
+    // a video that can't play (its browser copy is still being made): move on
+    $("ss_video").addEventListener("error", () => {
+      const cur = S.files[S.index];
+      if (S.running && !S.paused && cur && cur.kind === "video" && $("ss_video").getAttribute("src")) setTimeout(next, 800);
+    });
     $("ss_transition").addEventListener("change", e => setTransition(e.target.value));
     $("ss_videos").addEventListener("change", e => setVideos(e.target.value));
     if (typeof refreshControlButtons === "function") refreshControlButtons();

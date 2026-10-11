@@ -784,7 +784,7 @@ async function selectFile(fn, opts){
     // of the <video> (absolute, object-fit:contain) and hides it entirely.
     if(typeof mediaAnim!=='undefined'&&mediaAnim){ mediaAnim.classList.add('hidden'); mediaAnim.removeAttribute('src'); }
     mediaVideo.classList.remove('hidden');
-    mediaVideo.src=`/api/file/${encodeURIComponent(fn)}?ts=${Date.now()}`;
+    CIMVideo.load(mediaVideo, fn);
     imgObj.removeAttribute('src');
     vtOverlay.enable(fn);
   }else{
@@ -792,6 +792,7 @@ async function selectFile(fn, opts){
     if(typeof mainViewer!=='undefined'&&mainViewer.strip) mainViewer.strip.disable();
     mediaVideo.pause();
     mediaVideo.removeAttribute('src');
+    CIMVideo.clear(mediaVideo);
     mediaVideo.classList.add('hidden');
     const url=`/api/file/${encodeURIComponent(fn)}?ts=${Date.now()}`;
     // Show the still on the canvas immediately (fast, and it's what most files
@@ -987,3 +988,48 @@ async function bulkDelete(){
     alert('Bulk delete error.');
   }
 }
+
+window.CIMVideo = (function(){
+  const POLL_MS = 2000;
+  const timers = new WeakMap();
+  function notice(el, html){
+    const host = el.parentElement; if(!host) return;
+    let n = host.querySelector(':scope > .cim-video-notice');
+    if(!html){ if(n) n.remove(); return; }
+    if(!n){
+      n = document.createElement('div');
+      n.className = 'cim-video-notice';
+      host.appendChild(n);
+    }
+    n.innerHTML = html;
+  }
+  function setSrc(el, rel){
+    notice(el, '');
+    el.src = `/api/file/${encodeURIComponent(rel)}?ts=${Date.now()}`;
+  }
+  async function load(el, rel){
+    clearTimeout(timers.get(el));
+    el.dataset.cimVideo = rel;
+    let st = null;
+    try{ st = await fetch('/api/encoding/video?rel=' + encodeURIComponent(rel)).then(r => r.ok ? r.json() : null); }catch(e){ st = null; }
+    if(el.dataset.cimVideo !== rel) return;          // another file was opened meanwhile
+    if(!st || !st.success || ['original', 'ready'].includes(st.state) || st.verdict === 'remux'){ setSrc(el, rel); return; }
+    if(st.state === 'failed'){
+      notice(el, `<b>This video can't play in the browser</b><br>${_esc(st.reason || '')}<br>
+        Making a browser copy failed: ${_esc(st.error || 'unknown error')}<br>
+        <a href="/api/file/${encodeURIComponent(rel)}?original=1" download>Download the original</a>`);
+      return;
+    }
+    if(st.state === 'missing'){
+      // asking for the file queues the copy
+      fetch(`/api/file/${encodeURIComponent(rel)}`, {method: 'HEAD'}).catch(() => {});
+    }
+    el.removeAttribute('src');
+    notice(el, `<b>Preparing a browser copy...</b> ${st.progress ? st.progress + '%' : ''}<br>
+      <span>${_esc(st.reason || '')}. The original is untouched.</span>`);
+    timers.set(el, setTimeout(() => { if(el.dataset.cimVideo === rel) load(el, rel); }, POLL_MS));
+  }
+  /** @brief Stop waiting and remove the notice (another, non-video file was opened). */
+  function clear(el){ clearTimeout(timers.get(el)); delete el.dataset.cimVideo; notice(el, ''); }
+  return { load, clear };
+})();

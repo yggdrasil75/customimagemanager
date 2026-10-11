@@ -82,8 +82,32 @@ def media_prefs():
     return {k: dict(v) for k, v in _MEDIA_PREFS.items()}
 
 
-def target_ext(path: str) -> str:
-    """! @brief The extension `path` is stored under."""
+# fn(abs_path) -> True when a browser plays the video (playback.Playback.check); set by
+# the module at registration, None before (then the extension decides).
+_PLAYABLE = [None]
+
+
+def set_playability(fn):
+    """! @brief Install the codec check "convert only what browsers can't show" uses for videos."""
+    _PLAYABLE[0] = fn
+
+
+def _browser_unsafe(e, k, src):
+    """! @brief True when an input of kind k can't be shown by browsers. Videos are judged
+    by their codecs when the file is at hand (a .mov is fine with H.264, not with HEVC;
+    an .mp4 with 10-bit or HEVC video is not), else by the extension."""
+    if k == 'video' and src and _PLAYABLE[0] and os.path.exists(src):
+        try:
+            return not _PLAYABLE[0](src)
+        except Exception:
+            pass
+    return e not in mt.SAFE_EXTS[k]
+
+
+def target_ext(path: str, src: str | None = None) -> str:
+    """! @brief The extension `path` is stored under.
+    @param src  the uploaded file itself, when it is at hand: videos are then judged by
+                their codecs under "convert only what browsers can't show"."""
     e = _ext(path)
     k = mt.input_kind(path)
     if k is None:  # unknown: treated as an image
@@ -94,16 +118,25 @@ def target_ext(path: str) -> str:
         return e  # only comics become a cbz
     if e in mt.RAW_INPUT_EXTS:
         return S.raw_target() or t  # raws are never stored as is
-    convert = mode == 'all' or (mode == 'unsafe' and e not in mt.SAFE_EXTS[k])
+    convert = mode == 'all' or (mode == 'unsafe' and _browser_unsafe(e, k, src or path))
     if not convert or e == t or {e, t} == {'.jpg', '.jpeg'}:
         return e
     return t
 
 
-def stored_name(input_filename: str) -> str:
-    """! @brief The name an upload is stored under (its extension per Settings > Media)."""
+def needs_browser_convert(path: str) -> bool:
+    """! @brief True when an uploaded video must be re-encoded although it keeps its
+    container: "convert only what browsers can't show" and its codecs don't play
+    (an HEVC .mp4)."""
+    return (mt.input_kind(path) == 'video' and _MEDIA_PREFS['video']['mode'] == 'unsafe'
+            and _browser_unsafe(_ext(path), 'video', path))
+
+
+def stored_name(input_filename: str, src: str | None = None) -> str:
+    """! @brief The name an upload is stored under (its extension per Settings > Media).
+    @param src  the uploaded file, so a video's codecs can decide (see target_ext)."""
     base, _ = os.path.splitext(input_filename)
-    return base + target_ext(input_filename)
+    return base + target_ext(input_filename, src)
 
 
 def stored_image_exts():

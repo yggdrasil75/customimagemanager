@@ -299,6 +299,18 @@
         ${cimButton({ label: 'Cancel', variant: 'warn', size: 'xs', cls: 'media-job-cancel' })}
       </div>`;
     root.querySelectorAll('.media-view-btn').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
+    // browser copies of videos browsers can't play (HEVC / ProRes, .mov / .mkv): made when
+    // a video is opened, or for the whole library from here
+    root.insertAdjacentHTML('beforeend', `<div class="flex items-center gap-2 text-[11px] text-gray-400 mb-2" id="media_video_copies">
+        ${cimButton({ label: 'Make browser copies of every video', variant: 'secondary', size: 'xs', cls: 'media-video-prepare',
+                      title: "Videos browsers can't play (HEVC, ProRes, 10-bit, .mov / .mkv containers) get a playable copy in .cim/play; the originals are untouched." })}
+        <span class="media-video-msg">Unplayable videos get a browser copy when they are opened; this queues them all now.</span></div>`);
+    root.querySelector('.media-video-prepare').addEventListener('click', async () => {
+      const d = await fetch('/api/encoding/video/prepare', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+        .then(r => r.json()).catch(() => null);
+      root.querySelector('.media-video-msg').textContent = d && d.success
+        ? `${d.queued} video(s) queued for a browser copy.` : 'Could not queue the copies.';
+    });
     root.querySelector('.media-job-cancel').addEventListener('click', async () => {
       await fetch('/api/encoding/job/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => {});
       watchJob();

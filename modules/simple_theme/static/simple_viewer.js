@@ -195,11 +195,16 @@
     const isVid = active() && typeof isVideoFile === "function" && fn && isVideoFile(fn);
     if (isVid) {
       vid.classList.remove("hidden"); canvas.classList.add("hidden");
-      const src = `/api/file/${encodeURIComponent(fn)}`;
-      if (!vid.src || !vid.src.includes(src)) vid.src = src;
+      // CIMVideo waits for the browser copy of a video the browser can't play (HEVC, .mov)
+      if (window.CIMVideo) { if (vid.dataset.cimVideo !== fn) window.CIMVideo.load(vid, fn); }
+      else {
+        const src = `/api/file/${encodeURIComponent(fn)}`;
+        if (!vid.src || !vid.src.includes(src)) vid.src = src;
+      }
     } else {
       vid.classList.add("hidden"); canvas.classList.remove("hidden");
       if (vid.src) { vid.pause(); vid.removeAttribute("src"); vid.load(); }
+      if (window.CIMVideo) window.CIMVideo.clear(vid);
       if (active() && typeof popoutImg !== "undefined" && typeof imgObj !== "undefined" && popoutImg.src !== imgObj.src) popoutImg.src = imgObj.src;
     }
   }

@@ -14,11 +14,12 @@ Options whose tool is missing (probe.py) are hidden. Admins can re-encode
 existing files and regenerate thumbnails as cancellable background jobs. Core
 module, registered by manager.py before the plugins.
 """
+import os
 from types import SimpleNamespace
 
 from flask import jsonify, request
 
-from . import convert, probe, schema
+from . import convert, playback, probe, schema
 from .jobs import Jobs, REENCODE_KINDS
 from .schema import DEFAULTS
 from .settings import _state, needs_av_work, thumb_params, values
@@ -77,13 +78,21 @@ def service():
         target_ext=c.target_ext, stored_name=c.stored_name,
         stored_image_exts=c.stored_image_exts, animation_ext=c.animation_ext,
         anim_video_ext=c.anim_video_ext, strips_metadata=c.strips_metadata,
-        av_needs_work=c.av_needs_work,
+        av_needs_work=c.av_needs_work, needs_browser_convert=c.needs_browser_convert,
         # encoders
         cjxl_cmd=c.cjxl_cmd, encode_jxl=c.encode_jxl, convert_image=c.convert_image,
         convert_av=c.convert_av, convert_book=c.convert_book, develop_raw=c.develop_raw,
         transcode_animation_to_video=c.transcode_animation_to_video,
         # thumbnails
-        thumb_params=thumb_params)
+        thumb_params=thumb_params,
+        # videos the browser can play (playback.py): what /api/file sends for a video
+        video_serve_path=lambda rel, abs_path: _video().serve_path(rel, abs_path),
+        video_status=lambda rel, abs_path: _video().status(rel, abs_path),
+        video_check=lambda abs_path: _video().check(abs_path)[:2])
+
+
+def _video():
+    return _state["playback"]
 
 
 def register(host):
@@ -91,6 +100,8 @@ def register(host):
     worker and the `encoding` service."""
     _state["host"] = host
     jobs = _state["jobs"] = Jobs(host, needs_av_work)
+    pb = _state["playback"] = playback.Playback(host.media_dir, encoders=probe.ffmpeg_encoders, logger=host.logger)
+    convert.set_playability(lambda abs_path: pb.check(abs_path)[0] == "ok")
     host.provide_service("encoding", service())
     host.add_config_key("media_storage", default=convert.media_prefs(), validate=convert.clean_media_prefs,
                         on_change=lambda new, old: convert.set_media_prefs(new), tab="media")
@@ -159,6 +170,35 @@ def register(host):
                    level="write", admin=True, action="thumbs_regenerate")
     host.add_route("/api/encoding/job", api_job, feature="settings.media", admin=True)
     host.add_route("/api/encoding/job/cancel", api_cancel, methods=["POST"], feature="settings.media",
+                   level="write", admin=True)
+    def api_video():
+        """! @brief GET ?rel=: can the browser play this video, and is its browser copy ready."""
+        rel = request.args.get("rel") or ""
+        abs_path = host.safe_path(host.media_dir, rel)
+        if not abs_path or not os.path.exists(abs_path):
+            return jsonify({"success": False, "error": "not found"}), 404
+        return jsonify({"success": True, **pb.status(rel, abs_path)})
+
+    def api_video_prepare():
+        """! @brief POST: queue a browser copy for every video in the library that needs one."""
+        n = 0
+        for (rel,) in host.db().execute("SELECT rel_path FROM files WHERE media_kind='video'").fetchall():
+            abs_path = host.safe_path(host.media_dir, rel)
+            if abs_path and os.path.exists(abs_path) and pb.enqueue(rel, abs_path):
+                n += 1
+        return jsonify({"success": True, "queued": n, "queue": pb.queue_status()})
+
+    def video_stored(rel_path, **_kw):
+        if host.media.is_video(rel_path):
+            abs_path = host.safe_path(host.media_dir, rel_path)
+            if abs_path:
+                pb.enqueue(rel_path, abs_path)
+
+    host.on("upload.stored", video_stored)
+    host.on("file.deleted", lambda rel_path, **_kw: pb.drop(rel_path))
+    host.on("file.renamed", lambda old_rel, new_rel, **_kw: pb.drop(old_rel))
+    host.add_route("/api/encoding/video", api_video, feature="tab.gallery")
+    host.add_route("/api/encoding/video/prepare", api_video_prepare, methods=["POST"], feature="settings.media",
                    level="write", admin=True)
     host.add_asset("media_settings.js")
     host.on_startup(lambda: host.add_worker_source("encoding_jobs", jobs.claim, jobs.handle))

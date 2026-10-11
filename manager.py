@@ -5032,7 +5032,7 @@ def _run_upload():
                 orig = new_orig
 
         # name and format per Settings > Media
-        store_name = media_encoding.stored_name(fname)
+        store_name = media_encoding.stored_name(fname, orig)
         store_ext  = os.path.splitext(store_name)[1].lower()
         store_path = os.path.join(tdir, store_name)
         rel_path   = _rel(store_path)
@@ -5105,7 +5105,9 @@ def _run_upload():
                 # Video, audio and books: stored as uploaded or converted to the Settings > Media
                 # target; the music and books modules index them. A video already in its
                 # container is still re-encoded / remuxed when the settings ask for it.
-                if in_ext == store_ext and not (mt.is_video(fname) and media_encoding.av_needs_work(orig, store_ext)):
+                if in_ext == store_ext and not (mt.is_video(fname) and (
+                        media_encoding.av_needs_work(orig, store_ext)
+                        or media_encoding.needs_browser_convert(orig))):
                     shutil.copy(orig, out)
                 else:
                     err = (media_encoding.convert_book(orig, out) if mt.is_uploadable_book(fname)
@@ -6260,6 +6262,16 @@ def api_file(filename):
                 return send_file(io.BytesIO(data), mimetype='image/jpeg')
             # decode failed: serve the file as is
             access_logger.error("api_file: JXL decode failed, serving raw %r", filename)
+        # a video the browser can't play (HEVC / ProRes, a .mov or .mkv container) goes out as
+        # its browser copy (encoding module, <media>/.cim/play); ?original=1 sends the file
+        if (mt.is_video(fp) and request.args.get("original") not in ("1", "true")
+                and media_encoding is not None and hasattr(media_encoding, "video_serve_path")):
+            path, extra = media_encoding.video_serve_path(filename, fp)
+            if path is None:
+                # still being made: 202 with the progress (the viewer polls /api/encoding/video)
+                return jsonify({"success": False, "preparing": True, **(extra or {})}), 202
+            if path != fp:
+                return send_file(path, mimetype=extra, conditional=True)
         # conditional=True: Range requests, so <video> can seek
         return send_file(fp, mimetype=mt.mime_for(filename), conditional=True)
     access_logger.error("api_file: not found on disk %r", filename)
@@ -7643,6 +7655,9 @@ _core_api = SimpleNamespace(
     object_grouping=og,
     ingest_inline=_process_spooled_inline, enqueue_spooled_upload=_enqueue_spooled_upload,
     file_albums=_file_albums, set_file_albums=_set_file_albums, delete_file=_delete_file,
+    album_create=_album_create, album_add=_album_add, album_remove=_album_remove,
+    album_set_description=_album_set_description, album_set_cover=_album_set_cover,
+    album_list=lambda: _album_list(),
     move_file=_move_file,
     get_file_row=_get_file_row, thumb_bytes=thumb_bytes, thumb_reset=_thumb_reset,
     files_where=_files_where,
