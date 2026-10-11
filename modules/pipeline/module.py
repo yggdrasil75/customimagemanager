@@ -233,6 +233,7 @@ def _register_pipelines(host):
                                  (pid,)).fetchone()
         steps = agent.learned_steps(runs)
         return jsonify({"success": True, "runs": len(runs), "last_run": runs[0] if runs else None,
+                        "tools": pc.agent_tools(),
                         "last_history": json.loads(hist["history"]) if hist else [],
                         "recurring": agent.recurring(runs), "learned_steps": steps,
                         "learned_graph": agent.steps_to_graph(steps) if steps else None})

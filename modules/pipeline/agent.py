@@ -27,6 +27,7 @@ from .engine import crop_box, match_pose_boxes, _clamp, _dedup, _known_text
 
 WANTS = ("text", "tags", "bool", "choice", "json", "name")
 SUBJECT_FIELDS = ("name", "description", "appearance", "outfit", "detail", "region_type", "tags")
+SUBJECT_SHOWN = SUBJECT_FIELDS + ("posture",)
 MAX_SUBJECTS = 12
 RESULT_CHARS = 600
 LEARN_MIN_RUNS = 2
@@ -36,11 +37,25 @@ DEFAULT_GOAL = ("Describe every photo fully: who and what is in it, where it was
                 "in it, and tags that make it easy to find.")
 
 # name -> (description, params help, needs). `needs`: a hook that must be present.
+# Why a tool is missing when its hook isn't there (shown in the pipeline panel).
+MISSING_WHY = {
+    "person_fn": "no person detector (enable the people module and pick a detect.persons model)",
+    "seg_fn": "the segmentation module is off (or has no segment.box model)",
+    "ocr_fn": "the OCR module is off (or has no ocr model)",
+    "pose_fn": "the pose module is off (or has no pose model)",
+    "barcodes_fn": "the barcodes module is off",
+    "similar_fn": "no image embeddings (the embedding module is off or hasn't embedded the library)",
+}
+SIMILAR_MAX = 8
+# tools the graph runner has no node for: the learned graph leaves them out
+AGENT_ONLY = {"barcodes", "similar_photos"}
+
 TOOLS = {
     "llm": ("Ask the vision model about the whole photo. Earlier results are passed to it as context.",
             "prompt (required), want: text|tags|bool|choice|json|name, choices (list, for choice)", None),
-    "detect_persons": ("Find the people in the photo with the person detector and pose; gives subjects with boxes.",
-                       "none", "person_fn"),
+    "detect_persons": ("Find the people in the photo with the person detector; gives subjects with boxes, and "
+                       "each one's posture (standing, sitting, lying, arms raised, facing the camera or away) "
+                       "when a pose model is there.", "none", "person_fn"),
     "detect_boxes": ("Ask the vision model for boxes around things (animals, objects, characters); gives subjects.",
                      "prompt (what to box)", None),
     "segment": ("Add pixel masks to the current subjects.", "none", "seg_fn"),
@@ -48,7 +63,12 @@ TOOLS = {
                      "prompt (required), field: name|description|appearance|outfit|detail|region_type|tags, "
                      "want: text|tags|name", None),
     "ocr": ("Read the text in the photo (signs, captions, documents).", "none", "ocr_fn"),
-    "pose": ("Skeletons of the people in the photo.", "none", "pose_fn"),
+    "pose": ("Body pose of everyone in the photo, as posture per person (standing, sitting, lying, crouching, "
+             "arms raised, facing the camera or away). Use it to describe what people are doing.", "none", "pose_fn"),
+    "barcodes": ("Find and decode barcodes and QR codes (links, product codes, tickets).", "none", "barcodes_fn"),
+    "similar_photos": ("The descriptions, tags and albums of the library photos that look most like this one "
+                       "(same event, place or people). Use it to stay consistent with how the library already "
+                       "describes them and to learn names.", "count (1-8, default 5)", "similar_fn"),
     "panels": ("Find the panels of a comic page.", "prompt (only used without a panel model)", None),
     "finish": ("End the run and write the result.",
                "description (required: the full description), tags (list), image_type (photo, screenshot, "
@@ -62,10 +82,108 @@ def available_tools(hooks):
     for name, (desc, params, needs) in TOOLS.items():
         if needs is None or hooks.get(needs):
             out[name] = (desc, params)
+    labels = hooks.get("stage_labels") or {}
     for name, fn in (hooks.get("stage_fns") or {}).items():
         if name not in out:
-            out[name] = ("Module stage '%s' on the whole photo." % name, "none")
+            out[name] = ("%s (a module's step, run on the whole photo; its result is added to what you know)."
+                         % (labels.get(name) or name), "none")
     return out
+
+
+def missing_tools(hooks):
+    """! @brief {name: why} of the built-in tools the agent doesn't get now."""
+    return {name: MISSING_WHY.get(needs, "unavailable") for name, (_d, _p, needs) in TOOLS.items()
+            if needs is not None and not hooks.get(needs)}
+
+
+# -- pose -> words ------------------------------------------------------------------
+_VIS = 0.3
+
+
+def _kp(person, names, name):
+    """! @brief (x, y) of a named keypoint when it is confidently placed, else None."""
+    try:
+        i = names.index(name)
+        k = person["keypoints"][i]
+    except (ValueError, IndexError, KeyError, TypeError):
+        return None
+    if not isinstance(k, dict) or k.get("x") is None or k.get("y") is None:
+        return None
+    if k.get("v") is not None and float(k["v"]) < _VIS:
+        return None
+    return float(k["x"]), float(k["y"])
+
+
+def _mid(a, b):
+    if a and b:
+        return (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+    return a or b
+
+
+def posture(person, names):
+    """! @brief One skeleton in words: 'standing, arms raised, facing the camera' ('' when too
+    little of it is visible). Image coordinates: y grows downwards."""
+    g = lambda n: _kp(person, names, n)
+    ls, rs, lh, rh = g("left_shoulder"), g("right_shoulder"), g("left_hip"), g("right_hip")
+    sh, hip = _mid(ls, rs), _mid(lh, rh)
+    if not sh or not hip:
+        return ""
+    torso = ((sh[0] - hip[0]) ** 2 + (sh[1] - hip[1]) ** 2) ** 0.5 or 1e-6
+    words = []
+    if abs(sh[0] - hip[0]) > abs(sh[1] - hip[1]):
+        words.append("lying down")
+    else:
+        knee, ankle = _mid(g("left_knee"), g("right_knee")), _mid(g("left_ankle"), g("right_ankle"))
+        if knee:
+            drop = (knee[1] - hip[1]) / torso          # how far the knees sit below the hips
+            if drop < 0.35:
+                words.append("crouching" if ankle and (ankle[1] - knee[1]) / torso < 0.5 else "sitting")
+            else:
+                words.append("standing")
+        else:
+            words.append("upper body visible")
+    lw, rw = g("left_wrist"), g("right_wrist")
+    up = [w for w, s_ in ((lw, ls), (rw, rs)) if w and s_ and w[1] < s_[1]]
+    if len(up) == 2:
+        words.append("both arms raised")
+    elif up:
+        words.append("one arm raised")
+    if ls and rs:
+        words.append("facing the camera" if ls[0] > rs[0] else "facing away")
+    return ", ".join(words)
+
+
+def postures(pose):
+    """! @brief Every skeleton of a pose result in words, in order."""
+    names = (pose or {}).get("names") or []
+    return [posture(p, names) for p in (pose or {}).get("people") or []]
+
+
+def _center(person, names):
+    pts = [p for p in (_kp(person, names, n) for n in names) if p]
+    if not pts:
+        return None
+    return sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)
+
+
+def attach_postures(subjects, pose, width=1.0, height=1.0):
+    """! @brief Put each skeleton's posture on the subject whose box holds its centre.
+    Keypoints may be in pixels or 0..1; boxes are 0..1 centre form."""
+    names = (pose or {}).get("names") or []
+    for person in (pose or {}).get("people") or []:
+        c = _center(person, names)
+        if not c:
+            continue
+        cx, cy = c
+        if cx > 1.5 or cy > 1.5:                       # pixels
+            cx, cy = cx / max(width, 1), cy / max(height, 1)
+        for s in subjects:
+            b = s.get("box") or {}
+            if abs(cx - b.get("cx", -9)) <= b.get("w", 0) / 2 and abs(cy - b.get("cy", -9)) <= b.get("h", 0) / 2:
+                words = posture(person, names)
+                if words and not s.get("posture"):
+                    s["posture"] = words
+                break
 
 
 def _short(v, n=RESULT_CHARS):
@@ -86,7 +204,7 @@ def _subjects_line(subs):
         return "no subjects"
     parts = []
     for i, s in enumerate(subs):
-        extra = ", ".join("%s=%s" % (k, _short(s.get(k), 60)) for k in SUBJECT_FIELDS if s.get(k))
+        extra = ", ".join("%s=%s" % (k, _short(s.get(k), 60)) for k in SUBJECT_SHOWN if s.get(k))
         parts.append("#%d %s%s" % (i, s.get("label", "subject"), (" (" + extra + ")") if extra else ""))
     return "%d subjects: %s" % (len(subs), "; ".join(parts))
 
@@ -182,6 +300,9 @@ def execute(tool, params, img, st, hooks, llm, known_text):
         st.subjects = [{"box": {k: m["box"][k] for k in ("cx", "cy", "w", "h")}, "label": m["class_name"],
                         "pose": m.get("pose"), "needs_review": m.get("needs_review", False), "tags": []}
                        for m in matched]
+        if pose:
+            h, w = img.shape[:2]
+            attach_postures(st.subjects, pose, w, h)
         st.pose = pose or st.pose
         st.texts.append(("people found", str(len(st.subjects))))
         return _subjects_line(st.subjects)
@@ -237,7 +358,35 @@ def execute(tool, params, img, st, hooks, llm, known_text):
         return _short(o.get("text") or "no text")
     if tool == "pose":
         st.pose = hooks["pose_fn"](img)
-        return "%d skeletons" % len((st.pose or {}).get("people", []))
+        words = postures(st.pose)
+        if st.subjects and st.pose:
+            h, w = img.shape[:2]
+            attach_postures(st.subjects, st.pose, w, h)
+        if not words:
+            return (st.pose or {}).get("note") or "no people found"
+        line = "; ".join("person %d: %s" % (i + 1, w_ or "too little visible") for i, w_ in enumerate(words))
+        st.texts.append(("poses", line))
+        return "%d people. %s" % (len(words), line)
+    if tool == "barcodes":
+        res = hooks["barcodes_fn"](img) or {}
+        codes = [c for c in res.get("codes") or [] if c.get("data") or c.get("text")]
+        if not codes:
+            return res.get("note") or "no readable codes"
+        line = "; ".join("%s: %s" % (c.get("type") or c.get("format") or "code", c.get("data") or c.get("text"))
+                         for c in codes[:10])
+        st.texts.append(("codes", line))
+        return line
+    if tool == "similar_photos":
+        n = max(1, min(SIMILAR_MAX, int(float(p.get("count") or 5))))
+        hits = hooks["similar_fn"](img, n) or []
+        if not hits:
+            return "no similar photos described yet"
+        line = " | ".join("%s (%.2f): %s%s%s" % (
+            h.get("rel_path", "?"), h.get("score", 0), _short(h.get("description") or "no description", 200),
+            ("; tags " + ", ".join(h["tags"][:8])) if h.get("tags") else "",
+            ("; albums " + ", ".join(h["albums"][:3])) if h.get("albums") else "") for h in hits)
+        st.texts.append(("similar photos in the library", line))
+        return _short(line, 900)
     if tool == "panels":
         pl = []
         if hooks.get("panel_fn"):
@@ -434,7 +583,7 @@ def steps_to_graph(steps):
         elif t == "panels":
             add({"id": nid, "type": "panels", "prompt": p.get("prompt", ""), "in": {"image": ["start", "image"]}})
             end_in["panels"] = [nid, "panels"]
-        elif t not in ("finish", "segment", "each_subject"):
+        elif t not in ("finish", "segment", "each_subject") and t not in AGENT_ONLY:
             add({"id": nid, "type": t, "in": {"image": ["start", "image"]}})
             texts.append([nid, "text"])
     add({"id": "describe", "type": "llm", "label": "Final description", "want": "text",

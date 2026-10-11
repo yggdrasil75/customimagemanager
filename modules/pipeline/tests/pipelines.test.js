@@ -28,15 +28,46 @@ test("pipeline panel: scope, agent memory, save", { skip }, async () => {
   assert.match(el.textContent, /2 run\(s\)/);
   assert.match(el.textContent, /people first/);
   assert.match(el.textContent, /ocr x2/);
-  el.querySelector("#plp_q").value = "person:ana tag:trip";
-  el.querySelector("#plp_save").click();
-  await b.tick(20);
-  const call = b.api.last("/api/pipelines/save", "POST");
-  assert.ok(call, "saved");
-  const body = JSON.parse(JSON.stringify(call.body));
+  // edits save themselves a moment after the change, no button needed
+  const q = el.querySelector("#plp_q");
+  q.value = "person:ana tag:trip";
+  q.dispatchEvent(new b.window.Event("input", { bubbles: true }));
+  const goal = el.querySelector("#plp_goal");
+  goal.value = "Who is where.";
+  goal.dispatchEvent(new b.window.Event("input", { bubbles: true }));
+  assert.equal(b.api.find("/api/pipelines/save", "POST").length, 0, "debounced");
+  await b.tick(900);
+  const calls = b.api.find("/api/pipelines/save", "POST");
+  assert.equal(calls.length, 1, "one save for both edits");
+  const body = JSON.parse(JSON.stringify(calls[0].body));
   assert.equal(body.old_id, "family_trips");
   assert.equal(body.pipeline.q, "person:ana tag:trip");
+  assert.equal(body.pipeline.goal, "Who is where.");
   assert.equal(body.pipeline.mode, "semi");
+  assert.match(el.textContent, /Saved\./);
+});
+
+test("the Settings dialog's Save flushes a pending pipeline edit", { skip }, async () => {
+  const b = page({ modules: ["pipeline"] });
+  b.api.on("/api/pipelines", LIST);
+  b.api.on("/api/pipelines/match", { success: true, counts: {} });
+  b.api.on("/api/pipelines/agent", { success: true, runs: 0, tools: { available: { llm: "Ask", ocr: "Read" },
+    missing: { pose: "the pose module is off (or has no pose model)" } } });
+  b.api.on("POST /api/pipelines/save", { success: true, pipelines: LIST.pipelines });
+  const el = b.document.createElement("div");
+  b.document.body.appendChild(el);
+  await b.window.CIMPipelines.panel(el, null, "family_trips");
+  await b.tick(30);
+  assert.match(el.textContent, /pose: missing - the pose module is off/);
+  const mode = el.querySelector("#plp_mode");
+  mode.value = "full";
+  mode.dispatchEvent(new b.window.Event("change", { bubbles: true }));
+  const r = await b.window.CIMPipelines.flush();            // what saveAllSettings() runs
+  assert.ok(r.ok);
+  const call = b.api.last("/api/pipelines/save", "POST");
+  assert.equal(JSON.parse(JSON.stringify(call.body)).pipeline.mode, "full");
+  await b.tick(900);
+  assert.equal(b.api.find("/api/pipelines/save", "POST").length, 1, "the timer doesn't save it twice");
 });
 
 test("the default pipeline has no scope fields and can't be deleted", { skip }, async () => {

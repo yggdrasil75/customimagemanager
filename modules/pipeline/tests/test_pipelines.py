@@ -214,3 +214,86 @@ def test_agent_mode_through_smart_tag(client, upload, llm_on, monkeypatch, ungat
     assert pls.get(llm_on.state, "agent_test")["graph"].get("learned") is True
     assert client.post("/api/pipelines/forget", json={"id": "agent_test"}).get_json()["success"]
     assert client.get("/api/pipelines/agent", query_string={"id": "agent_test"}).get_json()["runs"] == 0
+
+
+# -- pose, barcodes, look-alikes, the tool list ----------------------------------------------
+def _person(**pts):
+    """! @brief A COCO-17 skeleton from named (x, y) points; the rest invisible."""
+    from modules.pose.skeleton import COCO_KP_NAMES
+    return {"keypoints": [{"x": pts[n][0], "y": pts[n][1], "v": 0.9} if n in pts else {"x": 0, "y": 0, "v": 0}
+                          for n in COCO_KP_NAMES]}
+
+
+def _names():
+    from modules.pose.skeleton import COCO_KP_NAMES
+    return COCO_KP_NAMES
+
+
+STAND = dict(left_shoulder=(60, 40), right_shoulder=(40, 40), left_hip=(58, 100), right_hip=(42, 100),
+             left_knee=(58, 150), right_knee=(42, 150), left_ankle=(58, 200), right_ankle=(42, 200),
+             left_wrist=(70, 20), right_wrist=(30, 110))
+
+
+def test_posture_words():
+    names = _names()
+    assert agent.posture(_person(**STAND), names) == "standing, one arm raised, facing the camera"
+    sit = dict(STAND, left_knee=(80, 105), right_knee=(64, 105), left_ankle=(80, 160), right_ankle=(64, 160),
+               left_wrist=(60, 90), right_wrist=(40, 90))
+    assert agent.posture(_person(**sit), names) == "sitting, facing the camera"
+    away = {k: (100 - x, y) for k, (x, y) in STAND.items()}
+    assert agent.posture(_person(**away), names).endswith("facing away")
+    lying = dict(left_shoulder=(40, 100), right_shoulder=(40, 110), left_hip=(100, 100), right_hip=(100, 110))
+    assert agent.posture(_person(**lying), names).startswith("lying down")
+    assert agent.posture(_person(nose=(1, 1)), names) == ""
+
+
+def test_pose_tool_and_postures_on_subjects():
+    pose = {"names": _names(), "people": [_person(**STAND)]}
+    hooks = dict(HOOKS, pose_fn=lambda img: pose,
+                 person_fn=lambda img: [{"cx": 50 / 64, "cy": 110 / 64, "w": 0.9, "h": 3.5, "class_name": "person"}])
+    llm = Script([{"tool": "pose", "params": {}},
+                  {"tool": "detect_persons", "params": {}},
+                  {"tool": "finish", "params": {"description": "x"}}])
+    img = np.zeros((220, 100, 3), np.uint8)
+    analysis, record = agent.run(img, PIPE, hooks, llm, {})
+    assert "person 1: standing, one arm raised, facing the camera" in record["history"][0]["result"]
+    assert "posture=standing" in record["history"][1]["result"]
+    assert analysis["subjects"][0]["posture"].startswith("standing")
+    assert "step 1: pose {} -> 1 people. person 1: standing" in llm.prompts[1]   # the next step sees it
+
+
+def test_barcodes_and_similar_tools():
+    hooks = dict(HOOKS, barcodes_fn=lambda img: {"codes": [{"type": "QRCODE", "data": "https://x.example"}]},
+                 similar_fn=lambda img, n: [{"rel_path": "trip/a.jpg", "score": 0.93, "description": "Ana at the beach",
+                                             "tags": ["beach"], "albums": ["Lisbon 2024"]}][:n])
+    llm = Script([{"tool": "barcodes", "params": {}}, {"tool": "similar_photos", "params": {"count": 3}},
+                  {"tool": "finish", "params": {"description": "x"}}])
+    _a, record = agent.run(IMG, PIPE, hooks, llm, {})
+    assert record["history"][0]["result"] == "QRCODE: https://x.example"
+    assert "Ana at the beach" in record["history"][1]["result"] and "Lisbon 2024" in record["history"][1]["result"]
+    assert "- barcodes:" in llm.prompts[0] and "- similar_photos:" in llm.prompts[0]
+    # agent-only tools stay out of the learned graph
+    g = agent.steps_to_graph([{"tool": "barcodes", "params": {}}, {"tool": "ocr", "params": {}}])
+    assert {n["type"] for n in g["nodes"]} == {"start", "ocr", "llm", "end"}
+
+
+def test_missing_tools_say_why():
+    hooks = dict(HOOKS, pose_fn=None, barcodes_fn=None, similar_fn=None,
+                 stage_fns={"rate": lambda *a, **k: {}}, stage_labels={"rate": "Rate (image quality)"})
+    av, miss = agent.available_tools(hooks), agent.missing_tools(hooks)
+    assert "pose" not in av and "pose module" in miss["pose"] and "embedding" in miss["similar_photos"]
+    assert av["rate"][0].startswith("Rate (image quality)")
+
+
+def test_agent_tools_route_and_library_context(client, upload, llm_on, ungated):
+    d = client.get("/api/pipelines/agent", query_string={"id": "default"}).get_json()
+    t = d["tools"]
+    assert "llm" in t["available"] and "finish" in t["available"]
+    assert set(t["available"]) | set(t["missing"]) >= set(agent.TOOLS)
+    fn = upload(seed=5104, name="ctx.png", folder="plw_ctx")
+    llm_on.module_host.db().execute("UPDATE files SET d_original='2024-06-03' WHERE rel_path=?", (fn,))
+    llm_on.module_host.db().commit()
+    known = pc._known_context(pc.get_safe_path(pc.MEDIA_DIR, fn))
+    assert known["taken"] == "2024-06-03"
+    from modules.pipeline.engine import _known_text
+    assert "Taken: 2024-06-03" in _known_text(known)

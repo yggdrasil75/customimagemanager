@@ -360,6 +360,11 @@
 
   async function save() {
     try {
+      // the pipeline panel's pending settings first (it saves the same list)
+      if (window.CIMPipelines && window.CIMPipelines.flush) {
+        const f = await window.CIMPipelines.flush();
+        if (f && f.ok === false) throw new Error(f.error);
+      }
       const r = await sources[srcId].save(root);
       if (!r || !r.ok) throw new Error((r && r.error) || 'save failed');
       dirty = false; const b = $('plg_save'); if (b) b.classList.remove('ring-2', 'ring-amber-400');

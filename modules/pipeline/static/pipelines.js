@@ -3,9 +3,13 @@
  * window.CIMPipelines.panel(el, api, id) fills the strip under the graph editor
  * for one pipeline: its name, its scope (gallery search syntax + folder +
  * album: which photos it takes), on / off, its order among the others, its
- * mode (graph / semi / full agent), the agent's goal and step budget, and the
- * agent's memory - the selections of its last run, the steps that recur, and
- * "Adopt learned graph". CIMPipelines.create() asks for a name and makes one.
+ * mode (graph / semi / full agent), the agent's goal and step budget, the tools
+ * the agent has (and why any are missing), and the agent's memory - the
+ * selections of its last run, the steps that recur, and "Adopt learned graph".
+ * CIMPipelines.create() asks for a name and makes one.
+ *
+ * Edits save themselves (a moment after a change); the Settings dialog's Save and
+ * the graph's "Save pipeline" also flush whatever is still pending.
  * The graph editor (pipeline_graph.js) lists one graph per pipeline; without
  * it a picker and the same panel mount at the end of the Pipeline tab.
  */
@@ -44,6 +48,28 @@
 
   function fmt(t) { return t ? new Date(t * 1000).toLocaleString() : ""; }
 
+  // -- saving ---------------------------------------------------------------------
+  // The open panel's unsaved edits: {id, body, timer}. save() flushes them; the dialog's
+  // Save runs it (registerSettingsPersist) and so does the graph editor before its save.
+  const pending = { id: null, body: null, timer: null };
+  const AUTOSAVE_MS = 700;
+  async function flush() {
+    clearTimeout(pending.timer); pending.timer = null;
+    if (!pending.id || !pending.body) return { ok: true };
+    const id = pending.id, body = pending.body;
+    pending.body = null;
+    const d = await post("/api/pipelines/save", { old_id: id, pipeline: body });
+    const msg = $("plp_saved");
+    if (!d.success) {
+      if (msg) { msg.textContent = "Not saved: " + (d.error || "error"); msg.className = "text-[11px] text-red-400"; }
+      return { ok: false, error: "Pipeline settings: " + (d.error || "save failed") };
+    }
+    if (msg) { msg.textContent = "Saved."; msg.className = "text-[11px] text-green-400"; }
+    return { ok: true, pipelines: d.pipelines };
+  }
+  if (window.registerSettingsPersist) window.registerSettingsPersist(flush);
+  else (window._settingsPersistSteps = window._settingsPersistSteps || []).push({ fn: flush, tab: null });
+
   /** @brief The settings + agent strip of pipeline `id` (api: the graph editor, or null). */
   async function panel(el, api, id) {
     const all = await list();
@@ -63,7 +89,7 @@
         <label>Mode <select id="plp_mode" class="${input}">${MODES.map(([v, l]) => `<option value="${v}"${p.mode === v ? " selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
         <div class="flex items-end gap-2 flex-wrap">
           ${isDefault ? "" : `<label class="inline-flex items-center gap-1 text-xs text-gray-300"><input type="checkbox" id="plp_enabled"${p.enabled ? " checked" : ""}> On</label>`}
-          ${btn({ id: "plp_save", label: "Save pipeline settings", variant: "primary", size: "xs" })}
+          <span id="plp_saved" class="text-[11px] text-gray-500">Changes save automatically.</span>
           ${movable ? btn({ id: "plp_up", label: "Earlier", variant: "neutral", size: "xs", title: "Tried before the ones below it" }) : ""}
           ${movable ? btn({ id: "plp_down", label: "Later", variant: "neutral", size: "xs" }) : ""}
           ${isDefault ? "" : btn({ id: "plp_delete", label: "Delete", variant: "danger", size: "xs" })}
@@ -79,13 +105,27 @@
       <div id="plp_agent" class="mt-1"></div>`;
     const val = k => { const e = $(k); return e ? (e.type === "checkbox" ? e.checked : e.value) : undefined; };
     $("plp_mode").addEventListener("change", () => $("plp_agent_opts").classList.toggle("hidden", val("plp_mode") === "graph"));
-    $("plp_save").addEventListener("click", async () => {
+    // every field saves itself a moment after it changes (no button to forget)
+    const collect = () => {
       const body = { name: val("plp_name"), mode: val("plp_mode"), goal: val("plp_goal"), max_steps: val("plp_steps") };
       if (!isDefault) Object.assign(body, { q: val("plp_q"), folder: val("plp_folder"), album: val("plp_album"), enabled: val("plp_enabled") });
-      const d = await post("/api/pipelines/save", { old_id: id, pipeline: body });
-      if (!d.success) { toast(d.error || "Save failed"); return; }
-      toast("Pipeline settings saved.");
-      if (api && api.open) api.open("photo:" + id); else panel(el, api, id);
+      return body;
+    };
+    const changed = () => {
+      if (pending.id && pending.id !== id) flush();      // another pipeline's edits first
+      pending.id = id; pending.body = collect();
+      const msg = $("plp_saved"); if (msg) { msg.textContent = "Saving..."; msg.className = "text-[11px] text-gray-400"; }
+      clearTimeout(pending.timer);
+      pending.timer = setTimeout(async () => {
+        const nameBefore = p.name;
+        const r = await flush();
+        // a rename shows in the graph picker
+        if (r.ok && api && api.reloadSources && val("plp_name") !== nameBefore) { p.name = val("plp_name"); api.reloadSources("photo:" + id); }
+        if (r.ok) countScope();
+      }, AUTOSAVE_MS);
+    };
+    el.querySelectorAll("input, select, textarea").forEach(f => {
+      f.addEventListener(f.tagName === "SELECT" || f.type === "checkbox" ? "change" : "input", changed);
     });
     const move = async dir => {
       const ids = all.map(x => x.id).filter(x => x !== "default");
@@ -105,13 +145,14 @@
       if (api && api.open) api.open("photo:default"); else mountStandalone();
     });
     // how many photos it takes, and where the open photo goes
-    fetch("/api/pipelines/match?counts=1" + (window.currentFile ? "&filename=" + encodeURIComponent(window.currentFile) : ""))
+    const countScope = () => fetch("/api/pipelines/match?counts=1" + (window.currentFile ? "&filename=" + encodeURIComponent(window.currentFile) : ""))
       .then(r => r.json()).then(m => {
         if (!m || !m.success) return;
         const c = (m.counts || {})[id];
         if ($("plp_count")) $("plp_count").textContent = isDefault ? "" : (typeof c === "number" ? `Scope lists ${c} file(s).` : `Scope error: ${c}`);
         if (m.pipeline && $("plp_current")) $("plp_current").textContent = `The open photo goes to: ${m.pipeline.name}.`;
       }).catch(() => {});
+    countScope();
     renderAgent(id, api, p);
   }
 
@@ -120,8 +161,13 @@
     const box = $("plp_agent"); if (!box) return;
     const d = await fetch("/api/pipelines/agent?id=" + encodeURIComponent(id)).then(r => r.json()).catch(() => null);
     if (!d || !d.success) return;
+    const t = d.tools || { available: {}, missing: {} };
+    const tools = `<details class="mt-1"><summary class="text-[11px] text-gray-500 cursor-pointer">Tools the agent has (${Object.keys(t.available).length})${
+        Object.keys(t.missing).length ? `, <span class="text-amber-300">${Object.keys(t.missing).length} missing</span>` : ""}</summary>
+      <ul class="text-[11px] pl-4">${Object.entries(t.available).map(([k, v]) => `<li><b>${esc(k)}</b> <span class="text-gray-500">${esc(v)}</span></li>`).join("")}
+      ${Object.entries(t.missing).map(([k, v]) => `<li class="text-amber-300"><b>${esc(k)}</b>: missing - ${esc(v)}</li>`).join("")}</ul></details>`;
     if (!d.runs) {
-      box.innerHTML = p.mode === "graph" ? "" : '<p class="text-[11px] text-gray-500">The agent hasn\'t run on this pipeline yet: Smart Tag a photo it takes.</p>';
+      box.innerHTML = p.mode === "graph" ? "" : tools + '<p class="text-[11px] text-gray-500">The agent hasn\'t run on this pipeline yet: Smart Tag a photo it takes.</p>';
       return;
     }
     const steps = (d.last_history || []).map((h, i) => `<li><b>${esc(h.tool)}</b> <span class="text-gray-500">${esc(JSON.stringify(h.params || {}))}</span>
@@ -136,6 +182,7 @@
         ${btn({ id: "plp_forget", label: "Forget runs", variant: "neutral", size: "xs", title: "Clear the agent's memory of this pipeline" })}
       </div>
       ${rec ? `<div class="mt-1 text-[11px]"><span class="text-gray-500">Steps that recur:</span> ${rec}</div>` : ""}
+      ${tools}
       <details class="mt-1"><summary class="text-[11px] text-gray-500 cursor-pointer">Last run's selections (${(d.last_history || []).length})</summary>
         <ol class="text-[11px] list-decimal pl-5 space-y-0.5">${steps}</ol></details>`;
     $("plp_adopt").addEventListener("click", async () => {
@@ -175,5 +222,5 @@
     if (ev.detail === "pipeline" && !window.CIMPipelineGraph) setTimeout(() => mountStandalone(), 0);
   });
 
-  window.CIMPipelines = { panel, create, list };
+  window.CIMPipelines = { panel, create, list, flush };
 })();

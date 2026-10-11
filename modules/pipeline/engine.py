@@ -159,6 +159,10 @@ def _known_text(known):
         parts.append("Filename: " + str(known["filename"]))
     if known.get("folder"):
         parts.append("Folder: " + str(known["folder"]))
+    if known.get("taken"):
+        parts.append("Taken: " + str(known["taken"]))
+    if known.get("place"):
+        parts.append("Place: " + str(known["place"]))
     people = [p for p in (known.get("people") or []) if p]
     if people:
         parts.append("People recognised in this image: " + ", ".join(people) + ".")

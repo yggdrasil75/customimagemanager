@@ -140,10 +140,73 @@ def _agent_memory(pid):
     return {"last_run": runs[0] if runs else None, "recurring": agent.recurring(runs)}
 
 
+def _barcodes_fn():
+    """! @brief The barcodes module's scan (fn(bgr) -> {codes, ...}), or None when it is off."""
+    svc = HOST.get_service("barcodes") if HOST is not None else None
+    return (lambda bgr: svc(bgr, deep=False)) if callable(svc) else None
+
+
+def _similar_fn(rel):
+    """! @brief fn(bgr, n) -> the n most alike library photos that have a description (not rel
+    itself): [{rel_path, score, description, tags, albums}], or None without embeddings."""
+    svc = HOST.get_service("embedding") if HOST is not None else None
+    if not svc:
+        return None
+    try:
+        if not svc["embedding_count"](_db()):
+            return None
+    except Exception:
+        return None
+
+    def run(bgr, n):
+        db = _db()
+        hits = [(r, sc) for r, sc in (svc["search_by_image"](db, bgr, top_k=n * 4 + 1) or []) if r != rel]
+        out = []
+        for r, sc in hits:
+            row = db.execute("SELECT description, tags, albums FROM files WHERE rel_path=?", (r,)).fetchone()
+            if not row or not ((row["description"] or "").strip() or (row["tags"] or "[]") != "[]"):
+                continue
+            try:
+                tags = [tag_name(t) for t in json.loads(row["tags"] or "[]")]
+                albums = json.loads(row["albums"] or "[]")
+            except ValueError:
+                tags, albums = [], []
+            out.append({"rel_path": r, "score": float(sc), "description": row["description"] or "",
+                        "tags": tags, "albums": albums})
+            if len(out) >= n:
+                break
+        return out
+    return run
+
+
+def _agent_hooks(hooks, fp):
+    """! @brief The graph hooks plus what only the agent uses (barcodes, look-alikes, the
+    module steps' labels)."""
+    rel = _rel(fp) if fp else None
+    return dict(hooks, rel_path=rel, barcodes_fn=_barcodes_fn(), similar_fn=_similar_fn(rel),
+                stage_labels={n: s["label"] for n, s in HOST.pipeline_stages.items()} if HOST else {})
+
+
+def agent_tools():
+    """! @brief {"available": {name: description}, "missing": {name: why}} as the agent would see them now."""
+    hooks = _agent_hooks(dict(pose_fn=_pose_stage_fn(), ocr_fn=_ocr_fn(), stage_fns=_module_stage_fns(),
+                              person_fn=_person_fn if _person_available() else None, panel_fn=_panel_fn,
+                              seg_fn=_seg_fn()), None)
+    return {"available": {k: v[0] for k, v in agent.available_tools(hooks).items()},
+            "missing": agent.missing_tools(hooks)}
+
+
+def _person_available():
+    """! @brief True when the people module (the person detector) is there."""
+    return HOST is not None and HOST.get_service("people") is not None
+
+
 def _run_agent(bgr, fp, pipe, hooks, progress):
     """! @brief Let the agent analyse the photo, store the run, and in mode "full" make the
     learned graph the pipeline's graph."""
-    hooks = dict(hooks, rel_path=_rel(fp) if fp else None)
+    hooks = _agent_hooks(hooks, fp)
+    if not _person_available():
+        hooks["person_fn"] = None
 
     def llm(prompt, img, want, choices=None):
         return _llm_call(prompt, img, want, choices)
@@ -282,11 +345,44 @@ def _known_context(fp, meta=None):
     # decides which (if any) actually match each subject; we only supply hints.
     frags = re.split(r"[\\/_\-\.\s]+", (stem + " " + folder))
     candidates = [c for c in (tag_names + frags) if c and len(c) > 1]
-    return {"names": list(dict.fromkeys(candidates)),
-            "tags": tag_names,
-            "description": meta.get("description", ""),
-            "filename": stem,
-            "folder": folder}
+    out = {"names": list(dict.fromkeys(candidates)),
+           "tags": tag_names,
+           "description": meta.get("description", ""),
+           "filename": stem,
+           "folder": folder}
+    out.update(_library_context(rel))
+    return out
+
+
+def _library_context(rel):
+    """! @brief What the library knows about a file beyond its own metadata: the people
+    recognised in it (named faces), where (the map module's place) and when it was taken."""
+    out = {}
+    db = _db()
+    try:
+        names = [r[0] for r in db.execute("SELECT DISTINCT name FROM face_regions WHERE rel_path=? AND name != ''",
+                                          (rel,)).fetchall()]
+        if names:
+            out["people"] = names
+    except Exception:
+        pass                       # people module off: no table
+    geo = HOST.get_service("geo") if HOST is not None else None
+    if geo:
+        try:
+            pl = geo["place_of"](rel) or {}
+            place = ", ".join(x for x in (pl.get("city"), pl.get("admin1"), pl.get("country")) if x)
+            if place:
+                out["place"] = place + (" (approximate)" if pl.get("source") == "approx" else "")
+        except Exception:
+            pass
+    try:
+        r = db.execute("SELECT COALESCE(d_original, d_capture, d_actual) AS d FROM files WHERE rel_path=?",
+                       (rel,)).fetchone()
+        if r and r["d"]:
+            out["taken"] = r["d"]
+    except Exception:
+        pass
+    return out
 
 def _apply_pipeline_result(fp, analysis):
     """! @brief Merge a pipeline analysis into a file's metadata: union tags, append
