@@ -69,8 +69,6 @@ RUN if [ "${GPU_BACKEND}" = "rocm" ]; then \
         && pip uninstall -y onnxruntime onnxruntime-gpu onnxruntime-rocm onnxruntime-migraphx || true \
         && pip install onnxruntime-migraphx \
             -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.0/ \
-        && pip install onnxruntime-rocm \
-            -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.0/ ; \
     fi
 
 COPY . .

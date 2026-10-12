@@ -64,7 +64,7 @@ else
     $PIP install -r "requirements-$MODE.txt" -r requirements.txt
 fi
 [ "$MODE" = rocm ] && { $PIP uninstall -qy onnxruntime onnxruntime-gpu || true; \
-    $PIP install onnxruntime-rocm onnxruntime-migraphx \
+    $PIP install onnxruntime-migraphx \
         -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.0/ \
         || echo "warn: no ROCm onnxruntime wheels; CPU inference" >&2; }
 
