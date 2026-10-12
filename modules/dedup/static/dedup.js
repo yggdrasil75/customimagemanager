@@ -230,7 +230,7 @@ function renderDedupGroup(group){
         ? `<div class="w-full h-28 rounded mb-1 bg-black flex flex-col items-center justify-center gap-2">
              <span class="text-3xl">🎵</span>
              <audio controls preload="none" class="w-full h-7" src="/api/file/${encodeURIComponent(f)}"></audio></div>`
-        : `<img src="/api/thumb/${encodeURIComponent(f)}"
+        : `<img loading="lazy" src="/api/thumb/${encodeURIComponent(f)}"
         class="w-full h-28 object-cover rounded mb-1 bg-black">`}
       ${item.kind==='anim'||item.kind==='video'
         ? `<span class="text-[9px] bg-indigo-900 text-indigo-300 px-1 rounded">${item.kind==='anim'?'ANIM':'VIDEO'}</span>` : ''}

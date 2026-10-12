@@ -451,8 +451,8 @@ function renderGallery(files){
   // "confirm all boxes" or "run pose" over an epub is meaningless, and letting
   // them into galleryFiles would put them in range of every bulk action.
   galleryFiles = files.filter(x=>x.kind!=='comic' && x.kind!=='book');
-  io.disconnect();
   const grid=document.getElementById('gallery_grid');
+  grid.querySelectorAll('.gallery-item').forEach(el=>io.unobserve(el));
   grid.innerHTML='';
   files.forEach(item=>{
     if(item.kind==='comic'){
@@ -989,6 +989,12 @@ async function bulkDelete(){
   }
 }
 
+/** @brief Videos the browser can't play natively (HEVC / ProRes, or a .mov / .mkv container)
+ *  are served as a browser copy the encoding module makes. A remux is made on request;
+ *  a transcode takes a while, so CIMVideo.load shows a notice with its progress over the
+ *  player and sets the source once the copy is ready.
+ *    CIMVideo.load(videoEl, rel)   set videoEl's source to rel, waiting for its copy if needed
+ */
 window.CIMVideo = (function(){
   const POLL_MS = 2000;
   const timers = new WeakMap();

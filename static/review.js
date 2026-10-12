@@ -146,7 +146,7 @@ function _reviewThumb(it, queue){
        title="${relAttr}\nclick to open in the editor">
       <div class="w-full h-full rounded bg-gray-900 bg-center bg-cover cursor-zoom-in ${flagRing}"
            onclick="selectFile('${relAttr}')"
-           style="background-image:url('${url}')"></div>
+           data-thumb="${url}"></div>
       ${badgeHtml}
     </div>`;
 }

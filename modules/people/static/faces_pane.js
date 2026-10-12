@@ -8,33 +8,14 @@ let _faceClusters = [];
 let _faceShowDrawn = false;   // list drawn-looking clusters the server folded away
 let _faceShowHidden = false;  // list people hidden from people lists (Hide on a card)
 
-const _thumbObserver = ('IntersectionObserver' in window)
-  ? new IntersectionObserver((entries, obs) => {
-      for (const e of entries) {
-        if (!e.isIntersecting) continue;
-        const el = e.target;
-        const url = el.dataset.thumb;
-        if (url) { el.style.backgroundImage = `url('${url}')`; el.removeAttribute('data-thumb'); }
-        obs.unobserve(el);
-      }
-    }, { root: null, rootMargin: '600px', threshold: 0 })
-  : null;
-
-/** @brief Attach the observer to every not-yet-painted chip currently in the DOM. Called
- *  after any innerHTML render of chips. Without an observer (old browsers) we fall
- *  back to painting everything immediately - same as before.
+/** @brief Hand the chips in scope to the shared thumbnail loader (CIMLazy in globals.js),
+ *  which paints them near the viewport and drops them again once they are far away. It
+ *  picks up added chips by itself; this covers chips rendered before it saw them.
  */
 function _observeLazyThumbs(scope) {
   const root = scope || document;
-  const chips = root.querySelectorAll('[data-thumb]');
-  if (!_thumbObserver) {
-    chips.forEach(el => {
-      const url = el.dataset.thumb;
-      if (url) { el.style.backgroundImage = `url('${url}')`; el.removeAttribute('data-thumb'); }
-    });
-    return;
-  }
-  chips.forEach(el => _thumbObserver.observe(el));
+  if (window.CIMLazy) { root.querySelectorAll('[data-thumb]').forEach(el => window.CIMLazy.observe(el)); return; }
+  root.querySelectorAll('[data-thumb]').forEach(el => { el.style.backgroundImage = `url('${el.dataset.thumb}')`; });
 }
 
 function faceChip(f, size = 56, pad = 1.6) {
