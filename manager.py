@@ -202,10 +202,27 @@ def _decode_cached(path, mtime):
 _db_local = threading.local()
 
 # Every connection handed out, keyed by id() (connections can't be weakly
-# referenced), so they can be closed at exit.
-_all_conns = {}
+# referenced) with the thread it belongs to, so they can be closed at exit and as
+# soon as their thread has ended.
+_all_conns = {}                  # id(conn) -> (conn, thread)
 _all_conns_lock = threading.Lock()
 DB_BUSY_TIMEOUT_MS = 30000
+
+
+def _register_conn(conn):
+    """! @brief Track a new per-thread connection, closing those of threads that have
+    ended. A thread that never called _db_close() (every short-lived worker a module
+    starts per event) otherwise kept its connection - three file handles in WAL mode:
+    the db, -wal and -shm - until the process ran out of them (EMFILE)."""
+    with _all_conns_lock:
+        dead = [k for k, (_c, t) in _all_conns.items() if not t.is_alive()]
+        stale = [_all_conns.pop(k)[0] for k in dead]
+        _all_conns[id(conn)] = (conn, threading.current_thread())
+    for c in stale:
+        try:
+            c.close()
+        except Exception:
+            pass
 
 def _db() -> sqlite3.Connection:
     conn = getattr(_db_local, 'conn', None)
@@ -219,8 +236,7 @@ def _db() -> sqlite3.Connection:
         conn.execute("PRAGMA cache_size=-32000")  # 32 MB page cache
         conn.row_factory = sqlite3.Row
         _db_local.conn = conn
-        with _all_conns_lock:
-            _all_conns[id(conn)] = conn
+        _register_conn(conn)
     return conn
 
 def _db_retry(fn, *args, attempts=6, **kwargs):
@@ -296,7 +312,7 @@ _exiting = threading.Event()  # set at teardown; background loops stop
 def _db_close_all():
     _exiting.set()
     with _all_conns_lock:
-        conns = list(_all_conns.values())
+        conns = [c for c, _t in _all_conns.values()]
         _all_conns.clear()
     for c in conns:
         try:
@@ -1684,20 +1700,20 @@ def _extract_anim_delays(src_path):
     if not _HAVE_PIL:
         return None
     try:
-        im = Image.open(src_path)
-        n = getattr(im, "n_frames", 1)
-        if n <= 1:
-            return None
-        delays = []
-        for i in range(n):
-            im.seek(i)
-            # frames without a duration count as 100 ms
-            d = im.info.get("duration", 100)
-            try:
-                d = int(round(float(d)))
-            except (TypeError, ValueError):
-                d = 100
-            delays.append(max(0, d))
+        with Image.open(src_path) as im:
+            n = getattr(im, "n_frames", 1)
+            if n <= 1:
+                return None
+            delays = []
+            for i in range(n):
+                im.seek(i)
+                # frames without a duration count as 100 ms
+                d = im.info.get("duration", 100)
+                try:
+                    d = int(round(float(d)))
+                except (TypeError, ValueError):
+                    d = 100
+                delays.append(max(0, d))
         total = sum(delays)
         return {"delays_ms": delays, "duration_ms": total, "n_frames": n}
     except Exception as e:
@@ -3406,8 +3422,7 @@ def _thumbdb() -> sqlite3.Connection:
         conn.execute("CREATE TABLE IF NOT EXISTS thumbs_meta(key TEXT PRIMARY KEY, value TEXT)")
         conn.commit()
         _thumbdb_local.conn = conn
-        with _all_conns_lock:
-            _all_conns[id(conn)] = conn
+        _register_conn(conn)
     return conn
 
 # Thumbnail settings (Settings > Media > Thumbnails): the cache holds one size /
