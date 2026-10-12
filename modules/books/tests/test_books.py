@@ -1,5 +1,6 @@
 """! @file
 @brief Books module: an uploaded epub is shelved, readable, and forgotten on delete."""
+import io
 import os
 import shutil
 import time
@@ -134,8 +135,6 @@ def test_meta_edit_is_written_into_comicinfo(client):
 
 
 # -- calibre libraries: metadata.opf beside the book -----------------------------------------
-import io
-
 CALIBRE_OPF = b"""<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">

@@ -3,13 +3,13 @@
 (tool by tool, its memory of the last run, the learned graph, semi / full modes).
     ./run_tests.sh modules/pipeline
 """
-import json
-
 import numpy as np
 import pytest
 
+from cimtest import media_path, read_meta
 from modules.pipeline import agent, graph_engine, pipelines as pls
 from modules.pipeline import pipeline_core as pc
+from modules.pipeline.engine import _known_text
 
 IMG = np.zeros((64, 64, 3), np.uint8)
 
@@ -246,15 +246,19 @@ def test_agent_mode_through_smart_tag(client, upload, llm_on, monkeypatch, ungat
 
 
 # -- pose, barcodes, look-alikes, the tool list ----------------------------------------------
+# the COCO-17 keypoint order every pose provider reports (a pose result carries its names)
+COCO_KP_NAMES = ["nose", "left_eye", "right_eye", "left_ear", "right_ear", "left_shoulder",
+                 "right_shoulder", "left_elbow", "right_elbow", "left_wrist", "right_wrist",
+                 "left_hip", "right_hip", "left_knee", "right_knee", "left_ankle", "right_ankle"]
+
+
 def _person(**pts):
     """! @brief A COCO-17 skeleton from named (x, y) points; the rest invisible."""
-    from modules.pose.skeleton import COCO_KP_NAMES
     return {"keypoints": [{"x": pts[n][0], "y": pts[n][1], "v": 0.9} if n in pts else {"x": 0, "y": 0, "v": 0}
                           for n in COCO_KP_NAMES]}
 
 
 def _names():
-    from modules.pose.skeleton import COCO_KP_NAMES
     return COCO_KP_NAMES
 
 
@@ -325,7 +329,6 @@ def test_agent_tools_route_and_library_context(client, upload, llm_on, ungated):
     llm_on.module_host.db().commit()
     known = pc._known_context(pc.get_safe_path(pc.MEDIA_DIR, fn))
     assert known["taken"] == "2024-06-03"
-    from modules.pipeline.engine import _known_text
     assert "Taken: 2024-06-03" in _known_text(known)
 
 
@@ -334,7 +337,6 @@ def test_agent_tools_route_and_library_context(client, upload, llm_on, ungated):
 def test_numpy_model_output_is_written_to_the_file(client, upload):
     """! @brief Detector / pose / segmentation output carries numpy numbers; one of them used to
     fail the whole sidecar write, so nothing the pipeline found was saved."""
-    from cimtest import read_meta, media_path
     fn = upload(seed=5105)
     f = np.float32
     kp = [{"x": f(10), "y": f(20), "v": f(0.9)}]
@@ -356,7 +358,6 @@ def test_numpy_model_output_is_written_to_the_file(client, upload):
 
 
 def test_a_failed_write_is_reported(client, upload, monkeypatch):
-    from cimtest import media_path
     fn = upload(seed=5106)
     monkeypatch.setattr(pc, "update_file", lambda *a, **k: {"success": False, "error": "metadata write failed"})
     with pytest.raises(RuntimeError, match="writing the result to the file failed"):

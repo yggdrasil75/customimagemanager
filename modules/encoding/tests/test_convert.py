@@ -2,9 +2,16 @@
 @brief The encoding module's storage policy and converters (convert.py): stored
 names, target extensions per Settings -> Media, the stored-image policy it installs
 into media_types, and a Pillow round trip."""
+import io
+import os
+import tarfile
+import zipfile
+
+import pytest
 from PIL import Image
 
 import media_types as mt
+from cimtest import drain_uploads, png_bytes
 from modules.encoding import convert as C
 
 
@@ -68,16 +75,6 @@ def test_convert_image_roundtrip(tmp_path):
 
 
 # -- archives ----------------------------------------------------------------------------
-import io
-import os
-import tarfile
-import zipfile
-
-import pytest
-
-from cimtest import drain_uploads, png_bytes
-
-
 def _zip(path, members):
     with zipfile.ZipFile(path, "w") as z:
         for name, data in members.items():

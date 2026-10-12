@@ -6,7 +6,6 @@ SMTP with an injected transport, and the routes.
 import collections
 import os
 
-import pytest
 
 from modules.storage_alerts import module as sam
 

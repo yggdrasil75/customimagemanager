@@ -1,9 +1,14 @@
 """! @file
 @brief Comics module: cbz archives on the books shelf (paged reader) and folder comics."""
+import copy
 import io
+import tarfile
 import time
+import zipfile
+
 import pytest
 from cimtest import png_bytes
+from modules.encoding import convert
 
 
 def _shelf(client, rel, tries=20):
@@ -53,13 +58,6 @@ def test_create_rejects_bad_folder(client):
 
 
 # -- comic uploads under Settings -> Media -> Books -----------------------------------------
-import copy
-import tarfile
-import zipfile
-
-from modules.encoding import convert
-
-
 def _pages(seed):
     return {f"p{i:02}.png": png_bytes(seed=seed + i) for i in range(3)}
 

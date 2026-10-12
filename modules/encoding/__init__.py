@@ -86,6 +86,7 @@ def service():
         # uploaded archives (.zip .rar .7z .tar...): unpacked, their contents uploaded
         is_archive_name=c.is_archive_name, archive_stem=c.archive_stem,
         archive_kind=c.archive_kind, expand_archive=c.expand_archive, ArchiveError=c.ArchiveError,
+        read_7z=c.read_7z,
         # thumbnails
         thumb_params=thumb_params,
         # videos the browser can play (playback.py): what /api/file sends for a video

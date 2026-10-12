@@ -47,7 +47,7 @@ Module tests (modules/<dir>/tests/test_*.py) are skipped automatically when
 that module isn't registered (disabled, or its deps missing), with the
 loader's reason.
 """
-import io, os, sys, shutil, tempfile, logging, json
+import io, os, sys, shutil, tempfile, logging
 import numpy as np
 import pytest
 

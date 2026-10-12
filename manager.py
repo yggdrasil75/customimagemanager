@@ -29,7 +29,6 @@ imagecodecs, _HAVE_IMAGECODECS = optional_import("imagecodecs")
 Image, _HAVE_PIL = optional_import("PIL.Image")
 ImageOps, _ = optional_import("PIL.ImageOps")
 import object_grouping as og
-import model_registry
 import common
 import media_types as mt
 # Settings > Media: filename cleanup (the storage format per kind, media_storage,
@@ -89,7 +88,7 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 shutil.rmtree(os.path.join(MEDIA_DIR, ".thumbs"), ignore_errors=True)  # old loose thumbnail cache
 os.makedirs("logs",     exist_ok=True)
 
-from cimlogger import access_logger, audit, training_logger as cimlogger_training_logger, enable_crash_log
+from cimlogger import access_logger, audit, training_logger as cimlogger_training_logger
 
 state = {
     "classes": ["object"], "available_models": [],

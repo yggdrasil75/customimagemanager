@@ -32,6 +32,7 @@ ImageSequence, _ = optional_import("PIL.ImageSequence")
 PngImagePlugin, _ = optional_import("PIL.PngImagePlugin")
 py7zr, _ = optional_import("py7zr", quiet=True)
 rarfile, _ = optional_import("rarfile", quiet=True)
+BytesIOFactory, _ = optional_import("py7zr.io", attr="BytesIOFactory", quiet=True)  # py7zr >= 1.0
 
 
 def _ext(path: str) -> str:
@@ -475,7 +476,6 @@ def read_7z(path: str, names=None) -> dict:
         if hasattr(a, 'readall'):
             got = a.readall() if names is None else a.read(list(names))
             return {k: v.read() for k, v in (got or {}).items()}
-        from py7zr.io import BytesIOFactory
         f = BytesIOFactory(limit=1 << 40)
         if names is None:
             a.extractall(factory=f)

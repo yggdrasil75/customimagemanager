@@ -162,6 +162,21 @@ def comicinfo_service():
         return None
 
 
+_encoding = None     # fn() -> the core "encoding" service (reads .7z on any py7zr)
+
+
+def bind_encoding(getter):
+    """! @brief How to reach the encoding service (a getter, bound in register())."""
+    global _encoding
+    _encoding = getter
+
+
+def _read_7z(path: str, names) -> dict:
+    """! @brief {name: bytes} of a .7z's members, via the encoding service ({} without it)."""
+    svc = _encoding() if _encoding else None
+    return svc.read_7z(path, names) if svc else {}
+
+
 def bind_media(media):
     global _media
     _media = media
@@ -1278,8 +1293,7 @@ def comic_page_bytes(abs_path: str, fmt: str, name: str) -> bytes | None:
             with rarfile.RarFile(abs_path) as r:
                 return r.read(name)
         if fmt == 'cb7':
-            from modules.encoding.convert import read_7z
-            return read_7z(abs_path, [name]).get(name)
+            return _read_7z(abs_path, [name]).get(name)
     except Exception:
         return None
     return None

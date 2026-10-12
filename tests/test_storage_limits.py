@@ -7,11 +7,11 @@ while the drive is full and picking its failed uploads back up when space return
 import collections
 import io
 import os
-import shutil
 
 import pytest
 
 import tiering
+from cimtest import png_bytes
 
 Usage = collections.namedtuple("usage", "total used free")
 GB = 1 << 30
@@ -70,7 +70,7 @@ def cap(app, media):
 
 
 def test_limit_reason(cap):
-    import manager
+    manager = cap
     cap.state["library_max_gb"] = 0
     assert manager._storage_limit_reason(0) == ""
     cap.state["library_max_gb"] = 1e-9                      # a few bytes: reached
@@ -80,8 +80,7 @@ def test_limit_reason(cap):
 
 
 def test_browser_uploads_wait_at_the_limit_but_the_spool_ingests(cap, client, upload):
-    import manager
-    from cimtest import png_bytes
+    manager = cap
     cap.state["library_max_gb"] = 1e-9
     r = client.post("/api/upload", data={"file": (io.BytesIO(png_bytes(seed=901)), "full.png")},
                     content_type="multipart/form-data")
@@ -105,14 +104,14 @@ def test_fetch_pauses_at_the_limit(cap, host):
     fetch = host.get_service("fetch")
     if fetch is None:
         pytest.skip("fetch module off")
-    import manager
+    manager = cap
     cap.state["library_max_gb"] = 1e-9
     assert "storage limit reached" in manager._core_api.storage_limit_reason(0)
 
 
 # -- the spool and a full drive ----------------------------------------------------------------
 def test_spool_waits_while_full_and_requeues_space_failures(app, monkeypatch):
-    import manager
+    manager = app
     db = manager._db()
     db.execute("INSERT INTO upload_queue(spool_path, orig_name, folder, status, attempts, error, created, updated) "
                "VALUES ('/tmp/x-space', 'a.png', '', 'error', 5, 'Conversion to .jxl failed. No space left on device', 0, 0)")
@@ -137,7 +136,7 @@ def test_spool_waits_while_full_and_requeues_space_failures(app, monkeypatch):
 
 
 def test_a_conversion_that_ran_out_of_space_is_retried(app, monkeypatch):
-    import manager
+    manager = app
     monkeypatch.setattr(manager.shutil, "disk_usage", lambda p: Usage(500 * GB, 400 * GB, 100 * GB))
     assert manager._spool_low_space("cjxl: No space left on device")
     assert not manager._spool_low_space("cjxl: bad header")
@@ -146,7 +145,7 @@ def test_a_conversion_that_ran_out_of_space_is_retried(app, monkeypatch):
 
 
 def test_limits_are_storage_tab_settings(app, client):
-    import manager
+    manager = app
     assert manager._settings_tab_for_key("library_max_gb") == "storage"
     assert manager._settings_tab_for_key("min_free_gb") == "storage"
     fields = client.get("/api/modules").get_json()["settings_fields"]

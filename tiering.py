@@ -15,7 +15,7 @@ the server is idle: copy, fsync, verify, swap the symlink, delete the old copy,
 throttled to `throttle_mbps`. gc_orphans() removes objects nothing points at.
 """
 
-import os, io, json, time, uuid, shutil, threading, logging
+import os, json, time, uuid, shutil, threading, logging
 
 log = logging.getLogger("tiering")
 if not log.handlers:
