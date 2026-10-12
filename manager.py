@@ -4998,6 +4998,68 @@ def _ingest_spooled(spool_path, orig_name, folder, metadata, pred, mode="auto"):
     return _enqueue_spooled_upload(spool_path, orig_name, folder,
                                    metadata, pred)
 
+_ARCHIVE_MAX_DEPTH = 3   # archives inside archives inside archives, and no deeper
+
+
+def _expand_uploaded_archive(path, fname, folder):
+    """! @brief Unpack an uploaded archive and queue each file in it as its own upload, in
+    <folder>/<archive name>/<its folders inside>. Files the library can't take are
+    listed as skipped; archives inside are queued too and unpacked in turn (up to
+    _ARCHIVE_MAX_DEPTH deep). The archive's tags and albums go to every file in it.
+    @return the response tuple.
+    """
+    meta = _form_metadata(fname)
+    depth = int(meta.pop("_archive_depth", 0) or 0)
+    if depth >= _ARCHIVE_MAX_DEPTH:
+        return jsonify({"success": False, "error_code": "conversion_failed",
+                        "error": f"Archive nested more than {_ARCHIVE_MAX_DEPTH} deep.",
+                        "detail": f"'{fname}' was not unpacked."}), 422
+    meta.pop("regions", None)
+    meta["_archive_depth"] = depth + 1
+    meta_json = json.dumps(meta)
+    base = "/".join(p for p in (folder.strip("/"), mt.clean_filename(media_encoding.archive_stem(fname)) or "archive") if p)
+    os.makedirs(_UPLOAD_SPOOL_DIR, exist_ok=True)
+    work = tempfile.mkdtemp(dir=_UPLOAD_SPOOL_DIR, prefix="x-")
+    try:
+        try:
+            room = shutil.disk_usage(_UPLOAD_SPOOL_DIR).free - max(common.min_free_bytes(MEDIA_DIR), _SPOOL_MIN_FREE)
+            files = media_encoding.expand_archive(path, work, max_bytes=max(0, room))
+        except media_encoding.ArchiveError as e:
+            msg = str(e)
+            if "free space" in msg:
+                # not a verdict on the archive: it waits for room like any upload
+                return jsonify({"success": False, "error_code": "server_error",
+                                "error": f"waiting for disk space: {msg}"}), 507
+            return jsonify({"success": False, "error_code": "conversion_failed",
+                            "error": f"Could not unpack '{fname}'.", "detail": msg}), 422
+        except Exception as e:
+            return jsonify({"success": False, "error_code": "conversion_failed",
+                            "error": f"Could not unpack '{fname}'.", "detail": str(e) or e.__class__.__name__}), 422
+        accepted = mt.UPLOAD_EXTS
+        queued, skipped = 0, []
+        for rel in files:
+            name = rel.rsplit("/", 1)[-1]
+            if os.path.splitext(name)[1].lower() not in accepted and not media_encoding.is_archive_name(name):
+                skipped.append(rel)
+                continue
+            sub = "/".join(mt.clean_filename(p) or "_" for p in rel.split("/")[:-1])
+            dest = "/".join(p for p in (base, sub) if p)
+            fd, spool = tempfile.mkstemp(dir=_UPLOAD_SPOOL_DIR, prefix="up-", suffix="-" + mt.clean_filename(name))
+            os.close(fd)
+            os.replace(os.path.join(work, *rel.split("/")), spool)
+            resp = _enqueue_spooled_upload(spool, name, dest, meta_json, _predicted_rel(
+                get_safe_path(MEDIA_DIR, dest) or MEDIA_DIR, name))
+            body, code = resp if isinstance(resp, tuple) else (resp, 200)
+            if code < 400:
+                queued += 1
+        access_logger.info(f"upload: unpacked '{fname}' into {base}/: {queued} file(s) queued, "
+                           f"{len(skipped)} skipped")
+        return jsonify({"success": True, "archive": True, "folder": base, "queued": queued,
+                        "skipped": skipped[:200], "skipped_count": len(skipped)}), 200
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def _run_upload():
     """! @brief Convert and index one upload from the current request context
     (a live request or the queue worker's rebuilt one).
@@ -5023,6 +5085,10 @@ def _run_upload():
         # save first so the bytes can be sniffed
         orig = os.path.join(tmp, fname or "upload.bin")
         file.save(orig)
+
+        # an archive (.zip .rar .7z .tar...) is unpacked and its contents uploaded one by one
+        if media_encoding.is_archive_name(fname):
+            return _expand_uploaded_archive(orig, fname, folder)
 
         # Always check the extension against the bytes: a JPEG named .png has a
         # valid-looking extension and would make cjxl fail.
@@ -5138,6 +5204,18 @@ def _run_upload():
                 else:
                     err = (media_encoding.convert_book(orig, out) if mt.is_uploadable_book(fname)
                            else media_encoding.convert_av(orig, out))
+                    if err and in_ext in mt.media_group('book', 'comic'):
+                        # a comic that can't be repacked (no rar reader here, say) is kept
+                        # as uploaded: the reader opens it by its content
+                        access_logger.warning(f"upload: could not repack comic '{fname}' to "
+                                              f"{store_ext} ({err}); storing it as uploaded")
+                        store_path = _free_store_path(os.path.join(tdir, fname)) \
+                            if os.path.exists(os.path.join(tdir, fname)) else os.path.join(tdir, fname)
+                        store_name, store_ext = os.path.basename(store_path), in_ext
+                        rel_path = _rel(store_path)
+                        out = os.path.join(tmp, "out" + store_ext)
+                        shutil.copy(orig, out)
+                        err = None
                     if err:
                         return jsonify({
                             "success": False, "error_code": "conversion_failed",
@@ -5220,7 +5298,7 @@ def _run_upload():
 
             # books: index this one file now, not a whole-tree walk per upload
             module_host.emit("upload.stored", rel_path=rel_path, filename=fname)
-            if mt.is_book(fname):
+            if mt.is_book(fname) or in_ext in mt.media_group('book', 'sidecar'):
                 resp = {"success": True, "filename": rel_path, "media_kind": "book"}
                 if corrected_from is not None:
                     resp["corrected_extension"] = {"from": corrected_from,

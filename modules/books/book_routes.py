@@ -346,6 +346,22 @@ def index_one(rel_path: str) -> dict:
         _record_triage(rel_path, ap, v)
     return v.as_dict()
 
+def reindex_folder(rel_path: str) -> int:
+    """! @brief A calibre metadata.opf arrived (uploaded after its book, say): index the
+    books in its folder again so its metadata fills their gaps.
+    @return how many books were indexed."""
+    ap = _abs(rel_path)
+    if not ap:
+        return 0
+    d, n = os.path.dirname(ap), 0
+    rel_dir = os.path.dirname(rel_path)
+    for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        if f.lower().endswith(".opf") or not bi.ext_candidate(f):
+            continue
+        if index_one(f"{rel_dir}/{f}" if rel_dir else f).get("status") == "book":
+            n += 1
+    return n
+
 def rename_book(old_rel: str, new_rel: str) -> bool:
     """! @brief Repoint every book table from old_rel to new_rel. Called by api_move.
 

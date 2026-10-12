@@ -157,7 +157,7 @@ class _Uploader:
         assert r.status_code == 200, r.get_data(as_text=True)
         j = r.get_json()
         assert j["success"], j
-        if not j.get("duplicate"):
+        if j.get("filename") and not j.get("duplicate"):
             self.made.append(j["filename"])
         return j
 
@@ -183,6 +183,15 @@ class _Uploader:
         for fn in self.made:
             self.client.post("/api/delete", json={"filename": fn})
         self.made.clear()
+
+
+def drain_uploads(app):
+    """! @brief Run every queued upload now, in this thread (the queue worker's path)."""
+    while True:
+        job = app._claim_upload_job()
+        if not job:
+            break
+        app._handle_upload_job(job)
 
 
 @pytest.fixture

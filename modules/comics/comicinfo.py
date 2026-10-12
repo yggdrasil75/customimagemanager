@@ -96,9 +96,10 @@ def _read_xml_bytes(abs_path, fmt):
         if fmt == "cb7" and HAVE_PY7ZR:
             with py7zr.SevenZipFile(abs_path) as s:
                 m = _find_member(s.getnames())
-                if not m:
-                    return None
-                return s.read([m])[m].read()
+            if not m:
+                return None
+            from modules.encoding.convert import read_7z
+            return read_7z(abs_path, [m]).get(m)
     except Exception:
         return None
     return None
@@ -181,14 +182,14 @@ def _rewrite(abs_path, fmt, member_name, xml_bytes):
                 import io
                 dst.addfile(info, io.BytesIO(xml_bytes))
         elif fmt == "cb7":
+            from modules.encoding.convert import read_7z
             with py7zr.SevenZipFile(abs_path) as src:
                 names = [n for n in src.getnames() if n != member_name]
-                data = src.read(names) if names else {}
+            data = read_7z(abs_path, names) if names else {}
             with py7zr.SevenZipFile(tmp, "w") as dst:
-                for n, fh in data.items():
-                    dst.writef(fh, n)
-                import io
-                dst.writef(io.BytesIO(xml_bytes), member_name or FILENAME)
+                for n, b in data.items():
+                    dst.writestr(b, n)
+                dst.writestr(xml_bytes, member_name or FILENAME)
         else:
             raise RuntimeError(f"{fmt} archives are read-only")
         shutil.move(tmp, abs_path)
