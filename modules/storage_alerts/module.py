@@ -266,7 +266,6 @@ def register(host):
         ("storage_alerts_min_free_gb", "Low disk below (GB)", "number",
          {"help": "0 uses the server's own floor (the one uploads wait on: 10 GB on disks over 1 TB, else 1 GB). "
                   "Checked for the media folder, every storage tier, the models folder and the extra paths."}),
-        ("storage_alerts_library_max_gb", "Library cap (GB)", "number", {"help": "0 = no cap."}),
         ("storage_alerts_tier_over_pct", "Tier over budget (%)", "number",
          {"help": "Budgets come from Settings -> Storage; only checked while tiering is enabled."}),
         ("storage_alerts_extra_paths", "Extra paths", "text",
@@ -385,12 +384,14 @@ def register(host):
                 tiering_on = bool((core.tiering.load_cfg() or {}).get("enabled"))
             except Exception:
                 tiering_on = False
-            # status() walks every tier and the media folder: only when a check needs it
-            if float(c["storage_alerts_library_max_gb"] or 0) > 0 or tiering_on:
+            # the cap is the core's max total size; measured like the limit it mirrors:
+            # everything the app stores (media and every tier), from the shared cached walk
+            c["storage_alerts_library_max_gb"] = float(host.config.get("library_max_gb") or 0)
+            if c["storage_alerts_library_max_gb"] > 0 or tiering_on:
                 try:
                     st = core.tiering.status()
                     tier_stats = st.get("tiers") or []
-                    media_bytes = (st.get("media") or {}).get("bytes")
+                    media_bytes = core.tiering.usage(max_age=60.0)["total"]
                 except Exception as e:
                     log.error("storage_alerts: tiering status failed: %s" % e)
             res = evaluate(c, watched_paths(c), common.min_free_bytes, tier_stats, media_bytes)
@@ -446,8 +447,19 @@ def register(host):
     def _handle(job):
         run_check(send=True)
 
+    def migrate_cap():
+        """! @brief The library cap used to be this module's own setting; it is the core's
+        "Max total size" now (it also stops fetch and uploads). Carry a set value over once."""
+        old = float(host.config.get("storage_alerts_library_max_gb") or 0)
+        if old > 0 and not float(host.config.get("library_max_gb") or 0):
+            host.set_config("library_max_gb", old)
+            log.info("storage_alerts: library cap %.1f GB moved to Settings -> Storage -> Max total size" % old)
+        if old:
+            host.set_config("storage_alerts_library_max_gb", 0)
+
     def _start():
         migrate_smtp()
+        migrate_cap()
         tick["next"] = time.time() + 120.0      # first check two minutes after boot
         host.add_worker_source("storage_alerts", _claim, _handle)
     host.on_startup(_start)

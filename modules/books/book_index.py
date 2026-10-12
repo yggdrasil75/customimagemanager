@@ -162,6 +162,21 @@ def comicinfo_service():
         return None
 
 
+_encoding = None     # fn() -> the core "encoding" service (reads .7z on any py7zr)
+
+
+def bind_encoding(getter):
+    """! @brief How to reach the encoding service (a getter, bound in register())."""
+    global _encoding
+    _encoding = getter
+
+
+def _read_7z(path: str, names) -> dict:
+    """! @brief {name: bytes} of a .7z's members, via the encoding service ({} without it)."""
+    svc = _encoding() if _encoding else None
+    return svc.read_7z(path, names) if svc else {}
+
+
 def bind_media(media):
     global _media
     _media = media
@@ -430,6 +445,9 @@ def classify(abs_path: str, ctx: dict | None = None) -> Verdict:
                                          for f in ctx['files']):
             return Verdict('book', 'opf-folder', 'book',
                            'manifest of an unpacked book; folder is the unit')
+        if any(_ext(f) in UNAMBIGUOUS_BOOK_EXTS or _ext(f) == '.pdf' for f in ctx['files']):
+            # calibre's metadata.opf: the metadata of the book file(s) beside it
+            return Verdict('part', 'opf', 'book', 'metadata of the book beside it (calibre)')
         return Verdict('triage', 'opf', 'book',
                        'stray .opf with no content beside it')
 
@@ -808,6 +826,7 @@ def read_metadata(abs_path: str, fmt: str) -> dict:
             _meta_text(abs_path, meta)
     except Exception:
         pass
+    _fill_from_calibre_opf(abs_path, fmt, meta)
     _overlay_sidecar(abs_path, fmt, meta)
 
     if not meta['title']:
@@ -819,6 +838,38 @@ def read_metadata(abs_path: str, fmt: str) -> dict:
     if not meta['source']:
         meta['source'] = _guess_source(abs_path, meta)
     return meta
+
+def calibre_opf(abs_path: str) -> str | None:
+    """! @brief The metadata.opf a calibre library keeps beside a book: the one .opf in the
+    book's folder, when that folder isn't an unpacked book (no chapters beside it)."""
+    d = os.path.dirname(abs_path)
+    try:
+        files = os.listdir(d)
+    except OSError:
+        return None
+    opfs = [f for f in files if f.lower().endswith('.opf')]
+    if len(opfs) != 1 or any(_ext(f) in ('.htm', '.html', '.xhtml') for f in files) \
+            or {f.lower() for f in files} & {'mimetype', 'container.xml', 'toc.ncx'}:
+        return None
+    return os.path.join(d, opfs[0])
+
+def _fill_from_calibre_opf(abs_path: str, fmt: str, meta: dict):
+    """! @brief Fill what the file itself doesn't say (title, authors, series, cover...)
+    from a calibre metadata.opf beside it. Only gaps: the file's own metadata, and the
+    edits this app writes into it, win."""
+    if fmt == 'opf-folder':
+        return
+    opf = calibre_opf(abs_path)
+    if not opf:
+        return
+    got = dict(_EMPTY_META, identifiers={}, authors=[], subjects=[])
+    _meta_opf_folder(opf, got)
+    for k, v in got.items():
+        if k == 'identifiers':
+            for ik, iv in v.items():
+                meta['identifiers'].setdefault(ik, iv)
+        elif v not in (None, '', [], {}) and meta.get(k) in (None, '', [], {}):
+            meta[k] = v
 
 def _overlay_sidecar(abs_path: str, fmt: str, meta: dict):
     """! @brief Formats with no embedded metadata home (MOBI, plain text, ...)
@@ -1242,10 +1293,7 @@ def comic_page_bytes(abs_path: str, fmt: str, name: str) -> bytes | None:
             with rarfile.RarFile(abs_path) as r:
                 return r.read(name)
         if fmt == 'cb7':
-            with py7zr.SevenZipFile(abs_path) as s:
-                got = s.read([name])
-                if got and name in got:
-                    return got[name].read()
+            return _read_7z(abs_path, [name]).get(name)
     except Exception:
         return None
     return None

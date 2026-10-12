@@ -42,14 +42,17 @@ Helpers
   read_meta / write_meta   /api/metadata read/write through the client
   post_json(client, url, body)  JSON POST; skips on the machine gate's 503
   box(**kw)      a region dict with sane defaults
+  signed_in_as(app, user)  requests run as this g.user (auth is off in the test app)
 
 Module tests (modules/<dir>/tests/test_*.py) are skipped automatically when
 that module isn't registered (disabled, or its deps missing), with the
 loader's reason.
 """
-import io, os, sys, shutil, tempfile, logging, json
+import contextlib
+import io, os, sys, shutil, tempfile, logging
 import numpy as np
 import pytest
+from flask import g
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURES = os.path.join(ROOT, "tests", "fixtures")     # --cim-fixtures overrides
@@ -157,7 +160,7 @@ class _Uploader:
         assert r.status_code == 200, r.get_data(as_text=True)
         j = r.get_json()
         assert j["success"], j
-        if not j.get("duplicate"):
+        if j.get("filename") and not j.get("duplicate"):
             self.made.append(j["filename"])
         return j
 
@@ -169,17 +172,46 @@ class _Uploader:
 
     def media(self, fixture_name, as_name=None, folder="", raw=False, **form):
         """! @brief A real fixture file (skips when absent) -> stored filename."""
-        p = fixture(fixture_name)
-        with open(p, "rb") as fh:
+        return self.file(fixture(fixture_name), as_name or fixture_name, folder=folder, raw=raw, **form)
+
+    def file(self, path, as_name=None, folder="", raw=False, **form):
+        """! @brief A file the test made (a generated clip, say) -> stored filename."""
+        with open(path, "rb") as fh:
             data = fh.read()
-        j = self._post({"file": (io.BytesIO(data), as_name or fixture_name),
-                        "mode": "sync", "folder": folder, **form}, fixture_name)
+        name = as_name or os.path.basename(path)
+        j = self._post({"file": (io.BytesIO(data), name), "mode": "sync", "folder": folder, **form}, name)
         return j if raw else j["filename"]
 
     def cleanup(self):
         for fn in self.made:
             self.client.post("/api/delete", json={"filename": fn})
         self.made.clear()
+
+
+@contextlib.contextmanager
+def signed_in_as(app, user):
+    """! @brief Requests in the block run as `user` (a g.user dict: id, username,
+    is_admin, features). The swap runs right after the auth gate sets g.user and
+    before any module's own before_request, as a real sign-in is seen by them."""
+    def _swap():
+        if getattr(g, "user", None) is not None:
+            g.user = user
+    funcs = app.app.before_request_funcs.setdefault(None, [])
+    gate = next((i for i, f in enumerate(funcs) if getattr(f, "__name__", "") == "_gate"), -1)
+    funcs.insert(gate + 1, _swap)
+    try:
+        yield
+    finally:
+        funcs.remove(_swap)
+
+
+def drain_uploads(app):
+    """! @brief Run every queued upload now, in this thread (the queue worker's path)."""
+    while True:
+        job = app._claim_upload_job()
+        if not job:
+            break
+        app._handle_upload_job(job)
 
 
 @pytest.fixture

@@ -43,7 +43,7 @@ from flask import request, jsonify
 from werkzeug.utils import secure_filename
 
 import common
-from common import disk_low, wait_for_space
+from common import disk_low
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS fetch_queue (
@@ -325,17 +325,8 @@ def register(host):
                           section="fetch", section_label="Fetch",
                           default="write", role_defaults={"viewer": "read"})
 
-    ## @brief Storage guard: downloads pause (not cancel) while free space is under this.
-    def _set_min_free(new, old=None):
-        common.MIN_FREE_GB = float(new or 0)
-    host.add_config_key("min_free_gb", default=0,
-                        validate=lambda v: max(0.0, float(v or 0)),
-                        on_change=_set_min_free)
-    host.add_settings_field(key="min_free_gb", label="Storage limit remaining (GB)",
-                            kind="number", pane="general", tab="general", section="system",
-                            help="Fetch queue and model downloads pause until space frees up. "
-                                 "0 = automatic: 10 GB on drives over 1 TB, else 1 GB.")
-    host.on_startup(lambda: _set_min_free(host.config.get("min_free_gb")))
+    # Storage guard: the limits live in Settings -> Storage (core: min_free_gb, library_max_gb);
+    # downloads pause (not cancel) while either is hit - see _pause_reason.
 
     # -- queue helpers (lazy manager import for core DB + upload ingest) ----
     m = host.core
@@ -437,8 +428,12 @@ def register(host):
                     for _mp, _meta in gen:
                         if _is_canceled(qid):
                             canceled = True; break
-                        if not wait_for_space(m.upload_spool_dir, host.media_dir,
-                                              stop=lambda: _is_canceled(qid)):
+                        # mid-job: wait while the drive is low or the max total size is reached
+                        while _pause_reason():
+                            if _is_canceled(qid):
+                                break
+                            time.sleep(30)
+                        if _is_canceled(qid):
                             canceled = True; break
                 finally:
                     try: gen.close()
@@ -472,7 +467,10 @@ def register(host):
     def _pause_reason():
         low = disk_low(m.upload_spool_dir, host.media_dir)
         why = (f"paused: {low} has under {common.min_free_bytes(low) >> 20} MB free "
-               "(Settings › General › Pause downloads below)") if low else ""
+               "(Settings > Storage > Keep free on the drive)") if low else ""
+        if not why:
+            limit = m.storage_limit_reason()
+            why = f"paused: {limit}" if limit else ""
         if why != _paused["why"]:
             _paused["why"] = why
             host.logger.warning(f"fetch queue {why or 'resumed'}")

@@ -188,12 +188,21 @@ def register(host):
         finally:
             state["embedding"] = False
 
-    def load_embeddings(space=None):
-        """! @brief Every stored vector in the current audio space (rows in another
-        model's space are kept but not comparable)."""
+    def where(clauses=(), params=(), column="rel_path"):
+        """! @brief " WHERE ..." of the clauses plus the access policies' (another account's
+        users/<name>/ tree is hidden from a signed-in user; admins and workers see all)."""
+        vc, vp = host.files_clause(column)
+        allc = list(clauses) + vc
+        return ((" WHERE " + " AND ".join(allc)) if allc else ""), list(params) + vp
+
+    def load_embeddings(space=None, everyone=False):
+        """! @brief Every stored vector in the current audio space the requester may see
+        (rows in another model's space are kept but not comparable).
+        @param everyone  all tracks, whoever asks (clustering is library-wide)."""
         space = space or _audio_space()
-        rows = db().execute("SELECT rel_path, emb FROM music WHERE emb IS NOT NULL AND emb_sig=?",
-                            (space,)).fetchall()
+        w, wp = (" WHERE emb IS NOT NULL AND emb_sig=?", [space]) if everyone else \
+            where(["emb IS NOT NULL", "emb_sig=?"], [space])
+        rows = db().execute(f"SELECT rel_path, emb FROM music{w}", wp).fetchall()
         paths, embs, dim = [], [], None
         for r in rows:
             v = ml.unpack_emb(r["emb"])
@@ -224,7 +233,8 @@ def register(host):
         by_path = {}
         if order:
             qm = ",".join("?" * len(order))
-            for r in db().execute(f"SELECT * FROM music WHERE rel_path IN ({qm})", order):
+            w, wp = where([f"rel_path IN ({qm})"], order)
+            for r in db().execute(f"SELECT * FROM music{w}", wp):
                 by_path[r["rel_path"]] = row_dict(r)
         return [by_path[p] for p in order if p in by_path]
 
@@ -263,11 +273,13 @@ def register(host):
 
     def status():
         _, space, embed_text = _try_audio_handle()
+        w, wp = where()
         c = db().execute("SELECT COUNT(*) tot, COUNT(DISTINCT artist) artists, "
-                         "COUNT(DISTINCT album) albums FROM music").fetchone()
-        emb = db().execute("SELECT COUNT(*) n FROM music WHERE emb IS NOT NULL AND emb_sig=?",
-                           (space,)).fetchone()["n"] if space else 0
-        n = db().execute("SELECT COUNT(DISTINCT cluster) c FROM music WHERE cluster>=0").fetchone()["c"]
+                         f"COUNT(DISTINCT album) albums FROM music{w}", wp).fetchone()
+        w, wp = where(["emb IS NOT NULL", "emb_sig=?"], [space])
+        emb = db().execute(f"SELECT COUNT(*) n FROM music{w}", wp).fetchone()["n"] if space else 0
+        w, wp = where(["cluster>=0"])
+        n = db().execute(f"SELECT COUNT(DISTINCT cluster) c FROM music{w}", wp).fetchone()["c"]
         return jsonify({"success": True, "state": state, "tracks": c["tot"] or 0,
                         "embedded": emb, "artists": c["artists"] or 0,
                         "albums": c["albums"] or 0, "clusters": n,
@@ -293,7 +305,7 @@ def register(host):
         if state["clustering"]:
             return jsonify({"success": False, "error": "already clustering"})
         k = (request.json or {}).get("k")
-        paths, embs = load_embeddings()
+        paths, embs = load_embeddings(everyone=True)
         if len(paths) < 2:
             return jsonify({"success": False,
                             "error": "Need at least 2 embedded tracks. Run 'Generate embeddings' first."})
@@ -315,19 +327,32 @@ def register(host):
             state["clustering"] = False
 
     def clusterlist():
-        rows = db().execute("SELECT cluster, label, size FROM music_clusters ORDER BY size DESC").fetchall()
-        return jsonify({"success": True, "clusters": [dict(r) for r in rows]})
+        """! @brief The clusters with the tracks the requester may see: their count, and the
+        label named after the top artist among them (another account's artist never shows)."""
+        labels = {r["cluster"]: r["label"] for r in db().execute("SELECT cluster, label FROM music_clusters")}
+        w, wp = where(["cluster>=0"])
+        sizes = db().execute(f"SELECT cluster, COUNT(*) n FROM music{w} GROUP BY cluster", wp).fetchall()
+        out = []
+        for r in sizes:
+            w, wp = where(["cluster=?", "artist!=''"], [r["cluster"]])
+            top = db().execute(f"SELECT artist, COUNT(*) n FROM music{w} GROUP BY artist "
+                               "ORDER BY n DESC LIMIT 1", wp).fetchone()
+            label = labels.get(r["cluster"]) if top is None or not host.files_clause()[0] else top["artist"]
+            out.append({"cluster": r["cluster"], "label": label or f"cluster {r['cluster']}", "size": r["n"]})
+        out.sort(key=lambda c: -c["size"])
+        return jsonify({"success": True, "clusters": out})
 
     def artists():
+        w, wp = where()
         rows = db().execute(f"SELECT {_NAME} AS name, COUNT(*) AS tracks, COUNT(DISTINCT album) AS albums "
-                            "FROM music GROUP BY name ORDER BY name COLLATE NOCASE").fetchall()
+                            f"FROM music{w} GROUP BY name ORDER BY name COLLATE NOCASE", wp).fetchall()
         return jsonify({"success": True, "artists": [dict(r) for r in rows]})
 
     def albums():
         artist = request.args.get("artist", "").strip()
-        where, params = ("WHERE " + _NAME + "=?", [artist]) if artist else ("", [])
+        w, params = where([_NAME + "=?"], [artist]) if artist else where()
         rows = db().execute(f"SELECT COALESCE(NULLIF(album,''),'(unknown)') AS album, {_NAME} AS artist, "
-                            f"COUNT(*) AS tracks, MIN(year) AS year FROM music {where} "
+                            f"COUNT(*) AS tracks, MIN(year) AS year FROM music{w} "
                             "GROUP BY album, artist ORDER BY year, album COLLATE NOCASE", params).fetchall()
         return jsonify({"success": True, "albums": [dict(r) for r in rows]})
 
@@ -387,10 +412,10 @@ def register(host):
             like = f"%{a['q'].strip()}%"
             clauses.append("(title LIKE ? OR artist LIKE ? OR album LIKE ? OR genre LIKE ? OR tags LIKE ?)")
             params += [like] * 5
-        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        w, params = where(clauses, params)
         page, per = max(0, int(a.get("page", 0))), 200
-        total = db().execute(f"SELECT COUNT(*) FROM music{where}", params).fetchone()[0]
-        rows = db().execute(f"SELECT * FROM music{where} ORDER BY albumartist COLLATE NOCASE, "
+        total = db().execute(f"SELECT COUNT(*) FROM music{w}", params).fetchone()[0]
+        rows = db().execute(f"SELECT * FROM music{w} ORDER BY albumartist COLLATE NOCASE, "
                             "album COLLATE NOCASE, disc, track, title COLLATE NOCASE LIMIT ? OFFSET ?",
                             (*params, per, page * per)).fetchall()
         return jsonify({"success": True, "total": total, "page": page, "page_size": per,
@@ -418,6 +443,8 @@ def register(host):
 
     def meta():
         d = request.json or {}
+        if not host.check_path(d.get("rel_path", ""), write=True):
+            return jsonify({"success": False, "error": "file not found"}), 404
         res = host.update_file(d.get("rel_path", ""),
                                set={k: d[k] for k in _TAG_KEYS + ("tags",) if k in d})
         if not res.get("success"):
@@ -436,10 +463,9 @@ def register(host):
         d = request.json or {}
         seed, seed_type = d.get("seed", ""), d.get("seed_type", "song")
         temp = float(d.get("temperature", 0.25))
-        q = (f"SELECT emb FROM music WHERE emb IS NOT NULL AND {_NAME}=?" if seed_type == "artist"
-             else "SELECT emb FROM music WHERE emb IS NOT NULL AND rel_path=?")
-        seed_vecs = [v for v in (ml.unpack_emb(r["emb"]) for r in db().execute(q, (seed,)).fetchall())
-                     if v is not None]
+        w, wp = where(["emb IS NOT NULL", f"{_NAME}=?" if seed_type == "artist" else "rel_path=?"], [seed])
+        seed_vecs = [v for v in (ml.unpack_emb(r["emb"]) for r in db().execute(
+            f"SELECT emb FROM music{w}", wp).fetchall()) if v is not None]
         if not seed_vecs:
             return jsonify({"success": False, "error": "Seed has no embedding. Generate embeddings first."})
         paths, embs = load_embeddings()
@@ -449,6 +475,8 @@ def register(host):
     def similar_tracks(rel_path, top_k=60):
         """! @brief (hits, songs, error): the tracks nearest to one track in the current
         space - the editor's Similar button and the player's next-track pick."""
+        if not host.check_path(rel_path):
+            return [], [], "not found"
         row = db().execute("SELECT emb, emb_sig FROM music WHERE rel_path=?", (rel_path,)).fetchone()
         space = _audio_space()
         if not space:
@@ -587,8 +615,9 @@ def register(host):
         paths, embs = load_embeddings()
         if len(paths) < 2:
             return [], {}, f"Fewer than 2 tracks embedded in '{space}' - press Embed first."
+        w, wp = where(["emb_sig=?"], [space])
         rows = {r["rel_path"]: r for r in db().execute(
-            "SELECT rel_path, title, album, genre, tags, comment, duration FROM music WHERE emb_sig=?", (space,))}
+            f"SELECT rel_path, title, album, genre, tags, comment, duration FROM music{w}", wp)}
         embs_by_path = dict(zip(paths, embs))
         dur = {p: float(rows[p]["duration"] or 240.0) for p in paths if p in rows}
         rng = random.Random(seed)
@@ -667,6 +696,8 @@ def register(host):
         rp = (request.json or {}).get("rel_path", "")
         if not rp:
             return jsonify({"success": False, "error": "rel_path required"})
+        if not host.check_path(rp):
+            return jsonify({"success": False, "error": "not found"}), 404
         db().execute("INSERT INTO music_plays(rel_path, played_at) VALUES(?,?)", (rp, time.time()))
         db().execute("DELETE FROM music_plays WHERE played_at<?", (time.time() - 30 * 86400,))
         db().commit()

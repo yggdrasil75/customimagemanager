@@ -38,7 +38,7 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-from .engine import (SCHEMA, crop_box, match_pose_boxes, _clamp, _dedup,
+from .engine import (SCHEMA, crop_box, match_pose_boxes, _clamp, _crop_rect, _dedup,
                      _iou_boxes, _map_box_to_full, _known_text)
 
 GRAPH_SCHEMA = "graph/1"
@@ -536,7 +536,6 @@ def run_graph(graph, image_bgr, llm, *, known=None, metadata=None, progress=None
 
 
 def _crop_rect_for(img, box, pad):
-    from .engine import _crop_rect
     h, w = img.shape[:2]
     return _crop_rect(h, w, box, pad)
 

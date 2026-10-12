@@ -1,9 +1,14 @@
 """! @file
 @brief Comics module: cbz archives on the books shelf (paged reader) and folder comics."""
+import copy
 import io
+import tarfile
 import time
+import zipfile
+
 import pytest
 from cimtest import png_bytes
+from modules.encoding import convert
 
 
 def _shelf(client, rel, tries=20):
@@ -50,3 +55,65 @@ def test_folder_comic_create_get_delete(client, upload):
 def test_create_rejects_bad_folder(client):
     assert client.post("/api/comic_create", json={"folder": ""}).get_json()["success"] is False
     assert client.post("/api/comic_create", json={"folder": "../x"}).get_json()["success"] is False
+
+
+# -- comic uploads under Settings -> Media -> Books -----------------------------------------
+def _pages(seed):
+    return {f"p{i:02}.png": png_bytes(seed=seed + i) for i in range(3)}
+
+
+def _zip_bytes(pages):
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as z:
+        for n, d in pages.items():
+            z.writestr(n, d)
+    return b.getvalue()
+
+
+def _tar_bytes(pages):
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode="w") as t:
+        for n, d in pages.items():
+            ti = tarfile.TarInfo(n)
+            ti.size = len(d)
+            t.addfile(ti, io.BytesIO(d))
+    return b.getvalue()
+
+
+def _7z_bytes(pages):
+    b = io.BytesIO()
+    with convert.py7zr.SevenZipFile(b, "w") as a:
+        for n, d in pages.items():
+            a.writestr(d, n)
+    return b.getvalue()
+
+
+@pytest.fixture
+def book_mode():
+    saved = copy.deepcopy(convert.media_prefs())
+
+    def set_(mode, target=".epub"):
+        p = copy.deepcopy(saved)
+        p["book"] = {"mode": mode, "target": target}
+        convert.set_media_prefs(p)
+    yield set_
+    convert.set_media_prefs(saved)
+
+
+@pytest.mark.parametrize("mode,want", [("all", ".cbz"), ("unsafe", None), ("none", None)])
+def test_comics_are_never_sent_to_calibre(client, upload, book_mode, mode, want):
+    """! @brief With an .epub target a comic stays a comic: repacked to .cbz when everything
+    is converted, else kept as uploaded. A .cbr that is really a zip, a .cbt and a .cb7
+    (py7zr 1.x has no read()) all make it, with or without a ComicInfo.xml."""
+    book_mode(mode)
+    made = [("a.cbr", _zip_bytes(_pages(910))), ("b.cbt", _tar_bytes(_pages(920)))]
+    if convert.py7zr is not None:
+        made.append(("c.cb7", _7z_bytes(_pages(930))))
+    for name, data in made:
+        j = upload._post({"file": (io.BytesIO(data), name), "mode": "sync", "folder": f"cm_{mode}"}, name)
+        fn = j["filename"]
+        assert fn.endswith(want or name[-4:]), (name, fn)
+        b = _shelf(client, fn)
+        assert b and b["kind"] == "comic" and b["page_count"] == 3, (name, b)
+        r = client.get(f"/api/books/page/{fn}", query_string={"n": 0})
+        assert r.status_code == 200 and r.content_type.startswith("image/")

@@ -127,6 +127,13 @@
           <div id="tiers_status" class="text-xs text-gray-300"></div>
         </section>
       </div>
+      <!-- Limits (core: library_max_gb, min_free_gb; pane="storage", section="limits"). -->
+      <section class="border-t border-gray-700 mt-3 pt-3">
+        <h3 class="font-bold text-amber-300 text-sm mb-2">Limits</h3>
+        <div id="module_settings_fields_storage_limits" data-compact class="settings-compact"></div>
+        <p class="text-[11px] text-gray-500 mt-1">Fetch pauses and browser uploads wait while a limit is hit, and
+          carry on by themselves once space is freed. Files already in the upload spool keep being added.</p>
+      </section>
       <!-- Alerts (the storage_alerts module): its fields render compact here
            (pane="storage", section="alerts"); storage_alerts.js unhides the
            section and adds the readings and its buttons. -->

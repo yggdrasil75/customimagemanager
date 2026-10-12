@@ -46,7 +46,7 @@ def test_role_defaults_for_tabs():
 
 def test_update_settings_checks_each_key_against_its_tab(app, client):
     before = app.state.get("min_free_gb")
-    with as_user(app, perms={"settings.general": "write", "settings.media": "read"}):
+    with as_user(app, perms={"settings.storage": "write", "settings.media": "read"}):
         r = client.post("/api/update_settings", json={"min_free_gb": 3})
         assert r.status_code == 200, r.get_json()
         r = client.post("/api/update_settings", json={"filename_cleanup": {"bad": True}})

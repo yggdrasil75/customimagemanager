@@ -21,7 +21,7 @@
   let cfg = null;          // /api/upload/config, fetched once
   const queue = [];        // items waiting: {file, folder, size, sent, ...}
   const failed = [];       // items that failed, for Retry
-  const batch = { items: [], done: 0, dup: 0, queued: 0, notes: new Set() };
+  const batch = { items: [], done: 0, dup: 0, queued: 0, unpacked: 0, skipped: 0, notes: new Set() };
   let running = 0;
 
   /** @brief HTML-escape (the core's _esc when present). */
@@ -90,6 +90,7 @@
   function httpError(r, j) {
     const e = new Error((j && j.error) || `HTTP ${r.status}`);
     e.status = r.status; e.code = j && j.error_code;
+    e.retryAfter = Number((j && j.retry_after) || r.headers.get('Retry-After') || 0);
     return e;
   }
 
@@ -174,16 +175,33 @@
     return j;
   }
 
-  /** @brief Upload one item, recording the outcome. */
+  const STORAGE_WAIT_MS = 60000;
+  /** @brief Upload one item, recording the outcome. A 507 (the server's storage limit is
+   *  reached or its disk is full) isn't a failure: the item waits and tries again by
+   *  itself (a chunked one resumes where it stopped) until space is freed. */
   async function sendOne(it) {
     it.error = '';
     try {
       const big = cfg.sessions && it.size > (cfg.chunked_over || FALLBACK_CHUNK);
-      const j = await (big ? sendChunked(it) : sendSmall(it));
+      let j;
+      for (;;) {
+        try { j = await (big ? sendChunked(it) : sendSmall(it)); break; }
+        catch (e) {
+          if (e.status !== 507) throw e;
+          const note = `Waiting for storage: ${e.message}. Uploads carry on by themselves when space is freed.`;
+          batch.notes.add(note); progress();
+          await sleep(Math.max(15000, (e.retryAfter || 0) * 1000) || STORAGE_WAIT_MS);
+          batch.notes.delete(note);
+        }
+      }
       it.sent = it.size;
       batch.done++;
       if (j.duplicate) batch.dup++;
       if (j.queued) batch.queued++;
+      if (j.archive) {                       // unpacked: its files are queued one by one
+        batch.unpacked += j.queued || 0;
+        batch.skipped += j.skipped_count || 0;
+      }
     } catch (e) {
       it.error = e && e.message || String(e);
       it.sent = 0;
@@ -212,10 +230,13 @@
     let msg = `Uploaded ${batch.done} of ${n} file${n === 1 ? '' : 's'}`;
     if (batch.dup) msg += `, ${batch.dup} already there`;
     if (batch.queued) msg += `, ${batch.queued} queued`;
+    if (batch.unpacked || batch.skipped)
+      msg += `, archives unpacked: ${batch.unpacked} file${batch.unpacked === 1 ? '' : 's'} queued` +
+             (batch.skipped ? `, ${batch.skipped} skipped (not a type the library takes)` : '');
     // the summary replaces the per-file toast: keep the first reason in it
     if (errs.length) msg += `, ${errs.length} failed (${errs[0].file.name}: ${errs[0].error})`;
     toast(msg);
-    batch.items = []; batch.done = batch.dup = batch.queued = 0;
+    batch.items = []; batch.done = batch.dup = batch.queued = batch.unpacked = batch.skipped = 0;
     progress();
     if (typeof window.loadGallery === 'function') window.loadGallery();
   }

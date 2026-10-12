@@ -484,8 +484,13 @@ async function refreshTiersStatus() {
 
   let rows = '';
   if (media) {
-    rows += _statusRow('media/ <span class="text-[10px] text-gray-500 font-normal">(links | DB | thumbs)</span>',
-      media.path || '', media.files, media.bytes, null, null);
+    rows += _statusRow('media/', media.path || '', media.files, media.bytes, null, null);
+    // where media/'s bytes are: a number that looks doubled is usually one of these
+    for (const p of (media.parts || []).filter(p => p.bytes > 0)) {
+      rows += `<div class="flex justify-between items-baseline gap-3 pl-3 text-[11px] text-gray-400">
+          <span>${escapeHtml(p.label)}</span>
+          <span class="whitespace-nowrap">${fmtGB(p.bytes)} <span class="text-gray-600 ml-1">${fmtCount(p.files)}</span></span></div>`;
+    }
   }
   for (const t of tiers) {
     const pct = t.budget_bytes ? 100 * t.actual_bytes / t.budget_bytes : null;
@@ -503,7 +508,14 @@ async function refreshTiersStatus() {
         <span class="text-[11px] text-gray-500 ml-2">${fmtCount(gfiles)}</span>
       </div></div>`;
 
-  el.innerHTML = worker + rows + total;
+  const u = r.usage || {};
+  const cap = Number((document.querySelector('[data-settings-field="library_max_gb"] input') || {}).value || 0);
+  const drive = u.drive ? `<div class="text-[11px] text-gray-500 mt-2 pt-1 border-t border-gray-800">
+      Drive: ${fmtGB(u.drive.used)} used of ${fmtGB(u.drive.total)}, ${fmtGB(u.drive.free)} free -
+      ${fmtGB(u.outside)} of it isn't this app's (other programs and files on the same drive).
+      ${cap > 0 ? `<br>Max total size: ${fmtGB(u.total)} of ${cap} GB${u.total >= cap * 1073741824 ? ' - <span class="text-red-400">reached</span>' : ''}.` : ''}
+      <span class="text-gray-600">Measured ${u.at ? new Date(u.at * 1000).toLocaleTimeString() : '-'}.</span></div>` : '';
+  el.innerHTML = worker + rows + total + drive;
 }
 
 async function tiersRebalance() {

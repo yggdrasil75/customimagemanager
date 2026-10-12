@@ -11,6 +11,9 @@ import time
 import numpy as np
 import pytest
 
+import features
+from cimtest import signed_in_as
+
 
 def _unit(v):
     v = np.asarray(v, np.float32)
@@ -125,3 +128,51 @@ def test_radio_played_log_defers_recent(client, library, app):
     # every just-played jazz track is pushed at least 4 h of playback in (60 x 4-min tracks)
     first_jazz = min(i for i, p in enumerate(order) if p.startswith("jazz/"))
     assert first_jazz * 240.0 >= 4 * 3600 - 240.0 or len(order) * 240.0 < 4 * 3600
+
+
+# -- another account's tracks --------------------------------------------------------------
+@pytest.fixture
+def listener(client):
+    """! @brief A real non-admin account that may use the Music tab."""
+    r = client.post("/api/auth/users/create", json={"username": "mus_carol", "password": "pw", "role": "custom"})
+    assert r.status_code == 200, r.get_json()
+    u = r.get_json()["user"]
+    yield {**u, "is_admin": False,
+           "features": features.effective_permissions("custom", {"tab.music": "write"})}
+    client.post("/api/auth/users/delete", json={"id": u["id"]})
+
+
+def test_another_accounts_tracks_stay_private(app, client, library, listener):
+    """! @brief Tracks in users/<name>/ follow the same rule as photos: another account
+    sees them in no list, count, search, shuffle, similar or radio, and can't edit them."""
+    from modules.music import music_lib as ml
+    db = app.module_host.db()
+    mine = [f"users/mus_dave/jazz/secret{i}.mp3" for i in range(3)]
+    for rel in mine:
+        db.execute("INSERT OR REPLACE INTO music(rel_path,title,artist,album,genre,duration,tags,"
+                   "emb,emb_sig,created) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                   (rel, "Secret", "Dave Private", "Dave Album", "jazz", 240.0, "[]",
+                    ml._pack_emb(_vec("jazz/" + rel.rsplit("/", 1)[1])), "test-audio", time.time()))
+    db.commit()
+    total = client.get("/api/music/status").get_json()["tracks"]          # the admin counts them
+    with signed_in_as(app, listener):
+        st = client.get("/api/music/status").get_json()
+        assert st["tracks"] == total - 3 and st["embedded"] == len(library)
+        songs = client.get("/api/music/songs", query_string={"q": "Secret"}).get_json()["songs"]
+        assert songs == []
+        assert "Dave Private" not in {a["name"] for a in client.get("/api/music/artists").get_json()["artists"]}
+        assert "Dave Album" not in {a["album"] for a in client.get("/api/music/albums").get_json()["albums"]}
+        sem = client.get("/api/music/songs", query_string={"q": "sem:jazz"}).get_json()["songs"]
+        assert sem and not any(s["rel_path"] in mine for s in sem)
+        sim = client.post("/api/music/similar", json={"rel_path": "jazz/track0.mp3"}).get_json()["songs"]
+        assert sim and not any(s["rel_path"] in mine for s in sim)
+        assert client.post("/api/music/similar", json={"rel_path": mine[0]}).get_json()["success"] is False
+        shuf = client.post("/api/music/shuffle", json={"seed": "jazz/track0.mp3"}).get_json()["songs"]
+        assert shuf and not any(s["rel_path"] in mine for s in shuf)
+        assert client.post("/api/music/shuffle", json={"seed": mine[0]}).get_json()["success"] is False
+        radio = client.post("/api/music/radio/next", json={"seed": 1}).get_json()["songs"]
+        assert radio and not any(s["rel_path"] in mine for s in radio)
+        assert client.post("/api/music/radio/played", json={"rel_path": mine[0]}).status_code == 404
+        assert client.post("/api/music/meta", json={"rel_path": mine[0], "title": "x"}).status_code == 404
+    sim = client.post("/api/music/similar", json={"rel_path": "jazz/track0.mp3"}).get_json()["songs"]
+    assert any(s["rel_path"] in mine for s in sim)                            # the admin sees all

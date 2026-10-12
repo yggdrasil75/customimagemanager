@@ -12,6 +12,7 @@ The rest of the app reaches these through the `encoding` service.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tarfile
 import zipfile
@@ -31,6 +32,7 @@ ImageSequence, _ = optional_import("PIL.ImageSequence")
 PngImagePlugin, _ = optional_import("PIL.PngImagePlugin")
 py7zr, _ = optional_import("py7zr", quiet=True)
 rarfile, _ = optional_import("rarfile", quiet=True)
+BytesIOFactory, _ = optional_import("py7zr.io", attr="BytesIOFactory", quiet=True)  # py7zr >= 1.0
 
 
 def _ext(path: str) -> str:
@@ -114,8 +116,15 @@ def target_ext(path: str, src: str | None = None) -> str:
         return _MEDIA_PREFS['image']['target']
     p = _MEDIA_PREFS[k]
     t, mode = p['target'], p['mode']
-    if k == 'book' and t == '.cbz' and e not in mt.media_group('book', 'comic'):
-        return e  # only comics become a cbz
+    if k == 'book':
+        if e in mt.media_group('book', 'sidecar'):
+            return e  # a book's metadata (calibre's metadata.opf) is kept as it is
+        if e in mt.media_group('book', 'comic'):
+            # a comic is never handed to calibre: it stays a comic archive, repacked to
+            # .cbz when everything is converted or .cbz is the target
+            return '.cbz' if mode != 'none' and (mode == 'all' or t == '.cbz') else e
+        if t == '.cbz':
+            return e  # only comics become a cbz
     if e in mt.RAW_INPUT_EXTS:
         return S.raw_target() or t  # raws are never stored as is
     convert = mode == 'all' or (mode == 'unsafe' and _browser_unsafe(e, k, src or path))
@@ -389,29 +398,19 @@ def convert_av(src: str, out: str) -> str | None:
 
 
 def convert_book(src: str, out: str) -> str | None:
-    """! @brief Comic archive -> .cbz by repacking; other books -> .epub / .pdf with
-    calibre's ebook-convert.
+    """! @brief Comic archive -> .cbz by repacking (whatever the archive really is: a
+    .cbr is often a zip and a .cbz a rar); other books -> .epub / .pdf with calibre's
+    ebook-convert.
     @return None on success, else the error.
     """
-    e = _ext(out)
-    if e == '.cbz':
-        s = _ext(src)
+    if _ext(out) == '.cbz':
         try:
+            if archive_kind(src) == 'zip':
+                shutil.copyfile(src, out)
+                return None
             with zipfile.ZipFile(out, 'w', zipfile.ZIP_STORED) as z:
-                if s == '.cbt':
-                    with tarfile.open(src) as t:
-                        for m in t.getmembers():
-                            if m.isfile():
-                                z.writestr(m.name, t.extractfile(m).read())
-                elif s == '.cb7':
-                    with py7zr.SevenZipFile(src) as a:
-                        for n, bio in (a.readall() or {}).items():
-                            z.writestr(n, bio.read())
-                else:  # rar (.cbr / .cba)
-                    with rarfile.RarFile(src) as r:
-                        for n in r.namelist():
-                            if not n.endswith('/'):
-                                z.writestr(n, r.read(n))
+                for name, _size, read in archive_members(src):
+                    z.writestr(name, read())
             return None
         except Exception as ex:
             return str(ex) or ex.__class__.__name__
@@ -425,6 +424,165 @@ def convert_book(src: str, out: str) -> str | None:
     if p.returncode == 0 and os.path.exists(out):
         return None
     return (p.stderr or p.stdout or '').strip()[-500:] or "ebook-convert failed"
+
+
+# -- general archives (.zip .rar .7z .tar[.gz|.bz2|.xz]) ------------------------------
+# An uploaded archive is unpacked and its contents uploaded one by one; comics repack
+# through the same readers. The CONTENT decides how an archive is read.
+ARCHIVE_EXTS = ('.tar.gz', '.tar.bz2', '.tar.xz', '.tgz', '.tbz2', '.txz',
+                '.zip', '.rar', '.7z', '.tar')
+
+
+def is_archive_name(name: str) -> bool:
+    """! @brief True for a general archive's file name (not a comic, epub or docx, which are
+    zips with their own meaning)."""
+    return str(name or '').lower().endswith(ARCHIVE_EXTS)
+
+
+def archive_stem(name: str) -> str:
+    """! @brief The name without its archive extension ("trip.tar.gz" -> "trip")."""
+    low = str(name or '').lower()
+    for e in ARCHIVE_EXTS:
+        if low.endswith(e):
+            return name[:-len(e)]
+    return os.path.splitext(name)[0]
+
+
+def archive_kind(path: str) -> str | None:
+    """! @brief "zip" | "rar" | "7z" | "tar" from the file's bytes, or None."""
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(8)
+    except OSError:
+        return None
+    if head[:4] == b'Rar!':
+        return 'rar'
+    if head[:6] == b'7z\xbc\xaf\x27\x1c':
+        return '7z'
+    if zipfile.is_zipfile(path):
+        return 'zip'
+    try:
+        if tarfile.is_tarfile(path):  # plain or gzip / bzip2 / xz compressed
+            return 'tar'
+    except Exception:
+        pass
+    return None
+
+
+def read_7z(path: str, names=None) -> dict:
+    """! @brief {name: bytes} for the named members of a .7z (all when names is None),
+    on py7zr before 1.0 (read / readall) and after (extract with a BytesIOFactory)."""
+    with py7zr.SevenZipFile(path) as a:
+        if hasattr(a, 'readall'):
+            got = a.readall() if names is None else a.read(list(names))
+            return {k: v.read() for k, v in (got or {}).items()}
+        f = BytesIOFactory(limit=1 << 40)
+        if names is None:
+            a.extractall(factory=f)
+        else:
+            a.extract(targets=list(names), factory=f)
+        out = {}
+        for k, v in f.products.items():
+            v.seek(0)
+            out[k] = v.read()
+        return out
+
+
+class ArchiveError(Exception):
+    """! @brief An archive that can't be read here (missing reader, password, damaged)."""
+
+
+def archive_members(path: str):
+    """! @brief [(name, size, read())] for every file in an archive, read by its content.
+    Names are as stored ("a/b.jpg"); the caller makes them safe.
+    @throws ArchiveError when the archive can't be opened."""
+    kind = archive_kind(path)
+    if kind == 'zip':
+        z = zipfile.ZipFile(path)
+        if any(i.flag_bits & 0x1 for i in z.infolist()):
+            raise ArchiveError("password-protected zip")
+        return [(i.filename, i.file_size, (lambda i=i: z.read(i)))
+                for i in z.infolist() if not i.is_dir()]
+    if kind == 'tar':
+        t = tarfile.open(path)
+        return [(m.name, m.size, (lambda m=m: t.extractfile(m).read()))
+                for m in t.getmembers() if m.isfile()]
+    if kind == 'rar':
+        if rarfile is None:
+            raise ArchiveError("reading .rar needs the rarfile package and unrar (or bsdtar)")
+        try:
+            r = rarfile.RarFile(path)
+            if r.needs_password():
+                raise ArchiveError("password-protected rar")
+            return [(i.filename, i.file_size, (lambda i=i: r.read(i)))
+                    for i in r.infolist() if not i.isdir()]
+        except rarfile.Error as ex:
+            raise ArchiveError(f"rar: {ex}")
+    if kind == '7z':
+        if py7zr is None:
+            raise ArchiveError("reading .7z needs the py7zr package")
+        a = py7zr.SevenZipFile(path)
+        if a.needs_password():
+            raise ArchiveError("password-protected 7z")
+        infos = [i for i in a.list() if not i.is_directory]
+        cache = {}
+
+        def _read(name):
+            # a 7z is usually solid: one pass reads it all (a comic's pages); expand_archive
+            # extracts big ones to disk instead
+            if not cache:
+                cache.update(read_7z(path))
+            return cache.get(name, b'')
+        return [(i.filename, i.uncompressed, (lambda n=i.filename: _read(n))) for i in infos]
+    raise ArchiveError("not a zip, rar, 7z or tar archive")
+
+
+_JUNK = {'.ds_store', 'thumbs.db', 'desktop.ini'}
+
+
+def expand_archive(path: str, dest: str, max_bytes: int, max_files: int = 100000):
+    """! @brief Unpack an archive into dest, skipping OS junk (__MACOSX, .DS_Store, dot
+    files) and refusing names that would leave dest. Sizes are checked as they are
+    written, so a member that lies about its size can't fill the drive.
+    @param max_bytes  the most it may write in all (free space minus the floor).
+    @return [relative path] of the files written.
+    @throws ArchiveError (unreadable, too big, too many files)."""
+    members = archive_members(path)
+    if len(members) > max_files:
+        raise ArchiveError(f"{len(members)} files: more than {max_files}")
+    if sum(max(0, s or 0) for _, s, _ in members) > max_bytes:
+        raise ArchiveError("its contents don't fit in the free space")
+    root = os.path.realpath(dest)
+
+    def target(name):
+        parts = [p for p in str(name).replace('\\', '/').split('/') if p not in ('', '.')]
+        if not parts or '..' in parts or parts[0] == '__MACOSX' \
+                or any(p.startswith('.') for p in parts) or parts[-1].lower() in _JUNK:
+            return None
+        full = os.path.realpath(os.path.join(root, *parts))
+        return full if full.startswith(root + os.sep) else None
+
+    if archive_kind(path) == '7z':
+        # straight to disk, not through memory (a 7z of photos can be gigabytes)
+        wanted = [n for n, _s, _r in members if target(n)]
+        with py7zr.SevenZipFile(path) as a:
+            a.extract(path=root, targets=wanted)
+        return [os.path.relpath(target(n), root).replace(os.sep, '/') for n in wanted
+                if os.path.isfile(target(n))]
+    out, written = [], 0
+    for name, _size, read in members:
+        full = target(name)
+        if not full:
+            continue
+        data = read()
+        written += len(data)
+        if written > max_bytes:
+            raise ArchiveError("its contents don't fit in the free space")
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, 'wb') as f:
+            f.write(data)
+        out.append(os.path.relpath(full, root).replace(os.sep, '/'))
+    return out
 
 
 def transcode_animation_to_video(src_path: str, out_path: str,

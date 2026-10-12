@@ -3,14 +3,15 @@
 albums carry owner + visibility; library (partner) and album shares open
 them up. Auth is off in the test app (every request is an admin), so `as`
 swaps g.user for a real non-admin account for the duration of a block."""
-import contextlib
 import io
 import os
+import time
+import zipfile
+
 import pytest
-from flask import g
 from PIL import Image
 import features
-from cimtest import png_bytes
+from cimtest import png_bytes, signed_in_as
 
 
 @pytest.fixture(scope="module")
@@ -27,31 +28,16 @@ def accounts(client):
         client.post("/api/auth/users/delete", json={"id": u["id"]})
 
 
-@contextlib.contextmanager
 def as_(app, acct):
-    def _swap():
-        if getattr(g, "user", None) is not None:
-            g.user = {**acct, "is_admin": False, "features": features.effective_permissions(
-                "custom", {"tab.albums": "write", "data.delete": "write", "data.upload": "write"})}
-    app.app.before_request_funcs.setdefault(None, []).append(_swap)
-    try:
-        yield
-    finally:
-        app.app.before_request_funcs[None].remove(_swap)
+    """! @brief Requests run as this real non-admin account."""
+    return signed_in_as(app, {**acct, "is_admin": False, "features": features.effective_permissions(
+        "custom", {"tab.albums": "write", "data.delete": "write", "data.upload": "write"})})
 
 
-@contextlib.contextmanager
 def as_admin(app, acct):
     """! @brief Like as_, but the account is an admin (a real id, unlike the test
     app's anonymous admin)."""
-    def _swap():
-        if getattr(g, "user", None) is not None:
-            g.user = {**acct, "is_admin": True, "features": features.effective_permissions("admin", {})}
-    app.app.before_request_funcs.setdefault(None, []).append(_swap)
-    try:
-        yield
-    finally:
-        app.app.before_request_funcs[None].remove(_swap)
+    return signed_in_as(app, {**acct, "is_admin": True, "features": features.effective_permissions("admin", {})})
 
 
 def _names(client, **q):
@@ -141,6 +127,47 @@ def test_ownership_end_to_end(app, client, upload, accounts, host):
 
     # admin sees everything
     assert {pub, mine} <= _names(client)
+
+
+def _cbz():
+    """! @brief A three-page comic archive."""
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as z:
+        for i in range(3):
+            z.writestr(f"p{i}.png", png_bytes(seed=60 + i))
+    return b.getvalue()
+
+
+def test_books_in_a_personal_tree_stay_private(app, client, upload, accounts):
+    """! @brief Books and comics live in their own table and reach the gallery through a
+    search provider: they follow the same rule as images. Another account sees them
+    nowhere (gallery tiles, shelf, authors, status, detail, cover, download)."""
+    alice, bob = accounts["own_alice"], accounts["own_bob"]
+    with as_(app, alice):
+        j = upload._post({"file": (io.BytesIO(_cbz()), "own_comic.cbz"), "mode": "sync"}, "own_comic.cbz")
+    rel = j["filename"]
+    assert rel.startswith("users/own_alice/")
+    for _ in range(20):
+        if any(b["rel_path"] == rel for b in client.get("/api/books/list").get_json()["books"]):
+            break
+        time.sleep(0.25)
+    shelf = client.get("/api/books/status").get_json()["books"]          # the admin counts it
+    with as_(app, alice):
+        assert rel in _names(client)
+        assert any(b["rel_path"] == rel for b in client.get("/api/books/list").get_json()["books"])
+    with as_(app, bob):
+        assert rel not in _names(client)
+        assert rel not in _names(client, folder="users/own_alice")
+        assert not any(b["rel_path"] == rel for b in client.get("/api/books/list").get_json()["books"])
+        assert client.get("/api/books/status").get_json()["books"] == shelf - 1
+        assert client.get("/api/books/detail", query_string={"rel_path": rel}).status_code == 404
+        assert client.get(f"/api/books/cover/{rel}").status_code == 404
+        assert client.get(f"/api/books/download/{rel}").status_code == 404
+        assert client.get("/api/books/page/" + rel, query_string={"n": 0}).status_code == 404
+        assert client.post("/api/books/delete", json={"rel_path": rel}).status_code == 404
+    assert os.path.exists(os.path.join("media", rel))
+    assert any(b["rel_path"] == rel for b in client.get("/api/books/list").get_json()["books"])  # admin
+    client.post("/api/books/delete", json={"rel_path": rel})
 
 
 def _jpeg_size(data):

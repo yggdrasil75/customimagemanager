@@ -13,6 +13,7 @@ Folder comics keep their metadata in comic.json; the module maps the common
 fields (Title / Writer / Summary / Tags / Characters) both ways so one
 editor serves both kinds.
 """
+import io
 import os
 import shutil
 import tarfile
@@ -24,6 +25,20 @@ from optional_deps import optional_import
 
 rarfile, HAVE_RARFILE = optional_import("rarfile", quiet=True)
 py7zr, HAVE_PY7ZR = optional_import("py7zr", quiet=True)
+
+_encoding = None     # fn() -> the core "encoding" service (reads .7z on any py7zr)
+
+
+def bind_encoding(getter):
+    """! @brief How to reach the encoding service (a getter, bound in register())."""
+    global _encoding
+    _encoding = getter
+
+
+def _read_7z(path, names):
+    """! @brief {name: bytes} of a .7z's members, via the encoding service ({} without it)."""
+    svc = _encoding() if _encoding else None
+    return svc.read_7z(path, names) if svc else {}
 
 FILENAME = "ComicInfo.xml"
 YES_NO = {"Unknown": "Unknown", "No": "No", "Yes": "Yes"}
@@ -96,9 +111,9 @@ def _read_xml_bytes(abs_path, fmt):
         if fmt == "cb7" and HAVE_PY7ZR:
             with py7zr.SevenZipFile(abs_path) as s:
                 m = _find_member(s.getnames())
-                if not m:
-                    return None
-                return s.read([m])[m].read()
+            if not m:
+                return None
+            return _read_7z(abs_path, [m]).get(m)
     except Exception:
         return None
     return None
@@ -178,17 +193,15 @@ def _rewrite(abs_path, fmt, member_name, xml_bytes):
                     dst.addfile(m, src.extractfile(m) if m.isfile() else None)
                 info = tarfile.TarInfo(member_name or FILENAME)
                 info.size = len(xml_bytes)
-                import io
                 dst.addfile(info, io.BytesIO(xml_bytes))
         elif fmt == "cb7":
             with py7zr.SevenZipFile(abs_path) as src:
                 names = [n for n in src.getnames() if n != member_name]
-                data = src.read(names) if names else {}
+            data = _read_7z(abs_path, names) if names else {}
             with py7zr.SevenZipFile(tmp, "w") as dst:
-                for n, fh in data.items():
-                    dst.writef(fh, n)
-                import io
-                dst.writef(io.BytesIO(xml_bytes), member_name or FILENAME)
+                for n, b in data.items():
+                    dst.writestr(b, n)
+                dst.writestr(xml_bytes, member_name or FILENAME)
         else:
             raise RuntimeError(f"{fmt} archives are read-only")
         shutil.move(tmp, abs_path)

@@ -1,5 +1,6 @@
 """! @file
 @brief Books module: an uploaded epub is shelved, readable, and forgotten on delete."""
+import io
 import os
 import shutil
 import time
@@ -131,3 +132,54 @@ def test_meta_edit_is_written_into_comicinfo(client):
                    "Publisher": "Pub", "Year": "2021", "Month": "3", "Day": "4"}, got
     b = _book(client, rel)
     assert b["title"] == "Issue One" and b["authors"] == ["A Writer"]
+
+
+# -- calibre libraries: metadata.opf beside the book -----------------------------------------
+CALIBRE_OPF = b"""<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:title>The Real Title</dc:title>
+    <dc:creator opf:role="aut">Ann Author</dc:creator>
+    <dc:publisher>Calibre Press</dc:publisher>
+    <meta name="calibre:series" content="The Saga"/>
+    <meta name="calibre:series_index" content="3"/>
+  </metadata>
+</package>"""
+
+
+def _bare_epub(title):
+    """! @brief A minimal epub that names its title and nothing else."""
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as z:
+        z.writestr("mimetype", "application/epub+zip")
+        z.writestr("META-INF/container.xml",
+                   '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+                   '<rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
+        z.writestr("content.opf",
+                   '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="id">'
+                   f'<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>{title}</dc:title></metadata>'
+                   '<manifest><item id="c1" href="c1.html" media-type="application/xhtml+xml"/></manifest>'
+                   '<spine><itemref idref="c1"/></spine></package>')
+        z.writestr("c1.html", "<html><body><p>" + "Words of the story. " * 200 + "</p></body></html>")
+    return b.getvalue()
+
+
+def test_calibre_metadata_opf_fills_the_books_gaps(client, upload):
+    """! @brief A calibre book folder (book + metadata.opf) uploads whole: the .opf is kept
+    beside the book, not rejected, and fills what the book file doesn't say (authors,
+    series, publisher) whichever of the two arrives first. The file's own title wins."""
+    folder = "calibre_test/Ann Author/The Real Title (12)"
+    j = upload._post({"file": (io.BytesIO(_bare_epub("Own Title")), "The Real Title.epub"),
+                      "mode": "sync", "folder": folder}, "x.epub")
+    rel = j["filename"]
+    j = upload._post({"file": (io.BytesIO(CALIBRE_OPF), "metadata.opf"), "mode": "sync",
+                      "folder": folder}, "metadata.opf")
+    assert j["success"] and j["filename"].endswith("metadata.opf"), j
+    assert os.path.exists(media_path(j["filename"]))
+    b = _book(client, rel)
+    assert b and b["title"] == "Own Title" and b["authors"] == ["Ann Author"], b
+    m = bi.read_metadata(media_path(rel), "epub")
+    assert (m["series"], m["series_index"], m["publisher"]) == ("The Saga", 3.0, "Calibre Press")
+    # the .opf itself is no book, and no stray for triage
+    assert bi.classify(media_path(j["filename"])).status == "part"
+    assert not _book(client, j["filename"], tries=1)

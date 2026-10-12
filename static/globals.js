@@ -278,19 +278,88 @@ window.selectedFiles = new Set();   // rel_paths currently selected
 let lastClickedFile = null;      // for shift-range selection
 let galleryFiles = [];           // current page's file list, in render order
 
-// Lazy thumbnail loading via IntersectionObserver
-const io=new IntersectionObserver(entries=>{
-  entries.forEach(e=>{
-    if(!e.isIntersecting) return;
-    const item=e.target, img=item.querySelector('img');
-    if(img && !img.src){
-      img.src=item.dataset.src;
-      img.onload=()=>{ img.classList.add('loaded'); item.querySelector('.skeleton')?.remove(); };
-      img.onerror=()=>{ item.querySelector('.skeleton')?.remove(); };
+/** @brief Thumbnails load near the viewport and are dropped again once they are well out
+ *  of it (scrolled away, or their pane hidden), so a long grid keeps a bounded number of
+ *  images decoded instead of growing until the tab crashes. Three shapes:
+ *   - a tile with data-src and an <img> child (gallery, favorites, memories, timeline: io.observe)
+ *   - a chip with data-thumb painted as its background (people, review)
+ *   - any <img loading="lazy"> (the browser's own lazy loading never unloads)
+ *  Chips and lazy images are picked up by themselves when they are added to the page.
+ */
+const CIMLazy=(()=>{
+  const NEAR='300px', FAR='1500px';
+  const tracked=new Set();
+  const hasIO=typeof IntersectionObserver!=='undefined';
+  function show(el){
+    if(el.tagName==='IMG'){
+      const u=el.dataset.lazySrc;
+      if(u && !el.getAttribute('src')) el.src=u;
+      el.style.minWidth=el.style.minHeight='';
+      return;
     }
-    io.unobserve(item);
-  });
-},{rootMargin:'300px'});
+    if(el.dataset.thumb){ el.style.backgroundImage=`url('${el.dataset.thumb}')`; return; }
+    const img=el.querySelector('img'), u=el.dataset.src;
+    if(!img || !u || img.getAttribute('src')) return;
+    img.onload=()=>{ img.classList.add('loaded'); el.querySelector('.skeleton')?.remove(); };
+    img.onerror=()=>{ el.querySelector('.skeleton')?.remove(); };
+    img.src=u;
+  }
+  function hide(el, r){
+    if(el.tagName==='IMG'){
+      const s=el.getAttribute('src');
+      if(!s || s.startsWith('blob:') || s.startsWith('data:')) return;
+      // keep the box while it is empty so nothing around it moves
+      if(r && r.width && r.height){ el.style.minWidth=r.width+'px'; el.style.minHeight=r.height+'px'; }
+      el.dataset.lazySrc=s; el.removeAttribute('src');
+      return;
+    }
+    if(el.dataset.thumb){ el.style.backgroundImage=''; return; }
+    const img=el.querySelector('img');
+    if(!img || !img.getAttribute('src')) return;
+    img.onload=img.onerror=null;
+    img.removeAttribute('src'); img.classList.remove('loaded');
+  }
+  const near=hasIO ? new IntersectionObserver(es=>{
+    for(const e of es) if(e.isIntersecting) show(e.target);
+  },{rootMargin:NEAR}) : null;
+  const far=hasIO ? new IntersectionObserver(es=>{
+    for(const e of es){
+      if(!e.target.isConnected){ forget(e.target); continue; }
+      if(!e.isIntersecting) hide(e.target, e.boundingClientRect);
+    }
+  },{rootMargin:FAR}) : null;
+  function observe(el){
+    if(!el || tracked.has(el)) return;
+    if(!near){ show(el); return; }
+    tracked.add(el); near.observe(el); far.observe(el);
+  }
+  function forget(el){
+    if(!tracked.delete(el)) return;
+    near.unobserve(el); far.unobserve(el);
+  }
+  /** @brief Track every chip and lazy image in root (root included). A lazy image inside a
+   *  tile that is already tracked is left to the tile. */
+  function scan(root){
+    if(!root || root.nodeType!==1) return;
+    const sel='img[loading="lazy"],[data-thumb]';
+    const els=root.matches(sel) ? [root] : [];
+    els.push(...root.querySelectorAll(sel));
+    for(const el of els){
+      if(el.tagName==='IMG' && el.parentElement && tracked.has(el.parentElement)) continue;
+      observe(el);
+    }
+  }
+  if(typeof MutationObserver!=='undefined'){
+    new MutationObserver(ms=>{
+      for(const m of ms) for(const n of m.addedNodes) scan(n);
+    }).observe(document.documentElement,{childList:true,subtree:true});
+  }
+  // tiles removed from the page (a re-render) stop being tracked
+  setInterval(()=>{ for(const el of tracked) if(!el.isConnected) forget(el); }, 20000);
+  return {observe, forget, scan, tracked};
+})();
+window.CIMLazy=CIMLazy;
+const io={ observe: el=>CIMLazy.observe(el), unobserve: el=>CIMLazy.forget(el) };
 
 // -- Sync with disk ----------------------------------------------------------
 /** @brief Start a library sync and follow it until it ends: a quick sync re-reads

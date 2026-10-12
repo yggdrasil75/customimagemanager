@@ -43,6 +43,7 @@ def _no_llm(*a, **k):
 def register(host):
     bi.bind_media(host.media)
     bi.bind_comicinfo(lambda: host.get_service("comicinfo"))
+    bi.bind_encoding(lambda: host.get_service("encoding"))
     # Teach core what a "book" is. Without this the app is a pure image gallery
     # that never sees an epub/cbz. The ext lists + mime map live with the module.
     _BOOK_MIME = {
@@ -61,6 +62,10 @@ def register(host):
         "book", exts=bi.BOOK_EXTS - bi.COMIC_ARCHIVE_EXTS,
         unambiguous_exts=bi.UNAMBIGUOUS_BOOK_EXTS - bi.COMIC_ARCHIVE_EXTS,
         uploadable_exts=bi.UPLOADABLE_BOOK_EXTS - bi.COMIC_ARCHIVE_EXTS, mime_map=_BOOK_MIME)
+    # calibre's metadata.opf is uploaded with its book folder and kept beside the book,
+    # as it is (never converted): it fills in what the book file doesn't say
+    host.extend_media_type("book", exts=(".opf",), unambiguous_exts=(), uploadable_exts=(".opf",),
+                           group="sidecar")
 
     # Auth feature: read = browse the shelf/read, write = delete/triage.
     host.register_feature("tab.books", "Books tab (read=view, write=delete)",
@@ -106,6 +111,8 @@ def register(host):
         "llm_request":   lambda *a, **k: (host.get_service("llm") or {}).get("request", _no_llm)(*a, **k),
         "comic_pages":   lambda: host.get_service("comic_pages"),   # comics module, or None
         "current_user":  host.current_user,
+        "files_clause":  host.files_clause,     # access policies (ownership): listings
+        "check_path":    host.check_path,       # and per-book routes see only what's allowed
     })
 
     # Archive / PDF page access for the comics module (cbz/cbr/cb7 pages).
@@ -130,7 +137,8 @@ def register(host):
     host.on("upload.duplicate_check",
             lambda sha, filename: book_routes.sha_exists(sha) if mt.is_book(filename) else None)
     host.on("upload.stored",
-            lambda rel_path, filename: book_routes.index_one(rel_path) if mt.is_book(filename) else None)
+            lambda rel_path, filename: book_routes.index_one(rel_path) if mt.is_book(filename)
+            else book_routes.reindex_folder(rel_path) if filename.lower().endswith(".opf") else None)
     host.on("file.deleted", lambda rel_path: book_routes.remove_book(rel_path))
     host.on("file.renamed",
             lambda old_rel, new_rel: book_routes.rename_book(old_rel, new_rel) if mt.is_book(old_rel) else None)

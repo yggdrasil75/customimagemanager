@@ -83,6 +83,10 @@ def service():
         cjxl_cmd=c.cjxl_cmd, encode_jxl=c.encode_jxl, convert_image=c.convert_image,
         convert_av=c.convert_av, convert_book=c.convert_book, develop_raw=c.develop_raw,
         transcode_animation_to_video=c.transcode_animation_to_video,
+        # uploaded archives (.zip .rar .7z .tar...): unpacked, their contents uploaded
+        is_archive_name=c.is_archive_name, archive_stem=c.archive_stem,
+        archive_kind=c.archive_kind, expand_archive=c.expand_archive, ArchiveError=c.ArchiveError,
+        read_7z=c.read_7z,
         # thumbnails
         thumb_params=thumb_params,
         # videos the browser can play (playback.py): what /api/file sends for a video

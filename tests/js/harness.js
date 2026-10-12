@@ -110,7 +110,7 @@ function boot(opts = {}) {
   window.alert = () => { }; window.confirm = () => true; window.prompt = () => opts.prompt ?? null;
   window.scrollTo = () => { }; window.requestAnimationFrame = fn => setTimeout(fn, 0);
   window.ResizeObserver = class { observe() { } disconnect() { } unobserve() { } };
-  window.IntersectionObserver = class { observe() { } disconnect() { } unobserve() { } };
+  window.IntersectionObserver = opts.IntersectionObserver || class { observe() { } disconnect() { } unobserve() { } };
   window.URL.createObjectURL = () => "blob:x"; window.URL.revokeObjectURL = () => { };
   window.HTMLMediaElement.prototype.play = () => Promise.resolve();
   window.HTMLMediaElement.prototype.pause = () => { };
