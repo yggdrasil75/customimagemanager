@@ -5,7 +5,6 @@ judged by their codecs under "convert only what browsers can't show".
     ./run_tests.sh modules/encoding
 """
 import copy
-import io
 import os
 import shutil
 import subprocess
@@ -113,29 +112,18 @@ def keep_videos(app):
     convert.set_media_prefs(saved)
 
 
-def _upload(client, path, name):
-    with open(path, "rb") as f:
-        r = client.post("/api/upload", data={"file": (io.BytesIO(f.read()), name), "folder": "pb_test"},
-                        content_type="multipart/form-data").get_json()
-    assert r.get("success"), r
-    return r.get("filename") or r.get("rel_path")
-
-
 @needs_ffmpeg
-def test_api_file_serves_the_browser_copy(client, keep_videos, tmp_path):
-    rel = _upload(client, clip(tmp_path / "c.mov"), "c.mov")
-    try:
-        assert rel.endswith(".mov")
-        r = client.get("/api/file/" + rel)
-        assert r.status_code == 200 and r.mimetype == "video/mp4"
-        r.close()
-        r = client.get("/api/file/" + rel + "?original=1")
-        assert r.mimetype == "video/quicktime"
-        r.close()
-        st = client.get("/api/encoding/video", query_string={"rel": rel}).get_json()
-        assert st["success"] and st["verdict"] == "remux" and st["state"] == "ready"
-    finally:
-        client.post("/api/delete", json={"filename": rel})
+def test_api_file_serves_the_browser_copy(client, upload, keep_videos, tmp_path):
+    rel = upload.file(clip(tmp_path / "c.mov"))
+    assert rel.endswith(".mov")
+    r = client.get("/api/file/" + rel)
+    assert r.status_code == 200 and r.mimetype == "video/mp4"
+    r.close()
+    r = client.get("/api/file/" + rel + "?original=1")
+    assert r.mimetype == "video/quicktime"
+    r.close()
+    st = client.get("/api/encoding/video", query_string={"rel": rel}).get_json()
+    assert st["success"] and st["verdict"] == "remux" and st["state"] == "ready"
 
 
 @needs_ffmpeg

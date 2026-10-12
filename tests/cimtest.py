@@ -169,11 +169,14 @@ class _Uploader:
 
     def media(self, fixture_name, as_name=None, folder="", raw=False, **form):
         """! @brief A real fixture file (skips when absent) -> stored filename."""
-        p = fixture(fixture_name)
-        with open(p, "rb") as fh:
+        return self.file(fixture(fixture_name), as_name or fixture_name, folder=folder, raw=raw, **form)
+
+    def file(self, path, as_name=None, folder="", raw=False, **form):
+        """! @brief A file the test made (a generated clip, say) -> stored filename."""
+        with open(path, "rb") as fh:
             data = fh.read()
-        j = self._post({"file": (io.BytesIO(data), as_name or fixture_name),
-                        "mode": "sync", "folder": folder, **form}, fixture_name)
+        name = as_name or os.path.basename(path)
+        j = self._post({"file": (io.BytesIO(data), name), "mode": "sync", "folder": folder, **form}, name)
         return j if raw else j["filename"]
 
     def cleanup(self):
