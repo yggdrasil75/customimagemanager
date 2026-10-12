@@ -89,6 +89,20 @@ def _abs(rel):
 def _log():
     return CTX["logger"]
 
+_READER_POSTS = ("/api/books/progress", "/api/books/bookmarks", "/api/books/search")
+
+
+def _visible(column="rel_path"):
+    """! @brief (clauses, params) limiting rows to what the requester may see (the access
+    policies: another account's users/<name>/ tree is hidden); none for admins / workers."""
+    return CTX["files_clause"](column)
+
+def _where(clauses, params, column="rel_path"):
+    """! @brief " WHERE ..." of the given clauses plus the access policies', and its params."""
+    vc, vp = _visible(column)
+    allc = list(clauses) + vc
+    return ((" WHERE " + " AND ".join(allc)) if allc else ""), list(params) + vp
+
 def _cache_dir():
     d = os.path.join(_media(), ".bookcache")
     os.makedirs(d, exist_ok=True)
@@ -825,7 +839,7 @@ def query_comics(text: str, folder: str, structured: list | None = None) -> list
         like = f"%{text}%"
         clauses.append("(folder LIKE ? OR title LIKE ? OR tags LIKE ? OR characters LIKE ?)")
         p += [like, like, like, like]
-    where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    where_sql, p = _where(clauses, p, "folder")
     rows = db().execute(
         f"SELECT folder,cover,title,page_order,tags FROM comics{where_sql} ORDER BY folder", p
     ).fetchall()
@@ -874,7 +888,7 @@ def query_books(text: str, folder: str, structured: list | None = None) -> list:
         clauses.append("(title LIKE ? OR authors LIKE ? OR series LIKE ? "
                        "OR tags LIKE ? OR subjects LIKE ?)")
         p += [like] * 5
-    where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    where_sql, p = _where(clauses, p)
     rows = db().execute(
         f"SELECT rel_path,title,authors,kind,fmt,page_count,cover,tags,rating "
         f"FROM books{where_sql} ORDER BY sort_title COLLATE NOCASE", p).fetchall()
@@ -1005,23 +1019,43 @@ def register(host, ctx: dict):
     except Exception as e:
         ctx["logger"].error(f"book ensure_tables: {e}")
 
+    @host.app.before_request
+    def _books_access():
+        """! @brief A book the access policies hide (another account's users/<name>/ tree)
+        is "not found" on every per-book route: its rel_path in the URL, the query or the
+        JSON body; changing the book needs write access."""
+        if not request.path.startswith("/api/books/"):
+            return None
+        rel = (request.view_args or {}).get("rel_path") or request.args.get("rel_path")
+        if not rel and request.is_json:
+            rel = (request.get_json(silent=True) or {}).get("rel_path")
+        # your own reading progress, bookmarks and a search change nothing in the book
+        write = request.method not in ("GET", "HEAD") and request.path not in _READER_POSTS
+        if rel and not CTX["check_path"](rel, write=write):
+            return jsonify({"success": False, "error": "not found"}), 404
+        return None
+
     # -- status / workers -----------------------------------------------------
     @host.route("/api/books/status", feature="tab.books")
     def books_status():
         db = _db()
+        w, wp = _where([], [])
         c = db.execute(
             "SELECT COUNT(*) tot, "
             "SUM(CASE WHEN kind='comic' THEN 1 ELSE 0 END) comics, "
             "SUM(CASE WHEN text_status='ok' THEN 1 ELSE 0 END) extracted, "
             "SUM(CASE WHEN text_status='needs_backend' THEN 1 ELSE 0 END) blocked, "
             "SUM(CASE WHEN emb_status='ok' THEN 1 ELSE 0 END) embedded "
-            "FROM books").fetchone()
+            f"FROM books{w}", wp).fetchone()
+        w, wp = _where([], [])
         authors = db.execute(
-            "SELECT COUNT(DISTINCT author) n FROM book_authors").fetchone()["n"]
+            f"SELECT COUNT(DISTINCT author) n FROM book_authors{w}", wp).fetchone()["n"]
+        w, wp = _where(["series!=''"], [])
         series = db.execute(
-            "SELECT COUNT(DISTINCT series) n FROM books WHERE series!=''").fetchone()["n"]
+            f"SELECT COUNT(DISTINCT series) n FROM books{w}", wp).fetchone()["n"]
+        w, wp = _where(["decision IS NULL"], [])
         pending_triage = db.execute(
-            "SELECT COUNT(*) n FROM book_triage WHERE decision IS NULL").fetchone()["n"]
+            f"SELECT COUNT(*) n FROM book_triage{w}", wp).fetchone()["n"]
         return jsonify({
             "success": True, "state": book_state,
             "books": c["tot"] or 0, "comics": c["comics"] or 0,
@@ -1083,7 +1117,7 @@ def register(host, ctx: dict):
             clauses.append("(title LIKE ? OR authors LIKE ? OR series LIKE ? "
                            "OR description LIKE ? OR tags LIKE ? OR subjects LIKE ?)")
             params += [like] * 6
-        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        where, params = _where(clauses, params)
 
         sort = {"title": "sort_title COLLATE NOCASE",
                 "added": "added DESC",
@@ -1103,18 +1137,20 @@ def register(host, ctx: dict):
 
     @host.route("/api/books/authors", feature="tab.books")
     def books_authors():
-        rows = _db().execute("""
+        w, wp = _where([], [], "ba.rel_path")
+        rows = _db().execute(f"""
             SELECT ba.author AS name, COUNT(*) AS books
-            FROM book_authors ba GROUP BY ba.author
-            ORDER BY ba.author COLLATE NOCASE""").fetchall()
+            FROM book_authors ba{w} GROUP BY ba.author
+            ORDER BY ba.author COLLATE NOCASE""", wp).fetchall()
         return jsonify({"success": True, "authors": [dict(r) for r in rows]})
 
     @host.route("/api/books/series", feature="tab.books")
     def books_series():
-        rows = _db().execute("""
+        w, wp = _where(["series!=''"], [])
+        rows = _db().execute(f"""
             SELECT series AS name, COUNT(*) AS books, MIN(published) AS started
-            FROM books WHERE series!='' GROUP BY series
-            ORDER BY series COLLATE NOCASE""").fetchall()
+            FROM books{w} GROUP BY series
+            ORDER BY series COLLATE NOCASE""", wp).fetchall()
         return jsonify({"success": True, "series": [dict(r) for r in rows]})
 
     @host.route("/api/books/detail", feature="tab.books")
@@ -1452,9 +1488,9 @@ def register(host, ctx: dict):
         if qv is None:
             return jsonify({"success": False, "error": "failed to embed the query"})
 
+        w, wp = _where(["emb_sig=?", "emb IS NOT NULL"], [sig])
         rows = db.execute(
-            "SELECT rel_path, idx, section, offset, text, emb FROM book_chunks "
-            "WHERE emb_sig=? AND emb IS NOT NULL", (sig,)).fetchall()
+            f"SELECT rel_path, idx, section, offset, text, emb FROM book_chunks{w}", wp).fetchall()
         ranked = bi.rank_by_vector(qv, rows)
 
         # Group by book, keep each book's best passages, book score = best chunk.
@@ -1543,9 +1579,9 @@ def register(host, ctx: dict):
     # -- triage ---------------------------------------------------------------
     @host.route("/api/books/triage", feature="tab.books")
     def books_triage():
+        w, wp = _where(["decision IS NULL"], [])
         rows = _db().execute(
-            "SELECT * FROM book_triage WHERE decision IS NULL "
-            "ORDER BY size DESC LIMIT 500").fetchall()
+            f"SELECT * FROM book_triage{w} ORDER BY size DESC LIMIT 500", wp).fetchall()
         return jsonify({"success": True, "items": [dict(r) for r in rows]})
 
     @host.route("/api/books/triage/decide", methods=["POST"], feature="tab.books", level="write")
@@ -1579,9 +1615,10 @@ def register(host, ctx: dict):
         decision = d.get("decision", "")
         if decision not in ("book", "not_book"):
             return jsonify({"success": False, "error": "bad decision"}), 400
-        rows = _db().execute(
+        rows = [r for r in _db().execute(
             "SELECT rel_path, sniffed FROM book_triage WHERE decision IS NULL "
             "AND ext=? AND reason=?", (ext, reason)).fetchall()
+            if CTX["check_path"](r["rel_path"], write=True)]   # only what this account may change
         for r in rows:
             _uf(table="book_triage", where=("rel_path=?", (r["rel_path"],)),
                 set={"decision": decision, "decided": time.time()}, commit=False)

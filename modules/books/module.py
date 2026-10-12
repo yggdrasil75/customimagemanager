@@ -111,6 +111,8 @@ def register(host):
         "llm_request":   lambda *a, **k: (host.get_service("llm") or {}).get("request", _no_llm)(*a, **k),
         "comic_pages":   lambda: host.get_service("comic_pages"),   # comics module, or None
         "current_user":  host.current_user,
+        "files_clause":  host.files_clause,     # access policies (ownership): listings
+        "check_path":    host.check_path,       # and per-book routes see only what's allowed
     })
 
     # Archive / PDF page access for the comics module (cbz/cbr/cb7 pages).
