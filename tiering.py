@@ -290,8 +290,37 @@ def _walk_usage(root):
                 pass
     return count, total
 
-def _media_usage(cfg):
-    """! @brief Files and bytes stored directly in media/ (tier roots inside it excluded)."""
+# What media/ holds besides the library itself, by where it lives (first match wins).
+# Shown in Settings -> Storage so a number that looks doubled can be traced.
+_MEDIA_PARTS = (
+    ("database", "Database", ("library.db",)),
+    ("thumbnails", "Thumbnails", ("thumbs.db", ".thumbs", ".persons", ".profiles")),
+    ("video_copies", "Browser video copies", (".cim/play",)),
+    ("reencode_backups", "Re-encode backups (originals kept)", (".cim/reencoded",)),
+    ("trash", "Trash", (".trash",)),
+    ("upload_spool", "Upload spool (waiting or failed uploads)", (".upload_spool",)),
+    ("raw_originals", "Raw originals", (".raws",)),
+    ("db_backups", "Database backups", (".backups",)),
+    ("archive", "Archive", (".archive",)),
+    ("quarantine", "Quarantine", (".cim/quarantine",)),
+)
+_PART_LABELS = dict([("library", "Library files"), ("app_other", "Other app data")]
+                    + [(k, label) for k, label, _ in _MEDIA_PARTS])
+
+
+def _media_part(rel):
+    """! @brief Which _MEDIA_PARTS bucket a path relative to media/ falls in."""
+    for key, _label, prefixes in _MEDIA_PARTS:
+        for pre in prefixes:
+            if rel == pre or rel.startswith(pre + "/") or (not pre.startswith(".") and "/" not in rel
+                                                            and rel.startswith(pre)):   # library.db-wal
+                return key
+    return "app_other" if rel.startswith(".") else "library"
+
+
+def _media_usage(cfg, parts=None):
+    """! @brief Files and bytes stored directly in media/ (tier roots inside it excluded).
+    @param parts  a dict filled with {bucket: [files, bytes]} (see _MEDIA_PARTS)."""
     media_dir = _state["media_dir"]
     if not media_dir:
         return 0, 0
@@ -301,6 +330,7 @@ def _media_usage(cfg):
         if os.path.abspath(dirpath) in tier_roots:
             dirs[:] = []
             continue
+        reldir = os.path.relpath(dirpath, media_dir).replace(os.sep, "/")
         for n in names:
             p = os.path.join(dirpath, n)
             try:
@@ -309,9 +339,70 @@ def _media_usage(cfg):
                 if not os.path.islink(p):
                     total += st.st_size
                     count += 1
+                    if parts is not None:
+                        part = parts.setdefault(_media_part(n if reldir == "." else reldir + "/" + n), [0, 0])
+                        part[0] += 1
+                        part[1] += st.st_size
             except OSError:
                 pass
     return count, total
+
+
+_usage_cache = {"at": 0.0, "value": None}
+_usage_lock = threading.Lock()
+
+
+def usage(max_age=60.0):
+    """! @brief Everything this app stores, measured by walking media/ and every tier's
+    objects (cached for max_age seconds, one walk at a time). The limits use it
+    (Settings -> Storage: max total size) instead of the drive's free space, which
+    counts whatever else lives on the drive.
+    @return {"at", "total": bytes the app stores, "library": library files (media/ + tiers),
+             "parts": [{id, label, files, bytes}], "tiers": [{name, path, files, bytes}],
+             "drive": {path, total, used, free}, "outside": bytes on media's drive that aren't
+             this app's}."""
+    with _usage_lock:
+        v = _usage_cache["value"]
+        if v is not None and time.time() - _usage_cache["at"] < max_age:
+            return v
+        cfg = _state["cfg"] or load_cfg()
+        parts = {}
+        m_files, m_bytes = _media_usage(cfg, parts)
+        media_dir = _state["media_dir"] or "."
+        try:
+            media_dev = os.stat(media_dir).st_dev
+        except OSError:
+            media_dev = None
+        tiers, on_media_drive = [], m_bytes
+        for t in cfg["tiers"]:
+            root = _object_root(t["path"])
+            n, b = _walk_usage(root)
+            tiers.append({"name": t["name"], "path": t["path"], "files": n, "bytes": b})
+            try:
+                if os.path.exists(root) and os.stat(root).st_dev == media_dev:
+                    on_media_drive += b
+            except OSError:
+                pass
+        try:
+            du = shutil.disk_usage(media_dir)
+            drive = {"path": media_dir, "total": du.total, "used": du.total - du.free, "free": du.free}
+        except OSError:
+            drive = {"path": media_dir, "total": 0, "used": 0, "free": 0}
+        tier_bytes = sum(t["bytes"] for t in tiers)
+        lib = parts.get("library", [0, 0])
+        v = {"at": time.time(), "total": m_bytes + tier_bytes, "files": m_files + sum(t["files"] for t in tiers),
+             "library": lib[1] + tier_bytes,
+             "parts": [{"id": k, "label": _PART_LABELS.get(k, k), "files": f, "bytes": b}
+                       for k, (f, b) in sorted(parts.items(), key=lambda kv: -kv[1][1])],
+             "tiers": tiers, "drive": drive,
+             "outside": max(0, drive["used"] - on_media_drive)}
+        _usage_cache.update(at=time.time(), value=v)
+        return v
+
+
+def usage_stale():
+    """! @brief Measure again on the next usage() call (space was freed or used)."""
+    _usage_cache["at"] = 0.0
 
 def _key(doc_id):
     """! @brief A DocumentID in comparable form: alphanumerics, lower case ("xmp.did:AB-12" == "ab12")."""
@@ -634,6 +725,10 @@ def status():
     except Exception as e:
         stats = []
         log.error(f"status plan failed: {e}")
-    m_files, m_bytes = _media_usage(cfg)
-    media = {"path": _state.get("media_dir"), "files": m_files, "bytes": m_bytes}
-    return {"config": cfg, "tiers": stats, "media": media, "run": dict(_state["run"])}
+    # the Storage tab polls this every few seconds: the walk is shared and cached
+    u = usage(max_age=15.0)
+    media_bytes = u["total"] - sum(t["bytes"] for t in u["tiers"])
+    media = {"path": _state.get("media_dir"), "files": u["files"] - sum(t["files"] for t in u["tiers"]),
+             "bytes": media_bytes, "parts": u["parts"]}
+    return {"config": cfg, "tiers": stats, "media": media, "run": dict(_state["run"]),
+            "usage": {k: u[k] for k in ("total", "library", "drive", "outside", "at")}}

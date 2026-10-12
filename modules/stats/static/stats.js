@@ -1,7 +1,8 @@
 /* stats.js - the Stats & jobs settings tab (modules/stats).
- * Two panels: Jobs (per-source table with Pause / Resume, running jobs, upload
- * queue, memory / VRAM bars; refreshed every 3 s while the tab is visible) and
- * Server (counts, storage bars, DB size, users, models, uptime, version). */
+ * Two panels side by side: Jobs (per-source table with Pause / Resume, running
+ * jobs summed up per source with the files folded away, upload queue, memory /
+ * VRAM bars; refreshed every 3 s while the tab is visible) and Server (counts,
+ * storage bars, DB size, users, models, uptime, version). */
 (function () {
   "use strict";
   const TAB = "stats";
@@ -51,19 +52,24 @@
     const root = document.createElement("div");
     root.id = "stats_root";
     root.setAttribute("data-feature", FEATURE);
+    root.className = "grid grid-cols-1 xl:grid-cols-[3fr_2fr] gap-x-6 gap-y-3";
     root.innerHTML = `
-      <div class="flex flex-wrap items-center gap-2 mb-2">
-        <h3 class="text-sm font-bold">Jobs</h3>
-        ${btn({ id: "stats_refresh", label: "Refresh", variant: "neutral", size: "xs", attrs: { "data-gate-keep": "1" } })}
-        <span id="stats_msg" class="text-xs text-gray-400"></span>
-      </div>
-      <div id="stats_budgets" class="mb-2"></div>
-      <div id="stats_sources" class="mb-2 text-xs"></div>
-      <div id="stats_running" class="mb-2 text-xs"></div>
-      <div id="stats_queue" class="mb-2 text-xs text-gray-300"></div>
-      <div id="stats_history" class="mb-3 text-xs"></div>
-      <h3 class="text-sm font-bold mt-3 mb-2 border-t border-gray-700 pt-3">Server</h3>
-      <div id="stats_server" class="text-xs text-gray-300"></div>`;
+      <section class="min-w-0">
+        <div class="flex flex-wrap items-center gap-2 mb-2">
+          <h3 class="text-sm font-bold">Jobs</h3>
+          ${btn({ id: "stats_refresh", label: "Refresh", variant: "neutral", size: "xs", attrs: { "data-gate-keep": "1" } })}
+          <span id="stats_msg" class="text-xs text-gray-400"></span>
+        </div>
+        <div id="stats_budgets" class="mb-2"></div>
+        <div id="stats_sources" class="mb-2 text-xs"></div>
+        <div id="stats_running" class="mb-2 text-xs"></div>
+        <div id="stats_queue" class="mb-2 text-xs text-gray-300"></div>
+        <div id="stats_history" class="text-xs"></div>
+      </section>
+      <section class="min-w-0 xl:border-l xl:border-gray-700 xl:pl-6">
+        <h3 class="text-sm font-bold mb-2">Server</h3>
+        <div id="stats_server" class="text-xs text-gray-300"></div>
+      </section>`;
     pane.appendChild(root);
     $("stats_refresh").addEventListener("click", () => { refreshJobs(); refreshServer(); });
     root.addEventListener("click", ev => {
@@ -130,20 +136,37 @@
       : '<div class="text-gray-500">No worker sources registered.</div>';
     if (window.CIMFeatures && CIMFeatures.apply) CIMFeatures.apply($("stats_sources"));
 
+    // Running now: one line per source (count, longest); the per-file list is
+    // folded away so a busy pool doesn't push everything else off screen.
     const running = [];
     names.forEach(n => (d.sources[n].running_jobs || []).forEach(j => running.push({ source: n, ...j })));
     running.sort((a, b) => b.seconds - a.seconds);
-    $("stats_running").innerHTML = '<div class="text-gray-500">Running now (' + running.length + ")</div>" +
-      (running.length ? "<ul>" + running.map(j => `<li>${esc(j.source)} ${j.key ? "<span class='text-gray-500'>" + esc(j.key) + "</span>" : ""} - ${fmtSecs(j.seconds)}</li>`).join("") + "</ul>" : "");
+    const bySource = {};
+    for (const j of running) {
+      const g = bySource[j.source] || (bySource[j.source] = { n: 0, longest: 0 });
+      g.n++; g.longest = Math.max(g.longest, j.seconds || 0);
+    }
+    const openRun = !!($("stats_running_list") && $("stats_running_list").open);
+    $("stats_running").innerHTML = running.length
+      ? `<div><span class="text-gray-500">Running now (${running.length}):</span> ` +
+        Object.keys(bySource).sort().map(s => `${esc(s)} <b>${bySource[s].n}</b> <span class="text-gray-500">(longest ${fmtSecs(bySource[s].longest)})</span>`).join(", ") +
+        `</div><details id="stats_running_list" class="mt-0.5"${openRun ? " open" : ""}><summary class="text-[11px] text-gray-500 cursor-pointer">files</summary>
+          <div class="max-h-32 overflow-y-auto"><table class="w-full text-[11px]"><tbody>` +
+        running.map(j => `<tr><td class="pr-2 whitespace-nowrap">${esc(j.source)}</td><td class="pr-2 text-gray-500 truncate max-w-0 w-full">${esc(j.key || "")}</td><td class="text-right whitespace-nowrap">${fmtSecs(j.seconds)}</td></tr>`).join("") +
+        "</tbody></table></div></details>"
+      : '<div class="text-gray-500">Running now: nothing</div>';
 
     const q = d.upload_queue || {};
     const qk = Object.keys(q);
     $("stats_queue").innerHTML = "Upload queue: " + (qk.length ? qk.map(k => esc(k) + " " + q[k]).join(", ") : "empty");
 
     const h = d.history || [];
-    $("stats_history").innerHTML = '<div class="text-gray-500">Recent jobs</div>' + (h.length
-      ? `<table class="w-full"><tbody>${h.slice(0, 20).map(j => `<tr class="${j.ok ? "" : "text-red-400"}"><td class="pr-2">${when(j.started)}</td><td class="pr-2">${esc(j.source)}</td><td class="pr-2 text-gray-500">${esc(j.key || "")}</td><td class="text-right pr-2">${fmtSecs(j.seconds)}</td><td>${j.ok ? "ok" : esc(j.error)}</td></tr>`).join("")}</tbody></table>`
-      : '<div class="text-gray-600">nothing finished yet</div>');
+    const failed = h.filter(j => !j.ok).length;
+    const openHist = !!($("stats_history_list") && $("stats_history_list").open);
+    $("stats_history").innerHTML = h.length
+      ? `<details id="stats_history_list"${openHist ? " open" : ""}><summary class="text-gray-500 cursor-pointer">Recent jobs (${Math.min(h.length, 20)}${failed ? `, <span class="text-red-400">${failed} failed</span>` : ""})</summary>
+          <div class="max-h-48 overflow-y-auto"><table class="w-full text-[11px]"><tbody>${h.slice(0, 20).map(j => `<tr class="${j.ok ? "" : "text-red-400"}"><td class="pr-2 whitespace-nowrap">${when(j.started)}</td><td class="pr-2 whitespace-nowrap">${esc(j.source)}</td><td class="pr-2 text-gray-500 truncate max-w-0 w-full">${esc(j.key || "")}</td><td class="text-right pr-2 whitespace-nowrap">${fmtSecs(j.seconds)}</td><td class="whitespace-nowrap">${j.ok ? "ok" : esc(j.error)}</td></tr>`).join("")}</tbody></table></div></details>`
+      : '<div class="text-gray-500">Recent jobs: nothing finished yet</div>';
   }
 
   /** @brief Draw the Server panel from /api/stats/server. */
@@ -152,7 +175,11 @@
     const lib = d.library || {}, disk = d.disk || {}, db = d.db || {}, users = d.users || {}, models = d.models || {};
     const parts = [];
     parts.push(`<div>Files: <b>${lib.files || 0}</b> (${lib.images || 0} images, ${lib.videos || 0} videos, ${lib.audio || 0} audio, ${lib.books || 0} books)</div>`);
-    parts.push(bar("Disk (media)", disk.used || 0, disk.total || 0, fmtBytes(disk.used) + " used, " + fmtBytes(disk.free) + " free of " + fmtBytes(disk.total)));
+    // the drive counts everything on it, other programs included; "This app" is what the
+    // storage limit counts (Settings -> Storage)
+    parts.push(bar("Drive (all of it)", disk.used || 0, disk.total || 0, fmtBytes(disk.used) + " used, " + fmtBytes(disk.free) + " free of " + fmtBytes(disk.total)));
+    if (d.app) parts.push(bar("This app", d.app.total || 0, disk.total || 0,
+      fmtBytes(d.app.total) + " (library, database, thumbnails, copies, trash); " + fmtBytes(d.app.outside) + " of the drive is other data"));
     const libText = lib.bytes == null ? "measuring..." : fmtBytes(lib.bytes) + " (" + esc(lib.source) + (lib.updated ? ", " + new Date(lib.updated * 1000).toLocaleString() : "") + ")";
     parts.push(bar("Library", lib.bytes || 0, disk.total || 0, libText));
     parts.push(`<div>DB: ${fmtBytes(db.bytes)} <span class="text-gray-500">${esc(db.path || "")}</span>; thumbnails: ${fmtBytes(db.thumbs_bytes)}</div>`);

@@ -90,6 +90,7 @@
   function httpError(r, j) {
     const e = new Error((j && j.error) || `HTTP ${r.status}`);
     e.status = r.status; e.code = j && j.error_code;
+    e.retryAfter = Number((j && j.retry_after) || r.headers.get('Retry-After') || 0);
     return e;
   }
 
@@ -174,12 +175,25 @@
     return j;
   }
 
-  /** @brief Upload one item, recording the outcome. */
+  const STORAGE_WAIT_MS = 60000;
+  /** @brief Upload one item, recording the outcome. A 507 (the server's storage limit is
+   *  reached or its disk is full) isn't a failure: the item waits and tries again by
+   *  itself (a chunked one resumes where it stopped) until space is freed. */
   async function sendOne(it) {
     it.error = '';
     try {
       const big = cfg.sessions && it.size > (cfg.chunked_over || FALLBACK_CHUNK);
-      const j = await (big ? sendChunked(it) : sendSmall(it));
+      let j;
+      for (;;) {
+        try { j = await (big ? sendChunked(it) : sendSmall(it)); break; }
+        catch (e) {
+          if (e.status !== 507) throw e;
+          const note = `Waiting for storage: ${e.message}. Uploads carry on by themselves when space is freed.`;
+          batch.notes.add(note); progress();
+          await sleep(Math.max(15000, (e.retryAfter || 0) * 1000) || STORAGE_WAIT_MS);
+          batch.notes.delete(note);
+        }
+      }
       it.sent = it.size;
       batch.done++;
       if (j.duplicate) batch.dup++;

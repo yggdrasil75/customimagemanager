@@ -332,6 +332,17 @@ def register(host):
         return {"enabled": True, "tiers": [{"name": t.get("name"), "path": t.get("path")}
                                            for t in cfg.get("tiers") or []]}
 
+    def app_usage():
+        """! @brief What this app stores in total and what else is on its drive (the shared,
+        cached walk the storage limit uses), or None."""
+        tiering = getattr(core, "tiering", None)
+        try:
+            u = tiering.usage(max_age=300.0) if tiering is not None else None
+        except Exception as e:
+            log.error("stats: storage usage failed: %s" % e)
+            return None
+        return {k: u[k] for k in ("total", "library", "outside", "at")} if u else None
+
     def server_stats():
         """! @brief The /api/stats/server payload."""
         counts = library_counts()
@@ -350,6 +361,7 @@ def register(host):
             "python": sys.version.split()[0],
             "platform": platform.platform(),
             "tiering": tiering_block(),
+            "app": app_usage(),
         }
         v = version_block()
         if v is not None:

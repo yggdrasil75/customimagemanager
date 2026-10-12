@@ -4,7 +4,7 @@ thumbnails, dedup and the background workers. Modules extend it through the
 Host (modules/host.py).
 """
 
-import os, glob, subprocess, shutil, numpy as np
+import os, glob, subprocess, shutil, errno, numpy as np
 from types import SimpleNamespace
 import tempfile, io, time, random, json, threading
 import base64, re, xml.sax.saxutils as saxutils
@@ -4179,7 +4179,8 @@ def api_models_select():
 # Saving a key needs write on its tab's permission (settings.<tab>); a key no
 # tab owns is admin-only.
 _CORE_KEY_TABS = {"search_quick_filters": "general", "media_storage": "media",
-                  "filename_cleanup": "media", "keep_raws": "media"}
+                  "filename_cleanup": "media", "keep_raws": "media",
+                  "min_free_gb": "storage", "library_max_gb": "storage"}
 
 def _settings_tab_for_key(key):
     if key in _CORE_KEY_TABS:
@@ -4896,6 +4897,9 @@ def api_upload():
     for reason in module_host.emit("upload.check", folder=folder, filename=orig_name, size=size):
         if reason:
             return jsonify({"success": False, "error_code": "refused", "error": str(reason)}), 413
+    full = _storage_limit_reason()
+    if full:
+        return _storage_full_reply(full)
 
     # already on disk under this name (same content under another name is caught by SHA later);
     # a raw and its camera JPEG share the name but are two files, stored side by side
@@ -4907,6 +4911,12 @@ def api_upload():
     # always spool first: inline stays crash-safe and can fall back to the queue
     try:
         spool_path = _spool_upload_to_disk(file, orig_name)
+    except OSError as e:
+        if e.errno == errno.ENOSPC:
+            return _storage_full_reply("the server's disk is full; the upload resumes when space is freed")
+        access_logger.error(f"upload spool write failed for {orig_name}: {e}")
+        return jsonify({"success": False, "error_code": "server_error",
+                        "error": "Could not stage upload."}), 500
     except Exception as e:
         access_logger.error(f"upload spool write failed for {orig_name}: {e}")
         return jsonify({"success": False, "error_code": "server_error",
@@ -5324,10 +5334,40 @@ def _upload_workers_wake():
     _upload_wake.set()
     thread_manager.wake()
 
+# The spool keeps ingesting whatever the storage limits say (its files are already here);
+# it only waits while the drive is actually full, so a conversion can't fail for lack of
+# room, and picks up again by itself - with the uploads that did fail that way - once
+# space is freed.
+_SPOOL_MIN_FREE = 1 << 30   # 1 GiB: room for a conversion's output
+_SPACE_ERRORS = ("%No space left%", "%ENOSPC%", "%disk is full%", "%waiting for disk space%")
+_spool_space = {"full": False}
+
+def _spool_disk_full(db) -> bool:
+    """! @brief True while the drive holding the spool / library has under _SPOOL_MIN_FREE free.
+    When space comes back, uploads that failed for lack of it go back in the queue."""
+    try:
+        free = shutil.disk_usage(MEDIA_DIR).free
+    except OSError:
+        return False
+    full = free < _SPOOL_MIN_FREE
+    if _spool_space["full"] and not full:
+        n = db.execute(
+            "UPDATE upload_queue SET status='pending', attempts=0, error='', updated=? "
+            "WHERE status='error' AND spool_path<>'' AND (" + " OR ".join(["error LIKE ?"] * len(_SPACE_ERRORS)) + ")",
+            (time.time(), *_SPACE_ERRORS)).rowcount
+        db.commit()
+        access_logger.info(f"upload spool resumed: disk space freed ({n} upload(s) requeued)")
+    elif full and not _spool_space["full"]:
+        access_logger.warning(f"upload spool waiting: {MEDIA_DIR} has {free >> 20} MB free")
+    _spool_space["full"] = full
+    return full
+
 def _claim_upload_job():
     def _claim():
         db = _db()
         db.rollback()
+        if _spool_disk_full(db):
+            return None   # stays pending; the pool asks again every second
         rows = db.execute(
             "SELECT id, spool_path, orig_name FROM upload_queue q WHERE status='pending' "
             "AND NOT EXISTS ("
@@ -5400,10 +5440,25 @@ def _process_upload_job(job) -> tuple[str, str, str]:
     if ecode in ("exact_duplicate", "filename_exists"):
         # already in the library (maybe written by a colliding worker)
         return "done", "", payload.get("existing_file", "")
+    err = payload.get("error", ecode) or ecode
+    if payload.get("detail"):
+        err = f"{err} {payload['detail']}"
+    if ecode == "conversion_failed" and _spool_low_space(err):
+        # the converter ran out of room: not a verdict on the file
+        return "retry", "waiting for disk space: " + err, ""
     if ecode in _TERMINAL_UPLOAD_CODES:
-        return "failed", payload.get("error", ecode) or ecode, ""
+        return "failed", err, ""
     # transient
     return "retry", payload.get("error", ecode or "unknown") or "unknown", ""
+
+def _spool_low_space(err: str) -> bool:
+    """! @brief Did a conversion fail for lack of disk space (its message, or a nearly full drive)?"""
+    if "No space left" in (err or "") or "ENOSPC" in (err or ""):
+        return True
+    try:
+        return shutil.disk_usage(MEDIA_DIR).free < _SPOOL_MIN_FREE
+    except OSError:
+        return False
 
 def _finish_upload_job(job_id, ok: bool, err: str, rel_path: str) -> None:
     """! @brief Store a job's final outcome (done or error)."""
@@ -5972,6 +6027,9 @@ def api_upload_session_create():
     for reason in module_host.emit("upload.check", folder=folder, filename=orig_name, size=size):
         if reason:
             return jsonify({"success": False, "error_code": "refused", "error": str(reason)}), 413
+    full = _storage_limit_reason()
+    if full:
+        return _storage_full_reply(full)
     pred = _predicted_rel(tdir, orig_name)
     existing = _existing_upload(pred, orig_name)
     if existing:
@@ -6052,6 +6110,11 @@ def api_upload_session_put(sid):
                     f.write(piece)
                     written += len(piece)
         except OSError as e:
+            if e.errno == errno.ENOSPC:
+                # keep what arrived: the uploader resumes from `received` once space is freed
+                return jsonify({"success": False, "error_code": "storage_full", "retry_after": 60,
+                                "error": "the server's disk is full; the upload resumes when space is freed",
+                                "received": _session_received(row["id"])}), 507
             access_logger.error(f"upload session {row['id']} write failed: {e}")
             return jsonify({"success": False, "error_code": "server_error",
                             "error": "Could not store the chunk.",
@@ -7679,6 +7742,7 @@ _core_api = SimpleNamespace(
     files_where=_files_where,
     user_setting=lambda key, username=None: _user_setting(key, username),
     file_data=file_data, set_file_data=set_file_data,
+    storage_limit_reason=lambda max_age=60.0: _storage_limit_reason(max_age),
     start_sync=start_sync, sync_status=sync_status,
     image_adjust=_image_adjust, jxl_orientation=_jxl_orientation,
 )
@@ -7763,6 +7827,48 @@ module_host.add_settings_field(
     section="system",
     help="At most this often (and only when there is something to do) the spool janitor "
          "retries failed uploads, removes finished ones and drops expired sessions.")
+# storage limits (Settings -> Storage, "Limits"): what this app may hold in total, and the free
+# space downloads keep on the drive. Both stop new data coming in (fetch, browser uploads);
+# the upload spool keeps ingesting, since its files are already here.
+def _set_min_free(new, old=None):
+    common.MIN_FREE_GB = float(new or 0)
+modules.config.declare("min_free_gb", default=0, owner="core", on_change=_set_min_free,
+                       validate=lambda v: max(0.0, float(v or 0)))
+modules.config.declare("library_max_gb", default=0, owner="core",
+                       validate=lambda v: max(0.0, float(v or 0)))
+module_host.add_settings_field(
+    key="library_max_gb", label="Max total size (GB)", kind="number", pane="storage", section="limits",
+    help="Everything this app stores: library files (media and tiers), database, thumbnails, video copies, "
+         "re-encode backups, trash. When reached, fetch pauses and browser uploads wait; both resume by "
+         "themselves when space is freed. 0 = no limit.")
+module_host.add_settings_field(
+    key="min_free_gb", label="Keep free on the drive (GB)", kind="number", pane="storage", section="limits",
+    help="Fetch and model downloads pause while the drive has less free space than this "
+         "(the whole drive, other programs included). 0 = automatic: 10 GB on drives over 1 TB, else 1 GB.")
+module_host.on_startup(lambda: _set_min_free(state.get("min_free_gb")))
+
+def _storage_limit_reason(max_age=60.0) -> str:
+    """! @brief Why new data may not come in right now ("" when it may): the max total size
+    is reached. Measured by tiering.usage() (cached max_age seconds)."""
+    cap = float(state.get("library_max_gb") or 0)
+    if cap <= 0:
+        return ""
+    try:
+        used = tiering.usage(max_age)["total"]
+    except Exception as e:
+        access_logger.error(f"storage usage: {e}")
+        return ""
+    if used >= cap * (1 << 30):
+        return (f"storage limit reached: this app holds {used / (1 << 30):.1f} GB of its "
+                f"{cap:g} GB maximum (Settings > Storage)")
+    return ""
+
+def _storage_full_reply(reason):
+    """! @brief 507 for an upload that must wait for space; the web uploader retries by itself."""
+    r = jsonify({"success": False, "error_code": "storage_full", "error": reason, "retry_after": 60})
+    r.headers["Retry-After"] = "60"
+    return r, 507
+
 # where the core schema's data lives (see host.add_table kinds)
 for _t, _k in (
         # mirrored from the files; its DB-only columns (autotag_done, face_done,
