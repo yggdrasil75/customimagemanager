@@ -391,7 +391,11 @@ def register(host):
             fd, spool = tempfile.mkstemp(dir=m.upload_spool_dir, prefix="up-",
                                          suffix="-" + orig)
             os.close(fd)
-            if meta.get("_move"):
+            # A file in this job's own download scratch is moved, not copied: a copy
+            # stayed there until the whole job ended, so every file of a long fetch
+            # took its space twice (and still did while the job waited for room).
+            ours = os.path.realpath(media_path).startswith(os.path.realpath(tmp) + os.sep)
+            if meta.get("_move") or ours:
                 shutil.move(media_path, spool)
             else:
                 shutil.copyfile(media_path, spool)
@@ -653,6 +657,13 @@ def register(host):
             m.db_retry(_requeue_stale)
         except Exception as e:
             host.logger.error(f"fetch queue boot requeue failed: {e}")
+        # download scratch a restart left behind (no job runs yet: every fetch-* is stale)
+        try:
+            for e in os.scandir(m.upload_spool_dir):
+                if e.name.startswith("fetch-") and e.is_dir(follow_symlinks=False):
+                    shutil.rmtree(e.path, ignore_errors=True)
+        except OSError:
+            pass
         host.thread_manager.register_source("fetch", _claim, _worker, key_of=_key)
     host.on_startup(_start)
 
