@@ -207,6 +207,11 @@ def _manifest_from_source(folder, entry_file):
             except ValueError:
                 return None
             return m if isinstance(m, dict) else None
+    # a module.py that re-exports the package's MANIFEST (`from . import MANIFEST`)
+    for node in tree.body:
+        if (isinstance(node, ast.ImportFrom) and node.level == 1 and not node.module
+                and any(a.name == "MANIFEST" for a in node.names) and entry_file != "__init__.py"):
+            return _manifest_from_source(folder, "__init__.py")
     return None
 
 

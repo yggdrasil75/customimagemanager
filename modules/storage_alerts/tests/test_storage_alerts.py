@@ -89,7 +89,10 @@ def test_legacy_smtp_keys_are_not_declared():
 
 
 def test_routes(client, host):
-    assert any(t.get("id") == "storage_alerts" for t in host.settings_tabs)
+    # no tab of its own: the fields are the Alerts section of Settings -> Storage
+    assert not any(t.get("id") == "storage_alerts" for t in host.settings_tabs)
+    mine = [f for f in host.settings_fields if f["key"].startswith("storage_alerts_")]
+    assert mine and all(f["pane"] == "storage" and f["section"] == "alerts" for f in mine)
     d = client.get("/api/storage_alerts/status").get_json()
     assert d["success"] and "recipients" in d and d["enabled"] is False
     d = client.post("/api/storage_alerts/check?send=0").get_json()
@@ -99,3 +102,8 @@ def test_routes(client, host):
     assert d["success"] is False and "SMTP host" in d["error"]
     d = client.get("/api/storage_alerts/status").get_json()
     assert d["log"] and d["log"][0]["kind"] == "error"
+
+
+def test_split_paths():
+    assert sam.split_paths("/a; /b\n/c;;/a") == ["/a", "/b", "/c"]
+    assert sam.split_paths("") == []
