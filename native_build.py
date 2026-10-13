@@ -40,7 +40,8 @@ EXCLUDE = {
     "manager.py",          # run as __main__ by run.sh: the .py is what executes
     "native_build.py",
     "conftest.py",
-    "prefetch_models.py",  # a script
+    "prefetch_models.py",  # scripts
+    "module_deps.py",
     "modules/loader.py",   # the plugin loader itself
     "modules/host.py",
     "modules/__init__.py", # core wiring (registry, broker)
@@ -220,7 +221,7 @@ def build():
         print("native: Cython not installed, modules stay plain Python "
               "(pip install cython, then native_build.py)", file=sys.stderr)
         return 0
-    if not (shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")):
+    if not (shutil.which("cc") or shutil.which("gcc") or shutil.which("clang") or shutil.which("cl")):
         print("native: no C compiler, modules stay plain Python", file=sys.stderr)
         return 0
     srcs = [p for p in COMPILE if os.path.exists(os.path.join(ROOT, p))]
