@@ -7,3 +7,5 @@ PyYAML
 pillow
 pyexiv2
 ldap3
+rjsmin
+rcssmin

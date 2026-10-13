@@ -13,12 +13,14 @@
 (function () {
   // -- 1. inject module assets -----------------------------------------------
   async function injectAssets() {
-    let assets = [];
-    try {
-      const data = await fetch("/api/module_assets").then((r) => r.json());
-      assets = (data && data.assets) || [];
-    } catch (e) {
-      return; // no modules / not logged in yet; harmless
+    let assets = Array.isArray(window.CIM_MODULE_ASSETS) ? window.CIM_MODULE_ASSETS : null;
+    if (!assets) {
+      try {
+        const data = await fetch("/api/module_assets").then((r) => r.json());
+        assets = (data && data.assets) || [];
+      } catch (e) {
+        return; // no modules / not logged in yet; harmless
+      }
     }
     for (const a of assets) {
       if (a.kind === "css") {

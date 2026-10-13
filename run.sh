@@ -27,4 +27,4 @@ for mid, pk in registry.missing_pip(optional=True).items():
         print(f"note: {mid} without optional {', '.join(pk)} (its features that need them are off)")
 PY
 fi
-exec venv/bin/python manager.py "$@"
+exec venv/bin/python manager.py "$@"   # --no-bundle: serve the JS/CSS files one by one (debugging)

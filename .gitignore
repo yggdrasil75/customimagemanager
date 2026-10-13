@@ -13,6 +13,7 @@ cookies.txt
 /**/__pycache__
 *.pyc
 *.pyo
+# local-only test media (see tests/fixtures/README.md)
 tests/fixtures/*
 !tests/fixtures/README.md
 tests/js/node_modules/
@@ -23,12 +24,11 @@ android/keystore/
 imports/
 static/tailwind.css
 tools/
+# native_build.py output (compiled helper modules); the .py files are the source
 *.so
 *.pyd
-/common.c
-/media_types.c
-/object_grouping.c
-/tiering.c
+/*.c
 /modules/**/*.c
 /build/
 /data/native_manifest.json
+/static/build/

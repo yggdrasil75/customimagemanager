@@ -4,7 +4,7 @@ thumbnails, dedup and the background workers. Modules extend it through the
 Host (modules/host.py).
 """
 
-import os, glob, subprocess, shutil, errno, numpy as np
+import os, sys, glob, subprocess, shutil, errno, numpy as np
 from types import SimpleNamespace
 import tempfile, io, time, random, json, threading
 import base64, re, xml.sax.saxutils as saxutils
@@ -38,6 +38,7 @@ modules.config.declare("filename_cleanup", default=dict(mt.DEFAULT_FILENAME_PREF
                        on_change=lambda new, old: mt.set_filename_prefs(new))
 import video_tracks as vt
 import tiering
+import assets as _assets
 
 def _read_bytes_loose(path):
     try:
@@ -208,6 +209,11 @@ _all_conns = {}                  # id(conn) -> (conn, thread)
 _all_conns_lock = threading.Lock()
 DB_BUSY_TIMEOUT_MS = 30000
 
+# The gallery's COUNT(*) is a full scan of `files` (every filter is a NOT IN or
+# a LIKE) and runs on every page turn; a page itself is a short index walk. The
+# count is remembered per WHERE and reused while nothing in the DB changed:
+# PRAGMA data_version moves when another connection commits, total_changes
+# when this one writes.
 _count_cache: OrderedDict = OrderedDict()
 _count_cache_lock = threading.Lock()
 _COUNT_CACHE_MAX = 256
@@ -8175,7 +8181,11 @@ module_registry.register_all(module_host)
 @app.after_request
 def _asset_cache_headers(resp):
     p = request.path
-    if p.startswith("/static/") or (p.startswith("/modules/") and "/static/" in p):
+    if p.startswith("/static/build/"):
+        pass  # content-hashed bundles: set by static_build()
+    elif p.startswith("/static/") and request.args.get("v"):
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"  # ?v= busts it
+    elif p.startswith("/static/") or (p.startswith("/modules/") and "/static/" in p):
         resp.headers["Cache-Control"] = "no-cache"
     return resp
 
@@ -8218,20 +8228,76 @@ except Exception as _e:
     access_logger.error(f"apply_db_tables: {_e}")
 
 
-@app.route("/api/module_assets")
-def api_module_assets():
-    """! @brief Asset URLs of enabled modules for the page to load: [{url, kind, module_id}]."""
+def _module_assets_list() -> list:
+    """! @brief The enabled modules' assets in load order: [{url, kind, module_id, path}]."""
     out = []
     for a in module_host.assets:
         if not module_registry.is_enabled(a["module_id"]):
             continue
         fn = a["filename"]
+        lm = module_registry._plugins.get(a["module_id"])
+        folder = lm.path if lm is not None and lm.path else os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "modules", a["module_id"])
         out.append({
             "url": fn if fn.startswith("/") else f"/modules/{a['module_id']}/static/{fn}",
             "kind": a["kind"],
             "module_id": a["module_id"],
+            "path": os.path.join(os.path.dirname(os.path.abspath(__file__)), fn.lstrip("/"))
+                    if fn.startswith("/") else os.path.join(folder, "static", fn),
         })
-    return jsonify({"assets": out})
+    return out
+
+## @brief The bundles assets.build() made at startup ({} = serve the files one by one).
+_bundles: dict = {}
+
+def _page_module_assets() -> list:
+    """! @brief What the page loads for the modules: the two bundles, else every file."""
+    if _bundles:
+        return [{"url": _bundles[k], "kind": kind, "module_id": "*"}
+                for k, kind in (("modules_css", "css"), ("modules_js", "js")) if _bundles.get(k)]
+    return [{k: a[k] for k in ("url", "kind", "module_id")} for a in _module_assets_list()]
+
+def _build_bundles():
+    """! @brief Bundle the page's scripts and the modules' assets (see assets.py)."""
+    global _bundles
+    _bundles = {}
+    if "--no-bundle" in sys.argv[1:]:
+        access_logger.info("bundles: --no-bundle, serving the individual files")
+        return
+    try:
+        _bundles = {k: v for k, v in _assets.build(_module_assets_list(), access_logger).items() if v}
+    except Exception as e:
+        access_logger.warning(f"bundles: build failed, serving individual files: {e}")
+        _bundles = {}
+
+@app.route("/api/module_assets")
+def api_module_assets():
+    """! @brief Asset URLs of enabled modules for the page to load: [{url, kind, module_id}]
+    (the modules bundle when bundling is on)."""
+    return jsonify({"assets": _page_module_assets()})
+
+@app.route("/static/build/<path:filename>")
+def static_build(filename):
+    """! @brief A content-hashed bundle: cached for a year, gzip-precompressed."""
+    fp = get_safe_path(_assets.BUILD_DIR, filename)
+    if not fp or not os.path.isfile(fp) or filename.endswith(".gz"):
+        return ("not found", 404)
+    mime = "application/javascript" if filename.endswith(".js") else "text/css"
+    if "gzip" in (request.headers.get("Accept-Encoding") or "") and os.path.isfile(fp + ".gz"):
+        resp = send_file(fp + ".gz", mimetype=mime, conditional=True)
+        resp.headers["Content-Encoding"] = "gzip"
+        resp.headers["Vary"] = "Accept-Encoding"
+    else:
+        resp = send_file(fp, mimetype=mime, conditional=True)
+    resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return resp
+
+@app.context_processor
+def _inject_page_assets():
+    """! @brief core_js_urls: the page's scripts (one bundle, or each file);
+    module_assets: what modules.js injects (saves the /api/module_assets round trip)."""
+    core = [_bundles["core_js"]] if _bundles.get("core_js") else [f"/static/{f}" for f in _assets.CORE_JS]
+    return {"core_js_urls": core, "module_assets": _page_module_assets()}
 
 
 if __name__=='__main__':
@@ -8248,6 +8314,7 @@ if __name__=='__main__':
         access_logger.error(f"launch check: {e}")
     access_logger.info("Compiling Tailwind stylesheet...")
     _build_tailwind()
+    _build_bundles()
     access_logger.info("Starting storage tiering worker...")
     ## @brief Tier config lives in app_config.json (state["tiers"]).
     def _load_tiers_cfg():
