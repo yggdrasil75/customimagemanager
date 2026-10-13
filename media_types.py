@@ -237,6 +237,132 @@ def is_library_file(path: str) -> bool:
 def is_animated_input(path: str) -> bool:
     return _ext(path) in ANIMATED_INPUT_EXTS
 
+# -- JXL without decoding: the codestream header, and threaded decodes --------
+
+# libjxl worker threads per decode. imagecodecs decodes on ONE thread unless
+# told otherwise; a 12 MP photo takes ~0.4 s that way and ~0.1 s with four.
+# Several requests may decode at once, so this stays well under the core count.
+JXL_DECODE_THREADS = max(2, min(4, (os.cpu_count() or 4) // 2))
+
+
+def jxl_decode(data, index=None):
+    """! @brief imagecodecs.jpegxl_decode with the app's thread count."""
+    return imagecodecs.jpegxl_decode(data, index, numthreads=JXL_DECODE_THREADS)
+
+
+class _JxlBits:
+    """! @brief LSB-first bit reader over a JXL codestream (ISO/IEC 18181-1 A.2)."""
+    def __init__(self, data):
+        self.d = data
+        self.pos = 0
+
+    def u(self, n):
+        v = 0
+        for i in range(n):
+            v |= ((self.d[self.pos >> 3] >> (self.pos & 7)) & 1) << i
+            self.pos += 1
+        return v
+
+    def u32(self, *sel):   # U32(d0..d3): an int is a constant, a tuple is (bits, offset)
+        s = sel[self.u(2)]
+        if isinstance(s, int):
+            return s
+        return s[1] + self.u(s[0])
+
+    def bool(self):
+        return self.u(1) == 1
+
+
+def _jxl_codestream(data):
+    """! @brief The codestream bytes of a bare or container JXL (jxlc / jxlp boxes), or None."""
+    if data[:2] == b"\xff\x0a":
+        return data
+    if data[4:8] != b"JXL ":
+        return None
+    pos, parts = 0, []
+    while pos + 8 <= len(data):
+        size, typ = struct.unpack(">I4s", data[pos:pos + 8])
+        hdr = 8
+        if size == 1:
+            size = struct.unpack(">Q", data[pos + 8:pos + 16])[0]
+            hdr = 16
+        if size == 0:
+            size = len(data) - pos
+        body = data[pos + hdr:pos + size]
+        if typ == b"jxlc":
+            return body
+        if typ == b"jxlp":
+            parts.append(body[4:])   # 4-byte part index first
+        pos += size
+    return b"".join(parts) if parts else None
+
+
+_JXL_RATIOS = ((1, 1), (12, 10), (4, 3), (3, 2), (16, 9), (5, 4), (2, 1))
+
+
+def _jxl_size_header(b):
+    if b.bool():   # small: multiples of 8 up to 256
+        ysize = (b.u(5) + 1) * 8
+        ratio = b.u(3)
+        xsize = (b.u(5) + 1) * 8 if ratio == 0 else None
+    else:
+        ysize = b.u32((9, 1), (13, 1), (18, 1), (30, 1))
+        ratio = b.u(3)
+        xsize = b.u32((9, 1), (13, 1), (18, 1), (30, 1)) if ratio == 0 else None
+    if ratio:
+        num, den = _JXL_RATIOS[ratio - 1]
+        xsize = ysize * num // den
+    return xsize, ysize
+
+
+def _jxl_preview_header(b):
+    div8 = b.bool()
+    if div8:
+        dim = lambda: b.u32(16, 32, (5, 1), (9, 33))
+    else:
+        dim = lambda: b.u32((6, 1), (8, 65), (10, 321), (12, 1345))
+    dim()               # ysize
+    if b.u(3) == 0:     # ratio
+        dim()           # xsize
+
+
+def jxl_header(data) -> dict | None:
+    """! @brief A JXL's SizeHeader + the first ImageMetadata fields, read from its
+    first bytes without touching a pixel (microseconds; a decode is hundreds of ms).
+    @param data  the file's first few KB (bare codestream or container).
+    @return {"xsize", "ysize", "animated", "orientation"} or None when it is not a JXL.
+    """
+    cs = _jxl_codestream(data)
+    if not cs or cs[:2] != b"\xff\x0a":
+        return None
+    try:
+        b = _JxlBits(cs)
+        b.u(16)
+        xsize, ysize = _jxl_size_header(b)
+        out = {"xsize": xsize, "ysize": ysize, "animated": False, "orientation": 1}
+        if b.bool():              # ImageMetadata.all_default
+            return out
+        if b.bool():              # extra_fields
+            out["orientation"] = b.u(3) + 1
+            if b.bool():          # have_intrinsic_size
+                _jxl_size_header(b)
+            if b.bool():          # have_preview
+                _jxl_preview_header(b)
+            out["animated"] = b.bool()
+        return out
+    except (IndexError, ValueError):
+        return None
+
+
+def jxl_header_of(path: str) -> dict | None:
+    """! @brief jxl_header() of a file (reads its first 64 KB), or None."""
+    try:
+        with open(path, "rb") as f:
+            return jxl_header(f.read(65536))
+    except OSError:
+        return None
+
+
 # Animation info read from the JXL header (decoding every frame was a stall),
 # cached on (path, mtime).
 _anim_cache: dict = {}
@@ -271,12 +397,17 @@ def jxl_anim_info(path: str) -> dict:
         else:
             with open(path, 'rb') as f:
                 data = f.read()
-            arr = imagecodecs.jpegxl_decode(data)
+            hdr = jxl_header(data[:65536])
             n = None
-            if arr.ndim == 4:
-                n = int(arr.shape[0])
-            elif arr.ndim == 3 and arr.shape[2] > 16:
-                n = int(arr.shape[0])
+            if hdr is not None and not hdr["animated"]:
+                n = 1                      # a still: settled from the header alone
+            else:
+                # animated (or an unreadable header): decode to count the frames
+                arr = jxl_decode(data)
+                if arr.ndim == 4:
+                    n = int(arr.shape[0])
+                elif arr.ndim == 3 and arr.shape[2] > 16:
+                    n = int(arr.shape[0])
         if n is not None:
             result['n_frames'] = n
             result['animated'] = n > 1
@@ -329,7 +460,7 @@ def jxl_decode_frames(path: str, indices=None, rgba=False):
         else:
             with open(path, 'rb') as f:
                 data = f.read()
-            arr = imagecodecs.jpegxl_decode(data)
+            arr = jxl_decode(data)
     except Exception:
         return []
     # normalise to (frames, h, w, c) RGB uint8

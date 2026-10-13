@@ -208,6 +208,20 @@ _all_conns = {}                  # id(conn) -> (conn, thread)
 _all_conns_lock = threading.Lock()
 DB_BUSY_TIMEOUT_MS = 30000
 
+_count_cache: OrderedDict = OrderedDict()
+_count_cache_lock = threading.Lock()
+_COUNT_CACHE_MAX = 256
+
+def _db_stamp(db) -> tuple:
+    """! @brief A value that changes whenever the database content may have."""
+    return (db.execute("PRAGMA data_version").fetchone()[0], db.total_changes)
+
+def _count_cache_forget(conn_id: int) -> None:
+    """! @brief Drop a closed connection's entries (its id may be reused with fresh counters)."""
+    with _count_cache_lock:
+        for k in [k for k in _count_cache if k[0] == conn_id]:
+            del _count_cache[k]
+
 
 def _register_conn(conn):
     """! @brief Track a new per-thread connection, closing those of threads that have
@@ -234,6 +248,11 @@ def _db() -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA cache_size=-32000")  # 32 MB page cache
+        # Map the file instead of read() into the page cache: a gallery COUNT is a
+        # scan of `files`, and the OS cache then serves it without copies.
+        conn.execute("PRAGMA mmap_size=268435456")  # 256 MB
+        # ORDER BY / GROUP BY spill b-trees go to RAM, not a temp file.
+        conn.execute("PRAGMA temp_store=MEMORY")
         conn.row_factory = sqlite3.Row
         _db_local.conn = conn
         _register_conn(conn)
@@ -285,9 +304,16 @@ def _db_close():
         _db_local.conn = None
         with _all_conns_lock:
             _all_conns.pop(id(conn), None)
+        _count_cache_forget(id(conn))
         try:
             if conn.in_transaction:
                 conn.rollback()
+        except Exception:
+            pass
+        try:
+            # keeps the planner's statistics fresh; cheap, and what SQLite
+            # recommends before closing a long-lived connection
+            conn.execute("PRAGMA optimize")
         except Exception:
             pass
         try:
@@ -498,6 +524,13 @@ def _init_db():
     try:
         for c in ("d_actual", "d_original", "d_capture", "d_digitized", "d_modified"):
             db.execute(f"CREATE INDEX IF NOT EXISTS idx_{c} ON files({c})")
+        # sort:date / sort:-date order by "(X IS NULL), X [DESC], rel_path" with
+        # X = COALESCE(d_actual, d_original, d_digitized) (the search module's key).
+        # An expression index per direction lets a page come straight off the
+        # index instead of sorting every row into a temp b-tree.
+        _x = "COALESCE(d_actual, d_original, d_digitized)"
+        db.execute(f"CREATE INDEX IF NOT EXISTS idx_files_date_sort ON files(({_x} IS NULL), {_x}, rel_path)")
+        db.execute(f"CREATE INDEX IF NOT EXISTS idx_files_date_sort_desc ON files(({_x} IS NULL), {_x} DESC, rel_path)")
         db.commit()
     except Exception:
         pass
@@ -1022,6 +1055,10 @@ def _date_clause(cols: tuple, op: str | None, literal: str) -> tuple[str, list]:
 # may hold spaces (location:"north carolina").
 _SEARCH_TOKEN_RE = re.compile(r'(?:[^\s"]+|"[^"]*"?)+')
 
+def _like_escape(s: str) -> str:
+    """! @brief `s` as a literal inside a LIKE pattern using ESCAPE '\\'."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
 def _parse_search(search: str) -> tuple[str, list, list, list]:
     """! @brief Split structured tokens (width:, is:, date:, sort:, module tokens, ...)
     from free text. A token may quote a value with spaces: key:"a b".
@@ -1051,11 +1088,21 @@ def _parse_search(search: str) -> tuple[str, list, list, list]:
             neg = low.startswith('-')
             name = tok.split(':', 1)[1].strip()
             if name:
-                # tags is a JSON list; unconfirmed tags start with '?'
-                where.append(("NOT " if neg else "") +
-                             "EXISTS (SELECT 1 FROM json_each(files.tags) "
-                             "WHERE lower(ltrim(json_each.value,'?'))=?)")
-                params.append(name.lower())
+                # tags is a JSON list; unconfirmed tags start with '?'. The LIKE
+                # is a cheap prefilter (a substring test per row instead of a
+                # json_each table per row): a row whose text lacks the name can't
+                # match, so json_each only runs on candidates. Only for names the
+                # stored JSON holds verbatim (json.dumps escapes non-ASCII, '"'
+                # and '\'); a negation needs no prefilter.
+                exists = ("EXISTS (SELECT 1 FROM json_each(files.tags) "
+                          "WHERE lower(ltrim(json_each.value,'?'))=?)")
+                plain = name.isascii() and name.isprintable() and not any(c in name for c in '"\\')
+                if neg or not plain:
+                    where.append(("NOT " if neg else "") + exists)
+                    params.append(name.lower())
+                else:
+                    where.append("(files.tags LIKE ? ESCAPE '\\' AND " + exists + ")")
+                    params += ["%" + _like_escape(name) + '"%', name.lower()]
                 structured.append(("tag", name, neg))
             continue
         if low.startswith('sort:'):
@@ -1133,6 +1180,25 @@ def _files_where(search: str, folder: str = '', album: str = '', recursive: bool
     where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     return where_sql, p, text, structured
 
+def _files_count(where_sql: str, params: list) -> int:
+    """! @brief COUNT(*) FROM files{where_sql}, cached until the DB changes."""
+    db = _db()
+    # per connection: data_version and total_changes are connection-local counters
+    key = (id(db), where_sql, tuple(params))
+    stamp = _db_stamp(db)
+    with _count_cache_lock:
+        hit = _count_cache.get(key)
+        if hit is not None and hit[0] == stamp:
+            _count_cache.move_to_end(key)
+            return hit[1]
+    n = db.execute(f"SELECT COUNT(*) FROM files{where_sql}", params).fetchone()[0]
+    with _count_cache_lock:
+        _count_cache[key] = (stamp, n)
+        _count_cache.move_to_end(key)
+        while len(_count_cache) > _COUNT_CACHE_MAX:
+            _count_cache.popitem(last=False)
+    return n
+
 def _query_files(search: str, offset: int, limit: int,
                  folder: str = '', album: str = '') -> tuple[list, int]:
     """! @brief One gallery page: module results (books, comics: one tile each) first,
@@ -1159,8 +1225,7 @@ def _query_files(search: str, offset: int, limit: int,
                 access_logger.error(f"search provider failed: {e}")
     nc = len(comic_entries)
 
-    total_files = _db().execute(
-        f"SELECT COUNT(*) FROM files{where_sql}", p).fetchone()[0]
+    total_files = _files_count(where_sql, p)
     total = nc + total_files
 
     entries = []
@@ -1240,7 +1305,7 @@ def _decode_jxl_uncached(path: str) -> np.ndarray | None:
         is_bare      = data[:2] == b'\xff\x0a'
         is_container = data[4:8] == b'JXL '
         if is_bare or is_container:
-            img = imagecodecs.jpegxl_decode(data)
+            img = mt.jxl_decode(data)
         elif mt.is_raw(path):
             # a camera raw found on disk is shown in place (indexed only with rawpy)
             img = mt.decode_raw(path)
@@ -7056,6 +7121,103 @@ def _meta_set(db, key, value):
     else:
         db.execute("INSERT OR REPLACE INTO cim_meta(key, value) VALUES (?, ?)", (key, str(value)))
 
+# -- background jobs for bulk requests ---------------------------------------
+# A bulk request (box 300 files, tag 2000) used to run to completion inside the
+# WSGI thread: one of the few request threads gone for minutes, the browser's
+# fetch hanging, and a model lock held the whole time. Past a small inline
+# budget the work now runs on its own thread and the request answers at once
+# with a job the client polls at /api/job/<id>.
+_jobs: dict = {}
+_jobs_lock = threading.Lock()
+JOBS_KEEP = 50          # finished jobs remembered
+BULK_INLINE_MAX = 3     # at most this many files run inside the request
+
+def job_status(job_id: str) -> dict | None:
+    """! @brief A copy of a job's state, or None."""
+    with _jobs_lock:
+        j = _jobs.get(job_id)
+        return dict(j, errors=list(j["errors"])) if j else None
+
+def run_bulk(label: str, items: list, work, *, inline_max: int | None = None,
+             audit_action: str | None = None, errors: list | None = None) -> dict:
+    """! @brief Run `work(item, job)` over `items` inline (few items) or on a background
+    thread (many), and return the reply body for the request.
+    @param work    fn(item, job) -> True when the item counted as done; raise or
+                   return False to count an error. It may add to job["errors"] and
+                   bump job["counts"][k]. Resolve anything that needs the request
+                   (paths through get_safe_path, the user) BEFORE calling run_bulk:
+                   the worker has no request context.
+    @param label   shown in the header status line.
+    @param errors  failures known before the job starts (files that didn't resolve).
+    @return {"success": True, "background": False, done, errors, counts, total} when
+            run inline, else {"success": True, "background": True, "job": {...}}.
+    """
+    inline_max = BULK_INLINE_MAX if inline_max is None else inline_max
+    job = {"id": uuid.uuid4().hex[:12], "label": label, "total": len(items), "done": 0,
+           "errors": list(errors or []), "counts": {}, "running": True, "started": time.time(),
+           "finished": None}
+
+    def _one(item):
+        try:
+            ok = work(item, job)
+        except Exception as e:
+            access_logger.error(f"{label} {item!r}: {e}")
+            ok = False
+            job["errors"].append(f"{item}: {e}" if not isinstance(item, (tuple, list)) else
+                                 f"{item[0]}: {e}")
+        if ok:
+            job["done"] += 1
+
+    if len(items) <= inline_max:
+        for it in items:
+            _one(it)
+        job["running"] = False
+        job["finished"] = time.time()
+        return {"success": True, "background": False, "done": job["done"],
+                "errors": list(job["errors"]), "counts": dict(job["counts"]),
+                "total": job["total"]}
+
+    actor = None
+    if audit_action:
+        actor = cimlogger_actor()  # captured now: the worker thread has no request
+
+    with _jobs_lock:
+        _jobs[job["id"]] = job
+        for old in sorted((j for j in _jobs.values() if not j["running"]),
+                          key=lambda j: j["finished"] or 0)[:-JOBS_KEEP]:
+            _jobs.pop(old["id"], None)
+
+    def _run():
+        try:
+            for i, it in enumerate(items):
+                _one(it)
+                if i % 10 == 9 or i == len(items) - 1:
+                    module_host.set_status(f"{label}: {i + 1}/{len(items)}")
+        finally:
+            job["running"] = False
+            job["finished"] = time.time()
+            bad = len(job["errors"])
+            module_host.set_status(f"{label}: done ({job['done']} ok" + (f", {bad} failed)" if bad else ")"))
+            if audit_action:
+                audit(audit_action, f"user={actor!r} files={len(items)} ok={job['done']} failed={bad}")
+            _db_close()  # the worker's per-thread connection
+
+    threading.Thread(target=_run, name=f"cim-job-{job['id']}", daemon=True).start()
+    return {"success": True, "background": True, "job": job_status(job["id"])}
+
+def cimlogger_actor() -> str:
+    """! @brief The requesting username for an audit line written off the request thread."""
+    return (getattr(g, "user", None) or {}).get("username", "") if has_request_context() else "system"
+
+@app.route("/api/job/<job_id>")
+@_auth.require_feature("tab.gallery")
+def api_job(job_id):
+    """! @brief A bulk job's progress: {id, label, total, done, errors, counts, running, started, finished}."""
+    j = job_status(job_id)
+    if j is None:
+        return jsonify({"success": False, "error": "no such job"}), 404
+    return jsonify({"success": True, "job": j})
+
 def sync_status() -> dict:
     """! @brief A copy of the sync job's state (see /api/sync/status)."""
     with _sync_lock:
@@ -7320,6 +7482,25 @@ def api_confirm_all_tags():
     update_file(fp, set={"tags": out}, meta=meta)
     return jsonify({"success": True, "tags": out, "confirmed": len(out)})
 
+def _resolve_bulk(filenames) -> tuple[list, list]:
+    """! @brief Resolve a bulk request's filenames inside the request (access policies
+    need it). @return ([(fn, abs_path)], [missing fn])."""
+    items, errors = [], []
+    for fn in filenames or []:
+        fp = get_safe_path(MEDIA_DIR, fn)
+        if not fp or not os.path.exists(fp):
+            errors.append(fn)
+        else:
+            items.append((fn, fp))
+    return items, errors
+
+def _bulk_reply(res: dict) -> dict:
+    """! @brief run_bulk's inline reply with `updated` (what older clients read) as an
+    alias of `done`; a background reply is passed through."""
+    if not res.get("background"):
+        res["updated"] = res["done"]
+    return res
+
 @app.route("/api/bulk_tag", methods=["POST"])
 @_auth.require_feature("annot.tags", level="write")
 def bulk_tag():
@@ -7328,22 +7509,17 @@ def bulk_tag():
     new_tags  = [t.strip() for t in request.json.get("tags", []) if t.strip()]
     if not filenames or not new_tags:
         return jsonify({"success": False, "error": "Need filenames and tags."})
-    updated = 0
-    errors  = []
-    for fn in filenames:
-        fp = get_safe_path(MEDIA_DIR, fn)
-        if not fp or not os.path.exists(fp):
-            errors.append(fn); continue
-        try:
-            # add= confirms an existing suggestion
-            if not update_file(fp, add={"tags": [make_tag(tag_name(t), confirmed=True)
-                                                 for t in new_tags]}).get("success"):
-                raise RuntimeError("write failed")
-            updated += 1
-        except Exception as e:
-            errors.append(fn)
-            access_logger.error(f"bulk_tag {fn}: {e}")
-    return jsonify({"success": True, "updated": updated, "errors": errors})
+    items, errors = _resolve_bulk(filenames)
+    tags = [make_tag(tag_name(t), confirmed=True) for t in new_tags]
+
+    def work(item, job):
+        fn, fp = item
+        # add= confirms an existing suggestion
+        if not update_file(fp, add={"tags": list(tags)}).get("success"):
+            raise RuntimeError("write failed")
+        return True
+
+    return jsonify(_bulk_reply(run_bulk("Tagging", items, work, audit_action="bulk_tag", errors=errors)))
 
 @app.route("/api/bulk_untag", methods=["POST"])
 @_auth.require_feature("annot.tags", level="write")
@@ -7353,18 +7529,13 @@ def bulk_untag():
     drop = {tag_name(t).lower() for t in request.json.get("tags", []) if t.strip()}
     if not filenames or not drop:
         return jsonify({"success": False, "error": "Need filenames and tags."})
-    updated, errors = 0, []
-    for fn in filenames:
-        fp = get_safe_path(MEDIA_DIR, fn)
-        if not fp or not os.path.exists(fp):
-            errors.append(fn); continue
-        try:
-            if "tags" in update_file(fp, remove={"tags": list(drop)}).get("changed", []):
-                updated += 1
-        except Exception as e:
-            errors.append(fn)
-            access_logger.error(f"bulk_untag {fn}: {e}")
-    return jsonify({"success": True, "updated": updated, "errors": errors})
+    items, errors = _resolve_bulk(filenames)
+
+    def work(item, job):
+        fn, fp = item
+        return "tags" in update_file(fp, remove={"tags": list(drop)}).get("changed", [])
+
+    return jsonify(_bulk_reply(run_bulk("Untagging", items, work, audit_action="bulk_untag", errors=errors)))
 
 @app.route("/api/bulk_delete", methods=["POST"])
 @_auth.require_feature("data.delete", level="write")
@@ -7566,58 +7737,55 @@ def bulk_box():
             detect = modules.broker.request("detect")
         except Exception as e:
             return jsonify({"success": False, "error": f"No detection model: {e}"})
-    done, boxed, errors = 0, 0, []
-    total = len(filenames)
-    for fn in filenames:
-        fp = get_safe_path(MEDIA_DIR, fn)
-        if not fp or not os.path.exists(fp):
-            errors.append(fn); continue
-        try:
-            img = read_jxl(fp)
-            if img is None:
-                errors.append(fn); continue
-            new = []
-            if method == "detect":
-                for b in (detect(_to_bgr(img), conf=modules.broker.variant("detect")["conf"]) or []):
-                    cb = _clamp_box({"cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"]})
+    items, errors = _resolve_bulk(filenames)
+
+    def work(item, job):
+        fn, fp = item
+        img = read_jxl(fp)
+        if img is None:
+            raise RuntimeError("decode failed")
+        new = []
+        if method == "detect":
+            for b in (detect(_to_bgr(img), conf=modules.broker.variant("detect")["conf"]) or []):
+                cb = _clamp_box({"cx": b["cx"], "cy": b["cy"], "w": b["w"], "h": b["h"]})
+                if cb:
+                    new.append({"class_name": b.get("class_name") or "object", "cx": cb["cx"], "cy": cb["cy"],
+                                "w": cb["w"], "h": cb["h"], "confirmed": False})
+        elif method == "yolo":
+            res = yolo(img, verbose=False, conf=0.25)
+            if res and res[0].boxes:
+                for box in res[0].boxes:
+                    cid = int(box.cls[0].item()); name = res[0].names[cid]
+                    cx, cy, w, h = box.xywhn[0].tolist()
+                    cb = _clamp_box({"cx":cx,"cy":cy,"w":w,"h":h})
                     if cb:
-                        new.append({"class_name": b.get("class_name") or "object", "cx": cb["cx"], "cy": cb["cy"],
+                        new.append({"class_name": name, "cx": cb["cx"], "cy": cb["cy"],
                                     "w": cb["w"], "h": cb["h"], "confirmed": False})
-            elif method == "yolo":
-                res = yolo(img, verbose=False, conf=0.25)
-                if res and res[0].boxes:
-                    for box in res[0].boxes:
-                        cid = int(box.cls[0].item()); name = res[0].names[cid]
-                        cx, cy, w, h = box.xywhn[0].tolist()
-                        cb = _clamp_box({"cx":cx,"cy":cy,"w":w,"h":h})
-                        if cb:
-                            new.append({"class_name": name, "cx": cb["cx"], "cy": cb["cy"],
-                                        "w": cb["w"], "h": cb["h"], "confirmed": False})
-            else:
-                svc = module_host.get_service("llm")
-                boxes = svc["call"](prompt, _to_bgr(img), "boxes") if svc else []
-                for b in boxes:
-                    try:
-                        new.append({"class_name": b.get("class_name", "object"),
-                                    "cx": float(b["cx"]), "cy": float(b["cy"]),
-                                    "w": float(b["w"]), "h": float(b["h"]),
-                                    "confirmed": False})
-                    except Exception:
-                        pass
-            if new:
-                for n in new:
-                    if n["class_name"] not in state["classes"]:
-                        state["classes"].append(n["class_name"])
-                save_classes()
-                update_file(fp, add={"regions": new})
-                boxed += 1
-            done += 1
-            state["status_text"] = f"AI Box: {done}/{total} ({boxed} boxed)..."
-        except Exception as e:
-            errors.append(fn)
-            access_logger.error(f"bulk_box {fn}: {e}")
-    state["status_text"] = "Ready."
-    return jsonify({"success": True, "done": done, "boxed": boxed, "errors": errors})
+        else:
+            svc = module_host.get_service("llm")
+            boxes = svc["call"](prompt, _to_bgr(img), "boxes") if svc else []
+            for b in boxes:
+                try:
+                    new.append({"class_name": b.get("class_name", "object"),
+                                "cx": float(b["cx"]), "cy": float(b["cy"]),
+                                "w": float(b["w"]), "h": float(b["h"]),
+                                "confirmed": False})
+                except Exception:
+                    pass
+        if new:
+            for n in new:
+                if n["class_name"] not in state["classes"]:
+                    state["classes"].append(n["class_name"])
+            save_classes()
+            update_file(fp, add={"regions": new})
+            job["counts"]["boxed"] = job["counts"].get("boxed", 0) + 1
+        return True
+
+    res = run_bulk("AI Box", items, work, audit_action="bulk_box", errors=errors)
+    if res.get("background"):
+        return jsonify(res)
+    return jsonify({"success": True, "done": res["done"], "boxed": res["counts"].get("boxed", 0),
+                    "errors": res["errors"]})
 
 def _bodies():
     """! @brief The bodies module's service, or None."""
@@ -7709,33 +7877,39 @@ def api_ai_run():
     if not files:
         return jsonify({"success": False, "error": "No file."})
     bulk = "filenames" in d
-    out, done, errors = None, 0, []
-    for fn in files:
-        fp = get_safe_path(MEDIA_DIR, fn)
-        if not fp or not os.path.exists(fp):
-            errors.append(f"{fn}: not found"); continue
+    items, missing = _resolve_bulk(files)
+    errors = [f"{fn}: not found" for fn in missing]
+    action_id = str(a["id"])
+
+    def _run_one(fp):
+        img = read_jxl(fp)
+        if img is None:
+            raise RuntimeError("Decode failed")
+        meta = read_metadata(fp)
+        return meta, (g["run"](action_id, fp, _to_bgr(img), meta) or {})
+
+    if not bulk:  # the editor applies single runs itself
+        if not items:
+            return jsonify({"success": False, "error": errors[0] if errors else "failed"})
+        fn, fp = items[0]
         try:
-            img = read_jxl(fp)
-            if img is None:
-                raise RuntimeError("Decode failed")
-            meta = read_metadata(fp)
-            res = g["run"](str(a["id"]), fp, _to_bgr(img), meta) or {}
-            if bulk:  # the editor applies single runs itself
-                add = {k: res[k] for k in ("tags", "regions", "description") if res.get(k)}
-                upd = update_file(fp, add=add, set={"flag": res["flag"]} if res.get("flag") else None,
-                                  meta=meta)
-                if not upd.get("success"):
-                    raise RuntimeError(upd.get("error") or "write failed")
-            else:
-                out = res
-            done += 1
+            _meta, out = _run_one(fp)
         except Exception as e:
-            errors.append(f"{fn}: {e}")
-    if bulk:
-        return jsonify({"success": True, "done": done, "errors": errors})
-    if out is None:
-        return jsonify({"success": False, "error": errors[0] if errors else "failed"})
-    return jsonify({"success": True, **out})
+            return jsonify({"success": False, "error": f"{fn}: {e}"})
+        return jsonify({"success": True, **out})
+
+    def work(item, job):
+        fn, fp = item
+        meta, res = _run_one(fp)
+        add = {k: res[k] for k in ("tags", "regions", "description") if res.get(k)}
+        upd = update_file(fp, add=add, set={"flag": res["flag"]} if res.get("flag") else None,
+                          meta=meta)
+        if not upd.get("success"):
+            raise RuntimeError(upd.get("error") or "write failed")
+        return True
+
+    return jsonify(_bulk_reply(run_bulk(f"AI: {a.get('label') or action_id}", items, work,
+                                        audit_action="ai_run", errors=errors)))
 
 
 @app.route("/api/box_labels")
@@ -8064,6 +8238,7 @@ if __name__=='__main__':
     from waitress import serve
     thread_manager.set_activity_source(lambda: _last_activity)
     model_registry.set_memory_hook(lambda cost_mb, gpu: thread_manager.reserve_model(cost_mb, gpu))
+    modules.model_broker.set_lease_hook(model_registry.lease)  # a model stays resident while a call runs
     model_registry.log_backend(access_logger)
     model_registry.standardize_onnx(access_logger)  # every onnxruntime session uses onnx_providers()
 

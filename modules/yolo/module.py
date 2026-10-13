@@ -97,15 +97,18 @@ def _run_yolo_path(model_path, feed, conf):
     bn/fuse-error unload+retry the old manager path had. Returns ultralytics
     results or None."""
     load = _loader_for(model_path)
+    key = f"yolo:{_canon(model_path)}"
     try:
-        return load()(feed, verbose=False, conf=conf)
+        with model_registry.lease(key):   # no budget eviction mid-forward
+            return load()(feed, verbose=False, conf=conf)
     except Exception as ex:
         if "bn" in str(ex) or "fuse" in str(ex).lower():
             try:
-                model_registry.unload(f"yolo:{_canon(model_path)}")
+                model_registry.unload(key)
             except Exception:
                 pass
-            return load()(feed, verbose=False, conf=conf)
+            with model_registry.lease(key):
+                return load()(feed, verbose=False, conf=conf)
         # Anything else (weights that don't exist upstream, a failed download,
         # a corrupt file) used to come back as None -> "no detections", which
         # read as "the model found nothing" instead of "the model never ran".

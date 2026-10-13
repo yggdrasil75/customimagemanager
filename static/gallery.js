@@ -933,9 +933,10 @@ async function applyBulkTag(){
   const files = [...selectedFiles];
   const btn = document.querySelector('#bulk_bar button');
   document.getElementById('bulk_tag_input').value='';
-  const d = await fetch('/api/bulk_tag',{method:'POST',
+  let d = await fetch('/api/bulk_tag',{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({filenames:files,tags})}).then(r=>r.json());
+  d = await awaitBulk(d, j=>showToast(`Tagging ${j.done}/${j.total}...`));
   if(d.success){
     showToast(`Tagged ${d.updated} file(s) with: ${tags.join(', ')}`);
     // If current file is in the set, refresh its tag display
@@ -958,9 +959,10 @@ async function applyBulkUntag(){
   const tags=raw.split(',').map(s=>s.trim()).filter(Boolean);
   const files=[...selectedFiles];
   inp.value='';
-  const d=await fetch('/api/bulk_untag',{method:'POST',
+  let d=await fetch('/api/bulk_untag',{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({filenames:files,tags})}).then(r=>r.json());
+  d=await awaitBulk(d, j=>showToast(`Untagging ${j.done}/${j.total}...`));
   if(d.success){
     showToast(`Removed ${tags.join(', ')} from ${d.updated} file(s)`);
     if(window.currentFile && selectedFiles.has(window.currentFile)) selectFile(window.currentFile);

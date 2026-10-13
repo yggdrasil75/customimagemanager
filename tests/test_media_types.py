@@ -111,3 +111,34 @@ def test_avif_upload_is_stored_and_readable(client, upload, host):
                             (j["filename"],)).fetchone()
     assert row and (row["width"], row["height"]) == (64, 48)
     assert (row["media_kind"] or "image") == "image"
+
+
+@pytest.mark.skipif(not mt._HAVE_IMAGECODECS, reason="imagecodecs")
+@pytest.mark.parametrize("kw", [{"distance": 1.0}, {"distance": 1.0, "usecontainer": True}, {"lossless": True}])
+def test_jxl_header_reads_size_and_animation_without_decoding(kw):
+    """! @brief The codestream header alone answers still-vs-animated (what the viewer
+    asks on every file open), so no decode happens for a still."""
+    rng = np.random.default_rng(0)
+    still = rng.integers(0, 255, (123, 457, 3), np.uint8)
+    anim = rng.integers(0, 255, (4, 120, 160, 3), np.uint8)
+    h = mt.jxl_header(mt.imagecodecs.jpegxl_encode(still, **kw))
+    assert h == {"xsize": 457, "ysize": 123, "animated": False, "orientation": 1}
+    h = mt.jxl_header(mt.imagecodecs.jpegxl_encode(anim, **kw))
+    assert (h["xsize"], h["ysize"], h["animated"]) == (160, 120, True)
+    # gray and alpha change nothing in the header fields we read
+    assert mt.jxl_header(mt.imagecodecs.jpegxl_encode(still[..., 0], **kw))["xsize"] == 457
+    assert not mt.jxl_header(mt.imagecodecs.jpegxl_encode(still[:16, :8], **kw))["animated"]
+    assert mt.jxl_header(b"\x89PNG....") is None
+    assert mt.jxl_header(b"\xff\x0a") is None
+
+
+@pytest.mark.skipif(not mt._HAVE_IMAGECODECS, reason="imagecodecs")
+def test_jxl_anim_info_still_skips_decode(tmp_path, monkeypatch):
+    p = tmp_path / "a.jxl"
+    p.write_bytes(mt.imagecodecs.jpegxl_encode(np.zeros((40, 48, 3), np.uint8), distance=1.0))
+    monkeypatch.setattr(mt, "jxl_decode", lambda *a, **k: pytest.fail("decoded a still"))
+    assert mt.jxl_anim_info(str(p)) == {"animated": False, "duration": None, "n_frames": 1}
+    q = tmp_path / "b.jxl"
+    q.write_bytes(mt.imagecodecs.jpegxl_encode(np.zeros((3, 40, 48, 3), np.uint8), distance=1.0))
+    monkeypatch.undo()
+    assert mt.jxl_anim_info(str(q))["n_frames"] == 3

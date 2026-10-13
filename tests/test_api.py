@@ -97,6 +97,29 @@ def test_bulk_tag(client, upload):
     assert client.post("/api/bulk_tag", json={"filenames": [], "tags": ["x"]}).get_json()["success"] is False
 
 
+def test_bulk_runs_in_background_past_inline_budget(client, upload, app, monkeypatch):
+    """! @brief More files than BULK_INLINE_MAX: the request returns a job at once, the
+    work finishes on its own thread, /api/job/<id> reports it; a missing file is an
+    error in the job, not a reason to stall."""
+    import time
+    monkeypatch.setattr(app, "BULK_INLINE_MAX", 1)
+    files = [upload(f"bg{i}.png", seed=40 + i) for i in range(3)]
+    r = client.post("/api/bulk_tag", json={"filenames": files + ["nope.png"], "tags": ["bgtag"]}).get_json()
+    assert r["success"] and r["background"] and r["job"]["total"] == 3
+    jid = r["job"]["id"]
+    for _ in range(200):
+        j = client.get(f"/api/job/{jid}").get_json()["job"]
+        if not j["running"]:
+            break
+        time.sleep(0.05)
+    assert not j["running"] and j["done"] == 3 and j["errors"] == ["nope.png"]
+    assert all("bgtag" in _read(client, f)["tags"] for f in files)
+    assert client.get("/api/job/zzz").status_code == 404
+    # under the budget it is still inline, with the old reply shape
+    r = client.post("/api/bulk_untag", json={"filenames": files[:1], "tags": ["bgtag"]}).get_json()
+    assert r["success"] and not r["background"] and r["updated"] == 1
+
+
 def test_review_boxes_and_confirm_all(client, upload):
     fn = upload(seed=6)
     _write(client, fn, regions=[BOX, dict(BOX, cx=.2, cy=.2, w=.1, h=.1, class_name="face")])

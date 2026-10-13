@@ -460,6 +460,20 @@ function showToast(msg){
   t._to=setTimeout(()=>t.style.opacity='0', 2500);
 }
 
+async function awaitBulk(d, onProgress){
+  if(!d || !d.background || !d.job) return d;
+  let job=d.job;
+  while(job.running){
+    if(onProgress) onProgress(job);
+    await new Promise(r=>setTimeout(r, Math.min(2000, 300+job.total*5)));
+    const r=await fetch(`/api/job/${encodeURIComponent(job.id)}`).then(r=>r.json()).catch(()=>null);
+    if(!r || !r.success){ return {success:false, error:'job lost'}; }
+    job=r.job;
+  }
+  return {success:true, background:true, done:job.done, updated:job.done, errors:job.errors||[],
+          counts:job.counts||{}, total:job.total, label:job.label};
+}
+
 // -- Global keyboard shortcuts ----------------------------------------------
 document.addEventListener('keydown', async e=>{
   const tag=document.activeElement.tagName;
