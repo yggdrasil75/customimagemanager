@@ -87,6 +87,10 @@ done
 for f in drawflow.min.js drawflow.min.css; do      # pipeline_graph module (MIT)
     get "https://unpkg.com/drawflow@0.0.60/dist/$f" "static/vendor/$f"
 done
+if [ -z "${CIM_NO_COMPILE:-}" ]; then
+    $PIP install -q cython 2>/dev/null || echo "warn: cython not installed; helper modules stay plain Python" >&2
+    venv/bin/python native_build.py || echo "warn: native build failed; helper modules stay plain Python" >&2
+fi
 
 mkdir -p media data logs models
 venv/bin/python - "$MODE" <<'PY'

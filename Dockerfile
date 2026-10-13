@@ -75,6 +75,10 @@ COPY . .
 # The app built (or skipped) by the android stage, served at /static/app/cim-family.apk.
 COPY --from=android /build/static/app/ ./static/app/
 
+# Native build of the pure-Python helper modules (native_build.py); best effort.
+ARG CIM_NO_COMPILE=
+RUN if [ -z "$CIM_NO_COMPILE" ]; then pip install cython && python native_build.py; fi
+
 RUN mkdir -p static && curl -fsSL https://cdn.tailwindcss.com/3.4.17 -o static/tailwindcss.js
 
 RUN mkdir -p static/vendor && \

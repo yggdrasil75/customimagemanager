@@ -4,6 +4,11 @@
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 [ -x venv/bin/python ] || { echo "run ./install.sh first" >&2; exit 1; }
+# A compiled helper module older than its .py (you edited the source) is dropped
+# so the edit runs; ./install.sh or venv/bin/python native_build.py rebuilds.
+venv/bin/python native_build.py --check
+# CPython's JIT (3.13+ builds that ship it; a no-op elsewhere). Set PYTHON_JIT=0 to turn it off.
+export PYTHON_JIT="${PYTHON_JIT:-1}"
 if [ -z "${CIM_NO_AUTO_INSTALL:-}" ]; then
     echo "==> checking module deps"
     venv/bin/python - <<'PY' || echo "warn: module dep check failed; starting anyway" >&2
